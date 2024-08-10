@@ -4,6 +4,25 @@ A Jolt subtable is a lookup table consisting of $2^{2m}$ field elements (indexed
 
 In this page, we give a full specification of all Jolt subtables for the current RV32IM version over curves. The subtables may change in future versions of Jolt.
 
+In the codebase, each subtable must implement the methods described below.
+
+```rust
+pub trait LassoSubtable<F: JoltField>: 'static + Sync {
+
+    fn subtable_id(&self) -> SubtableId { TypeId::of::<Self>() }
+    
+    fn materialize(&self, M: usize) -> Vec<F>;
+
+    fn evaluate_mle(&self, point: &[F]) -> F;
+}
+```
+
+- `subtable_id` returns the unique identifier for the subtable.
+
+- `materialize` returns a vector of size `M` containing the subtable values.
+
+- `evaluate_mle` returns the value of the multilinear extension polynomial for the subtable at the given `point`, interpreted to be of size `log_2(M)`, where `M` is the size of the subtable.
+
 ## Notation
 
 - $m$ is the number of bits for each operand. Currently, Jolt subtables are used with $m=16$.
@@ -149,25 +168,25 @@ This subtable implements a logical left shift operation on a chunk of bits. It h
 
 Function: For inputs $x$ and $y$, where $x$ is the chunk to be shifted and $y$ is the shift amount:
 
-$Sll(x, y) = (x \ll (y \bmod WORD\_SIZE + suffix\_length)) \gg suffix\_length$
+$Sll(x, y) = (x \ll (y \bmod \verb|WORD_SIZE| + \verb|suffix_length|)) \gg \verb|suffix_length|$
 
-where $suffix\_length = operand\_chunk\_width * CHUNK\_INDEX$, and $operand\_chunk\_width = \log_2(M) / 2$.
+where $\verb|suffix_length| = \verb|operand_chunk_width| * \verb|CHUNK_INDEX|$, and $\verb|operand_chunk_width| = \log_2(M) / 2$.
 
 The operation performs the following steps:
-1. Left-shift $x$ by $(y \bmod WORD\_SIZE + suffix\_length)$
-2. Take the result modulo $2^{WORD\_SIZE}$ to wrap around
-3. Right-shift by $suffix\_length$ to align the result
+1. Left-shift $x$ by $(y \bmod \verb|WORD_SIZE| + \verb|suffix_length|)$
+2. Take the result modulo $2^{\verb|WORD_SIZE|}$ to wrap around
+3. Right-shift by $\verb|suffix_length|$ to align the result
 
 Multilinear extension: The MLE is more complex and involves summing over possible shift amounts:
 
-$\widetilde{Sll}(x, y) = \sum_{k=0}^{\min(WORD\_SIZE-1, 2^b-1)} eq\_term_k \cdot shift\_x\_by\_k$
+$\widetilde{Sll}(x, y) = \sum_{k=0}^{\min(\verb|WORD_SIZE|-1, 2^b-1)} \verb|eq_term_k| \cdot \verb|shift_x_by_k|$
 
 where:
 - $b$ is half the number of input bits
-- $eq\_term_k = \prod_{i=0}^{\min(\log_2(WORD\_SIZE)-1, b-1)} (k_i \cdot y_i + (1 - k_i) \cdot (1 - y_i))$
+- $eq\_term_k = \prod_{i=0}^{\min(\log_2(\verb|WORD_SIZE|)-1, b-1)} (k_i \cdot y_i + (1 - k_i) \cdot (1 - y_i))$
 - $k_i$ is the $i$-th bit of $k$ in big-endian order
 - $shift\_x\_by\_k = \sum_{j=0}^{m'-1} 2^{j+k} \cdot x_{b-1-j}$
-- $m = \min(b, (k + b \cdot (CHUNK\_INDEX + 1)) - WORD\_SIZE)$ if $(k + b \cdot (CHUNK\_INDEX + 1)) > WORD\_SIZE$, else 0
+- $m = \min(b, (k + b \cdot (\verb|CHUNK_INDEX| + 1)) - \verb|WORD_SIZE|)$ if $(k + b \cdot (\verb|CHUNK_INDEX| + 1)) > \verb|WORD_SIZE|$, else 0
 - $m' = b - m$
 
 This subtable handles the complexities of shifting within a specific chunk of a larger word, taking into account potential overflow and alignment issues.
@@ -182,22 +201,22 @@ This subtable implements the sign extension part of an arithmetic right shift op
 
 Function: For inputs $x$ and $y$, where $x$ is the chunk containing the sign bit and $y$ is the shift amount:
 
-$SraSign(x, y) = \sum_{i=0}^{(y \bmod WORD\_SIZE) - 1} 2^{WORD\_SIZE - 1 - i} \cdot sign\_bit$
+$SraSign(x, y) = \sum_{i=0}^{(y \bmod \verb|WORD_SIZE|) - 1} 2^{\verb|WORD_SIZE| - 1 - i} \cdot sign\_bit$
 
-where $sign\_bit = x_{sign\_bit\_index}$ and $sign\_bit\_index = (WORD\_SIZE - 1) \bmod operand\_chunk\_width$.
+where $\verb|sign_bit| = x_{\verb|sign_bit_index|}$ and $\verb|sign_bit_index| = (\verb|WORD_SIZE| - 1) \bmod \verb|operand_chunk_width|$.
 
-The $operand\_chunk\_width$ is calculated as $\log_2(M) / 2$, where $M$ is the size of the subtable.
+The $\verb|operand_chunk_width|$ is calculated as $\log_2(M) / 2$, where $M$ is the size of the subtable.
 
 Multilinear extension:
 
-$\widetilde{SraSign}(x, y) = \sum_{k=0}^{\min(WORD\_SIZE-1, 2^b-1)} eq\_term_k \cdot x\_sign\_upper_k$
+$\widetilde{SraSign}(x, y) = \sum_{k=0}^{\min(\verb|WORD_SIZE|-1, 2^b-1)} \verb|eq_term_k| \cdot \verb|x_sign_upper_k|$
 
 where:
 - $b$ is half the number of input bits
-- $eq\_term_k = \prod_{i=0}^{\min(\log_2(WORD\_SIZE)-1, b-1)} (k_i \cdot y_i + (1 - k_i) \cdot (1 - y_i))$
+- $eq\_term_k = \prod_{i=0}^{\min(\log_2(\verb|WORD_SIZE|)-1, b-1)} (k_i \cdot y_i + (1 - k_i) \cdot (1 - y_i))$
 - $k_i$ is the $i$-th bit of $k$ in big-endian order
-- $x\_sign\_upper_k = \sum_{i=0}^{k-1} 2^{WORD\_SIZE - 1 - i} \cdot x_{sign}$
-- $x_{sign}$ is the sign bit of $x$, located at index $(WORD\_SIZE - 1) \bmod b$ in the $x$ input vector
+- $x\_sign\_upper_k = \sum_{i=0}^{k-1} 2^{\verb|WORD_SIZE| - 1 - i} \cdot x_{sign}$
+- $x_{sign}$ is the sign bit of $x$, located at index $(\verb|WORD_SIZE| - 1) \bmod b$ in the $x$ input vector
 
 This subtable handles the complexities of sign extension during an arithmetic right shift, taking into account the position of the sign bit within the input chunk and the variable shift amount.
 
@@ -213,25 +232,25 @@ This subtable implements a logical right shift operation on a chunk of bits. It 
 
 Function: For inputs $x$ and $y$, where $x$ is the chunk to be shifted and $y$ is the shift amount:
 
-$Srl(x, y) = (x \ll suffix\_length) \gg (y \bmod WORD\_SIZE)$
+$Srl(x, y) = (x \ll \verb|suffix_length|) \gg (y \bmod \verb|WORD_SIZE|)$
 
-where $suffix\_length = operand\_chunk\_width * CHUNK\_INDEX$, and $operand\_chunk\_width = \log_2(M) / 2$.
+where $\verb|suffix_length| = \verb|operand_chunk_width| * \verb|CHUNK_INDEX|$, and $\verb|operand_chunk_width| = \log_2(M) / 2$.
 
 The operation performs the following steps:
-1. Left-shift $x$ by $suffix\_length$ to align it within the word
-2. Right-shift the result by $(y \bmod WORD\_SIZE)$
+1. Left-shift $x$ by $\verb|suffix_length|$ to align it within the word
+2. Right-shift the result by $(y \bmod \verb|WORD_SIZE|)$
 
 Multilinear extension: The MLE involves summing over possible shift amounts:
 
-$\widetilde{Srl}(x, y) = \sum_{k=0}^{\min(WORD\_SIZE-1, 2^b-1)} eq\_term_k \cdot shift\_x\_by\_k$
+$\widetilde{Srl}(x, y) = \sum_{k=0}^{\min(\verb|WORD_SIZE|-1, 2^b-1)} \verb|eq_term_k| \cdot \verb|shift_x_by_k|$
 
 where:
 - $b$ is half the number of input bits
-- $eq\_term_k = \prod_{i=0}^{\min(\log_2(WORD\_SIZE)-1, b-1)} (k_i \cdot y_i + (1 - k_i) \cdot (1 - y_i))$
+- $\verb|eq_term_k| = \prod_{i=0}^{\min(\log_2(\verb|WORD_SIZE|)-1, b-1)} (k_i \cdot y_i + (1 - k_i) \cdot (1 - y_i))$
 - $k_i$ is the $i$-th bit of $k$ in big-endian order
-- $m = \min(b, k - b \cdot CHUNK\_INDEX)$ if $k > b \cdot CHUNK\_INDEX$, else 0
-- $chunk\_length = b - \max(0, (b \cdot (CHUNK\_INDEX + 1)) - WORD\_SIZE)$
-- $shift\_x\_by\_k = \sum_{j=m}^{chunk\_length-1} 2^{b \cdot CHUNK\_INDEX + j - k} \cdot x_{b-1-j}$
+- $m = \min(b, k - b \cdot \verb|CHUNK_INDEX|)$ if $k > b \cdot \verb|CHUNK_INDEX|$, else 0
+- $\verb|chunk_length| = b - \max(0, (b \cdot (\verb|CHUNK_INDEX| + 1)) - \verb|WORD_SIZE|)$
+- $\verb|shift_x_by_k| = \sum_{j=m}^{\verb|chunk_length|-1} 2^{b \cdot \verb|CHUNK_INDEX| + j - k} \cdot x_{b-1-j}$
 
 This subtable handles the complexities of shifting within a specific chunk of a larger word, taking into account potential underflow and alignment issues.
 
@@ -242,13 +261,13 @@ This subtable handles the complexities of shifting within a specific chunk of a 
 
 This subtable truncates the input to the least significant bits that fit within the specified `WORD_SIZE`, effectively handling overflow by discarding the most significant bits.
 
-Function: For an input $x$, let $c = WORD\_SIZE \bmod \log_2(M)$. Then:
+Function: For an input $x$, let $c = \verb|WORD_SIZE| \bmod \log_2(M)$. Then:
 
 $TruncateOverflow(x) = x \bmod 2^c$
 
 Multilinear extension: $\widetilde{TruncateOverflow}(x) = \sum_{i=0}^{c-1} 2^i \cdot x_{m - i - 1}$
 
-where $c = WORD\_SIZE \bmod \log_2(M)$, and $x_i$ represents the $i$-th bit of the input $x$ (0-indexed from least significant).
+where $c = \verb|WORD_SIZE| \bmod \log_2(M)$, and $x_i$ represents the $i$-th bit of the input $x$ (0-indexed from least significant).
 
 Note: This subtable is parameterized by `WORD_SIZE` and adapts to the size of the field $M$. It retains only the least significant $c$ bits of the input, where $c$ is the remainder when `WORD_SIZE` is divided by $\log_2(M)$.
 

@@ -1,8 +1,12 @@
 # Specification of Jolt Subtables
 
+A Jolt subtable is a lookup table consisting of $2^{2m}$ field elements (indexed by a tuple of two $m$-bit natural numbers $(x,y)$), whose multilinear extension (MLE) has a simple algebraic form.
+
+In this page, we give a full specification of all Jolt subtables for the current RV32IM version over curves. The subtables may change in future versions of Jolt.
+
 ## Notation
 
-- $m$ is the number of bits for each operand.
+- $m$ is the number of bits for each operand. Currently, Jolt subtables are used with $m=16$.
 
 - $x$ is a $m$-bit natural number, expressed in binary as $(x_{m-1}, x_{m-2}, \ldots, x_1, x_0) \in \{0, 1\}^m$.
 

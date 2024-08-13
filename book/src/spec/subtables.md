@@ -27,6 +27,10 @@ pub trait LassoSubtable<F: JoltField>: 'static + Sync {
 
 - $m$ is the number of bits for each operand. Currently, Jolt subtables are used with $m=16$.
 
+- `WORD_SIZE`: The total size of the word in bits (either 32 or 64)
+
+- `CHUNK_INDEX`: For shift instructions, this is the index of the chunk being shifted
+
 - $x$ is a $m$-bit natural number, expressed in binary as $(x_{m-1}, x_{m-2}, \ldots, x_1, x_0) \in \{0, 1\}^m$.
 
 - $y$ is a $m$-bit natural number, expressed in binary as $(y_{m-1}, y_{m-2}, \ldots, y_1, y_0) \in \{0, 1\}^m$.
@@ -161,10 +165,7 @@ Note: The current implementation assumes $M = 2^{16}$ and extends the sign to fi
 
 14. `SllSubtable`
 
-This subtable implements a logical left shift operation on a chunk of bits. It has three type parameters:
-- `F`: The field type
-- `CHUNK_INDEX`: The index of the chunk being shifted
-- `WORD_SIZE`: The total size of the word in bits
+This subtable implements a logical left shift operation on a chunk of bits.
 
 Function: For inputs $x$ and $y$, where $x$ is the chunk to be shifted and $y$ is the shift amount:
 
@@ -195,17 +196,9 @@ This subtable handles the complexities of shifting within a specific chunk of a 
 
 (TODO: double-check this description)
 
-This subtable implements the sign extension part of an arithmetic right shift operation. It has two type parameters:
-- `F`: The field type
-- `WORD_SIZE`: The total size of the word in bits
+This subtable implements the following function. If $x$'s most significant bit is `0`, then the result is `0`. Otherwise, the result is the number `11..10..0` with the same number of `1`s as the shift amount, which is `y % WORD_SIZE`.
 
-Function: For inputs $x$ and $y$, where $x$ is the chunk containing the sign bit and $y$ is the shift amount:
-
-$SraSign(x, y) = \sum_{i=0}^{(y \bmod \verb|WORD_SIZE|) - 1} 2^{\verb|WORD_SIZE| - 1 - i} \cdot sign\_bit$
-
-where $\verb|sign_bit| = x_{\verb|sign_bit_index|}$ and $\verb|sign_bit_index| = (\verb|WORD_SIZE| - 1) \bmod \verb|operand_chunk_width|$.
-
-The $\verb|operand_chunk_width|$ is calculated as $\log_2(M) / 2$, where $M$ is the size of the subtable.
+$SraSign(x, y) = \begin{cases} 0 & \text{if } x_{m-1} = 0 \\ \sum_{i=0}^{(y \bmod \verb|WORD_SIZE|) - 1} 2^{\verb|WORD_SIZE| - 1 - i} & \text{if } x_{m-1} = 1 \end{cases}$
 
 Multilinear extension:
 
@@ -221,14 +214,11 @@ where:
 This subtable handles the complexities of sign extension during an arithmetic right shift, taking into account the position of the sign bit within the input chunk and the variable shift amount.
 
 
-16. `SrlSubtable`
+1.  `SrlSubtable`
 
 (TODO: double-check this description)
 
-This subtable implements a logical right shift operation on a chunk of bits. It has three type parameters:
-- `F`: The field type
-- `CHUNK_INDEX`: The index of the chunk being shifted
-- `WORD_SIZE`: The total size of the word in bits
+This subtable implements a logical right shift operation on a chunk of bits.
 
 Function: For inputs $x$ and $y$, where $x$ is the chunk to be shifted and $y$ is the shift amount:
 

@@ -101,19 +101,31 @@ VirtualAssertValidDiv0
 
 VirtualAssertValidSignedRemainder
 
-- 
+- First operand is the remainder, second is the divisor
+
+- Output 1 if the remainder is valid w.r.t. the divisor, and 0 otherwise. Validity here means that either the remainder or divisor is 0, or they have the same sign and the remainder is less than the divisor in absolute value.
+
+- This is checked by the subtables via getting the sign bits, the (equal 0) bit, and the (less than) comparison via subtables.
 
 VirtualAssertValidUnsignedRemainder
 
-- 
+- First operand is the remainder, second is the divisor (both are unsigned)
+
+- Output 1 if the remainder is valid w.r.t. the divisor, and 0 otherwise. Validity here means that either the divisor is 0, or the remainder is less than the divisor.
+
+- This is checked by the subtables via getting the (equal 0) bit, and the (less than) comparison via subtables.
 
 VirtualMove
 
 - Just range-check each (16-bit) chunk of the operand to be at most 16-bit (instead of an arbitrary field element)
 
+- Used in `DIV`, `DIVU`, `REM`, and `REMU`
+
 VirtualMOVSIGN
 
 - Returns (max `u32/u64`) if the first operand's sign bit is 1, and 0 otherwise
+
+- Used in `MULH` and `MULHSU`
 
 ### Sequence of Virtual Instructions
 
@@ -121,232 +133,108 @@ MULH / MULHSU / DIV / DIVU / REM / REMU
 
 NOTE: some instructions are actually sequences of other (virtual) instructions, which is the case for the `MUL` and `DIV` instructions.
 
-1. `ADDInstruction(x, y)`
+#### `MULH`
 
-- Expected output: $x + y$, truncated to $\verb|WORD_SIZE|$ bits.
+Expected output: the high bits of $x * y$ where $x$ is signed and $y$ is signed.
 
-- Subtables: `TruncateOverflowSubtable`, `IdentitySubtable`
+Let `r_x := rs1`, `r_y := rs2`, `x := rs1_val`, `y := rs2_val`. Initialize virtual registers `v_sx := 32`, `v_sy := 33`, `v_0 := 34`, `v_1 := 35`, `v_2 := 36`, `v_3 := 37`.
 
-- How to query subtables:
+1. Let `s_x` be the value of applying `MOVSIGNInstruction` to `x`. 
 
-- How to combine lookup outputs:
+First virtual instruction is `VIRTUAL_MOVSIGN` with `rs1 := r_x`, `rd := v_sx`, `rs1_val := x`, `rd_post_val := s_x`.
 
-2. `SUBInstruction(x, y)`
+2. Let `s_y` be the value of applying `MOVSIGNInstruction` to `y`.
 
-- Expected output: $x - y$, truncated to $\verb|WORD_SIZE|$ bits.
+Second virtual instruction is `VIRTUAL_MOVSIGN` with `rs1 := r_y`, `rd := v_sy`, `rs1_val := y`, `rd_post_val := s_y`.
 
-- Subtables: 
+3. Let `xy_high_bits` be the value of applying `MULHUInstruction` to `x` and `y`.
 
-- How to query subtables:
+Third virtual instruction is `MULHU` with `rs1 := r_x`, `rs2 := r_y`, `rd := v_0`, `rs1_val := x`, `rs2_val := y`, `rd_post_val := xy_high_bits`.
 
-- How to combine lookup outputs:
+4. Let `sx_y_low_bits` be the value of applying `MULUInstruction` to `s_x` and `y`.
 
-3. `ANDInstruction(x, y)`
+Fourth virtual instruction is `MULU` with `rs1 := v_sx`, `rs2 := r_y`, `rd := v_1`, `rs1_val := s_x`, `rs2_val := y`, `rd_post_val := sx_y_low_bits`.
 
-- Expected output: $x \land y$ (performed bitwise on $\verb|WORD_SIZE|$ bit operands).
+5. Let `sy_x_low_bits` be the value of applying `MULUInstruction` to `s_y` and `s_x`.
 
-- Subtables: 
+Fifth virtual instruction is `MULU` with `rs1 := v_sy`, `rs2 := r_x`, `rd := v_2`, `rs1_val := s_y`, `rs2_val := s_x`, `rd_post_val := sy_x_low_bits`.
 
-- How to query subtables:
+6. Let `partial_sum` be the value of applying `ADDInstruction` to `xy_high_bits` and `sx_y_low_bits`.
 
-- How to combine lookup outputs:
+Sixth virtual instruction is `ADD` with `rs1 := v_0`, `rs2 := v_1`, `rd := v_3`, `rs1_val := xy_high_bits`, `rs2_val := sy_x_low_bits`, `rd_post_val := partial_sum`.
 
-1. `ORInstruction(x, y)`
+7. Let `result` be the value of applying `ADDInstruction` to `partial_sum` and `sy_x_low_bits`.
 
-- Subtables: 
+Seventh virtual instruction is `ADD` with `rs1 := v_3`, `rs2 := v_2`, `rd := rd` (original `rd`), `rs1_val := partial_sum`, `rs2_val := sy_x_low_bits`, `rd_post_val := result`.
 
-- How to query subtables:
+#### `MULHSU`
 
-- How to combine lookup outputs:
+Expected output: the high bits of $x * y$ where $x$ is signed and $y$ is unsigned. (double-check?)
 
-5. `XORInstruction(x, y)`
+Let `r_x := rs1`, `r_y := rs2`, `x := rs1_val`, `y := rs2_val`. Initialize virtual registers `v_sx := 32`, `v_1 := 33`, `v_2 := 34`, `v_3 := 35`.
 
-- Subtables: 
+1. Let `s_x` be the result of applying `MOVSIGNInstruction` to `x`.
 
-- How to query subtables:
+First virtual instruction is `VIRTUAL_MOVSIGN` with `rs1 := r_x`, `rd := v_sx`, `rs1_val := x`, `rd_post_val := s_x`.
 
-- How to combine lookup outputs:
+2. Let `xy_high_bits` be the result of applying `MULHUInstruction` to `x` and `y`.
 
-6. `LBInstruction(x)`
+Second virtual instruction is `MULHU` with `rs1 := r_x`, `rs2 := r_y`, `rd := v_1`, `rs1_val := x`, `rs2_val := y`, `rd_post_val := xy_high_bits`.
 
-- Subtables: 
+3. Let `sx_y_low_bits` be the result of applying `MULUInstruction` to `s_x` and `y`.
 
-- How to query subtables:
+Third virtual instruction is `MULU` with `rs1 := v_sx`, `rs2 := r_y`, `rd := v_2`, `rs1_val := s_x`, `rs2_val := y`, `rd_post_val := sx_y_low_bits`.
 
-- How to combine lookup outputs:
+4. Let `result` be the result of applying `ADDInstruction` to `xy_high_bits` and `sx_y_low_bits`.
 
-7. `LHInstruction(x)`
+Fourth virtual instruction is `ADD` with `rs1 := v_1`, `rs2 := v_2`, `rd := rd` (original `rd`), `rs1_val := xy_high_bits`, `rs2_val := sx_y_low_bits`, `rd_post_val := result`.
 
-- Subtables: 
 
-- How to query subtables:
+#### `DIV`
 
-- How to combine lookup outputs:
+Expected output: the quotient of $x / y$ where $x$ is signed and $y$ is signed, rounded towards zero.
 
-8. `SBInstruction(x)`
+Let `r_x := rs1`, `r_y := rs2`, `x := rs1_val`, `y := rs2_val`. Initialize virtual registers `v_0 := 32`, `v_q := 33`, `v_r := 34`, `v_qy := 35`.
 
-- Subtables: 
+Let `quotient` and `remainder` be the result of applying division on `x` and `y`, where both are signed.
 
-- How to query subtables:
+1. Let `q` be the value of applying `ADVICEInstruction` to `quotient` (i.e. just range-check `quotient` to be `u32/u64`).
 
-- How to combine lookup outputs:
+First virtual instruction is `VIRTUAL_ADVICE` with `rd := v_q`, `rd_post_val := v_q`, and `advice_value := quotient`.
 
-9. `SHInstruction(x)`
+(double-check on advice value)
 
-- Subtables: 
+2. Let `r` be the value of applying `ADVICEInstruction` to `remainder` (i.e. just range-check `remainder` to be `u32/u64`).
 
-- How to query subtables:
+Second virtual instruction is `VIRTUAL_ADVICE` with `rd := v_r`, `rd_post_val := v_r`, and `advice_value := remainder`.
 
-- How to combine lookup outputs:
+(double-check on advice value)
 
-10. `SWInstruction(x)`
+3. Let `is_valid` be the value of applying `AssertValidSignedRemainderInstruction` to `r` and `y`. Fails if `is_valid` is 0.
 
-- Subtables: 
+Third virtual instruction is `VIRTUAL_ASSERT_VALID_SIGNED_REMAINDER` with `rs1 := v_r`, `rs2 := r_y`, `rs1_val := r`, `rs2_val := y`.
 
-- How to query subtables:
+4. Let `is_valid` be the value of applying `AssertValidDiv0Instruction` to `y` and `q`. Fails if `is_valid` is 0.
 
-- How to combine lookup outputs:
+(Note: this overrides the previous `is_valid` value)
 
-11. `BEQInstruction(x, y)`
+Fourth virtual instruction is `VIRTUAL_ASSERT_VALID_DIV0` with `rs1 := r_y`, `rs2 := v_q`, `rs1_val := y`, `rs2_val := q`.
 
-- Subtables: 
+5. Let `q_y` be the value of applying `MULInstruction` to `q` and `y`.
 
-- How to query subtables:
+Fifth virtual instruction is `MUL` with `rs1 := v_q`, `rs2 := r_y`, `rd := v_qy`, `rs1_val := q`, `rs2_val := y`, `rd_post_val := q_y`.
 
-- How to combine lookup outputs:
+6. Let `add_0` be the value of applying `ADDInstruction` to `q_y` and `r`.
 
-12. `BGEInstruction(x, y)`
+Sixth virtual instruction is `ADD` with `rs1 := v_qy`, `rs2 := v_r`, `rd := v_0`, `rs1_val := q_y`, `rs2_val := r`, `rd_post_val := add_0`.
 
-- Subtables: 
+7. Let `_assert_eq` be the value of applying `BEQInstruction` to `add_0` and `r`.
 
-- How to query subtables:
+(todo: put assert command that `_assert_eq` is 1 in https://github.com/a16z/jolt/blob/main/jolt-core/src/jolt/instruction/div.rs#L184)
 
-- How to combine lookup outputs:
+Seventh virtual instruction is `VIRTUAL_ASSERT_EQ` with `rs1 := v_0`, `rs2 := r_x`, `rs1_val := add_0`, `rs2_val := r`.
 
-13. `BGEUInstruction(x, y)`
+8. Eighth virtual instruction is `VIRTUAL_MOVE` with `rs1 := v_q`, `rd := rd` (original `rd`), `rs1_val := q`, `rd_post_val := q`.
 
-- Subtables: 
 
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-14. `BNEInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-15. `SLTInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-16. `SLTUInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-17. `SLLInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-18. `SRAInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-19. `SRLInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-20. `MOVSIGNInstruction(x)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-21. `MULInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-22. `MULUInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-23. `MULHUInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-24. `ADVICEInstruction(x)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-25. `ASSERTLTEInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-26. `AssertValidSignedRemainderInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-27. `AssertValidUnsignedRemainderInstruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
-
-28. `AssertValidDiv0Instruction(x, y)`
-
-- Subtables: 
-
-- How to query subtables:
-
-- How to combine lookup outputs:
+#### `DIVU`

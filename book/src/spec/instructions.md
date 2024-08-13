@@ -49,6 +49,76 @@ In the codebase, we assert that: $\verb|WORD_SIZE| \leq C \cdot \log_2(M)$. This
 
 ## Instructions List
 
+### Logical & Arithmetic Instructions
+
+AND / OR / XOR
+
+- Perform bitwise operations using the corresponding subtables
+
+ADD / SUB / MUL / MULU / MULHU
+
+- Perform the operation in-circuit, and then range-check the result to be `u32/u64`
+
+SLL / SRL / SRA
+
+- 
+
+### Set & Branch Instructions
+
+SLT / SLTU / BEQ / BNE / BGE / BGEU
+
+- 
+
+### Load & Store Instructions
+
+LB / LH / SB / SH / SW
+
+(why no LW?)
+
+SW
+
+- Returns the lower 32 bits of the (second) operand
+
+- Is constrained via two `IdentitySubtable`s on the third and fourth chunks of the second operand (for 32 bits only, what about 64?)
+
+- What about the other chunks? Why can they be unconstrained? The answer is that the other chunks are simply ignored. There's no subtable lookup for them, so they are not present when combining lookups.
+
+
+### Virtual Instructions
+
+VirtualAdvice
+
+- Only range-check the advice to be `u32/u64`
+
+VirtualAssertLTE
+
+- Compute $x \le y$ as a combination of strict less-than and equality
+
+VirtualAssertValidDiv0
+
+- Inputs $x, y$ are interpreted as (unsigned) divisor and quotient
+- Output 1 if $x \ne 0$ or if $x = 0$ and $y = 2 ^ \verb|WORD_SIZE| - 1$
+
+VirtualAssertValidSignedRemainder
+
+- 
+
+VirtualAssertValidUnsignedRemainder
+
+- 
+
+VirtualMove
+
+- Just range-check each (16-bit) chunk of the operand to be at most 16-bit (instead of an arbitrary field element)
+
+VirtualMOVSIGN
+
+- Returns (max `u32/u64`) if the first operand's sign bit is 1, and 0 otherwise
+
+### Sequence of Virtual Instructions
+
+MULH / MULHSU / DIV / DIVU / REM / REMU
+
 NOTE: some instructions are actually sequences of other (virtual) instructions, which is the case for the `MUL` and `DIV` instructions.
 
 1. `ADDInstruction(x, y)`

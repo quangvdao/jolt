@@ -43,6 +43,12 @@ pub trait LassoSubtable<F: JoltField>: 'static + Sync {
 
 - Jolt internally represents subtables as a single vector of $M:=2^{2m}$ field elements. The indexing is done in the natural way, by interpreting the concatenation $z := x \| y$ as a $2m$-bit natural number.
 
+## TODOs
+
+Which subtables have methods specialized to a specific `M` parameter? Or can be rewritten to be more efficient / readable?
+
+
+
 ## Subtables List
 
 1. `AndSubtable`

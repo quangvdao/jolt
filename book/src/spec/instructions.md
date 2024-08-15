@@ -133,6 +133,8 @@ MULH / MULHSU / DIV / DIVU / REM / REMU
 
 NOTE: some instructions are actually sequences of other (virtual) instructions, which is the case for the `MUL` and `DIV` instructions.
 
+TODO: reformat these instructions to be more readable, and also merge with the description in "M extension"
+
 #### `MULH`
 
 Expected output: the high bits of $x * y$ where $x$ is signed and $y$ is signed.
@@ -238,3 +240,41 @@ Seventh virtual instruction is `VIRTUAL_ASSERT_EQ` with `rs1 := v_0`, `rs2 := r_
 
 
 #### `DIVU`
+
+Expected output: the quotient $x / y$ where $x$ is unsigned and $y$ is unsigned. If $y = 0$, the quotient is $2^{\verb|WORD_SIZE|} - 1$.
+
+Let `r_x := rs1`, `r_y := rs2`, `x := rs1_val`, `y := rs2_val`. Initialize virtual registers `v_0 := 32`, `v_q := 33`, `v_r := 34`, `v_qy := 35`.
+
+Let `quotient` and `remainder` be the result of applying division on `x` and `y`, where both are unsigned. If $y = 0$, then `quotient` is $2^{\verb|WORD_SIZE|} - 1$ and `remainder` is $x$.
+
+1. Let `q` be the value of applying `ADVICEInstruction` to `quotient` (i.e. just range-check `quotient` to be `u32/u64`).
+
+First virtual instruction is `VIRTUAL_ADVICE` with `rd := v_q`, `rd_post_val := q`, and `advice_value := quotient`.
+
+(double-check on advice value)
+
+2. Let `r` be the value of applying `ADVICEInstruction` to `remainder` (i.e. just range-check `remainder` to be `u32/u64`).
+
+Second virtual instruction is `VIRTUAL_ADVICE` with `rd := v_r`, `rd_post_val := r`, and `advice_value := remainder`.
+
+(double-check on advice value)
+
+3. Let `q_y` be the value of applying `MULUInstruction` to `q` and `y`.
+
+Third virtual instruction is `MULU` with `rs1 := v_q`, `rs2 := r_y`, `rd := v_qy`, `rs1_val := q`, `rs2_val := y`, `rd_post_val := q_y`.
+
+4. Let `is_valid` be the value of applying `AssertValidUnsignedRemainderInstruction` to `r` and `y`.
+
+Fourth virtual instruction is `VIRTUAL_ASSERT_VALID_UNSIGNED_REMAINDER` with `rs1 := v_r`, `rs2 := r_y`, `rs1_val := r`, `rs2_val := y`.
+
+5. 6. 7. 8. 9. TODO
+
+#### `REM`
+
+(7 instructions)
+
+#### `REMU`
+
+(8 instructions)
+
+Note for Div and Rem instructions: we cannot remove the final `MOVE` instruction (instead putting the quotient or remainder directly in the `rd` register) because of the edge case that `rd` is equal to `rs1` or `rs2`.

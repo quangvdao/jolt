@@ -7,7 +7,7 @@ use super::{JoltInstruction, SubtableIndices};
 use crate::jolt::subtable::{sra_sign::SraSignSubtable, srl::SrlSubtable, LassoSubtable};
 use crate::utils::instruction_utils::{assert_valid_parameters, chunk_and_concatenate_for_shift};
 
-#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SRAInstruction<const WORD_SIZE: usize>(pub u64, pub u64);
 
 impl<const WORD_SIZE: usize> JoltInstruction for SRAInstruction<WORD_SIZE> {
@@ -67,7 +67,7 @@ impl<const WORD_SIZE: usize> JoltInstruction for SRAInstruction<WORD_SIZE> {
     fn lookup_entry(&self) -> u64 {
         if WORD_SIZE == 32 {
             let x = self.0 as i32;
-            let y = (self.1 as u32 % 32) as u32;
+            let y = self.1 as u32 % 32;
             (x.wrapping_shr(y) as u32).into()
         } else if WORD_SIZE == 64 {
             let x = self.0 as i64;
@@ -79,7 +79,13 @@ impl<const WORD_SIZE: usize> JoltInstruction for SRAInstruction<WORD_SIZE> {
     }
 
     fn random(&self, rng: &mut StdRng) -> Self {
-        Self(rng.next_u32() as u64, rng.next_u32() as u64)
+        if WORD_SIZE == 32 {
+            Self(rng.next_u32() as u64, rng.next_u32() as u64)
+        } else if WORD_SIZE == 64 {
+            Self(rng.next_u64(), rng.next_u64())
+        } else {
+            panic!("Only 32-bit and 64-bit word sizes are supported");
+        }
     }
 }
 

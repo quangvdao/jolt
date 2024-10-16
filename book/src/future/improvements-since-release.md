@@ -19,12 +19,12 @@ not mentioned in this file is presumably not yet started (or barely started).
 * Add support for Quarks/Spartan grand product argument and hybrid grand product 
 (which achieves most of the verifier benefits of Quarks without a significant hit to prover time).
 
-  * Still to do here: [Optimize](https://github.com/a16z/jolt/issues/444) to how the prover commits to partial products. 
+  * Note: the cost of Quarks/Spartan and hybrid grand products (i.e., time to commit to partial products) were improved subsequent to initial implementation, via [this PR](https://github.com/a16z/jolt/pull/473). 
 
 * In progress: change how we are batching grand products, treating them all laid side-by-side as one giant circuit. This
 will reduce proof size by up to 200KB.
 
-* In progress: reduce the number of polynomial evaluation proofs from 7-10 down to 1. 
+* Reduce the number of polynomial evaluation proofs from 7-10 down to 1 (achieved in [this PR](https://github.com/a16z/jolt/pull/453)) 
 
 ## Prover cost improvements (all in progress)
 
@@ -35,6 +35,14 @@ as per [Dao-Thaler](https://eprint.iacr.org/2024/1210).
 
 * Implement the sum-check prover optimization from Section 3 of Angus Gruen's [paper](https://eprint.iacr.org/2024/108).
 
-* AVX-512 speedups.
+* Implement the sum-check prover optimizations from [Bagad-Domb-Thaler](https://eprint.iacr.org/2024/1046), which actually apply whenever small values are being summed, even if those values reside in a big (e.g., 256-bit) field. This captures Spartan as applied in Jolt. Thanks to Lev Soukhanov for this observation.
 
-* GPU integration. 
+* Replace byte-addressable memory with word-addressable memory. This is actually [implemented](https://github.com/a16z/jolt/pull/412), but the above speedups to Spartan proving will need to be implemented before it yields an overall performance improvement. 
+
+* AVX-512 speedups (see [here](https://github.com/a16z/vectorized-fields) for a detailed description of in-progress efforts).
+
+* GPU integration.
+
+* Prover space control via folding (see [here](https://jolt.a16zcrypto.com/future/folding.html) for a sketchy overview of how this will be implemented).
+
+* Eliminate some unnecessary lookups identified via formal verification efforts. 

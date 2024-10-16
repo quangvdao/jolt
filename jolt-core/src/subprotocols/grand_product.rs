@@ -3,6 +3,7 @@ use super::sumcheck::{BatchedCubicSumcheck, SumcheckInstanceProof};
 use crate::field::{JoltField, OptimizedMul};
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::eq_poly::EqPolynomial;
+use crate::poly::opening_proof::{ProverOpeningAccumulator, VerifierOpeningAccumulator};
 use crate::poly::{dense_mlpoly::DensePolynomial, unipoly::UniPoly};
 use crate::utils::math::Math;
 use crate::utils::thread::drop_in_background_thread;
@@ -34,17 +35,22 @@ impl<F: JoltField> BatchedGrandProductLayerProof<F> {
 }
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
-pub struct BatchedGrandProductProof<C: CommitmentScheme> {
-    pub layers: Vec<BatchedGrandProductLayerProof<C::Field>>,
-    pub quark_proof: Option<QuarkGrandProductProof<C>>,
+pub struct BatchedGrandProductProof<PCS: CommitmentScheme> {
+    pub layers: Vec<BatchedGrandProductLayerProof<PCS::Field>>,
+    pub quark_proof: Option<QuarkGrandProductProof<PCS>>,
 }
 
-pub trait BatchedGrandProduct<F: JoltField, C: CommitmentScheme<Field = F>>: Sized {
+pub trait BatchedGrandProduct<F: JoltField, PCS: CommitmentScheme<Field = F>>: Sized {
     /// The bottom/input layer of the grand products
     type Leaves;
+    type Config: Default + Clone + Copy;
 
-    /// Constructs the grand product circuit(s) from `leaves`
-    fn construct(leaves: Self::Leaves) -> Self;
+    /// Constructs the grand product circuit(s) from `leaves` with the default configuration
+    fn construct(leaves: Self::Leaves) -> Self {
+        Self::construct_with_config(leaves, Self::Config::default())
+    }
+    /// Constructs the grand product circuit(s) from `leaves` with a config
+    fn construct_with_config(leaves: Self::Leaves, config: Self::Config) -> Self;
     /// The number of layers in the grand product.
     fn num_layers(&self) -> usize;
     /// The claimed outputs of the grand products.
@@ -58,9 +64,10 @@ pub trait BatchedGrandProduct<F: JoltField, C: CommitmentScheme<Field = F>>: Siz
     #[tracing::instrument(skip_all, name = "BatchedGrandProduct::prove_grand_product")]
     fn prove_grand_product(
         &mut self,
+        _opening_accumulator: Option<&mut ProverOpeningAccumulator<F>>,
         transcript: &mut ProofTranscript,
-        _setup: Option<&C::Setup>,
-    ) -> (BatchedGrandProductProof<C>, Vec<F>) {
+        _setup: Option<&PCS::Setup>,
+    ) -> (BatchedGrandProductProof<PCS>, Vec<F>) {
         let mut proof_layers = Vec::with_capacity(self.num_layers());
         let mut claims_to_verify = self.claims();
         let mut r_grand_product = Vec::new();
@@ -181,10 +188,11 @@ pub trait BatchedGrandProduct<F: JoltField, C: CommitmentScheme<Field = F>>: Siz
 
     /// Verifies the given grand product proof.
     fn verify_grand_product(
-        proof: &BatchedGrandProductProof<C>,
+        proof: &BatchedGrandProductProof<PCS>,
         claims: &Vec<F>,
+        _opening_accumulator: Option<&mut VerifierOpeningAccumulator<F, PCS>>,
         transcript: &mut ProofTranscript,
-        _setup: Option<&C::Setup>,
+        _setup: Option<&PCS::Setup>,
     ) -> (Vec<F>, Vec<F>) {
         // Pass the inputs to the layer verification function, by default we have no quarks and so we do not
         // use the quark proof fields.
@@ -412,10 +420,11 @@ pub struct BatchedDenseGrandProduct<F: JoltField> {
     layers: Vec<BatchedDenseGrandProductLayer<F>>,
 }
 
-impl<F: JoltField, C: CommitmentScheme<Field = F>> BatchedGrandProduct<F, C>
+impl<F: JoltField, PCS: CommitmentScheme<Field = F>> BatchedGrandProduct<F, PCS>
     for BatchedDenseGrandProduct<F>
 {
     type Leaves = Vec<Vec<F>>;
+    type Config = ();
 
     #[tracing::instrument(skip_all, name = "BatchedDenseGrandProduct::construct")]
     fn construct(leaves: Self::Leaves) -> Self {
@@ -441,6 +450,10 @@ impl<F: JoltField, C: CommitmentScheme<Field = F>> BatchedGrandProduct<F, C>
 
         Self { layers }
     }
+    #[tracing::instrument(skip_all, name = "BatchedDenseGrandProduct::construct_with_config")]
+    fn construct_with_config(leaves: Self::Leaves, _config: Self::Config) -> Self {
+        <Self as BatchedGrandProduct<F, PCS>>::construct(leaves)
+    }
 
     fn num_layers(&self) -> usize {
         self.layers.len()
@@ -448,7 +461,7 @@ impl<F: JoltField, C: CommitmentScheme<Field = F>> BatchedGrandProduct<F, C>
 
     fn claims(&self) -> Vec<F> {
         let num_layers =
-            <BatchedDenseGrandProduct<F> as BatchedGrandProduct<F, C>>::num_layers(self);
+            <BatchedDenseGrandProduct<F> as BatchedGrandProduct<F, PCS>>::num_layers(self);
         let last_layers = &self.layers[num_layers - 1];
         assert_eq!(last_layers.layer_len, 2);
         last_layers
@@ -1112,6 +1125,7 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedGrandProductToggleLayer<F>
                 debug_assert!(self.layer_len % 2 == 0);
                 let n = self.layer_len / 2;
                 for i in 0..n {
+                    // TODO(moodlezoup): Try mul_0_optimized here
                     layer[i] = layer[2 * i] + *r * (layer[2 * i + 1] - layer[2 * i]);
                 }
             });
@@ -1420,10 +1434,11 @@ pub struct ToggledBatchedGrandProduct<F: JoltField> {
     sparse_layers: Vec<BatchedSparseGrandProductLayer<F>>,
 }
 
-impl<F: JoltField, C: CommitmentScheme<Field = F>> BatchedGrandProduct<F, C>
-    for ToggledBatchedGrandProduct<C::Field>
+impl<F: JoltField, PCS: CommitmentScheme<Field = F>> BatchedGrandProduct<F, PCS>
+    for ToggledBatchedGrandProduct<PCS::Field>
 {
     type Leaves = (Vec<Vec<usize>>, Vec<Vec<F>>); // (flags, fingerprints)
+    type Config = ();
 
     #[tracing::instrument(skip_all, name = "ToggledBatchedGrandProduct::construct")]
     fn construct(leaves: Self::Leaves) -> Self {
@@ -1452,6 +1467,11 @@ impl<F: JoltField, C: CommitmentScheme<Field = F>> BatchedGrandProduct<F, C>
             toggle_layer,
             sparse_layers: layers,
         }
+    }
+
+    #[tracing::instrument(skip_all, name = "ToggledBatchedGrandProduct::construct_with_config")]
+    fn construct_with_config(leaves: Self::Leaves, _config: Self::Config) -> Self {
+        <Self as BatchedGrandProduct<F, PCS>>::construct(leaves)
     }
 
     fn num_layers(&self) -> usize {
@@ -1575,12 +1595,17 @@ mod grand_product_tests {
             Fr,
             Zeromorph<Bn254>,
         >>::prove_grand_product(
-            &mut batched_circuit, &mut transcript, None
+            &mut batched_circuit, None, &mut transcript, None
         );
 
         let mut transcript: ProofTranscript = ProofTranscript::new(b"test_transcript");
-        let (_, r_verifier) =
-            BatchedDenseGrandProduct::verify_grand_product(&proof, &claims, &mut transcript, None);
+        let (_, r_verifier) = BatchedDenseGrandProduct::verify_grand_product(
+            &proof,
+            &claims,
+            None,
+            &mut transcript,
+            None,
+        );
         assert_eq!(r_prover, r_verifier);
     }
 

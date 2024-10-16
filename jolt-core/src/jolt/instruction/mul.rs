@@ -12,7 +12,7 @@ use crate::utils::instruction_utils::{
     assert_valid_parameters, concatenate_lookups, multiply_and_chunk_operands,
 };
 
-#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MULInstruction<const WORD_SIZE: usize>(pub u64, pub u64);
 
 impl<const WORD_SIZE: usize> JoltInstruction for MULInstruction<WORD_SIZE> {
@@ -108,6 +108,7 @@ mod test {
             MULInstruction::<WORD_SIZE>(1, 0),
             MULInstruction::<WORD_SIZE>(0, u32_max),
             MULInstruction::<WORD_SIZE>(u32_max, 0),
+            MULInstruction::<WORD_SIZE>(2, u32_max),
             MULInstruction::<WORD_SIZE>(u32_max, u32_max),
             MULInstruction::<WORD_SIZE>(u32_max, 1 << 8),
             MULInstruction::<WORD_SIZE>(1 << 8, u32_max),

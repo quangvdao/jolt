@@ -7,7 +7,7 @@ use crate::field::JoltField;
 use crate::jolt::subtable::{identity::IdentitySubtable, LassoSubtable};
 use crate::utils::instruction_utils::chunk_operand_usize;
 
-#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SHInstruction<const WORD_SIZE: usize>(pub u64);
 
 impl<const WORD_SIZE: usize> JoltInstruction for SHInstruction<WORD_SIZE> {
@@ -51,7 +51,7 @@ impl<const WORD_SIZE: usize> JoltInstruction for SHInstruction<WORD_SIZE> {
     }
 
     fn lookup_entry(&self) -> u64 {
-        // Lower 16 bits of the rs2 value
+        // Lower 16 bits of the rs2 value, no sign extension
         // Same for both 32-bit and 64-bit word sizes
         self.0 & 0xffff
     }

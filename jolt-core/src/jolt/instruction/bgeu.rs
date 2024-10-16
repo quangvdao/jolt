@@ -9,7 +9,7 @@ use crate::{
     utils::instruction_utils::chunk_and_concatenate_operands,
 };
 
-#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BGEUInstruction<const WORD_SIZE: usize>(pub u64, pub u64);
 
 impl<const WORD_SIZE: usize> JoltInstruction for BGEUInstruction<WORD_SIZE> {
@@ -18,7 +18,7 @@ impl<const WORD_SIZE: usize> JoltInstruction for BGEUInstruction<WORD_SIZE> {
     }
 
     fn combine_lookups<F: JoltField>(&self, vals: &[F], C: usize, M: usize) -> F {
-        // 1 - LTU(x, y) =
+        // 1 - SLTU(x, y) =
         F::one() - SLTUInstruction::<WORD_SIZE>(self.0, self.1).combine_lookups(vals, C, M)
     }
 
@@ -33,7 +33,7 @@ impl<const WORD_SIZE: usize> JoltInstruction for BGEUInstruction<WORD_SIZE> {
     ) -> Vec<(Box<dyn LassoSubtable<F>>, SubtableIndices)> {
         vec![
             (Box::new(LtuSubtable::new()), SubtableIndices::from(0..C)),
-            (Box::new(EqSubtable::new()), SubtableIndices::from(0..C)),
+            (Box::new(EqSubtable::new()), SubtableIndices::from(0..C - 1)),
         ]
     }
 

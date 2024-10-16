@@ -33,7 +33,7 @@ pub struct ZeromorphSRS<P: Pairing>(Arc<SRS<P>>);
 
 impl<P: Pairing> ZeromorphSRS<P> {
     pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, max_degree: usize) -> Self {
-        Self(Arc::new(SRS::setup(rng, max_degree)))
+        Self(Arc::new(SRS::setup(rng, max_degree, max_degree)))
     }
 
     pub fn trim(self, max_degree: usize) -> (ZeromorphProverKey<P>, ZeromorphVerifierKey<P>) {
@@ -66,6 +66,12 @@ pub struct ZeromorphVerifierKey<P: Pairing> {
 
 #[derive(Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct ZeromorphCommitment<P: Pairing>(P::G1Affine);
+
+impl<P: Pairing> Default for ZeromorphCommitment<P> {
+    fn default() -> Self {
+        Self(P::G1Affine::zero())
+    }
+}
 
 impl<P: Pairing> AppendToTranscript for ZeromorphCommitment<P> {
     fn append_to_transcript(&self, transcript: &mut ProofTranscript) {
@@ -484,6 +490,7 @@ where
         ZeromorphSRS(Arc::new(SRS::setup(
             &mut ChaCha20Rng::from_seed(*b"ZEROMORPH_POLY_COMMITMENT_SCHEME"),
             max_len,
+            max_len,
         )))
         .trim(max_len)
     }
@@ -550,6 +557,18 @@ where
         transcript: &mut ProofTranscript,
     ) -> Self::BatchedProof {
         Zeromorph::<P>::batch_open(&setup.0, polynomials, opening_point, openings, transcript)
+    }
+
+    fn combine_commitments(
+        commitments: &[&Self::Commitment],
+        coeffs: &[Self::Field],
+    ) -> Self::Commitment {
+        let combined_commitment: P::G1 = commitments
+            .iter()
+            .zip(coeffs.iter())
+            .map(|(commitment, coeff)| commitment.0 * coeff)
+            .sum();
+        ZeromorphCommitment(combined_commitment.into_affine())
     }
 
     fn verify(

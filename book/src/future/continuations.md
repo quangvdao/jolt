@@ -14,7 +14,7 @@ Continuations come in two flavors: "brute-force recursion" and folding. In brute
 
 In folding schemes, the "proof" for each chunk is actually only a "partial proof", in particular omitting any evaluation proofs for any committed polynomials. The partial proofs for each chunk are not explicitly checked by anyone. Rather, they are "aggregated" into a single partial proof, and that partial proof is then "completed" into a full SNARK proof. In folding schemes, the prover winds up recursively proving that it correctly aggregated the partial proofs. This has major performance benefits relative to "brute force recursion", because aggregating proofs is much simpler than checking them. Hence, proving aggregation was done correctly is much cheaper than proving full-fledged proof verification was done correctly.
 
-Folding schemes only work with elliptic-curve-based commitment schemes (there have been some efforts to extend folding techniques to hashing-based commitment schemes but they introduce large overheads). So most zkVMs do not pursue folding today as they use hashing-based commitment schemes. Fortunately, Jolt today does use elliptic curves and hence folding as a means of prover space control is available to it.
+Folding schemes only work with elliptic-curve-based commitment schemes (there have been some efforts to extend folding techniques to hashing-based commitment schemes but they introduce large overheads). So most zkVMs do not pursue folding today as they use hashing-based commitment schemes. Fortunately, Jolt today does use elliptic curves and hence folding as a means of prover space control is available to it. A sketchy overview of how to integrate folding into Jolt is provided [here](https://jolt.a16zcrypto.com/future/folding.html).
 
 # More detail on non-recursive space control
 
@@ -40,12 +40,14 @@ A generic config parameter will be added to the `Jolt` struct called `Continuati
 
 # References on non-recursive prover space control
 
-*Verifiable computation using multiple provers. Andrew J. Blumberg, Justin Thaler, Victor Vu, and Michael Walfish. https://eprint.iacr.org/2014/846.
+<OL>
+<LI> Verifiable computation using multiple provers. Andrew J. Blumberg, Justin Thaler, Victor Vu, and Michael Walfish. https://eprint.iacr.org/2014/846.
 
-*Public-coin zero-knowledge arguments with (almost) minimal time and space overheads. AR Block, J Holmgren, A Rosen, RD Rothblum, P Soni. Theory of Cryptography Conference, 168-197.
+<LI> Public-coin zero-knowledge arguments with (almost) minimal time and space overheads. AR Block, J Holmgren, A Rosen, RD Rothblum, P Soni. Theory of Cryptography Conference, 168-197.
 
-*Gemini: Elastic SNARKs for diverse environments J Bootle, A Chiesa, Y Hu, M Orru. EUROCRYPT 2022
+<LI> Gemini: Elastic SNARKs for diverse environments J Bootle, A Chiesa, Y Hu, M Orru. EUROCRYPT 2022
 
-*On black-box constructions of time and space efficient sublinear arguments from symmetric-key primitives. Laasya Bangalore, Rishabh Bhadauria, Carmit Hazay & Muthuramakrishnan Venkitasubramaniam. TCC 2022.
+<LI> On black-box constructions of time and space efficient sublinear arguments from symmetric-key primitives. Laasya Bangalore, Rishabh Bhadauria, Carmit Hazay & Muthuramakrishnan Venkitasubramaniam. TCC 2022.
 
-*Ligetron: Lightweight Scalable End-to-End Zero-Knowledge Proofs. Post-Quantum ZK-SNARKs on a Browser. Ruihan Wang  Carmit Hazay  Muthuramakrishnan Venkitasubramaniam. 2024 IEEE Symposium on Security and Privacy (SP).
+<LI> Ligetron: Lightweight Scalable End-to-End Zero-Knowledge Proofs. Post-Quantum ZK-SNARKs on a Browser. Ruihan Wang  Carmit Hazay  Muthuramakrishnan Venkitasubramaniam. 2024 IEEE Symposium on Security and Privacy (SP).
+</OL>

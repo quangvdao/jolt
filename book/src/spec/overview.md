@@ -1,4 +1,3 @@
 # Specification of Jolt
 
-In this section, we give a full specification of Jolt, specifically focusing on the constraint system that Jolt imposes on the witness.
-
+This chapter gives a specification of Jolt, including the constraint system and an overview of proof generation & verification process. It is meant to document the Jolt codebase in greater details than in [the section on Architecture Overview](../how/architecture.md).

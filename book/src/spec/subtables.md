@@ -47,7 +47,9 @@ pub trait LassoSubtable<F: JoltField>: 'static + Sync {
 
 ## Subtables List
 
-1. `AndSubtable`
+<!-- markdownlint-disable MD029 -->
+
+1. [`AndSubtable`](../../../jolt-core/src/jolt/subtable/and.rs)
 
 This subtable stores the bitwise AND of the inputs, interpreted as a $m$-bit natural number.
 
@@ -55,7 +57,7 @@ This subtable stores the bitwise AND of the inputs, interpreted as a $m$-bit nat
 
 - **Multilinear extension:** $\widetilde{\mathsf{And}}_m(x, y) = \prod_{i=0}^{m-1} 2^{m - i - 1} \cdot x_i \cdot y_i $
 
-2. `DivByZeroSubtable`
+2. [`DivByZeroSubtable`](../../../jolt-core/src/jolt/subtable/div_by_zero.rs)
 
 This subtable stores `1` if the inputs are $x=0$ and $y=2^m - 1$, and `0` otherwise.
 
@@ -63,7 +65,7 @@ This subtable stores `1` if the inputs are $x=0$ and $y=2^m - 1$, and `0` otherw
 
 - **Multilinear extension:** $\widetilde{\mathsf{DivByZero}}_m(x, y) = \prod_{i=0}^{m-1} \left( (1 - x_i) \cdot y_i \right) $
 
-3. `EqAbsSubtable`
+3. [`EqAbsSubtable`](../../../jolt-core/src/jolt/subtable/eq_abs.rs)
 
 This subtable stores `1` if the inputs are equal ignoring the first bit, and `0` otherwise.
 
@@ -71,7 +73,7 @@ This subtable stores `1` if the inputs are equal ignoring the first bit, and `0`
 
 - **Multilinear extension:** $\widetilde{\mathsf{EqAbs}}_m(x, y) = \prod_{i=1}^{m-1} \left( (1 - x_i) \cdot (1 - y_i) + x_i \cdot y_i \right) $
 
-4. `EqSubtable`
+4. [`EqSubtable`](../../../jolt-core/src/jolt/subtable/eq.rs)
 
 This subtable stores `1` if the inputs are equal, and `0` otherwise.
 
@@ -79,7 +81,7 @@ This subtable stores `1` if the inputs are equal, and `0` otherwise.
 
 - **Multilinear extension:** $\widetilde{\mathsf{Eq}}_m(x, y) = \prod_{i=0}^{m-1} \left( (1 - x_i) \cdot (1 - y_i) + x_i \cdot y_i \right) $
 
-5. `IdentitySubtable`
+5. [`IdentitySubtable`](../../../jolt-core/src/jolt/subtable/identity.rs)
 
 This subtable stores the result of two inputs concatenated together, interpreted as a $2m$-bit number.
 
@@ -87,7 +89,7 @@ This subtable stores the result of two inputs concatenated together, interpreted
 
 - **Multilinear extension:** $\widetilde{\mathsf{Id}}_m(z) = \sum_{i=0}^{m-1} 2^{m - i - 1} \cdot z_{i} $
 
-6. `LeftIsZeroSubtable`
+6. [`LeftIsZeroSubtable`](../../../jolt-core/src/jolt/subtable/left_is_zero.rs)
 
 This subtable stores `1` if and only if the first input is zero.
 
@@ -95,7 +97,7 @@ This subtable stores `1` if and only if the first input is zero.
 
 - **Multilinear extension:** $\widetilde{\mathsf{LeftIsZero}}_m(x, y) = \prod_{i=0}^{m-1} (1 - x_i) $
 
-7. `LeftMSBSubtable`
+7. [`LeftMSBSubtable`](../../../jolt-core/src/jolt/subtable/left_msb.rs)
 
 This subtable stores the most significant bit of the first input.
 
@@ -103,7 +105,7 @@ This subtable stores the most significant bit of the first input.
 
 - **Multilinear extension:** $\widetilde{\mathsf{LeftMSB}}_m(x, y) = x[0] $
 
-8. `LtAbsSubtable`
+8. [`LtAbsSubtable`](../../../jolt-core/src/jolt/subtable/lt_abs.rs)
 
 This subtable stores `1` if the first input is less than the second input, after ignoring the first bit, and `0` otherwise.
 
@@ -111,7 +113,7 @@ This subtable stores `1` if the first input is less than the second input, after
 
 - **Multilinear extension:** $\widetilde{\mathsf{LtAbs}}_m(x, y) = \sum_{i=1}^{m-1} (1 - x_i) \cdot y_i \cdot \prod_{j=0}^{i-1} ((1 - x_j) \cdot (1 - y_j) + x_j \cdot y_j) $
 
-9. `LtuSubtable`
+9. [`LtuSubtable`](../../../jolt-core/src/jolt/subtable/ltu.rs)
 
 This subtable stores `1` if the first input is less than the second input, and `0` otherwise.
 
@@ -119,7 +121,7 @@ This subtable stores `1` if the first input is less than the second input, and `
 
 - **Multilinear extension:** $\widetilde{\mathsf{Ltu}}_m(x, y) = \sum_{i=0}^{m-1} (1 - x_i) \cdot y_i \cdot \prod_{j=0}^{i-1} ((1 - x_j) \cdot (1 - y_j) + x_j \cdot y_j) $
 
-10. `OrSubtable`
+10. [`OrSubtable`](../../../jolt-core/src/jolt/subtable/or.rs)
 
 This subtable stores the bitwise OR of the inputs, interpreted as a $m$-bit natural number.
 
@@ -127,7 +129,7 @@ This subtable stores the bitwise OR of the inputs, interpreted as a $m$-bit natu
 
 - **Multilinear extension:** $\widetilde{\mathsf{Or}}_m(x, y) = \sum_{i=0}^{m-1} 2^{m - i - 1} \cdot \left( 2^m \cdot (x_i + y_i - x_i \cdot y_i) \right) $
 
-11. `RightIsZeroSubtable`
+11. [`RightIsZeroSubtable`](../../../jolt-core/src/jolt/subtable/right_is_zero.rs)
 
 This subtable stores `1` if and only if the second input is zero.
 
@@ -135,7 +137,7 @@ This subtable stores `1` if and only if the second input is zero.
 
 - **Multilinear extension:** $\widetilde{\mathsf{RightIsZero}}_m(x, y) = \prod_{i=0}^{m-1} (1 - y_i) $
 
-12. `RightMSBSubtable`
+12. [`RightMSBSubtable`](../../../jolt-core/src/jolt/subtable/right_msb.rs)
 
 This subtable stores the most significant bit of the second input.
 
@@ -143,7 +145,7 @@ This subtable stores the most significant bit of the second input.
 
 - **Multilinear extension:** $\widetilde{\mathsf{RightMSB}}_m(x, y) = y[0] $
 
-13. `SignExtendSubtable`
+13. [`SignExtendSubtable`](../../../jolt-core/src/jolt/subtable/sign_extend.rs)
 
 This subtable is further parametrized by a width $w \le 2m$ (denoted in Jolt as `WIDTH`). Informally, this subtable stores either all-zero or all-one (for $w$ bits) depending on the $w$-th least significant bit of $z = x \| y$ (interpreted as a sign bit).
 
@@ -154,7 +156,7 @@ This subtable is further parametrized by a width $w \le 2m$ (denoted in Jolt as 
 
 - *Implementation Note:* The current implementation assumes $M = 2^{16}$ and extends the sign to fill the entire `WIDTH`-bit output, rather than extending to $2m$ bits.
 
-14. `SllSubtable`
+14. [`SllSubtable`](../../../jolt-core/src/jolt/subtable/sll.rs)
 
 This subtable is further parametrized by two values, the chunk index $i$ (or `CHUNK_INDEX`) and the word size $W$ (or `WORD_SIZE`). Informally, this subtable assumes that $x$ is the $i$-th chunk of some $W$-bit number, shifts it left by $y \bmod W$ bits, then truncates the result to be $W - m \cdot i$ bits. Recall that each chunk of a $W$-sized number $x$ has $m$ bits, and the indexing goes from left-to-right, so the first chunk is the most significant bits of $x$.
 
@@ -162,7 +164,7 @@ This subtable is further parametrized by two values, the chunk index $i$ (or `CH
 
 - **Multilinear extension:** $\widetilde{\mathsf{Sll}}_{m,i,W}(X, Y) = \sum_{k=0}^{2^{m'}-1} \widetilde{\mathsf{Eq}}_{m'}(Y,k) \cdot \left(\sum_{j=0}^{m - n_{\mathsf{out}}-1} 2^{k + j} \cdot X_{m - j - 1}\right) $
 
-15.  `SraSignSubtable`
+15. [`SraSignSubtable`](../../../jolt-core/src/jolt/subtable/sra_sign.rs)
 
 This subtable is further parametrized by the word size $W$ (`WORD_SIZE` in code), and stores $x_{(m - 1) - ((W-1) \bmod m)}$ (interpreted as a sign bit) duplicated $y \bmod W$ times in the most significant bits of the result (which is a $W$-bit number). In other words, if $x$'s most significant bit is `0`, then the result is `0`. Otherwise, the result is the number `11..10..0` with the same number of `1`s as the shift amount, which is $y \bmod W$.
 
@@ -172,7 +174,7 @@ This subtable is further parametrized by the word size $W$ (`WORD_SIZE` in code)
 - **Multilinear extension:** Let $m' = \min(m, \lceil \log_2(W) \rceil)$. Then:
     $$\widetilde{\mathsf{SraSign}}_{m,W}(X, Y) = \sum_{k=0}^{2^{m'} - 1} \widetilde{\mathsf{Eq}}_{m'}(Y,k) \cdot X_{i_{\mathsf{sign}}} \cdot \left(\sum_{j=0}^{k - 1} 2^{W - 1 - j}\right).$$
 
-16.  `SrlSubtable`
+16. [`SrlSubtable`](../../../jolt-core/src/jolt/subtable/srl.rs)
 
 This subtable is further parametrized by two values, the chunk index $i$ (`CHUNK_INDEX` in code) and the word size $W$ (`WORD_SIZE` in code). Informally, this subtable assumes that $x$ is the $i$-th chunk of some $W$-bit number, shifts it left by $m \cdot i$ bits to align with the pre-chunk position, then shifts it right by $y \bmod W$ bits.
 
@@ -181,7 +183,7 @@ This subtable is further parametrized by two values, the chunk index $i$ (`CHUNK
 - **Multilinear extension:** Let $m' = \min(m, \lceil \log_2(W) \rceil)$, $m''=\min(m,W - m \cdot i)$, and $n_{\mathsf{out}} = \min\left(m, \max \left(0, k + m \cdot (i + 1) - W\right)\right)$ denotes the number of bits that goes out of range. Then:
     $$\widetilde{\mathsf{Srl}}_{m,i,W}(X, Y) = \sum_{k=0}^{2^{m'}-1} \widetilde{\mathsf{Eq}}_{m'}(Y,k) \cdot \left(\sum_{j=n_{\mathsf{out}}}^{m'' - 1} 2^{m \cdot (i - 1) - k + j} \cdot X_{m - j - 1}\right).$$
 
-17.   `TruncateOverflowSubtable`
+17. [`TruncateOverflowSubtable`](../../../jolt-core/src/jolt/subtable/truncate_overflow.rs)
 
 This subtable is further parametrized by a word size $W$. Informally, this subtable truncates $z = x \| y$ to $w$ bits and then zero-extends it to $2m$ bits, where $w = W \bmod (2m)$ is the number of overflow bits.
 
@@ -189,7 +191,7 @@ This subtable is further parametrized by a word size $W$. Informally, this subta
 
 - **Multilinear extension:** $\widetilde{\mathsf{TruncateOverflow}}_{m,W}(Z) = \sum_{i=0}^{(W \bmod 2m) - 1} 2^i \cdot Z_{m - i - 1}$
 
-18.  `XorSubtable`
+18. [`XorSubtable`](../../../jolt-core/src/jolt/subtable/xor.rs)
 
 This subtable stores the bitwise XOR of the inputs, interpreted as a $m$-bit natural number.
 
@@ -197,7 +199,7 @@ This subtable stores the bitwise XOR of the inputs, interpreted as a $m$-bit nat
 
 - **Multilinear extension:** $\widetilde{\mathsf{Xor}}_m(x, y) = \sum_{i=0}^{m-1} 2^{m - i - 1} \cdot ((1 - x_i) \cdot y_i + x_i \cdot (1 - y_i)) $
 
-19. `ZeroLSBSubtable`
+19. [`ZeroLSBSubtable`](../../../jolt-core/src/jolt/subtable/zero_lsb.rs)
 
 This subtable stores the input value with its least significant bit (LSB) set to zero, and all other bits remaining the same.
 

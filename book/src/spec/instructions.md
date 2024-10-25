@@ -31,75 +31,116 @@ pub trait JoltInstruction: Clone + Debug + Send + Sync + Serialize {
 
 - `lookup_entry` returns the expected output of the instruction.
 
-
-
 Note that the RISC-V instructions are not the same as the Jolt instructions. In fact, several RISC-V instructions may invoke the same Jolt instruction, or a single RISC-V instruction may invoke multiple Jolt instructions.
 
 ## Notation
 
-- $\verb|WORD_SIZE|$ is the number of bits in each operand.
+- `WORD_SIZE` (or `W`): The total bit size of the operands (either 32 or 64).
 
-- $C$ is the number of chunks that each operand is split into.
+- `x`, `y`: The first and second input operands, respectively. For some instructions, there is only one operand, in which case the other operand is set to zero (and not involved in the lookup procedure).
 
-- $M$ is the size of the subtables (so that $m := \log_2(M) / 2$ is the number of bits in each chunk).
+- `C`: The number of chunks that each operand is split into. Current Jolt always sets `C = 4` for `WORD_SIZE = 32` and `C = 8` for `WORD_SIZE = 64`.
 
-In the codebase, we assert that: $\verb|WORD_SIZE| \leq C \cdot \log_2(M)$. This guarantees that all the bits in each operand are divided into chunks (though the last chunk might be shorter).
+- `M`: The size of the subtables (so that `m := \log_2(M) / 2` is the number of bits in each operand of each chunk). Current Jolt always sets `M = 2 ^ 16` and thus `m = 8`.
 
-- 
+## Helper Functions
+
+- Truncation / Zero-extension: For a `WORD_SIZE`-bit number `x`, `truncate_to_W(x)` returns the `WORD_SIZE`-bit number `x` itself.
+
+- Sign-extension: For a `WORD_SIZE`-bit number `x`, `sign_extend_to_W(x)` returns the `WORD_SIZE`-bit number `x` itself.
+
+- Chunking:
+
+- Chunk & interleave:
+
+- Chunk for shift:
+
+- Concatenate:
 
 ## Instructions List
 
 ### Logical & Arithmetic Instructions
 
-AND / OR / XOR
+1. [`ANDInstruction`](../../../jolt-core/src/jolt/instruction/and.rs)
 
-- Perform bitwise operations using the corresponding subtables
+- **Operands:** $x, y \in \{0,1\}^W$
+- **Expected output:** Bitwise AND of two unsigned $W$-bit integers:
+\[x \land y \in \{0,1\}^W.\]
+- **Chunking:**
+\[\mathsf{Chunk}_{\,\mathsf{AND}}(x,y) = \mathsf{ChunkInterleave}_{\,m,C}(x,y).\]
+- **Subtables:**
+\begin{align*}
+    \mathsf{Subtables}_{\,\mathsf{AND}} = \left(\left[(\mathsf{And},i)\right]_{i=0}^{C-1}\right).
+\end{align*}
+- **Lookup combination:** Let $(Z_0, \ldots, Z_{C-1})$ be the lookup results. Then
+\[\mathsf{Combine}_{\,\mathsf{AND}}(Z_0, \ldots, Z_{C-1}) = \mathsf{Concatenate}_{\,m,C}(Z_0, \ldots, Z_{C-1}).\]
 
-ADD / SUB / MUL / MULU / MULHU
+2. [`ORInstruction`](../../../jolt-core/src/jolt/instruction/or.rs)
 
-- Perform the operation in-circuit, and then range-check the result to be `u32/u64`
+3. [`XORInstruction`](../../../jolt-core/src/jolt/instruction/xor.rs)
 
-SLL / SRL / SRA
+4. [`ADDInstruction`](../../../jolt-core/src/jolt/instruction/add.rs)
 
-- 
+5. [`SUBInstruction`](../../../jolt-core/src/jolt/instruction/sub.rs)
 
-### Set & Branch Instructions
+6. [`MULInstruction`](../../../jolt-core/src/jolt/instruction/mul.rs)
 
-SLT / SLTU / BEQ / BNE / BGE / BGEU
+7. [`MULUInstruction`](../../../jolt-core/src/jolt/instruction/mul.rs)
 
-- 
+8. [`MULHUInstruction`](../../../jolt-core/src/jolt/instruction/mul.rs)
+
+9. [`SLLInstruction`](../../../jolt-core/src/jolt/instruction/sll.rs)
+
+10. [`SRLInstruction`](../../../jolt-core/src/jolt/instruction/srl.rs)
+
+11. [`SRAInstruction`](../../../jolt-core/src/jolt/instruction/sra.rs)
+
+### Comparison Instructions
+
+12. [`BEQInstruction`](../../../jolt-core/src/jolt/instruction/beq.rs)
+
+13. [`BNEInstruction`](../../../jolt-core/src/jolt/instruction/bne.rs)
+
+14. [`SLTInstruction`](../../../jolt-core/src/jolt/instruction/slt.rs)
+
+15. [`SLTUInstruction`](../../../jolt-core/src/jolt/instruction/sltu.rs)
+
+16. [`BGEInstruction`](../../../jolt-core/src/jolt/instruction/bge.rs)
+
+17. [`BGEUInstruction`](../../../jolt-core/src/jolt/instruction/bgeu.rs)
 
 ### Load & Store Instructions
 
-LB / LH / SB / SH / SW
+18. [`LBInstruction`](../../../jolt-core/src/jolt/instruction/lb.rs)
 
-(why no LW?)
+19. [`LHInstruction`](../../../jolt-core/src/jolt/instruction/lh.rs)
 
-SW
+20. [`SBInstruction`](../../../jolt-core/src/jolt/instruction/sb.rs)
 
-- Returns the lower 32 bits of the (second) operand
+21. [`SHInstruction`](../../../jolt-core/src/jolt/instruction/sh.rs)
+
+22. [`SWInstruction`](../../../jolt-core/src/jolt/instruction/sw.rs)
 
 - Is constrained via two `IdentitySubtable`s on the third and fourth chunks of the second operand (for 32 bits only, what about 64?)
 
 - What about the other chunks? Why can they be unconstrained? The answer is that the other chunks are simply ignored. There's no subtable lookup for them, so they are not present when combining lookups.
 
-
 ### Virtual Instructions
 
-VirtualAdvice
+23. [`VirtualAdvice`](../../../jolt-core/src/jolt/instruction/virtual_advice.rs)
 
 - Only range-check the advice to be `u32/u64`
 
-VirtualAssertLTE
+24. [`VirtualAssertLTE`](../../../jolt-core/src/jolt/instruction/virtual_assert_lte.rs)
 
 - Compute $x \le y$ as a combination of strict less-than and equality
 
-VirtualAssertValidDiv0
+25. [`VirtualAssertValidDiv0`](../../../jolt-core/src/jolt/instruction/virtual_assert_valid_div0.rs)
 
 - Inputs $x, y$ are interpreted as (unsigned) divisor and quotient
 - Output 1 if $x \ne 0$ or if $x = 0$ and $y = 2 ^ \verb|WORD_SIZE| - 1$
 
-VirtualAssertValidSignedRemainder
+26. [`VirtualAssertValidSignedRemainder`](../../../jolt-core/src/jolt/instruction/virtual_assert_valid_signed_remainder.rs)
 
 - First operand is the remainder, second is the divisor
 
@@ -107,7 +148,7 @@ VirtualAssertValidSignedRemainder
 
 - This is checked by the subtables via getting the sign bits, the (equal 0) bit, and the (less than) comparison via subtables.
 
-VirtualAssertValidUnsignedRemainder
+27. [`VirtualAssertValidUnsignedRemainder`](../../../jolt-core/src/jolt/instruction/virtual_assert_valid_unsigned_remainder.rs)
 
 - First operand is the remainder, second is the divisor (both are unsigned)
 
@@ -115,13 +156,13 @@ VirtualAssertValidUnsignedRemainder
 
 - This is checked by the subtables via getting the (equal 0) bit, and the (less than) comparison via subtables.
 
-VirtualMove
+28. [`VirtualMove`](../../../jolt-core/src/jolt/instruction/virtual_move.rs)
 
 - Just range-check each (16-bit) chunk of the operand to be at most 16-bit (instead of an arbitrary field element)
 
 - Used in `DIV`, `DIVU`, `REM`, and `REMU`
 
-VirtualMOVSIGN
+29. [`VirtualMOVSIGN`](../../../jolt-core/src/jolt/instruction/virtual_movsign.rs)
 
 - Returns (max `u32/u64`) if the first operand's sign bit is 1, and 0 otherwise
 
@@ -129,12 +170,9 @@ VirtualMOVSIGN
 
 ### Sequence of Virtual Instructions
 
-MULH / MULHSU / DIV / DIVU / REM / REMU
+See [M extension](../spec/m_extension.md) for the description of the virtual instructions (MULH, MULHSU, DIV, DIVU, REM, REMU).
 
-NOTE: some instructions are actually sequences of other (virtual) instructions, which is the case for the `MUL` and `DIV` instructions.
-
-TODO: reformat these instructions to be more readable, and also merge with the description in "M extension"
-
+<!--
 #### `MULH`
 
 Expected output: the high bits of $x * y$ where $x$ is signed and $y$ is signed.
@@ -278,3 +316,5 @@ Fourth virtual instruction is `VIRTUAL_ASSERT_VALID_UNSIGNED_REMAINDER` with `rs
 (8 instructions)
 
 Note for Div and Rem instructions: we cannot remove the final `MOVE` instruction (instead putting the quotient or remainder directly in the `rd` register) because of the edge case that `rd` is equal to `rs1` or `rs2`.
+
+-->

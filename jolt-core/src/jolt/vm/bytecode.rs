@@ -113,6 +113,7 @@ pub struct BytecodeRow {
     /// Index of the second source register for this instruction (0 if register is unused).
     rs2: u8,
     /// "Immediate" value for this instruction (0 if unused).
+    /// QD: Based on the 32-bit RISC-V spec, this should fit in `i32`.
     imm: i64,
     /// If this instruction is part of a "virtual sequence" (see Section 6.2 of the
     /// Jolt paper), then this contains the number of virtual instructions after this

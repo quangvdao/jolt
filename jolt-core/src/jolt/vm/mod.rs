@@ -502,6 +502,9 @@ where
             &trace,
         );
 
+        // Bytecode polynomials are a number of `MultilinearPolynomial`s,
+        // each of which may be a `CompactPolynomial` of different scalar type.
+        // (i.e. `U8Scalars` for register addresses)
         let (bytecode_polynomials, range_check_polys) = rayon::join(
             || {
                 BytecodeProof::<F, PCS, ProofTranscript>::generate_witness(
@@ -527,6 +530,7 @@ where
             ProofTranscript,
         >::setup(&r1cs_builder, padded_trace_length);
 
+        // Generate the R1CS values not used in other proofs
         let r1cs_polynomials = R1CSPolynomials::new::<
             C,
             M,
@@ -570,6 +574,7 @@ where
             &mut transcript,
         );
 
+        // This only changes the `instruction_lookups` field in `jolt_polynomials`
         let instruction_proof = InstructionLookupsProof::prove(
             &preprocessing.shared.generators,
             &mut jolt_polynomials,

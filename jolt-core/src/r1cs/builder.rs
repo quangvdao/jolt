@@ -18,32 +18,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub enum ConstraintType {
-    /// The variable is binary
-    ///
-    /// Constraint takes the form `var * (1 - var) = 0`
-    Binary,
-    /// The variable is the bit decomposition of a vector of binary variables
-    ///
-    /// Constraint takes the form `1 * (\sum_i 2^i * var_i) = var_total`
-    BitDecomp,
-    /// Either `condition` is equal to 0 (i.e. false), or one (linear combination of) variables is equal to another (linear combination of) variables
-    ///
-    /// Constraint takes the form `lc_var_cond * (lc_var_left - lc_var_right) = 0`
-    EqConditional,
-    /// Constraint is an if-else statement, where
-    /// `result = if (condition) then (result_true) else (result_false)`
-    ///
-    /// Here `condition` should be binary, and `result`, `result_true` and `result_false` may be a variable or a linear combination of variables
-    ///
-    /// Constraint takes the form `lc_var_cond * (lc_var_true - lc_var_false) = var_result - lc_var_false`
-    IfElse,
-    /// One (linear combination of) variable is a product of two other (linear combination of) variables
-    ///
-    /// Constraint takes the form `lc_var_left * lc_var_right = lc_var_result`
-    Prod,
-}
-
 /// Constraints over a single row. Each variable points to a single item in Z and the corresponding coefficient.
 #[derive(Clone)]
 pub struct Constraint {
@@ -241,6 +215,17 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> R1CSBuilder<C, F, I> {
         self.aux_computations.insert(aux_index, computation);
 
         new_aux
+    }
+
+    /// Pads the builder with `num_rows` empty constraints.
+    pub fn pad(&mut self, num_rows: usize) {
+        for _ in 0..num_rows {
+            self.constraints.push(Constraint {
+                a: LC::new(vec![]),
+                b: LC::new(vec![]),
+                c: LC::new(vec![]),
+            });
+        }
     }
 
     pub fn constrain_eq(&mut self, left: impl Into<LC>, right: impl Into<LC>) {
@@ -531,13 +516,25 @@ pub(crate) fn eval_offset_lc<F: JoltField>(
     }
 }
 
+pub struct CombinedR1CSBuilder<const C: usize, F: JoltField, I: ConstraintInput> {
+    // The builders for constraints of each type
+    instruction_flags_builder: R1CSBuilder<C, F, I>,
+    circuit_flags_builder: R1CSBuilder<C, F, I>,
+    eq_conditional_builder: R1CSBuilder<C, F, I>,
+    product_builder: R1CSBuilder<C, F, I>,
+
+    // Padded repetition of the constraints
+    uniform_repeat: usize,
+
+    // Offset equality constraints, grouped with `eq_conditional_builder`
+    offset_equality_constraints: Vec<OffsetEqConstraint>,
+}
+
 // TODO(sragss): Detailed documentation with wiki.
 pub struct CombinedUniformBuilder<const C: usize, F: JoltField, I: ConstraintInput> {
     uniform_builder: R1CSBuilder<C, F, I>,
-
     /// Padded to the nearest power of 2
     uniform_repeat: usize, // TODO(JP): Remove padding of steps
-
     offset_equality_constraints: Vec<OffsetEqConstraint>,
 }
 

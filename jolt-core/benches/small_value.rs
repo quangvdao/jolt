@@ -2,7 +2,6 @@ use ark_bn254::Fr;
 use ark_std::{test_rng, UniformRand};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use jolt_core::field::JoltField;
-use jolt_core::utils::signed_u64::SignedU64;
 use rand::Rng;
 use rayon::prelude::*;
 

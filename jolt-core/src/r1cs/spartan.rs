@@ -1,15 +1,17 @@
+use common::rv_trace::NUM_CIRCUIT_FLAGS;
 use std::marker::PhantomData;
 use tracing::{span, Level};
 
 use crate::field::JoltField;
 use crate::jolt::vm::JoltCommitments;
 use crate::jolt::vm::JoltPolynomials;
+use crate::lasso::memory_checking::StructuredPolynomialData;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::multilinear_polynomial::PolynomialEvaluation;
 use crate::poly::opening_proof::ProverOpeningAccumulator;
 use crate::poly::opening_proof::VerifierOpeningAccumulator;
-use crate::poly::split_eq_poly::SplitEqPolynomial;
+use crate::poly::split_eq_poly::{OldSplitEqPolynomial, SplitEqPolynomial};
 use crate::r1cs::key::UniformSpartanKey;
 use crate::utils::math::Math;
 use crate::utils::thread::drop_in_background_thread;
@@ -123,6 +125,13 @@ where
             .map(|var| var.get_ref(polynomials))
             .collect();
 
+        // The product polynomials for use in the product constraint
+        let product_polys_ref: [&MultilinearPolynomial<F>; 3] = [
+            &polynomials.read_write_memory.v_read_rs1,
+            &polynomials.read_write_memory.v_read_rs2,
+            &polynomials.r1cs.aux.product,
+        ];
+
         let num_rounds_x = key.num_rows_bits();
 
         /* Sumcheck 1: Outer sumcheck */
@@ -130,9 +139,10 @@ where
         let tau = (0..num_rounds_x)
             .map(|_i| transcript.challenge_scalar())
             .collect::<Vec<F>>();
-        let mut eq_tau = SplitEqPolynomial::new(&tau);
+        let mut eq_tau = OldSplitEqPolynomial::new(&tau);
 
         let mut az_bz_cz_poly = constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+
         let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) =
             SumcheckInstanceProof::prove_spartan_cubic(
                 num_rounds_x,
@@ -140,8 +150,30 @@ where
                 &mut az_bz_cz_poly,
                 transcript,
             );
+
         let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
         drop_in_background_thread((az_bz_cz_poly, eq_tau));
+
+        // New stuff
+
+        let mut eq_tau_new = SplitEqPolynomial::new(&tau);
+
+        let mut az_bz_cz_poly_new = constraint_builder.compute_spartan_Az_Bz_Cz_new(
+            &polynomials.instruction_lookups.instruction_flags,
+            &polynomials.r1cs.circuit_flags,
+            product_polys_ref,
+            &flattened_polys,
+        );
+
+        let (outer_sumcheck_proof_new, outer_sumcheck_r_new, outer_sumcheck_claims_new) =
+            SumcheckInstanceProof::prove_spartan_cubic_new(
+                num_rounds_x,
+                &mut eq_tau_new,
+                &mut az_bz_cz_poly_new,
+                transcript,
+            );
+
+        // End new stuff
 
         ProofTranscript::append_scalars(transcript, &outer_sumcheck_claims);
         // claims from the end of sum-check

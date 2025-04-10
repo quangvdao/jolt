@@ -7,7 +7,9 @@ use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::{
     field::JoltField,
     jolt::vm::JoltPolynomials,
-    poly::spartan_interleaved_poly::SpartanInterleavedPolynomial,
+    poly::spartan_interleaved_poly::{
+        NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial,
+    },
     r1cs::key::{SparseConstraints, UniformR1CS},
 };
 use ark_ff::One;
@@ -469,8 +471,8 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> R1CSBuilder<C, F, I> {
 /// constraint system.
 pub type OffsetLC = (bool, LC);
 
-/// A conditional constraint that Linear Combinations a, b are equal where a and b need not be in the same step an a
-/// uniform constraint system.
+/// A conditional constraint that Linear Combinations a, b are equal where a and b need not be
+/// in the same step as in the uniform constraints.
 #[derive(Debug)]
 pub struct OffsetEqConstraint {
     pub(crate) cond: OffsetLC,
@@ -657,4 +659,19 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
             self.padded_rows_per_step(),
         )
     }
+
+    // compute_spartan_Az_Bz_Cz_new
+    #[tracing::instrument(skip_all)]
+    pub fn compute_spartan_Az_Bz_Cz_new(
+        &self,
+        instruction_flags: &Vec<MultilinearPolynomial<F>>,
+        circuit_flags: &[MultilinearPolynomial<F>; 11],
+        product_polys: [&MultilinearPolynomial<F>; 3],
+        flattened_polynomials: &[&MultilinearPolynomial<F>], // N variables of (S steps)
+    ) -> NewSpartanInterleavedPolynomial<F> {
+        // TODO: Implement the logic to separate constraints and populate
+        // the specialized coefficient fields in NewSpartanInterleavedPolynomial.
+        todo!("compute_spartan_Az_Bz_Cz_new not yet implemented")
+    }
+    // NewSpartanInterleavedPolynomial::new(...)
 }

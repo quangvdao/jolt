@@ -109,6 +109,7 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
         cs.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED - 1);
         // This is the **only** constraint where the `a` variable may not be in {0,1}
         // When we prove the first Spartan sumcheck, we will process this separately.
+        // This constraint is put last so that we never have to subtract when computing evals at infintiy
         cs.allocate_prod(
             JoltR1CSInputs::Aux(AuxVariable::Product),
             JoltR1CSInputs::RS1_Read,
@@ -333,11 +334,52 @@ mod tests {
         // jolt::vm::JoltPolynomials,
         // poly::multilinear_polynomial::MultilinearPolynomial,
         r1cs::{
-            builder::CombinedUniformBuilder, constraints::JoltRV32IMConstraints,
+            builder::{CombinedR1CSBuilder, CombinedUniformBuilder},
+            constraints::JoltRV32IMConstraints,
             inputs::JoltR1CSInputs,
         },
     };
     use ark_bn254::Fr;
+    use std::fmt::Display; // Import Display trait
+
+    // Helper function to format a linear combination for a specific row
+    fn format_lincomb<F: ark_ff::Field + Display>(
+        vars: &[(usize, usize, F)],
+        consts: &[(usize, F)],
+        row_index: usize,
+        // TODO: Ideally map var_idx to JoltR1CSInputs enum variant names
+        // input_map: &HashMap<usize, String> // Or similar mapping
+    ) -> String {
+        let mut terms = Vec::new();
+        let mut constant_term = F::zero();
+
+        // Collect variable terms for the current row
+        for &(r, var_idx, ref coeff) in vars {
+            if r == row_index {
+                // Use v{index} for variable names for now
+                terms.push(format!("{}*v{}", coeff, var_idx));
+            }
+        }
+
+        // Find the constant term for the current row
+        for &(r, ref constant) in consts {
+            if r == row_index {
+                constant_term = *constant;
+                break; // Assume at most one constant per row
+            }
+        }
+
+        // Add constant term if non-zero
+        if !constant_term.is_zero() || terms.is_empty() {
+            terms.push(format!("{}", constant_term));
+        }
+
+        if terms.is_empty() {
+            "0".to_string() // Should ideally not happen if constant is added
+        } else {
+            terms.join(" + ")
+        }
+    }
 
     #[test]
     fn print_constraints() {
@@ -355,44 +397,51 @@ mod tests {
         let uniform_r1cs = builder.materialize_uniform();
         let nonuniform_r1cs = builder.materialize_offset_eq();
 
-        // Print the number of instruction flags (corresponding to cardinality of `RV32I`)
+        // Print summary information
         println!("Number of instruction flags: {}", RV32I::iter().count());
-
-        // Print the number of circuit flags (corresponding to cardinality of `CircuitFlags`)
         println!("Number of circuit flags: {}", CircuitFlags::iter().count());
-
-        // Total number of binary constraints, as the sum of the number of instruction flags and
-        // circuit flags
         println!(
             "Total number of binary constraints: {}",
             RV32I::iter().count() + CircuitFlags::iter().count()
         );
-
-        // Print the number of constraints
         println!(
-            "Uniform constraints, num_rows: {}, num_vars: {}",
+            "Uniform R1CS: {} constraints, {} variables (witness size)",
             uniform_r1cs.num_rows, uniform_r1cs.num_vars
         );
 
-        // Print all the constraints
-        println!(
-            "a_vars: {:?}\n\n a_consts: {:?}",
-            uniform_r1cs.a.vars, uniform_r1cs.a.consts
-        );
-        println!(
-            "b_vars: {:?}\n\n b_consts: {:?}",
-            uniform_r1cs.b.vars, uniform_r1cs.b.consts
-        );
-        println!(
-            "c_vars: {:?}\n\n c_consts: {:?}",
-            uniform_r1cs.c.vars, uniform_r1cs.c.consts
-        );
+        println!("\nUniform Constraints (Format: (A) * (B) = (C)):");
+        // TODO: Create a mapping from variable index back to JoltR1CSInputs names
+        // let input_map = build_input_map::<C>(); // Placeholder for mapping logic
 
+        for i in 0..uniform_r1cs.num_rows {
+            // Pass num_vars, might be useful later if mapping is complex
+            let a_str = format_lincomb(&uniform_r1cs.a.vars, &uniform_r1cs.a.consts, i);
+            let b_str = format_lincomb(&uniform_r1cs.b.vars, &uniform_r1cs.b.consts, i);
+            let c_str = format_lincomb(&uniform_r1cs.c.vars, &uniform_r1cs.c.consts, i);
+            println!(
+                "  Constraint {}: ({}) * ({}) = ({})",
+                i, a_str, b_str, c_str
+            );
+        }
+
+        // Print offset constraints (still using Debug for now)
+        // TODO: Improve printing for offset_eq constraints if needed
+        println!("\nOffset Equality Constraints (Constants):");
+        println!("  {:?}", nonuniform_r1cs.constants());
+
+        // Optionally print the raw sparse data if still needed for debugging
+        // println!("\nRaw Sparse Data:");
         // println!(
-        //     "num_offset_eq_constraints: {:?}",
-        //     nonuniform_r1cs.num_constraints()
+        //     "a_vars: {:?}\na_consts: {:?}",
+        //     uniform_r1cs.a.vars, uniform_r1cs.a.consts
         // );
-
-        println!("offset_eq_r1cs: {:?}", nonuniform_r1cs.constants());
+        // println!(
+        //     "b_vars: {:?}\nb_consts: {:?}",
+        //     uniform_r1cs.b.vars, uniform_r1cs.b.consts
+        // );
+        // println!(
+        //     "c_vars: {:?}\nc_consts: {:?}",
+        //     uniform_r1cs.c.vars, uniform_r1cs.c.consts
+        // );
     }
 }

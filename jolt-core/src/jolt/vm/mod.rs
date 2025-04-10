@@ -523,6 +523,7 @@ where
             padded_trace_length,
             program_io.memory_layout.input_start,
         );
+
         let spartan_key = spartan::UniformSpartanProof::<
             C,
             <Self::Constraints as R1CSConstraints<C, F>>::Inputs,
@@ -546,6 +547,7 @@ where
             r1cs: r1cs_polynomials,
         };
 
+        // Compute the auxiliary polynomials (and change nothing else)
         r1cs_builder.compute_aux(&mut jolt_polynomials);
 
         let jolt_commitments =

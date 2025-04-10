@@ -6,12 +6,13 @@ use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::poly::multilinear_polynomial::{
     BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
 };
-use crate::poly::spartan_interleaved_poly::SpartanInterleavedPolynomial;
-use crate::poly::split_eq_poly::SplitEqPolynomial;
+use crate::poly::spartan_interleaved_poly::{
+    NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial,
+};
+use crate::poly::split_eq_poly::{OldSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
-use crate::utils::small_value;
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
 use ark_serialize::*;
@@ -192,7 +193,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
     #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic")]
     pub fn prove_spartan_cubic(
         num_rounds: usize,
-        eq_poly: &mut SplitEqPolynomial<F>,
+        eq_poly: &mut OldSplitEqPolynomial<F>,
         az_bz_cz_poly: &mut SpartanInterleavedPolynomial<F>,
         transcript: &mut ProofTranscript,
     ) -> (Self, Vec<F>, [F; 3]) {
@@ -200,21 +201,46 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
         let mut claim = F::zero();
 
-        // for round in 0..num_rounds {
-        //     if round < small_value::NUM_SMALL_VALUE_ROUNDS {
-        //         az_bz_cz_poly.small_value_sumcheck_round(
-        //             eq_poly, transcript, &mut r, &mut polys, &mut claim,
-        //         );
-        //     } else {
-        //         az_bz_cz_poly
-        //             .subsequent_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
-        //     }
-        // }
-
         for round in 0..num_rounds {
             if round == 0 {
                 az_bz_cz_poly
                     .first_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+            } else {
+                az_bz_cz_poly
+                    .subsequent_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+            }
+        }
+
+        (
+            SumcheckInstanceProof::new(polys),
+            r,
+            az_bz_cz_poly.final_sumcheck_evals(),
+        )
+    }
+
+    #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic_new")]
+    pub fn prove_spartan_cubic_new(
+        num_rounds: usize,
+        eq_poly: &mut SplitEqPolynomial<F>,
+        az_bz_cz_poly: &mut NewSpartanInterleavedPolynomial<F>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self, Vec<F>, [F; 3]) {
+        let mut r: Vec<F> = Vec::new();
+        let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
+        let mut claim = F::zero();
+
+        // TODO: Combine results from specialized sumchecks to get the claim for the first round
+        // and potentially update the state of az_bz_cz_poly or polys/r.
+        // The current implementation below assumes a structure similar to the old one,
+        // which needs to be replaced.
+
+        // Subsequent rounds (using the stubbed method)
+        for round in 0..num_rounds {
+            if round < 5 {
+                todo!("small_value_sumcheck_round not yet implemented");
+                // az_bz_cz_poly.small_value_sumcheck_round(
+                //     eq_poly, transcript, &mut r, &mut polys, &mut claim,
+                // );
             } else {
                 az_bz_cz_poly
                     .subsequent_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);

@@ -799,10 +799,58 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
     }
 }
 
+// We will need to compute the following evaluations for the small-value optimization (Algo 4)
+
+// Az[j_{0-4}, u, x_{5-n}]
+// Bz[{0,1,infty)^4, {1,infty), x_{5-n}]
+// Cz[{0,1,infty)^4, {1,infty), x_{5-n}]
+
+// where j_{0-4} \in {0,1,infty}^4 and u \in {1,infty}.
+
+// These values feature in the Spartan sumcheck as
+// `Az[j_{0-4}, u, x_{5-n}] * Bz[j_{0-4}, u, x_{5-n}] - Cz[j_{0-4}, u, x_{5-n}]`
+
+// There are technically 3^4 * 2 = 162 values to compute for each Az, Bz, Cz.
+// But because of our constraints, we will be able to make many simplifications in computing these values.
+
+// First, the generic way to compute these values is as follows:
+// 1. Recall that p(infty) = p(1) - p(0) for a linear polynomial p.
+// 2. So we will compute layer by layer, storing all values in between
+
+// 1. For instruction flags:
+// Az[x_{0-5}, x_{5-n}] = 0 *except* if x_{0-5} = instruction index of step x_{5-n}, in which case it is 1.
+// Bz[x_{0-5}, x_{5-n}] = 1 *except* if x_{0-5} = instruction index of step x_{5-n}, in which case it is 0.
+// Cz[x_{0-5}, x_{5-n}] = 0 always.
+
+//
+
+// 2. For circuit flags:
+// Az[x_{0-5}, x_{5-n}] = 0 *except* if x_{0-5} \in circuit indices of step x_{5-n}, in which case it is 1.
+// Bz[x_{0-5}, x_{5-n}] = 1 *except* if x_{0-5} \in circuit indices of step x_{5-n}, in which case it is 0.
+// Cz[x_{0-5}, x_{5-n}] = 0 always.
+
+//
+
+// 3. For product constraints: since there's only one of them and 31 padded constraints,
+// Az[11111, x_{5-n}] = rs1_read_value
+// Bz[11111, x_{5-n}] = rs2_read_value
+// Cz[11111, x_{5-n}] = rs1_read_value * rs2_read_value
+// and the rest are 0.
+
+// 4. For equality / if-else constraints:
+// Az[x_{0-5}, x_{5-n}] \in {0, 1} (not much else we can say)
+// Bz[x_{0-5}, x_{5-n}] is i64 (not much else we can say)
+// Cz[x_{0-5}, x_{5-n}] is i64 (not much else we can say)
+
+// This is the most inefficient part. May need to switch to linear-time algo sooner?
+
 #[derive(Default, Debug, Clone)]
 pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A sparse vector representing the binary coefficients of the instruction flags
-    pub(crate) instruction_flags_coeffs: Vec<usize>,
+    pub(crate) instruction_flags: Vec<Option<u8>>,
+
+    /// The indices for the
+    pub(crate) instruction_flags_indices: Vec<Vec<usize>>,
 
     /// A sparse vector representing the binary coefficients of the circuit flags
     pub(crate) circuit_flags_coeffs: Vec<SparseCoefficient<u16>>,

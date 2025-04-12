@@ -1532,7 +1532,9 @@ mod tests {
     use crate::poly::commitment::zeromorph::ZeromorphSRS;
     use crate::{
         poly::{
-            commitment::zeromorph::Zeromorph, dense_interleaved_poly::DenseInterleavedPolynomial,
+            commitment::zeromorph::Zeromorph,
+            dense_interleaved_poly::DenseInterleavedPolynomial,
+            split_eq_poly::OldSplitEqPolynomial, // Import OldSplitEqPolynomial
         },
         utils::transcript::KeccakTranscript,
     };

@@ -135,6 +135,9 @@ where
         let num_rounds_x = key.num_rows_bits();
 
         /* Sumcheck 1: Outer sumcheck */
+        
+        // Choose whether to use the new or old sumcheck based on `num_rounds_x`
+        if num_rounds_x <= 10 { todo!() }
 
         let tau = (0..num_rounds_x)
             .map(|_i| transcript.challenge_scalar())
@@ -161,7 +164,6 @@ where
         let mut az_bz_cz_poly_new = constraint_builder.compute_spartan_Az_Bz_Cz_new(
             &polynomials.instruction_lookups.instruction_flags,
             &polynomials.r1cs.circuit_flags,
-            product_polys_ref,
             &flattened_polys,
         );
 

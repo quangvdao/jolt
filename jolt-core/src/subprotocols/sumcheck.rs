@@ -11,10 +11,12 @@ use crate::poly::spartan_interleaved_poly::{
 };
 use crate::poly::split_eq_poly::{OldSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
+use crate::r1cs::constraints::LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
+use common::rv_trace::MAX_ACTIVE_CIRCUIT_FLAGS;
 use ark_serialize::*;
 use rayon::prelude::*;
 use std::marker::PhantomData;
@@ -190,6 +192,228 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         (SumcheckInstanceProof::new(compressed_polys), r, final_evals)
     }
 
+    /// Using the small-value optimization, precompute the necessary data for the first few rounds of sumcheck for 
+    /// the Spartan polynomial `eq(w, X) * (Az(X) * Bz(X) - Cz(X))`.
+    /// This is the **generic** version of the small-value optimization.
+    /// We have special handling for binary constraints and (very) sparse constraints (such as the single product constraint)
+    pub fn precompute_small_value_spartan_generic(
+        num_small_value_rounds: usize,
+        eq_poly: &SplitEqPolynomial<F>,
+        az_evals: &Vec<F>,
+        bz_evals: &Vec<F>,
+        cz_evals: &Vec<F>,
+    ) -> Vec<(Vec<F>, Vec<F>)> {
+        // Sanity check that the input polynomials are consistent
+        #[cfg(test)]
+        {
+            assert_eq!(az_evals.len(), bz_evals.len());
+            assert_eq!(az_evals.len(), cz_evals.len());
+            (0..az_evals.len()).for_each(|i| {
+                assert_eq!(az_evals[i] * bz_evals[i], cz_evals[i]);
+            });
+        }
+
+        let len = az_evals.len();
+        let E2_len = eq_poly.E2_len();
+        let num_E2_chunks = len / E2_len;
+        let E1_len = num_E2_chunks / (1 << num_small_value_rounds);
+        
+        assert!(len % E2_len == 0);
+        assert!(num_E2_chunks % E1_len == 0);
+
+        // Accumulator of the form `A[i][(v_0, ..., v_i , x_R)]`, where `v_0, ..., v_{i-1} \in \{0, 1, \infty\}`, `v_i \in \{0, \infty\}`
+        // and `x_R \in {0,1}^{E2_len}`
+        let mut accum: Vec<Vec<F>> = Vec::new();
+
+        (0..num_small_value_rounds).for_each(|i| {
+            accum.push(vec![F::zero(); 2 * (3 ^ i)]);
+        });
+
+        // Recall that we need to compute the sum
+        // \sum_{x_R} eq(w_R, x_R) * \sum_{x_L} (az(v, u, x_L, x_R) * bz(v, u, x_L, x_R) - cz(v, u, x_L, x_R))
+
+        // We can do this by first iterating over x_R (i.e. the E2 chunks), and then iterating over x_L (i.e. the E1 chunks),
+        // and then summing over the values of `v` and `u`.
+        // We do this map-reduce style for parallelization.
+        let accum_flat = eq_poly.E2_current().par_iter()
+            .zip(az_evals.par_chunks(num_E2_chunks))
+            .zip(bz_evals.par_chunks(num_E2_chunks))
+            .zip(cz_evals.par_chunks(num_E2_chunks))
+            // .enumerate()
+            .map(|(((E2_eval, az_E2_chunk), bz_E2_chunk), cz_E2_chunk)| {
+                az_E2_chunk.par_chunks(E1_len)
+                    .zip(bz_E2_chunk.par_chunks(E1_len))
+                    .zip(cz_E2_chunk.par_chunks(E1_len))
+                    .enumerate()
+                    .map(|(i, ((az_E1_chunk, bz_E1_chunk), cz_E1_chunk))| {
+                        todo!()
+                });
+                return vec![F::zero(); 3 ^ num_small_value_rounds - 1];
+            }).reduce(|| vec![F::zero(); 3usize.pow(num_small_value_rounds as u32) - 1], |a, b| {
+                a.par_iter().zip(b.par_iter()).map(|(a_val, b_val)| *a_val + *b_val).collect()
+        });
+
+        (0..num_small_value_rounds)
+            .scan(&accum_flat[..], |remaining_slice, i| {
+                let level_size = 2 * (3usize.pow(i as u32));
+                if remaining_slice.len() >= level_size {
+                    let (current_level_data, next_remaining_slice) = remaining_slice.split_at(level_size);
+                    *remaining_slice = next_remaining_slice; // Update state (remaining slice)
+                    // Split the current level data in half
+                    let mid = level_size / 2;
+                    let (first_half, second_half) = current_level_data.split_at(mid);
+                    Some((first_half.to_vec(), second_half.to_vec())) // Output the tuple of halves
+                } else {
+                    // This case should be caught by the size check above, but included for robustness.
+                    panic!("Slice length mismatch during scan-based unflattening");
+                }
+        }).collect()
+    }
+
+    pub fn precompute_small_value_binary_constraints(
+        num_small_value_rounds: usize,
+        max_num_ones : usize,
+        eq_poly: &SplitEqPolynomial<F>,
+        one_indices: &Vec<Vec<u8>>,
+    ) -> Vec<(Vec<F>, Vec<F>)> {
+        todo!()
+    }
+
+    pub fn merge_binary_and_other_constraints(
+        binary_constraints: Vec<Vec<F>>,
+        other_constraints: Vec<Vec<F>>,
+    ) -> Vec<Vec<F>> {
+        todo!()
+    }
+
+    // Computing the evaluations for linear-time sumcheck, after the small value rounds
+    // pub fn prove_spartan_small_space_one_round(
+    //     eq_poly: &mut SplitEqPolynomial<F>,
+    // )
+
+    #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic_new")]
+    pub fn prove_spartan_cubic_new(
+        num_rounds: usize,
+        eq_poly: &mut SplitEqPolynomial<F>,
+        az_bz_cz_poly: &mut NewSpartanInterleavedPolynomial<F>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self, Vec<F>, [F; 3]) {
+
+        let mut r: Vec<F> = Vec::new();
+        let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
+        let mut claim = F::zero();
+
+        // TODO: Combine results from specialized sumchecks to get the claim for the first round
+        // and potentially update the state of az_bz_cz_poly or polys/r.
+        // The current implementation below assumes a structure similar to the old one,
+        // which needs to be replaced.
+
+        let instruction_accums = Self::precompute_small_value_binary_constraints(
+            LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED,
+            1,
+            eq_poly,
+            &az_bz_cz_poly.instruction_indices,
+        );
+
+        let circuit_accums = Self::precompute_small_value_binary_constraints(
+            LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED,
+            MAX_ACTIVE_CIRCUIT_FLAGS,
+            eq_poly,
+            &az_bz_cz_poly.circuit_indices,
+        );
+
+        // Two rounds is enough... can even do special handling (6 values)
+        const REDUCED_NUM_SMALL_VALUE_ROUNDS: usize = 2;
+
+        let other_accums = Self::precompute_small_value_spartan_generic(
+            REDUCED_NUM_SMALL_VALUE_ROUNDS,
+            eq_poly,
+            &az_bz_cz_poly.bound_coeffs.0,
+            &az_bz_cz_poly.bound_coeffs.1,
+            &az_bz_cz_poly.bound_coeffs.2,
+        );
+
+        let mut lagrange_coeffs = vec![F::one(); 1];
+
+        // Subsequent rounds (using the stubbed method)
+        for round in 0..num_rounds {
+            if round < LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
+                let quadratic_evals: (F, F) = {
+                    let binary_constraints_eval_0 = lagrange_coeffs.iter()
+                        .zip(instruction_accums[round].0.iter())
+                        .zip(circuit_accums[round].0.iter())
+                        .map(|((lagrange_coeff, instr_val), circ_val)| *lagrange_coeff * (*instr_val + *circ_val))
+                        .fold(F::zero(), |a, b| a + b);
+
+                    let binary_constraints_eval_infty = lagrange_coeffs.iter()
+                        .zip(instruction_accums[round].1.iter())
+                        .zip(circuit_accums[round].1.iter())
+                        .map(|((lagrange_coeff, instr_val), circ_val)| *lagrange_coeff * (*instr_val + *circ_val))
+                        .fold(F::zero(), |a, b| a + b);
+
+                    if round < REDUCED_NUM_SMALL_VALUE_ROUNDS {
+                        let other_constraints_eval_0 = lagrange_coeffs.iter()
+                            .zip(other_accums[round].0.iter())
+                            .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
+                            .fold(F::zero(), |a, b| a + b);
+
+                        let other_constraints_eval_infty = lagrange_coeffs.iter()
+                            .zip(other_accums[round].1.iter())
+                            .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
+                            .fold(F::zero(), |a, b| a + b);
+
+                        (binary_constraints_eval_0 + other_constraints_eval_0, binary_constraints_eval_infty + other_constraints_eval_infty)
+                    } else {
+                        todo!()
+                }};
+
+                let scalar_times_w_i = eq_poly.current_scalar * eq_poly.w[eq_poly.current_index - 1];
+
+                let cubic_poly = UniPoly::from_linear_times_quadratic_with_hint(
+                    // The coefficients of `eq(w[(n - i)..], r[..i]) * eq(w[n - i - 1], X)`
+                    [
+                        eq_poly.current_scalar - scalar_times_w_i,
+                        scalar_times_w_i + scalar_times_w_i - eq_poly.current_scalar,
+                    ],
+                    quadratic_evals.0,
+                    quadratic_evals.1,
+                    claim,
+                );
+
+                let compressed_poly = cubic_poly.compress();
+                compressed_poly.append_to_transcript(transcript);
+
+                let r_i: F = transcript.challenge_scalar();
+                r.push(r_i);
+                polys.push(compressed_poly);
+                
+                claim = cubic_poly.evaluate(&r_i);
+                eq_poly.bind(r_i);
+                
+                // Update Lagrange coefficients: L_{i+1} = L_i \otimes [r_i.square(), (F::one() - r_i).square(), r_i * (F::one() - r_i)]
+                let lagrange_coeffs_r_i = [r_i.square(), (F::one() - r_i).square(), r_i * (F::one() - r_i)];
+                lagrange_coeffs = lagrange_coeffs.iter()
+                    .flat_map(|lagrange_coeff| {
+                        lagrange_coeffs_r_i.iter().map(move |coeff| *lagrange_coeff * *coeff)
+                    })
+                    .collect();
+                
+            } else if round == LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
+                // Do the merging & compute the cached arrays for linear-time sumcheck, which may be delicate...
+                todo!()
+            } else {
+                az_bz_cz_poly
+                    .linear_time_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+            }
+        }
+
+        (
+            SumcheckInstanceProof::new(polys),
+            r,
+            az_bz_cz_poly.final_sumcheck_evals(),
+        )
+    }
+
     #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic")]
     pub fn prove_spartan_cubic(
         num_rounds: usize,
@@ -205,42 +429,6 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             if round == 0 {
                 az_bz_cz_poly
                     .first_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
-            } else {
-                az_bz_cz_poly
-                    .subsequent_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
-            }
-        }
-
-        (
-            SumcheckInstanceProof::new(polys),
-            r,
-            az_bz_cz_poly.final_sumcheck_evals(),
-        )
-    }
-
-    #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic_new")]
-    pub fn prove_spartan_cubic_new(
-        num_rounds: usize,
-        eq_poly: &mut SplitEqPolynomial<F>,
-        az_bz_cz_poly: &mut NewSpartanInterleavedPolynomial<F>,
-        transcript: &mut ProofTranscript,
-    ) -> (Self, Vec<F>, [F; 3]) {
-        let mut r: Vec<F> = Vec::new();
-        let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
-        let mut claim = F::zero();
-
-        // TODO: Combine results from specialized sumchecks to get the claim for the first round
-        // and potentially update the state of az_bz_cz_poly or polys/r.
-        // The current implementation below assumes a structure similar to the old one,
-        // which needs to be replaced.
-
-        // Subsequent rounds (using the stubbed method)
-        for round in 0..num_rounds {
-            if round < 5 {
-                todo!("small_value_sumcheck_round not yet implemented");
-                // az_bz_cz_poly.small_value_sumcheck_round(
-                //     eq_poly, transcript, &mut r, &mut polys, &mut claim,
-                // );
             } else {
                 az_bz_cz_poly
                     .subsequent_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);

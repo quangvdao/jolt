@@ -25,7 +25,8 @@ pub const PC_START_ADDRESS: i64 = 0x80000000;
 const PC_NOOP_SHIFT: i64 = 4;
 const LOG_M: usize = 16;
 const OPERAND_SIZE: usize = LOG_M / 2;
-const ONE_FOURTH_NUM_CONSTRAINTS_PADDED: usize = 32;
+pub const ONE_FOURTH_NUM_CONSTRAINTS_PADDED: usize = 32;
+pub const LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED: usize = 5;
 
 pub trait R1CSConstraints<const C: usize, F: JoltField> {
     type Inputs: ConstraintInput;
@@ -44,27 +45,15 @@ pub trait R1CSConstraints<const C: usize, F: JoltField> {
         )
     }
 
-    /// Constructs binary constraints on the instruction flags.
+    /// Constructs binary constraints on the instruction flags (26 of them)
     /// We know that only one instruction flag is set for each cycle.
     fn instruction_flags_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>);
 
-    /// Constructs binary constraints on the circuit flags.
+    /// Constructs binary constraints on the circuit flags (11 of them)
     fn circuit_flags_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>);
 
-    /// Constructs product constraints where both operands may be non-binary.
-    /// Returns the auxiliary variable that is constrained to be the product of the two operands.
-    fn prod_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>) -> Variable;
-
-    /// Constructs constraints where the first operand (Az) is binary.
-    /// This includes constraints of the form:
-    /// - `X = Y` (equality)
-    /// - `if (condition) then X = Y` (conditional equality)
-    /// - `if (condition) then X else Y` (conditional assignment)
-    fn eq_conditional_constraints(
-        cs: &mut R1CSBuilder<C, F, Self::Inputs>,
-        memory_start: u64,
-        product: Variable,
-    );
+    /// Constructs other uniform constraints (<32 of them)
+    fn other_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>, memory_start: u64);
 
     /// Constructs Jolt's uniform constraints.
     /// Uniform constraints are constraints that hold for each step of
@@ -84,6 +73,7 @@ pub struct JoltRV32IMConstraints;
 impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstraints {
     type Inputs = JoltR1CSInputs;
 
+    // Might be better to just have full binary constraints (no padding)
     fn instruction_flags_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>) {
         assert!(RV32I::iter().count() < ONE_FOURTH_NUM_CONSTRAINTS_PADDED);
         for flag in RV32I::iter() {
@@ -104,23 +94,9 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
         cs.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED - CircuitFlags::iter().count());
     }
 
-    fn prod_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>) -> Variable {
-        // First pad with empty constraints to `ONE_FOURTH_NUM_CONSTRAINTS_PADDED` minus one
-        cs.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED - 1);
-        // This is the **only** constraint where the `a` variable may not be in {0,1}
-        // When we prove the first Spartan sumcheck, we will process this separately.
-        // This constraint is put last so that we never have to subtract when computing evals at infintiy
-        cs.allocate_prod(
-            JoltR1CSInputs::Aux(AuxVariable::Product),
-            JoltR1CSInputs::RS1_Read,
-            JoltR1CSInputs::RS2_Read,
-        )
-    }
-
-    fn eq_conditional_constraints(
+    fn other_constraints(
         cs: &mut R1CSBuilder<C, F, Self::Inputs>,
         memory_start: u64,
-        product: Variable,
     ) {
         // Note(quang): the convention is that the first variable is always the smaller one (i.e.
         // the condition), except for the single `prod` constraint between `rs1_read` and `rs2_read`
@@ -193,6 +169,13 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
             + JoltR1CSInputs::InstructionFlags(MULUInstruction::default().into())
             + JoltR1CSInputs::InstructionFlags(MULHUInstruction::default().into());
 
+        // This constraint may have both Az and Bz be non-binary
+        let product = cs.allocate_prod(
+            JoltR1CSInputs::Aux(AuxVariable::Product),
+            JoltR1CSInputs::RS1_Read,
+            JoltR1CSInputs::RS2_Read,
+        );
+
         cs.constrain_eq_conditional(is_mul, packed_query.clone(), product);
         cs.constrain_eq_conditional(
             JoltR1CSInputs::InstructionFlags(MOVSIGNInstruction::default().into())
@@ -250,6 +233,8 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
             JoltR1CSInputs::OpFlags(CircuitFlags::WriteLookupOutputToRD),
             JoltR1CSInputs::Bytecode_RD,
         );
+
+        // This constraint may have both Az and Bz be non-binary
         cs.constrain_eq_conditional(
             rd_nonzero_and_lookup_to_rd,
             JoltR1CSInputs::RD_Write,
@@ -280,6 +265,8 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
             JoltR1CSInputs::OpFlags(CircuitFlags::Branch),
             JoltR1CSInputs::LookupOutput,
         );
+
+        // This constraint may have both Az and Bz be non-binary
         let _next_pc = cs.allocate_if_else(
             JoltR1CSInputs::Aux(AuxVariable::NextPC),
             should_branch,
@@ -293,11 +280,12 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
     fn uniform_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>, memory_start: u64) {
         Self::instruction_flags_constraints(cs);
         Self::circuit_flags_constraints(cs);
-        let product = Self::prod_constraints(cs);
-        Self::eq_conditional_constraints(cs, memory_start, product);
+        cs.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED);
+        Self::other_constraints(cs, memory_start);
     }
 
     fn cross_step_constraints() -> Vec<OffsetEqConstraint> {
+        // This constraint may have both Az and Bz be non-binary
         // If the next instruction's ELF address is not zero (i.e. it's
         // not padding), then check the PC update.
         let pc_constraint = OffsetEqConstraint::new(
@@ -429,19 +417,7 @@ mod tests {
         println!("\nOffset Equality Constraints (Constants):");
         println!("  {:?}", nonuniform_r1cs.constants());
 
-        // Optionally print the raw sparse data if still needed for debugging
-        // println!("\nRaw Sparse Data:");
-        // println!(
-        //     "a_vars: {:?}\na_consts: {:?}",
-        //     uniform_r1cs.a.vars, uniform_r1cs.a.consts
-        // );
-        // println!(
-        //     "b_vars: {:?}\nb_consts: {:?}",
-        //     uniform_r1cs.b.vars, uniform_r1cs.b.consts
-        // );
-        // println!(
-        //     "c_vars: {:?}\nc_consts: {:?}",
-        //     uniform_r1cs.c.vars, uniform_r1cs.c.consts
-        // );
+        println!("Total number of constraints: {}", builder.num_constraints());
+        println!("Total (padded) number of constraints: {}", builder.padded_rows_per_step());
     }
 }

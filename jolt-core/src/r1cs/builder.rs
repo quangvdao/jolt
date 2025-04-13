@@ -13,6 +13,7 @@ use crate::{
     r1cs::key::{SparseConstraints, UniformR1CS},
 };
 use ark_ff::One;
+use common::rv_trace::NUM_CIRCUIT_FLAGS;
 use rayon::prelude::*;
 use std::{
     collections::BTreeMap,
@@ -563,11 +564,13 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         }
     }
 
+    pub(super) fn num_constraints(&self) -> usize {
+        self.uniform_builder.constraints.len() + self.offset_equality_constraints.len()
+    }
+
     /// Number of constraint rows per step, padded to the next power of two.
     pub(super) fn padded_rows_per_step(&self) -> usize {
-        let num_constraints =
-            self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
-        num_constraints.next_power_of_two()
+        self.num_constraints().next_power_of_two()
     }
 
     /// Total number of rows used across all repeated constraints. Not padded to nearest power of two.
@@ -665,13 +668,17 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
     pub fn compute_spartan_Az_Bz_Cz_new(
         &self,
         instruction_flags: &Vec<MultilinearPolynomial<F>>,
-        circuit_flags: &[MultilinearPolynomial<F>; 11],
-        product_polys: [&MultilinearPolynomial<F>; 3],
+        circuit_flags: &[MultilinearPolynomial<F>; NUM_CIRCUIT_FLAGS],
         flattened_polynomials: &[&MultilinearPolynomial<F>], // N variables of (S steps)
     ) -> NewSpartanInterleavedPolynomial<F> {
-        // TODO: Implement the logic to separate constraints and populate
-        // the specialized coefficient fields in NewSpartanInterleavedPolynomial.
-        todo!("compute_spartan_Az_Bz_Cz_new not yet implemented")
+        NewSpartanInterleavedPolynomial::new(
+            instruction_flags,
+            circuit_flags,
+            &self.uniform_builder.constraints,
+            &self.offset_equality_constraints,
+            flattened_polynomials,
+            self.uniform_repeat,
+        )
     }
     // NewSpartanInterleavedPolynomial::new(...)
 }

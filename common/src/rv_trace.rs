@@ -369,6 +369,9 @@ impl ELFInstruction {
     }
 }
 
+// TODO: derive this automatically from `ELFInstruction::to_circuit_flags`
+pub const MAX_ACTIVE_CIRCUIT_FLAGS: usize = 5;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RegisterState {
     pub rs1_val: Option<u64>,
@@ -400,7 +403,7 @@ impl RVTraceRow {
 }
 
 // Reference: https://www.cs.sfu.ca/~ashriram/Courses/CS295/assets/notebooks/RISCV/RISCV_CARD.pdf
-#[derive(Debug, PartialEq, Eq, Clone, Copy, FromRepr, Serialize, Deserialize, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, FromRepr, EnumCountMacro, Serialize, Deserialize, Hash)]
 #[repr(u8)]
 #[allow(non_camel_case_types)]
 pub enum RV32IM {
@@ -469,6 +472,8 @@ pub enum RV32IM {
     VIRTUAL_SRA_PAD,
     VIRTUAL_SRA_PADI,
 }
+
+pub const NUM_RV32IM_INSTRUCTIONS: usize = RV32IM::COUNT;
 
 impl FromStr for RV32IM {
     type Err = String;

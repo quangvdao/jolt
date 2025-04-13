@@ -136,6 +136,9 @@ instruction_set!(
   VIRTUAL_POW2: POW2Instruction<WORD_SIZE>,
   VIRTUAL_SRA_PADDING: RightShiftPaddingInstruction<WORD_SIZE>
 );
+
+pub const NUM_INSTRUCTION_FLAGS: usize = RV32I::COUNT;
+
 subtable_enum!(
   RV32ISubtables,
   AND: AndSubtable<F>,

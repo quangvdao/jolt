@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    builder::{CombinedUniformBuilder, OffsetEqConstraint, R1CSBuilder},
+    builder::{NewCombinedUniformBuilder, CombinedUniformBuilder, OffsetEqConstraint, R1CSBuilder},
     inputs::{AuxVariable, ConstraintInput, JoltR1CSInputs},
     ops::Variable,
 };
@@ -27,6 +27,8 @@ const LOG_M: usize = 16;
 const OPERAND_SIZE: usize = LOG_M / 2;
 pub const ONE_FOURTH_NUM_CONSTRAINTS_PADDED: usize = 32;
 pub const LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED: usize = 5;
+pub const ONE_HALF_NUM_CONSTRAINTS_PADDED: usize = 64;
+pub const LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED: usize = 6;
 
 pub trait R1CSConstraints<const C: usize, F: JoltField> {
     type Inputs: ConstraintInput;
@@ -45,14 +47,29 @@ pub trait R1CSConstraints<const C: usize, F: JoltField> {
         )
     }
 
-    /// Constructs binary constraints on the instruction flags (26 of them)
-    /// We know that only one instruction flag is set for each cycle.
-    fn instruction_flags_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>);
+    fn construct_constraints_new(
+        padded_trace_length: usize,
+        memory_start: u64,
+    ) -> NewCombinedUniformBuilder<C, F, Self::Inputs> {
+        let mut binary_builder = R1CSBuilder::<C, F, Self::Inputs>::new();
+        let mut other_builder = R1CSBuilder::<C, F, Self::Inputs>::new();
+        Self::uniform_constraints(&mut binary_builder, memory_start);
+        Self::other_constraints(&mut other_builder, memory_start);
+        let cross_step_constraints = Self::cross_step_constraints();
 
-    /// Constructs binary constraints on the circuit flags (11 of them)
-    fn circuit_flags_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>);
+        NewCombinedUniformBuilder::construct(
+            binary_builder,
+            other_builder,
+            padded_trace_length,
+            cross_step_constraints,
+        )
+    }
 
-    /// Constructs other uniform constraints (<32 of them)
+    /// Constructs binary constraints on the instruction & circuit flags (27 + 11 = 38 of them)
+    /// We know that only one instruction flag, and at most 5 circuit flags, are set for each cycle
+    fn binary_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>);
+
+    /// Constructs other uniform constraints (32 of them)
     fn other_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>, memory_start: u64);
 
     /// Constructs Jolt's uniform constraints.
@@ -73,33 +90,26 @@ pub struct JoltRV32IMConstraints;
 impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstraints {
     type Inputs = JoltR1CSInputs;
 
-    // Might be better to just have full binary constraints (no padding)
-    fn instruction_flags_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>) {
-        assert!(RV32I::iter().count() < ONE_FOURTH_NUM_CONSTRAINTS_PADDED);
-        for flag in RV32I::iter() {
+    /// We have 64 binary constraints, 27 for instruction flags, 11 for circuit flags, and 26 dummy (e.g. 0 * 1 == 0) for padding
+    fn binary_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>) {
+        // Reversing the order is necessary to match with the indices in the bitflag
+        for flag in RV32I::iter().rev() {
             cs.constrain_binary(JoltR1CSInputs::InstructionFlags(flag));
         }
-        // Pad with empty constraints after the instruction flags (there are 26 of them) to
-        // `ONE_FOURTH_NUM_CONSTRAINTS_PADDED`, which is 32.
-        cs.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED - RV32I::iter().count());
-    }
-
-    fn circuit_flags_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>) {
-        assert!(CircuitFlags::iter().count() < ONE_FOURTH_NUM_CONSTRAINTS_PADDED);
-        for flag in CircuitFlags::iter() {
+        for flag in CircuitFlags::iter().rev() {
             cs.constrain_binary(JoltR1CSInputs::OpFlags(flag));
         }
-        // Pad with empty constraints after the circuit flags (there are 11 of them) to
-        // `ONE_FOURTH_NUM_CONSTRAINTS_PADDED`, which is 32.
-        cs.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED - CircuitFlags::iter().count());
+        // Pad with 26 dummy constraints after the circuit flags to get 64 binary constraints
+        for _ in 0..(ONE_HALF_NUM_CONSTRAINTS_PADDED - RV32I::iter().count() - CircuitFlags::iter().count()) {
+            cs.constrain_binary_dummy();
+        }
     }
 
+    /// We have 30 other constraints (together with 2 offset constraints, which give precisely 32)
     fn other_constraints(
         cs: &mut R1CSBuilder<C, F, Self::Inputs>,
         memory_start: u64,
     ) {
-        // Note(quang): the convention is that the first variable is always the smaller one (i.e.
-        // the condition), except for the single `prod` constraint between `rs1_read` and `rs2_read`
         let flags = CircuitFlags::iter()
             .map(|flag| JoltR1CSInputs::OpFlags(flag).into())
             .chain(RV32I::iter().map(|flag| JoltR1CSInputs::InstructionFlags(flag).into()))
@@ -278,8 +288,7 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
     }
 
     fn uniform_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>, memory_start: u64) {
-        Self::instruction_flags_constraints(cs);
-        Self::circuit_flags_constraints(cs);
+        Self::binary_constraints(cs);
         cs.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED);
         Self::other_constraints(cs, memory_start);
     }
@@ -322,7 +331,7 @@ mod tests {
         // jolt::vm::JoltPolynomials,
         // poly::multilinear_polynomial::MultilinearPolynomial,
         r1cs::{
-            builder::{CombinedR1CSBuilder, CombinedUniformBuilder},
+            builder::CombinedUniformBuilder,
             constraints::JoltRV32IMConstraints,
             inputs::JoltR1CSInputs,
         },

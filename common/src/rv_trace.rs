@@ -245,8 +245,11 @@ pub enum CircuitFlags {
 pub const NUM_CIRCUIT_FLAGS: usize = CircuitFlags::COUNT;
 
 impl ELFInstruction {
+    /// Note: circuit flags are entirely determined by the `opcode` and the `virtual_sequence_remaining` field.
+    /// 
+    /// There are `NUM_RV32IM_INSTRUCTIONS` possible values for `opcode`, and `3` possible states for `virtual_sequence_remaining`: `None`, `Some(0)`, and `Some(>0)`.
     #[rustfmt::skip]
-    pub fn to_circuit_flags(&self) -> [bool; NUM_CIRCUIT_FLAGS] {
+    pub const fn to_circuit_flags(&self) -> [bool; NUM_CIRCUIT_FLAGS] {
         let mut flags = [false; NUM_CIRCUIT_FLAGS];
 
         flags[CircuitFlags::LeftOperandIsPC as usize] = matches!(
@@ -346,7 +349,7 @@ impl ELFInstruction {
             | RV32IM::VIRTUAL_ASSERT_VALID_DIV0,
         );
 
-        flags[CircuitFlags::Virtual as usize] = self.virtual_sequence_remaining.is_some();
+        flags[CircuitFlags::Virtual as usize] = self.is_virtual();
 
         flags[CircuitFlags::Assert as usize] = matches!(self.opcode,
             RV32IM::VIRTUAL_ASSERT_EQ                        |
@@ -360,17 +363,99 @@ impl ELFInstruction {
         // All instructions in virtual sequence are mapped from the same
         // ELF address. Thus if an instruction is virtual (and not the last one
         // in its sequence), then we should *not* update the PC.
-        flags[CircuitFlags::DoNotUpdatePC as usize] = match self.virtual_sequence_remaining {
-            Some(i) => i != 0,
-            None => false
-        };
+        flags[CircuitFlags::DoNotUpdatePC as usize] = self.should_not_update_pc();
 
         flags
     }
+
+    // Helper const fn for virtual status check
+    const fn is_virtual(&self) -> bool {
+        matches!(self.virtual_sequence_remaining, Some(_))
+    }
+
+    // Helper const fn for PC update logic
+    const fn should_not_update_pc(&self) -> bool {
+        match self.virtual_sequence_remaining {
+            Some(0) => false, // Last instruction in sequence, PC *should* update
+            Some(_) => true,  // Instruction is virtual and not the last one
+            None => false,    // Not a virtual instruction
+        }
+    }
 }
 
-// TODO: derive this automatically from `ELFInstruction::to_circuit_flags`
-pub const MAX_ACTIVE_CIRCUIT_FLAGS: usize = 5;
+/// Computes the maximum number of circuit flags that can be active for any
+/// single instruction, considering all opcodes and virtual sequence states.
+// Note: This function manually iterates through opcodes because iterators are not const-stable.
+pub const fn compute_max_active_circuit_flags() -> usize {
+    // Manually list all RV32IM opcodes. Ensure this list stays in sync with the enum definition.
+    const OPCODES: [RV32IM; NUM_RV32IM_INSTRUCTIONS] = [
+        RV32IM::ADD, RV32IM::SUB, RV32IM::XOR, RV32IM::OR, RV32IM::AND, 
+        RV32IM::SLL, RV32IM::SRL, RV32IM::SRA, RV32IM::SLT, RV32IM::SLTU, 
+        RV32IM::ADDI, RV32IM::XORI, RV32IM::ORI, RV32IM::ANDI, RV32IM::SLLI, 
+        RV32IM::SRLI, RV32IM::SRAI, RV32IM::SLTI, RV32IM::SLTIU, RV32IM::LB, 
+        RV32IM::LH, RV32IM::LW, RV32IM::LBU, RV32IM::LHU, RV32IM::SB, RV32IM::SH, 
+        RV32IM::SW, RV32IM::BEQ, RV32IM::BNE, RV32IM::BLT, RV32IM::BGE, 
+        RV32IM::BLTU, RV32IM::BGEU, RV32IM::JAL, RV32IM::JALR, RV32IM::LUI, 
+        RV32IM::AUIPC, RV32IM::ECALL, RV32IM::EBREAK, RV32IM::MUL, RV32IM::MULH, 
+        RV32IM::MULHU, RV32IM::MULHSU, RV32IM::MULU, RV32IM::DIV, RV32IM::DIVU, 
+        RV32IM::REM, RV32IM::REMU, RV32IM::FENCE, RV32IM::UNIMPL,
+        // Virtual instructions
+        RV32IM::VIRTUAL_MOVSIGN, RV32IM::VIRTUAL_MOVE, RV32IM::VIRTUAL_ADVICE,
+        RV32IM::VIRTUAL_ASSERT_LTE, RV32IM::VIRTUAL_ASSERT_VALID_UNSIGNED_REMAINDER, 
+        RV32IM::VIRTUAL_ASSERT_VALID_SIGNED_REMAINDER, RV32IM::VIRTUAL_ASSERT_EQ,
+        RV32IM::VIRTUAL_ASSERT_VALID_DIV0, RV32IM::VIRTUAL_ASSERT_HALFWORD_ALIGNMENT,
+        RV32IM::VIRTUAL_POW2, RV32IM::VIRTUAL_POW2I, RV32IM::VIRTUAL_SRA_PAD, 
+        RV32IM::VIRTUAL_SRA_PADI,
+    ];
+
+    let mut max_flags = 0;
+    let mut opcode_idx = 0;
+    while opcode_idx < NUM_RV32IM_INSTRUCTIONS {
+        let opcode = OPCODES[opcode_idx];
+
+        // Virtual states: None, Some(0), Some(1) (representing Some(>0))
+        let virtual_states = [None, Some(0), Some(1)];
+        let mut state_idx = 0;
+        while state_idx < 3 {
+            let virtual_state = virtual_states[state_idx];
+            // Create a dummy instruction. Note: address, registers, imm don't affect flags.
+            let instruction = ELFInstruction {
+                address: 0, 
+                opcode, 
+                rs1: None, 
+                rs2: None, 
+                rd: None, 
+                imm: None, 
+                virtual_sequence_remaining: virtual_state 
+            };
+            let flags = instruction.to_circuit_flags();
+            let count = count_set_bits(&flags);
+
+            if count > max_flags {
+                max_flags = count;
+            }
+            state_idx += 1;
+        }
+        opcode_idx += 1;
+    }
+
+    max_flags
+}
+
+/// Helper const function to count set bits (true values) in a boolean array.
+const fn count_set_bits(flags: &[bool; NUM_CIRCUIT_FLAGS]) -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < NUM_CIRCUIT_FLAGS {
+        if flags[i] {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+pub const MAX_ACTIVE_CIRCUIT_FLAGS: usize = compute_max_active_circuit_flags();
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RegisterState {
@@ -403,7 +488,7 @@ impl RVTraceRow {
 }
 
 // Reference: https://www.cs.sfu.ca/~ashriram/Courses/CS295/assets/notebooks/RISCV/RISCV_CARD.pdf
-#[derive(Debug, PartialEq, Eq, Clone, Copy, FromRepr, EnumCountMacro, Serialize, Deserialize, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, FromRepr, EnumCountMacro, Serialize, Deserialize, Hash, EnumIter)]
 #[repr(u8)]
 #[allow(non_camel_case_types)]
 pub enum RV32IM {

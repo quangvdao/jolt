@@ -1,11 +1,11 @@
-use common::rv_trace::NUM_CIRCUIT_FLAGS;
 use std::marker::PhantomData;
 use tracing::{span, Level};
+use strum::IntoEnumIterator;
 
 use crate::field::JoltField;
 use crate::jolt::vm::JoltCommitments;
 use crate::jolt::vm::JoltPolynomials;
-use crate::lasso::memory_checking::StructuredPolynomialData;
+// use crate::lasso::memory_checking::StructuredPolynomialData;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::multilinear_polynomial::PolynomialEvaluation;
@@ -30,10 +30,21 @@ use crate::{
     subprotocols::sumcheck::SumcheckInstanceProof,
 };
 
-use super::builder::CombinedUniformBuilder;
+use super::builder::{CombinedUniformBuilder, NewCombinedUniformBuilder};
 use super::inputs::ConstraintInput;
 
 use rayon::prelude::*;
+
+/// Returns the indices of the set bits in a u64 bitflag.
+pub fn bitflag_indices(bitflags: u64) -> Vec<u8> {
+    let mut indices = Vec::new();
+    for i in 0..64 {
+        if (bitflags >> i) & 1 == 1 {
+            indices.push(i as u8);
+        }
+    }
+    indices
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum SpartanError {
@@ -99,19 +110,20 @@ where
 {
     #[tracing::instrument(skip_all, name = "Spartan::setup")]
     pub fn setup(
-        constraint_builder: &CombinedUniformBuilder<C, F, I>,
+        constraint_builder: &NewCombinedUniformBuilder<C, F, I>,
         padded_num_steps: usize,
     ) -> UniformSpartanKey<C, I, F> {
+        let old_builder = constraint_builder.to_old_builder();
         assert_eq!(
             padded_num_steps,
-            constraint_builder.uniform_repeat().next_power_of_two()
+            old_builder.uniform_repeat().next_power_of_two()
         );
-        UniformSpartanKey::from_builder(constraint_builder)
+        UniformSpartanKey::from_builder(&old_builder)
     }
 
     #[tracing::instrument(skip_all, name = "Spartan::prove")]
     pub fn prove<PCS>(
-        constraint_builder: &CombinedUniformBuilder<C, F, I>,
+        constraint_builder: &NewCombinedUniformBuilder<C, F, I>,
         key: &UniformSpartanKey<C, I, F>,
         polynomials: &JoltPolynomials<F>,
         opening_accumulator: &mut ProverOpeningAccumulator<F, ProofTranscript>,
@@ -120,60 +132,67 @@ where
     where
         PCS: CommitmentScheme<ProofTranscript, Field = F>,
     {
+        let old_builder = constraint_builder.to_old_builder();
+
         let flattened_polys: Vec<&MultilinearPolynomial<F>> = I::flatten::<C>()
             .iter()
             .map(|var| var.get_ref(polynomials))
             .collect();
 
-        // The product polynomials for use in the product constraint
-        let product_polys_ref: [&MultilinearPolynomial<F>; 3] = [
-            &polynomials.read_write_memory.v_read_rs1,
-            &polynomials.read_write_memory.v_read_rs2,
-            &polynomials.r1cs.aux.product,
-        ];
-
         let num_rounds_x = key.num_rows_bits();
+
+        let tau: Vec<F> = (0..num_rounds_x).map(|_i| transcript.challenge_scalar()).collect();
 
         /* Sumcheck 1: Outer sumcheck */
         
         // Choose whether to use the new or old sumcheck based on `num_rounds_x`
-        if num_rounds_x <= 10 { todo!() }
+        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) = if num_rounds_x <= 10 {
+            let mut eq_tau = OldSplitEqPolynomial::new(&tau);
 
-        let tau = (0..num_rounds_x)
-            .map(|_i| transcript.challenge_scalar())
-            .collect::<Vec<F>>();
-        let mut eq_tau = OldSplitEqPolynomial::new(&tau);
+            let mut az_bz_cz_poly = old_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
 
-        let mut az_bz_cz_poly = constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+            let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) =
+                SumcheckInstanceProof::prove_spartan_cubic(
+                    num_rounds_x,
+                    &mut eq_tau,
+                    &mut az_bz_cz_poly,
+                    transcript,
+                );
+    
+            let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
+            drop_in_background_thread((az_bz_cz_poly, eq_tau));
 
-        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) =
-            SumcheckInstanceProof::prove_spartan_cubic(
-                num_rounds_x,
-                &mut eq_tau,
-                &mut az_bz_cz_poly,
-                transcript,
+            (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims)
+        } else {
+            // New stuff
+            let mut eq_tau_new = SplitEqPolynomial::new(&tau);
+
+            // Hack: re-derive (instruction & circuit) flag indices from the `bitflags` polynomial
+            let flag_indices: Vec<Vec<u8>> = match polynomials.bytecode.v_read_write[1].clone() {
+                MultilinearPolynomial::U64Scalars(poly) => poly.iter().map(|coeff| {
+                    bitflag_indices(*coeff)
+                }).collect(),
+                _ => unreachable!(),
+            };
+
+            let mut az_bz_cz_poly_new = constraint_builder.compute_spartan_Az_Bz_Cz(
+                flag_indices,
+                &flattened_polys,
             );
 
-        let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-        drop_in_background_thread((az_bz_cz_poly, eq_tau));
+            let (outer_sumcheck_proof_new, outer_sumcheck_r_new, outer_sumcheck_claims_new) =
+                SumcheckInstanceProof::prove_spartan_cubic_new(
+                    num_rounds_x,
+                    &mut eq_tau_new,
+                    &mut az_bz_cz_poly_new,
+                    transcript,
+                );
 
-        // New stuff
+            let outer_sumcheck_r_new: Vec<F> = outer_sumcheck_r_new.into_iter().rev().collect();
+            drop_in_background_thread((az_bz_cz_poly_new, eq_tau_new));
 
-        let mut eq_tau_new = SplitEqPolynomial::new(&tau);
-
-        let mut az_bz_cz_poly_new = constraint_builder.compute_spartan_Az_Bz_Cz_new(
-            &polynomials.instruction_lookups.instruction_flags,
-            &polynomials.r1cs.circuit_flags,
-            &flattened_polys,
-        );
-
-        let (outer_sumcheck_proof_new, outer_sumcheck_r_new, outer_sumcheck_claims_new) =
-            SumcheckInstanceProof::prove_spartan_cubic_new(
-                num_rounds_x,
-                &mut eq_tau_new,
-                &mut az_bz_cz_poly_new,
-                transcript,
-            );
+            (outer_sumcheck_proof_new, outer_sumcheck_r_new, outer_sumcheck_claims_new)
+        };
 
         // End new stuff
 

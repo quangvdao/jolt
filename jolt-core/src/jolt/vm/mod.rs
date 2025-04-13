@@ -519,7 +519,7 @@ where
             },
         );
 
-        let r1cs_builder = Self::Constraints::construct_constraints(
+        let r1cs_builder = Self::Constraints::construct_constraints_new(
             padded_trace_length,
             program_io.memory_layout.input_start,
         );
@@ -548,7 +548,7 @@ where
         };
 
         // Compute the auxiliary polynomials (and change nothing else)
-        r1cs_builder.compute_aux(&mut jolt_polynomials);
+        r1cs_builder.to_old_builder().compute_aux(&mut jolt_polynomials);
 
         let jolt_commitments =
             jolt_polynomials.commit::<C, PCS, ProofTranscript>(&preprocessing.shared);
@@ -671,7 +671,7 @@ where
         let padded_trace_length = proof.trace_length.next_power_of_two();
         let memory_start = preprocessing.memory_layout.input_start;
         let r1cs_builder =
-            Self::Constraints::construct_constraints(padded_trace_length, memory_start);
+            Self::Constraints::construct_constraints_new(padded_trace_length, memory_start);
         let spartan_key = spartan::UniformSpartanProof::<C, _, F, ProofTranscript>::setup(
             &r1cs_builder,
             padded_trace_length,

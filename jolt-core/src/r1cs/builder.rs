@@ -1,7 +1,5 @@
 use super::{
-    inputs::ConstraintInput,
-    key::{CrossStepR1CS, CrossStepR1CSConstraint, SparseEqualityItem},
-    ops::{Term, Variable, LC},
+    constraints::ONE_FOURTH_NUM_CONSTRAINTS_PADDED, inputs::ConstraintInput, key::{CrossStepR1CS, CrossStepR1CSConstraint, SparseEqualityItem}, ops::{Term, Variable, LC}
 };
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::{
@@ -19,6 +17,7 @@ use std::{
     collections::BTreeMap,
     marker::PhantomData,
     sync::atomic::{AtomicBool, Ordering},
+    sync::Arc,
 };
 
 /// Constraints over a single row. Each variable points to a single item in Z and the corresponding coefficient.
@@ -80,9 +79,10 @@ impl Constraint {
 
 type AuxComputationFunction = dyn Fn(&[i128]) -> i128 + Send + Sync;
 
+#[derive(Clone)]
 struct AuxComputation<F: JoltField> {
     symbolic_inputs: Vec<LC>,
-    compute: Box<AuxComputationFunction>,
+    compute: Arc<AuxComputationFunction>,
     _field: PhantomData<F>,
 }
 
@@ -124,7 +124,7 @@ impl<F: JoltField> AuxComputation<F> {
 
         Self {
             symbolic_inputs,
-            compute,
+            compute: Arc::from(compute),
             _field: PhantomData,
         }
     }
@@ -220,13 +220,20 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> R1CSBuilder<C, F, I> {
         new_aux
     }
 
+    /// Appends the constraints and aux computations from another builder.
+    pub fn append(&mut self, other: &Self) {
+        self.constraints.extend(other.constraints.iter().cloned());
+        // Assuming AuxComputation needs cloning.
+        self.aux_computations.extend(other.aux_computations.iter().map(|(k, v)| (*k, v.clone())));
+    }
+
     /// Pads the builder with `num_rows` empty constraints.
     pub fn pad(&mut self, num_rows: usize) {
         for _ in 0..num_rows {
             self.constraints.push(Constraint {
-                a: LC::new(vec![]),
-                b: LC::new(vec![]),
-                c: LC::new(vec![]),
+                a: LC::zero(),
+                b: LC::zero(),
+                c: LC::zero(),
             });
         }
     }
@@ -272,6 +279,17 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> R1CSBuilder<C, F, I> {
         let constraint = Constraint {
             a,
             b,
+            c: LC::zero(),
+        };
+        self.constraints.push(constraint);
+    }
+
+    pub fn constrain_binary_dummy(&mut self) {
+        let one: LC = Variable::Constant.into();
+        // 0 * 1 == 0
+        let constraint = Constraint {
+            a: LC::zero(),
+            b: one,
             c: LC::zero(),
         };
         self.constraints.push(constraint);
@@ -474,7 +492,7 @@ pub type OffsetLC = (bool, LC);
 
 /// A conditional constraint that Linear Combinations a, b are equal where a and b need not be
 /// in the same step as in the uniform constraints.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OffsetEqConstraint {
     pub(crate) cond: OffsetLC,
     pub(crate) a: OffsetLC,
@@ -517,20 +535,6 @@ pub(crate) fn eval_offset_lc<F: JoltField>(
     } else {
         offset.1.constant_term_field()
     }
-}
-
-pub struct CombinedR1CSBuilder<const C: usize, F: JoltField, I: ConstraintInput> {
-    // The builders for constraints of each type
-    instruction_flags_builder: R1CSBuilder<C, F, I>,
-    circuit_flags_builder: R1CSBuilder<C, F, I>,
-    eq_conditional_builder: R1CSBuilder<C, F, I>,
-    product_builder: R1CSBuilder<C, F, I>,
-
-    // Padded repetition of the constraints
-    uniform_repeat: usize,
-
-    // Offset equality constraints, grouped with `eq_conditional_builder`
-    offset_equality_constraints: Vec<OffsetEqConstraint>,
 }
 
 // TODO(sragss): Detailed documentation with wiki.
@@ -662,23 +666,64 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
             self.padded_rows_per_step(),
         )
     }
+}
 
-    // compute_spartan_Az_Bz_Cz_new
+pub struct NewCombinedUniformBuilder<const C: usize, F: JoltField, I: ConstraintInput> {
+    // The builders for constraints of each type
+    binary_builder: R1CSBuilder<C, F, I>,
+    other_builder: R1CSBuilder<C, F, I>,
+
+    // Padded repetition of the constraints
+    uniform_repeat: usize,
+
+    // Offset equality constraints, grouped with `eq_conditional_builder`
+    offset_equality_constraints: Vec<OffsetEqConstraint>,
+}
+
+impl<const C: usize, F: JoltField, I: ConstraintInput> NewCombinedUniformBuilder<C, F, I> {
+    pub fn construct(
+        binary_builder: R1CSBuilder<C, F, I>,
+        other_builder: R1CSBuilder<C, F, I>,
+        uniform_repeat: usize,
+        offset_equality_constraints: Vec<OffsetEqConstraint>,
+    ) -> Self {
+        assert!(uniform_repeat.is_power_of_two());
+        Self {
+            binary_builder,
+            other_builder,
+            uniform_repeat,
+            offset_equality_constraints,
+        }
+    }
+
+    pub fn to_old_builder(&self) -> CombinedUniformBuilder<C, F, I> {
+        let mut uniform_builder = R1CSBuilder::<C, F, I>::new();
+        uniform_builder.append(&self.binary_builder);
+        uniform_builder.pad(ONE_FOURTH_NUM_CONSTRAINTS_PADDED);
+        uniform_builder.append(&self.other_builder);
+
+        CombinedUniformBuilder::construct(
+            uniform_builder,
+            self.uniform_repeat,
+            self.offset_equality_constraints.clone(),
+        )
+    }
+
+    pub fn uniform_repeat(&self) -> usize {
+        self.uniform_repeat
+    }
+
     #[tracing::instrument(skip_all)]
-    pub fn compute_spartan_Az_Bz_Cz_new(
+    pub fn compute_spartan_Az_Bz_Cz(
         &self,
-        instruction_flags: &Vec<MultilinearPolynomial<F>>,
-        circuit_flags: &[MultilinearPolynomial<F>; NUM_CIRCUIT_FLAGS],
+        flag_indices: Vec<Vec<u8>>,
         flattened_polynomials: &[&MultilinearPolynomial<F>], // N variables of (S steps)
     ) -> NewSpartanInterleavedPolynomial<F> {
         NewSpartanInterleavedPolynomial::new(
-            instruction_flags,
-            circuit_flags,
-            &self.uniform_builder.constraints,
+            flag_indices,
+            &self.other_builder.constraints,
             &self.offset_equality_constraints,
             flattened_polynomials,
-            self.uniform_repeat,
         )
     }
-    // NewSpartanInterleavedPolynomial::new(...)
 }

@@ -308,64 +308,48 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         // The current implementation below assumes a structure similar to the old one,
         // which needs to be replaced.
 
-        let instruction_accums = Self::precompute_small_value_binary_constraints(
+        let flag_accums = Self::precompute_small_value_binary_constraints(
             LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED,
-            1,
+            6, // at most 6 flags (1 instruction flag + 5 circuit flags) can be active at once
             eq_poly,
-            &az_bz_cz_poly.instruction_indices,
-        );
-
-        let circuit_accums = Self::precompute_small_value_binary_constraints(
-            LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED,
-            MAX_ACTIVE_CIRCUIT_FLAGS,
-            eq_poly,
-            &az_bz_cz_poly.circuit_indices,
-        );
-
-        // Two rounds is enough... can even do special handling (6 values)
-        const REDUCED_NUM_SMALL_VALUE_ROUNDS: usize = 2;
-
-        let other_accums = Self::precompute_small_value_spartan_generic(
-            REDUCED_NUM_SMALL_VALUE_ROUNDS,
-            eq_poly,
-            &az_bz_cz_poly.bound_coeffs.0,
-            &az_bz_cz_poly.bound_coeffs.1,
-            &az_bz_cz_poly.bound_coeffs.2,
+            &az_bz_cz_poly.flag_indices,
         );
 
         let mut lagrange_coeffs = vec![F::one(); 1];
 
-        // Subsequent rounds (using the stubbed method)
+        // // 0-th round
+        // let (other_evals_0, other_evals_infty) : (F, F) = (F::zero(), F::zero());
+
+        // let 
+
         for round in 0..num_rounds {
-            if round < LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
-                let quadratic_evals: (F, F) = {
+            let quadratic_evals: (F, F) = {
+                if round < LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
                     let binary_constraints_eval_0 = lagrange_coeffs.iter()
-                        .zip(instruction_accums[round].0.iter())
-                        .zip(circuit_accums[round].0.iter())
-                        .map(|((lagrange_coeff, instr_val), circ_val)| *lagrange_coeff * (*instr_val + *circ_val))
+                        .zip(flag_accums[round].0.iter())
+                        .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
                         .fold(F::zero(), |a, b| a + b);
 
                     let binary_constraints_eval_infty = lagrange_coeffs.iter()
-                        .zip(instruction_accums[round].1.iter())
-                        .zip(circuit_accums[round].1.iter())
-                        .map(|((lagrange_coeff, instr_val), circ_val)| *lagrange_coeff * (*instr_val + *circ_val))
+                        .zip(flag_accums[round].1.iter())
+                        .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
                         .fold(F::zero(), |a, b| a + b);
 
-                    if round < REDUCED_NUM_SMALL_VALUE_ROUNDS {
-                        let other_constraints_eval_0 = lagrange_coeffs.iter()
-                            .zip(other_accums[round].0.iter())
-                            .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
-                            .fold(F::zero(), |a, b| a + b);
-
-                        let other_constraints_eval_infty = lagrange_coeffs.iter()
-                            .zip(other_accums[round].1.iter())
-                            .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
-                            .fold(F::zero(), |a, b| a + b);
-
-                        (binary_constraints_eval_0 + other_constraints_eval_0, binary_constraints_eval_infty + other_constraints_eval_infty)
+                    if round == 0 {
+                        let (other_evals_0, other_evals_infty) = az_bz_cz_poly.compute_first_round_other_evals();
+                        (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty)
                     } else {
-                        todo!()
-                }};
+                        let (other_evals_0, other_evals_infty) = az_bz_cz_poly.compute_subsequent_round_other_evals();
+                        (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty)
+                    }
+                } else if round == LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
+                    // Use small-space algorithm to compute the cached arrays for the binary constraints
+                    todo!()
+                    } else {
+                        // Do the linear-time sumcheck
+                        az_bz_cz_poly.compute_linear_time_evals(eq_poly, &r)
+                    }
+                };
 
                 let scalar_times_w_i = eq_poly.current_scalar * eq_poly.w[eq_poly.current_index - 1];
 
@@ -390,21 +374,17 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 claim = cubic_poly.evaluate(&r_i);
                 eq_poly.bind(r_i);
                 
-                // Update Lagrange coefficients: L_{i+1} = L_i \otimes [r_i.square(), (F::one() - r_i).square(), r_i * (F::one() - r_i)]
-                let lagrange_coeffs_r_i = [r_i.square(), (F::one() - r_i).square(), r_i * (F::one() - r_i)];
+                // Lagrange coefficients for 0, 1, and infty, respectively
+                let lagrange_coeffs_r_i = [F::one() - r_i, r_i, r_i * (r_i - F::one())];
+                // Update Lagrange coefficients:
+                // L_{i+1} = L_i \otimes lagrange_coeffs_r_i
                 lagrange_coeffs = lagrange_coeffs.iter()
                     .flat_map(|lagrange_coeff| {
                         lagrange_coeffs_r_i.iter().map(move |coeff| *lagrange_coeff * *coeff)
                     })
                     .collect();
-                
-            } else if round == LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
-                // Do the merging & compute the cached arrays for linear-time sumcheck, which may be delicate...
-                todo!()
-            } else {
-                az_bz_cz_poly
-                    .linear_time_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
-            }
+
+                az_bz_cz_poly.bind_bound_polys(&r_i);
         }
 
         (

@@ -17,7 +17,7 @@ use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::compact_polynomial::{CompactPolynomial, SmallScalar};
 use crate::poly::multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation};
 use common::constants::{BYTES_PER_INSTRUCTION, RAM_START_ADDRESS};
-use common::rv_trace::ELFInstruction;
+use common::rv_trace::{ELFInstruction, NUM_CIRCUIT_FLAGS};
 
 use rayon::prelude::*;
 
@@ -48,19 +48,19 @@ pub struct BytecodeStuff<T: CanonicalSerialize + CanonicalDeserialize> {
     v_init_final: VerifierComputedOpening<[T; 6]>,
 }
 
-/// Note –– F: JoltField bound is not enforced.
+/// Note –– F: JoltField bound is not enforced.
 ///
 /// See issue #112792 <https://github.com/rust-lang/rust/issues/112792>.
 /// Adding #![feature(lazy_type_alias)] to the crate attributes seem to break
 /// `alloy_sol_types`.
 pub type BytecodePolynomials<F: JoltField> = BytecodeStuff<MultilinearPolynomial<F>>;
-/// Note –– F: JoltField bound is not enforced.
+/// Note –– F: JoltField bound is not enforced.
 ///
 /// See issue #112792 <https://github.com/rust-lang/rust/issues/112792>.
 /// Adding #![feature(lazy_type_alias)] to the crate attributes seem to break
 /// `alloy_sol_types`.
 pub type BytecodeOpenings<F: JoltField> = BytecodeStuff<F>;
-/// Note –– PCS: CommitmentScheme bound is not enforced.
+/// Note –– PCS: CommitmentScheme bound is not enforced.
 /// See issue #112792 <https://github.com/rust-lang/rust/issues/112792>.
 /// Adding #![feature(lazy_type_alias)] to the crate attributes seem to break
 pub type BytecodeCommitments<PCS: CommitmentScheme<ProofTranscript>, ProofTranscript: Transcript> =

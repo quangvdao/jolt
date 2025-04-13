@@ -3,6 +3,7 @@
 
 use crate::field::JoltField;
 use crate::poly::dense_mlpoly::DensePolynomial;
+use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::{
     BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
 };
@@ -11,12 +12,12 @@ use crate::poly::spartan_interleaved_poly::{
 };
 use crate::poly::split_eq_poly::{OldSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
-use crate::r1cs::constraints::LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED;
+use crate::r1cs::constraints::LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
-use common::rv_trace::MAX_ACTIVE_CIRCUIT_FLAGS;
+use crate::utils::{get_vec_by_fixed_bit, get_vec_by_fixed_bit_pair};
 use ark_serialize::*;
 use rayon::prelude::*;
 use std::marker::PhantomData;
@@ -192,6 +193,55 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         (SumcheckInstanceProof::new(compressed_polys), r, final_evals)
     }
 
+    /// Helper function to encapsulate the common subroutine:
+    /// - Compute the linear factor E_i(X) from the current eq-poly
+    /// - Reconstruct the cubic polynomial s_i(X) = E_i(X) * t_i(X) for the i-th round
+    /// - Compress the cubic polynomial
+    /// - Append the compressed polynomial to the transcript
+    /// - Derive the challenge for the next round
+    /// - Bind the cubic polynomial to the challenge
+    /// - Update the claim as the evaluation of the cubic polynomial at the challenge
+    /// 
+    /// Returns the derived challenge
+    fn process_sumcheck_round(
+        quadratic_evals: (F, F), // (t_i(0), t_i(infty))
+        eq_poly: &mut SplitEqPolynomial<F>,
+        polys: &mut Vec<CompressedUniPoly<F>>,
+        r: &mut Vec<F>,
+        claim: &mut F,
+        transcript: &mut ProofTranscript,
+    ) -> F {
+        let scalar_times_w_i = eq_poly.current_scalar * eq_poly.w[eq_poly.current_index - 1];
+
+        let cubic_poly = UniPoly::from_linear_times_quadratic_with_hint(
+            // The coefficients of `eq(w[(n - i)..], r[..i]) * eq(w[n - i - 1], X)`
+            [
+                eq_poly.current_scalar - scalar_times_w_i,
+                scalar_times_w_i + scalar_times_w_i - eq_poly.current_scalar,
+            ],
+            quadratic_evals.0,
+            quadratic_evals.1,
+            claim.clone(),
+        );
+
+        // Compress and add to transcript
+        let compressed_poly = cubic_poly.compress();
+        compressed_poly.append_to_transcript(transcript);
+
+        // Derive challenge
+        let r_i: F = transcript.challenge_scalar();
+        r.push(r_i);
+        polys.push(compressed_poly);
+
+        // Evaluate for next round's claim
+        *claim = cubic_poly.evaluate(&r_i);
+
+        // Bind eq_poly for next round
+        eq_poly.bind(r_i);
+
+        r_i
+    }
+
     /// Using the small-value optimization, precompute the necessary data for the first few rounds of sumcheck for 
     /// the Spartan polynomial `eq(w, X) * (Az(X) * Bz(X) - Cz(X))`.
     /// This is the **generic** version of the small-value optimization.
@@ -286,10 +336,80 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         todo!()
     }
 
-    // Computing the evaluations for linear-time sumcheck, after the small value rounds
-    // pub fn prove_spartan_small_space_one_round(
-    //     eq_poly: &mut SplitEqPolynomial<F>,
-    // )
+    /// This function computes, for each `x_L \in {0,1}^{eq_poly.E1_len()}` and `x_R \in {0,1}^{eq_poly.E2_len()}`,
+    /// Az[r, 0, x_L, x_R] = \sum_{y \in {0, 1}^{r.len()}} eq(r, y) * Az[y, 0, x_L, x_R]
+    /// and 
+    /// Bz[r, 0, x_L, x_R] = \sum_{y \in {0, 1}^{r.len()}} eq(r, y) * Bz[y, 0, x_L, x_R]
+    /// 
+    /// Note that since Bz[y, 0, x_L, x_R] = 1 - Az[y, 0, x_L, x_R], we have that
+    /// Bz[r, 0, x_L, x_R] = \sum_{y} eq(r, y) - Az[r, 0, x_L, x_R]
+    /// 
+    /// Also, since Az[y, 0, x_L, x_R] is given via the sparse representation `flag_indices`,
+    /// we can compute Az[r, 0, x_L, x_R] very quickly.
+    /// 
+    /// We can then derive the evaluation of
+    /// t_i(0) = \sum_{x_R} E2[x_R] \sum_{x_L} E1[x_L] * Az[r, 0, x_L, x_R] * Bz[r, 0, x_L, x_R]
+    pub fn compute_evals_binary_constraints_after_small_value_rounds(
+        eq_poly: &SplitEqPolynomial<F>,
+        r: Vec<F>,
+        flag_indices: &Vec<Vec<u8>>,
+    ) -> (Vec<F>, Vec<F>, F) {
+        let E1_len = eq_poly.E1_len(); // 2^{num_rounds / 2 - 7}
+        let E2_len = eq_poly.E2_len(); // 2^{num_rounds / 2}
+        let eq_poly_r = EqPolynomial::evals(&r);
+
+        let sum_eq_poly_r = eq_poly_r.iter().sum::<F>();
+
+        // Pre-allocate vectors with the correct size
+        let total_size = E1_len * E2_len;
+        assert_eq!(flag_indices.len(), total_size);
+        let mut Az_evals_r = vec![F::zero(); total_size];
+        let mut Bz_evals_r = vec![F::zero(); total_size];
+
+        let E2_current_evals = eq_poly.E2_current(); // Get E2 evaluations once
+        
+        // Use par_chunks_mut to get mutable slices of the output vectors.
+        // Zip them with the corresponding E2 evaluations.
+        // Calculate values for each chunk, write them directly via the mutable slices,
+        // and sum the quadratic contributions in the end.
+        let quadratic_eval_0 = Az_evals_r
+            .par_chunks_mut(E1_len) // Mutable slice of Az_evals_r for this E2 chunk
+            .zip(Bz_evals_r.par_chunks_mut(E1_len)) // Mutable slice of Bz_evals_r for this E2 chunk
+            .zip(E2_current_evals.par_iter()) // Corresponding E2 evaluation
+            .enumerate() // Get the E2 chunk index `i` for flag_indices access
+            .map(|(i, ((az_chunk, bz_chunk), E2_eval))| {
+                let mut E2_sum = F::zero();
+                // Compute Az and Bz evals for the current E1 chunk associated with this E2 chunk
+                let (Az_evals_r_E2, Bz_evals_r_E2): (Vec<F>, Vec<F>) = eq_poly
+                    .E1_current() // Evals for E1 associated with *this* E2 chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(j, E1_eval)| {
+                        // Calculate indices based on E2 chunk index `i` and E1 index `j`
+                        let global_index = i * E1_len + j;
+                        let indices = &flag_indices[global_index];
+                        let mut Az_eval_r = F::zero();
+                        for index in indices {
+                            Az_eval_r += eq_poly_r[*index as usize];
+                        }
+                        let Bz_eval_r = sum_eq_poly_r - Az_eval_r;
+                        E2_sum += *E1_eval * Az_eval_r * Bz_eval_r;
+                        (Az_eval_r, Bz_eval_r)
+                    })
+                    .unzip();
+
+                // assert_eq!(az_chunk.len(), Az_evals_r_E2.len());
+                // assert_eq!(bz_chunk.len(), Bz_evals_r_E2.len());
+                az_chunk.copy_from_slice(&Az_evals_r_E2);
+                bz_chunk.copy_from_slice(&Bz_evals_r_E2);
+
+                // Return the quadratic contribution for this E2 chunk
+                *E2_eval * E2_sum
+            })
+            .sum::<F>(); // Sum up the quadratic contributions from all E2 chunks
+
+        (Az_evals_r, Bz_evals_r, quadratic_eval_0)
+    }
 
     #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic_new")]
     pub fn prove_spartan_cubic_new(
@@ -303,13 +423,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
         let mut claim = F::zero();
 
-        // TODO: Combine results from specialized sumchecks to get the claim for the first round
-        // and potentially update the state of az_bz_cz_poly or polys/r.
-        // The current implementation below assumes a structure similar to the old one,
-        // which needs to be replaced.
-
         let flag_accums = Self::precompute_small_value_binary_constraints(
-            LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED,
+            LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED, // 64 binary constraints
             6, // at most 6 flags (1 instruction flag + 5 circuit flags) can be active at once
             eq_poly,
             &az_bz_cz_poly.flag_indices,
@@ -317,74 +432,110 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         let mut lagrange_coeffs = vec![F::one(); 1];
 
-        // // 0-th round
-        // let (other_evals_0, other_evals_infty) : (F, F) = (F::zero(), F::zero());
+        // Recall that the indices are as follows:
+        // (y_0, y_1, y_2, y_3, y_4, y_5, z, x_L, x_R)
+        // where:
+        // - `x_L \in {0,1}^{num_rounds / 2 - 7}`
+        // - `x_R \in {0,1}^{num_rounds / 2}`
+        // - If `z = 0`, then `y_{0-5}` corresponds to the 64 binary constraints
+        // - If `z = 1` and `y_5 = 0`, then `y_{0-4}` corresponds to empty padded constraints
+        // - If `z = 1` and `y_5 = 1`, then `y_{0-4}` corresponds to the 32 other (non-binary) constraints
 
-        // let 
+        // We need to derive the right slices of E1_poly for the binary & other constraints
+        // 1. For binary constraints: in round i = 0..4, we have:
+        // - eq_poly.E1_current() ranges over (y_{i+1}, ..., y_5, z, x_L)
+        // We need to only take the slices where `z = 0` for the binary constraints
+        // 2. For other constraints: in round i = 0..3, we have:
+        // - eq_poly.E1_current() ranges over (y_{i+1}, ..., y_5, z, x_L)
+        // We need to only take the slices where `z = 1` and `y_5 = 1` for the other constraints
 
-        for round in 0..num_rounds {
-            let quadratic_evals: (F, F) = {
-                if round < LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
-                    let binary_constraints_eval_0 = lagrange_coeffs.iter()
-                        .zip(flag_accums[round].0.iter())
-                        .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
-                        .fold(F::zero(), |a, b| a + b);
+        // Rounds 0, 1, 2, 3, 4, 5
+        for round in 0..LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED {
 
-                    let binary_constraints_eval_infty = lagrange_coeffs.iter()
-                        .zip(flag_accums[round].1.iter())
-                        .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
-                        .fold(F::zero(), |a, b| a + b);
+            // Compute the contributions from the binary constraints to the evaluations t_i(0), t_i(infty)
+            let binary_constraints_eval_0 = lagrange_coeffs.iter()
+            .zip(flag_accums[round].0.iter())
+            .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
+            .fold(F::zero(), |a, b| a + b);
 
-                    if round == 0 {
-                        let (other_evals_0, other_evals_infty) = az_bz_cz_poly.compute_first_round_other_evals();
-                        (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty)
-                    } else {
-                        let (other_evals_0, other_evals_infty) = az_bz_cz_poly.compute_subsequent_round_other_evals();
-                        (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty)
-                    }
-                } else if round == LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED {
-                    // Use small-space algorithm to compute the cached arrays for the binary constraints
-                    todo!()
-                    } else {
-                        // Do the linear-time sumcheck
-                        az_bz_cz_poly.compute_linear_time_evals(eq_poly, &r)
-                    }
-                };
+            let binary_constraints_eval_infty = lagrange_coeffs.iter()
+                .zip(flag_accums[round].1.iter())
+                .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
+                .fold(F::zero(), |a, b| a + b);
 
-                let scalar_times_w_i = eq_poly.current_scalar * eq_poly.w[eq_poly.current_index - 1];
+            let E1_evals_for_other_constraints = get_vec_by_fixed_bit_pair(eq_poly.E1_current(), 4 - round, true, 5 - round, true);
 
-                let cubic_poly = UniPoly::from_linear_times_quadratic_with_hint(
-                    // The coefficients of `eq(w[(n - i)..], r[..i]) * eq(w[n - i - 1], X)`
-                    [
-                        eq_poly.current_scalar - scalar_times_w_i,
-                        scalar_times_w_i + scalar_times_w_i - eq_poly.current_scalar,
-                    ],
-                    quadratic_evals.0,
-                    quadratic_evals.1,
-                    claim,
-                );
+            // For round 0, compute the contribution from the other constraints using specialized method
+            // with handling of `i128` instead of full `F`
+            if round == 0 {
+                let az_bz_cz_chunks = az_bz_cz_poly.chunks_first_round();
 
-                let compressed_poly = cubic_poly.compress();
-                compressed_poly.append_to_transcript(transcript);
+                let (other_evals_0, other_evals_infty) = az_bz_cz_poly
+                    .compute_first_round_other_evals(az_bz_cz_chunks, &E1_evals_for_other_constraints, eq_poly.E2_current());
 
-                let r_i: F = transcript.challenge_scalar();
-                r.push(r_i);
-                polys.push(compressed_poly);
-                
-                claim = cubic_poly.evaluate(&r_i);
-                eq_poly.bind(r_i);
-                
+                let quadratic_evals: (F, F) = (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty);
+
+                let r_i = Self::process_sumcheck_round(quadratic_evals, eq_poly, &mut polys, &mut r, &mut claim, transcript);
+
                 // Lagrange coefficients for 0, 1, and infty, respectively
                 let lagrange_coeffs_r_i = [F::one() - r_i, r_i, r_i * (r_i - F::one())];
-                // Update Lagrange coefficients:
-                // L_{i+1} = L_i \otimes lagrange_coeffs_r_i
-                lagrange_coeffs = lagrange_coeffs.iter()
+
+                // Update Lagrange coefficients (so that indices for `r_i` is in the most significant digit):
+                // L_{i+1} = lagrange_coeffs_r_i \otimes L_i
+                lagrange_coeffs = lagrange_coeffs_r_i.iter()
                     .flat_map(|lagrange_coeff| {
-                        lagrange_coeffs_r_i.iter().map(move |coeff| *lagrange_coeff * *coeff)
+                        lagrange_coeffs.iter().map(move |coeff| *lagrange_coeff * *coeff)
                     })
                     .collect();
 
-                az_bz_cz_poly.bind_bound_polys(&r_i);
+                // TODO: can't do mutable borrow here, may need to revert to having sumcheck logic inside az_bz_cz_poly
+                // az_bz_cz_poly.bind_first_round_other_coeffs(az_bz_cz_chunks, r_i);
+            } else {
+                let az_bz_cz_chunks = az_bz_cz_poly.chunks_subsequent_round();
+
+                let (other_evals_0, other_evals_infty) = az_bz_cz_poly
+                    .compute_subsequent_round_other_evals(az_bz_cz_chunks, &E1_evals_for_other_constraints, eq_poly.E2_current());
+
+                // Combine evaluations
+                let quadratic_evals: (F, F) = (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty);
+
+                let r_i = Self::process_sumcheck_round(quadratic_evals, eq_poly, &mut polys, &mut r, &mut claim, transcript);
+
+                // Lagrange coefficients for 0, 1, and infty, respectively
+                let lagrange_coeffs_r_i = [F::one() - r_i, r_i, r_i * (r_i - F::one())];
+
+                // Update Lagrange coefficients (so that indices for `r_i` is in the most significant digit):
+                // L_{i+1} = lagrange_coeffs_r_i \otimes L_i
+                lagrange_coeffs = lagrange_coeffs_r_i.iter()
+                    .flat_map(|lagrange_coeff| {
+                        lagrange_coeffs.iter().map(move |coeff| *lagrange_coeff * *coeff)
+                    })
+                    .collect();
+                
+                // az_bz_cz_poly.bind_subsequent_round_other_coeffs(az_bz_cz_chunks, r_i);
+            }
+        }
+        // Round 6
+        // For this round, we will compute the arrays
+        // P[r_0, ..., r_5, (z \in {0, 1}), x'] for P \in {Az, Bz, Cz}
+        // and use those to compute the evaluations t_6(0), t_6(infty)
+
+        // If `z = 0`, then we are computing the evaluations of the binary constraints
+        // This can be computed quickly in a subroutine
+        let (Az_evals_0, Bz_evals_0, quadratic_eval_0) =
+            Self::compute_evals_binary_constraints_after_small_value_rounds(eq_poly, r.clone(), &az_bz_cz_poly.flag_indices);
+            
+        // If `z = 1`, then we compute the evaluations of the other constraints
+        // This corresponds to coalescing / uninterleaving the other constraints
+        let (Az_other_evals_1, Bz_other_evals_1, Cz_other_evals_1) =
+            (vec![F::zero(); 32], vec![F::zero(); 32], vec![F::zero(); 32]);
+        // az_bz_cz_poly.uninterleave(eq_poly.E2_current(), &E1_evals_for_other_constraints);
+
+        // Round 7 onwards
+        // We just follow the linear-time algorithm for `az_bz_cz_poly`
+        for round in (LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED+1)..num_rounds {
+            az_bz_cz_poly.linear_time_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+            todo!()
         }
 
         (

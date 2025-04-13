@@ -799,7 +799,8 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
     }
 }
 
-// We will need to compute the following evaluations for the small-value optimization (Algo 4)
+// We will use the small-value optimization (Algo 4) for **only** the 64 binary constraints.
+// For the other 32 constraints, we will use the generic / previous method.
 
 // Az[j_{0-4}, u, x_{5-n}]
 // Bz[{0,1,infty)^4, {1,infty), x_{5-n}]
@@ -810,39 +811,19 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
 // These values feature in the Spartan sumcheck as
 // `Az[j_{0-4}, u, x_{5-n}] * Bz[j_{0-4}, u, x_{5-n}] - Cz[j_{0-4}, u, x_{5-n}]`
 
-// There are technically 3^4 * 2 = 162 values to compute for each Az, Bz, Cz.
+// There are technically 3^5 * 2 = 486 values to compute for each Az, Bz, Cz.
 // But because of our constraints, we will be able to make many simplifications in computing these values.
 
 // First, the generic way to compute these values is as follows:
 // 1. Recall that p(infty) = p(1) - p(0) for a linear polynomial p.
 // 2. So we will compute layer by layer, storing all values in between
 
-// 1. For instruction flags:
+// 1. For binary constraints:
 // Az[x_{0-5}, x_{5-n}] = 0 *except* if x_{0-5} = instruction index of step x_{5-n}, in which case it is 1.
 // Bz[x_{0-5}, x_{5-n}] = 1 *except* if x_{0-5} = instruction index of step x_{5-n}, in which case it is 0.
 // Cz[x_{0-5}, x_{5-n}] = 0 always.
 
-//
-
-// 2. For circuit flags:
-// Az[x_{0-5}, x_{5-n}] = 0 *except* if x_{0-5} \in circuit indices of step x_{5-n}, in which case it is 1.
-// Bz[x_{0-5}, x_{5-n}] = 1 *except* if x_{0-5} \in circuit indices of step x_{5-n}, in which case it is 0.
-// Cz[x_{0-5}, x_{5-n}] = 0 always.
-
-//
-
-// 3. For product constraints: since there's only one of them and 31 padded constraints,
-// Az[11111, x_{5-n}] = rs1_read_value
-// Bz[11111, x_{5-n}] = rs2_read_value
-// Cz[11111, x_{5-n}] = rs1_read_value * rs2_read_value
-// and the rest are 0.
-
-// 4. For equality / if-else constraints:
-// Az[x_{0-5}, x_{5-n}] \in {0, 1} (not much else we can say)
-// Bz[x_{0-5}, x_{5-n}] is i64 (not much else we can say)
-// Cz[x_{0-5}, x_{5-n}] is i64 (not much else we can say)
-
-// This is the most inefficient part. May need to switch to linear-time algo sooner?
+// 2. For other constraints: (32 of them)
 
 #[derive(Default, Debug, Clone)]
 pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
@@ -852,7 +833,8 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A sparse vector representing the coefficients of non-binary constraints
     pub(crate) unbound_other_coeffs: Vec<SparseCoefficient<i128>>,
 
-    /// The vector of bound coefficients for linear-time sumcheck after binding
+    /// The sparse vector of bound coefficients for linear-time sumcheck after the first round
+    /// (so that coefficients are now in `F` instead of `i128`)
     pub(crate) bound_other_coeffs: Vec<SparseCoefficient<F>>,
 
     /// A reused buffer where bound values are written to during `bind`.
@@ -862,7 +844,7 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A tuple of dense polynomials representing the evaluations of the Az, Bz, Cz polynomials
     /// 
     /// Used for the linear-time rounds of sumcheck (rounds 6 and after)
-    /// Initially empty, populated after round 5
+    /// Initially empty, populated after round 6
     pub(crate) bound_polys: (DensePolynomial<F>, DensePolynomial<F>, DensePolynomial<F>),
 
     dense_len: usize,
@@ -888,6 +870,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         println!("num_chunks: {}", num_chunks);
         println!("chunk_size: {}", chunk_size);
         println!("number of non-binary constraints: {}", num_other_constraints);
+
         let unbound_other_coeffs: Vec<SparseCoefficient<i128>> = (0..num_chunks)
             .into_par_iter()
             .flat_map_iter(|chunk_index| {
@@ -1025,34 +1008,388 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         }
     }
 
-    pub fn compute_first_round_other_evals(&self) -> (F, F) {
-        todo!()
+    /// Parallelize the computation of the evaluations of the part corresponding to the non-binary constraints
+    /// for the first round of sumcheck
+    pub fn chunks_first_round(&self) -> Vec<&[SparseCoefficient<i128>]> {
+        // In order to parallelize, we do a first pass over the coefficients to
+        // determine how to divide it into chunks that can be processed independently.
+        // In particular, coefficients whose indices are the same modulo 6 cannot
+        // be processed independently.
+        let block_size = self
+            .unbound_other_coeffs
+            .len()
+            .div_ceil(rayon::current_num_threads())
+            .next_multiple_of(6);
+
+        let chunks: Vec<&[SparseCoefficient<i128>]> = self
+            .unbound_other_coeffs
+            .par_chunk_by(|x, y| x.index / block_size == y.index / block_size)
+            .collect();
+
+        chunks
     }
 
-    pub fn compute_subsequent_round_other_evals(&self) -> (F, F) {
-        todo!()
+    /// Compute the evaluations of the part corresponding to the non-binary constraints
+    /// for the first round of sumcheck
+    pub fn compute_first_round_other_evals(&self, chunks: Vec<&[SparseCoefficient<i128>]>, E1_evals: &[F], E2_evals: &[F]) -> (F, F) {
+        let num_x1_bits = E1_evals.len().log_2() - 1;
+        let x1_bitmask = (1 << num_x1_bits) - 1;
+
+        let quadratic_evals: (F, F) = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut eval_point_0 = F::zero();
+                let mut eval_point_infty = F::zero();
+
+                let mut inner_sums = (F::zero(), F::zero());
+                let mut prev_x2 = 0;
+
+                for sparse_block in chunk.chunk_by(|x, y| x.index / 6 == y.index / 6) {
+                    let block_index = sparse_block[0].index / 6;
+                    let x1 = block_index & x1_bitmask;
+                    let E1_eval = E1_evals[x1];
+                    let x2 = block_index >> num_x1_bits;
+
+                    if x2 != prev_x2 {
+                        eval_point_0 += E2_evals[prev_x2] * inner_sums.0;
+                        eval_point_infty += E2_evals[prev_x2] * inner_sums.1;
+
+                        inner_sums = (F::zero(), F::zero());
+                        prev_x2 = x2;
+                    }
+
+                    let mut block = [0; 6];
+                    for coeff in sparse_block {
+                        block[coeff.index % 6] = coeff.value;
+                    }
+
+                    let az = (block[0], block[3]);
+                    let bz = (block[1], block[4]);
+                    let cz = (block[2], block[5]);
+
+                    let az_eval_infty = az.1 - az.0;
+                    let bz_eval_infty = bz.1 - bz.0;
+                    let cz_eval_infty = cz.1 - cz.0;
+
+                    // TODO(moodlezoup): optimize
+                    inner_sums.0 += E1_eval * F::from_i128(az.0 * bz.0 - cz.0);
+                    inner_sums.1 += E1_eval * F::from_i128(az_eval_infty * bz_eval_infty - cz_eval_infty);
+                }
+
+                let E2_eval = E2_evals[prev_x2];
+
+                eval_point_0 += E2_eval * inner_sums.0;
+                eval_point_infty += E2_eval * inner_sums.1;
+
+                (eval_point_0, eval_point_infty)
+            })
+            .reduce(
+                || (F::zero(), F::zero()),
+                |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
+            );
+
+        return quadratic_evals;
+    }
+
+    /// Bind the other (non-binary) coefficients for the first round of sumcheck
+    pub fn bind_first_round_other_coeffs(&mut self, chunks: Vec<&[SparseCoefficient<i128>]>, r: F) {
+        
+        #[cfg(test)]
+        let (mut az, mut bz, mut cz) = self.uninterleave();
+
+        // Compute the number of non-zero bound coefficients that will be produced per chunk.
+        let output_sizes: Vec<_> = chunks
+            .par_iter()
+            .map(|chunk| Self::binding_output_length(chunk))
+            .collect();
+
+        let total_output_len = output_sizes.iter().sum();
+        self.bound_other_coeffs = Vec::with_capacity(total_output_len);
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            self.bound_other_coeffs.set_len(total_output_len);
+        }
+        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> = Vec::with_capacity(chunks.len());
+        let mut remainder = self.bound_other_coeffs.as_mut_slice();
+        for slice_len in output_sizes {
+            let (first, second) = remainder.split_at_mut(slice_len);
+            output_slices.push(first);
+            remainder = second;
+        }
+        debug_assert_eq!(remainder.len(), 0);
+
+        chunks
+            .par_iter()
+            .zip_eq(output_slices.into_par_iter())
+            .for_each(|(unbound_coeffs, output_slice)| {
+                let mut output_index = 0;
+                for block in unbound_coeffs.chunk_by(|x, y| x.index / 6 == y.index / 6) {
+                    let block_index = block[0].index / 6;
+
+                    let mut az_coeff: (Option<i128>, Option<i128>) = (None, None);
+                    let mut bz_coeff: (Option<i128>, Option<i128>) = (None, None);
+                    let mut cz_coeff: (Option<i128>, Option<i128>) = (None, None);
+
+                    for coeff in block {
+                        match coeff.index % 6 {
+                            0 => az_coeff.0 = Some(coeff.value),
+                            1 => bz_coeff.0 = Some(coeff.value),
+                            2 => cz_coeff.0 = Some(coeff.value),
+                            3 => az_coeff.1 = Some(coeff.value),
+                            4 => bz_coeff.1 = Some(coeff.value),
+                            5 => cz_coeff.1 = Some(coeff.value),
+                            _ => unreachable!(),
+                        }
+                    }
+                    if az_coeff != (None, None) {
+                        let (low, high) = (az_coeff.0.unwrap_or(0), az_coeff.1.unwrap_or(0));
+                        output_slice[output_index] = (
+                            3 * block_index,
+                            F::from_i128(low) + r * F::from_i128(high - low),
+                        )
+                            .into();
+                        output_index += 1;
+                    }
+                    if bz_coeff != (None, None) {
+                        let (low, high) = (bz_coeff.0.unwrap_or(0), bz_coeff.1.unwrap_or(0));
+                        output_slice[output_index] = (
+                            3 * block_index + 1,
+                            F::from_i128(low) + r * F::from_i128(high - low),
+                        )
+                            .into();
+                        output_index += 1;
+                    }
+                    if cz_coeff != (None, None) {
+                        let (low, high) = (cz_coeff.0.unwrap_or(0), cz_coeff.1.unwrap_or(0));
+                        output_slice[output_index] = (
+                            3 * block_index + 2,
+                            F::from_i128(low) + r * F::from_i128(high - low),
+                        )
+                            .into();
+                        output_index += 1;
+                    }
+                }
+                debug_assert_eq!(output_index, output_slice.len())
+            });
+        self.dense_len /= 2;
+
+        #[cfg(test)]
+        {
+            // Check that the binding is consistent with binding
+            // Az, Bz, Cz individually
+            let (az_bound, bz_bound, cz_bound) = self.uninterleave();
+            az.bound_poly_var_bot(&r);
+            bz.bound_poly_var_bot(&r);
+            cz.bound_poly_var_bot(&r);
+            for i in 0..az.len() {
+                if az_bound[i] != az[i] {
+                    println!("{i} {} != {}", az_bound[i], az[i]);
+                }
+            }
+            assert!(az_bound.Z[..az_bound.len()] == az.Z[..az.len()]);
+            assert!(bz_bound.Z[..bz_bound.len()] == bz.Z[..bz.len()]);
+            assert!(cz_bound.Z[..cz_bound.len()] == cz.Z[..cz.len()]);
+        }
+    }
+
+    pub fn chunks_subsequent_round(&self) -> Vec<&[SparseCoefficient<F>]> {
+        let block_size = self
+            .bound_other_coeffs
+            .len()
+            .div_ceil(rayon::current_num_threads())
+            .next_multiple_of(6);
+
+        let chunks: Vec<&[SparseCoefficient<F>]> = self
+            .bound_other_coeffs
+            .par_chunk_by(|x, y| x.index / block_size == y.index / block_size)
+            .collect();
+
+        chunks
+    }
+
+    pub fn compute_subsequent_round_other_evals(&self, chunks: Vec<&[SparseCoefficient<F>]>, E1_evals: &[F], E2_evals: &[F]) -> (F, F) {
+        // This should never happen, since we only run this for large enough instance sizes
+        // (i.e. within 5 rounds, E1_evals will never be fully bound)
+        assert!(E1_evals.len() > 1, "E1_evals should have at least 2 elements");
+
+        let num_x1_bits = E1_evals.len().log_2() - 1;
+        let x1_bitmask = (1 << num_x1_bits) - 1;
+
+        let quadratic_evals: (F, F) = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut eval_point_0 = F::zero();
+                let mut eval_point_infty = F::zero();
+
+                let mut inner_sums = (F::zero(), F::zero());
+                let mut prev_x2 = 0;
+
+                for sparse_block in chunk.chunk_by(|x, y| x.index / 6 == y.index / 6) {
+                    let block_index = sparse_block[0].index / 6;
+                    let x1 = block_index & x1_bitmask;
+                    let E1_eval = E1_evals[x1];
+                    let x2 = block_index >> num_x1_bits;
+
+                    if x2 != prev_x2 {
+                        eval_point_0 += E2_evals[prev_x2] * inner_sums.0;
+                        eval_point_infty += E2_evals[prev_x2] * inner_sums.1;
+
+                        inner_sums = (F::zero(), F::zero());
+                        prev_x2 = x2;
+                    }
+
+                    let mut block = [F::zero(); 6];
+                    for coeff in sparse_block {
+                        block[coeff.index % 6] = coeff.value;
+                    }
+
+                    let az = (block[0], block[3]);
+                    let bz = (block[1], block[4]);
+                    let cz = (block[2], block[5]);
+
+                    let az_eval_infty = az.1 - az.0;
+                    let bz_eval_infty = bz.1 - bz.0;
+                    let cz_eval_infty = cz.1 - cz.0;
+
+                    // TODO(moodlezoup): optimize
+                    inner_sums.0 += E1_eval.mul_0_optimized(az.0.mul_0_optimized(bz.0) - cz.0);
+                    inner_sums.1 += E1_eval.mul_0_optimized(az_eval_infty.mul_0_optimized(bz_eval_infty) - cz_eval_infty);
+                }
+
+                let E2_eval = E2_evals[prev_x2];
+
+                eval_point_0 += E2_eval * inner_sums.0;
+                eval_point_infty += E2_eval * inner_sums.1;
+
+                (eval_point_0, eval_point_infty)
+            })
+            .reduce(
+                || (F::zero(), F::zero()),
+                |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
+            );
+
+        return quadratic_evals;
+    }
+
+    /// Bind the coefficients for the subsequent sumcheck round
+    /// Use the `binding_scratch_space` as a buffer for the bound values
+    pub fn bind_subsequent_round_other_coeffs(&mut self, chunks: Vec<&[SparseCoefficient<F>]>, r: F) {
+        #[cfg(test)]
+        let (mut az, mut bz, mut cz) = self.uninterleave();
+
+        let output_sizes: Vec<_> = chunks
+            .par_iter()
+            .map(|chunk| Self::binding_output_length(chunk))
+            .collect();
+
+        let total_output_len = output_sizes.iter().sum();
+        if self.binding_scratch_space.is_empty() {
+            self.binding_scratch_space = Vec::with_capacity(total_output_len);
+        }
+        unsafe {
+            self.binding_scratch_space.set_len(total_output_len);
+        }
+
+        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> = Vec::with_capacity(chunks.len());
+        let mut remainder = self.binding_scratch_space.as_mut_slice();
+        for slice_len in output_sizes {
+            let (first, second) = remainder.split_at_mut(slice_len);
+            output_slices.push(first);
+            remainder = second;
+        }
+        debug_assert_eq!(remainder.len(), 0);
+
+        chunks
+            .par_iter()
+            .zip_eq(output_slices.into_par_iter())
+            .for_each(|(coeffs, output_slice)| {
+                let mut output_index = 0;
+                for block in coeffs.chunk_by(|x, y| x.index / 6 == y.index / 6) {
+                    let block_index = block[0].index / 6;
+
+                    let mut az_coeff: (Option<F>, Option<F>) = (None, None);
+                    let mut bz_coeff: (Option<F>, Option<F>) = (None, None);
+                    let mut cz_coeff: (Option<F>, Option<F>) = (None, None);
+
+                    for coeff in block {
+                        match coeff.index % 6 {
+                            0 => az_coeff.0 = Some(coeff.value),
+                            1 => bz_coeff.0 = Some(coeff.value),
+                            2 => cz_coeff.0 = Some(coeff.value),
+                            3 => az_coeff.1 = Some(coeff.value),
+                            4 => bz_coeff.1 = Some(coeff.value),
+                            5 => cz_coeff.1 = Some(coeff.value),
+                            _ => unreachable!(),
+                        }
+                    }
+                    if az_coeff != (None, None) {
+                        let (low, high) = (
+                            az_coeff.0.unwrap_or(F::zero()),
+                            az_coeff.1.unwrap_or(F::zero()),
+                        );
+                        output_slice[output_index] =
+                            (3 * block_index, low + r * (high - low)).into();
+                        output_index += 1;
+                    }
+                    if bz_coeff != (None, None) {
+                        let (low, high) = (
+                            bz_coeff.0.unwrap_or(F::zero()),
+                            bz_coeff.1.unwrap_or(F::zero()),
+                        );
+                        output_slice[output_index] =
+                            (3 * block_index + 1, low + r * (high - low)).into();
+                        output_index += 1;
+                    }
+                    if cz_coeff != (None, None) {
+                        let (low, high) = (
+                            cz_coeff.0.unwrap_or(F::zero()),
+                            cz_coeff.1.unwrap_or(F::zero()),
+                        );
+                        output_slice[output_index] =
+                            (3 * block_index + 2, low + r * (high - low)).into();
+                        output_index += 1;
+                    }
+                }
+                debug_assert_eq!(output_index, output_slice.len())
+            });
+
+        std::mem::swap(&mut self.bound_other_coeffs, &mut self.binding_scratch_space);
+        self.dense_len /= 2;
+
+        #[cfg(test)]
+        {
+            // Check that the binding is consistent with binding
+            // Az, Bz, Cz individually
+            let (az_bound, bz_bound, cz_bound) = self.uninterleave();
+            az.bound_poly_var_bot(&r);
+            bz.bound_poly_var_bot(&r);
+            cz.bound_poly_var_bot(&r);
+            assert!(az_bound.Z[..az_bound.len()] == az.Z[..az.len()]);
+            assert!(bz_bound.Z[..bz_bound.len()] == bz.Z[..bz.len()]);
+            assert!(cz_bound.Z[..cz_bound.len()] == cz.Z[..cz.len()]);
+        }
     }
 
     pub fn coalesce_other_coeffs(&mut self) {
         // Sanity check: `bound_polys` should be empty
         assert!(self.bound_polys.0.is_empty());
 
-        // Do the `uninterleave` stuff from `SpartanInterleavedPolynomial`
+        self.bound_polys = self.uninterleave();
     }
 
-    pub fn compute_linear_time_evals(&mut self, eq_poly: &mut SplitEqPolynomial<F>, r: &Vec<F>) -> (F, F) {
+    // pub fn compute_linear_time_evals(&mut self, eq_poly: &mut SplitEqPolynomial<F>, r: &Vec<F>) -> (F, F) {
 
-        let (az, bz, cz) = &mut self.bound_polys;
+    //     let (az, bz, cz) = &mut self.bound_polys;
 
-        todo!()
-    }
+    //     todo!()
+    // }
 
-    pub fn bind_bound_polys(&mut self, r: &F) {
-        let (az, bz, cz) = &mut self.bound_polys;
-        az.bind(*r, BindingOrder::LowToHigh);
-        bz.bind(*r, BindingOrder::LowToHigh);
-        cz.bind(*r, BindingOrder::LowToHigh);
-    }
+    // pub fn bind_bound_polys(&mut self, r: &F) {
+    //     let (az, bz, cz) = &mut self.bound_polys;
+    //     az.bind(*r, BindingOrder::LowToHigh);
+    //     bz.bind(*r, BindingOrder::LowToHigh);
+    //     cz.bind(*r, BindingOrder::LowToHigh);
+    // }
 
     /// Performs a sumcheck round based on the linear-time algorithm.
     /// This is invoked after the first few rounds of sum-check, which follow the optimized small-value algorithm instead.
@@ -1065,6 +1402,77 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         claim: &mut F,
     ) {
         todo!()
+    }
+
+    fn uninterleave(&self) -> (DensePolynomial<F>, DensePolynomial<F>, DensePolynomial<F>) {
+        let mut az = vec![F::zero(); self.dense_len];
+        let mut bz = vec![F::zero(); self.dense_len];
+        let mut cz = vec![F::zero(); self.dense_len];
+
+        if !self.is_bound() {
+            for coeff in &self.unbound_other_coeffs {
+                match coeff.index % 3 {
+                    0 => az[coeff.index / 3] = F::from_i128(coeff.value),
+                    1 => bz[coeff.index / 3] = F::from_i128(coeff.value),
+                    2 => cz[coeff.index / 3] = F::from_i128(coeff.value),
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            for coeff in &self.bound_other_coeffs {
+                match coeff.index % 3 {
+                    0 => az[coeff.index / 3] = coeff.value,
+                    1 => bz[coeff.index / 3] = coeff.value,
+                    2 => cz[coeff.index / 3] = coeff.value,
+                    _ => unreachable!(),
+                }
+            }
+        }
+        (
+            DensePolynomial::new(az),
+            DensePolynomial::new(bz),
+            DensePolynomial::new(cz),
+        )
+    }
+
+    pub fn is_bound(&self) -> bool {
+        !self.bound_polys.0.is_empty()
+    }
+
+    /// Computes the number of non-zero coefficients that would result from
+    /// binding the given slice of sparse coefficients.
+    fn binding_output_length<T>(coeffs: &[SparseCoefficient<T>]) -> usize {
+        let mut output_size = 0;
+        for block in coeffs.chunk_by(|x, y| x.index / 6 == y.index / 6) {
+            let mut Az_coeff_found = false;
+            let mut Bz_coeff_found = false;
+            let mut Cz_coeff_found = false;
+            for coeff in block {
+                match coeff.index % 3 {
+                    0 => {
+                        if !Az_coeff_found {
+                            Az_coeff_found = true;
+                            output_size += 1;
+                        }
+                    }
+                    1 => {
+                        if !Bz_coeff_found {
+                            Bz_coeff_found = true;
+                            output_size += 1;
+                        }
+                    }
+                    2 => {
+                        if !Cz_coeff_found {
+                            Cz_coeff_found = true;
+                            output_size += 1;
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        output_size
     }
 
     /// Retrieves the final evaluations of Az, Bz, Cz after the sumcheck is complete

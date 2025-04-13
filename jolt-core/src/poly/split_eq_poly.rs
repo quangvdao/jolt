@@ -24,8 +24,6 @@ pub struct SplitEqPolynomial<F> {
     pub(crate) w: Vec<F>,
     pub(crate) E1: Vec<Vec<F>>,
     pub(crate) E2: Vec<Vec<F>>,
-    // Whether the polynomial is freshly created
-    pub(crate) is_new: bool,
 }
 
 /// Old struct for equality polynomial, without Gruen's optimization
@@ -59,7 +57,6 @@ impl<F: JoltField> SplitEqPolynomial<F> {
             w: w.to_vec(),
             E1,
             E2,
-            is_new: true,
         }
     }
 
@@ -127,8 +124,6 @@ impl<F: JoltField> SplitEqPolynomial<F> {
         } else if 0 < self.current_index {
             self.E2.pop();
         }
-        // After binding, the polynomial is no longer fresh
-        self.is_new = false;
         // println!(
         //     "current_index: {}, E1_len: {}, E2_len: {}",
         //     self.current_index,

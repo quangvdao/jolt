@@ -9,7 +9,6 @@ pub mod gaussian_elimination;
 pub mod instruction_utils;
 pub mod math;
 pub mod profiling;
-pub mod small_value;
 pub mod sol_types;
 pub mod thread;
 pub mod transcript;
@@ -255,6 +254,33 @@ pub fn interleave_bits(even_bits: u32, odd_bits: u32) -> u64 {
     y_bits = (y_bits | (y_bits << 1)) & 0x5555_5555_5555_5555;
 
     (x_bits << 1) | y_bits
+}
+
+/// Get a new vector containing the elements of the slice `vec` where the bit at `bit_idx` is `bit_val`
+pub fn get_vec_by_fixed_bit<F: JoltField>(vec: &[F], bit_idx: usize, bit_val: bool) -> Vec<F> {
+    assert!(vec.len().is_power_of_two(), "vec must have length a power of 2");
+    assert!(vec.len() > 2 ^ bit_idx, "bit_idx is too large for the vector length");
+    vec.iter().enumerate().filter_map(|(i, x)| {
+        if (i >> bit_idx) & 1 == (bit_val as usize) {
+            Some(*x)
+        } else {
+            None
+        }
+    }).collect()
+}
+
+/// Get a new vector containing the elements of the slice `vec` where the bits at `bit_idx1` and `bit_idx2` are `bit_val1` and `bit_val2` respectively
+pub fn get_vec_by_fixed_bit_pair<F: JoltField>(vec: &[F], bit_idx1: usize, bit_val1: bool, bit_idx2: usize, bit_val2: bool) -> Vec<F> {
+    assert!(vec.len().is_power_of_two(), "vec must have length a power of 2");
+    assert!(vec.len() > 2 ^ bit_idx1, "bit_idx1 is too large for the vector length");
+    assert!(vec.len() > 2 ^ bit_idx2, "bit_idx2 is too large for the vector length");
+    vec.iter().enumerate().filter_map(|(i, x)| {
+        if (i >> bit_idx1) & 1 == (bit_val1 as usize) && (i >> bit_idx2) & 1 == (bit_val2 as usize) {
+            Some(*x)
+        } else {
+            None
+        }
+    }).collect()
 }
 
 #[cfg(test)]

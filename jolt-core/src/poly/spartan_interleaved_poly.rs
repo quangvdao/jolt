@@ -16,6 +16,7 @@ use crate::{
         transcript::{AppendToTranscript, Transcript},
     },
 };
+use crate::subprotocols::sumcheck::process_eq_sumcheck_round;
 use ark_ff::Zero;
 use rayon::prelude::*;
 

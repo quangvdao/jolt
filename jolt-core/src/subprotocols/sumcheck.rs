@@ -427,6 +427,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let E2_evals = eq_poly.E2_current();
         assert_eq!(E2_evals.len(), E2_len);
 
+        let E1_evals_across_rounds: Vec<&Vec<F>> = eq_poly.E1.iter().rev().collect();
+
         // precomputed_E2_times_neg_k_sq[k-1][idx_R] = E2_evals[idx_R] * neg_sq[k]
         // Stores E2_evals * (-k^2) for k = 1 to max_num_ones
         let precomputed_E2_times_neg_k_sq: Vec<Vec<F>> = (1..=max_num_ones).map(|k| {
@@ -437,18 +439,13 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let num_accumulators = 3usize.pow(ell as u32) - 1; // Total number of outputs ((v', u'), i)
         let num_local_states = 3usize.pow(ell as u32); // Number of states y in {0,1,inf}^ell
 
-        // Accumulator of the form `A[i][(v_0, ..., v_{i-1}, u)]`, where `v_0, ..., v_{i-1} ∈ {0, 1, ∞}`, `u ∈ {0, ∞}`
-        // This holds a total of `2 + 2 * 3 + 2 * 3^2 + ... + 2 * 3^{5} = 3^6 - 1 = 728` elements
-        let mut accum: Vec<Vec<F>> = Vec::new();
-
-        (0..num_small_value_rounds).for_each(|i| {
-            accum.push(vec![F::zero(); 2 * (3 ^ i)]);
-        });
-
+        
         // Recall that the accumulator formula is:
         // accum[i][(vec(v), u)] = Σ_{b \in {0,1}^{\ell - i}} Σ_{x_L \in {0,1}^{n/2 - \ell}} eq(w_L, (b, x_L))
         //          * (Σ_{x_R} eq(w_R, x_R) * (-a(vec(v), u, b, x_L, x_R)^2))
-
+        // 
+        // There is a total of `2 + 2 * 3 + 2 * 3^2 + ... + 2 * 3^{5} = 3^6 - 1 = 728` accumulators
+        
         // We want the following performance characteristics of our algorithm:
         // 1. It computes each a(vec(v), u, b, x_L, x_R) only once
         // 2. It re-uses the precomputed `eq(w_L, (0,x_L)) * (-i^2)` for each `i`
@@ -466,14 +463,14 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         // (8) For each such tuple (i, v', u', b), add to the accumulator `accum[i][(v, u)]` the product
         // `eq_poly.E1[i][(b, x_L)] * E2_sum(v, u)`.
 
-        // To compute step (4), we can use an iterative approach, computing in each variable y_0 to y_5
+        // To compute step (4), we can use an iterative / dynamic programming approach, computing in each variable y_0 to y_5
         // i.e. if \ell=2 (instead of 5), we compute:
         // `a(infty, 0) = a(1, 0) - a(0, 0)`, 
         // `a(0, infty) = a(0, 1) - a(0, 0)`, 
         // `a(1, infty) = a(1, 1) - a(1, 0)`,
         // `a(infty, infty) = a(1, 1) - a(1, 0) - a(0, 1) + a(0, 0) = a(infty, 1) - a(infty, 0)`
         // and so on...
-        // This will be its own method
+        // This will be its own method, `compute_all_az_dp`
 
         // --- Main Computation ---
         let final_accum_flat: Vec<F> = (0..E1_base_len) // Parallelize over x_L
@@ -551,8 +548,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                             // This requires accessing eq evaluations for variables i..ell-1 (from b)
                             // combined with variables ell..n/2-1 (from x_L).
                             // Accessing eq_poly.E1 might be complex here.
-                            // Placeholder:
-                            let eq_L_eval = F::one();
+                            // TODO: double-check indices
+                            let eq_L_eval = E1_evals_across_rounds[i][b_idx];
 
                             let final_contrib = eq_L_eval * current_E2_sum;
                             let target_idx = v_prime_u_prime.flat_index(i);
@@ -585,13 +582,6 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         assert_eq!(current_idx, num_accumulators);
 
         result
-
-        // // For each `i`, split the accumulator down in exact halves, and return the pair of halves
-        // accum.iter().enumerate().map(|(i, accum_i)| {
-        //     // assert!(accum_i.len() == 3usize.pow(i as u32) * 2);
-        //     let mid = 3usize.pow(i as u32);
-        //     (accum_i[..mid].to_vec(), accum_i[mid..].to_vec())
-        // }).collect()
     }
 
     /// This function computes, for each `x_L ∈ {0,1}^{eq_poly.E1_len()}` and `x_R ∈ {0,1}^{eq_poly.E2_len()}`,

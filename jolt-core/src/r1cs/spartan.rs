@@ -167,11 +167,37 @@ where
             // New stuff
             let mut eq_tau_new = SplitEqPolynomial::new(&tau);
 
-            // Hack: re-derive (instruction & circuit) flag indices from the `bitflags` polynomial
-            let flag_indices: Vec<Vec<u8>> = match polynomials.bytecode.v_read_write[1].clone() {
-                MultilinearPolynomial::U64Scalars(poly) => poly.iter().map(|coeff| {
-                    bitflag_indices(*coeff)
-                }).collect(),
+            let num_vars_right = eq_tau_new.E2_len().ilog2() as usize;
+            assert_eq!(1 << num_vars_right, eq_tau_new.E2_len());
+            let num_vars_left = num_rounds_x - num_vars_right;
+            let E1_len = 1 << num_vars_left;
+            let E2_len = 1 << num_vars_right;
+            let total_len = E1_len * E2_len;
+
+            // Re-derive (instruction & circuit) flag indices from the `bitflags` polynomial
+            // ensuring memory layout is (x_L, x_R) flattened for compatibility with sumcheck precomputation.
+            let flag_indices: Vec<Vec<u8>> = match &polynomials.bytecode.v_read_write[1] {
+                MultilinearPolynomial::U64Scalars(poly) => {
+                    assert_eq!(poly.len(), total_len);
+                    let mut indices_for_sumcheck = Vec::with_capacity(total_len);
+                    // Iterate x_L first, then x_R to match sumcheck's expected layout.
+                    for x_L in 0..E1_len {
+                        for x_R in 0..E2_len {
+                            // The polynomial index k corresponds to (x_L, x_R)
+                            // where x_L are the high bits and x_R are the low bits.
+                            // k = x_L * 2^num_vars_right + x_R = x_L * E2_len + x_R
+                            let poly_index = x_L * E2_len + x_R;
+                            if poly_index >= poly.len() {
+                                // This should not happen if total_len calculation is correct
+                                // but added as a safeguard.
+                                panic!("Calculated polynomial index out of bounds");
+                            }
+                            let coeff = poly[poly_index];
+                            indices_for_sumcheck.push(bitflag_indices(coeff));
+                        }
+                    }
+                    indices_for_sumcheck
+                },
                 _ => unreachable!(),
             };
 

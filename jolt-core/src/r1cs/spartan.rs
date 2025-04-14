@@ -202,7 +202,6 @@ where
             };
 
             let mut az_bz_cz_poly_new = constraint_builder.compute_spartan_Az_Bz_Cz(
-                flag_indices,
                 &flattened_polys,
             );
 
@@ -210,6 +209,7 @@ where
                 SumcheckInstanceProof::prove_spartan_cubic_new(
                     num_rounds_x,
                     &mut eq_tau_new,
+                    &flag_indices,
                     &mut az_bz_cz_poly_new,
                     transcript,
                 );

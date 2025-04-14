@@ -716,11 +716,9 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> NewCombinedUniformBuilder
     #[tracing::instrument(skip_all)]
     pub fn compute_spartan_Az_Bz_Cz(
         &self,
-        flag_indices: Vec<Vec<u8>>,
         flattened_polynomials: &[&MultilinearPolynomial<F>], // N variables of (S steps)
     ) -> NewSpartanInterleavedPolynomial<F> {
         NewSpartanInterleavedPolynomial::new(
-            flag_indices,
             &self.other_builder.constraints,
             &self.offset_equality_constraints,
             flattened_polynomials,

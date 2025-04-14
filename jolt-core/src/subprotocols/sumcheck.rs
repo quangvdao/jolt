@@ -596,7 +596,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
     /// we can compute Az[r, 0, x_L, x_R] very quickly.
     /// 
     /// We can then derive the evaluation of
-    /// t_i(0) = Σ_{x_R} E2[x_R] * Σ_{x_L} E1[x_L] * Az[r, 0, x_L, x_R] * Bz[r, 0, x_L, x_R]
+    /// t_i(0) = Σ_{x_L} E1[x_L] * Σ_{x_R} E2[x_R] * Az[r, 0, x_L, x_R] * Bz[r, 0, x_L, x_R]
+    /// (recall that because of pre-computation, we have switched the order of x_L and x_R, so multiplying with E2[x_R] is memory-efficient)
     pub fn compute_evals_binary_constraints_after_small_value_rounds(
         eq_poly: &SplitEqPolynomial<F>,
         r: Vec<F>,
@@ -614,6 +615,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut Az_evals_r = vec![F::zero(); total_size];
         let mut Bz_evals_r = vec![F::zero(); total_size];
 
+        let E1_current_evals = eq_poly.E1_current(); // Get E1 evaluations once
         let E2_current_evals = eq_poly.E2_current(); // Get E2 evaluations once
         
         // Use par_chunks_mut to get mutable slices of the output vectors.
@@ -621,38 +623,36 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         // Calculate values for each chunk, write them directly via the mutable slices,
         // and sum the quadratic contributions in the end.
         let quadratic_eval_0 = Az_evals_r
-            .par_chunks_mut(E1_len) // Mutable slice of Az_evals_r for this E2 chunk
-            .zip(Bz_evals_r.par_chunks_mut(E1_len)) // Mutable slice of Bz_evals_r for this E2 chunk
-            .zip(E2_current_evals.par_iter()) // Corresponding E2 evaluation
-            .enumerate() // Get the E2 chunk index `i` for flag_indices access
-            .map(|(i, ((az_chunk, bz_chunk), E2_eval))| {
-                let mut E2_sum = F::zero();
-                // Compute Az and Bz evals for the current E1 chunk associated with this E2 chunk
-                let (Az_evals_r_E2, Bz_evals_r_E2): (Vec<F>, Vec<F>) = eq_poly
-                    .E1_current() // Evals for E1 associated with *this* E2 chunk
+            .par_chunks_mut(E2_len) // Mutable slice of Az_evals_r for this E1 chunk
+            .zip(Bz_evals_r.par_chunks_mut(E2_len)) // Mutable slice of Bz_evals_r for this E1 chunk
+            .zip(E1_current_evals.par_iter()) // Corresponding E1 evaluation
+            .enumerate() // Get the E1 chunk index `i` for flag_indices access
+            .map(|(i, ((az_chunk, bz_chunk), E1_eval))| {
+                let mut E1_sum = F::zero();
+                // Compute Az and Bz evals for the current E2 chunk associated with this E1 chunk
+                // Evals for E2 associated with *this* E2 chunk
+                let (Az_evals_r_E1, Bz_evals_r_E1): (Vec<F>, Vec<F>) = E2_current_evals 
                     .iter()
                     .enumerate()
-                    .map(|(j, E1_eval)| {
-                        // Calculate indices based on E2 chunk index `i` and E1 index `j`
-                        let global_index = i * E1_len + j;
+                    .map(|(j, E2_eval)| {
+                        // Calculate indices based on E1 chunk index `i` and E2 index `j`
+                        let global_index = i * E2_len + j;
                         let indices = &flag_indices[global_index];
                         let mut Az_eval_r = F::zero();
                         for index in indices {
                             Az_eval_r += eq_poly_r[*index as usize];
                         }
                         let Bz_eval_r = sum_eq_poly_r - Az_eval_r;
-                        E2_sum += *E1_eval * Az_eval_r * Bz_eval_r;
+                        E1_sum += *E2_eval * Az_eval_r * Bz_eval_r;
                         (Az_eval_r, Bz_eval_r)
                     })
                     .unzip();
 
-                // assert_eq!(az_chunk.len(), Az_evals_r_E2.len());
-                // assert_eq!(bz_chunk.len(), Bz_evals_r_E2.len());
-                az_chunk.copy_from_slice(&Az_evals_r_E2);
-                bz_chunk.copy_from_slice(&Bz_evals_r_E2);
+                az_chunk.copy_from_slice(&Az_evals_r_E1);
+                bz_chunk.copy_from_slice(&Bz_evals_r_E1);
 
                 // Return the quadratic contribution for this E2 chunk
-                *E2_eval * E2_sum
+                *E1_eval * E1_sum
             })
             .sum::<F>(); // Sum up the quadratic contributions from all E2 chunks
 
@@ -663,6 +663,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
     pub fn prove_spartan_cubic_new(
         num_rounds: usize,
         eq_poly: &mut SplitEqPolynomial<F>,
+        flag_indices: &Vec<Vec<u8>>,
         az_bz_cz_poly: &mut NewSpartanInterleavedPolynomial<F>,
         transcript: &mut ProofTranscript,
     ) -> (Self, Vec<F>, [F; 3]) {
@@ -675,7 +676,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED, // 64 binary constraints
             6, // at most 6 flags (1 instruction flag + 5 circuit flags) can be active at once
             eq_poly,
-            &az_bz_cz_poly.flag_indices,
+            flag_indices,
         );
 
         let mut lagrange_coeffs = vec![F::one(); 1];
@@ -771,7 +772,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         // If `z = 0`, then we are computing the evaluations of the binary constraints
         // This can be computed quickly in a subroutine
         let (Az_evals_0, Bz_evals_0, quadratic_eval_0) =
-            Self::compute_evals_binary_constraints_after_small_value_rounds(eq_poly, r.clone(), &az_bz_cz_poly.flag_indices);
+            Self::compute_evals_binary_constraints_after_small_value_rounds(eq_poly, r.clone(), flag_indices);
             
         // If `z = 1`, then we compute the evaluations of the other constraints
         // This corresponds to coalescing / uninterleaving the other constraints
@@ -781,7 +782,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         // Round 7 onwards
         // We just follow the linear-time algorithm for `az_bz_cz_poly`
-        for round in (LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED+1)..num_rounds {
+        for _round in (LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED+1)..num_rounds {
             az_bz_cz_poly.linear_time_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
             todo!()
         }

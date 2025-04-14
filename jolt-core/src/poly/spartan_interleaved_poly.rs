@@ -829,7 +829,8 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
 #[derive(Default, Debug, Clone)]
 pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A vector of vectors of the indices of the flags (instruction & circuit) set at each cycle
-    pub(crate) flag_indices: Vec<Vec<u8>>,
+    /// No longer needed
+    // pub(crate) flag_indices: Vec<Vec<u8>>,
 
     /// A sparse vector representing the coefficients of non-binary constraints
     pub(crate) unbound_other_coeffs: Vec<SparseCoefficient<i128>>,
@@ -853,7 +854,7 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
 
 impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     pub fn new(
-        flag_indices: Vec<Vec<u8>>,
+        // flag_indices: Vec<Vec<u8>>,
         non_binary_constraints: &[Constraint],
         cross_step_constraints: &[OffsetEqConstraint],
         flattened_polynomials: &[&MultilinearPolynomial<F>],
@@ -1000,7 +1001,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         }
         
         Self {
-            flag_indices,
+            // flag_indices,
             unbound_other_coeffs,
             bound_other_coeffs: Vec::new(),
             binding_scratch_space: Vec::new(),

@@ -34,6 +34,32 @@ impl<F: JoltField> EqPolynomial<F> {
         }
     }
 
+    /// Extends an EQ evaluation table `eq(r_prefix, x)` to `eq((r_prefix, r_new), (x, y))`.
+    ///
+    /// Takes a slice `evals_prefix` representing evaluations of `eq(r_prefix, x)` for all `x` in `{0, 1}^k`,
+    /// and a new challenge `r_new`. Returns a `Vec<F>` of length `2 * evals_prefix.len()` representing
+    /// evaluations of `eq((r_prefix, r_new), z)` for all `z` in `{0, 1}^{k+1}`.
+    pub fn extend_eq_evals(evals_prefix: &[F], r_new: F) -> Vec<F> {
+        let prefix_len = evals_prefix.len();
+        let new_len = prefix_len * 2;
+        let mut new_evals = Vec::with_capacity(new_len);
+
+        for i in 0..prefix_len {
+            let scalar = evals_prefix[i];
+            let eval_1 = scalar * r_new;      // Corresponds to y=1
+            let eval_0 = scalar - eval_1;    // Corresponds to y=0
+            new_evals.push(eval_0);
+            new_evals.push(eval_1);
+        }
+        // The layout should match evals_serial: evals[2*i] is y=0, evals[2*i+1] is y=1
+        // Check against evals_serial logic: (i is new index)
+        // evals[i] = scalar * r[j];         -> new_evals[2*idx+1] = evals_prefix[idx] * r_new
+        // evals[i-1] = scalar - evals[i]; -> new_evals[2*idx] = evals_prefix[idx] - new_evals[2*idx+1]
+        // The current implementation matches this logic.
+
+        new_evals
+    }
+
     #[tracing::instrument(skip_all, name = "EqPolynomial::evals_cached")]
     /// Computes the table of coefficients like `evals`, but also caches the intermediate results
     ///
@@ -295,6 +321,45 @@ mod tests {
                 let evals = EqPolynomial::evals(&r[..i]);
                 assert_eq!(evals_serial_cached[i], evals);
             }
+        }
+    }
+
+    #[test]
+    fn test_extend_eq_evals() {
+        let mut rng = test_rng();
+
+        // Goal: Verify that `extend_eq_evals` correctly performs one step of the iterative
+        // EQ table computation performed by `evals`.
+        // Strategy: Compare the output of `extend_eq_evals(evals(r_prefix), r_new)`
+        // against the direct computation `evals([r_prefix, r_new].concat())`.
+
+        // Loop through prefix lengths 0 to 9
+        for len in 0..10 {
+            // --- Setup ---
+            // Generate random challenges for the prefix and the new element.
+            let r_prefix: Vec<Fr> = (0..len).map(|_| Fr::random(&mut rng)).collect();
+            let r_new = Fr::random(&mut rng);
+
+            // --- Step 1: Calculate EQ table for the prefix challenges --- 
+            // evals_prefix = [eq(r_prefix, x) for all x in {0,1}^len]
+            // If len = 0, r_prefix = [], evals_prefix = [1].
+            let evals_prefix = EqPolynomial::evals(&r_prefix);
+            assert_eq!(evals_prefix.len(), 1 << len);
+
+            // --- Step 2: Use the new function to extend the table with r_new --- 
+            // extended_evals should be [eq((r_prefix, r_new), z) for z in {0,1}^{len+1}]
+            let extended_evals = EqPolynomial::extend_eq_evals(&evals_prefix, r_new);
+            assert_eq!(extended_evals.len(), 1 << (len + 1));
+
+            // --- Step 3: Calculate EQ table for the full challenge vector directly (ground truth) --- 
+            let r_full = [r_prefix.as_slice(), &[r_new]].concat(); // Combine prefix and new challenge
+            // expected_evals = [eq((r_prefix, r_new), z) for z in {0,1}^{len+1}]
+            let expected_evals = EqPolynomial::evals(&r_full);
+            assert_eq!(expected_evals.len(), 1 << (len + 1));
+
+            // --- Step 4: Compare results from Step 2 and Step 3 --- 
+            // They should be identical because extend_eq_evals performs exactly one step of the evals logic.
+            assert_eq!(extended_evals, expected_evals, "Failed for prefix length {}", len);
         }
     }
 }

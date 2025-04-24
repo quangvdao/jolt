@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{
-    builder::{NewCombinedUniformBuilder, CombinedUniformBuilder, OffsetEqConstraint, R1CSBuilder},
+    builder::{CombinedUniformBuilder, NewCombinedUniformBuilder, OffsetEqConstraint, R1CSBuilder},
     inputs::{AuxVariable, ConstraintInput, JoltR1CSInputs},
     ops::Variable,
 };
@@ -100,16 +100,16 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
             cs.constrain_binary(JoltR1CSInputs::OpFlags(flag));
         }
         // Pad with 26 dummy constraints after the circuit flags to get 64 binary constraints
-        for _ in 0..(ONE_HALF_NUM_CONSTRAINTS_PADDED - RV32I::iter().count() - CircuitFlags::iter().count()) {
+        for _ in 0..(ONE_HALF_NUM_CONSTRAINTS_PADDED
+            - RV32I::iter().count()
+            - CircuitFlags::iter().count())
+        {
             cs.constrain_binary_dummy();
         }
     }
 
     /// We have 30 other constraints (together with 2 offset constraints, which give precisely 32)
-    fn other_constraints(
-        cs: &mut R1CSBuilder<C, F, Self::Inputs>,
-        memory_start: u64,
-    ) {
+    fn other_constraints(cs: &mut R1CSBuilder<C, F, Self::Inputs>, memory_start: u64) {
         let flags = CircuitFlags::iter()
             .map(|flag| JoltR1CSInputs::OpFlags(flag).into())
             .chain(RV32I::iter().map(|flag| JoltR1CSInputs::InstructionFlags(flag).into()))
@@ -331,8 +331,7 @@ mod tests {
         // jolt::vm::JoltPolynomials,
         // poly::multilinear_polynomial::MultilinearPolynomial,
         r1cs::{
-            builder::CombinedUniformBuilder,
-            constraints::JoltRV32IMConstraints,
+            builder::CombinedUniformBuilder, constraints::JoltRV32IMConstraints,
             inputs::JoltR1CSInputs,
         },
     };
@@ -427,6 +426,9 @@ mod tests {
         println!("  {:?}", nonuniform_r1cs.constants());
 
         println!("Total number of constraints: {}", builder.num_constraints());
-        println!("Total (padded) number of constraints: {}", builder.padded_rows_per_step());
+        println!(
+            "Total (padded) number of constraints: {}",
+            builder.padded_rows_per_step()
+        );
     }
 }

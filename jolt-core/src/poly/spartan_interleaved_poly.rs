@@ -7,16 +7,16 @@ use super::{
 use crate::poly::dense_mlpoly::DensePolynomial;
 #[cfg(test)]
 use crate::r1cs::inputs::JoltR1CSInputs;
+use crate::subprotocols::sumcheck::process_eq_sumcheck_round;
 use crate::{
     field::{JoltField, OptimizedMul},
     r1cs::builder::{eval_offset_lc, Constraint, OffsetEqConstraint},
-    r1cs::constraints::{ONE_FOURTH_NUM_CONSTRAINTS_PADDED, LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED},
+    r1cs::constraints::{LOG_ONE_FOURTH_NUM_CONSTRAINTS_PADDED, ONE_FOURTH_NUM_CONSTRAINTS_PADDED},
     utils::{
         math::Math,
         transcript::{AppendToTranscript, Transcript},
     },
 };
-use crate::subprotocols::sumcheck::process_eq_sumcheck_round;
 use ark_ff::Zero;
 use rayon::prelude::*;
 
@@ -844,7 +844,7 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     binding_scratch_space: Vec<SparseCoefficient<F>>, // Initially empty
 
     /// A tuple of dense polynomials representing the evaluations of the Az, Bz, Cz polynomials
-    /// 
+    ///
     /// Used for the linear-time rounds of sumcheck (rounds 6 and after)
     /// Initially empty, populated after round 6
     pub(crate) bound_polys: (DensePolynomial<F>, DensePolynomial<F>, DensePolynomial<F>),
@@ -871,7 +871,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         println!("num_steps: {}", num_steps);
         println!("num_chunks: {}", num_chunks);
         println!("chunk_size: {}", chunk_size);
-        println!("number of non-binary constraints: {}", num_other_constraints);
+        println!(
+            "number of non-binary constraints: {}",
+            num_other_constraints
+        );
 
         let unbound_other_coeffs: Vec<SparseCoefficient<i128>> = (0..num_chunks)
             .into_par_iter()
@@ -999,13 +1002,17 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                 prev_index = coeff.index;
             }
         }
-        
+
         Self {
             // flag_indices,
             unbound_other_coeffs,
             bound_other_coeffs: Vec::new(),
             binding_scratch_space: Vec::new(),
-            bound_polys: (DensePolynomial::new(vec![]), DensePolynomial::new(vec![]), DensePolynomial::new(vec![])),
+            bound_polys: (
+                DensePolynomial::new(vec![]),
+                DensePolynomial::new(vec![]),
+                DensePolynomial::new(vec![]),
+            ),
             dense_len: num_steps * ONE_FOURTH_NUM_CONSTRAINTS_PADDED,
         }
     }
@@ -1033,7 +1040,12 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
     /// Compute the evaluations of the part corresponding to the non-binary constraints
     /// for the first round of sumcheck
-    pub fn compute_first_round_other_evals(&self, chunks: Vec<&[SparseCoefficient<i128>]>, E1_evals: &[F], E2_evals: &[F]) -> (F, F) {
+    pub fn compute_first_round_other_evals(
+        &self,
+        chunks: Vec<&[SparseCoefficient<i128>]>,
+        E1_evals: &[F],
+        E2_evals: &[F],
+    ) -> (F, F) {
         let num_x1_bits = E1_evals.len().log_2() - 1;
         let x1_bitmask = (1 << num_x1_bits) - 1;
 
@@ -1075,7 +1087,8 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
                     // TODO(moodlezoup): optimize
                     inner_sums.0 += E1_eval * F::from_i128(az.0 * bz.0 - cz.0);
-                    inner_sums.1 += E1_eval * F::from_i128(az_eval_infty * bz_eval_infty - cz_eval_infty);
+                    inner_sums.1 +=
+                        E1_eval * F::from_i128(az_eval_infty * bz_eval_infty - cz_eval_infty);
                 }
 
                 let E2_eval = E2_evals[prev_x2];
@@ -1095,7 +1108,6 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
     /// Bind the other (non-binary) coefficients for the first round of sumcheck
     pub fn bind_first_round_other_coeffs(&mut self, chunks: Vec<&[SparseCoefficient<i128>]>, r: F) {
-        
         #[cfg(test)]
         let (mut az, mut bz, mut cz) = self.uninterleave();
 
@@ -1209,10 +1221,18 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         chunks
     }
 
-    pub fn compute_subsequent_round_other_evals(&self, chunks: Vec<&[SparseCoefficient<F>]>, E1_evals: &[F], E2_evals: &[F]) -> (F, F) {
+    pub fn compute_subsequent_round_other_evals(
+        &self,
+        chunks: Vec<&[SparseCoefficient<F>]>,
+        E1_evals: &[F],
+        E2_evals: &[F],
+    ) -> (F, F) {
         // This should never happen, since we only run this for large enough instance sizes
         // (i.e. within 5 rounds, E1_evals will never be fully bound)
-        assert!(E1_evals.len() > 1, "E1_evals should have at least 2 elements");
+        assert!(
+            E1_evals.len() > 1,
+            "E1_evals should have at least 2 elements"
+        );
 
         let num_x1_bits = E1_evals.len().log_2() - 1;
         let x1_bitmask = (1 << num_x1_bits) - 1;
@@ -1255,7 +1275,9 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
                     // TODO(moodlezoup): optimize
                     inner_sums.0 += E1_eval.mul_0_optimized(az.0.mul_0_optimized(bz.0) - cz.0);
-                    inner_sums.1 += E1_eval.mul_0_optimized(az_eval_infty.mul_0_optimized(bz_eval_infty) - cz_eval_infty);
+                    inner_sums.1 += E1_eval.mul_0_optimized(
+                        az_eval_infty.mul_0_optimized(bz_eval_infty) - cz_eval_infty,
+                    );
                 }
 
                 let E2_eval = E2_evals[prev_x2];
@@ -1275,7 +1297,11 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
     /// Bind the coefficients for the subsequent sumcheck round
     /// Use the `binding_scratch_space` as a buffer for the bound values
-    pub fn bind_subsequent_round_other_coeffs(&mut self, chunks: Vec<&[SparseCoefficient<F>]>, r: F) {
+    pub fn bind_subsequent_round_other_coeffs(
+        &mut self,
+        chunks: Vec<&[SparseCoefficient<F>]>,
+        r: F,
+    ) {
         #[cfg(test)]
         let (mut az, mut bz, mut cz) = self.uninterleave();
 
@@ -1355,7 +1381,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                 debug_assert_eq!(output_index, output_slice.len())
             });
 
-        std::mem::swap(&mut self.bound_other_coeffs, &mut self.binding_scratch_space);
+        std::mem::swap(
+            &mut self.bound_other_coeffs,
+            &mut self.binding_scratch_space,
+        );
         self.dense_len /= 2;
 
         #[cfg(test)]
@@ -1483,7 +1512,11 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             assert!(self.bound_polys.0.len() == 1);
             assert!(self.bound_polys.1.len() == 1);
             assert!(self.bound_polys.2.len() == 1);
-            [self.bound_polys.0[0], self.bound_polys.1[0], self.bound_polys.2[0]]
+            [
+                self.bound_polys.0[0],
+                self.bound_polys.1[0],
+                self.bound_polys.2[0],
+            ]
         } else {
             [F::zero(), F::zero(), F::zero()]
         }

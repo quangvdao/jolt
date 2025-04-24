@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
-use tracing::{span, Level};
 use strum::IntoEnumIterator;
+use tracing::{span, Level};
 
 use crate::field::JoltField;
 use crate::jolt::vm::JoltCommitments;
@@ -141,12 +141,15 @@ where
 
         let num_rounds_x = key.num_rows_bits();
 
-        let tau: Vec<F> = (0..num_rounds_x).map(|_i| transcript.challenge_scalar()).collect();
+        let tau: Vec<F> = (0..num_rounds_x)
+            .map(|_i| transcript.challenge_scalar())
+            .collect();
 
         /* Sumcheck 1: Outer sumcheck */
-        
+
         // Choose whether to use the new or old sumcheck based on `num_rounds_x`
-        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) = if num_rounds_x <= 10 {
+        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) = if num_rounds_x <= 10
+        {
             let mut eq_tau = OldSplitEqPolynomial::new(&tau);
 
             let mut az_bz_cz_poly = old_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
@@ -158,11 +161,15 @@ where
                     &mut az_bz_cz_poly,
                     transcript,
                 );
-    
+
             let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
             drop_in_background_thread((az_bz_cz_poly, eq_tau));
 
-            (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims)
+            (
+                outer_sumcheck_proof,
+                outer_sumcheck_r,
+                outer_sumcheck_claims,
+            )
         } else {
             // New stuff
             let mut eq_tau_new = SplitEqPolynomial::new(&tau);
@@ -197,13 +204,12 @@ where
                         }
                     }
                     indices_for_sumcheck
-                },
+                }
                 _ => unreachable!(),
             };
 
-            let mut az_bz_cz_poly_new = constraint_builder.compute_spartan_Az_Bz_Cz(
-                &flattened_polys,
-            );
+            let mut az_bz_cz_poly_new =
+                constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
 
             let (outer_sumcheck_proof_new, outer_sumcheck_r_new, outer_sumcheck_claims_new) =
                 SumcheckInstanceProof::prove_spartan_cubic_new(
@@ -217,7 +223,11 @@ where
             let outer_sumcheck_r_new: Vec<F> = outer_sumcheck_r_new.into_iter().rev().collect();
             drop_in_background_thread((az_bz_cz_poly_new, eq_tau_new));
 
-            (outer_sumcheck_proof_new, outer_sumcheck_r_new, outer_sumcheck_claims_new)
+            (
+                outer_sumcheck_proof_new,
+                outer_sumcheck_r_new,
+                outer_sumcheck_claims_new,
+            )
         };
 
         // End new stuff

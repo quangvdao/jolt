@@ -1,0 +1,304 @@
+// Subroutines for small-value optimizations in Spartan's first sum-check
+
+/// Represents a point y in {0, 1, infinity}^ell, where infinity is represented by 2.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TernaryVec(pub Vec<u8>);
+
+impl TernaryVec {
+    /// Creates a `TernaryVec` of length `ell` from a base-3 index `idx`.
+    pub fn from_index(idx: usize, ell: usize) -> Self {
+        let mut y_vec = vec![0u8; ell];
+        let mut temp_idx = idx;
+        for k in 0..ell {
+            let digit = (temp_idx % 3) as u8;
+            y_vec[ell - 1 - k] = digit;
+            temp_idx /= 3;
+        }
+        TernaryVec(y_vec)
+    }
+
+    /// Computes the base-3 index represented by this `TernaryVec`.
+    pub fn local_index(&self) -> usize {
+        let mut index = 0;
+        let mut power_of_3 = 1;
+        for &val in self.0.iter().rev() {
+            debug_assert!(val <= 2);
+            index += (val as usize) * power_of_3;
+            power_of_3 *= 3;
+        }
+        index
+    }
+
+    /// Computes a flattened index for a specific configuration used in Spartan.
+    /// Maps `(i, v', u')` to `0..3^ell - 2`, where `v'` is the prefix of `self` of length `i`,
+    /// and `u'` is the element at index `i` (must be 0 or 2).
+    /// The mapping order is: `i` (0..ell-1), `u'` (0 maps before 2), `v'` (lexicographic base-3).
+    pub fn flat_index(&self, i: usize) -> usize {
+        debug_assert_eq!(self.0.len(), i + 1);
+        let u_prime = self.0[i];
+        debug_assert!(u_prime == 0 || u_prime == 2);
+
+        let base_offset: usize = if i == 0 { 0 } else { 3usize.pow(i as u32) - 1 }; // Sum_{k=0}^{i-1} 2*3^k
+        let u_offset = if u_prime == 0 {
+            0
+        } else {
+            3usize.pow(i as u32)
+        }; // Size of the v' space for u'=0
+
+        // Calculate index of v' within its {0,1,inf}^i space
+        let mut v_prime_index = 0;
+        let mut power_of_3 = 1;
+        for k in 0..i {
+            v_prime_index += (self.0[i - 1 - k] as usize) * power_of_3;
+            power_of_3 *= 3;
+        }
+
+        base_offset + u_offset + v_prime_index
+    }
+
+    /// Checks if any element in the vector represents infinity (is 2).
+    pub fn has_inf(&self) -> bool {
+        self.0.iter().any(|&bit| bit == 2)
+    }
+
+    /// Checks if all elements are valid ternary values (0, 1, or 2).
+    pub fn _is_valid(&self) -> bool {
+        self.0.iter().all(|&ternary_val| ternary_val <= 2)
+    }
+}
+
+/// Filters a vector `vec` (whose length must be a power of 2) keeping only elements
+/// at indices `j` where the `bit_idx`-th bit of `j` is equal to `bit_val`.
+pub fn get_vec_by_fixed_bit<F: Copy>(vec: &[F], bit_idx: usize, bit_val: bool) -> Vec<F> {
+    assert!(
+        vec.len().is_power_of_two(),
+        "vec must have length a power of 2"
+    );
+    assert!(
+        bit_idx < vec.len().trailing_zeros() as usize,
+        "bit_idx is too large for the vector length"
+    );
+    vec.iter()
+        .enumerate()
+        .filter_map(|(i, x)| {
+            if (i >> bit_idx) & 1 == (bit_val as usize) {
+                Some(*x)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Filters a vector `vec` (whose length must be a power of 2) keeping only elements
+/// at indices `j` where the `bit_idx1`-th bit is `bit_val1` AND the `bit_idx2`-th bit is `bit_val2`.
+pub fn get_vec_by_fixed_bit_pair<F: Copy>(
+    vec: &[F],
+    bit_idx1: usize,
+    bit_val1: bool,
+    bit_idx2: usize,
+    bit_val2: bool,
+) -> Vec<F> {
+    assert!(
+        vec.len().is_power_of_two(),
+        "vec must have length a power of 2"
+    );
+    assert!(
+        bit_idx1 < vec.len().trailing_zeros() as usize,
+        "bit_idx1 is too large for the vector length"
+    );
+    assert!(
+        bit_idx2 < vec.len().trailing_zeros() as usize,
+        "bit_idx2 is too large for the vector length"
+    );
+    vec.iter()
+        .enumerate()
+        .filter_map(|(i, x)| {
+            if (i >> bit_idx1) & 1 == (bit_val1 as usize)
+                && (i >> bit_idx2) & 1 == (bit_val2 as usize)
+            {
+                Some(*x)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests the creation of `TernaryVec` from a base-3 index.
+    #[test]
+    fn test_ternary_vec_from_index() {
+        // Test simple cases
+        assert_eq!(TernaryVec::from_index(0, 3), TernaryVec(vec![0, 0, 0]));
+        assert_eq!(TernaryVec::from_index(1, 3), TernaryVec(vec![0, 0, 1]));
+        assert_eq!(TernaryVec::from_index(2, 3), TernaryVec(vec![0, 0, 2]));
+        assert_eq!(TernaryVec::from_index(3, 3), TernaryVec(vec![0, 1, 0]));
+        assert_eq!(TernaryVec::from_index(4, 3), TernaryVec(vec![0, 1, 1]));
+
+        // Test larger values
+        assert_eq!(TernaryVec::from_index(26, 3), TernaryVec(vec![2, 2, 2]));
+        assert_eq!(TernaryVec::from_index(13, 3), TernaryVec(vec![1, 1, 1]));
+    }
+
+    /// Tests the conversion of `TernaryVec` back to its base-3 index.
+    #[test]
+    fn test_ternary_vec_local_index() {
+        // Test simple cases
+        assert_eq!(TernaryVec(vec![0, 0, 0]).local_index(), 0);
+        assert_eq!(TernaryVec(vec![0, 0, 1]).local_index(), 1);
+        assert_eq!(TernaryVec(vec![0, 0, 2]).local_index(), 2);
+        assert_eq!(TernaryVec(vec![0, 1, 0]).local_index(), 3);
+
+        // Test larger values
+        assert_eq!(TernaryVec(vec![1, 1, 1]).local_index(), 13);
+        assert_eq!(TernaryVec(vec![2, 2, 2]).local_index(), 26);
+
+        // Verify round-trip
+        for idx in 0..27 {
+            let tv = TernaryVec::from_index(idx, 3);
+            assert_eq!(tv.local_index(), idx);
+        }
+    }
+
+    /// Tests the flattened index calculation used in Spartan.
+    #[test]
+    fn test_ternary_vec_flat_index() {
+        // Test for i=0
+        // self=[0], u\'=0, v\'=[]. base=3^0-1=0, u_off=0, v\'_idx=0. Total = 0.
+        assert_eq!(TernaryVec(vec![0]).flat_index(0), 0);
+        // self=[2], u\'=2, v\'=[]. base=0, u_off=3^0=1, v\'_idx=0. Total = 1.
+        assert_eq!(TernaryVec(vec![2]).flat_index(0), 1);
+
+        // Test for i=1
+        // base_offset = 3^1 - 1 = 2
+        // self=[0, 0], u\'=0, v\'=[0]. u_off=0, v\'_idx=0. Total = 2 + 0 + 0 = 2.
+        assert_eq!(TernaryVec(vec![0, 0]).flat_index(1), 2);
+        // self=[1, 0], u\'=0, v\'=[1]. u_off=0, v\'_idx=1. Total = 2 + 0 + 1 = 3.
+        assert_eq!(TernaryVec(vec![1, 0]).flat_index(1), 3);
+        // self=[2, 0], u\'=0, v\'=[2]. u_off=0, v\'_idx=2. Total = 2 + 0 + 2 = 4.
+        assert_eq!(TernaryVec(vec![2, 0]).flat_index(1), 4);
+        // self=[0, 2], u\'=2, v\'=[0]. u_off=3^1=3, v\'_idx=0. Total = 2 + 3 + 0 = 5.
+        assert_eq!(TernaryVec(vec![0, 2]).flat_index(1), 5);
+        // self=[1, 2], u\'=2, v\'=[1]. u_off=3^1=3, v\'_idx=1. Total = 2 + 3 + 1 = 6.
+        assert_eq!(TernaryVec(vec![1, 2]).flat_index(1), 6);
+        // self=[2, 2], u\'=2, v\'=[2]. u_off=3^1=3, v\'_idx=2. Total = 2 + 3 + 2 = 7.
+        assert_eq!(TernaryVec(vec![2, 2]).flat_index(1), 7);
+
+        // Test for i=2
+        // base_offset = 3^2 - 1 = 8
+        // self=[0, 0, 0], u\'=0, v\'=[0, 0]. u_off=0, v\'_idx=0. Total = 8 + 0 + 0 = 8.
+        assert_eq!(TernaryVec(vec![0, 0, 0]).flat_index(2), 8);
+        // self=[1, 0, 0], u\'=0, v\'=[1, 0]. u_off=0, v\'_idx=(0*1 + 1*3)=3. Total = 8 + 0 + 3 = 11.
+        assert_eq!(TernaryVec(vec![1, 0, 0]).flat_index(2), 11);
+        // self=[0, 1, 0], u\'=0, v\'=[0, 1]. u_off=0, v\'_idx=(1*1 + 0*3)=1. Total = 8 + 0 + 1 = 9.
+        assert_eq!(TernaryVec(vec![0, 1, 0]).flat_index(2), 9);
+        // self=[0, 0, 2], u\'=2, v\'=[0, 0]. u_off=3^2=9, v\'_idx=0. Total = 8 + 9 + 0 = 17.
+        assert_eq!(TernaryVec(vec![0, 0, 2]).flat_index(2), 17);
+    }
+
+    /// Tests the check for the presence of infinity (2) in the vector.
+    #[test]
+    fn test_ternary_vec_has_inf() {
+        assert!(!TernaryVec(vec![0, 0, 0]).has_inf());
+        assert!(!TernaryVec(vec![0, 1, 1]).has_inf());
+        assert!(TernaryVec(vec![0, 2, 0]).has_inf());
+        assert!(TernaryVec(vec![2, 0, 0]).has_inf());
+        assert!(TernaryVec(vec![0, 0, 2]).has_inf());
+    }
+
+    /// Tests filtering a vector based on a single bit in the index.
+    /// Iterates through all possible bit positions for a vector of size 16,
+    /// checking both `bit_val = true` and `bit_val = false`.
+    /// Compares the function's output against a programmatically generated expected result.
+    #[test]
+    fn test_get_vec_by_fixed_bit() {
+        const LEN: usize = 16;
+        let log_len = LEN.trailing_zeros() as usize;
+        let vec = (0..LEN).map(|i| i as u64).collect::<Vec<_>>();
+
+        for bit_idx in 0..log_len {
+            for bit_val_bool in [false, true] {
+                let bit_val = bit_val_bool as usize;
+                let result = get_vec_by_fixed_bit(&vec, bit_idx, bit_val_bool);
+
+                let expected: Vec<u64> = vec
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &x)| {
+                        if (i >> bit_idx) & 1 == bit_val {
+                            Some(x)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                assert_eq!(result.len(), LEN / 2);
+                assert_eq!(
+                    result, expected,
+                    "Failed for bit_idx = {}, bit_val = {}",
+                    bit_idx, bit_val_bool
+                );
+            }
+        }
+    }
+
+    /// Tests filtering a vector based on a pair of bits in the index.
+    /// Iterates through all distinct pairs of bit positions for a vector of size 16,
+    /// checking all four combinations of `bit_val1` and `bit_val2` (true/false).
+    /// Compares the function's output against a programmatically generated expected result.
+    #[test]
+    fn test_get_vec_by_fixed_bit_pair() {
+        const LEN: usize = 16;
+        let log_len = LEN.trailing_zeros() as usize;
+        let vec = (0..LEN).map(|i| i as u64).collect::<Vec<_>>();
+
+        for bit_idx1 in 0..log_len {
+            for bit_idx2 in 0..log_len {
+                if bit_idx1 == bit_idx2 {
+                    continue;
+                }
+
+                for bit_val1_bool in [false, true] {
+                    for bit_val2_bool in [false, true] {
+                        let bit_val1 = bit_val1_bool as usize;
+                        let bit_val2 = bit_val2_bool as usize;
+
+                        let result = get_vec_by_fixed_bit_pair(
+                            &vec,
+                            bit_idx1,
+                            bit_val1_bool,
+                            bit_idx2,
+                            bit_val2_bool,
+                        );
+
+                        let expected: Vec<u64> = vec
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &x)| {
+                                if (i >> bit_idx1) & 1 == bit_val1
+                                    && (i >> bit_idx2) & 1 == bit_val2
+                                {
+                                    Some(x)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        assert_eq!(result.len(), LEN / 4);
+                        assert_eq!(
+                            result, expected,
+                            "Failed for bit_idx1 = {}, bit_val1 = {}, bit_idx2 = {}, bit_val2 = {}",
+                            bit_idx1, bit_val1_bool, bit_idx2, bit_val2_bool
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

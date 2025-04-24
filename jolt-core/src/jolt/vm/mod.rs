@@ -548,7 +548,9 @@ where
         };
 
         // Compute the auxiliary polynomials (and change nothing else)
-        r1cs_builder.to_old_builder().compute_aux(&mut jolt_polynomials);
+        r1cs_builder
+            .to_old_builder()
+            .compute_aux(&mut jolt_polynomials);
 
         let jolt_commitments =
             jolt_polynomials.commit::<C, PCS, ProofTranscript>(&preprocessing.shared);

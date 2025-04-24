@@ -1,5 +1,8 @@
 use super::{
-    constraints::ONE_FOURTH_NUM_CONSTRAINTS_PADDED, inputs::ConstraintInput, key::{CrossStepR1CS, CrossStepR1CSConstraint, SparseEqualityItem}, ops::{Term, Variable, LC}
+    constraints::ONE_FOURTH_NUM_CONSTRAINTS_PADDED,
+    inputs::ConstraintInput,
+    key::{CrossStepR1CS, CrossStepR1CSConstraint, SparseEqualityItem},
+    ops::{Term, Variable, LC},
 };
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::{
@@ -224,7 +227,8 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> R1CSBuilder<C, F, I> {
     pub fn append(&mut self, other: &Self) {
         self.constraints.extend(other.constraints.iter().cloned());
         // Assuming AuxComputation needs cloning.
-        self.aux_computations.extend(other.aux_computations.iter().map(|(k, v)| (*k, v.clone())));
+        self.aux_computations
+            .extend(other.aux_computations.iter().map(|(k, v)| (*k, v.clone())));
     }
 
     /// Pads the builder with `num_rows` empty constraints.

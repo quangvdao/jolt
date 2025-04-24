@@ -15,9 +15,9 @@ use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::constraints::LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
+use crate::utils::small_value::{get_vec_by_fixed_bit, get_vec_by_fixed_bit_pair, TernaryVec};
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
-use crate::utils::{get_vec_by_fixed_bit, get_vec_by_fixed_bit_pair};
 use ark_serialize::*;
 use rayon::prelude::*;
 use std::marker::PhantomData;
@@ -34,7 +34,7 @@ pub trait Bindable<F: JoltField>: Sync {
 /// - Derive the challenge for the next round
 /// - Bind the cubic polynomial to the challenge
 /// - Update the claim as the evaluation of the cubic polynomial at the challenge
-/// 
+///
 /// Returns the derived challenge
 pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
     quadratic_evals: (F, F), // (t_i(0), t_i(infty))
@@ -75,63 +75,6 @@ pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
     r_i
 }
 
-// Represents a point y in {0,1,inf}^ell
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TernaryVec(Vec<u8>);
-
-impl TernaryVec {
-    fn from_index(idx: usize, ell: usize) -> Self {
-        let mut y_vec = vec![0u8; ell];
-        let mut temp_idx = idx;
-        for k in 0..ell {
-            let digit = (temp_idx % 3) as u8;
-            y_vec[ell - 1 - k] = digit;
-            temp_idx /= 3;
-        }
-        TernaryVec(y_vec)
-    }
-
-    fn local_index(&self) -> usize {
-        let mut index = 0;
-        let mut power_of_3 = 1;
-        for &val in self.0.iter().rev() {
-            debug_assert!(val <= 2);
-            index += (val as usize) * power_of_3;
-            power_of_3 *= 3;
-        }
-        index
-    }
-
-    // Map (i, v', u') to 0..3^ell - 2, where v' in {0,1,inf}^{i}, u' in {0,inf}
-    // Order: i (0..ell-1), u' (0=0, inf=2), v' (lexicographic base-3)
-    fn flat_index(&self, i: usize) -> usize {
-        debug_assert_eq!(self.0.len(), i + 1);
-        let u_prime = self.0[i];
-            debug_assert!(u_prime == 0 || u_prime == 2);
-
-        let base_offset: usize = if i == 0 { 0 } else { 3usize.pow(i as u32) - 1 }; // Sum_{k=0}^{i-1} 2*3^k
-        let u_offset = if u_prime == 0 { 0 } else { 3usize.pow(i as u32) }; // Size of the v' space for u'=0
-        
-        // Calculate index of v' within its {0,1,inf}^i space
-        let mut v_prime_index = 0;
-        let mut power_of_3 = 1;
-        for k in 0..i {
-                v_prime_index += (self.0[i - 1 - k] as usize) * power_of_3;
-                power_of_3 *= 3;
-        }
-        
-        base_offset + u_offset + v_prime_index
-    }
-    
-    fn has_inf(&self) -> bool {
-        self.0.iter().any(|&bit| bit == 2)
-    }
-
-    fn _is_valid(&self) -> bool {
-        self.0.iter().all(|&ternary_val| ternary_val <= 2)
-    }
-}
-
 // Stub for DP computation
 // Input: flags = indices y in {0,1}^ell where Az(y)=1 for this (x_L, x_R)
 // Output: Vec<i8> of size 3^ell storing Az(y) for y in {0,1,inf}^ell
@@ -140,11 +83,12 @@ pub fn compute_all_az_dp(flags: &[u8], ell: usize, max_k_abs: &mut usize) -> Vec
     // TODO: Implement the DP logic here
     let size = 3usize.pow(ell as u32);
     let mut az_values = vec![0i8; size];
-    if ell == 0 { // Base case for recursion/DP if needed, though ell > 0 typically
+    if ell == 0 {
+        // Base case for recursion/DP if needed, though ell > 0 typically
         if !flags.is_empty() && flags[0] == 0 { // Check if Az() = 1
-            // Decide how to represent Az() for ell=0 if applicable
+             // Decide how to represent Az() for ell=0 if applicable
         }
-        return az_values; 
+        return az_values;
     }
 
     // Initialize for y in {0,1}^ell based on flags
@@ -168,13 +112,14 @@ pub fn compute_all_az_dp(flags: &[u8], ell: usize, max_k_abs: &mut usize) -> Vec
                 temp_y_bin /= 2;
             }
             let ternary_idx = TernaryVec::from_index(y_bin_idx, ell).local_index();
-        az_values[ternary_idx] = 1;
+            az_values[ternary_idx] = 1;
         }
     }
 
     // DP recurrence: compute Az for y containing infinity (2)
     let mut power_of_3_k = 1;
-    for k in 0..ell { // Iterate through variable index k
+    for k in 0..ell {
+        // Iterate through variable index k
         let power_of_3_kp1 = power_of_3_k * 3;
         for suffix_idx in 0..(size / power_of_3_kp1) {
             for prefix_idx in 0..power_of_3_k {
@@ -182,9 +127,9 @@ pub fn compute_all_az_dp(flags: &[u8], ell: usize, max_k_abs: &mut usize) -> Vec
                 let idx_0 = base_idx + 0 * power_of_3_k; // y_k = 0
                 let idx_1 = base_idx + 1 * power_of_3_k; // y_k = 1
                 let idx_inf = base_idx + 2 * power_of_3_k; // y_k = inf
-                
+
                 az_values[idx_inf] = az_values[idx_1] - az_values[idx_0];
-                
+
                 let k_abs_val = az_values[idx_inf].abs() as usize;
                 if k_abs_val > *max_k_abs {
                     *max_k_abs = k_abs_val;
@@ -364,46 +309,46 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         (SumcheckInstanceProof::new(compressed_polys), r, final_evals)
     }
 
-    /// Using the small-value optimization, precompute the necessary data for the first few rounds of sumcheck for 
+    /// Using the small-value optimization, precompute the necessary data for the first few rounds of sumcheck for
     /// the binary constraints: `eq(w, X) * Az(X) * Bz(X)`, where `Bz(X) = 1 - Az(X)` and
     /// `Az(y_{0-5}, x_L, x_R)` is given by the sparse representation `flag_indices`.
     /// (more precisely, it is `Az(y_{0-5}, 0, x_L, x_R)` within the larger R1CS constraint system,
     /// but we will ignore it here)
-    /// 
+    ///
     /// What this means is that we need to compute the accumulators
-    /// 
-    /// `accum[i][vec(v)][u] = Σ_{b \in {0,1}^{\ell - i}} Σ_{x_L \in {0,1}^{n/2 - \ell}} eq(w_L, x_L) 
+    ///
+    /// `accum[i][vec(v)][u] = Σ_{b \in {0,1}^{\ell - i}} Σ_{x_L \in {0,1}^{n/2 - \ell}} eq(w_L, x_L)
     ///      * (Σ_{x_R \in {0,1}^{n/2}} eq(w_R, x_R) * Az(vec(v), u, b, x_L, x_R) * Bz(vec(v), u, b, x_L, x_R))`
-    /// 
+    ///
     /// for all `i = 0..5`, `(v_0, ..., v_{i-1}) ∈ {0, 1, ∞}^{i-1}`, and `u ∈ {0, ∞}`. (`\ell = num_small_value_rounds`)
     /// There are `2 + 2 * 3 + 2 * 3^2 + ... + 2 * 3^5 = 3^6 - 1 = 728` such accumulators.
-    /// 
+    ///
     /// We make several important observations:
-    /// 
-    /// (0) In order for the above sum to have good memory locality, we need to store Az evals via 
+    ///
+    /// (0) In order for the above sum to have good memory locality, we need to store Az evals via
     /// chunks with the same left bits (vec(u), u, b, x_L part), and iterating over the right bits x_R.
     /// We do this when building `flag_indices`.
-    /// 
+    ///
     /// (1) Let vec* = (vec(v), u). If `S := {j : vec*(j) = ∞} \subset [0..5]`, then
     /// `Az(vec*, 0, x_L, x_R) = Σ_{T \subset S} (-1)^|T| * Az(vec*[T], 0, x_L, x_R)`,
     /// where `vec*[T]` is the vector vec* with the elements of T set to 0, and of `S \ T` set to 1.
-    /// 
+    ///
     /// Concretely, `Az(infty, 1, infty, 0..0, x_L, x_R) = Az(1, 1, 1, 0..0, x_L, x_R) - Az(1, 1, 0, 0..0, x_L, x_R) - Az(0, 0, 1, 0..0, x_L, x_R) + Az(0, 0, 0, 0..0, x_L, x_R)`.
-    /// 
+    ///
     /// (2) Since Bz = 1 - Az and Az is binary, we can show that:
     /// - `Bz(vec*, 0, x_L, x_R) = 1 - Az(vec*, 0, x_L, x_R)` if `vec*` has no \infty elements (and thus `Az(.) * Bz(.) = 0`)
     /// - `Bz(vec*, 0, x_L, x_R) = - Az(vec*, 0, x_L, x_R)` if `vec*` has one or more \infty elements (and thus `Az(.) * Bz(.) = - Az(.)^2`)
-    /// 
+    ///
     /// (3) Since `Az(y, 0, x_L, x_R)` is very sparse (at most `max_num_ones` ones, given by `flag_indices[x_L, x_R]`),
     /// `Az(vec*, 0, x_L, x_R)` is between `-max_num_ones` and `max_num_ones`.
-    /// 
-    /// Meaning that `Az(.) * Bz(.) \in {0, -1, -4, ..., -max_num_ones^2}`. And so we can pre-compute `eq(w_L, (0,x_L)) * (-i^2)` 
+    ///
+    /// Meaning that `Az(.) * Bz(.) \in {0, -1, -4, ..., -max_num_ones^2}`. And so we can pre-compute `eq(w_L, (0,x_L)) * (-i^2)`
     /// for `i = 0..max_num_ones`, and use a lookup to get the contribution `eq(w_L, (0,x_L)) * Az(.) * Bz(.)` for any `vec*`.
-    /// 
+    ///
     /// (4) We can compute `Az(vec*, 0, x_L, x_R)` iteratively using the sparse representation `flag_indices[x_L][x_R]`, storing the results once again in a sparse representation.
     pub fn precompute_small_value_binary_constraints(
         num_small_value_rounds: usize,
-        max_num_ones : usize,
+        max_num_ones: usize,
         eq_poly: &SplitEqPolynomial<F>,
         flag_indices: &Vec<Vec<u8>>,
     ) -> Vec<(Vec<F>, Vec<F>)> {
@@ -414,9 +359,13 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         let E2_len = 1 << n_half;
         let E1_base_len = 1 << (n_half - ell); // Size of the x_L space
-        let total_expected_flags_len = E1_base_len * E2_len; 
+        let total_expected_flags_len = E1_base_len * E2_len;
         // This assumption might be wrong if flag_indices is structured differently
-        assert_eq!(flag_indices.len(), total_expected_flags_len, "flag_indices length mismatch");
+        assert_eq!(
+            flag_indices.len(),
+            total_expected_flags_len,
+            "flag_indices length mismatch"
+        );
 
         // --- Precomputations ---
         // Stores [-0^2, -1^2, -2^2, ..., -max_num_ones^2]
@@ -431,21 +380,25 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         // precomputed_E2_times_neg_k_sq[k-1][idx_R] = E2_evals[idx_R] * neg_sq[k]
         // Stores E2_evals * (-k^2) for k = 1 to max_num_ones
-        let precomputed_E2_times_neg_k_sq: Vec<Vec<F>> = (1..=max_num_ones).map(|k| {
-            E2_evals.iter().map(|E2_eval| *E2_eval * neg_sq[k]).collect()
-        }).collect();
+        let precomputed_E2_times_neg_k_sq: Vec<Vec<F>> = (1..=max_num_ones)
+            .map(|k| {
+                E2_evals
+                    .iter()
+                    .map(|E2_eval| *E2_eval * neg_sq[k])
+                    .collect()
+            })
+            .collect();
 
         // --- Mappings & Helper ---
         let num_accumulators = 3usize.pow(ell as u32) - 1; // Total number of outputs ((v', u'), i)
         let num_local_states = 3usize.pow(ell as u32); // Number of states y in {0,1,inf}^ell
 
-        
         // Recall that the accumulator formula is:
         // accum[i][(vec(v), u)] = Σ_{b \in {0,1}^{\ell - i}} Σ_{x_L \in {0,1}^{n/2 - \ell}} eq(w_L, (b, x_L))
         //          * (Σ_{x_R} eq(w_R, x_R) * (-a(vec(v), u, b, x_L, x_R)^2))
-        // 
+        //
         // There is a total of `2 + 2 * 3 + 2 * 3^2 + ... + 2 * 3^{5} = 3^6 - 1 = 728` accumulators
-        
+
         // We want the following performance characteristics of our algorithm:
         // 1. It computes each a(vec(v), u, b, x_L, x_R) only once
         // 2. It re-uses the precomputed `eq(w_L, (0,x_L)) * (-i^2)` for each `i`
@@ -465,8 +418,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         // To compute step (4), we can use an iterative / dynamic programming approach, computing in each variable y_0 to y_5
         // i.e. if \ell=2 (instead of 5), we compute:
-        // `a(infty, 0) = a(1, 0) - a(0, 0)`, 
-        // `a(0, infty) = a(0, 1) - a(0, 0)`, 
+        // `a(infty, 0) = a(1, 0) - a(0, 0)`,
+        // `a(0, infty) = a(0, 1) - a(0, 0)`,
         // `a(1, infty) = a(1, 1) - a(1, 0)`,
         // `a(infty, infty) = a(1, 1) - a(1, 0) - a(0, 1) + a(0, 0) = a(infty, 1) - a(infty, 0)`
         // and so on...
@@ -474,62 +427,76 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         // --- Main Computation ---
         let final_accum_flat: Vec<F> = (0..E1_base_len) // Parallelize over x_L
-        .into_par_iter()
-        .map(|idx_L| {
-            // Per x_L accumulator, stores contributions to the final flat_accum vector
-            let mut local_accum = vec![F::zero(); num_accumulators];
-            // Stores Σ_{x_R} eq(w_R, x_R) * Term(y, x_L, x_R) for y in {0,1,inf}^ell
-            let mut E2_sum = vec![F::zero(); num_local_states];
-            let mut max_k_abs_local = 0usize; // Track max |Az(y)| for this x_L
+            .into_par_iter()
+            .map(|idx_L| {
+                // Per x_L accumulator, stores contributions to the final flat_accum vector
+                let mut local_accum = vec![F::zero(); num_accumulators];
+                // Stores Σ_{x_R} eq(w_R, x_R) * Term(y, x_L, x_R) for y in {0,1,inf}^ell
+                let mut E2_sum = vec![F::zero(); num_local_states];
+                let mut max_k_abs_local = 0usize; // Track max |Az(y)| for this x_L
 
-            // Inner loop over x_R
-            for idx_R in 0..E2_len {
-                // Calculate index into flag_indices based on idx_L and idx_R.
-                // The exact structure depends on how flag_indices was built.
-                // Assuming flags are grouped by x_L first, then x_R:
-                let global_flag_index = idx_L * E2_len + idx_R;
-                let flags = &flag_indices[global_flag_index];
+                // Inner loop over x_R
+                for idx_R in 0..E2_len {
+                    // Calculate index into flag_indices based on idx_L and idx_R.
+                    // The exact structure depends on how flag_indices was built.
+                    // Assuming flags are grouped by x_L first, then x_R:
+                    let global_flag_index = idx_L * E2_len + idx_R;
+                    let flags = &flag_indices[global_flag_index];
 
-                // No need to compute if flags is empty, Az will be 0.
-                if flags.is_empty() { continue; }
+                    // No need to compute if flags is empty, Az will be 0.
+                    if flags.is_empty() {
+                        continue;
+                    }
 
-                let all_az_k_values: Vec<i8> = compute_all_az_dp(flags, ell, &mut max_k_abs_local);
+                    let all_az_k_values: Vec<i8> =
+                        compute_all_az_dp(flags, ell, &mut max_k_abs_local);
 
-                // Accumulate E2_sum using precomputed values
-                for idx_y in 0..num_local_states {
-                    let y = TernaryVec::from_index(idx_y, ell);
-                    if !y.has_inf() { continue; } // Term is 0 if no infinity
+                    // Accumulate E2_sum using precomputed values
+                    for idx_y in 0..num_local_states {
+                        let y = TernaryVec::from_index(idx_y, ell);
+                        if !y.has_inf() {
+                            continue;
+                        } // Term is 0 if no infinity
 
-                    let k = all_az_k_values[idx_y];
-                    let k_abs = k.abs() as usize;
+                        let k = all_az_k_values[idx_y];
+                        let k_abs = k.abs() as usize;
 
-                    if k_abs > 0 && k_abs <= max_num_ones {
-                        // Use precomputed E2_evals[idx_R] * neg_sq[k_abs]
-                        let contrib = precomputed_E2_times_neg_k_sq[k_abs - 1][idx_R];
-                        E2_sum[idx_y] += contrib;
+                        if k_abs > 0 && k_abs <= max_num_ones {
+                            // Use precomputed E2_evals[idx_R] * neg_sq[k_abs]
+                            let contrib = precomputed_E2_times_neg_k_sq[k_abs - 1][idx_R];
+                            E2_sum[idx_y] += contrib;
+                        }
                     }
                 }
-            }
-            // Sanity check after processing all x_R for this x_L
-            assert!(max_k_abs_local <= max_num_ones, "Max k encountered ({}) exceeds max_num_ones ({})", max_k_abs_local, max_num_ones);
+                // Sanity check after processing all x_R for this x_L
+                assert!(
+                    max_k_abs_local <= max_num_ones,
+                    "Max k encountered ({}) exceeds max_num_ones ({})",
+                    max_k_abs_local,
+                    max_num_ones
+                );
 
+                // Prefix Accumulation Step
+                for idx_y in 0..num_local_states {
+                    let current_E2_sum = E2_sum[idx_y];
+                    if current_E2_sum.is_zero() {
+                        continue;
+                    }
 
-            // Prefix Accumulation Step
-            for idx_y in 0..num_local_states {
-                let current_E2_sum = E2_sum[idx_y];
-                if current_E2_sum.is_zero() { continue; }
+                    let y = TernaryVec::from_index(idx_y, ell);
 
-                let y = TernaryVec::from_index(idx_y, ell);
-
-                // Check all possible valid prefixes (i, v', u')
-                for i in 0..ell { // Length of v' is i
+                    // Check all possible valid prefixes (i, v', u')
+                    for i in 0..ell {
+                        // Length of v' is i
                         let prefix_len = i + 1; // Length of (v', u')
                         let v_prime_u_prime = TernaryVec(y.0[0..prefix_len].to_vec());
                         let u_prime = v_prime_u_prime.0[i];
-                        
+
                         // Prefix must end in 0 or inf
-                        if u_prime == 1 { continue; } 
-                        
+                        if u_prime == 1 {
+                            continue;
+                        }
+
                         let b_suffix = &y.0[prefix_len..ell];
 
                         // Suffix `b` must be binary (contain only 0s and 1s)
@@ -544,28 +511,32 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                             let ell_minus_i = ell - prefix_len;
                             debug_assert_eq!(b_suffix.len(), ell_minus_i);
 
-                        // TODO: Calculate eq_L_eval = eq(w_{L,i}, (b, x_L))
-                            // This requires accessing eq evaluations for variables i..ell-1 (from b)
-                            // combined with variables ell..n/2-1 (from x_L).
-                            // Accessing eq_poly.E1 might be complex here.
-                            // TODO: double-check indices
+                            // TODO: Calculate eq_L_eval = eq(w_{L,i}, (b, x_L))
+                            // This requires accessing eq evaluations for
+                            // variables i..ell-1 (from b) combined with
+                            // variables ell..n/2-1 (from x_L). Accessing
+                            // eq_poly.E1 might be complex here. TODO:
+                            // double-check indices
                             let eq_L_eval = E1_evals_across_rounds[i][b_idx];
 
                             let final_contrib = eq_L_eval * current_E2_sum;
                             let target_idx = v_prime_u_prime.flat_index(i);
                             local_accum[target_idx] += final_contrib;
                         }
+                    }
                 }
-            }
-            local_accum // Return contributions for this idx_L
-        })
-        .reduce(|| vec![F::zero(); num_accumulators], |mut a, b| {
-            // Combine accumulators from different idx_L threads
-            for (a_val, b_val) in a.iter_mut().zip(b.iter()) {
-                *a_val += *b_val;
-            }
-            a
-        });
+                local_accum // Return contributions for this idx_L
+            })
+            .reduce(
+                || vec![F::zero(); num_accumulators],
+                |mut a, b| {
+                    // Combine accumulators from different idx_L threads
+                    for (a_val, b_val) in a.iter_mut().zip(b.iter()) {
+                        *a_val += *b_val;
+                    }
+                    a
+                },
+            );
 
         // --- Reshape final_accum_flat -> Vec<(Vec<F>, Vec<F>)> ---
         let mut result = Vec::with_capacity(ell);
@@ -586,15 +557,15 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
     /// This function computes, for each `x_L ∈ {0,1}^{eq_poly.E1_len()}` and `x_R ∈ {0,1}^{eq_poly.E2_len()}`,
     /// Az[r, 0, x_L, x_R] = Σ_{y ∈ {0, 1}^{r.len()}} eq(r, y) * Az[y, 0, x_L, x_R]
-    /// and 
+    /// and
     /// Bz[r, 0, x_L, x_R] = Σ_{y ∈ {0, 1}^{r.len()}} eq(r, y) * Bz[y, 0, x_L, x_R]
-    /// 
+    ///
     /// Note that since Bz[y, 0, x_L, x_R] = 1 - Az[y, 0, x_L, x_R], we have that
     /// Bz[r, 0, x_L, x_R] = Σ_{y} eq(r, y) - Az[r, 0, x_L, x_R]
-    /// 
+    ///
     /// Also, since Az[y, 0, x_L, x_R] is given via the sparse representation `flag_indices`,
     /// we can compute Az[r, 0, x_L, x_R] very quickly.
-    /// 
+    ///
     /// We can then derive the evaluation of
     /// t_i(0) = Σ_{x_L} E1[x_L] * Σ_{x_R} E2[x_R] * Az[r, 0, x_L, x_R] * Bz[r, 0, x_L, x_R]
     /// (recall that because of pre-computation, we have switched the order of x_L and x_R, so multiplying with E2[x_R] is memory-efficient)
@@ -617,7 +588,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         let E1_current_evals = eq_poly.E1_current(); // Get E1 evaluations once
         let E2_current_evals = eq_poly.E2_current(); // Get E2 evaluations once
-        
+
         // Use par_chunks_mut to get mutable slices of the output vectors.
         // Zip them with the corresponding E2 evaluations.
         // Calculate values for each chunk, write them directly via the mutable slices,
@@ -631,7 +602,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 let mut E1_sum = F::zero();
                 // Compute Az and Bz evals for the current E2 chunk associated with this E1 chunk
                 // Evals for E2 associated with *this* E2 chunk
-                let (Az_evals_r_E1, Bz_evals_r_E1): (Vec<F>, Vec<F>) = E2_current_evals 
+                let (Az_evals_r_E1, Bz_evals_r_E1): (Vec<F>, Vec<F>) = E2_current_evals
                     .iter()
                     .enumerate()
                     .map(|(j, E2_eval)| {
@@ -667,7 +638,6 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         az_bz_cz_poly: &mut NewSpartanInterleavedPolynomial<F>,
         transcript: &mut ProofTranscript,
     ) -> (Self, Vec<F>, [F; 3]) {
-
         let mut r: Vec<F> = Vec::new();
         let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
         let mut claim = F::zero();
@@ -700,19 +670,21 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         // Rounds 0, 1, 2, 3, 4, 5
         for round in 0..LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED {
-
             // Compute the contributions from the binary constraints to the evaluations t_i(0), t_i(infty)
-            let binary_constraints_eval_0 = lagrange_coeffs.iter()
-            .zip(flag_accums[round].0.iter())
-            .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
-            .fold(F::zero(), |a, b| a + b);
+            let binary_constraints_eval_0 = lagrange_coeffs
+                .iter()
+                .zip(flag_accums[round].0.iter())
+                .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
+                .fold(F::zero(), |a, b| a + b);
 
-            let binary_constraints_eval_infty = lagrange_coeffs.iter()
+            let binary_constraints_eval_infty = lagrange_coeffs
+                .iter()
                 .zip(flag_accums[round].1.iter())
                 .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
                 .fold(F::zero(), |a, b| a + b);
 
-            let E1_evals_for_other_constraints = get_vec_by_fixed_bit_pair(eq_poly.E1_current(), 4 - round, true, 5 - round, true);
+            let E1_evals_for_other_constraints =
+                get_vec_by_fixed_bit_pair(eq_poly.E1_current(), 4 - round, true, 5 - round, true);
 
             // For round 0, compute the contribution from the other constraints using specialized method
             // with handling of `i128` instead of full `F`
@@ -720,20 +692,37 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 let az_bz_cz_chunks = az_bz_cz_poly.chunks_first_round();
 
                 let (other_evals_0, other_evals_infty) = az_bz_cz_poly
-                    .compute_first_round_other_evals(az_bz_cz_chunks, &E1_evals_for_other_constraints, eq_poly.E2_current());
+                    .compute_first_round_other_evals(
+                        az_bz_cz_chunks,
+                        &E1_evals_for_other_constraints,
+                        eq_poly.E2_current(),
+                    );
 
-                let quadratic_evals: (F, F) = (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty);
+                let quadratic_evals: (F, F) = (
+                    binary_constraints_eval_0 + other_evals_0,
+                    binary_constraints_eval_infty + other_evals_infty,
+                );
 
-                let r_i = process_eq_sumcheck_round(quadratic_evals, eq_poly, &mut polys, &mut r, &mut claim, transcript);
+                let r_i = process_eq_sumcheck_round(
+                    quadratic_evals,
+                    eq_poly,
+                    &mut polys,
+                    &mut r,
+                    &mut claim,
+                    transcript,
+                );
 
                 // Lagrange coefficients for 0, 1, and infty, respectively
                 let lagrange_coeffs_r_i = [F::one() - r_i, r_i, r_i * (r_i - F::one())];
 
                 // Update Lagrange coefficients (so that indices for `r_i` is in the most significant digit):
                 // L_{i+1} = lagrange_coeffs_r_i \otimes L_i
-                lagrange_coeffs = lagrange_coeffs_r_i.iter()
+                lagrange_coeffs = lagrange_coeffs_r_i
+                    .iter()
                     .flat_map(|lagrange_coeff| {
-                        lagrange_coeffs.iter().map(move |coeff| *lagrange_coeff * *coeff)
+                        lagrange_coeffs
+                            .iter()
+                            .map(move |coeff| *lagrange_coeff * *coeff)
                     })
                     .collect();
 
@@ -743,24 +732,41 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 let az_bz_cz_chunks = az_bz_cz_poly.chunks_subsequent_round();
 
                 let (other_evals_0, other_evals_infty) = az_bz_cz_poly
-                    .compute_subsequent_round_other_evals(az_bz_cz_chunks, &E1_evals_for_other_constraints, eq_poly.E2_current());
+                    .compute_subsequent_round_other_evals(
+                        az_bz_cz_chunks,
+                        &E1_evals_for_other_constraints,
+                        eq_poly.E2_current(),
+                    );
 
                 // Combine evaluations
-                let quadratic_evals: (F, F) = (binary_constraints_eval_0 + other_evals_0, binary_constraints_eval_infty + other_evals_infty);
+                let quadratic_evals: (F, F) = (
+                    binary_constraints_eval_0 + other_evals_0,
+                    binary_constraints_eval_infty + other_evals_infty,
+                );
 
-                let r_i = process_eq_sumcheck_round(quadratic_evals, eq_poly, &mut polys, &mut r, &mut claim, transcript);
+                let r_i = process_eq_sumcheck_round(
+                    quadratic_evals,
+                    eq_poly,
+                    &mut polys,
+                    &mut r,
+                    &mut claim,
+                    transcript,
+                );
 
                 // Lagrange coefficients for 0, 1, and infty, respectively
                 let lagrange_coeffs_r_i = [F::one() - r_i, r_i, r_i * (r_i - F::one())];
 
                 // Update Lagrange coefficients (so that indices for `r_i` is in the most significant digit):
                 // L_{i+1} = lagrange_coeffs_r_i \otimes L_i
-                lagrange_coeffs = lagrange_coeffs_r_i.iter()
+                lagrange_coeffs = lagrange_coeffs_r_i
+                    .iter()
                     .flat_map(|lagrange_coeff| {
-                        lagrange_coeffs.iter().map(move |coeff| *lagrange_coeff * *coeff)
+                        lagrange_coeffs
+                            .iter()
+                            .map(move |coeff| *lagrange_coeff * *coeff)
                     })
                     .collect();
-                
+
                 // az_bz_cz_poly.bind_subsequent_round_other_coeffs(az_bz_cz_chunks, r_i);
             }
         }
@@ -772,18 +778,26 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         // If `z = 0`, then we are computing the evaluations of the binary constraints
         // This can be computed quickly in a subroutine
         let (Az_evals_0, Bz_evals_0, quadratic_eval_0) =
-            Self::compute_evals_binary_constraints_after_small_value_rounds(eq_poly, r.clone(), flag_indices);
-            
+            Self::compute_evals_binary_constraints_after_small_value_rounds(
+                eq_poly,
+                r.clone(),
+                flag_indices,
+            );
+
         // If `z = 1`, then we compute the evaluations of the other constraints
         // This corresponds to coalescing / uninterleaving the other constraints
-        let (Az_other_evals_1, Bz_other_evals_1, Cz_other_evals_1) =
-            (vec![F::zero(); 32], vec![F::zero(); 32], vec![F::zero(); 32]);
+        let (Az_other_evals_1, Bz_other_evals_1, Cz_other_evals_1) = (
+            vec![F::zero(); 32],
+            vec![F::zero(); 32],
+            vec![F::zero(); 32],
+        );
         // az_bz_cz_poly.uninterleave(eq_poly.E2_current(), &E1_evals_for_other_constraints);
 
         // Round 7 onwards
         // We just follow the linear-time algorithm for `az_bz_cz_poly`
-        for _round in (LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED+1)..num_rounds {
-            az_bz_cz_poly.linear_time_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+        for _round in (LOG_ONE_HALF_NUM_CONSTRAINTS_PADDED + 1)..num_rounds {
+            az_bz_cz_poly
+                .linear_time_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
             todo!()
         }
 

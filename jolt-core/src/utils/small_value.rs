@@ -135,9 +135,9 @@ use crate::poly::sparse_interleaved_poly::SparseCoefficient; // If struct is nee
 /// Placeholder - Requires complex index mapping and difference logic.
 pub fn compute_abc_for_ternary_point(
     coeffs: &[SparseCoefficient<i128>],
-    y: &TernaryVec, // Point in {0,1,inf}^k
-    x_prime_idx: usize, // Index for x' in {0,1}^{num_later_vars}
-    num_vars: usize, // Total number of variables (k + num_later_vars)
+    y: &TernaryVec,                  // Point in {0,1,inf}^k
+    x_prime_idx: usize,              // Index for x' in {0,1}^{num_later_vars}
+    num_vars: usize,                 // Total number of variables (k + num_later_vars)
     dense_len_before_binding: usize, // Original dense length (num_coeffs / 3)
 ) -> (i128, i128, i128) {
     // k = y.0.len()
@@ -170,9 +170,11 @@ pub fn compute_idx4(y_prefix: &TernaryVec) -> Vec<(usize, TernaryVec, u8, Ternar
     let k = y_prefix.0.len();
     let mut results = Vec::new();
 
-    for i in 0..k { // i is the potential index of the *first* binary digit (0-based)
+    for i in 0..k {
+        // i is the potential index of the *first* binary digit (0-based)
         let u = y_prefix.0[i];
-        if u == 0 || u == 1 { // Found the first binary digit candidate u at index i
+        if u == 0 || u == 1 {
+            // Found the first binary digit candidate u at index i
             // Check if the suffix y[i+1..k-1] is all binary
             let suffix_is_binary = y_prefix.0[i + 1..].iter().all(|&val| val == 0 || val == 1);
 
@@ -191,9 +193,9 @@ pub fn compute_idx4(y_prefix: &TernaryVec) -> Vec<(usize, TernaryVec, u8, Ternar
                 // The pseudocode seems to generate all valid (i,v,u,y) tuples.
                 // Let's stick to the pseudocode interpretation: find ALL valid splits.
             }
-         } else if u != 2 {
-             panic!("Invalid ternary value in y_prefix"); // Should only contain 0, 1, 2
-         }
+        } else if u != 2 {
+            panic!("Invalid ternary value in y_prefix"); // Should only contain 0, 1, 2
+        }
     }
     results
 }

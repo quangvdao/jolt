@@ -7,7 +7,7 @@ use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::{
     field::JoltField,
     jolt::vm::JoltPolynomials,
-    poly::spartan_interleaved_poly::{NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial},
+    poly::spartan_interleaved_poly::SpartanInterleavedPolynomial,
     r1cs::key::{SparseConstraints, UniformR1CS},
 };
 use ark_ff::One;
@@ -501,6 +501,21 @@ pub(crate) fn eval_offset_lc<F: JoltField>(
         offset.1.evaluate_row(flattened_polynomials, next_step)
     } else {
         offset.1.constant_term_field()
+    }
+}
+
+pub(crate) fn eval_offset_lc_i64<F: JoltField>(
+    offset: &OffsetLC,
+    flattened_polynomials: &[&MultilinearPolynomial<F>],
+    step: usize,
+    next_step_m: Option<usize>,
+) -> i64 {
+    if !offset.0 {
+        offset.1.evaluate_row_i64(flattened_polynomials, step)
+    } else if let Some(next_step) = next_step_m {
+        offset.1.evaluate_row_i64(flattened_polynomials, next_step)
+    } else {
+        offset.1.constant_term_field_i64()
     }
 }
 

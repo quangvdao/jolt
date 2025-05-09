@@ -6,18 +6,20 @@ use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::poly::multilinear_polynomial::{
     BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
 };
-use crate::poly::spartan_interleaved_poly::{NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial};
+use crate::poly::spartan_interleaved_poly::{
+    NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial,
+};
 use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
+use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
+use crate::utils::small_value::NUM_SMALL_VALUE_ROUNDS;
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
 use ark_serialize::*;
 use rayon::prelude::*;
 use std::marker::PhantomData;
-use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
-use crate::utils::small_value::NUM_SMALL_VALUE_ROUNDS;
 
 pub trait Bindable<F: JoltField>: Sync {
     fn bind(&mut self, r: F);
@@ -198,21 +200,20 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         tau: &[F],
         transcript: &mut ProofTranscript,
     ) -> (Self, Vec<F>, [F; 3]) {
-
         let mut r = Vec::new();
         let mut polys = Vec::new();
         let mut claim = F::zero();
 
         // Round 0..NUM_SMALL_VALUE_ROUNDS:
-        
+
         // First, precompute the accumulators and also the `NewSpartanInterleavedPolynomial`
-        let (accums, mut az_bz_cz_poly) = 
-            NewSpartanInterleavedPolynomial::new_with_precompute(
-                padded_num_constraints, 
-                uniform_constraints, 
-                cross_step_constraints, 
-                &flattened_polys, 
-                tau);
+        let (accums, mut az_bz_cz_poly) = NewSpartanInterleavedPolynomial::new_with_precompute(
+            padded_num_constraints,
+            uniform_constraints,
+            cross_step_constraints,
+            &flattened_polys,
+            tau,
+        );
 
         let mut lagrange_coeffs = vec![F::one()];
 
@@ -235,12 +236,12 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             let quadratic_evals = (quadratic_eval_0, quadratic_eval_infty);
 
             let r_i = process_eq_sumcheck_round(
-                quadratic_evals, 
+                quadratic_evals,
                 &mut eq_poly,
                 &mut polys,
                 &mut r,
                 &mut claim,
-                transcript
+                transcript,
             );
 
             // Lagrange coefficients for 0, 1, and infty, respectively
@@ -259,11 +260,23 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         }
 
         // Round NUM_SMALL_VALUE_ROUNDS : do the streaming sumcheck to compute cached values
-        az_bz_cz_poly.streaming_sumcheck_round(&mut eq_poly, transcript, &mut r, &mut polys, &mut claim);
+        az_bz_cz_poly.streaming_sumcheck_round(
+            &mut eq_poly,
+            transcript,
+            &mut r,
+            &mut polys,
+            &mut claim,
+        );
 
         // Round (NUM_SMALL_VALUE_ROUNDS + 1)..num_rounds : do the linear time sumcheck
         for _ in (NUM_SMALL_VALUE_ROUNDS + 1)..num_rounds {
-            az_bz_cz_poly.remaining_sumcheck_round(&mut eq_poly, transcript, &mut r, &mut polys, &mut claim);
+            az_bz_cz_poly.remaining_sumcheck_round(
+                &mut eq_poly,
+                transcript,
+                &mut r,
+                &mut polys,
+                &mut claim,
+            );
         }
 
         (
@@ -570,7 +583,7 @@ pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
         ],
         quadratic_evals.0,
         quadratic_evals.1,
-        claim.clone(),
+        *claim,
     );
 
     // Compress and add to transcript

@@ -25,7 +25,8 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A sparse vector representing the (interleaved) coefficients for the Az, Bz polynomials
     /// (note: **no** Cz coefficients are stored here, since they are not needed for small value
     /// precomputation, and can be computed on the fly in streaming round)
-    pub(crate) ab_unbound_coeffs: Vec<SparseCoefficient<i64>>,
+    /// This is grouped by y_high_prefix determined by num_precomputation_rounds.
+    pub(crate) ab_unbound_coeffs: Vec<Vec<SparseCoefficient<i64>>>,
 
     pub(crate) az_bound_coeffs: DensePolynomial<F>,
     pub(crate) bz_bound_coeffs: DensePolynomial<F>,
@@ -41,139 +42,151 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         cross_step_constraints: &[OffsetEqConstraint],
         flattened_polynomials: &[&MultilinearPolynomial<F>],
         tau: &[F],
+        num_precomputation_rounds: usize,
     ) -> (Vec<(Vec<F>, Vec<F>)>, Self) {
-        // Initialize special split eq polynomial for small value precompute.
+        let num_steps = flattened_polynomials[0].len();
+        let constraint_vars = padded_num_constraints.log_2();
 
-        // Instead of having a clean split around the half-point, we will have a delayed +
-        // wrap-around split around the point l + n/2, where l is the number of small value rounds
-
+        // DO NOT DELETE. Relevant for full small value optimization (SVO).
         // 0 ..... l ..... (l + n/2) ..... n
         //          <--- E_in --->
         // E_out ->                <-- E_out
-        let _eq_poly = NewSplitEqPolynomial::new(tau);
+        // let _eq_poly = NewSplitEqPolynomial::new(tau);
 
-        // TODO: add small value precompute logic
+        assert!(num_precomputation_rounds <= constraint_vars, 
+                "num_precomputation_rounds (for SVO on constraint variables) cannot exceed constraint_vars (log2 of padded_num_constraints)");
 
-        let num_steps = flattened_polynomials[0].len();
+        // effective_svo_rounds are the top bits of constraint_index_within_step for SVO
+        // Assuming num_precomputation_rounds is already capped or validated by caller if necessary for 0 case.
+        let effective_svo_rounds = num_precomputation_rounds; 
+                                                        // If num_precomputation_rounds can be 0, handle accordingly.
+        let lower_constraint_vars = constraint_vars.saturating_sub(effective_svo_rounds);
+        let num_svo_chunks_per_step = 1 << lower_constraint_vars;
+        let total_svo_chunks = num_steps * num_svo_chunks_per_step;
 
-        let num_chunks = rayon::current_num_threads().next_power_of_two() * 4;
-        let chunk_size = num_steps.div_ceil(num_chunks);
-
-        // The parallel computation below generates coefficients for each chunk. Each chunk's output
-        // (`coeffs_chunk`) is internally sorted by index due to sequential processing of step_index
-        // and constraint_index. `flat_map_iter`, when used with an IndexedParallelIterator (like
-        // the range `0..num_chunks`), processes these chunks in parallel **but** then concatenates
-        // their resulting iterators (which are `coeffs_chunk.into_iter()`) in the order of the
-        // original indexed items.
-
-        // This ensures that the final `ab_unbound_coeffs` vector is sorted by `index` without
-        // requiring a separate sort step.
-        let ab_unbound_coeffs: Vec<SparseCoefficient<i64>> = (0..num_chunks)
+        let ab_unbound_coeffs: Vec<Vec<SparseCoefficient<i64>>> = (0..total_svo_chunks)
             .into_par_iter()
-            .flat_map_iter(|chunk_index| {
-                let mut coeffs_chunk = Vec::with_capacity(chunk_size * padded_num_constraints * 2); // Max 2 coeffs (A,B) per constraint
-                for step_index in chunk_size * chunk_index..chunk_size * (chunk_index + 1).min(num_steps) {
-                    // Uniform constraints
-                    for (constraint_index, constraint) in uniform_constraints.iter().enumerate() {
-                        let global_index = step_index * padded_num_constraints + constraint_index;
+            .map(|svo_chunk_global_idx| {
+                let step_index = svo_chunk_global_idx / num_svo_chunks_per_step;
+                let lower_constraint_bits_val = svo_chunk_global_idx % num_svo_chunks_per_step;
+                
+                let mut current_chunk_coeffs: Vec<SparseCoefficient<i64>> = Vec::new();
 
-                        // Az
-                        if !constraint.a.terms().is_empty() {
-                            let az_coeff = constraint
-                                .a
-                                .evaluate_row_i64(flattened_polynomials, step_index);
+                for svo_prefix_val in 0..(1 << effective_svo_rounds) {
+                    let constraint_index_within_step =
+                        (svo_prefix_val << lower_constraint_vars) + lower_constraint_bits_val;
+
+                    if constraint_index_within_step < padded_num_constraints {
+                        let global_r1cs_index = step_index * padded_num_constraints + constraint_index_within_step;
+
+                        // Uniform constraints
+                        if constraint_index_within_step < uniform_constraints.len() {
+                            let constraint = &uniform_constraints[constraint_index_within_step];
+                            // Az
+                            if !constraint.a.terms().is_empty() {
+                                let az_coeff = constraint
+                                    .a
+                                    .evaluate_row_i64(flattened_polynomials, step_index);
+                                if !az_coeff.is_zero() {
+                                    current_chunk_coeffs.push((global_r1cs_index * 2, az_coeff).into());
+                                }
+                            }
+                            // Bz
+                            if !constraint.b.terms().is_empty() {
+                                let bz_coeff = constraint
+                                    .b
+                                    .evaluate_row_i64(flattened_polynomials, step_index);
+                                if !bz_coeff.is_zero() {
+                                    current_chunk_coeffs.push((global_r1cs_index * 2 + 1, bz_coeff).into());
+                                }
+                            }
+                        }
+                        // Cross-step constraints
+                        // Check if constraint_index_within_step corresponds to a cross-step constraint
+                        else if constraint_index_within_step < uniform_constraints.len() + cross_step_constraints.len() {
+                            let cross_step_constraint_idx = constraint_index_within_step - uniform_constraints.len();
+                            let constraint = &cross_step_constraints[cross_step_constraint_idx];
+                            
+                            let next_step_index_opt = if step_index + 1 < num_steps {
+                                Some(step_index + 1)
+                            } else {
+                                None
+                            };
+
+                            // Az for cross-step
+                            let eq_a_eval = eval_offset_lc_i64(
+                                &constraint.a,
+                                flattened_polynomials,
+                                step_index,
+                                next_step_index_opt,
+                            );
+                            let eq_b_eval = eval_offset_lc_i64(
+                                &constraint.b,
+                                flattened_polynomials,
+                                step_index,
+                                next_step_index_opt,
+                            );
+                            let az_coeff = eq_a_eval - eq_b_eval;
+
                             if !az_coeff.is_zero() {
-                                coeffs_chunk.push((global_index * 2, az_coeff).into());
-                            }
-                        }
-                        // Bz
-                        if !constraint.b.terms().is_empty() {
-                            let bz_coeff = constraint
-                                .b
-                                .evaluate_row_i64(flattened_polynomials, step_index);
-                            if !bz_coeff.is_zero() {
-                                coeffs_chunk.push((global_index * 2 + 1, bz_coeff).into());
-                            }
-                        }
-                    }
-
-                    let next_step_index = if step_index + 1 < num_steps {
-                        Some(step_index + 1)
-                    } else {
-                        None
-                    };
-
-                    // Cross-step constraints
-                    for (constraint_index, constraint) in cross_step_constraints.iter().enumerate()
-                    {
-                        let global_index =
-                                step_index * padded_num_constraints
-                                + uniform_constraints.len()
-                                + constraint_index;
-
-                        // Az
-                        let eq_a_eval = eval_offset_lc_i64(
-                            &constraint.a,
-                            flattened_polynomials,
-                            step_index,
-                            next_step_index,
-                        );
-                        let eq_b_eval = eval_offset_lc_i64(
-                            &constraint.b,
-                            flattened_polynomials,
-                            step_index,
-                            next_step_index,
-                        );
-                        let az_coeff = eq_a_eval - eq_b_eval;
-                        if !az_coeff.is_zero() {
-                            coeffs_chunk.push((global_index * 2, az_coeff).into());
-                            #[cfg(test)]
-                            {
-                                let bz_coeff_cond_check = eval_offset_lc_i64(
+                                current_chunk_coeffs.push((global_r1cs_index * 2, az_coeff).into());
+                                #[cfg(test)]
+                                {
+                                    let bz_coeff_cond_check = eval_offset_lc_i64(
+                                        &constraint.cond,
+                                        flattened_polynomials,
+                                        step_index,
+                                        next_step_index_opt,
+                                    );
+                                    assert_eq!(bz_coeff_cond_check, 0, "Cross-step constraint {cross_step_constraint_idx} violated at step {step_index} for Az term");
+                                }
+                            } else {
+                                // Bz for cross-step (only if Az is zero)
+                                let bz_coeff = eval_offset_lc_i64(
                                     &constraint.cond,
                                     flattened_polynomials,
                                     step_index,
-                                    next_step_index,
+                                    next_step_index_opt,
                                 );
-                                assert_eq!(bz_coeff_cond_check, 0, "Cross-step constraint {constraint_index} violated at step {step_index} for Az term");
-                            }
-                        } else {
-                            // Bz
-                            let bz_coeff = eval_offset_lc_i64(
-                                &constraint.cond,
-                                flattened_polynomials,
-                                step_index,
-                                next_step_index,
-                            );
-                            if !bz_coeff.is_zero() {
-                                coeffs_chunk.push((global_index * 2 + 1, bz_coeff).into());
+                                if !bz_coeff.is_zero() {
+                                    current_chunk_coeffs.push((global_r1cs_index * 2 + 1, bz_coeff).into());
+                                }
                             }
                         }
                     }
                 }
-                coeffs_chunk
+                // Sort coefficients within this SVO chunk by their global sparse index (Az/Bz interleaved)
+                current_chunk_coeffs.sort_by_key(|coeff| coeff.index);
+                current_chunk_coeffs
             })
             .collect();
+        
+        // TODO: SVO Precomputation logic will consume/use ab_unbound_coeffs
+        // For now, _eq_poly is unused beyond this point for this function's current scope
+        let _eq_poly = NewSplitEqPolynomial::new(tau); 
+
 
         #[cfg(test)]
         {
-            // Check that indices are monotonically increasing
-            if !ab_unbound_coeffs.is_empty() {
-                let mut prev_index = ab_unbound_coeffs[0].index;
-                for coeff in ab_unbound_coeffs[1..].iter() {
-                    assert!(
-                        coeff.index > prev_index,
-                        "Indices not monotonically increasing: prev {}, current {}",
-                        prev_index,
-                        coeff.index
-                    );
-                    prev_index = coeff.index;
+            for (svo_chunk_idx, group_coeffs) in ab_unbound_coeffs.iter().enumerate() {
+                if !group_coeffs.is_empty() {
+                    let mut prev_index = group_coeffs[0].index;
+                    for coeff in group_coeffs[1..].iter() {
+                        assert!(
+                            coeff.index > prev_index,
+                            "Indices not monotonically increasing in SVO chunk {}: prev {}, current {}",
+                            svo_chunk_idx,
+                            prev_index,
+                            coeff.index
+                        );
+                        prev_index = coeff.index;
+                    }
                 }
             }
         }
 
         (
-            vec![],
+            vec![], // Placeholder for SVO accumulators
             Self {
                 ab_unbound_coeffs,
                 az_bound_coeffs: DensePolynomial::new(vec![]),
@@ -200,7 +213,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     /// and `t_i(infty) = \sum_{x_out} E2[x_out] \sum_{x_in} E1[x_in] *
     /// (unbound_coeffs_a(r,infty,x_in, x_out) * unbound_coeffs_b(r,infty, x_in, x_out))`
     ///
-    /// Here the "_{a,b,c}" subscript indicates the coefficients of `unbound_coeffs` corresponding
+    /// Here the "_a,b,c" subscript indicates the coefficients of `unbound_coeffs` corresponding
     /// to Az, Bz, Cz respectively. Importantly, since the eval at `r` is not cached, we will need
     /// to recompute it via another sum
     ///
@@ -244,137 +257,127 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         let eq_r = EqPolynomial::evals(r_challenges);
         assert_eq!(eq_r.len(), N_high);
 
-        // 2. Compute dense bound evaluations P(r_{[<i]}, u, x') for u=0 and u=1
-        // These will be populated by iterating through ab_unbound_coeffs
-        let mut az_evals_0: Vec<F> = vec![F::zero(); N_k];
-        let mut az_evals_1: Vec<F> = vec![F::zero(); N_k];
-        let mut bz_evals_0: Vec<F> = vec![F::zero(); N_k];
-        let mut bz_evals_1: Vec<F> = vec![F::zero(); N_k];
-        // We need to populate cz_evals_0/1 **during** the below loop, not after it.
-        let mut cz_evals_0: Vec<F> = vec![F::zero(); N_k];
-        let mut cz_evals_1: Vec<F> = vec![F::zero(); N_k];
+        // --- Phase A: Parallel computation of Az(r,u,x'), Bz(r,u,x'), Cz(r,u,x') ---
 
-        // Create iterators for parallel processing if possible, or manage indices carefully.
-        // The core idea: for each (y_high, x_prime_idx) pair, find relevant sparse coeffs.
-        // Since ab_unbound_coeffs is sorted, we can advance a single iterator.
-
-        // Simplified sequential version for clarity, can be parallelized over x_prime_idx later
-        // by giving each thread/task its own iterator or a sub-slice of ab_unbound_coeffs.
-        let mut ab_iter = self.ab_unbound_coeffs.iter().peekable();
-
-        // THIS NEEDS TO BE MERGED WITH THE BELOW LOOP!
-        for y_high_idx in 0..N_high {
-            // Iterate over assignments y_high (already bound variables)
-            let eq_r_value = eq_r[y_high_idx];
-            if eq_r_value.is_zero() {
-                // If eq_r_value is zero, this y_high_idx contributes nothing to any sum, so we can skip processing its x_prime_idx range.
-                // However, the iterator ab_iter must still be advanced past all coefficients related to this y_high_idx.
-                // The simplest way is to calculate the max dense_idx for this y_high_idx and advance iterator past it.
-                let max_r1cs_row_idx_for_y_high = (y_high_idx << (current_var_index_k + 1))
-                    | ((1 << (current_var_index_k + 1)) - 1); // Max index if all lower bits are 1
-                let max_sparse_idx_for_y_high = max_r1cs_row_idx_for_y_high * 2 + 1;
-                while let Some(coeff) = ab_iter.peek() {
-                    if coeff.index <= max_sparse_idx_for_y_high {
-                        ab_iter.next();
-                    } else {
-                        break;
-                    }
+        // 1.1 Pre-group ab_unbound_coeffs by y_high_idx
+        let mut coeffs_grouped_by_y_high: Vec<Vec<SparseCoefficient<i64>>> =
+            vec![Vec::new(); N_high];
+        for group in &self.ab_unbound_coeffs { // Iterate over precomputation groups
+            for coeff in group { // Iterate over coefficients within that group
+                let r1cs_row_index = coeff.index / 2;
+                // y_high_idx is the most significant num_rounds_done bits of the r1cs_row_index.
+                // The lower (current_var_index_k + 1) bits correspond to X_k and x_prime.
+                let y_idx_of_coeff = r1cs_row_index >> (current_var_index_k + 1);
+                if y_idx_of_coeff < N_high {
+                    // Ensure index is within bounds, though it should be by construction
+                    coeffs_grouped_by_y_high[y_idx_of_coeff].push(*coeff);
                 }
-                continue;
             }
+        }
 
-            for x_prime_idx in 0..N_k {
-                // Iterate over assignments to x' (variables lower than k)
+        // 1.2 Parallel map-reduce over y_high_idx groups
+        let (az_evals_0, az_evals_1, bz_evals_0, bz_evals_1, cz_evals_0, cz_evals_1) =
+            coeffs_grouped_by_y_high
+                .par_iter()
+                .enumerate()
+                .map(|(y_high_idx, one_y_coeffs_vec)| {
+                    let eq_r_value = eq_r[y_high_idx];
+                    let mut task_az_0 = vec![F::zero(); N_k];
+                    let mut task_az_1 = vec![F::zero(); N_k];
+                    let mut task_bz_0 = vec![F::zero(); N_k];
+                    let mut task_bz_1 = vec![F::zero(); N_k];
+                    let mut task_cz_0 = vec![F::zero(); N_k];
+                    let mut task_cz_1 = vec![F::zero(); N_k];
 
-                // Temporary variables to store original i64 coefficients for the current (y_high_idx, x_prime_idx) contribution
-                let mut az_orig_val_at_y_xk0: i64 = 0;
-                let mut bz_orig_val_at_y_xk0: i64 = 0;
-                let mut az_orig_val_at_y_xk1: i64 = 0;
-                let mut bz_orig_val_at_y_xk1: i64 = 0;
-
-                // Target R1CS row index for (y_high, X_k=0, x_prime) and (y_high, X_k=1, x_prime)
-                let r1cs_row_idx_if_Xk_0 = (y_high_idx << (current_var_index_k + 1))
-                    | (0 << current_var_index_k)
-                    | x_prime_idx;
-                let r1cs_row_idx_if_Xk_1 = (y_high_idx << (current_var_index_k + 1))
-                    | (1 << current_var_index_k)
-                    | x_prime_idx;
-
-                // Corresponding target sparse indices
-                let target_sparse_idx_Az_Xk_0 = r1cs_row_idx_if_Xk_0 * 2;
-                let target_sparse_idx_Bz_Xk_0 = r1cs_row_idx_if_Xk_0 * 2 + 1;
-                let target_sparse_idx_Az_Xk_1 = r1cs_row_idx_if_Xk_1 * 2;
-                let target_sparse_idx_Bz_Xk_1 = r1cs_row_idx_if_Xk_1 * 2 + 1;
-
-                // --- Process Az for Xk=0 ---
-                while let Some(coeff) = ab_iter.peek() {
-                    if coeff.index < target_sparse_idx_Az_Xk_0 {
-                        ab_iter.next();
-                    } else {
-                        if coeff.index == target_sparse_idx_Az_Xk_0 {
-                            // Found Az(y_high, 0, x')
-                            az_evals_0[x_prime_idx] += eq_r_value.mul_i64(coeff.value);
-                            az_orig_val_at_y_xk0 = coeff.value; // Store for Cz calculation
-                        }
-                        break;
+                    if eq_r_value.is_zero() {
+                        // If eq_r_value is zero, this y_high_idx contributes nothing.
+                        return (task_az_0, task_az_1, task_bz_0, task_bz_1, task_cz_0, task_cz_1);
                     }
-                }
-                // --- Process Bz for Xk=0 ---
-                // Iterator is now at or after Az_Xk_0
-                while let Some(coeff) = ab_iter.peek() {
-                    if coeff.index < target_sparse_idx_Bz_Xk_0 {
-                        ab_iter.next();
-                    } else {
-                        if coeff.index == target_sparse_idx_Bz_Xk_0 {
-                            // Found Bz(y_high, 0, x')
-                            bz_evals_0[x_prime_idx] += eq_r_value.mul_i64(coeff.value);
-                            bz_orig_val_at_y_xk0 = coeff.value; // Store for Cz calculation
-                        }
-                        break;
-                    }
-                }
-                // --- Process Az for Xk=1 ---
-                while let Some(coeff) = ab_iter.peek() {
-                    if coeff.index < target_sparse_idx_Az_Xk_1 {
-                        ab_iter.next();
-                    } else {
-                        if coeff.index == target_sparse_idx_Az_Xk_1 {
-                            // Found Az(y_high, 1, x')
-                            az_evals_1[x_prime_idx] += eq_r_value.mul_i64(coeff.value);
-                            az_orig_val_at_y_xk1 = coeff.value; // Store for Cz calculation
-                        }
-                        break;
-                    }
-                }
-                // --- Process Bz for Xk=1 ---
-                while let Some(coeff) = ab_iter.peek() {
-                    if coeff.index < target_sparse_idx_Bz_Xk_1 {
-                        ab_iter.next();
-                    } else {
-                        if coeff.index == target_sparse_idx_Bz_Xk_1 {
-                            // Found Bz(y_high, 1, x')
-                            bz_evals_1[x_prime_idx] += eq_r_value.mul_i64(coeff.value);
-                            bz_orig_val_at_y_xk1 = coeff.value; // Store for Cz calculation
-                        }
-                        break;
-                    }
-                }
 
-                // Accumulate Cz contributions for the current y_high_idx
-                // Cz_orig(y,0,x') = Az_orig(y,0,x') * Bz_orig(y,0,x')
-                cz_evals_0[x_prime_idx] += eq_r_value.mul_i128(az_orig_val_at_y_xk0 as i128 * bz_orig_val_at_y_xk0 as i128);
-                // Cz_orig(y,1,x') = Az_orig(y,1,x') * Bz_orig(y,1,x')
-                cz_evals_1[x_prime_idx] += eq_r_value.mul_i128(az_orig_val_at_y_xk1 as i128 * bz_orig_val_at_y_xk1 as i128);
-            } // End x_prime_idx loop
-              // After processing all x_prime_idx for a given y_high_idx, the iterator ab_iter
-              // should ideally be positioned at the start of the next y_high_idx block or past the
-              // current one. The current structure with nested loops and a single shared iterator
-              // is complex for parallelization and correctness. The iterator must be managed
-              // carefully so it's correctly positioned for the *next* y_high_idx, x_prime_idx
-              // combination.
-        } // End y_high_idx loop
+                    let mut current_coeffs_iter = one_y_coeffs_vec.iter().peekable();
 
-        // 3. Compute t_i(0) and t_i(infty) using the dense evals and eq_poly logic
+                    for x_prime_idx in 0..N_k {
+                        let mut az_orig_0_i64: i64 = 0;
+                        let mut bz_orig_0_i64: i64 = 0;
+                        let mut az_orig_1_i64: i64 = 0;
+                        let mut bz_orig_1_i64: i64 = 0;
+
+                        // Target R1CS row index parts for (y_high, X_k=0, x_prime) and (y_high, X_k=1, x_prime)
+                        // Note: y_high_idx is fixed for this map task.
+                        let r1cs_row_idx_if_Xk_0 = (y_high_idx << (current_var_index_k + 1))
+                            | (0 << current_var_index_k)
+                            | x_prime_idx;
+                        let r1cs_row_idx_if_Xk_1 = (y_high_idx << (current_var_index_k + 1))
+                            | (1 << current_var_index_k)
+                            | x_prime_idx;
+
+                        let target_sparse_idx_Az_Xk_0 = r1cs_row_idx_if_Xk_0 * 2;
+                        let target_sparse_idx_Bz_Xk_0 = r1cs_row_idx_if_Xk_0 * 2 + 1;
+                        let target_sparse_idx_Az_Xk_1 = r1cs_row_idx_if_Xk_1 * 2;
+                        let target_sparse_idx_Bz_Xk_1 = r1cs_row_idx_if_Xk_1 * 2 + 1;
+
+                        // Fallback to sequential-style iteration logic for this y_high_idx's slice
+                        // (The single `current_coeffs_iter` is advanced across all x_prime_idx for this y_high_idx)
+                        while let Some(coeff) = current_coeffs_iter.peek() {
+                            if coeff.index < target_sparse_idx_Az_Xk_0 { current_coeffs_iter.next(); continue; }
+                            if coeff.index == target_sparse_idx_Az_Xk_0 { az_orig_0_i64 = coeff.value; /* do not break yet if next coeff is Bz_Xk_0 */}
+                            break; // Found or passed Az_Xk_0
+                        }
+                        while let Some(coeff) = current_coeffs_iter.peek() {
+                            if coeff.index < target_sparse_idx_Bz_Xk_0 { current_coeffs_iter.next(); continue; }
+                            if coeff.index == target_sparse_idx_Bz_Xk_0 { bz_orig_0_i64 = coeff.value; }
+                            break; // Found or passed Bz_Xk_0
+                        }
+                        while let Some(coeff) = current_coeffs_iter.peek() {
+                            if coeff.index < target_sparse_idx_Az_Xk_1 { current_coeffs_iter.next(); continue; }
+                            if coeff.index == target_sparse_idx_Az_Xk_1 { az_orig_1_i64 = coeff.value; }
+                            break; // Found or passed Az_Xk_1
+                        }
+                        while let Some(coeff) = current_coeffs_iter.peek() {
+                            if coeff.index < target_sparse_idx_Bz_Xk_1 { current_coeffs_iter.next(); continue; }
+                            if coeff.index == target_sparse_idx_Bz_Xk_1 { bz_orig_1_i64 = coeff.value; }
+                            break; // Found or passed Bz_Xk_1
+                        }
+
+                        task_az_0[x_prime_idx] = eq_r_value.mul_i64(az_orig_0_i64);
+                        task_bz_0[x_prime_idx] = eq_r_value.mul_i64(bz_orig_0_i64);
+                        task_cz_0[x_prime_idx] = eq_r_value.mul_i128(az_orig_0_i64 as i128 * bz_orig_0_i64 as i128);
+                        task_az_1[x_prime_idx] = eq_r_value.mul_i64(az_orig_1_i64);
+                        task_bz_1[x_prime_idx] = eq_r_value.mul_i64(bz_orig_1_i64);
+                        task_cz_1[x_prime_idx] = eq_r_value.mul_i128(az_orig_1_i64 as i128 * bz_orig_1_i64 as i128);
+                    }
+                    (task_az_0, task_az_1, task_bz_0, task_bz_1, task_cz_0, task_cz_1)
+                })
+                .reduce(
+                    || {
+                        (
+                            vec![F::zero(); N_k],
+                            vec![F::zero(); N_k],
+                            vec![F::zero(); N_k],
+                            vec![F::zero(); N_k],
+                            vec![F::zero(); N_k],
+                            vec![F::zero(); N_k],
+                        )
+                    },
+                    |acc, item| {
+                        let (mut acc_az0, mut acc_az1, mut acc_bz0, mut acc_bz1, mut acc_cz0, mut acc_cz1) = acc;
+                        let (item_az0, item_az1, item_bz0, item_bz1, item_cz0, item_cz1) = item;
+                        for i in 0..N_k {
+                            acc_az0[i] += item_az0[i];
+                            acc_az1[i] += item_az1[i];
+                            acc_bz0[i] += item_bz0[i];
+                            acc_bz1[i] += item_bz1[i];
+                            acc_cz0[i] += item_cz0[i];
+                            acc_cz1[i] += item_cz1[i];
+                        }
+                        (acc_az0, acc_az1, acc_bz0, acc_bz1, acc_cz0, acc_cz1)
+                    },
+                );
+
+        // --- End of Phase A ---
+
+        // Phase B: Compute t_i(0) and t_i(infty) using the dense evals from Phase A
+        // TODO: merge this with the above loop
         let (quadratic_eval_at_0, quadratic_eval_at_infty) = if eq_poly.E1_len() == 1 {
             // E1 is bound, E2 covers all remaining variables x' (size N_k)
             debug_assert_eq!(
@@ -620,9 +623,11 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                         let term_eval_at_0 = az0 * bz0 - cz0;
                         let term_eval_at_infty = az_m * bz_m;
 
+                        // Inner sum part: sum_{x_in} E1(x_in) * P(r_{high}, {0,infty}, x_out, x_in)
                         inner_sum_eval_at_0 += e1_val * term_eval_at_0;
                         inner_sum_eval_at_infty += e1_val * term_eval_at_infty;
                     }
+                    // Outer sum part: E2(x_out) * (inner sum)
                     (
                         *e2_val * inner_sum_eval_at_0,
                         *e2_val * inner_sum_eval_at_infty,
@@ -1442,3 +1447,4 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         [final_az_eval, final_bz_eval, final_cz_eval]
     }
 }
+

@@ -21,11 +21,194 @@ use crate::{
 use ark_ff::Zero;
 use rayon::prelude::*;
 
+use std::collections::BTreeMap; // Still needed for temp_tA internal to a task
+
+// Helper Enum for SVO evaluation points
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)] // Added Ord for BTreeMap key
+pub enum SVOEvalPoint {
+    Zero,
+    One,
+    Infinity,
+}
+
+// TODO: Implement these helper functions
+
+// Defines how non-SVO variables (like step_idx, lower_constraint_bits) are iterated.
+// The first element of the tuple is an iterator for the "outer" part (e.g., step_idx or its higher bits),
+// which will be parallelized over.
+// The second element is a function that, given an outer value, returns an iterator for the "inner" part.
+fn define_non_svo_iteration_split<F: JoltField>(
+    num_steps: usize,
+    lower_constraint_vars: usize, // Num bits for lower part of constraint index (non-SVO part)
+) -> (
+    std::ops::Range<usize>, // Changed from impl Iterator<Item = usize>
+    impl Fn(usize) -> std::ops::Range<usize> + Send + Sync + Copy, // Closure for inner loop
+) {
+    // Example: x_out is step_idx, x_in is lower_constraint_bits_val
+    // This needs a concrete definition based on how Z variables are structured and parallelized.
+    // For now, assume x_out_non_svo_val = step_idx
+    // and x_in_non_svo_val = lower_constraint_bits_val
+    let x_out_iterator = 0..num_steps; // This will be used with .into_par_iter()
+    let x_in_fn = move |_step_idx: usize| (0..(1 << lower_constraint_vars));
+    (x_out_iterator, x_in_fn)
+}
+
+// From the parts iterated by define_non_svo_iteration_split, reconstruct the full indices.
+fn reconstruct_full_non_svo_indices(
+    x_out_non_svo_val: usize, // e.g., step_idx from the outer parallel loop
+    x_in_non_svo_val: usize,  // e.g., lower_constraint_bits_val from the inner serial loop
+    _num_steps: usize, // For context if step_idx was split
+    _lower_constraint_vars: usize, // For context if lower_constraint_vars was split
+) -> (usize, usize) { // Returns (current_step_idx, current_lower_bits_val)
+    // If x_out_non_svo_val is step_idx and x_in_non_svo_val is lower_bits_val:
+    (x_out_non_svo_val, x_in_non_svo_val)
+}
+
+// Evaluates Az, Bz for a given R1CS row with fully binary SVO prefix.
+fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
+    uniform_constraints: &[Constraint],
+    cross_step_constraints: &[OffsetEqConstraint],
+    flattened_polynomials: &[&MultilinearPolynomial<F>],
+    current_step_idx: usize,
+    constraint_idx_within_step: usize, // Full constraint index including SVO bits (all binary)
+    num_uniform_constraints: usize,
+    num_total_constraints_padded: usize, // For calculating global_r1cs_idx if needed by caller
+    num_total_steps: usize,
+) -> (i64, i64) { // Returns (az_coeff_i64, bz_coeff_i64)
+    let mut az_i64 = 0i64;
+    let mut bz_i64 = 0i64;
+
+    if constraint_idx_within_step < num_uniform_constraints {
+        let constraint = &uniform_constraints[constraint_idx_within_step];
+        if !constraint.a.terms().is_empty() {
+            az_i64 = constraint.a.evaluate_row_i64(flattened_polynomials, current_step_idx);
+        }
+        if !constraint.b.terms().is_empty() {
+            bz_i64 = constraint.b.evaluate_row_i64(flattened_polynomials, current_step_idx);
+        }
+    } else if constraint_idx_within_step < num_uniform_constraints + cross_step_constraints.len() {
+        let cross_step_constraint_idx = constraint_idx_within_step - num_uniform_constraints;
+        let constraint = &cross_step_constraints[cross_step_constraint_idx];
+        let next_step_index_opt = if current_step_idx + 1 < num_total_steps {
+            Some(current_step_idx + 1)
+        } else {
+            None
+        };
+
+        let eq_a_eval = eval_offset_lc_i64(&constraint.a, flattened_polynomials, current_step_idx, next_step_index_opt);
+        let eq_b_eval = eval_offset_lc_i64(&constraint.b, flattened_polynomials, current_step_idx, next_step_index_opt);
+        let temp_az = eq_a_eval - eq_b_eval;
+
+        if !temp_az.is_zero() {
+            az_i64 = temp_az;
+            // Optional: Assert cond is zero:
+            // let cond_eval = eval_offset_lc_i64(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
+            // assert_eq!(cond_eval, 0, "Cross-step constraint violated");
+        } else {
+            bz_i64 = eval_offset_lc_i64(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
+        }
+    }
+    (az_i64, bz_i64)
+}
+
+
+// Computes product P(Y_ext, Z_curr) = Az_ext * Bz_ext (no Cz for SVO infinity paths)
+// from all binary Az/Bz values at Z_curr. Updates temp_tA.
+fn TODO_compute_extended_products_and_update_tA<F: JoltField>(
+    binary_evals_at_Z_current: &[(i64, i64)], // Indexed by Y_binary_prefix_val (0 to 2^num_svo_rounds - 1)
+    num_svo_rounds: usize,
+    E_in_val: F, // Factor from Teq over x_in_non_svo variables (using tau parts for Z_in)
+    temp_tA: &mut BTreeMap<Vec<SVOEvalPoint>, F>, // Key: Y_extended (length num_svo_rounds)
+) {
+    // Placeholder: Actual implementation is complex.
+    // Iterate all 3^num_svo_rounds Y_ext (Vec<SVOEvalPoint>).
+    // For each Y_ext:
+    //   Calculate Az_ext(Y_ext, Z_curr) and Bz_ext(Y_ext, Z_curr) using multilinearity
+    //   from the provided `binary_evals_at_Z_current`.
+    //   product_P = Az_ext * Bz_ext.
+    //   *temp_tA.entry(Y_ext.clone()).or_insert(F::zero()) += E_in_val * product_P;
+}
+
+// Implements Definition 4 ("idx4") from the paper to map an extended SVO prefix
+// to (round_s, v_config, u_eval, y_suffix_binary) tuples.
+fn TODO_idx4_mapping(
+    svo_prefix_extended: Vec<SVOEvalPoint>, // k_eff == num_svo_rounds length
+    num_svo_rounds: usize,
+) -> Vec<(
+    usize,                      // SVO round index s (0 to num_svo_rounds-1)
+    Vec<SVOEvalPoint>,       // v_config (v_0, ..., v_{s-1}), length s
+    SVOEvalPoint,            // u_eval (for y_s)
+    Vec<bool>,                  // y_suffix_binary (binary values for y_{s+1}, ..., y_{num_svo_rounds-1})
+)> {
+    // Placeholder: Actual implementation needs careful iteration and checking conditions.
+    vec![]
+}
+
+// Maps a v-configuration (Vec<SVOEvalPoint> of length s) to a unique usize index (0 to 3^s - 1).
+fn map_v_config_to_idx(v_config: &[SVOEvalPoint], _round_s: usize) -> usize {
+    // Example: Treat SVOEvalPoint::{Zero, One, Infinity} as digits 0, 1, 2 in base 3.
+    let mut index = 0;
+    let base: usize = 3;
+    for (i, point) in v_config.iter().enumerate() {
+        let digit = match point {
+            SVOEvalPoint::Zero => 0,
+            SVOEvalPoint::One => 1,
+            SVOEvalPoint::Infinity => 2,
+        };
+        index += digit * base.pow(i as u32);
+    }
+    index
+}
+
+// Computes Teq(tau_for_x_in, x_in_non_svo_val_as_binary_vec)
+fn TODO_get_E_in_val_for_x_in<F: JoltField>(
+    _x_in_non_svo_val: usize, // Represents the specific assignment to x_in non-SVO variables
+    _tau: &[F],           // Full verifier challenges for all R1CS variables
+    _num_step_vars: usize,      // To help locate tau components for step vars
+    _num_svo_rounds: usize,    // To help locate tau components for SVO vars
+    _lower_constraint_vars: usize, // To help locate tau components for lower constraint vars
+                               // Potentially pass a pre-configured Z_eq_poly for this
+) -> F {
+    // Placeholder: This needs to select the right challenges from tau that correspond
+    // to the variables represented by x_in_non_svo_val, convert x_in_non_svo_val to its
+    // bit decomposition, and evaluate the Eq polynomial.
+    F::one()
+}
+
+// Computes Teq factor for E_out_s
+fn TODO_get_E_out_s_val<F: JoltField>(
+    _svo_round_s: usize,
+    _y_suffix_binary_for_E_out: &[bool], // Binary suffix of SVO vars from idx4
+    _x_out_non_svo_val: usize, // Represents assignment to x_out non-SVO variables
+    _tau: &[F],
+    _num_step_vars: usize,
+    _num_svo_rounds: usize,
+    _lower_constraint_vars: usize,
+    // Potentially pass a pre-configured Z_eq_poly
+) -> F {
+    // Placeholder: Similar to E_in, but for variables in (y_suffix, x_out_non_svo).
+    F::one()
+}
+
+// Result of a single parallel task in the fold-reduce pattern for the small value optimization (SVO)
+struct PartialSmallValueContrib<F: JoltField> {
+    // Outer Vec indexed by y_svo_e2_binary_bucket.
+    // Inner Vec contains SparseCoefficients for that bucket from this task,
+    // generated in sorted order by global_r1cs_idx.
+    ab_coeffs_buckets_contribution: Vec<Vec<SparseCoefficient<i64>>>,
+
+    // Direct contribution to the final accumulator structure.
+    // Outer Vec: SVO round s (0 to num_svo_rounds-1)
+    // Inner Vec: v-config index (0 to 3^s - 1)
+    // Tuple: (val_for_u_eq_0, val_for_u_eq_infty)
+    svo_accumulators_contribution: Vec<Vec<(F, F)>>,
+}
+
 pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A sparse vector representing the (interleaved) coefficients for the Az, Bz polynomials
     /// (note: **no** Cz coefficients are stored here, since they are not needed for small value
     /// precomputation, and can be computed on the fly in streaming round)
-    /// This is grouped by y_high_prefix determined by num_precomputation_rounds.
+    /// This is grouped by y_high_prefix determined by num_precomp_rounds.
     pub(crate) ab_unbound_coeffs: Vec<Vec<SparseCoefficient<i64>>>,
 
     pub(crate) az_bound_coeffs: DensePolynomial<F>,
@@ -36,159 +219,253 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
 }
 
 impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
+    /// Compute the unbound coefficients for the Az and Bz polynomials (no Cz coefficients are
+    /// needed), along with the accumulators for the small value optimization (SVO) rounds.
+    /// 
+    /// Recall that the accumulators are of the form: accum_i[v_0, ..., v_{i-1}, u] = \sum_{y_rest}
+    /// \sum_{x_out} E2(x_out) * \sum_{x_in} E1(x_in) 
+    /// * P(v_0, ..., v_{i-1}, u, y_rest, x_out, x_in),
+    /// 
+    /// for all i < num_svo_rounds,
+    /// 
+    /// where v_0,..., v_{i-1} \in {0,1,infty}, u \in {0,infty}, and P(X) = Az(X) * Bz(X) - Cz(X).
+    /// Note that only the accumulators with at least one infinity among v_j and u are non-zero, so
+    /// the fully binary ones do not need to be computed. AND the ones with at least one infinity
+    /// will NOT have any Cz contributions.
+    /// 
+    /// This is why we do not need to compute the Cz terms here.
+    /// 
+    /// The output of the accumulators is Vec<Vec<(F,F)>>, where the outer Vec is indexed by SVO
+    /// round `i` (0 to `num_svo_rounds`-1), the inner Vec's are for the evals at v_0, ...,
+    /// v_{i-1} = 0, 1, infty, and the tuple are for the evals at u = 0 and u = infty respectively.
     pub fn new_with_precompute(
         padded_num_constraints: usize,
         uniform_constraints: &[Constraint],
         cross_step_constraints: &[OffsetEqConstraint],
         flattened_polynomials: &[&MultilinearPolynomial<F>],
         tau: &[F],
-        num_precomputation_rounds: usize,
-    ) -> (Vec<(Vec<F>, Vec<F>)>, Self) {
-        let num_steps = flattened_polynomials[0].len();
-        let constraint_vars = padded_num_constraints.log_2();
-
+        num_svo_rounds: usize,
+    ) -> (Vec<Vec<(F,F)>>, Self) {
         // DO NOT DELETE. Relevant for full small value optimization (SVO).
         // 0 ..... l ..... (l + n/2) ..... n
         //          <--- E_in --->
         // E_out ->                <-- E_out
-        // let _eq_poly = NewSplitEqPolynomial::new(tau);
+        let _eq_poly = NewSplitEqPolynomial::new(tau);
 
-        assert!(num_precomputation_rounds <= constraint_vars, 
-                "num_precomputation_rounds (for SVO on constraint variables) cannot exceed constraint_vars (log2 of padded_num_constraints)");
+        let num_steps = flattened_polynomials[0].len();
+        let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 }; // Handle num_steps = 0 or 1
+        let constraint_vars_total = if padded_num_constraints > 0 { padded_num_constraints.log_2() } else { 0 };
 
-        // effective_svo_rounds are the top bits of constraint_index_within_step for SVO
-        // Assuming num_precomputation_rounds is already capped or validated by caller if necessary for 0 case.
-        let effective_svo_rounds = num_precomputation_rounds; 
-                                                        // If num_precomputation_rounds can be 0, handle accordingly.
-        let lower_constraint_vars = constraint_vars.saturating_sub(effective_svo_rounds);
-        let num_svo_chunks_per_step = 1 << lower_constraint_vars;
-        let total_svo_chunks = num_steps * num_svo_chunks_per_step;
+        assert_eq!(
+            tau.len(),
+            num_step_vars + constraint_vars_total,
+            "tau length ({}) mismatch with R1CS variable count (step_vars {} + constraint_vars {})",
+            tau.len(), num_step_vars, constraint_vars_total
+        );
+        assert!(
+            num_svo_rounds <= constraint_vars_total,
+            "num_svo_rounds ({}) cannot exceed total constraint variables ({})",
+            num_svo_rounds, constraint_vars_total
+        );
 
-        let ab_unbound_coeffs: Vec<Vec<SparseCoefficient<i64>>> = (0..total_svo_chunks)
-            .into_par_iter()
-            .map(|svo_chunk_global_idx| {
-                let step_index = svo_chunk_global_idx / num_svo_chunks_per_step;
-                let lower_constraint_bits_val = svo_chunk_global_idx % num_svo_chunks_per_step;
-                
-                let mut current_chunk_coeffs: Vec<SparseCoefficient<i64>> = Vec::new();
+        // This is the number of non-SVO bits within the constraint index part
+        let lower_constraint_vars = constraint_vars_total.saturating_sub(num_svo_rounds);
 
-                for svo_prefix_val in 0..(1 << effective_svo_rounds) {
-                    let constraint_index_within_step =
-                        (svo_prefix_val << lower_constraint_vars) + lower_constraint_bits_val;
+        // Define iteration strategy for non-SVO variables (Z variables)
+        // Z = (step_variables, lower_constraint_variables)
+        // We split Z into x_out_non_svo and x_in_non_svo for the parallel fold-reduce.
+        // Example: x_out_non_svo = step_idx, x_in_non_svo = lower_constraint_bits_val
+        let (non_svo_x_out_iterator_template, non_svo_x_in_fn) =
+            define_non_svo_iteration_split::<F>(num_steps, lower_constraint_vars);
 
-                    if constraint_index_within_step < padded_num_constraints {
-                        let global_r1cs_index = step_index * padded_num_constraints + constraint_index_within_step;
+        let num_y_svo_e2_bits = num_svo_rounds / 2; // For bucketing ab_unbound_coeffs
+        let num_y_svo_e2_buckets = 1 << num_y_svo_e2_bits;
 
-                        // Uniform constraints
-                        if constraint_index_within_step < uniform_constraints.len() {
-                            let constraint = &uniform_constraints[constraint_index_within_step];
-                            // Az
-                            if !constraint.a.terms().is_empty() {
-                                let az_coeff = constraint
-                                    .a
-                                    .evaluate_row_i64(flattened_polynomials, step_index);
-                                if !az_coeff.is_zero() {
-                                    current_chunk_coeffs.push((global_r1cs_index * 2, az_coeff).into());
+        // --- Parallel Fold-Reduce over x_out_non_svo_val ---
+        let reduction_identity = || PartialSmallValueContrib {
+            ab_coeffs_buckets_contribution: vec![Vec::new(); num_y_svo_e2_buckets],
+            svo_accumulators_contribution: (0..num_svo_rounds)
+                .map(|s| vec![(F::zero(), F::zero()); 3_usize.pow(s as u32)])
+                .collect(),
+        };
+
+        // Convert the concrete iterator to a parallel one for Rayon
+        // This depends on the exact type returned by define_non_svo_iteration_split
+        // Assuming it's a Range that can be made parallel:
+        let mapped_results: Vec<PartialSmallValueContrib<F>> = non_svo_x_out_iterator_template
+            .into_par_iter() // Make it parallel
+            .map(|x_out_non_svo_val| {
+                let mut task_ab_coeffs_buckets: Vec<Vec<SparseCoefficient<i64>>> =
+                    vec![Vec::new(); num_y_svo_e2_buckets];
+                let mut task_svo_acc_contrib: Vec<Vec<(F, F)>> = (0..num_svo_rounds)
+                    .map(|s| vec![(F::zero(), F::zero()); 3_usize.pow(s as u32)])
+                    .collect();
+
+                // Temporary accumulators tA for this x_out_non_svo_val.
+                // Key: Full SVO prefix (Vec<SVOEvalPoint>) of length num_svo_rounds.
+                // Value: Sum over x_in_non_svo of (E_in_val * Az_extended * Bz_extended).
+                let mut temp_tA: BTreeMap<Vec<SVOEvalPoint>, F> = BTreeMap::new();
+
+                for x_in_non_svo_val in non_svo_x_in_fn(x_out_non_svo_val) {
+                    let (current_step_idx, current_lower_bits_val) =
+                        reconstruct_full_non_svo_indices(
+                            x_out_non_svo_val, x_in_non_svo_val,
+                            num_steps, lower_constraint_vars
+                        );
+
+                    // This stores (Az_bin, Bz_bin) for current Z and all binary Y
+                    let mut binary_evals_for_current_Z: Vec<(i64, i64)> =
+                        vec![(0, 0); 1 << num_svo_rounds];
+
+                    for y_svo_binary_prefix_val in 0..(1 << num_svo_rounds) {
+                        let constraint_idx_within_step =
+                            (y_svo_binary_prefix_val << lower_constraint_vars) + current_lower_bits_val;
+
+                        if constraint_idx_within_step < padded_num_constraints {
+                            let (az_i64, bz_i64) = evaluate_Az_Bz_for_r1cs_row_binary::<F>(
+                                uniform_constraints,
+                                cross_step_constraints,
+                                flattened_polynomials,
+                                current_step_idx,
+                                constraint_idx_within_step,
+                                uniform_constraints.len(),
+                                padded_num_constraints,
+                                num_steps,
+                            );
+                            binary_evals_for_current_Z[y_svo_binary_prefix_val] = (az_i64, bz_i64);
+
+                            if num_svo_rounds > 0 { // Only bucket if SVO is active
+                                let y_svo_e2_bucket = y_svo_binary_prefix_val >> (num_svo_rounds - num_y_svo_e2_bits);
+                                let global_r1cs_idx =
+                                    current_step_idx * padded_num_constraints + constraint_idx_within_step;
+                                if az_i64 != 0 {
+                                    task_ab_coeffs_buckets[y_svo_e2_bucket].push((global_r1cs_idx * 2, az_i64).into());
                                 }
-                            }
-                            // Bz
-                            if !constraint.b.terms().is_empty() {
-                                let bz_coeff = constraint
-                                    .b
-                                    .evaluate_row_i64(flattened_polynomials, step_index);
-                                if !bz_coeff.is_zero() {
-                                    current_chunk_coeffs.push((global_r1cs_index * 2 + 1, bz_coeff).into());
+                                if bz_i64 != 0 {
+                                    task_ab_coeffs_buckets[y_svo_e2_bucket].push((global_r1cs_idx * 2 + 1, bz_i64).into());
+                                }
+                            } else { // No SVO, all coeffs go to a single conceptual bucket (bucket 0)
+                                 let global_r1cs_idx =
+                                    current_step_idx * padded_num_constraints + constraint_idx_within_step;
+                                if az_i64 != 0 {
+                                    task_ab_coeffs_buckets[0].push((global_r1cs_idx * 2, az_i64).into());
+                                }
+                                if bz_i64 != 0 {
+                                    task_ab_coeffs_buckets[0].push((global_r1cs_idx * 2 + 1, bz_i64).into());
                                 }
                             }
                         }
-                        // Cross-step constraints
-                        // Check if constraint_index_within_step corresponds to a cross-step constraint
-                        else if constraint_index_within_step < uniform_constraints.len() + cross_step_constraints.len() {
-                            let cross_step_constraint_idx = constraint_index_within_step - uniform_constraints.len();
-                            let constraint = &cross_step_constraints[cross_step_constraint_idx];
-                            
-                            let next_step_index_opt = if step_index + 1 < num_steps {
-                                Some(step_index + 1)
-                            } else {
-                                None
-                            };
+                    } // End loop over binary SVO prefixes
 
-                            // Az for cross-step
-                            let eq_a_eval = eval_offset_lc_i64(
-                                &constraint.a,
-                                flattened_polynomials,
-                                step_index,
-                                next_step_index_opt,
-                            );
-                            let eq_b_eval = eval_offset_lc_i64(
-                                &constraint.b,
-                                flattened_polynomials,
-                                step_index,
-                                next_step_index_opt,
-                            );
-                            let az_coeff = eq_a_eval - eq_b_eval;
+                    if num_svo_rounds > 0 {
+                        let E_in_val = TODO_get_E_in_val_for_x_in::<F>(
+                            x_in_non_svo_val, tau,
+                            num_step_vars, num_svo_rounds, lower_constraint_vars,
+                        );
+                        TODO_compute_extended_products_and_update_tA::<F>(
+                            &binary_evals_for_current_Z,
+                            num_svo_rounds,
+                            E_in_val,
+                            &mut temp_tA,
+                        );
+                    }
+                } // End loop over x_in_non_svo_val
 
-                            if !az_coeff.is_zero() {
-                                current_chunk_coeffs.push((global_r1cs_index * 2, az_coeff).into());
-                                #[cfg(test)]
-                                {
-                                    let bz_coeff_cond_check = eval_offset_lc_i64(
-                                        &constraint.cond,
-                                        flattened_polynomials,
-                                        step_index,
-                                        next_step_index_opt,
-                                    );
-                                    assert_eq!(bz_coeff_cond_check, 0, "Cross-step constraint {cross_step_constraint_idx} violated at step {step_index} for Az term");
+                // --- Distribute temp_tA to task_svo_acc_contrib ---
+                if num_svo_rounds > 0 {
+                    for (svo_prefix_extended, tA_val) in temp_tA {
+                        if tA_val.is_zero() { continue; }
+
+                        for (round_s, v_config_vec, u_eval_point, y_suffix_binary_for_E_out) in
+                            TODO_idx4_mapping(svo_prefix_extended, num_svo_rounds)
+                        {
+                            let E_out_s_val = TODO_get_E_out_s_val::<F>(
+                                round_s, &y_suffix_binary_for_E_out, x_out_non_svo_val,
+                                tau, num_step_vars, num_svo_rounds, lower_constraint_vars,
+                            );
+                            let v_config_idx = map_v_config_to_idx(&v_config_vec, round_s);
+
+                            match u_eval_point {
+                                SVOEvalPoint::Zero => {
+                                    task_svo_acc_contrib[round_s][v_config_idx].0 += E_out_s_val * tA_val;
                                 }
-                            } else {
-                                // Bz for cross-step (only if Az is zero)
-                                let bz_coeff = eval_offset_lc_i64(
-                                    &constraint.cond,
-                                    flattened_polynomials,
-                                    step_index,
-                                    next_step_index_opt,
-                                );
-                                if !bz_coeff.is_zero() {
-                                    current_chunk_coeffs.push((global_r1cs_index * 2 + 1, bz_coeff).into());
+                                SVOEvalPoint::Infinity => {
+                                    task_svo_acc_contrib[round_s][v_config_idx].1 += E_out_s_val * tA_val;
+                                }
+                                SVOEvalPoint::One => {
+                                    // As per current SVO logic, P(1) is not directly stored in these primary accums.
+                                    // It's derived later: P(1) = P(0) + slope_at_0.
+                                    // If idx4 produces u=One, it means the P(u) in Algo7 for this u
+                                    // would contribute to how P(0) and P(Inf) are formed or used.
+                                    // For now, we only populate for u=0 and u=Inf.
                                 }
                             }
                         }
                     }
                 }
-                // Sort coefficients within this SVO chunk by their global sparse index (Az/Bz interleaved)
-                current_chunk_coeffs.sort_by_key(|coeff| coeff.index);
-                current_chunk_coeffs
+                PartialSmallValueContrib {
+                    ab_coeffs_buckets_contribution: task_ab_coeffs_buckets,
+                    svo_accumulators_contribution: task_svo_acc_contrib,
+                }
             })
             .collect();
-        
-        // TODO: SVO Precomputation logic will consume/use ab_unbound_coeffs
-        // For now, _eq_poly is unused beyond this point for this function's current scope
-        let _eq_poly = NewSplitEqPolynomial::new(tau); 
 
+        let fold_result: PartialSmallValueContrib<F> = mapped_results
+            .into_par_iter()
+            .reduce(reduction_identity, |mut acc_res, task_res| {
+                for bucket_idx in 0..num_y_svo_e2_buckets {
+                    acc_res.ab_coeffs_buckets_contribution[bucket_idx].extend(
+                        task_res.ab_coeffs_buckets_contribution[bucket_idx].iter().cloned()
+                    );
+                }
+                if num_svo_rounds > 0 {
+                    for s in 0..num_svo_rounds {
+                        for v_idx in 0..3_usize.pow(s as u32) {
+                            acc_res.svo_accumulators_contribution[s][v_idx].0 +=
+                                task_res.svo_accumulators_contribution[s][v_idx].0;
+                            acc_res.svo_accumulators_contribution[s][v_idx].1 +=
+                                task_res.svo_accumulators_contribution[s][v_idx].1;
+                        }
+                    }
+                }
+                acc_res
+            });
+
+        // If the parallel iteration and reduction strategy preserves the global sorted order
+        // (e.g., by processing x_out_non_svo_val in order and extending slices),
+        // the final sort per bucket for ab_unbound_coeffs might not be needed.
+        // However, a general Rayon reduce does not guarantee order of combination of task results.
+        // To be safe and ensure sorted buckets if the reduce was arbitrary, or if tasks finished out of order:
+        let mut final_ab_unbound_coeffs = fold_result.ab_coeffs_buckets_contribution;
+        if num_y_svo_e2_buckets > 0 { // only sort if there are buckets
+             for bucket in final_ab_unbound_coeffs.iter_mut() {
+                bucket.sort_by_key(|sc| sc.index);
+            }
+        }
 
         #[cfg(test)]
         {
-            for (svo_chunk_idx, group_coeffs) in ab_unbound_coeffs.iter().enumerate() {
-                if !group_coeffs.is_empty() {
-                    let mut prev_index = group_coeffs[0].index;
-                    for coeff in group_coeffs[1..].iter() {
-                        assert!(
-                            coeff.index > prev_index,
-                            "Indices not monotonically increasing in SVO chunk {}: prev {}, current {}",
-                            svo_chunk_idx,
-                            prev_index,
-                            coeff.index
-                        );
-                        prev_index = coeff.index;
+            if num_svo_rounds > 0 { // Only run test if SVO is active and buckets exist
+                for (bucket_idx, bucket_coeffs) in final_ab_unbound_coeffs.iter().enumerate() {
+                    if !bucket_coeffs.is_empty() {
+                        let mut prev_index = bucket_coeffs[0].index;
+                        for coeff in bucket_coeffs.iter().skip(1) {
+                            assert!(
+                                coeff.index > prev_index,
+                                "Indices not monotonically increasing in ab_unbound_coeffs bucket {}: prev {}, current {}",
+                                bucket_idx, prev_index, coeff.index
+                            );
+                            prev_index = coeff.index;
+                        }
                     }
                 }
             }
         }
 
         (
-            vec![], // Placeholder for SVO accumulators
+            fold_result.svo_accumulators_contribution,
             Self {
-                ab_unbound_coeffs,
+                ab_unbound_coeffs: final_ab_unbound_coeffs,
                 az_bound_coeffs: DensePolynomial::new(vec![]),
                 bz_bound_coeffs: DensePolynomial::new(vec![]),
                 cz_bound_coeffs: DensePolynomial::new(vec![]),
@@ -236,273 +513,284 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         round_polys: &mut Vec<CompressedUniPoly<F>>,
         claim: &mut F,
     ) {
-        let num_rounds_done = r_challenges.len();
-        // Assuming initial dense_len corresponds to the total number of variables ell
-        let total_vars = self.dense_len.log_2();
-        let remaining_vars = total_vars - num_rounds_done;
+        // TODO: This implementation assumes that `self.ab_unbound_coeffs` is
+        // `Vec<Vec<SparseCoefficient<i64>>>` where the outer Vec is indexed by `x_out_idx`
+        // (derived from `eq_poly.E2_current()`). The inner Vec contains all sparse Az/Bz
+        // coefficients for that `x_out_idx`, sorted by their global R1CS index (covering
+        // all y_high_idx and x_in_idx for that x_out_idx).
+        // The `new_with_precompute` method needs to be updated to produce this format.
 
-        // Index k of the *current* variable being bound (using 0..ell-1 index, LSB=0)
-        // Sumcheck binds vars ell-1, ell-2, ..., 0.
-        // Round i=0 binds var ell-1. Round i=ell-1 binds var 0.
-        // k = total_vars - 1 - num_rounds_done
+        // --- 1. Initial Setup ---
+        // `num_rounds_done`: Number of sumcheck rounds completed so far (i.e., number of variables bound).
+        let num_rounds_done = r_challenges.len();
+        // `total_vars`: Total number of variables in the original R1CS instance (ell).
+        let total_vars = self.dense_len.log_2();
+        // `remaining_vars`: Number of variables yet to be bound in the sumcheck protocol.
+        let remaining_vars = total_vars - num_rounds_done;
+        // `current_var_index_k`: Index of the current sumcheck variable X_k being processed in this round.
+        // Sumcheck binds variables from MSB to LSB (ell-1 down to 0).
+        // Round i=0 binds var ell-1. X_k is var (total_vars - 1 - num_rounds_done).
         let current_var_index_k = remaining_vars - 1;
 
-        // Size of the evaluation domain for variables *lower* than k (indices 0..k-1)
+        // `N_k`: Total number of evaluation points for the remaining free variables x' = (x_out, x_in).
+        // These are the variables *below* X_k.
         let N_k = 1 << current_var_index_k;
-        // Size of the evaluation domain for variables *higher* than k (indices k+1..ell-1) -> these are the bound variables
+        // `N_high`: Total number of evaluation points for the already bound variables y_high = (r_0, ..., r_{num_rounds_done-1}).
         let N_high = 1 << num_rounds_done;
 
-        // 1. Compute eq(r_{[<i]}, y_{high}) table
-        // r_challenges contains r_0, ..., r_{i-1}
+        // `eq_r`: Precomputed evaluations of eq(y_high, r_challenges) for all y_high in {0,1}^num_rounds_done.
+        // eq_r[y_high_as_int] = eq(y_high, r_challenges).
         let eq_r = EqPolynomial::evals(r_challenges);
-        assert_eq!(eq_r.len(), N_high);
 
-        // --- Phase A: Parallel computation of Az(r,u,x'), Bz(r,u,x'), Cz(r,u,x') ---
+        // Determine how the remaining free variables x' (size `current_var_index_k` bits)
+        // are split into x_out (controlled by E2) and x_in (controlled by E1).
+        let num_x_out_vars = eq_poly.E2_len().log_2(); // Number of variables corresponding to E2_current evaluations.
+        let num_x_in_vars = eq_poly.E1_len().log_2(); // Number of variables corresponding to E1_current evaluations.
 
-        // 1.1 Pre-group ab_unbound_coeffs by y_high_idx
-        let mut coeffs_grouped_by_y_high: Vec<Vec<SparseCoefficient<i64>>> =
-            vec![Vec::new(); N_high];
-        for group in &self.ab_unbound_coeffs { // Iterate over precomputation groups
-            for coeff in group { // Iterate over coefficients within that group
-                let r1cs_row_index = coeff.index / 2;
-                // y_high_idx is the most significant num_rounds_done bits of the r1cs_row_index.
-                // The lower (current_var_index_k + 1) bits correspond to X_k and x_prime.
-                let y_idx_of_coeff = r1cs_row_index >> (current_var_index_k + 1);
-                if y_idx_of_coeff < N_high {
-                    // Ensure index is within bounds, though it should be by construction
-                    coeffs_grouped_by_y_high[y_idx_of_coeff].push(*coeff);
+        // Sanity check: The sum of x_out and x_in variables should match the number of free variables below X_k.
+        assert_eq!(
+            num_x_out_vars + num_x_in_vars,
+            current_var_index_k,
+            "Mismatch in variable split for x_prime based on eq_poly and current_var_index_k"
+        );
+
+        let num_x_out_points = 1 << num_x_out_vars; // Number of points for x_out, |E2_current()|
+        let num_x_in_points = if num_x_in_vars == 0 {
+            1
+        } else {
+            1 << num_x_in_vars
+        }; // Number of points for x_in, |E1_current()|
+
+        // This struct will be used as the accumulator in the fold-reduce pattern.
+        // It accumulates results from processing multiple x_out_idx values.
+        #[derive(Debug)]
+        struct StreamingRoundAccumulator<F: JoltField> {
+            // These vectors will be built by concatenating results from each x_out_idx.
+            // Final length of each will be N_k.
+            az0_evals_all: Vec<F>,
+            az1_evals_all: Vec<F>,
+            bz0_evals_all: Vec<F>,
+            bz1_evals_all: Vec<F>,
+            cz0_evals_all: Vec<F>,
+            cz1_evals_all: Vec<F>,
+            // Final sum S(0) = sum_{x_out} E2(x_out) sum_{x_in} E1(x_in) * P(r, X_k=0, x_out, x_in)
+            total_quadratic_eval_at_0: F,
+            // Final sum S(infty) = sum_{x_out} E2(x_out) sum_{x_in} E1(x_in) * P(r, X_k=infty, x_out, x_in)
+            total_quadratic_eval_at_infty: F,
+        }
+
+        impl<F: JoltField> StreamingRoundAccumulator<F> {
+            #[inline]
+            fn new() -> Self {
+                // Initialize with empty Vecs for accumulation via extend
+                Self {
+                    az0_evals_all: Vec::new(),
+                    az1_evals_all: Vec::new(),
+                    bz0_evals_all: Vec::new(),
+                    bz1_evals_all: Vec::new(),
+                    cz0_evals_all: Vec::new(),
+                    cz1_evals_all: Vec::new(),
+                    total_quadratic_eval_at_0: F::zero(),
+                    total_quadratic_eval_at_infty: F::zero(),
                 }
             }
         }
 
-        // 1.2 Parallel map-reduce over y_high_idx groups
-        let (az_evals_0, az_evals_1, bz_evals_0, bz_evals_1, cz_evals_0, cz_evals_1) =
-            coeffs_grouped_by_y_high
-                .par_iter()
-                .enumerate()
-                .map(|(y_high_idx, one_y_coeffs_vec)| {
-                    let eq_r_value = eq_r[y_high_idx];
-                    let mut task_az_0 = vec![F::zero(); N_k];
-                    let mut task_az_1 = vec![F::zero(); N_k];
-                    let mut task_bz_0 = vec![F::zero(); N_k];
-                    let mut task_bz_1 = vec![F::zero(); N_k];
-                    let mut task_cz_0 = vec![F::zero(); N_k];
-                    let mut task_cz_1 = vec![F::zero(); N_k];
+        // --- 2. Parallel Computation of Evaluations and Quadratic Sums ---
+        // Uses Rayon's fold-reduce pattern. The primary parallel iteration is over `x_out_idx`.
+        let final_results: StreamingRoundAccumulator<F> = (0..num_x_out_points)
+            .into_par_iter()
+            // `.fold()`: Each thread gets its own `StreamingRoundAccumulator` accumulator.
+            // It processes a subset of `x_out_idx` values assigned by Rayon.
+            .fold(
+                || StreamingRoundAccumulator::new(), // Each thread gets its own accumulator instance.
+                |mut thread_acc, x_out_idx| { // Closure: Process one x_out_idx.
+                    let e2_val = eq_poly.E2_current()[x_out_idx];
+                    
+                    // `coeffs_for_this_x_out`: Assumed to be a slice of SparseCoefficients specific to this x_out_idx,
+                    // containing all original Az/Bz terms, sorted by their global R1CS index.
+                    let coeffs_for_this_x_out = &self.ab_unbound_coeffs[x_out_idx];
+                    // `current_coeffs_iter`: A peekable iterator for efficiently scanning `coeffs_for_this_x_out`.
+                    let mut current_coeffs_iter = coeffs_for_this_x_out.iter().peekable();
+                    
+                    // Accumulators for sum_{x_in} E1(x_in) * P(r, X_k={0,infty}, x_out_idx, x_in)
+                    let mut inner_sum_0_for_this_x_out = F::zero();
+                    let mut inner_sum_infty_for_this_x_out = F::zero();
 
-                    if eq_r_value.is_zero() {
-                        // If eq_r_value is zero, this y_high_idx contributes nothing.
-                        return (task_az_0, task_az_1, task_bz_0, task_bz_1, task_cz_0, task_cz_1);
-                    }
+                    // Results for the current x_out_idx, covering all its x_in_idx.
+                    let mut az0_for_current_x_out: Vec<F> = vec![F::zero(); num_x_in_points];
+                    let mut az1_for_current_x_out: Vec<F> = vec![F::zero(); num_x_in_points];
+                    let mut bz0_for_current_x_out: Vec<F> = vec![F::zero(); num_x_in_points];
+                    let mut bz1_for_current_x_out: Vec<F> = vec![F::zero(); num_x_in_points];
+                    let mut cz0_for_current_x_out: Vec<F> = vec![F::zero(); num_x_in_points];
+                    let mut cz1_for_current_x_out: Vec<F> = vec![F::zero(); num_x_in_points];
 
-                    let mut current_coeffs_iter = one_y_coeffs_vec.iter().peekable();
+                    // Loop over x_in_idx: Corresponds to the inner sum controlled by E1.
+                    for x_in_idx in 0..num_x_in_points {
+                        // Accumulators for Az(r, X_k={0,1}, x_prime_val), Bz(...), Cz(...)
+                        // These sum over all y_high_idx contributions for a fixed x_prime_val.
+                        let mut az0_at_x_prime = F::zero();
+                        let mut bz0_at_x_prime = F::zero();
+                        let mut cz0_at_x_prime = F::zero();
+                        let mut az1_at_x_prime = F::zero();
+                        let mut bz1_at_x_prime = F::zero();
+                        let mut cz1_at_x_prime = F::zero();
 
-                    for x_prime_idx in 0..N_k {
-                        let mut az_orig_0_i64: i64 = 0;
-                        let mut bz_orig_0_i64: i64 = 0;
-                        let mut az_orig_1_i64: i64 = 0;
-                        let mut bz_orig_1_i64: i64 = 0;
+                        let x_prime_val = (x_out_idx << num_x_in_vars) | x_in_idx;
 
-                        // Target R1CS row index parts for (y_high, X_k=0, x_prime) and (y_high, X_k=1, x_prime)
-                        // Note: y_high_idx is fixed for this map task.
-                        let r1cs_row_idx_if_Xk_0 = (y_high_idx << (current_var_index_k + 1))
-                            | (0 << current_var_index_k)
-                            | x_prime_idx;
-                        let r1cs_row_idx_if_Xk_1 = (y_high_idx << (current_var_index_k + 1))
-                            | (1 << current_var_index_k)
-                            | x_prime_idx;
+                        for y_high_idx in 0..N_high {
+                            let eq_r_val = eq_r[y_high_idx];
 
-                        let target_sparse_idx_Az_Xk_0 = r1cs_row_idx_if_Xk_0 * 2;
-                        let target_sparse_idx_Bz_Xk_0 = r1cs_row_idx_if_Xk_0 * 2 + 1;
-                        let target_sparse_idx_Az_Xk_1 = r1cs_row_idx_if_Xk_1 * 2;
-                        let target_sparse_idx_Bz_Xk_1 = r1cs_row_idx_if_Xk_1 * 2 + 1;
+                            let r1cs_row_idx_if_Xk_0 = (y_high_idx << (current_var_index_k + 1)) | x_prime_val;
+                            let r1cs_row_idx_if_Xk_1 = r1cs_row_idx_if_Xk_0 | (1 << current_var_index_k);
+                                                    
+                            let target_sparse_idx_Az_Xk_0 = r1cs_row_idx_if_Xk_0 * 2;
+                            let target_sparse_idx_Bz_Xk_0 = r1cs_row_idx_if_Xk_0 * 2 + 1;
+                            let target_sparse_idx_Az_Xk_1 = r1cs_row_idx_if_Xk_1 * 2;
+                            let target_sparse_idx_Bz_Xk_1 = r1cs_row_idx_if_Xk_1 * 2 + 1;
+                            
+                            let mut loc_az0: i64 = 0;
+                            let mut loc_bz0: i64 = 0;
+                            let mut loc_az1: i64 = 0;
+                            let mut loc_bz1: i64 = 0;
+                            
+                            while let Some(&coeff) = current_coeffs_iter.peek() {
+                                if coeff.index < target_sparse_idx_Az_Xk_0 { current_coeffs_iter.next(); } 
+                                else if coeff.index == target_sparse_idx_Az_Xk_0 { loc_az0 = coeff.value; break; } 
+                                else { break; }
+                            }
 
-                        // Fallback to sequential-style iteration logic for this y_high_idx's slice
-                        // (The single `current_coeffs_iter` is advanced across all x_prime_idx for this y_high_idx)
-                        while let Some(coeff) = current_coeffs_iter.peek() {
-                            if coeff.index < target_sparse_idx_Az_Xk_0 { current_coeffs_iter.next(); continue; }
-                            if coeff.index == target_sparse_idx_Az_Xk_0 { az_orig_0_i64 = coeff.value; /* do not break yet if next coeff is Bz_Xk_0 */}
-                            break; // Found or passed Az_Xk_0
-                        }
-                        while let Some(coeff) = current_coeffs_iter.peek() {
-                            if coeff.index < target_sparse_idx_Bz_Xk_0 { current_coeffs_iter.next(); continue; }
-                            if coeff.index == target_sparse_idx_Bz_Xk_0 { bz_orig_0_i64 = coeff.value; }
-                            break; // Found or passed Bz_Xk_0
-                        }
-                        while let Some(coeff) = current_coeffs_iter.peek() {
-                            if coeff.index < target_sparse_idx_Az_Xk_1 { current_coeffs_iter.next(); continue; }
-                            if coeff.index == target_sparse_idx_Az_Xk_1 { az_orig_1_i64 = coeff.value; }
-                            break; // Found or passed Az_Xk_1
-                        }
-                        while let Some(coeff) = current_coeffs_iter.peek() {
-                            if coeff.index < target_sparse_idx_Bz_Xk_1 { current_coeffs_iter.next(); continue; }
-                            if coeff.index == target_sparse_idx_Bz_Xk_1 { bz_orig_1_i64 = coeff.value; }
-                            break; // Found or passed Bz_Xk_1
-                        }
+                            while let Some(&coeff) = current_coeffs_iter.peek() { 
+                                if coeff.index < target_sparse_idx_Bz_Xk_0 { current_coeffs_iter.next(); } 
+                                else if coeff.index == target_sparse_idx_Bz_Xk_0 { loc_bz0 = coeff.value; break; } 
+                                else { break; } 
+                            }
 
-                        task_az_0[x_prime_idx] = eq_r_value.mul_i64(az_orig_0_i64);
-                        task_bz_0[x_prime_idx] = eq_r_value.mul_i64(bz_orig_0_i64);
-                        task_cz_0[x_prime_idx] = eq_r_value.mul_i128(az_orig_0_i64 as i128 * bz_orig_0_i64 as i128);
-                        task_az_1[x_prime_idx] = eq_r_value.mul_i64(az_orig_1_i64);
-                        task_bz_1[x_prime_idx] = eq_r_value.mul_i64(bz_orig_1_i64);
-                        task_cz_1[x_prime_idx] = eq_r_value.mul_i128(az_orig_1_i64 as i128 * bz_orig_1_i64 as i128);
-                    }
-                    (task_az_0, task_az_1, task_bz_0, task_bz_1, task_cz_0, task_cz_1)
-                })
-                .reduce(
-                    || {
-                        (
-                            vec![F::zero(); N_k],
-                            vec![F::zero(); N_k],
-                            vec![F::zero(); N_k],
-                            vec![F::zero(); N_k],
-                            vec![F::zero(); N_k],
-                            vec![F::zero(); N_k],
-                        )
-                    },
-                    |acc, item| {
-                        let (mut acc_az0, mut acc_az1, mut acc_bz0, mut acc_bz1, mut acc_cz0, mut acc_cz1) = acc;
-                        let (item_az0, item_az1, item_bz0, item_bz1, item_cz0, item_cz1) = item;
-                        for i in 0..N_k {
-                            acc_az0[i] += item_az0[i];
-                            acc_az1[i] += item_az1[i];
-                            acc_bz0[i] += item_bz0[i];
-                            acc_bz1[i] += item_bz1[i];
-                            acc_cz0[i] += item_cz0[i];
-                            acc_cz1[i] += item_cz1[i];
-                        }
-                        (acc_az0, acc_az1, acc_bz0, acc_bz1, acc_cz0, acc_cz1)
-                    },
-                );
+                            while let Some(&coeff) = current_coeffs_iter.peek() {
+                                if coeff.index < target_sparse_idx_Az_Xk_1 { current_coeffs_iter.next(); }
+                                else if coeff.index == target_sparse_idx_Az_Xk_1 { loc_az1 = coeff.value; break; }
+                                else { break; }
+                            }
 
-        // --- End of Phase A ---
+                            while let Some(&coeff) = current_coeffs_iter.peek() {
+                                if coeff.index < target_sparse_idx_Bz_Xk_1 { current_coeffs_iter.next(); }
+                                else if coeff.index == target_sparse_idx_Bz_Xk_1 { loc_bz1 = coeff.value; break; }
+                                else { break; }
+                            }
 
-        // Phase B: Compute t_i(0) and t_i(infty) using the dense evals from Phase A
-        // TODO: merge this with the above loop
-        let (quadratic_eval_at_0, quadratic_eval_at_infty) = if eq_poly.E1_len() == 1 {
-            // E1 is bound, E2 covers all remaining variables x' (size N_k)
-            debug_assert_eq!(
-                eq_poly.E2_len(),
-                N_k,
-                "E2_len should match N_k when E1_len is 1"
-            );
-            // Sum over all N_k points, weighted only by E2
-            (0..N_k)
-                .into_par_iter()
-                .map(|idx_rest| {
-                    // idx_rest corresponds to x'
-                    let e2_val = eq_poly.E2_current()[idx_rest];
-                    // P(r_{high}, u, x') values have been computed into *_evals_0/1
-                    let az0 = az_evals_0[idx_rest];
-                    let az1 = az_evals_1[idx_rest];
-                    let bz0 = bz_evals_0[idx_rest];
-                    let bz1 = bz_evals_1[idx_rest];
-                    let cz0 = cz_evals_0[idx_rest];
+                            if loc_az0 != 0 { az0_at_x_prime += eq_r_val.mul_i64(loc_az0); }
+                            if loc_bz0 != 0 { bz0_at_x_prime += eq_r_val.mul_i64(loc_bz0); }
+                            if loc_az0 != 0 && loc_bz0 != 0 { cz0_at_x_prime += eq_r_val.mul_i128(loc_az0 as i128 * loc_bz0 as i128); }
+                            
+                            if loc_az1 != 0 { az1_at_x_prime += eq_r_val.mul_i64(loc_az1); }
+                            if loc_bz1 != 0 { bz1_at_x_prime += eq_r_val.mul_i64(loc_bz1); }
+                            if loc_az1 != 0 && loc_bz1 != 0 { cz1_at_x_prime += eq_r_val.mul_i128(loc_az1 as i128 * loc_bz1 as i128); }
+                        } 
 
-                    let az_m = az1 - az0; // Az_m(r_{high}, x')
-                    let bz_m = bz1 - bz0; // Bz_m(r_{high}, x')
+                        az0_for_current_x_out[x_in_idx] = az0_at_x_prime;
+                        az1_for_current_x_out[x_in_idx] = az1_at_x_prime;
+                        bz0_for_current_x_out[x_in_idx] = bz0_at_x_prime;
+                        bz1_for_current_x_out[x_in_idx] = bz1_at_x_prime;
+                        cz0_for_current_x_out[x_in_idx] = cz0_at_x_prime;
+                        cz1_for_current_x_out[x_in_idx] = cz1_at_x_prime;
 
-                    let term_eval_at_0 = az0 * bz0 - cz0; // P(r_{high}, 0, x')
-                    let term_eval_at_infty = az_m * bz_m; // P(r_{high}, infty, x')
+                        let e1_val = eq_poly.E1_current()[x_in_idx];
 
-                    (e2_val * term_eval_at_0, e2_val * term_eval_at_infty)
-                })
-                .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
-        } else {
-            // Nested sum: E2 corresponds to outer variables x_out, E1 to inner variables x_in
-            // where x' = (x_out, x_in)
-            let num_e2_points = eq_poly.E2_len(); // = 2^{num_vars_in_E2}
-            let num_e1_points = eq_poly.E1_len(); // = 2^{num_vars_in_E1}
-            debug_assert_eq!(
-                N_k,
-                num_e2_points * num_e1_points,
-                "N_k should be product of E1_len and E2_len"
-            );
-
-            eq_poly
-                .E2_current()
-                .par_iter()
-                .enumerate()
-                .map(|(e2_idx, e2_val)| {
-                    // e2_idx is index over x_out
-                    let mut inner_sum_eval_at_0 = F::zero();
-                    let mut inner_sum_eval_at_infty = F::zero();
-                    let start_idx_rest = e2_idx * num_e1_points;
-
-                    for e1_idx in 0..num_e1_points {
-                        // e1_idx is index over x_in
-                        let idx_rest = start_idx_rest + e1_idx; // Index for x' = (x_out, x_in)
-                        let e1_val = eq_poly.E1_current()[e1_idx];
-
-                        let az0 = az_evals_0[idx_rest];
-                        let az1 = az_evals_1[idx_rest];
-                        let bz0 = bz_evals_0[idx_rest];
-                        let bz1 = bz_evals_1[idx_rest];
-                        let cz0 = cz_evals_0[idx_rest];
-
-                        let az_m = az1 - az0;
-                        let bz_m = bz1 - bz0;
-
-                        let term_eval_at_0 = az0 * bz0 - cz0;
+                        let term_eval_at_0 = az0_at_x_prime * bz0_at_x_prime - cz0_at_x_prime;
+                        let az_m = az1_at_x_prime - az0_at_x_prime;
+                        let bz_m = bz1_at_x_prime - bz0_at_x_prime;
                         let term_eval_at_infty = az_m * bz_m;
 
-                        // Inner sum part: sum_{x_in} E1(x_in) * P(r_{high}, {0,infty}, x_out, x_in)
-                        inner_sum_eval_at_0 += e1_val * term_eval_at_0;
-                        inner_sum_eval_at_infty += e1_val * term_eval_at_infty;
-                    }
-                    // Outer sum part: E2(x_out) * (inner sum)
-                    (
-                        *e2_val * inner_sum_eval_at_0,
-                        *e2_val * inner_sum_eval_at_infty,
-                    )
-                })
-                .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
-        };
+                        inner_sum_0_for_this_x_out += e1_val * term_eval_at_0;
+                        inner_sum_infty_for_this_x_out += e1_val * term_eval_at_infty;
+                    } 
 
-        // 4. Process Round & Get Challenge r_i
-        let r_i = process_eq_sumcheck_round(
-            (quadratic_eval_at_0, quadratic_eval_at_infty),
-            eq_poly, // Helper binds this according to r_i
-            round_polys,
-            r_challenges, // Helper pushes r_i into this
-            claim,        // Helper updates this to s_i(r_i)
-            transcript,   // Helper appends poly and gets challenge
+                    // Append the computed Vec<F> for this x_out_idx to the thread-local accumulator.
+                    thread_acc.az0_evals_all.extend(az0_for_current_x_out);
+                    thread_acc.az1_evals_all.extend(az1_for_current_x_out);
+                    thread_acc.bz0_evals_all.extend(bz0_for_current_x_out);
+                    thread_acc.bz1_evals_all.extend(bz1_for_current_x_out);
+                    thread_acc.cz0_evals_all.extend(cz0_for_current_x_out);
+                    thread_acc.cz1_evals_all.extend(cz1_for_current_x_out);
+
+                    thread_acc.total_quadratic_eval_at_0 += e2_val * inner_sum_0_for_this_x_out;
+                    thread_acc.total_quadratic_eval_at_infty += e2_val * inner_sum_infty_for_this_x_out;
+                    
+                    thread_acc
+                },
+            )
+            .reduce(
+                || StreamingRoundAccumulator::new(), 
+                |mut acc_a, acc_b| {
+                    // Concatenate the Vec<F> evaluations. Order is preserved by fold + extend.
+                    acc_a.az0_evals_all.extend(acc_b.az0_evals_all);
+                    acc_a.az1_evals_all.extend(acc_b.az1_evals_all);
+                    acc_a.bz0_evals_all.extend(acc_b.bz0_evals_all);
+                    acc_a.bz1_evals_all.extend(acc_b.bz1_evals_all);
+                    acc_a.cz0_evals_all.extend(acc_b.cz0_evals_all);
+                    acc_a.cz1_evals_all.extend(acc_b.cz1_evals_all);
+                    
+                    acc_a.total_quadratic_eval_at_0 += acc_b.total_quadratic_eval_at_0;
+                    acc_a.total_quadratic_eval_at_infty += acc_b.total_quadratic_eval_at_infty;
+                    acc_a
+                }
+            );
+
+        // --- 3. Extract Final Results and Process Round ---
+        // At this point, final_results.az0_evals_all (etc.) should have N_k elements in correct order.
+        assert_eq!(
+            final_results.az0_evals_all.len(),
+            N_k,
+            "Length mismatch in final Az0 evals"
         );
 
-        // 5. Compute and Store Next Bound Coefficients
-        // Resulting vectors represent P(r_{high}, r_i, x')
+        let quadratic_eval_at_0 = final_results.total_quadratic_eval_at_0;
+        let quadratic_eval_at_infty = final_results.total_quadratic_eval_at_infty;
+
+        let r_i = process_eq_sumcheck_round(
+            (quadratic_eval_at_0, quadratic_eval_at_infty),
+            eq_poly,
+            round_polys,
+            r_challenges,
+            claim,
+            transcript,
+        );
+
+        // --- 4. Bind Dense Polynomials for Next Round ---
         let mut az_bound_next = vec![F::zero(); N_k];
         let mut bz_bound_next = vec![F::zero(); N_k];
         let mut cz_bound_next = vec![F::zero(); N_k];
 
-        // This binding implements P'(x') = P(0, x') + r_i * (P(1, x') - P(0, x'))
-        // where P' is the poly for the next round (bound in var k), and P is the poly for this round.
+        let final_az0 = &final_results.az0_evals_all;
+        let final_az1 = &final_results.az1_evals_all;
+        let final_bz0 = &final_results.bz0_evals_all;
+        let final_bz1 = &final_results.bz1_evals_all;
+        let final_cz0 = &final_results.cz0_evals_all;
+        let final_cz1 = &final_results.cz1_evals_all;
+
         az_bound_next
             .par_iter_mut()
             .enumerate()
             .for_each(|(idx, val)| {
-                *val = az_evals_0[idx] + r_i * (az_evals_1[idx] - az_evals_0[idx]);
+                *val = final_az0[idx] + r_i * (final_az1[idx] - final_az0[idx]);
             });
         bz_bound_next
             .par_iter_mut()
             .enumerate()
             .for_each(|(idx, val)| {
-                *val = bz_evals_0[idx] + r_i * (bz_evals_1[idx] - bz_evals_0[idx]);
+                *val = final_bz0[idx] + r_i * (final_bz1[idx] - final_bz0[idx]);
             });
         cz_bound_next
             .par_iter_mut()
             .enumerate()
             .for_each(|(idx, val)| {
-                *val = cz_evals_0[idx] + r_i * (cz_evals_1[idx] - cz_evals_0[idx]);
+                *val = final_cz0[idx] + r_i * (final_cz1[idx] - final_cz0[idx]);
             });
 
-        // Replace sparse unbound with dense bound coefficients for subsequent rounds
-        // Note: This assumes streaming_sumcheck_round is called exactly once.
-        self.ab_unbound_coeffs = Vec::new(); // Free memory
+        self.ab_unbound_coeffs = Vec::new();
         self.az_bound_coeffs = DensePolynomial::new(az_bound_next);
         self.bz_bound_coeffs = DensePolynomial::new(bz_bound_next);
         self.cz_bound_coeffs = DensePolynomial::new(cz_bound_next);
-        // Update dense_len to reflect the size of the *newly bound* polynomials
-        // The internal DensePolynomials now represent functions over k variables.
         self.dense_len = N_k;
     }
 
@@ -1447,4 +1735,3 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         [final_az_eval, final_bz_eval, final_cz_eval]
     }
 }
-

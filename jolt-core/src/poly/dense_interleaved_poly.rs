@@ -365,17 +365,21 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
         // For details, refer to Section 3.6.1 of the Twist & Shout paper
         // https://eprint.iacr.org/2025/105.pdf, which is a slight refinement of Section 2.2 of
         // https://eprint.iacr.org/2024/1210.pdf
+        // (TODO: link to "Speeding Up Sum-Check Proving" paper once it's out)
 
         // From that paper, we have the equation: s_i(X) = eq(r_i, X) * t_i(X)
         // We will compute the evaluations at zero and infinity of t_i(X), which recall (when `i=0`) is:
-        // `t_0(X) = \sum_x2 E2[x2] * (\sum_x1 E1[x1] * \prod_k ((1 - X) * P_k(0 || x1 || x2) + X * P_k(1 || x1 || x2)))`
-        // (here "evaluation at infinity" is just the quadratic coefficient of t_i(X))
 
-        let quadratic_evals = if eq_poly.E1_len() == 1 {
-            // If `eq_poly.E1` has been fully bound, we compute the cubic polynomial as
-            // \sum_x2 E2[x2] * \prod_k ((1 - j) * P_k(r || 0 || x2) + j * P_k(r || 1 || x2))
+        // `t_0(X) = \sum_{x_out} E_out[x_out] * (\sum_{x_in} E_in[x_in] * 
+        // \prod_k ((1 - X) * P_k(x_out, x_in, 0) + X * P_k(x_out, x_in, 1)))`
+
+        // (here "evaluation at infinity" is just the quadratic coefficient of t_i(X), and we use
+        // the indexing convention that x_out is the MSB and x_in is the LSB)
+        let quadratic_evals = if eq_poly.E_in_current_len() == 1 {
+            // If `eq_poly.E_in` has been fully bound, we compute the cubic polynomial as
+            // \sum_{x_out} E_out[x_out] * \prod_k ((1 - j) * P_k(x_out, 0, r) + j * P_k(x_out, 1, r))
             self.par_chunks(4)
-                .zip(eq_poly.E2_current())
+                .zip(eq_poly.E_out_current())
                 .map(|(layer_chunk, eq_chunk)| {
                     let left = (
                         *layer_chunk.first().unwrap_or(&F::zero()),
@@ -399,32 +403,22 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
                     |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
                 )
         } else {
-            // If `eq_poly.E1` has NOT been fully bound, we compute the cubic polynomial
+            // If `eq_poly.E_in` has NOT been fully bound, we compute the cubic polynomial
             // using the nested summation approach
             //
-            // Note, however, that we reverse the inner/outer summation compared to the
-            // description in the paper. I.e. instead of:
-            //
-            // \sum_x1 E1[x1] * (\sum_x2 E2[x2] * \prod_k ((1 - j) * P_k(0 || x1 || x2) + j * P_k(1 || x1 || x2)))
-            //
-            // we do:
-            //
-            // \sum_x2 E2[x2] * (\sum_x1 E1[x1] * \prod_k ((1 - j) * P_k(0 || x1 || x2) + j * P_k(1 || x1 || x2)))
-            //
-            // because it has better memory locality.
-            // (note also that we are doing the binding in the opposite order, i.e. the correct formula should be P_k(x2 || x1 || 0))
-
-            let chunk_size = (self.len.next_power_of_two() / eq_poly.E2_len()).max(1);
+            // `\sum_{x_out} E_out[x_out] * (\sum_{x_in} E_in[x_in] * 
+            // \prod_k ((1 - j) * P_k(x_out, x_in, 0) + j * P_k(x_out, x_in, 1)))`
+            let chunk_size = (self.len.next_power_of_two() / eq_poly.E_out_current_len()).max(1);
 
             eq_poly
-                .E2_current()
+                .E_out_current()
                 .par_iter()
                 .zip(self.par_chunks(chunk_size))
-                .map(|(E2_eval, P_x2)| {
+                .map(|(E_out_eval, P_x_out)| {
                     // The for-loop below corresponds to the inner sum:
-                    // \sum_x1 E1[x1] * \prod_k ((1 - j) * P_k(0 || x1 || x2) + j * P_k(1 || x1 || x2))
+                    // \sum_{x_in} E_in[x_in] * \prod_k ((1 - j) * P_k(x_out, x_in, 0) + j * P_k(x_out, x_in, 1))
                     let mut inner_sum = (F::zero(), F::zero());
-                    for (E1_evals, P_chunk) in eq_poly.E1_current().iter().zip(P_x2.chunks(4)) {
+                    for (E_in_evals, P_chunk) in eq_poly.E_in_current().iter().zip(P_x_out.chunks(4)) {
                         let left = (
                             *P_chunk.first().unwrap_or(&F::zero()),
                             *P_chunk.get(2).unwrap_or(&F::zero()),
@@ -436,12 +430,12 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
                         let left_eval_infty = left.1 - left.0;
                         let right_eval_infty = right.1 - right.0;
 
-                        inner_sum.0 += *E1_evals * left.0 * right.0;
-                        inner_sum.1 += *E1_evals * left_eval_infty * right_eval_infty;
+                        inner_sum.0 += *E_in_evals * left.0 * right.0;
+                        inner_sum.1 += *E_in_evals * left_eval_infty * right_eval_infty;
                     }
 
-                    // Multiply the inner sum by E2[x2]
-                    (*E2_eval * inner_sum.0, *E2_eval * inner_sum.1)
+                    // Multiply the inner sum by E_out[x_out]
+                    (*E_out_eval * inner_sum.0, *E_out_eval * inner_sum.1)
                 })
                 .reduce(
                     || (F::zero(), F::zero()),

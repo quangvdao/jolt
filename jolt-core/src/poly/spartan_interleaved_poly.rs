@@ -21,7 +21,7 @@ use crate::{
 use ark_ff::Zero;
 use rayon::prelude::*;
 
-use std::collections::BTreeMap; // Still needed for temp_tA internal to a task
+use std::collections::BTreeMap;
 
 // Helper Enum for SVO evaluation points
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)] // Added Ord for BTreeMap key
@@ -37,7 +37,7 @@ pub enum SVOEvalPoint {
 // The first element of the tuple is an iterator for the "outer" part (e.g., step_idx or its higher bits),
 // which will be parallelized over.
 // The second element is a function that, given an outer value, returns an iterator for the "inner" part.
-fn define_non_svo_iteration_split<F: JoltField>(
+fn define_iteration_split<F: JoltField>(
     num_steps: usize,
     lower_constraint_vars: usize, // Num bits for lower part of constraint index (non-SVO part)
 ) -> (
@@ -46,23 +46,11 @@ fn define_non_svo_iteration_split<F: JoltField>(
 ) {
     // Example: x_out is step_idx, x_in is lower_constraint_bits_val
     // This needs a concrete definition based on how Z variables are structured and parallelized.
-    // For now, assume x_out_non_svo_val = step_idx
-    // and x_in_non_svo_val = lower_constraint_bits_val
+    // For now, assume x_out_val = step_idx
+    // and x_in_val = lower_constraint_bits_val
     let x_out_iterator = 0..num_steps; // This will be used with .into_par_iter()
     let x_in_fn = move |_step_idx: usize| (0..(1 << lower_constraint_vars));
     (x_out_iterator, x_in_fn)
-}
-
-// From the parts iterated by define_non_svo_iteration_split, reconstruct the full indices.
-fn reconstruct_full_non_svo_indices(
-    x_out_non_svo_val: usize,      // e.g., step_idx from the outer parallel loop
-    x_in_non_svo_val: usize,       // e.g., lower_constraint_bits_val from the inner serial loop
-    _num_steps: usize,             // For context if step_idx was split
-    _lower_constraint_vars: usize, // For context if lower_constraint_vars was split
-) -> (usize, usize) {
-    // Returns (current_step_idx, current_lower_bits_val)
-    // If x_out_non_svo_val is step_idx and x_in_non_svo_val is lower_bits_val:
-    (x_out_non_svo_val, x_in_non_svo_val)
 }
 
 // Evaluates Az, Bz for a given R1CS row with fully binary SVO prefix.
@@ -137,7 +125,7 @@ fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
 fn TODO_compute_extended_products_and_update_tA<F: JoltField>(
     binary_evals_at_Z_current: &[(i64, i64)], // Indexed by Y_binary_prefix_val (0 to 2^num_svo_rounds - 1)
     num_svo_rounds: usize,
-    E_in_val: F, // Factor from Teq over x_in_non_svo variables (using tau parts for Z_in)
+    E_in_val: F, // Factor from Teq over x_in variables (using tau parts for Z_in)
     temp_tA: &mut BTreeMap<Vec<SVOEvalPoint>, F>, // Key: Y_extended (length num_svo_rounds)
 ) {
     // Placeholder: Actual implementation is complex.
@@ -155,16 +143,16 @@ fn TODO_compute_extended_products_and_update_tA<F: JoltField>(
 fn get_E_out_s_val<F: JoltField>(
     E_out_s_evals: &[F],              // Precomputed evaluations from eq_poly.E1[svo_round_s]
     num_y_suffix_vars: usize,         // Number of variables in y_suffix
-    num_x_out_non_svo_vars: usize,    // Number of variables in x_out_non_svo
+    num_x_out_vars: usize,    // Number of variables in x_out
     y_suffix_as_int: usize,           // Integer representation of y_suffix (LSB)
-    x_out_non_svo_val: usize,           // Integer assignment for x_out_non_svo variables (MSB)
+    x_out_val: usize,           // Integer assignment for x_out variables (MSB)
 ) -> F {
     // Sanity check for evaluation table length
-    let expected_len = 1 << (num_y_suffix_vars + num_x_out_non_svo_vars);
-    assert_eq!(E_out_s_evals.len(), expected_len, "E_out_s_evals has unexpected length {}. Expected {}. num_y_suffix_vars = {}, num_x_out_non_svo_vars = {}", E_out_s_evals.len(), expected_len, num_y_suffix_vars, num_x_out_non_svo_vars);
+    let expected_len = 1 << (num_y_suffix_vars + num_x_out_vars);
+    assert_eq!(E_out_s_evals.len(), expected_len, "E_out_s_evals has unexpected length {}. Expected {}. num_y_suffix_vars = {}, num_x_out_vars = {}", E_out_s_evals.len(), expected_len, num_y_suffix_vars, num_x_out_vars);
 
-    // y_suffix_as_int is LSB, x_out_non_svo_val is MSB.
-    let combined_idx = (x_out_non_svo_val << num_y_suffix_vars) | y_suffix_as_int;
+    // y_suffix_as_int is LSB, x_out_val is MSB.
+    let combined_idx = (x_out_val << num_y_suffix_vars) | y_suffix_as_int;
     
     assert!(combined_idx < E_out_s_evals.len(), "combined_idx out of bounds for E_out_s_evals");
     E_out_s_evals[combined_idx]
@@ -231,18 +219,18 @@ fn map_v_config_to_idx(v_config: &[SVOEvalPoint], _round_s: usize) -> usize {
     index
 }
 
-// Computes Teq(tau_for_x_in, x_in_non_svo_val_as_binary_vec)
+// Computes Teq(tau_for_x_in, x_in_val_as_binary_vec)
 // This function now uses the precomputed E_in evaluations.
 #[inline]
 fn get_E_in_val_for_x_in<F: JoltField>(
     E_in_evals: &[F],         // Precomputed evaluations from eq_poly.E2_current()
-    x_in_non_svo_val: usize,  // Integer representation of assignment to x_in_non_svo variables
+    x_in_val: usize,  // Integer representation of assignment to x_in variables
 ) -> F {
-    // x_in_non_svo_val is the direct index into the flat evaluation table E_in_evals.
+    // x_in_val is the direct index into the flat evaluation table E_in_evals.
     // E_in_evals stores T_eq(challenges_for_x_in_vars, assignment)
     // where assignment iterates from 0 to 2^(num_x_in_vars) - 1.
-    assert!(x_in_non_svo_val < E_in_evals.len(), "x_in_non_svo_val out of bounds for E_in_evals");
-    E_in_evals[x_in_non_svo_val]
+    assert!(x_in_val < E_in_evals.len(), "x_in_val out of bounds for E_in_evals");
+    E_in_evals[x_in_val]
 }
 
 // Result of a single parallel task in the fold-reduce pattern for the small value optimization (SVO)
@@ -276,18 +264,21 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     /// Compute the unbound coefficients for the Az and Bz polynomials (no Cz coefficients are
     /// needed), along with the accumulators for the small value optimization (SVO) rounds.
     ///
-    /// Recall that the accumulators are of the form: accum_i[v_0, ..., v_{i-1}, u] = \sum_{y_rest}
-    /// \sum_{x_out} E2(x_out) * \sum_{x_in} E1(x_in)
-    /// * P(v_0, ..., v_{i-1}, u, y_rest, x_out, x_in),
+    /// Recall that the accumulators are of the form:
+    /// accum_i[v_0, ..., v_{i-1}, u] = \sum_{y_rest} \sum_{x_out} E_out(x_out || y_rest) * 
+    /// \sum_{x_in} E_in(x_in) * P(x_out, x_in, y_rest, u, v_0, ..., v_{i-1}),
     ///
-    /// for all i < num_svo_rounds,
-    ///
-    /// where v_0,..., v_{i-1} \in {0,1,infty}, u \in {0,infty}, and P(X) = Az(X) * Bz(X) - Cz(X).
+    /// for all i < num_svo_rounds, v_0,..., v_{i-1} \in {0,1,infty}, u \in {0,infty}, and 
+    /// P(X) = Az(X) * Bz(X) - Cz(X).
+    /// 
+    /// Note that we have reverse the order of variables from the paper, since in this codebase
+    /// the indexing is MSB to LSB (as we go from 0 to N-1, i.e. left to right).
+    /// 
     /// Note that only the accumulators with at least one infinity among v_j and u are non-zero, so
-    /// the fully binary ones do not need to be computed. AND the ones with at least one infinity
+    /// the fully binary ones do not need to be computed. Plus, the ones with at least one infinity
     /// will NOT have any Cz contributions.
     ///
-    /// This is why we do not need to compute the Cz terms here.
+    /// This is why we do not need to compute the Cz terms in the unbound coefficients.
     ///
     /// The output of the accumulators is Vec<(Vec<F>, Vec<F>)>, where the outer Vec is indexed by SVO
     /// round `i` (0 to `num_svo_rounds`-1). The tuple contains two Vec<F>: the first for evals at
@@ -301,14 +292,14 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         tau: &[F],
         num_svo_rounds: usize,
     ) -> (Vec<(Vec<F>, Vec<F>)>, Self) {
-        // DO NOT DELETE. Relevant for full small value optimization (SVO).
         let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, num_svo_rounds);
 
-        // E_in is the unique vector in E2
-        let E_in_evals = eq_poly.E2_current();
+        // E_in is the unique vector in E1 (E_in)
+        let E_in_evals = eq_poly.E_in_current();
         // E_out_vec contains the evaluation tables for E_out_s, for s = 0 to num_svo_rounds-1
-        // E_out_vec[s] corresponds to challenges for (Y_{s+1}...Y_{l-1}, X_{out_non_svo})
-        let E_out_vec = &eq_poly.E1; // eq_poly.E1 is Vec<Vec<F>>
+        // E_out_vec[s] corresponds to challenges for
+        // (X_{out}, Y_{num_step_vars-num_svo_rounds}..Y_{num_step_vars-s-1})
+        let E_out_vec = &eq_poly.E_out_vec; // eq_poly.E_out_vec is Vec<Vec<F>>
 
         let num_steps = flattened_polynomials[0].len();
         let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 }; // Handle num_steps = 0 or 1
@@ -338,15 +329,15 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
         // Define iteration strategy for non-SVO variables (Z variables)
         // Z = (step_variables, lower_constraint_variables)
-        // We split Z into x_out_non_svo and x_in_non_svo for the parallel fold-reduce.
-        // Example: x_out_non_svo = step_idx, x_in_non_svo = lower_constraint_bits_val
-        let (non_svo_x_out_iterator_template, non_svo_x_in_fn) =
-            define_non_svo_iteration_split::<F>(num_steps, lower_constraint_vars);
+        // We split Z into x_out and x_in for the parallel fold-reduce.
+        // Example: x_out = some_step_idx, x_in = rest_step_idx || lower_constraint_bits_val
+        let (x_out_iterator_template, x_in_fn) =
+            define_iteration_split::<F>(num_steps, lower_constraint_vars);
 
         let num_y_svo_e2_bits = num_svo_rounds / 2; // For bucketing ab_unbound_coeffs
         let num_y_svo_e2_buckets = 1 << num_y_svo_e2_bits;
 
-        // --- Parallel Fold-Reduce over x_out_non_svo_val ---
+        // --- Parallel Fold-Reduce over x_out_val ---
         let reduction_identity = || PartialSmallValueContrib {
             ab_coeffs_buckets_contribution: vec![Vec::new(); num_y_svo_e2_buckets],
             svo_accumulators_contribution: (0..num_svo_rounds)
@@ -358,11 +349,11 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         };
 
         // Convert the concrete iterator to a parallel one for Rayon
-        // This depends on the exact type returned by define_non_svo_iteration_split
+        // This depends on the exact type returned by define_iteration_split
         // Assuming it's a Range that can be made parallel:
-        let mapped_results: Vec<PartialSmallValueContrib<F>> = non_svo_x_out_iterator_template
+        let fold_result: PartialSmallValueContrib<F> = x_out_iterator_template
             .into_par_iter() // Make it parallel
-            .map(|x_out_non_svo_val| {
+            .map(|x_out_val| {
                 let mut task_ab_coeffs_buckets: Vec<Vec<SparseCoefficient<i64>>> =
                     vec![Vec::new(); num_y_svo_e2_buckets];
                 let mut task_svo_acc_contrib: Vec<(Vec<F>, Vec<F>)> = (0..num_svo_rounds)
@@ -372,17 +363,15 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     })
                     .collect();
 
-                // Temporary accumulators tA for this x_out_non_svo_val.
+                // Temporary accumulators tA for this x_out_val.
                 // Key: Full SVO prefix (Vec<SVOEvalPoint>) of length num_svo_rounds.
-                // Value: Sum over x_in_non_svo of (E_in_val * Az_extended * Bz_extended).
+                // Value: Sum over x_in of (E_in_val * Az_extended * Bz_extended).
                 let mut temp_tA: BTreeMap<Vec<SVOEvalPoint>, F> = BTreeMap::new();
 
-                for x_in_non_svo_val in non_svo_x_in_fn(x_out_non_svo_val) {
+                for x_in_val in x_in_fn(x_out_val) {
+                    // Renaming for clarity
                     let (current_step_idx, current_lower_bits_val) =
-                        reconstruct_full_non_svo_indices(
-                            x_out_non_svo_val, x_in_non_svo_val,
-                            num_steps, lower_constraint_vars
-                        );
+                        (x_out_val, x_in_val);
 
                     // This stores (Az_bin, Bz_bin) for current Z and all binary Y
                     let mut binary_evals_for_current_Z: Vec<(i64, i64)> =
@@ -429,10 +418,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     } // End loop over binary SVO prefixes
 
                     if num_svo_rounds > 0 {
-                        let E_in_val = get_E_in_val_for_x_in::<F>(
-                            E_in_evals,
-                            x_in_non_svo_val,
-                        );
+                        let E_in_val = E_in_evals[x_in_val];
                         TODO_compute_extended_products_and_update_tA::<F>(
                             &binary_evals_for_current_Z,
                             num_svo_rounds,
@@ -440,7 +426,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                             &mut temp_tA,
                         );
                     }
-                } // End loop over x_in_non_svo_val
+                } // End loop over x_in_val
 
                 // --- Distribute temp_tA to task_svo_acc_contrib ---
                 if num_svo_rounds > 0 {
@@ -471,9 +457,9 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                             let E_out_s_val = get_E_out_s_val::<F>(
                                 &E_out_vec[round_s],
                                 num_y_suffix_vars_for_this_Yext, // num_vars in y_suffix_from_Yext
-                                num_step_vars,                   // Num bits for x_out_non_svo_val (MSB part)
+                                num_step_vars,                   // Num bits for x_out_val (MSB part)
                                 y_suffix_as_int_from_Yext,       // y_suffix_from_Yext as int (LSB part)
-                                x_out_non_svo_val,
+                                x_out_val,
                             );
                             let v_config_idx = map_v_config_to_idx(&v_config_vec, round_s);
 
@@ -498,44 +484,42 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     svo_accumulators_contribution: task_svo_acc_contrib,
                 }
             })
-            .collect();
-
-        let fold_result: PartialSmallValueContrib<F> =
-            mapped_results
-                .into_par_iter()
-                .reduce(reduction_identity, |mut acc_res, task_res| {
-                    for bucket_idx in 0..num_y_svo_e2_buckets {
-                        acc_res.ab_coeffs_buckets_contribution[bucket_idx].extend(
-                            task_res.ab_coeffs_buckets_contribution[bucket_idx]
-                                .iter()
-                                .cloned(),
-                        );
-                    }
-                    if num_svo_rounds > 0 {
-                        for s in 0..num_svo_rounds {
-                            for v_idx in 0..3_usize.pow(s as u32) {
-                                acc_res.svo_accumulators_contribution[s].0[v_idx] +=
-                                    task_res.svo_accumulators_contribution[s].0[v_idx];
-                                acc_res.svo_accumulators_contribution[s].1[v_idx] +=
-                                    task_res.svo_accumulators_contribution[s].1[v_idx];
-                            }
+            .reduce(reduction_identity, |mut acc_res, task_res| {
+                for bucket_idx in 0..num_y_svo_e2_buckets {
+                    acc_res.ab_coeffs_buckets_contribution[bucket_idx].extend(
+                        task_res.ab_coeffs_buckets_contribution[bucket_idx]
+                            .iter()
+                            .cloned(),
+                    );
+                }
+                if num_svo_rounds > 0 {
+                    for s in 0..num_svo_rounds {
+                        for v_idx in 0..3_usize.pow(s as u32) {
+                            acc_res.svo_accumulators_contribution[s].0[v_idx] +=
+                                task_res.svo_accumulators_contribution[s].0[v_idx];
+                            acc_res.svo_accumulators_contribution[s].1[v_idx] +=
+                                task_res.svo_accumulators_contribution[s].1[v_idx];
                         }
                     }
-                    acc_res
-                });
+                }
+                acc_res
+            });
 
         // If the parallel iteration and reduction strategy preserves the global sorted order
-        // (e.g., by processing x_out_non_svo_val in order and extending slices),
+        // (e.g., by processing x_out_val in order and extending slices),
         // the final sort per bucket for ab_unbound_coeffs might not be needed.
         // However, a general Rayon reduce does not guarantee order of combination of task results.
         // To be safe and ensure sorted buckets if the reduce was arbitrary, or if tasks finished out of order:
-        let mut final_ab_unbound_coeffs = fold_result.ab_coeffs_buckets_contribution;
-        if num_y_svo_e2_buckets > 0 {
-            // only sort if there are buckets
-            for bucket in final_ab_unbound_coeffs.iter_mut() {
-                bucket.sort_by_key(|sc| sc.index);
-            }
-        }
+        // We comment this out for now, and will revisit if the order is not sorted by fold-reduce.
+        // let mut final_ab_unbound_coeffs = fold_result.ab_coeffs_buckets_contribution;
+        // if num_y_svo_e2_buckets > 0 {
+        //     // only sort if there are buckets
+        //     for bucket in final_ab_unbound_coeffs.iter_mut() {
+        //         bucket.sort_by_key(|sc| sc.index);
+        //     }
+        // }
+
+        let final_ab_unbound_coeffs = fold_result.ab_coeffs_buckets_contribution;
 
         #[cfg(test)]
         {
@@ -579,10 +563,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     ///
     /// Recall that we need to compute
     ///
-    /// `t_i(0) = \sum_{x_out} E2[x_out] \sum_{x_in} E1[x_in] * (unbound_coeffs_a(r,0,x_in, x_out) *
+    /// `t_i(0) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] * (unbound_coeffs_a(r,0,x_in, x_out) *
     /// unbound_coeffs_b(r,0, x_in, x_out) - unbound_coeffs_c(r,0, x_in, x_out))`
     ///
-    /// and `t_i(infty) = \sum_{x_out} E2[x_out] \sum_{x_in} E1[x_in] *
+    /// and `t_i(infty) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] *
     /// (unbound_coeffs_a(r,infty,x_in, x_out) * unbound_coeffs_b(r,infty, x_in, x_out))`
     ///
     /// Here the "_a,b,c" subscript indicates the coefficients of `unbound_coeffs` corresponding
@@ -594,12 +578,13 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     ///
     /// (and the eval at infty is computed as (eval at 1) - (eval at 0))
     ///
-    /// Note that since `unbound_coeffs` are in sparse format, we will need to be more careful with
+    /// Since `unbound_coeffs` are in sparse format, we will need to be more careful with
     /// indexing; see the old implementation for details.
     ///
     /// Finally, as we compute each `unbound_coeffs_{a,b,c}(r, {0,infty}, x_in, x_out)`, we will
     /// need to store them in `{az/bz/cz}_bound_coeffs`. (the eval at 1 will be eval at 0 + eval at
-    /// infty)
+    /// infty). We then derive the next challenge from the transcript, and bind these bound coeffs
+    /// for the next round.
     pub fn streaming_sumcheck_round<ProofTranscript: Transcript>(
         &mut self,
         eq_poly: &mut NewSplitEqPolynomial<F>,
@@ -638,9 +623,12 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         let eq_r = EqPolynomial::evals(r_challenges);
 
         // Determine how the remaining free variables x' (size `current_var_index_k` bits)
-        // are split into x_out (controlled by E2) and x_in (controlled by E1).
-        let num_x_out_vars = eq_poly.E2_len().log_2(); // Number of variables corresponding to E2_current evaluations.
-        let num_x_in_vars = eq_poly.E1_len().log_2(); // Number of variables corresponding to E1_current evaluations.
+        // are split into x_out (controlled by E_out_current) and x_in (controlled by E_in_current).
+
+        // Number of variables corresponding to E_out_current evaluations.
+        let num_x_out_vars = eq_poly.E_out_current_len().log_2();
+        // Number of variables corresponding to E_in_current evaluations.
+        let num_x_in_vars = eq_poly.E_in_current_len().log_2();
 
         // Sanity check: The sum of x_out and x_in variables should match the number of free variables below X_k.
         assert_eq!(
@@ -649,12 +637,12 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             "Mismatch in variable split for x_prime based on eq_poly and current_var_index_k"
         );
 
-        let num_x_out_points = 1 << num_x_out_vars; // Number of points for x_out, |E2_current()|
+        let num_x_out_points = 1 << num_x_out_vars; // Number of points for x_out, |E_out_current()|
         let num_x_in_points = if num_x_in_vars == 0 {
             1
         } else {
             1 << num_x_in_vars
-        }; // Number of points for x_in, |E1_current()|
+        }; // Number of points for x_in, |E_in_current()|
 
         // This struct will be used as the accumulator in the fold-reduce pattern.
         // It accumulates results from processing multiple x_out_idx values.
@@ -700,7 +688,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             .fold(
                 || StreamingRoundAccumulator::new(), // Each thread gets its own accumulator instance.
                 |mut thread_acc, x_out_idx| { // Closure: Process one x_out_idx.
-                    let e2_val = eq_poly.E2_current()[x_out_idx];
+                    let e_out_val = eq_poly.E_out_current()[x_out_idx];
                     
                     // `coeffs_for_this_x_out`: Assumed to be a slice of SparseCoefficients specific to this x_out_idx,
                     // containing all original Az/Bz terms, sorted by their global R1CS index.
@@ -789,15 +777,15 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                         cz0_for_current_x_out[x_in_idx] = cz0_at_x_prime;
                         cz1_for_current_x_out[x_in_idx] = cz1_at_x_prime;
 
-                        let e1_val = eq_poly.E1_current()[x_in_idx];
+                        let e_in_val = eq_poly.E_in_current()[x_in_idx];
 
                         let term_eval_at_0 = az0_at_x_prime * bz0_at_x_prime - cz0_at_x_prime;
                         let az_m = az1_at_x_prime - az0_at_x_prime;
                         let bz_m = bz1_at_x_prime - bz0_at_x_prime;
                         let term_eval_at_infty = az_m * bz_m;
 
-                        inner_sum_0_for_this_x_out += e1_val * term_eval_at_0;
-                        inner_sum_infty_for_this_x_out += e1_val * term_eval_at_infty;
+                        inner_sum_0_for_this_x_out += e_in_val * term_eval_at_0;
+                        inner_sum_infty_for_this_x_out += e_in_val * term_eval_at_infty;
                     } 
 
                     // Append the computed Vec<F> for this x_out_idx to the thread-local accumulator.
@@ -808,8 +796,8 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     thread_acc.cz0_evals_all.extend(cz0_for_current_x_out);
                     thread_acc.cz1_evals_all.extend(cz1_for_current_x_out);
 
-                    thread_acc.total_quadratic_eval_at_0 += e2_val * inner_sum_0_for_this_x_out;
-                    thread_acc.total_quadratic_eval_at_infty += e2_val * inner_sum_infty_for_this_x_out;
+                    thread_acc.total_quadratic_eval_at_0 += e_out_val * inner_sum_0_for_this_x_out;
+                    thread_acc.total_quadratic_eval_at_infty += e_out_val * inner_sum_infty_for_this_x_out;
                     
                     thread_acc
                 },
@@ -894,12 +882,17 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     ///
     /// At this point, we have computed the `{az/bz/cz}_bound_coeffs` for the current round.
     /// We need to compute:
-    /// `t_i(0) = \sum_{x_out} E2[x_out] \sum_{x_in} E1[x_in] *
-    /// (az_bound[0,x_in, x_out] * bz_bound[0, x_in, x_out] - cz_bound[0, x_in, x_out])`
+    /// 
+    /// `t_i(0) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] *
+    /// (az_bound[x_out, x_in, 0] * bz_bound[x_out, x_in, 0] - cz_bound[x_out, x_in, 0])`
+    /// 
     /// and
-    /// `t_i(infty) = \sum_{x_out} E2[x_out] \sum_{x_in} E1[x_in] *
-    /// az_bound[infty, x_in, x_out] * bz_bound[infty, x_in, x_out]`
+    /// 
+    /// `t_i(infty) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] *
+    /// az_bound[x_out, x_in, infty] * bz_bound[x_out, x_in, infty]`
     ///
+    /// (ordering of indices is MSB to LSB, so x_out is the MSB and x_in is the LSB)
+    /// 
     /// We can compute this via a single pass over the coefficients, similar to the old method below
     /// (but simpler since we work directly with dense instead of sparse coefficients)
     /// The closest analogue is the `dense_interleaved_poly` implementation.
@@ -929,30 +922,30 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         let (cz_low, _cz_high) = cz_coeffs.split_at(num_x_rest_evals); // cz_high unused for t_i(infty)
 
         // Compute t_i(0) and t_i(infty)
-        let (quadratic_eval_at_0, quadratic_eval_at_infty) = if eq_poly.E1_len() == 1 {
-            // E1 part is fully bound. E2 covers all remaining eq_poly variables.
+        let (quadratic_eval_at_0, quadratic_eval_at_infty) = if eq_poly.E_in_current_len() == 1 {
+            // E_in part is fully bound. E_out covers all remaining eq_poly variables.
             debug_assert_eq!(
-                eq_poly.E2_len(),
+                eq_poly.E_out_current_len(),
                 num_x_rest_evals,
-                "E2_len should match num_x_rest_evals when E1_len is 1"
+                "E_out_current_len should match num_x_rest_evals when E_in_current_len is 1"
             );
 
-            // Combine iterators over the halves and E2
+            // Combine iterators over the halves and E_out
             az_low
                 .par_iter()
                 .zip(az_high.par_iter())
                 .zip(bz_low.par_iter())
                 .zip(bz_high.par_iter())
                 .zip(cz_low.par_iter())
-                .zip(eq_poly.E2_current().par_iter())
+                .zip(eq_poly.E_out_current().par_iter())
                 .map(
-                    |(((((az0_ref, az1_ref), bz0_ref), bz1_ref), cz0_ref), e2_val_ref)| {
+                    |(((((az0_ref, az1_ref), bz0_ref), bz1_ref), cz0_ref), e_out_val_ref)| {
                         let az0 = *az0_ref;
                         let az1 = *az1_ref;
                         let bz0 = *bz0_ref;
                         let bz1 = *bz1_ref;
                         let cz0 = *cz0_ref;
-                        let e2_val = *e2_val_ref;
+                        let e_out_val = *e_out_val_ref;
 
                         let az_m = az1 - az0; // Coeff of X_current_MSB in Az
                         let bz_m = bz1 - bz0; // Coeff of X_current_MSB in Bz
@@ -960,7 +953,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                         let term_eval_at_0 = az0 * bz0 - cz0;
                         let term_eval_at_infty = az_m * bz_m; // X^2 coeff of (Az*Bz)
 
-                        (e2_val * term_eval_at_0, e2_val * term_eval_at_infty)
+                        (e_out_val * term_eval_at_0, e_out_val * term_eval_at_infty)
                     },
                 )
                 .reduce(
@@ -968,29 +961,29 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     |(acc_0, acc_infty), (val_0, val_infty)| (acc_0 + val_0, acc_infty + val_infty),
                 )
         } else {
-            // Nested sum structure: sum over E2 (outer), then sum over E1 (inner)
-            let num_e2_points = eq_poly.E2_len();
-            let num_e1_points = eq_poly.E1_len();
+            // Nested sum structure: sum over E_out (outer), then sum over E_in (inner)
+            let num_e_out_points = eq_poly.E_out_current_len();
+            let num_e_in_points = eq_poly.E_in_current_len();
             debug_assert_eq!(
                 num_x_rest_evals,
-                num_e2_points * num_e1_points,
-                "num_x_rest_evals should be product of E1_len and E2_len"
+                num_e_out_points * num_e_in_points,
+                "num_x_rest_evals should be product of E_out_current_len and E_in_current_len"
             );
 
             eq_poly
-                .E2_current()
+                .E_out_current()
                 .par_iter()
                 .enumerate()
-                .map(|(e2_idx, e2_val)| {
+                .map(|(e_out_idx, e_out_val)| {
                     let mut inner_sum_eval_at_0 = F::zero();
                     let mut inner_sum_eval_at_infty = F::zero();
 
-                    let start_idx_rest = e2_idx * num_e1_points;
+                    let start_idx_rest = e_out_idx * num_e_in_points;
 
-                    // Iterate over the indices corresponding to this E2 chunk
-                    for e1_idx in 0..num_e1_points {
-                        let idx_rest = start_idx_rest + e1_idx;
-                        let e1_val = eq_poly.E1_current()[e1_idx];
+                    // Iterate over the indices corresponding to this E_out chunk
+                    for e_in_idx in 0..num_e_in_points {
+                        let idx_rest = start_idx_rest + e_in_idx;
+                        let e_in_val = eq_poly.E_in_current()[e_in_idx];
 
                         // Access halves using the calculated index
                         let az0 = az_low[idx_rest];
@@ -1006,14 +999,14 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                         let term_eval_at_0 = az0 * bz0 - cz0;
                         let term_eval_at_infty = az_m * bz_m;
 
-                        // Inner sum part: sum_{x_in} E1(x_in) * P(r_{high}, {0,infty}, x_out, x_in)
-                        inner_sum_eval_at_0 += e1_val * term_eval_at_0;
-                        inner_sum_eval_at_infty += e1_val * term_eval_at_infty;
+                        // Inner sum part: sum_{x_in} E_in[x_in] * P(x_out, x_in, {0,infty}, r_{high})
+                        inner_sum_eval_at_0 += e_in_val * term_eval_at_0;
+                        inner_sum_eval_at_infty += e_in_val * term_eval_at_infty;
                     }
-                    // Outer sum part: E2(x_out) * (inner sum)
+                    // Outer sum part: E_out[x_out] * (inner sum)
                     (
-                        *e2_val * inner_sum_eval_at_0,
-                        *e2_val * inner_sum_eval_at_infty,
+                        *e_out_val * inner_sum_eval_at_0,
+                        *e_out_val * inner_sum_eval_at_infty,
                     )
                 })
                 .reduce(

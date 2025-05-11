@@ -12,9 +12,9 @@ use crate::{field::JoltField, poly::eq_poly::EqPolynomial};
 ///
 /// - `current_index = n - i` (where `n = w.len()`)
 /// - `current_scalar = eq(w[(n - i)..],r[..i])`
-/// - `E2.last().unwrap() = [eq(w[..min(i, n/2)], x) for all x in {0, 1}^{n - min(i, n/2)}]`
-/// - If `i < n/2`, then `E1.last().unwrap() = [eq(w[n/2..(n/2 + i + 1)], x) for all x in {0,
-///   1}^{n/2 - i - 1}]`; else `E1` is empty
+/// - `E_out_vec.last().unwrap() = [eq(w[..min(i, n/2)], x) for all x in {0, 1}^{n - min(i, n/2)}]`
+/// - If `i < n/2`, then `E_in_vec.last().unwrap() = [eq(w[n/2..(n/2 + i + 1)], x) for all x in {0,
+///   1}^{n/2 - i - 1}]`; else `E_in_vec` is empty
 ///
 /// Note: all current applications of `SplitEqPolynomial` use the `LowToHigh` binding order. This
 /// means that we are iterating over `w` in the reverse order: `w.len()` down to `0`.
@@ -22,8 +22,8 @@ pub struct NewSplitEqPolynomial<F> {
     pub(crate) current_index: usize,
     pub(crate) current_scalar: F,
     pub(crate) w: Vec<F>,
-    pub(crate) E1: Vec<Vec<F>>,
-    pub(crate) E2: Vec<Vec<F>>,
+    pub(crate) E_in_vec: Vec<Vec<F>>,
+    pub(crate) E_out_vec: Vec<Vec<F>>,
 }
 
 /// Old struct for equality polynomial, without Gruen's optimization
@@ -47,7 +47,7 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         //        first half of remaining elements (for E2)
         let (_, wprime) = w.split_last().unwrap();
         let (w2, w1) = wprime.split_at(m);
-        let (E2, E1) = rayon::join(
+        let (E_out_vec, E_in_vec) = rayon::join(
             || EqPolynomial::evals_cached(w2),
             || EqPolynomial::evals_cached(w1),
         );
@@ -55,30 +55,42 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
             current_index: w.len(),
             current_scalar: F::one(),
             w: w.to_vec(),
-            E1,
-            E2,
+            E_in_vec,
+            E_out_vec,
         }
     }
 
-    // 0 ..... (n/2 - l) ..... (n - l) ..... n
-    //              <--- E_in --->
-    // E_out ---->                <---- E_out
-    // where the first E_out part corresponds to x_out, and the second E_out part corresponds to y_suffix
+    /// Compute the split equality polynomial for the small value optimization
+    ///
+    /// The split is done as follows: (here `l = num_small_value_rounds`)
+    /// 
+    /// 0 ..... (n/2 - l) ..... (n - l) ..... n
+    /// 
+    ///           <-- E_in -->
+    /// 
+    /// E_out --->                <--- E_out
+    ///
+    /// where the first E_out part (0 to n/2 - l) corresponds to x_out, and the second E_out part 
+    /// (n/2 - l to n) corresponds to y_suffix
+    /// 
+    /// Returns E_out which contains `l` vectors of eq evals for the same x_out part, with decreasing 
+    /// length for y_suffix, and E_in which contains the single vector of eq evals for the x_in part.
+    /// 
+    /// Note the differences between this and the `new` constructor: this is specialized for the
+    /// small value optimization.
     pub fn new_for_small_value(w: &[F], num_small_value_rounds: usize) -> Self {
         // Split w into the slices: (l = num_small_value_rounds)
         // (n/2 - l) ..... (n - l)
         // 0..(n/2 - l - 1) concatenated with (n - l)...n
-        // Then invoke the evals_cached constructor on the concatenated slice, producing E1 (this is E_out)
-        // Invoke the evals constructor (no caching) on the middle slice, producing E2 (this is E_in)
-        // In other words, there is only 1 vector in E2, and l vectors in E1
+        // Then invoke the evals_cached constructor on the concatenated slice, producing E_out
+        // Invoke the evals constructor (no caching) on the middle slice, producing E_in
+        // In other words, there is only 1 vector in E_in, and l vectors in E_out
         // (we may drop the rest of the vectors after evals_cached)
         let n = w.len();
         let l = num_small_value_rounds;
 
         assert!(n >= 2 * l, "length of w must be >= 2 * num_small_value_rounds for the split to be valid.");
-        // n must be even if n/2 is used without remainder concerns for lengths.
-        // If n is odd, standard integer division for n/2 might lead to off-by-one in lengths if not handled carefully.
-        // Assuming n is such that n/2 is meaningful as intended, often implying n is even or handling is robust.
+        assert!(n > 0, "length of w must be positive for the split to be valid.");
 
         let split_point1 = n / 2 - l;
         let split_point2 = n - 1 - split_point1;
@@ -89,23 +101,25 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         w_E_out_vars.extend_from_slice(&w[0..split_point1]);
         w_E_out_vars.extend_from_slice(&w[split_point2..n-1]);
 
-        let (E_out_cached, E_in_evals) = rayon::join(
+        let (E_out_vec, E_in) = rayon::join(
             || EqPolynomial::evals_cached(&w_E_out_vars),
             || EqPolynomial::evals(&w_E_in_vars),
         );
         
-        let num_total_E_out_vectors = E_out_cached.len();
+        let num_total_E_out_vectors = E_out_vec.len();
         // l is num_small_value_rounds
         let start_index = num_total_E_out_vectors.saturating_sub(l);
-        let final_E1 = E_out_cached[start_index..].to_vec();
+        let mut final_E_out = E_out_vec[start_index..].to_vec();
+        // Reverse the order of the vectors in final_E1, so that the first vector is the largest
+        final_E_out.reverse();
 
         Self {
             current_index: w.len(),
             current_scalar: F::one(),
             w: w.to_vec(),
             // Only filter out the _last_ l vectors from E_out, and discard the rest
-            E1: final_E1,
-            E2: vec![E_in_evals],
+            E_in_vec: vec![E_in],
+            E_out_vec: final_E_out,
         }
     }
 
@@ -117,30 +131,30 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         1 << self.current_index
     }
 
-    pub fn E1_len(&self) -> usize {
-        self.E1.last().unwrap().len()
+    pub fn E_in_current_len(&self) -> usize {
+        self.E_in_vec.last().unwrap().len()
     }
 
-    pub fn E2_len(&self) -> usize {
-        self.E2.last().unwrap().len()
+    pub fn E_out_current_len(&self) -> usize {
+        self.E_out_vec.last().unwrap().len()
     }
 
     /// Return the last vector from `E1` as a slice
-    pub fn E1_current(&self) -> &[F] {
-        self.E1.last().unwrap()
+    pub fn E_in_current(&self) -> &[F] {
+        self.E_in_vec.last().unwrap()
     }
 
     pub fn to_E1_old(&self) -> Vec<F> {
         if self.current_index > self.w.len() / 2 {
             let wi = self.w[self.current_index - 1];
             let E1_old_odd: Vec<F> = self
-                .E1
+                .E_in_vec
                 .last()
                 .unwrap()
                 .iter()
                 .map(|x| *x * (F::one() - wi))
                 .collect();
-            let E1_old_even: Vec<F> = self.E1.last().unwrap().iter().map(|x| *x * wi).collect();
+            let E1_old_even: Vec<F> = self.E_in_vec.last().unwrap().iter().map(|x| *x * wi).collect();
             // Interleave the two vectors
             let mut E1_old = vec![];
             for i in 0..E1_old_odd.len() {
@@ -155,8 +169,8 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
     }
 
     /// Return the last vector from `E2` as a slice
-    pub fn E2_current(&self) -> &[F] {
-        self.E2.last().unwrap()
+    pub fn E_out_current(&self) -> &[F] {
+        self.E_out_vec.last().unwrap()
     }
 
     #[tracing::instrument(skip_all, name = "NewSplitEqPolynomial::bind")]
@@ -167,17 +181,17 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
             + self.w[self.current_index - 1] * r;
         // decrement `current_index`
         self.current_index -= 1;
-        // pop the last vector from `E1` or `E2` (since we don't need it anymore)
+        // pop the last vector from `E_in_vec` or `E_out_vec` (since we don't need it anymore)
         if self.w.len() / 2 < self.current_index {
-            self.E1.pop();
+            self.E_in_vec.pop();
         } else if 0 < self.current_index {
-            self.E2.pop();
+            self.E_out_vec.pop();
         }
         // println!(
         //     "current_index: {}, E1_len: {}, E2_len: {}",
         //     self.current_index,
-        //     self.E1.len(),
-        //     self.E2.len()
+        //     self.E_in_vec.len(),
+        //     self.E_out_vec.len()
         // );
     }
 
@@ -305,7 +319,7 @@ mod tests {
         assert_eq!(old_split_eq.get_num_vars(), new_split_eq.get_num_vars());
         assert_eq!(old_split_eq.len(), new_split_eq.len());
         assert_eq!(old_split_eq.E1, *new_split_eq.to_E1_old());
-        assert_eq!(old_split_eq.E2, *new_split_eq.E2.last().unwrap());
+        assert_eq!(old_split_eq.E2, *new_split_eq.E_out_current());
         assert_eq!(old_split_eq.merge(), new_split_eq.merge());
         // Show that they are the same after binding
         for i in (0..NUM_VARS).rev() {
@@ -314,11 +328,11 @@ mod tests {
             new_split_eq.bind(r);
             assert_eq!(old_split_eq.merge(), new_split_eq.merge());
             if NUM_VARS / 2 < i {
-                assert_eq!(old_split_eq.E1_len, new_split_eq.E1_len() * 2);
-                assert_eq!(old_split_eq.E2_len, new_split_eq.E2_len());
+                assert_eq!(old_split_eq.E1_len, new_split_eq.E_in_current_len() * 2);
+                assert_eq!(old_split_eq.E2_len, new_split_eq.E_out_current_len());
             } else if i > 0 {
-                assert_eq!(old_split_eq.E1_len, new_split_eq.E1_len());
-                assert_eq!(old_split_eq.E2_len, new_split_eq.E2_len() * 2);
+                assert_eq!(old_split_eq.E1_len, new_split_eq.E_in_current_len());
+                assert_eq!(old_split_eq.E2_len, new_split_eq.E_out_current_len() * 2);
             }
         }
     }

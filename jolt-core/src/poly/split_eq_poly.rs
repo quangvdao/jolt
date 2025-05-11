@@ -114,7 +114,8 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         final_E_out.reverse();
 
         Self {
-            current_index: w.len(),
+            // Hack: we re-purpose `current_index` to store the split point 1
+            current_index: split_point1,
             current_scalar: F::one(),
             w: w.to_vec(),
             // Only filter out the _last_ l vectors from E_out, and discard the rest

@@ -37,7 +37,7 @@ impl<F: JoltField> EqPolynomial<F> {
     #[tracing::instrument(skip_all, name = "EqPolynomial::evals_cached")]
     /// Computes the table of coefficients like `evals`, but also caches the intermediate results
     ///
-    /// In other words, computes `{eq(r[i..], x) for all x in {0, 1}^{n - i}}` and for all `i in
+    /// In other words, computes `{eq(r[..i], x) for all x in {0, 1}^{n - i}}` and for all `i in
     /// 0..r.len()`.
     pub fn evals_cached(r: &[F]) -> Vec<Vec<F>> {
         // TODO: implement parallel version (it seems more difficult to parallelize all the

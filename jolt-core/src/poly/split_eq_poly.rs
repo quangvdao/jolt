@@ -60,6 +60,55 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         }
     }
 
+    // 0 ..... (n/2 - l) ..... (n - l) ..... n
+    //              <--- E_in --->
+    // E_out ---->                <---- E_out
+    // where the first E_out part corresponds to x_out, and the second E_out part corresponds to y_suffix
+    pub fn new_for_small_value(w: &[F], num_small_value_rounds: usize) -> Self {
+        // Split w into the slices: (l = num_small_value_rounds)
+        // (n/2 - l) ..... (n - l)
+        // 0..(n/2 - l - 1) concatenated with (n - l)...n
+        // Then invoke the evals_cached constructor on the concatenated slice, producing E1 (this is E_out)
+        // Invoke the evals constructor (no caching) on the middle slice, producing E2 (this is E_in)
+        // In other words, there is only 1 vector in E2, and l vectors in E1
+        // (we may drop the rest of the vectors after evals_cached)
+        let n = w.len();
+        let l = num_small_value_rounds;
+
+        assert!(n >= 2 * l, "length of w must be >= 2 * num_small_value_rounds for the split to be valid.");
+        // n must be even if n/2 is used without remainder concerns for lengths.
+        // If n is odd, standard integer division for n/2 might lead to off-by-one in lengths if not handled carefully.
+        // Assuming n is such that n/2 is meaningful as intended, often implying n is even or handling is robust.
+
+        let split_point1 = n / 2 - l;
+        let split_point2 = n - 1 - split_point1;
+
+        let w_E_in_vars: Vec<F> = w[split_point1..split_point2].to_vec();
+
+        let mut w_E_out_vars: Vec<F> = Vec::with_capacity(n / 2);
+        w_E_out_vars.extend_from_slice(&w[0..split_point1]);
+        w_E_out_vars.extend_from_slice(&w[split_point2..n-1]);
+
+        let (E_out_cached, E_in_evals) = rayon::join(
+            || EqPolynomial::evals_cached(&w_E_out_vars),
+            || EqPolynomial::evals(&w_E_in_vars),
+        );
+        
+        let num_total_E_out_vectors = E_out_cached.len();
+        // l is num_small_value_rounds
+        let start_index = num_total_E_out_vectors.saturating_sub(l);
+        let final_E1 = E_out_cached[start_index..].to_vec();
+
+        Self {
+            current_index: w.len(),
+            current_scalar: F::one(),
+            w: w.to_vec(),
+            // Only filter out the _last_ l vectors from E_out, and discard the rest
+            E1: final_E1,
+            E2: vec![E_in_evals],
+        }
+    }
+
     pub fn get_num_vars(&self) -> usize {
         self.w.len()
     }

@@ -55,11 +55,12 @@ fn define_non_svo_iteration_split<F: JoltField>(
 
 // From the parts iterated by define_non_svo_iteration_split, reconstruct the full indices.
 fn reconstruct_full_non_svo_indices(
-    x_out_non_svo_val: usize, // e.g., step_idx from the outer parallel loop
-    x_in_non_svo_val: usize,  // e.g., lower_constraint_bits_val from the inner serial loop
-    _num_steps: usize, // For context if step_idx was split
+    x_out_non_svo_val: usize,      // e.g., step_idx from the outer parallel loop
+    x_in_non_svo_val: usize,       // e.g., lower_constraint_bits_val from the inner serial loop
+    _num_steps: usize,             // For context if step_idx was split
     _lower_constraint_vars: usize, // For context if lower_constraint_vars was split
-) -> (usize, usize) { // Returns (current_step_idx, current_lower_bits_val)
+) -> (usize, usize) {
+    // Returns (current_step_idx, current_lower_bits_val)
     // If x_out_non_svo_val is step_idx and x_in_non_svo_val is lower_bits_val:
     (x_out_non_svo_val, x_in_non_svo_val)
 }
@@ -74,17 +75,22 @@ fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
     num_uniform_constraints: usize,
     num_total_constraints_padded: usize, // For calculating global_r1cs_idx if needed by caller
     num_total_steps: usize,
-) -> (i64, i64) { // Returns (az_coeff_i64, bz_coeff_i64)
+) -> (i64, i64) {
+    // Returns (az_coeff_i64, bz_coeff_i64)
     let mut az_i64 = 0i64;
     let mut bz_i64 = 0i64;
 
     if constraint_idx_within_step < num_uniform_constraints {
         let constraint = &uniform_constraints[constraint_idx_within_step];
         if !constraint.a.terms().is_empty() {
-            az_i64 = constraint.a.evaluate_row_i64(flattened_polynomials, current_step_idx);
+            az_i64 = constraint
+                .a
+                .evaluate_row_i64(flattened_polynomials, current_step_idx);
         }
         if !constraint.b.terms().is_empty() {
-            bz_i64 = constraint.b.evaluate_row_i64(flattened_polynomials, current_step_idx);
+            bz_i64 = constraint
+                .b
+                .evaluate_row_i64(flattened_polynomials, current_step_idx);
         }
     } else if constraint_idx_within_step < num_uniform_constraints + cross_step_constraints.len() {
         let cross_step_constraint_idx = constraint_idx_within_step - num_uniform_constraints;
@@ -95,8 +101,18 @@ fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
             None
         };
 
-        let eq_a_eval = eval_offset_lc_i64(&constraint.a, flattened_polynomials, current_step_idx, next_step_index_opt);
-        let eq_b_eval = eval_offset_lc_i64(&constraint.b, flattened_polynomials, current_step_idx, next_step_index_opt);
+        let eq_a_eval = eval_offset_lc_i64(
+            &constraint.a,
+            flattened_polynomials,
+            current_step_idx,
+            next_step_index_opt,
+        );
+        let eq_b_eval = eval_offset_lc_i64(
+            &constraint.b,
+            flattened_polynomials,
+            current_step_idx,
+            next_step_index_opt,
+        );
         let temp_az = eq_a_eval - eq_b_eval;
 
         if !temp_az.is_zero() {
@@ -105,12 +121,16 @@ fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
             // let cond_eval = eval_offset_lc_i64(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
             // assert_eq!(cond_eval, 0, "Cross-step constraint violated");
         } else {
-            bz_i64 = eval_offset_lc_i64(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
+            bz_i64 = eval_offset_lc_i64(
+                &constraint.cond,
+                flattened_polynomials,
+                current_step_idx,
+                next_step_index_opt,
+            );
         }
     }
     (az_i64, bz_i64)
 }
-
 
 // Computes product P(Y_ext, Z_curr) = Az_ext * Bz_ext (no Cz for SVO infinity paths)
 // from all binary Az/Bz values at Z_curr. Updates temp_tA.
@@ -129,19 +149,70 @@ fn TODO_compute_extended_products_and_update_tA<F: JoltField>(
     //   *temp_tA.entry(Y_ext.clone()).or_insert(F::zero()) += E_in_val * product_P;
 }
 
+// Computes Teq factor for E_out_s
+// This function now uses the precomputed E_out_s evaluations from eq_poly.E1.
+#[inline]
+fn get_E_out_s_val<F: JoltField>(
+    E_out_s_evals: &[F],              // Precomputed evaluations from eq_poly.E1[svo_round_s]
+    num_y_suffix_vars: usize,         // Number of variables in y_suffix
+    num_x_out_non_svo_vars: usize,    // Number of variables in x_out_non_svo
+    y_suffix_as_int: usize,           // Integer representation of y_suffix (LSB)
+    x_out_non_svo_val: usize,           // Integer assignment for x_out_non_svo variables (MSB)
+) -> F {
+    // Sanity check for evaluation table length
+    let expected_len = 1 << (num_y_suffix_vars + num_x_out_non_svo_vars);
+    assert_eq!(E_out_s_evals.len(), expected_len, "E_out_s_evals has unexpected length {}. Expected {}. num_y_suffix_vars = {}, num_x_out_non_svo_vars = {}", E_out_s_evals.len(), expected_len, num_y_suffix_vars, num_x_out_non_svo_vars);
+
+    // y_suffix_as_int is LSB, x_out_non_svo_val is MSB.
+    let combined_idx = (x_out_non_svo_val << num_y_suffix_vars) | y_suffix_as_int;
+    
+    assert!(combined_idx < E_out_s_evals.len(), "combined_idx out of bounds for E_out_s_evals");
+    E_out_s_evals[combined_idx]
+}
+
 // Implements Definition 4 ("idx4") from the paper to map an extended SVO prefix
-// to (round_s, v_config, u_eval, y_suffix_binary) tuples.
-fn TODO_idx4_mapping(
-    svo_prefix_extended: Vec<SVOEvalPoint>, // k_eff == num_svo_rounds length
+// to (round_s, v_config, u_eval) tuples. y_suffix is handled by the caller.
+fn idx_mapping<F: JoltField>(
+    svo_prefix_extended: &[SVOEvalPoint], // k_eff == num_svo_rounds length
     num_svo_rounds: usize,
 ) -> Vec<(
-    usize,                      // SVO round index s (0 to num_svo_rounds-1)
-    Vec<SVOEvalPoint>,       // v_config (v_0, ..., v_{s-1}), length s
-    SVOEvalPoint,            // u_eval (for y_s)
-    Vec<bool>,                  // y_suffix_binary (binary values for y_{s+1}, ..., y_{num_svo_rounds-1})
+    usize,             // SVO round index s (0 to num_svo_rounds-1)
+    Vec<SVOEvalPoint>, // v_config (v_0, ..., v_{s-1}), length s
+    SVOEvalPoint,      // u_eval (for y_s)
 )> {
-    // Placeholder: Actual implementation needs careful iteration and checking conditions.
-    vec![]
+    let mut result = Vec::new();
+    if num_svo_rounds == 0 {
+        return result;
+    }
+    assert_eq!(svo_prefix_extended.len(), num_svo_rounds);
+
+    for s in 0..num_svo_rounds {
+        let v_config: Vec<SVOEvalPoint> = svo_prefix_extended[0..s].to_vec();
+        let u_eval = svo_prefix_extended[s];
+
+        // Condition: u_eval must be Zero or Infinity for Spartan Az*Bz-Cz context with SVO.
+        if !(u_eval == SVOEvalPoint::Zero || u_eval == SVOEvalPoint::Infinity) {
+            continue;
+        }
+
+        let y_suffix_components = &svo_prefix_extended[s + 1..num_svo_rounds];
+        let mut y_suffix_is_binary = true;
+        for &point in y_suffix_components.iter() {
+            if point == SVOEvalPoint::Infinity {
+                y_suffix_is_binary = false;
+                break;
+            }
+        }
+
+        // Condition: y_suffix must be binary.
+        // This condition from idx4 ensures that the Y_ext can correspond to a P(v,u,y,...) where y is binary.
+        if !y_suffix_is_binary {
+            continue;
+        }
+
+        result.push((s, v_config, u_eval));
+    }
+    result
 }
 
 // Maps a v-configuration (Vec<SVOEvalPoint> of length s) to a unique usize index (0 to 3^s - 1).
@@ -161,33 +232,17 @@ fn map_v_config_to_idx(v_config: &[SVOEvalPoint], _round_s: usize) -> usize {
 }
 
 // Computes Teq(tau_for_x_in, x_in_non_svo_val_as_binary_vec)
-fn TODO_get_E_in_val_for_x_in<F: JoltField>(
-    _x_in_non_svo_val: usize, // Represents the specific assignment to x_in non-SVO variables
-    _tau: &[F],           // Full verifier challenges for all R1CS variables
-    _num_step_vars: usize,      // To help locate tau components for step vars
-    _num_svo_rounds: usize,    // To help locate tau components for SVO vars
-    _lower_constraint_vars: usize, // To help locate tau components for lower constraint vars
-                               // Potentially pass a pre-configured Z_eq_poly for this
+// This function now uses the precomputed E_in evaluations.
+#[inline]
+fn get_E_in_val_for_x_in<F: JoltField>(
+    E_in_evals: &[F],         // Precomputed evaluations from eq_poly.E2_current()
+    x_in_non_svo_val: usize,  // Integer representation of assignment to x_in_non_svo variables
 ) -> F {
-    // Placeholder: This needs to select the right challenges from tau that correspond
-    // to the variables represented by x_in_non_svo_val, convert x_in_non_svo_val to its
-    // bit decomposition, and evaluate the Eq polynomial.
-    F::one()
-}
-
-// Computes Teq factor for E_out_s
-fn TODO_get_E_out_s_val<F: JoltField>(
-    _svo_round_s: usize,
-    _y_suffix_binary_for_E_out: &[bool], // Binary suffix of SVO vars from idx4
-    _x_out_non_svo_val: usize, // Represents assignment to x_out non-SVO variables
-    _tau: &[F],
-    _num_step_vars: usize,
-    _num_svo_rounds: usize,
-    _lower_constraint_vars: usize,
-    // Potentially pass a pre-configured Z_eq_poly
-) -> F {
-    // Placeholder: Similar to E_in, but for variables in (y_suffix, x_out_non_svo).
-    F::one()
+    // x_in_non_svo_val is the direct index into the flat evaluation table E_in_evals.
+    // E_in_evals stores T_eq(challenges_for_x_in_vars, assignment)
+    // where assignment iterates from 0 to 2^(num_x_in_vars) - 1.
+    assert!(x_in_non_svo_val < E_in_evals.len(), "x_in_non_svo_val out of bounds for E_in_evals");
+    E_in_evals[x_in_non_svo_val]
 }
 
 // Result of a single parallel task in the fold-reduce pattern for the small value optimization (SVO)
@@ -199,9 +254,8 @@ struct PartialSmallValueContrib<F: JoltField> {
 
     // Direct contribution to the final accumulator structure.
     // Outer Vec: SVO round s (0 to num_svo_rounds-1)
-    // Inner Vec: v-config index (0 to 3^s - 1)
-    // Tuple: (val_for_u_eq_0, val_for_u_eq_infty)
-    svo_accumulators_contribution: Vec<Vec<(F, F)>>,
+    // Tuple: (Vec of vals_for_u_eq_0, Vec of vals_for_u_eq_infty), each inner Vec indexed by v-config index.
+    svo_accumulators_contribution: Vec<(Vec<F>, Vec<F>)>,
 }
 
 pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
@@ -221,23 +275,24 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
 impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     /// Compute the unbound coefficients for the Az and Bz polynomials (no Cz coefficients are
     /// needed), along with the accumulators for the small value optimization (SVO) rounds.
-    /// 
+    ///
     /// Recall that the accumulators are of the form: accum_i[v_0, ..., v_{i-1}, u] = \sum_{y_rest}
-    /// \sum_{x_out} E2(x_out) * \sum_{x_in} E1(x_in) 
+    /// \sum_{x_out} E2(x_out) * \sum_{x_in} E1(x_in)
     /// * P(v_0, ..., v_{i-1}, u, y_rest, x_out, x_in),
-    /// 
+    ///
     /// for all i < num_svo_rounds,
-    /// 
+    ///
     /// where v_0,..., v_{i-1} \in {0,1,infty}, u \in {0,infty}, and P(X) = Az(X) * Bz(X) - Cz(X).
     /// Note that only the accumulators with at least one infinity among v_j and u are non-zero, so
     /// the fully binary ones do not need to be computed. AND the ones with at least one infinity
     /// will NOT have any Cz contributions.
-    /// 
+    ///
     /// This is why we do not need to compute the Cz terms here.
-    /// 
-    /// The output of the accumulators is Vec<Vec<(F,F)>>, where the outer Vec is indexed by SVO
-    /// round `i` (0 to `num_svo_rounds`-1), the inner Vec's are for the evals at v_0, ...,
-    /// v_{i-1} = 0, 1, infty, and the tuple are for the evals at u = 0 and u = infty respectively.
+    ///
+    /// The output of the accumulators is Vec<(Vec<F>, Vec<F>)>, where the outer Vec is indexed by SVO
+    /// round `i` (0 to `num_svo_rounds`-1). The tuple contains two Vec<F>: the first for evals at
+    /// u = 0, and the second for u = infty. Each of these inner Vecs is indexed by the v-config
+    /// (v_0, ..., v_{i-1}).
     pub fn new_with_precompute(
         padded_num_constraints: usize,
         uniform_constraints: &[Constraint],
@@ -245,27 +300,37 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         flattened_polynomials: &[&MultilinearPolynomial<F>],
         tau: &[F],
         num_svo_rounds: usize,
-    ) -> (Vec<Vec<(F,F)>>, Self) {
+    ) -> (Vec<(Vec<F>, Vec<F>)>, Self) {
         // DO NOT DELETE. Relevant for full small value optimization (SVO).
-        // 0 ..... l ..... (l + n/2) ..... n
-        //          <--- E_in --->
-        // E_out ->                <-- E_out
-        let _eq_poly = NewSplitEqPolynomial::new(tau);
+        let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, num_svo_rounds);
+
+        // E_in is the unique vector in E2
+        let E_in_evals = eq_poly.E2_current();
+        // E_out_vec contains the evaluation tables for E_out_s, for s = 0 to num_svo_rounds-1
+        // E_out_vec[s] corresponds to challenges for (Y_{s+1}...Y_{l-1}, X_{out_non_svo})
+        let E_out_vec = &eq_poly.E1; // eq_poly.E1 is Vec<Vec<F>>
 
         let num_steps = flattened_polynomials[0].len();
         let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 }; // Handle num_steps = 0 or 1
-        let constraint_vars_total = if padded_num_constraints > 0 { padded_num_constraints.log_2() } else { 0 };
+        let constraint_vars_total = if padded_num_constraints > 0 {
+            padded_num_constraints.log_2()
+        } else {
+            0
+        };
 
         assert_eq!(
             tau.len(),
             num_step_vars + constraint_vars_total,
             "tau length ({}) mismatch with R1CS variable count (step_vars {} + constraint_vars {})",
-            tau.len(), num_step_vars, constraint_vars_total
+            tau.len(),
+            num_step_vars,
+            constraint_vars_total
         );
         assert!(
             num_svo_rounds <= constraint_vars_total,
             "num_svo_rounds ({}) cannot exceed total constraint variables ({})",
-            num_svo_rounds, constraint_vars_total
+            num_svo_rounds,
+            constraint_vars_total
         );
 
         // This is the number of non-SVO bits within the constraint index part
@@ -285,7 +350,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         let reduction_identity = || PartialSmallValueContrib {
             ab_coeffs_buckets_contribution: vec![Vec::new(); num_y_svo_e2_buckets],
             svo_accumulators_contribution: (0..num_svo_rounds)
-                .map(|s| vec![(F::zero(), F::zero()); 3_usize.pow(s as u32)])
+                .map(|s| {
+                    let v_config_count = 3_usize.pow(s as u32);
+                    (vec![F::zero(); v_config_count], vec![F::zero(); v_config_count])
+                })
                 .collect(),
         };
 
@@ -297,8 +365,11 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             .map(|x_out_non_svo_val| {
                 let mut task_ab_coeffs_buckets: Vec<Vec<SparseCoefficient<i64>>> =
                     vec![Vec::new(); num_y_svo_e2_buckets];
-                let mut task_svo_acc_contrib: Vec<Vec<(F, F)>> = (0..num_svo_rounds)
-                    .map(|s| vec![(F::zero(), F::zero()); 3_usize.pow(s as u32)])
+                let mut task_svo_acc_contrib: Vec<(Vec<F>, Vec<F>)> = (0..num_svo_rounds)
+                    .map(|s| {
+                        let v_config_count = 3_usize.pow(s as u32);
+                        (vec![F::zero(); v_config_count], vec![F::zero(); v_config_count])
+                    })
                     .collect();
 
                 // Temporary accumulators tA for this x_out_non_svo_val.
@@ -358,9 +429,9 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     } // End loop over binary SVO prefixes
 
                     if num_svo_rounds > 0 {
-                        let E_in_val = TODO_get_E_in_val_for_x_in::<F>(
-                            x_in_non_svo_val, tau,
-                            num_step_vars, num_svo_rounds, lower_constraint_vars,
+                        let E_in_val = get_E_in_val_for_x_in::<F>(
+                            E_in_evals,
+                            x_in_non_svo_val,
                         );
                         TODO_compute_extended_products_and_update_tA::<F>(
                             &binary_evals_for_current_Z,
@@ -376,28 +447,47 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     for (svo_prefix_extended, tA_val) in temp_tA {
                         if tA_val.is_zero() { continue; }
 
-                        for (round_s, v_config_vec, u_eval_point, y_suffix_binary_for_E_out) in
-                            TODO_idx4_mapping(svo_prefix_extended, num_svo_rounds)
+                        // idx_mapping gives (s, v_config, u_eval) for which this svo_prefix_extended is relevant.
+                        // The y_suffix part of svo_prefix_extended must be binary for it to be in the result of idx_mapping.
+                        for (round_s, v_config_vec, u_eval_point) in
+                            idx_mapping::<F>(&svo_prefix_extended, num_svo_rounds)
                         {
-                            let E_out_s_val = TODO_get_E_out_s_val::<F>(
-                                round_s, &y_suffix_binary_for_E_out, x_out_non_svo_val,
-                                tau, num_step_vars, num_svo_rounds, lower_constraint_vars,
+                            // The specific y_suffix from the svo_prefix_extended that led to this tA_val.
+                            // This is the y_suffix for which P( (v_config, u_eval, y_suffix_from_Yext), Z_current) was computed in tA_val.
+                            let y_suffix_components_from_Yext = &svo_prefix_extended[round_s + 1..num_svo_rounds];
+                            let mut y_suffix_as_int_from_Yext = 0;
+                            for (bit_idx, &point) in y_suffix_components_from_Yext.iter().enumerate() {
+                                if point == SVOEvalPoint::One {
+                                    y_suffix_as_int_from_Yext |= 1 << bit_idx; // LSB-first conversion
+                                }
+                            }
+                            let num_y_suffix_vars_for_this_Yext = y_suffix_components_from_Yext.len();
+
+                            // The accumulator definition sums over all binary y_suffix for a given (round_s, v_config, u_eval).
+                            // Here, tA_val is for a specific Y_ext, which includes a specific y_suffix (y_suffix_as_int_from_Yext).
+                            // So, we only contribute this tA_val to the sum for that specific y_suffix.
+                            // The E_out_s_val will be specific to y_suffix_as_int_from_Yext.
+
+                            let E_out_s_val = get_E_out_s_val::<F>(
+                                &E_out_vec[round_s],
+                                num_y_suffix_vars_for_this_Yext, // num_vars in y_suffix_from_Yext
+                                num_step_vars,                   // Num bits for x_out_non_svo_val (MSB part)
+                                y_suffix_as_int_from_Yext,       // y_suffix_from_Yext as int (LSB part)
+                                x_out_non_svo_val,
                             );
                             let v_config_idx = map_v_config_to_idx(&v_config_vec, round_s);
 
                             match u_eval_point {
                                 SVOEvalPoint::Zero => {
-                                    task_svo_acc_contrib[round_s][v_config_idx].0 += E_out_s_val * tA_val;
+                                    task_svo_acc_contrib[round_s].0[v_config_idx] += E_out_s_val * tA_val;
                                 }
                                 SVOEvalPoint::Infinity => {
-                                    task_svo_acc_contrib[round_s][v_config_idx].1 += E_out_s_val * tA_val;
+                                    task_svo_acc_contrib[round_s].1[v_config_idx] += E_out_s_val * tA_val;
                                 }
                                 SVOEvalPoint::One => {
+                                     panic!("SVOEvalPoint::One should not be used in the accumulator");
                                     // As per current SVO logic, P(1) is not directly stored in these primary accums.
                                     // It's derived later: P(1) = P(0) + slope_at_0.
-                                    // If idx4 produces u=One, it means the P(u) in Algo7 for this u
-                                    // would contribute to how P(0) and P(Inf) are formed or used.
-                                    // For now, we only populate for u=0 and u=Inf.
                                 }
                             }
                         }
@@ -410,26 +500,29 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             })
             .collect();
 
-        let fold_result: PartialSmallValueContrib<F> = mapped_results
-            .into_par_iter()
-            .reduce(reduction_identity, |mut acc_res, task_res| {
-                for bucket_idx in 0..num_y_svo_e2_buckets {
-                    acc_res.ab_coeffs_buckets_contribution[bucket_idx].extend(
-                        task_res.ab_coeffs_buckets_contribution[bucket_idx].iter().cloned()
-                    );
-                }
-                if num_svo_rounds > 0 {
-                    for s in 0..num_svo_rounds {
-                        for v_idx in 0..3_usize.pow(s as u32) {
-                            acc_res.svo_accumulators_contribution[s][v_idx].0 +=
-                                task_res.svo_accumulators_contribution[s][v_idx].0;
-                            acc_res.svo_accumulators_contribution[s][v_idx].1 +=
-                                task_res.svo_accumulators_contribution[s][v_idx].1;
+        let fold_result: PartialSmallValueContrib<F> =
+            mapped_results
+                .into_par_iter()
+                .reduce(reduction_identity, |mut acc_res, task_res| {
+                    for bucket_idx in 0..num_y_svo_e2_buckets {
+                        acc_res.ab_coeffs_buckets_contribution[bucket_idx].extend(
+                            task_res.ab_coeffs_buckets_contribution[bucket_idx]
+                                .iter()
+                                .cloned(),
+                        );
+                    }
+                    if num_svo_rounds > 0 {
+                        for s in 0..num_svo_rounds {
+                            for v_idx in 0..3_usize.pow(s as u32) {
+                                acc_res.svo_accumulators_contribution[s].0[v_idx] +=
+                                    task_res.svo_accumulators_contribution[s].0[v_idx];
+                                acc_res.svo_accumulators_contribution[s].1[v_idx] +=
+                                    task_res.svo_accumulators_contribution[s].1[v_idx];
+                            }
                         }
                     }
-                }
-                acc_res
-            });
+                    acc_res
+                });
 
         // If the parallel iteration and reduction strategy preserves the global sorted order
         // (e.g., by processing x_out_non_svo_val in order and extending slices),
@@ -437,15 +530,17 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         // However, a general Rayon reduce does not guarantee order of combination of task results.
         // To be safe and ensure sorted buckets if the reduce was arbitrary, or if tasks finished out of order:
         let mut final_ab_unbound_coeffs = fold_result.ab_coeffs_buckets_contribution;
-        if num_y_svo_e2_buckets > 0 { // only sort if there are buckets
-             for bucket in final_ab_unbound_coeffs.iter_mut() {
+        if num_y_svo_e2_buckets > 0 {
+            // only sort if there are buckets
+            for bucket in final_ab_unbound_coeffs.iter_mut() {
                 bucket.sort_by_key(|sc| sc.index);
             }
         }
 
         #[cfg(test)]
         {
-            if num_svo_rounds > 0 { // Only run test if SVO is active and buckets exist
+            if num_svo_rounds > 0 {
+                // Only run test if SVO is active and buckets exist
                 for (bucket_idx, bucket_coeffs) in final_ab_unbound_coeffs.iter().enumerate() {
                     if !bucket_coeffs.is_empty() {
                         let mut prev_index = bucket_coeffs[0].index;

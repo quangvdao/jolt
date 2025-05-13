@@ -204,7 +204,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut claim = F::zero();
 
         // TODO: tune this parameter depending on the number of cycles, desired RAM usage, etc.
-        const NUM_SMALL_VALUE_ROUNDS: usize = 3;
+        const NUM_SMALL_VALUE_ROUNDS: usize = 2;
 
         // Round 0..NUM_SMALL_VALUE_ROUNDS:
 
@@ -606,4 +606,84 @@ pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
     eq_poly.bind(r_i);
 
     r_i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Display the ordering of the Lagrange coefficients in the small value sumcheck
+    #[test]
+    fn test_lagrange_coeffs_ordering() {
+        // Challenges for 3 rounds
+        let r_challenges = [
+            2_i32, // r_0
+            3_i32, // r_1
+            4_i32, // r_2
+        ];
+
+        let mut lagrange_coeffs: Vec<i32> = vec![1_i32];
+
+        for &r_i in &r_challenges {
+            // Lagrange coefficients for 0, 1, and infty, respectively for the current r_i
+            // [1 - r_i, r_i, r_i * (r_i - 1)]
+            let lagrange_coeffs_r_i = [
+                1_i32 - r_i,
+                r_i,
+                r_i * (r_i - 1_i32),
+            ];
+
+            // Update Lagrange coefficients: L_{i+1} = lagrange_coeffs_r_i \otimes L_i
+            lagrange_coeffs = lagrange_coeffs_r_i
+                .iter()
+                .flat_map(|&lagrange_coeff_from_r_i| {
+                    lagrange_coeffs
+                        .iter()
+                        .map(move |&coeff_from_prev_round| lagrange_coeff_from_r_i * coeff_from_prev_round)
+                })
+                .collect();
+
+            // Optional: Print intermediate states to trace
+            // println!("After round with r_i = {:?}, lagrange_coeffs = {:?}", r_i, lagrange_coeffs);
+        }
+
+        // Expected values from the worked out example:
+        // Initial: lagrange_coeffs = [1]
+        //
+        // Round 0 (r_0 = 2):
+        //   lagrange_coeffs_r_0 = [1-2, 2, 2*(2-1)] = [-1, 2, 2]
+        //   lagrange_coeffs = flat_map([-1, 2, 2] with [1])
+        //                   = [-1*1, 2*1, 2*1]
+        //                   = [-1, 2, 2]
+        //
+        // Round 1 (r_1 = 3):
+        //   lagrange_coeffs_r_1 = [1-3, 3, 3*(3-1)] = [-2, 3, 6]
+        //   lagrange_coeffs = flat_map([-2, 3, 6] with [-1, 2, 2])
+        //                   = concat(
+        //                       [-2*-1, -2*2, -2*2],       // from -2
+        //                       [3*-1,  3*2,  3*2],        // from  3
+        //                       [6*-1,  6*2,  6*2]         // from  6
+        //                     )
+        //                   = [2, -4, -4, -3, 6, 6, -6, 12, 12]
+        //
+        // Round 2 (r_2 = 4):
+        //   lagrange_coeffs_r_2 = [1-4, 4, 4*(4-1)] = [-3, 4, 12]
+        //   lagrange_coeffs = flat_map([-3, 4, 12] with [2, -4, -4, -3, 6, 6, -6, 12, 12])
+        //                   = concat(
+        //                       [-3*2, -3*-4, -3*-4, -3*-3, -3*6, -3*6, -3*-6, -3*12, -3*12], // from -3
+        //                       [4*2,  4*-4,  4*-4,  4*-3,  4*6,  4*6,  4*-6,  4*12,  4*12],  // from  4
+        //                       [12*2, 12*-4, 12*-4, 12*-3, 12*6, 12*6, 12*-6, 12*12, 12*12] // from 12
+        //                     )
+        //                   = [-6, 12, 12, 9, -18, -18, 18, -36, -36,
+        //                      8, -16, -16, -12, 24, 24, -24, 48, 48,
+        //                      24, -48, -48, -36, 72, 72, -72, 144, 144]
+        let expected_coeffs: Vec<i32> = vec![
+            -6, 12, 12, 9, -18, -18, 18, -36, -36, 
+            8, -16, -16, -12, 24, 24, -24, 48, 48, 
+            24, -48, -48, -36, 72, 72, -72, 144, 144,
+        ];
+
+        assert_eq!(lagrange_coeffs.len(), 27);
+        assert_eq!(lagrange_coeffs, expected_coeffs);
+    }
 }

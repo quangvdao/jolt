@@ -192,10 +192,10 @@ pub struct JoltProof<
     ProofTranscript: Transcript,
 {
     pub trace_length: usize,
-    pub bytecode: BytecodeProof<F, PCS, ProofTranscript>,
-    pub read_write_memory: ReadWriteMemoryProof<F, PCS, ProofTranscript>,
+    pub bytecode: Option<BytecodeProof<F, PCS, ProofTranscript>>,
+    pub read_write_memory: Option<ReadWriteMemoryProof<F, PCS, ProofTranscript>>,
     pub instruction_lookups:
-        InstructionLookupsProof<C, M, F, PCS, InstructionSet, Subtables, ProofTranscript>,
+        Option<InstructionLookupsProof<C, M, F, PCS, InstructionSet, Subtables, ProofTranscript>>,
     pub r1cs: UniformSpartanProof<C, I, F, ProofTranscript>,
     pub opening_proof: ReducedOpeningProof<F, PCS, ProofTranscript>,
 }
@@ -549,43 +549,99 @@ where
 
         transcript.append_scalar(&spartan_key.vk_digest);
 
-        jolt_commitments
-            .read_write_values()
-            .iter()
-            .for_each(|value| value.append_to_transcript(&mut transcript));
-        jolt_commitments
-            .init_final_values()
-            .iter()
-            .for_each(|value| value.append_to_transcript(&mut transcript));
+        // Append R1CS commitments to transcript (always)
+        for com in jolt_commitments.r1cs.read_write_values() {
+            com.append_to_transcript(&mut transcript);
+        }
+        // Note: R1CS init_final_values (if any) are typically handled by Spartan's own proof transcript additions.
+
+        #[cfg(not(feature = "spartan_only"))]
+        {
+            // Append Bytecode commitments
+            for com in jolt_commitments.bytecode.read_write_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+            for com in jolt_commitments.bytecode.init_final_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+
+            // Append ReadWriteMemory commitments
+            for com in jolt_commitments.read_write_memory.read_write_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+            for com in jolt_commitments.read_write_memory.init_final_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+
+            // Append InstructionLookups commitments
+            for com in jolt_commitments.instruction_lookups.read_write_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+            for com in jolt_commitments.instruction_lookups.init_final_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+            
+            // Append TimestampRangeCheck commitments
+            for com in jolt_commitments.timestamp_range_check.read_write_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+            for com in jolt_commitments.timestamp_range_check.init_final_values() {
+                com.append_to_transcript(&mut transcript);
+            }
+        }
 
         let mut opening_accumulator: ProverOpeningAccumulator<F, ProofTranscript> =
             ProverOpeningAccumulator::new();
 
-        let bytecode_proof = BytecodeProof::prove_memory_checking(
-            &preprocessing.shared.generators,
-            &preprocessing.shared.bytecode,
-            &jolt_polynomials.bytecode,
-            &jolt_polynomials,
-            &mut opening_accumulator,
-            &mut transcript,
-        );
+        let bytecode_proof_opt: Option<BytecodeProof<F, PCS, ProofTranscript>>;
+        #[cfg(not(feature = "spartan_only"))]
+        {
+            bytecode_proof_opt = Some(BytecodeProof::prove_memory_checking(
+                &preprocessing.shared.generators,
+                &preprocessing.shared.bytecode,
+                &jolt_polynomials.bytecode,
+                &jolt_polynomials,
+                &mut opening_accumulator,
+                &mut transcript,
+            ));
+        }
+        #[cfg(feature = "spartan_only")]
+        {
+            bytecode_proof_opt = None;
+        }
 
-        let instruction_proof = InstructionLookupsProof::prove(
-            &preprocessing.shared.generators,
-            &mut jolt_polynomials,
-            &preprocessing.shared.instruction_lookups,
-            &mut opening_accumulator,
-            &mut transcript,
-        );
-
-        let memory_proof = ReadWriteMemoryProof::prove(
-            &preprocessing.shared.generators,
-            &preprocessing.shared.read_write_memory,
-            &jolt_polynomials,
-            &program_io,
-            &mut opening_accumulator,
-            &mut transcript,
-        );
+        let instruction_proof_opt: Option<InstructionLookupsProof<C, M, F, PCS, Self::InstructionSet, Self::Subtables, ProofTranscript>>;
+        #[cfg(not(feature = "spartan_only"))]
+        {
+            instruction_proof_opt = Some(InstructionLookupsProof::prove(
+                &preprocessing.shared.generators,
+                &mut jolt_polynomials,
+                &preprocessing.shared.instruction_lookups,
+                &mut opening_accumulator,
+                &mut transcript,
+            ));
+        }
+        #[cfg(feature = "spartan_only")]
+        {
+            instruction_proof_opt = None;
+        }
+        
+        let memory_proof_opt: Option<ReadWriteMemoryProof<F, PCS, ProofTranscript>>;
+        #[cfg(not(feature = "spartan_only"))]
+        {
+            memory_proof_opt = Some(ReadWriteMemoryProof::prove(
+                &preprocessing.shared.generators,
+                &preprocessing.shared.read_write_memory,
+                &jolt_polynomials,
+                &program_io,
+                &mut opening_accumulator,
+                &mut transcript,
+            ));
+        }
+        #[cfg(feature = "spartan_only")]
+        {
+            memory_proof_opt = None;
+        }
 
         let spartan_proof = UniformSpartanProof::<
             C,
@@ -609,9 +665,9 @@ where
 
         let jolt_proof = JoltProof {
             trace_length,
-            bytecode: bytecode_proof,
-            read_write_memory: memory_proof,
-            instruction_lookups: instruction_proof,
+            bytecode: bytecode_proof_opt,
+            read_write_memory: memory_proof_opt,
+            instruction_lookups: instruction_proof_opt,
             r1cs: spartan_proof,
             opening_proof,
         };
@@ -677,41 +733,61 @@ where
             _marker: PhantomData,
         };
 
-        commitments
-            .read_write_values()
-            .iter()
-            .for_each(|value| value.append_to_transcript(&mut transcript));
-        commitments
-            .init_final_values()
-            .iter()
-            .for_each(|value| value.append_to_transcript(&mut transcript));
+        // Append R1CS commitments to transcript (always)
+        for com in commitments.r1cs.read_write_values() {
+            com.append_to_transcript(&mut transcript);
+        }
+        // Note: R1CS init_final_values (if any) are typically handled by Spartan's own proof transcript additions.
 
-        Self::verify_bytecode(
-            &preprocessing.bytecode,
-            &preprocessing.generators,
-            proof.bytecode,
-            &commitments,
-            &mut opening_accumulator,
-            &mut transcript,
-        )?;
-        Self::verify_instruction_lookups(
-            &preprocessing.instruction_lookups,
-            &preprocessing.generators,
-            proof.instruction_lookups,
-            &commitments,
-            &mut opening_accumulator,
-            &mut transcript,
-        )?;
-        Self::verify_memory(
-            &mut preprocessing.read_write_memory,
-            &preprocessing.generators,
-            &preprocessing.memory_layout,
-            proof.read_write_memory,
-            &commitments,
-            program_io,
-            &mut opening_accumulator,
-            &mut transcript,
-        )?;
+        #[cfg(not(feature = "spartan_only"))]
+        {
+            if let Some(bytecode_proof) = proof.bytecode {
+                Self::verify_bytecode(
+                    &preprocessing.bytecode,
+                    &preprocessing.generators,
+                    bytecode_proof,
+                    &commitments,
+                    &mut opening_accumulator,
+                    &mut transcript,
+                )?;
+            } else {
+                return Err(ProofVerifyError::InternalError);
+            }
+
+            if let Some(instruction_lookups_proof) = proof.instruction_lookups {
+                Self::verify_instruction_lookups(
+                    &preprocessing.instruction_lookups,
+                    &preprocessing.generators,
+                    instruction_lookups_proof,
+                    &commitments,
+                    &mut opening_accumulator,
+                    &mut transcript,
+                )?;
+            } else {
+                 return Err(ProofVerifyError::InternalError);
+            }
+            
+            if let Some(read_write_memory_proof) = proof.read_write_memory {
+                 Self::verify_memory(
+                    &mut preprocessing.read_write_memory,
+                    &preprocessing.generators,
+                    &preprocessing.memory_layout,
+                    read_write_memory_proof,
+                    &commitments,
+                    program_io, // Consumed here
+                    &mut opening_accumulator,
+                    &mut transcript,
+                )?;
+            } else {
+                 return Err(ProofVerifyError::InternalError);
+            }
+        }
+        #[cfg(feature = "spartan_only")]
+        {
+            // program_io is not consumed by verify_memory in this mode, so mark it as used to avoid warnings.
+            let _ = program_io;
+        }
+
         Self::verify_r1cs(
             r1cs_proof,
             &commitments,

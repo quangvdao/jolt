@@ -28,6 +28,7 @@ default = [
     "ark-ff/asm",
     "host",
     "rayon",
+    "spartan_only",
 ]
 host = ["dep:reqwest", "dep:tokio"]
 icicle = [
@@ -38,6 +39,8 @@ icicle = [
 ]
 # Need to pass in `--features small_value_optimization` to enable this
 small_value_optimization = [] 
+# Reduce proving & verifying to Spartan only, in order to benchmark Spartan specifically
+spartan_only = []
 
 [dependencies]
 ark-bn254 = "0.5.0"

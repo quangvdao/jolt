@@ -194,8 +194,8 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
         // if (rd != 0 && update_rd_with_lookup_output == 1) constrain(rd_val == LookupOutput)
         let rd_nonzero_and_lookup_to_rd = cs.allocate_prod(
             JoltR1CSInputs::Aux(AuxVariable::WriteLookupOutputToRD),
-            JoltR1CSInputs::Bytecode_RD,
             JoltR1CSInputs::OpFlags(CircuitFlags::WriteLookupOutputToRD),
+            JoltR1CSInputs::Bytecode_RD,
         );
         cs.constrain_eq_conditional(
             rd_nonzero_and_lookup_to_rd,
@@ -205,8 +205,8 @@ impl<const C: usize, F: JoltField> R1CSConstraints<C, F> for JoltRV32IMConstrain
         // if (rd != 0 && is_jump_instr == 1) constrain(rd_val == 4 * PC)
         let rd_nonzero_and_jmp = cs.allocate_prod(
             JoltR1CSInputs::Aux(AuxVariable::WritePCtoRD),
-            JoltR1CSInputs::Bytecode_RD,
             JoltR1CSInputs::OpFlags(CircuitFlags::Jump),
+            JoltR1CSInputs::Bytecode_RD,
         );
         cs.constrain_eq_conditional(
             rd_nonzero_and_jmp,

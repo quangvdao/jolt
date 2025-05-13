@@ -2,7 +2,7 @@
 
 use crate::field::JoltField;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
-use crate::r1cs::builder::{Constraint, OffsetEqConstraint, eval_offset_lc_i64};
+use crate::r1cs::builder::{Constraint, OffsetEqConstraint, eval_offset_lc};
 use ark_ff::Zero;
 use rayon::prelude::*;
 
@@ -26,22 +26,22 @@ pub mod svo_helpers {
         constraint_idx_within_step: usize, // Full constraint index including SVO bits (all binary)
         num_uniform_constraints: usize,
         num_total_steps: usize,
-    ) -> (i64, i64) {
-        // Returns (az_coeff_i64, bz_coeff_i64)
-        let mut az_i64 = 0i64;
-        let mut bz_i64 = 0i64;
+    ) -> (i128, i128) {
+        // Returns (az_coeff_i128, bz_coeff_i128)
+        let mut az_i128 = 0i128;
+        let mut bz_i128 = 0i128;
 
         if constraint_idx_within_step < num_uniform_constraints {
             let constraint = &uniform_constraints[constraint_idx_within_step];
             if !constraint.a.terms().is_empty() {
-                az_i64 = constraint
+                az_i128 = constraint
                     .a
-                    .evaluate_row_i64(flattened_polynomials, current_step_idx);
+                    .evaluate_row(flattened_polynomials, current_step_idx);
             }
             if !constraint.b.terms().is_empty() {
-                bz_i64 = constraint
+                bz_i128 = constraint
                     .b
-                    .evaluate_row_i64(flattened_polynomials, current_step_idx);
+                    .evaluate_row(flattened_polynomials, current_step_idx);
             }
         } else if constraint_idx_within_step < num_uniform_constraints + cross_step_constraints.len() {
             let cross_step_constraint_idx = constraint_idx_within_step - num_uniform_constraints;
@@ -52,13 +52,13 @@ pub mod svo_helpers {
                 None
             };
 
-            let eq_a_eval = eval_offset_lc_i64(
+            let eq_a_eval = eval_offset_lc(
                 &constraint.a,
                 flattened_polynomials,
                 current_step_idx,
                 next_step_index_opt,
             );
-            let eq_b_eval = eval_offset_lc_i64(
+            let eq_b_eval = eval_offset_lc(
                 &constraint.b,
                 flattened_polynomials,
                 current_step_idx,
@@ -67,12 +67,12 @@ pub mod svo_helpers {
             let temp_az = eq_a_eval - eq_b_eval;
 
             if !temp_az.is_zero() {
-                az_i64 = temp_az;
+                az_i128 = temp_az;
                 // Optional: Assert cond is zero:
                 // let cond_eval = eval_offset_lc_i64(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
                 // assert_eq!(cond_eval, 0, "Cross-step constraint violated");
             } else {
-                bz_i64 = eval_offset_lc_i64(
+                bz_i128 = eval_offset_lc(
                     &constraint.cond,
                     flattened_polynomials,
                     current_step_idx,
@@ -80,7 +80,7 @@ pub mod svo_helpers {
                 );
             }
         }
-        (az_i64, bz_i64)
+        (az_i128, bz_i128)
     }
 
     // Computes Teq factor for E_out_s
@@ -266,8 +266,8 @@ pub mod svo_helpers {
     /// Performs in-place multilinear extension on ternary evaluation vectors
     /// and updates the temporary accumulator `temp_tA` with the product contribution.
     pub fn compute_and_update_tA_inplace<F: JoltField>(
-        ternary_az_evals: &mut [i64], // Size 3^l0, holds Az evals. Initially populated at binary points. Modified in-place.
-        ternary_bz_evals: &mut [i64], // Size 3^l0, holds Bz evals. Initially populated at binary points. Modified in-place.
+        ternary_az_evals: &mut [i128], // Size 3^l0, holds Az evals. Initially populated at binary points. Modified in-place.
+        ternary_bz_evals: &mut [i128], // Size 3^l0, holds Bz evals. Initially populated at binary points. Modified in-place.
         num_svo_rounds: usize,        // l_0
         e_in_val: F,                  // E_in[x_in] factor for the current x_in
         temp_tA: &mut [F],            // Accumulator vector (size 3^l0), updated with E_in * P_ext contribution.
@@ -288,7 +288,7 @@ pub mod svo_helpers {
                 let az0 = ternary_az_evals[0];
                 let bz0 = ternary_bz_evals[0];
                 if az0 != 0 && bz0 != 0 { // Early check
-                    let product_i128 = (az0 as i128) * (bz0 as i128);
+                    let product_i128 = az0.checked_mul(bz0).expect("Az0*Bz0 product overflow i128 in SVO base case");
                     temp_tA[0] += e_in_val.mul_i128(product_i128);
                 }
             }
@@ -353,7 +353,7 @@ pub mod svo_helpers {
                     return; // In parallel context, this exits the current closure iteration
                 }
 
-                let product_p_i128 = (az_final as i128) * (bz_final as i128);
+                let product_p_i128 = az_final.checked_mul(bz_final).expect("Az_ext*Bz_ext product overflow i128");
                 // product_p_i128 cannot be zero here due to the check above
 
                 // Accumulate contribution from this x_in using mul_i128
@@ -425,6 +425,10 @@ pub mod svo_helpers {
 #[cfg(test)]
 mod tests {
     use super::svo_helpers::*;
+    use SVOEvalPoint::*;
+    use crate::field::JoltField;
+    use ark_bn254::Fr as TestField;
+    use ark_ff::{Zero, One};
 
     /// Tests the `get_svo_prefix_extended_from_idx` function.
     /// This function converts a base-3 integer index into a vector of `SVOEvalPoint`s.
@@ -645,5 +649,262 @@ mod tests {
         assert!(res_ioz.contains(&(0, vec![], Infinity, 1, 2))); // y=[O,Z] (O is LSB of y_suffix components, int value becomes 1)
         // s=1, v=[I], u=O -> skip
         assert!(res_ioz.contains(&(2, vec![Infinity, One], Zero, 0, 0))); // y=[]
+    }
+
+    /// Tests the `get_E_out_s_val` function.
+    /// This function retrieves a precomputed evaluation E_out,s[y, x_out].
+    /// y_suffix_as_int is LSB, x_out_val is MSB.
+    #[test]
+    fn test_get_E_out_s_val() {
+        let e_out_s_evals: Vec<TestField> = (0..16).map(|i| TestField::from(i as u64)).collect();
+
+        // Case 1: num_y_suffix_vars = 0, num_x_out_vars = 2. Length = 4.
+        let evals_nx2_ny0: Vec<TestField> = (0..4).map(|i| TestField::from(i as u64)).collect();
+        assert_eq!(
+            get_E_out_s_val(&evals_nx2_ny0, 0, #[cfg(test)] 2, 0, 0), // x_out=0
+            TestField::from(0u64)
+        );
+        assert_eq!(
+            get_E_out_s_val(&evals_nx2_ny0, 0, #[cfg(test)] 2, 0, 3), // x_out=3
+            TestField::from(3u64)
+        );
+
+        // Case 2: num_y_suffix_vars = 2, num_x_out_vars = 2. Length = 16.
+        // Index = (x_out_val << 2) | y_suffix_as_int
+        assert_eq!(
+            get_E_out_s_val(&e_out_s_evals, 2, #[cfg(test)] 2, 0, 0), // x=0, y=0 => idx=0
+            TestField::from(0u64)
+        );
+         assert_eq!(
+            get_E_out_s_val(&e_out_s_evals, 2, #[cfg(test)] 2, 1, 0), // x=0, y=1 => idx=1
+            TestField::from(1u64)
+        );
+        assert_eq!(
+            get_E_out_s_val(&e_out_s_evals, 2, #[cfg(test)] 2, 0, 1), // x=1, y=0 => idx=4
+            TestField::from(4u64)
+        );
+        assert_eq!(
+            get_E_out_s_val(&e_out_s_evals, 2, #[cfg(test)] 2, 3, 3), // x=3, y=3 => idx=15
+            TestField::from(15u64)
+        );
+
+        // Case 3: num_y_suffix_vars = 3, num_x_out_vars = 1. Length = 16.
+        // Index = (x_out_val << 3) | y_suffix_as_int
+        assert_eq!(
+            get_E_out_s_val(&e_out_s_evals, 3, #[cfg(test)] 1, 0, 1), // x=1, y=0 => idx = 8
+            TestField::from(8u64)
+        );
+        assert_eq!(
+            get_E_out_s_val(&e_out_s_evals, 3, #[cfg(test)] 1, 7, 0), // x=0, y=7 => idx = 7
+            TestField::from(7u64)
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_E_out_s_val_panic_bad_length() {
+        // Requires num_y=1, num_x=1 => len = 4. Provide len = 3.
+        let e_out_s_evals: Vec<TestField> = vec![TestField::from(0u64); 3];
+        get_E_out_s_val(&e_out_s_evals, 1, #[cfg(test)] 1, 0, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_E_out_s_val_panic_idx_bounds() {
+        // Requires num_y=1, num_x=1 => len = 4.
+        let e_out_s_evals: Vec<TestField> = vec![TestField::from(0u64); 4];
+        // Access index (2 << 1) | 0 = 4, which is out of bounds.
+        get_E_out_s_val(&e_out_s_evals, 1, #[cfg(test)] 1, 0, 2);
+    }
+
+    /// Tests the `precompute_all_idx_mappings` function.
+    #[test]
+    fn test_precompute_all_idx_mappings() {
+        // num_svo_rounds = 0
+        let map_0 = precompute_all_idx_mappings(0, 1);
+        assert_eq!(map_0.len(), 1);
+        assert_eq!(map_0[0], vec![]);
+
+        // num_svo_rounds = 1
+        let map_1 = precompute_all_idx_mappings(1, 3);
+        assert_eq!(map_1.len(), 3);
+        // beta_idx = 0 (Z): svo_prefix = [Z]
+        assert_eq!(map_1[0], idx_mapping(&[Zero], 1));
+        assert_eq!(map_1[0], vec![(0, vec![], Zero, 0, 0)]);
+        // beta_idx = 1 (O): svo_prefix = [O]
+        assert_eq!(map_1[1], idx_mapping(&[One], 1));
+        assert_eq!(map_1[1], vec![]);
+        // beta_idx = 2 (I): svo_prefix = [I]
+        assert_eq!(map_1[2], idx_mapping(&[Infinity], 1));
+        assert_eq!(map_1[2], vec![(0, vec![], Infinity, 0, 0)]);
+
+        // num_svo_rounds = 2
+        let map_2 = precompute_all_idx_mappings(2, 9);
+        assert_eq!(map_2.len(), 9);
+        for beta_idx in 0..9 {
+            let svo_prefix = get_svo_prefix_extended_from_idx(beta_idx, 2);
+            assert_eq!(map_2[beta_idx], idx_mapping(&svo_prefix, 2), 
+                      "Mismatch for beta_idx {}", beta_idx);
+        }
+        
+        // Spot check beta_idx = 0 ([Z,Z])
+        let res_zz = map_2[0].clone();
+        assert_eq!(res_zz.len(), 2);
+        assert!(res_zz.contains(&(0, vec![], Zero, 0, 1))); 
+        assert!(res_zz.contains(&(1, vec![Zero], Zero, 0, 0)));
+
+        // Spot check beta_idx = 5 ([O,I]) = 12_3 = 1*3 + 2*1 = 5
+        let svo_prefix_oi = get_svo_prefix_extended_from_idx(5, 2);
+        assert_eq!(svo_prefix_oi, vec![One, Infinity]);
+        let res_oi = idx_mapping(&svo_prefix_oi, 2);
+        assert_eq!(map_2[5], res_oi);
+        assert_eq!(res_oi.len(), 1);
+        assert!(res_oi.contains(&(1, vec![One], Infinity, 0, 0)));
+    }
+
+    // Basic test for compute_and_update_tA_inplace
+    #[test]
+    fn test_compute_and_update_tA_inplace() {
+        // Test num_svo_rounds = 0 (base case)
+        let mut az_evals_0 = vec![5i128];
+        let mut bz_evals_0 = vec![3i128];
+        let mut temp_tA_0 = vec![TestField::zero()];
+        let e_in_val_0 = TestField::from(2u64);
+
+        compute_and_update_tA_inplace(
+            &mut az_evals_0,
+            &mut bz_evals_0,
+            0, // num_svo_rounds
+            e_in_val_0,
+            &mut temp_tA_0
+        );
+
+        // Expected: e_in_val * az * bz = 2 * 5 * 3 = 30
+        assert_eq!(temp_tA_0[0], TestField::from(30u64));
+
+        // Test num_svo_rounds = 1
+        // For l0=1, we have 3 points (0,1,I) and need to test extension
+        let mut az_evals_1 = vec![2i128, 4i128, 0i128]; // Only 0 and 1 points initially populated
+        let mut bz_evals_1 = vec![3i128, 5i128, 0i128];
+        let mut temp_tA_1 = vec![TestField::zero(); 3];
+        let e_in_val_1 = TestField::from(1u64);
+
+        compute_and_update_tA_inplace(
+            &mut az_evals_1,
+            &mut bz_evals_1,
+            1,
+            e_in_val_1,
+            &mut temp_tA_1
+        );
+
+        // After extension:
+        // az_evals_1 should be [2, 4, 2] (I value is 4-2=2)
+        // bz_evals_1 should be [3, 5, 2] (I value is 5-3=2)
+        assert_eq!(az_evals_1, vec![2i128, 4i128, 2i128]);
+        assert_eq!(bz_evals_1, vec![3i128, 5i128, 2i128]);
+
+        // Expected: e_in_val * az * bz
+        assert_eq!(temp_tA_1[0], TestField::from(6u64));  // 1 * 2 * 3 = 6
+        assert_eq!(temp_tA_1[1], TestField::from(20u64)); // 1 * 4 * 5 = 20
+        assert_eq!(temp_tA_1[2], TestField::from(4u64));  // 1 * 2 * 2 = 4
+    }
+
+    // Test for distribute_tA_to_svo_accumulators
+    #[test]
+    fn test_distribute_tA_to_svo_accumulators() {
+        // Test scenario: l0=2, round_s in {0,1}
+        // Num ternary points = 3^2 = 9
+        let num_svo_rounds = 2;
+        let num_ternary_points = 9;
+        let x_out_val = 0; // Simple case with x_out=0
+        #[cfg(test)]
+        let iter_num_x_out_vars = 1; // Match the fixed value used in testing
+
+        // Prepare task_tA_accumulator_vec - Only populate a few indices to test specific paths
+        let mut task_tA_accumulator_vec = vec![TestField::zero(); num_ternary_points];
+        // beta_idx 0 = [Z,Z] -> Should be zero according to SVO logic (fully binary)
+        task_tA_accumulator_vec[0] = TestField::zero();
+        // beta_idx 4 = [O,O] -> Should be zero according to SVO logic (fully binary)
+        task_tA_accumulator_vec[4] = TestField::zero();
+        // beta_idx 2 = [Z,I] -> Not fully binary, can be non-zero
+        task_tA_accumulator_vec[2] = TestField::from(5u64);
+
+        // Prepare E_out_vec with two vectors, one for each SVO round
+        // Round 0 has num_y_suffix_vars=1, Round 1 has num_y_suffix_vars=0
+        let mut E_out_vec = Vec::new();
+        // For round_s=0: num_y_suffix_vars=1, num_x_out_vars=1
+        // Table length 2^(1+1) = 4
+        let E_out_s0 = vec![
+            TestField::from(1u64), // E[0,0]
+            TestField::from(2u64), // E[0,1] 
+            TestField::from(3u64), // E[1,0]
+            TestField::from(4u64), // E[1,1]
+        ];
+        // For round_s=1: num_y_suffix_vars=0, num_x_out_vars=1
+        // Table length 2^(0+1) = 2
+        let E_out_s1 = vec![
+            TestField::from(5u64), // E[0]
+            TestField::from(6u64), // E[1]
+        ];
+        E_out_vec.push(E_out_s0);
+        E_out_vec.push(E_out_s1);
+
+        // Precompute all the idx mappings
+        let all_idx_mapping_results = precompute_all_idx_mappings(num_svo_rounds, num_ternary_points);
+        
+        // Initialize SVO accumulators for both rounds
+        // For each round, we need two vectors: one for u=Z and one for u=I
+        // Each vector has size 3^s (s=round index)
+        let mut task_svo_accs = Vec::new();
+        // Round 0: s=0, num_v_configs = 3^0 = 1
+        task_svo_accs.push((
+            vec![TestField::zero()], // u=Z, v=[] (only one config)
+            vec![TestField::zero()]  // u=I, v=[] (only one config)
+        ));
+        // Round 1: s=1, num_v_configs = 3^1 = 3 (v can be Z, O, or I)
+        task_svo_accs.push((
+            vec![TestField::zero(); 3], // u=Z, v in {Z,O,I}
+            vec![TestField::zero(); 3]  // u=I, v in {Z,O,I}
+        ));
+
+        // Invoke the distribution function
+        distribute_tA_to_svo_accumulators(
+            &task_tA_accumulator_vec,
+            x_out_val,
+            num_svo_rounds,
+            num_ternary_points,
+            &E_out_vec,
+            &all_idx_mapping_results,
+            &mut task_svo_accs,
+            #[cfg(test)]
+            iter_num_x_out_vars
+        );
+
+        // Verify results based on our knowledge of the mappings and values
+        // For beta_idx = 0 ([Z,Z]), task_tA = 2:
+        // - Maps to (0, [], Z, 0, 1) and (1, [Z], Z, 0, 0)
+        // - For round 0: s=0, v=[], u=Z, y=0, E_out = E[0,0] = 1
+        //   => task_svo_accs[0].0[0] += 1 * 2 = 2. Now expects 0 since task_tA_accumulator_vec[0] is 0.
+        // - For round 1: s=1, v=[Z], u=Z, y=[], E_out = E[0] = 5
+        //   => task_svo_accs[1].0[0] += 5 * 2 = 10. Now expects 0 since task_tA_accumulator_vec[0] is 0.
+        assert_eq!(task_svo_accs[0].0[0], TestField::zero()); // round 0, u=Z
+        assert_eq!(task_svo_accs[1].0[0], TestField::zero()); // round 1, u=Z, v=[Z]
+        
+        // For beta_idx = 2 ([Z,I]), task_tA = 5:
+        // - Maps to (1, [Z], I, 0, 0)
+        // - For round 1: s=1, v=[Z], u=I, y=[], E_out = E[0] = 5
+        //   => task_svo_accs[1].1[0] += 5 * 5 = 25
+        assert_eq!(task_svo_accs[1].1[0], TestField::from(25u64)); // round 1, u=I, v=[Z]
+        
+        // For beta_idx = 4 ([O,O]), task_tA = 3:
+        // - Maps to (1, [O], O, 0, 0) - This gets skipped because u=O
+        // - No contribution expected
+        
+        // Check that other accumulators remain at zero
+        assert_eq!(task_svo_accs[0].1[0], TestField::zero()); // round 0, u=I
+        assert_eq!(task_svo_accs[1].0[1], TestField::zero()); // round 1, u=Z, v=[O]
+        assert_eq!(task_svo_accs[1].0[2], TestField::zero()); // round 1, u=Z, v=[I]
+        assert_eq!(task_svo_accs[1].1[1], TestField::zero()); // round 1, u=I, v=[O]
+        assert_eq!(task_svo_accs[1].1[2], TestField::zero()); // round 1, u=I, v=[I]
     }
 }

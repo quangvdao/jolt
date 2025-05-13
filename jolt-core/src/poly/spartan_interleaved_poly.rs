@@ -28,7 +28,7 @@ pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// 
     /// (note: **no** Cz coefficients are stored here, since they are not needed for small value
     /// precomputation, and can be computed on the fly in streaming round)
-    pub(crate) ab_unbound_coeffs: Vec<SparseCoefficient<i64>>,
+    pub(crate) ab_unbound_coeffs: Vec<SparseCoefficient<i128>>,
 
     pub(crate) az_bound_coeffs: DensePolynomial<F>,
     pub(crate) bz_bound_coeffs: DensePolynomial<F>,
@@ -110,6 +110,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         // Number of constraint variables that are NOT part of the SVO prefix Y.
         let num_non_svo_constraint_vars = num_constraint_vars.saturating_sub(num_svo_rounds);
         let num_non_svo_z_vars = num_step_vars + num_non_svo_constraint_vars;
+        assert_eq!(num_non_svo_z_vars, total_num_vars - num_svo_rounds, "num_non_svo_z_vars ({}) + num_svo_rounds ({}) must be == total_num_vars ({})", num_non_svo_z_vars, num_svo_rounds, total_num_vars);
  
         // --- Define Iteration Spaces for Non-SVO Z variables (x_out_val, x_in_val) ---
         let potential_x_out_vars = total_num_vars / 2 - num_svo_rounds;
@@ -118,25 +119,20 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         let iter_num_x_in_step_vars = num_step_vars - iter_num_x_out_vars;
         let iter_num_x_in_constraint_vars = num_non_svo_constraint_vars;
         assert_eq!(iter_num_x_in_vars, iter_num_x_in_step_vars + iter_num_x_in_constraint_vars);
+        assert_eq!(num_non_svo_z_vars, iter_num_x_out_vars + iter_num_x_in_vars);
 
         // --- Setup: E_in and E_out tables ---
-        // Call NewSplitEqPolynomial::new_for_small_value with the determined iter_num_x_out_vars.
-        // This ensures alignment between eq_poly tables and iteration logic here.
-        let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, num_svo_rounds, iter_num_x_out_vars);
-        let E_in_evals = eq_poly.E_in_current(); 
-        let E_out_vec = &eq_poly.E_out_vec; 
+        // Call NewSplitEqPolynomial::new_for_small_value with the determined variable splits.
+        let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, iter_num_x_out_vars, iter_num_x_in_vars, num_svo_rounds);
+        let E_in_evals = eq_poly.E_in_current();
+        let E_out_vec = &eq_poly.E_out_vec;
  
         assert_eq!(E_out_vec.len(), num_svo_rounds);
- 
-        // --- Assertions / Sanity Checks for eq_poly tables based on our definitions ---
-        let tau_vars_Ein = total_num_vars / 2;
-        assert_eq!(iter_num_x_in_vars, tau_vars_Ein,
-            "Mismatch for x_in: iter_num_x_in_vars ({}) != tau_vars_Ein ({}). Check split_eq_poly.rs.",
-            iter_num_x_in_vars, tau_vars_Ein
-        );
 
         let num_x_out_vals = 1 << iter_num_x_out_vars;
         let num_x_in_vals = 1 << iter_num_x_in_vars;
+
+        assert_eq!(num_x_in_vals, E_in_evals.len(), "num_x_in_vals ({}) != E_in_evals.len ({})", num_x_in_vals, E_in_evals.len());
 
         // --- Precompute binary to ternary index mapping --- 
         let binary_to_ternary_indices = svo_helpers::precompute_binary_to_ternary_indices(num_svo_rounds);
@@ -152,7 +148,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         
         // Define the structure returned by the map step and the reduction identity
         struct PrecomputeTaskResult<F: JoltField> {
-            ab_coeffs: Vec<SparseCoefficient<i64>>,
+            ab_coeffs: Vec<SparseCoefficient<i128>>,
             // Partial SVO accumulators computed *for a single x_out* and then reduced
             svo_accs: Vec<(Vec<F>, Vec<F>)>, 
         }
@@ -193,8 +189,8 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     let current_lower_bits_val = x_in_val & constraint_mask;
 
                     // Initialize ternary vectors with zeros for Az/Bz for this x_in_val
-                    let mut ternary_az_evals = vec![0i64; num_ternary_points];
-                    let mut ternary_bz_evals = vec![0i64; num_ternary_points];
+                    let mut ternary_az_evals = vec![0i128; num_ternary_points];
+                    let mut ternary_bz_evals = vec![0i128; num_ternary_points];
 
                     // --- Loop over Binary SVO Prefixes (Y_bin) ---
                     // Evaluates Az/Bz for the current Z and all binary Y_bin.
@@ -204,7 +200,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                             (y_svo_binary_prefix_val << num_non_svo_constraint_vars) + current_lower_bits_val;
 
                         if constraint_idx_within_step < padded_num_constraints {
-                            let (az_i64, bz_i64) = svo_helpers::evaluate_Az_Bz_for_r1cs_row_binary::<F>(
+                            let (az_i128, bz_i128) = svo_helpers::evaluate_Az_Bz_for_r1cs_row_binary::<F>(
                                 uniform_constraints, cross_step_constraints, flattened_polynomials,
                                 current_step_idx, constraint_idx_within_step,
                                 uniform_constraints.len(), num_steps,
@@ -215,17 +211,17 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                             let ternary_idx = binary_to_ternary_indices[y_svo_binary_prefix_val];
 
                             // Populate the ternary vectors at the binary positions
-                            ternary_az_evals[ternary_idx] = az_i64;
-                            ternary_bz_evals[ternary_idx] = bz_i64;
+                            ternary_az_evals[ternary_idx] = az_i128;
+                            ternary_bz_evals[ternary_idx] = bz_i128;
 
                             // Collect sparse coefficients (Simultaneous generation, not in Algo 6).
                             let global_r1cs_idx =
                                 current_step_idx * padded_num_constraints + constraint_idx_within_step;
-                            if az_i64 != 0 {
-                                task_res.ab_coeffs.push((global_r1cs_idx * 2, az_i64).into());
+                            if az_i128 != 0 {
+                                task_res.ab_coeffs.push((global_r1cs_idx * 2, az_i128).into());
                             }
-                            if bz_i64 != 0 {
-                                task_res.ab_coeffs.push((global_r1cs_idx * 2 + 1, bz_i64).into());
+                            if bz_i128 != 0 {
+                                task_res.ab_coeffs.push((global_r1cs_idx * 2 + 1, bz_i128).into());
                             }
                         }
                     } // End loop over Y_bin
@@ -251,7 +247,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                                 let az0 = ternary_az_evals[0]; // Should contain the only binary eval
                                 let bz0 = ternary_bz_evals[0];
                                 if az0 != 0 && bz0 != 0 { // Early break
-                                    let product_i128 = (az0 as i128) * (bz0 as i128);
+                                    let product_i128 = az0.checked_mul(bz0).expect("Az0*Bz0 product overflow for SVO l0=0 case");
                                     task_tA_accumulator_vec[0] += E_in_val.mul_i128(product_i128);
                                 }
                             }
@@ -324,9 +320,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             fold_result.svo_accs,
             Self {
                 ab_unbound_coeffs: final_ab_unbound_coeffs,
-                az_bound_coeffs: DensePolynomial::new(vec![]),
-                bz_bound_coeffs: DensePolynomial::new(vec![]),
-                cz_bound_coeffs: DensePolynomial::new(vec![]),
+                // Need to initialize non-trivial vectors for dense polynomials to avoid panics
+                az_bound_coeffs: DensePolynomial::new(vec![F::zero(); 1]),
+                bz_bound_coeffs: DensePolynomial::new(vec![F::zero(); 1]),
+                cz_bound_coeffs: DensePolynomial::new(vec![F::zero(); 1]),
                 dense_len: num_steps * padded_num_constraints,
             },
         )
@@ -476,10 +473,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                             let target_sparse_idx_Az_Xk_1 = r1cs_row_idx_if_Xk_1 * 2;
                             let target_sparse_idx_Bz_Xk_1 = r1cs_row_idx_if_Xk_1 * 2 + 1;
                             
-                            let mut loc_az0: i64 = 0;
-                            let mut loc_bz0: i64 = 0;
-                            let mut loc_az1: i64 = 0;
-                            let mut loc_bz1: i64 = 0;
+                            let mut loc_az0: i128 = 0;
+                            let mut loc_bz0: i128 = 0;
+                            let mut loc_az1: i128 = 0;
+                            let mut loc_bz1: i128 = 0;
                             
                             // Peekable iterator allows advancing without consuming if condition not met.
                             // Iterator state persists across these while loops for a single (y_high_idx, x_prime_val)
@@ -504,13 +501,19 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                                 break; 
                             }
 
-                            if loc_az0 != 0 { az0_at_x_prime += eq_r_val.mul_i64(loc_az0); }
-                            if loc_bz0 != 0 { bz0_at_x_prime += eq_r_val.mul_i64(loc_bz0); }
-                            if loc_az0 != 0 && loc_bz0 != 0 { cz0_at_x_prime += eq_r_val.mul_i128(loc_az0 as i128 * loc_bz0 as i128); }
+                            if loc_az0 != 0 { az0_at_x_prime += eq_r_val.mul_i128(loc_az0); }
+                            if loc_bz0 != 0 { bz0_at_x_prime += eq_r_val.mul_i128(loc_bz0); }
+                            if loc_az0 != 0 && loc_bz0 != 0 { 
+                                let prod = loc_az0.checked_mul(loc_bz0).expect("loc_az0 * loc_bz0 product overflow i128 for Cz0");
+                                cz0_at_x_prime += eq_r_val.mul_i128(prod); 
+                            }
                             
-                            if loc_az1 != 0 { az1_at_x_prime += eq_r_val.mul_i64(loc_az1); }
-                            if loc_bz1 != 0 { bz1_at_x_prime += eq_r_val.mul_i64(loc_bz1); }
-                            if loc_az1 != 0 && loc_bz1 != 0 { cz1_at_x_prime += eq_r_val.mul_i128(loc_az1 as i128 * loc_bz1 as i128); }
+                            if loc_az1 != 0 { az1_at_x_prime += eq_r_val.mul_i128(loc_az1); }
+                            if loc_bz1 != 0 { bz1_at_x_prime += eq_r_val.mul_i128(loc_bz1); }
+                            if loc_az1 != 0 && loc_bz1 != 0 { 
+                                let prod = loc_az1.checked_mul(loc_bz1).expect("loc_az1 * loc_bz1 product overflow i128 for Cz1");
+                                cz1_at_x_prime += eq_r_val.mul_i128(prod); 
+                            }
                         } 
 
                         az0_for_current_x_out[x_in_idx] = az0_at_x_prime;

@@ -219,7 +219,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             NUM_SMALL_VALUE_ROUNDS,
         );
 
-        let mut lagrange_coeffs = vec![F::one()];
+        let mut lagrange_coeffs: Vec<F> = vec![F::one()];
 
         let mut eq_poly = NewSplitEqPolynomial::new(&tau);
 

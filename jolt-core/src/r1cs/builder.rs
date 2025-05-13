@@ -504,21 +504,6 @@ pub(crate) fn eval_offset_lc<F: JoltField>(
     }
 }
 
-pub(crate) fn eval_offset_lc_i64<F: JoltField>(
-    offset: &OffsetLC,
-    flattened_polynomials: &[&MultilinearPolynomial<F>],
-    step: usize,
-    next_step_m: Option<usize>,
-) -> i64 {
-    if !offset.0 {
-        offset.1.evaluate_row_i64(flattened_polynomials, step)
-    } else if let Some(next_step) = next_step_m {
-        offset.1.evaluate_row_i64(flattened_polynomials, next_step)
-    } else {
-        offset.1.constant_term_field_i64()
-    }
-}
-
 // TODO(sragss): Detailed documentation with wiki.
 pub struct CombinedUniformBuilder<const C: usize, F: JoltField, I: ConstraintInput> {
     pub uniform_builder: R1CSBuilder<C, F, I>,

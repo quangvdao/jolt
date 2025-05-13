@@ -143,7 +143,7 @@ where
             // SVO Path
             let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_small_value(
                 num_rounds_x,
-                constraint_builder.uniform_repeat(),
+                constraint_builder.padded_rows_per_step(),
                 &constraint_builder.uniform_builder.constraints,
                 &constraint_builder.offset_equality_constraints,
                 &flattened_polys,

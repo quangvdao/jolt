@@ -78,7 +78,7 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
     /// 
     /// Note the differences between this and the `new` constructor: this is specialized for the
     /// small value optimization.
-    pub fn new_for_small_value(w: &[F], num_small_value_rounds: usize) -> Self {
+    pub fn new_for_small_value(w: &[F], num_small_value_rounds: usize, num_x_out_vars: usize) -> Self {
         // Split w into the slices: (l = num_small_value_rounds)
         // (n/2 - l) ..... (n - l)
         // 0..(n/2 - l - 1) concatenated with (n - l)...n
@@ -92,7 +92,7 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         assert!(n >= 2 * l, "length of w must be >= 2 * num_small_value_rounds for the split to be valid.");
         assert!(n > 0, "length of w must be positive for the split to be valid.");
 
-        let split_point1 = n / 2 - l;
+        let split_point1 = num_x_out_vars;
         let split_point2 = n - 1 - split_point1;
 
         let w_E_in_vars: Vec<F> = w[split_point1..split_point2].to_vec();

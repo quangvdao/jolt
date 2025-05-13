@@ -41,7 +41,6 @@ fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
     current_step_idx: usize,
     constraint_idx_within_step: usize, // Full constraint index including SVO bits (all binary)
     num_uniform_constraints: usize,
-    num_total_constraints_padded: usize, // For calculating global_r1cs_idx if needed by caller
     num_total_steps: usize,
 ) -> (i64, i64) {
     // Returns (az_coeff_i64, bz_coeff_i64)
@@ -100,53 +99,43 @@ fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
     (az_i64, bz_i64)
 }
 
-// Computes product P(Z_curr, Y_ext) = Az_ext * Bz_ext (no Cz for SVO infinity paths)
-// from all binary Az/Bz values at Z_curr. Updates temp_tA.
-fn TODO_compute_extended_products_and_update_tA<F: JoltField>(
-    binary_evals_at_Z_current: &[(i64, i64)], // Indexed by Y_binary_prefix_val (0 to 2^num_svo_rounds - 1)
-    num_svo_rounds: usize,
-    E_in_val: F, // Factor from Teq over x_in variables (using tau parts for Z_in)
-    temp_tA: &mut BTreeMap<Vec<SVOEvalPoint>, F>, // Key: Y_extended (length num_svo_rounds)
-) {
-    // Placeholder: Actual implementation is complex.
-    // Iterate all 3^num_svo_rounds Y_ext (Vec<SVOEvalPoint>).
-    // For each Y_ext:
-    //   Calculate Az_ext(Z_curr, Y_ext) and Bz_ext(Z_curr, Y_ext) using multilinearity
-    //   from the provided `binary_evals_at_Z_current`.
-    //   product_P = Az_ext * Bz_ext.
-    //   *temp_tA.entry(Y_ext.clone()).or_insert(F::zero()) += E_in_val * product_P;
-}
-
 // Computes Teq factor for E_out_s
 // This function now uses the precomputed E_out_s evaluations from eq_poly.E1.
+// Corresponds to accessing E_out,i[y, x_out] in Algorithm 6 (proc:precompute-algo-6, Line 14).
 #[inline]
 fn get_E_out_s_val<F: JoltField>(
-    E_out_s_evals: &[F],              // Precomputed evaluations from eq_poly.E1[svo_round_s]
-    num_y_suffix_vars: usize,         // Number of variables in y_suffix
-    num_x_out_vars: usize,    // Number of variables in x_out
+    E_out_s_evals: &[F],              // Precomputed evaluations E_out,i for round i=s
+    num_y_suffix_vars: usize,         // Number of variables in y_suffix (length of y in E_out,i[y, x_out])
+    #[cfg(test)]
+    num_x_out_vars: usize,            // Number of variables in x_out (length of x_out in E_out,i[y, x_out])
     y_suffix_as_int: usize,           // Integer representation of y_suffix (LSB)
-    x_out_val: usize,           // Integer assignment for x_out variables (MSB)
+    x_out_val: usize,                 // Integer assignment for x_out variables (MSB)
 ) -> F {
     // Sanity check for evaluation table length
-    let expected_len = 1 << (num_y_suffix_vars + num_x_out_vars);
-    assert_eq!(E_out_s_evals.len(), expected_len, "E_out_s_evals has unexpected length {}. Expected {}. num_y_suffix_vars = {}, num_x_out_vars = {}", E_out_s_evals.len(), expected_len, num_y_suffix_vars, num_x_out_vars);
+    #[cfg(test)]
+    {
+        let expected_len = 1 << (num_y_suffix_vars + num_x_out_vars);
+        assert_eq!(E_out_s_evals.len(), expected_len, "E_out_s_evals has unexpected length {}. Expected {}. num_y_suffix_vars = {}, num_x_out_vars = {}", E_out_s_evals.len(), expected_len, num_y_suffix_vars, num_x_out_vars);
+    }
 
-    // y_suffix_as_int is LSB, x_out_val is MSB.
+    // y_suffix_as_int is LSB, x_out_val is MSB. Combine to form the index into E_out,i.
     let combined_idx = (x_out_val << num_y_suffix_vars) | y_suffix_as_int;
-    
+
     assert!(combined_idx < E_out_s_evals.len(), "combined_idx out of bounds for E_out_s_evals");
-    E_out_s_evals[combined_idx]
+    E_out_s_evals[combined_idx] // E_out,i[y, x_out]
 }
 
 // Implements Definition 4 ("idx4") from the paper to map an extended SVO prefix
 // to (round_s, v_config, u_eval) tuples. y_suffix is handled by the caller.
+// Corresponds to Algorithm 6 (proc:precompute-algo-6, Line 13): determining the target indices (i, v, u, y) from beta.
+#[inline]
 fn idx_mapping(
-    svo_prefix_extended: &[SVOEvalPoint], // k_eff == num_svo_rounds length
+    svo_prefix_extended: &[SVOEvalPoint], // k_eff == num_svo_rounds length. Corresponds to beta in Algo 6.
     num_svo_rounds: usize,
 ) -> Vec<(
-    usize,             // SVO round index s (0 to num_svo_rounds-1)
-    Vec<SVOEvalPoint>, // v_config (v_0, ..., v_{s-1}), length s
-    SVOEvalPoint,      // u_eval (for y_s)
+    usize,             // SVO round index s (i in Algo 6)
+    Vec<SVOEvalPoint>, // v_config (v in Algo 6)
+    SVOEvalPoint,      // u_eval (u in Algo 6)
 )> {
     let mut result = Vec::new();
     if num_svo_rounds == 0 {
@@ -154,19 +143,20 @@ fn idx_mapping(
     }
     assert_eq!(svo_prefix_extended.len(), num_svo_rounds);
 
-    for s in 0..num_svo_rounds {
-        let v_config: Vec<SVOEvalPoint> = svo_prefix_extended[0..s].to_vec();
-        let u_eval = svo_prefix_extended[s];
+    for s in 0..num_svo_rounds { // Corresponds to checking condition for each potential round i
+        let v_config: Vec<SVOEvalPoint> = svo_prefix_extended[0..s].to_vec(); // beta_1 to beta_{i-1}
+        let u_eval = svo_prefix_extended[s]; // beta_i
 
         // Condition: u_eval must be Zero or Infinity for Spartan Az*Bz-Cz context with SVO.
+        // This is a specific condition for Algo 6's target accumulators (u in {0, inf}).
         if !(u_eval == SVOEvalPoint::Zero || u_eval == SVOEvalPoint::Infinity) {
             continue;
         }
 
-        let y_suffix_components = &svo_prefix_extended[s + 1..num_svo_rounds];
+        let y_suffix_components = &svo_prefix_extended[s + 1..num_svo_rounds]; // beta_{i+1} to beta_{l0}
         let mut y_suffix_is_binary = true;
         for &point in y_suffix_components.iter() {
-            if point == SVOEvalPoint::Infinity {
+            if point == SVOEvalPoint::Infinity { // Condition: y must be binary
                 y_suffix_is_binary = false;
                 break;
             }
@@ -178,12 +168,13 @@ fn idx_mapping(
             continue;
         }
 
-        result.push((s, v_config, u_eval));
+        result.push((s, v_config, u_eval)); // Add the valid target (i, v, u) derived from beta
     }
     result
 }
 
 // Maps a v-configuration (Vec<SVOEvalPoint> of length s) to a unique usize index (0 to 3^s - 1).
+// Used for indexing into the SVO accumulator vectors.
 fn map_v_config_to_idx(v_config: &[SVOEvalPoint], _round_s: usize) -> usize {
     // Example: Treat SVOEvalPoint::{Zero, One, Infinity} as digits 0, 1, 2 in base 3.
     let mut index = 0;
@@ -199,21 +190,169 @@ fn map_v_config_to_idx(v_config: &[SVOEvalPoint], _round_s: usize) -> usize {
     index
 }
 
-// Result of a single parallel task in the fold-reduce pattern for the small value optimization (SVO)
-struct PartialSmallValueContrib<F: JoltField> {
-    // Outer Vec indexed by y_svo_e2_binary_bucket.
-    // Inner Vec contains SparseCoefficients for that bucket from this task,
-    // generated in sorted order by global_r1cs_idx.
-    ab_coeffs_buckets_contribution: Vec<SparseCoefficient<i64>>,
 
-    // Direct contribution to the final accumulator structure.
-    // Outer Vec: SVO round s (0 to num_svo_rounds-1)
-    // Tuple: (Vec of vals_for_u_eq_0, Vec of vals_for_u_eq_infty), each inner Vec indexed by v-config index.
-    svo_accumulators_contribution: Vec<(Vec<F>, Vec<F>)>,
+// Helper to compute the integer index for a point represented by its coordinate values
+/// in a fixed-base radix system.
+/// Assumes coordinates and the single `base` apply to all dimensions.
+/// Coordinates are MSB-first (index 0 is highest order variable Y_0).
+/// Calculates index assuming LSB-first contribution (Y_0 has lowest stride).
+#[inline]
+fn get_fixed_radix_index(point_coords: &[usize], base: usize, num_vars: usize) -> usize {
+    debug_assert_eq!(num_vars, point_coords.len());
+    let mut index = 0;
+    let mut stride = 1;
+    // Iterate from LSB (Y_{l0-1}) to MSB (Y_0)
+    for i in (0..num_vars).rev() {
+        debug_assert!(point_coords[i] < base, "Coord {} out of bounds for base {}", point_coords[i], base);
+        index += point_coords[i] * stride;
+        if i > 0 { // Avoid overflow on last stride calculation
+           // Use checked_mul for safety
+           stride = stride.checked_mul(base).expect("Base power overflow computing stride");
+        }
+    }
+    index
+}
+
+/// Helper to convert a binary index (0..2^l0-1) to its equivalent index
+/// in a base-3 system where binary 0 -> ternary 0, binary 1 -> ternary 1.
+/// Binary index is interpreted LSB first (bit 0 corresponds to Y_0).
+/// Ternary index is calculated LSB first (Y_0 has stride 1).
+#[inline]
+fn binary_to_ternary_index(binary_idx: usize, num_svo_rounds: usize) -> usize {
+    let mut ternary_idx = 0;
+    let mut current_binary_val = binary_idx;
+    let mut stride = 1;
+    for i in 0..num_svo_rounds {
+        let bit = current_binary_val % 2; // Get LSB
+        ternary_idx += bit * stride; // Add 0 or 1 * stride
+        // Stride calculation needs to be careful for the *next* iteration
+        if i < num_svo_rounds - 1 {
+             stride = stride.checked_mul(3).expect("Stride overflow in binary_to_ternary_index");
+        }
+        current_binary_val /= 2;
+    }
+    if current_binary_val != 0 {
+        // This indicates the binary_idx was too large for num_svo_rounds
+        panic!("binary_idx {} too large for {} SVO rounds", binary_idx, num_svo_rounds);
+    }
+    ternary_idx
+}
+
+/// Precomputes the mapping from binary indices to their ternary equivalents.
+fn precompute_binary_to_ternary_indices(num_svo_rounds: usize) -> Vec<usize> {
+    if num_svo_rounds == 0 {
+        // If l0=0, there's one point (empty prefix), index 0 maps to 0.
+        return vec![0];
+    }
+    let num_binary_points = 1 << num_svo_rounds;
+    (0..num_binary_points)
+        .map(|bin_idx| binary_to_ternary_index(bin_idx, num_svo_rounds))
+        .collect()
+}
+
+
+/// Performs in-place multilinear extension on ternary evaluation vectors
+/// and updates the temporary accumulator `temp_tA` with the product contribution.
+fn compute_and_update_tA_inplace<F: JoltField>(
+    ternary_az_evals: &mut [i64], // Size 3^l0, holds Az evals. Initially populated at binary points. Modified in-place.
+    ternary_bz_evals: &mut [i64], // Size 3^l0, holds Bz evals. Initially populated at binary points. Modified in-place.
+    num_svo_rounds: usize,        // l_0
+    e_in_val: F,                  // E_in[x_in] factor for the current x_in
+    temp_tA: &mut [F],            // Accumulator vector (size 3^l0), updated with E_in * P_ext contribution.
+) {
+    let num_ternary_points = ternary_az_evals.len();
+    let expected_ternary_points = 3_usize.checked_pow(num_svo_rounds as u32)
+                                     .expect("Ternary points count overflow");
+    debug_assert_eq!(num_ternary_points, expected_ternary_points);
+    debug_assert_eq!(ternary_bz_evals.len(), num_ternary_points);
+    debug_assert_eq!(temp_tA.len(), num_ternary_points);
+
+    if e_in_val.is_zero() {
+        return; // No contribution if E_in is zero
+    }
+
+    if num_svo_rounds == 0 {
+        if num_ternary_points > 0 { // Should be size 1 if l0=0
+             let az0 = ternary_az_evals[0];
+             let bz0 = ternary_bz_evals[0];
+             if az0 != 0 && bz0 != 0 { // Early check
+                let product_i128 = (az0 as i128) * (bz0 as i128);
+                temp_tA[0] += e_in_val.mul_i128(product_i128);
+             }
+        }
+        return;
+    }
+
+    // --- In-place Extension Phase ---
+    for j_dim_idx in 0..num_svo_rounds {
+        let base: usize = 3;
+        let num_prefix_vars = j_dim_idx;
+        let num_suffix_vars = num_svo_rounds - 1 - j_dim_idx;
+        let num_prefix_points = base.checked_pow(num_prefix_vars as u32).expect("Prefix power overflow");
+        let num_suffix_points = base.checked_pow(num_suffix_vars as u32).expect("Suffix power overflow");
+
+        for prefix_int in 0..num_prefix_points {
+            for suffix_int in 0..num_suffix_points {
+                 let mut coords = vec![0usize; num_svo_rounds];
+                 let mut current_suffix_int = suffix_int;
+                 for i in (j_dim_idx + 1..num_svo_rounds).rev() {
+                     coords[i] = current_suffix_int % base;
+                     current_suffix_int /= base;
+                 }
+                 let mut current_prefix_int = prefix_int;
+                 for i in (0..j_dim_idx).rev() {
+                     coords[i] = current_prefix_int % base;
+                     current_prefix_int /= base;
+                 }
+
+                 coords[j_dim_idx] = 0;
+                 let idx0 = get_fixed_radix_index(&coords, base, num_svo_rounds);
+                 coords[j_dim_idx] = 1;
+                 let idx1 = get_fixed_radix_index(&coords, base, num_svo_rounds);
+                 coords[j_dim_idx] = 2;
+                 let idx_inf = get_fixed_radix_index(&coords, base, num_svo_rounds);
+
+                 let az_p0 = ternary_az_evals[idx0];
+                 let az_p1 = ternary_az_evals[idx1];
+                 let bz_p0 = ternary_bz_evals[idx0];
+                 let bz_p1 = ternary_bz_evals[idx1];
+
+                 let az_p_inf = az_p1.saturating_sub(az_p0);
+                 let bz_p_inf = bz_p1.saturating_sub(bz_p0);
+
+                 ternary_az_evals[idx_inf] = az_p_inf;
+                 ternary_bz_evals[idx_inf] = bz_p_inf;
+            }
+        }
+    } // End loop over j_dim_idx
+
+    // --- Accumulation Phase ---
+    // After the j_dim_idx loops, ternary_az_evals and ternary_bz_evals 
+    // contain the fully extended evaluations.
+    temp_tA
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, tA_val)| {
+            let az_final = ternary_az_evals[idx];
+            let bz_final = ternary_bz_evals[idx];
+
+            // Premature breaking condition
+            if az_final == 0 || bz_final == 0 {
+                return; // In parallel context, this exits the current closure iteration
+            }
+
+            let product_p_i128 = (az_final as i128) * (bz_final as i128);
+            // product_p_i128 cannot be zero here due to the check above
+
+            // Accumulate contribution from this x_in using mul_i128
+            *tA_val += e_in_val.mul_i128(product_p_i128);
+        });
 }
 
 pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A sparse vector representing the (interleaved) coefficients for the Az, Bz polynomials
+    /// Generated from binary evaluations. Sorted by index.
+    /// 
     /// (note: **no** Cz coefficients are stored here, since they are not needed for small value
     /// precomputation, and can be computed on the fly in streaming round)
     pub(crate) ab_unbound_coeffs: Vec<SparseCoefficient<i64>>,
@@ -254,25 +393,14 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         uniform_constraints: &[Constraint],
         cross_step_constraints: &[OffsetEqConstraint],
         flattened_polynomials: &[&MultilinearPolynomial<F>],
-        tau: &[F],
-        num_svo_rounds: usize,
+        tau: &[F], // Challenges for ALL N_total R1CS variables
+        num_svo_rounds: usize, // l_0 in Algo 6
     ) -> (Vec<(Vec<F>, Vec<F>)>, Self) {
-        let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, num_svo_rounds);
-
-        // E_in is the unique vector in E1 (E_in)
-        let E_in_evals = eq_poly.E_in_current();
-        // E_out_vec contains the evaluation tables for E_out_s, for s = 0 to num_svo_rounds-1
-        // E_out_vec[s] corresponds to challenges for
-        // (X_{out}, Y_{num_step_vars-num_svo_rounds}..Y_{num_step_vars-s-1})
-        let E_out_vec = &eq_poly.E_out_vec; // eq_poly.E_out_vec is Vec<Vec<F>>
-
-        assert_eq!(E_out_vec.len(), num_svo_rounds);
-
         // Here's the full layout of the variables:
         // 0 ... (N/2 - l) ... (n_s) ... (N - l) ... (N - i - 1) ... (N - 1)
         // where n_s = num_step_vars, n_c = num_constraint_vars, N = n_s + n_c, l = num_svo_rounds
         // and i is an iterator over 0..l (for the SVO rounds)
-
+ 
         // Within this layout, we have the partition:
         // - 0 ... (N/2 - l) is x_out
         // - (N/2 - l) ... (n_s) is x_in_step
@@ -281,14 +409,15 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         // - (N - l) ... (N - i - 1) is y_suffix_svo
         // - (N - i - 1) ... (N - 1) is u || v_config
 
+        // --- Variable Definitions ---
         let num_steps = flattened_polynomials[0].len();
-        let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 }; // Handle num_steps = 0 or 1
+        let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
         let num_constraint_vars = if padded_num_constraints > 0 {
             padded_num_constraints.log_2()
         } else {
             0
         };
-        let total_num_vars = num_step_vars + num_constraint_vars;
+        let total_num_vars = num_step_vars + num_constraint_vars; // N_total (or l in Algo 6)
 
         assert_eq!(
             tau.len(),
@@ -305,262 +434,275 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             num_constraint_vars
         );
 
-        // This is the number of non-SVO bits within the constraint index part
+        // Number of constraint variables that are NOT part of the SVO prefix Y.
         let num_non_svo_constraint_vars = num_constraint_vars.saturating_sub(num_svo_rounds);
+        let num_non_svo_z_vars = num_step_vars + num_non_svo_constraint_vars;
+ 
+        // --- Define Iteration Spaces for Non-SVO Z variables (x_out_val, x_in_val) ---
+        let potential_x_out_vars = total_num_vars / 2 - num_svo_rounds;
+        let iter_num_x_out_vars = std::cmp::min(potential_x_out_vars, num_step_vars);
+        let iter_num_x_in_vars = num_non_svo_z_vars - iter_num_x_out_vars;
+        let iter_num_x_in_step_vars = num_step_vars - iter_num_x_out_vars;
+        let iter_num_x_in_constraint_vars = num_non_svo_constraint_vars;
+        assert_eq!(iter_num_x_in_vars, iter_num_x_in_step_vars + iter_num_x_in_constraint_vars);
 
-        // // Defining x_in and x_out variables (my writing, commented out, do not delete)
-        // let num_x_out_vars = total_num_vars / 2 - num_svo_rounds;
-        // let num_x_in_vars = eq_poly.E_in_current_len().log_2();
-        // let num_x_in_step_vars = num_x_in_vars - num_non_svo_constraint_vars;
-        // let num_x_in_constraint_vars = num_non_svo_constraint_vars;
+        // --- Setup: E_in and E_out tables ---
+        // Call NewSplitEqPolynomial::new_for_small_value with the determined iter_num_x_out_vars.
+        // This ensures alignment between eq_poly tables and iteration logic here.
+        let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, num_svo_rounds, iter_num_x_out_vars);
+        let E_in_evals = eq_poly.E_in_current(); 
+        let E_out_vec = &eq_poly.E_out_vec; 
+ 
+        assert_eq!(E_out_vec.len(), num_svo_rounds);
+ 
+        // --- Assertions / Sanity Checks for eq_poly tables based on our definitions ---
+        let tau_vars_Ein = total_num_vars / 2;
+        assert_eq!(iter_num_x_in_vars, tau_vars_Ein,
+            "Mismatch for x_in: iter_num_x_in_vars ({}) != tau_vars_Ein ({}). Check split_eq_poly.rs.",
+            iter_num_x_in_vars, tau_vars_Ein
+        );
 
-        // Defining x_in and x_out variables based on tau partitioning for E_in and E_out
-        // These are counts of *all* variables (SVO or non-SVO) in these conceptual tau segments.
-        let num_vars_for_E_out_prefix_segment = total_num_vars / 2 - num_svo_rounds;
-        let num_vars_for_E_in_segment = eq_poly.E_in_current_len().log_2(); // num_vars in tau[N/2-l .. N-l-1]
+        // Number of x_out variables E_out tables should be defined over (must match iter_num_x_out_vars).
+        // According to Algo 6, this should be N_total/2 - num_svo_rounds.
+        // Our iter_num_x_out_vars might be smaller if capped by num_step_vars.
+        // The modified split_eq_poly should use iter_num_x_out_vars for its E_out prefix construction.
+        let tau_vars_Eout_prefix = iter_num_x_out_vars; // This is the count used for iteration.
 
-        // Now, determine how many of *these specific counts* are to be iterated as 
-        // non-SVO Z variables (x_out_val, x_in_val) in the main loops.
-        // This interpretation assumes x_out_val iterates assignments for non-SVO Z vars
-        // that fall into the E_out prefix segment, and x_in_val for those in E_in segment.
+        let num_x_out_vals = 1 << iter_num_x_out_vars;
+        let num_x_in_vals = 1 << iter_num_x_in_vars;
 
-        // num_x_out_vars: Non-SVO Z variables corresponding to tau[0 ... num_vars_for_E_out_prefix_segment-1]
-        // These are purely step_vars if num_vars_for_E_out_prefix_segment <= num_step_vars
-        let iter_num_x_out_vars = std::cmp::min(num_step_vars, num_vars_for_E_out_prefix_segment);
-        
-        // num_x_in_vars: Non-SVO Z variables corresponding to tau[num_vars_for_E_out_prefix_segment ... num_vars_for_E_out_prefix_segment + num_vars_for_E_in_segment - 1]
-        let start_tau_idx_for_E_in_iter_vars = num_vars_for_E_out_prefix_segment;
-        let end_tau_idx_for_E_in_iter_vars = num_vars_for_E_out_prefix_segment + num_vars_for_E_in_segment;
+        // --- Precompute binary to ternary index mapping --- 
+        let binary_to_ternary_indices = precompute_binary_to_ternary_indices(num_svo_rounds);
+        // Expected size of vectors holding ternary evaluations (Az, Bz, and temp_tA)
+        let num_ternary_points = 3_usize.checked_pow(num_svo_rounds as u32)
+            .expect("Number of ternary points overflowed");
 
-        let iter_num_x_in_vars;
-        let iter_num_x_in_step_vars;
-        let iter_num_x_in_constraint_vars;
-
-        if start_tau_idx_for_E_in_iter_vars >= num_step_vars + num_non_svo_constraint_vars { // E_in segment is entirely outside non-SVO Z vars
-            iter_num_x_in_vars = 0;
-            iter_num_x_in_step_vars = 0;
-            iter_num_x_in_constraint_vars = 0;
-        } else {
-            let Z_vars_start_in_E_in_segment = std::cmp::max(start_tau_idx_for_E_in_iter_vars, 0); // Should be >= 0
-            let Z_vars_end_in_E_in_segment = std::cmp::min(num_step_vars + num_non_svo_constraint_vars, end_tau_idx_for_E_in_iter_vars);
-            iter_num_x_in_vars = Z_vars_end_in_E_in_segment.saturating_sub(Z_vars_start_in_E_in_segment);
-
-            // Split iter_num_x_in_vars into step and constraint parts
-            let Z_step_vars_end_in_E_in_segment = std::cmp::min(num_step_vars, Z_vars_end_in_E_in_segment);
-            iter_num_x_in_step_vars = Z_step_vars_end_in_E_in_segment.saturating_sub(std::cmp::max(start_tau_idx_for_E_in_iter_vars, std::cmp::min(num_step_vars, Z_vars_start_in_E_in_segment)));
-            
-            iter_num_x_in_constraint_vars = iter_num_x_in_vars - iter_num_x_in_step_vars;
-        }
-
-
-        let num_x_out_vals = 1 << iter_num_x_out_vars; 
-        let num_x_in_vals = 1 << iter_num_x_in_vars; 
-
-        assert_eq!(E_in_evals.len(), 1 << num_vars_for_E_in_segment, "E_in_evals length mismatch with variables in E_in tau segment");
-        for i in 0..num_svo_rounds {
-            // num_y_suffix_vars for E_out_vec[i] is num_svo_rounds - 1 - i
-            // num_x_out_vars for E_out_vec[i] (from tau perspective) is num_vars_for_E_out_prefix_segment
-            let expected_E_out_len = 1 << (num_vars_for_E_out_prefix_segment + (num_svo_rounds - 1 - i));
-            assert_eq!(E_out_vec[i].len(), expected_E_out_len, "E_out_vec[{}] length mismatch", i);
-        }
 
         // --- Parallel Fold-Reduce over x_out_val ---
-        let reduction_identity = || PartialSmallValueContrib {
-            ab_coeffs_buckets_contribution: vec![],
-            svo_accumulators_contribution: (0..num_svo_rounds)
-                .map(|s| {
-                    let v_config_count = 3_usize.pow(s as u32);
-                    (vec![F::zero(); v_config_count], vec![F::zero(); v_config_count])
-                })
-                .collect(),
-        };
+        // Corresponds to Algo 6, Line 7: Outer loop over x_out.
+        
+        // Define the structure returned by the map step and the reduction identity
+        struct PrecomputeTaskResult<F: JoltField> {
+            ab_coeffs: Vec<SparseCoefficient<i64>>,
+            // Partial SVO accumulators computed *for a single x_out* and then reduced
+            svo_accs: Vec<(Vec<F>, Vec<F>)>, 
+        }
 
-        let fold_result: PartialSmallValueContrib<F> = (0..num_x_out_vals)
-            .into_par_iter() // Make it parallel
-            .map(|x_out_val| {
-                let mut task_ab_coeffs_buckets: Vec<SparseCoefficient<i64>> = vec![];
-                let mut task_svo_acc_contrib: Vec<(Vec<F>, Vec<F>)> = (0..num_svo_rounds)
+        let reduction_identity = || -> PrecomputeTaskResult<F> {
+            PrecomputeTaskResult {
+                ab_coeffs: vec![],
+                svo_accs: (0..num_svo_rounds) 
                     .map(|s| {
-                        let v_config_count = 3_usize.pow(s as u32);
+                        let v_config_count = 3_usize.checked_pow(s as u32).expect("V-config count overflow");
                         (vec![F::zero(); v_config_count], vec![F::zero(); v_config_count])
                     })
-                    .collect();
+                    .collect(),
+            }
+        };
 
-                // Temporary accumulators tA for this x_out_val.
-                // Key: Full SVO prefix (Vec<SVOEvalPoint>) of length num_svo_rounds.
-                // Value: Sum over x_in of (E_in_val * Az_extended * Bz_extended).
-                let mut temp_tA: BTreeMap<Vec<SVOEvalPoint>, F> = BTreeMap::new();
+        let fold_result: PrecomputeTaskResult<F> = (0..num_x_out_vals)
+            .into_par_iter()
+            .map(|x_out_val| { // Algo 6, Line 7: Current x_out value
+                let mut task_res = reduction_identity();
+                // Accumulator for SUM_{x_in} E_in * P_ext for this x_out task.
+                // This vector will be updated by the inplace helper.
+                let mut task_tA_accumulator_vec = vec![F::zero(); num_ternary_points];
 
+                // --- Inner Loop over x_in_val ---
+                // Corresponds to Algo 6, Line 8: Inner loop over x_in.
                 for x_in_val in 0..num_x_in_vals {
-                    // Reconstruct current_step_idx and current_lower_bits_val from x_out_val and x_in_val
-                    // x_out_val is assignment for the first iter_num_x_out_vars (which are step_vars)
-                    // x_in_val is assignment for iter_num_x_in_step_vars of step_vars and iter_num_x_in_constraint_vars of constraint_vars
-                    
-                    let mut temp_step_idx = x_out_val; // These are the most significant bits of step_idx
-                    
-                    // Add step bits from x_in_val
-                    let x_in_step_part = x_in_val >> iter_num_x_in_constraint_vars; // Higher bits of x_in_val
+                    // Reconstruct current R1CS indices (step_idx, lower_bits_val) from x_out_val, x_in_val.
+                    // This Z = (x_out, x_in) is needed to evaluate the original R1CS constraints.
+                    let mut temp_step_idx = x_out_val;
+                     // Add step bits from x_in_val
+                    let x_in_step_part = x_in_val >> iter_num_x_in_constraint_vars; // Higher bits of x_in_val are step bits
                     temp_step_idx = (temp_step_idx << iter_num_x_in_step_vars) | x_in_step_part;
-                    
                     let current_step_idx = temp_step_idx;
-                    
-                    // Lower bits of x_in_val are for constraints
+
+                     // Lower bits of x_in_val are for constraints
                     let constraint_mask = (1 << iter_num_x_in_constraint_vars) - 1;
                     let current_lower_bits_val = x_in_val & constraint_mask;
 
+                    // Initialize ternary vectors with zeros for Az/Bz for this x_in_val
+                    let mut ternary_az_evals = vec![0i64; num_ternary_points];
+                    let mut ternary_bz_evals = vec![0i64; num_ternary_points];
 
-                    // This stores (Az_bin, Bz_bin) for current Z and all binary Y
-                    let mut binary_evals_for_current_Z: Vec<(i64, i64)> =
-                        vec![(0, 0); 1 << num_svo_rounds];
-
+                    // --- Loop over Binary SVO Prefixes (Y_bin) ---
+                    // Evaluates Az/Bz for the current Z and all binary Y_bin.
+                    // Also collects the sparse coefficients for ab_unbound_coeffs.
                     for y_svo_binary_prefix_val in 0..(1 << num_svo_rounds) {
                         let constraint_idx_within_step =
                             (y_svo_binary_prefix_val << num_non_svo_constraint_vars) + current_lower_bits_val;
 
                         if constraint_idx_within_step < padded_num_constraints {
                             let (az_i64, bz_i64) = evaluate_Az_Bz_for_r1cs_row_binary::<F>(
-                                uniform_constraints,
-                                cross_step_constraints,
-                                flattened_polynomials,
-                                current_step_idx,
-                                constraint_idx_within_step,
-                                uniform_constraints.len(),
-                                padded_num_constraints,
-                                num_steps,
+                                uniform_constraints, cross_step_constraints, flattened_polynomials,
+                                current_step_idx, constraint_idx_within_step,
+                                uniform_constraints.len(), num_steps,
                             );
-                            binary_evals_for_current_Z[y_svo_binary_prefix_val] = (az_i64, bz_i64);
 
-                            if num_svo_rounds > 0 { // Only bucket if SVO is active
-                                let global_r1cs_idx =
-                                    current_step_idx * padded_num_constraints + constraint_idx_within_step;
-                                if az_i64 != 0 {
-                                    task_ab_coeffs_buckets.push((global_r1cs_idx * 2, az_i64).into());
-                                }
-                                if bz_i64 != 0 {
-                                    task_ab_coeffs_buckets.push((global_r1cs_idx * 2 + 1, bz_i64).into());
-                                }
-                            } else { // No SVO, all coeffs go to a single conceptual bucket (bucket 0)
-                                 let global_r1cs_idx =
-                                    current_step_idx * padded_num_constraints + constraint_idx_within_step;
-                                if az_i64 != 0 {
-                                    task_ab_coeffs_buckets.push((global_r1cs_idx * 2, az_i64).into());
-                                }
-                                if bz_i64 != 0 {
-                                    task_ab_coeffs_buckets.push((global_r1cs_idx * 2 + 1, bz_i64).into());
+                            // Get the index corresponding to this binary point in the ternary vectors
+                            let ternary_idx = binary_to_ternary_indices[y_svo_binary_prefix_val];
+
+                            // Populate the ternary vectors at the binary positions
+                            ternary_az_evals[ternary_idx] = az_i64;
+                            ternary_bz_evals[ternary_idx] = bz_i64;
+
+                            // Collect sparse coefficients (Simultaneous generation, not in Algo 6).
+                            let global_r1cs_idx =
+                                current_step_idx * padded_num_constraints + constraint_idx_within_step;
+                            if az_i64 != 0 {
+                                task_res.ab_coeffs.push((global_r1cs_idx * 2, az_i64).into());
+                            }
+                            if bz_i64 != 0 {
+                                task_res.ab_coeffs.push((global_r1cs_idx * 2 + 1, bz_i64).into());
+                            }
+                        }
+                    } // End loop over Y_bin
+
+                    // If SVO active, perform extension and update task_tA_accumulator_vec
+                    if num_svo_rounds > 0 {
+                        let E_in_val_for_current_x_in = E_in_evals[x_in_val];
+
+                        // Perform extension IN-PLACE on ternary_az/bz_evals
+                        // and ACCUMULATE the E_in * P_ext result into task_tA_accumulator_vec.
+                        compute_and_update_tA_inplace::<F>(
+                            &mut ternary_az_evals, // Pass mutable slice
+                            &mut ternary_bz_evals, // Pass mutable slice
+                            num_svo_rounds,
+                            E_in_val_for_current_x_in,
+                            &mut task_tA_accumulator_vec, // Pass mutable slice for accumulation
+                        );
+                    } else {
+                        // Handle base case l0=0: update task_tA_accumulator_vec[0] directly
+                        if num_ternary_points > 0 { // i.e., l0==0, so num_ternary_points is 1
+                            let E_in_val = E_in_evals[x_in_val];
+                            if !E_in_val.is_zero() {
+                                let az0 = ternary_az_evals[0]; // Should contain the only binary eval
+                                let bz0 = ternary_bz_evals[0];
+                                if az0 != 0 && bz0 != 0 { // Early break
+                                    let product_i128 = (az0 as i128) * (bz0 as i128);
+                                    task_tA_accumulator_vec[0] += E_in_val.mul_i128(product_i128);
                                 }
                             }
                         }
-                    } // End loop over binary SVO prefixes
-
-                    if num_svo_rounds > 0 {
-                        let E_in_val = E_in_evals[x_in_val];
-                        TODO_compute_extended_products_and_update_tA::<F>(
-                            &binary_evals_for_current_Z,
-                            num_svo_rounds,
-                            E_in_val,
-                            &mut temp_tA,
-                        );
                     }
-                } // End loop over x_in_val
+                } // End loop over x_in_val (Algo 6, Line 8 complete for this x_out)
 
-                // --- Distribute temp_tA to task_svo_acc_contrib ---
+                // --- Distribute task_tA_accumulator_vec (for this x_out) to task_res.svo_accs ---
+                // task_tA_accumulator_vec now holds SUM_{x_in} (E_in * P_ext) for the current x_out_val
                 if num_svo_rounds > 0 {
-                    for (svo_prefix_extended, tA_val) in temp_tA {
-                        if tA_val.is_zero() { continue; }
+                    // Iterate over beta_idx (0 to 3^l0 - 1) representing extended points beta
+                    for beta_idx in 0..num_ternary_points {
+                        let tA_for_this_beta = task_tA_accumulator_vec[beta_idx];
+                        if tA_for_this_beta.is_zero() { continue; } // Optimization: Skip if sum was zero
 
-                        // idx_mapping gives (s, v_config, u_eval) for which this svo_prefix_extended is relevant.
-                        // The y_suffix part of svo_prefix_extended must be binary for it to be in the result of idx_mapping.
+                        // Convert beta_idx (integer representation, base 3) to Vec<SVOEvalPoint>
+                        let mut temp_beta_coords = vec![0usize; num_svo_rounds];
+                        let mut temp_beta_int = beta_idx;
+                        for i in (0..num_svo_rounds).rev() {
+                            temp_beta_coords[i] = temp_beta_int % 3;
+                            temp_beta_int /= 3;
+                        }
+                        let svo_prefix_extended = temp_beta_coords.iter().map(|&coord| match coord {
+                            0 => SVOEvalPoint::Zero,
+                            1 => SVOEvalPoint::One,
+                            2 => SVOEvalPoint::Infinity,
+                            _ => unreachable!("Invalid coordinate in beta_idx conversion"),
+                        }).collect::<Vec<_>>();
+
                         for (round_s, v_config_vec, u_eval_point) in
                             idx_mapping(&svo_prefix_extended, num_svo_rounds)
                         {
-                            // The specific y_suffix from the svo_prefix_extended that led to this tA_val.
-                            // This is the y_suffix for which P( (v_config, u_eval, y_suffix_from_Yext), Z_current) was computed in tA_val.
+                            // Check if the target accumulator (v_config_vec, u_eval_point) is fully binary.
+                            // If so, its value should be zero and we skip the update.
+                            let mut is_v_config_binary = true;
+                            for v_comp in &v_config_vec {
+                                if *v_comp == SVOEvalPoint::Infinity {
+                                    is_v_config_binary = false;
+                                    break;
+                                }
+                            }
+                            // An accumulator (v,u) is fully binary if v is binary and u is Zero.
+                            // u_eval_point is already guaranteed by idx_mapping to be Zero or Infinity.
+                            if is_v_config_binary && u_eval_point == SVOEvalPoint::Zero {
+                                // This accumulator should be zero, so skip adding to it.
+                                // Since task_res.svo_accs is initialized to zero, this maintains it.
+                                continue;
+                            }
+
                             let y_suffix_components_from_Yext = &svo_prefix_extended[round_s + 1..num_svo_rounds];
                             let mut y_suffix_as_int_from_Yext = 0;
+                            // Convert binary y_suffix vector to integer representation (LSB y_{s+1})
                             for (bit_idx, &point) in y_suffix_components_from_Yext.iter().enumerate() {
                                 if point == SVOEvalPoint::One {
-                                    y_suffix_as_int_from_Yext |= 1 << bit_idx; // LSB-first conversion
+                                    y_suffix_as_int_from_Yext |= 1 << bit_idx;
                                 }
                             }
                             let num_y_suffix_vars_for_this_Yext = y_suffix_components_from_Yext.len();
 
-                            // The accumulator definition sums over all binary y_suffix for a given (round_s, v_config, u_eval).
-                            // Here, tA_val is for a specific Y_ext, which includes a specific y_suffix (y_suffix_as_int_from_Yext).
-                            // So, we only contribute this tA_val to the sum for that specific y_suffix.
-                            // The E_out_s_val will be specific to y_suffix_as_int_from_Yext.
-
+                            // Get E_out factor for this round s, y_suffix, and current x_out.
+                            // Corresponds to Algo 6, Line 14: E_out,i[y, x_out] factor.
                             let E_out_s_val = get_E_out_s_val::<F>(
                                 &E_out_vec[round_s],
-                                num_y_suffix_vars_for_this_Yext, 
-                                num_vars_for_E_out_prefix_segment, // Num X_out vars for E_out table
-                                y_suffix_as_int_from_Yext,       
-                                x_out_val, // x_out_val is assignment for the X_out vars of E_out table
+                                num_y_suffix_vars_for_this_Yext,
+                                #[cfg(test)]
+                                iter_num_x_out_vars, 
+                                y_suffix_as_int_from_Yext,
+                                x_out_val, 
                             );
                             let v_config_idx = map_v_config_to_idx(&v_config_vec, round_s);
 
-                            match u_eval_point {
-                                SVOEvalPoint::Zero => {
-                                    task_svo_acc_contrib[round_s].0[v_config_idx] += E_out_s_val * tA_val;
-                                }
-                                SVOEvalPoint::Infinity => {
-                                    task_svo_acc_contrib[round_s].1[v_config_idx] += E_out_s_val * tA_val;
-                                }
-                                SVOEvalPoint::One => {
-                                     panic!("SVOEvalPoint::One should not be used in the accumulator");
-                                    // As per current SVO logic, P(1) is not directly stored in these primary accums.
-                                    // It's derived later: P(1) = P(0) + slope_at_0.
+                            // Update the task-local SVO accumulator A_i(v,u)
+                            // Corresponds to Algo 6, Line 14: Update A_i(v,u) += E_out * tA[beta]
+                            if !E_out_s_val.is_zero() { // Optimization
+                                match u_eval_point {
+                                    SVOEvalPoint::Zero => {
+                                        task_res.svo_accs[round_s].0[v_config_idx] += E_out_s_val * tA_for_this_beta;
+                                    }
+                                    SVOEvalPoint::Infinity => {
+                                        task_res.svo_accs[round_s].1[v_config_idx] += E_out_s_val * tA_for_this_beta;
+                                    }
+                                    SVOEvalPoint::One => { panic!("SVO accumulators only store u=0/inf"); }
                                 }
                             }
                         }
                     }
-                }
-                PartialSmallValueContrib {
-                    ab_coeffs_buckets_contribution: task_ab_coeffs_buckets,
-                    svo_accumulators_contribution: task_svo_acc_contrib,
-                }
-            })
-            .reduce(reduction_identity, |mut acc_res, task_res| {
-                acc_res.ab_coeffs_buckets_contribution.extend(
-                    task_res.ab_coeffs_buckets_contribution
-                        .iter()
-                        .cloned(),
-                );
+                } // End distribution loop (Algo 6, Line 12-14 complete for this x_out)
+
+                // Return partial results from this task (for current x_out)
+                task_res
+            }) // End .map() over x_out_val
+            .reduce(reduction_identity, |mut acc_res, task_res| { // Combine results
+                // Combine sparse coefficient lists
+                acc_res.ab_coeffs.extend(task_res.ab_coeffs);
+                // Combine SVO accumulators (completes the sum over x_out in Algo 6, Line 7)
                 if num_svo_rounds > 0 {
                     for s in 0..num_svo_rounds {
-                        for v_idx in 0..3_usize.pow(s as u32) {
-                            acc_res.svo_accumulators_contribution[s].0[v_idx] +=
-                                task_res.svo_accumulators_contribution[s].0[v_idx];
-                            acc_res.svo_accumulators_contribution[s].1[v_idx] +=
-                                task_res.svo_accumulators_contribution[s].1[v_idx];
+                        let v_config_count = 3_usize.checked_pow(s as u32).expect("V-config count for reduce overflow");
+                        for v_idx in 0..v_config_count {
+                            acc_res.svo_accs[s].0[v_idx] +=
+                                task_res.svo_accs[s].0[v_idx];
+                            acc_res.svo_accs[s].1[v_idx] +=
+                                task_res.svo_accs[s].1[v_idx];
                         }
                     }
                 }
                 acc_res
-            });
+            }); // End .reduce()
 
-        // If the parallel iteration and reduction strategy preserves the global sorted order
-        // (e.g., by processing x_out_val in order and extending slices),
-        // the final sort per bucket for ab_unbound_coeffs might not be needed.
-        // However, a general Rayon reduce does not guarantee order of combination of task results.
-        // To be safe and ensure sorted buckets if the reduce was arbitrary, or if tasks finished out of order:
-        // We comment this out for now, and will revisit if the order is not sorted by fold-reduce.
-        // let mut final_ab_unbound_coeffs = fold_result.ab_coeffs_buckets_contribution;
-        // if num_y_svo_e2_buckets > 0 {
-        //     // only sort if there are buckets
-        //     for bucket in final_ab_unbound_coeffs.iter_mut() {
-        //         bucket.sort_by_key(|sc| sc.index);
-        //     }
-        // }
-        
-        let mut final_ab_unbound_coeffs = fold_result.ab_coeffs_buckets_contribution;
-        final_ab_unbound_coeffs.sort_by_key(|sc| sc.index); // Sort the flat list
+        // --- Finalization ---
+        // Get final flat list of sparse Az/Bz coefficients from reduction result.
+        let mut final_ab_unbound_coeffs = fold_result.ab_coeffs;
+        // Sort the combined list globally by R1CS index.
+        final_ab_unbound_coeffs.sort_by_key(|sc| sc.index);
 
-
+        // Debug check for sortedness
         #[cfg(test)]
         {
             if num_svo_rounds > 0 && !final_ab_unbound_coeffs.is_empty() {
                 let mut prev_index = final_ab_unbound_coeffs[0].index;
-                for coeff in final_ab_unbound_coeffs.iter().skip(1) { // Iterate the flat list directly
+                for coeff in final_ab_unbound_coeffs.iter().skip(1) {
                     assert!(
                         coeff.index > prev_index,
                         "Indices not monotonically increasing in final_ab_unbound_coeffs: prev {}, current {}",
@@ -571,8 +713,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             }
         }
 
+        // Return final SVO accumulators and Self struct.
+        // Corresponds to Algo 6, Line 15: Return {A_i(v,u)}.
         (
-            fold_result.svo_accumulators_contribution,
+            fold_result.svo_accs,
             Self {
                 ab_unbound_coeffs: final_ab_unbound_coeffs,
                 az_bound_coeffs: DensePolynomial::new(vec![]),

@@ -211,7 +211,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                             );
 
                             // Get the index corresponding to this binary point in the ternary vectors
-                            let binary_to_ternary_indices = svo_helpers::precompute_binary_to_ternary_indices(num_svo_rounds);
+                            // Use the precomputed binary_to_ternary_indices from the outer scope
                             let ternary_idx = binary_to_ternary_indices[y_svo_binary_prefix_val];
 
                             // Populate the ternary vectors at the binary positions

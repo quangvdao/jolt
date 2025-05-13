@@ -14,7 +14,6 @@ use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
-use crate::utils::small_value::NUM_SMALL_VALUE_ROUNDS;
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
 use ark_serialize::*;
@@ -203,6 +202,9 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut r = Vec::new();
         let mut polys = Vec::new();
         let mut claim = F::zero();
+
+        // TODO: tune this parameter depending on the number of cycles, desired RAM usage, etc.
+        const NUM_SMALL_VALUE_ROUNDS: usize = 3;
 
         // Round 0..NUM_SMALL_VALUE_ROUNDS:
 

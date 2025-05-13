@@ -421,3 +421,229 @@ pub mod svo_helpers {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::svo_helpers::*;
+
+    /// Tests the `get_svo_prefix_extended_from_idx` function.
+    /// This function converts a base-3 integer index into a vector of `SVOEvalPoint`s.
+    /// It covers cases for 0, 1, 2, and 3 SVO rounds, ensuring correct MSB-first
+    /// conversion from the ternary representation of the index.
+    #[test]
+    fn test_get_svo_prefix_extended_from_idx() {
+        // num_svo_rounds = 0
+        assert_eq!(get_svo_prefix_extended_from_idx(0, 0), vec![]);
+
+        // num_svo_rounds = 1
+        assert_eq!(get_svo_prefix_extended_from_idx(0, 1), vec![SVOEvalPoint::Zero]);
+        assert_eq!(get_svo_prefix_extended_from_idx(1, 1), vec![SVOEvalPoint::One]);
+        assert_eq!(get_svo_prefix_extended_from_idx(2, 1), vec![SVOEvalPoint::Infinity]);
+
+        // num_svo_rounds = 2. Indices are in base 3, MSB first in output vector.
+        // 0 = 00_3
+        assert_eq!(get_svo_prefix_extended_from_idx(0, 2), vec![SVOEvalPoint::Zero, SVOEvalPoint::Zero]);
+        // 1 = 01_3
+        assert_eq!(get_svo_prefix_extended_from_idx(1, 2), vec![SVOEvalPoint::Zero, SVOEvalPoint::One]);
+        // 2 = 02_3
+        assert_eq!(get_svo_prefix_extended_from_idx(2, 2), vec![SVOEvalPoint::Zero, SVOEvalPoint::Infinity]);
+        // 3 = 10_3
+        assert_eq!(get_svo_prefix_extended_from_idx(3, 2), vec![SVOEvalPoint::One, SVOEvalPoint::Zero]);
+        // 4 = 11_3
+        assert_eq!(get_svo_prefix_extended_from_idx(4, 2), vec![SVOEvalPoint::One, SVOEvalPoint::One]);
+        // 8 = 22_3
+        assert_eq!(get_svo_prefix_extended_from_idx(8, 2), vec![SVOEvalPoint::Infinity, SVOEvalPoint::Infinity]);
+
+        // num_svo_rounds = 3
+        // 0 = 000_3
+        assert_eq!(get_svo_prefix_extended_from_idx(0, 3), vec![SVOEvalPoint::Zero, SVOEvalPoint::Zero, SVOEvalPoint::Zero]);
+        // 13 = 111_3  (1*9 + 1*3 + 1*1)
+        assert_eq!(get_svo_prefix_extended_from_idx(13, 3), vec![SVOEvalPoint::One, SVOEvalPoint::One, SVOEvalPoint::One]);
+        // 26 = 222_3 (2*9 + 2*3 + 2*1)
+        assert_eq!(get_svo_prefix_extended_from_idx(26, 3), vec![SVOEvalPoint::Infinity, SVOEvalPoint::Infinity, SVOEvalPoint::Infinity]);
+         // 5 = 012_3 (0*9 + 1*3 + 2*1)
+        assert_eq!(get_svo_prefix_extended_from_idx(5, 3), vec![SVOEvalPoint::Zero, SVOEvalPoint::One, SVOEvalPoint::Infinity]);
+    }
+
+    /// Tests the `map_v_config_to_idx` function.
+    /// This function converts a v-configuration (a slice of `SVOEvalPoint`s representing
+    /// a prefix of an SVO evaluation point) into a unique base-3 integer index.
+    /// The `_round_s` parameter is currently unused by the function but kept for API consistency.
+    /// It tests with empty, single-element, and multi-element v-configurations.
+    /// The v-config elements are treated as LSB-first digits for the base-3 number.
+    #[test]
+    fn test_map_v_config_to_idx() {
+        assert_eq!(map_v_config_to_idx(&[], 0), 0);
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Zero], 0), 0);
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::One], 0), 1);
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Infinity], 0), 2);
+
+        // v_config is LSB first for powers of 3
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Zero, SVOEvalPoint::Zero], 1), 0); // 0*3^0 + 0*3^1
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::One, SVOEvalPoint::Zero], 1), 1);  // 1*3^0 + 0*3^1
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Zero, SVOEvalPoint::One], 1), 3);  // 0*3^0 + 1*3^1
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Infinity, SVOEvalPoint::Infinity], 1), 8); // 2*3^0 + 2*3^1 = 2+6
+
+        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::One, SVOEvalPoint::One, SVOEvalPoint::One], 2), 13); // 1*1 + 1*3 + 1*9
+    }
+
+    /// Tests the `get_fixed_radix_index` function.
+    /// This function calculates a linear index from a slice of coordinates in a fixed-base radix system.
+    /// It assumes coordinates are MSB-first in the input slice, but calculates the index
+    /// as if contributions are LSB-first (i.e., the last coordinate has stride 1).
+    /// Tests cover 0 variables, base 3, and base 2 systems with varying numbers of variables.
+    #[test]
+    fn test_get_fixed_radix_index() {
+        // num_vars = 0
+        assert_eq!(get_fixed_radix_index(&[], 3, 0), 0);
+        
+        // base = 3, num_vars = 1 (coords are MSB first)
+        assert_eq!(get_fixed_radix_index(&[0], 3, 1), 0);
+        assert_eq!(get_fixed_radix_index(&[1], 3, 1), 1);
+        assert_eq!(get_fixed_radix_index(&[2], 3, 1), 2);
+
+        // base = 3, num_vars = 2 (coords MSB first: [Y0, Y1])
+        // index LSB first: Y1*stride_Y1 + Y0*stride_Y0 where stride_Y1=1, stride_Y0=base
+        assert_eq!(get_fixed_radix_index(&[0, 0], 3, 2), 0); // 0*1 + 0*3
+        assert_eq!(get_fixed_radix_index(&[0, 1], 3, 2), 1); // 1*1 + 0*3
+        assert_eq!(get_fixed_radix_index(&[0, 2], 3, 2), 2); // 2*1 + 0*3
+        assert_eq!(get_fixed_radix_index(&[1, 0], 3, 2), 3); // 0*1 + 1*3
+        assert_eq!(get_fixed_radix_index(&[1, 1], 3, 2), 4); // 1*1 + 1*3
+        assert_eq!(get_fixed_radix_index(&[2, 2], 3, 2), 8); // 2*1 + 2*3
+
+        // base = 2, num_vars = 3
+        assert_eq!(get_fixed_radix_index(&[0,0,0], 2, 3), 0); // 0*1+0*2+0*4
+        assert_eq!(get_fixed_radix_index(&[0,0,1], 2, 3), 1); // 1*1+0*2+0*4
+        assert_eq!(get_fixed_radix_index(&[0,1,0], 2, 3), 2); // 0*1+1*2+0*4
+        assert_eq!(get_fixed_radix_index(&[1,1,1], 2, 3), 7); // 1*1+1*2+1*4
+    }
+
+    /// Tests the `binary_to_ternary_index` function.
+    /// This function converts a binary index (representing an SVO prefix with only 0s and 1s)
+    /// to its equivalent index in a base-3 system where binary 0 maps to ternary 0, and binary 1 to ternary 1.
+    /// Both binary and ternary indices are interpreted LSB-first for their digits.
+    /// It tests for 0, 1, 2, and 3 SVO rounds.
+    #[test]
+    fn test_binary_to_ternary_index() {
+        assert_eq!(binary_to_ternary_index(0, 0), 0); // Special case, 0 rounds -> 1 point
+
+        assert_eq!(binary_to_ternary_index(0, 1), 0); // 0_2 -> 0_3
+        assert_eq!(binary_to_ternary_index(1, 1), 1); // 1_2 -> 1_3
+
+        // num_svo_rounds = 2
+        // Binary LSB first: Y0, Y1
+        // Ternary LSB first: Y0, Y1 with base 3 strides
+        assert_eq!(binary_to_ternary_index(0b00, 2), 0); // 00_3 is 0
+        assert_eq!(binary_to_ternary_index(0b01, 2), 1); // 01_3 is 1
+        assert_eq!(binary_to_ternary_index(0b10, 2), 3); // 10_3 is 3
+        assert_eq!(binary_to_ternary_index(0b11, 2), 4); // 11_3 is 4
+
+        // num_svo_rounds = 3
+        assert_eq!(binary_to_ternary_index(0b000, 3), 0);  // 0
+        assert_eq!(binary_to_ternary_index(0b001, 3), 1);  // 1
+        assert_eq!(binary_to_ternary_index(0b010, 3), 3);  // 3
+        assert_eq!(binary_to_ternary_index(0b011, 3), 4);  // 4
+        assert_eq!(binary_to_ternary_index(0b100, 3), 9);  // 9
+        assert_eq!(binary_to_ternary_index(0b101, 3), 10); // 10
+        assert_eq!(binary_to_ternary_index(0b110, 3), 12); // 12
+        assert_eq!(binary_to_ternary_index(0b111, 3), 13); // 13
+    }
+
+    /// Tests that `binary_to_ternary_index` panics when the binary index is too large
+    /// for the specified number of SVO rounds (1 round case).
+    #[test]
+    #[should_panic]
+    fn test_binary_to_ternary_index_panic() {
+        binary_to_ternary_index(4, 1); // binary_idx 4 (100_2) too large for 1 SVO round (max 1_2)
+    }
+    /// Tests that `binary_to_ternary_index` panics when the binary index is too large
+    /// for the specified number of SVO rounds (2 rounds case).
+     #[test]
+    #[should_panic]
+    fn test_binary_to_ternary_index_panic_2() {
+        binary_to_ternary_index(1 << 2, 2); // 2 rounds, 1<<2 = 4 is too large (max is 3)
+    }
+
+
+    /// Tests the `precompute_binary_to_ternary_indices` function.
+    /// This function generates a lookup table mapping all possible binary indices for a given
+    /// number of SVO rounds to their corresponding ternary indices (where binary 0/1 map to ternary 0/1).
+    /// It tests for 0, 1, 2, and 3 SVO rounds.
+    #[test]
+    fn test_precompute_binary_to_ternary_indices() {
+        assert_eq!(precompute_binary_to_ternary_indices(0), vec![0]);
+        assert_eq!(precompute_binary_to_ternary_indices(1), vec![0, 1]);
+        assert_eq!(precompute_binary_to_ternary_indices(2), vec![0, 1, 3, 4]);
+        assert_eq!(precompute_binary_to_ternary_indices(3), vec![0, 1, 3, 4, 9, 10, 12, 13]);
+    }
+
+    /// Tests the `idx_mapping` function.
+    /// This function implements Definition 4 ("idx4") from the Jolt paper, mapping an extended
+    /// SVO prefix (beta) to a vector of tuples. Each tuple contains `(round_s, v_config, u_eval, y_suffix_as_int, num_y_suffix_vars)`
+    /// relevant for SVO accumulator updates. `u_eval` must be Zero or Infinity, and the `y_suffix` must be binary.
+    /// Tests cover 0, 1, 2, and 3 SVO rounds with various beta configurations.
+    #[test]
+    fn test_idx_mapping() {
+        use SVOEvalPoint::*;
+        // num_svo_rounds = 0
+        assert_eq!(idx_mapping(&[], 0), vec![]);
+
+        // num_svo_rounds = 1
+        assert_eq!(idx_mapping(&[Zero], 1), vec![(0, vec![], Zero, 0, 0)]);
+        assert_eq!(idx_mapping(&[One], 1), vec![]); // u_eval must be Z or I
+        assert_eq!(idx_mapping(&[Infinity], 1), vec![(0, vec![], Infinity, 0, 0)]);
+
+        // num_svo_rounds = 2
+        // beta = [Z, Z]
+        let res_zz = idx_mapping(&[Zero, Zero], 2);
+        assert_eq!(res_zz.len(), 2);
+        assert!(res_zz.contains(&(0, vec![], Zero, 0, 1))); // s=0, v=[], u=Z, y=[Z] -> y_val=0, y_len=1
+        assert!(res_zz.contains(&(1, vec![Zero], Zero, 0, 0)));   // s=1, v=[Z], u=Z, y=[] -> y_val=0, y_len=0
+        
+        // beta = [Z, O]
+        let res_zo = idx_mapping(&[Zero, One], 2);
+        assert_eq!(res_zo.len(), 1);
+        assert!(res_zo.contains(&(0, vec![], Zero, 1, 1))); // s=0, v=[], u=Z, y=[O] -> y_val=1, y_len=1
+                                                              // s=1, v=[Z], u=O -> skipped
+
+        // beta = [Z, I]
+        let res_zi = idx_mapping(&[Zero, Infinity], 2);
+        assert_eq!(res_zi.len(), 1);
+                                                              // s=0, v=[], u=Z, y=[I] -> y_suffix not binary, skipped
+        assert!(res_zi.contains(&(1, vec![Zero], Infinity, 0, 0))); // s=1, v=[Z], u=I, y=[] -> y_val=0, y_len=0
+
+        // beta = [I, Z]
+        let res_iz = idx_mapping(&[Infinity, Zero], 2);
+        assert_eq!(res_iz.len(), 2);
+        assert!(res_iz.contains(&(0, vec![], Infinity, 0, 1))); // s=0, v=[], u=I, y=[Z] -> y_val=0, y_len=1
+        assert!(res_iz.contains(&(1, vec![Infinity], Zero, 0, 0))); // s=1, v=[I], u=Z, y=[] -> y_val=0, y_len=0
+
+        // beta = [O, Z]
+        let res_oz = idx_mapping(&[One, Zero], 2);
+        assert_eq!(res_oz.len(), 1);
+                                                            // s=0, v=[], u=O -> skipped
+        assert!(res_oz.contains(&(1, vec![One], Zero, 0, 0))); // s=1, v=[O], u=Z, y=[] -> y_val=0, y_len=0
+        
+        // num_svo_rounds = 3
+        // beta = [Z, O, I]
+        let res_zoi = idx_mapping(&[Zero, One, Infinity], 3);
+        assert_eq!(res_zoi.len(), 1);
+        // s=0, v=[], u=Z, y=[O,I] -> y not binary, skipped
+        // s=1, v=[Z], u=O -> u not Z/I, skipped
+        assert!(res_zoi.contains(&(2, vec![Zero, One], Infinity, 0, 0))); // s=2, v=[Z,O], u=I, y=[]
+
+        // beta = [Z,Z,Z]
+        let res_zzz = idx_mapping(&[Zero,Zero,Zero], 3);
+        assert_eq!(res_zzz.len(), 3);
+        assert!(res_zzz.contains(&(0, vec![], Zero, 0, 2))); // y=[Z,Z]
+        assert!(res_zzz.contains(&(1, vec![Zero], Zero, 0, 1))); // y=[Z]
+        assert!(res_zzz.contains(&(2, vec![Zero,Zero], Zero, 0, 0))); // y=[]
+
+        // beta = [I,O,Z]
+        let res_ioz = idx_mapping(&[Infinity, One, Zero], 3);
+        assert_eq!(res_ioz.len(), 2);
+        assert!(res_ioz.contains(&(0, vec![], Infinity, 1, 2))); // y=[O,Z] (O is LSB of y_suffix components, int value becomes 1)
+        // s=1, v=[I], u=O -> skip
+        assert!(res_ioz.contains(&(2, vec![Infinity, One], Zero, 0, 0))); // y=[]
+    }
+}

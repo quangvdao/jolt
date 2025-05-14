@@ -221,6 +221,8 @@ pub mod svo_helpers {
     /// temp_tA[∞,∞,0] += e_in_val * (az[1,∞,0] - az[0,∞,0]) * (bz[1,∞,0] - bz[0,∞,0])
     /// temp_tA[∞,∞,1] += e_in_val * (az[1,∞,1] - az[0,∞,1]) * (bz[1,∞,1] - bz[0,∞,1])
     /// temp_tA[∞,∞,∞] += e_in_val * (az[1,∞,∞] - az[0,∞,∞]) * (bz[1,∞,∞] - bz[0,∞,∞])
+    /// 
+    /// TODO: propagate this logic below
     #[inline]
     pub fn compute_and_update_tA_inplace_3<F: JoltField>(
         binary_az_evals: &[i128],
@@ -231,10 +233,6 @@ pub mod svo_helpers {
         assert!(binary_az_evals.len() == 8);
         assert!(binary_bz_evals.len() == 8);
         assert!(temp_tA.len() == 19);
-
-        if e_in_val.is_zero() {
-            return;
-        }
 
         // Binary evaluations: (Y0,Y1,Y2) -> index Y0*4 + Y1*2 + Y2
         let az000 = binary_az_evals[0]; let bz000 = binary_bz_evals[0];
@@ -264,41 +262,49 @@ pub mod svo_helpers {
             temp_tA[1] += e_in_val.mul_i128(prod);
         }
 
-        // 3. Point (1,0,I) -> temp_tA[5]
+        // 3. Point (1,0,I) -> temp_tA[2]
         let az_10I = az101 - az100;
         let bz_10I = bz101 - bz100;
         if az_10I != 0 {
             let prod = az_10I.checked_mul(bz_10I).expect("Product overflow for (1,0,I)");
-            temp_tA[5] += e_in_val.mul_i128(prod);
+            temp_tA[2] += e_in_val.mul_i128(prod);
         }
 
-        // 4. Point (1,1,I) -> temp_tA[6]
+        // 4. Point (1,1,I) -> temp_tA[3]
         let az_11I = az111 - az110;
         let bz_11I = bz111 - bz110;
         if az_11I != 0 {
             let prod = az_11I.checked_mul(bz_11I).expect("Product overflow for (1,1,I)");
-            temp_tA[6] += e_in_val.mul_i128(prod);
+            temp_tA[3] += e_in_val.mul_i128(prod);
         }
 
         // --- SECOND GROUP: I in MIDDLE (first occurrence) ---
 
-        // 5. Point (0,I,0) -> temp_tA[2]
+        // 5. Point (0,I,0) -> temp_tA[4]
         let az_0I0 = az010 - az000;
         let bz_0I0 = bz010 - bz000;
         if az_0I0 != 0 {
             let prod = az_0I0.checked_mul(bz_0I0).expect("Product overflow for (0,I,0)");
-            temp_tA[2] += e_in_val.mul_i128(prod);
+            temp_tA[4] += e_in_val.mul_i128(prod);
         }
 
-        // 6. Point (0,I,1) -> temp_tA[3]
+        // 6. Point (0,I,1) -> temp_tA[5]
         let az_0I1 = az011 - az001;
         let bz_0I1 = bz011 - bz001;
         if az_0I1 != 0 {
             let prod = az_0I1.checked_mul(bz_0I1).expect("Product overflow for (0,I,1)");
-            temp_tA[3] += e_in_val.mul_i128(prod);
+            temp_tA[5] += e_in_val.mul_i128(prod);
         }
 
-        // 7. Point (1,I,0) -> temp_tA[7]
+        // 7. Point (0,I,I) -> temp_tA[6]
+        let az_0II = az_01I - az_00I;
+        let bz_0II = bz_01I - bz_00I;
+        if az_0II != 0 {
+            let prod = az_0II.checked_mul(bz_0II).expect("Product overflow for (0,I,I)");
+            temp_tA[6] += e_in_val.mul_i128(prod);
+        }
+
+        // 8. Point (1,I,0) -> temp_tA[7]
         let az_1I0 = az110 - az100;
         let bz_1I0 = bz110 - bz100;
         if az_1I0 != 0 {
@@ -306,7 +312,7 @@ pub mod svo_helpers {
             temp_tA[7] += e_in_val.mul_i128(prod);
         }
 
-        // 8. Point (1,I,1) -> temp_tA[8]
+        // 9. Point (1,I,1) -> temp_tA[8]
         let az_1I1 = az111 - az101;
         let bz_1I1 = bz111 - bz101;
         if az_1I1 != 0 {
@@ -314,51 +320,7 @@ pub mod svo_helpers {
             temp_tA[8] += e_in_val.mul_i128(prod);
         }
 
-        // --- THIRD GROUP: I at BEGINNING (first occurrence) ---
-
-        // 9. Point (I,0,0) -> temp_tA[10]
-        let az_I00 = az100 - az000;
-        let bz_I00 = bz100 - bz000;
-        if az_I00 != 0 {
-            let prod = az_I00.checked_mul(bz_I00).expect("Product overflow for (I,0,0)");
-            temp_tA[10] += e_in_val.mul_i128(prod);
-        }
-
-        // 10. Point (I,0,1) -> temp_tA[11]
-        let az_I01 = az101 - az001;
-        let bz_I01 = bz101 - bz001;
-        if az_I01 != 0 {
-            let prod = az_I01.checked_mul(bz_I01).expect("Product overflow for (I,0,1)");
-            temp_tA[11] += e_in_val.mul_i128(prod);
-        }
-
-        // 11. Point (I,1,0) -> temp_tA[13]
-        let az_I10 = az110 - az010;
-        let bz_I10 = bz110 - bz010;
-        if az_I10 != 0 {
-            let prod = az_I10.checked_mul(bz_I10).expect("Product overflow for (I,1,0)");
-            temp_tA[13] += e_in_val.mul_i128(prod);
-        }
-
-        // 12. Point (I,1,1) -> temp_tA[14]
-        let az_I11 = az111 - az011;
-        let bz_I11 = bz111 - bz011;
-        if az_I11 != 0 {
-            let prod = az_I11.checked_mul(bz_I11).expect("Product overflow for (I,1,1)");
-            temp_tA[14] += e_in_val.mul_i128(prod);
-        }
-
-        // --- FOURTH GROUP: MULTIPLE I's ---
-        
-        // 13. Point (0,I,I) -> temp_tA[4]
-        let az_0II = az_01I - az_00I;
-        let bz_0II = bz_01I - bz_00I;
-        if az_0II != 0 {
-            let prod = az_0II.checked_mul(bz_0II).expect("Product overflow for (0,I,I)");
-            temp_tA[4] += e_in_val.mul_i128(prod);
-        }
-
-        // 14. Point (1,I,I) -> temp_tA[9]
+        // 10. Point (1,I,I) -> temp_tA[9]
         let az_1II = az_11I - az_10I;
         let bz_1II = bz_11I - bz_10I;
         if az_1II != 0 {
@@ -366,12 +328,46 @@ pub mod svo_helpers {
             temp_tA[9] += e_in_val.mul_i128(prod);
         }
 
-        // 15. Point (I,0,I) -> temp_tA[12]
+        // --- THIRD GROUP: I at BEGINNING (first occurrence) ---
+
+        // 11. Point (I,0,0) -> temp_tA[10]
+        let az_I00 = az100 - az000;
+        let bz_I00 = bz100 - bz000;
+        if az_I00 != 0 {
+            let prod = az_I00.checked_mul(bz_I00).expect("Product overflow for (I,0,0)");
+            temp_tA[10] += e_in_val.mul_i128(prod);
+        }
+
+        // 12. Point (I,0,1) -> temp_tA[11]
+        let az_I01 = az101 - az001;
+        let bz_I01 = bz101 - bz001;
+        if az_I01 != 0 {
+            let prod = az_I01.checked_mul(bz_I01).expect("Product overflow for (I,0,1)");
+            temp_tA[11] += e_in_val.mul_i128(prod);
+        }
+
+        // 13. Point (I,0,I) -> temp_tA[12]
         let az_I0I = az_I01 - az_I00;
         let bz_I0I = bz_I01 - bz_I00;
         if az_I0I != 0 {
             let prod = az_I0I.checked_mul(bz_I0I).expect("Product overflow for (I,0,I)");
             temp_tA[12] += e_in_val.mul_i128(prod);
+        }
+
+        // 14. Point (I,1,0) -> temp_tA[13]
+        let az_I10 = az110 - az010;
+        let bz_I10 = bz110 - bz010;
+        if az_I10 != 0 {
+            let prod = az_I10.checked_mul(bz_I10).expect("Product overflow for (I,1,0)");
+            temp_tA[13] += e_in_val.mul_i128(prod);
+        }
+
+        // 15. Point (I,1,1) -> temp_tA[14]
+        let az_I11 = az111 - az011;
+        let bz_I11 = bz111 - bz011;
+        if az_I11 != 0 {
+            let prod = az_I11.checked_mul(bz_I11).expect("Product overflow for (I,1,1)");
+            temp_tA[14] += e_in_val.mul_i128(prod);
         }
 
         // 16. Point (I,1,I) -> temp_tA[15]
@@ -407,11 +403,9 @@ pub mod svo_helpers {
         }
     }
 
-    // Do the same for 2, 3
-
     /// Performs in-place multilinear extension on ternary evaluation vectors
     /// and updates the temporary accumulator `temp_tA` with the product contribution.
-    /// This is the generic version
+    /// This is the original version with no bound on num_svo_rounds
     #[inline]
     pub fn compute_and_update_tA_inplace<F: JoltField>(
         ternary_az_evals: &mut [i128], // Size 3^l0, holds Az evals. Initially populated at binary points. Modified in-place.
@@ -523,24 +517,18 @@ pub mod svo_helpers {
     }
 
     /// Hardcoded version for `num_svo_rounds == 1`
-    /// For NUM_SVO_ROUNDS=1, we have only one non-binary point (Y0=I)
-    /// This maps to only one round (s=0) with only one v-configuration (v=[])
+    /// We have only one non-binary point (Y0=I), mapping to accum_1(I)
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_1<F: JoltField>(
         task_tA_accumulator_vec: &[F], 
         x_out_val: usize,             
         E_out_vec: &[Vec<F>],
-        task_svo_accs_zero: &mut [F],
+        _task_svo_accs_zero: &mut [F],
         task_svo_accs_infty: &mut [F],
     ) {
+        assert!(_task_svo_accs_zero.len() == 0);
+        assert!(task_svo_accs_infty.len() == 1);
         assert!(task_tA_accumulator_vec.len() == 1);
-        assert!(E_out_vec.len() >= 1);
-        
-        // For NUM_SVO_ROUNDS=1, we have only one non-binary point (Y0=I)
-        // This maps to only one round (s=0) with only one v-configuration (v=[])
-        
-        // Get task_tA value for the Infinity point
-        let tA_for_I = task_tA_accumulator_vec[0];
         
         // For this point (Y0=I), we have:
         // round_s = 0, v_config = [], u = Infinity, y_suffix = []
@@ -550,19 +538,21 @@ pub mod svo_helpers {
             0,                      // y_suffix_as_int = 0
             x_out_val,
         );
-        
+
         // Update accumulator for round 0, v_config=[], u=Infinity
         // v_config_idx = 0 (empty v_config)
-        task_svo_accs_infty[0] += E_out_0_val * tA_for_I;
+        task_svo_accs_infty[0] += E_out_0_val * task_tA_accumulator_vec[0];
     }
 
     /// Hardcoded version for `num_svo_rounds == 2`
-    /// For NUM_SVO_ROUNDS=2, we have 5 non-binary points with their corresponding mappings:
-    /// 0: (0,I) -> s=0, v=[], u=I, y=[0] (temp_tA[0])
-    /// 1: (1,I) -> s=0, v=[], u=I, y=[1] (temp_tA[1])
-    /// 2: (I,0) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=0, y=[] (temp_tA[2])
-    /// 3: (I,1) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=1, y=[] (temp_tA[3])
-    /// 4: (I,I) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=I, y=[] (temp_tA[4])
+    /// We have 5 non-binary points with their corresponding mappings: (recall, LSB is rightmost)
+    /// 0: (0,I) -> s=0, v=[], u=I, y=[0] (accum_1(I))
+    /// 1: (1,I) -> s=0, v=[], u=I, y=[1] (accum_1(I))
+    /// 2: (I,0) -> s=1, v=[I], u=0, y=[] (accum_2(0,I))
+    /// 3: (I,1) -> s=1, v=[I], u=1, y=[] (accum_2(1,I))
+    /// 4: (I,I) -> s=1, v=[I], u=I, y=[] (accum_2(I,I))
+    /// 
+    /// fuck this is a mess...
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_2<F: JoltField>(
         task_tA_accumulator_vec: &[F], 
@@ -572,6 +562,8 @@ pub mod svo_helpers {
         task_svo_accs_infty: &mut [F],
     ) {
         assert!(task_tA_accumulator_vec.len() == 5);
+        assert!(task_svo_accs_zero.len() == 1);
+        assert!(task_svo_accs_infty.len() == 3);
         assert!(E_out_vec.len() >= 2);
         
         // Points 0 and 1: (0,I) and (1,I) both map to round_s=0, v_config=[], u=I
@@ -608,8 +600,7 @@ pub mod svo_helpers {
             x_out_val,
         );
         
-        // v_config_idx = 2 (for v_config=[I])
-        task_svo_accs_zero[2] += E_out_1_val * tA_I0;
+        task_svo_accs_zero[0] += E_out_1_val * tA_I0;
 
         // Point 3: (I,1) -> round_s=1, v_config=[I], u=1, y=[]
         let tA_I1 = task_tA_accumulator_vec[3];
@@ -621,7 +612,7 @@ pub mod svo_helpers {
         );
         
         // v_config_idx = 2 (for v_config=[I])
-        task_svo_accs_zero[2] += E_out_1_val * tA_I1;
+        task_svo_accs_infty[1] += E_out_1_val * tA_I1;
 
         // Point 4: (I,I) -> round_s=1, v_config=[I], u=I, y=[]
         let tA_II = task_tA_accumulator_vec[4];
@@ -637,7 +628,9 @@ pub mod svo_helpers {
     }
 
     /// Hardcoded version for `num_svo_rounds == 3`
-    /// For NUM_SVO_ROUNDS=3, we have 19 non-binary points with various mappings
+    /// We have 19 non-binary points with various mappings into the 19 accumulators over 3 rounds
+    /// 
+    /// TODO: update logic
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_3<F: JoltField>(
         task_tA_accumulator_vec: &[F], 
@@ -647,7 +640,11 @@ pub mod svo_helpers {
         task_svo_accs_infty: &mut [F],
     ) {
         assert!(task_tA_accumulator_vec.len() == 19);
+        assert!(task_svo_accs_zero.len() == 5);
+        assert!(task_svo_accs_infty.len() == 14);
         assert!(E_out_vec.len() >= 3);
+
+        // TODO: update logic
         
         // --- FIRST GROUP: I at END (first occurrence) ---
         // Points (0,0,I), (0,1,I), (1,0,I), (1,1,I) -> round_s=0, v=[], u=I

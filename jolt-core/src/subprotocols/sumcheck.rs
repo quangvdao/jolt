@@ -222,22 +222,28 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             let mut quadratic_eval_0 = F::zero();
             let mut quadratic_eval_infty = F::zero();
 
-            // Hard-coding for 2 svo rounds right now
+            // Hard-coding for up to 3 svo rounds right now
             if USES_SMALL_VALUE_OPTIMIZATION {
                 match i {
-                    // accum_{zero/infty}[0]
                     0 => {
                     // Eval at 0 is zero due to fully binary
                     quadratic_eval_0 = F::zero();
 
                     quadratic_eval_infty = accums_infty[0];
-                }
-                // accum_{zero/infty}[1..5]
-                1 => {
-                    quadratic_eval_0 = F::zero();
-                    quadratic_eval_infty = F::zero();
-                }
-                    _ => { unreachable!("Hard-coding two small value rounds for now!") }
+                    }
+                    1 => {
+                        quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
+                        quadratic_eval_infty =
+                            accums_infty[0] * lagrange_coeffs[0] + 
+                            accums_infty[1] * lagrange_coeffs[1] + 
+                            accums_infty[2] * lagrange_coeffs[2];
+                    }
+                    2 => {
+                        // TODO: fill this (3 svo rounds)
+                        quadratic_eval_0 = F::zero();
+                        quadratic_eval_infty = F::zero();                        
+                    }
+                    _ => { unreachable!("Hard-coding up to three small value rounds for now!") }
                 }
             }
 

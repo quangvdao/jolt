@@ -5,6 +5,7 @@ use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint, eval_offset_lc};
 use ark_ff::Zero;
 use rayon::prelude::*;
+use crate::r1cs::spartan::small_value_optimization::{NUM_SVO_ROUNDS, TOTAL_NUM_ACCUMS};
 
 pub mod svo_helpers {
     use super::*;
@@ -82,6 +83,21 @@ pub mod svo_helpers {
             }
         }
         (az_i128, bz_i128)
+    }
+
+    #[inline]
+    pub fn compute_and_update_tA_inplace_generic<const NUM_SVO_ROUNDS: usize, F: JoltField>(
+        binary_az_evals: &[i128],
+        binary_bz_evals: &[i128],
+        e_in_val: &F,
+        temp_tA: &mut [F],
+    ) {
+        match NUM_SVO_ROUNDS {
+            1 => compute_and_update_tA_inplace_1(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
+            2 => compute_and_update_tA_inplace_2(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
+            3 => compute_and_update_tA_inplace_3(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
+            _ => panic!("Unsupported number of SVO rounds"),
+        }
     }
 
     /// Special case when `num_svo_rounds == 1`
@@ -185,7 +201,26 @@ pub mod svo_helpers {
     /// 
     /// There are 27 - 8 = 19 temp_tA accumulators, with the following logic:
     /// temp_tA[0,0,∞] += e_in_val * (az[0,0,1] - az[0,0,0]) * (bz[0,0,1] - bz[0,0,0])
-    /// (todo: fill the rest)
+    /// temp_tA[0,1,∞] += e_in_val * (az[0,1,1] - az[0,1,0]) * (bz[0,1,1] - bz[0,1,0])
+    /// temp_tA[1,0,∞] += e_in_val * (az[1,0,1] - az[1,0,0]) * (bz[1,0,1] - bz[1,0,0])
+    /// temp_tA[1,1,∞] += e_in_val * (az[1,1,1] - az[1,1,0]) * (bz[1,1,1] - bz[1,1,0])
+    /// 
+    /// temp_tA[0,∞,0] += e_in_val * (az[0,1,0] - az[0,0,0]) * (bz[0,1,0] - bz[0,0,0])
+    /// temp_tA[0,∞,1] += e_in_val * (az[0,1,1] - az[0,0,1]) * (bz[0,1,1] - bz[0,0,1])
+    /// temp_tA[0,∞,∞] += e_in_val * (az[0,1,∞] - az[0,0,∞]) * (bz[0,1,∞] - bz[0,0,∞])
+    /// temp_tA[1,∞,0] += e_in_val * (az[1,1,0] - az[1,0,0]) * (bz[1,1,0] - bz[1,0,0])
+    /// temp_tA[1,∞,1] += e_in_val * (az[1,1,0] - az[1,0,0]) * (bz[1,1,0] - bz[1,0,0])
+    /// temp_tA[1,∞,∞] += e_in_val * (az[1,1,∞] - az[1,0,∞]) * (bz[1,1,∞] - bz[1,0,∞])
+    /// 
+    /// temp_tA[∞,0,0] += e_in_val * (az[1,0,0] - az[0,0,0]) * (bz[1,0,0] - bz[0,0,0])
+    /// temp_tA[∞,0,1] += e_in_val * (az[1,0,1] - az[0,0,1]) * (bz[1,0,1] - bz[0,0,1])
+    /// temp_tA[∞,0,∞] += e_in_val * (az[1,0,∞] - az[0,0,∞]) * (bz[1,0,∞] - bz[0,0,∞])
+    /// temp_tA[∞,1,0] += e_in_val * (az[1,1,0] - az[0,1,0]) * (bz[1,1,0] - bz[0,1,0])
+    /// temp_tA[∞,1,1] += e_in_val * (az[∞,1,1] - az[∞,1,1]) * (bz[∞,1,1] - bz[∞,1,1])
+    /// temp_tA[∞,1,∞] += e_in_val * (az[∞,1,∞] - az[∞,1,∞]) * (bz[∞,1,∞] - bz[∞,1,∞])
+    /// temp_tA[∞,∞,0] += e_in_val * (az[1,∞,0] - az[0,∞,0]) * (bz[1,∞,0] - bz[0,∞,0])
+    /// temp_tA[∞,∞,1] += e_in_val * (az[1,∞,1] - az[0,∞,1]) * (bz[1,∞,1] - bz[0,∞,1])
+    /// temp_tA[∞,∞,∞] += e_in_val * (az[1,∞,∞] - az[0,∞,∞]) * (bz[1,∞,∞] - bz[0,∞,∞])
     #[inline]
     pub fn compute_and_update_tA_inplace_3<F: JoltField>(
         binary_az_evals: &[i128],
@@ -470,17 +505,36 @@ pub mod svo_helpers {
             });
     }
 
+    /// Generic version for distributing tA to svo accumulators
+    #[inline]
+    pub fn distribute_tA_to_svo_accumulators_generic<const NUM_SVO_ROUNDS: usize, F: JoltField>(
+        task_tA_accumulator_vec: &[F],
+        x_out_val: usize,
+        E_out_vec: &[Vec<F>],
+        task_svo_accs_zero: &mut [F],
+        task_svo_accs_infty: &mut [F],
+    ) {
+        match NUM_SVO_ROUNDS {
+            1 => distribute_tA_to_svo_accumulators_1(task_tA_accumulator_vec, x_out_val, E_out_vec, task_svo_accs_zero, task_svo_accs_infty),
+            2 => distribute_tA_to_svo_accumulators_2(task_tA_accumulator_vec, x_out_val, E_out_vec, task_svo_accs_zero, task_svo_accs_infty),
+            3 => distribute_tA_to_svo_accumulators_3(task_tA_accumulator_vec, x_out_val, E_out_vec, task_svo_accs_zero, task_svo_accs_infty),
+            _ => panic!("Unsupported number of SVO rounds"),
+        }
+    }
+
     /// Hardcoded version for `num_svo_rounds == 1`
+    /// For NUM_SVO_ROUNDS=1, we have only one non-binary point (Y0=I)
+    /// This maps to only one round (s=0) with only one v-configuration (v=[])
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_1<F: JoltField>(
         task_tA_accumulator_vec: &[F], 
         x_out_val: usize,             
         E_out_vec: &[Vec<F>],
-        task_svo_accs: &mut Vec<(Vec<F>, Vec<F>)>,
+        task_svo_accs_zero: &mut [F],
+        task_svo_accs_infty: &mut [F],
     ) {
         assert!(task_tA_accumulator_vec.len() == 1);
         assert!(E_out_vec.len() >= 1);
-        assert!(task_svo_accs.len() >= 1);
         
         // For NUM_SVO_ROUNDS=1, we have only one non-binary point (Y0=I)
         // This maps to only one round (s=0) with only one v-configuration (v=[])
@@ -499,28 +553,27 @@ pub mod svo_helpers {
         
         // Update accumulator for round 0, v_config=[], u=Infinity
         // v_config_idx = 0 (empty v_config)
-        task_svo_accs[0].1[0] += E_out_0_val * tA_for_I;
+        task_svo_accs_infty[0] += E_out_0_val * tA_for_I;
     }
 
     /// Hardcoded version for `num_svo_rounds == 2`
+    /// For NUM_SVO_ROUNDS=2, we have 5 non-binary points with their corresponding mappings:
+    /// 0: (0,I) -> s=0, v=[], u=I, y=[0] (temp_tA[0])
+    /// 1: (1,I) -> s=0, v=[], u=I, y=[1] (temp_tA[1])
+    /// 2: (I,0) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=0, y=[] (temp_tA[2])
+    /// 3: (I,1) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=1, y=[] (temp_tA[3])
+    /// 4: (I,I) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=I, y=[] (temp_tA[4])
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_2<F: JoltField>(
         task_tA_accumulator_vec: &[F], 
         x_out_val: usize,             
         E_out_vec: &[Vec<F>],
-        task_svo_accs: &mut Vec<(Vec<F>, Vec<F>)>,
+        task_svo_accs_zero: &mut [F],
+        task_svo_accs_infty: &mut [F],
     ) {
         assert!(task_tA_accumulator_vec.len() == 5);
         assert!(E_out_vec.len() >= 2);
-        assert!(task_svo_accs.len() >= 2);
         
-        // For NUM_SVO_ROUNDS=2, we have 5 non-binary points with their corresponding mappings:
-        // 0: (0,I) -> s=0, v=[], u=I, y=[0] (temp_tA[0])
-        // 1: (1,I) -> s=0, v=[], u=I, y=[1] (temp_tA[1])
-        // 2: (I,0) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=0, y=[] (temp_tA[2])
-        // 3: (I,1) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=1, y=[] (temp_tA[3])
-        // 4: (I,I) -> s=0, v=[], u=I, y=[] and s=1, v=[I], u=I, y=[] (temp_tA[4])
-
         // Points 0 and 1: (0,I) and (1,I) both map to round_s=0, v_config=[], u=I
         // Point 0: (0,I) -> round_s=0, v_config=[], u=I, y=[0]
         let tA_0I = task_tA_accumulator_vec[0];
@@ -531,7 +584,7 @@ pub mod svo_helpers {
             x_out_val,
         );
         // v_config_idx = 0 (empty v_config)
-        task_svo_accs[0].1[0] += E_out_0_val * tA_0I;
+        task_svo_accs_infty[0] += E_out_0_val * tA_0I;
 
         // Point 1: (1,I) -> round_s=0, v_config=[], u=I, y=[1]
         let tA_1I = task_tA_accumulator_vec[1];
@@ -543,7 +596,7 @@ pub mod svo_helpers {
         );
         
         // v_config_idx = 0 (empty v_config)
-        task_svo_accs[0].1[0] += E_out_0_val * tA_1I;
+        task_svo_accs_infty[0] += E_out_0_val * tA_1I;
 
         // Points 2,3,4: (I,0), (I,1), (I,I) all map to round_s=1, v_config=[I]
         // Point 2: (I,0) -> round_s=1, v_config=[I], u=0, y=[]
@@ -556,7 +609,7 @@ pub mod svo_helpers {
         );
         
         // v_config_idx = 2 (for v_config=[I])
-        task_svo_accs[1].0[2] += E_out_1_val * tA_I0;
+        task_svo_accs_zero[2] += E_out_1_val * tA_I0;
 
         // Point 3: (I,1) -> round_s=1, v_config=[I], u=1, y=[]
         let tA_I1 = task_tA_accumulator_vec[3];
@@ -568,7 +621,7 @@ pub mod svo_helpers {
         );
         
         // v_config_idx = 2 (for v_config=[I])
-        task_svo_accs[1].0[2] += E_out_1_val * tA_I1;
+        task_svo_accs_zero[2] += E_out_1_val * tA_I1;
 
         // Point 4: (I,I) -> round_s=1, v_config=[I], u=I, y=[]
         let tA_II = task_tA_accumulator_vec[4];
@@ -580,42 +633,201 @@ pub mod svo_helpers {
         );
         
         // v_config_idx = 2 (for v_config=[I])
-        task_svo_accs[1].1[2] += E_out_1_val * tA_II;
+        task_svo_accs_infty[2] += E_out_1_val * tA_II;
     }
 
     /// Hardcoded version for `num_svo_rounds == 3`
+    /// For NUM_SVO_ROUNDS=3, we have 19 non-binary points with various mappings
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_3<F: JoltField>(
         task_tA_accumulator_vec: &[F], 
-        x_out_val: usize,             
+        x_out_val: usize,
         E_out_vec: &[Vec<F>],
-        task_svo_accs: &mut Vec<(Vec<F>, Vec<F>)>,
+        task_svo_accs_zero: &mut [F],
+        task_svo_accs_infty: &mut [F],
     ) {
         assert!(task_tA_accumulator_vec.len() == 19);
         assert!(E_out_vec.len() >= 3);
-        assert!(task_svo_accs.len() >= 3);
         
-        // For NUM_SVO_ROUNDS=3, we have 19 non-binary points with various mappings
-        // This is a simplified implementation - in a real scenario, we would handle all 19 points
-        
-        // Just a placeholder for now - to be expanded
-        for idx in 0..19 {
-            let tA_val = task_tA_accumulator_vec[idx];
-            
-            // Map the temp_tA index to appropriate round, v_config, and u
-            // This is a simplified version - in practice we'd have 19 specific cases
-            if idx < 4 {
-                // First few points contribute to round 0
-                let E_out_0_val = get_E_out_s_val::<F>(
-                    &E_out_vec[0],
-                    0,
-                    0,
-                    x_out_val,
-                );
-                
-                task_svo_accs[0].1[0] += E_out_0_val * tA_val;
-            }
-        }
+        // --- FIRST GROUP: I at END (first occurrence) ---
+        // Points (0,0,I), (0,1,I), (1,0,I), (1,1,I) -> round_s=0, v=[], u=I
+        let tA_00I = task_tA_accumulator_vec[0];
+        let E_out_0_val = get_E_out_s_val::<F>(
+            &E_out_vec[0],
+            2,                    // num_y_suffix_vars = 2
+            0b00,                 // y_suffix_as_int = 00
+            x_out_val,
+        );
+        task_svo_accs_infty[0] += E_out_0_val * tA_00I;
+
+        let tA_01I = task_tA_accumulator_vec[1];
+        let E_out_0_val = get_E_out_s_val::<F>(
+            &E_out_vec[0],
+            2,                    // num_y_suffix_vars = 2
+            0b01,                 // y_suffix_as_int = 01
+            x_out_val,
+        );
+        task_svo_accs_infty[0] += E_out_0_val * tA_01I;
+
+        let tA_10I = task_tA_accumulator_vec[5];
+        let E_out_0_val = get_E_out_s_val::<F>(
+            &E_out_vec[0],
+            2,                    // num_y_suffix_vars = 2
+            0b10,                 // y_suffix_as_int = 10
+            x_out_val,
+        );
+        task_svo_accs_infty[0] += E_out_0_val * tA_10I;
+
+        let tA_11I = task_tA_accumulator_vec[6];
+        let E_out_0_val = get_E_out_s_val::<F>(
+            &E_out_vec[0],
+            2,                    // num_y_suffix_vars = 2
+            0b11,                 // y_suffix_as_int = 11
+            x_out_val,
+        );
+        task_svo_accs_infty[0] += E_out_0_val * tA_11I;
+
+        // --- SECOND GROUP: I in MIDDLE (first occurrence) ---
+        // Points (0,I,0), (0,I,1), (1,I,0), (1,I,1) -> round_s=1, v=[I], u=0/1
+        let tA_0I0 = task_tA_accumulator_vec[2];
+        let E_out_1_val = get_E_out_s_val::<F>(
+            &E_out_vec[1],
+            1,                    // num_y_suffix_vars = 1
+            0b0,                  // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[2] += E_out_1_val * tA_0I0;
+
+        let tA_0I1 = task_tA_accumulator_vec[3];
+        let E_out_1_val = get_E_out_s_val::<F>(
+            &E_out_vec[1],
+            1,                    // num_y_suffix_vars = 1
+            0b1,                  // y_suffix_as_int = 1
+            x_out_val,
+        );
+        task_svo_accs_zero[2] += E_out_1_val * tA_0I1;
+
+        let tA_1I0 = task_tA_accumulator_vec[7];
+        let E_out_1_val = get_E_out_s_val::<F>(
+            &E_out_vec[1],
+            1,                    // num_y_suffix_vars = 1
+            0b0,                  // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[2] += E_out_1_val * tA_1I0;
+
+        let tA_1I1 = task_tA_accumulator_vec[8];
+        let E_out_1_val = get_E_out_s_val::<F>(
+            &E_out_vec[1],
+            1,                    // num_y_suffix_vars = 1
+            0b1,                  // y_suffix_as_int = 1
+            x_out_val,
+        );
+        task_svo_accs_zero[2] += E_out_1_val * tA_1I1;
+
+        // --- THIRD GROUP: I at BEGINNING (first occurrence) ---
+        // Points (I,0,0), (I,0,1), (I,1,0), (I,1,1) -> round_s=2, v=[I,0/1], u=0/1
+        let tA_I00 = task_tA_accumulator_vec[10];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[4] += E_out_2_val * tA_I00;
+
+        let tA_I01 = task_tA_accumulator_vec[11];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[4] += E_out_2_val * tA_I01;
+
+        let tA_I10 = task_tA_accumulator_vec[13];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[5] += E_out_2_val * tA_I10;
+
+        let tA_I11 = task_tA_accumulator_vec[14];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[5] += E_out_2_val * tA_I11;
+
+        // --- FOURTH GROUP: MULTIPLE I's ---
+        // Points with two I's
+        let tA_0II = task_tA_accumulator_vec[4];
+        let E_out_1_val = get_E_out_s_val::<F>(
+            &E_out_vec[1],
+            1,                    // num_y_suffix_vars = 1
+            0b0,                  // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_infty[2] += E_out_1_val * tA_0II;
+
+        let tA_1II = task_tA_accumulator_vec[9];
+        let E_out_1_val = get_E_out_s_val::<F>(
+            &E_out_vec[1],
+            1,                    // num_y_suffix_vars = 1
+            0b1,                  // y_suffix_as_int = 1
+            x_out_val,
+        );
+        task_svo_accs_infty[2] += E_out_1_val * tA_1II;
+
+        let tA_I0I = task_tA_accumulator_vec[12];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_infty[4] += E_out_2_val * tA_I0I;
+
+        let tA_I1I = task_tA_accumulator_vec[15];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_infty[5] += E_out_2_val * tA_I1I;
+
+        let tA_II0 = task_tA_accumulator_vec[16];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[6] += E_out_2_val * tA_II0;
+
+        let tA_II1 = task_tA_accumulator_vec[17];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_zero[6] += E_out_2_val * tA_II1;
+
+        // Point with three I's
+        let tA_III = task_tA_accumulator_vec[18];
+        let E_out_2_val = get_E_out_s_val::<F>(
+            &E_out_vec[2],
+            0,                    // num_y_suffix_vars = 0
+            0,                    // y_suffix_as_int = 0
+            x_out_val,
+        );
+        task_svo_accs_infty[6] += E_out_2_val * tA_III;
     }
 
     // Distributes the accumulated tA values (sum over x_in) for a single x_out_val 

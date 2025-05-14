@@ -12,6 +12,7 @@ use crate::poly::spartan_interleaved_poly::{
 use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
+use crate::r1cs::spartan::small_value_optimization::{NUM_SVO_ROUNDS, USES_SMALL_VALUE_OPTIMIZATION};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
 use crate::utils::thread::drop_in_background_thread;
@@ -190,7 +191,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
     }
 
     #[tracing::instrument(skip_all, name = "Spartan2::prove_spartan_small_value")]
-    pub fn prove_spartan_small_value(
+    pub fn prove_spartan_small_value<const NUM_SVO_ROUNDS: usize>(
         num_rounds: usize,
         padded_num_constraints: usize,
         uniform_constraints: &[Constraint],
@@ -203,13 +204,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut polys = Vec::new();
         let mut claim = F::zero();
 
-        // TODO: tune this parameter depending on the number of cycles, desired RAM usage, etc.
-        const NUM_SMALL_VALUE_ROUNDS: usize = 2;
-
-        // Round 0..NUM_SMALL_VALUE_ROUNDS:
-
         // First, precompute the accumulators and also the `NewSpartanInterleavedPolynomial`
-        let (accums, mut az_bz_cz_poly) = NewSpartanInterleavedPolynomial::new_with_precompute(
+        let (accums_zero, accums_infty, mut az_bz_cz_poly) = NewSpartanInterleavedPolynomial::<NUM_SVO_ROUNDS, F>::new_with_precompute(
             padded_num_constraints,
             uniform_constraints,
             cross_step_constraints,
@@ -222,23 +218,31 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut eq_poly = NewSplitEqPolynomial::new(&tau);
 
         // Then, do the sumcheck logic
-        for i in 0..NUM_SMALL_VALUE_ROUNDS {
-            let quadratic_eval_0 = lagrange_coeffs
-                .iter()
-                .zip(accums[i].0.iter())
-                .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
-                .fold(F::zero(), |a, b| a + b);
+        for i in 0..NUM_SVO_ROUNDS {
+            let mut quadratic_eval_0 = F::zero();
+            let mut quadratic_eval_infty = F::zero();
 
-            let quadratic_eval_infty = lagrange_coeffs
-                .iter()
-                .zip(accums[i].1.iter())
-                .map(|(lagrange_coeff, val)| *lagrange_coeff * *val)
-                .fold(F::zero(), |a, b| a + b);
+            // Hard-coding for 2 svo rounds right now
+            if USES_SMALL_VALUE_OPTIMIZATION {
+                match i {
+                    // accum_{zero/infty}[0]
+                    0 => {
+                    // Eval at 0 is zero due to fully binary
+                    quadratic_eval_0 = F::zero();
 
-            let quadratic_evals = (quadratic_eval_0, quadratic_eval_infty);
+                    quadratic_eval_infty = accums_infty[0];
+                }
+                // accum_{zero/infty}[1..5]
+                1 => {
+                    quadratic_eval_0 = F::zero();
+                    quadratic_eval_infty = F::zero();
+                }
+                    _ => { unreachable!("Hard-coding two small value rounds for now!") }
+                }
+            }
 
             let r_i = process_eq_sumcheck_round(
-                quadratic_evals,
+                (quadratic_eval_0, quadratic_eval_infty),
                 &mut eq_poly,
                 &mut polys,
                 &mut r,
@@ -261,7 +265,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 .collect();
         }
 
-        // Round NUM_SMALL_VALUE_ROUNDS : do the streaming sumcheck to compute cached values
+        // Round NUM_SVO_ROUNDS : do the streaming sumcheck to compute cached values
         az_bz_cz_poly.streaming_sumcheck_round(
             &mut eq_poly,
             transcript,
@@ -270,8 +274,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             &mut claim,
         );
 
-        // Round (NUM_SMALL_VALUE_ROUNDS + 1)..num_rounds : do the linear time sumcheck
-        for _ in (NUM_SMALL_VALUE_ROUNDS + 1)..num_rounds {
+        // Round (NUM_SVO_ROUNDS + 1)..num_rounds : do the linear time sumcheck
+        for _ in (NUM_SVO_ROUNDS + 1)..num_rounds {
             az_bz_cz_poly.remaining_sumcheck_round(
                 &mut eq_poly,
                 transcript,

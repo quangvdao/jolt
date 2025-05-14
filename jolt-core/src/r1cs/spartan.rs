@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use small_value_optimization::NUM_SVO_ROUNDS;
 use tracing::{span, Level};
 
 use crate::field::JoltField;
@@ -43,6 +44,13 @@ pub mod small_value_optimization {
     /// We currently support values of 1, 2, or 3
     pub const NUM_SVO_ROUNDS: usize = 2;
 
+    /// Total number of non-zero accumulators across all SVO rounds
+    /// Round 1: 1 eval (at infty)
+    /// Round 2: 5 evals
+    /// Round 3: 19 evals (if used)
+    /// Total for 2 rounds = 1 + 5 = 6
+    pub const TOTAL_NUM_ACCUMS: usize = 6;
+
     pub const NUM_ACCUM_ROUNDS: [usize; NUM_SVO_ROUNDS] = [1, 4];
 
     pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 5;
@@ -54,9 +62,12 @@ pub mod small_value_optimization {
 
     pub const NUM_SVO_ROUNDS: usize = 0;
 
+    // Avoid panic array access
+    pub const TOTAL_NUM_ACCUMS: usize = 1;
+
     pub const NUM_ACCUM_ROUNDS: [usize; NUM_SVO_ROUNDS] = [];
 
-    pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 0;
+    pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 1;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
@@ -159,8 +170,8 @@ where
 
         let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) = if small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION {
             // SVO Path
-            let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_small_value(
-                num_rounds_x,
+            let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
+            num_rounds_x,
                 constraint_builder.padded_rows_per_step(),
                 &constraint_builder.uniform_builder.constraints,
                 &constraint_builder.offset_equality_constraints,

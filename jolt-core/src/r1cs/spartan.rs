@@ -36,10 +36,28 @@ use rayon::prelude::*;
 // Added flag to enable/disable small value optimization
 // For testing / benchmarking purposes. Will be deleted once merged into `main`.
 #[cfg(feature = "small_value_optimization")]
-pub const USES_SMALL_VALUE_OPTIMIZATION: bool = true;
+pub mod small_value_optimization {
+    pub const USES_SMALL_VALUE_OPTIMIZATION: bool = true;
+
+    /// The number of small value optimization rounds to use
+    /// We currently support values of 1, 2, or 3
+    pub const NUM_SVO_ROUNDS: usize = 2;
+
+    pub const NUM_ACCUM_ROUNDS: [usize; NUM_SVO_ROUNDS] = [1, 4];
+
+    pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 5;
+}
 
 #[cfg(not(feature = "small_value_optimization"))]
-pub const USES_SMALL_VALUE_OPTIMIZATION: bool = false;
+pub mod small_value_optimization {
+    pub const USES_SMALL_VALUE_OPTIMIZATION: bool = false;
+
+    pub const NUM_SVO_ROUNDS: usize = 0;
+
+    pub const NUM_ACCUM_ROUNDS: [usize; NUM_SVO_ROUNDS] = [];
+
+    pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 0;
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum SpartanError {
@@ -139,7 +157,7 @@ where
             .map(|_i| transcript.challenge_scalar())
             .collect::<Vec<F>>();
 
-        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) = if USES_SMALL_VALUE_OPTIMIZATION {
+        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) = if small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION {
             // SVO Path
             let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_small_value(
                 num_rounds_x,

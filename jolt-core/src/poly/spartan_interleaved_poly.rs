@@ -22,6 +22,8 @@ use crate::{
 use ark_ff::Zero;
 use rayon::prelude::*;
 
+use crate::r1cs::spartan::small_value_optimization::{NUM_SVO_ROUNDS, NUM_ACCUM_ROUNDS, NUM_NONTRIVIAL_TERNARY_POINTS};
+
 pub struct NewSpartanInterleavedPolynomial<F: JoltField> {
     /// A sparse vector representing the (interleaved) coefficients for the Az, Bz polynomials
     /// Generated from binary evaluations. Sorted by index.
@@ -45,7 +47,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     /// accum_i[v_0, ..., v_{i-1}, u] = \sum_{y_rest} \sum_{x_out} E_out(x_out || y_rest) * 
     /// \sum_{x_in} E_in(x_in) * P(x_out, x_in, y_rest, u, v_0, ..., v_{i-1}),
     ///
-    /// for all i < num_svo_rounds, v_0,..., v_{i-1} \in {0,1,infty}, u \in {0,infty}, and 
+    /// for all i < NUM_SVO_ROUNDS, v_0,..., v_{i-1} \in {0,1,infty}, u \in {0,infty}, and 
     /// P(X) = Az(X) * Bz(X) - Cz(X).
     /// 
     /// Note that we have reverse the order of variables from the paper, since in this codebase
@@ -58,7 +60,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     /// This is why we do not need to compute the Cz terms in the unbound coefficients.
     ///
     /// The output of the accumulators is Vec<(Vec<F>, Vec<F>)>, where the outer Vec is indexed by SVO
-    /// round `i` (0 to `num_svo_rounds`-1). The tuple contains two Vec<F>: the first for evals at
+    /// round `i` (0 to `NUM_SVO_ROUNDS`-1). The tuple contains two Vec<F>: the first for evals at
     /// u = 0, and the second for u = infty. Each of these inner Vecs is indexed by the v-config
     /// (v_0, ..., v_{i-1}).
     /// 
@@ -70,11 +72,10 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         cross_step_constraints: &[OffsetEqConstraint],
         flattened_polynomials: &[&MultilinearPolynomial<F>],
         tau: &[F], // Challenges for ALL N_total R1CS variables
-        num_svo_rounds: usize, // l_0 in Algo 6
     ) -> (Vec<(Vec<F>, Vec<F>)>, Self) {
         // Here's the full layout of the variables:
         // 0 ... (N/2 - l) ... (n_s) ... (N - l) ... (N - i - 1) ... (N - 1)
-        // where n_s = num_step_vars, n_c = num_constraint_vars, N = n_s + n_c, l = num_svo_rounds
+        // where n_s = num_step_vars, n_c = num_constraint_vars, N = n_s + n_c, l = NUM_SVO_ROUNDS
         // and i is an iterator over 0..l (for the SVO rounds)
  
         // Within this layout, we have the partition:
@@ -85,8 +86,8 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         // - (N - l) ... (N - i - 1) is y_suffix_svo
         // - (N - i - 1) ... (N - 1) is u || v_config
 
-        assert!(num_svo_rounds <= 3, "num_svo_rounds ({}) must be <= 3", num_svo_rounds);
-        assert!(num_svo_rounds > 0, "num_svo_rounds ({}) must be > 0", num_svo_rounds);
+        assert!(NUM_SVO_ROUNDS <= 3, "NUM_SVO_ROUNDS ({}) must be <= 3", NUM_SVO_ROUNDS);
+        assert!(NUM_SVO_ROUNDS > 0, "NUM_SVO_ROUNDS ({}) must be > 0 (0 not yet supported in this path)", NUM_SVO_ROUNDS);
 
         // --- Variable Definitions ---
         let num_steps = flattened_polynomials[0].len();
@@ -107,19 +108,19 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
             num_constraint_vars
         );
         assert!(
-            num_svo_rounds <= num_constraint_vars,
-            "num_svo_rounds ({}) cannot exceed total constraint variables ({})",
-            num_svo_rounds,
+            NUM_SVO_ROUNDS <= num_constraint_vars,
+            "NUM_SVO_ROUNDS ({}) cannot exceed total constraint variables ({})",
+            NUM_SVO_ROUNDS,
             num_constraint_vars
         );
 
         // Number of constraint variables that are NOT part of the SVO prefix Y.
-        let num_non_svo_constraint_vars = num_constraint_vars.saturating_sub(num_svo_rounds);
+        let num_non_svo_constraint_vars = num_constraint_vars.saturating_sub(NUM_SVO_ROUNDS);
         let num_non_svo_z_vars = num_step_vars + num_non_svo_constraint_vars;
-        assert_eq!(num_non_svo_z_vars, total_num_vars - num_svo_rounds, "num_non_svo_z_vars ({}) + num_svo_rounds ({}) must be == total_num_vars ({})", num_non_svo_z_vars, num_svo_rounds, total_num_vars);
+        assert_eq!(num_non_svo_z_vars, total_num_vars - NUM_SVO_ROUNDS, "num_non_svo_z_vars ({}) + NUM_SVO_ROUNDS ({}) must be == total_num_vars ({})", num_non_svo_z_vars, NUM_SVO_ROUNDS, total_num_vars);
  
         // --- Define Iteration Spaces for Non-SVO Z variables (x_out_val, x_in_val) ---
-        let potential_x_out_vars = total_num_vars / 2 - num_svo_rounds;
+        let potential_x_out_vars = total_num_vars / 2 - NUM_SVO_ROUNDS;
         let iter_num_x_out_vars = std::cmp::min(potential_x_out_vars, num_step_vars);
         let iter_num_x_in_vars = num_non_svo_z_vars - iter_num_x_out_vars;
         let iter_num_x_in_step_vars = num_step_vars - iter_num_x_out_vars;
@@ -129,11 +130,11 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
         // --- Setup: E_in and E_out tables ---
         // Call NewSplitEqPolynomial::new_for_small_value with the determined variable splits.
-        let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, iter_num_x_out_vars, iter_num_x_in_vars, num_svo_rounds);
+        let eq_poly = NewSplitEqPolynomial::new_for_small_value(tau, iter_num_x_out_vars, iter_num_x_in_vars, NUM_SVO_ROUNDS);
         let E_in_evals = eq_poly.E_in_current();
         let E_out_vec = &eq_poly.E_out_vec;
  
-        assert_eq!(E_out_vec.len(), num_svo_rounds);
+        assert_eq!(E_out_vec.len(), NUM_SVO_ROUNDS);
 
         let num_x_out_vals = 1 << iter_num_x_out_vars;
         let num_x_in_vals = 1 << iter_num_x_in_vars;
@@ -141,13 +142,13 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         assert_eq!(num_x_in_vals, E_in_evals.len(), "num_x_in_vals ({}) != E_in_evals.len ({})", num_x_in_vals, E_in_evals.len());
 
         // // --- Precompute binary to ternary index mapping --- 
-        // let binary_to_ternary_indices = svo_helpers::precompute_binary_to_ternary_indices(num_svo_rounds);
+        // let binary_to_ternary_indices = svo_helpers::precompute_binary_to_ternary_indices(NUM_SVO_ROUNDS);
         // // Expected size of vectors holding ternary evaluations (Az, Bz, and temp_tA)
-        // let num_ternary_points = 3_usize.checked_pow(num_svo_rounds as u32)
+        // let num_ternary_points = 3_usize.checked_pow(NUM_SVO_ROUNDS as u32)
         //     .expect("Number of ternary points overflowed");
 
         // // Precompute all idx_mapping results
-        // let all_idx_mapping_results = svo_helpers::precompute_all_idx_mappings(num_svo_rounds, num_ternary_points);
+        // let all_idx_mapping_results = svo_helpers::precompute_all_idx_mappings(NUM_SVO_ROUNDS, num_ternary_points);
 
         // --- Parallel Fold-Reduce over x_out_val ---
         // Corresponds to Algo 6, Line 7: Outer loop over x_out.
@@ -162,7 +163,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         let reduction_identity = || -> PrecomputeTaskResult<F> {
             PrecomputeTaskResult {
                 ab_coeffs: vec![],
-                svo_accs: (0..num_svo_rounds) 
+                svo_accs: (0..NUM_SVO_ROUNDS) 
                     .map(|s| {
                         let v_config_count = 3_usize.checked_pow(s as u32).expect("V-config count overflow");
                         (vec![F::zero(); v_config_count], vec![F::zero(); v_config_count])
@@ -179,7 +180,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                 // This vector will be updated by the inplace helper.
                 let mut task_tA_accumulator_vec;
 
-                match num_svo_rounds {
+                match NUM_SVO_ROUNDS {
                     1 => { // 3 - 2 = 1
                         task_tA_accumulator_vec = vec![F::zero(); 1];
                     },
@@ -189,7 +190,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     3 => { // 27 - 8 = 19
                         task_tA_accumulator_vec = vec![F::zero(); 19];
                     },
-                    _ => { unreachable!("Unsupported number of SVO rounds: {}", num_svo_rounds) },
+                    _ => { unreachable!("Unsupported number of SVO rounds: {}", NUM_SVO_ROUNDS) },
                 }
 
                 // --- Inner Loop over x_in_val ---
@@ -208,13 +209,13 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     let current_lower_bits_val = x_in_val & constraint_mask;
 
                     // Initialize binary vectors with zeros for Az/Bz for this x_in_val
-                    let mut binary_az_evals: Vec<i128> = vec![0i128; 1 << num_svo_rounds];
-                    let mut binary_bz_evals: Vec<i128> = vec![0i128; 1 << num_svo_rounds];
+                    let mut binary_az_evals: Vec<i128> = vec![0i128; 1 << NUM_SVO_ROUNDS];
+                    let mut binary_bz_evals: Vec<i128> = vec![0i128; 1 << NUM_SVO_ROUNDS];
 
                     // --- Loop over Binary SVO Prefixes (Y_bin) ---
                     // Evaluates Az/Bz for the current Z and all binary Y_bin.
                     // Also collects the sparse coefficients for ab_unbound_coeffs.
-                    for y_svo_binary_prefix_val in 0..(1 << num_svo_rounds) {
+                    for y_svo_binary_prefix_val in 0..(1 << NUM_SVO_ROUNDS) {
                         let constraint_idx_within_step =
                             (y_svo_binary_prefix_val << num_non_svo_constraint_vars) + current_lower_bits_val;
 
@@ -243,7 +244,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
                     let E_in_val_for_current_x_in = &E_in_evals[x_in_val];
 
-                    match num_svo_rounds {
+                    match NUM_SVO_ROUNDS {
                         1 => {
                             svo_helpers::compute_and_update_tA_inplace_1::<F>(
                                 &binary_az_evals,
@@ -268,13 +269,13 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                                 &mut task_tA_accumulator_vec,
                             );
                         },
-                        _ => { unreachable!("Unsupported number of SVO rounds: {}", num_svo_rounds) },
+                        _ => { unreachable!("Unsupported number of SVO rounds: {}", NUM_SVO_ROUNDS) },
                     }
                 } // End loop over x_in_val (Algo 6, Line 8 complete for this x_out)
 
                 // --- Distribute task_tA_accumulator_vec (for this x_out) to task_res.svo_accs ---
                 // task_tA_accumulator_vec now holds SUM_{x_in} (E_in * P_ext) for the current x_out_val
-                match num_svo_rounds {
+                match NUM_SVO_ROUNDS {
                     1 => {
                         svo_helpers::distribute_tA_to_svo_accumulators_1(
                             &task_tA_accumulator_vec,
@@ -299,7 +300,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                             &mut task_res.svo_accs,
                         );
                     },
-                    _ => { unreachable!("Unsupported number of SVO rounds: {}", num_svo_rounds) },
+                    _ => { unreachable!("Unsupported number of SVO rounds: {}", NUM_SVO_ROUNDS) },
                 } // End distribution logic
 
                 // Return partial results from this task (for current x_out)
@@ -309,8 +310,8 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                 // Combine sparse coefficient lists
                 acc_res.ab_coeffs.extend(task_res.ab_coeffs);
                 // Combine SVO accumulators (completes the sum over x_out in Algo 6, Line 7)
-                if num_svo_rounds > 0 {
-                    for s in 0..num_svo_rounds {
+                if NUM_SVO_ROUNDS > 0 {
+                    for s in 0..NUM_SVO_ROUNDS {
                         let v_config_count = 3_usize.checked_pow(s as u32).expect("V-config count for reduce overflow");
                         for v_idx in 0..v_config_count {
                             acc_res.svo_accs[s].0[v_idx] +=
@@ -332,7 +333,7 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         // Debug check for sortedness
         #[cfg(test)]
         {
-            if num_svo_rounds > 0 && !final_ab_unbound_coeffs.is_empty() {
+            if NUM_SVO_ROUNDS > 0 && !final_ab_unbound_coeffs.is_empty() {
                 let mut prev_index = final_ab_unbound_coeffs[0].index;
                 for coeff in final_ab_unbound_coeffs.iter().skip(1) {
                     assert!(

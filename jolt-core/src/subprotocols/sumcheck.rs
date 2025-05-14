@@ -215,8 +215,6 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             cross_step_constraints,
             &flattened_polys,
             tau,
-            // TODO: in the future, could tune this parameter depending on the number of cycles, desired RAM usage, etc.
-            NUM_SMALL_VALUE_ROUNDS,
         );
 
         let mut lagrange_coeffs: Vec<F> = vec![F::one()];

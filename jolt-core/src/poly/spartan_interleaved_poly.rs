@@ -61,6 +61,9 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
     /// round `i` (0 to `num_svo_rounds`-1). The tuple contains two Vec<F>: the first for evals at
     /// u = 0, and the second for u = infty. Each of these inner Vecs is indexed by the v-config
     /// (v_0, ..., v_{i-1}).
+    /// 
+    /// NOTE: we hard-code the logic for number of small value rounds for efficiency reasons.
+    /// We currently support 1, 2, and 3 SVO rounds.
     pub fn new_with_precompute(
         padded_num_constraints: usize,
         uniform_constraints: &[Constraint],
@@ -81,6 +84,9 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
         // - (N/2 - l) ... (N - l) in total is x_in
         // - (N - l) ... (N - i - 1) is y_suffix_svo
         // - (N - i - 1) ... (N - 1) is u || v_config
+
+        assert!(num_svo_rounds <= 3, "num_svo_rounds ({}) must be <= 3", num_svo_rounds);
+        assert!(num_svo_rounds > 0, "num_svo_rounds ({}) must be > 0", num_svo_rounds);
 
         // --- Variable Definitions ---
         let num_steps = flattened_polynomials[0].len();
@@ -134,14 +140,14 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
 
         assert_eq!(num_x_in_vals, E_in_evals.len(), "num_x_in_vals ({}) != E_in_evals.len ({})", num_x_in_vals, E_in_evals.len());
 
-        // --- Precompute binary to ternary index mapping --- 
-        let binary_to_ternary_indices = svo_helpers::precompute_binary_to_ternary_indices(num_svo_rounds);
-        // Expected size of vectors holding ternary evaluations (Az, Bz, and temp_tA)
-        let num_ternary_points = 3_usize.checked_pow(num_svo_rounds as u32)
-            .expect("Number of ternary points overflowed");
+        // // --- Precompute binary to ternary index mapping --- 
+        // let binary_to_ternary_indices = svo_helpers::precompute_binary_to_ternary_indices(num_svo_rounds);
+        // // Expected size of vectors holding ternary evaluations (Az, Bz, and temp_tA)
+        // let num_ternary_points = 3_usize.checked_pow(num_svo_rounds as u32)
+        //     .expect("Number of ternary points overflowed");
 
-        // Precompute all idx_mapping results
-        let all_idx_mapping_results = svo_helpers::precompute_all_idx_mappings(num_svo_rounds, num_ternary_points);
+        // // Precompute all idx_mapping results
+        // let all_idx_mapping_results = svo_helpers::precompute_all_idx_mappings(num_svo_rounds, num_ternary_points);
 
         // --- Parallel Fold-Reduce over x_out_val ---
         // Corresponds to Algo 6, Line 7: Outer loop over x_out.
@@ -171,7 +177,20 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                 let mut task_res = reduction_identity();
                 // Accumulator for SUM_{x_in} E_in * P_ext for this x_out task.
                 // This vector will be updated by the inplace helper.
-                let mut task_tA_accumulator_vec = vec![F::zero(); num_ternary_points];
+                let mut task_tA_accumulator_vec;
+
+                match num_svo_rounds {
+                    1 => { // 3 - 2 = 1
+                        task_tA_accumulator_vec = vec![F::zero(); 1];
+                    },
+                    2 => { // 9 - 4 = 5
+                        task_tA_accumulator_vec = vec![F::zero(); 5];
+                    },
+                    3 => { // 27 - 8 = 19
+                        task_tA_accumulator_vec = vec![F::zero(); 19];
+                    },
+                    _ => { unreachable!("Unsupported number of SVO rounds: {}", num_svo_rounds) },
+                }
 
                 // --- Inner Loop over x_in_val ---
                 // Corresponds to Algo 6, Line 8: Inner loop over x_in.
@@ -188,9 +207,9 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                     let constraint_mask = (1 << iter_num_x_in_constraint_vars) - 1;
                     let current_lower_bits_val = x_in_val & constraint_mask;
 
-                    // Initialize ternary vectors with zeros for Az/Bz for this x_in_val
-                    let mut ternary_az_evals = vec![0i128; num_ternary_points];
-                    let mut ternary_bz_evals = vec![0i128; num_ternary_points];
+                    // Initialize binary vectors with zeros for Az/Bz for this x_in_val
+                    let mut binary_az_evals: Vec<i128> = vec![0i128; 1 << num_svo_rounds];
+                    let mut binary_bz_evals: Vec<i128> = vec![0i128; 1 << num_svo_rounds];
 
                     // --- Loop over Binary SVO Prefixes (Y_bin) ---
                     // Evaluates Az/Bz for the current Z and all binary Y_bin.
@@ -206,13 +225,9 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                                 uniform_constraints.len(), num_steps,
                             );
 
-                            // Get the index corresponding to this binary point in the ternary vectors
-                            // Use the precomputed binary_to_ternary_indices from the outer scope
-                            let ternary_idx = binary_to_ternary_indices[y_svo_binary_prefix_val];
-
                             // Populate the ternary vectors at the binary positions
-                            ternary_az_evals[ternary_idx] = az_i128;
-                            ternary_bz_evals[ternary_idx] = bz_i128;
+                            binary_az_evals[y_svo_binary_prefix_val] = az_i128;
+                            binary_bz_evals[y_svo_binary_prefix_val] = bz_i128;
 
                             // Collect sparse coefficients (Simultaneous generation, not in Algo 6).
                             let global_r1cs_idx =
@@ -226,49 +241,65 @@ impl<F: JoltField> NewSpartanInterleavedPolynomial<F> {
                         }
                     } // End loop over Y_bin
 
-                    // If SVO active, perform extension and update task_tA_accumulator_vec
-                    if num_svo_rounds > 0 {
-                        let E_in_val_for_current_x_in = E_in_evals[x_in_val];
+                    let E_in_val_for_current_x_in = &E_in_evals[x_in_val];
 
-                        // Perform extension IN-PLACE on ternary_az/bz_evals
-                        // and ACCUMULATE the E_in * P_ext result into task_tA_accumulator_vec.
-                        svo_helpers::compute_and_update_tA_inplace::<F>(
-                            &mut ternary_az_evals, // Pass mutable slice
-                            &mut ternary_bz_evals, // Pass mutable slice
-                            num_svo_rounds,
-                            E_in_val_for_current_x_in,
-                            &mut task_tA_accumulator_vec, // Pass mutable slice for accumulation
-                        );
-                    } else {
-                        // Handle base case l0=0: update task_tA_accumulator_vec[0] directly
-                        if num_ternary_points > 0 { // i.e., l0==0, so num_ternary_points is 1
-                            let E_in_val = E_in_evals[x_in_val];
-                            if !E_in_val.is_zero() {
-                                let az0 = ternary_az_evals[0]; // Should contain the only binary eval
-                                let bz0 = ternary_bz_evals[0];
-                                if az0 != 0 && bz0 != 0 { // Early break
-                                    let product_i128 = az0.checked_mul(bz0).expect("Az0*Bz0 product overflow for SVO l0=0 case");
-                                    task_tA_accumulator_vec[0] += E_in_val.mul_i128(product_i128);
-                                }
-                            }
-                        }
+                    match num_svo_rounds {
+                        1 => {
+                            svo_helpers::compute_and_update_tA_inplace_1::<F>(
+                                &binary_az_evals,
+                                &binary_bz_evals,
+                                E_in_val_for_current_x_in,
+                                &mut task_tA_accumulator_vec,
+                            );
+                        },
+                        2 => {
+                            svo_helpers::compute_and_update_tA_inplace_2::<F>(
+                                &binary_az_evals,
+                                &binary_bz_evals,
+                                E_in_val_for_current_x_in,
+                                &mut task_tA_accumulator_vec,
+                            );
+                        },
+                        3 => {
+                            svo_helpers::compute_and_update_tA_inplace_3::<F>(
+                                &binary_az_evals,
+                                &binary_bz_evals,
+                                E_in_val_for_current_x_in,
+                                &mut task_tA_accumulator_vec,
+                            );
+                        },
+                        _ => { unreachable!("Unsupported number of SVO rounds: {}", num_svo_rounds) },
                     }
                 } // End loop over x_in_val (Algo 6, Line 8 complete for this x_out)
 
                 // --- Distribute task_tA_accumulator_vec (for this x_out) to task_res.svo_accs ---
                 // task_tA_accumulator_vec now holds SUM_{x_in} (E_in * P_ext) for the current x_out_val
-                if num_svo_rounds > 0 {
-                    svo_helpers::distribute_tA_to_svo_accumulators(
-                        &task_tA_accumulator_vec,
-                        x_out_val,
-                        num_svo_rounds,
-                        num_ternary_points,
-                        E_out_vec, // Pass reference to Vec<Vec<F>>
-                        &all_idx_mapping_results, // Pass reference
-                        &mut task_res.svo_accs,
-                        #[cfg(test)]
-                        iter_num_x_out_vars,
-                    );
+                match num_svo_rounds {
+                    1 => {
+                        svo_helpers::distribute_tA_to_svo_accumulators_1(
+                            &task_tA_accumulator_vec,
+                            x_out_val,
+                            E_out_vec,
+                            &mut task_res.svo_accs,
+                        );
+                    },
+                    2 => {
+                        svo_helpers::distribute_tA_to_svo_accumulators_2(
+                            &task_tA_accumulator_vec,
+                            x_out_val,
+                            E_out_vec,
+                            &mut task_res.svo_accs,
+                        );
+                    },
+                    3 => {
+                        svo_helpers::distribute_tA_to_svo_accumulators_3(
+                            &task_tA_accumulator_vec,
+                            x_out_val,
+                            E_out_vec,
+                            &mut task_res.svo_accs,
+                        );
+                    },
+                    _ => { unreachable!("Unsupported number of SVO rounds: {}", num_svo_rounds) },
                 } // End distribution logic
 
                 // Return partial results from this task (for current x_out)

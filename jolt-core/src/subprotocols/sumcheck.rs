@@ -322,34 +322,34 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         #[cfg(test)]
         {
-            let mut az_bz_cz_poly = SpartanInterleavedPolynomial::new(
+            let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
                 uniform_constraints,
                 cross_step_constraints,
                 flattened_polys,
                 padded_num_constraints,
             );
 
-            let mut r: Vec<F> = Vec::new();
+            let mut old_r: Vec<F> = Vec::new();
             let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
-            let mut claim = F::zero();
+            let mut old_claim = F::zero();
             let mut old_eq_poly = SplitEqPolynomial::new(tau);
 
             for round in 0..NUM_SVO_ROUNDS {
                 if round == 0 {
-                    az_bz_cz_poly.first_sumcheck_round(
+                    old_az_bz_cz_poly.first_sumcheck_round(
                         &mut old_eq_poly,
                         transcript,
-                        &mut r,
+                        &mut old_r,
                         &mut old_polys,
-                        &mut claim,
+                        &mut old_claim,
                     );
                 } else {
-                    az_bz_cz_poly.subsequent_sumcheck_round(
+                    old_az_bz_cz_poly.subsequent_sumcheck_round(
                         &mut old_eq_poly,
                         transcript,
-                        &mut r,
+                        &mut old_r,
                         &mut old_polys,
-                        &mut claim,
+                        &mut old_claim,
                     );
                 }
             }
@@ -360,7 +360,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 assert_eq!(
                     old_polys[round].coeffs_except_linear_term,
                     polys[round].coeffs_except_linear_term,
-                    "The old and new method must yield the same results!"
+                    "The old and new method do not yield the same results at round {}!", round
                 );
             }
         }
@@ -373,6 +373,18 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             &mut polys,
             &mut claim,
         );
+
+        #[cfg(test)] {
+            // How to pass in values from test cfg block above?
+            // old_az_bz_cz_poly.subsequent_sumcheck_round(
+            //     &mut old_eq_poly,
+            //     transcript,
+            //     &mut old_r,
+            //     &mut old_polys,
+            //     &mut old_claim,
+            // );
+
+        }
 
         // Round (NUM_SVO_ROUNDS + 1)..num_rounds : do the linear time sumcheck
         for _ in (NUM_SVO_ROUNDS + 1)..num_rounds {
@@ -712,8 +724,6 @@ pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// Display the ordering of the Lagrange coefficients in the small value sumcheck
     #[test]
     fn test_lagrange_coeffs_ordering() {

@@ -88,6 +88,9 @@ pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = num_non_trivial_ternary_points(
 pub const NUM_ACCUMS_EVAL_ZERO: usize = num_accums_eval_zero(NUM_SVO_ROUNDS);
 pub const NUM_ACCUMS_EVAL_INFTY: usize = num_accums_eval_infty(NUM_SVO_ROUNDS);
 
+pub const Y_SVO_SPACE_SIZE: usize = 1 << NUM_SVO_ROUNDS;
+pub const Y_SVO_RELATED_COEFF_BLOCK_SIZE: usize = 4 * Y_SVO_SPACE_SIZE; // Az/Bz * Xk=0/1 * Y_SVO_SPACE_SIZE
+
 pub struct NewSpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltField> {
     /// A sparse vector representing the (interleaved) coefficients for the Az, Bz polynomials
     /// Generated from binary evaluations. Sorted by index.
@@ -282,8 +285,19 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             svo_accums_infty_local: [F; NUM_ACCUMS_EVAL_INFTY],
         }
 
-        let num_parallel_chunks = rayon::current_num_threads().next_power_of_two() * 2;
-        let x_out_chunk_size = num_x_out_vals.div_ceil(num_parallel_chunks);
+        let num_parallel_chunks = if num_x_out_vals > 0 {
+            std::cmp::min(num_x_out_vals, rayon::current_num_threads().next_power_of_two() * 2)
+        } else {
+            1 // Avoid 0 chunks if num_x_out_vals is 0
+        };
+        assert!(num_parallel_chunks > 0 || num_x_out_vals == 0,
+            "num_parallel_chunks must be positive if there are x_out_vals to process");
+        
+        let x_out_chunk_size = if num_x_out_vals > 0 {
+            num_x_out_vals.div_ceil(num_parallel_chunks)
+        } else {
+            0 // No work per chunk if no x_out_vals
+        };
 
         let collected_chunk_outputs: Vec<PrecomputeTaskOutput<F>> = (0..num_parallel_chunks)
             .into_par_iter()
@@ -543,383 +557,267 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let top_level_span = tracing::span!(tracing::Level::INFO, "streaming_sumcheck_round_body");
         let _top_level_guard = top_level_span.enter();
 
-        let setup_span = tracing::span!(tracing::Level::DEBUG, "streaming_round_setup");
+        let setup_span = tracing::debug_span!("streaming_round_setup");
         let _setup_guard = setup_span.enter();
 
         // --- 1. Initial Setup ---
-        let num_y_svo_vars = r_challenges.len();
-        let N_high = 1 << num_y_svo_vars;
-        let eq_r = EqPolynomial::evals(r_challenges);
+        let num_y_svo_vars = r_challenges.len(); // These are the r_challenges for Y_svo variables
+        assert_eq!(num_y_svo_vars, NUM_SVO_ROUNDS, "r_challenges length mismatch with NUM_SVO_ROUNDS");
+        let eq_r_evals = EqPolynomial::evals(r_challenges);
 
-        let num_x_out_vars = eq_poly.E_out_current_len().log_2();
-        let num_x_in_vars = eq_poly.E_in_current_len().log_2();
-        let num_x_prime_vars = num_x_out_vars + num_x_in_vars;
-        let num_non_x_out_vars = num_x_in_vars + num_y_svo_vars;
-
-        let num_x_out_points = 1 << num_x_out_vars;
-        let num_x_in_points = if num_x_in_vars == 0 {
-            1
-        } else {
-            1 << num_x_in_vars
-        };
-        let num_non_x_out_points = 1 << num_non_x_out_vars;
-
-        println!("num_x_out_vars {}", num_x_out_vars);
-        println!("num_x_in_vars {}", num_x_in_vars);
-        println!("num_x_prime_vars {}", num_x_prime_vars);
-        println!("num_y_svo_vars {}", num_y_svo_vars);
-        println!("num_non_x_out_vars {}", num_non_x_out_vars);
-        println!("dense_len {}", self.dense_len);
-        println!("unbound_coeffs_len {}", self.ab_unbound_coeffs.len());
-
-        let N_k_dense_len_for_x_prime = 1 << num_x_prime_vars;
         drop(_setup_guard);
 
-        let ranges_calc_span = tracing::span!(
-            tracing::Level::DEBUG,
-            "streaming_round_ranges_calc",
-            num_x_out_points
-        );
-        let _ranges_calc_guard = ranges_calc_span.enter();
-        let mut ranges_for_x_out: Vec<std::ops::Range<usize>> =
-            Vec::with_capacity(num_x_out_points);
-        let mut output_sizes: Vec<usize> = Vec::with_capacity(num_x_out_points);
+        let main_processing_span = tracing::info_span!("streaming_round_main_processing");
+        let _main_processing_guard = main_processing_span.enter();
 
-        if !self.ab_unbound_coeffs.is_empty() {
-            for x_out_task_val in 0..num_x_out_points {
-                let min_r1cs_row = (x_out_task_val << (num_x_in_vars + num_y_svo_vars))
-                    | (0 << num_y_svo_vars)
-                    | 0;
-                let max_x_in_val = (1 << num_x_in_vars) - 1;
-                let max_y_svo_val = (1 << num_y_svo_vars) - 1;
-                let max_r1cs_row = (x_out_task_val << (num_x_in_vars + num_y_svo_vars))
-                    | (max_x_in_val << num_y_svo_vars)
-                    | max_y_svo_val;
-                let start_sparse_idx = min_r1cs_row * 2;
-                let end_sparse_idx = max_r1cs_row * 2 + 1;
-                let start = self
-                    .ab_unbound_coeffs
-                    .partition_point(|sc| sc.index < start_sparse_idx);
-                let end = self
-                    .ab_unbound_coeffs
-                    .partition_point(|sc| sc.index <= end_sparse_idx);
-                ranges_for_x_out.push(start..end);
-                output_sizes.push(end - start);
-            }
+        struct StreamingTaskOutput<F: JoltField> {
+            bound_coeffs_local: Vec<SparseCoefficient<F>>,
+            sumcheck_eval_at_0_local: F,
+            sumcheck_eval_at_infty_local: F,
         }
-        drop(_ranges_calc_guard);
 
-        // In order to parallelize, we do a first pass over the coefficients to
-        // determine how to divide it into chunks that can be processed independently.
-        // In particular, coefficients whose indices are the same modulo (2 ^ (NUM_SVO_ROUNDS + 1))
-        // cannot be processed independently.
+        // --- Setup for iteration similar to new_with_precompute ---
+        let num_streaming_x_out_vars = eq_poly.E_out_current_len().log_2();
+        let num_streaming_x_in_vars = eq_poly.E_in_current_len().log_2();
 
-        // Simplifying assumption: group by `x_out`
-        // let block_size = self
-        //     .ab_unbound_coeffs
-        //     .len()
-        //     .div_ceil(rayon::current_num_threads())
-        //     .next_multiple_of(2 * (1 << NUM_SVO_ROUNDS));
+        let num_total_streaming_x_out_vals = 1 << num_streaming_x_out_vars;
+        let num_total_streaming_x_in_vals = 1 << num_streaming_x_in_vars;
 
-        // Parallel chunking based on the same highest `x_out` bits
-        let chunks: Vec<_> = self
-            .ab_unbound_coeffs
-            .par_chunk_by(|x, y| x.index / num_non_x_out_points == y.index / num_non_x_out_points)
+        // Pre-build a map from block_index to the relevant slice of ab_unbound_coeffs
+        let mut block_idx_to_coeffs_map = std::collections::HashMap::new();
+        let temp_all_logical_blocks: Vec<&[SparseCoefficient<i128>]> = self.ab_unbound_coeffs
+            .chunk_by(move |c1, c2| c1.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE == c2.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE)
             .collect();
 
-        // assert_eq!(chunks.len(), num_x_out_points, "Length of chunks should be number of x_out points!");
-
-        // Initialize the bound coeffs
-
-        // TODO: refine (can use binding scratch space)
-        let mut bound_coeffs: Vec<SparseCoefficient<F>> = Vec::with_capacity(self.dense_len);
-
-        // Partition `bound_coeffs` into slices for iteration
-        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> = vec![];
-
-        // Inside the loop, we will set elements of the output_slices
-        // TODO: how to make Rust not complain about parallel threads operating on slices
-        // that we have partitioned beforehand
-        // The loop returns a bunch of partial quadratic evals which are then summed together
-        // to form the final evals (at 0 and infty)
-
-        #[derive(Debug)]
-        struct StreamingRoundAccumulator<F: JoltField> {
-            total_quadratic_eval_at_0: F,
-            total_quadratic_eval_at_infty: F,
-        }
-
-        impl<F: JoltField> StreamingRoundAccumulator<F> {
-            #[inline]
-            fn new() -> Self {
-                Self {
-                    total_quadratic_eval_at_0: F::zero(),
-                    total_quadratic_eval_at_infty: F::zero(),
-                }
+        for logical_block_coeffs_slice in temp_all_logical_blocks {
+            if !logical_block_coeffs_slice.is_empty() {
+                let block_id = logical_block_coeffs_slice[0].index / Y_SVO_RELATED_COEFF_BLOCK_SIZE;
+                block_idx_to_coeffs_map.insert(block_id, logical_block_coeffs_slice);
             }
         }
+        
+        let num_parallel_chunks_streaming = if num_total_streaming_x_out_vals > 0 {
+            std::cmp::min(num_total_streaming_x_out_vals, rayon::current_num_threads().next_power_of_two() * 2)
+        } else {
+             1 // Avoid 0 chunks if num_total_streaming_x_out_vals is 0, or if it's 1 to ensure loop runs
+        };
+        // Ensure num_parallel_chunks_streaming is at least 1 if there's work, to prevent 0/0 issues with div_ceil if num_total_streaming_x_out_vals is also 1.
+        // If num_total_streaming_x_out_vals is 0, x_out_chunk_size will be 0, and the inner loop won't run.
+        assert!(num_parallel_chunks_streaming > 0 || num_total_streaming_x_out_vals == 0, 
+            "num_parallel_chunks_streaming must be positive if there are x_out_vals to process");
 
-        let parallel_fold_span =
-            tracing::span!(tracing::Level::INFO, "streaming_round_parallel_fold");
-        let _parallel_fold_guard = parallel_fold_span.enter();
+        let streaming_x_out_chunk_size = if num_total_streaming_x_out_vals > 0 {
+            num_total_streaming_x_out_vals.div_ceil(num_parallel_chunks_streaming)
+        } else {
+            0
+        };
 
-        // LOOP NEEDS TO BE SIGNIFICANTLY OVERHAULED!!!
-        let final_results: StreamingRoundAccumulator<F> = (0..num_x_out_points)
+        let collected_chunk_outputs: Vec<StreamingTaskOutput<F>> = (0..num_parallel_chunks_streaming)
             .into_par_iter()
-            .fold(
-                || StreamingRoundAccumulator::new(),
-                |mut thread_acc, x_out_task_val| {
-                    let fold_task_span =
-                        tracing::span!(tracing::Level::DEBUG, "fold_task", x_out = x_out_task_val);
-                    let _fold_task_guard = fold_task_span.enter();
+            .map(|chunk_idx| {
+                let mut chunk_bound_coeffs = Vec::new();
+                let mut chunk_sum_contrib_0 = F::zero();
+                let mut chunk_sum_contrib_infty = F::zero();
 
-                    let e_out_val = eq_poly.E_out_current()[x_out_task_val];
+                let x_out_start = chunk_idx * streaming_x_out_chunk_size;
+                let x_out_end = std::cmp::min((chunk_idx + 1) * streaming_x_out_chunk_size, num_total_streaming_x_out_vals);
 
-                    let relevant_coeffs_slice = if !self.ab_unbound_coeffs.is_empty()
-                        && x_out_task_val < ranges_for_x_out.len()
-                    {
-                        &self.ab_unbound_coeffs[ranges_for_x_out[x_out_task_val].clone()]
-                    } else {
-                        &[]
-                    };
+                for x_out_val in x_out_start..x_out_end {
+                    let e_out_val = eq_poly.E_out_current()[x_out_val];
+                    let mut current_x_out_inner_sum_0 = F::zero();
+                    let mut current_x_out_inner_sum_infty = F::zero();
 
-                    let mut current_group_y_val: Option<usize> = None;
-                    let mut current_group_x_in_val: Option<usize> = None;
+                    for x_in_val in 0..num_total_streaming_x_in_vals {
+                        let block_index = (x_out_val << num_streaming_x_in_vars) | x_in_val;
+                        
+                        if let Some(logical_block_coeffs) = block_idx_to_coeffs_map.get(&block_index) {
+                            if logical_block_coeffs.is_empty() { continue; }
 
-                    let mut loc_raw_az0: i128 = 0;
-                    let mut loc_raw_bz0: i128 = 0;
-                    let mut loc_raw_az1: i128 = 0;
-                    let mut loc_raw_bz1: i128 = 0;
+                            let mut az0_for_y: [Option<i128>; Y_SVO_SPACE_SIZE] = [None; Y_SVO_SPACE_SIZE];
+                            let mut bz0_for_y: [Option<i128>; Y_SVO_SPACE_SIZE] = [None; Y_SVO_SPACE_SIZE];
+                            let mut az1_for_y: [Option<i128>; Y_SVO_SPACE_SIZE] = [None; Y_SVO_SPACE_SIZE];
+                            let mut bz1_for_y: [Option<i128>; Y_SVO_SPACE_SIZE] = [None; Y_SVO_SPACE_SIZE];
 
-                    let coeff_scan_span = tracing::span!(
-                        tracing::Level::DEBUG,
-                        "coeff_scan_loop",
-                        slice_len = relevant_coeffs_slice.len()
-                    );
-                    let _coeff_scan_guard = coeff_scan_span.enter();
-                    for coeff_sparse in relevant_coeffs_slice.iter() {
-                        let r1cs_row_idx = coeff_sparse.index / 2;
-                        let type_is_B = (coeff_sparse.index % 2) == 1;
+                            for coeff_sparse in *logical_block_coeffs { 
+                                let local_offset = coeff_sparse.index % Y_SVO_RELATED_COEFF_BLOCK_SIZE;
+                                let is_B_coeff = (local_offset % 2) == 1;
+                                let y_val_idx = (local_offset / 2) % Y_SVO_SPACE_SIZE;
+                                let xk_val = (local_offset / 2) / Y_SVO_SPACE_SIZE; 
 
-                        let y_val_of_coeff = r1cs_row_idx & ((1 << num_y_svo_vars) - 1);
-                        let x_part_of_coeff = r1cs_row_idx >> num_y_svo_vars;
-                        let x_in_val_of_coeff = x_part_of_coeff & ((1 << num_x_in_vars) - 1);
-                        let x_out_val_of_coeff = x_part_of_coeff >> num_x_in_vars;
-
-                        if x_out_val_of_coeff != x_out_task_val {
-                            continue;
-                        }
-
-                        let xk_bit_of_coeff = if num_x_out_vars > 0 {
-                            (x_out_val_of_coeff >> (num_x_out_vars - 1)) & 1
-                        } else if num_x_in_vars > 0 {
-                            (x_in_val_of_coeff >> (num_x_in_vars - 1)) & 1
-                        } else {
-                            0
-                        };
-
-                        if current_group_y_val.map_or(true, |prev_y| prev_y != y_val_of_coeff)
-                            || current_group_x_in_val
-                                .map_or(true, |prev_x_in| prev_x_in != x_in_val_of_coeff)
-                        {
-                            if let (Some(prev_y), Some(prev_x_in)) =
-                                (current_group_y_val, current_group_x_in_val)
-                            {
-                                if prev_y < eq_r.len() {
-                                    let eq_r_val = eq_r[prev_y];
-                                    // if loc_raw_az0 != 0 {
-                                    //     az0_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az0); }
-                                    // if loc_raw_bz0 != 0 {
-                                    //     bz0_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_bz0); }
-                                    // if loc_raw_az0 != 0 && loc_raw_bz0 != 0 {
-                                    //     cz0_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az0.checked_mul(loc_raw_bz0).expect("Cz0 product overflow"));
-                                    // }
-                                    // if loc_raw_az1 != 0 {
-                                    //     az1_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az1); }
-                                    // if loc_raw_bz1 != 0 {
-                                    //     bz1_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_bz1); }
-                                    // if loc_raw_az1 != 0 && loc_raw_bz1 != 0 {
-                                    //     cz1_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az1.checked_mul(loc_raw_bz1).expect("Cz1 product overflow"));
-                                    // }
+                                match (is_B_coeff, xk_val) {
+                                    (false, 0) => az0_for_y[y_val_idx] = Some(coeff_sparse.value),
+                                    (true,  0) => bz0_for_y[y_val_idx] = Some(coeff_sparse.value),
+                                    (false, 1) => az1_for_y[y_val_idx] = Some(coeff_sparse.value),
+                                    (true,  1) => bz1_for_y[y_val_idx] = Some(coeff_sparse.value),
+                                    _ => unreachable!("xk_val should be 0 or 1"),
                                 }
                             }
-                            current_group_y_val = Some(y_val_of_coeff);
-                            current_group_x_in_val = Some(x_in_val_of_coeff);
-                            loc_raw_az0 = 0;
-                            loc_raw_bz0 = 0;
-                            loc_raw_az1 = 0;
-                            loc_raw_bz1 = 0;
-                        }
 
-                        let val_i128 = coeff_sparse.value;
-                        if !type_is_B {
-                            if xk_bit_of_coeff == 0 {
-                                loc_raw_az0 = val_i128;
-                            } else {
-                                loc_raw_az1 = val_i128;
+                            let mut az0_at_r = F::zero(); let mut bz0_at_r = F::zero();
+                            let mut az1_at_r = F::zero(); let mut bz1_at_r = F::zero();
+
+                            for y_val_idx in 0..Y_SVO_SPACE_SIZE {
+                                let eq_r_y = eq_r_evals[y_val_idx];
+                                az0_at_r += eq_r_y.mul_i128(az0_for_y[y_val_idx].unwrap_or(0));
+                                bz0_at_r += eq_r_y.mul_i128(bz0_for_y[y_val_idx].unwrap_or(0));
+                                az1_at_r += eq_r_y.mul_i128(az1_for_y[y_val_idx].unwrap_or(0));
+                                bz1_at_r += eq_r_y.mul_i128(bz1_for_y[y_val_idx].unwrap_or(0));
                             }
-                        } else {
-                            if xk_bit_of_coeff == 0 {
-                                loc_raw_bz0 = val_i128;
+
+                            let cz0_at_r = az0_at_r * bz0_at_r;
+                            let cz1_at_r = az1_at_r * bz1_at_r;
+
+                            if !az0_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 0, az0_at_r).into()); }
+                            if !bz0_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 1, bz0_at_r).into()); }
+                            if !cz0_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 2, cz0_at_r).into()); }
+                            if !az1_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 3, az1_at_r).into()); }
+                            if !bz1_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 4, bz1_at_r).into()); }
+                            if !cz1_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 5, cz1_at_r).into()); }
+                            
+                            let e_in_val = if eq_poly.E_in_current_len() > 1 {
+                                eq_poly.E_in_current()[x_in_val]
                             } else {
-                                loc_raw_bz1 = val_i128;
-                            }
+                                eq_poly.E_in_current()[0] 
+                            };
+                            
+                            let p_at_xk0 = az0_at_r * bz0_at_r - cz0_at_r;
+                            let az_m = az1_at_r - az0_at_r;
+                            let bz_m = bz1_at_r - bz0_at_r;
+                            let p_slope_term = az_m * bz_m;
+
+                            current_x_out_inner_sum_0 += e_in_val * p_at_xk0;
+                            current_x_out_inner_sum_infty += e_in_val * p_slope_term;
                         }
-                    }
-                    drop(_coeff_scan_guard);
+                    } // End inner loop over x_in_val
+                    chunk_sum_contrib_0 += e_out_val * current_x_out_inner_sum_0;
+                    chunk_sum_contrib_infty += e_out_val * current_x_out_inner_sum_infty;
+                } // End loop over x_out_val in chunk
 
-                    if let (Some(prev_y), Some(prev_x_in)) =
-                        (current_group_y_val, current_group_x_in_val)
-                    {
-                        if prev_y < eq_r.len() {
-                            let eq_r_val = eq_r[prev_y];
-                            // if loc_raw_az0 != 0 { az0_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az0); }
-                            // if loc_raw_bz0 != 0 { bz0_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_bz0); }
-                            // if loc_raw_az0 != 0 && loc_raw_bz0 != 0 {
-                            //     cz0_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az0.checked_mul(loc_raw_bz0).expect("Cz0 product overflow"));
-                            // }
-                            // if loc_raw_az1 != 0 { az1_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az1); }
-                            // if loc_raw_bz1 != 0 { bz1_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_bz1); }
-                            // if loc_raw_az1 != 0 && loc_raw_bz1 != 0 {
-                            //     cz1_summed_for_x_out[prev_x_in] += eq_r_val.mul_i128(loc_raw_az1.checked_mul(loc_raw_bz1).expect("Cz1 product overflow"));
-                            // }
-                        }
-                    }
+                StreamingTaskOutput {
+                    bound_coeffs_local: chunk_bound_coeffs,
+                    sumcheck_eval_at_0_local: chunk_sum_contrib_0,
+                    sumcheck_eval_at_infty_local: chunk_sum_contrib_infty,
+                }
+            })
+            .collect();
+        
+        drop(_main_processing_guard);
 
-                    let inner_sum_calc_span = tracing::span!(
-                        tracing::Level::DEBUG,
-                        "inner_sum_calculation",
-                        num_x_in_points
-                    );
-                    let _inner_sum_calc_guard = inner_sum_calc_span.enter();
-                    let mut inner_sum_0_for_this_x_out = F::zero();
-                    let mut inner_sum_infty_for_this_x_out = F::zero();
+        let finalization_span = tracing::info_span!("streaming_round_finalization");
+        let _finalization_guard = finalization_span.enter();
+        
+        let mut final_bound_coeffs_capacity = 0;
+        for output in &collected_chunk_outputs { 
+            final_bound_coeffs_capacity += output.bound_coeffs_local.len();
+        }
+        let mut final_bound_coeffs = Vec::with_capacity(final_bound_coeffs_capacity);
+        let mut total_sumcheck_eval_at_0 = F::zero();
+        let mut total_sumcheck_eval_at_infty = F::zero();
 
-                    for x_in_idx_loop in 0..num_x_in_points {
-                        // let az0 = az0_summed_for_x_out[x_in_idx_loop];
-                        // let bz0 = bz0_summed_for_x_out[x_in_idx_loop];
-                        // let cz0 = cz0_summed_for_x_out[x_in_idx_loop];
-                        // let az1 = az1_summed_for_x_out[x_in_idx_loop];
-                        // let bz1 = bz1_summed_for_x_out[x_in_idx_loop];
+        for output in collected_chunk_outputs { 
+           final_bound_coeffs.extend(output.bound_coeffs_local);
+           total_sumcheck_eval_at_0 += output.sumcheck_eval_at_0_local;
+           total_sumcheck_eval_at_infty += output.sumcheck_eval_at_infty_local;
+        }
+        
+        self.ab_unbound_coeffs.clear();
+        // Sorting might be beneficial if the binding step relies on specific order not guaranteed by par_chunk_by's collection
+        final_bound_coeffs.par_sort_unstable_by_key(|sc| sc.index); 
+        
+        drop(_finalization_guard);
 
-                        let az0 = F::zero();
-                        let az1 = F::zero();
-                        let bz0 = F::zero();
-                        let bz1 = F::zero();
-                        let cz0 = F::zero();
-
-                        let e_in_val = eq_poly.E_in_current()[x_in_idx_loop];
-                        let term_eval_at_0 = az0 * bz0 - cz0;
-                        let term_eval_at_infty = (az1 - az0) * (bz1 - bz0);
-
-                        inner_sum_0_for_this_x_out += e_in_val * term_eval_at_0;
-                        inner_sum_infty_for_this_x_out += e_in_val * term_eval_at_infty;
-                    }
-                    drop(_inner_sum_calc_guard);
-
-                    let extend_span = tracing::span!(tracing::Level::DEBUG, "extend_thread_acc");
-                    let _extend_guard = extend_span.enter();
-                    // thread_acc.az0_evals_all.extend(az0_summed_for_x_out);
-                    // thread_acc.bz0_evals_all.extend(bz0_summed_for_x_out);
-                    // thread_acc.cz0_evals_all.extend(cz0_summed_for_x_out);
-                    // thread_acc.az1_evals_all.extend(az1_summed_for_x_out);
-                    // thread_acc.bz1_evals_all.extend(bz1_summed_for_x_out);
-                    // thread_acc.cz1_evals_all.extend(cz1_summed_for_x_out);
-                    drop(_extend_guard);
-
-                    thread_acc.total_quadratic_eval_at_0 += e_out_val * inner_sum_0_for_this_x_out;
-                    thread_acc.total_quadratic_eval_at_infty +=
-                        e_out_val * inner_sum_infty_for_this_x_out;
-
-                    drop(_fold_task_guard);
-                    thread_acc
-                },
-            )
-            .reduce(
-                || StreamingRoundAccumulator::new(),
-                |mut acc_a, acc_b| {
-                    // let reduce_span = tracing::span!(tracing::Level::DEBUG, "fold_reduce",
-                    //     acc_a_az0_len = acc_a.az0_evals_all.len(), acc_b_az0_len = acc_b.az0_evals_all.len());
-                    // let _reduce_guard = reduce_span.enter();
-
-                    // let extend_az0_span = tracing::span!(tracing::Level::TRACE, "reduce_extend_az0");
-                    // let _extend_az0_guard = extend_az0_span.enter();
-                    // acc_a.az0_evals_all.extend(acc_b.az0_evals_all);
-                    // drop(_extend_az0_guard);
-
-                    // let extend_az1_span = tracing::span!(tracing::Level::TRACE, "reduce_extend_az1");
-                    // let _extend_az1_guard = extend_az1_span.enter();
-                    // acc_a.az1_evals_all.extend(acc_b.az1_evals_all);
-                    // drop(_extend_az1_guard);
-
-                    // let extend_bz0_span = tracing::span!(tracing::Level::TRACE, "reduce_extend_bz0");
-                    // let _extend_bz0_guard = extend_bz0_span.enter();
-                    // acc_a.bz0_evals_all.extend(acc_b.bz0_evals_all);
-                    // drop(_extend_bz0_guard);
-
-                    // let extend_bz1_span = tracing::span!(tracing::Level::TRACE, "reduce_extend_bz1");
-                    // let _extend_bz1_guard = extend_bz1_span.enter();
-                    // acc_a.bz1_evals_all.extend(acc_b.bz1_evals_all);
-                    // drop(_extend_bz1_guard);
-
-                    // let extend_cz0_span = tracing::span!(tracing::Level::TRACE, "reduce_extend_cz0");
-                    // let _extend_cz0_guard = extend_cz0_span.enter();
-                    // acc_a.cz0_evals_all.extend(acc_b.cz0_evals_all);
-                    // drop(_extend_cz0_guard);
-
-                    // let extend_cz1_span = tracing::span!(tracing::Level::TRACE, "reduce_extend_cz1");
-                    // let _extend_cz1_guard = extend_cz1_span.enter();
-                    // acc_a.cz1_evals_all.extend(acc_b.cz1_evals_all);
-                    // drop(_extend_cz1_guard);
-
-                    let add_totals_span =
-                        tracing::span!(tracing::Level::TRACE, "reduce_add_totals");
-                    let _add_totals_guard = add_totals_span.enter();
-                    acc_a.total_quadratic_eval_at_0 += acc_b.total_quadratic_eval_at_0;
-                    acc_a.total_quadratic_eval_at_infty += acc_b.total_quadratic_eval_at_infty;
-                    drop(_add_totals_guard);
-
-                    // drop(_reduce_guard);
-                    acc_a
-                },
-            );
-        drop(_parallel_fold_guard);
-
-        let process_round_span =
-            tracing::span!(tracing::Level::INFO, "streaming_round_process_eq_sumcheck");
+        let process_round_span = tracing::info_span!("streaming_round_process_eq_sumcheck");
         let _process_round_guard = process_round_span.enter();
-
-        // No longer needed
-        self.ab_unbound_coeffs = Vec::new();
-
-        // assert_eq!(
-        //     final_results.az0_evals_all.len(),
-        //     N_k_dense_len_for_x_prime,
-        //     "Length mismatch in final Az0 evals"
-        // );
-        // Similar assertions for bz0, cz0, az1, bz1, cz1 if needed.
-
-        let quadratic_eval_at_0 = final_results.total_quadratic_eval_at_0;
-        let quadratic_eval_at_infty = final_results.total_quadratic_eval_at_infty;
-
-        let r_i = process_eq_sumcheck_round(
-            (quadratic_eval_at_0, quadratic_eval_at_infty),
-            eq_poly,
+        
+        let r_k = process_eq_sumcheck_round(
+            (total_sumcheck_eval_at_0, total_sumcheck_eval_at_infty),
+            eq_poly, 
             round_polys,
-            r_challenges,
-            claim,
+            r_challenges, 
+            claim,       
             transcript,
         );
         drop(_process_round_guard);
 
-        let bind_dense_span = tracing::span!(tracing::Level::INFO, "streaming_round_bind_dense");
-        let _bind_dense_guard = bind_dense_span.enter();
+        let bind_coeffs_span = tracing::span!(tracing::Level::INFO, "streaming_round_bind_coeffs");
+        let _bind_coeffs_guard = bind_coeffs_span.enter();
 
-        // Bind `bound_coeffs` similar to `subsequent_sumcheck_round`
+        // --- Bind `final_bound_coeffs` with r_k (reusing logic from remaining_sumcheck_round) ---
+        let binding_chunks_for_final: Vec<&[SparseCoefficient<F>]> = final_bound_coeffs
+            .par_chunk_by(|c1, c2| c1.index / 6 == c2.index / 6) 
+            .collect();
 
-        self.bound_coeffs = bound_coeffs;
-        self.dense_len = N_k_dense_len_for_x_prime;
-        drop(_bind_dense_guard);
+        let binding_output_sizes_per_chunk: Vec<usize> = binding_chunks_for_final.iter()
+            .map(|chunk_6_coeffs| Self::binding_output_length(chunk_6_coeffs))
+            .collect();
+        
+        let total_binding_output_len = binding_output_sizes_per_chunk.iter().sum();
+
+        if self.binding_scratch_space.capacity() < total_binding_output_len {
+            self.binding_scratch_space.reserve_exact(total_binding_output_len - self.binding_scratch_space.capacity());
+        }
+        unsafe {
+            self.binding_scratch_space.set_len(total_binding_output_len);
+        }
+
+        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> = Vec::with_capacity(binding_chunks_for_final.len());
+        let mut scratch_remainder = self.binding_scratch_space.as_mut_slice();
+        for slice_len in binding_output_sizes_per_chunk {
+            let (first, second) = scratch_remainder.split_at_mut(slice_len);
+            output_slices.push(first);
+            scratch_remainder = second;
+        }
+        debug_assert_eq!(scratch_remainder.len(), 0);
+
+        binding_chunks_for_final
+            .into_par_iter()
+            .zip_eq(output_slices.into_par_iter())
+            .for_each(|(coeffs_6_block, output_slice_for_3_coeffs)| {
+                let block_idx_for_6_coeffs = if !coeffs_6_block.is_empty() { coeffs_6_block[0].index / 6 } else { 0 }; 
+
+                let mut az0 = F::zero(); let mut bz0 = F::zero(); let mut cz0 = F::zero();
+                let mut az1 = F::zero(); let mut bz1 = F::zero(); let mut cz1 = F::zero();
+
+                for coeff in coeffs_6_block { 
+                    match coeff.index % 6 {
+                        0 => az0 = coeff.value, 1 => bz0 = coeff.value, 2 => cz0 = coeff.value,
+                        3 => az1 = coeff.value, 4 => bz1 = coeff.value, 5 => cz1 = coeff.value,
+                        _ => {} 
+                    }
+                }
+                
+                let mut current_output_idx = 0;
+                let new_block_idx = block_idx_for_6_coeffs; 
+
+                let bound_az = az0 + r_k * (az1 - az0);
+                if !bound_az.is_zero() {
+                    if current_output_idx < output_slice_for_3_coeffs.len() {
+                        output_slice_for_3_coeffs[current_output_idx] = (3 * new_block_idx + 0, bound_az).into();
+                    }
+                    current_output_idx += 1;
+                }
+                let bound_bz = bz0 + r_k * (bz1 - bz0);
+                if !bound_bz.is_zero() {
+                     if current_output_idx < output_slice_for_3_coeffs.len() {
+                        output_slice_for_3_coeffs[current_output_idx] = (3 * new_block_idx + 1, bound_bz).into();
+                     }
+                    current_output_idx += 1;
+                }
+                let bound_cz = cz0 + r_k * (cz1 - cz0); 
+                if !bound_cz.is_zero() {
+                    if current_output_idx < output_slice_for_3_coeffs.len() {
+                        output_slice_for_3_coeffs[current_output_idx] = (3 * new_block_idx + 2, bound_cz).into();
+                    }
+                    current_output_idx += 1;
+                }
+                 // Assert that the number of written elements is consistent with pre-calculated slice length
+                debug_assert_eq!(current_output_idx, output_slice_for_3_coeffs.len());
+            });
+
+        std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
+        self.dense_len = eq_poly.len(); 
+        
+        drop(_bind_coeffs_guard);
         drop(_top_level_guard);
     }
 
@@ -1006,7 +904,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             evals
         } else {
             // If `E_in` is not fully bound, then we have to collect the sum over `E_out` as well
-            let num_x1_bits = eq_poly.E_in_current_len().log_2() - 1;
+            let num_x1_bits = eq_poly.E_in_current_len().log_2();
             let x1_bitmask = (1 << num_x1_bits) - 1;
 
             let evals: (F, F) = chunks
@@ -1150,129 +1048,11 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
         self.dense_len /= 2;
-
-        // Commented out dense representation for now
-        // // num_x_rest_evals is the number of evaluation points for the *remaining* variables (X_rest),
-        // // after the current sumcheck variable (X_current_MSB) is fixed to 0 or 1.
-        // let num_x_rest_evals = self.az_bound_coeffs.len() / 2;
-
-        // // Get references to the coefficient vectors' current state
-        // let az_coeffs = self.az_bound_coeffs.evals_ref();
-        // let bz_coeffs = self.bz_bound_coeffs.evals_ref();
-        // let cz_coeffs = self.cz_bound_coeffs.evals_ref();
-
-        // // Split each coefficient vector into low (X_MSB = 0) and high (X_MSB = 1) halves
-        // // TODO: should be low to high, not high to low, i.e. iterate over az_coeffs by blocks of two at a time
-        // let (az_low, az_high) = az_coeffs.split_at(num_x_rest_evals);
-        // let (bz_low, bz_high) = bz_coeffs.split_at(num_x_rest_evals);
-        // let (cz_low, _cz_high) = cz_coeffs.split_at(num_x_rest_evals); // cz_high unused for t_i(infty)
-
-        // // Compute t_i(0) and t_i(infty)
-        // let (quadratic_eval_at_0, quadratic_eval_at_infty) = if eq_poly.E_in_current_len() == 1 {
-        //     // E_in part is fully bound. E_out covers all remaining eq_poly variables.
-        //     debug_assert_eq!(
-        //         eq_poly.E_out_current_len(),
-        //         num_x_rest_evals,
-        //         "E_out_current_len should match num_x_rest_evals when E_in_current_len is 1"
-        //     );
-
-        //     // Combine iterators over the halves and E_out
-        //     az_low
-        //         .par_iter()
-        //         .zip(az_high.par_iter())
-        //         .zip(bz_low.par_iter())
-        //         .zip(bz_high.par_iter())
-        //         .zip(cz_low.par_iter())
-        //         .zip(eq_poly.E_out_current().par_iter())
-        //         .map(
-        //             |(((((az0_ref, az1_ref), bz0_ref), bz1_ref), cz0_ref), e_out_val_ref)| {
-        //                 let e_out_val = *e_out_val_ref;
-
-        //                 let az_infty = *az1_ref - *az0_ref; // Coeff of X_current_MSB in Az
-        //                 let bz_infty = *bz1_ref - *bz0_ref; // Coeff of X_current_MSB in Bz
-
-        //                 let term_eval_at_0 = *az0_ref * *bz0_ref - *cz0_ref;
-        //                 let term_eval_at_infty = az_infty * bz_infty; // X^2 coeff of (Az*Bz)
-
-        //                 (e_out_val * term_eval_at_0, e_out_val * term_eval_at_infty)
-        //             },
-        //         )
-        //         .reduce(
-        //             || (F::zero(), F::zero()),
-        //             |(acc_0, acc_infty), (val_0, val_infty)| (acc_0 + val_0, acc_infty + val_infty),
-        //         )
-        // } else {
-        //     // Nested sum structure: sum over E_out (outer), then sum over E_in (inner)
-        //     let num_e_out_points = eq_poly.E_out_current_len();
-        //     let num_e_in_points = eq_poly.E_in_current_len();
-        //     debug_assert_eq!(
-        //         num_x_rest_evals,
-        //         num_e_out_points * num_e_in_points,
-        //         "num_x_rest_evals should be product of E_out_current_len and E_in_current_len"
-        //     );
-
-        //     eq_poly
-        //         .E_out_current()
-        //         .par_iter()
-        //         .enumerate()
-        //         .map(|(e_out_idx, e_out_val)| {
-        //             let mut inner_sum_eval_at_0 = F::zero();
-        //             let mut inner_sum_eval_at_infty = F::zero();
-
-        //             let start_idx_rest = e_out_idx * num_e_in_points;
-
-        //             // Iterate over the indices corresponding to this E_out chunk
-        //             for e_in_idx in 0..num_e_in_points {
-        //                 let idx_rest = start_idx_rest + e_in_idx;
-        //                 let e_in_val = eq_poly.E_in_current()[e_in_idx];
-
-        //                 // Access halves using the calculated index
-        //                 let az0 = az_low[idx_rest];
-        //                 let az1 = az_high[idx_rest];
-        //                 let az_m = az1 - az0;
-
-        //                 let bz0 = bz_low[idx_rest];
-        //                 let bz1 = bz_high[idx_rest];
-        //                 let bz_m = bz1 - bz0;
-
-        //                 let cz0 = cz_low[idx_rest];
-
-        //                 let term_eval_at_0 = az0 * bz0 - cz0;
-        //                 let term_eval_at_infty = az_m * bz_m;
-
-        //                 // Inner sum part: sum_{x_in} E_in[x_in] * P(x_out, x_in, {0,∞}, r_{high})
-        //                 inner_sum_eval_at_0 += e_in_val * term_eval_at_0;
-        //                 inner_sum_eval_at_infty += e_in_val * term_eval_at_infty;
-        //             }
-        //             // Outer sum part: E_out[x_out] * (inner sum)
-        //             (
-        //                 *e_out_val * inner_sum_eval_at_0,
-        //                 *e_out_val * inner_sum_eval_at_infty,
-        //             )
-        //         })
-        //         .reduce(
-        //             || (F::zero(), F::zero()),
-        //             |(acc_0, acc_infty), (val_0, val_infty)| (acc_0 + val_0, acc_infty + val_infty),
-        //         )
-        // };
-
-        // // Use the helper function to process the rest of the sumcheck round
-        // let r_i = process_eq_sumcheck_round(
-        //     (quadratic_eval_at_0, quadratic_eval_at_infty), // (t_i(0), t_i(infty))
-        //     eq_poly,                                        // Helper will bind this
-        //     round_polys,
-        //     r_challenges,
-        //     current_claim,
-        //     transcript,
-        // );
-
-        // // Bind Az, Bz, Cz polynomials for the next round using the challenge r_i
-        // // self.bind uses BindingOrder::LowToHigh internally now
-        // self.bind(r_i);
     }
 
     /// Computes the number of non-zero coefficients that would result from
-    /// binding the given slice of coefficients.
+    /// binding the given slice of coefficients. Only invoked on `bound_coeffs` which holds
+    /// Az/Bz/Cz bound evaluations.
     fn binding_output_length<T>(coeffs: &[SparseCoefficient<T>]) -> usize {
         let mut output_size = 0;
         for block in coeffs.chunk_by(|x, y| x.index / 6 == y.index / 6) {
@@ -1303,26 +1083,8 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 }
             }
         }
-
         output_size
     }
-
-    // /// Binds the current `{az/bz/cz}_bound_coeffs` with the challenge `r`
-    // pub fn bind(&mut self, r: F) {
-    //     self.az_bound_coeffs.bind(r, BindingOrder::LowToHigh);
-    //     self.bz_bound_coeffs.bind(r, BindingOrder::LowToHigh);
-    //     self.cz_bound_coeffs.bind(r, BindingOrder::LowToHigh);
-    // }
-
-    // No longer applicable with revert to sparse coefficients
-    // pub fn final_sumcheck_evals(&self) -> [F; 3] {
-    //     // Simply returns the final evals of Az, Bz, Cz
-    //     // At this point `DensePolynomial` has been fully bound, and hence has length 1
-    //     let az = self.az_bound_coeffs[0];
-    //     let bz = self.bz_bound_coeffs[0];
-    //     let cz = self.cz_bound_coeffs[0];
-    //     [az, bz, cz]
-    // }
 
     pub fn final_sumcheck_evals(&self) -> [F; 3] {
         let mut final_az_eval = F::zero();
@@ -1338,7 +1100,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 }
             }
         }
-
         [final_az_eval, final_bz_eval, final_cz_eval]
     }
 }

@@ -42,18 +42,18 @@ pub mod small_value_optimization {
 
     /// The number of small value optimization rounds to use
     /// We currently support values of 1, 2, or 3
-    pub const NUM_SVO_ROUNDS: usize = 2;
+    pub const NUM_SVO_ROUNDS: usize = 3;
 
-    /// Total number of non-zero accumulators across all SVO rounds
-    /// Round 1: 1 eval (at infty)
-    /// Round 2: 5 evals
-    /// Round 3: 19 evals (if used)
-    /// Total for 2 rounds = 1 + 5 = 6
-    pub const TOTAL_NUM_ACCUMS: usize = 6;
+    // /// Total number of non-zero accumulators across all SVO rounds
+    // /// Round 1: 1 eval (at infty)
+    // /// Round 2: 5 evals
+    // /// Round 3: 19 evals (if used)
+    // /// Total for 2 rounds = 1 + 5 = 6
+    // pub const TOTAL_NUM_ACCUMS: usize = 19;
 
-    pub const NUM_ACCUM_ROUNDS: [usize; NUM_SVO_ROUNDS] = [1, 4];
+    // pub const NUM_ACCUM_PER_ROUNDS: [usize; NUM_SVO_ROUNDS] = [1, 4, 14];
 
-    pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 5;
+    // pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 19;
 }
 
 #[cfg(not(feature = "small_value_optimization"))]

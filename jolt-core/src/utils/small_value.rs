@@ -1,11 +1,7 @@
 // Small Value Optimization (SVO) helpers for Spartan first sum-check
 
 use crate::field::JoltField;
-use crate::poly::multilinear_polynomial::MultilinearPolynomial;
-use crate::r1cs::builder::{Constraint, OffsetEqConstraint, eval_offset_lc};
-use ark_ff::Zero;
 use rayon::prelude::*;
-use crate::r1cs::spartan::small_value_optimization::{NUM_SVO_ROUNDS, TOTAL_NUM_ACCUMS};
 
 pub mod svo_helpers {
     use super::*;
@@ -16,73 +12,6 @@ pub mod svo_helpers {
         Zero,
         One,
         Infinity,
-    }
-
-    // Function to evaluate Az, Bz for a given R1CS row with fully binary SVO prefix
-    #[inline]
-    pub fn evaluate_Az_Bz_for_r1cs_row_binary<F: JoltField>(
-        uniform_constraints: &[Constraint],
-        cross_step_constraints: &[OffsetEqConstraint],
-        flattened_polynomials: &[&MultilinearPolynomial<F>],
-        current_step_idx: usize,
-        constraint_idx_within_step: usize, // Full constraint index including SVO bits (all binary)
-        num_uniform_constraints: usize,
-        num_total_steps: usize,
-    ) -> (i128, i128) {
-        // Returns (az_coeff_i128, bz_coeff_i128)
-        let mut az_i128 = 0i128;
-        let mut bz_i128 = 0i128;
-
-        if constraint_idx_within_step < num_uniform_constraints {
-            let constraint = &uniform_constraints[constraint_idx_within_step];
-            if !constraint.a.terms().is_empty() {
-                az_i128 = constraint
-                    .a
-                    .evaluate_row(flattened_polynomials, current_step_idx);
-            }
-            if !az_i128.is_zero() && !constraint.b.terms().is_empty() {
-                bz_i128 = constraint
-                    .b
-                    .evaluate_row(flattened_polynomials, current_step_idx);
-            }
-        } else if constraint_idx_within_step < num_uniform_constraints + cross_step_constraints.len() {
-            let cross_step_constraint_idx = constraint_idx_within_step - num_uniform_constraints;
-            let constraint = &cross_step_constraints[cross_step_constraint_idx];
-            let next_step_index_opt = if current_step_idx + 1 < num_total_steps {
-                Some(current_step_idx + 1)
-            } else {
-                None
-            };
-
-            let eq_a_eval = eval_offset_lc(
-                &constraint.a,
-                flattened_polynomials,
-                current_step_idx,
-                next_step_index_opt,
-            );
-            let eq_b_eval = eval_offset_lc(
-                &constraint.b,
-                flattened_polynomials,
-                current_step_idx,
-                next_step_index_opt,
-            );
-            let temp_az = eq_a_eval - eq_b_eval;
-
-            if !temp_az.is_zero() {
-                az_i128 = temp_az;
-                // Optional: Assert cond is zero:
-                // let cond_eval = eval_offset_lc_i64(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
-                // assert_eq!(cond_eval, 0, "Cross-step constraint violated");
-            } else {
-                bz_i128 = eval_offset_lc(
-                    &constraint.cond,
-                    flattened_polynomials,
-                    current_step_idx,
-                    next_step_index_opt,
-                );
-            }
-        }
-        (az_i128, bz_i128)
     }
 
     #[inline]
@@ -561,7 +490,7 @@ pub mod svo_helpers {
     ) {
         assert!(task_tA_accumulator_vec.len() == 5);
         assert!(task_svo_accs_zero.len() == 1);
-        assert!(task_svo_accs_infty.len() == 3);
+        assert!(task_svo_accs_infty.len() == 4);
         assert!(E_out_vec.len() >= 2);
         
         // Points 0 and 1: (0,I) and (1,I) both map to round_s=0, v_config=[], u=I
@@ -805,32 +734,35 @@ pub mod svo_helpers {
         task_svo_accs_infty[5] += E_out_2_val * tA_I1I;
 
         let tA_II0 = task_tA_accumulator_vec[16];
+        // Double-check this, seems wrong (y is 0?)
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
             0,                    // num_y_suffix_vars = 0
             0,                    // y_suffix_as_int = 0
             x_out_val,
         );
-        task_svo_accs_zero[6] += E_out_2_val * tA_II0;
+        task_svo_accs_zero[10] += E_out_2_val * tA_II0; // (I,I,0)
 
         let tA_II1 = task_tA_accumulator_vec[17];
+        // Double-check this, seems wrong (y is 0?)
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
             0,                    // num_y_suffix_vars = 0
             0,                    // y_suffix_as_int = 0
             x_out_val,
         );
-        task_svo_accs_zero[6] += E_out_2_val * tA_II1;
+        task_svo_accs_zero[11] += E_out_2_val * tA_II1; // (I,I,1)
 
         // Point with three I's
         let tA_III = task_tA_accumulator_vec[18];
+        // Double-check this, seems wrong (y is 0?)
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
             0,                    // num_y_suffix_vars = 0
             0,                    // y_suffix_as_int = 0
             x_out_val,
         );
-        task_svo_accs_infty[6] += E_out_2_val * tA_III;
+        task_svo_accs_infty[12] += E_out_2_val * tA_III; // (I,I,I)
     }
 
     // Distributes the accumulated tA values (sum over x_in) for a single x_out_val 
@@ -1068,9 +1000,8 @@ pub mod svo_helpers {
 mod tests {
     use super::svo_helpers::*;
     use SVOEvalPoint::*;
-    use crate::field::JoltField;
     use ark_bn254::Fr as TestField;
-    use ark_ff::{Zero, One};
+    use ark_ff::Zero;
 
     /// Tests the `get_svo_prefix_extended_from_idx` function.
     /// This function converts a base-3 integer index into a vector of `SVOEvalPoint`s.
@@ -1393,8 +1324,6 @@ mod tests {
         let num_svo_rounds = 2;
         let num_ternary_points = 9;
         let x_out_val = 0; // Simple case with x_out=0
-        #[cfg(test)]
-        let iter_num_x_out_vars = 1; // Match the fixed value used in testing
 
         // Prepare task_tA_accumulator_vec - Only populate a few indices to test specific paths
         let mut task_tA_accumulator_vec = vec![TestField::zero(); num_ternary_points];

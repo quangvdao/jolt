@@ -1,12 +1,11 @@
 use super::{
     eq_poly::EqPolynomial,
-    multilinear_polynomial::{BindingOrder, MultilinearPolynomial},
+    multilinear_polynomial::MultilinearPolynomial,
     sparse_interleaved_poly::SparseCoefficient,
     split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial},
     unipoly::{CompressedUniPoly, UniPoly},
 };
 // #[cfg(test)]
-use crate::poly::dense_mlpoly::DensePolynomial;
 #[cfg(test)]
 use crate::r1cs::inputs::JoltR1CSInputs;
 use crate::subprotocols::sumcheck::process_eq_sumcheck_round;
@@ -217,15 +216,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         assert_eq!(num_x_in_vals, E_in_evals.len(), "num_x_in_vals ({}) != E_in_evals.len ({})", num_x_in_vals, E_in_evals.len());
 
-        // // --- Precompute binary to ternary index mapping --- 
-        // let binary_to_ternary_indices = svo_helpers::precompute_binary_to_ternary_indices(NUM_SVO_ROUNDS);
-        // // Expected size of vectors holding ternary evaluations (Az, Bz, and temp_tA)
-        // let num_ternary_points = 3_usize.checked_pow(NUM_SVO_ROUNDS as u32)
-        //     .expect("Number of ternary points overflowed");
-
-        // // Precompute all idx_mapping results
-        // let all_idx_mapping_results = svo_helpers::precompute_all_idx_mappings(NUM_SVO_ROUNDS, num_ternary_points);
-
         // --- Parallel Fold-Reduce over x_out_val ---
         // Corresponds to Algo 6, Line 7: Outer loop over x_out.
         
@@ -258,11 +248,10 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 for x_in_val in 0..num_x_in_vals {
                     // Reconstruct current R1CS indices (step_idx, lower_bits_val) from x_out_val, x_in_val.
                     // This Z = (x_out, x_in) is needed to evaluate the original R1CS constraints.
-                    let mut temp_step_idx = x_out_val;
-                     // Add step bits from x_in_val
-                    let x_in_step_part = x_in_val >> iter_num_x_in_constraint_vars; // Higher bits of x_in_val are step bits
-                    temp_step_idx = (temp_step_idx << iter_num_x_in_step_vars) | x_in_step_part;
-                    let current_step_idx = temp_step_idx;
+
+                    // Add step bits from x_in_val (higher bits of x_in_val are step bits)
+                    let x_in_step_part = x_in_val >> iter_num_x_in_constraint_vars;
+                    let current_step_idx = (x_out_val << iter_num_x_in_step_vars) | x_in_step_part;
 
                      // Lower bits of x_in_val are for constraints
                     let constraint_mask = (1 << iter_num_x_in_constraint_vars) - 1;
@@ -276,31 +265,85 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     // Evaluates Az/Bz for the current Z and all binary Y_bin.
                     // Also collects the sparse coefficients for ab_unbound_coeffs.
                     for y_svo_binary_prefix_val in 0..(1 << NUM_SVO_ROUNDS) {
+                        // This seems like the right indexing, Y should be LSB
                         let constraint_idx_within_step =
-                            (y_svo_binary_prefix_val << num_non_svo_constraint_vars) + current_lower_bits_val;
+                            (current_lower_bits_val << NUM_SVO_ROUNDS) + y_svo_binary_prefix_val;
+                            // (y_svo_binary_prefix_val << num_non_svo_constraint_vars) + current_lower_bits_val;
 
-                        if constraint_idx_within_step < padded_num_constraints {
-                            let (az_i128, bz_i128) = svo_helpers::evaluate_Az_Bz_for_r1cs_row_binary::<F>(
-                                uniform_constraints, cross_step_constraints, flattened_polynomials,
-                                current_step_idx, constraint_idx_within_step,
-                                uniform_constraints.len(), num_steps,
-                            );
+                        // Collect sparse coefficients
+                        let global_r1cs_idx =
+                            2 * (current_step_idx * padded_num_constraints + constraint_idx_within_step);
 
-                            // Populate the ternary vectors at the binary positions
-                            binary_az_evals[y_svo_binary_prefix_val] = az_i128;
-                            binary_bz_evals[y_svo_binary_prefix_val] = bz_i128;
+                        assert!(constraint_idx_within_step < padded_num_constraints,
+                            "Constraint index must be less than the padded number of constraints!");
 
-                            // Collect sparse coefficients (Simultaneous generation, not in Algo 6).
-                            let global_r1cs_idx =
-                                current_step_idx * padded_num_constraints + constraint_idx_within_step;
-                            if az_i128 != 0 {
-                                task_res.ab_coeffs.push((global_r1cs_idx * 2, az_i128).into());
+                        if constraint_idx_within_step < uniform_constraints.len() {
+                            let constraint = &uniform_constraints[constraint_idx_within_step];
+                            if !constraint.a.terms().is_empty() {
+                                let az_i128 = constraint
+                                    .a
+                                    .evaluate_row(flattened_polynomials, current_step_idx);
+                                if !az_i128.is_zero() {
+                                    binary_az_evals[y_svo_binary_prefix_val] = az_i128;
+                                    task_res.ab_coeffs.push((global_r1cs_idx, az_i128).into());
+                                }
                             }
-                            if bz_i128 != 0 {
-                                task_res.ab_coeffs.push((global_r1cs_idx * 2 + 1, bz_i128).into());
+                            if !constraint.b.terms().is_empty() {
+                                let bz_i128 = constraint
+                                    .b
+                                    .evaluate_row(flattened_polynomials, current_step_idx);
+                                if !bz_i128.is_zero() {
+                                    binary_bz_evals[y_svo_binary_prefix_val] = bz_i128;
+                                    task_res.ab_coeffs.push((global_r1cs_idx + 1, bz_i128).into());
+                                }
+                            }
+                        } else if constraint_idx_within_step < uniform_constraints.len() + cross_step_constraints.len() {
+                            let cross_step_constraint_idx = constraint_idx_within_step - uniform_constraints.len();
+                            let constraint = &cross_step_constraints[cross_step_constraint_idx];
+
+                            // For the final step we will not compute the offset terms, and will assume the condition to be set to 0
+                            let next_step_index_opt = if current_step_idx + 1 < num_steps {
+                                Some(current_step_idx + 1)
+                            } else {
+                                None
+                            };
+                
+                            let eq_a_eval = eval_offset_lc(
+                                &constraint.a,
+                                flattened_polynomials,
+                                current_step_idx,
+                                next_step_index_opt,
+                            );
+                            let eq_b_eval = eval_offset_lc(
+                                &constraint.b,
+                                flattened_polynomials,
+                                current_step_idx,
+                                next_step_index_opt,
+                            );
+                            let az_i128 = eq_a_eval - eq_b_eval;
+                
+                            if !az_i128.is_zero() {
+                                binary_az_evals[y_svo_binary_prefix_val] = az_i128;
+                                task_res.ab_coeffs.push((global_r1cs_idx, az_i128).into());
+
+                                // If Az != 0, then the condition must be false (i.e. Bz = 0)
+                                // Optional: Assert cond is zero:
+                                // let cond_eval = eval_offset_lc_i64(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
+                                // assert_eq!(cond_eval, 0, "Cross-step constraint violated");
+                            } else {
+                                let bz_i128 = eval_offset_lc(
+                                    &constraint.cond,
+                                    flattened_polynomials,
+                                    current_step_idx,
+                                    next_step_index_opt,
+                                );
+                                if !bz_i128.is_zero() {
+                                    binary_bz_evals[y_svo_binary_prefix_val] = bz_i128;
+                                    task_res.ab_coeffs.push((global_r1cs_idx, bz_i128).into());
+                                }
                             }
                         }
-                    } // End loop over Y_bin
+                    }
 
                     let E_in_val_for_current_x_in = &E_in_evals[x_in_val];
 
@@ -347,6 +390,9 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         // Sort the combined list globally by R1CS index.
         // final_ab_unbound_coeffs.sort_by_key(|sc| sc.index);
 
+        // If this is not sorted, revert to `flat_map_iter` as `new()`, which gives a vector
+        // of acc_res, which we then reduce (in parallel)
+
         // Debug check for sortedness
         #[cfg(test)]
         {
@@ -370,10 +416,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             fold_result.svo_accums_infty,
             Self {
                 ab_unbound_coeffs: final_ab_unbound_coeffs,
-                // Need to initialize non-trivial vectors for dense polynomials to avoid panics
-                // az_bound_coeffs: DensePolynomial::new(vec![F::zero(); 1]),
-                // bz_bound_coeffs: DensePolynomial::new(vec![F::zero(); 1]),
-                // cz_bound_coeffs: DensePolynomial::new(vec![F::zero(); 1]),
                 bound_coeffs: vec![],
                 binding_scratch_space: vec![],
                 dense_len: num_steps * padded_num_constraints,
@@ -411,10 +453,10 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
     /// Since `unbound_coeffs` are in sparse format, we will need to be more careful with indexing;
     /// see the old implementation for details.
     ///
-    /// Finally, as we compute each `unbound_coeffs_{a,b,c}(x_out, x_in, {0,∞}, r)`, we will need to
-    /// store them in `{az/bz/cz}_bound_coeffs`. (the eval at 1 will be eval at 0 + eval at ∞). We
-    /// then derive the next challenge from the transcript, and bind these bound coeffs for the next
-    /// round.
+    /// Finally, as we compute each `unbound_coeffs_{a,b,c}(x_out, x_in, {0,∞}, r)`, we will
+    /// store them in `bound_coeffs`. which is still in sparse format (the eval at 1 will be eval 
+    /// at 0 + eval at ∞). We then derive the next challenge from the transcript, and bind these 
+    /// bound coeffs for the next round.
     #[tracing::instrument(skip_all, name = "NewSpartanInterleavedPolynomial::streaming_sumcheck_round")]
     pub fn streaming_sumcheck_round<ProofTranscript: Transcript>(
         &mut self,
@@ -504,7 +546,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         // Initialize the bound coeffs
 
-        // TODO: refine
+        // TODO: refine (can use binding scratch space)
         let mut bound_coeffs: Vec<SparseCoefficient<F>> = Vec::with_capacity(self.dense_len);
 
         // Partition `bound_coeffs` into slices for iteration

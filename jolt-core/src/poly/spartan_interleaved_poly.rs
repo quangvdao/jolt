@@ -45,16 +45,28 @@ const fn total_num_accums(num_svo_rounds: usize) -> usize {
 }
 
 const fn num_accums_eval_zero(num_svo_rounds: usize) -> usize {
-    // Returns 3^{num_svo_rounds - 1} - 2^{num_svo_rounds - 1}
-    let pow_3 = 3_usize.checked_pow(num_svo_rounds.saturating_sub(1) as u32).expect("Number of ternary points overflowed");
-    let pow_2 = 2_usize.checked_pow(num_svo_rounds.saturating_sub(1) as u32).expect("Number of ternary points overflowed");
-    pow_3 - pow_2
+    // Returns \sum_{i=0}^{num_svo_rounds - 1} (3^i - 2^i)
+    let mut sum = 0;
+    let mut i = 0;
+    while i < num_svo_rounds {
+        let pow_3 = 3_usize.checked_pow(i as u32).expect("Number of ternary points overflowed");
+        let pow_2 = 2_usize.checked_pow(i as u32).expect("Number of binary points overflowed");
+        sum += pow_3 - pow_2;
+        i += 1;
+    }
+    sum
 }
 
 const fn num_accums_eval_infty(num_svo_rounds: usize) -> usize {
-    // Returns 3^{num_svo_rounds - 1}
-    let pow_3 = 3_usize.checked_pow(num_svo_rounds.saturating_sub(1) as u32).expect("Number of ternary points overflowed");
-    pow_3
+    // Returns \sum_{i=0}^{num_svo_rounds - 1} 3^i
+    let mut sum = 0;
+    let mut i = 0;
+    while i < num_svo_rounds {
+        let pow_3 = 3_usize.checked_pow(i as u32).expect("Number of ternary points overflowed");
+        sum += pow_3;
+        i += 1;
+    }
+    sum
 }
 
 pub const TOTAL_NUM_ACCUMS: usize = total_num_accums(NUM_SVO_ROUNDS);
@@ -114,17 +126,18 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
     /// - Eval at infty: acc_1(infty)
     /// 
     /// For 2 rounds of small value optimization, this is same as 1 round, with addition of:
-    /// - Eval at zero: acc_2(infty, 0)
-    /// - Eval at infty: acc_2(0,infty), acc_2(1, infty), acc_2(infty, infty)
+    /// (recall: we do MSB => LSB, so 0/infty refers to the leftmost variable)
+    /// - Eval at zero: acc_2(0, infty)
+    /// - Eval at infty: acc_2(infty,0), acc_2(infty,1), acc_2(infty, infty)
     /// 
     /// Total = 5 accumulators
     /// 
     /// For 3 rounds of small value optimization, this is same as 2 rounds, with addition of:
-    /// - Eval at zero: acc_3(0, infty, 0), acc_3(1, infty, 0),
-    ///   acc_3(infty, 0, 0), acc_3(infty, 1, 0), acc_3(infty, infty, 0)
-    /// - Eval at infty: acc_3(v_1, v_2, infty), where v_1, v_2 \in {0, 1, infty}
+    /// - Eval at zero: acc_3(0, 0, infty), acc_3(0, 1, infty),
+    ///   acc_3(0, infty, 0), acc_3(0, infty, 1), acc_3(0, infty, infty)
+    /// - Eval at infty: acc_3(infty, v_1, v_2), where v_1, v_2 \in {0, 1, infty}
     /// 
-    /// Total = 14 accumulators
+    /// Total = 19 accumulators
     #[tracing::instrument(skip_all, name = "NewSpartanInterleavedPolynomial::new_with_precompute")]
     pub fn new_with_precompute(
         padded_num_constraints: usize,

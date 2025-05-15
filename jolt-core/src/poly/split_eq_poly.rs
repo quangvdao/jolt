@@ -63,22 +63,27 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
     /// Compute the split equality polynomial for the small value optimization
     ///
     /// The split is done as follows: (here `l = num_small_value_rounds`)
-    /// 
+    ///
     /// 0 ..... (n/2 - l) ..... (n - l) ..... n
-    /// 
+    ///
     ///           <-- E_in -->
-    /// 
+    ///
     /// E_out --->                <--- E_out
     ///
-    /// where the first E_out part (0 to n/2 - l) corresponds to x_out, and the second E_out part 
+    /// where the first E_out part (0 to n/2 - l) corresponds to x_out, and the second E_out part
     /// (n/2 - l to n) corresponds to y_suffix
-    /// 
-    /// Returns E_out which contains `l` vectors of eq evals for the same x_out part, with decreasing 
+    ///
+    /// Returns E_out which contains `l` vectors of eq evals for the same x_out part, with decreasing
     /// length for y_suffix, and E_in which contains the single vector of eq evals for the x_in part.
-    /// 
+    ///
     /// Note the differences between this and the `new` constructor: this is specialized for the
     /// small value optimization.
-    pub fn new_for_small_value(w: &[F], num_x_out_vars: usize, num_x_in_vars: usize, num_small_value_rounds: usize) -> Self {
+    pub fn new_for_small_value(
+        w: &[F],
+        num_x_out_vars: usize,
+        num_x_in_vars: usize,
+        num_small_value_rounds: usize,
+    ) -> Self {
         // Split w into the slices: (l = num_small_value_rounds)
         // (n/2 - l) ..... (n - l)
         // 0..(n/2 - l - 1) concatenated with (n - l)...n
@@ -88,7 +93,10 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         // (we may drop the rest of the vectors after evals_cached)
         let n = w.len();
 
-        assert!(n > 0, "length of w must be positive for the split to be valid.");
+        assert!(
+            n > 0,
+            "length of w must be positive for the split to be valid."
+        );
         assert!(num_x_out_vars + num_x_in_vars + num_small_value_rounds == n, "num_x_out_vars + num_x_in_vars + num_small_value_rounds must be == n for the split to be valid.");
 
         // This should be `min(num_steps, n/2 - num_small_value_rounds)`, computed externally before calling this function.
@@ -112,7 +120,8 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
 
         let mut w_E_out_vars: Vec<F> = Vec::with_capacity(num_x_out_vars + num_actual_suffix_vars);
         w_E_out_vars.extend_from_slice(&w[0..split_point_x_out]);
-        if split_point_x_in < suffix_slice_end { // Add suffix only if range is valid and non-empty
+        if split_point_x_in < suffix_slice_end {
+            // Add suffix only if range is valid and non-empty
             w_E_out_vars.extend_from_slice(&w[split_point_x_in..suffix_slice_end]);
         }
 
@@ -133,7 +142,7 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
             w: w.to_vec(),
             // Only filter out the _last_ l vectors from E_out, and discard the rest
             E_in_vec: vec![E_in],
-            E_out_vec: E_out_vec,
+            E_out_vec,
         }
     }
 
@@ -168,7 +177,13 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
                 .iter()
                 .map(|x| *x * (F::one() - wi))
                 .collect();
-            let E1_old_even: Vec<F> = self.E_in_vec.last().unwrap().iter().map(|x| *x * wi).collect();
+            let E1_old_even: Vec<F> = self
+                .E_in_vec
+                .last()
+                .unwrap()
+                .iter()
+                .map(|x| *x * wi)
+                .collect();
             // Interleave the two vectors
             let mut E1_old = vec![];
             for i in 0..E1_old_odd.len() {
@@ -295,8 +310,8 @@ impl<F: JoltField> SplitEqPolynomial<F> {
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use ark_std::test_rng;
     use ark_ff::One;
+    use ark_std::test_rng;
 
     #[test]
     fn bind() {
@@ -383,28 +398,32 @@ mod tests {
     fn test_new_for_small_value() {
         let mut rng = test_rng();
         const N: usize = 10; // Total variables
-        const L0: usize = 3;  // SVO rounds
+        const L0: usize = 3; // SVO rounds
 
         // Test case 1: Standard setup
         let num_x_out_vars_1 = 2; // Example split for x_out part
         let w1: Vec<Fr> = (0..N).map(|i| Fr::from(i as u64)).collect(); // Use predictable values
 
         let num_x_in_vars_1 = N - num_x_out_vars_1 - L0;
-        let split_eq1 = NewSplitEqPolynomial::new_for_small_value(&w1, num_x_out_vars_1, num_x_in_vars_1, L0);
+        let split_eq1 =
+            NewSplitEqPolynomial::new_for_small_value(&w1, num_x_out_vars_1, num_x_in_vars_1, L0);
 
         // Verify split points and variable slices
         let split_point1_expected1 = num_x_out_vars_1; // Should be 2
         let split_point_x_in_expected1 = num_x_out_vars_1 + num_x_in_vars_1;
         assert_eq!(split_eq1.current_index, split_point1_expected1); // repurposed current_index
 
-        let w_E_in_vars_expected1: Vec<Fr> = w1[split_point1_expected1..split_point_x_in_expected1].to_vec(); // w[2..7] = [2,3,4,5,6]
+        let w_E_in_vars_expected1: Vec<Fr> =
+            w1[split_point1_expected1..split_point_x_in_expected1].to_vec(); // w[2..7] = [2,3,4,5,6]
         let mut w_E_out_vars_expected1: Vec<Fr> = Vec::new();
         w_E_out_vars_expected1.extend_from_slice(&w1[0..split_point1_expected1]); // w[0..2] = [0,1]
-        // Suffix slice is w[split_point_x_in .. N-1] = w[7..9] for N=10, L0=3.
-        if split_point_x_in_expected1 < N - 1 { // Match logic in main code for L0 > 0
-             w_E_out_vars_expected1.extend_from_slice(&w1[split_point_x_in_expected1 .. N-1]); // w[7..9] = [7,8]
+                                                                                  // Suffix slice is w[split_point_x_in .. N-1] = w[7..9] for N=10, L0=3.
+        if split_point_x_in_expected1 < N - 1 {
+            // Match logic in main code for L0 > 0
+            w_E_out_vars_expected1.extend_from_slice(&w1[split_point_x_in_expected1..N - 1]);
+            // w[7..9] = [7,8]
         }
-                                                                                   // Combined = [0, 1, 7, 8]
+        // Combined = [0, 1, 7, 8]
 
         // Verify E_in content
         assert_eq!(split_eq1.E_in_vec.len(), 1);
@@ -426,22 +445,33 @@ mod tests {
         assert_eq!(cached_E_out1.len(), w_E_out_vars_expected1.len() + 1);
 
         // E_out_vec[0] should be cached_E_out1[4] (evals for w=[0])
-        assert_eq!(split_eq1.E_out_vec[0], cached_E_out1[w_E_out_vars_expected1.len() - 0]);
+        assert_eq!(
+            split_eq1.E_out_vec[0],
+            cached_E_out1[w_E_out_vars_expected1.len() - 0]
+        );
         // E_out_vec[1] should be cached_E_out1[3] (evals for w=[0,1])
-        assert_eq!(split_eq1.E_out_vec[1], cached_E_out1[w_E_out_vars_expected1.len() - 1]);
+        assert_eq!(
+            split_eq1.E_out_vec[1],
+            cached_E_out1[w_E_out_vars_expected1.len() - 1]
+        );
         // E_out_vec[2] should be cached_E_out1[2] (evals for w=[0,1,7])
-        assert_eq!(split_eq1.E_out_vec[2], cached_E_out1[w_E_out_vars_expected1.len() - 2]);
+        assert_eq!(
+            split_eq1.E_out_vec[2],
+            cached_E_out1[w_E_out_vars_expected1.len() - 2]
+        );
 
         // Test case 2: Edge case L0 = 0
         let num_x_out_vars_2 = N / 2; // Max possible value for num_x_out_vars if num_x_in_vars is also N/2 and L0=0
         let w2: Vec<Fr> = (0..N).map(|_| Fr::random(&mut rng)).collect();
         let num_x_in_vars_2 = N - num_x_out_vars_2 - 0; // L0 is 0
-        let split_eq2 = NewSplitEqPolynomial::new_for_small_value(&w2, num_x_out_vars_2, num_x_in_vars_2, 0);
+        let split_eq2 =
+            NewSplitEqPolynomial::new_for_small_value(&w2, num_x_out_vars_2, num_x_in_vars_2, 0);
         assert_eq!(split_eq2.E_out_vec.len(), 0);
         assert_eq!(split_eq2.E_in_vec.len(), 1); // E_in should cover w[N/2 .. N/2 + num_x_in_vars_2 -1]
         let split_point1_expected2 = num_x_out_vars_2;
         let split_point_x_in_expected2 = num_x_out_vars_2 + num_x_in_vars_2;
-        let w_E_in_vars_expected2: Vec<Fr> = w2[split_point1_expected2..split_point_x_in_expected2].to_vec();
+        let w_E_in_vars_expected2: Vec<Fr> =
+            w2[split_point1_expected2..split_point_x_in_expected2].to_vec();
         assert!(w_E_in_vars_expected2.len() == num_x_in_vars_2);
         let expected_E_in2 = EqPolynomial::evals(&w_E_in_vars_expected2); // evals of N/2 vars
         assert_eq!(split_eq2.E_in_vec[0], expected_E_in2);
@@ -453,7 +483,7 @@ mod tests {
         let n3 = w3.len();
         let num_x_in_vars_3 = n3 - num_x_out_vars_3 - l0_3; // 0 - 0 - 0 = 0
         let result3 = std::panic::catch_unwind(|| {
-             NewSplitEqPolynomial::new_for_small_value(&w3, num_x_out_vars_3, num_x_in_vars_3, l0_3);
+            NewSplitEqPolynomial::new_for_small_value(&w3, num_x_out_vars_3, num_x_in_vars_3, l0_3);
         });
         assert!(result3.is_err());
     }

@@ -370,7 +370,7 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
         // From that paper, we have the equation: s_i(X) = eq(r_i, X) * t_i(X)
         // We will compute the evaluations at zero and infinity of t_i(X), which recall (when `i=0`) is:
 
-        // `t_0(X) = \sum_{x_out} E_out[x_out] * (\sum_{x_in} E_in[x_in] * 
+        // `t_0(X) = \sum_{x_out} E_out[x_out] * (\sum_{x_in} E_in[x_in] *
         // \prod_k ((1 - X) * P_k(x_out, x_in, 0) + X * P_k(x_out, x_in, 1)))`
 
         // (here "evaluation at infinity" is just the quadratic coefficient of t_i(X), and we use
@@ -406,7 +406,7 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
             // If `eq_poly.E_in` has NOT been fully bound, we compute the cubic polynomial
             // using the nested summation approach
             //
-            // `\sum_{x_out} E_out[x_out] * (\sum_{x_in} E_in[x_in] * 
+            // `\sum_{x_out} E_out[x_out] * (\sum_{x_in} E_in[x_in] *
             // \prod_k ((1 - j) * P_k(x_out, x_in, 0) + j * P_k(x_out, x_in, 1)))`
             let chunk_size = (self.len.next_power_of_two() / eq_poly.E_out_current_len()).max(1);
 
@@ -418,7 +418,9 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
                     // The for-loop below corresponds to the inner sum:
                     // \sum_{x_in} E_in[x_in] * \prod_k ((1 - j) * P_k(x_out, x_in, 0) + j * P_k(x_out, x_in, 1))
                     let mut inner_sum = (F::zero(), F::zero());
-                    for (E_in_evals, P_chunk) in eq_poly.E_in_current().iter().zip(P_x_out.chunks(4)) {
+                    for (E_in_evals, P_chunk) in
+                        eq_poly.E_in_current().iter().zip(P_x_out.chunks(4))
+                    {
                         let left = (
                             *P_chunk.first().unwrap_or(&F::zero()),
                             *P_chunk.get(2).unwrap_or(&F::zero()),

@@ -22,9 +22,15 @@ pub mod svo_helpers {
         temp_tA: &mut [F],
     ) {
         match NUM_SVO_ROUNDS {
-            1 => compute_and_update_tA_inplace_1(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
-            2 => compute_and_update_tA_inplace_2(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
-            3 => compute_and_update_tA_inplace_3(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
+            1 => {
+                compute_and_update_tA_inplace_1(binary_az_evals, binary_bz_evals, e_in_val, temp_tA)
+            }
+            2 => {
+                compute_and_update_tA_inplace_2(binary_az_evals, binary_bz_evals, e_in_val, temp_tA)
+            }
+            3 => {
+                compute_and_update_tA_inplace_3(binary_az_evals, binary_bz_evals, e_in_val, temp_tA)
+            }
             _ => panic!("Unsupported number of SVO rounds"),
         }
     }
@@ -46,7 +52,9 @@ pub mod svo_helpers {
         let az_I = binary_az_evals[1] - binary_az_evals[0];
         if az_I != 0 {
             let bz_I = binary_bz_evals[1] - binary_bz_evals[0];
-            let product_i128 = az_I.checked_mul(bz_I).expect("Az_I*Bz_I product overflow i128");
+            let product_i128 = az_I
+                .checked_mul(bz_I)
+                .expect("Az_I*Bz_I product overflow i128");
             temp_tA[0] += e_in_val.mul_i128(product_i128);
         }
     }
@@ -54,7 +62,7 @@ pub mod svo_helpers {
     /// Special case when `num_svo_rounds == 2`
     /// In this case, we know that there are 4 binary evals of Az and Bz,
     /// corresponding to (0,0) => 0, (0,1) => 1, (1,0) => 2, (1,1) => 3. (i.e. big endian, TODO: double-check this)
-    /// 
+    ///
     /// There are 9 - 4 = 5 temp_tA accumulators, with the following logic (in this order 0 => 4 indexing):
     /// temp_tA[0,∞] += e_in_val * (az[0,1] - az[0,0]) * (bz[0,1] - bz[0,0])
     /// temp_tA[1,∞] += e_in_val * (az[1,1] - az[1,0]) * (bz[1,1] - bz[1,0])
@@ -72,10 +80,14 @@ pub mod svo_helpers {
         assert!(binary_bz_evals.len() == 4);
         assert!(temp_tA.len() == 5);
         // Binary evaluations: (Y0,Y1) -> index Y0*2 + Y1
-        let az00 = binary_az_evals[0]; let bz00 = binary_bz_evals[0]; // Y0=0, Y1=0
-        let az01 = binary_az_evals[1]; let bz01 = binary_bz_evals[1]; // Y0=0, Y1=1
-        let az10 = binary_az_evals[2]; let bz10 = binary_bz_evals[2]; // Y0=1, Y1=0
-        let az11 = binary_az_evals[3]; let bz11 = binary_bz_evals[3]; // Y0=1, Y1=1
+        let az00 = binary_az_evals[0];
+        let bz00 = binary_bz_evals[0]; // Y0=0, Y1=0
+        let az01 = binary_az_evals[1];
+        let bz01 = binary_bz_evals[1]; // Y0=0, Y1=1
+        let az10 = binary_az_evals[2];
+        let bz10 = binary_bz_evals[2]; // Y0=1, Y1=0
+        let az11 = binary_az_evals[3];
+        let bz11 = binary_bz_evals[3]; // Y0=1, Y1=1
 
         // Extended evaluations (points with at least one 'I')
         // temp_tA indices follow the order: (0,I), (1,I), (I,0), (I,1), (I,I)
@@ -83,8 +95,11 @@ pub mod svo_helpers {
         // 1. Point (0,I) -> temp_tA[0]
         let az_0I = az01 - az00;
         let bz_0I = bz01 - bz00;
-        if az_0I != 0 { // Due to constraint layout, it's more likely for Az to be zero
-            let prod_0I = az_0I.checked_mul(bz_0I).expect("Product overflow for (0,I)");
+        if az_0I != 0 {
+            // Due to constraint layout, it's more likely for Az to be zero
+            let prod_0I = az_0I
+                .checked_mul(bz_0I)
+                .expect("Product overflow for (0,I)");
             temp_tA[0] += e_in_val.mul_i128(prod_0I);
         }
 
@@ -92,7 +107,9 @@ pub mod svo_helpers {
         let az_1I = az11 - az10;
         let bz_1I = bz11 - bz10;
         if az_1I != 0 {
-            let prod_1I = az_1I.checked_mul(bz_1I).expect("Product overflow for (1,I)");
+            let prod_1I = az_1I
+                .checked_mul(bz_1I)
+                .expect("Product overflow for (1,I)");
             temp_tA[1] += e_in_val.mul_i128(prod_1I);
         }
 
@@ -100,7 +117,9 @@ pub mod svo_helpers {
         let az_I0 = az10 - az00;
         if az_I0 != 0 {
             let bz_I0 = bz10 - bz00;
-            let prod_I0 = az_I0.checked_mul(bz_I0).expect("Product overflow for (I,0)");
+            let prod_I0 = az_I0
+                .checked_mul(bz_I0)
+                .expect("Product overflow for (I,0)");
             temp_tA[2] += e_in_val.mul_i128(prod_I0);
         }
 
@@ -108,7 +127,9 @@ pub mod svo_helpers {
         let az_I1 = az11 - az01;
         if az_I1 != 0 {
             let bz_I1 = bz11 - bz01;
-            let prod_I1 = az_I1.checked_mul(bz_I1).expect("Product overflow for (I,1)");
+            let prod_I1 = az_I1
+                .checked_mul(bz_I1)
+                .expect("Product overflow for (I,1)");
             temp_tA[3] += e_in_val.mul_i128(prod_I1);
         }
 
@@ -116,7 +137,9 @@ pub mod svo_helpers {
         let az_II = az_1I - az_0I;
         if az_II != 0 {
             let bz_II = bz_1I - bz_0I;
-            let prod_II = az_II.checked_mul(bz_II).expect("Product overflow for (I,I)");
+            let prod_II = az_II
+                .checked_mul(bz_II)
+                .expect("Product overflow for (I,I)");
             temp_tA[4] += e_in_val.mul_i128(prod_II);
         }
     }
@@ -125,20 +148,20 @@ pub mod svo_helpers {
     /// In this case, we know that there are 8 binary evals of Az and Bz,
     /// corresponding to (0,0,0) => 0, (0,0,1) => 1, (0,1,0) => 2, (0,1,1) => 3, (1,0,0) => 4,
     /// (1,0,1) => 5, (1,1,0) => 6, (1,1,1) => 7. (i.e. big endian, TODO: double-check this)
-    /// 
+    ///
     /// There are 27 - 8 = 19 temp_tA accumulators, with the following logic:
     /// temp_tA[0,0,∞] += e_in_val * (az[0,0,1] - az[0,0,0]) * (bz[0,0,1] - bz[0,0,0])
     /// temp_tA[0,1,∞] += e_in_val * (az[0,1,1] - az[0,1,0]) * (bz[0,1,1] - bz[0,1,0])
     /// temp_tA[1,0,∞] += e_in_val * (az[1,0,1] - az[1,0,0]) * (bz[1,0,1] - bz[1,0,0])
     /// temp_tA[1,1,∞] += e_in_val * (az[1,1,1] - az[1,1,0]) * (bz[1,1,1] - bz[1,1,0])
-    /// 
+    ///
     /// temp_tA[0,∞,0] += e_in_val * (az[0,1,0] - az[0,0,0]) * (bz[0,1,0] - bz[0,0,0])
     /// temp_tA[0,∞,1] += e_in_val * (az[0,1,1] - az[0,0,1]) * (bz[0,1,1] - bz[0,0,1])
     /// temp_tA[0,∞,∞] += e_in_val * (az[0,1,∞] - az[0,0,∞]) * (bz[0,1,∞] - bz[0,0,∞])
     /// temp_tA[1,∞,0] += e_in_val * (az[1,1,0] - az[1,0,0]) * (bz[1,1,0] - bz[1,0,0])
     /// temp_tA[1,∞,1] += e_in_val * (az[1,1,0] - az[1,0,0]) * (bz[1,1,0] - bz[1,0,0])
     /// temp_tA[1,∞,∞] += e_in_val * (az[1,1,∞] - az[1,0,∞]) * (bz[1,1,∞] - bz[1,0,∞])
-    /// 
+    ///
     /// temp_tA[∞,0,0] += e_in_val * (az[1,0,0] - az[0,0,0]) * (bz[1,0,0] - bz[0,0,0])
     /// temp_tA[∞,0,1] += e_in_val * (az[1,0,1] - az[0,0,1]) * (bz[1,0,1] - bz[0,0,1])
     /// temp_tA[∞,0,∞] += e_in_val * (az[1,0,∞] - az[0,0,∞]) * (bz[1,0,∞] - bz[0,0,∞])
@@ -148,7 +171,7 @@ pub mod svo_helpers {
     /// temp_tA[∞,∞,0] += e_in_val * (az[1,∞,0] - az[0,∞,0]) * (bz[1,∞,0] - bz[0,∞,0])
     /// temp_tA[∞,∞,1] += e_in_val * (az[1,∞,1] - az[0,∞,1]) * (bz[1,∞,1] - bz[0,∞,1])
     /// temp_tA[∞,∞,∞] += e_in_val * (az[1,∞,∞] - az[0,∞,∞]) * (bz[1,∞,∞] - bz[0,∞,∞])
-    /// 
+    ///
     /// TODO: propagate this logic below
     #[inline]
     pub fn compute_and_update_tA_inplace_3<F: JoltField>(
@@ -162,22 +185,32 @@ pub mod svo_helpers {
         assert!(temp_tA.len() == 19);
 
         // Binary evaluations: (Y0,Y1,Y2) -> index Y0*4 + Y1*2 + Y2
-        let az000 = binary_az_evals[0]; let bz000 = binary_bz_evals[0];
-        let az001 = binary_az_evals[1]; let bz001 = binary_bz_evals[1];
-        let az010 = binary_az_evals[2]; let bz010 = binary_bz_evals[2];
-        let az011 = binary_az_evals[3]; let bz011 = binary_bz_evals[3];
-        let az100 = binary_az_evals[4]; let bz100 = binary_bz_evals[4];
-        let az101 = binary_az_evals[5]; let bz101 = binary_bz_evals[5];
-        let az110 = binary_az_evals[6]; let bz110 = binary_bz_evals[6];
-        let az111 = binary_az_evals[7]; let bz111 = binary_bz_evals[7];
+        let az000 = binary_az_evals[0];
+        let bz000 = binary_bz_evals[0];
+        let az001 = binary_az_evals[1];
+        let bz001 = binary_bz_evals[1];
+        let az010 = binary_az_evals[2];
+        let bz010 = binary_bz_evals[2];
+        let az011 = binary_az_evals[3];
+        let bz011 = binary_bz_evals[3];
+        let az100 = binary_az_evals[4];
+        let bz100 = binary_bz_evals[4];
+        let az101 = binary_az_evals[5];
+        let bz101 = binary_bz_evals[5];
+        let az110 = binary_az_evals[6];
+        let bz110 = binary_bz_evals[6];
+        let az111 = binary_az_evals[7];
+        let bz111 = binary_bz_evals[7];
 
         // --- FIRST GROUP: I at END (first occurrence) ---
-        
+
         // 1. Point (0,0,I) -> temp_tA[0]
         let az_00I = az001 - az000;
         let bz_00I = bz001 - bz000;
         if az_00I != 0 {
-            let prod = az_00I.checked_mul(bz_00I).expect("Product overflow for (0,0,I)");
+            let prod = az_00I
+                .checked_mul(bz_00I)
+                .expect("Product overflow for (0,0,I)");
             temp_tA[0] += e_in_val.mul_i128(prod);
         }
 
@@ -185,7 +218,9 @@ pub mod svo_helpers {
         let az_01I = az011 - az010;
         let bz_01I = bz011 - bz010;
         if az_01I != 0 {
-            let prod = az_01I.checked_mul(bz_01I).expect("Product overflow for (0,1,I)");
+            let prod = az_01I
+                .checked_mul(bz_01I)
+                .expect("Product overflow for (0,1,I)");
             temp_tA[1] += e_in_val.mul_i128(prod);
         }
 
@@ -193,7 +228,9 @@ pub mod svo_helpers {
         let az_10I = az101 - az100;
         let bz_10I = bz101 - bz100;
         if az_10I != 0 {
-            let prod = az_10I.checked_mul(bz_10I).expect("Product overflow for (1,0,I)");
+            let prod = az_10I
+                .checked_mul(bz_10I)
+                .expect("Product overflow for (1,0,I)");
             temp_tA[2] += e_in_val.mul_i128(prod);
         }
 
@@ -201,7 +238,9 @@ pub mod svo_helpers {
         let az_11I = az111 - az110;
         let bz_11I = bz111 - bz110;
         if az_11I != 0 {
-            let prod = az_11I.checked_mul(bz_11I).expect("Product overflow for (1,1,I)");
+            let prod = az_11I
+                .checked_mul(bz_11I)
+                .expect("Product overflow for (1,1,I)");
             temp_tA[3] += e_in_val.mul_i128(prod);
         }
 
@@ -211,7 +250,9 @@ pub mod svo_helpers {
         let az_0I0 = az010 - az000;
         let bz_0I0 = bz010 - bz000;
         if az_0I0 != 0 {
-            let prod = az_0I0.checked_mul(bz_0I0).expect("Product overflow for (0,I,0)");
+            let prod = az_0I0
+                .checked_mul(bz_0I0)
+                .expect("Product overflow for (0,I,0)");
             temp_tA[4] += e_in_val.mul_i128(prod);
         }
 
@@ -219,7 +260,9 @@ pub mod svo_helpers {
         let az_0I1 = az011 - az001;
         let bz_0I1 = bz011 - bz001;
         if az_0I1 != 0 {
-            let prod = az_0I1.checked_mul(bz_0I1).expect("Product overflow for (0,I,1)");
+            let prod = az_0I1
+                .checked_mul(bz_0I1)
+                .expect("Product overflow for (0,I,1)");
             temp_tA[5] += e_in_val.mul_i128(prod);
         }
 
@@ -227,7 +270,9 @@ pub mod svo_helpers {
         let az_0II = az_01I - az_00I;
         let bz_0II = bz_01I - bz_00I;
         if az_0II != 0 {
-            let prod = az_0II.checked_mul(bz_0II).expect("Product overflow for (0,I,I)");
+            let prod = az_0II
+                .checked_mul(bz_0II)
+                .expect("Product overflow for (0,I,I)");
             temp_tA[6] += e_in_val.mul_i128(prod);
         }
 
@@ -235,7 +280,9 @@ pub mod svo_helpers {
         let az_1I0 = az110 - az100;
         let bz_1I0 = bz110 - bz100;
         if az_1I0 != 0 {
-            let prod = az_1I0.checked_mul(bz_1I0).expect("Product overflow for (1,I,0)");
+            let prod = az_1I0
+                .checked_mul(bz_1I0)
+                .expect("Product overflow for (1,I,0)");
             temp_tA[7] += e_in_val.mul_i128(prod);
         }
 
@@ -243,7 +290,9 @@ pub mod svo_helpers {
         let az_1I1 = az111 - az101;
         let bz_1I1 = bz111 - bz101;
         if az_1I1 != 0 {
-            let prod = az_1I1.checked_mul(bz_1I1).expect("Product overflow for (1,I,1)");
+            let prod = az_1I1
+                .checked_mul(bz_1I1)
+                .expect("Product overflow for (1,I,1)");
             temp_tA[8] += e_in_val.mul_i128(prod);
         }
 
@@ -251,7 +300,9 @@ pub mod svo_helpers {
         let az_1II = az_11I - az_10I;
         let bz_1II = bz_11I - bz_10I;
         if az_1II != 0 {
-            let prod = az_1II.checked_mul(bz_1II).expect("Product overflow for (1,I,I)");
+            let prod = az_1II
+                .checked_mul(bz_1II)
+                .expect("Product overflow for (1,I,I)");
             temp_tA[9] += e_in_val.mul_i128(prod);
         }
 
@@ -261,7 +312,9 @@ pub mod svo_helpers {
         let az_I00 = az100 - az000;
         let bz_I00 = bz100 - bz000;
         if az_I00 != 0 {
-            let prod = az_I00.checked_mul(bz_I00).expect("Product overflow for (I,0,0)");
+            let prod = az_I00
+                .checked_mul(bz_I00)
+                .expect("Product overflow for (I,0,0)");
             temp_tA[10] += e_in_val.mul_i128(prod);
         }
 
@@ -269,7 +322,9 @@ pub mod svo_helpers {
         let az_I01 = az101 - az001;
         let bz_I01 = bz101 - bz001;
         if az_I01 != 0 {
-            let prod = az_I01.checked_mul(bz_I01).expect("Product overflow for (I,0,1)");
+            let prod = az_I01
+                .checked_mul(bz_I01)
+                .expect("Product overflow for (I,0,1)");
             temp_tA[11] += e_in_val.mul_i128(prod);
         }
 
@@ -277,7 +332,9 @@ pub mod svo_helpers {
         let az_I0I = az_I01 - az_I00;
         let bz_I0I = bz_I01 - bz_I00;
         if az_I0I != 0 {
-            let prod = az_I0I.checked_mul(bz_I0I).expect("Product overflow for (I,0,I)");
+            let prod = az_I0I
+                .checked_mul(bz_I0I)
+                .expect("Product overflow for (I,0,I)");
             temp_tA[12] += e_in_val.mul_i128(prod);
         }
 
@@ -285,7 +342,9 @@ pub mod svo_helpers {
         let az_I10 = az110 - az010;
         let bz_I10 = bz110 - bz010;
         if az_I10 != 0 {
-            let prod = az_I10.checked_mul(bz_I10).expect("Product overflow for (I,1,0)");
+            let prod = az_I10
+                .checked_mul(bz_I10)
+                .expect("Product overflow for (I,1,0)");
             temp_tA[13] += e_in_val.mul_i128(prod);
         }
 
@@ -293,7 +352,9 @@ pub mod svo_helpers {
         let az_I11 = az111 - az011;
         let bz_I11 = bz111 - bz011;
         if az_I11 != 0 {
-            let prod = az_I11.checked_mul(bz_I11).expect("Product overflow for (I,1,1)");
+            let prod = az_I11
+                .checked_mul(bz_I11)
+                .expect("Product overflow for (I,1,1)");
             temp_tA[14] += e_in_val.mul_i128(prod);
         }
 
@@ -301,7 +362,9 @@ pub mod svo_helpers {
         let az_I1I = az_I11 - az_I10;
         let bz_I1I = bz_I11 - bz_I10;
         if az_I1I != 0 {
-            let prod = az_I1I.checked_mul(bz_I1I).expect("Product overflow for (I,1,I)");
+            let prod = az_I1I
+                .checked_mul(bz_I1I)
+                .expect("Product overflow for (I,1,I)");
             temp_tA[15] += e_in_val.mul_i128(prod);
         }
 
@@ -309,7 +372,9 @@ pub mod svo_helpers {
         let az_II0 = az_1I0 - az_0I0;
         let bz_II0 = bz_1I0 - bz_0I0;
         if az_II0 != 0 {
-            let prod = az_II0.checked_mul(bz_II0).expect("Product overflow for (I,I,0)");
+            let prod = az_II0
+                .checked_mul(bz_II0)
+                .expect("Product overflow for (I,I,0)");
             temp_tA[16] += e_in_val.mul_i128(prod);
         }
 
@@ -317,7 +382,9 @@ pub mod svo_helpers {
         let az_II1 = az_1I1 - az_0I1;
         let bz_II1 = bz_1I1 - bz_0I1;
         if az_II1 != 0 {
-            let prod = az_II1.checked_mul(bz_II1).expect("Product overflow for (I,I,1)");
+            let prod = az_II1
+                .checked_mul(bz_II1)
+                .expect("Product overflow for (I,I,1)");
             temp_tA[17] += e_in_val.mul_i128(prod);
         }
 
@@ -325,7 +392,9 @@ pub mod svo_helpers {
         let az_III = az_1II - az_0II;
         let bz_III = bz_1II - bz_0II;
         if az_III != 0 {
-            let prod = az_III.checked_mul(bz_III).expect("Product overflow for (I,I,I)");
+            let prod = az_III
+                .checked_mul(bz_III)
+                .expect("Product overflow for (I,I,I)");
             temp_tA[18] += e_in_val.mul_i128(prod);
         }
     }
@@ -337,23 +406,28 @@ pub mod svo_helpers {
     pub fn compute_and_update_tA_inplace<F: JoltField>(
         ternary_az_evals: &mut [i128], // Size 3^l0, holds Az evals. Initially populated at binary points. Modified in-place.
         ternary_bz_evals: &mut [i128], // Size 3^l0, holds Bz evals. Initially populated at binary points. Modified in-place.
-        num_svo_rounds: usize,        // l_0
+        num_svo_rounds: usize,         // l_0
         e_in_val: &F,                  // E_in[x_in] factor for the current x_in
-        temp_tA: &mut [F],            // Accumulator vector (size 3^l0), updated with E_in * P_ext contribution.
+        temp_tA: &mut [F], // Accumulator vector (size 3^l0), updated with E_in * P_ext contribution.
     ) {
         let num_ternary_points = ternary_az_evals.len();
-        let expected_ternary_points = 3_usize.checked_pow(num_svo_rounds as u32)
-                                        .expect("Ternary points count overflow");
+        let expected_ternary_points = 3_usize
+            .checked_pow(num_svo_rounds as u32)
+            .expect("Ternary points count overflow");
         debug_assert_eq!(num_ternary_points, expected_ternary_points);
         debug_assert_eq!(ternary_bz_evals.len(), num_ternary_points);
         debug_assert_eq!(temp_tA.len(), num_ternary_points);
 
         if num_svo_rounds == 0 {
-            if num_ternary_points > 0 { // Should be size 1 if l0=0
+            if num_ternary_points > 0 {
+                // Should be size 1 if l0=0
                 let az0 = ternary_az_evals[0];
                 let bz0 = ternary_bz_evals[0];
-                if az0 != 0 && bz0 != 0 { // Early check
-                    let product_i128 = az0.checked_mul(bz0).expect("Az0*Bz0 product overflow i128 in SVO base case");
+                if az0 != 0 && bz0 != 0 {
+                    // Early check
+                    let product_i128 = az0
+                        .checked_mul(bz0)
+                        .expect("Az0*Bz0 product overflow i128 in SVO base case");
                     temp_tA[0] += e_in_val.mul_i128(product_i128);
                 }
             }
@@ -365,8 +439,12 @@ pub mod svo_helpers {
             let base: usize = 3;
             let num_prefix_vars = j_dim_idx;
             let num_suffix_vars = num_svo_rounds - 1 - j_dim_idx;
-            let num_prefix_points = base.checked_pow(num_prefix_vars as u32).expect("Prefix power overflow");
-            let num_suffix_points = base.checked_pow(num_suffix_vars as u32).expect("Suffix power overflow");
+            let num_prefix_points = base
+                .checked_pow(num_prefix_vars as u32)
+                .expect("Prefix power overflow");
+            let num_suffix_points = base
+                .checked_pow(num_suffix_vars as u32)
+                .expect("Suffix power overflow");
 
             for prefix_int in 0..num_prefix_points {
                 for suffix_int in 0..num_suffix_points {
@@ -404,7 +482,7 @@ pub mod svo_helpers {
         } // End loop over j_dim_idx
 
         // --- Accumulation Phase ---
-        // After the j_dim_idx loops, ternary_az_evals and ternary_bz_evals 
+        // After the j_dim_idx loops, ternary_az_evals and ternary_bz_evals
         // contain the fully extended evaluations.
         temp_tA
             .par_iter_mut()
@@ -418,7 +496,9 @@ pub mod svo_helpers {
                     return; // In parallel context, this exits the current closure iteration
                 }
 
-                let product_p_i128 = az_final.checked_mul(bz_final).expect("Az_ext*Bz_ext product overflow i128");
+                let product_p_i128 = az_final
+                    .checked_mul(bz_final)
+                    .expect("Az_ext*Bz_ext product overflow i128");
                 // product_p_i128 cannot be zero here due to the check above
 
                 // Accumulate contribution from this x_in using mul_i128
@@ -436,9 +516,27 @@ pub mod svo_helpers {
         task_svo_accs_infty: &mut [F],
     ) {
         match NUM_SVO_ROUNDS {
-            1 => distribute_tA_to_svo_accumulators_1(task_tA_accumulator_vec, x_out_val, E_out_vec, task_svo_accs_zero, task_svo_accs_infty),
-            2 => distribute_tA_to_svo_accumulators_2(task_tA_accumulator_vec, x_out_val, E_out_vec, task_svo_accs_zero, task_svo_accs_infty),
-            3 => distribute_tA_to_svo_accumulators_3(task_tA_accumulator_vec, x_out_val, E_out_vec, task_svo_accs_zero, task_svo_accs_infty),
+            1 => distribute_tA_to_svo_accumulators_1(
+                task_tA_accumulator_vec,
+                x_out_val,
+                E_out_vec,
+                task_svo_accs_zero,
+                task_svo_accs_infty,
+            ),
+            2 => distribute_tA_to_svo_accumulators_2(
+                task_tA_accumulator_vec,
+                x_out_val,
+                E_out_vec,
+                task_svo_accs_zero,
+                task_svo_accs_infty,
+            ),
+            3 => distribute_tA_to_svo_accumulators_3(
+                task_tA_accumulator_vec,
+                x_out_val,
+                E_out_vec,
+                task_svo_accs_zero,
+                task_svo_accs_infty,
+            ),
             _ => panic!("Unsupported number of SVO rounds"),
         }
     }
@@ -447,8 +545,8 @@ pub mod svo_helpers {
     /// We have only one non-binary point (Y0=I), mapping to accum_1(I)
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_1<F: JoltField>(
-        task_tA_accumulator_vec: &[F], 
-        x_out_val: usize,             
+        task_tA_accumulator_vec: &[F],
+        x_out_val: usize,
         E_out_vec: &[Vec<F>],
         _task_svo_accs_zero: &mut [F],
         task_svo_accs_infty: &mut [F],
@@ -456,13 +554,13 @@ pub mod svo_helpers {
         assert!(_task_svo_accs_zero.len() == 0);
         assert!(task_svo_accs_infty.len() == 1);
         assert!(task_tA_accumulator_vec.len() == 1);
-        
+
         // For this point (Y0=I), we have:
         // round_s = 0, v_config = [], u = Infinity, y_suffix = []
         let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0],          // E_out for round 0
-            0,                      // num_y_suffix_vars = 0
-            0,                      // y_suffix_as_int = 0
+            &E_out_vec[0], // E_out for round 0
+            0,             // num_y_suffix_vars = 0
+            0,             // y_suffix_as_int = 0
             x_out_val,
         );
 
@@ -478,12 +576,12 @@ pub mod svo_helpers {
     /// 2: (I,0) -> s=1, v=[I], u=0, y=[] (accum_2(I,0))
     /// 3: (I,1) -> s=1, v=[I], u=1, y=[] (accum_2(I,1))
     /// 4: (I,I) -> s=1, v=[I], u=I, y=[] (accum_2(I,I))
-    /// 
+    ///
     /// fuck this is a mess...
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_2<F: JoltField>(
-        task_tA_accumulator_vec: &[F], 
-        x_out_val: usize,             
+        task_tA_accumulator_vec: &[F],
+        x_out_val: usize,
         E_out_vec: &[Vec<F>],
         task_svo_accs_zero: &mut [F],
         task_svo_accs_infty: &mut [F],
@@ -492,14 +590,14 @@ pub mod svo_helpers {
         assert!(task_svo_accs_zero.len() == 1);
         assert!(task_svo_accs_infty.len() == 4);
         assert!(E_out_vec.len() >= 2);
-        
+
         // Points 0 and 1: (0,I) and (1,I) both map to round_s=0, v_config=[], u=I
         // Point 0: (0,I) -> round_s=0, v_config=[], u=I, y=[0]
         let tA_0I = task_tA_accumulator_vec[0];
         let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0],        // E_out for round 0
-            1,                    // num_y_suffix_vars = 1
-            0,                    // y_suffix_as_int = 0
+            &E_out_vec[0], // E_out for round 0
+            1,             // num_y_suffix_vars = 1
+            0,             // y_suffix_as_int = 0
             x_out_val,
         );
         let product_0I = E_out_0_val * tA_0I;
@@ -510,9 +608,9 @@ pub mod svo_helpers {
         // Point 1: (1,I) -> round_s=0, v_config=[], u=I, y=[1]
         let tA_1I = task_tA_accumulator_vec[1];
         let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0],        // E_out for round 0
-            1,                    // num_y_suffix_vars = 1
-            1,                    // y_suffix_as_int = 1
+            &E_out_vec[0], // E_out for round 0
+            1,             // num_y_suffix_vars = 1
+            1,             // y_suffix_as_int = 1
             x_out_val,
         );
 
@@ -523,9 +621,9 @@ pub mod svo_helpers {
         // Point 2: (I,0) -> round_s=1, v_config=[I], u=0, y=[]
         let tA_I0 = task_tA_accumulator_vec[2];
         let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],        // E_out for round 1
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            &E_out_vec[1], // E_out for round 1
+            0,             // num_y_suffix_vars = 0
+            0,             // y_suffix_as_int = 0
             x_out_val,
         );
 
@@ -534,31 +632,31 @@ pub mod svo_helpers {
         // Point 3: (I,1) -> round_s=1, v_config=[I], u=1, y=[]
         let tA_I1 = task_tA_accumulator_vec[3];
         let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],        // E_out for round 1
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            &E_out_vec[1], // E_out for round 1
+            0,             // num_y_suffix_vars = 0
+            0,             // y_suffix_as_int = 0
             x_out_val,
         );
-        
+
         // v_config_idx = 2 (for v_config=[I])
         task_svo_accs_infty[2] += E_out_1_val * tA_I1;
 
         // Point 4: (I,I) -> round_s=1, v_config=[I], u=I, y=[]
         let tA_II = task_tA_accumulator_vec[4];
         let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],        // E_out for round 1
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            &E_out_vec[1], // E_out for round 1
+            0,             // num_y_suffix_vars = 0
+            0,             // y_suffix_as_int = 0
             x_out_val,
         );
-        
+
         // v_config_idx = 2 (for v_config=[I])
         task_svo_accs_infty[3] += E_out_1_val * tA_II;
     }
 
     /// Hardcoded version for `num_svo_rounds == 3`
     /// We have 19 non-binary points with various mappings into the 19 accumulators over 3 rounds
-    /// 
+    ///
     /// TODO: double-check logic
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_3<F: JoltField>(
@@ -572,14 +670,14 @@ pub mod svo_helpers {
         assert!(task_svo_accs_zero.len() == 5);
         assert!(task_svo_accs_infty.len() == 14);
         assert!(E_out_vec.len() >= 3);
-        
+
         // --- FIRST GROUP: I at END (first occurrence) ---
         // Points (0,0,I), (0,1,I), (1,0,I), (1,1,I) -> round_s=0, v=[], u=I
         let tA_00I = task_tA_accumulator_vec[0];
         let E_out_0_val = get_E_out_s_val::<F>(
             &E_out_vec[0],
-            2,                    // num_y_suffix_vars = 2
-            0b00,                 // y_suffix_as_int = 00
+            2,    // num_y_suffix_vars = 2
+            0b00, // y_suffix_as_int = 00
             x_out_val,
         );
         let product_00I = E_out_0_val * tA_00I;
@@ -590,8 +688,8 @@ pub mod svo_helpers {
         let tA_01I = task_tA_accumulator_vec[1];
         let E_out_0_val = get_E_out_s_val::<F>(
             &E_out_vec[0],
-            2,                    // num_y_suffix_vars = 2
-            0b01,                 // y_suffix_as_int = 01
+            2,    // num_y_suffix_vars = 2
+            0b01, // y_suffix_as_int = 01
             x_out_val,
         );
         let product_01I = E_out_0_val * tA_01I;
@@ -600,8 +698,8 @@ pub mod svo_helpers {
         let tA_10I = task_tA_accumulator_vec[2];
         let E_out_0_val = get_E_out_s_val::<F>(
             &E_out_vec[0],
-            2,                    // num_y_suffix_vars = 2
-            0b10,                 // y_suffix_as_int = 10
+            2,    // num_y_suffix_vars = 2
+            0b10, // y_suffix_as_int = 10
             x_out_val,
         );
         let product_10I = E_out_0_val * tA_10I;
@@ -610,8 +708,8 @@ pub mod svo_helpers {
         let tA_11I = task_tA_accumulator_vec[3];
         let E_out_0_val = get_E_out_s_val::<F>(
             &E_out_vec[0],
-            2,                    // num_y_suffix_vars = 2
-            0b11,                 // y_suffix_as_int = 11
+            2,    // num_y_suffix_vars = 2
+            0b11, // y_suffix_as_int = 11
             x_out_val,
         );
         let product_11I = E_out_0_val * tA_11I;
@@ -624,8 +722,8 @@ pub mod svo_helpers {
         let tA_0I0 = task_tA_accumulator_vec[2];
         let E_out_1_val = get_E_out_s_val::<F>(
             &E_out_vec[1],
-            1,                    // num_y_suffix_vars = 1
-            0b0,                  // y_suffix_as_int = 0
+            1,   // num_y_suffix_vars = 1
+            0b0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[2] += E_out_1_val * tA_0I0;
@@ -633,8 +731,8 @@ pub mod svo_helpers {
         let tA_0I1 = task_tA_accumulator_vec[3];
         let E_out_1_val = get_E_out_s_val::<F>(
             &E_out_vec[1],
-            1,                    // num_y_suffix_vars = 1
-            0b1,                  // y_suffix_as_int = 1
+            1,   // num_y_suffix_vars = 1
+            0b1, // y_suffix_as_int = 1
             x_out_val,
         );
         task_svo_accs_zero[2] += E_out_1_val * tA_0I1;
@@ -642,8 +740,8 @@ pub mod svo_helpers {
         let tA_1I0 = task_tA_accumulator_vec[7];
         let E_out_1_val = get_E_out_s_val::<F>(
             &E_out_vec[1],
-            1,                    // num_y_suffix_vars = 1
-            0b0,                  // y_suffix_as_int = 0
+            1,   // num_y_suffix_vars = 1
+            0b0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[2] += E_out_1_val * tA_1I0;
@@ -651,8 +749,8 @@ pub mod svo_helpers {
         let tA_1I1 = task_tA_accumulator_vec[8];
         let E_out_1_val = get_E_out_s_val::<F>(
             &E_out_vec[1],
-            1,                    // num_y_suffix_vars = 1
-            0b1,                  // y_suffix_as_int = 1
+            1,   // num_y_suffix_vars = 1
+            0b1, // y_suffix_as_int = 1
             x_out_val,
         );
         task_svo_accs_zero[2] += E_out_1_val * tA_1I1;
@@ -662,8 +760,8 @@ pub mod svo_helpers {
         let tA_I00 = task_tA_accumulator_vec[10];
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[4] += E_out_2_val * tA_I00;
@@ -671,8 +769,8 @@ pub mod svo_helpers {
         let tA_I01 = task_tA_accumulator_vec[11];
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[4] += E_out_2_val * tA_I01;
@@ -680,8 +778,8 @@ pub mod svo_helpers {
         let tA_I10 = task_tA_accumulator_vec[13];
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[5] += E_out_2_val * tA_I10;
@@ -689,8 +787,8 @@ pub mod svo_helpers {
         let tA_I11 = task_tA_accumulator_vec[14];
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[5] += E_out_2_val * tA_I11;
@@ -700,8 +798,8 @@ pub mod svo_helpers {
         let tA_0II = task_tA_accumulator_vec[4];
         let E_out_1_val = get_E_out_s_val::<F>(
             &E_out_vec[1],
-            1,                    // num_y_suffix_vars = 1
-            0b0,                  // y_suffix_as_int = 0
+            1,   // num_y_suffix_vars = 1
+            0b0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_infty[2] += E_out_1_val * tA_0II;
@@ -709,8 +807,8 @@ pub mod svo_helpers {
         let tA_1II = task_tA_accumulator_vec[9];
         let E_out_1_val = get_E_out_s_val::<F>(
             &E_out_vec[1],
-            1,                    // num_y_suffix_vars = 1
-            0b1,                  // y_suffix_as_int = 1
+            1,   // num_y_suffix_vars = 1
+            0b1, // y_suffix_as_int = 1
             x_out_val,
         );
         task_svo_accs_infty[2] += E_out_1_val * tA_1II;
@@ -718,8 +816,8 @@ pub mod svo_helpers {
         let tA_I0I = task_tA_accumulator_vec[12];
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_infty[4] += E_out_2_val * tA_I0I;
@@ -727,8 +825,8 @@ pub mod svo_helpers {
         let tA_I1I = task_tA_accumulator_vec[15];
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_infty[5] += E_out_2_val * tA_I1I;
@@ -737,8 +835,8 @@ pub mod svo_helpers {
         // Double-check this, seems wrong (y is 0?)
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[10] += E_out_2_val * tA_II0; // (I,I,0)
@@ -747,8 +845,8 @@ pub mod svo_helpers {
         // Double-check this, seems wrong (y is 0?)
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_zero[11] += E_out_2_val * tA_II1; // (I,I,1)
@@ -758,36 +856,40 @@ pub mod svo_helpers {
         // Double-check this, seems wrong (y is 0?)
         let E_out_2_val = get_E_out_s_val::<F>(
             &E_out_vec[2],
-            0,                    // num_y_suffix_vars = 0
-            0,                    // y_suffix_as_int = 0
+            0, // num_y_suffix_vars = 0
+            0, // y_suffix_as_int = 0
             x_out_val,
         );
         task_svo_accs_infty[12] += E_out_2_val * tA_III; // (I,I,I)
     }
 
-    // Distributes the accumulated tA values (sum over x_in) for a single x_out_val 
+    // Distributes the accumulated tA values (sum over x_in) for a single x_out_val
     // to the appropriate SVO round accumulators.
     #[inline]
     pub fn distribute_tA_to_svo_accumulators<F: JoltField>(
-        task_tA_accumulator_vec: &[F], 
-        x_out_val: usize,             
+        task_tA_accumulator_vec: &[F],
+        x_out_val: usize,
         num_svo_rounds: usize,
         num_ternary_points: usize,
-        E_out_vec: &[Vec<F>],         
+        E_out_vec: &[Vec<F>],
         all_idx_mapping_results: &[Vec<(usize, Vec<SVOEvalPoint>, SVOEvalPoint, usize, usize)>], // Updated tuple
         task_svo_accs: &mut Vec<(Vec<F>, Vec<F>)>,
     ) {
         if num_svo_rounds == 0 {
-            return; 
+            return;
         }
 
         for beta_idx in 0..num_ternary_points {
             let tA_for_this_beta = task_tA_accumulator_vec[beta_idx];
-            if tA_for_this_beta.is_zero() { continue; }
+            if tA_for_this_beta.is_zero() {
+                continue;
+            }
 
             let relevant_mappings = &all_idx_mapping_results[beta_idx];
 
-            for (round_s, v_config_vec, u_eval_point, y_suffix_as_int, num_y_suffix_vars) in relevant_mappings.iter().cloned() {
+            for (round_s, v_config_vec, u_eval_point, y_suffix_as_int, num_y_suffix_vars) in
+                relevant_mappings.iter().cloned()
+            {
                 let mut is_v_config_binary = true;
                 for v_comp in &v_config_vec {
                     if *v_comp == SVOEvalPoint::Infinity {
@@ -798,24 +900,28 @@ pub mod svo_helpers {
                 if is_v_config_binary && u_eval_point == SVOEvalPoint::Zero {
                     continue;
                 }
-                
+
                 let E_out_s_val = get_E_out_s_val::<F>(
                     &E_out_vec[round_s],
                     num_y_suffix_vars, // Use precomputed num_y_suffix_vars
                     y_suffix_as_int,   // Use precomputed y_suffix_as_int
-                    x_out_val, 
+                    x_out_val,
                 );
                 let v_config_idx = map_v_config_to_idx(&v_config_vec, round_s);
 
                 if !E_out_s_val.is_zero() {
                     match u_eval_point {
                         SVOEvalPoint::Zero => {
-                            task_svo_accs[round_s].0[v_config_idx] += E_out_s_val * tA_for_this_beta;
+                            task_svo_accs[round_s].0[v_config_idx] +=
+                                E_out_s_val * tA_for_this_beta;
                         }
                         SVOEvalPoint::Infinity => {
-                            task_svo_accs[round_s].1[v_config_idx] += E_out_s_val * tA_for_this_beta;
+                            task_svo_accs[round_s].1[v_config_idx] +=
+                                E_out_s_val * tA_for_this_beta;
                         }
-                        SVOEvalPoint::One => { panic!("SVO accumulators only store u=0/inf"); }
+                        SVOEvalPoint::One => {
+                            panic!("SVO accumulators only store u=0/inf");
+                        }
                     }
                 }
             }
@@ -827,10 +933,10 @@ pub mod svo_helpers {
     // Corresponds to accessing E_out,i[y, x_out] in Algorithm 6 (proc:precompute-algo-6, Line 14).
     #[inline]
     pub fn get_E_out_s_val<F: JoltField>(
-        E_out_s_evals: &[F],              // Precomputed evaluations E_out,i for round i=s
-        num_y_suffix_vars: usize,         // Number of variables in y_suffix (length of y in E_out,i[y, x_out])
-        y_suffix_as_int: usize,           // Integer representation of y_suffix (LSB)
-        x_out_val: usize,                 // Integer assignment for x_out variables (MSB)
+        E_out_s_evals: &[F],      // Precomputed evaluations E_out,i for round i=s
+        num_y_suffix_vars: usize, // Number of variables in y_suffix (length of y in E_out,i[y, x_out])
+        y_suffix_as_int: usize,   // Integer representation of y_suffix (LSB)
+        x_out_val: usize,         // Integer assignment for x_out variables (MSB)
     ) -> F {
         // y_suffix_as_int is LSB, x_out_val is MSB. Combine to form the index into E_out,i.
         let combined_idx = (x_out_val << num_y_suffix_vars) | y_suffix_as_int;
@@ -842,18 +948,19 @@ pub mod svo_helpers {
     // Corresponds to Algorithm 6 (proc:precompute-algo-6, Line 13): determining the target indices (i, v, u, y) from beta.
     #[inline]
     pub fn idx_mapping(
-        svo_prefix_extended: &[SVOEvalPoint], 
+        svo_prefix_extended: &[SVOEvalPoint],
         num_svo_rounds: usize,
-    ) -> Vec<(usize, Vec<SVOEvalPoint>, SVOEvalPoint, usize, usize)> { // Added y_suffix_as_int, num_y_suffix_vars
+    ) -> Vec<(usize, Vec<SVOEvalPoint>, SVOEvalPoint, usize, usize)> {
+        // Added y_suffix_as_int, num_y_suffix_vars
         let mut result = Vec::new();
         if num_svo_rounds == 0 {
             return result;
         }
         assert_eq!(svo_prefix_extended.len(), num_svo_rounds);
 
-        for s in 0..num_svo_rounds { 
+        for s in 0..num_svo_rounds {
             let v_config: Vec<SVOEvalPoint> = svo_prefix_extended[0..s].to_vec();
-            let u_eval = svo_prefix_extended[s]; 
+            let u_eval = svo_prefix_extended[s];
 
             if !(u_eval == SVOEvalPoint::Zero || u_eval == SVOEvalPoint::Infinity) {
                 continue;
@@ -863,7 +970,7 @@ pub mod svo_helpers {
             let mut y_suffix_is_binary = true;
             let mut y_suffix_as_int = 0;
             for (bit_idx, &point) in y_suffix_components.iter().enumerate() {
-                if point == SVOEvalPoint::Infinity { 
+                if point == SVOEvalPoint::Infinity {
                     y_suffix_is_binary = false;
                     break;
                 }
@@ -912,11 +1019,19 @@ pub mod svo_helpers {
         let mut stride = 1;
         // Iterate from LSB (Y_{l0-1}) to MSB (Y_0)
         for i in (0..num_vars).rev() {
-            debug_assert!(point_coords[i] < base, "Coord {} out of bounds for base {}", point_coords[i], base);
+            debug_assert!(
+                point_coords[i] < base,
+                "Coord {} out of bounds for base {}",
+                point_coords[i],
+                base
+            );
             index += point_coords[i] * stride;
-            if i > 0 { // Avoid overflow on last stride calculation
-               // Use checked_mul for safety
-               stride = stride.checked_mul(base).expect("Base power overflow computing stride");
+            if i > 0 {
+                // Avoid overflow on last stride calculation
+                // Use checked_mul for safety
+                stride = stride
+                    .checked_mul(base)
+                    .expect("Base power overflow computing stride");
             }
         }
         index
@@ -934,15 +1049,20 @@ pub mod svo_helpers {
         for i in 0..num_svo_rounds {
             let bit = current_binary_val % 2; // Get LSB
             ternary_idx += bit * stride; // Add 0 or 1 * stride
-            // Stride calculation needs to be careful for the *next* iteration
+                                         // Stride calculation needs to be careful for the *next* iteration
             if i < num_svo_rounds - 1 {
-                 stride = stride.checked_mul(3).expect("Stride overflow in binary_to_ternary_index");
+                stride = stride
+                    .checked_mul(3)
+                    .expect("Stride overflow in binary_to_ternary_index");
             }
             current_binary_val /= 2;
         }
         if current_binary_val != 0 {
             // This indicates the binary_idx was too large for num_svo_rounds
-            panic!("binary_idx {} too large for {} SVO rounds", binary_idx, num_svo_rounds);
+            panic!(
+                "binary_idx {} too large for {} SVO rounds",
+                binary_idx, num_svo_rounds
+            );
         }
         ternary_idx
     }
@@ -962,22 +1082,29 @@ pub mod svo_helpers {
 
     // Helper to convert an integer index (base 3) to its SVOEvalPoint vector representation.
     #[inline]
-    pub fn get_svo_prefix_extended_from_idx(beta_idx: usize, num_svo_rounds: usize) -> Vec<SVOEvalPoint> {
+    pub fn get_svo_prefix_extended_from_idx(
+        beta_idx: usize,
+        num_svo_rounds: usize,
+    ) -> Vec<SVOEvalPoint> {
         if num_svo_rounds == 0 {
             return vec![];
         }
         let mut temp_beta_coords = vec![0usize; num_svo_rounds];
         let mut temp_beta_int = beta_idx;
-        for i in (0..num_svo_rounds).rev() { // MSB first for coords array from LSB of int
+        for i in (0..num_svo_rounds).rev() {
+            // MSB first for coords array from LSB of int
             temp_beta_coords[i] = temp_beta_int % 3;
             temp_beta_int /= 3;
         }
-        temp_beta_coords.iter().map(|&coord| match coord {
-            0 => SVOEvalPoint::Zero,
-            1 => SVOEvalPoint::One,
-            2 => SVOEvalPoint::Infinity,
-            _ => unreachable!("Invalid coordinate in beta_idx to SVOEvalPoint conversion"),
-        }).collect::<Vec<_>>()
+        temp_beta_coords
+            .iter()
+            .map(|&coord| match coord {
+                0 => SVOEvalPoint::Zero,
+                1 => SVOEvalPoint::One,
+                2 => SVOEvalPoint::Infinity,
+                _ => unreachable!("Invalid coordinate in beta_idx to SVOEvalPoint conversion"),
+            })
+            .collect::<Vec<_>>()
     }
 
     // Precomputes idx_mapping results for all possible beta values.
@@ -985,23 +1112,26 @@ pub mod svo_helpers {
     pub fn precompute_all_idx_mappings(
         num_svo_rounds: usize,
         num_ternary_points: usize,
-    ) -> Vec<Vec<(usize, Vec<SVOEvalPoint>, SVOEvalPoint, usize, usize)>> { // Updated tuple
+    ) -> Vec<Vec<(usize, Vec<SVOEvalPoint>, SVOEvalPoint, usize, usize)>> {
+        // Updated tuple
         if num_svo_rounds == 0 {
-            return vec![vec![]]; 
+            return vec![vec![]];
         }
-        (0..num_ternary_points).map(|beta_idx| {
-            let svo_prefix = get_svo_prefix_extended_from_idx(beta_idx, num_svo_rounds);
-            idx_mapping(&svo_prefix, num_svo_rounds) // idx_mapping now returns the richer tuple
-        }).collect()
+        (0..num_ternary_points)
+            .map(|beta_idx| {
+                let svo_prefix = get_svo_prefix_extended_from_idx(beta_idx, num_svo_rounds);
+                idx_mapping(&svo_prefix, num_svo_rounds) // idx_mapping now returns the richer tuple
+            })
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::svo_helpers::*;
-    use SVOEvalPoint::*;
     use ark_bn254::Fr as TestField;
     use ark_ff::Zero;
+    use SVOEvalPoint::*;
 
     /// Tests the `get_svo_prefix_extended_from_idx` function.
     /// This function converts a base-3 integer index into a vector of `SVOEvalPoint`s.
@@ -1013,33 +1143,80 @@ mod tests {
         assert_eq!(get_svo_prefix_extended_from_idx(0, 0), vec![]);
 
         // num_svo_rounds = 1
-        assert_eq!(get_svo_prefix_extended_from_idx(0, 1), vec![SVOEvalPoint::Zero]);
-        assert_eq!(get_svo_prefix_extended_from_idx(1, 1), vec![SVOEvalPoint::One]);
-        assert_eq!(get_svo_prefix_extended_from_idx(2, 1), vec![SVOEvalPoint::Infinity]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(0, 1),
+            vec![SVOEvalPoint::Zero]
+        );
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(1, 1),
+            vec![SVOEvalPoint::One]
+        );
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(2, 1),
+            vec![SVOEvalPoint::Infinity]
+        );
 
         // num_svo_rounds = 2. Indices are in base 3, MSB first in output vector.
         // 0 = 00_3
-        assert_eq!(get_svo_prefix_extended_from_idx(0, 2), vec![SVOEvalPoint::Zero, SVOEvalPoint::Zero]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(0, 2),
+            vec![SVOEvalPoint::Zero, SVOEvalPoint::Zero]
+        );
         // 1 = 01_3
-        assert_eq!(get_svo_prefix_extended_from_idx(1, 2), vec![SVOEvalPoint::Zero, SVOEvalPoint::One]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(1, 2),
+            vec![SVOEvalPoint::Zero, SVOEvalPoint::One]
+        );
         // 2 = 02_3
-        assert_eq!(get_svo_prefix_extended_from_idx(2, 2), vec![SVOEvalPoint::Zero, SVOEvalPoint::Infinity]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(2, 2),
+            vec![SVOEvalPoint::Zero, SVOEvalPoint::Infinity]
+        );
         // 3 = 10_3
-        assert_eq!(get_svo_prefix_extended_from_idx(3, 2), vec![SVOEvalPoint::One, SVOEvalPoint::Zero]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(3, 2),
+            vec![SVOEvalPoint::One, SVOEvalPoint::Zero]
+        );
         // 4 = 11_3
-        assert_eq!(get_svo_prefix_extended_from_idx(4, 2), vec![SVOEvalPoint::One, SVOEvalPoint::One]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(4, 2),
+            vec![SVOEvalPoint::One, SVOEvalPoint::One]
+        );
         // 8 = 22_3
-        assert_eq!(get_svo_prefix_extended_from_idx(8, 2), vec![SVOEvalPoint::Infinity, SVOEvalPoint::Infinity]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(8, 2),
+            vec![SVOEvalPoint::Infinity, SVOEvalPoint::Infinity]
+        );
 
         // num_svo_rounds = 3
         // 0 = 000_3
-        assert_eq!(get_svo_prefix_extended_from_idx(0, 3), vec![SVOEvalPoint::Zero, SVOEvalPoint::Zero, SVOEvalPoint::Zero]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(0, 3),
+            vec![SVOEvalPoint::Zero, SVOEvalPoint::Zero, SVOEvalPoint::Zero]
+        );
         // 13 = 111_3  (1*9 + 1*3 + 1*1)
-        assert_eq!(get_svo_prefix_extended_from_idx(13, 3), vec![SVOEvalPoint::One, SVOEvalPoint::One, SVOEvalPoint::One]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(13, 3),
+            vec![SVOEvalPoint::One, SVOEvalPoint::One, SVOEvalPoint::One]
+        );
         // 26 = 222_3 (2*9 + 2*3 + 2*1)
-        assert_eq!(get_svo_prefix_extended_from_idx(26, 3), vec![SVOEvalPoint::Infinity, SVOEvalPoint::Infinity, SVOEvalPoint::Infinity]);
-         // 5 = 012_3 (0*9 + 1*3 + 2*1)
-        assert_eq!(get_svo_prefix_extended_from_idx(5, 3), vec![SVOEvalPoint::Zero, SVOEvalPoint::One, SVOEvalPoint::Infinity]);
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(26, 3),
+            vec![
+                SVOEvalPoint::Infinity,
+                SVOEvalPoint::Infinity,
+                SVOEvalPoint::Infinity
+            ]
+        );
+        // 5 = 012_3 (0*9 + 1*3 + 2*1)
+        assert_eq!(
+            get_svo_prefix_extended_from_idx(5, 3),
+            vec![
+                SVOEvalPoint::Zero,
+                SVOEvalPoint::One,
+                SVOEvalPoint::Infinity
+            ]
+        );
     }
 
     /// Tests the `map_v_config_to_idx` function.
@@ -1056,12 +1233,30 @@ mod tests {
         assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Infinity], 0), 2);
 
         // v_config is LSB first for powers of 3
-        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Zero, SVOEvalPoint::Zero], 1), 0); // 0*3^0 + 0*3^1
-        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::One, SVOEvalPoint::Zero], 1), 1);  // 1*3^0 + 0*3^1
-        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Zero, SVOEvalPoint::One], 1), 3);  // 0*3^0 + 1*3^1
-        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::Infinity, SVOEvalPoint::Infinity], 1), 8); // 2*3^0 + 2*3^1 = 2+6
+        assert_eq!(
+            map_v_config_to_idx(&[SVOEvalPoint::Zero, SVOEvalPoint::Zero], 1),
+            0
+        ); // 0*3^0 + 0*3^1
+        assert_eq!(
+            map_v_config_to_idx(&[SVOEvalPoint::One, SVOEvalPoint::Zero], 1),
+            1
+        ); // 1*3^0 + 0*3^1
+        assert_eq!(
+            map_v_config_to_idx(&[SVOEvalPoint::Zero, SVOEvalPoint::One], 1),
+            3
+        ); // 0*3^0 + 1*3^1
+        assert_eq!(
+            map_v_config_to_idx(&[SVOEvalPoint::Infinity, SVOEvalPoint::Infinity], 1),
+            8
+        ); // 2*3^0 + 2*3^1 = 2+6
 
-        assert_eq!(map_v_config_to_idx(&[SVOEvalPoint::One, SVOEvalPoint::One, SVOEvalPoint::One], 2), 13); // 1*1 + 1*3 + 1*9
+        assert_eq!(
+            map_v_config_to_idx(
+                &[SVOEvalPoint::One, SVOEvalPoint::One, SVOEvalPoint::One],
+                2
+            ),
+            13
+        ); // 1*1 + 1*3 + 1*9
     }
 
     /// Tests the `get_fixed_radix_index` function.
@@ -1073,7 +1268,7 @@ mod tests {
     fn test_get_fixed_radix_index() {
         // num_vars = 0
         assert_eq!(get_fixed_radix_index(&[], 3, 0), 0);
-        
+
         // base = 3, num_vars = 1 (coords are MSB first)
         assert_eq!(get_fixed_radix_index(&[0], 3, 1), 0);
         assert_eq!(get_fixed_radix_index(&[1], 3, 1), 1);
@@ -1089,10 +1284,10 @@ mod tests {
         assert_eq!(get_fixed_radix_index(&[2, 2], 3, 2), 8); // 2*1 + 2*3
 
         // base = 2, num_vars = 3
-        assert_eq!(get_fixed_radix_index(&[0,0,0], 2, 3), 0); // 0*1+0*2+0*4
-        assert_eq!(get_fixed_radix_index(&[0,0,1], 2, 3), 1); // 1*1+0*2+0*4
-        assert_eq!(get_fixed_radix_index(&[0,1,0], 2, 3), 2); // 0*1+1*2+0*4
-        assert_eq!(get_fixed_radix_index(&[1,1,1], 2, 3), 7); // 1*1+1*2+1*4
+        assert_eq!(get_fixed_radix_index(&[0, 0, 0], 2, 3), 0); // 0*1+0*2+0*4
+        assert_eq!(get_fixed_radix_index(&[0, 0, 1], 2, 3), 1); // 1*1+0*2+0*4
+        assert_eq!(get_fixed_radix_index(&[0, 1, 0], 2, 3), 2); // 0*1+1*2+0*4
+        assert_eq!(get_fixed_radix_index(&[1, 1, 1], 2, 3), 7); // 1*1+1*2+1*4
     }
 
     /// Tests the `binary_to_ternary_index` function.
@@ -1116,11 +1311,11 @@ mod tests {
         assert_eq!(binary_to_ternary_index(0b11, 2), 4); // 11_3 is 4
 
         // num_svo_rounds = 3
-        assert_eq!(binary_to_ternary_index(0b000, 3), 0);  // 0
-        assert_eq!(binary_to_ternary_index(0b001, 3), 1);  // 1
-        assert_eq!(binary_to_ternary_index(0b010, 3), 3);  // 3
-        assert_eq!(binary_to_ternary_index(0b011, 3), 4);  // 4
-        assert_eq!(binary_to_ternary_index(0b100, 3), 9);  // 9
+        assert_eq!(binary_to_ternary_index(0b000, 3), 0); // 0
+        assert_eq!(binary_to_ternary_index(0b001, 3), 1); // 1
+        assert_eq!(binary_to_ternary_index(0b010, 3), 3); // 3
+        assert_eq!(binary_to_ternary_index(0b011, 3), 4); // 4
+        assert_eq!(binary_to_ternary_index(0b100, 3), 9); // 9
         assert_eq!(binary_to_ternary_index(0b101, 3), 10); // 10
         assert_eq!(binary_to_ternary_index(0b110, 3), 12); // 12
         assert_eq!(binary_to_ternary_index(0b111, 3), 13); // 13
@@ -1135,12 +1330,11 @@ mod tests {
     }
     /// Tests that `binary_to_ternary_index` panics when the binary index is too large
     /// for the specified number of SVO rounds (2 rounds case).
-     #[test]
+    #[test]
     #[should_panic]
     fn test_binary_to_ternary_index_panic_2() {
         binary_to_ternary_index(1 << 2, 2); // 2 rounds, 1<<2 = 4 is too large (max is 3)
     }
-
 
     /// Tests the `precompute_binary_to_ternary_indices` function.
     /// This function generates a lookup table mapping all possible binary indices for a given
@@ -1151,7 +1345,10 @@ mod tests {
         assert_eq!(precompute_binary_to_ternary_indices(0), vec![0]);
         assert_eq!(precompute_binary_to_ternary_indices(1), vec![0, 1]);
         assert_eq!(precompute_binary_to_ternary_indices(2), vec![0, 1, 3, 4]);
-        assert_eq!(precompute_binary_to_ternary_indices(3), vec![0, 1, 3, 4, 9, 10, 12, 13]);
+        assert_eq!(
+            precompute_binary_to_ternary_indices(3),
+            vec![0, 1, 3, 4, 9, 10, 12, 13]
+        );
     }
 
     /// Tests the `idx_mapping` function.
@@ -1168,25 +1365,28 @@ mod tests {
         // num_svo_rounds = 1
         assert_eq!(idx_mapping(&[Zero], 1), vec![(0, vec![], Zero, 0, 0)]);
         assert_eq!(idx_mapping(&[One], 1), vec![]); // u_eval must be Z or I
-        assert_eq!(idx_mapping(&[Infinity], 1), vec![(0, vec![], Infinity, 0, 0)]);
+        assert_eq!(
+            idx_mapping(&[Infinity], 1),
+            vec![(0, vec![], Infinity, 0, 0)]
+        );
 
         // num_svo_rounds = 2
         // beta = [Z, Z]
         let res_zz = idx_mapping(&[Zero, Zero], 2);
         assert_eq!(res_zz.len(), 2);
         assert!(res_zz.contains(&(0, vec![], Zero, 0, 1))); // s=0, v=[], u=Z, y=[Z] -> y_val=0, y_len=1
-        assert!(res_zz.contains(&(1, vec![Zero], Zero, 0, 0)));   // s=1, v=[Z], u=Z, y=[] -> y_val=0, y_len=0
-        
+        assert!(res_zz.contains(&(1, vec![Zero], Zero, 0, 0))); // s=1, v=[Z], u=Z, y=[] -> y_val=0, y_len=0
+
         // beta = [Z, O]
         let res_zo = idx_mapping(&[Zero, One], 2);
         assert_eq!(res_zo.len(), 1);
         assert!(res_zo.contains(&(0, vec![], Zero, 1, 1))); // s=0, v=[], u=Z, y=[O] -> y_val=1, y_len=1
-                                                              // s=1, v=[Z], u=O -> skipped
+                                                            // s=1, v=[Z], u=O -> skipped
 
         // beta = [Z, I]
         let res_zi = idx_mapping(&[Zero, Infinity], 2);
         assert_eq!(res_zi.len(), 1);
-                                                              // s=0, v=[], u=Z, y=[I] -> y_suffix not binary, skipped
+        // s=0, v=[], u=Z, y=[I] -> y_suffix not binary, skipped
         assert!(res_zi.contains(&(1, vec![Zero], Infinity, 0, 0))); // s=1, v=[Z], u=I, y=[] -> y_val=0, y_len=0
 
         // beta = [I, Z]
@@ -1198,9 +1398,9 @@ mod tests {
         // beta = [O, Z]
         let res_oz = idx_mapping(&[One, Zero], 2);
         assert_eq!(res_oz.len(), 1);
-                                                            // s=0, v=[], u=O -> skipped
+        // s=0, v=[], u=O -> skipped
         assert!(res_oz.contains(&(1, vec![One], Zero, 0, 0))); // s=1, v=[O], u=Z, y=[] -> y_val=0, y_len=0
-        
+
         // num_svo_rounds = 3
         // beta = [Z, O, I]
         let res_zoi = idx_mapping(&[Zero, One, Infinity], 3);
@@ -1210,17 +1410,17 @@ mod tests {
         assert!(res_zoi.contains(&(2, vec![Zero, One], Infinity, 0, 0))); // s=2, v=[Z,O], u=I, y=[]
 
         // beta = [Z,Z,Z]
-        let res_zzz = idx_mapping(&[Zero,Zero,Zero], 3);
+        let res_zzz = idx_mapping(&[Zero, Zero, Zero], 3);
         assert_eq!(res_zzz.len(), 3);
         assert!(res_zzz.contains(&(0, vec![], Zero, 0, 2))); // y=[Z,Z]
         assert!(res_zzz.contains(&(1, vec![Zero], Zero, 0, 1))); // y=[Z]
-        assert!(res_zzz.contains(&(2, vec![Zero,Zero], Zero, 0, 0))); // y=[]
+        assert!(res_zzz.contains(&(2, vec![Zero, Zero], Zero, 0, 0))); // y=[]
 
         // beta = [I,O,Z]
         let res_ioz = idx_mapping(&[Infinity, One, Zero], 3);
         assert_eq!(res_ioz.len(), 2);
         assert!(res_ioz.contains(&(0, vec![], Infinity, 1, 2))); // y=[O,Z] (O is LSB of y_suffix components, int value becomes 1)
-        // s=1, v=[I], u=O -> skip
+                                                                 // s=1, v=[I], u=O -> skip
         assert!(res_ioz.contains(&(2, vec![Infinity, One], Zero, 0, 0))); // y=[]
     }
 
@@ -1250,14 +1450,18 @@ mod tests {
         assert_eq!(map_2.len(), 9);
         for beta_idx in 0..9 {
             let svo_prefix = get_svo_prefix_extended_from_idx(beta_idx, 2);
-            assert_eq!(map_2[beta_idx], idx_mapping(&svo_prefix, 2), 
-                      "Mismatch for beta_idx {}", beta_idx);
+            assert_eq!(
+                map_2[beta_idx],
+                idx_mapping(&svo_prefix, 2),
+                "Mismatch for beta_idx {}",
+                beta_idx
+            );
         }
-        
+
         // Spot check beta_idx = 0 ([Z,Z])
         let res_zz = map_2[0].clone();
         assert_eq!(res_zz.len(), 2);
-        assert!(res_zz.contains(&(0, vec![], Zero, 0, 1))); 
+        assert!(res_zz.contains(&(0, vec![], Zero, 0, 1)));
         assert!(res_zz.contains(&(1, vec![Zero], Zero, 0, 0)));
 
         // Spot check beta_idx = 5 ([O,I]) = 12_3 = 1*3 + 2*1 = 5
@@ -1283,7 +1487,7 @@ mod tests {
             &mut bz_evals_0,
             0, // num_svo_rounds
             &e_in_val_0,
-            &mut temp_tA_0
+            &mut temp_tA_0,
         );
 
         // Expected: e_in_val * az * bz = 2 * 5 * 3 = 30
@@ -1301,7 +1505,7 @@ mod tests {
             &mut bz_evals_1,
             1,
             &e_in_val_1,
-            &mut temp_tA_1
+            &mut temp_tA_1,
         );
 
         // After extension:
@@ -1311,9 +1515,9 @@ mod tests {
         assert_eq!(bz_evals_1, vec![3i128, 5i128, 2i128]);
 
         // Expected: e_in_val * az * bz
-        assert_eq!(temp_tA_1[0], TestField::from(6u64));  // 1 * 2 * 3 = 6
+        assert_eq!(temp_tA_1[0], TestField::from(6u64)); // 1 * 2 * 3 = 6
         assert_eq!(temp_tA_1[1], TestField::from(20u64)); // 1 * 4 * 5 = 20
-        assert_eq!(temp_tA_1[2], TestField::from(4u64));  // 1 * 2 * 2 = 4
+        assert_eq!(temp_tA_1[2], TestField::from(4u64)); // 1 * 2 * 2 = 4
     }
 
     // Test for distribute_tA_to_svo_accumulators
@@ -1341,7 +1545,7 @@ mod tests {
         // Table length 2^(1+1) = 4
         let E_out_s0 = vec![
             TestField::from(1u64), // E[0,0]
-            TestField::from(2u64), // E[0,1] 
+            TestField::from(2u64), // E[0,1]
             TestField::from(3u64), // E[1,0]
             TestField::from(4u64), // E[1,1]
         ];
@@ -1355,8 +1559,9 @@ mod tests {
         E_out_vec.push(E_out_s1);
 
         // Precompute all the idx mappings
-        let all_idx_mapping_results = precompute_all_idx_mappings(num_svo_rounds, num_ternary_points);
-        
+        let all_idx_mapping_results =
+            precompute_all_idx_mappings(num_svo_rounds, num_ternary_points);
+
         // Initialize SVO accumulators for both rounds
         // For each round, we need two vectors: one for u=Z and one for u=I
         // Each vector has size 3^s (s=round index)
@@ -1364,12 +1569,12 @@ mod tests {
         // Round 0: s=0, num_v_configs = 3^0 = 1
         task_svo_accs.push((
             vec![TestField::zero()], // u=Z, v=[] (only one config)
-            vec![TestField::zero()]  // u=I, v=[] (only one config)
+            vec![TestField::zero()], // u=I, v=[] (only one config)
         ));
         // Round 1: s=1, num_v_configs = 3^1 = 3 (v can be Z, O, or I)
         task_svo_accs.push((
             vec![TestField::zero(); 3], // u=Z, v in {Z,O,I}
-            vec![TestField::zero(); 3]  // u=I, v in {Z,O,I}
+            vec![TestField::zero(); 3], // u=I, v in {Z,O,I}
         ));
 
         // Invoke the distribution function
@@ -1392,17 +1597,17 @@ mod tests {
         //   => task_svo_accs[1].0[0] += 5 * 2 = 10. Now expects 0 since task_tA_accumulator_vec[0] is 0.
         assert_eq!(task_svo_accs[0].0[0], TestField::zero()); // round 0, u=Z
         assert_eq!(task_svo_accs[1].0[0], TestField::zero()); // round 1, u=Z, v=[Z]
-        
+
         // For beta_idx = 2 ([Z,I]), task_tA = 5:
         // - Maps to (1, [Z], I, 0, 0)
         // - For round 1: s=1, v=[Z], u=I, y=[], E_out = E[0] = 5
         //   => task_svo_accs[1].1[0] += 5 * 5 = 25
         assert_eq!(task_svo_accs[1].1[0], TestField::from(25u64)); // round 1, u=I, v=[Z]
-        
+
         // For beta_idx = 4 ([O,O]), task_tA = 3:
         // - Maps to (1, [O], O, 0, 0) - This gets skipped because u=O
         // - No contribution expected
-        
+
         // Check that other accumulators remain at zero
         assert_eq!(task_svo_accs[0].1[0], TestField::zero()); // round 0, u=I
         assert_eq!(task_svo_accs[1].0[1], TestField::zero()); // round 1, u=Z, v=[O]

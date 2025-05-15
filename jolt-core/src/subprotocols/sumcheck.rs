@@ -12,7 +12,9 @@ use crate::poly::spartan_interleaved_poly::{
 use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
-use crate::r1cs::spartan::small_value_optimization::{NUM_SVO_ROUNDS, USES_SMALL_VALUE_OPTIMIZATION};
+use crate::r1cs::spartan::small_value_optimization::{
+    NUM_SVO_ROUNDS, USES_SMALL_VALUE_OPTIMIZATION,
+};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
 use crate::utils::thread::drop_in_background_thread;
@@ -205,13 +207,14 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut claim = F::zero();
 
         // First, precompute the accumulators and also the `NewSpartanInterleavedPolynomial`
-        let (accums_zero, accums_infty, mut az_bz_cz_poly) = NewSpartanInterleavedPolynomial::<NUM_SVO_ROUNDS, F>::new_with_precompute(
-            padded_num_constraints,
-            uniform_constraints,
-            cross_step_constraints,
-            &flattened_polys,
-            tau,
-        );
+        let (accums_zero, accums_infty, mut az_bz_cz_poly) =
+            NewSpartanInterleavedPolynomial::<NUM_SVO_ROUNDS, F>::new_with_precompute(
+                padded_num_constraints,
+                uniform_constraints,
+                cross_step_constraints,
+                &flattened_polys,
+                tau,
+            );
 
         let mut lagrange_coeffs: Vec<F> = vec![F::one()];
 
@@ -229,21 +232,20 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                         assert!(i == 0);
                         quadratic_eval_infty = accums_infty[0];
                     }
-                    2 => {
-                        match i {
-                            0 => {
-                                quadratic_eval_infty = accums_infty[0];
-                            }
-                            1 => {
-                                quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
-                                quadratic_eval_infty =
-                                    accums_infty[1] * lagrange_coeffs[0] + 
-                                    accums_infty[2] * lagrange_coeffs[1] + 
-                                    accums_infty[3] * lagrange_coeffs[2];                                
-                            }
-                            _ => { unreachable!("i must be less than NUM_SVO_ROUNDS!") }
+                    2 => match i {
+                        0 => {
+                            quadratic_eval_infty = accums_infty[0];
                         }
-                    }
+                        1 => {
+                            quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
+                            quadratic_eval_infty = accums_infty[1] * lagrange_coeffs[0]
+                                + accums_infty[2] * lagrange_coeffs[1]
+                                + accums_infty[3] * lagrange_coeffs[2];
+                        }
+                        _ => {
+                            unreachable!("i must be less than NUM_SVO_ROUNDS!")
+                        }
+                    },
                     // 3 => {
                     //     match i {
                     //         0 => {
@@ -252,9 +254,9 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     //         1 => {
                     //             quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
                     //             quadratic_eval_infty =
-                    //                 accums_infty[1] * lagrange_coeffs[0] + 
-                    //                 accums_infty[2] * lagrange_coeffs[1] + 
-                    //                 accums_infty[3] * lagrange_coeffs[2];                                
+                    //                 accums_infty[1] * lagrange_coeffs[0] +
+                    //                 accums_infty[2] * lagrange_coeffs[1] +
+                    //                 accums_infty[3] * lagrange_coeffs[2];
                     //         }
                     //         2 => {
                     //             // We have accums_zero[1..6] corresponding to
@@ -266,26 +268,28 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     //             // (infty, v_1, v_2), where v_1, v_2 \in {0, 1, infty}
                     //             // Do full inner product over lagrange_coeffs
                     //             quadratic_eval_0 =
-                    //                 accums_zero[1] * lagrange_coeffs[2] + 
-                    //                 accums_zero[2] * lagrange_coeffs[5] + 
-                    //                 accums_zero[3] * lagrange_coeffs[6] + 
-                    //                 accums_zero[4] * lagrange_coeffs[7] + 
+                    //                 accums_zero[1] * lagrange_coeffs[2] +
+                    //                 accums_zero[2] * lagrange_coeffs[5] +
+                    //                 accums_zero[3] * lagrange_coeffs[6] +
+                    //                 accums_zero[4] * lagrange_coeffs[7] +
                     //                 accums_zero[5] * lagrange_coeffs[8];
-                    //             quadratic_eval_infty = 
-                    //                 accums_infty[4] * lagrange_coeffs[0] + 
-                    //                 accums_infty[5] * lagrange_coeffs[1] + 
-                    //                 accums_infty[6] * lagrange_coeffs[2] + 
-                    //                 accums_infty[7] * lagrange_coeffs[3] + 
+                    //             quadratic_eval_infty =
+                    //                 accums_infty[4] * lagrange_coeffs[0] +
+                    //                 accums_infty[5] * lagrange_coeffs[1] +
+                    //                 accums_infty[6] * lagrange_coeffs[2] +
+                    //                 accums_infty[7] * lagrange_coeffs[3] +
                     //                 accums_infty[8] * lagrange_coeffs[4] +
-                    //                 accums_infty[9] * lagrange_coeffs[5] + 
-                    //                 accums_infty[10] * lagrange_coeffs[6] + 
-                    //                 accums_infty[11] * lagrange_coeffs[7] + 
-                    //                 accums_infty[12] * lagrange_coeffs[8];      
+                    //                 accums_infty[9] * lagrange_coeffs[5] +
+                    //                 accums_infty[10] * lagrange_coeffs[6] +
+                    //                 accums_infty[11] * lagrange_coeffs[7] +
+                    //                 accums_infty[12] * lagrange_coeffs[8];
                     //         }
                     //         _ => { unreachable!("i must be less than NUM_SVO_ROUNDS!") }
                     //     }
                     // }
-                    _ => { unreachable!("Hard-coding up to three small value rounds for now!") }
+                    _ => {
+                        unreachable!("Hard-coding up to three small value rounds for now!")
+                    }
                 }
             }
 
@@ -313,6 +317,51 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                             .map(move |coeff| *lagrange_coeff * *coeff)
                     })
                     .collect();
+            }
+        }
+
+        #[cfg(test)]
+        {
+            let mut az_bz_cz_poly = SpartanInterleavedPolynomial::new(
+                uniform_constraints,
+                cross_step_constraints,
+                flattened_polys,
+                padded_num_constraints,
+            );
+
+            let mut r: Vec<F> = Vec::new();
+            let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
+            let mut claim = F::zero();
+            let mut old_eq_poly = SplitEqPolynomial::new(tau);
+
+            for round in 0..NUM_SVO_ROUNDS {
+                if round == 0 {
+                    az_bz_cz_poly.first_sumcheck_round(
+                        &mut old_eq_poly,
+                        transcript,
+                        &mut r,
+                        &mut old_polys,
+                        &mut claim,
+                    );
+                } else {
+                    az_bz_cz_poly.subsequent_sumcheck_round(
+                        &mut old_eq_poly,
+                        transcript,
+                        &mut r,
+                        &mut old_polys,
+                        &mut claim,
+                    );
+                }
+            }
+
+            // Assert that the sumcheck polys at each steps are the same
+            // (and hence the `r` challenges and the round claims are also the same)
+            for round in 0..NUM_SVO_ROUNDS {
+                assert_eq!(
+                    old_polys[round].coeffs_except_linear_term,
+                    polys[round].coeffs_except_linear_term,
+                    "The old and new method must yield the same results!"
+                );
             }
         }
 
@@ -680,19 +729,15 @@ mod tests {
         for &r_i in &r_challenges {
             // Lagrange coefficients for 0, 1, and infty, respectively for the current r_i
             // [1 - r_i, r_i, r_i * (r_i - 1)]
-            let lagrange_coeffs_r_i = [
-                1_i32 - r_i,
-                r_i,
-                r_i * (r_i - 1_i32),
-            ];
+            let lagrange_coeffs_r_i = [1_i32 - r_i, r_i, r_i * (r_i - 1_i32)];
 
             // Update Lagrange coefficients: L_{i+1} = lagrange_coeffs_r_i \otimes L_i
             lagrange_coeffs = lagrange_coeffs_r_i
                 .iter()
                 .flat_map(|&lagrange_coeff_from_r_i| {
-                    lagrange_coeffs
-                        .iter()
-                        .map(move |&coeff_from_prev_round| lagrange_coeff_from_r_i * coeff_from_prev_round)
+                    lagrange_coeffs.iter().map(move |&coeff_from_prev_round| {
+                        lagrange_coeff_from_r_i * coeff_from_prev_round
+                    })
                 })
                 .collect();
 
@@ -731,9 +776,8 @@ mod tests {
         //                      8, -16, -16, -12, 24, 24, -24, 48, 48,
         //                      24, -48, -48, -36, 72, 72, -72, 144, 144]
         let expected_coeffs: Vec<i32> = vec![
-            -6, 12, 12, 9, -18, -18, 18, -36, -36, 
-            8, -16, -16, -12, 24, 24, -24, 48, 48, 
-            24, -48, -48, -36, 72, 72, -72, 144, 144,
+            -6, 12, 12, 9, -18, -18, 18, -36, -36, 8, -16, -16, -12, 24, 24, -24, 48, 48, 24, -48,
+            -48, -36, 72, 72, -72, 144, 144,
         ];
 
         assert_eq!(lagrange_coeffs.len(), 27);

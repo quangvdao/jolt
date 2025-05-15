@@ -1,5 +1,5 @@
-use std::marker::PhantomData;
 use small_value_optimization::NUM_SVO_ROUNDS;
+use std::marker::PhantomData;
 use tracing::{span, Level};
 
 use crate::field::JoltField;
@@ -168,33 +168,36 @@ where
             .map(|_i| transcript.challenge_scalar())
             .collect::<Vec<F>>();
 
-        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) = if small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION {
-            // SVO Path
-            let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
-            num_rounds_x,
-                constraint_builder.padded_rows_per_step(),
-                &constraint_builder.uniform_builder.constraints,
-                &constraint_builder.offset_equality_constraints,
-                &flattened_polys,
-                &tau,
-                transcript,
-            );
-            let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-            (proof, outer_sumcheck_r, claims)
-        } else {
-            // Standard Cubic Path
-            let mut eq_tau = SplitEqPolynomial::new(&tau);
-            let mut az_bz_cz_poly = constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-            let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic(
-                num_rounds_x,
-                &mut eq_tau,
-                &mut az_bz_cz_poly,
-                transcript,
-            );
-            drop_in_background_thread((az_bz_cz_poly, eq_tau));
-            let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-            (proof, outer_sumcheck_r, claims)
-        };
+        let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) =
+            if small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION {
+                // SVO Path
+                let (proof, outer_sumcheck_r, claims) =
+                    SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
+                        num_rounds_x,
+                        constraint_builder.padded_rows_per_step(),
+                        &constraint_builder.uniform_builder.constraints,
+                        &constraint_builder.offset_equality_constraints,
+                        &flattened_polys,
+                        &tau,
+                        transcript,
+                    );
+                let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
+                (proof, outer_sumcheck_r, claims)
+            } else {
+                // Standard Cubic Path
+                let mut eq_tau = SplitEqPolynomial::new(&tau);
+                let mut az_bz_cz_poly =
+                    constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+                let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic(
+                    num_rounds_x,
+                    &mut eq_tau,
+                    &mut az_bz_cz_poly,
+                    transcript,
+                );
+                drop_in_background_thread((az_bz_cz_poly, eq_tau));
+                let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
+                (proof, outer_sumcheck_r, claims)
+            };
 
         ProofTranscript::append_scalars(transcript, &outer_sumcheck_claims);
         // claims from the end of sum-check

@@ -571,13 +571,16 @@ pub mod svo_helpers {
 
     /// Hardcoded version for `num_svo_rounds == 2`
     /// We have 5 non-binary points with their corresponding mappings: (recall, LSB is rightmost)
-    /// 0: (0,I) -> s=0, v=[], u=I, y=[0] (accum_1(I), accum_2(0,I)), or accum_infty[0], accum_zero[0]
-    /// 1: (1,I) -> s=0, v=[], u=I, y=[1] (accum_1(I))
-    /// 2: (I,0) -> s=1, v=[I], u=0, y=[] (accum_2(I,0))
-    /// 3: (I,1) -> s=1, v=[I], u=1, y=[] (accum_2(I,1))
-    /// 4: (I,I) -> s=1, v=[I], u=I, y=[] (accum_2(I,I))
+    /// task_tA_accumulator_vec indices:
+    ///   [0]: Y_ext = (0,I)
+    ///   [1]: Y_ext = (1,I)
+    ///   [2]: Y_ext = (I,0)
+    ///   [3]: Y_ext = (I,1)
+    ///   [4]: Y_ext = (I,I)
     ///
-    /// fuck this is a mess...
+    /// Target flat accumulators (NUM_SVO_ROUNDS = 2):
+    ///   task_svo_accs_zero (len 1): [ A_1(I,0) ]
+    ///   task_svo_accs_infty (len 4): [ A_0(empty,I), A_1(0,I), A_1(1,I), A_1(I,I) ]
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_2<F: JoltField>(
         task_tA_accumulator_vec: &[F],
@@ -587,280 +590,268 @@ pub mod svo_helpers {
         task_svo_accs_infty: &mut [F],
     ) {
         assert!(task_tA_accumulator_vec.len() == 5);
-        assert!(task_svo_accs_zero.len() == 1);
-        assert!(task_svo_accs_infty.len() == 4);
+        assert!(task_svo_accs_zero.len() == 1); // For A_1(I,0)
+        assert!(task_svo_accs_infty.len() == 4); // For A_0(empty,I), A_1(0,I), A_1(1,I), A_1(I,I)
         assert!(E_out_vec.len() >= 2);
 
-        // Points 0 and 1: (0,I) and (1,I) both map to round_s=0, v_config=[], u=I
-        // Point 0: (0,I) -> round_s=0, v_config=[], u=I, y=[0]
-        let tA_0I = task_tA_accumulator_vec[0];
-        let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0], // E_out for round 0
-            1,             // num_y_suffix_vars = 1
-            0,             // y_suffix_as_int = 0
-            x_out_val,
-        );
-        let product_0I = E_out_0_val * tA_0I;
-        // v_config_idx = 0 (empty v_config)
-        task_svo_accs_infty[0] += product_0I;
-        task_svo_accs_zero[0] += product_0I;
+        // --- Contributions from task_tA_accumulator_vec ---
 
-        // Point 1: (1,I) -> round_s=0, v_config=[], u=I, y=[1]
-        let tA_1I = task_tA_accumulator_vec[1];
-        let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0], // E_out for round 0
-            1,             // num_y_suffix_vars = 1
-            1,             // y_suffix_as_int = 1
-            x_out_val,
-        );
+        // Y_ext = (0,I) -> task_tA_accumulator_vec[0]
+        // Maps to: (s=1, v_config=[0], u=I, y_sfx=0, n_y_sfx=0)
+        if !task_tA_accumulator_vec[0].is_zero() {
+            let E_val_s1_y0 = get_E_out_s_val::<F>(&E_out_vec[1], 0, 0, x_out_val); // E_out_1[x_out_val]
+            // Target: A_1(0,I) -> task_svo_accs_infty[1] (base_idx_infty_s1=1, local_v_idx=map_v_config_to_idx([0],1)=0)
+            task_svo_accs_infty[1] += E_val_s1_y0 * task_tA_accumulator_vec[0];
+        }
 
-        // v_config_idx = 0 (empty v_config)
-        task_svo_accs_infty[0] += E_out_0_val * tA_1I;
+        // Y_ext = (1,I) -> task_tA_accumulator_vec[1]
+        // Maps to: (s=1, v_config=[1], u=I, y_sfx=0, n_y_sfx=0)
+        if !task_tA_accumulator_vec[1].is_zero() {
+            let E_val_s1_y0 = get_E_out_s_val::<F>(&E_out_vec[1], 0, 0, x_out_val); // E_out_1[x_out_val]
+            // Target: A_1(1,I) -> task_svo_accs_infty[2] (base_idx_infty_s1=1, local_v_idx=map_v_config_to_idx([1],1)=1)
+            task_svo_accs_infty[2] += E_val_s1_y0 * task_tA_accumulator_vec[1];
+        }
 
-        // Points 2,3,4: (I,0), (I,1), (I,I) all map to round_s=1, v_config=[I]
-        // Point 2: (I,0) -> round_s=1, v_config=[I], u=0, y=[]
-        let tA_I0 = task_tA_accumulator_vec[2];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1], // E_out for round 1
-            0,             // num_y_suffix_vars = 0
-            0,             // y_suffix_as_int = 0
-            x_out_val,
-        );
+        // Y_ext = (I,0) -> task_tA_accumulator_vec[2]
+        // Maps to:
+        //   1. (s=0, v_config=[], u=I, y_sfx=0, n_y_sfx=1) where y_sfx is Y_ext[1]=0
+        //   2. (s=1, v_config=[I], u=0, y_sfx=0, n_y_sfx=0)
+        if !task_tA_accumulator_vec[2].is_zero() {
+            // Contribution 1 (to A_0(empty,I))
+            let E_val_s0_y0 = get_E_out_s_val::<F>(&E_out_vec[0], 1, 0, x_out_val); // E_out_0[(x_out_val<<1)|0]
+            // Target: A_0(empty,I) -> task_svo_accs_infty[0] (base_idx_infty_s0=0, local_v_idx=0)
+            task_svo_accs_infty[0] += E_val_s0_y0 * task_tA_accumulator_vec[2];
 
-        task_svo_accs_infty[1] += E_out_1_val * tA_I0;
+            // Contribution 2 (to A_1(I,0))
+            let E_val_s1_y0 = get_E_out_s_val::<F>(&E_out_vec[1], 0, 0, x_out_val); // E_out_1[x_out_val]
+            // Target: A_1(I,0) -> task_svo_accs_zero[0] (base_idx_zero_s1=0, local_v_zero_idx for [I] is 0)
+            task_svo_accs_zero[0] += E_val_s1_y0 * task_tA_accumulator_vec[2];
+        }
 
-        // Point 3: (I,1) -> round_s=1, v_config=[I], u=1, y=[]
-        let tA_I1 = task_tA_accumulator_vec[3];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1], // E_out for round 1
-            0,             // num_y_suffix_vars = 0
-            0,             // y_suffix_as_int = 0
-            x_out_val,
-        );
+        // Y_ext = (I,1) -> task_tA_accumulator_vec[3]
+        // Maps to: (s=0, v_config=[], u=I, y_sfx=1, n_y_sfx=1) where y_sfx is Y_ext[1]=1
+        // (Note: (s=1, v=[I], u=1) is skipped by idx_mapping as u != Z or I)
+        if !task_tA_accumulator_vec[3].is_zero() {
+            let E_val_s0_y1 = get_E_out_s_val::<F>(&E_out_vec[0], 1, 1, x_out_val); // E_out_0[(x_out_val<<1)|1]
+            // Target: A_0(empty,I) -> task_svo_accs_infty[0]
+            task_svo_accs_infty[0] += E_val_s0_y1 * task_tA_accumulator_vec[3];
+        }
 
-        // v_config_idx = 2 (for v_config=[I])
-        task_svo_accs_infty[2] += E_out_1_val * tA_I1;
-
-        // Point 4: (I,I) -> round_s=1, v_config=[I], u=I, y=[]
-        let tA_II = task_tA_accumulator_vec[4];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1], // E_out for round 1
-            0,             // num_y_suffix_vars = 0
-            0,             // y_suffix_as_int = 0
-            x_out_val,
-        );
-
-        // v_config_idx = 2 (for v_config=[I])
-        task_svo_accs_infty[3] += E_out_1_val * tA_II;
+        // Y_ext = (I,I) -> task_tA_accumulator_vec[4]
+        // Maps to: (s=1, v_config=[I], u=I, y_sfx=0, n_y_sfx=0)
+        if !task_tA_accumulator_vec[4].is_zero() {
+            let E_val_s1_y0 = get_E_out_s_val::<F>(&E_out_vec[1], 0, 0, x_out_val); // E_out_1[x_out_val]
+            // Target: A_1(I,I) -> task_svo_accs_infty[3] (base_idx_infty_s1=1, local_v_idx=map_v_config_to_idx([I],1)=2)
+            task_svo_accs_infty[3] += E_val_s1_y0 * task_tA_accumulator_vec[4];
+        }
     }
 
     /// Hardcoded version for `num_svo_rounds == 3`
-    /// We have 19 non-binary points with various mappings into the 19 accumulators over 3 rounds
+    /// task_tA_accumulator_vec (len 19) order:
+    ///  [0]:(0,0,I), [1]:(0,1,I), [2]:(1,0,I), [3]:(1,1,I),  // Y_ext[2]=I
+    ///  [4]:(0,I,0), [5]:(0,I,1), [6]:(0,I,I),              // Y_ext[1]=I, Y_ext[2]!=I
+    ///  [7]:(1,I,0), [8]:(1,I,1), [9]:(1,I,I),              // Y_ext[1]=I, Y_ext[2]!=I
+    /// [10]:(I,0,0), [11]:(I,0,1), [12]:(I,0,I),            // Y_ext[0]=I, Y_ext[1,2]!=I
+    /// [13]:(I,1,0), [14]:(I,1,1), [15]:(I,1,I),            // Y_ext[0]=I, Y_ext[1,2]!=I
+    /// [16]:(I,I,0), [17]:(I,I,1), [18]:(I,I,I)             // Y_ext[0]=I, Y_ext[1]=I
     ///
-    /// TODO: double-check logic
+    /// Target flat accumulators (NUM_SVO_ROUNDS = 3):
+    /// task_svo_accs_zero (len 6 = 0_s0 + 1_s1 + 5_s2):
+    ///   [0]: A_1(I,0)
+    ///   [1]: A_2((0,I),0), [2]: A_2((1,I),0), [3]: A_2((I,0),0)
+    ///   [4]: A_2((I,1),0), [5]: A_2((I,I),0)
+    /// task_svo_accs_infty (len 13 = 1_s0 + 3_s1 + 9_s2):
+    ///   [0]: A_0(empty,I)
+    ///   [1]: A_1((0),I), [2]: A_1((1),I), [3]: A_1((I),I)
+    ///   [4..12]: A_2((Y0,Y1),I) for all 9 (Y0,Y1) for v_config=(Y0,Y1)
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_3<F: JoltField>(
-        task_tA_accumulator_vec: &[F], // (0,0,I), etc.
+        task_tA_accumulator_vec: &[F], 
         x_out_val: usize,
         E_out_vec: &[Vec<F>],
-        task_svo_accs_zero: &mut [F], // (0,I), (0,0,I), (0,1,I), (0,I,0), (0,I,1), (0,I,I)
-        task_svo_accs_infty: &mut [F], // (I), (I,{0/1/I}), (I,{0/1/I},{0/1/I})
+        task_svo_accs_zero: &mut [F], 
+        task_svo_accs_infty: &mut [F],
     ) {
         assert!(task_tA_accumulator_vec.len() == 19);
-        assert!(task_svo_accs_zero.len() == 5);
-        assert!(task_svo_accs_infty.len() == 14);
+        assert!(task_svo_accs_zero.len() == 6); 
+        assert!(task_svo_accs_infty.len() == 13);
         assert!(E_out_vec.len() >= 3);
 
-        // --- FIRST GROUP: I at END (first occurrence) ---
-        // Points (0,0,I), (0,1,I), (1,0,I), (1,1,I) -> round_s=0, v=[], u=I
-        let tA_00I = task_tA_accumulator_vec[0];
-        let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0],
-            2,    // num_y_suffix_vars = 2
-            0b00, // y_suffix_as_int = 00
-            x_out_val,
-        );
-        let product_00I = E_out_0_val * tA_00I;
-        task_svo_accs_zero[0] += product_00I; // (0,I)
-        task_svo_accs_zero[1] += product_00I; // (0,0,I)
-        task_svo_accs_infty[0] += product_00I; // (I)
+        // Helper: Base indices for flat accumulator arrays
+        // Zero accs: s=0 (none), s=1 (idx 0), s=2 (idx 1 to 5)
+        const BASE_IDX_ZERO_S1: usize = 0;
+        const BASE_IDX_ZERO_S2: usize = 1; // (3^0-2^0) + (3^1-2^1) = 0 + 1
+        // Infty accs: s=0 (idx 0), s=1 (idx 1 to 3), s=2 (idx 4 to 12)
+        const BASE_IDX_INFTY_S0: usize = 0;
+        const BASE_IDX_INFTY_S1: usize = 1; // 3^0
+        const BASE_IDX_INFTY_S2: usize = 4; // 3^0 + 3^1
 
-        let tA_01I = task_tA_accumulator_vec[1];
-        let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0],
-            2,    // num_y_suffix_vars = 2
-            0b01, // y_suffix_as_int = 01
-            x_out_val,
-        );
-        let product_01I = E_out_0_val * tA_01I;
-        task_svo_accs_infty[0] += product_01I; // (I)
+        // Helper: map_v_config_to_idx (local index within round for infty accs)
+        // s=0, v_cfg=[] -> 0
+        // s=1, v_cfg=[0]->0, [1]->1, [I]->2
+        // s=2, v_cfg=[0,0]->0, [0,1]->1, [0,I]->2, [1,0]->3, [1,1]->4, [1,I]->5, [I,0]->6, [I,1]->7, [I,I]->8
 
-        let tA_10I = task_tA_accumulator_vec[2];
-        let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0],
-            2,    // num_y_suffix_vars = 2
-            0b10, // y_suffix_as_int = 10
-            x_out_val,
-        );
-        let product_10I = E_out_0_val * tA_10I;
-        task_svo_accs_infty[0] += product_10I; // (I)
+        // Helper: local_v_config_idx_for_zero_acc (local index for non-binary v_cfgs for zero accs)
+        // s=1: [I] -> 0
+        // s=2: (0,I)->0, (1,I)->1, (I,0)->2, (I,1)->3, (I,I)->4
 
-        let tA_11I = task_tA_accumulator_vec[3];
-        let E_out_0_val = get_E_out_s_val::<F>(
-            &E_out_vec[0],
-            2,    // num_y_suffix_vars = 2
-            0b11, // y_suffix_as_int = 11
-            x_out_val,
-        );
-        let product_11I = E_out_0_val * tA_11I;
-        task_svo_accs_infty[0] += product_11I; // (I)
+        let tA = task_tA_accumulator_vec; // Shorthand
 
-        // TODO: fill in the rest
+        // --- Group Y_ext[2]=I ---
+        // Y_ext=(0,0,I) -> tA[0]
+        // Maps to: (s=2, v=[0,0], u=I, y=[], n_y=0)
+        if !tA[0].is_zero() {
+            let E_val = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 0] += E_val * tA[0]; // A_2((0,0),I) (v_idx=0 for [0,0])
+        }
+        // Y_ext=(0,1,I) -> tA[1]
+        // Maps to: (s=2, v=[0,1], u=I, y=[], n_y=0)
+        if !tA[1].is_zero() {
+            let E_val = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 1] += E_val * tA[1]; // A_2((0,1),I) (v_idx=1 for [0,1])
+        }
+        // Y_ext=(1,0,I) -> tA[2]
+        // Maps to: (s=2, v=[1,0], u=I, y=[], n_y=0)
+        if !tA[2].is_zero() {
+            let E_val = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 3] += E_val * tA[2]; // A_2((1,0),I) (v_idx=3 for [1,0])
+        }
+        // Y_ext=(1,1,I) -> tA[3]
+        // Maps to: (s=2, v=[1,1], u=I, y=[], n_y=0)
+        if !tA[3].is_zero() {
+            let E_val = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 4] += E_val * tA[3]; // A_2((1,1),I) (v_idx=4 for [1,1])
+        }
 
-        // --- SECOND GROUP: I in MIDDLE (first occurrence) ---
-        // Points (0,I,0), (0,I,1), (1,I,0), (1,I,1) -> round_s=1, v=[I], u=0/1
-        let tA_0I0 = task_tA_accumulator_vec[2];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],
-            1,   // num_y_suffix_vars = 1
-            0b0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[2] += E_out_1_val * tA_0I0;
+        // --- Group Y_ext[1]=I, Y_ext[2]!=I ---
+        // Y_ext=(0,I,0) -> tA[4]
+        // Maps to:
+        //   1. (s=1, v=[0], u=I, y_sfx=[0], n_y_sfx=1)
+        //   2. (s=2, v=[0,I], u=0, y_sfx=[], n_y_sfx=0)
+        if !tA[4].is_zero() {
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 0, x_out_val); // y_sfx=0
+            task_svo_accs_infty[BASE_IDX_INFTY_S1 + 0] += E_val_s1 * tA[4]; // A_1((0),I) (v_idx=0 for [0])
+            
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_zero[BASE_IDX_ZERO_S2 + 0] += E_val_s2 * tA[4]; // A_2((0,I),0) (v_zero_idx=0 for [0,I])
+        }
+        // Y_ext=(0,I,1) -> tA[5]
+        // Maps to: (s=1, v=[0], u=I, y_sfx=[1], n_y_sfx=1)
+        if !tA[5].is_zero() {
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 1, x_out_val); // y_sfx=1
+            task_svo_accs_infty[BASE_IDX_INFTY_S1 + 0] += E_val_s1 * tA[5]; // A_1((0),I)
+        }
+        // Y_ext=(0,I,I) -> tA[6]
+        // Maps to: (s=2, v=[0,I], u=I, y_sfx=[], n_y_sfx=0)
+        if !tA[6].is_zero() {
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 2] += E_val_s2 * tA[6]; // A_2((0,I),I) (v_idx=2 for [0,I])
+        }
+        // Y_ext=(1,I,0) -> tA[7]
+        // Maps to:
+        //   1. (s=1, v=[1], u=I, y_sfx=[0], n_y_sfx=1)
+        //   2. (s=2, v=[1,I], u=0, y_sfx=[], n_y_sfx=0)
+        if !tA[7].is_zero() {
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S1 + 1] += E_val_s1 * tA[7]; // A_1((1),I) (v_idx=1 for [1])
 
-        let tA_0I1 = task_tA_accumulator_vec[3];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],
-            1,   // num_y_suffix_vars = 1
-            0b1, // y_suffix_as_int = 1
-            x_out_val,
-        );
-        task_svo_accs_zero[2] += E_out_1_val * tA_0I1;
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_zero[BASE_IDX_ZERO_S2 + 1] += E_val_s2 * tA[7]; // A_2((1,I),0) (v_zero_idx=1 for [1,I])
+        }
+        // Y_ext=(1,I,1) -> tA[8]
+        // Maps to: (s=1, v=[1], u=I, y_sfx=[1], n_y_sfx=1)
+        if !tA[8].is_zero() {
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 1, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S1 + 1] += E_val_s1 * tA[8]; // A_1((1),I)
+        }
+        // Y_ext=(1,I,I) -> tA[9]
+        // Maps to: (s=2, v=[1,I], u=I, y_sfx=[], n_y_sfx=0)
+        if !tA[9].is_zero() {
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 5] += E_val_s2 * tA[9]; // A_2((1,I),I) (v_idx=5 for [1,I])
+        }
 
-        let tA_1I0 = task_tA_accumulator_vec[7];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],
-            1,   // num_y_suffix_vars = 1
-            0b0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[2] += E_out_1_val * tA_1I0;
+        // --- Group Y_ext[0]=I, Y_ext[1,2]!=I ---
+        // Y_ext=(I,0,0) -> tA[10]
+        // Maps to:
+        //   1. (s=0, v=[], u=I, y_sfx=[0,0], n_y_sfx=2)
+        //   2. (s=1, v=[I], u=0, y_sfx=[0], n_y_sfx=1)
+        //   3. (s=2, v=[I,0], u=0, y_sfx=[], n_y_sfx=0)
+        if !tA[10].is_zero() {
+            let E_val_s0 = get_E_out_s_val::<F>(&E_out_vec[0], 2, 0b00, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S0 + 0] += E_val_s0 * tA[10]; // A_0(empty,I)
 
-        let tA_1I1 = task_tA_accumulator_vec[8];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],
-            1,   // num_y_suffix_vars = 1
-            0b1, // y_suffix_as_int = 1
-            x_out_val,
-        );
-        task_svo_accs_zero[2] += E_out_1_val * tA_1I1;
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 0, x_out_val);
+            task_svo_accs_zero[BASE_IDX_ZERO_S1 + 0] += E_val_s1 * tA[10]; // A_1(I,0) (v_zero_idx=0 for [I])
 
-        // --- THIRD GROUP: I at BEGINNING (first occurrence) ---
-        // Points (I,0,0), (I,0,1), (I,1,0), (I,1,1) -> round_s=2, v=[I,0/1], u=0/1
-        let tA_I00 = task_tA_accumulator_vec[10];
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[4] += E_out_2_val * tA_I00;
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_zero[BASE_IDX_ZERO_S2 + 2] += E_val_s2 * tA[10]; // A_2((I,0),0) (v_zero_idx=2 for [I,0])
+        }
+        // Y_ext=(I,0,1) -> tA[11]
+        // Maps to:
+        //   1. (s=0, v=[], u=I, y_sfx=[0,1], n_y_sfx=2)
+        //   2. (s=1, v=[I], u=0, y_sfx=[1], n_y_sfx=1)
+        if !tA[11].is_zero() {
+            let E_val_s0 = get_E_out_s_val::<F>(&E_out_vec[0], 2, 0b01, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S0 + 0] += E_val_s0 * tA[11]; // A_0(empty,I)
+            
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 1, x_out_val);
+            task_svo_accs_zero[BASE_IDX_ZERO_S1 + 0] += E_val_s1 * tA[11]; // A_1(I,0)
+        }
+        // Y_ext=(I,0,I) -> tA[12]
+        // Maps to: (s=2, v=[I,0], u=I, y_sfx=[], n_y_sfx=0)
+        if !tA[12].is_zero() {
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 6] += E_val_s2 * tA[12]; // A_2((I,0),I) (v_idx=6 for [I,0])
+        }
+        // Y_ext=(I,1,0) -> tA[13]
+        // Maps to:
+        //   1. (s=0, v=[], u=I, y_sfx=[1,0], n_y_sfx=2)
+        //   2. (s=2, v=[I,1], u=0, y_sfx=[], n_y_sfx=0)
+        if !tA[13].is_zero() {
+            let E_val_s0 = get_E_out_s_val::<F>(&E_out_vec[0], 2, 0b10, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S0 + 0] += E_val_s0 * tA[13]; // A_0(empty,I)
 
-        let tA_I01 = task_tA_accumulator_vec[11];
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[4] += E_out_2_val * tA_I01;
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_zero[BASE_IDX_ZERO_S2 + 3] += E_val_s2 * tA[13]; // A_2((I,1),0) (v_zero_idx=3 for [I,1])
+        }
+        // Y_ext=(I,1,1) -> tA[14]
+        // Maps to: (s=0, v=[], u=I, y_sfx=[1,1], n_y_sfx=2)
+        if !tA[14].is_zero() {
+            let E_val_s0 = get_E_out_s_val::<F>(&E_out_vec[0], 2, 0b11, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S0 + 0] += E_val_s0 * tA[14]; // A_0(empty,I)
+        }
+        // Y_ext=(I,1,I) -> tA[15]
+        // Maps to: (s=2, v=[I,1], u=I, y_sfx=[], n_y_sfx=0)
+        if !tA[15].is_zero() {
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 7] += E_val_s2 * tA[15]; // A_2((I,1),I) (v_idx=7 for [I,1])
+        }
 
-        let tA_I10 = task_tA_accumulator_vec[13];
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[5] += E_out_2_val * tA_I10;
+        // --- Group Y_ext[0]=I, Y_ext[1]=I ---
+        // Y_ext=(I,I,0) -> tA[16]
+        // Maps to:
+        //   1. (s=1, v=[I], u=I, y_sfx=[0], n_y_sfx=1)
+        //   2. (s=2, v=[I,I], u=0, y_sfx=[], n_y_sfx=0)
+        if !tA[16].is_zero() {
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S1 + 2] += E_val_s1 * tA[16]; // A_1((I),I) (v_idx=2 for [I])
 
-        let tA_I11 = task_tA_accumulator_vec[14];
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[5] += E_out_2_val * tA_I11;
-
-        // --- FOURTH GROUP: MULTIPLE I's ---
-        // Points with two I's
-        let tA_0II = task_tA_accumulator_vec[4];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],
-            1,   // num_y_suffix_vars = 1
-            0b0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_infty[2] += E_out_1_val * tA_0II;
-
-        let tA_1II = task_tA_accumulator_vec[9];
-        let E_out_1_val = get_E_out_s_val::<F>(
-            &E_out_vec[1],
-            1,   // num_y_suffix_vars = 1
-            0b1, // y_suffix_as_int = 1
-            x_out_val,
-        );
-        task_svo_accs_infty[2] += E_out_1_val * tA_1II;
-
-        let tA_I0I = task_tA_accumulator_vec[12];
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_infty[4] += E_out_2_val * tA_I0I;
-
-        let tA_I1I = task_tA_accumulator_vec[15];
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_infty[5] += E_out_2_val * tA_I1I;
-
-        let tA_II0 = task_tA_accumulator_vec[16];
-        // Double-check this, seems wrong (y is 0?)
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[10] += E_out_2_val * tA_II0; // (I,I,0)
-
-        let tA_II1 = task_tA_accumulator_vec[17];
-        // Double-check this, seems wrong (y is 0?)
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_zero[11] += E_out_2_val * tA_II1; // (I,I,1)
-
-        // Point with three I's
-        let tA_III = task_tA_accumulator_vec[18];
-        // Double-check this, seems wrong (y is 0?)
-        let E_out_2_val = get_E_out_s_val::<F>(
-            &E_out_vec[2],
-            0, // num_y_suffix_vars = 0
-            0, // y_suffix_as_int = 0
-            x_out_val,
-        );
-        task_svo_accs_infty[12] += E_out_2_val * tA_III; // (I,I,I)
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_zero[BASE_IDX_ZERO_S2 + 4] += E_val_s2 * tA[16]; // A_2((I,I),0) (v_zero_idx=4 for [I,I])
+        }
+        // Y_ext=(I,I,1) -> tA[17]
+        // Maps to: (s=1, v=[I], u=I, y_sfx=[1], n_y_sfx=1)
+        if !tA[17].is_zero() {
+            let E_val_s1 = get_E_out_s_val::<F>(&E_out_vec[1], 1, 1, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S1 + 2] += E_val_s1 * tA[17]; // A_1((I),I)
+        }
+        // Y_ext=(I,I,I) -> tA[18]
+        // Maps to: (s=2, v=[I,I], u=I, y_sfx=[], n_y_sfx=0)
+        if !tA[18].is_zero() {
+            let E_val_s2 = get_E_out_s_val::<F>(&E_out_vec[2], 0, 0, x_out_val);
+            task_svo_accs_infty[BASE_IDX_INFTY_S2 + 8] += E_val_s2 * tA[18]; // A_2((I,I),I) (v_idx=8 for [I,I])
+        }
     }
 
     // Distributes the accumulated tA values (sum over x_in) for a single x_out_val

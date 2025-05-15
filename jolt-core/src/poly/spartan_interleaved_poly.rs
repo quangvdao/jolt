@@ -74,6 +74,13 @@ pub struct NewSpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltF
     pub(crate) bz_bound_coeffs: DensePolynomial<F>,
     pub(crate) cz_bound_coeffs: DensePolynomial<F>,
 
+    // What if we do sparse coeffs throughout like old method...
+    // Really need best performance for the first few rounds
+    // and the old methods are already tested and optimized
+    // pub(crate) bound_coeffs: Vec<SparseCoefficient<F>>,
+
+    // binding_scratch_space: Vec<SparseCoefficient<F>>,
+
     pub(crate) dense_len: usize,
 }
 
@@ -316,10 +323,14 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             }); // End .reduce()
 
         // --- Finalization ---
+        
+        
+        let final_ab_unbound_coeffs = fold_result.ab_coeffs;
+
+        // Try commenting this for now
         // Get final flat list of sparse Az/Bz coefficients from reduction result.
-        let mut final_ab_unbound_coeffs = fold_result.ab_coeffs;
         // Sort the combined list globally by R1CS index.
-        final_ab_unbound_coeffs.sort_by_key(|sc| sc.index);
+        // final_ab_unbound_coeffs.sort_by_key(|sc| sc.index);
 
         // Debug check for sortedness
         #[cfg(test)]
@@ -410,16 +421,28 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let num_x_out_vars = eq_poly.E_out_current_len().log_2();
         let num_x_in_vars = eq_poly.E_in_current_len().log_2();
         let num_x_prime_vars = num_x_out_vars + num_x_in_vars; 
+        let num_non_x_out_vars = num_x_in_vars + num_y_svo_vars;
 
         let num_x_out_points = 1 << num_x_out_vars;
         let num_x_in_points = if num_x_in_vars == 0 { 1 } else { 1 << num_x_in_vars };
-        
+        let num_non_x_out_points = 1 << num_non_x_out_vars;
+
+        println!("num_x_out_vars {}", num_x_out_vars);
+        println!("num_x_in_vars {}", num_x_in_vars);
+        println!("num_x_prime_vars {}", num_x_prime_vars);
+        println!("num_y_svo_vars {}", num_y_svo_vars);
+        println!("num_non_x_out_vars {}", num_non_x_out_vars);
+        println!("dense_len {}", self.dense_len);
+        println!("unbound_coeffs_len {}", self.ab_unbound_coeffs.len());
+
         let N_k_dense_len_for_x_prime = 1 << num_x_prime_vars;
         drop(_setup_guard); 
 
         let ranges_calc_span = tracing::span!(tracing::Level::DEBUG, "streaming_round_ranges_calc", num_x_out_points);
         let _ranges_calc_guard = ranges_calc_span.enter();
         let mut ranges_for_x_out: Vec<std::ops::Range<usize>> = Vec::with_capacity(num_x_out_points);
+        let mut output_sizes: Vec<usize> = Vec::with_capacity(num_x_out_points);
+
         if !self.ab_unbound_coeffs.is_empty() {
             for x_out_task_val in 0..num_x_out_points { 
                 let min_r1cs_row = (x_out_task_val << (num_x_in_vars + num_y_svo_vars))
@@ -435,9 +458,67 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 let start = self.ab_unbound_coeffs.partition_point(|sc| sc.index < start_sparse_idx);
                 let end = self.ab_unbound_coeffs.partition_point(|sc| sc.index <= end_sparse_idx);
                 ranges_for_x_out.push(start..end);
+                output_sizes.push(end - start);
             }
         }
         drop(_ranges_calc_guard);
+
+        // In order to parallelize, we do a first pass over the coefficients to
+        // determine how to divide it into chunks that can be processed independently.
+        // In particular, coefficients whose indices are the same modulo (2 ^ (NUM_SVO_ROUNDS + 1))
+        // cannot be processed independently.
+
+        // Simplifying assumption: group by `x_out`
+        // let block_size = self
+        //     .ab_unbound_coeffs
+        //     .len()
+        //     .div_ceil(rayon::current_num_threads())
+        //     .next_multiple_of(2 * (1 << NUM_SVO_ROUNDS));
+
+        // Parallel chunking based on the same highest `x_out` bits
+        let chunks: Vec<_> = self
+            .ab_unbound_coeffs
+            .par_chunk_by(|x, y|
+                x.index / num_non_x_out_points == y.index / num_non_x_out_points)
+            .collect();
+
+        assert_eq!(chunks.len(), num_x_out_points, "Length of chunks should be number of x_out points!");
+
+        // Initialize the bound coeffs
+
+        let mut az_bound_coeffs: Vec<F> = Vec::with_capacity(N_k_dense_len_for_x_prime);
+        let mut bz_bound_coeffs: Vec<F> = Vec::with_capacity(N_k_dense_len_for_x_prime);
+        let mut cz_bound_coeffs: Vec<F> = Vec::with_capacity(N_k_dense_len_for_x_prime);
+
+        let mut az_output_slices: Vec<&mut [F]> = Vec::with_capacity(num_x_out_points);
+        let mut bz_output_slices: Vec<&mut [F]> = Vec::with_capacity(num_x_out_points);
+        let mut cz_output_slices: Vec<&mut [F]> = Vec::with_capacity(num_x_out_points);
+
+        let mut az_remainder = az_bound_coeffs.as_mut_slice();
+        let mut bz_remainder = bz_bound_coeffs.as_mut_slice();
+        let mut cz_remainder = cz_bound_coeffs.as_mut_slice();
+
+        for _ in 0..num_x_out_points {
+            let (az_first, az_second) = az_remainder.split_at_mut(num_x_in_points);
+            az_output_slices.push(az_first);
+            az_remainder = az_second;
+
+            let (bz_first, bz_second) = bz_remainder.split_at_mut(num_x_in_points);
+            bz_output_slices.push(bz_first);
+            bz_remainder = bz_second;
+
+            let (cz_first, cz_second) = cz_remainder.split_at_mut(num_x_in_points);
+            cz_output_slices.push(cz_first);
+            cz_remainder = cz_second;
+        }
+
+        assert!(az_remainder.len() == 0);
+        assert!(bz_remainder.len() == 0);
+        assert!(cz_remainder.len() == 0);
+
+        // Inside the loop, we will set elements of the {az/bz/cz}_output_slices
+        // The loop returns a bunch of partial quadratic evals which are then summed together
+        // to form the final evals (at 0 and infty)
 
         #[derive(Debug)]
         struct StreamingRoundAccumulator<F: JoltField> {
@@ -673,9 +754,9 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let bind_dense_span = tracing::span!(tracing::Level::INFO, "streaming_round_bind_dense");
         let _bind_dense_guard = bind_dense_span.enter();
         
-        let mut az_bound_next = vec![F::zero(); N_k_dense_len_for_x_prime];
-        let mut bz_bound_next = vec![F::zero(); N_k_dense_len_for_x_prime];
-        let mut cz_bound_next = vec![F::zero(); N_k_dense_len_for_x_prime];
+        let mut az_bound_next = Vec::with_capacity(N_k_dense_len_for_x_prime);
+        let mut bz_bound_next = Vec::with_capacity(N_k_dense_len_for_x_prime);
+        let mut cz_bound_next = Vec::with_capacity(N_k_dense_len_for_x_prime);
 
         let final_az0 = &final_results.az0_evals_all;
         let final_az1 = &final_results.az1_evals_all;

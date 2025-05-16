@@ -23,6 +23,7 @@ use jolt_core::{
     utils::transcript::{KeccakTranscript, Transcript},
 };
 use postcard;
+use std::time::Duration;
 
 type F = Fr;
 type PCS = HyperKZG<Bn254, KeccakTranscript>;
@@ -125,16 +126,8 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
             num_iters
         ));
 
-        // Set sample size based on num_iters
-        let sample_size_for_iters = match num_iters {
-            16 => 50,
-            32 => 40,
-            64 => 30,
-            128 => 20,
-            256 => 10,
-            _ => 10, // Default for any other values
-        };
-        group.sample_size(sample_size_for_iters);
+        group.measurement_time(Duration::from_secs(120));
+        group.sample_size(10);
 
         group.bench_function(
             "Original (SpartanInterleaved + SplitEq)",
@@ -148,13 +141,13 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                         let mut eq_poly = SplitEqPolynomial::new(&tau);
 
                         let mut az_bz_cz_poly =
-                            r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                        SumcheckInstanceProof::prove_spartan_cubic(
+                            black_box(r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys));
+                        black_box(SumcheckInstanceProof::prove_spartan_cubic(
                             num_rounds_x,
-                            &mut eq_poly,
-                            &mut az_bz_cz_poly,
-                            &mut transcript,
-                        );
+                            black_box(&mut eq_poly),
+                            black_box(&mut az_bz_cz_poly),
+                            black_box(&mut transcript),
+                        ));
                     },
                     BatchSize::SmallInput,
                 );
@@ -173,13 +166,13 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                         let mut eq_poly = NewSplitEqPolynomial::new(&tau);
 
                         let mut az_bz_cz_poly =
-                            r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                        SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
+                            black_box(r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys));
+                        black_box(SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
                             num_rounds_x,
                             black_box(&mut eq_poly),
                             black_box(&mut az_bz_cz_poly),
                             black_box(&mut transcript),
-                        );
+                        ));
                     },
                     BatchSize::SmallInput,
                 );
@@ -195,15 +188,15 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                         return new_transcript;
                     },
                     |mut transcript| {
-                        SumcheckInstanceProof::prove_spartan_small_value::<3>(
+                        black_box(SumcheckInstanceProof::prove_spartan_small_value::<3>(
                             num_rounds_x,
                             padded_rows_per_step,
-                            &uniform_constraints,
-                            &cross_step_constraints,
-                            &flattened_polys,
-                            &tau,
-                            &mut transcript,
-                        )
+                            black_box(&uniform_constraints),
+                            black_box(&cross_step_constraints),
+                            black_box(&flattened_polys),
+                            black_box(&tau),
+                            black_box(&mut transcript),
+                        ));
                     },
                     BatchSize::SmallInput,
                 );

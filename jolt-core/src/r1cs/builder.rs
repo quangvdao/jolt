@@ -459,7 +459,7 @@ pub type OffsetLC = (bool, LC);
 
 /// A conditional constraint that Linear Combinations a, b are equal where a and b need not be in the same step an a
 /// uniform constraint system.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OffsetEqConstraint {
     pub(crate) cond: OffsetLC,
     pub(crate) a: OffsetLC,

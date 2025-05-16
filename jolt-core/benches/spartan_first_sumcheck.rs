@@ -109,6 +109,10 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
 
         let num_rounds_x = spartan_key.num_rows_bits();
 
+        let padded_rows_per_step = r1cs_builder.padded_rows_per_step();
+        let uniform_constraints = r1cs_builder.uniform_builder.constraints.clone();
+        let cross_step_constraints = r1cs_builder.offset_equality_constraints.clone();
+
         /* Sumcheck 1: Outer sumcheck */
 
         let tau = (0..num_rounds_x)
@@ -121,8 +125,16 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
             num_iters
         ));
 
-        // Set sample size
-        group.sample_size(10);
+        // Set sample size based on num_iters
+        let sample_size_for_iters = match num_iters {
+            16 => 50,
+            32 => 40,
+            64 => 30,
+            128 => 20,
+            256 => 10,
+            _ => 10, // Default for any other values
+        };
+        group.sample_size(sample_size_for_iters);
 
         group.bench_function(
             "Original (SpartanInterleaved + SplitEq)",
@@ -185,9 +197,9 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                     |mut transcript| {
                         SumcheckInstanceProof::prove_spartan_small_value::<3>(
                             num_rounds_x,
-                            r1cs_builder.padded_rows_per_step(),
-                            &r1cs_builder.uniform_builder.constraints,
-                            &r1cs_builder.offset_equality_constraints,
+                            padded_rows_per_step,
+                            &uniform_constraints,
+                            &cross_step_constraints,
                             &flattened_polys,
                             &tau,
                             &mut transcript,

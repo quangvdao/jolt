@@ -126,7 +126,6 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
             num_iters
         ));
 
-        group.measurement_time(Duration::from_secs(300));
         group.sample_size(10);
 
         group.bench_function(

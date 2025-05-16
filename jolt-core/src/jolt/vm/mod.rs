@@ -197,7 +197,7 @@ pub struct JoltProof<
     pub instruction_lookups:
         Option<InstructionLookupsProof<C, M, F, PCS, InstructionSet, Subtables, ProofTranscript>>,
     pub r1cs: UniformSpartanProof<C, I, F, ProofTranscript>,
-    pub opening_proof: ReducedOpeningProof<F, PCS, ProofTranscript>,
+    pub opening_proof: Option<ReducedOpeningProof<F, PCS, ProofTranscript>>,
 }
 
 #[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
@@ -668,9 +668,16 @@ where
         .expect("r1cs proof failed");
 
         // Batch-prove all openings
-        let opening_proof = opening_accumulator
-            .reduce_and_prove::<PCS>(&preprocessing.shared.generators, &mut transcript);
-
+        let opening_proof_opt: Option<ReducedOpeningProof<F, PCS, ProofTranscript>>;
+        #[cfg(not(feature = "spartan_only"))]
+        {
+            opening_proof_opt = Some(opening_accumulator
+                .reduce_and_prove::<PCS>(&preprocessing.shared.generators, &mut transcript));
+        }
+        #[cfg(feature = "spartan_only")]
+        {
+            opening_proof_opt = None;
+        }
         drop_in_background_thread(jolt_polynomials);
 
         let jolt_proof = JoltProof {
@@ -679,7 +686,7 @@ where
             read_write_memory: memory_proof_opt,
             instruction_lookups: instruction_proof_opt,
             r1cs: spartan_proof,
-            opening_proof,
+            opening_proof: opening_proof_opt,
         };
 
         #[cfg(test)]
@@ -806,12 +813,16 @@ where
         )?;
 
         // Batch-verify all openings
-        opening_accumulator.reduce_and_verify(
-            &preprocessing.generators,
-            &proof.opening_proof,
-            &mut transcript,
-        )?;
-
+        if let Some(ref opening_proof) = proof.opening_proof {
+            opening_accumulator.reduce_and_verify(
+                &preprocessing.generators,
+                opening_proof,
+                &mut transcript,
+            )?;
+        } else {
+            #[cfg(not(feature = "spartan_only"))]
+            { return Err(ProofVerifyError::InternalError); }
+        }
         Ok(())
     }
 

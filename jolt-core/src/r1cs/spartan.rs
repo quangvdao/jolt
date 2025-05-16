@@ -10,7 +10,7 @@ use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::multilinear_polynomial::PolynomialEvaluation;
 use crate::poly::opening_proof::ProverOpeningAccumulator;
 use crate::poly::opening_proof::VerifierOpeningAccumulator;
-use crate::poly::split_eq_poly::SplitEqPolynomial;
+use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
 use crate::r1cs::key::UniformSpartanKey;
 use crate::utils::math::Math;
 use crate::utils::thread::drop_in_background_thread;
@@ -68,6 +68,17 @@ pub mod small_value_optimization {
     pub const NUM_ACCUM_ROUNDS: [usize; NUM_SVO_ROUNDS] = [];
 
     pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 1;
+}
+
+// This applies Gruen's optimization ONLY (no small value optimization)
+#[cfg(feature = "gruen_optimization")]
+pub mod gruen_optimization {
+    pub const USES_GRUEN_OPTIMIZATION: bool = true;
+}
+
+#[cfg(not(feature = "gruen_optimization"))]
+pub mod gruen_optimization {
+    pub const USES_GRUEN_OPTIMIZATION: bool = false;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
@@ -183,8 +194,21 @@ where
                     );
                 let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
                 (proof, outer_sumcheck_r, claims)
+            } else if gruen_optimization::USES_GRUEN_OPTIMIZATION {
+                // Path with Gruen's optimization but no SVO
+                let mut eq_tau = NewSplitEqPolynomial::new(&tau);
+                let mut az_bz_cz_poly =
+                    constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+                let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
+                    num_rounds_x,
+                    &mut eq_tau,
+                    &mut az_bz_cz_poly,
+                    transcript,
+                );
+                drop_in_background_thread((az_bz_cz_poly, eq_tau));
+                let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
+                (proof, outer_sumcheck_r, claims)
             } else {
-                // Standard Cubic Path
                 let mut eq_tau = SplitEqPolynomial::new(&tau);
                 let mut az_bz_cz_poly =
                     constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
@@ -196,7 +220,7 @@ where
                 );
                 drop_in_background_thread((az_bz_cz_poly, eq_tau));
                 let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-                (proof, outer_sumcheck_r, claims)
+                (proof, outer_sumcheck_r, claims)                
             };
 
         ProofTranscript::append_scalars(transcript, &outer_sumcheck_claims);

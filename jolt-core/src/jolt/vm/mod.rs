@@ -580,7 +580,7 @@ where
             for com in jolt_commitments.instruction_lookups.init_final_values() {
                 com.append_to_transcript(&mut transcript);
             }
-            
+
             // Append TimestampRangeCheck commitments
             for com in jolt_commitments.timestamp_range_check.read_write_values() {
                 com.append_to_transcript(&mut transcript);
@@ -610,7 +610,17 @@ where
             bytecode_proof_opt = None;
         }
 
-        let instruction_proof_opt: Option<InstructionLookupsProof<C, M, F, PCS, Self::InstructionSet, Self::Subtables, ProofTranscript>>;
+        let instruction_proof_opt: Option<
+            InstructionLookupsProof<
+                C,
+                M,
+                F,
+                PCS,
+                Self::InstructionSet,
+                Self::Subtables,
+                ProofTranscript,
+            >,
+        >;
         #[cfg(not(feature = "spartan_only"))]
         {
             instruction_proof_opt = Some(InstructionLookupsProof::prove(
@@ -625,7 +635,7 @@ where
         {
             instruction_proof_opt = None;
         }
-        
+
         let memory_proof_opt: Option<ReadWriteMemoryProof<F, PCS, ProofTranscript>>;
         #[cfg(not(feature = "spartan_only"))]
         {
@@ -764,11 +774,11 @@ where
                     &mut transcript,
                 )?;
             } else {
-                 return Err(ProofVerifyError::InternalError);
+                return Err(ProofVerifyError::InternalError);
             }
-            
+
             if let Some(read_write_memory_proof) = proof.read_write_memory {
-                 Self::verify_memory(
+                Self::verify_memory(
                     &mut preprocessing.read_write_memory,
                     &preprocessing.generators,
                     &preprocessing.memory_layout,
@@ -779,7 +789,7 @@ where
                     &mut transcript,
                 )?;
             } else {
-                 return Err(ProofVerifyError::InternalError);
+                return Err(ProofVerifyError::InternalError);
             }
         }
         #[cfg(feature = "spartan_only")]

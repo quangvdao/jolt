@@ -12,9 +12,8 @@ use crate::poly::spartan_interleaved_poly::{
 use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
-use crate::r1cs::spartan::small_value_optimization::{
-    NUM_SVO_ROUNDS, USES_SMALL_VALUE_OPTIMIZATION,
-};
+use crate::r1cs::spartan::small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION;
+use crate::r1cs::spartan::gruen_optimization::USES_GRUEN_OPTIMIZATION;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
 use crate::utils::thread::drop_in_background_thread;
@@ -422,6 +421,35 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             } else {
                 az_bz_cz_poly
                     .subsequent_sumcheck_round(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+            }
+        }
+
+        (
+            SumcheckInstanceProof::new(polys),
+            r,
+            az_bz_cz_poly.final_sumcheck_evals(),
+        )
+    }
+
+    /// Version of `prove_spartan_cubic` that uses Gruen's optimization (but no small value optimization)
+    #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic_with_gruen")]
+    pub fn prove_spartan_cubic_with_gruen(
+        num_rounds: usize,
+        eq_poly: &mut NewSplitEqPolynomial<F>,
+        az_bz_cz_poly: &mut SpartanInterleavedPolynomial<F>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self, Vec<F>, [F; 3]) {
+        let mut r: Vec<F> = Vec::new();
+        let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
+        let mut claim = F::zero();
+
+        for round in 0..num_rounds {
+            if round == 0 {
+                az_bz_cz_poly
+                    .first_sumcheck_round_with_gruen(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+            } else {
+                az_bz_cz_poly
+                    .subsequent_sumcheck_round_with_gruen(eq_poly, transcript, &mut r, &mut polys, &mut claim);
             }
         }
 

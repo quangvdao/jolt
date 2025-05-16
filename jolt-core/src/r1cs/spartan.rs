@@ -50,13 +50,6 @@ pub mod small_value_optimization {
     pub const USES_SMALL_VALUE_OPTIMIZATION: bool = false;
 
     pub const NUM_SVO_ROUNDS: usize = 0;
-
-    // Avoid panic array access
-    pub const TOTAL_NUM_ACCUMS: usize = 1;
-
-    pub const NUM_ACCUM_ROUNDS: [usize; NUM_SVO_ROUNDS] = [];
-
-    pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 1;
 }
 
 // This applies Gruen's optimization ONLY (no small value optimization)

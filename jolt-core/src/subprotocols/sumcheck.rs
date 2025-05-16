@@ -205,7 +205,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut claim = F::zero();
 
         // Clone the transcript at this point so that we could also test with non-svo sumcheck
-        // #[cfg(test)]
+        #[cfg(test)]
         let mut old_transcript = transcript.clone();
 
         // First, precompute the accumulators and also the `NewSpartanInterleavedPolynomial`

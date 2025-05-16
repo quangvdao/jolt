@@ -28,7 +28,6 @@ default = [
     "ark-ff/asm",
     "host",
     "rayon",
-    "spartan_only",
     "small_value_optimization",
 ]
 host = ["dep:reqwest", "dep:tokio"]
@@ -95,9 +94,9 @@ once_cell = "1.19.0"
 rand_distr = "0.4.3"
 anyhow = "1.0.97"
 paste = "1.0.15"
+criterion = { version = "0.5.1", features = ["html_reports"] }
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["html_reports"] }
 iai-callgrind = "0.10.2"
 
 [build-dependencies]
@@ -133,6 +132,10 @@ harness = false
 
 [[bench]]
 name = "msm_adapter_batch"
+harness = false
+
+[[bench]]
+name = "spartan_first_sumcheck"
 harness = false
 
 [lib]

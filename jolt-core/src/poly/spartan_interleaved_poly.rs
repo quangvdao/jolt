@@ -288,7 +288,8 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let num_parallel_chunks = if num_x_out_vals > 0 {
             std::cmp::min(
                 num_x_out_vals,
-                rayon::current_num_threads().next_power_of_two() * 2,
+                // Trying to increase number of chunks for more even work distribution
+                rayon::current_num_threads().next_power_of_two() * 16,
             )
         } else {
             1 // Avoid 0 chunks if num_x_out_vals is 0
@@ -306,11 +307,11 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         let collected_chunk_outputs: Vec<PrecomputeTaskOutput<F>> = (0..num_parallel_chunks)
             .into_par_iter()
-            .map(|chunk_idx| { 
+            .map(|chunk_idx| {
                 let x_out_task_span = tracing::debug_span!("chunk_task", chunk_idx);
                 let _x_out_task_guard = x_out_task_span.enter();
 
-                let mut chunk_ab_coeffs = Vec::new(); 
+                let mut chunk_ab_coeffs = Vec::new();
                 let mut chunk_svo_accums_zero = [F::zero(); NUM_ACCUMS_EVAL_ZERO];
                 let mut chunk_svo_accums_infty = [F::zero(); NUM_ACCUMS_EVAL_INFTY];
 
@@ -409,7 +410,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                         &task_tA_accumulator_vec,
                         x_out_val, // Use the specific x_out_val for this iteration
                         E_out_vec,
-                        &mut current_x_out_svo_zero, 
+                        &mut current_x_out_svo_zero,
                         &mut current_x_out_svo_infty,
                     );
 
@@ -695,21 +696,52 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let prep_processing_span = tracing::info_span!("streaming_round_prep_processing");
         let _prep_processing_guard = prep_processing_span.enter();
 
-        // Pre-build a map from block_index to the relevant slice of ab_unbound_coeffs
-        let mut block_idx_to_coeffs_map = std::collections::HashMap::new();
-        let temp_all_logical_blocks: Vec<&[SparseCoefficient<i128>]> = self
-            .ab_unbound_coeffs
-            .chunk_by(move |c1, c2| {
-                c1.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
-                    == c2.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
-            })
-            .collect();
+        let total_num_potential_blocks =
+            num_total_streaming_x_out_vals * num_total_streaming_x_in_vals;
+        let mut block_idx_to_coeffs_vec: Vec<Option<&[SparseCoefficient<i128>]>> =
+            vec![None; total_num_potential_blocks];
 
-        for logical_block_coeffs_slice in temp_all_logical_blocks {
-            if !logical_block_coeffs_slice.is_empty() {
-                let block_id = logical_block_coeffs_slice[0].index / Y_SVO_RELATED_COEFF_BLOCK_SIZE;
-                block_idx_to_coeffs_map.insert(block_id, logical_block_coeffs_slice);
+        if !self.ab_unbound_coeffs.is_empty() {
+            // Step 1: Group coefficients by block_id and get (block_id, slice) pairs in parallel.
+            let map_span = tracing::debug_span!("streaming_map_chunk_to_id_slice_pair");
+            let _map_guard = map_span.enter();
+            let block_id_slice_pairs: Vec<(usize, &[SparseCoefficient<i128>])> = self
+                .ab_unbound_coeffs
+                .par_chunk_by(move |c1, c2| {
+                    // Group by block_id
+                    c1.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
+                        == c2.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
+                })
+                .map(|logical_block_coeffs_slice| {
+                    // par_chunk_by yields non-empty slices if ab_unbound_coeffs is non-empty.
+                    let block_id =
+                        logical_block_coeffs_slice[0].index / Y_SVO_RELATED_COEFF_BLOCK_SIZE;
+                    (block_id, logical_block_coeffs_slice)
+                })
+                .collect(); // This collect is parallel.
+
+            drop(_map_guard);
+
+            // Step 2: Populate the target vector. This part is sequential but operates on the
+            // (relatively small) number of actual blocks found, not total_num_potential_blocks.
+            let populate_span = tracing::debug_span!("streaming_populate_coeffs_vec_from_pairs");
+            let _populate_guard = populate_span.enter();
+            for (block_id, slice) in block_id_slice_pairs {
+                if block_id < total_num_potential_blocks {
+                    block_idx_to_coeffs_vec[block_id] = Some(slice);
+                } else {
+                    // This case should ideally not be reached if indices and total_num_potential_blocks are consistent.
+                    tracing::error!(
+                        "Block ID {} is out of bounds for total_num_potential_blocks {}. Slice len: {}",
+                        block_id,
+                        total_num_potential_blocks,
+                        slice.len()
+                    );
+                    // Depending on severity, might panic or handle error. For now, just log.
+                }
             }
+
+            drop(_populate_guard);
         }
 
         drop(_prep_processing_guard);
@@ -717,7 +749,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let num_parallel_chunks_streaming = if num_total_streaming_x_out_vals > 0 {
             std::cmp::min(
                 num_total_streaming_x_out_vals,
-                rayon::current_num_threads().next_power_of_two() * 2,
+                rayon::current_num_threads().next_power_of_two() * 8,
             )
         } else {
             1 // Avoid 0 chunks if num_total_streaming_x_out_vals is 0, or if it's 1 to ensure loop runs
@@ -761,10 +793,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     for x_in_val in 0..num_total_streaming_x_in_vals {
                         let block_index = (x_out_val << num_streaming_x_in_vars) | x_in_val;
 
+                        // Use .get() for bounds checking, then .copied().flatten() as before
                         if let Some(logical_block_coeffs) =
-                            block_idx_to_coeffs_map.get(&block_index)
+                            block_idx_to_coeffs_vec.get(block_index).copied().flatten()
                         {
                             if logical_block_coeffs.is_empty() {
+                                // Should be caught by Option being None
                                 continue;
                             }
 
@@ -912,8 +946,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         }
 
         self.ab_unbound_coeffs.clear();
+
+        let sort_span = tracing::info_span!("streaming_bind_sort_final_bound_coeffs");
+        let _sort_guard = sort_span.enter();
         // Sorting might be beneficial if the binding step relies on specific order not guaranteed by par_chunk_by's collection
         final_bound_coeffs.par_sort_unstable_by_key(|sc| sc.index);
+        drop(_sort_guard);
 
         drop(_finalization_guard);
 
@@ -930,20 +968,43 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         );
         drop(_process_round_guard);
 
-        let bind_coeffs_span = tracing::span!(tracing::Level::INFO, "streaming_round_bind_coeffs");
+        let bind_coeffs_span =
+            tracing::span!(tracing::Level::INFO, "streaming_round_bind_coeffs_overall");
         let _bind_coeffs_guard = bind_coeffs_span.enter();
 
-        // --- Bind `final_bound_coeffs` with r_i (reusing logic from remaining_sumcheck_round) ---
-        let binding_chunks_for_final: Vec<&[SparseCoefficient<F>]> = final_bound_coeffs
-            .par_chunk_by(|c1, c2| c1.index / 6 == c2.index / 6)
-            .collect();
+        // --- Revert to binding logic similar to remaining_sumcheck_round, using final_bound_coeffs ---
+        let group_coeffs_span = tracing::debug_span!("streaming_bind_group_coeffs_for_binding");
+        let _group_coeffs_guard = group_coeffs_span.enter();
 
-        let binding_output_sizes_per_chunk: Vec<usize> = binding_chunks_for_final
-            .iter()
-            .map(|chunk_6_coeffs| Self::binding_output_length(chunk_6_coeffs))
-            .collect();
+        let block_size = final_bound_coeffs
+            .len()
+            .div_ceil(rayon::current_num_threads())
+            .next_multiple_of(6); // Ensures chunks are multiples of 6, good for index % 6 logic
 
-        let total_binding_output_len = binding_output_sizes_per_chunk.iter().sum();
+        let chunks: Vec<&[SparseCoefficient<F>]> = final_bound_coeffs
+            .par_chunk_by(|c1, c2| c1.index / block_size == c2.index / block_size) // Group by larger blocks first
+            .collect();
+        drop(_group_coeffs_guard);
+
+        let calc_output_sizes_span = tracing::debug_span!("streaming_bind_calc_output_sizes");
+        let _calc_output_sizes_guard = calc_output_sizes_span.enter();
+        let output_sizes: Vec<usize> = chunks
+            .par_iter()
+            .map(|chunk_of_coeffs| {
+                // chunk_of_coeffs is a large block from par_chunk_by
+                // We need to iterate through sub-blocks of 6 within this large chunk
+                let mut current_chunk_output_size = 0;
+                for sub_block_of_6 in
+                    chunk_of_coeffs.chunk_by(|sc1, sc2| sc1.index / 6 == sc2.index / 6)
+                {
+                    current_chunk_output_size += Self::binding_output_length(sub_block_of_6);
+                }
+                current_chunk_output_size
+            })
+            .collect();
+        drop(_calc_output_sizes_guard);
+
+        let total_binding_output_len = output_sizes.iter().sum();
 
         if self.binding_scratch_space.capacity() < total_binding_output_len {
             self.binding_scratch_space
@@ -953,77 +1014,96 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             self.binding_scratch_space.set_len(total_binding_output_len);
         }
 
-        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> =
-            Vec::with_capacity(binding_chunks_for_final.len());
+        let create_output_slices_span = tracing::debug_span!("streaming_bind_create_output_slices");
+        let _create_output_slices_guard = create_output_slices_span.enter();
+        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> = Vec::with_capacity(chunks.len());
         let mut scratch_remainder = self.binding_scratch_space.as_mut_slice();
-        for slice_len in binding_output_sizes_per_chunk {
+        for slice_len in output_sizes {
             let (first, second) = scratch_remainder.split_at_mut(slice_len);
             output_slices.push(first);
             scratch_remainder = second;
         }
         debug_assert_eq!(scratch_remainder.len(), 0);
+        drop(_create_output_slices_guard);
 
-        binding_chunks_for_final
+        let parallel_bind_loop_span =
+            tracing::info_span!("streaming_bind_parallel_coeff_binding_loop");
+        let _parallel_bind_loop_guard = parallel_bind_loop_span.enter();
+        chunks // Use the `chunks` from par_chunk_by(block_size)
             .into_par_iter()
             .zip_eq(output_slices.into_par_iter())
-            .for_each(|(coeffs_6_block, output_slice_for_3_coeffs)| {
-                let block_idx_for_6_coeffs = if !coeffs_6_block.is_empty() {
-                    coeffs_6_block[0].index / 6
-                } else {
-                    0
-                };
+            .for_each(|(coeffs_block, output_slice_for_block)| {
+                let bind_chunk_span =
+                    tracing::debug_span!("streaming_bind_process_larger_coeff_block");
+                let _bind_chunk_guard = bind_chunk_span.enter();
 
-                let mut az0 = F::zero();
-                let mut bz0 = F::zero();
-                let mut cz0 = F::zero();
-                let mut az1 = F::zero();
-                let mut bz1 = F::zero();
-                let mut cz1 = F::zero();
+                let mut current_output_idx_in_slice = 0;
+                // Iterate through sub-blocks of 6 within this larger coeffs_block
+                for sub_block_of_6 in
+                    coeffs_block.chunk_by(|sc1, sc2| sc1.index / 6 == sc2.index / 6)
+                {
+                    let block_idx_for_6_coeffs = if !sub_block_of_6.is_empty() {
+                        sub_block_of_6[0].index / 6
+                    } else {
+                        0
+                    };
 
-                for coeff in coeffs_6_block {
-                    match coeff.index % 6 {
-                        0 => az0 = coeff.value,
-                        1 => bz0 = coeff.value,
-                        2 => cz0 = coeff.value,
-                        3 => az1 = coeff.value,
-                        4 => bz1 = coeff.value,
-                        5 => cz1 = coeff.value,
-                        _ => {}
+                    let mut az0 = F::zero();
+                    let mut bz0 = F::zero();
+                    let mut cz0 = F::zero();
+                    let mut az1 = F::zero();
+                    let mut bz1 = F::zero();
+                    let mut cz1 = F::zero();
+
+                    for coeff in sub_block_of_6 {
+                        match coeff.index % 6 {
+                            0 => az0 = coeff.value,
+                            1 => bz0 = coeff.value,
+                            2 => cz0 = coeff.value,
+                            3 => az1 = coeff.value,
+                            4 => bz1 = coeff.value,
+                            5 => cz1 = coeff.value,
+                            _ => {}
+                        }
+                    }
+
+                    let new_block_idx = block_idx_for_6_coeffs;
+
+                    let bound_az = az0 + r_i * (az1 - az0);
+                    if !bound_az.is_zero() {
+                        if current_output_idx_in_slice < output_slice_for_block.len() {
+                            output_slice_for_block[current_output_idx_in_slice] =
+                                (3 * new_block_idx + 0, bound_az).into();
+                        }
+                        current_output_idx_in_slice += 1;
+                    }
+                    let bound_bz = bz0 + r_i * (bz1 - bz0);
+                    if !bound_bz.is_zero() {
+                        if current_output_idx_in_slice < output_slice_for_block.len() {
+                            output_slice_for_block[current_output_idx_in_slice] =
+                                (3 * new_block_idx + 1, bound_bz).into();
+                        }
+                        current_output_idx_in_slice += 1;
+                    }
+                    let bound_cz = cz0 + r_i * (cz1 - cz0);
+                    if !bound_cz.is_zero() {
+                        if current_output_idx_in_slice < output_slice_for_block.len() {
+                            output_slice_for_block[current_output_idx_in_slice] =
+                                (3 * new_block_idx + 2, bound_cz).into();
+                        }
+                        current_output_idx_in_slice += 1;
                     }
                 }
-
-                let mut current_output_idx = 0;
-                let new_block_idx = block_idx_for_6_coeffs;
-
-                let bound_az = az0 + r_i * (az1 - az0);
-                if !bound_az.is_zero() {
-                    if current_output_idx < output_slice_for_3_coeffs.len() {
-                        output_slice_for_3_coeffs[current_output_idx] =
-                            (3 * new_block_idx + 0, bound_az).into();
-                    }
-                    current_output_idx += 1;
-                }
-                let bound_bz = bz0 + r_i * (bz1 - bz0);
-                if !bound_bz.is_zero() {
-                    if current_output_idx < output_slice_for_3_coeffs.len() {
-                        output_slice_for_3_coeffs[current_output_idx] =
-                            (3 * new_block_idx + 1, bound_bz).into();
-                    }
-                    current_output_idx += 1;
-                }
-                let bound_cz = cz0 + r_i * (cz1 - cz0);
-                if !bound_cz.is_zero() {
-                    if current_output_idx < output_slice_for_3_coeffs.len() {
-                        output_slice_for_3_coeffs[current_output_idx] =
-                            (3 * new_block_idx + 2, bound_cz).into();
-                    }
-                    current_output_idx += 1;
-                }
-                // Assert that the number of written elements is consistent with pre-calculated slice length
-                debug_assert_eq!(current_output_idx, output_slice_for_3_coeffs.len());
+                // Assert that the number of written elements is consistent with pre-calculated slice length for the larger block
+                debug_assert_eq!(current_output_idx_in_slice, output_slice_for_block.len());
             });
+        drop(_parallel_bind_loop_guard);
 
+        let swap_span = tracing::debug_span!("streaming_bind_swap_coeff_buffers");
+        let _swap_guard = swap_span.enter();
         std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
+        drop(_swap_guard);
+
         self.dense_len = eq_poly.len();
 
         drop(_bind_coeffs_guard);
@@ -1358,7 +1438,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
     ) -> Self {
         let num_steps = flattened_polynomials[0].len();
 
-        let num_chunks = rayon::current_num_threads().next_power_of_two() * 4;
+        let num_chunks = rayon::current_num_threads().next_power_of_two() * 16;
         let chunk_size = num_steps.div_ceil(num_chunks);
 
         let unbound_coeffs: Vec<SparseCoefficient<i128>> = (0..num_chunks)

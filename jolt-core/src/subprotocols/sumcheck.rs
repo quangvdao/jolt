@@ -343,7 +343,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             );
         }
 
-        // #[cfg(test)]
+        #[cfg(test)]
         {
             let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
                 uniform_constraints,

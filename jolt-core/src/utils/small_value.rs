@@ -157,15 +157,15 @@ pub mod svo_helpers {
     /// corresponding to (0,0,0) => 0, (0,0,1) => 1, (0,1,0) => 2, (0,1,1) => 3, (1,0,0) => 4,
     /// (1,0,1) => 5, (1,1,0) => 6, (1,1,1) => 7.
     ///
-    /// There are 27 - 8 = 19 temp_tA accumulators, with the following logic: 
+    /// There are 27 - 8 = 19 temp_tA accumulators, with the following logic:
     /// (listed in increasing order, when considering ∞ as 2 and going from MSB to LSB)
-    /// 
+    ///
     /// temp_tA[0,0,∞] += e_in_val * (az[0,0,1] - az[0,0,0]) * (bz[0,0,1] - bz[0,0,0])
     /// temp_tA[0,1,∞] += e_in_val * (az[0,1,1] - az[0,1,0]) * (bz[0,1,1] - bz[0,1,0])
     /// temp_tA[0,∞,0] += e_in_val * (az[0,1,0] - az[0,0,0]) * (bz[0,1,0] - bz[0,0,0])
     /// temp_tA[0,∞,1] += e_in_val * (az[0,1,1] - az[0,0,1]) * (bz[0,1,1] - bz[0,0,1])
     /// temp_tA[0,∞,∞] += e_in_val * (az[0,1,∞] - az[0,0,∞]) * (bz[0,1,∞] - bz[0,0,∞])
-    /// 
+    ///
     /// temp_tA[1,0,∞] += e_in_val * (az[1,0,1] - az[1,0,0]) * (bz[1,0,1] - bz[1,0,0])
     /// temp_tA[1,1,∞] += e_in_val * (az[1,1,1] - az[1,1,0]) * (bz[1,1,1] - bz[1,1,0])
     /// temp_tA[1,∞,0] += e_in_val * (az[1,1,0] - az[1,0,0]) * (bz[1,1,0] - bz[1,0,0])
@@ -194,31 +194,51 @@ pub mod svo_helpers {
         debug_assert!(temp_tA.len() == 19);
 
         // Binary evaluations (Y0,Y1,Y2) -> index Y0*4 + Y1*2 + Y2
-        let az000 = binary_az_evals[0]; let bz000 = binary_bz_evals[0];
-        let az001 = binary_az_evals[1]; let bz001 = binary_bz_evals[1];
-        let az010 = binary_az_evals[2]; let bz010 = binary_bz_evals[2];
-        let az011 = binary_az_evals[3]; let bz011 = binary_bz_evals[3];
-        let az100 = binary_az_evals[4]; let bz100 = binary_bz_evals[4];
-        let az101 = binary_az_evals[5]; let bz101 = binary_bz_evals[5];
-        let az110 = binary_az_evals[6]; let bz110 = binary_bz_evals[6];
-        let az111 = binary_az_evals[7]; let bz111 = binary_bz_evals[7];
+        let az000 = binary_az_evals[0];
+        let bz000 = binary_bz_evals[0];
+        let az001 = binary_az_evals[1];
+        let bz001 = binary_bz_evals[1];
+        let az010 = binary_az_evals[2];
+        let bz010 = binary_bz_evals[2];
+        let az011 = binary_az_evals[3];
+        let bz011 = binary_bz_evals[3];
+        let az100 = binary_az_evals[4];
+        let bz100 = binary_bz_evals[4];
+        let az101 = binary_az_evals[5];
+        let bz101 = binary_bz_evals[5];
+        let az110 = binary_az_evals[6];
+        let bz110 = binary_bz_evals[6];
+        let az111 = binary_az_evals[7];
+        let bz111 = binary_bz_evals[7];
 
         // Precompute all first-order extensions (single infinity)
         // These depend only on binary evaluations.
-        let az_00I = az001 - az000; let bz_00I = bz001 - bz000;
-        let az_01I = az011 - az010; let bz_01I = bz011 - bz010;
-        let az_10I = az101 - az100; let bz_10I = bz101 - bz100;
-        let az_11I = az111 - az110; let bz_11I = bz111 - bz110;
+        let az_00I = az001 - az000;
+        let bz_00I = bz001 - bz000;
+        let az_01I = az011 - az010;
+        let bz_01I = bz011 - bz010;
+        let az_10I = az101 - az100;
+        let bz_10I = bz101 - bz100;
+        let az_11I = az111 - az110;
+        let bz_11I = bz111 - bz110;
 
-        let az_0I0 = az010 - az000; let bz_0I0 = bz010 - bz000;
-        let az_0I1 = az011 - az001; let bz_0I1 = bz011 - bz001;
-        let az_1I0 = az110 - az100; let bz_1I0 = bz110 - bz100;
-        let az_1I1 = az111 - az101; let bz_1I1 = bz111 - bz101;
+        let az_0I0 = az010 - az000;
+        let bz_0I0 = bz010 - bz000;
+        let az_0I1 = az011 - az001;
+        let bz_0I1 = bz011 - bz001;
+        let az_1I0 = az110 - az100;
+        let bz_1I0 = bz110 - bz100;
+        let az_1I1 = az111 - az101;
+        let bz_1I1 = bz111 - bz101;
 
-        let az_I00 = az100 - az000; let bz_I00 = bz100 - bz000;
-        let az_I01 = az101 - az001; let bz_I01 = bz101 - bz001;
-        let az_I10 = az110 - az010; let bz_I10 = bz110 - bz010;
-        let az_I11 = az111 - az011; let bz_I11 = bz111 - bz011;
+        let az_I00 = az100 - az000;
+        let bz_I00 = bz100 - bz000;
+        let az_I01 = az101 - az001;
+        let bz_I01 = bz101 - bz001;
+        let az_I10 = az110 - az010;
+        let bz_I10 = bz110 - bz010;
+        let az_I11 = az111 - az011;
+        let bz_I11 = bz111 - bz011;
 
         // Populate temp_tA in lexicographical MSB-first order
         // Z=0, O=1, I=2 for Y_i
@@ -642,18 +662,18 @@ pub mod svo_helpers {
     ///
     #[inline]
     pub fn distribute_tA_to_svo_accumulators_3<F: JoltField>(
-        tA_accums: &[F], 
+        tA_accums: &[F],
         x_out_val: usize,
         E_out_vec: &[Vec<F>],
-        accums_zero: &mut [F], 
+        accums_zero: &mut [F],
         accums_infty: &mut [F],
     ) {
         debug_assert!(tA_accums.len() == 19);
-        debug_assert!(accums_zero.len() == 6); 
+        debug_assert!(accums_zero.len() == 6);
         debug_assert!(accums_infty.len() == 13);
         debug_assert!(E_out_vec.len() >= 3);
 
-        use SVOEvalPoint::{Zero, One, Infinity}; 
+        use SVOEvalPoint::{Infinity, One, Zero};
 
         // Accumulator slots (conceptual LSB-first paper round s_p)
         // Nomenclature: A_{s_p}(v_{s_p-1},...,v_0, u_s_p)
@@ -679,28 +699,43 @@ pub mod svo_helpers {
         const ACCUM_IDX_A2_I0_0: usize = 3; // A_2(v1=I,v0=0,0)
         const ACCUM_IDX_A2_I1_0: usize = 4; // A_2(v1=I,v0=1,0)
         const ACCUM_IDX_A2_II_0: usize = 5; // A_2(v1=I,v0=I,0)
-        
+
         // E_out_vec[s_code] interpretation (s_code is MSB-first index for Y_c variables):
         // E_out_vec[0] (s_code=0 in E_out_vec): Y2_c is u_eff for E. y_suffix_eff=(Y0_c, Y1_c). Index (x_out << 2) | (Y0_c_bit << 1) | Y1_c_bit
         let e0_suf00 = E_out_vec[0][(x_out_val << 2) | 0b00]; // y_suffix_eff=(Y0_c=0, Y1_c=0)
         let e0_suf01 = E_out_vec[0][(x_out_val << 2) | 0b01]; // y_suffix_eff=(Y0_c=0, Y1_c=1)
         let e0_suf10 = E_out_vec[0][(x_out_val << 2) | 0b10]; // y_suffix_eff=(Y0_c=1, Y1_c=0)
         let e0_suf11 = E_out_vec[0][(x_out_val << 2) | 0b11]; // y_suffix_eff=(Y0_c=1, Y1_c=1)
-        
+
         // E_out_vec[1] (s_code=1 in E_out_vec): Y1_c is u_eff for E. y_suffix_eff=(Y0_c). Index (x_out << 1) | Y0_c_bit
-        let e1_suf0 = E_out_vec[1][(x_out_val << 1) | 0];    // y_suffix_eff=(Y0_c=0)
-        let e1_suf1 = E_out_vec[1][(x_out_val << 1) | 1];    // y_suffix_eff=(Y0_c=1)
-        
+        let e1_suf0 = E_out_vec[1][(x_out_val << 1) | 0]; // y_suffix_eff=(Y0_c=0)
+        let e1_suf1 = E_out_vec[1][(x_out_val << 1) | 1]; // y_suffix_eff=(Y0_c=1)
+
         // E_out_vec[2] (s_code=2 in E_out_vec): Y0_c is u_eff for E. y_suffix_eff=(). Index x_out_val
         let e2_sufempty = E_out_vec[2][x_out_val];
 
         // Y_EXT_CODE_MAP[tA_idx] gives (Y0_c, Y1_c, Y2_c) for tA_accums[tA_idx]
         // Y0_c is MSB, Y2_c is LSB for code variables. This order matches compute_and_update_tA_inplace_3.
         const Y_EXT_CODE_MAP: [(SVOEvalPoint, SVOEvalPoint, SVOEvalPoint); 19] = [
-            (Zero, Zero, Infinity), (Zero, One, Infinity), (Zero, Infinity, Zero), (Zero, Infinity, One), (Zero, Infinity, Infinity),
-            (One, Zero, Infinity), (One, One, Infinity), (One, Infinity, Zero), (One, Infinity, One), (One, Infinity, Infinity),
-            (Infinity, Zero, Zero), (Infinity, Zero, One), (Infinity, Zero, Infinity), (Infinity, One, Zero), (Infinity, One, One),
-            (Infinity, One, Infinity), (Infinity, Infinity, Zero), (Infinity, Infinity, One), (Infinity, Infinity, Infinity),
+            (Zero, Zero, Infinity),
+            (Zero, One, Infinity),
+            (Zero, Infinity, Zero),
+            (Zero, Infinity, One),
+            (Zero, Infinity, Infinity),
+            (One, Zero, Infinity),
+            (One, One, Infinity),
+            (One, Infinity, Zero),
+            (One, Infinity, One),
+            (One, Infinity, Infinity),
+            (Infinity, Zero, Zero),
+            (Infinity, Zero, One),
+            (Infinity, Zero, Infinity),
+            (Infinity, One, Zero),
+            (Infinity, One, One),
+            (Infinity, One, Infinity),
+            (Infinity, Infinity, Zero),
+            (Infinity, Infinity, One),
+            (Infinity, Infinity, Infinity),
         ];
 
         for i in 0..19 {
@@ -711,13 +746,15 @@ pub mod svo_helpers {
 
             // --- Contributions to Paper Round s_p=0 Accumulators (u_paper = Y2_c) ---
             // E-factor uses E_out_vec[0] (where Y2_c is u_eff), E_suffix is (Y0_c, Y1_c)
-            if y2_c == Infinity { // u_paper = I
-                if y0_c != Infinity && y1_c != Infinity { // Suffix (Y0_c,Y1_c) for E_out_vec[0] must be binary
+            if y2_c == Infinity {
+                // u_paper = I
+                if y0_c != Infinity && y1_c != Infinity {
+                    // Suffix (Y0_c,Y1_c) for E_out_vec[0] must be binary
                     let e_val = match (y0_c, y1_c) {
                         (Zero, Zero) => e0_suf00,
-                        (Zero, One)  => e0_suf01,
-                        (One, Zero)  => e0_suf10,
-                        (One, One)   => e0_suf11,
+                        (Zero, One) => e0_suf01,
+                        (One, Zero) => e0_suf10,
+                        (One, One) => e0_suf11,
                         _ => unreachable!(), // Should be covered by binary check above
                     };
                     accums_infty[ACCUM_IDX_A0_I] += current_tA * e_val;
@@ -727,17 +764,28 @@ pub mod svo_helpers {
 
             // --- Contributions to Paper Round s_p=1 Accumulators (u_paper = Y1_c, v0_paper = Y2_c) ---
             // E-factor uses E_out_vec[1] (where Y1_c is u_eff), E_suffix is (Y0_c)
-            if y0_c != Infinity { // Suffix Y0_c for E_out_vec[1] must be binary
+            if y0_c != Infinity {
+                // Suffix Y0_c for E_out_vec[1] must be binary
                 let e1_val = if y0_c == Zero { e1_suf0 } else { e1_suf1 }; // y0_c is One or Zero here
-                
-                if y1_c == Infinity { // u_paper = I
-                    match y2_c { // v0_paper = Y2_c
-                        Zero     => { accums_infty[ACCUM_IDX_A1_0_I] += current_tA * e1_val; }
-                        One      => { accums_infty[ACCUM_IDX_A1_1_I] += current_tA * e1_val; }
-                        Infinity => { accums_infty[ACCUM_IDX_A1_I_I] += current_tA * e1_val; }
+
+                if y1_c == Infinity {
+                    // u_paper = I
+                    match y2_c {
+                        // v0_paper = Y2_c
+                        Zero => {
+                            accums_infty[ACCUM_IDX_A1_0_I] += current_tA * e1_val;
+                        }
+                        One => {
+                            accums_infty[ACCUM_IDX_A1_1_I] += current_tA * e1_val;
+                        }
+                        Infinity => {
+                            accums_infty[ACCUM_IDX_A1_I_I] += current_tA * e1_val;
+                        }
                     }
-                } else if y1_c == Zero { // u_paper = 0
-                    if y2_c == Infinity { // v0_paper = I, for A_1(I,0)
+                } else if y1_c == Zero {
+                    // u_paper = 0
+                    if y2_c == Infinity {
+                        // v0_paper = I, for A_1(I,0)
                         accums_zero[ACCUM_IDX_A1_I_0] += current_tA * e1_val;
                     }
                 }
@@ -746,26 +794,58 @@ pub mod svo_helpers {
             // --- Contributions to Paper Round s_p=2 Accumulators (u_paper = Y0_c, v_paper = (Y1_c,Y2_c)) ---
             // E-factor uses E_out_vec[2] (where Y0_c is u_eff), E_suffix is empty
             let e2_val = e2_sufempty;
-            if y0_c == Infinity { // u_paper = I
-                 match (y1_c, y2_c) { // v_paper = (Y1_c, Y2_c)
-                    (Zero, Zero)         => { accums_infty[ACCUM_IDX_A2_00_I] += current_tA * e2_val; }
-                    (Zero, One)          => { accums_infty[ACCUM_IDX_A2_01_I] += current_tA * e2_val; }
-                    (Zero, Infinity)     => { accums_infty[ACCUM_IDX_A2_0I_I] += current_tA * e2_val; }
-                    (One, Zero)          => { accums_infty[ACCUM_IDX_A2_10_I] += current_tA * e2_val; }
-                    (One, One)           => { accums_infty[ACCUM_IDX_A2_11_I] += current_tA * e2_val; }
-                    (One, Infinity)      => { accums_infty[ACCUM_IDX_A2_1I_I] += current_tA * e2_val; }
-                    (Infinity, Zero)     => { accums_infty[ACCUM_IDX_A2_I0_I] += current_tA * e2_val; }
-                    (Infinity, One)      => { accums_infty[ACCUM_IDX_A2_I1_I] += current_tA * e2_val; }
-                    (Infinity, Infinity) => { accums_infty[ACCUM_IDX_A2_II_I] += current_tA * e2_val; }
-                 }
-            } else if y0_c == Zero { // u_paper = 0
-                match (y1_c, y2_c) { // v_paper = (Y1_c, Y2_c)
+            if y0_c == Infinity {
+                // u_paper = I
+                match (y1_c, y2_c) {
+                    // v_paper = (Y1_c, Y2_c)
+                    (Zero, Zero) => {
+                        accums_infty[ACCUM_IDX_A2_00_I] += current_tA * e2_val;
+                    }
+                    (Zero, One) => {
+                        accums_infty[ACCUM_IDX_A2_01_I] += current_tA * e2_val;
+                    }
+                    (Zero, Infinity) => {
+                        accums_infty[ACCUM_IDX_A2_0I_I] += current_tA * e2_val;
+                    }
+                    (One, Zero) => {
+                        accums_infty[ACCUM_IDX_A2_10_I] += current_tA * e2_val;
+                    }
+                    (One, One) => {
+                        accums_infty[ACCUM_IDX_A2_11_I] += current_tA * e2_val;
+                    }
+                    (One, Infinity) => {
+                        accums_infty[ACCUM_IDX_A2_1I_I] += current_tA * e2_val;
+                    }
+                    (Infinity, Zero) => {
+                        accums_infty[ACCUM_IDX_A2_I0_I] += current_tA * e2_val;
+                    }
+                    (Infinity, One) => {
+                        accums_infty[ACCUM_IDX_A2_I1_I] += current_tA * e2_val;
+                    }
+                    (Infinity, Infinity) => {
+                        accums_infty[ACCUM_IDX_A2_II_I] += current_tA * e2_val;
+                    }
+                }
+            } else if y0_c == Zero {
+                // u_paper = 0
+                match (y1_c, y2_c) {
+                    // v_paper = (Y1_c, Y2_c)
                     // Only specific v_paper configs for A_2(v,0) are stored, based on ACCUM_IDX constants
-                    (Zero, Infinity)     => { accums_zero[ACCUM_IDX_A2_0I_0] += current_tA * e2_val; }
-                    (One, Infinity)      => { accums_zero[ACCUM_IDX_A2_1I_0] += current_tA * e2_val; }
-                    (Infinity, Zero)     => { accums_zero[ACCUM_IDX_A2_I0_0] += current_tA * e2_val; }
-                    (Infinity, One)      => { accums_zero[ACCUM_IDX_A2_I1_0] += current_tA * e2_val; }
-                    (Infinity, Infinity) => { accums_zero[ACCUM_IDX_A2_II_0] += current_tA * e2_val; }
+                    (Zero, Infinity) => {
+                        accums_zero[ACCUM_IDX_A2_0I_0] += current_tA * e2_val;
+                    }
+                    (One, Infinity) => {
+                        accums_zero[ACCUM_IDX_A2_1I_0] += current_tA * e2_val;
+                    }
+                    (Infinity, Zero) => {
+                        accums_zero[ACCUM_IDX_A2_I0_0] += current_tA * e2_val;
+                    }
+                    (Infinity, One) => {
+                        accums_zero[ACCUM_IDX_A2_I1_0] += current_tA * e2_val;
+                    }
+                    (Infinity, Infinity) => {
+                        accums_zero[ACCUM_IDX_A2_II_0] += current_tA * e2_val;
+                    }
                     _ => {} // Other v_paper configs (e.g. fully binary, or other Infinity patterns) for u_paper=0 are not stored.
                 }
             }
@@ -1424,7 +1504,6 @@ mod tests {
         ternary_bz_for_generic_1[binary_to_ternary_index(0, 1)] = 3i128; // bz(0)
         ternary_bz_for_generic_1[binary_to_ternary_index(1, 1)] = 5i128; // bz(1)
 
-
         compute_and_update_tA_inplace::<1, TestField>(
             &mut ternary_az_for_generic_1,
             &mut ternary_bz_for_generic_1,
@@ -1457,22 +1536,21 @@ mod tests {
         // Values are P_ext(Y_ext) * E_in. For simplicity, assume E_in is 1 for these points.
         let mut tA_accums = vec![TestField::zero(); num_ternary_points];
         // Y_ext = [Z,Z] (beta_idx 0 via get_fixed_radix_index(&[0,0],3,2)). task_tA = 2.
-        tA_accums[get_fixed_radix_index(&[0,0],3,num_svo_rounds)] = TestField::from(2u64);
+        tA_accums[get_fixed_radix_index(&[0, 0], 3, num_svo_rounds)] = TestField::from(2u64);
         // Y_ext = [Z,I] (beta_idx 2 via get_fixed_radix_index(&[0,2],3,2)). task_tA = 5.
-        tA_accums[get_fixed_radix_index(&[0,2],3,num_svo_rounds)] = TestField::from(5u64);
+        tA_accums[get_fixed_radix_index(&[0, 2], 3, num_svo_rounds)] = TestField::from(5u64);
         // Y_ext = [O,O] (beta_idx 4 via get_fixed_radix_index(&[1,1],3,2)). task_tA = 3.
-        tA_accums[get_fixed_radix_index(&[1,1],3,num_svo_rounds)] = TestField::from(3u64);
+        tA_accums[get_fixed_radix_index(&[1, 1], 3, num_svo_rounds)] = TestField::from(3u64);
         // Y_ext = [I,Z] (beta_idx 6 via get_fixed_radix_index(&[2,0],3,2)). task_tA = 7.
-        tA_accums[get_fixed_radix_index(&[2,0],3,num_svo_rounds)] = TestField::from(7u64);
+        tA_accums[get_fixed_radix_index(&[2, 0], 3, num_svo_rounds)] = TestField::from(7u64);
         // Y_ext = [I,O] (beta_idx 7 via get_fixed_radix_index(&[2,1],3,2)). task_tA = 8.
-        tA_accums[get_fixed_radix_index(&[2,1],3,num_svo_rounds)] = TestField::from(8u64);
+        tA_accums[get_fixed_radix_index(&[2, 1], 3, num_svo_rounds)] = TestField::from(8u64);
         // Y_ext = [O,I] (beta_idx 5 via get_fixed_radix_index(&[1,2],3,2)). task_tA = 6.
-        tA_accums[get_fixed_radix_index(&[1,2],3,num_svo_rounds)] = TestField::from(6u64);
+        tA_accums[get_fixed_radix_index(&[1, 2], 3, num_svo_rounds)] = TestField::from(6u64);
         // Y_ext = [I,I] (beta_idx 8 via get_fixed_radix_index(&[2,2],3,2)). task_tA = 9.
-        tA_accums[get_fixed_radix_index(&[2,2],3,num_svo_rounds)] = TestField::from(9u64);
+        tA_accums[get_fixed_radix_index(&[2, 2], 3, num_svo_rounds)] = TestField::from(9u64);
 
-
-        // Prepare E_out_vec 
+        // Prepare E_out_vec
         let mut E_out_vec = Vec::new();
         // For round_s=0: num_y_suffix_vars=1 (Y1), num_x_out_vars=1 (X0). Table length 2^(1+1) = 4. Index (X0 << 1 | Y1)
         let E_out_s0 = vec![
@@ -1495,10 +1573,10 @@ mod tests {
         let mut task_svo_accs = Vec::new();
         // Round 0: s=0, num_v_configs = 3^0 = 1
         task_svo_accs.push((
-            vec![TestField::zero()], // u=Z, v=[] 
-            vec![TestField::zero()], // u=I, v=[] 
+            vec![TestField::zero()], // u=Z, v=[]
+            vec![TestField::zero()], // u=I, v=[]
         ));
-        // Round 1: s=1, num_v_configs = 3^1 = 3 
+        // Round 1: s=1, num_v_configs = 3^1 = 3
         task_svo_accs.push((
             vec![TestField::zero(); 3], // u=Z, v in {Z,O,I}
             vec![TestField::zero(); 3], // u=I, v in {Z,O,I}
@@ -1529,7 +1607,11 @@ mod tests {
         //   - Y_ext=[I,Z] (beta 6, tA=7) -> maps to (s=0,v=[],u=I,y_sfx=[Z]->0). E_out_s0[(0<<1)|0]=E_out_s0[0]=1. Contr: 7*1=7.
         //   - Y_ext=[I,O] (beta 7, tA=8) -> maps to (s=0,v=[],u=I,y_sfx=[O]->1). E_out_s0[(0<<1)|1]=E_out_s0[1]=2. Contr: 8*2=16.
         //   - Y_ext=[I,I] (beta 8, tA=9) -> maps to (s=0,v=[],u=I,y_sfx=[I]). Skipped by idx_mapping (y_sfx not binary).
-        assert_eq!(task_svo_accs[0].1[0], TestField::from(7u64 + 16u64), "A_0(v=[], u=I)");
+        assert_eq!(
+            task_svo_accs[0].1[0],
+            TestField::from(7u64 + 16u64),
+            "A_0(v=[], u=I)"
+        );
 
         // task_svo_accs[1] is for s=1 (Y1 is current variable u, Y0 is in v_config)
         // task_svo_accs[1].0[map_v_config_to_idx(&[Z],1)=0] is A_1(v=[Z], u=Z)
@@ -1542,19 +1624,35 @@ mod tests {
 
         // task_svo_accs[1].0[map_v_config_to_idx(&[I],1)=2] is A_1(v=[I], u=Z)
         //   - Y_ext=[I,Z] (beta 6, tA=7) -> maps to (s=1,v=[I],u=Z,y_sfx=[]). v=[I] not binary. E_out_s1[0]=5. Contr: 7*5=35.
-        assert_eq!(task_svo_accs[1].0[2], TestField::from(35u64), "A_1(v=[I], u=Z)");
+        assert_eq!(
+            task_svo_accs[1].0[2],
+            TestField::from(35u64),
+            "A_1(v=[I], u=Z)"
+        );
 
         // task_svo_accs[1].1[map_v_config_to_idx(&[Z],1)=0] is A_1(v=[Z], u=I)
         //   - Y_ext=[Z,I] (beta 2, tA=5) -> maps to (s=1,v=[Z],u=I,y_sfx=[]). E_out_s1[0]=5. Contr: 5*5=25.
-        assert_eq!(task_svo_accs[1].1[0], TestField::from(25u64), "A_1(v=[Z], u=I)");
+        assert_eq!(
+            task_svo_accs[1].1[0],
+            TestField::from(25u64),
+            "A_1(v=[Z], u=I)"
+        );
 
         // task_svo_accs[1].1[map_v_config_to_idx(&[O],1)=1] is A_1(v=[O], u=I)
         //   - Y_ext=[O,I] (beta 5, tA=6) -> maps to (s=1,v=[O],u=I,y_sfx=[]). E_out_s1[0]=5. Contr: 6*5=30.
-        assert_eq!(task_svo_accs[1].1[1], TestField::from(30u64), "A_1(v=[O], u=I)");
+        assert_eq!(
+            task_svo_accs[1].1[1],
+            TestField::from(30u64),
+            "A_1(v=[O], u=I)"
+        );
 
         // task_svo_accs[1].1[map_v_config_to_idx(&[I],1)=2] is A_1(v=[I], u=I)
         //   - Y_ext=[I,I] (beta 8, tA=9) -> maps to (s=1,v=[I],u=I,y_sfx=[]). E_out_s1[0]=5. Contr: 9*5=45.
-        assert_eq!(task_svo_accs[1].1[2], TestField::from(45u64), "A_1(v=[I], u=I)");
+        assert_eq!(
+            task_svo_accs[1].1[2],
+            TestField::from(45u64),
+            "A_1(v=[I], u=I)"
+        );
     }
 
     fn _initialize_ternary_from_binary<const NUM_SVO_ROUNDS: usize>(

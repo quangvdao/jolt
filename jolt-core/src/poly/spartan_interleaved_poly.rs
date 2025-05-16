@@ -286,13 +286,18 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         }
 
         let num_parallel_chunks = if num_x_out_vals > 0 {
-            std::cmp::min(num_x_out_vals, rayon::current_num_threads().next_power_of_two() * 2)
+            std::cmp::min(
+                num_x_out_vals,
+                rayon::current_num_threads().next_power_of_two() * 2,
+            )
         } else {
             1 // Avoid 0 chunks if num_x_out_vals is 0
         };
-        assert!(num_parallel_chunks > 0 || num_x_out_vals == 0,
-            "num_parallel_chunks must be positive if there are x_out_vals to process");
-        
+        assert!(
+            num_parallel_chunks > 0 || num_x_out_vals == 0,
+            "num_parallel_chunks must be positive if there are x_out_vals to process"
+        );
+
         let x_out_chunk_size = if num_x_out_vals > 0 {
             num_x_out_vals.div_ceil(num_parallel_chunks)
         } else {
@@ -425,7 +430,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 }
             }) // End .map() over chunks
             .collect(); // Collect all chunk outputs
-        
+
         drop(_main_fold_guard);
 
         // --- Finalization ---
@@ -436,7 +441,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             .iter()
             .map(|output| output.ab_coeffs_local.len())
             .sum();
-        
+
         let mut final_ab_unbound_coeffs = Vec::with_capacity(total_ab_coeffs_len);
         let mut final_svo_accums_zero = [F::zero(); NUM_ACCUMS_EVAL_ZERO];
         let mut final_svo_accums_infty = [F::zero(); NUM_ACCUMS_EVAL_INFTY];
@@ -450,7 +455,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 final_svo_accums_infty[idx] += task_output.svo_accums_infty_local[idx];
             }
         }
-        
+
         // final_ab_unbound_coeffs is now fully populated and SVO accumulators are summed.
 
         // Try commenting this for now
@@ -522,8 +527,10 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     // logical_idx_old == logical_idx_new
                     let old_coeff_type = old_coeff.index % 3; // 0 for Az, 1 for Bz, 2 for Cz
 
-                    if is_new_az { // new_coeff is Az
-                        if old_coeff_type == 0 { // old_coeff is Az
+                    if is_new_az {
+                        // new_coeff is Az
+                        if old_coeff_type == 0 {
+                            // old_coeff is Az
                             assert_eq!(
                                 new_coeff.value, old_coeff.value,
                                 "Az value mismatch: new_idx {}, old_idx {}. Logical_idx: {}",
@@ -537,8 +544,10 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                             old_coeffs_ptr += 1;
                             // Continue in this inner loop to find Az for logical_idx_new or exhaust options for it.
                         }
-                    } else { // new_coeff is Bz
-                        if old_coeff_type == 1 { // old_coeff is Bz
+                    } else {
+                        // new_coeff is Bz
+                        if old_coeff_type == 1 {
+                            // old_coeff is Bz
                             assert_eq!(
                                 new_coeff.value, old_coeff.value,
                                 "Bz value mismatch: new_idx {}, old_idx {}. Logical_idx: {}",
@@ -564,12 +573,13 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 }
                 new_coeffs_ptr += 1;
             }
-            
+
             // Optional: Check if there are any remaining Az/Bz in old_coeffs that weren't matched.
             // This would indicate new_coeffs is missing something old_coeffs had.
             while old_coeffs_ptr < old_new_result.unbound_coeffs.len() {
                 let old_coeff = &old_new_result.unbound_coeffs[old_coeffs_ptr];
-                if old_coeff.index % 3 != 2 { // If it's not a Cz coefficient
+                if old_coeff.index % 3 != 2 {
+                    // If it's not a Cz coefficient
                     let logical_idx_old = old_coeff.index / 3;
                     // Check if this logical_idx_old was covered by any logical_idx_new
                     // This check is more complex; for now, focus on all new_coeffs being found.
@@ -584,13 +594,14 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 old_coeffs_ptr += 1;
             }
 
-            println!("Az/Bz coefficient comparison with old SpartanInterleavedPolynomial::new() passed!");
+            println!(
+                "Az/Bz coefficient comparison with old SpartanInterleavedPolynomial::new() passed!"
+            );
         }
 
         drop(_finalization_guard);
 
         // Return final SVO accumulators and Self struct.
-        // Corresponds to Algo 6, Line 15: Return {A_i(v,u)}.
         (
             final_svo_accums_zero,
             final_svo_accums_infty,
@@ -657,7 +668,10 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         // --- 1. Initial Setup ---
         let num_y_svo_vars = r_challenges.len(); // These are the r_challenges for Y_svo variables
-        assert_eq!(num_y_svo_vars, NUM_SVO_ROUNDS, "r_challenges length mismatch with NUM_SVO_ROUNDS");
+        assert_eq!(
+            num_y_svo_vars, NUM_SVO_ROUNDS,
+            "r_challenges length mismatch with NUM_SVO_ROUNDS"
+        );
         let eq_r_evals = EqPolynomial::evals(r_challenges);
 
         drop(_setup_guard);
@@ -678,10 +692,17 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let num_total_streaming_x_out_vals = 1 << num_streaming_x_out_vars;
         let num_total_streaming_x_in_vals = 1 << num_streaming_x_in_vars;
 
+        let prep_processing_span = tracing::info_span!("streaming_round_prep_processing");
+        let _prep_processing_guard = prep_processing_span.enter();
+
         // Pre-build a map from block_index to the relevant slice of ab_unbound_coeffs
         let mut block_idx_to_coeffs_map = std::collections::HashMap::new();
-        let temp_all_logical_blocks: Vec<&[SparseCoefficient<i128>]> = self.ab_unbound_coeffs
-            .chunk_by(move |c1, c2| c1.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE == c2.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE)
+        let temp_all_logical_blocks: Vec<&[SparseCoefficient<i128>]> = self
+            .ab_unbound_coeffs
+            .chunk_by(move |c1, c2| {
+                c1.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
+                    == c2.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
+            })
             .collect();
 
         for logical_block_coeffs_slice in temp_all_logical_blocks {
@@ -690,16 +711,23 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 block_idx_to_coeffs_map.insert(block_id, logical_block_coeffs_slice);
             }
         }
-        
+
+        drop(_prep_processing_guard);
+
         let num_parallel_chunks_streaming = if num_total_streaming_x_out_vals > 0 {
-            std::cmp::min(num_total_streaming_x_out_vals, rayon::current_num_threads().next_power_of_two() * 2)
+            std::cmp::min(
+                num_total_streaming_x_out_vals,
+                rayon::current_num_threads().next_power_of_two() * 2,
+            )
         } else {
-             1 // Avoid 0 chunks if num_total_streaming_x_out_vals is 0, or if it's 1 to ensure loop runs
+            1 // Avoid 0 chunks if num_total_streaming_x_out_vals is 0, or if it's 1 to ensure loop runs
         };
         // Ensure num_parallel_chunks_streaming is at least 1 if there's work, to prevent 0/0 issues with div_ceil if num_total_streaming_x_out_vals is also 1.
         // If num_total_streaming_x_out_vals is 0, x_out_chunk_size will be 0, and the inner loop won't run.
-        assert!(num_parallel_chunks_streaming > 0 || num_total_streaming_x_out_vals == 0, 
-            "num_parallel_chunks_streaming must be positive if there are x_out_vals to process");
+        assert!(
+            num_parallel_chunks_streaming > 0 || num_total_streaming_x_out_vals == 0,
+            "num_parallel_chunks_streaming must be positive if there are x_out_vals to process"
+        );
 
         let streaming_x_out_chunk_size = if num_total_streaming_x_out_vals > 0 {
             num_total_streaming_x_out_vals.div_ceil(num_parallel_chunks_streaming)
@@ -707,10 +735,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             0
         };
 
-        let collected_chunk_outputs: Vec<StreamingTaskOutput<F>> = (0..num_parallel_chunks_streaming)
+        let collected_chunk_outputs: Vec<StreamingTaskOutput<F>> = (0
+            ..num_parallel_chunks_streaming)
             .into_par_iter()
             .map(|chunk_idx| {
-                let streaming_chunk_task_span = tracing::debug_span!("streaming_chunk_task", chunk_idx);
+                let streaming_chunk_task_span =
+                    tracing::debug_span!("streaming_chunk_task", chunk_idx);
                 let _streaming_chunk_task_guard = streaming_chunk_task_span.enter();
 
                 let mut chunk_bound_coeffs = Vec::new();
@@ -718,7 +748,10 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 let mut chunk_sum_contrib_infty = F::zero();
 
                 let x_out_start = chunk_idx * streaming_x_out_chunk_size;
-                let x_out_end = std::cmp::min((chunk_idx + 1) * streaming_x_out_chunk_size, num_total_streaming_x_out_vals);
+                let x_out_end = std::cmp::min(
+                    (chunk_idx + 1) * streaming_x_out_chunk_size,
+                    num_total_streaming_x_out_vals,
+                );
 
                 for x_out_val in x_out_start..x_out_end {
                     let e_out_val = eq_poly.E_out_current()[x_out_val];
@@ -727,18 +760,26 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
                     for x_in_val in 0..num_total_streaming_x_in_vals {
                         let block_index = (x_out_val << num_streaming_x_in_vars) | x_in_val;
-                        
-                        if let Some(logical_block_coeffs) = block_idx_to_coeffs_map.get(&block_index) {
-                            if logical_block_coeffs.is_empty() { continue; }
 
-                            let mut az0_at_r = F::zero(); let mut az1_at_r = F::zero();
-                            let mut bz0_at_r = F::zero(); let mut bz1_at_r = F::zero();
-                            let mut cz0_at_r = F::zero(); let mut cz1_at_r = F::zero();
+                        if let Some(logical_block_coeffs) =
+                            block_idx_to_coeffs_map.get(&block_index)
+                        {
+                            if logical_block_coeffs.is_empty() {
+                                continue;
+                            }
+
+                            let mut az0_at_r = F::zero();
+                            let mut az1_at_r = F::zero();
+                            let mut bz0_at_r = F::zero();
+                            let mut bz1_at_r = F::zero();
+                            let mut cz0_at_r = F::zero();
+                            let mut cz1_at_r = F::zero();
 
                             let mut coeffs_iter = logical_block_coeffs.iter().peekable();
 
                             while let Some(current_coeff) = coeffs_iter.next() {
-                                let local_offset = current_coeff.index % Y_SVO_RELATED_COEFF_BLOCK_SIZE;
+                                let local_offset =
+                                    current_coeff.index % Y_SVO_RELATED_COEFF_BLOCK_SIZE;
                                 let current_is_B = (local_offset % 2) == 1;
                                 let y_val_idx = (local_offset / 2) % Y_SVO_SPACE_SIZE;
                                 let xk_val = (local_offset / 2) / Y_SVO_SPACE_SIZE; // 0 or 1
@@ -748,17 +789,26 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                     let bz_orig_val = current_coeff.value;
                                     match xk_val {
                                         // Optimize multiplication by 1 (do not optimize by mult by 0 as it's already non-zero)
-                                        0 => bz0_at_r += eq_r_y_svo.mul_i128_1_optimized(bz_orig_val),
-                                        1 => bz1_at_r += eq_r_y_svo.mul_i128_1_optimized(bz_orig_val),
+                                        0 => {
+                                            bz0_at_r += eq_r_y_svo.mul_i128_1_optimized(bz_orig_val)
+                                        }
+                                        1 => {
+                                            bz1_at_r += eq_r_y_svo.mul_i128_1_optimized(bz_orig_val)
+                                        }
                                         _ => unreachable!(),
                                     }
-                                } else { // current is A
+                                } else {
+                                    // current is A
                                     let az_orig_val = current_coeff.value;
                                     let mut bz_orig_for_this_az = 0i128;
 
                                     match xk_val {
-                                        0 => az0_at_r += eq_r_y_svo.mul_i128_1_optimized(az_orig_val),
-                                        1 => az1_at_r += eq_r_y_svo.mul_i128_1_optimized(az_orig_val),
+                                        0 => {
+                                            az0_at_r += eq_r_y_svo.mul_i128_1_optimized(az_orig_val)
+                                        }
+                                        1 => {
+                                            az1_at_r += eq_r_y_svo.mul_i128_1_optimized(az_orig_val)
+                                        }
                                         _ => unreachable!(),
                                     }
 
@@ -766,17 +816,26 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                         if next_coeff.index == current_coeff.index + 1 {
                                             bz_orig_for_this_az = next_coeff.value;
                                             coeffs_iter.next(); // Consume the Bz coefficient
-                                            match xk_val { // xk_val of the current Az
-                                                0 => bz0_at_r += eq_r_y_svo.mul_i128_1_optimized(bz_orig_for_this_az),
-                                                1 => bz1_at_r += eq_r_y_svo.mul_i128_1_optimized(bz_orig_for_this_az),
+                                            match xk_val {
+                                                // xk_val of the current Az
+                                                0 => {
+                                                    bz0_at_r += eq_r_y_svo
+                                                        .mul_i128_1_optimized(bz_orig_for_this_az)
+                                                }
+                                                1 => {
+                                                    bz1_at_r += eq_r_y_svo
+                                                        .mul_i128_1_optimized(bz_orig_for_this_az)
+                                                }
                                                 _ => unreachable!(),
                                             }
                                         }
                                     }
-                                    
-                                    if !az_orig_val.is_zero() && !bz_orig_for_this_az.is_zero() { 
-                                        let cz_orig_val = az_orig_val.wrapping_mul(bz_orig_for_this_az);
-                                        match xk_val { // xk_val of the current Az
+
+                                    if !az_orig_val.is_zero() && !bz_orig_for_this_az.is_zero() {
+                                        let cz_orig_val =
+                                            az_orig_val.wrapping_mul(bz_orig_for_this_az);
+                                        match xk_val {
+                                            // xk_val of the current Az
                                             // cz is likely not 1, so no optimization here
                                             0 => cz0_at_r += eq_r_y_svo.mul_i128(cz_orig_val),
                                             1 => cz1_at_r += eq_r_y_svo.mul_i128(cz_orig_val),
@@ -786,19 +845,31 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                 }
                             }
 
-                            if !az0_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 0, az0_at_r).into()); }
-                            if !bz0_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 1, bz0_at_r).into()); }
-                            if !cz0_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 2, cz0_at_r).into()); }
-                            if !az1_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 3, az1_at_r).into()); }
-                            if !bz1_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 4, bz1_at_r).into()); }
-                            if !cz1_at_r.is_zero() { chunk_bound_coeffs.push((6 * block_index + 5, cz1_at_r).into()); }
-                            
+                            if !az0_at_r.is_zero() {
+                                chunk_bound_coeffs.push((6 * block_index + 0, az0_at_r).into());
+                            }
+                            if !bz0_at_r.is_zero() {
+                                chunk_bound_coeffs.push((6 * block_index + 1, bz0_at_r).into());
+                            }
+                            if !cz0_at_r.is_zero() {
+                                chunk_bound_coeffs.push((6 * block_index + 2, cz0_at_r).into());
+                            }
+                            if !az1_at_r.is_zero() {
+                                chunk_bound_coeffs.push((6 * block_index + 3, az1_at_r).into());
+                            }
+                            if !bz1_at_r.is_zero() {
+                                chunk_bound_coeffs.push((6 * block_index + 4, bz1_at_r).into());
+                            }
+                            if !cz1_at_r.is_zero() {
+                                chunk_bound_coeffs.push((6 * block_index + 5, cz1_at_r).into());
+                            }
+
                             let e_in_val = if eq_poly.E_in_current_len() > 1 {
                                 eq_poly.E_in_current()[x_in_val]
                             } else {
                                 eq_poly.E_in_current()[0]
                             };
-                            
+
                             let p_at_xk0 = az0_at_r * bz0_at_r - cz0_at_r;
                             let az_eval_infty = az1_at_r - az0_at_r;
                             let bz_eval_infty = bz1_at_r - bz0_at_r;
@@ -820,41 +891,41 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 }
             })
             .collect();
-        
+
         drop(_main_processing_guard);
 
         let finalization_span = tracing::info_span!("streaming_round_finalization");
         let _finalization_guard = finalization_span.enter();
-        
+
         let mut final_bound_coeffs_capacity = 0;
-        for output in &collected_chunk_outputs { 
+        for output in &collected_chunk_outputs {
             final_bound_coeffs_capacity += output.bound_coeffs_local.len();
         }
         let mut final_bound_coeffs = Vec::with_capacity(final_bound_coeffs_capacity);
         let mut total_sumcheck_eval_at_0 = F::zero();
         let mut total_sumcheck_eval_at_infty = F::zero();
 
-        for output in collected_chunk_outputs { 
-           final_bound_coeffs.extend(output.bound_coeffs_local);
-           total_sumcheck_eval_at_0 += output.sumcheck_eval_at_0_local;
-           total_sumcheck_eval_at_infty += output.sumcheck_eval_at_infty_local;
+        for output in collected_chunk_outputs {
+            final_bound_coeffs.extend(output.bound_coeffs_local);
+            total_sumcheck_eval_at_0 += output.sumcheck_eval_at_0_local;
+            total_sumcheck_eval_at_infty += output.sumcheck_eval_at_infty_local;
         }
-        
+
         self.ab_unbound_coeffs.clear();
         // Sorting might be beneficial if the binding step relies on specific order not guaranteed by par_chunk_by's collection
-        final_bound_coeffs.par_sort_unstable_by_key(|sc| sc.index); 
-        
+        final_bound_coeffs.par_sort_unstable_by_key(|sc| sc.index);
+
         drop(_finalization_guard);
 
         let process_round_span = tracing::info_span!("streaming_round_process_eq_sumcheck");
         let _process_round_guard = process_round_span.enter();
-        
+
         let r_i = process_eq_sumcheck_round(
             (total_sumcheck_eval_at_0, total_sumcheck_eval_at_infty),
-            eq_poly, 
+            eq_poly,
             round_polys,
-            r_challenges, 
-            claim,       
+            r_challenges,
+            claim,
             transcript,
         );
         drop(_process_round_guard);
@@ -864,23 +935,26 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         // --- Bind `final_bound_coeffs` with r_i (reusing logic from remaining_sumcheck_round) ---
         let binding_chunks_for_final: Vec<&[SparseCoefficient<F>]> = final_bound_coeffs
-            .par_chunk_by(|c1, c2| c1.index / 6 == c2.index / 6) 
+            .par_chunk_by(|c1, c2| c1.index / 6 == c2.index / 6)
             .collect();
 
-        let binding_output_sizes_per_chunk: Vec<usize> = binding_chunks_for_final.iter()
+        let binding_output_sizes_per_chunk: Vec<usize> = binding_chunks_for_final
+            .iter()
             .map(|chunk_6_coeffs| Self::binding_output_length(chunk_6_coeffs))
             .collect();
-        
+
         let total_binding_output_len = binding_output_sizes_per_chunk.iter().sum();
 
         if self.binding_scratch_space.capacity() < total_binding_output_len {
-            self.binding_scratch_space.reserve_exact(total_binding_output_len - self.binding_scratch_space.capacity());
+            self.binding_scratch_space
+                .reserve_exact(total_binding_output_len - self.binding_scratch_space.capacity());
         }
         unsafe {
             self.binding_scratch_space.set_len(total_binding_output_len);
         }
 
-        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> = Vec::with_capacity(binding_chunks_for_final.len());
+        let mut output_slices: Vec<&mut [SparseCoefficient<F>]> =
+            Vec::with_capacity(binding_chunks_for_final.len());
         let mut scratch_remainder = self.binding_scratch_space.as_mut_slice();
         for slice_len in binding_output_sizes_per_chunk {
             let (first, second) = scratch_remainder.split_at_mut(slice_len);
@@ -893,50 +967,65 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             .into_par_iter()
             .zip_eq(output_slices.into_par_iter())
             .for_each(|(coeffs_6_block, output_slice_for_3_coeffs)| {
-                let block_idx_for_6_coeffs = if !coeffs_6_block.is_empty() { coeffs_6_block[0].index / 6 } else { 0 }; 
+                let block_idx_for_6_coeffs = if !coeffs_6_block.is_empty() {
+                    coeffs_6_block[0].index / 6
+                } else {
+                    0
+                };
 
-                let mut az0 = F::zero(); let mut bz0 = F::zero(); let mut cz0 = F::zero();
-                let mut az1 = F::zero(); let mut bz1 = F::zero(); let mut cz1 = F::zero();
+                let mut az0 = F::zero();
+                let mut bz0 = F::zero();
+                let mut cz0 = F::zero();
+                let mut az1 = F::zero();
+                let mut bz1 = F::zero();
+                let mut cz1 = F::zero();
 
-                for coeff in coeffs_6_block { 
+                for coeff in coeffs_6_block {
                     match coeff.index % 6 {
-                        0 => az0 = coeff.value, 1 => bz0 = coeff.value, 2 => cz0 = coeff.value,
-                        3 => az1 = coeff.value, 4 => bz1 = coeff.value, 5 => cz1 = coeff.value,
-                        _ => {} 
+                        0 => az0 = coeff.value,
+                        1 => bz0 = coeff.value,
+                        2 => cz0 = coeff.value,
+                        3 => az1 = coeff.value,
+                        4 => bz1 = coeff.value,
+                        5 => cz1 = coeff.value,
+                        _ => {}
                     }
                 }
-                
+
                 let mut current_output_idx = 0;
-                let new_block_idx = block_idx_for_6_coeffs; 
+                let new_block_idx = block_idx_for_6_coeffs;
 
                 let bound_az = az0 + r_i * (az1 - az0);
                 if !bound_az.is_zero() {
                     if current_output_idx < output_slice_for_3_coeffs.len() {
-                        output_slice_for_3_coeffs[current_output_idx] = (3 * new_block_idx + 0, bound_az).into();
+                        output_slice_for_3_coeffs[current_output_idx] =
+                            (3 * new_block_idx + 0, bound_az).into();
                     }
                     current_output_idx += 1;
                 }
                 let bound_bz = bz0 + r_i * (bz1 - bz0);
                 if !bound_bz.is_zero() {
-                     if current_output_idx < output_slice_for_3_coeffs.len() {
-                        output_slice_for_3_coeffs[current_output_idx] = (3 * new_block_idx + 1, bound_bz).into();
-                     }
-                    current_output_idx += 1;
-                }
-                let bound_cz = cz0 + r_i * (cz1 - cz0); 
-                if !bound_cz.is_zero() {
                     if current_output_idx < output_slice_for_3_coeffs.len() {
-                        output_slice_for_3_coeffs[current_output_idx] = (3 * new_block_idx + 2, bound_cz).into();
+                        output_slice_for_3_coeffs[current_output_idx] =
+                            (3 * new_block_idx + 1, bound_bz).into();
                     }
                     current_output_idx += 1;
                 }
-                 // Assert that the number of written elements is consistent with pre-calculated slice length
+                let bound_cz = cz0 + r_i * (cz1 - cz0);
+                if !bound_cz.is_zero() {
+                    if current_output_idx < output_slice_for_3_coeffs.len() {
+                        output_slice_for_3_coeffs[current_output_idx] =
+                            (3 * new_block_idx + 2, bound_cz).into();
+                    }
+                    current_output_idx += 1;
+                }
+                // Assert that the number of written elements is consistent with pre-calculated slice length
                 debug_assert_eq!(current_output_idx, output_slice_for_3_coeffs.len());
             });
 
         std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
-        self.dense_len = eq_poly.len(); 
-        
+        self.dense_len = eq_poly.len();
+
         drop(_bind_coeffs_guard);
         drop(_top_level_guard);
     }
@@ -1748,16 +1837,12 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
                                 eq_evals
                                     .0
                                     .mul_0_optimized(az.0.mul_0_optimized(bz.0) - cz.0),
-                                eq_evals
-                                    .1
-                                    .mul_0_optimized(
-                                        az_eval_2.mul_0_optimized(bz_eval_2) - cz_eval_2,
-                                    ),
-                                eq_evals
-                                    .2
-                                    .mul_0_optimized(
-                                        az_eval_3.mul_0_optimized(bz_eval_3) - cz_eval_3,
-                                    ),
+                                eq_evals.1.mul_0_optimized(
+                                    az_eval_2.mul_0_optimized(bz_eval_2) - cz_eval_2,
+                                ),
+                                eq_evals.2.mul_0_optimized(
+                                    az_eval_3.mul_0_optimized(bz_eval_3) - cz_eval_3,
+                                ),
                             )
                         })
                 })
@@ -2028,10 +2113,13 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
     /// The first round of the first Spartan sumcheck. Since the polynomials
     /// are still unbound at the beginning of this round, we can replace some
     /// of the field arithmetic with `i128` arithmetic.
-    /// 
+    ///
     /// THIS IS THE VERSION WITH GRUEN'S OPTIMIZATION. We also implement the extra optimization of
     /// only computing the quadratic evaluation at infinity, since the one at zero is always zero.
-    #[tracing::instrument(skip_all, name = "SpartanInterleavedPolynomial::first_sumcheck_round_with_gruen")]
+    #[tracing::instrument(
+        skip_all,
+        name = "SpartanInterleavedPolynomial::first_sumcheck_round_with_gruen"
+    )]
     pub fn first_sumcheck_round_with_gruen<ProofTranscript: Transcript>(
         &mut self,
         eq_poly: &mut NewSplitEqPolynomial<F>,
@@ -2077,8 +2165,10 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
 
                     // This holds the az0, az1, bz0, bz1 evals. No need for cz0, cz1 since we only need
                     // the eval at infinity.
-                    let mut az0 = 0i128; let mut az1 = 0i128;
-                    let mut bz0 = 0i128; let mut bz1 = 0i128;
+                    let mut az0 = 0i128;
+                    let mut az1 = 0i128;
+                    let mut bz0 = 0i128;
+                    let mut bz1 = 0i128;
                     for coeff in sparse_block {
                         let local_idx = coeff.index % 6;
                         if local_idx == 0 {
@@ -2091,27 +2181,27 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
                             bz1 = coeff.value;
                         }
                     }
-                    let az_infty = az1 - az0; let bz_infty = bz1 - bz0;
+                    let az_infty = az1 - az0;
+                    let bz_infty = bz1 - bz0;
                     if az_infty != 0 && bz_infty != 0 {
-                        inner_sums += E_in_evals.mul_i128_1_optimized(az_infty.checked_mul(bz_infty).unwrap_or_else(|| {
-                            panic!("az_infty * bz_infty overflow");
-                        }));
+                        inner_sums += E_in_evals.mul_i128_1_optimized(
+                            az_infty.checked_mul(bz_infty).unwrap_or_else(|| {
+                                panic!("az_infty * bz_infty overflow");
+                            }),
+                        );
                     }
                 }
                 eval_point_infty += eq_poly.E_out_current()[prev_x_out] * inner_sums;
                 eval_point_infty
             })
-            .reduce(
-                || F::zero(),
-                |sum, evals| sum + evals,
-            );
+            .reduce(|| F::zero(), |sum, evals| sum + evals);
 
         let r_i = process_eq_sumcheck_round(
             (F::zero(), quadratic_eval_at_infty),
-            eq_poly, 
+            eq_poly,
             polys,
-            r, 
-            claim,       
+            r,
+            claim,
             transcript,
         );
 
@@ -2240,8 +2330,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
                             let eq_evals = eq_poly.E_out_current()[block_index];
 
                             (
-                                eq_evals
-                                    .mul_0_optimized(az.0.mul_0_optimized(bz.0) - cz0),
+                                eq_evals.mul_0_optimized(az.0.mul_0_optimized(bz.0) - cz0),
                                 eq_evals
                                     .mul_0_optimized(az_eval_infty.mul_0_optimized(bz_eval_infty)),
                             )
@@ -2292,10 +2381,9 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
                         let az_eval_infty = az.1 - az.0;
                         let bz_eval_infty = bz.1 - bz.0;
 
-                        inner_sums.0 += E_in_eval
-                            .mul_0_optimized(az.0.mul_0_optimized(bz.0) - cz0);
-                        inner_sums.1 += E_in_eval
-                            .mul_0_optimized(az_eval_infty.mul_0_optimized(bz_eval_infty));
+                        inner_sums.0 += E_in_eval.mul_0_optimized(az.0.mul_0_optimized(bz.0) - cz0);
+                        inner_sums.1 +=
+                            E_in_eval.mul_0_optimized(az_eval_infty.mul_0_optimized(bz_eval_infty));
                     }
 
                     eval_point_0 += eq_poly.E_out_current()[prev_x_out] * inner_sums.0;
@@ -2310,14 +2398,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
             evals
         };
 
-        let r_i = process_eq_sumcheck_round(
-            quadratic_evals,
-            eq_poly,
-            polys,
-            r,
-            claim,
-            transcript,
-        );
+        let r_i = process_eq_sumcheck_round(quadratic_evals, eq_poly, polys, r, claim, transcript);
 
         let output_sizes: Vec<_> = chunks
             .par_iter()

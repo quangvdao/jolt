@@ -191,12 +191,13 @@ where
                     let mut eq_tau = NewSplitEqPolynomial::new(&tau);
                     let mut az_bz_cz_poly =
                         constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                    let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
-                        num_rounds_x,
-                        &mut eq_tau,
-                        &mut az_bz_cz_poly,
-                        transcript,
-                    );
+                    let (proof, outer_sumcheck_r, claims) =
+                        SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
+                            num_rounds_x,
+                            &mut eq_tau,
+                            &mut az_bz_cz_poly,
+                            transcript,
+                        );
                     drop_in_background_thread((az_bz_cz_poly, eq_tau));
                     let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
                     (proof, outer_sumcheck_r, claims)
@@ -206,15 +207,16 @@ where
                     let mut eq_tau = SplitEqPolynomial::new(&tau);
                     let mut az_bz_cz_poly =
                         constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                    let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic(
-                        num_rounds_x,
-                        &mut eq_tau,
-                        &mut az_bz_cz_poly,
-                        transcript,
-                    );
+                    let (proof, outer_sumcheck_r, claims) =
+                        SumcheckInstanceProof::prove_spartan_cubic(
+                            num_rounds_x,
+                            &mut eq_tau,
+                            &mut az_bz_cz_poly,
+                            transcript,
+                        );
                     drop_in_background_thread((az_bz_cz_poly, eq_tau));
                     let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-                    (proof, outer_sumcheck_r, claims)                
+                    (proof, outer_sumcheck_r, claims)
                 })
             };
 

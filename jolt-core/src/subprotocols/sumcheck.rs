@@ -258,10 +258,9 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                             }
                             1 => {
                                 quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
-                                quadratic_eval_infty =
-                                    accums_infty[1] * lagrange_coeffs[0] +
-                                    accums_infty[2] * lagrange_coeffs[1] +
-                                    accums_infty[3] * lagrange_coeffs[2];
+                                quadratic_eval_infty = accums_infty[1] * lagrange_coeffs[0]
+                                    + accums_infty[2] * lagrange_coeffs[1]
+                                    + accums_infty[3] * lagrange_coeffs[2];
                             }
                             2 => {
                                 // We have accums_zero[1..6] corresponding to
@@ -272,24 +271,24 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                                 // We have accums_infty[4..] corresponding to
                                 // (infty, v_1, v_2), where v_1, v_2 \in {0, 1, infty}
                                 // Do full inner product over lagrange_coeffs
-                                quadratic_eval_0 =
-                                    accums_zero[1] * lagrange_coeffs[2] +
-                                    accums_zero[2] * lagrange_coeffs[5] +
-                                    accums_zero[3] * lagrange_coeffs[6] +
-                                    accums_zero[4] * lagrange_coeffs[7] +
-                                    accums_zero[5] * lagrange_coeffs[8];
-                                quadratic_eval_infty =
-                                    accums_infty[4] * lagrange_coeffs[0] +
-                                    accums_infty[5] * lagrange_coeffs[1] +
-                                    accums_infty[6] * lagrange_coeffs[2] +
-                                    accums_infty[7] * lagrange_coeffs[3] +
-                                    accums_infty[8] * lagrange_coeffs[4] +
-                                    accums_infty[9] * lagrange_coeffs[5] +
-                                    accums_infty[10] * lagrange_coeffs[6] +
-                                    accums_infty[11] * lagrange_coeffs[7] +
-                                    accums_infty[12] * lagrange_coeffs[8];
+                                quadratic_eval_0 = accums_zero[1] * lagrange_coeffs[2]
+                                    + accums_zero[2] * lagrange_coeffs[5]
+                                    + accums_zero[3] * lagrange_coeffs[6]
+                                    + accums_zero[4] * lagrange_coeffs[7]
+                                    + accums_zero[5] * lagrange_coeffs[8];
+                                quadratic_eval_infty = accums_infty[4] * lagrange_coeffs[0]
+                                    + accums_infty[5] * lagrange_coeffs[1]
+                                    + accums_infty[6] * lagrange_coeffs[2]
+                                    + accums_infty[7] * lagrange_coeffs[3]
+                                    + accums_infty[8] * lagrange_coeffs[4]
+                                    + accums_infty[9] * lagrange_coeffs[5]
+                                    + accums_infty[10] * lagrange_coeffs[6]
+                                    + accums_infty[11] * lagrange_coeffs[7]
+                                    + accums_infty[12] * lagrange_coeffs[8];
                             }
-                            _ => { unreachable!("i must be less than NUM_SVO_ROUNDS!") }
+                            _ => {
+                                unreachable!("i must be less than NUM_SVO_ROUNDS!")
+                            }
                         }
                     }
                     _ => {
@@ -355,7 +354,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
             let mut old_r: Vec<F> = Vec::new();
             let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
-            let mut old_claim = F::zero(); 
+            let mut old_claim = F::zero();
             let mut old_eq_poly = SplitEqPolynomial::new(tau);
 
             old_az_bz_cz_poly.first_sumcheck_round(
@@ -386,9 +385,9 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 );
                 // If challenges are derived correctly from independent but identically starting transcripts:
                 assert_eq!(
-                    old_r[round],
-                    r[round],
-                    "The old and new method do not yield the same challenges (round {})!", round
+                    old_r[round], r[round],
+                    "The old and new method do not yield the same challenges (round {})!",
+                    round
                 );
             }
         }
@@ -442,11 +441,13 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         for round in 0..num_rounds {
             if round == 0 {
-                az_bz_cz_poly
-                    .first_sumcheck_round_with_gruen(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+                az_bz_cz_poly.first_sumcheck_round_with_gruen(
+                    eq_poly, transcript, &mut r, &mut polys, &mut claim,
+                );
             } else {
-                az_bz_cz_poly
-                    .subsequent_sumcheck_round_with_gruen(eq_poly, transcript, &mut r, &mut polys, &mut claim);
+                az_bz_cz_poly.subsequent_sumcheck_round_with_gruen(
+                    eq_poly, transcript, &mut r, &mut polys, &mut claim,
+                );
             }
         }
 

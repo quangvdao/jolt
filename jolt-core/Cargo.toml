@@ -28,6 +28,7 @@ default = [
     "ark-ff/asm",
     "host",
     "rayon",
+    "spartan_only",
     "small_value_optimization",
 ]
 host = ["dep:reqwest", "dep:tokio"]

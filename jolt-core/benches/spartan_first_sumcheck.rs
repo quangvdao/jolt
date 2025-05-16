@@ -91,7 +91,7 @@ fn setup_for_spartan(
 
 fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
     // Define a range or list of iteration counts you want to benchmark
-    let iteration_counts = vec![16, 32, 64, 128, 256]; // Example values
+    let iteration_counts = vec![64, 128, 256, 512, 1024, 2048]; // Example values
 
     for &num_iters in iteration_counts.iter() {
         println!(
@@ -127,7 +127,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
         ));
 
         group.measurement_time(Duration::from_secs(120));
-        group.sample_size(10);
+        group.sample_size(5);
 
         group.bench_function(
             "Original (SpartanInterleaved + SplitEq)",

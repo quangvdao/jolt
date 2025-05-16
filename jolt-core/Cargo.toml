@@ -29,6 +29,7 @@ default = [
     "host",
     "rayon",
     "spartan_only",
+    "small_value_optimization",
 ]
 host = ["dep:reqwest", "dep:tokio"]
 icicle = [
@@ -37,8 +38,8 @@ icicle = [
     "dep:icicle-core",
     "dep:icicle-bn254",
 ]
-# Need to pass in `--features small_value_optimization` to enable this
-small_value_optimization = [] 
+small_value_optimization = []
+gruen_optimization = []
 # Reduce proving & verifying to Spartan only, in order to benchmark Spartan specifically
 spartan_only = []
 

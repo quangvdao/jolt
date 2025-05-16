@@ -538,7 +538,7 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
     }
 
     /// Number of constraint rows per step, padded to the next power of two.
-    pub(super) fn padded_rows_per_step(&self) -> usize {
+    pub fn padded_rows_per_step(&self) -> usize {
         let num_constraints =
             self.uniform_builder.constraints.len() + self.offset_equality_constraints.len();
         num_constraints.next_power_of_two()

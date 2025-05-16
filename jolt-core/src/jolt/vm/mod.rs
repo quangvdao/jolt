@@ -6,7 +6,9 @@ use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::opening_proof::{
     ProverOpeningAccumulator, ReducedOpeningProof, VerifierOpeningAccumulator,
 };
+use crate::r1cs::builder::CombinedUniformBuilder;
 use crate::r1cs::constraints::R1CSConstraints;
+use crate::r1cs::key::UniformSpartanKey;
 use crate::r1cs::spartan::{self, UniformSpartanProof};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::rv_trace::{MemoryLayout, NUM_CIRCUIT_FLAGS};
@@ -152,7 +154,7 @@ where
 }
 
 impl<InstructionSet: JoltInstructionSet> JoltTraceStep<InstructionSet> {
-    fn no_op() -> Self {
+    pub fn no_op() -> Self {
         JoltTraceStep {
             instruction_lookup: None,
             bytecode_row: BytecodeRow::no_op(0),
@@ -166,7 +168,7 @@ impl<InstructionSet: JoltInstructionSet> JoltTraceStep<InstructionSet> {
         }
     }
 
-    fn pad(trace: &mut Vec<Self>) {
+    pub fn pad(trace: &mut Vec<Self>) {
         let unpadded_length = trace.len();
         let padded_length = unpadded_length.next_power_of_two();
         trace.resize(padded_length, Self::no_op());
@@ -444,6 +446,80 @@ where
             field: small_value_lookup_tables,
         }
     }
+    
+    fn initialize_lookup_tables(preprocessing: &mut JoltProverPreprocessing<C, F, PCS, ProofTranscript>) {
+        F::initialize_lookup_tables(std::mem::take(&mut preprocessing.field));
+    }
+
+    fn construct_data_for_spartan(
+        program_io: JoltDevice,
+        padded_trace_length: usize,
+        mut trace: Vec<JoltTraceStep<Self::InstructionSet>>,
+        preprocessing: &JoltProverPreprocessing<C, F, PCS, ProofTranscript>,
+    ) -> (CombinedUniformBuilder<C, F, <Self::Constraints as R1CSConstraints<C, F>>::Inputs>,
+        UniformSpartanKey<C, <Self::Constraints as R1CSConstraints<C, F>>::Inputs, F>,
+        JoltPolynomials<F>) {
+        let instruction_polynomials =
+        InstructionLookupsProof::<
+            C,
+            M,
+            F,
+            PCS,
+            Self::InstructionSet,
+            Self::Subtables,
+            ProofTranscript,
+        >::generate_witness(&preprocessing.shared.instruction_lookups, &trace);
+
+        let memory_polynomials = ReadWriteMemoryPolynomials::generate_witness(
+            &program_io,
+            &preprocessing.shared.read_write_memory,
+            &trace,
+        );
+
+        let (bytecode_polynomials, range_check_polys) = rayon::join(
+            || {
+                BytecodeProof::<F, PCS, ProofTranscript>::generate_witness(
+                    &preprocessing.shared.bytecode,
+                    &mut trace,
+                )
+            },
+            || {
+                TimestampValidityProof::<F, PCS, ProofTranscript>::generate_witness(
+                    &memory_polynomials,
+                )
+            },
+        );
+
+        let r1cs_builder = Self::Constraints::construct_constraints(
+            padded_trace_length,
+            program_io.memory_layout.input_start,
+        );
+        let spartan_key = spartan::UniformSpartanProof::<
+            C,
+            <Self::Constraints as R1CSConstraints<C, F>>::Inputs,
+            F,
+            ProofTranscript,
+        >::setup(&r1cs_builder, padded_trace_length);
+
+        let r1cs_polynomials = R1CSPolynomials::new::<
+            C,
+            M,
+            Self::InstructionSet,
+            <Self::Constraints as R1CSConstraints<C, F>>::Inputs,
+        >(&trace);
+
+        let mut jolt_polynomials = JoltPolynomials {
+            bytecode: bytecode_polynomials,
+            read_write_memory: memory_polynomials,
+            timestamp_range_check: range_check_polys,
+            instruction_lookups: instruction_polynomials,
+            r1cs: r1cs_polynomials,
+        };
+
+        r1cs_builder.compute_aux(&mut jolt_polynomials);
+
+        (r1cs_builder, spartan_key, jolt_polynomials)
+    }
 
     #[tracing::instrument(skip_all, name = "Jolt::prove")]
     fn prove(
@@ -543,7 +619,7 @@ where
         };
 
         r1cs_builder.compute_aux(&mut jolt_polynomials);
-
+        
         let jolt_commitments =
             jolt_polynomials.commit::<C, PCS, ProofTranscript>(&preprocessing.shared);
 
@@ -671,8 +747,10 @@ where
         let opening_proof_opt: Option<ReducedOpeningProof<F, PCS, ProofTranscript>>;
         #[cfg(not(feature = "spartan_only"))]
         {
-            opening_proof_opt = Some(opening_accumulator
-                .reduce_and_prove::<PCS>(&preprocessing.shared.generators, &mut transcript));
+            opening_proof_opt = Some(
+                opening_accumulator
+                    .reduce_and_prove::<PCS>(&preprocessing.shared.generators, &mut transcript),
+            );
         }
         #[cfg(feature = "spartan_only")]
         {
@@ -821,7 +899,9 @@ where
             )?;
         } else {
             #[cfg(not(feature = "spartan_only"))]
-            { return Err(ProofVerifyError::InternalError); }
+            {
+                return Err(ProofVerifyError::InternalError);
+            }
         }
         Ok(())
     }

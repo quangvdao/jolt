@@ -1,8 +1,9 @@
 use crate::field::JoltField;
 use crate::host;
 use crate::jolt::instruction::{JoltInstructionSet, LookupTables};
-use crate::jolt::vm::rv32i_vm::{RV32IJoltVM, RV32I, C, M};
+use crate::jolt::vm::rv32i_vm::{RV32IJoltVM, C, M, RV32I};
 use crate::jolt::vm::Jolt;
+use crate::jolt::vm::{JoltProverPreprocessing, JoltTraceStep};
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::poly::commitment::zeromorph::Zeromorph;
@@ -15,14 +16,13 @@ use crate::utils::math::Math;
 use crate::utils::transcript::{KeccakTranscript, Transcript};
 use ark_bn254::{Bn254, Fr};
 use ark_std::test_rng;
+use common::rv_trace::JoltDevice;
+use criterion::{black_box, BatchSize, Bencher, Criterion};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_core::RngCore;
 use rand_distr::{Distribution, Zipf};
 use serde::Serialize;
-use criterion::{Criterion, Bencher, BatchSize, black_box};
-use crate::jolt::vm::{JoltProverPreprocessing, JoltTraceStep};
-use common::rv_trace::JoltDevice;
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum PCSType {
@@ -416,7 +416,7 @@ struct ProveIterationData<
     const C_CONST: usize,
     F: JoltField,
     PCS: CommitmentScheme<PT, Field = F>, // Corrected ProofTranscript to PT
-    PT: Transcript, // Renamed ProofTranscript to PT for brevity in struct def
+    PT: Transcript,                       // Renamed ProofTranscript to PT for brevity in struct def
 > {
     preprocessing: JoltProverPreprocessing<C_CONST, F, PCS, PT>,
     io_device: JoltDevice,
@@ -428,16 +428,22 @@ fn benchmark_jolt_prove_only_sha2_chain(c: &mut Criterion) {
     // Define types for this specific benchmark
     // These should align with types used in other benchmarks in the file for consistency
     type F = ark_bn254::Fr; // Assuming Fr as in other examples
-    type PCSImpl = crate::poly::commitment::hyperkzg::HyperKZG<ark_bn254::Bn254, crate::utils::transcript::KeccakTranscript>;
+    type PCSImpl = crate::poly::commitment::hyperkzg::HyperKZG<
+        ark_bn254::Bn254,
+        crate::utils::transcript::KeccakTranscript,
+    >;
     type PTImpl = crate::utils::transcript::KeccakTranscript;
-    
+
     // Use constants for C and M, potentially from crate::jolt::vm::rv32i_vm or define specific ones
     const C_CONST_VAL: usize = crate::jolt::vm::rv32i_vm::C; // Default C from the VM
     const M_CONST_VAL: usize = crate::jolt::vm::rv32i_vm::M; // Default M from the VM
 
     // --- Part 1: One-time setup for this benchmark ---
     let example_name_str = "sha2-chain-guest";
-    println!("Setting up benchmark for: {} (prove step only)", example_name_str); // Log setup
+    println!(
+        "Setting up benchmark for: {} (prove step only)",
+        example_name_str
+    ); // Log setup
 
     let mut program = host::Program::new(example_name_str);
 
@@ -450,7 +456,10 @@ fn benchmark_jolt_prove_only_sha2_chain(c: &mut Criterion) {
     // Perform one trace to get memory_layout for preprocessing
     let (initial_io_device_template, _) = program.trace(&inputs_bytes);
 
-    println!("Performing one-time prover preprocessing for {}...", example_name_str);
+    println!(
+        "Performing one-time prover preprocessing for {}...",
+        example_name_str
+    );
     let prover_preprocessing: JoltProverPreprocessing<C_CONST_VAL, F, PCSImpl, PTImpl> =
         RV32IJoltVM::prover_preprocess(
             bytecode.clone(),

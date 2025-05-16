@@ -446,8 +446,10 @@ where
             field: small_value_lookup_tables,
         }
     }
-    
-    fn initialize_lookup_tables(preprocessing: &mut JoltProverPreprocessing<C, F, PCS, ProofTranscript>) {
+
+    fn initialize_lookup_tables(
+        preprocessing: &mut JoltProverPreprocessing<C, F, PCS, ProofTranscript>,
+    ) {
         F::initialize_lookup_tables(std::mem::take(&mut preprocessing.field));
     }
 
@@ -456,19 +458,21 @@ where
         padded_trace_length: usize,
         mut trace: Vec<JoltTraceStep<Self::InstructionSet>>,
         preprocessing: &JoltProverPreprocessing<C, F, PCS, ProofTranscript>,
-    ) -> (CombinedUniformBuilder<C, F, <Self::Constraints as R1CSConstraints<C, F>>::Inputs>,
+    ) -> (
+        CombinedUniformBuilder<C, F, <Self::Constraints as R1CSConstraints<C, F>>::Inputs>,
         UniformSpartanKey<C, <Self::Constraints as R1CSConstraints<C, F>>::Inputs, F>,
-        JoltPolynomials<F>) {
+        JoltPolynomials<F>,
+    ) {
         let instruction_polynomials =
-        InstructionLookupsProof::<
-            C,
-            M,
-            F,
-            PCS,
-            Self::InstructionSet,
-            Self::Subtables,
-            ProofTranscript,
-        >::generate_witness(&preprocessing.shared.instruction_lookups, &trace);
+            InstructionLookupsProof::<
+                C,
+                M,
+                F,
+                PCS,
+                Self::InstructionSet,
+                Self::Subtables,
+                ProofTranscript,
+            >::generate_witness(&preprocessing.shared.instruction_lookups, &trace);
 
         let memory_polynomials = ReadWriteMemoryPolynomials::generate_witness(
             &program_io,
@@ -619,7 +623,7 @@ where
         };
 
         r1cs_builder.compute_aux(&mut jolt_polynomials);
-        
+
         let jolt_commitments =
             jolt_polynomials.commit::<C, PCS, ProofTranscript>(&preprocessing.shared);
 

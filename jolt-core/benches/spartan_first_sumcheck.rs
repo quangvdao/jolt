@@ -2,16 +2,12 @@
 // then run Spartan first sumcheck on it
 
 use ark_bn254::{Bn254, Fr};
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, Bencher, Criterion,
-};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Bencher, Criterion};
 use jolt_core::{
-    field::JoltField,
     host,
-    jolt::{
-        vm::{
-            rv32i_vm::{RV32IJoltVM, C, M, RV32I}, Jolt, JoltPolynomials, JoltProverPreprocessing, JoltTraceStep
-        },
+    jolt::vm::{
+        rv32i_vm::{RV32IJoltVM, C},
+        Jolt, JoltPolynomials, JoltProverPreprocessing, JoltTraceStep,
     },
     poly::{
         commitment::hyperkzg::HyperKZG,
@@ -19,8 +15,9 @@ use jolt_core::{
         split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial},
     },
     r1cs::{
-        builder::CombinedUniformBuilder, inputs::{ConstraintInput, JoltR1CSInputs}, key::UniformSpartanKey,
-        constraints::JoltRV32IMConstraints
+        builder::CombinedUniformBuilder,
+        inputs::{ConstraintInput, JoltR1CSInputs},
+        key::UniformSpartanKey,
     },
     subprotocols::sumcheck::SumcheckInstanceProof,
     utils::transcript::{KeccakTranscript, Transcript},
@@ -31,30 +28,36 @@ type F = Fr;
 type PCS = HyperKZG<Bn254, KeccakTranscript>;
 type ProofTranscript = KeccakTranscript;
 
-fn setup_for_spartan() ->
-    (JoltPolynomials<F>,
-        ProofTranscript,
-        CombinedUniformBuilder<C, F, JoltR1CSInputs>,
-        UniformSpartanKey<C, JoltR1CSInputs, F>) {
-    let mut program = host::Program::new("fibonacci-guest");
-    let fib_arg = 9u32; // Example input for setup
-    let inputs = postcard::to_stdvec(&fib_arg).unwrap();
+fn setup_for_spartan(
+    num_iterations: u32,
+) -> (
+    JoltPolynomials<F>,
+    ProofTranscript,
+    CombinedUniformBuilder<C, F, JoltR1CSInputs>,
+    UniformSpartanKey<C, JoltR1CSInputs, F>,
+) {
+    let mut program = host::Program::new("sha2-chain-guest");
+
+    // Prepare input for sha2_chain guest: (input_data: [u8; 32], iterations: u32)
+    let initial_hash_data = [0u8; 32]; // Example initial data
+    let guest_input_tuple = (initial_hash_data, num_iterations);
+    let inputs = postcard::to_stdvec(&guest_input_tuple).unwrap();
 
     let (io_device, mut trace) = program.trace(&inputs);
     let (bytecode, memory_init) = program.decode();
 
     let max_trace_len = 1 << 18; // Adjust if needed for the specific program
-    
+
     let mut preprocessing: JoltProverPreprocessing<C, F, PCS, ProofTranscript> =
-    RV32IJoltVM::prover_preprocess(
-        bytecode.clone(),
-        io_device.memory_layout.clone(),
-        memory_init.clone(),
-        max_trace_len, 
-        max_trace_len, 
-        max_trace_len,
-    );
-    
+        RV32IJoltVM::prover_preprocess(
+            bytecode.clone(),
+            io_device.memory_layout.clone(),
+            memory_init.clone(),
+            max_trace_len,
+            max_trace_len,
+            max_trace_len,
+        );
+
     let trace_len = trace.len();
     let padded_trace_length = trace_len.next_power_of_two();
 
@@ -73,7 +76,12 @@ fn setup_for_spartan() ->
     //     trace_len,
     // );
 
-    let (r1cs_builder, spartan_key, jolt_polynomials) = RV32IJoltVM::construct_data_for_spartan(io_device, padded_trace_length, trace, &preprocessing);
+    let (r1cs_builder, spartan_key, jolt_polynomials) = RV32IJoltVM::construct_data_for_spartan(
+        io_device,
+        padded_trace_length,
+        trace,
+        &preprocessing,
+    );
 
     transcript.append_scalar(&spartan_key.vk_digest);
 
@@ -81,91 +89,117 @@ fn setup_for_spartan() ->
 }
 
 fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
-    println!("Running one-time setup for Spartan sumcheck benchmarks...");
-    let (jolt_polynomials, mut transcript, r1cs_builder, spartan_key) = setup_for_spartan();
-    println!("Setup complete.");
+    // Define a range or list of iteration counts you want to benchmark
+    let iteration_counts = vec![16, 32, 64, 128, 256]; // Example values
 
-    let flattened_polys: Vec<&MultilinearPolynomial<F>> = JoltR1CSInputs::flatten::<C>()
-    .iter()
-    .map(|var| var.get_ref(&jolt_polynomials))
-    .collect();
+    for &num_iters in iteration_counts.iter() {
+        println!(
+            "Running one-time setup for Spartan sumcheck benchmarks with {} iterations...",
+            num_iters
+        );
+        // Pass num_iters to setup
+        let (jolt_polynomials, mut transcript, r1cs_builder, spartan_key) =
+            setup_for_spartan(num_iters);
+        println!("Setup complete for {} iterations.", num_iters);
 
-    let num_rounds_x = spartan_key.num_rows_bits();
+        let flattened_polys: Vec<&MultilinearPolynomial<F>> = JoltR1CSInputs::flatten::<C>()
+            .iter()
+            .map(|var| var.get_ref(&jolt_polynomials))
+            .collect();
 
-    /* Sumcheck 1: Outer sumcheck */
+        let num_rounds_x = spartan_key.num_rows_bits();
 
-    let tau = (0..num_rounds_x)
-        .map(|_i| transcript.challenge_scalar())
-        .collect::<Vec<F>>();
+        /* Sumcheck 1: Outer sumcheck */
 
-    let mut group = c.benchmark_group("SpartanFirstSumcheckStandalone");
+        let tau = (0..num_rounds_x)
+            .map(|_i| transcript.challenge_scalar())
+            .collect::<Vec<F>>();
 
-    group.bench_function("Original (SpartanInterleaved + SplitEq)", |b: &mut Bencher| {
-        b.iter_batched(
-            || {
-                let new_transcript = transcript.clone();
-                return new_transcript;
-            },
-            |mut transcript| {
-                let mut eq_poly = SplitEqPolynomial::new(&tau);
+        // Use a group name that reflects the parameterization
+        let mut group = c.benchmark_group(format!(
+            "SpartanFirstSumcheckStandalone_iters_{}",
+            num_iters
+        ));
 
-                let mut az_bz_cz_poly =
-                    r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                SumcheckInstanceProof::prove_spartan_cubic(
-                    num_rounds_x,
-                    &mut eq_poly,
-                    &mut az_bz_cz_poly,
-                    &mut transcript,
+        // Set sample size
+        group.sample_size(10);
+
+        group.bench_function(
+            "Original (SpartanInterleaved + SplitEq)",
+            |b: &mut Bencher| {
+                b.iter_batched(
+                    || {
+                        let new_transcript = transcript.clone();
+                        return new_transcript;
+                    },
+                    |mut transcript| {
+                        let mut eq_poly = SplitEqPolynomial::new(&tau);
+
+                        let mut az_bz_cz_poly =
+                            r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+                        SumcheckInstanceProof::prove_spartan_cubic(
+                            num_rounds_x,
+                            &mut eq_poly,
+                            &mut az_bz_cz_poly,
+                            &mut transcript,
+                        );
+                    },
+                    BatchSize::SmallInput,
                 );
             },
-            BatchSize::SmallInput,
         );
-    });
 
-    group.bench_function("Gruen (SpartanInterleaved + NewSplitEq)", |b: &mut Bencher| {
-        b.iter_batched(
-            || {
-                let new_transcript = transcript.clone();
-                return new_transcript;
-            },
-            |mut transcript| {
-                let mut eq_poly = NewSplitEqPolynomial::new(&tau);
+        group.bench_function(
+            "Gruen (SpartanInterleaved + NewSplitEq)",
+            |b: &mut Bencher| {
+                b.iter_batched(
+                    || {
+                        let new_transcript = transcript.clone();
+                        return new_transcript;
+                    },
+                    |mut transcript| {
+                        let mut eq_poly = NewSplitEqPolynomial::new(&tau);
 
-                let mut az_bz_cz_poly =
-                    r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
-                    num_rounds_x,
-                    black_box(&mut eq_poly),
-                    black_box(&mut az_bz_cz_poly),
-                    black_box(&mut transcript),
+                        let mut az_bz_cz_poly =
+                            r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+                        SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
+                            num_rounds_x,
+                            black_box(&mut eq_poly),
+                            black_box(&mut az_bz_cz_poly),
+                            black_box(&mut transcript),
+                        );
+                    },
+                    BatchSize::SmallInput,
                 );
             },
-            BatchSize::SmallInput,
         );
-    });
 
-    group.bench_function("Gruen + SVO (NewSpartanInterleaved + NewSplitEq)", |b: &mut Bencher| {
-        b.iter_batched(
-            || {
-                let new_transcript = transcript.clone();
-                return new_transcript;
+        group.bench_function(
+            "Gruen + SVO (NewSpartanInterleaved + NewSplitEq)",
+            |b: &mut Bencher| {
+                b.iter_batched(
+                    || {
+                        let new_transcript = transcript.clone();
+                        return new_transcript;
+                    },
+                    |mut transcript| {
+                        SumcheckInstanceProof::prove_spartan_small_value::<3>(
+                            num_rounds_x,
+                            r1cs_builder.padded_rows_per_step(),
+                            &r1cs_builder.uniform_builder.constraints,
+                            &r1cs_builder.offset_equality_constraints,
+                            &flattened_polys,
+                            &tau,
+                            &mut transcript,
+                        )
+                    },
+                    BatchSize::SmallInput,
+                );
             },
-            |mut transcript| {
-                SumcheckInstanceProof::prove_spartan_small_value::<3>(
-                    num_rounds_x,
-                    r1cs_builder.padded_rows_per_step(),
-                    &r1cs_builder.uniform_builder.constraints,
-                    &r1cs_builder.offset_equality_constraints,
-                    &flattened_polys,
-                    &tau,
-                    &mut transcript,
-                )
-            },
-            BatchSize::SmallInput,
         );
-    });
 
-    group.finish();
+        group.finish();
+    }
 }
 
 criterion_group!(spartan_sumcheck_benches, bench_spartan_sumchecks_in_file);

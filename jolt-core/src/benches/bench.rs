@@ -331,7 +331,7 @@ where
             &jolt_proof.instruction_lookups,
         );
 
-        let verification_result = RV32IJoltVM::verify(
+        let _verification_result = RV32IJoltVM::verify(
             preprocessing.shared,
             jolt_proof,
             jolt_commitments,
@@ -386,7 +386,7 @@ where
                 trace,
                 preprocessing.clone(),
             );
-        let verification_result = RV32IJoltVM::verify(
+        let _verification_result = RV32IJoltVM::verify(
             preprocessing.shared,
             jolt_proof,
             jolt_commitments,

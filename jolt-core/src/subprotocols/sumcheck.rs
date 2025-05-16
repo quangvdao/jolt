@@ -13,7 +13,6 @@ use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
 use crate::r1cs::spartan::small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION;
-use crate::r1cs::spartan::gruen_optimization::USES_GRUEN_OPTIMIZATION;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
 use crate::utils::thread::drop_in_background_thread;
@@ -205,6 +204,10 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut polys = Vec::new();
         let mut claim = F::zero();
 
+        // Clone the transcript at this point so that we could also test with non-svo sumcheck
+        // #[cfg(test)]
+        let mut old_transcript = transcript.clone();
+
         // First, precompute the accumulators and also the `NewSpartanInterleavedPolynomial`
         let (accums_zero, accums_infty, mut az_bz_cz_poly) =
             NewSpartanInterleavedPolynomial::<NUM_SVO_ROUNDS, F>::new_with_precompute(
@@ -233,10 +236,13 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     }
                     2 => match i {
                         0 => {
+                            // A_0(I)
                             quadratic_eval_infty = accums_infty[0];
                         }
                         1 => {
+                            // A_1(0, I) * L_1(I)
                             quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
+                            // A_1(I, {0/1/I}) * L_1({0/1/I})
                             quadratic_eval_infty = accums_infty[1] * lagrange_coeffs[0]
                                 + accums_infty[2] * lagrange_coeffs[1]
                                 + accums_infty[3] * lagrange_coeffs[2];
@@ -318,52 +324,6 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     .collect();
             }
         }
-
-        #[cfg(test)]
-        {
-            let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
-                uniform_constraints,
-                cross_step_constraints,
-                flattened_polys,
-                padded_num_constraints,
-            );
-
-            let mut old_r: Vec<F> = Vec::new();
-            let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
-            let mut old_claim = F::zero();
-            let mut old_eq_poly = SplitEqPolynomial::new(tau);
-
-            for round in 0..NUM_SVO_ROUNDS {
-                if round == 0 {
-                    old_az_bz_cz_poly.first_sumcheck_round(
-                        &mut old_eq_poly,
-                        transcript,
-                        &mut old_r,
-                        &mut old_polys,
-                        &mut old_claim,
-                    );
-                } else {
-                    old_az_bz_cz_poly.subsequent_sumcheck_round(
-                        &mut old_eq_poly,
-                        transcript,
-                        &mut old_r,
-                        &mut old_polys,
-                        &mut old_claim,
-                    );
-                }
-            }
-
-            // Assert that the sumcheck polys at each steps are the same
-            // (and hence the `r` challenges and the round claims are also the same)
-            for round in 0..NUM_SVO_ROUNDS {
-                assert_eq!(
-                    old_polys[round].coeffs_except_linear_term,
-                    polys[round].coeffs_except_linear_term,
-                    "The old and new method do not yield the same results at round {}!", round
-                );
-            }
-        }
-
         // Round NUM_SVO_ROUNDS : do the streaming sumcheck to compute cached values
         az_bz_cz_poly.streaming_sumcheck_round(
             &mut eq_poly,
@@ -372,18 +332,6 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             &mut polys,
             &mut claim,
         );
-
-        #[cfg(test)] {
-            // How to pass in values from test cfg block above?
-            // old_az_bz_cz_poly.subsequent_sumcheck_round(
-            //     &mut old_eq_poly,
-            //     transcript,
-            //     &mut old_r,
-            //     &mut old_polys,
-            //     &mut old_claim,
-            // );
-
-        }
 
         // Round (NUM_SVO_ROUNDS + 1)..num_rounds : do the linear time sumcheck
         for _ in (NUM_SVO_ROUNDS + 1)..num_rounds {
@@ -394,6 +342,55 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 &mut polys,
                 &mut claim,
             );
+        }
+
+        // #[cfg(test)]
+        {
+            let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
+                uniform_constraints,
+                cross_step_constraints,
+                flattened_polys,
+                padded_num_constraints,
+            );
+
+            let mut old_r: Vec<F> = Vec::new();
+            let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
+            let mut old_claim = F::zero(); 
+            let mut old_eq_poly = SplitEqPolynomial::new(tau);
+
+            old_az_bz_cz_poly.first_sumcheck_round(
+                &mut old_eq_poly,
+                &mut old_transcript,
+                &mut old_r,
+                &mut old_polys,
+                &mut old_claim,
+            );
+
+            for _ in 1..num_rounds {
+                old_az_bz_cz_poly.subsequent_sumcheck_round(
+                    &mut old_eq_poly,
+                    &mut old_transcript,
+                    &mut old_r,
+                    &mut old_polys,
+                    &mut old_claim,
+                );
+            }
+
+            // Assert that the sumcheck polys at each steps are the same
+            // (and hence the `r` challenges and the round claims are also the same)
+            for round in 0..num_rounds {
+                assert_eq!(
+                    old_polys[round].coeffs_except_linear_term,
+                    polys[round].coeffs_except_linear_term,
+                    "The old and new method do not yield the same results for polynomial coeffs (round {})!", round
+                );
+                // If challenges are derived correctly from independent but identically starting transcripts:
+                assert_eq!(
+                    old_r[round],
+                    r[round],
+                    "The old and new method do not yield the same challenges (round {})!", round
+                );
+            }
         }
 
         (

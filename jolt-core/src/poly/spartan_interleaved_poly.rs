@@ -24,7 +24,7 @@ use rayon::prelude::*;
 
 use crate::r1cs::spartan::small_value_optimization::NUM_SVO_ROUNDS;
 
-const fn num_non_trivial_ternary_points(num_svo_rounds: usize) -> usize {
+pub const fn num_non_trivial_ternary_points(num_svo_rounds: usize) -> usize {
     // Returns 3^num_svo_rounds - 2^num_svo_rounds
     let pow_3 = 3_usize
         .checked_pow(num_svo_rounds as u32)
@@ -35,7 +35,7 @@ const fn num_non_trivial_ternary_points(num_svo_rounds: usize) -> usize {
     pow_3 - pow_2
 }
 
-const fn total_num_accums(num_svo_rounds: usize) -> usize {
+pub const fn total_num_accums(num_svo_rounds: usize) -> usize {
     // Compute the sum \sum_{i=1}^{num_svo_rounds} (3^i - 2^i)
     let mut sum = 0;
     let mut i = 1;
@@ -52,7 +52,7 @@ const fn total_num_accums(num_svo_rounds: usize) -> usize {
     sum
 }
 
-const fn num_accums_eval_zero(num_svo_rounds: usize) -> usize {
+pub const fn num_accums_eval_zero(num_svo_rounds: usize) -> usize {
     // Returns \sum_{i=0}^{num_svo_rounds - 1} (3^i - 2^i)
     let mut sum = 0;
     let mut i = 0;
@@ -69,7 +69,7 @@ const fn num_accums_eval_zero(num_svo_rounds: usize) -> usize {
     sum
 }
 
-const fn num_accums_eval_infty(num_svo_rounds: usize) -> usize {
+pub const fn num_accums_eval_infty(num_svo_rounds: usize) -> usize {
     // Returns \sum_{i=0}^{num_svo_rounds - 1} 3^i
     let mut sum = 0;
     let mut i = 0;
@@ -332,9 +332,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                 (current_lower_bits_val << NUM_SVO_ROUNDS) + y_svo_binary_prefix_val;
                             let global_r1cs_idx =
                                 2 * (current_step_idx * padded_num_constraints + constraint_idx_within_step);
-
-                            assert!(constraint_idx_within_step < padded_num_constraints,
-                                "Constraint index must be less than the padded number of constraints!");
 
                             if constraint_idx_within_step < uniform_constraints.len() {
                                 let constraint = &uniform_constraints[constraint_idx_within_step];

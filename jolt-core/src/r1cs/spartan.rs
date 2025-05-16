@@ -43,17 +43,6 @@ pub mod small_value_optimization {
     /// The number of small value optimization rounds to use
     /// We currently support values of 1, 2, or 3
     pub const NUM_SVO_ROUNDS: usize = 3;
-
-    // /// Total number of non-zero accumulators across all SVO rounds
-    // /// Round 1: 1 eval (at infty)
-    // /// Round 2: 5 evals
-    // /// Round 3: 19 evals (if used)
-    // /// Total for 2 rounds = 1 + 5 = 6
-    // pub const TOTAL_NUM_ACCUMS: usize = 19;
-
-    // pub const NUM_ACCUM_PER_ROUNDS: [usize; NUM_SVO_ROUNDS] = [1, 4, 14];
-
-    // pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = 19;
 }
 
 #[cfg(not(feature = "small_value_optimization"))]
@@ -182,45 +171,51 @@ where
         let (outer_sumcheck_proof, outer_sumcheck_r, outer_sumcheck_claims) =
             if small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION {
                 // SVO Path
-                let (proof, outer_sumcheck_r, claims) =
-                    SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
-                        num_rounds_x,
-                        constraint_builder.padded_rows_per_step(),
-                        &constraint_builder.uniform_builder.constraints,
-                        &constraint_builder.offset_equality_constraints,
-                        &flattened_polys,
-                        &tau,
-                        transcript,
-                    );
-                let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-                (proof, outer_sumcheck_r, claims)
+                span!(Level::INFO, "first_spartan_sumcheck_svo").in_scope(|| {
+                    let (proof, outer_sumcheck_r, claims) =
+                        SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
+                            num_rounds_x,
+                            constraint_builder.padded_rows_per_step(),
+                            &constraint_builder.uniform_builder.constraints,
+                            &constraint_builder.offset_equality_constraints,
+                            &flattened_polys,
+                            &tau,
+                            transcript,
+                        );
+                    let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
+                    (proof, outer_sumcheck_r, claims)
+                })
             } else if gruen_optimization::USES_GRUEN_OPTIMIZATION {
                 // Path with Gruen's optimization but no SVO
-                let mut eq_tau = NewSplitEqPolynomial::new(&tau);
-                let mut az_bz_cz_poly =
-                    constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
-                    num_rounds_x,
-                    &mut eq_tau,
-                    &mut az_bz_cz_poly,
-                    transcript,
-                );
-                drop_in_background_thread((az_bz_cz_poly, eq_tau));
-                let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-                (proof, outer_sumcheck_r, claims)
+                span!(Level::INFO, "first_spartan_sumcheck_with_gruen").in_scope(|| {
+                    let mut eq_tau = NewSplitEqPolynomial::new(&tau);
+                    let mut az_bz_cz_poly =
+                        constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+                    let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
+                        num_rounds_x,
+                        &mut eq_tau,
+                        &mut az_bz_cz_poly,
+                        transcript,
+                    );
+                    drop_in_background_thread((az_bz_cz_poly, eq_tau));
+                    let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
+                    (proof, outer_sumcheck_r, claims)
+                })
             } else {
-                let mut eq_tau = SplitEqPolynomial::new(&tau);
-                let mut az_bz_cz_poly =
-                    constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
-                let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic(
-                    num_rounds_x,
-                    &mut eq_tau,
-                    &mut az_bz_cz_poly,
-                    transcript,
-                );
-                drop_in_background_thread((az_bz_cz_poly, eq_tau));
-                let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
-                (proof, outer_sumcheck_r, claims)                
+                span!(Level::INFO, "first_spartan_sumcheck").in_scope(|| {
+                    let mut eq_tau = SplitEqPolynomial::new(&tau);
+                    let mut az_bz_cz_poly =
+                        constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+                    let (proof, outer_sumcheck_r, claims) = SumcheckInstanceProof::prove_spartan_cubic(
+                        num_rounds_x,
+                        &mut eq_tau,
+                        &mut az_bz_cz_poly,
+                        transcript,
+                    );
+                    drop_in_background_thread((az_bz_cz_poly, eq_tau));
+                    let outer_sumcheck_r: Vec<F> = outer_sumcheck_r.into_iter().rev().collect();
+                    (proof, outer_sumcheck_r, claims)                
+                })
             };
 
         ProofTranscript::append_scalars(transcript, &outer_sumcheck_claims);

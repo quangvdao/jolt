@@ -1,7 +1,6 @@
 // Small Value Optimization (SVO) helpers for Spartan first sum-check
 
 use crate::field::{JoltField, OptimizedMulI128};
-use rayon::prelude::*;
 
 pub mod svo_helpers {
     use super::*;
@@ -422,12 +421,109 @@ pub mod svo_helpers {
     /// This is the original version with no bound on num_svo_rounds
     #[inline]
     pub fn compute_and_update_tA_inplace<const NUM_SVO_ROUNDS: usize, F: JoltField>(
-        binary_az_evals: &mut [i128],
-        binary_bz_evals: &mut [i128],
+        binary_az_evals_input: &[i128], // Source of 2^N binary evals for Az
+        binary_bz_evals_input: &[i128], // Source of 2^N binary evals for Bz
         e_in_val: &F,
-        temp_tA: &mut [F],
+        temp_tA: &mut [F],                  // Target for 3^N - 2^N non-binary extended products
     ) {
-        todo!()
+        if NUM_SVO_ROUNDS == 0 {
+            debug_assert!(temp_tA.is_empty(), "temp_tA should be empty for 0 SVO rounds");
+            return;
+        }
+
+        let num_binary_points = 1 << NUM_SVO_ROUNDS;
+        let num_ternary_points = 3_usize.pow(NUM_SVO_ROUNDS as u32);
+
+        debug_assert_eq!(binary_az_evals_input.len(), num_binary_points, "binary_az_evals_input length mismatch");
+        debug_assert_eq!(binary_bz_evals_input.len(), num_binary_points, "binary_bz_evals_input length mismatch");
+        debug_assert_eq!(temp_tA.len(), num_ternary_points - num_binary_points, "temp_tA length mismatch");
+
+        // These will store all 3^N extended evaluations.
+        // Using Vec here as heap allocation is acceptable for this setup phase.
+        // The core logic avoids allocations.
+        let mut extended_az_evals: Vec<i128> = vec![0; num_ternary_points];
+        let mut extended_bz_evals: Vec<i128> = vec![0; num_ternary_points];
+
+        let mut current_temp_tA_idx = 0;
+
+        // Iterate k from 0 to 3^NUM_SVO_ROUNDS - 1.
+        // k represents a point in the ternary hypercube (y_0, ..., y_{N-1})
+        // where y_i are digits of k in base 3 (0=Zero, 1=One, 2=Infinity).
+        // The iteration order is lexicographical if we consider (y_0, ..., y_{N-1}) MSB-first.
+        for k_ternary_idx in 0..num_ternary_points {
+            let mut temp_k = k_ternary_idx;
+            let mut is_binary_point_flag = true;
+            let mut first_inf_dim_msb_idx: Option<usize> = None; // Dimension index (0 to N-1, MSB-first) of the most significant Infinity
+
+            // Decompose k_ternary_idx into base-3 digits to represent the ternary point.
+            // We store it in an array where index 0 is MSB.
+            let mut current_coords_base3 = [0u8; NUM_SVO_ROUNDS];
+            for i_dim_rev in 0..NUM_SVO_ROUNDS { // Iterates to fill from LSB of k
+                let i_dim_msb = NUM_SVO_ROUNDS - 1 - i_dim_rev; // Current dimension index (MSB is 0)
+                let digit = (temp_k % 3) as u8;
+                current_coords_base3[i_dim_msb] = digit;
+                if digit == 2 { // Digit 2 represents Infinity
+                    is_binary_point_flag = false;
+                    if first_inf_dim_msb_idx.is_none() {
+                        first_inf_dim_msb_idx = Some(i_dim_msb);
+                    }
+                }
+                temp_k /= 3;
+            }
+
+            // Calculate extended_az_evals[k_ternary_idx] and extended_bz_evals[k_ternary_idx]
+            if is_binary_point_flag {
+                // Convert current_coords_base3 (containing only 0s and 1s) to a binary index
+                let mut binary_idx = 0;
+                for i_dim_msb in 0..NUM_SVO_ROUNDS {
+                    binary_idx <<= 1;
+                    if current_coords_base3[i_dim_msb] == 1 {
+                        binary_idx |= 1;
+                    }
+                }
+                extended_az_evals[k_ternary_idx] = binary_az_evals_input[binary_idx];
+                extended_bz_evals[k_ternary_idx] = binary_bz_evals_input[binary_idx];
+            } else {
+                // Non-binary point: calculate using P(...,Inf,...) = P(...,1,...) - P(...,0,...)
+                // The terms on the RHS are at indices < k_ternary_idx.
+                let j_inf_dim = first_inf_dim_msb_idx.unwrap(); // Safe due to !is_binary_point_flag
+
+                // Power of 3 for the dimension j_inf_dim (0-indexed from MSB)
+                // Example: N=3, j_inf_dim=0 (MSB), power = 3^(3-1-0) = 3^2 = 9
+                //          N=3, j_inf_dim=1 (Mid), power = 3^(3-1-1) = 3^1 = 3
+                //          N=3, j_inf_dim=2 (LSB), power = 3^(3-1-2) = 3^0 = 1
+                let inf_dim_power_of_3 = 3_usize.pow((NUM_SVO_ROUNDS - 1 - j_inf_dim) as u32);
+
+                // k_ternary_idx has a '2' at dimension j_inf_dim.
+                // k_at_1_idx corresponds to changing this '2' to a '1'.
+                // k_at_0_idx corresponds to changing this '2' to a '0'.
+                let k_at_1_idx = k_ternary_idx - inf_dim_power_of_3;
+                let k_at_0_idx = k_ternary_idx - 2 * inf_dim_power_of_3;
+                
+                debug_assert!(k_at_1_idx < k_ternary_idx, "k_at_1_idx should be less than k_ternary_idx");
+                debug_assert!(k_at_0_idx < k_ternary_idx, "k_at_0_idx should be less than k_ternary_idx");
+
+                extended_az_evals[k_ternary_idx] = extended_az_evals[k_at_1_idx] - extended_az_evals[k_at_0_idx];
+                extended_bz_evals[k_ternary_idx] = extended_bz_evals[k_at_1_idx] - extended_bz_evals[k_at_0_idx];
+
+                // This is a non-binary point, so it contributes to temp_tA.
+                // The temp_tA array is indexed by the order non-binary points are encountered.
+                debug_assert!(current_temp_tA_idx < temp_tA.len(), "temp_tA index out of bounds");
+
+                let az_val = extended_az_evals[k_ternary_idx];
+                if az_val != 0 {
+                    let bz_val = extended_bz_evals[k_ternary_idx];
+                    if bz_val != 0 {
+                        let product = az_val.checked_mul(bz_val)
+                            .expect("Extended Az*Bz product overflow i128");
+                        temp_tA[current_temp_tA_idx] += e_in_val.mul_i128(product);
+                    }
+                }
+                current_temp_tA_idx += 1;
+            }
+        }
+        // Final check that all entries in temp_tA that were supposed to be filled, were.
+        debug_assert_eq!(current_temp_tA_idx, temp_tA.len(), "temp_tA was not fully populated or was overpopulated.");
     }
 
     /// Generic version for distributing tA to svo accumulators
@@ -742,7 +838,222 @@ pub mod svo_helpers {
         accums_zero: &mut [F],
         accums_infty: &mut [F],
     ) {
-        todo!()
+        if NUM_SVO_ROUNDS == 0 {
+            debug_assert!(tA_accums.is_empty());
+            debug_assert!(accums_zero.is_empty());
+            debug_assert!(accums_infty.is_empty());
+            return;
+        }
+
+        // --- Helper: Convert k (overall ternary index) to Y_ext coordinates (MSB-first SVOEvalPoint) ---
+        fn k_to_y_ext<const N: usize>(k_ternary: usize) -> ([SVOEvalPoint; N], bool /*is_binary*/) {
+            let mut coords = [SVOEvalPoint::Zero; N];
+            let mut temp_k = k_ternary;
+            let mut is_binary = true;
+            if N > 0 { // Guard against N=0 for current_coords_base3 access
+                for i_rev in 0..N {
+                    let i_msb = N - 1 - i_rev; // Fill from MSB
+                    coords[i_msb] = match temp_k % 3 {
+                        0 => SVOEvalPoint::Zero,
+                        1 => SVOEvalPoint::One,
+                        2 => { is_binary = false; SVOEvalPoint::Infinity },
+                        _ => unreachable!(),
+                    };
+                    temp_k /= 3;
+                }
+            }
+            (coords, is_binary)
+        }
+        
+        // --- Helper: Convert LSB-first SVOEvalPoint tuple to base-3 index ---
+        // e.g., (LSB, ..., MSB) -> LSB*3^0 + ... + MSB*3^{len-1}
+        fn v_tuple_to_base3_idx(v_tuple_lsb_ordered: &[SVOEvalPoint]) -> usize {
+            let mut idx = 0;
+            let mut power_of_3 = 1;
+            for point in v_tuple_lsb_ordered {
+                idx += match point {
+                    SVOEvalPoint::Zero => 0,
+                    SVOEvalPoint::One => power_of_3,
+                    SVOEvalPoint::Infinity => 2 * power_of_3,
+                };
+                power_of_3 *= 3;
+            }
+            idx
+        }
+
+        // --- Helper: Check if LSB-first SVOEvalPoint tuple contains Infinity ---
+        fn v_tuple_has_infinity(v_tuple_lsb_ordered: &[SVOEvalPoint]) -> bool {
+            v_tuple_lsb_ordered.iter().any(|&p| p == SVOEvalPoint::Infinity)
+        }
+        
+        // --- Helper: Convert LSB-first SVOEvalPoint tuple to non-binary base-3 index ---
+        // This counts how many valid `v` configurations (non-binary, ternary) appear before this one.
+        fn v_tuple_to_non_binary_base3_idx(v_tuple_lsb_ordered: &[SVOEvalPoint]) -> usize {
+            let num_v_vars = v_tuple_lsb_ordered.len();
+            if num_v_vars == 0 { 
+                // This case means s_p = 0. The A_0(.;0) accumulator block has size 3^0 - 2^0 = 0.
+                // So, an index is not meaningful here as there are no slots.
+                // The calling code should check if num_slots_in_block_A_sp_zero > 0.
+                return 0; 
+            }
+
+            let mut index_count = 0;
+            let target_v_config_ternary_value = v_tuple_to_base3_idx(v_tuple_lsb_ordered);
+
+            // Iterate all ternary configurations for v_tuple that are lexicographically smaller
+            let max_k_v = 3_usize.pow(num_v_vars as u32);
+            for k_v_ternary in 0..max_k_v {
+                if k_v_ternary == target_v_config_ternary_value {
+                    break; // Stop when we reach the target configuration itself
+                }
+
+                // Check if this k_v_ternary configuration for v has an infinity
+                let mut current_k_v_has_inf = false;
+                let mut temp_k = k_v_ternary;
+                for _ in 0..num_v_vars {
+                    if temp_k % 3 == 2 { // 2 represents Infinity
+                        current_k_v_has_inf = true;
+                        break;
+                    }
+                    temp_k /= 3;
+                }
+
+                if current_k_v_has_inf {
+                    index_count += 1;
+                }
+            }
+            index_count
+        }
+
+
+        // 1. Precompute E-factors: E_factors[s_e_idx][bin_suffix_idx]
+        let mut precomputed_E_factors: Vec<Vec<F>> = Vec::with_capacity(NUM_SVO_ROUNDS);
+        for s_e_idx in 0..NUM_SVO_ROUNDS { // s_e_idx is MSB-first index for Y_c, and for E_out_vec
+            let num_suffix_vars_for_E = if NUM_SVO_ROUNDS > s_e_idx + 1 { NUM_SVO_ROUNDS - (s_e_idx + 1) } else { 0 };
+            let num_binary_suffixes = 1 << num_suffix_vars_for_E;
+            let mut current_s_e_factors = Vec::with_capacity(num_binary_suffixes);
+            if E_out_vec.len() > s_e_idx && !E_out_vec[s_e_idx].is_empty() {
+                for bin_suffix_val in 0..num_binary_suffixes {
+                    let e_idx = (x_out_val << num_suffix_vars_for_E) | bin_suffix_val;
+                    if e_idx < E_out_vec[s_e_idx].len() {
+                         current_s_e_factors.push(E_out_vec[s_e_idx][e_idx]);
+                    } else {
+                        current_s_e_factors.push(F::zero()); 
+                    }
+                }
+            } else {
+                 for _ in 0..num_binary_suffixes { current_s_e_factors.push(F::zero());}
+            }
+            precomputed_E_factors.push(current_s_e_factors);
+        }
+
+        // 2. Precompute Accumulator Offsets
+        let mut round_offsets_infty = vec![0; NUM_SVO_ROUNDS];
+        let mut round_offsets_zero = vec![0; NUM_SVO_ROUNDS];
+        if NUM_SVO_ROUNDS > 0 {
+            let mut current_sum_infty = 0;
+            let mut current_sum_zero = 0;
+            for s_p in 0..NUM_SVO_ROUNDS { // s_p is paper round index (number of v's)
+                round_offsets_infty[s_p] = current_sum_infty;
+                round_offsets_zero[s_p] = current_sum_zero;
+                current_sum_infty += 3_usize.pow(s_p as u32);
+                current_sum_zero += 3_usize.pow(s_p as u32) - 2_usize.pow(s_p as u32);
+            }
+        }
+        
+        // Main Loop
+        let mut current_tA_idx = 0;
+        let num_total_ternary_points = 3_usize.pow(NUM_SVO_ROUNDS as u32);
+
+        for k_overall_idx in 0..num_total_ternary_points {
+            let (y_ext_msb, is_y_ext_binary) = k_to_y_ext::<NUM_SVO_ROUNDS>(k_overall_idx);
+
+            if is_y_ext_binary {
+                continue;
+            }
+            if current_tA_idx >= tA_accums.len() { 
+                break; 
+            }
+            let current_tA_val = tA_accums[current_tA_idx];
+            if current_tA_val.is_zero() { // Optimization: if tA is zero, it contributes nothing
+                current_tA_idx += 1;
+                continue;
+            }
+
+            // Inner Loop: Target Paper Round s_p (also used as MSB index for E_out_vec choice)
+            for s_p_msb_idx_for_E in 0..NUM_SVO_ROUNDS { 
+                // s_p_msb_idx_for_E is the MSB index of the Y_c variable that is u_eff for E_out_vec[s_p_msb_idx_for_E]
+                // This also aligns with the paper's s_p if we map s_p=0 (A0) to E_out_vec[0], s_p=1 (A1) to E_out_vec[1] etc.
+                
+                // u_eff_for_this_E is y_ext_msb[s_p_msb_idx_for_E]
+                // Suffix for E_out_vec[s_p_msb_idx_for_E] is (y_ext_msb[s_p_msb_idx_for_E+1], ..., y_ext_msb[N-1])
+                let num_suffix_vars_for_this_E = if NUM_SVO_ROUNDS > s_p_msb_idx_for_E + 1 { NUM_SVO_ROUNDS - (s_p_msb_idx_for_E + 1) } else { 0 };
+                let mut e_suffix_bin_idx = 0;
+                let mut e_suffix_for_this_E_is_binary = true;
+                for i_suffix_bit_msb in 0..num_suffix_vars_for_this_E {
+                    let y_coord_for_suffix = y_ext_msb[s_p_msb_idx_for_E + 1 + i_suffix_bit_msb];
+                    e_suffix_bin_idx <<= 1;
+                    match y_coord_for_suffix {
+                        SVOEvalPoint::Zero => { /* e_suffix_bin_idx |= 0; */ }
+                        SVOEvalPoint::One => { e_suffix_bin_idx |= 1; }
+                        SVOEvalPoint::Infinity => { e_suffix_for_this_E_is_binary = false; break; }
+                    }
+                }
+
+                let e_factor = if e_suffix_for_this_E_is_binary && 
+                                  precomputed_E_factors.len() > s_p_msb_idx_for_E && 
+                                  precomputed_E_factors[s_p_msb_idx_for_E].len() > e_suffix_bin_idx {
+                    precomputed_E_factors[s_p_msb_idx_for_E][e_suffix_bin_idx]
+                } else {
+                    F::zero()
+                };
+
+                if e_factor.is_zero() { // If E-factor is zero, no contribution
+                    continue;
+                }
+
+                // Determine u_A and v_A for A_{s_p_msb_idx_for_E}
+                // u_A is the (s_p_msb_idx_for_E)-th LSB variable of Y_ext.
+                // The paper round s_p (number of v_vars) is s_p_msb_idx_for_E.
+                let paper_s_p = s_p_msb_idx_for_E; 
+
+                let u_A = y_ext_msb[NUM_SVO_ROUNDS - 1 - paper_s_p]; 
+                
+                let mut v_A_tuple_lsb_ordered: Vec<SVOEvalPoint> = Vec::with_capacity(paper_s_p);
+                for i_v_lsb in 0..paper_s_p { // iterates from LSB of v_A up to MSB of v_A
+                    v_A_tuple_lsb_ordered.push(y_ext_msb[NUM_SVO_ROUNDS - 1 - i_v_lsb]);
+                }
+
+                match u_A {
+                    SVOEvalPoint::Infinity => {
+                        let base_offset = round_offsets_infty[paper_s_p];
+                        let idx_within_block = v_tuple_to_base3_idx(&v_A_tuple_lsb_ordered);
+                        if base_offset + idx_within_block < accums_infty.len() {
+                             accums_infty[base_offset + idx_within_block] += current_tA_val * e_factor;
+                        }
+                    }
+                    SVOEvalPoint::Zero => {
+                        if paper_s_p == 0 { 
+                            continue; 
+                        }
+                        if v_tuple_has_infinity(&v_A_tuple_lsb_ordered) { 
+                           let base_offset = round_offsets_zero[paper_s_p];
+                           let num_slots_in_block_A_sp_zero = 3_usize.pow(paper_s_p as u32) - 2_usize.pow(paper_s_p as u32);
+                           
+                           if num_slots_in_block_A_sp_zero > 0 { 
+                               let idx_within_block = v_tuple_to_non_binary_base3_idx(&v_A_tuple_lsb_ordered);
+                               if base_offset + idx_within_block < accums_zero.len() && idx_within_block < num_slots_in_block_A_sp_zero {
+                                    accums_zero[base_offset + idx_within_block] += current_tA_val * e_factor;
+                               }
+                           }
+                        }
+                    }
+                    SVOEvalPoint::One => { /* Does not contribute */ }
+                }
+            }
+            current_tA_idx += 1;
+        }
+        debug_assert_eq!(current_tA_idx, tA_accums.len(), "tA_accums not fully processed or over-processed.");
     }
 }
 
@@ -751,8 +1062,193 @@ mod tests {
     use super::svo_helpers::*;
     use ark_bn254::Fr as TestField;
     use ark_ff::Zero;
-    use SVOEvalPoint::*;
-    // use crate::poly::spartan_interleaved_poly::{num_accums_eval_zero, num_accums_eval_infty};
+    // use SVOEvalPoint::*; // Not strictly needed for these tests as SVOEvalPoint is internal.
 
-    // TODO: add tests after refactoring the logic
+    // Helper to calculate the number of entries in temp_tA: 3^N - 2^N
+    const fn num_temp_tA_entries(num_svo_rounds: usize) -> usize {
+        if num_svo_rounds == 0 {
+            return 0;
+        }
+        let pow3 = 3_usize.pow(num_svo_rounds as u32);
+        let pow2 = 2_usize.pow(num_svo_rounds as u32);
+        pow3 - pow2
+    }
+
+    // Helper to calculate number of entries for accums_zero: sum_{i=0}^{N-1} (3^i - 2^i)
+    const fn num_accums_zero_entries(num_svo_rounds: usize) -> usize {
+        let mut sum = 0;
+        let mut i = 0;
+        while i < num_svo_rounds {
+            sum += 3_usize.pow(i as u32) - 2_usize.pow(i as u32);
+            i += 1;
+        }
+        sum
+    }
+
+    // Helper to calculate number of entries for accums_infty: sum_{i=0}^{N-1} 3^i
+    const fn num_accums_infty_entries(num_svo_rounds: usize) -> usize {
+        let mut sum = 0;
+        let mut i = 0;
+        while i < num_svo_rounds {
+            sum += 3_usize.pow(i as u32);
+            i += 1;
+        }
+        sum
+    }
+
+    fn test_consistency_for_num_rounds(num_svo_rounds: usize) {
+        let num_binary_points = 1 << num_svo_rounds;
+        let num_temp_tA = num_temp_tA_entries(num_svo_rounds);
+
+        // Test with non-zero patterned data
+        let binary_az_evals: Vec<i128> = (0..num_binary_points).map(|i| (i + 1) as i128 * 2).collect();
+        let binary_bz_evals: Vec<i128> = (0..num_binary_points).map(|i| (i + 2) as i128 * 3).collect();
+        let e_in_val = TestField::from(10u64);
+
+        let mut temp_tA_new = vec![TestField::zero(); num_temp_tA];
+        let mut temp_tA_old = vec![TestField::zero(); num_temp_tA];
+        
+        // Call the new general function (the one being tested)
+        match num_svo_rounds {
+            1 => compute_and_update_tA_inplace::<1, TestField>(&binary_az_evals, &binary_bz_evals, &e_in_val, &mut temp_tA_new),
+            2 => compute_and_update_tA_inplace::<2, TestField>(&binary_az_evals, &binary_bz_evals, &e_in_val, &mut temp_tA_new),
+            3 => compute_and_update_tA_inplace::<3, TestField>(&binary_az_evals, &binary_bz_evals, &e_in_val, &mut temp_tA_new),
+            _ => panic!("Unsupported NUM_SVO_ROUNDS for this consistency test structure"),
+        }
+
+        // Call the old hardcoded function
+        match num_svo_rounds {
+            1 => compute_and_update_tA_inplace_1(&binary_az_evals, &binary_bz_evals, &e_in_val, &mut temp_tA_old),
+            2 => compute_and_update_tA_inplace_2(&binary_az_evals, &binary_bz_evals, &e_in_val, &mut temp_tA_old),
+            3 => compute_and_update_tA_inplace_3(&binary_az_evals, &binary_bz_evals, &e_in_val, &mut temp_tA_old),
+            _ => panic!("Unsupported NUM_SVO_ROUNDS for this consistency test structure"),
+        }
+        assert_eq!(temp_tA_new, temp_tA_old, "Mismatch for NUM_SVO_ROUNDS = {} with patterned data", num_svo_rounds);
+
+        // Test with all zeros for binary evals
+        let binary_az_evals_zeros: Vec<i128> = vec![0; num_binary_points];
+        let binary_bz_evals_zeros: Vec<i128> = vec![0; num_binary_points];
+        let mut temp_tA_new_zeros = vec![TestField::zero(); num_temp_tA];
+        let mut temp_tA_old_zeros = vec![TestField::zero(); num_temp_tA];
+
+        match num_svo_rounds {
+            1 => compute_and_update_tA_inplace::<1, TestField>(&binary_az_evals_zeros, &binary_bz_evals_zeros, &e_in_val, &mut temp_tA_new_zeros),
+            2 => compute_and_update_tA_inplace::<2, TestField>(&binary_az_evals_zeros, &binary_bz_evals_zeros, &e_in_val, &mut temp_tA_new_zeros),
+            3 => compute_and_update_tA_inplace::<3, TestField>(&binary_az_evals_zeros, &binary_bz_evals_zeros, &e_in_val, &mut temp_tA_new_zeros),
+            _ => panic!("Unsupported NUM_SVO_ROUNDS for this consistency test structure"),
+        }
+        
+        match num_svo_rounds {
+            1 => compute_and_update_tA_inplace_1(&binary_az_evals_zeros, &binary_bz_evals_zeros, &e_in_val, &mut temp_tA_old_zeros),
+            2 => compute_and_update_tA_inplace_2(&binary_az_evals_zeros, &binary_bz_evals_zeros, &e_in_val, &mut temp_tA_old_zeros),
+            3 => compute_and_update_tA_inplace_3(&binary_az_evals_zeros, &binary_bz_evals_zeros, &e_in_val, &mut temp_tA_old_zeros),
+            _ => panic!("Unsupported NUM_SVO_ROUNDS for this consistency test structure"),
+        }
+        assert_eq!(temp_tA_new_zeros, temp_tA_old_zeros, "Mismatch for NUM_SVO_ROUNDS = {} with zero data", num_svo_rounds);
+
+        // Test with e_in_val = 0
+        let e_in_val_zero = TestField::zero();
+        let mut temp_tA_new_zero_e = vec![TestField::zero(); num_temp_tA];
+        let mut temp_tA_old_zero_e = vec![TestField::zero(); num_temp_tA];
+
+        match num_svo_rounds {
+            1 => compute_and_update_tA_inplace::<1, TestField>(&binary_az_evals, &binary_bz_evals, &e_in_val_zero, &mut temp_tA_new_zero_e),
+            2 => compute_and_update_tA_inplace::<2, TestField>(&binary_az_evals, &binary_bz_evals, &e_in_val_zero, &mut temp_tA_new_zero_e),
+            3 => compute_and_update_tA_inplace::<3, TestField>(&binary_az_evals, &binary_bz_evals, &e_in_val_zero, &mut temp_tA_new_zero_e),
+            _ => panic!("Unsupported NUM_SVO_ROUNDS for this consistency test structure"),
+        }
+
+        match num_svo_rounds {
+            1 => compute_and_update_tA_inplace_1(&binary_az_evals, &binary_bz_evals, &e_in_val_zero, &mut temp_tA_old_zero_e),
+            2 => compute_and_update_tA_inplace_2(&binary_az_evals, &binary_bz_evals, &e_in_val_zero, &mut temp_tA_old_zero_e),
+            3 => compute_and_update_tA_inplace_3(&binary_az_evals, &binary_bz_evals, &e_in_val_zero, &mut temp_tA_old_zero_e),
+            _ => panic!("Unsupported NUM_SVO_ROUNDS for this consistency test structure"),
+        }
+         assert_eq!(temp_tA_new_zero_e, temp_tA_old_zero_e, "Mismatch for NUM_SVO_ROUNDS = {} with zero e_in_val", num_svo_rounds);
+         for val in temp_tA_new_zero_e { // Confirm they are all zero
+            assert!(val.is_zero(), "temp_tA should be all zeros if e_in_val is zero");
+        }
+    }
+
+    #[test]
+    fn test_compute_and_update_tA_inplace_vs_hardcoded_1() {
+        test_consistency_for_num_rounds(1);
+    }
+
+    #[test]
+    fn test_compute_and_update_tA_inplace_vs_hardcoded_2() {
+        test_consistency_for_num_rounds(2);
+    }
+
+    #[test]
+    fn test_compute_and_update_tA_inplace_vs_hardcoded_3() {
+        test_consistency_for_num_rounds(3);
+    }
+
+    // --- Tests for distribute_tA_to_svo_accumulators --- 
+
+    fn test_distribute_consistency(num_svo_rounds: usize) {
+        let num_tA = num_temp_tA_entries(num_svo_rounds);
+        let tA_accums: Vec<TestField> = (0..num_tA).map(|i| TestField::from((i + 1) as u64 * 100)).collect();
+        
+        let x_out_val = 1; // Arbitrary x_out_val for testing E_out_vec indexing
+
+        // Mock E_out_vec: E_out_vec[s_code_E][(x_out_val << num_suffix) | suffix_val]
+        // For simplicity in test, make E_out_vec values somewhat predictable.
+        // E_out_vec[s_code_E] will have 2^(N-1-s_code_E) * (x_out_max_val_mock+1) entries.
+        // Let x_out_val be small, and E_out_vec constructed to be dense enough.
+        let mut E_out_vec: Vec<Vec<TestField>> = Vec::with_capacity(num_svo_rounds);
+        for s_e in 0..num_svo_rounds {
+            let num_suffix_vars = if num_svo_rounds > s_e + 1 { num_svo_rounds - (s_e + 1) } else { 0 };
+            let num_e_entries_for_x_out = 1 << num_suffix_vars;
+            let total_e_entries = (x_out_val + 10) * num_e_entries_for_x_out; // Ensure enough space for x_out_val
+            let mut e_s: Vec<TestField> = Vec::with_capacity(total_e_entries);
+            for i in 0..total_e_entries {
+                e_s.push(TestField::from((s_e + 1) as u64 * 10 + (i + 1) as u64));
+            }
+            E_out_vec.push(e_s);
+        }
+
+        let num_zero = num_accums_zero_entries(num_svo_rounds);
+        let num_infty = num_accums_infty_entries(num_svo_rounds);
+
+        let mut accums_zero_new = vec![TestField::zero(); num_zero];
+        let mut accums_infty_new = vec![TestField::zero(); num_infty];
+        let mut accums_zero_old = vec![TestField::zero(); num_zero];
+        let mut accums_infty_old = vec![TestField::zero(); num_infty];
+
+        match num_svo_rounds {
+            1 => {
+                distribute_tA_to_svo_accumulators::<1, TestField>(&tA_accums, x_out_val, &E_out_vec, &mut accums_zero_new, &mut accums_infty_new);
+                distribute_tA_to_svo_accumulators_1(&tA_accums, x_out_val, &E_out_vec, &mut accums_zero_old, &mut accums_infty_old);
+            }
+            2 => {
+                distribute_tA_to_svo_accumulators::<2, TestField>(&tA_accums, x_out_val, &E_out_vec, &mut accums_zero_new, &mut accums_infty_new);
+                distribute_tA_to_svo_accumulators_2(&tA_accums, x_out_val, &E_out_vec, &mut accums_zero_old, &mut accums_infty_old);
+            }
+            3 => {
+                distribute_tA_to_svo_accumulators::<3, TestField>(&tA_accums, x_out_val, &E_out_vec, &mut accums_zero_new, &mut accums_infty_new);
+                distribute_tA_to_svo_accumulators_3(&tA_accums, x_out_val, &E_out_vec, &mut accums_zero_old, &mut accums_infty_old);
+            }
+            _ => panic!("Unsupported NUM_SVO_ROUNDS for distribute consistency test"),
+        }
+
+        assert_eq!(accums_zero_new, accums_zero_old, "accums_zero mismatch for N={}", num_svo_rounds);
+        assert_eq!(accums_infty_new, accums_infty_old, "accums_infty mismatch for N={}", num_svo_rounds);
+    }
+
+    #[test]
+    fn test_distribute_tA_vs_hardcoded_1() {
+        test_distribute_consistency(1);
+    }
+
+    #[test]
+    fn test_distribute_tA_vs_hardcoded_2() {
+        test_distribute_consistency(2);
+    }
+
+    #[test]
+    fn test_distribute_tA_vs_hardcoded_3() {
+        test_distribute_consistency(3);
+    }
 }

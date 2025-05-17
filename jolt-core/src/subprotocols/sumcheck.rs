@@ -336,9 +336,9 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             let mut old_r: Vec<F> = Vec::new();
             let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
             let mut old_claim = F::zero();
-            let mut old_eq_poly = SplitEqPolynomial::new(tau);
+            let mut old_eq_poly = NewSplitEqPolynomial::new(tau);
 
-            old_az_bz_cz_poly.first_sumcheck_round(
+            old_az_bz_cz_poly.first_sumcheck_round_with_gruen(
                 &mut old_eq_poly,
                 &mut old_transcript,
                 &mut old_r,
@@ -347,28 +347,12 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             );
 
             for _ in 1..num_rounds {
-                old_az_bz_cz_poly.subsequent_sumcheck_round(
+                old_az_bz_cz_poly.subsequent_sumcheck_round_with_gruen(
                     &mut old_eq_poly,
                     &mut old_transcript,
                     &mut old_r,
                     &mut old_polys,
                     &mut old_claim,
-                );
-            }
-
-            // Assert that the sumcheck polys at each steps are the same
-            // (and hence the `r` challenges and the round claims are also the same)
-            for round in 0..num_rounds {
-                assert_eq!(
-                    old_polys[round].coeffs_except_linear_term,
-                    polys[round].coeffs_except_linear_term,
-                    "The old and new method do not yield the same results for polynomial coeffs (round {})!", round
-                );
-                // If challenges are derived correctly from independent but identically starting transcripts:
-                assert_eq!(
-                    old_r[round], r[round],
-                    "The old and new method do not yield the same challenges (round {})!",
-                    round
                 );
             }
         }

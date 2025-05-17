@@ -103,12 +103,21 @@ pub struct NewSpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltF
     /// precomputation, and can be computed on the fly in streaming round)
     pub(crate) ab_unbound_coeffs: Vec<SparseCoefficient<i128>>,
 
-    bound_coeffs: Vec<SparseCoefficient<F>>,
+    pub(crate) bound_coeffs: Vec<SparseCoefficient<F>>,
 
     binding_scratch_space: Vec<SparseCoefficient<F>>,
 
     pub(crate) dense_len: usize,
 }
+
+// Define the structure returned by each parallel map task in the SVO precomputation
+struct PrecomputeTaskOutput<F: JoltField> {
+    ab_coeffs_local: Vec<SparseCoefficient<i128>>,
+    svo_accums_zero_local: [F; NUM_ACCUMS_EVAL_ZERO],
+    svo_accums_infty_local: [F; NUM_ACCUMS_EVAL_INFTY],
+}
+
+// Implement parallel flat map iterator for the SVO precomputation
 
 impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<NUM_SVO_ROUNDS, F> {
     /// Compute the unbound coefficients for the Az and Bz polynomials (no Cz coefficients are
@@ -275,13 +284,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let main_fold_span = tracing::info_span!("parallel_fold_reduce_x_out");
         let _main_fold_guard = main_fold_span.enter();
 
-        // Define the structure returned by each parallel map task
-        struct PrecomputeTaskOutput<F: JoltField> {
-            ab_coeffs_local: Vec<SparseCoefficient<i128>>,
-            svo_accums_zero_local: [F; NUM_ACCUMS_EVAL_ZERO],
-            svo_accums_infty_local: [F; NUM_ACCUMS_EVAL_INFTY],
-        }
-
         let num_parallel_chunks = if num_x_out_vals > 0 {
             std::cmp::min(
                 num_x_out_vals,
@@ -436,8 +438,8 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let finalization_span = tracing::info_span!("finalization");
         let _finalization_guard = finalization_span.enter();
 
-        let total_ab_coeffs_len = collected_chunk_outputs
-            .iter()
+        let total_ab_coeffs_len: usize = collected_chunk_outputs
+            .par_iter() // Can be parallel here too
             .map(|output| output.ab_coeffs_local.len())
             .sum();
 
@@ -445,15 +447,36 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let mut final_svo_accums_zero = [F::zero(); NUM_ACCUMS_EVAL_ZERO];
         let mut final_svo_accums_infty = [F::zero(); NUM_ACCUMS_EVAL_INFTY];
 
+        let aggregation_loop_span = tracing::debug_span!("finalization_aggregate_chunk_outputs_loop");
+        let _aggregation_loop_guard = aggregation_loop_span.enter();
+        // collected_chunk_outputs is consumed by value if we use .into_iter() or if it's moved from.
+        // If it's iterated by reference (for task_output in &collected_chunk_outputs), then task_output.ab_coeffs_local needs clone for extend.
+        // The original code `for task_output in collected_chunk_outputs` moves from `collected_chunk_outputs`.
         for task_output in collected_chunk_outputs {
-            final_ab_unbound_coeffs.extend(task_output.ab_coeffs_local);
-            for idx in 0..NUM_ACCUMS_EVAL_ZERO {
-                final_svo_accums_zero[idx] += task_output.svo_accums_zero_local[idx];
+            let extend_span = tracing::trace_span!("extend_final_ab_unbound_coeffs", len = task_output.ab_coeffs_local.len());
+            let _extend_guard = extend_span.enter();
+            final_ab_unbound_coeffs.extend(task_output.ab_coeffs_local); // task_output.ab_coeffs_local is moved
+            drop(_extend_guard);
+
+            if NUM_ACCUMS_EVAL_ZERO > 0 {
+                let svo_zero_span = tracing::trace_span!("sum_svo_accums_zero");
+                let _svo_zero_guard = svo_zero_span.enter();
+                for idx in 0..NUM_ACCUMS_EVAL_ZERO {
+                    final_svo_accums_zero[idx] += task_output.svo_accums_zero_local[idx];
+                }
+                drop(_svo_zero_guard);
             }
-            for idx in 0..NUM_ACCUMS_EVAL_INFTY {
-                final_svo_accums_infty[idx] += task_output.svo_accums_infty_local[idx];
+
+            if NUM_ACCUMS_EVAL_INFTY > 0 {
+                let svo_infty_span = tracing::trace_span!("sum_svo_accums_infty");
+                let _svo_infty_guard = svo_infty_span.enter();
+                for idx in 0..NUM_ACCUMS_EVAL_INFTY {
+                    final_svo_accums_infty[idx] += task_output.svo_accums_infty_local[idx];
+                }
+                drop(_svo_infty_guard);
             }
         }
+        drop(_aggregation_loop_guard);
 
         // final_ab_unbound_coeffs is now fully populated and SVO accumulators are summed.
 
@@ -484,110 +507,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 flattened_polynomials,
                 padded_num_constraints,
             );
-
-            let mut new_coeffs_ptr = 0;
-            let mut old_coeffs_ptr = 0;
-
-            while new_coeffs_ptr < final_ab_unbound_coeffs.len() {
-                let new_coeff = &final_ab_unbound_coeffs[new_coeffs_ptr];
-                let is_new_az = new_coeff.index % 2 == 0;
-                let logical_idx_new = if is_new_az {
-                    new_coeff.index / 2
-                } else {
-                    (new_coeff.index - 1) / 2
-                };
-
-                let mut found_match_for_current_new_coeff = false;
-                while old_coeffs_ptr < old_new_result.unbound_coeffs.len() {
-                    let old_coeff = &old_new_result.unbound_coeffs[old_coeffs_ptr];
-                    let logical_idx_old = old_coeff.index / 3;
-
-                    if logical_idx_old < logical_idx_new {
-                        old_coeffs_ptr += 1;
-                        continue;
-                    }
-
-                    if logical_idx_old > logical_idx_new {
-                        panic!(
-                            "New coefficient for logical_idx {} (new_coeff.index {}) not found in old coefficients. \
-                             Next old logical_idx is {} (old_coeff.index {}).",
-                            logical_idx_new, new_coeff.index, logical_idx_old, old_coeff.index
-                        );
-                    }
-
-                    // logical_idx_old == logical_idx_new
-                    let old_coeff_type = old_coeff.index % 3; // 0 for Az, 1 for Bz, 2 for Cz
-
-                    if is_new_az {
-                        // new_coeff is Az
-                        if old_coeff_type == 0 {
-                            // old_coeff is Az
-                            assert_eq!(
-                                new_coeff.value, old_coeff.value,
-                                "Az value mismatch: new_idx {}, old_idx {}. Logical_idx: {}",
-                                new_coeff.index, old_coeff.index, logical_idx_new
-                            );
-                            found_match_for_current_new_coeff = true;
-                            old_coeffs_ptr += 1; // Consumed this old_coeff for the match
-                            break; // Move to next new_coeff
-                        } else {
-                            // old_coeff is Bz or Cz for the same logical_idx. Skip it.
-                            old_coeffs_ptr += 1;
-                            // Continue in this inner loop to find Az for logical_idx_new or exhaust options for it.
-                        }
-                    } else {
-                        // new_coeff is Bz
-                        if old_coeff_type == 1 {
-                            // old_coeff is Bz
-                            assert_eq!(
-                                new_coeff.value, old_coeff.value,
-                                "Bz value mismatch: new_idx {}, old_idx {}. Logical_idx: {}",
-                                new_coeff.index, old_coeff.index, logical_idx_new
-                            );
-                            found_match_for_current_new_coeff = true;
-                            old_coeffs_ptr += 1; // Consumed this old_coeff for the match
-                            break; // Move to next new_coeff
-                        } else {
-                            // old_coeff is Az or Cz for the same logical_idx. Skip it.
-                            old_coeffs_ptr += 1;
-                            // Continue in this inner loop to find Bz for logical_idx_new or exhaust options for it.
-                        }
-                    }
-                }
-
-                if !found_match_for_current_new_coeff {
-                    panic!(
-                        "No match found in old coefficients for new_coeff at index {} (logical_idx {}). \
-                         Old coefficients pointer reached end or no suitable type found for this logical index.",
-                        new_coeff.index, logical_idx_new
-                    );
-                }
-                new_coeffs_ptr += 1;
-            }
-
-            // Optional: Check if there are any remaining Az/Bz in old_coeffs that weren't matched.
-            // This would indicate new_coeffs is missing something old_coeffs had.
-            while old_coeffs_ptr < old_new_result.unbound_coeffs.len() {
-                let old_coeff = &old_new_result.unbound_coeffs[old_coeffs_ptr];
-                if old_coeff.index % 3 != 2 {
-                    // If it's not a Cz coefficient
-                    let logical_idx_old = old_coeff.index / 3;
-                    // Check if this logical_idx_old was covered by any logical_idx_new
-                    // This check is more complex; for now, focus on all new_coeffs being found.
-                    // A simple panic here might be too strict if old_coeffs can have trailing Az/Bz
-                    // for logical indices not present at all in new_coeffs (which shouldn't happen).
-                    println!(
-                        "Warning: Remaining non-Cz coefficient in old_coeffs after checking all new_coeffs: index {}, value {}, logical_idx {}. \
-                        This might indicate that the new method produces fewer Az/Bz coefficients.", 
-                        old_coeff.index, old_coeff.value, logical_idx_old
-                    );
-                }
-                old_coeffs_ptr += 1;
-            }
-
-            println!(
-                "Az/Bz coefficient comparison with old SpartanInterleavedPolynomial::new() passed!"
-            );
+            tests::compare_new_and_old_ab_coeffs::<F>(&final_ab_unbound_coeffs, &old_new_result.unbound_coeffs);
         }
 
         drop(_finalization_guard);
@@ -665,7 +585,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             num_y_svo_vars, NUM_SVO_ROUNDS,
             "r_challenges length mismatch with NUM_SVO_ROUNDS"
         );
-        let eq_r_evals = EqPolynomial::evals(r_challenges);
+
+        // Need to reverse r_challenges, since the challenges are appended as [r_0, ..., r_{i-1}],
+        // whereas the binding order is [r_{i-1}, ..., r_0].
+        let mut r_rev = r_challenges.clone();
+        r_rev.reverse();
+        let eq_r_evals = EqPolynomial::evals(&r_rev);
 
         drop(_setup_guard);
 
@@ -943,7 +868,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let sort_span = tracing::info_span!("streaming_bind_sort_final_bound_coeffs");
         let _sort_guard = sort_span.enter();
         // Sorting might be beneficial if the binding step relies on specific order not guaranteed by par_chunk_by's collection
-        final_bound_coeffs.par_sort_unstable_by_key(|sc| sc.index);
+        // final_bound_coeffs.par_sort_unstable_by_key(|sc| sc.index);
         drop(_sort_guard);
 
         drop(_finalization_guard);
@@ -1431,14 +1356,30 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         flattened_polynomials: &[&MultilinearPolynomial<F>], // N variables of (S steps)
         padded_num_constraints: usize,
     ) -> Self {
+        let outer_span = tracing::info_span!("SpartanInterleavedPolynomial::new_body");
+        let _outer_guard = outer_span.enter();
+
+        let var_setup_span = tracing::debug_span!("old_new_variable_setup");
+        let _var_setup_guard = var_setup_span.enter();
+
         let num_steps = flattened_polynomials[0].len();
 
         let num_chunks = rayon::current_num_threads().next_power_of_two() * 16;
         let chunk_size = num_steps.div_ceil(num_chunks);
 
-        let unbound_coeffs: Vec<SparseCoefficient<i128>> = (0..num_chunks)
+        drop(_var_setup_guard);
+
+        let main_coeff_compute_span = tracing::info_span!("old_new_main_coefficient_computation");
+        let _main_coeff_compute_guard = main_coeff_compute_span.enter();
+
+        let par_iter_span = tracing::debug_span!("old_new_flat_map_iter_computation");
+        let _par_iter_guard = par_iter_span.enter();
+        let unbound_coeffs_iter = (0..num_chunks)
             .into_par_iter()
             .flat_map_iter(|chunk_index| {
+                let chunk_task_span = tracing::debug_span!("old_new_chunk_task", chunk_idx = chunk_index);
+                let _chunk_task_guard = chunk_task_span.enter();
+
                 let mut coeffs = Vec::with_capacity(chunk_size * padded_num_constraints * 3);
                 for step_index in chunk_size * chunk_index..chunk_size * (chunk_index + 1) {
                     // Uniform constraints
@@ -1550,8 +1491,15 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
                 }
 
                 coeffs
-            })
-            .collect();
+            });
+        drop(_par_iter_guard);
+
+        let collect_span = tracing::info_span!("old_new_collect_unbound_coeffs");
+        let _collect_guard = collect_span.enter();
+        let unbound_coeffs: Vec<SparseCoefficient<i128>> = unbound_coeffs_iter.collect();
+        drop(_collect_guard);
+        
+        drop(_main_coeff_compute_guard);
 
         #[cfg(test)]
         {
@@ -2553,5 +2501,120 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
 
         std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
         self.dense_len /= 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Helper function to compare Az/Bz coefficients from NewSpartanInterleavedPolynomial 
+    // (which only has Az/Bz) with those from the old SpartanInterleavedPolynomial (which has Az/Bz/Cz).
+    pub(super) fn compare_new_and_old_ab_coeffs<F: JoltField> (
+        new_coeffs_az_bz_only: &[SparseCoefficient<i128>],
+        old_coeffs_az_bz_cz: &[SparseCoefficient<i128>]
+    ) {
+        let mut new_coeffs_ptr = 0;
+        let mut old_coeffs_ptr = 0;
+
+        while new_coeffs_ptr < new_coeffs_az_bz_only.len() {
+            let new_coeff = &new_coeffs_az_bz_only[new_coeffs_ptr];
+            let is_new_az = new_coeff.index % 2 == 0;
+            let logical_idx_new = if is_new_az {
+                new_coeff.index / 2
+            } else {
+                (new_coeff.index - 1) / 2
+            };
+
+            let mut found_match_for_current_new_coeff = false;
+            while old_coeffs_ptr < old_coeffs_az_bz_cz.len() {
+                let old_coeff = &old_coeffs_az_bz_cz[old_coeffs_ptr];
+                let logical_idx_old = old_coeff.index / 3;
+
+                if logical_idx_old < logical_idx_new {
+                    old_coeffs_ptr += 1;
+                    continue;
+                }
+
+                if logical_idx_old > logical_idx_new {
+                    panic!(
+                        "New coefficient for logical_idx {} (new_coeff.index {}) not found in old coefficients. \
+                         Next old logical_idx is {} (old_coeff.index {}).",
+                        logical_idx_new, new_coeff.index, logical_idx_old, old_coeff.index
+                    );
+                }
+
+                // logical_idx_old == logical_idx_new
+                let old_coeff_type = old_coeff.index % 3; // 0 for Az, 1 for Bz, 2 for Cz
+
+                if is_new_az {
+                    // new_coeff is Az
+                    if old_coeff_type == 0 {
+                        // old_coeff is Az
+                        assert_eq!(
+                            new_coeff.value, old_coeff.value,
+                            "Az value mismatch: new_idx {}, old_idx {}. Logical_idx: {}",
+                            new_coeff.index, old_coeff.index, logical_idx_new
+                        );
+                        found_match_for_current_new_coeff = true;
+                        old_coeffs_ptr += 1; // Consumed this old_coeff for the match
+                        break; // Move to next new_coeff
+                    } else {
+                        // old_coeff is Bz or Cz for the same logical_idx. Skip it.
+                        old_coeffs_ptr += 1;
+                        // Continue in this inner loop to find Az for logical_idx_new or exhaust options for it.
+                    }
+                } else {
+                    // new_coeff is Bz
+                    if old_coeff_type == 1 {
+                        // old_coeff is Bz
+                        assert_eq!(
+                            new_coeff.value, old_coeff.value,
+                            "Bz value mismatch: new_idx {}, old_idx {}. Logical_idx: {}",
+                            new_coeff.index, old_coeff.index, logical_idx_new
+                        );
+                        found_match_for_current_new_coeff = true;
+                        old_coeffs_ptr += 1; // Consumed this old_coeff for the match
+                        break; // Move to next new_coeff
+                    } else {
+                        // old_coeff is Az or Cz for the same logical_idx. Skip it.
+                        old_coeffs_ptr += 1;
+                        // Continue in this inner loop to find Bz for logical_idx_new or exhaust options for it.
+                    }
+                }
+            }
+
+            if !found_match_for_current_new_coeff {
+                panic!(
+                    "No match found in old coefficients for new_coeff at index {} (logical_idx {}). \
+                     Old coefficients pointer reached end or no suitable type found for this logical index.",
+                    new_coeff.index, logical_idx_new
+                );
+            }
+            new_coeffs_ptr += 1;
+        }
+
+        // Optional: Check if there are any remaining Az/Bz in old_coeffs that weren't matched.
+        // This would indicate new_coeffs is missing something old_coeffs had.
+        while old_coeffs_ptr < old_coeffs_az_bz_cz.len() {
+            let old_coeff = &old_coeffs_az_bz_cz[old_coeffs_ptr];
+            if old_coeff.index % 3 != 2 {
+                // If it's not a Cz coefficient
+                let logical_idx_old = old_coeff.index / 3;
+                // Check if this logical_idx_old was covered by any logical_idx_new
+                // This check is more complex; for now, focus on all new_coeffs being found.
+                // A simple panic here might be too strict if old_coeffs can have trailing Az/Bz
+                // for logical indices not present at all in new_coeffs (which shouldn't happen).
+                println!(
+                    "Warning: Remaining non-Cz coefficient in old_coeffs after checking all new_coeffs: index {}, value {}, logical_idx {}. \
+                    This might indicate that the new method produces fewer Az/Bz coefficients.", 
+                    old_coeff.index, old_coeff.value, logical_idx_old
+                );
+            }
+            old_coeffs_ptr += 1;
+        }
+
+        println!(
+            "Az/Bz coefficient comparison with old SpartanInterleavedPolynomial::new() passed!"
+        );
     }
 }

@@ -136,7 +136,7 @@ name = "msm_adapter_batch"
 harness = false
 
 [[bench]]
-name = "spartan_first_sumcheck"
+name = "spartan"
 harness = false
 
 [lib]

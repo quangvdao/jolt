@@ -27,6 +27,8 @@ impl<F: JoltField> EqPolynomial<F> {
 
     #[tracing::instrument(skip_all, name = "EqPolynomial::evals")]
     /// Computes the table of coefficients: `{eq(r, x) for all x in {0, 1}^n}`
+    /// The order is in the LSB to MSB of `x`. For instance, with `n = 2`, we have
+    /// `[(1-r_0)(1-r_1), r_0(1-r_1), (1-r_0)r_1, r_0r_1]` corresponding to `x = 00, 10, 01, 11`.
     pub fn evals(r: &[F]) -> Vec<F> {
         match r.len() {
             0..=PARALLEL_THRESHOLD => Self::evals_serial(r, None),
@@ -228,6 +230,7 @@ mod tests {
     use ark_bn254::Fr;
     use ark_std::test_rng;
     use std::time::Instant;
+    use ark_ff::One;
 
     #[test]
     /// Test that the results of running `evals_serial`, `evals_parallel`, and `evals_serial_cached`
@@ -277,4 +280,34 @@ mod tests {
             }
         }
     }
+
+    // Explicit values for evals_serial for n=2 with scaling factor
+    #[test]
+    fn test_eq_evals_serial_n2_with_scaling() {
+        let r0 = Fr::from(2u64);
+        let r1 = Fr::from(3u64);
+        let r = vec![r0, r1];
+        let scaling_factor = Fr::from(5u64);
+
+        let evals = EqPolynomial::<Fr>::evals_serial(&r, Some(scaling_factor));
+
+        assert_eq!(evals.len(), 4);
+        
+        let s = scaling_factor;
+        // Based on the code's logic (r0 processes first, then r1):
+        // evals[0] (x0=0, x1=0) = s * (1-r0)(1-r1)
+        // evals[1] (x0=0, x1=1) = s * (1-r0)r1
+        // evals[2] (x0=1, x1=0) = s * r0(1-r1)
+        // evals[3] (x0=1, x1=1) = s * r0r1
+        let expected_val_at_0 = s * (Fr::one() - r[0]) * (Fr::one() - r[1]);
+        let expected_val_at_1 = s * (Fr::one() - r[0]) * r[1];
+        let expected_val_at_2 = s * r[0] * (Fr::one() - r[1]);
+        let expected_val_at_3 = s * r[0] * r[1];
+
+        assert_eq!(evals[0], expected_val_at_0, "Mismatch for x=(0,0) with scaling");
+        assert_eq!(evals[1], expected_val_at_1, "Mismatch for x=(1,0) with scaling");
+        assert_eq!(evals[2], expected_val_at_2, "Mismatch for x=(0,1) with scaling");
+        assert_eq!(evals[3], expected_val_at_3, "Mismatch for x=(1,1) with scaling");
+    }
 }
+

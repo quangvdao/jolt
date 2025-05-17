@@ -25,7 +25,6 @@ use jolt_core::{
     utils::transcript::{KeccakTranscript, Transcript},
 };
 use postcard;
-use std::time::Duration;
 
 type F = Fr;
 type PCS = HyperKZG<Bn254, KeccakTranscript>;

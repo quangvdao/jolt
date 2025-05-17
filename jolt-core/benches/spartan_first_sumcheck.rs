@@ -2,7 +2,9 @@
 // then run Spartan first sumcheck on it
 
 use ark_bn254::{Bn254, Fr};
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Bencher, Criterion};
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, Bencher, Criterion, SamplingMode,
+};
 use jolt_core::{
     host,
     jolt::vm::{
@@ -91,7 +93,8 @@ fn setup_for_spartan(
 
 fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
     // Define a range or list of iteration counts you want to benchmark
-    let iteration_counts = vec![64, 128, 256, 512, 1024, 2048]; // Example values
+    // 64, 128, 256, 512,
+    let iteration_counts = vec![2048]; // Example values
 
     for &num_iters in iteration_counts.iter() {
         println!(
@@ -109,6 +112,9 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
             .collect();
 
         let num_rounds_x = spartan_key.num_rows_bits();
+        println!("num_rounds_x: {}", num_rounds_x);
+
+        println!("trace length: {:?}", flattened_polys[0].len());
 
         let padded_rows_per_step = r1cs_builder.padded_rows_per_step();
         let uniform_constraints = r1cs_builder.uniform_builder.constraints.clone();
@@ -127,6 +133,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
         ));
 
         group.sample_size(10);
+        group.sampling_mode(SamplingMode::Flat);
 
         group.bench_function(
             "Original (SpartanInterleaved + SplitEq)",
@@ -205,6 +212,5 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
         group.finish();
     }
 }
-
 criterion_group!(spartan_sumcheck_benches, bench_spartan_sumchecks_in_file);
 criterion_main!(spartan_sumcheck_benches);

@@ -331,18 +331,18 @@ where
             &jolt_proof.instruction_lookups,
         );
 
-        let _verification_result = RV32IJoltVM::verify(
+        let verification_result = RV32IJoltVM::verify(
             preprocessing.shared,
             jolt_proof,
             jolt_commitments,
             verifier_io_device,
             None,
         );
-        // assert!(
-        //     verification_result.is_ok(),
-        //     "Verification failed with error: {:?}",
-        //     verification_result.err()
-        // );
+        assert!(
+            verification_result.is_ok(),
+            "Verification failed with error: {:?}",
+            verification_result.err()
+        );
     };
 
     tasks.push((
@@ -386,18 +386,18 @@ where
                 trace,
                 preprocessing.clone(),
             );
-        let _verification_result = RV32IJoltVM::verify(
+        let verification_result = RV32IJoltVM::verify(
             preprocessing.shared,
             jolt_proof,
             jolt_commitments,
             verifier_io_device,
             None,
         );
-        // assert!(
-        //     verification_result.is_ok(),
-        //     "Verification failed with error: {:?}",
-        //     verification_result.err()
-        // );
+        assert!(
+            verification_result.is_ok(),
+            "Verification failed with error: {:?}",
+            verification_result.err()
+        );
     };
 
     tasks.push((

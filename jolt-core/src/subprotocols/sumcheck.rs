@@ -205,7 +205,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut claim = F::zero();
 
         // Clone the transcript at this point so that we could also test with non-svo sumcheck
-        #[cfg(test)]
+        // #[cfg(test)]
         let mut old_transcript = transcript.clone();
 
         // First, precompute the accumulators and also the `NewSpartanInterleavedPolynomial`
@@ -219,82 +219,63 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             );
 
         let mut lagrange_coeffs: Vec<F> = vec![F::one()];
-
         let mut eq_poly = NewSplitEqPolynomial::new(&tau);
+
+        let mut current_acc_zero_offset = 0;
+        let mut current_acc_infty_offset = 0;
 
         // Then, do the sumcheck logic
         for i in 0..NUM_SVO_ROUNDS {
             let mut quadratic_eval_0 = F::zero();
             let mut quadratic_eval_infty = F::zero();
 
-            // Hard-coding for up to 3 svo rounds right now
             if USES_SMALL_VALUE_OPTIMIZATION {
-                match NUM_SVO_ROUNDS {
-                    1 => {
-                        assert!(i == 0);
-                        quadratic_eval_infty = accums_infty[0];
-                    }
-                    2 => match i {
-                        0 => {
-                            // A_0(I)
-                            quadratic_eval_infty = accums_infty[0];
-                        }
-                        1 => {
-                            // A_1(0, I) * L_1(I)
-                            quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
-                            // A_1(I, {0/1/I}) * L_1({0/1/I})
-                            quadratic_eval_infty = accums_infty[1] * lagrange_coeffs[0]
-                                + accums_infty[2] * lagrange_coeffs[1]
-                                + accums_infty[3] * lagrange_coeffs[2];
-                        }
-                        _ => {
-                            unreachable!("i must be less than NUM_SVO_ROUNDS!")
-                        }
-                    },
-                    3 => {
-                        match i {
-                            0 => {
-                                quadratic_eval_infty = accums_infty[0];
-                            }
-                            1 => {
-                                quadratic_eval_0 = accums_zero[0] * lagrange_coeffs[2];
-                                quadratic_eval_infty = accums_infty[1] * lagrange_coeffs[0]
-                                    + accums_infty[2] * lagrange_coeffs[1]
-                                    + accums_infty[3] * lagrange_coeffs[2];
-                            }
-                            2 => {
-                                // We have accums_zero[1..6] corresponding to
-                                // (0, 0, infty),(0, 1, infty),(0, infty 0),(0, infty, 1),(0, infty, infty)
-                                // => matches with indices 2, 5, 6, 7, 8 of lagrange_coeffs respectively
-                                // (recall the order MSB => LSB, 0 is MSB)
+                let num_vars_in_v_config = i; // v_config is (v_0, ..., v_{i-1})
+                let num_lagrange_coeffs_for_round = three_pow(num_vars_in_v_config);
 
-                                // We have accums_infty[4..] corresponding to
-                                // (infty, v_1, v_2), where v_1, v_2 \in {0, 1, infty}
-                                // Do full inner product over lagrange_coeffs
-                                quadratic_eval_0 = accums_zero[1] * lagrange_coeffs[2]
-                                    + accums_zero[2] * lagrange_coeffs[5]
-                                    + accums_zero[3] * lagrange_coeffs[6]
-                                    + accums_zero[4] * lagrange_coeffs[7]
-                                    + accums_zero[5] * lagrange_coeffs[8];
-                                quadratic_eval_infty = accums_infty[4] * lagrange_coeffs[0]
-                                    + accums_infty[5] * lagrange_coeffs[1]
-                                    + accums_infty[6] * lagrange_coeffs[2]
-                                    + accums_infty[7] * lagrange_coeffs[3]
-                                    + accums_infty[8] * lagrange_coeffs[4]
-                                    + accums_infty[9] * lagrange_coeffs[5]
-                                    + accums_infty[10] * lagrange_coeffs[6]
-                                    + accums_infty[11] * lagrange_coeffs[7]
-                                    + accums_infty[12] * lagrange_coeffs[8];
-                            }
-                            _ => {
-                                unreachable!("i must be less than NUM_SVO_ROUNDS!")
-                            }
+                // Compute quadratic_eval_infty
+                let num_accs_infty_curr_round = three_pow(num_vars_in_v_config);
+                if num_accs_infty_curr_round > 0 {
+                    let accums_infty_slice = &accums_infty
+                        [current_acc_infty_offset..current_acc_infty_offset + num_accs_infty_curr_round];
+                    for k in 0..num_lagrange_coeffs_for_round {
+                        if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
+                             quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
+                        } else {
+                            // This case should ideally not be hit if logic is perfect,
+                            // but can happen if num_vars_in_v_config=0 leading to lagrange_coeffs.len()=1
+                            // and num_accs_infty_curr_round=1.
+                            // Or if accums_infty_slice is unexpectedly short.
                         }
-                    }
-                    _ => {
-                        unreachable!("Hard-coding up to three small value rounds for now!")
                     }
                 }
+                current_acc_infty_offset += num_accs_infty_curr_round;
+
+                // Compute quadratic_eval_0
+                let num_accs_zero_curr_round = if num_vars_in_v_config == 0 {
+                    0 // 3^0 - 2^0 = 0
+                } else {
+                    three_pow(num_vars_in_v_config) - two_pow(num_vars_in_v_config)
+                };
+
+                if num_accs_zero_curr_round > 0 {
+                    let accums_zero_slice = &accums_zero
+                        [current_acc_zero_offset..current_acc_zero_offset + num_accs_zero_curr_round];
+                    let mut non_binary_v_config_counter = 0;
+                    for k_global in 0..num_lagrange_coeffs_for_round {
+                        let v_config = get_v_config_digits(k_global, num_vars_in_v_config);
+                        if is_v_config_non_binary(&v_config) {
+                            if non_binary_v_config_counter < accums_zero_slice.len() && k_global < lagrange_coeffs.len() {
+                                quadratic_eval_0 += accums_zero_slice[non_binary_v_config_counter]
+                                    * lagrange_coeffs[k_global];
+                                non_binary_v_config_counter += 1;
+                            } else {
+                                // Should not be reached if counts are correct.
+                            }
+                        }
+                    }
+                }
+                current_acc_zero_offset += num_accs_zero_curr_round;
             }
 
             let r_i = process_eq_sumcheck_round(
@@ -343,7 +324,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             );
         }
 
-        #[cfg(test)]
+        // #[cfg(test)]
         {
             let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
                 uniform_constraints,
@@ -746,6 +727,37 @@ pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
     eq_poly.bind(r_i);
 
     r_i
+}
+
+// Helper function to compute 3^k
+fn three_pow(k: usize) -> usize {
+    3_usize.checked_pow(k as u32).expect("3^k overflow")
+}
+
+// Helper function to compute 2^k
+fn two_pow(k: usize) -> usize {
+    2_usize.checked_pow(k as u32).expect("2^k overflow")
+}
+
+// Helper function to get v_config digits from k_global (MSB first in result vector)
+// k_global is an integer from 0 to 3^num_vars - 1
+// Returns Vec<usize> where each element is 0, 1, or 2 (for Z, O, I respectively)
+// The returned digits vector has digits[0] as MSB.
+fn get_v_config_digits(mut k_global: usize, num_vars: usize) -> Vec<usize> {
+    if num_vars == 0 {
+        return Vec::new();
+    }
+    let mut digits = vec![0; num_vars];
+    for i in (0..num_vars).rev() { // Fill from LSB of digits vec, which corresponds to LSB of k_global
+        digits[i] = k_global % 3;
+        k_global /= 3;
+    }
+    digits
+}
+
+// Helper to check if v_config (digits 0,1,2) is non-binary (contains a 2, representing infinity)
+fn is_v_config_non_binary(v_config: &[usize]) -> bool {
+    v_config.iter().any(|&digit| digit == 2)
 }
 
 #[cfg(test)]

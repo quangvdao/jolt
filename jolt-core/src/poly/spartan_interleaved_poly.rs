@@ -110,13 +110,6 @@ pub struct NewSpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltF
     pub(crate) dense_len: usize,
 }
 
-// Define the structure returned by each parallel map task in the SVO precomputation
-struct PrecomputeTaskOutput<F: JoltField> {
-    ab_coeffs_local: Vec<SparseCoefficient<i128>>,
-    svo_accums_zero_local: [F; NUM_ACCUMS_EVAL_ZERO],
-    svo_accums_infty_local: [F; NUM_ACCUMS_EVAL_INFTY],
-}
-
 // Implement parallel flat map iterator for the SVO precomputation
 
 impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<NUM_SVO_ROUNDS, F> {
@@ -271,6 +264,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let num_x_out_vals = 1usize << iter_num_x_out_vars;
         let num_x_in_vals = 1 << iter_num_x_in_vars;
 
+        
         assert_eq!(
             num_x_in_vals,
             E_in_evals.len(),
@@ -278,12 +272,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             num_x_in_vals,
             E_in_evals.len()
         );
-
+        
         drop(_eq_setup_guard);
-
+        
         let main_fold_span = tracing::info_span!("parallel_fold_reduce_x_out");
         let _main_fold_guard = main_fold_span.enter();
-
+        
         let num_parallel_chunks = if num_x_out_vals > 0 {
             std::cmp::min(
                 num_x_out_vals,
@@ -297,12 +291,20 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             num_parallel_chunks > 0 || num_x_out_vals == 0,
             "num_parallel_chunks must be positive if there are x_out_vals to process"
         );
-
+        
         let x_out_chunk_size = if num_x_out_vals > 0 {
             num_x_out_vals.div_ceil(num_parallel_chunks)
         } else {
             0 // No work per chunk if no x_out_vals
         };
+        
+        
+        // Define the structure returned by each parallel map task in the SVO precomputation
+        struct PrecomputeTaskOutput<F: JoltField> {
+            ab_coeffs_local: Vec<SparseCoefficient<i128>>,
+            svo_accums_zero_local: [F; NUM_ACCUMS_EVAL_ZERO],
+            svo_accums_infty_local: [F; NUM_ACCUMS_EVAL_INFTY],
+        }
 
         let collected_chunk_outputs: Vec<PrecomputeTaskOutput<F>> = (0..num_parallel_chunks)
             .into_par_iter()
@@ -325,6 +327,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
                     // --- Inner Loop over x_in_val ---
                     for x_in_val in 0..num_x_in_vals {
+
                         let x_in_step_part = x_in_val >> iter_num_x_in_constraint_vars;
                         let current_step_idx = (x_out_val << iter_num_x_in_step_vars) | x_in_step_part;
                         let constraint_mask = (1 << iter_num_x_in_constraint_vars) - 1;
@@ -340,6 +343,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
                             if constraint_idx_within_step < uniform_constraints.len() {
                                 let constraint = &uniform_constraints[constraint_idx_within_step];
+
                                 if !constraint.a.terms().is_empty() {
                                     let az_i128 = constraint
                                         .a
@@ -361,6 +365,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                             } else if constraint_idx_within_step < uniform_constraints.len() + cross_step_constraints.len() {
                                 let cross_step_constraint_idx = constraint_idx_within_step - uniform_constraints.len();
                                 let constraint = &cross_step_constraints[cross_step_constraint_idx];
+
                                 let next_step_index_opt = if current_step_idx + 1 < num_steps {
                                     Some(current_step_idx + 1)
                                 } else {
@@ -396,6 +401,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                 }
                             }
                         }
+
                         let E_in_val_for_current_x_in = &E_in_evals[x_in_val];
                         svo_helpers::compute_and_update_tA_inplace_generic::<NUM_SVO_ROUNDS, F>(
                             &binary_az_evals,
@@ -421,6 +427,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     for i in 0..NUM_ACCUMS_EVAL_INFTY {
                         chunk_svo_accums_infty[i] += current_x_out_svo_infty[i];
                     }
+
                 } // End loop over x_out_val in chunk
 
                 drop(_x_out_task_guard);
@@ -443,42 +450,32 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             .map(|output| output.ab_coeffs_local.len())
             .sum();
 
-        let mut final_ab_unbound_coeffs = Vec::with_capacity(total_ab_coeffs_len);
         let mut final_svo_accums_zero = [F::zero(); NUM_ACCUMS_EVAL_ZERO];
         let mut final_svo_accums_infty = [F::zero(); NUM_ACCUMS_EVAL_INFTY];
 
-        let aggregation_loop_span = tracing::debug_span!("finalization_aggregate_chunk_outputs_loop");
-        let _aggregation_loop_guard = aggregation_loop_span.enter();
-        // collected_chunk_outputs is consumed by value if we use .into_iter() or if it's moved from.
-        // If it's iterated by reference (for task_output in &collected_chunk_outputs), then task_output.ab_coeffs_local needs clone for extend.
-        // The original code `for task_output in collected_chunk_outputs` moves from `collected_chunk_outputs`.
-        for task_output in collected_chunk_outputs {
-            let extend_span = tracing::trace_span!("extend_final_ab_unbound_coeffs", len = task_output.ab_coeffs_local.len());
-            let _extend_guard = extend_span.enter();
-            final_ab_unbound_coeffs.extend(task_output.ab_coeffs_local); // task_output.ab_coeffs_local is moved
-            drop(_extend_guard);
-
+        // First, sum the SVO accumulators (which is low overhead)
+        for task_output in &collected_chunk_outputs {
             if NUM_ACCUMS_EVAL_ZERO > 0 {
-                let svo_zero_span = tracing::trace_span!("sum_svo_accums_zero");
-                let _svo_zero_guard = svo_zero_span.enter();
                 for idx in 0..NUM_ACCUMS_EVAL_ZERO {
                     final_svo_accums_zero[idx] += task_output.svo_accums_zero_local[idx];
                 }
-                drop(_svo_zero_guard);
             }
 
             if NUM_ACCUMS_EVAL_INFTY > 0 {
-                let svo_infty_span = tracing::trace_span!("sum_svo_accums_infty");
-                let _svo_infty_guard = svo_infty_span.enter();
                 for idx in 0..NUM_ACCUMS_EVAL_INFTY {
                     final_svo_accums_infty[idx] += task_output.svo_accums_infty_local[idx];
                 }
-                drop(_svo_infty_guard);
             }
         }
-        drop(_aggregation_loop_guard);
 
-        // final_ab_unbound_coeffs is now fully populated and SVO accumulators are summed.
+        let mut final_ab_unbound_coeffs = Vec::with_capacity(total_ab_coeffs_len);
+
+        // Then, use par_extend to efficiently build the final vector in parallel
+        final_ab_unbound_coeffs.par_extend(
+            collected_chunk_outputs
+                .into_par_iter() // This consumes the vector
+                .flat_map(|task_output| task_output.ab_coeffs_local) // This consumes each inner vector
+        );
 
         // Debug check for sortedness
         #[cfg(test)]
@@ -500,7 +497,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         #[cfg(test)]
         {
             // Check that the Az Bz coeffs are the same (note that the old result also contains Cz coeffs)
-            // Assumes final_ab_unbound_coeffs and old_new_result.unbound_coeffs are sorted by index.
             let old_new_result = SpartanInterleavedPolynomial::new(
                 uniform_constraints,
                 cross_step_constraints,

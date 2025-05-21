@@ -4,6 +4,16 @@ use crate::field::{JoltField, OptimizedMulI128};
 
 pub mod svo_helpers {
     use super::*;
+    use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
+    use crate::poly::unipoly::CompressedUniPoly;
+    use crate::subprotocols::sumcheck::process_eq_sumcheck_round;
+    use crate::utils::transcript::Transcript;
+
+    // Import constants for assertions and USES_SMALL_VALUE_OPTIMIZATION
+    use crate::poly::spartan_interleaved_poly::{
+        num_accums_eval_zero, num_accums_eval_infty,
+    };
+    use crate::r1cs::spartan::small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION;
 
     // SVOEvalPoint enum definition
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -11,6 +21,37 @@ pub mod svo_helpers {
         Zero,
         One,
         Infinity,
+    }
+
+    // Moved helper functions from sumcheck.rs
+    #[inline]
+    const fn three_pow(k: usize) -> usize {
+        3_usize.checked_pow(k as u32).expect("3^k overflow")
+    }
+
+    #[inline]
+    const fn two_pow(k: usize) -> usize {
+        2_usize.checked_pow(k as u32).expect("2^k overflow")
+    }
+
+    #[inline]
+    fn get_v_config_digits(mut k_global: usize, num_vars: usize) -> Vec<usize> {
+        if num_vars == 0 {
+            return vec![];
+        }
+        let mut digits = vec![0; num_vars];
+        let mut i = num_vars;
+        while i > 0 { // Fill from LSB of digits vec, which corresponds to LSB of k_global
+            digits[i - 1] = k_global % 3;
+            k_global /= 3;
+            i -= 1;
+        }
+        digits
+    }
+
+    #[inline]
+    fn is_v_config_non_binary(v_config: &[usize]) -> bool {
+        v_config.iter().any(|&digit| digit == 2)
     }
 
     #[inline]
@@ -30,7 +71,7 @@ pub mod svo_helpers {
             3 => {
                 compute_and_update_tA_inplace_3(binary_az_evals, binary_bz_evals, e_in_val, temp_tA)
             }
-            _ => compute_and_update_tA_inplace_generic::<NUM_SVO_ROUNDS, F>(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
+            _ => compute_and_update_tA_inplace::<NUM_SVO_ROUNDS, F>(binary_az_evals, binary_bz_evals, e_in_val, temp_tA),
         }
     }
 
@@ -90,7 +131,7 @@ pub mod svo_helpers {
         let az11 = binary_az_evals[3];
         let bz11 = binary_bz_evals[3]; // Y0=1, Y1=1
 
-        // Extended evaluations (points with at least one 'I')
+        // Extended evaluations (points with at least one \'I\')
         // temp_tA indices follow the order: (0,I), (1,I), (I,0), (I,1), (I,I)
 
         // 1. Point (0,I) -> temp_tA[0]
@@ -462,9 +503,9 @@ pub mod svo_helpers {
                 //          N=3, j_inf_dim=2 (LSB), power = 3^(3-1-2) = 3^0 = 1
                 let inf_dim_power_of_3 = 3_usize.pow((NUM_SVO_ROUNDS - 1 - j_inf_dim) as u32);
 
-                // k_ternary_idx has a '2' at dimension j_inf_dim.
-                // k_at_1_idx corresponds to changing this '2' to a '1'.
-                // k_at_0_idx corresponds to changing this '2' to a '0'.
+                // k_ternary_idx has a \'2\' at dimension j_inf_dim.
+                // k_at_1_idx corresponds to changing this \'2\' to a \'1\'.
+                // k_at_0_idx corresponds to changing this \'2\' to a \'0\'.
                 let k_at_1_idx = k_ternary_idx - inf_dim_power_of_3;
                 let k_at_0_idx = k_ternary_idx - 2 * inf_dim_power_of_3;
                 
@@ -586,7 +627,7 @@ pub mod svo_helpers {
 
         // Y_ext = (1,I) -> tA_accums[1]
         // Contributes to A_0(empty,I) (i.e. accums_infty[0]) via E_out_0[x_out_val | 1]
-        // (no term A_1(1,I) as it is not needed i.e. it's an eval at 1)
+        // (no term A_1(1,I) as it is not needed i.e. it\'s an eval at 1)
         accums_infty[0] += E0_y1 * tA_accums[1];
 
         // Y_ext = (I,0) -> tA_accums[2]
@@ -686,7 +727,7 @@ pub mod svo_helpers {
             let current_tA = tA_accums[i];
             // No !current_tA.is_zero() check, as requested
 
-            let (y0_c, y1_c, y2_c) = Y_EXT_CODE_MAP[i]; // (MSB, Mid, LSB) from code's perspective
+            let (y0_c, y1_c, y2_c) = Y_EXT_CODE_MAP[i]; // (MSB, Mid, LSB) from code\'s perspective
 
             // --- Contributions to Paper Round s_p=0 Accumulators (u_paper = Y2_c) ---
             // E-factor uses E_out_vec[0] (where Y2_c is u_eff), E_suffix is (Y0_c, Y1_c)
@@ -921,7 +962,7 @@ pub mod svo_helpers {
         if NUM_SVO_ROUNDS > 0 {
             let mut current_sum_infty = 0;
             let mut current_sum_zero = 0;
-            for s_p in 0..NUM_SVO_ROUNDS { // s_p is paper round index (number of v's)
+            for s_p in 0..NUM_SVO_ROUNDS { // s_p is paper round index (number of v\'s)
                 round_offsets_infty[s_p] = current_sum_infty;
                 round_offsets_zero[s_p] = current_sum_zero;
                 current_sum_infty += 3_usize.pow(s_p as u32);
@@ -951,7 +992,7 @@ pub mod svo_helpers {
             // Inner Loop: Target Paper Round s_p (also used as MSB index for E_out_vec choice)
             for s_p_msb_idx_for_E in 0..NUM_SVO_ROUNDS { 
                 // s_p_msb_idx_for_E is the MSB index of the Y_c variable that is u_eff for E_out_vec[s_p_msb_idx_for_E]
-                // This also aligns with the paper's s_p if we map s_p=0 (A0) to E_out_vec[0], s_p=1 (A1) to E_out_vec[1] etc.
+                // This also aligns with the paper\'s s_p if we map s_p=0 (A0) to E_out_vec[0], s_p=1 (A1) to E_out_vec[1] etc.
                 
                 // u_eff_for_this_E is y_ext_msb[s_p_msb_idx_for_E]
                 // Suffix for E_out_vec[s_p_msb_idx_for_E] is (y_ext_msb[s_p_msb_idx_for_E+1], ..., y_ext_msb[N-1])
@@ -1023,6 +1064,110 @@ pub mod svo_helpers {
         }
         debug_assert_eq!(current_tA_idx, tA_accums.len(), "tA_accums not fully processed or over-processed.");
     }
+
+    /// Process the first few sum-check rounds using small value optimization (SVO)
+    /// We take in the pre-computed accumulator values, and use them to compute the quadratic
+    /// evaluations (and thus cubic polynomials) for the first few sum-check rounds.
+    pub fn process_svo_sumcheck_rounds<
+        const NUM_SVO_ROUNDS: usize,
+        F: JoltField,
+        ProofTranscript: Transcript,
+    >(
+        accums_zero: &[F],
+        accums_infty: &[F],
+        r_challenges: &mut Vec<F>,
+        round_polys: &mut Vec<CompressedUniPoly<F>>,
+        claim: &mut F,
+        transcript: &mut ProofTranscript,
+        eq_poly: &mut GruenSplitEqPolynomial<F>,
+    ) {
+        // Assert lengths of accumulator slices based on NUM_SVO_ROUNDS
+        let expected_accums_zero_len = num_accums_eval_zero(NUM_SVO_ROUNDS);
+        let expected_accums_infty_len = num_accums_eval_infty(NUM_SVO_ROUNDS);
+        assert_eq!(
+            accums_zero.len(),
+            expected_accums_zero_len,
+            "accums_zero length mismatch"
+        );
+        assert_eq!(
+            accums_infty.len(),
+            expected_accums_infty_len,
+            "accums_infty length mismatch"
+        );
+
+        let mut lagrange_coeffs: Vec<F> = vec![F::one()];
+        let mut current_acc_zero_offset = 0;
+        let mut current_acc_infty_offset = 0;
+
+        for i in 0..NUM_SVO_ROUNDS {
+            let mut quadratic_eval_0 = F::zero();
+            let mut quadratic_eval_infty = F::zero();
+
+            if USES_SMALL_VALUE_OPTIMIZATION {
+                let num_vars_in_v_config = i; // v_config is (v_0, ..., v_{i-1})
+                let num_lagrange_coeffs_for_round = three_pow(num_vars_in_v_config);
+
+                // Compute quadratic_eval_infty
+                let num_accs_infty_curr_round = three_pow(num_vars_in_v_config);
+                if num_accs_infty_curr_round > 0 && current_acc_infty_offset + num_accs_infty_curr_round <= accums_infty.len() {
+                    let accums_infty_slice = &accums_infty
+                        [current_acc_infty_offset..current_acc_infty_offset + num_accs_infty_curr_round];
+                    for k in 0..num_lagrange_coeffs_for_round {
+                        if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
+                            quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
+                        }
+                    }
+                }
+                current_acc_infty_offset += num_accs_infty_curr_round;
+
+                // Compute quadratic_eval_0
+                let num_accs_zero_curr_round = if num_vars_in_v_config == 0 {
+                    0 // 3^0 - 2^0 = 0
+                } else {
+                    three_pow(num_vars_in_v_config) - two_pow(num_vars_in_v_config)
+                };
+
+                if num_accs_zero_curr_round > 0 && current_acc_zero_offset + num_accs_zero_curr_round <= accums_zero.len() {
+                    let accums_zero_slice = &accums_zero
+                        [current_acc_zero_offset..current_acc_zero_offset + num_accs_zero_curr_round];
+                    let mut non_binary_v_config_counter = 0;
+                    for k_global in 0..num_lagrange_coeffs_for_round {
+                        let v_config = get_v_config_digits(k_global, num_vars_in_v_config);
+                        if is_v_config_non_binary(&v_config) {
+                            if non_binary_v_config_counter < accums_zero_slice.len() && k_global < lagrange_coeffs.len() {
+                                quadratic_eval_0 += accums_zero_slice[non_binary_v_config_counter]
+                                    * lagrange_coeffs[k_global];
+                                non_binary_v_config_counter += 1;
+                            }
+                        }
+                    }
+                }
+                current_acc_zero_offset += num_accs_zero_curr_round;
+            }
+
+            let r_i = process_eq_sumcheck_round(
+                (quadratic_eval_0, quadratic_eval_infty),
+                eq_poly,
+                round_polys,
+                r_challenges,
+                claim,
+                transcript,
+            );
+
+            let lagrange_coeffs_r_i = [F::one() - r_i, r_i, r_i * (r_i - F::one())];
+
+            if i < NUM_SVO_ROUNDS.saturating_sub(1) {
+                lagrange_coeffs = lagrange_coeffs_r_i
+                    .iter()
+                    .flat_map(|lagrange_coeff| {
+                        lagrange_coeffs
+                            .iter()
+                            .map(move |coeff| *lagrange_coeff * *coeff)
+                    })
+                    .collect();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1043,7 +1188,7 @@ mod tests {
     }
 
     // Helper to calculate number of entries for accums_zero: sum_{i=0}^{N-1} (3^i - 2^i)
-    const fn num_accums_zero_entries(num_svo_rounds: usize) -> usize {
+    const fn num_accums_zero_entries_test_helper(num_svo_rounds: usize) -> usize {
         let mut sum = 0;
         let mut i = 0;
         while i < num_svo_rounds {
@@ -1054,7 +1199,7 @@ mod tests {
     }
 
     // Helper to calculate number of entries for accums_infty: sum_{i=0}^{N-1} 3^i
-    const fn num_accums_infty_entries(num_svo_rounds: usize) -> usize {
+    const fn num_accums_infty_entries_test_helper(num_svo_rounds: usize) -> usize {
         let mut sum = 0;
         let mut i = 0;
         while i < num_svo_rounds {
@@ -1177,8 +1322,9 @@ mod tests {
             E_out_vec.push(e_s);
         }
 
-        let num_zero = num_accums_zero_entries(num_svo_rounds);
-        let num_infty = num_accums_infty_entries(num_svo_rounds);
+        let num_zero = num_accums_zero_entries_test_helper(num_svo_rounds);
+        let num_infty = num_accums_infty_entries_test_helper(num_svo_rounds);
+
 
         let mut accums_zero_new = vec![TestField::zero(); num_zero];
         let mut accums_infty_new = vec![TestField::zero(); num_infty];

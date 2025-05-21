@@ -18,7 +18,7 @@ use crate::{field::JoltField, poly::eq_poly::EqPolynomial};
 ///
 /// Note: all current applications of `SplitEqPolynomial` use the `LowToHigh` binding order. This
 /// means that we are iterating over `w` in the reverse order: `w.len()` down to `0`.
-pub struct NewSplitEqPolynomial<F> {
+pub struct GruenSplitEqPolynomial<F> {
     pub(crate) current_index: usize,
     pub(crate) current_scalar: F,
     pub(crate) w: Vec<F>,
@@ -35,8 +35,8 @@ pub struct SplitEqPolynomial<F> {
     pub(crate) E2_len: usize,
 }
 
-impl<F: JoltField> NewSplitEqPolynomial<F> {
-    #[tracing::instrument(skip_all, name = "NewSplitEqPolynomial::new")]
+impl<F: JoltField> GruenSplitEqPolynomial<F> {
+    #[tracing::instrument(skip_all, name = "GruenSplitEqPolynomial::new")]
     pub fn new(w: &[F]) -> Self {
         let m = w.len() / 2;
         //   w = [w2, w1, w_last]
@@ -202,7 +202,7 @@ impl<F: JoltField> NewSplitEqPolynomial<F> {
         self.E_out_vec.last().unwrap()
     }
 
-    #[tracing::instrument(skip_all, name = "NewSplitEqPolynomial::bind")]
+    #[tracing::instrument(skip_all, name = "GruenSplitEqPolynomial::bind")]
     pub fn bind(&mut self, r: F) {
         // multiply `current_scalar` by `eq(w[i], r) = (1 - w[i]) * (1 - r) + w[i] * r`
         self.current_scalar *= F::one() - self.w[self.current_index - 1] - r
@@ -321,7 +321,7 @@ mod tests {
             .collect();
 
         let mut regular_eq = DensePolynomial::new(EqPolynomial::evals(&w));
-        let mut split_eq = NewSplitEqPolynomial::new(&w);
+        let mut split_eq = GruenSplitEqPolynomial::new(&w);
         assert_eq!(regular_eq, split_eq.merge());
 
         for _ in 0..NUM_VARS {
@@ -343,7 +343,7 @@ mod tests {
             .collect();
 
         let mut old_split_eq = SplitEqPolynomial::new(&w);
-        let mut new_split_eq = NewSplitEqPolynomial::new(&w);
+        let mut new_split_eq = GruenSplitEqPolynomial::new(&w);
 
         assert_eq!(old_split_eq.get_num_vars(), new_split_eq.get_num_vars());
         assert_eq!(old_split_eq.len(), new_split_eq.len());
@@ -384,7 +384,7 @@ mod tests {
             );
 
             let start_new_split_eq_time = std::time::Instant::now();
-            let _new_split_eq = NewSplitEqPolynomial::new(&w);
+            let _new_split_eq = GruenSplitEqPolynomial::new(&w);
             let end_new_split_eq_time = std::time::Instant::now();
             println!(
                 "Time taken for creating new split eq: {:?}",
@@ -405,7 +405,7 @@ mod tests {
 
         let num_x_in_vars_1 = N - num_x_out_vars_1 - L0;
         let split_eq1 =
-            NewSplitEqPolynomial::new_for_small_value(&w1, num_x_out_vars_1, num_x_in_vars_1, L0);
+            GruenSplitEqPolynomial::new_for_small_value(&w1, num_x_out_vars_1, num_x_in_vars_1, L0);
 
         // Verify split points and variable slices
         let split_point1_expected1 = num_x_out_vars_1; // Should be 2
@@ -464,7 +464,7 @@ mod tests {
         let w2: Vec<Fr> = (0..N).map(|_| Fr::random(&mut rng)).collect();
         let num_x_in_vars_2 = N - num_x_out_vars_2 - 0; // L0 is 0
         let split_eq2 =
-            NewSplitEqPolynomial::new_for_small_value(&w2, num_x_out_vars_2, num_x_in_vars_2, 0);
+            GruenSplitEqPolynomial::new_for_small_value(&w2, num_x_out_vars_2, num_x_in_vars_2, 0);
         assert_eq!(split_eq2.E_out_vec.len(), 0);
         assert_eq!(split_eq2.E_in_vec.len(), 1); // E_in should cover w[N/2 .. N/2 + num_x_in_vars_2 -1]
         let split_point1_expected2 = num_x_out_vars_2;
@@ -482,7 +482,7 @@ mod tests {
         let n3 = w3.len();
         let num_x_in_vars_3 = n3 - num_x_out_vars_3 - l0_3; // 0 - 0 - 0 = 0
         let result3 = std::panic::catch_unwind(|| {
-            NewSplitEqPolynomial::new_for_small_value(&w3, num_x_out_vars_3, num_x_in_vars_3, l0_3);
+            GruenSplitEqPolynomial::new_for_small_value(&w3, num_x_out_vars_3, num_x_in_vars_3, l0_3);
         });
         assert!(result3.is_err());
     }

@@ -10,7 +10,7 @@ use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::multilinear_polynomial::PolynomialEvaluation;
 use crate::poly::opening_proof::ProverOpeningAccumulator;
 use crate::poly::opening_proof::VerifierOpeningAccumulator;
-use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
+use crate::poly::split_eq_poly::{GruenSplitEqPolynomial, SplitEqPolynomial};
 use crate::r1cs::key::UniformSpartanKey;
 use crate::utils::math::Math;
 use crate::utils::thread::drop_in_background_thread;
@@ -181,7 +181,7 @@ where
             } else if gruen_optimization::USES_GRUEN_OPTIMIZATION {
                 // Path with Gruen's optimization but no SVO
                 span!(Level::INFO, "first_spartan_sumcheck_with_gruen").in_scope(|| {
-                    let mut eq_tau = NewSplitEqPolynomial::new(&tau);
+                    let mut eq_tau = GruenSplitEqPolynomial::new(&tau);
                     let mut az_bz_cz_poly =
                         constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
                     let (proof, outer_sumcheck_r, claims) =

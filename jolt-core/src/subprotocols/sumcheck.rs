@@ -9,14 +9,14 @@ use crate::poly::multilinear_polynomial::{
 use crate::poly::spartan_interleaved_poly::{
     NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial,
 };
-use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
+use crate::poly::split_eq_poly::{GruenSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
-use crate::r1cs::spartan::small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
+use crate::utils::small_value::svo_helpers::process_svo_sumcheck_rounds;
 use ark_serialize::*;
 use rayon::prelude::*;
 use std::marker::PhantomData;
@@ -205,8 +205,11 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut claim = F::zero();
 
         // Clone the transcript at this point so that we could also test with non-svo sumcheck
-        // #[cfg(test)]
+        #[cfg(test)]
         let mut old_transcript = transcript.clone();
+
+        let svo_sumcheck_span = tracing::info_span!("small_value_optimized_sumcheck");
+        let _svo_sumcheck_guard = svo_sumcheck_span.enter();
 
         // First, precompute the accumulators and also the `NewSpartanInterleavedPolynomial`
         let (accums_zero, accums_infty, mut az_bz_cz_poly) =
@@ -218,92 +221,19 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 tau,
             );
 
-        let mut lagrange_coeffs: Vec<F> = vec![F::one()];
-        let mut eq_poly = NewSplitEqPolynomial::new(&tau);
-
-        let mut current_acc_zero_offset = 0;
-        let mut current_acc_infty_offset = 0;
-
-        // Then, do the sumcheck logic
-        for i in 0..NUM_SVO_ROUNDS {
-            let mut quadratic_eval_0 = F::zero();
-            let mut quadratic_eval_infty = F::zero();
-
-            if USES_SMALL_VALUE_OPTIMIZATION {
-                let num_vars_in_v_config = i; // v_config is (v_0, ..., v_{i-1})
-                let num_lagrange_coeffs_for_round = three_pow(num_vars_in_v_config);
-
-                // Compute quadratic_eval_infty
-                let num_accs_infty_curr_round = three_pow(num_vars_in_v_config);
-                if num_accs_infty_curr_round > 0 {
-                    let accums_infty_slice = &accums_infty
-                        [current_acc_infty_offset..current_acc_infty_offset + num_accs_infty_curr_round];
-                    for k in 0..num_lagrange_coeffs_for_round {
-                        if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
-                             quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
-                        } else {
-                            // This case should ideally not be hit if logic is perfect,
-                            // but can happen if num_vars_in_v_config=0 leading to lagrange_coeffs.len()=1
-                            // and num_accs_infty_curr_round=1.
-                            // Or if accums_infty_slice is unexpectedly short.
-                        }
-                    }
-                }
-                current_acc_infty_offset += num_accs_infty_curr_round;
-
-                // Compute quadratic_eval_0
-                let num_accs_zero_curr_round = if num_vars_in_v_config == 0 {
-                    0 // 3^0 - 2^0 = 0
-                } else {
-                    three_pow(num_vars_in_v_config) - two_pow(num_vars_in_v_config)
-                };
-
-                if num_accs_zero_curr_round > 0 {
-                    let accums_zero_slice = &accums_zero
-                        [current_acc_zero_offset..current_acc_zero_offset + num_accs_zero_curr_round];
-                    let mut non_binary_v_config_counter = 0;
-                    for k_global in 0..num_lagrange_coeffs_for_round {
-                        let v_config = get_v_config_digits(k_global, num_vars_in_v_config);
-                        if is_v_config_non_binary(&v_config) {
-                            if non_binary_v_config_counter < accums_zero_slice.len() && k_global < lagrange_coeffs.len() {
-                                quadratic_eval_0 += accums_zero_slice[non_binary_v_config_counter]
-                                    * lagrange_coeffs[k_global];
-                                non_binary_v_config_counter += 1;
-                            } else {
-                                // Should not be reached if counts are correct.
-                            }
-                        }
-                    }
-                }
-                current_acc_zero_offset += num_accs_zero_curr_round;
-            }
-
-            let r_i = process_eq_sumcheck_round(
-                (quadratic_eval_0, quadratic_eval_infty),
-                &mut eq_poly,
-                &mut polys,
-                &mut r,
-                &mut claim,
-                transcript,
-            );
-
-            // Lagrange coefficients for 0, 1, and infty, respectively
-            let lagrange_coeffs_r_i = [F::one() - r_i, r_i, r_i * (r_i - F::one())];
-
-            // Update Lagrange coefficients (so that indices for `r_i` is in the most significant digit):
-            // L_{i+1} = lagrange_coeffs_r_i \otimes L_i
-            // Update only needed for round < NUM_SVO_ROUNDS - 1
-            if i < NUM_SVO_ROUNDS.saturating_sub(1) {
-                lagrange_coeffs = lagrange_coeffs_r_i
-                    .iter()
-                    .flat_map(|lagrange_coeff| {
-                        lagrange_coeffs
-                            .iter()
-                            .map(move |coeff| *lagrange_coeff * *coeff)
-                    })
-                    .collect();
-            }
-        }
+        let mut eq_poly = GruenSplitEqPolynomial::new(tau);
+        
+        // Call the refactored SVO sumcheck processing logic
+        process_svo_sumcheck_rounds::<NUM_SVO_ROUNDS, F, ProofTranscript>(
+            &accums_zero,
+            &accums_infty,
+            &mut r,
+            &mut polys,
+            &mut claim,
+            transcript,
+            &mut eq_poly,
+        );
+        
         // Round NUM_SVO_ROUNDS : do the streaming sumcheck to compute cached values
         az_bz_cz_poly.streaming_sumcheck_round(
             &mut eq_poly,
@@ -324,8 +254,13 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             );
         }
 
-        // #[cfg(test)]
+        drop(_svo_sumcheck_guard);
+
+        #[cfg(test)]
         {
+            let old_sumcheck_span = tracing::info_span!("old_sumcheck_with_gruen_optimization");
+            let _old_sumcheck_guard = old_sumcheck_span.enter();
+            
             let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
                 uniform_constraints,
                 cross_step_constraints,
@@ -336,7 +271,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             let mut old_r: Vec<F> = Vec::new();
             let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
             let mut old_claim = F::zero();
-            let mut old_eq_poly = NewSplitEqPolynomial::new(tau);
+            let mut old_eq_poly = GruenSplitEqPolynomial::new(tau);
 
             old_az_bz_cz_poly.first_sumcheck_round_with_gruen(
                 &mut old_eq_poly,
@@ -355,6 +290,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     &mut old_claim,
                 );
             }
+            
+            drop(_old_sumcheck_guard);
         }
 
         (
@@ -396,7 +333,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
     #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic_with_gruen")]
     pub fn prove_spartan_cubic_with_gruen(
         num_rounds: usize,
-        eq_poly: &mut NewSplitEqPolynomial<F>,
+        eq_poly: &mut GruenSplitEqPolynomial<F>,
         az_bz_cz_poly: &mut SpartanInterleavedPolynomial<F>,
         transcript: &mut ProofTranscript,
     ) -> (Self, Vec<F>, [F; 3]) {
@@ -676,7 +613,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 /// Returns the derived challenge
 pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
     quadratic_evals: (F, F), // (t_i(0), t_i(infty))
-    eq_poly: &mut NewSplitEqPolynomial<F>,
+    eq_poly: &mut GruenSplitEqPolynomial<F>,
     polys: &mut Vec<CompressedUniPoly<F>>,
     r: &mut Vec<F>,
     claim: &mut F,
@@ -711,37 +648,6 @@ pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
     eq_poly.bind(r_i);
 
     r_i
-}
-
-// Helper function to compute 3^k
-fn three_pow(k: usize) -> usize {
-    3_usize.checked_pow(k as u32).expect("3^k overflow")
-}
-
-// Helper function to compute 2^k
-fn two_pow(k: usize) -> usize {
-    2_usize.checked_pow(k as u32).expect("2^k overflow")
-}
-
-// Helper function to get v_config digits from k_global (MSB first in result vector)
-// k_global is an integer from 0 to 3^num_vars - 1
-// Returns Vec<usize> where each element is 0, 1, or 2 (for Z, O, I respectively)
-// The returned digits vector has digits[0] as MSB.
-fn get_v_config_digits(mut k_global: usize, num_vars: usize) -> Vec<usize> {
-    if num_vars == 0 {
-        return Vec::new();
-    }
-    let mut digits = vec![0; num_vars];
-    for i in (0..num_vars).rev() { // Fill from LSB of digits vec, which corresponds to LSB of k_global
-        digits[i] = k_global % 3;
-        k_global /= 3;
-    }
-    digits
-}
-
-// Helper to check if v_config (digits 0,1,2) is non-binary (contains a 2, representing infinity)
-fn is_v_config_non_binary(v_config: &[usize]) -> bool {
-    v_config.iter().any(|&digit| digit == 2)
 }
 
 #[cfg(test)]

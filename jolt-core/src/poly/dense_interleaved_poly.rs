@@ -14,7 +14,7 @@ use rayon::{prelude::*, slice::Chunks};
 #[cfg(test)]
 use super::dense_mlpoly::DensePolynomial;
 use super::{
-    split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial},
+    split_eq_poly::{GruenSplitEqPolynomial, SplitEqPolynomial},
     unipoly::{CompressedUniPoly, UniPoly},
 };
 
@@ -356,7 +356,7 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
     #[tracing::instrument(skip_all, name = "DenseInterleavedPolynomial::compute_cubic_new")]
     pub fn compute_cubic_new(
         &self,
-        eq_poly: &NewSplitEqPolynomial<F>,
+        eq_poly: &GruenSplitEqPolynomial<F>,
         previous_round_claim: F,
     ) -> UniPoly<F> {
         // We use the Dao-Thaler optimization for the EQ polynomial, so there are two cases we
@@ -461,7 +461,7 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
 
     pub fn prove_sumcheck_new<ProofTranscript: Transcript>(
         &mut self,
-        eq_poly: &mut NewSplitEqPolynomial<F>,
+        eq_poly: &mut GruenSplitEqPolynomial<F>,
         claim: &F,
         transcript: &mut ProofTranscript,
     ) -> (SumcheckInstanceProof<F, ProofTranscript>, Vec<F>, (F, F)) {
@@ -525,7 +525,7 @@ impl<F: JoltField> DenseInterleavedPolynomial<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::poly::split_eq_poly::{NewSplitEqPolynomial, SplitEqPolynomial};
+    use crate::poly::split_eq_poly::{GruenSplitEqPolynomial, SplitEqPolynomial};
     use crate::subprotocols::sumcheck::BatchedCubicSumcheck;
     use crate::utils::transcript::KeccakTranscript;
     use ark_bn254::Fr;
@@ -623,7 +623,7 @@ mod tests {
             let w: Vec<_> = (0..log_size).map(|_| Fr::rand(&mut rng)).collect();
 
             let mut eq_poly = SplitEqPolynomial::new(&w);
-            let mut new_eq_poly = NewSplitEqPolynomial::new(&w);
+            let mut new_eq_poly = GruenSplitEqPolynomial::new(&w);
 
             let (left, right) = poly.uninterleave();
             let merged_eq = eq_poly.merge();
@@ -670,7 +670,7 @@ mod tests {
 
             // Create both types of EQ polynomials
             let mut eq_poly = SplitEqPolynomial::new(&w);
-            let mut new_eq_poly = NewSplitEqPolynomial::new(&w);
+            let mut new_eq_poly = GruenSplitEqPolynomial::new(&w);
 
             let (left, right) = poly.uninterleave();
             let merged_eq = eq_poly.merge();

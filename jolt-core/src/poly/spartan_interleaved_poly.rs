@@ -21,73 +21,13 @@ use crate::{
 };
 use ark_ff::Zero;
 use rayon::prelude::*;
-use std::sync::Arc;
 
 use crate::r1cs::spartan::small_value_optimization::NUM_SVO_ROUNDS;
 
-pub const fn num_non_trivial_ternary_points(num_svo_rounds: usize) -> usize {
-    // Returns 3^num_svo_rounds - 2^num_svo_rounds
-    let pow_3 = 3_usize
-        .checked_pow(num_svo_rounds as u32)
-        .expect("Number of ternary points overflowed");
-    let pow_2 = 2_usize
-        .checked_pow(num_svo_rounds as u32)
-        .expect("Number of ternary points overflowed");
-    pow_3 - pow_2
-}
-
-pub const fn total_num_accums(num_svo_rounds: usize) -> usize {
-    // Compute the sum \sum_{i=1}^{num_svo_rounds} (3^i - 2^i)
-    let mut sum = 0;
-    let mut i = 1;
-    while i <= num_svo_rounds {
-        let pow_3 = 3_usize
-            .checked_pow(i as u32)
-            .expect("Number of ternary points overflowed");
-        let pow_2 = 2_usize
-            .checked_pow(i as u32)
-            .expect("Number of ternary points overflowed");
-        sum += pow_3 - pow_2;
-        i += 1;
-    }
-    sum
-}
-
-pub const fn num_accums_eval_zero(num_svo_rounds: usize) -> usize {
-    // Returns \sum_{i=0}^{num_svo_rounds - 1} (3^i - 2^i)
-    let mut sum = 0;
-    let mut i = 0;
-    while i < num_svo_rounds {
-        let pow_3 = 3_usize
-            .checked_pow(i as u32)
-            .expect("Number of ternary points overflowed");
-        let pow_2 = 2_usize
-            .checked_pow(i as u32)
-            .expect("Number of binary points overflowed");
-        sum += pow_3 - pow_2;
-        i += 1;
-    }
-    sum
-}
-
-pub const fn num_accums_eval_infty(num_svo_rounds: usize) -> usize {
-    // Returns \sum_{i=0}^{num_svo_rounds - 1} 3^i
-    let mut sum = 0;
-    let mut i = 0;
-    while i < num_svo_rounds {
-        let pow_3 = 3_usize
-            .checked_pow(i as u32)
-            .expect("Number of ternary points overflowed");
-        sum += pow_3;
-        i += 1;
-    }
-    sum
-}
-
-pub const TOTAL_NUM_ACCUMS: usize = total_num_accums(NUM_SVO_ROUNDS);
-pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = num_non_trivial_ternary_points(NUM_SVO_ROUNDS);
-pub const NUM_ACCUMS_EVAL_ZERO: usize = num_accums_eval_zero(NUM_SVO_ROUNDS);
-pub const NUM_ACCUMS_EVAL_INFTY: usize = num_accums_eval_infty(NUM_SVO_ROUNDS);
+pub const TOTAL_NUM_ACCUMS: usize = svo_helpers::total_num_accums(NUM_SVO_ROUNDS);
+pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize = svo_helpers::num_non_trivial_ternary_points(NUM_SVO_ROUNDS);
+pub const NUM_ACCUMS_EVAL_ZERO: usize = svo_helpers::num_accums_eval_zero(NUM_SVO_ROUNDS);
+pub const NUM_ACCUMS_EVAL_INFTY: usize = svo_helpers::num_accums_eval_infty(NUM_SVO_ROUNDS);
 
 pub const Y_SVO_SPACE_SIZE: usize = 1 << NUM_SVO_ROUNDS;
 pub const Y_SVO_RELATED_COEFF_BLOCK_SIZE: usize = 4 * Y_SVO_SPACE_SIZE; // Az/Bz * Xk=0/1 * Y_SVO_SPACE_SIZE
@@ -182,12 +122,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         // - (N/2 - l) ... (N - l) in total is x_in
         // - (N - l) ... (N - i - 1) is y_suffix_svo
         // - (N - i - 1) ... (N - 1) is u || v_config
-
-        assert!(
-            NUM_SVO_ROUNDS > 0 && NUM_SVO_ROUNDS <= 3,
-            "NUM_SVO_ROUNDS ({}) must be > 0 and <= 3",
-            NUM_SVO_ROUNDS
-        );
 
         // --- Variable Definitions ---
         let num_steps = flattened_polynomials[0].len();
@@ -1258,7 +1192,7 @@ pub struct SpartanInterleavedPolynomial<F: JoltField> {
     /// A sparse vector representing the (interleaved) coefficients in the Az, Bz, Cz
     /// polynomials used in the first Spartan sumcheck. Before the polynomial is bound
     /// the first time, all the coefficients can be represented by `i128`s.
-    pub(crate) unbound_coeffs_shards: Vec<Arc<Vec<SparseCoefficient<i128>>>>,
+    pub(crate) unbound_coeffs_shards: Vec<Vec<SparseCoefficient<i128>>>,
     /// A sparse vector representing the (interleaved) coefficients in the Az, Bz, Cz
     /// polynomials used in the first Spartan sumcheck. Once the polynomial has been
     /// bound, we switch to using `bound_coeffs` instead of `unbound_coeffs`, because
@@ -1302,7 +1236,6 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         let unbound_coeffs_shards_iter = (0..num_chunks)
             .into_par_iter()
             .map(|chunk_index| {
-                // let chunk_start_time: std::time::Instant = std::time::Instant::now();
                 let chunk_task_span = tracing::debug_span!("old_new_chunk_task", chunk_idx = chunk_index);
                 let _chunk_task_guard = chunk_task_span.enter();
 
@@ -1418,18 +1351,13 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
                         // Cz is always 0 for cross-step constraints
                     }
                 }
-                
-                // let total_chunk_time = chunk_start_time.elapsed();
-                // println!("OLD_MEMORY_ACCESS_DIAGNOSTIC: Chunk {} total_time={:.3}s, coeffs={}", 
-                //          chunk_index, total_chunk_time.as_secs_f64(), coeffs.len());
-
-                Arc::new(coeffs)
+                coeffs
             });
         drop(_par_iter_guard);
 
         let collect_span = tracing::info_span!("old_new_collect_unbound_coeffs");
         let _collect_guard = collect_span.enter();
-        let unbound_coeffs_shards: Vec<Arc<Vec<SparseCoefficient<i128>>>> =
+        let unbound_coeffs_shards: Vec<Vec<SparseCoefficient<i128>>> =
             unbound_coeffs_shards_iter.collect();
         drop(_collect_guard);
 
@@ -1438,8 +1366,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         #[cfg(test)]
         {
             // Check that indices are monotonically increasing
-            for shard_arc in &unbound_coeffs_shards {
-                let shard = shard_arc.as_ref();
+            for shard in &unbound_coeffs_shards {
                 if !shard.is_empty() {
                     let mut prev_index = shard[0].index;
                     for coeff in shard.iter().skip(1) {
@@ -1469,8 +1396,8 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         let mut cz = vec![F::zero(); self.dense_len];
 
         if !self.is_bound() {
-            for shard_arc in &self.unbound_coeffs_shards {
-                for coeff in shard_arc.as_ref() {
+            for shard in &self.unbound_coeffs_shards {
+                for coeff in shard {
                     match coeff.index % 3 {
                         0 => az[coeff.index / 3] = F::from_i128(coeff.value),
                         1 => bz[coeff.index / 3] = F::from_i128(coeff.value),
@@ -1514,20 +1441,6 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
     ) {
         assert!(!self.is_bound());
 
-        // In order to parallelize, we do a first pass over the coefficients to
-        // determine how to divide it into chunks that can be processed independently.
-        // In particular, coefficients whose indices are the same modulo 6 cannot
-        // be processed independently.
-        // let block_size = self
-        //     .unbound_coeffs_shards
-        //     .len()
-        //     .div_ceil(rayon::current_num_threads())
-        //     .next_multiple_of(6);
-        // let chunks: Vec<_> = self
-        //     .unbound_coeffs_shards
-        //     .par_chunk_by(|x, y| x.index / block_size == y.index / block_size)
-        //     .collect();
-
         // We start by computing the E1 evals:
         // (1 - j) * E1[0, x1] + j * E1[1, x1]
         let E1_evals: Vec<_> = eq_poly.E1[..eq_poly.E1_len]
@@ -1547,8 +1460,8 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         let evals: (F, F, F) = self
             .unbound_coeffs_shards
             .par_iter()
-            .map(|shard_arc| {
-                let shard_coeffs = shard_arc.as_ref();
+            .map(|shard| {
+                let shard_coeffs = shard;
                 let mut eval_point_0 = F::zero();
                 let mut eval_point_2 = F::zero();
                 let mut eval_point_3 = F::zero();
@@ -1640,7 +1553,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         let output_sizes: Vec<_> = self
             .unbound_coeffs_shards
             .par_iter()
-            .map(|shard_arc| Self::binding_output_length(shard_arc.as_ref()))
+            .map(|shard| Self::binding_output_length(shard))
             .collect();
 
         let total_output_len = output_sizes.iter().sum();
@@ -1662,8 +1575,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         self.unbound_coeffs_shards
             .par_iter()
             .zip_eq(output_slices.into_par_iter())
-            .for_each(|(unbound_shard_arc, output_slice_for_shard)| {
-                let unbound_coeffs_in_shard = unbound_shard_arc.as_ref();
+            .for_each(|(unbound_coeffs_in_shard, output_slice_for_shard)| {
                 let mut output_index = 0;
                 for block in unbound_coeffs_in_shard.chunk_by(|x, y| x.index / 6 == y.index / 6) {
                     let block_index = block[0].index / 6;
@@ -2114,8 +2026,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         let quadratic_eval_at_infty = self
             .unbound_coeffs_shards
             .par_iter()
-            .map(|shard_arc| {
-                let shard_coeffs = shard_arc.as_ref();
+            .map(|shard_coeffs| {
                 let mut shard_eval_point_infty = F::zero();
 
                 let mut current_shard_inner_sums = F::zero();
@@ -2204,8 +2115,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         self.unbound_coeffs_shards
             .par_iter()
             .zip_eq(output_slices.into_par_iter())
-            .for_each(|(unbound_shard_arc, output_slice_for_shard)| {
-                let unbound_coeffs_in_shard = unbound_shard_arc.as_ref();
+            .for_each(|(unbound_coeffs_in_shard, output_slice_for_shard)| {
                 let mut output_index = 0;
                 for block in unbound_coeffs_in_shard.chunk_by(|x, y| x.index / 6 == y.index / 6) {
                     let block_index = block[0].index / 6;

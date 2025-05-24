@@ -42,7 +42,7 @@ pub mod small_value_optimization {
 
     /// The number of small value optimization rounds to use
     /// We currently support values of 1, 2, or 3
-    pub const NUM_SVO_ROUNDS: usize = 3;
+    pub const NUM_SVO_ROUNDS: usize = 4;
 }
 
 #[cfg(not(feature = "small_value_optimization"))]

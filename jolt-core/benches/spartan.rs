@@ -1,6 +1,3 @@
-// TODO: import the logic needed to build program trace, preprocess it into jolt witness
-// then run Spartan first sumcheck on it
-
 use ark_bn254::{Bn254, Fr};
 use ark_ff::{One, Zero};
 use criterion::{
@@ -105,14 +102,13 @@ fn setup_for_spartan(
 fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
     // Define programs to benchmark
     let programs = vec![
-        "sha3-chain-guest",
+        // "sha3-chain-guest",
         // "fibonacci-guest",
-        // "sha2-chain-guest",
+        "sha2-chain-guest",
     ];
 
     // Define iteration counts for chain programs
-    let chain_iteration_counts = vec![8, 16, 32, 64, 128];
-    // vec![512,1024,2048]; // Reduced for brevity; add more as needed
+    let chain_iteration_counts = vec![8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
     // Define iteration counts for non-chain programs (this is just a dummy value)
     let non_chain_iterations = vec![0];
@@ -274,7 +270,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
 
 fn bench_spartan_svo_components(c: &mut Criterion) {
     // Define the program and iteration counts to test
-    let program_name = "sha3-chain-guest";
+    let program_name = "sha2-chain-guest";
     let iteration_counts = vec![16, 32, 64, 128, 256, 512]; // Include small and large iterations for comparison
 
     for &num_iters in &iteration_counts {

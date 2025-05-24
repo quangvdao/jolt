@@ -263,6 +263,30 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                 },
             );
 
+            // group.bench_function(
+            //     "Gruen + 4 SVO rounds (NewSpartanInterleaved + NewSplitEq)",
+            //     |b: &mut Bencher| {
+            //         b.iter_batched(
+            //             || {
+            //                 let new_transcript = transcript.clone();
+            //                 return new_transcript;
+            //             },
+            //             |mut transcript| {
+            //                 SumcheckInstanceProof::prove_spartan_small_value::<4>(
+            //                     num_rounds_x,
+            //                     padded_rows_per_step,
+            //                     &uniform_constraints,
+            //                     &cross_step_constraints,
+            //                     &flattened_polys,
+            //                     &tau,
+            //                     &mut transcript,
+            //                 );
+            //             },
+            //             BatchSize::SmallInput,
+            //         );
+            //     },
+            // );
+
             group.finish();
         }
     }

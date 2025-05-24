@@ -9,9 +9,6 @@ pub mod svo_helpers {
     use crate::subprotocols::sumcheck::process_eq_sumcheck_round;
     use crate::utils::transcript::Transcript;
 
-    // Import constants for assertions and USES_SMALL_VALUE_OPTIMIZATION
-    use crate::r1cs::spartan::small_value_optimization::USES_SMALL_VALUE_OPTIMIZATION;
-
     // SVOEvalPoint enum definition
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
     pub enum SVOEvalPoint {
@@ -255,12 +252,21 @@ pub mod svo_helpers {
             3 => {
                 compute_and_update_tA_inplace_3(binary_az_evals, binary_bz_evals, e_in_val, temp_tA)
             }
-            _ => compute_and_update_tA_inplace::<NUM_SVO_ROUNDS, F>(
+            // 81 - 16 = 65 non-binary points
+            4 => compute_and_update_tA_inplace::<
+                    4, 
+                    65, 
+                    81,
+                    F, 
+                >(
                 binary_az_evals,
                 binary_bz_evals,
                 e_in_val,
                 temp_tA,
             ),
+            _ => {
+                panic!("Unsupported number of SVO rounds: {}", NUM_SVO_ROUNDS);
+            }
         }
     }
 
@@ -613,27 +619,96 @@ pub mod svo_helpers {
         }
     }
 
+    /// Converts MSB-first SVOEvalPoint coordinates to their global ternary index k.
+    /// k = sum_{i=0}^{N-1} val(coords_msb[i]) * 3^(N-1-i)
+    pub const fn svo_coords_msb_to_k_ternary_idx<const N: usize>(coords_msb: &[SVOEvalPoint; N]) -> usize {
+        if N == 0 {
+            return 0; 
+        }
+        let mut k_val = 0;
+        let mut i_msb_dim = 0; // iterates from 0 (MSB) to N-1 (LSB)
+        while i_msb_dim < N {
+            let digit_val = match coords_msb[i_msb_dim] {
+                SVOEvalPoint::Zero => 0,
+                SVOEvalPoint::One => 1,
+                SVOEvalPoint::Infinity => 2,
+            };
+            let power_of_3_for_dim = pow(3, N - 1 - i_msb_dim);
+            k_val += digit_val * power_of_3_for_dim;
+            i_msb_dim += 1;
+        }
+        k_val
+    }
+
+    /// Recursive helper to compute extended polynomial evaluations.
+    /// Uses memoization to store intermediate results.
+    fn get_extended_eval<const N: usize, const NUM_TERN_PTS: usize>(
+        k_target: usize,
+        binary_evals_input: &[i128],
+        memoized_evals: &mut [Option<i128>; NUM_TERN_PTS], // Using array for memoization table
+        ternary_point_info_table: &[TernaryPointInfo<N>; NUM_TERN_PTS],
+    ) -> i128 {
+        if let Some(val) = memoized_evals[k_target] {
+            return val;
+        }
+
+        let point_info = ternary_point_info_table[k_target]; // This is a copy, which is fine for this small struct
+        let result = if point_info.is_binary {
+            binary_evals_input[point_info.binary_eval_idx]
+        } else {
+            // These recursive calls must use the same memoization table and info table
+            let eval_at_1 = get_extended_eval(
+                point_info.k_val_at_one,
+                binary_evals_input,
+                memoized_evals,
+                ternary_point_info_table,
+            );
+            let eval_at_0 = get_extended_eval(
+                point_info.k_val_at_zero,
+                binary_evals_input,
+                memoized_evals,
+                ternary_point_info_table,
+            );
+            eval_at_1 - eval_at_0
+        };
+
+        memoized_evals[k_target] = Some(result);
+        result
+    }
+
     /// Performs in-place multilinear extension on ternary evaluation vectors
     /// and updates the temporary accumulator `temp_tA` with the product contribution.
     /// This is the generic version with no bound on num_svo_rounds.
     /// TODO: optimize this further
     #[inline]
-    pub fn compute_and_update_tA_inplace<const NUM_SVO_ROUNDS: usize, F: JoltField>(
+    pub fn compute_and_update_tA_inplace<
+        const NUM_SVO_ROUNDS: usize, 
+        const M_NON_BINARY_POINTS_CONST: usize, // num_non_binary_points(NUM_SVO_ROUNDS)
+        const NUM_TERNARY_POINTS_CONST: usize, // pow(3, NUM_SVO_ROUNDS)
+        F: JoltField,
+    >(
         binary_az_evals_input: &[i128], // Source of 2^N binary evals for Az
         binary_bz_evals_input: &[i128], // Source of 2^N binary evals for Bz
         e_in_val: &F,
-        temp_tA: &mut [F], // Target for 3^N - 2^N non-binary extended products
+        temp_tA: &mut [F], // Target for M_NON_BINARY_POINTS_CONST non-binary extended products
     ) {
         if NUM_SVO_ROUNDS == 0 {
             debug_assert!(
                 temp_tA.is_empty(),
                 "temp_tA should be empty for 0 SVO rounds"
             );
+            // M_NON_BINARY_POINTS_CONST would be 0, NUM_TERNARY_POINTS_CONST would be 1.
+            // The loops below would not run.
             return;
         }
+        
+        // Verify consistency of const generic arguments with NUM_SVO_ROUNDS
+        debug_assert_eq!(M_NON_BINARY_POINTS_CONST, num_non_binary_points(NUM_SVO_ROUNDS), "M_NON_BINARY_POINTS_CONST mismatch");
+        debug_assert_eq!(NUM_TERNARY_POINTS_CONST, pow(3, NUM_SVO_ROUNDS), "NUM_TERNARY_POINTS_CONST mismatch");
+
 
         let num_binary_points = 1 << NUM_SVO_ROUNDS;
-        let num_ternary_points = 3_usize.pow(NUM_SVO_ROUNDS as u32);
+        // temp_tA length is M_NON_BINARY_POINTS_CONST
 
         debug_assert_eq!(
             binary_az_evals_input.len(),
@@ -647,114 +722,60 @@ pub mod svo_helpers {
         );
         debug_assert_eq!(
             temp_tA.len(),
-            num_ternary_points - num_binary_points,
-            "temp_tA length mismatch"
+            M_NON_BINARY_POINTS_CONST, // temp_tA stores only non-binary point contributions
+            "temp_tA length mismatch with M_NON_BINARY_POINTS_CONST"
         );
 
-        // These will store all 3^N extended evaluations.
-        // Using Vec here as heap allocation is acceptable for this setup phase.
-        // The core logic avoids allocations.
-        let mut extended_az_evals: Vec<i128> = vec![0; num_ternary_points];
-        let mut extended_bz_evals: Vec<i128> = vec![0; num_ternary_points];
+        // This table contains info for ALL 3^N points, used by the recursive helper.
+        let ternary_point_info_table: [TernaryPointInfo<NUM_SVO_ROUNDS>; NUM_TERNARY_POINTS_CONST] =
+            precompute_ternary_point_infos::<NUM_SVO_ROUNDS, NUM_TERNARY_POINTS_CONST>();
 
-        let mut current_temp_tA_idx = 0;
+        // Memoization tables for all 3^N points.
+        // Initialize with a value that signifies "not computed yet".
+        // Using array for memoization tables.
+        let mut memoized_az_evals: [Option<i128>; NUM_TERNARY_POINTS_CONST] = [None; NUM_TERNARY_POINTS_CONST];
+        let mut memoized_bz_evals: [Option<i128>; NUM_TERNARY_POINTS_CONST] = [None; NUM_TERNARY_POINTS_CONST];
+        
+        // Get the map of non-binary points. The order here dictates temp_tA indexing.
+        let y_ext_code_map_non_binary: [[SVOEvalPoint; NUM_SVO_ROUNDS]; M_NON_BINARY_POINTS_CONST] =
+            build_y_ext_code_map::<NUM_SVO_ROUNDS, M_NON_BINARY_POINTS_CONST>();
+        
+        for i_temp_tA in 0..M_NON_BINARY_POINTS_CONST {
+            let current_y_ext_coords_msb: &[SVOEvalPoint; NUM_SVO_ROUNDS] = &y_ext_code_map_non_binary[i_temp_tA];
+            
+            // Convert the MSB coordinates of the current non-binary point to its global k_ternary_idx
+            let k_target_idx = svo_coords_msb_to_k_ternary_idx::<NUM_SVO_ROUNDS>(current_y_ext_coords_msb);
 
-        // Iterate k from 0 to 3^NUM_SVO_ROUNDS - 1.
-        // k represents a point in the ternary hypercube (y_0, ..., y_{N-1})
-        // where y_i are digits of k in base 3 (0=Zero, 1=One, 2=Infinity).
-        // The iteration order is lexicographical if we consider (y_0, ..., y_{N-1}) MSB-first.
-        for k_ternary_idx in 0..num_ternary_points {
-            let mut temp_k = k_ternary_idx;
-            let mut is_binary_point_flag = true;
-            let mut first_inf_dim_msb_idx: Option<usize> = None; // Dimension index (0 to N-1, MSB-first) of the most significant Infinity
+            // Sanity check: the k_target_idx must be non-binary.
+            // The ternary_point_info_table can be indexed by k_target_idx.
+            debug_assert!(k_target_idx < NUM_TERNARY_POINTS_CONST, "k_target_idx out of bounds for ternary_point_info_table");
+            debug_assert!(!ternary_point_info_table[k_target_idx].is_binary, "Target for temp_tA[{}] (k={}) is unexpectedly binary.", i_temp_tA, k_target_idx);
 
-            // Decompose k_ternary_idx into base-3 digits to represent the ternary point.
-            // We store it in an array where index 0 is MSB.
-            let mut current_coords_base3 = [0u8; NUM_SVO_ROUNDS];
-            for i_dim_rev in 0..NUM_SVO_ROUNDS {
-                // Iterates to fill from LSB of k
-                let i_dim_msb = NUM_SVO_ROUNDS - 1 - i_dim_rev; // Current dimension index (MSB is 0)
-                let digit = (temp_k % 3) as u8;
-                current_coords_base3[i_dim_msb] = digit;
-                if digit == 2 {
-                    // Digit 2 represents Infinity
-                    is_binary_point_flag = false;
-                    if first_inf_dim_msb_idx.is_none() {
-                        first_inf_dim_msb_idx = Some(i_dim_msb);
-                    }
-                }
-                temp_k /= 3;
-            }
+            let az_val = get_extended_eval::<NUM_SVO_ROUNDS, NUM_TERNARY_POINTS_CONST>(
+                k_target_idx,
+                binary_az_evals_input,
+                &mut memoized_az_evals,
+                &ternary_point_info_table,
+            );
 
-            // Calculate extended_az_evals[k_ternary_idx] and extended_bz_evals[k_ternary_idx]
-            if is_binary_point_flag {
-                // Convert current_coords_base3 (containing only 0s and 1s) to a binary index
-                let mut binary_idx = 0;
-                for i_dim_msb in 0..NUM_SVO_ROUNDS {
-                    binary_idx <<= 1;
-                    if current_coords_base3[i_dim_msb] == 1 {
-                        binary_idx |= 1;
-                    }
-                }
-                extended_az_evals[k_ternary_idx] = binary_az_evals_input[binary_idx];
-                extended_bz_evals[k_ternary_idx] = binary_bz_evals_input[binary_idx];
-            } else {
-                // Non-binary point: calculate using P(...,Inf,...) = P(...,1,...) - P(...,0,...)
-                // The terms on the RHS are at indices < k_ternary_idx.
-                let j_inf_dim = first_inf_dim_msb_idx.unwrap(); // Safe due to !is_binary_point_flag
-
-                // Power of 3 for the dimension j_inf_dim (0-indexed from MSB)
-                // Example: N=3, j_inf_dim=0 (MSB), power = 3^(3-1-0) = 3^2 = 9
-                //          N=3, j_inf_dim=1 (Mid), power = 3^(3-1-1) = 3^1 = 3
-                //          N=3, j_inf_dim=2 (LSB), power = 3^(3-1-2) = 3^0 = 1
-                let inf_dim_power_of_3 = 3_usize.pow((NUM_SVO_ROUNDS - 1 - j_inf_dim) as u32);
-
-                // k_ternary_idx has a \'2\' at dimension j_inf_dim.
-                // k_at_1_idx corresponds to changing this \'2\' to a \'1\'.
-                // k_at_0_idx corresponds to changing this \'2\' to a \'0\'.
-                let k_at_1_idx = k_ternary_idx - inf_dim_power_of_3;
-                let k_at_0_idx = k_ternary_idx - 2 * inf_dim_power_of_3;
-
-                debug_assert!(
-                    k_at_1_idx < k_ternary_idx,
-                    "k_at_1_idx should be less than k_ternary_idx"
-                );
-                debug_assert!(
-                    k_at_0_idx < k_ternary_idx,
-                    "k_at_0_idx should be less than k_ternary_idx"
+            if az_val != 0 {
+                let bz_val = get_extended_eval::<NUM_SVO_ROUNDS, NUM_TERNARY_POINTS_CONST>(
+                    k_target_idx,
+                    binary_bz_evals_input,
+                    &mut memoized_bz_evals,
+                    &ternary_point_info_table,
                 );
 
-                extended_az_evals[k_ternary_idx] =
-                    extended_az_evals[k_at_1_idx] - extended_az_evals[k_at_0_idx];
-                extended_bz_evals[k_ternary_idx] =
-                    extended_bz_evals[k_at_1_idx] - extended_bz_evals[k_at_0_idx];
-
-                // This is a non-binary point, so it contributes to temp_tA.
-                // The temp_tA array is indexed by the order non-binary points are encountered.
-                debug_assert!(
-                    current_temp_tA_idx < temp_tA.len(),
-                    "temp_tA index out of bounds"
-                );
-
-                let az_val = extended_az_evals[k_ternary_idx];
-                if az_val != 0 {
-                    let bz_val = extended_bz_evals[k_ternary_idx];
-                    if bz_val != 0 {
-                        let product = az_val
-                            .checked_mul(bz_val)
-                            .expect("Extended Az*Bz product overflow i128");
-                        temp_tA[current_temp_tA_idx] += e_in_val.mul_i128(product);
-                    }
+                if bz_val != 0 {
+                    let product = az_val
+                        .checked_mul(bz_val)
+                        .expect("Extended Az*Bz product overflow i128");
+                    // Note: temp_tA is indexed by `i_temp_tA` which is the iteration order
+                    // of non-binary points from build_y_ext_code_map.
+                    temp_tA[i_temp_tA] += e_in_val.mul_i128(product);
                 }
-                current_temp_tA_idx += 1;
             }
         }
-        // Final check that all entries in temp_tA that were supposed to be filled, were.
-        debug_assert_eq!(
-            current_temp_tA_idx,
-            temp_tA.len(),
-            "temp_tA was not fully populated or was overpopulated."
-        );
     }
 
     /// Generic version for distributing tA to svo accumulators
@@ -968,10 +989,10 @@ pub mod svo_helpers {
 
             let (y0_c, y1_c, y2_c) = Y_EXT_CODE_MAP[i]; // (MSB, Mid, LSB) from code\'s perspective
 
-            // --- Contributions to Paper Round s_p=0 Accumulators (u_paper = Y2_c) ---
+            // --- Contributions to Paper Round s_p=0 Accumulators (u = Y2_c) ---
             // E-factor uses E_out_vec[0] (where Y2_c is u_eff), E_suffix is (Y0_c, Y1_c)
             if y2_c == Infinity {
-                // u_paper = I
+                // u = I
                 if y0_c != Infinity && y1_c != Infinity {
                     // Suffix (Y0_c,Y1_c) for E_out_vec[0] must be binary
                     let e_val = match (y0_c, y1_c) {
@@ -986,16 +1007,16 @@ pub mod svo_helpers {
             }
             // No A_0(0) slots defined in the provided consts for accums_zero.
 
-            // --- Contributions to Paper Round s_p=1 Accumulators (u_paper = Y1_c, v0_paper = Y2_c) ---
+            // --- Contributions to Paper Round s_p=1 Accumulators (u = Y1_c, v0 = Y2_c) ---
             // E-factor uses E_out_vec[1] (where Y1_c is u_eff), E_suffix is (Y0_c)
             if y0_c != Infinity {
                 // Suffix Y0_c for E_out_vec[1] must be binary
                 let e1_val = if y0_c == Zero { e1_suf0 } else { e1_suf1 }; // y0_c is One or Zero here
 
                 if y1_c == Infinity {
-                    // u_paper = I
+                    // u = I
                     match y2_c {
-                        // v0_paper = Y2_c
+                        // v0 = Y2_c
                         Zero => {
                             accums_infty[ACCUM_IDX_A1_0_I] += current_tA * e1_val;
                         }
@@ -1007,21 +1028,21 @@ pub mod svo_helpers {
                         }
                     }
                 } else if y1_c == Zero {
-                    // u_paper = 0
+                    // u = 0
                     if y2_c == Infinity {
-                        // v0_paper = I, for A_1(I,0)
+                        // v0 = I, for A_1(I,0)
                         accums_zero[ACCUM_IDX_A1_I_0] += current_tA * e1_val;
                     }
                 }
             }
 
-            // --- Contributions to Paper Round s_p=2 Accumulators (u_paper = Y0_c, v_paper = (Y1_c,Y2_c)) ---
+            // --- Contributions to Paper Round s_p=2 Accumulators (u = Y0_c, v = (Y1_c,Y2_c)) ---
             // E-factor uses E_out_vec[2] (where Y0_c is u_eff), E_suffix is empty
             let e2_val = e2_sufempty;
             if y0_c == Infinity {
-                // u_paper = I
+                // u = I
                 match (y1_c, y2_c) {
-                    // v_paper = (Y1_c, Y2_c)
+                    // v = (Y1_c, Y2_c)
                     (Zero, Zero) => {
                         accums_infty[ACCUM_IDX_A2_00_I] += current_tA * e2_val;
                     }
@@ -1051,10 +1072,10 @@ pub mod svo_helpers {
                     }
                 }
             } else if y0_c == Zero {
-                // u_paper = 0
+                // u = 0
                 match (y1_c, y2_c) {
-                    // v_paper = (Y1_c, Y2_c)
-                    // Only specific v_paper configs for A_2(v,0) are stored, based on ACCUM_IDX constants
+                    // v = (Y1_c, Y2_c)
+                    // Only specific v configs for A_2(v,0) are stored, based on ACCUM_IDX constants
                     (Zero, Infinity) => {
                         accums_zero[ACCUM_IDX_A2_0I_0] += current_tA * e2_val;
                     }
@@ -1070,7 +1091,7 @@ pub mod svo_helpers {
                     (Infinity, Infinity) => {
                         accums_zero[ACCUM_IDX_A2_II_0] += current_tA * e2_val;
                     }
-                    _ => {} // Other v_paper configs (e.g. fully binary, or other Infinity patterns) for u_paper=0 are not stored.
+                    _ => {} // Other v configs (e.g. fully binary, or other Infinity patterns) for u=0 are not stored.
                 }
             }
         }
@@ -1117,9 +1138,9 @@ pub mod svo_helpers {
 
             let y_ext_coords_msb: &[SVOEvalPoint; NUM_SVO_ROUNDS] = &y_ext_code_map[tA_idx];
 
-            for s_p_paper in 0..NUM_SVO_ROUNDS {
-                let num_suffix_vars_for_E = if NUM_SVO_ROUNDS > s_p_paper + 1 {
-                    NUM_SVO_ROUNDS - 1 - s_p_paper
+            for s_p in 0..NUM_SVO_ROUNDS {
+                let num_suffix_vars_for_E = if NUM_SVO_ROUNDS > s_p + 1 {
+                    NUM_SVO_ROUNDS - 1 - s_p
                 } else {
                     0
                 };
@@ -1142,10 +1163,10 @@ pub mod svo_helpers {
                 }
                 
                 let e_factor: F;
-                if e_suffix_is_binary && E_out_vec.len() > s_p_paper && !E_out_vec[s_p_paper].is_empty() {
+                if e_suffix_is_binary && E_out_vec.len() > s_p && !E_out_vec[s_p].is_empty() {
                     let e_vec_target_idx = (x_out_val << num_suffix_vars_for_E) | e_suffix_bin_idx;
-                    if e_vec_target_idx < E_out_vec[s_p_paper].len() {
-                        e_factor = E_out_vec[s_p_paper][e_vec_target_idx];
+                    if e_vec_target_idx < E_out_vec[s_p].len() {
+                        e_factor = E_out_vec[s_p][e_vec_target_idx];
                     } else {
                         e_factor = F::zero();
                     }
@@ -1157,37 +1178,37 @@ pub mod svo_helpers {
                     continue;
                 }
 
-                let u_A = y_ext_coords_msb[NUM_SVO_ROUNDS - 1 - s_p_paper];
+                let u_A = y_ext_coords_msb[NUM_SVO_ROUNDS - 1 - s_p];
 
                 let mut v_A_coords_lsb_buffer = [SVOEvalPoint::Zero; NUM_SVO_ROUNDS];
-                if s_p_paper > 0 {
-                    for i_v_lsb in 0..s_p_paper {
+                if s_p > 0 {
+                    for i_v_lsb in 0..s_p {
                         v_A_coords_lsb_buffer[i_v_lsb] = y_ext_coords_msb[NUM_SVO_ROUNDS - 1 - i_v_lsb];
                     }
                 }
-                let v_A_slice_lsb_paper_order = &v_A_coords_lsb_buffer[0..s_p_paper];
+                let v_A_slice_lsb_order = &v_A_coords_lsb_buffer[0..s_p];
 
                 match u_A {
                     SVOEvalPoint::Infinity => {
-                        let base_offset = round_offsets_infty[s_p_paper];
-                        let idx_within_block = v_coords_to_base3_idx(v_A_slice_lsb_paper_order);
+                        let base_offset = round_offsets_infty[s_p];
+                        let idx_within_block = v_coords_to_base3_idx(v_A_slice_lsb_order);
                         let final_idx = base_offset + idx_within_block;
                         if final_idx < accums_infty.len() {
                              accums_infty[final_idx] += current_tA_val * e_factor;
                         }
                     }
                     SVOEvalPoint::Zero => {
-                        if s_p_paper == 0 { 
+                        if s_p == 0 { 
                             continue; 
                         }
                         
-                        if v_coords_has_infinity(v_A_slice_lsb_paper_order) {
-                            let base_offset = round_offsets_zero[s_p_paper];
+                        if v_coords_has_infinity(v_A_slice_lsb_order) {
+                            let base_offset = round_offsets_zero[s_p];
                             let num_slots_in_block_A_sp_zero = 
-                                pow(3, s_p_paper) - pow(2, s_p_paper);
+                                pow(3, s_p) - pow(2, s_p);
 
                             if num_slots_in_block_A_sp_zero > 0 { 
-                                 let idx_within_block = v_coords_to_non_binary_base3_idx(v_A_slice_lsb_paper_order);
+                                 let idx_within_block = v_coords_to_non_binary_base3_idx(v_A_slice_lsb_order);
                                  let final_idx = base_offset + idx_within_block;
                                  if final_idx < accums_zero.len() && idx_within_block < num_slots_in_block_A_sp_zero {
                                      accums_zero[final_idx] += current_tA_val * e_factor;
@@ -1239,48 +1260,46 @@ pub mod svo_helpers {
             let mut quadratic_eval_0 = F::zero();
             let mut quadratic_eval_infty = F::zero();
 
-            if USES_SMALL_VALUE_OPTIMIZATION {
-                let num_vars_in_v_config = i; // v_config is (v_0, ..., v_{i-1})
-                let num_lagrange_coeffs_for_round = pow(3, num_vars_in_v_config);
+            let num_vars_in_v_config = i; // v_config is (v_0, ..., v_{i-1})
+            let num_lagrange_coeffs_for_round = pow(3, num_vars_in_v_config);
 
-                // Compute quadratic_eval_infty
-                let num_accs_infty_curr_round = pow(3, num_vars_in_v_config);
-                if num_accs_infty_curr_round > 0
-                    && current_acc_infty_offset + num_accs_infty_curr_round <= accums_infty.len()
-                {
-                    let accums_infty_slice = &accums_infty[current_acc_infty_offset
-                        ..current_acc_infty_offset + num_accs_infty_curr_round];
-                    for k in 0..num_lagrange_coeffs_for_round {
-                        if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
-                            quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
-                        }
+            // Compute quadratic_eval_infty
+            let num_accs_infty_curr_round = pow(3, num_vars_in_v_config);
+            if num_accs_infty_curr_round > 0
+                && current_acc_infty_offset + num_accs_infty_curr_round <= accums_infty.len()
+            {
+                let accums_infty_slice = &accums_infty[current_acc_infty_offset
+                    ..current_acc_infty_offset + num_accs_infty_curr_round];
+                for k in 0..num_lagrange_coeffs_for_round {
+                    if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
+                        quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
                     }
                 }
-                current_acc_infty_offset += num_accs_infty_curr_round;
+            }
+            current_acc_infty_offset += num_accs_infty_curr_round;
 
-                // Compute quadratic_eval_0
-                let num_accs_zero_curr_round = if num_vars_in_v_config == 0 {
-                    0 // 3^0 - 2^0 = 0
-                } else {
-                    pow(3, num_vars_in_v_config) - pow(2, num_vars_in_v_config)
-                };
+            // Compute quadratic_eval_0
+            let num_accs_zero_curr_round = if num_vars_in_v_config == 0 {
+                0 // 3^0 - 2^0 = 0
+            } else {
+                pow(3, num_vars_in_v_config) - pow(2, num_vars_in_v_config)
+            };
 
-                if num_accs_zero_curr_round > 0
-                    && current_acc_zero_offset + num_accs_zero_curr_round <= accums_zero.len()
-                {
-                    let accums_zero_slice = &accums_zero[current_acc_zero_offset
-                        ..current_acc_zero_offset + num_accs_zero_curr_round];
-                    let mut non_binary_v_config_counter = 0;
-                    for k_global in 0..num_lagrange_coeffs_for_round {
-                        let v_config = get_v_config_digits(k_global, num_vars_in_v_config);
-                        if is_v_config_non_binary(&v_config) {
-                            if non_binary_v_config_counter < accums_zero_slice.len()
-                                && k_global < lagrange_coeffs.len()
-                            {
-                                quadratic_eval_0 += accums_zero_slice[non_binary_v_config_counter]
-                                    * lagrange_coeffs[k_global];
-                                non_binary_v_config_counter += 1;
-                            }
+            if num_accs_zero_curr_round > 0
+                && current_acc_zero_offset + num_accs_zero_curr_round <= accums_zero.len()
+            {
+                let accums_zero_slice = &accums_zero[current_acc_zero_offset
+                    ..current_acc_zero_offset + num_accs_zero_curr_round];
+                let mut non_binary_v_config_counter = 0;
+                for k_global in 0..num_lagrange_coeffs_for_round {
+                    let v_config = get_v_config_digits(k_global, num_vars_in_v_config);
+                    if is_v_config_non_binary(&v_config) {
+                        if non_binary_v_config_counter < accums_zero_slice.len()
+                            && k_global < lagrange_coeffs.len()
+                        {
+                            quadratic_eval_0 += accums_zero_slice[non_binary_v_config_counter]
+                                * lagrange_coeffs[k_global];
+                            non_binary_v_config_counter += 1;
                         }
                     }
                 }
@@ -1310,6 +1329,152 @@ pub mod svo_helpers {
             }
         }
     }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct TernaryPointInfo<const N: usize> {
+        /// True if this point (y_0, ..., y_{N-1}) has all y_i in {0, 1}.
+        pub is_binary: bool,
+        /// If is_binary is true, this is the index into the binary_az_evals_input.
+        /// If is_binary is false, this field is unused (can be 0).
+        pub binary_eval_idx: usize,
+        /// If is_binary is false, this is the k_ternary_idx corresponding to
+        /// replacing the *most significant* Infinity with a 1.
+        /// If is_binary is true, this field is unused (can be 0).
+        pub k_val_at_one: usize,
+        /// If is_binary is false, this is the k_ternary_idx corresponding to
+        /// replacing the *most significant* Infinity with a 0.
+        /// If is_binary is true, this field is unused (can be 0).
+        pub k_val_at_zero: usize,
+    }
+
+    impl<const N: usize> TernaryPointInfo<N> {
+        pub const fn default_val() -> Self {
+            Self {
+                is_binary: false,
+                binary_eval_idx: 0,
+                k_val_at_one: 0,
+                k_val_at_zero: 0,
+            }
+        }
+    }
+
+    /// Converts a k_ternary_idx (0 to 3^N - 1) to its base-3 digits, MSB-first.
+    /// Example: N=3, k=5 (012_base3). Returns [0,1,2].
+    /// k=26 (222_base3). Returns [2,2,2].
+    pub const fn get_msb_ternary_digits<const N: usize>(k: usize) -> [u8; N] {
+        if N == 0 {
+            return [0u8; N];
+        }
+        let mut digits = [0u8; N];
+        let mut temp_k = k;
+        let mut i_rev = 0;
+        while i_rev < N {
+            let i_dim_msb = N - 1 - i_rev; // Current dimension index (MSB is 0, LSB is N-1)
+            digits[i_dim_msb] = (temp_k % 3) as u8;
+            temp_k /= 3;
+            i_rev += 1;
+        }
+        digits
+    }
+
+    pub const fn precompute_ternary_point_infos<const N: usize, const NUM_TERNARY_POINTS_VAL: usize>() -> [TernaryPointInfo<N>; NUM_TERNARY_POINTS_VAL] {
+        if N == 0 {
+            // NUM_TERNARY_POINTS_VAL should be 1 in this case (pow(3,0)=1)
+            // An empty array cannot be returned if NUM_TERNARY_POINTS_VAL is > 0.
+            // The caller should handle N=0 as a special case if an empty array is truly desired.
+            // For now, if N=0 but NUM_TERNARY_POINTS_VAL = 1, we provide one default entry.
+             if NUM_TERNARY_POINTS_VAL == 1 {
+                let mut infos = [TernaryPointInfo::<N>::default_val(); NUM_TERNARY_POINTS_VAL];
+                // For N=0, point k=0 is binary, index 0.
+                // infos[0] = TernaryPointInfo { is_binary: true, binary_eval_idx: 0, k_val_at_one: 0, k_val_at_zero: 0 };
+                // However, the existing code for N=0 for compute_and_update_tA_inplace simply returns.
+                // Let's keep it simple and consistent with that.
+                // If N=0, NUM_TERNARY_POINTS_VAL will be 1.
+                // The point k=0 is binary, with binary_eval_idx = 0.
+                // The actual logic in compute_and_update_tA_inplace will handle N=0 separately.
+                // So this precomputation for N=0 might not even be used directly if compute_and_update_tA_inplace returns early.
+                // For safety, and if it were used, the single point k=0 is binary.
+                 let mut point_info = TernaryPointInfo::<N>::default_val();
+                 point_info.is_binary = true;
+                 point_info.binary_eval_idx = 0;
+                 infos[0] = point_info;
+                 return infos;
+             } else {
+                // This state implies an inconsistency (e.g. N=0 but NUM_TERNARY_POINTS_VAL != 1)
+                // Const panics are not stable yet, so we return a default array.
+                // This should be caught by debug_asserts in the calling function.
+                 return [TernaryPointInfo::<N>::default_val(); NUM_TERNARY_POINTS_VAL];
+             }
+        }
+
+        let mut infos = [TernaryPointInfo::<N>::default_val(); NUM_TERNARY_POINTS_VAL];
+        let mut k_ternary_idx = 0;
+        while k_ternary_idx < NUM_TERNARY_POINTS_VAL {
+            let current_coords_base3_msb = get_msb_ternary_digits::<N>(k_ternary_idx);
+            let mut is_binary_point_flag = true;
+            let mut first_inf_dim_msb_idx: Option<usize> = None; // Dimension index (0 to N-1, MSB-first)
+
+            let mut i_dim_msb = 0;
+            while i_dim_msb < N {
+                if current_coords_base3_msb[i_dim_msb] == 2 { // 2 represents Infinity
+                    is_binary_point_flag = false;
+                    if first_inf_dim_msb_idx.is_none() {
+                        first_inf_dim_msb_idx = Some(i_dim_msb);
+                    }
+                    // We only care about the *most significant* (smallest index) infinity for the reduction rule.
+                    // So we can break once the first one is found.
+                    break;
+                }
+                i_dim_msb += 1;
+            }
+
+            if is_binary_point_flag {
+                let mut binary_idx = 0;
+                let mut dim_idx_msb = 0;
+                while dim_idx_msb < N {
+                    binary_idx <<= 1;
+                    if current_coords_base3_msb[dim_idx_msb] == 1 {
+                        binary_idx |= 1;
+                    }
+                    dim_idx_msb += 1;
+                }
+                infos[k_ternary_idx] = TernaryPointInfo {
+                    is_binary: true,
+                    binary_eval_idx: binary_idx,
+                    k_val_at_one: 0, // Unused
+                    k_val_at_zero: 0, // Unused
+                };
+            } else {
+                // This is a non-binary point.
+                // j_inf_dim is the index of the *most significant* dimension that is Infinity.
+                // Example: N=3, point (Inf, 0, Inf) = (2,0,2)_base3. k_ternary_idx = 2*9 + 0*3 + 2*1 = 20.
+                // current_coords_base3_msb = [2,0,2].
+                // first_inf_dim_msb_idx will be Some(0).
+                let j_inf_dim = first_inf_dim_msb_idx.unwrap(); // Safe due to !is_binary_point_flag
+
+                // Power of 3 for the dimension j_inf_dim (0-indexed from MSB)
+                // N=3, j_inf_dim=0 (MSB y_0), power = 3^(3-1-0) = 3^2 = 9
+                // N=3, j_inf_dim=1 (Mid y_1), power = 3^(3-1-1) = 3^1 = 3
+                // N=3, j_inf_dim=2 (LSB y_2), power = 3^(3-1-2) = 3^0 = 1
+                let inf_dim_power_of_3 = pow(3, N - 1 - j_inf_dim);
+
+                // k_ternary_idx has a '2' at dimension j_inf_dim (MSB-numbering).
+                // k_at_1_idx corresponds to changing this '2' to a '1'.
+                // k_at_0_idx corresponds to changing this '2' to a '0'.
+                let k_at_1_val = k_ternary_idx - inf_dim_power_of_3;
+                let k_at_0_val = k_ternary_idx - 2 * inf_dim_power_of_3;
+
+                infos[k_ternary_idx] = TernaryPointInfo {
+                    is_binary: false,
+                    binary_eval_idx: 0, // Unused
+                    k_val_at_one: k_at_1_val,
+                    k_val_at_zero: k_at_0_val,
+                };
+            }
+            k_ternary_idx += 1;
+        }
+        infos
+    }
 }
 
 #[cfg(test)]
@@ -1336,19 +1501,19 @@ mod tests {
 
         // Call the new general function (the one being tested)
         match num_svo_rounds {
-            1 => compute_and_update_tA_inplace::<1, TestField>(
+            1 => compute_and_update_tA_inplace::<1,  1, 3, TestField>(
                 &binary_az_evals,
                 &binary_bz_evals,
                 &e_in_val,
                 &mut temp_tA_new,
             ),
-            2 => compute_and_update_tA_inplace::<2, TestField>(
+            2 => compute_and_update_tA_inplace::<2, 5, 9, TestField>(
                 &binary_az_evals,
                 &binary_bz_evals,
                 &e_in_val,
                 &mut temp_tA_new,
             ),
-            3 => compute_and_update_tA_inplace::<3, TestField>(
+            3 => compute_and_update_tA_inplace::<3, 19, 27, TestField>(
                 &binary_az_evals,
                 &binary_bz_evals,
                 &e_in_val,
@@ -1392,19 +1557,19 @@ mod tests {
         let mut temp_tA_old_zeros = vec![TestField::zero(); num_temp_tA];
 
         match num_svo_rounds {
-            1 => compute_and_update_tA_inplace::<1, TestField>(
+            1 => compute_and_update_tA_inplace::<1,  1, 3, TestField>(
                 &binary_az_evals_zeros,
                 &binary_bz_evals_zeros,
                 &e_in_val,
                 &mut temp_tA_new_zeros,
             ),
-            2 => compute_and_update_tA_inplace::<2, TestField>(
+            2 => compute_and_update_tA_inplace::<2, 5, 9, TestField>(
                 &binary_az_evals_zeros,
                 &binary_bz_evals_zeros,
                 &e_in_val,
                 &mut temp_tA_new_zeros,
             ),
-            3 => compute_and_update_tA_inplace::<3, TestField>(
+            3 => compute_and_update_tA_inplace::<3, 19, 27, TestField>(
                 &binary_az_evals_zeros,
                 &binary_bz_evals_zeros,
                 &e_in_val,
@@ -1446,19 +1611,19 @@ mod tests {
         let mut temp_tA_old_zero_e = vec![TestField::zero(); num_temp_tA];
 
         match num_svo_rounds {
-            1 => compute_and_update_tA_inplace::<1, TestField>(
+            1 => compute_and_update_tA_inplace::<1,  1, 3, TestField>(
                 &binary_az_evals,
                 &binary_bz_evals,
                 &e_in_val_zero,
                 &mut temp_tA_new_zero_e,
             ),
-            2 => compute_and_update_tA_inplace::<2, TestField>(
+            2 => compute_and_update_tA_inplace::<2, 5, 9, TestField>(
                 &binary_az_evals,
                 &binary_bz_evals,
                 &e_in_val_zero,
                 &mut temp_tA_new_zero_e,
             ),
-            3 => compute_and_update_tA_inplace::<3, TestField>(
+            3 => compute_and_update_tA_inplace::<3, 19, 27, TestField>(
                 &binary_az_evals,
                 &binary_bz_evals,
                 &e_in_val_zero,

@@ -98,12 +98,12 @@ pub const Y_SVO_RELATED_COEFF_BLOCK_SIZE: usize = 4 * Y_SVO_SPACE_SIZE; // Az/Bz
 
 #[derive(Clone, Debug)]
 pub struct NewSpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltField> {
-    /// A list of Arc'd sparse vectors representing the (interleaved) coefficients for the Az, Bz polynomials
+    /// A list of sparse vectors representing the (interleaved) coefficients for the Az, Bz polynomials
     /// Generated from binary evaluations. Each inner Vec is sorted by index.
     ///
     /// (note: **no** Cz coefficients are stored here, since they are not needed for small value
     /// precomputation, and can be computed on the fly in streaming round)
-    pub(crate) ab_unbound_coeffs_shards: Vec<Arc<Vec<SparseCoefficient<i128>>>>,
+    pub(crate) ab_unbound_coeffs_shards: Vec<Vec<SparseCoefficient<i128>>>,
 
     pub(crate) bound_coeffs: Vec<SparseCoefficient<F>>,
 
@@ -288,11 +288,11 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         // Define the structure returned by each parallel map task
         struct PrecomputeTaskOutput<F: JoltField> {
-            ab_coeffs_local_arc: Arc<Vec<SparseCoefficient<i128>>>,
+            ab_coeffs_local: Vec<SparseCoefficient<i128>>,
             svo_accums_zero_local: [F; NUM_ACCUMS_EVAL_ZERO],
             svo_accums_infty_local: [F; NUM_ACCUMS_EVAL_INFTY],
-            coeff_computation_time_local: std::time::Duration,
-            ta_update_time_local: std::time::Duration,
+            // coeff_computation_time_local: std::time::Duration, // Commented out
+            // ta_update_time_local: std::time::Duration, // Commented out
         }
 
         let num_parallel_chunks = if num_x_out_vals > 0 {
@@ -324,8 +324,8 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 let mut chunk_ab_coeffs = Vec::new();
                 let mut chunk_svo_accums_zero = [F::zero(); NUM_ACCUMS_EVAL_ZERO];
                 let mut chunk_svo_accums_infty = [F::zero(); NUM_ACCUMS_EVAL_INFTY];
-                let mut chunk_coeff_time = std::time::Duration::new(0, 0);
-                let mut chunk_ta_time = std::time::Duration::new(0, 0);
+                // let mut chunk_coeff_time = std::time::Duration::new(0, 0); // Commented out
+                // let mut chunk_ta_time = std::time::Duration::new(0, 0); // Commented out
 
                 let x_out_start = chunk_idx * x_out_chunk_size;
                 let x_out_end = std::cmp::min((chunk_idx + 1) * x_out_chunk_size, num_x_out_vals);
@@ -348,12 +348,10 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
                         // Phase 1: Process Uniform Constraints
                         for (uniform_chunk_iter_idx, uniform_svo_chunk) in uniform_constraints.chunks(Y_SVO_SPACE_SIZE).enumerate() {
-
-                            let coeff_start_time = std::time::Instant::now();
+                            // let coeff_start_time = std::time::Instant::now(); // Commented out
                             for (idx_in_svo_block, constraint) in uniform_svo_chunk.iter().enumerate() {
-                                // original_uniform_idx_in_step is the index of this constraint within the full list of uniform_constraints for this step
-                                let original_uniform_idx_in_step = (uniform_chunk_iter_idx * Y_SVO_SPACE_SIZE) + idx_in_svo_block;
-                                
+                                let original_uniform_idx_in_step = (uniform_chunk_iter_idx << NUM_SVO_ROUNDS) + idx_in_svo_block;
+
                                 let global_r1cs_idx = 2 * (current_step_idx * padded_num_constraints + original_uniform_idx_in_step);
 
                                 if !constraint.a.terms().is_empty() {
@@ -376,30 +374,35 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                     }
                                 }
                             }
-                            chunk_coeff_time += coeff_start_time.elapsed();
+                            // chunk_coeff_time += coeff_start_time.elapsed(); // Commented out
 
-                            let x_in_val = (x_in_step_val << iter_num_x_in_constraint_vars) | current_x_in_constraint_val;
-                            let E_in_val = &E_in_evals[x_in_val];
+                            // If this is a full block, compute and update tA, then reset Az, Bz blocks
+                            // (the last block may not be full, in which case we need to delay
+                            // computation of tA until the offset constraints are processed)
+                            if uniform_svo_chunk.len() == Y_SVO_SPACE_SIZE {
+                                let x_in_val = (x_in_step_val << iter_num_x_in_constraint_vars) | current_x_in_constraint_val;
+                                let E_in_val = &E_in_evals[x_in_val];
 
-                            let ta_start_time = std::time::Instant::now();
-                            svo_helpers::compute_and_update_tA_inplace_generic::<NUM_SVO_ROUNDS, F>(
-                                &binary_az_block,
-                                &binary_bz_block,
-                                E_in_val,
-                                &mut tA_sum_for_current_x_out,
-                            );
-                            chunk_ta_time += ta_start_time.elapsed();
-                            current_x_in_constraint_val += 1;
+                                // let ta_start_time = std::time::Instant::now(); // Commented out
+                                svo_helpers::compute_and_update_tA_inplace_generic::<NUM_SVO_ROUNDS, F>(
+                                    &binary_az_block,
+                                    &binary_bz_block,
+                                    E_in_val,
+                                    &mut tA_sum_for_current_x_out,
+                                );
+                                // chunk_ta_time += ta_start_time.elapsed(); // Commented out
 
-                            // Reset Az, Bz binary evaluations after each block
-                            binary_az_block = [0i128; Y_SVO_SPACE_SIZE];
-                            binary_bz_block = [0i128; Y_SVO_SPACE_SIZE];
+                                current_x_in_constraint_val += 1;
+                                binary_az_block = [0i128; Y_SVO_SPACE_SIZE];
+                                binary_bz_block = [0i128; Y_SVO_SPACE_SIZE];
+                            }
                         }
 
                         // Phase 2: Process Offset Constraints
-                        for (idx, constraint) in cross_step_constraints.iter().enumerate() {
+                        // (only 2 of them, in the same block as the last uniform constraints)
+                        // let coeff_start_time_phase2 = std::time::Instant::now(); // Commented out
 
-                            let coeff_start_time = std::time::Instant::now();
+                        for (idx, constraint) in cross_step_constraints.iter().enumerate() {
 
                             let actual_r1cs_constraint_idx = num_uniform_r1cs_constraints + idx;
                             // Note: the indices 0...rem_num_uniform_r1cs_constraints are already processed in the uniform constraints loop
@@ -435,22 +438,21 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                     chunk_ab_coeffs.push((global_r1cs_idx + 1, bz).into());
                                 }
                             }
-
-                            chunk_coeff_time += coeff_start_time.elapsed();
-
-                            let x_in_val = (x_in_step_val << iter_num_x_in_constraint_vars) | current_x_in_constraint_val;
-                            let E_in_val = &E_in_evals[x_in_val];
-
-                            // No coeff computation time for padding as blocks are already zero
-                            let ta_start_time = std::time::Instant::now();
-                            svo_helpers::compute_and_update_tA_inplace_generic::<NUM_SVO_ROUNDS, F>(
-                                &binary_az_block,
-                                &binary_bz_block,
-                                E_in_val,
-                                &mut tA_sum_for_current_x_out,
-                            );
-                            chunk_ta_time += ta_start_time.elapsed();
                         }
+                        // chunk_coeff_time += coeff_start_time_phase2.elapsed(); // Commented out
+
+                        let x_in_val_phase2 = (x_in_step_val << iter_num_x_in_constraint_vars) | current_x_in_constraint_val;
+                        let E_in_val_phase2 = &E_in_evals[x_in_val_phase2];
+
+                        // No coeff computation time for padding as blocks are already zero
+                        // let ta_start_time = std::time::Instant::now(); // Commented out
+                        svo_helpers::compute_and_update_tA_inplace_generic::<NUM_SVO_ROUNDS, F>(
+                            &binary_az_block,
+                            &binary_bz_block,
+                            E_in_val_phase2, // Use E_in_val specific to this phase/block
+                            &mut tA_sum_for_current_x_out,
+                        );
+                        // chunk_ta_time += ta_start_time.elapsed(); // Commented out
                     } // End x_in_step_val loop
 
                     // Distribute the accumulated tA values to the SVO accumulators
@@ -474,11 +476,11 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
                 drop(_x_out_task_guard);
                 PrecomputeTaskOutput {
-                    ab_coeffs_local_arc: Arc::new(chunk_ab_coeffs),
+                    ab_coeffs_local: chunk_ab_coeffs,
                     svo_accums_zero_local: chunk_svo_accums_zero,
                     svo_accums_infty_local: chunk_svo_accums_infty,
-                    coeff_computation_time_local: chunk_coeff_time,
-                    ta_update_time_local: chunk_ta_time,
+                    // coeff_computation_time_local: chunk_coeff_time, // Commented out
+                    // ta_update_time_local: chunk_ta_time, // Commented out
                 }
             }) // End .map() over chunks
             .collect(); // Collect all chunk outputs
@@ -489,21 +491,19 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let finalization_span = tracing::info_span!("finalization");
         let _finalization_guard = finalization_span.enter();
 
-        // No need to calculate total_ab_coeffs_len for allocation if using Vec<Arc<...>> directly
-
         let mut final_svo_accums_zero = [F::zero(); NUM_ACCUMS_EVAL_ZERO];
         let mut final_svo_accums_infty = [F::zero(); NUM_ACCUMS_EVAL_INFTY];
-        let mut final_ab_unbound_coeffs_shards: Vec<Arc<Vec<SparseCoefficient<i128>>>> =
+        let mut final_ab_unbound_coeffs_shards: Vec<Vec<SparseCoefficient<i128>>> =
             Vec::with_capacity(collected_chunk_outputs.len());
-        let mut total_coeff_computation_time = std::time::Duration::new(0, 0);
-        let mut total_ta_update_time = std::time::Duration::new(0, 0);
+        // let mut total_coeff_computation_time = std::time::Duration::new(0, 0); // Commented out
+        // let mut total_ta_update_time = std::time::Duration::new(0, 0); // Commented out
 
         let aggregation_loop_span =
             tracing::debug_span!("finalization_aggregate_chunk_outputs_loop");
         let _aggregation_loop_guard = aggregation_loop_span.enter();
 
         for task_output in collected_chunk_outputs {
-            final_ab_unbound_coeffs_shards.push(task_output.ab_coeffs_local_arc); // Collect Arcs
+            final_ab_unbound_coeffs_shards.push(task_output.ab_coeffs_local); // Move Vec directly
 
             if NUM_ACCUMS_EVAL_ZERO > 0 {
                 for idx in 0..NUM_ACCUMS_EVAL_ZERO {
@@ -516,8 +516,8 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     final_svo_accums_infty[idx] += task_output.svo_accums_infty_local[idx];
                 }
             }
-            total_coeff_computation_time += task_output.coeff_computation_time_local;
-            total_ta_update_time += task_output.ta_update_time_local;
+            // total_coeff_computation_time += task_output.coeff_computation_time_local; // Commented out
+            // total_ta_update_time += task_output.ta_update_time_local; // Commented out
         }
         drop(_aggregation_loop_guard);
 
@@ -527,8 +527,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         #[cfg(test)]
         {
             if NUM_SVO_ROUNDS > 0 {
-                for shard_arc in &final_ab_unbound_coeffs_shards {
-                    let shard = shard_arc.as_ref();
+                for shard in &final_ab_unbound_coeffs_shards { // Iterate over &Vec directly
                     if !shard.is_empty() {
                         let mut prev_index = shard[0].index;
                         for coeff in shard.iter().skip(1) {
@@ -546,30 +545,30 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         }
 
         drop(_finalization_guard);
-        let reporting_span = tracing::info_span!("timing_reporting");
-        let _reporting_guard = reporting_span.enter();
+        // let reporting_span = tracing::info_span!("timing_reporting"); // Commented out
+        // let _reporting_guard = reporting_span.enter(); // Commented out
 
-        let total_instrumented_time = total_coeff_computation_time + total_ta_update_time;
-        if !total_instrumented_time.is_zero() {
-            let coeff_time_percentage = (total_coeff_computation_time.as_secs_f64()
-                / total_instrumented_time.as_secs_f64())
-                * 100.0;
-            let ta_update_time_percentage = (total_ta_update_time.as_secs_f64()
-                / total_instrumented_time.as_secs_f64())
-                * 100.0;
+        // let total_instrumented_time = total_coeff_computation_time + total_ta_update_time; // Commented out
+        // if !total_instrumented_time.is_zero() { // Commented out
+        //     let coeff_time_percentage = (total_coeff_computation_time.as_secs_f64() // Commented out
+        //         / total_instrumented_time.as_secs_f64()) // Commented out
+        //         * 100.0; // Commented out
+        //     let ta_update_time_percentage = (total_ta_update_time.as_secs_f64() // Commented out
+        //         / total_instrumented_time.as_secs_f64()) // Commented out
+        //         * 100.0; // Commented out
 
-            println!(
-                "Timing breakdown for new_with_precompute SVO part (instrumented sections):\n - Coefficient computation: {:.2}s ({:.2}%)\n - tA update (inplace extension & sum): {:.2}s ({:.2}%)\n Total instrumented: {:.2}s",
-                total_coeff_computation_time.as_secs_f64(),
-                coeff_time_percentage,
-                total_ta_update_time.as_secs_f64(),
-                ta_update_time_percentage,
-                total_instrumented_time.as_secs_f64()
-            );
-        } else {
-            // println!("Total instrumented time for SVO part was zero. No timing breakdown available.");
-        }
-        drop(_reporting_guard);
+        //     println!( // Commented out
+        //         "Timing breakdown for new_with_precompute SVO part (instrumented sections):\n - Coefficient computation: {:.2}s ({:.2}%)\n - tA update (inplace extension & sum): {:.2}s ({:.2}%)\n Total instrumented: {:.2}s", // Commented out
+        //         total_coeff_computation_time.as_secs_f64(), // Commented out
+        //         coeff_time_percentage, // Commented out
+        //         total_ta_update_time.as_secs_f64(), // Commented out
+        //         ta_update_time_percentage, // Commented out
+        //         total_instrumented_time.as_secs_f64() // Commented out
+        //     ); // Commented out
+        // } else { // Commented out
+        //     // println!("Total instrumented time for SVO part was zero. No timing breakdown available."); // Commented out
+        // } // Commented out
+        // drop(_reporting_guard); // Commented out
 
         // Return final SVO accumulators and Self struct.
         (
@@ -663,13 +662,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
         let collected_chunk_outputs: Vec<StreamingTaskOutput<F>> = self.ab_unbound_coeffs_shards
             .par_iter()
-            .map(|shard_arc| {
-                let shard_slice = shard_arc.as_ref();
+            .map(|shard_data: &Vec<SparseCoefficient<i128>>| {
                 let mut task_bound_coeffs = Vec::new();
                 let mut task_sum_contrib_0 = F::zero();
                 let mut task_sum_contrib_infty = F::zero();
 
-                for logical_block_coeffs in shard_slice.chunk_by(|c1, c2| {
+                for logical_block_coeffs in shard_data.chunk_by(|c1, c2| { // Use shard_data directly
                     c1.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE == c2.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
                 }) {
                     if logical_block_coeffs.is_empty() {

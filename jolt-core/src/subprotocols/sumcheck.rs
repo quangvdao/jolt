@@ -190,7 +190,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         (SumcheckInstanceProof::new(compressed_polys), r, final_evals)
     }
 
-    #[tracing::instrument(skip_all, name = "Spartan2::prove_spartan_small_value")]
+    #[tracing::instrument(skip_all, name = "Spartan::prove_spartan_small_value")]
     pub fn prove_spartan_small_value<const NUM_SVO_ROUNDS: usize>(
         num_rounds: usize,
         padded_num_constraints: usize,
@@ -205,11 +205,10 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut claim = F::zero();
 
         // Clone the transcript at this point so that we could also test with non-svo sumcheck
-        // #[cfg(test)]
+        #[cfg(test)]
         let mut old_transcript = transcript.clone();
 
-
-        // #[cfg(test)]
+        #[cfg(test)]
         {
             let old_sumcheck_span = tracing::info_span!("old_sumcheck_with_gruen_optimization");
             let _old_sumcheck_guard = old_sumcheck_span.enter();

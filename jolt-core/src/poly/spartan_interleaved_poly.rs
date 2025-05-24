@@ -660,14 +660,17 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         // These are needed to derive x_out_val_stream and x_in_val_stream from a block_id
         let num_streaming_x_in_vars = eq_poly.E_in_current_len().log_2();
 
-        let collected_chunk_outputs: Vec<StreamingTaskOutput<F>> = self.ab_unbound_coeffs_shards
-            .par_iter()
-            .map(|shard_data: &Vec<SparseCoefficient<i128>>| {
+        // Take ownership
+        let shards_to_process = std::mem::take(&mut self.ab_unbound_coeffs_shards);
+
+        let collected_chunk_outputs: Vec<StreamingTaskOutput<F>> = shards_to_process // Use the taken vec
+            .into_par_iter() // Consumes and gives ownership to closures
+            .map(|shard_data: Vec<SparseCoefficient<i128>>| { // shard_data is now owned Vec
                 let mut task_bound_coeffs = Vec::new();
                 let mut task_sum_contrib_0 = F::zero();
                 let mut task_sum_contrib_infty = F::zero();
 
-                for logical_block_coeffs in shard_data.chunk_by(|c1, c2| { // Use shard_data directly
+                for logical_block_coeffs in shard_data.chunk_by(|c1, c2| { // Use owned shard_data directly
                     c1.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE == c2.index / Y_SVO_RELATED_COEFF_BLOCK_SIZE
                 }) {
                     if logical_block_coeffs.is_empty() {
@@ -678,20 +681,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
 
                     let x_out_val_stream = current_block_id >> num_streaming_x_in_vars;
                     let x_in_val_stream = current_block_id & ((1 << num_streaming_x_in_vars) - 1);
-
-                    // // Boundary checks (important if eq_poly dimensions can change unexpectedly)
-                    // if x_out_val_stream >= eq_poly.E_out_current_len() || 
-                    //    (eq_poly.E_in_current_len() > 0 && x_in_val_stream >= eq_poly.E_in_current_len()) {
-                    //     tracing::error!(
-                    //         "Derived (x_out_val_stream {}, x_in_val_stream {}) from block_id {} in shard is out of bounds for current eq_poly (E_out_len {}, E_in_len {}). Coefficients: {:?}",
-                    //         x_out_val_stream, x_in_val_stream, current_block_id, 
-                    //         eq_poly.E_out_current_len(), eq_poly.E_in_current_len(),
-                    //         logical_block_coeffs.iter().map(|c| (c.index, c.value)).collect::<Vec<_>>(),
-                    //     );
-                    //     // This should ideally not happen if the invariant holds and precompute/streaming vars are aligned.
-                    //     // Depending on desired robustness, could panic or skip.
-                    //     continue; 
-                    // }
 
                     let e_out_val = eq_poly.E_out_current()[x_out_val_stream];
                     let e_in_val = if eq_poly.E_in_current_len() > 1 {
@@ -804,10 +793,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             .collect();
 
         drop(_main_processing_guard);
-
-        // Clear ab_unbound_coeffs_shards as they are processed and their data (conceptually) moves to bound_coeffs via binding_scratch_space
-        self.ab_unbound_coeffs_shards.clear();
-        self.ab_unbound_coeffs_shards.shrink_to_fit();
 
         // Aggregate sumcheck contributions directly from collected_chunk_outputs
         let sum_aggregation_span = tracing::info_span!("streaming_round_aggregate_sums");

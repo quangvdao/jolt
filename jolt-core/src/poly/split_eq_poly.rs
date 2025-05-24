@@ -482,7 +482,12 @@ mod tests {
         let n3 = w3.len();
         let num_x_in_vars_3 = n3 - num_x_out_vars_3 - l0_3; // 0 - 0 - 0 = 0
         let result3 = std::panic::catch_unwind(|| {
-            GruenSplitEqPolynomial::new_for_small_value(&w3, num_x_out_vars_3, num_x_in_vars_3, l0_3);
+            GruenSplitEqPolynomial::new_for_small_value(
+                &w3,
+                num_x_out_vars_3,
+                num_x_in_vars_3,
+                l0_3,
+            );
         });
         assert!(result3.is_err());
     }

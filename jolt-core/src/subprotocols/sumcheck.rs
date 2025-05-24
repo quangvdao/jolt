@@ -14,9 +14,9 @@ use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::r1cs::builder::{Constraint, OffsetEqConstraint};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::mul_0_optimized;
+use crate::utils::small_value::svo_helpers::process_svo_sumcheck_rounds;
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::{AppendToTranscript, Transcript};
-use crate::utils::small_value::svo_helpers::process_svo_sumcheck_rounds;
 use ark_serialize::*;
 use rayon::prelude::*;
 use std::marker::PhantomData;
@@ -222,7 +222,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             );
 
         let mut eq_poly = GruenSplitEqPolynomial::new(tau);
-        
+
         // Call the refactored SVO sumcheck processing logic
         process_svo_sumcheck_rounds::<NUM_SVO_ROUNDS, F, ProofTranscript>(
             &accums_zero,
@@ -233,7 +233,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             transcript,
             &mut eq_poly,
         );
-        
+
         // Round NUM_SVO_ROUNDS : do the streaming sumcheck to compute cached values
         az_bz_cz_poly.streaming_sumcheck_round(
             &mut eq_poly,
@@ -260,7 +260,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         {
             let old_sumcheck_span = tracing::info_span!("old_sumcheck_with_gruen_optimization");
             let _old_sumcheck_guard = old_sumcheck_span.enter();
-            
+
             let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
                 uniform_constraints,
                 cross_step_constraints,
@@ -290,7 +290,7 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     &mut old_claim,
                 );
             }
-            
+
             drop(_old_sumcheck_guard);
         }
 

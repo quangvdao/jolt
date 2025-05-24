@@ -61,7 +61,9 @@ pub fn benchmarks(
             BenchType::Fibonacci => {
                 fibonacci::<Fr, Zeromorph<Bn254, KeccakTranscript>, KeccakTranscript>()
             }
-            BenchType::MemoryOps => memory_ops::<Fr, Zeromorph<Bn254, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::MemoryOps => {
+                memory_ops::<Fr, Zeromorph<Bn254, KeccakTranscript>, KeccakTranscript>()
+            }
             BenchType::Shout => shout::<Fr, KeccakTranscript>(),
             BenchType::Twist => twist::<Fr, KeccakTranscript>(),
             BenchType::SparseDenseShout => sparse_dense_shout::<Fr, KeccakTranscript>(),
@@ -79,7 +81,9 @@ pub fn benchmarks(
             BenchType::Fibonacci => {
                 fibonacci::<Fr, HyperKZG<Bn254, KeccakTranscript>, KeccakTranscript>()
             }
-            BenchType::MemoryOps => memory_ops::<Fr, HyperKZG<Bn254, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::MemoryOps => {
+                memory_ops::<Fr, HyperKZG<Bn254, KeccakTranscript>, KeccakTranscript>()
+            }
             BenchType::Shout => shout::<Fr, KeccakTranscript>(),
             BenchType::Twist => twist::<Fr, KeccakTranscript>(),
             BenchType::SparseDenseShout => sparse_dense_shout::<Fr, KeccakTranscript>(),

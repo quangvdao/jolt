@@ -228,9 +228,9 @@ impl<F: JoltField> EqPlusOnePolynomial<F> {
 mod tests {
     use super::*;
     use ark_bn254::Fr;
+    use ark_ff::One;
     use ark_std::test_rng;
     use std::time::Instant;
-    use ark_ff::One;
 
     #[test]
     /// Test that the results of running `evals_serial`, `evals_parallel`, and `evals_serial_cached`
@@ -292,7 +292,7 @@ mod tests {
         let evals = EqPolynomial::<Fr>::evals_serial(&r, Some(scaling_factor));
 
         assert_eq!(evals.len(), 4);
-        
+
         let s = scaling_factor;
         // Based on the code's logic (r0 processes first, then r1):
         // evals[0] (x0=0, x1=0) = s * (1-r0)(1-r1)
@@ -304,10 +304,21 @@ mod tests {
         let expected_val_at_2 = s * r[0] * (Fr::one() - r[1]);
         let expected_val_at_3 = s * r[0] * r[1];
 
-        assert_eq!(evals[0], expected_val_at_0, "Mismatch for x=(0,0) with scaling");
-        assert_eq!(evals[1], expected_val_at_1, "Mismatch for x=(1,0) with scaling");
-        assert_eq!(evals[2], expected_val_at_2, "Mismatch for x=(0,1) with scaling");
-        assert_eq!(evals[3], expected_val_at_3, "Mismatch for x=(1,1) with scaling");
+        assert_eq!(
+            evals[0], expected_val_at_0,
+            "Mismatch for x=(0,0) with scaling"
+        );
+        assert_eq!(
+            evals[1], expected_val_at_1,
+            "Mismatch for x=(1,0) with scaling"
+        );
+        assert_eq!(
+            evals[2], expected_val_at_2,
+            "Mismatch for x=(0,1) with scaling"
+        );
+        assert_eq!(
+            evals[3], expected_val_at_3,
+            "Mismatch for x=(1,1) with scaling"
+        );
     }
 }
-

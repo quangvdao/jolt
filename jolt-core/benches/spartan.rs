@@ -4,7 +4,7 @@
 use ark_bn254::{Bn254, Fr};
 use ark_ff::{One, Zero};
 use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, Bencher, Criterion, SamplingMode
+    black_box, criterion_group, criterion_main, BatchSize, Bencher, Criterion, SamplingMode,
 };
 use jolt_core::{
     host,
@@ -13,10 +13,9 @@ use jolt_core::{
         Jolt, JoltPolynomials, JoltProverPreprocessing, JoltTraceStep,
     },
     poly::{
-        commitment::hyperkzg::HyperKZG,
-        multilinear_polynomial::MultilinearPolynomial,
-        split_eq_poly::GruenSplitEqPolynomial,
+        commitment::hyperkzg::HyperKZG, multilinear_polynomial::MultilinearPolynomial,
         spartan_interleaved_poly::NewSpartanInterleavedPolynomial,
+        split_eq_poly::GruenSplitEqPolynomial,
     },
     r1cs::{
         builder::CombinedUniformBuilder,
@@ -110,11 +109,11 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
         // "fibonacci-guest",
         "sha2-chain-guest",
     ];
-    
+
     // Define iteration counts for chain programs
-    // 64, 128, 256, 512,
-    let chain_iteration_counts = vec![512,1024,2048]; // Reduced for brevity; add more as needed
-    
+    let chain_iteration_counts = vec![8, 16, 32, 64, 128];
+    // vec![512,1024,2048]; // Reduced for brevity; add more as needed
+
     // Define iteration counts for non-chain programs (this is just a dummy value)
     let non_chain_iterations = vec![0];
 
@@ -125,18 +124,21 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
         } else {
             &non_chain_iterations
         };
-        
+
         for &num_iters in iteration_counts {
             println!(
                 "Running one-time setup for Spartan sumcheck with program '{}' and {} iterations...",
                 program_name, num_iters
             );
-            
+
             // Pass program_name and num_iters to setup
             let (jolt_polynomials, mut transcript, r1cs_builder, spartan_key) =
                 setup_for_spartan(program_name, num_iters);
-                
-            println!("Setup complete for {} with {} iterations.", program_name, num_iters);
+
+            println!(
+                "Setup complete for {} with {} iterations.",
+                program_name, num_iters
+            );
 
             let flattened_polys: Vec<&MultilinearPolynomial<F>> = JoltR1CSInputs::flatten::<C>()
                 .iter()
@@ -169,7 +171,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
             group.sampling_mode(SamplingMode::Flat);
 
             group.bench_function(
-                "Gruen (SpartanInterleaved + NewSplitEq)",
+                "Gruen (SpartanInterleaved + GruenSplitEq)",
                 |b: &mut Bencher| {
                     b.iter_batched(
                         || {
@@ -273,7 +275,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
 fn bench_spartan_svo_components(c: &mut Criterion) {
     // Define the program and iteration counts to test
     let program_name = "sha3-chain-guest";
-    let iteration_counts = vec![8, 16, 32, 64, 128, 256, 512]; // Include small and large iterations for comparison
+    let iteration_counts = vec![16, 32, 64, 128, 256, 512]; // Include small and large iterations for comparison
 
     for &num_iters in &iteration_counts {
         println!(
@@ -301,11 +303,8 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
             .collect::<Vec<F>>();
 
         // Create a benchmark group for this specific iteration count
-        let mut group = c.benchmark_group(format!(
-            "SpartanSVO_Components_{}_iters",
-            num_iters
-        ));
-        
+        let mut group = c.benchmark_group(format!("SpartanSVO_Components_{}_iters", num_iters));
+
         group.sample_size(10);
         group.sampling_mode(SamplingMode::Flat);
 
@@ -321,7 +320,7 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
                             &cross_step_constraints,
                             &flattened_polys,
                             &tau,
-                        )
+                        ),
                     )
                 },
                 BatchSize::SmallInput,
@@ -349,31 +348,48 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
                     let transcript_clone = transcript.clone();
                     let accums_zero_clone = accums_zero.clone();
                     let accums_infty_clone = accums_infty.clone();
-                    
-                    (r_challenges, polys, claim, transcript_clone, accums_zero_clone, accums_infty_clone)
+
+                    (
+                        r_challenges,
+                        polys,
+                        claim,
+                        transcript_clone,
+                        accums_zero_clone,
+                        accums_infty_clone,
+                    )
                 },
-                |(mut r_challenges, mut polys, mut claim, mut transcript_clone, accums_zero, accums_infty)| {
+                |(
+                    mut r_challenges,
+                    mut polys,
+                    mut claim,
+                    mut transcript_clone,
+                    accums_zero,
+                    accums_infty,
+                )| {
                     let mut eq_poly = GruenSplitEqPolynomial::new(&tau);
                     let mut lagrange_coeffs: Vec<F> = vec![F::one()];
                     let mut current_acc_zero_offset = 0;
                     let mut current_acc_infty_offset = 0;
-                    
+
                     // Perform the 3 SVO rounds (the same logic as in prove_spartan_small_value)
                     for i in 0..3 {
                         let mut quadratic_eval_0 = F::zero();
                         let mut quadratic_eval_infty = F::zero();
 
                         let num_vars_in_v_config = i;
-                        let num_lagrange_coeffs_for_round = 3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
+                        let num_lagrange_coeffs_for_round =
+                            3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
 
                         // Compute quadratic_eval_infty
-                        let num_accs_infty_curr_round = 3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
+                        let num_accs_infty_curr_round =
+                            3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
                         if num_accs_infty_curr_round > 0 {
-                            let accums_infty_slice = &accums_infty
-                                [current_acc_infty_offset..current_acc_infty_offset + num_accs_infty_curr_round];
+                            let accums_infty_slice = &accums_infty[current_acc_infty_offset
+                                ..current_acc_infty_offset + num_accs_infty_curr_round];
                             for k in 0..num_lagrange_coeffs_for_round {
                                 if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
-                                    quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
+                                    quadratic_eval_infty +=
+                                        accums_infty_slice[k] * lagrange_coeffs[k];
                                 }
                             }
                         }
@@ -383,14 +399,14 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
                         let num_accs_zero_curr_round = if num_vars_in_v_config == 0 {
                             0
                         } else {
-                            3_usize.checked_pow(num_vars_in_v_config as u32).unwrap() - 
-                            2_usize.checked_pow(num_vars_in_v_config as u32).unwrap()
+                            3_usize.checked_pow(num_vars_in_v_config as u32).unwrap()
+                                - 2_usize.checked_pow(num_vars_in_v_config as u32).unwrap()
                         };
 
                         if num_accs_zero_curr_round > 0 {
-                            let accums_zero_slice = &accums_zero
-                                [current_acc_zero_offset..current_acc_zero_offset + num_accs_zero_curr_round];
-                            
+                            let accums_zero_slice = &accums_zero[current_acc_zero_offset
+                                ..current_acc_zero_offset + num_accs_zero_curr_round];
+
                             // The logic to compute quadratic_eval_0 using accums_zero_slice
                             // This is simplified for benchmarking purposes
                             for val in accums_zero_slice {
@@ -421,7 +437,7 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
                                 .collect();
                         }
                     }
-                    
+
                     black_box((r_challenges, polys, claim))
                 },
                 BatchSize::SmallInput,
@@ -436,19 +452,21 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
         let mut lagrange_coeffs: Vec<F> = vec![F::one()];
         let mut current_acc_zero_offset = 0;
         let mut current_acc_infty_offset = 0;
-        
+
         for i in 0..3 {
             let mut quadratic_eval_0 = F::zero();
             let mut quadratic_eval_infty = F::zero();
 
             let num_vars_in_v_config = i;
-            let num_lagrange_coeffs_for_round = 3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
+            let num_lagrange_coeffs_for_round =
+                3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
 
             // Compute quadratic_eval_infty (simplified calculation for setup)
-            let num_accs_infty_curr_round = 3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
+            let num_accs_infty_curr_round =
+                3_usize.checked_pow(num_vars_in_v_config as u32).unwrap();
             if num_accs_infty_curr_round > 0 {
-                let accums_infty_slice = &accums_infty
-                    [current_acc_infty_offset..current_acc_infty_offset + num_accs_infty_curr_round];
+                let accums_infty_slice = &accums_infty[current_acc_infty_offset
+                    ..current_acc_infty_offset + num_accs_infty_curr_round];
                 for k in 0..num_lagrange_coeffs_for_round {
                     if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
                         quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
@@ -491,19 +509,31 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
                     let polys_clone = polys.clone();
                     let claim_clone = claim.clone();
                     let transcript_clone = transcript.clone();
-                    
-                    (az_bz_cz_poly_clone, eq_poly_clone, r_challenges_clone, polys_clone, claim_clone, transcript_clone)
-                },
-                |(mut az_bz_cz_poly_clone, mut eq_poly_clone, mut r_challenges_clone, mut polys_clone, mut claim_clone, mut transcript_clone)| {
-                    black_box(
-                        az_bz_cz_poly_clone.streaming_sumcheck_round(
-                            &mut eq_poly_clone,
-                            &mut transcript_clone,
-                            &mut r_challenges_clone,
-                            &mut polys_clone,
-                            &mut claim_clone,
-                        )
+
+                    (
+                        az_bz_cz_poly_clone,
+                        eq_poly_clone,
+                        r_challenges_clone,
+                        polys_clone,
+                        claim_clone,
+                        transcript_clone,
                     )
+                },
+                |(
+                    mut az_bz_cz_poly_clone,
+                    mut eq_poly_clone,
+                    mut r_challenges_clone,
+                    mut polys_clone,
+                    mut claim_clone,
+                    mut transcript_clone,
+                )| {
+                    black_box(az_bz_cz_poly_clone.streaming_sumcheck_round(
+                        &mut eq_poly_clone,
+                        &mut transcript_clone,
+                        &mut r_challenges_clone,
+                        &mut polys_clone,
+                        &mut claim_clone,
+                    ))
                 },
                 BatchSize::SmallInput,
             )
@@ -519,7 +549,8 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
         );
 
         // Benchmark 4: Remaining sumcheck rounds
-        if num_rounds_x > 4 { // Only if we have remaining rounds
+        if num_rounds_x > 4 {
+            // Only if we have remaining rounds
             group.bench_function("4_remaining_rounds", |b: &mut Bencher| {
                 b.iter_batched(
                     || {
@@ -530,10 +561,24 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
                         let polys_clone = polys.clone();
                         let claim_clone = claim.clone();
                         let transcript_clone = transcript.clone();
-                        
-                        (az_bz_cz_poly_clone, eq_poly_clone, r_challenges_clone, polys_clone, claim_clone, transcript_clone)
+
+                        (
+                            az_bz_cz_poly_clone,
+                            eq_poly_clone,
+                            r_challenges_clone,
+                            polys_clone,
+                            claim_clone,
+                            transcript_clone,
+                        )
                     },
-                    |(mut az_bz_cz_poly_clone, mut eq_poly_clone, mut r_challenges_clone, mut polys_clone, mut claim_clone, mut transcript_clone)| {
+                    |(
+                        mut az_bz_cz_poly_clone,
+                        mut eq_poly_clone,
+                        mut r_challenges_clone,
+                        mut polys_clone,
+                        mut claim_clone,
+                        mut transcript_clone,
+                    )| {
                         // Perform all remaining rounds
                         for _ in 4..num_rounds_x {
                             az_bz_cz_poly_clone.remaining_sumcheck_round(
@@ -555,6 +600,6 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
     }
 }
 
-// criterion_group!(spartan_sumcheck_benches, bench_spartan_sumchecks_in_file);
+criterion_group!(spartan_sumcheck_benches, bench_spartan_sumchecks_in_file);
 criterion_group!(spartan_svo_components, bench_spartan_svo_components);
-criterion_main!(spartan_svo_components);
+criterion_main!(spartan_sumcheck_benches, spartan_svo_components);

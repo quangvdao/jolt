@@ -205,8 +205,54 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut claim = F::zero();
 
         // Clone the transcript at this point so that we could also test with non-svo sumcheck
-        #[cfg(test)]
+        // #[cfg(test)]
         let mut old_transcript = transcript.clone();
+
+
+        // #[cfg(test)]
+        {
+            let old_sumcheck_span = tracing::info_span!("old_sumcheck_with_gruen_optimization");
+            let _old_sumcheck_guard = old_sumcheck_span.enter();
+
+            let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
+                uniform_constraints,
+                cross_step_constraints,
+                flattened_polys,
+                padded_num_constraints,
+            );
+
+            let mut old_r: Vec<F> = Vec::new();
+            let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
+            let mut old_claim = F::zero();
+            let mut old_eq_poly = GruenSplitEqPolynomial::new(tau);
+
+            old_az_bz_cz_poly.first_sumcheck_round_with_gruen(
+                &mut old_eq_poly,
+                &mut old_transcript,
+                &mut old_r,
+                &mut old_polys,
+                &mut old_claim,
+            );
+
+            for _ in 1..num_rounds {
+                old_az_bz_cz_poly.subsequent_sumcheck_round_with_gruen(
+                    &mut old_eq_poly,
+                    &mut old_transcript,
+                    &mut old_r,
+                    &mut old_polys,
+                    &mut old_claim,
+                );
+            }
+
+            // Compare the new and old sumcheck results
+            // for i in 0..num_rounds {
+            //     assert_eq!(polys[i].coeffs_except_linear_term,
+            //         old_polys[i].coeffs_except_linear_term,
+            //         "Old and new polys at round {} are not equal", i);
+            // }
+
+            drop(_old_sumcheck_guard);
+        }
 
         let svo_sumcheck_span = tracing::info_span!("small_value_optimized_sumcheck");
         let _svo_sumcheck_guard = svo_sumcheck_span.enter();
@@ -223,7 +269,6 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         let mut eq_poly = GruenSplitEqPolynomial::new(tau);
 
-        // Call the refactored SVO sumcheck processing logic
         process_svo_sumcheck_rounds::<NUM_SVO_ROUNDS, F, ProofTranscript>(
             &accums_zero,
             &accums_infty,
@@ -290,6 +335,13 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     &mut old_claim,
                 );
             }
+
+            // Compare the new and old sumcheck results
+            // for i in 0..num_rounds {
+            //     assert_eq!(polys[i].coeffs_except_linear_term,
+            //         old_polys[i].coeffs_except_linear_term,
+            //         "Old and new polys at round {} are not equal", i);
+            // }
 
             drop(_old_sumcheck_guard);
         }

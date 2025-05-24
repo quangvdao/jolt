@@ -105,9 +105,9 @@ fn setup_for_spartan(
 fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
     // Define programs to benchmark
     let programs = vec![
-        // "sha3-chain-guest",
+        "sha3-chain-guest",
         // "fibonacci-guest",
-        "sha2-chain-guest",
+        // "sha2-chain-guest",
     ];
 
     // Define iteration counts for chain programs
@@ -450,11 +450,10 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
         let mut polys = Vec::new();
         let mut claim = F::zero();
         let mut lagrange_coeffs: Vec<F> = vec![F::one()];
-        let mut current_acc_zero_offset = 0;
         let mut current_acc_infty_offset = 0;
 
         for i in 0..3 {
-            let mut quadratic_eval_0 = F::zero();
+            let quadratic_eval_0 = F::zero();
             let mut quadratic_eval_infty = F::zero();
 
             let num_vars_in_v_config = i;
@@ -602,4 +601,4 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
 
 criterion_group!(spartan_sumcheck_benches, bench_spartan_sumchecks_in_file);
 criterion_group!(spartan_svo_components, bench_spartan_svo_components);
-criterion_main!(spartan_sumcheck_benches, spartan_svo_components);
+criterion_main!(spartan_sumcheck_benches);

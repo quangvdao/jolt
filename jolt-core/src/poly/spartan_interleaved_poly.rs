@@ -244,7 +244,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let num_uniform_r1cs_constraints = uniform_constraints.len();
         let rem_num_uniform_r1cs_constraints = num_uniform_r1cs_constraints % Y_SVO_SPACE_SIZE;
         let num_cross_step_constraints = cross_step_constraints.len();
-        assert!(rem_num_uniform_r1cs_constraints + num_cross_step_constraints < Y_SVO_SPACE_SIZE);
+        assert!(rem_num_uniform_r1cs_constraints + num_cross_step_constraints < Y_SVO_SPACE_SIZE,
+            "The last block of {} uniform constraints + {} cross step constraints must fit in a single block of size {}",
+            rem_num_uniform_r1cs_constraints,
+            num_cross_step_constraints,
+            Y_SVO_SPACE_SIZE
+        );
 
         drop(_var_setup_guard);
 
@@ -294,7 +299,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             std::cmp::min(
                 num_x_out_vals,
                 // Setting number of chunks for more even work distribution
-                rayon::current_num_threads().next_power_of_two() * 4,
+                rayon::current_num_threads().next_power_of_two() * 8,
             )
         } else {
             1 // Avoid 0 chunks if num_x_out_vals is 0
@@ -351,16 +356,24 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                 
                                 let global_r1cs_idx = 2 * (current_step_idx * padded_num_constraints + original_uniform_idx_in_step);
 
-                                let az = constraint.a.evaluate_row(flattened_polynomials, current_step_idx);
-                                let bz = constraint.b.evaluate_row(flattened_polynomials, current_step_idx);
-
-                                if az != 0 {
-                                    binary_az_block[idx_in_svo_block] = az;
-                                    chunk_ab_coeffs.push((global_r1cs_idx, az).into());
+                                if !constraint.a.terms().is_empty() {
+                                    let az = constraint
+                                        .a
+                                        .evaluate_row(flattened_polynomials, current_step_idx);
+                                    if !az.is_zero() {
+                                        binary_az_block[idx_in_svo_block] = az;
+                                        chunk_ab_coeffs.push((global_r1cs_idx, az).into());
+                                    }
                                 }
-                                if bz != 0 {
-                                    binary_bz_block[idx_in_svo_block] = bz;
-                                    chunk_ab_coeffs.push((global_r1cs_idx + 1, bz).into());
+
+                                if !constraint.b.terms().is_empty() {
+                                    let bz = constraint
+                                        .b
+                                        .evaluate_row(flattened_polynomials, current_step_idx);
+                                    if !bz.is_zero() {
+                                        binary_bz_block[idx_in_svo_block] = bz;
+                                        chunk_ab_coeffs.push((global_r1cs_idx + 1, bz).into());
+                                    }
                                 }
                             }
                             chunk_coeff_time += coeff_start_time.elapsed();
@@ -389,25 +402,38 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                             let coeff_start_time = std::time::Instant::now();
 
                             let actual_r1cs_constraint_idx = num_uniform_r1cs_constraints + idx;
+                            // Note: the indices 0...rem_num_uniform_r1cs_constraints are already processed in the uniform constraints loop
+                            let block_idx = rem_num_uniform_r1cs_constraints + idx;
                             let global_r1cs_idx = 2 * (current_step_idx * padded_num_constraints + actual_r1cs_constraint_idx);
                             let next_step_index_opt = if current_step_idx + 1 < num_steps { Some(current_step_idx + 1) } else { None };
 
-                            let eq_a_eval = eval_offset_lc(&constraint.a, flattened_polynomials, current_step_idx, next_step_index_opt);
-                            let eq_b_eval = eval_offset_lc(&constraint.b, flattened_polynomials, current_step_idx, next_step_index_opt);
+                            let eq_a_eval = eval_offset_lc(
+                                &constraint.a,
+                                flattened_polynomials,
+                                current_step_idx,
+                                next_step_index_opt,
+                            );
+                            let eq_b_eval = eval_offset_lc(
+                                &constraint.b,
+                                flattened_polynomials,
+                                current_step_idx,
+                                next_step_index_opt,
+                            );
                             let az = eq_a_eval - eq_b_eval;
-                            let mut bz = 0i128;
-                            if az == 0 {
-                                bz = eval_offset_lc(&constraint.cond, flattened_polynomials, current_step_idx, next_step_index_opt);
-                            }
-
-                            // Note: the indices 0...rem_num_uniform_r1cs_constraints are already processed in the uniform constraints loop
-                            if az != 0 {
-                                binary_az_block[rem_num_uniform_r1cs_constraints + idx] = az;
+                            if !az.is_zero() {
+                                binary_az_block[block_idx] = az;
                                 chunk_ab_coeffs.push((global_r1cs_idx, az).into());
-                            }
-                            if bz != 0 {
-                                binary_bz_block[rem_num_uniform_r1cs_constraints + idx] = bz;
-                                chunk_ab_coeffs.push((global_r1cs_idx + 1, bz).into());
+                            } else {
+                                let bz = eval_offset_lc(
+                                    &constraint.cond,
+                                    flattened_polynomials,
+                                    current_step_idx,
+                                    next_step_index_opt,
+                                );
+                                if !bz.is_zero() {
+                                    binary_bz_block[block_idx] = bz;
+                                    chunk_ab_coeffs.push((global_r1cs_idx + 1, bz).into());
+                                }
                             }
 
                             chunk_coeff_time += coeff_start_time.elapsed();
@@ -425,7 +451,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                             );
                             chunk_ta_time += ta_start_time.elapsed();
                         }
-
                     } // End x_in_step_val loop
 
                     // Distribute the accumulated tA values to the SVO accumulators
@@ -1294,7 +1319,7 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
         let unbound_coeffs_shards_iter = (0..num_chunks)
             .into_par_iter()
             .map(|chunk_index| {
-                let chunk_start_time: std::time::Instant = std::time::Instant::now();
+                // let chunk_start_time: std::time::Instant = std::time::Instant::now();
                 let chunk_task_span = tracing::debug_span!("old_new_chunk_task", chunk_idx = chunk_index);
                 let _chunk_task_guard = chunk_task_span.enter();
 
@@ -1411,9 +1436,9 @@ impl<F: JoltField> SpartanInterleavedPolynomial<F> {
                     }
                 }
                 
-                let total_chunk_time = chunk_start_time.elapsed();
-                println!("OLD_MEMORY_ACCESS_DIAGNOSTIC: Chunk {} total_time={:.3}s, coeffs={}", 
-                         chunk_index, total_chunk_time.as_secs_f64(), coeffs.len());
+                // let total_chunk_time = chunk_start_time.elapsed();
+                // println!("OLD_MEMORY_ACCESS_DIAGNOSTIC: Chunk {} total_time={:.3}s, coeffs={}", 
+                //          chunk_index, total_chunk_time.as_secs_f64(), coeffs.len());
 
                 Arc::new(coeffs)
             });

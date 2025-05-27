@@ -167,7 +167,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                 num_iters
             ));
 
-            group.sample_size(20);
+            group.sample_size(10);
             // group.sampling_mode(SamplingMode::Flat);
 
             group.bench_function(

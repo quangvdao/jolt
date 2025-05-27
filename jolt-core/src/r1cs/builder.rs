@@ -7,7 +7,7 @@ use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::{
     field::JoltField,
     jolt::vm::JoltPolynomials,
-    poly::spartan_interleaved_poly::SpartanInterleavedPolynomial,
+    poly::spartan_interleaved_poly::{GruenSpartanInterleavedPolynomial, SpartanInterleavedPolynomial},
     r1cs::key::{SparseConstraints, UniformR1CS},
 };
 use ark_ff::One;
@@ -627,6 +627,19 @@ impl<const C: usize, F: JoltField, I: ConstraintInput> CombinedUniformBuilder<C,
         flattened_polynomials: &[&MultilinearPolynomial<F>], // N variables of (S steps)
     ) -> SpartanInterleavedPolynomial<F> {
         SpartanInterleavedPolynomial::new(
+            &self.uniform_builder.constraints,
+            &self.offset_equality_constraints,
+            flattened_polynomials,
+            self.padded_rows_per_step(),
+        )
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn compute_spartan_Az_Bz_Cz_gruen(
+        &self,
+        flattened_polynomials: &[&MultilinearPolynomial<F>], // N variables of (S steps)
+    ) -> GruenSpartanInterleavedPolynomial<F> {
+        GruenSpartanInterleavedPolynomial::new(
             &self.uniform_builder.constraints,
             &self.offset_equality_constraints,
             flattened_polynomials,

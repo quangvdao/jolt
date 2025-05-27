@@ -183,7 +183,7 @@ where
                 span!(Level::INFO, "first_spartan_sumcheck_with_gruen").in_scope(|| {
                     let mut eq_tau = GruenSplitEqPolynomial::new(&tau);
                     let mut az_bz_cz_poly =
-                        constraint_builder.compute_spartan_Az_Bz_Cz(&flattened_polys);
+                        constraint_builder.compute_spartan_Az_Bz_Cz_gruen(&flattened_polys);
                     let (proof, outer_sumcheck_r, claims) =
                         SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
                             num_rounds_x,

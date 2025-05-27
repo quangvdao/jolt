@@ -22,3 +22,6 @@ temp_file
 # ide
 .idea
 .vscode
+
+# latex
+.latex

@@ -7,7 +7,7 @@ use crate::poly::multilinear_polynomial::{
     BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
 };
 use crate::poly::spartan_interleaved_poly::{
-    NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial,
+    GruenSpartanInterleavedPolynomial, NewSpartanInterleavedPolynomial, SpartanInterleavedPolynomial,
 };
 use crate::poly::split_eq_poly::{GruenSplitEqPolynomial, SplitEqPolynomial};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
@@ -204,54 +204,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut polys = Vec::new();
         let mut claim = F::zero();
 
-        // Clone the transcript at this point so that we could also test with non-svo sumcheck
         #[cfg(test)]
-        let mut old_transcript = transcript.clone();
-
-        #[cfg(test)]
-        {
-            let old_sumcheck_span = tracing::info_span!("old_sumcheck_with_gruen_optimization");
-            let _old_sumcheck_guard = old_sumcheck_span.enter();
-
-            let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
-                uniform_constraints,
-                cross_step_constraints,
-                flattened_polys,
-                padded_num_constraints,
-            );
-
-            let mut old_r: Vec<F> = Vec::new();
-            let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
-            let mut old_claim = F::zero();
-            let mut old_eq_poly = GruenSplitEqPolynomial::new(tau);
-
-            old_az_bz_cz_poly.first_sumcheck_round_with_gruen(
-                &mut old_eq_poly,
-                &mut old_transcript,
-                &mut old_r,
-                &mut old_polys,
-                &mut old_claim,
-            );
-
-            for _ in 1..num_rounds {
-                old_az_bz_cz_poly.subsequent_sumcheck_round_with_gruen(
-                    &mut old_eq_poly,
-                    &mut old_transcript,
-                    &mut old_r,
-                    &mut old_polys,
-                    &mut old_claim,
-                );
-            }
-
-            // Compare the new and old sumcheck results
-            // for i in 0..num_rounds {
-            //     assert_eq!(polys[i].coeffs_except_linear_term,
-            //         old_polys[i].coeffs_except_linear_term,
-            //         "Old and new polys at round {} are not equal", i);
-            // }
-
-            drop(_old_sumcheck_guard);
-        }
+        let old_transcript = transcript.clone();
 
         let svo_sumcheck_span = tracing::info_span!("small_value_optimized_sumcheck");
         let _svo_sumcheck_guard = svo_sumcheck_span.enter();
@@ -300,50 +254,50 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         drop(_svo_sumcheck_guard);
 
-        #[cfg(test)]
-        {
-            let old_sumcheck_span = tracing::info_span!("old_sumcheck_with_gruen_optimization");
-            let _old_sumcheck_guard = old_sumcheck_span.enter();
+        // #[cfg(test)]
+        // {
+        //     let old_sumcheck_span = tracing::info_span!("old_sumcheck_with_gruen_optimization");
+        //     let _old_sumcheck_guard = old_sumcheck_span.enter();
 
-            let mut old_az_bz_cz_poly = SpartanInterleavedPolynomial::new(
-                uniform_constraints,
-                cross_step_constraints,
-                flattened_polys,
-                padded_num_constraints,
-            );
+        //     let mut old_az_bz_cz_poly = GruenSpartanInterleavedPolynomial::new(
+        //         uniform_constraints,
+        //         cross_step_constraints,
+        //         flattened_polys,
+        //         padded_num_constraints,
+        //     );
 
-            let mut old_r: Vec<F> = Vec::new();
-            let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
-            let mut old_claim = F::zero();
-            let mut old_eq_poly = GruenSplitEqPolynomial::new(tau);
+        //     let mut old_r: Vec<F> = Vec::new();
+        //     let mut old_polys: Vec<CompressedUniPoly<F>> = Vec::new();
+        //     let mut old_claim = F::zero();
+        //     let mut old_eq_poly = GruenSplitEqPolynomial::new(tau);
 
-            old_az_bz_cz_poly.first_sumcheck_round_with_gruen(
-                &mut old_eq_poly,
-                &mut old_transcript,
-                &mut old_r,
-                &mut old_polys,
-                &mut old_claim,
-            );
+        //     old_az_bz_cz_poly.first_sumcheck_round(
+        //         &mut old_eq_poly,
+        //         &mut old_transcript,
+        //         &mut old_r,
+        //         &mut old_polys,
+        //         &mut old_claim,
+        //     );
 
-            for _ in 1..num_rounds {
-                old_az_bz_cz_poly.subsequent_sumcheck_round_with_gruen(
-                    &mut old_eq_poly,
-                    &mut old_transcript,
-                    &mut old_r,
-                    &mut old_polys,
-                    &mut old_claim,
-                );
-            }
+        //     for _ in 1..num_rounds {
+        //         old_az_bz_cz_poly.subsequent_sumcheck_round(
+        //             &mut old_eq_poly,
+        //             &mut old_transcript,
+        //             &mut old_r,
+        //             &mut old_polys,
+        //             &mut old_claim,
+        //         );
+        //     }
 
-            // Compare the new and old sumcheck results
-            // for i in 0..num_rounds {
-            //     assert_eq!(polys[i].coeffs_except_linear_term,
-            //         old_polys[i].coeffs_except_linear_term,
-            //         "Old and new polys at round {} are not equal", i);
-            // }
+        //     // Compare the new and old sumcheck results
+        //     // for i in 0..num_rounds {
+        //     //     assert_eq!(polys[i].coeffs_except_linear_term,
+        //     //         old_polys[i].coeffs_except_linear_term,
+        //     //         "Old and new polys at round {} are not equal", i);
+        //     // }
 
-            drop(_old_sumcheck_guard);
-        }
+        //     drop(_old_sumcheck_guard);
+        // }
 
         (
             SumcheckInstanceProof::new(polys),
@@ -385,6 +339,37 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
     pub fn prove_spartan_cubic_with_gruen(
         num_rounds: usize,
         eq_poly: &mut GruenSplitEqPolynomial<F>,
+        az_bz_cz_poly: &mut GruenSpartanInterleavedPolynomial<F>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self, Vec<F>, [F; 3]) {
+        let mut r: Vec<F> = Vec::new();
+        let mut polys: Vec<CompressedUniPoly<F>> = Vec::new();
+        let mut claim = F::zero();
+
+        for round in 0..num_rounds {
+            if round == 0 {
+                az_bz_cz_poly.first_sumcheck_round(
+                    eq_poly, transcript, &mut r, &mut polys, &mut claim,
+                );
+            } else {
+                az_bz_cz_poly.subsequent_sumcheck_round(
+                    eq_poly, transcript, &mut r, &mut polys, &mut claim,
+                );
+            }
+        }
+
+        (
+            SumcheckInstanceProof::new(polys),
+            r,
+            az_bz_cz_poly.final_sumcheck_evals(),
+        )
+    }
+
+    /// Version of `prove_spartan_cubic` that uses Gruen's optimization (but no small value optimization)
+    #[tracing::instrument(skip_all, name = "Spartan2::sumcheck::prove_spartan_cubic_with_gruen")]
+    pub fn prove_spartan_cubic_original(
+        num_rounds: usize,
+        eq_poly: &mut SplitEqPolynomial<F>,
         az_bz_cz_poly: &mut SpartanInterleavedPolynomial<F>,
         transcript: &mut ProofTranscript,
     ) -> (Self, Vec<F>, [F; 3]) {
@@ -394,11 +379,11 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
 
         for round in 0..num_rounds {
             if round == 0 {
-                az_bz_cz_poly.first_sumcheck_round_with_gruen(
+                az_bz_cz_poly.first_sumcheck_round(
                     eq_poly, transcript, &mut r, &mut polys, &mut claim,
                 );
             } else {
-                az_bz_cz_poly.subsequent_sumcheck_round_with_gruen(
+                az_bz_cz_poly.subsequent_sumcheck_round(
                     eq_poly, transcript, &mut r, &mut polys, &mut claim,
                 );
             }

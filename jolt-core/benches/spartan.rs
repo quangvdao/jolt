@@ -108,7 +108,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
     ];
 
     // Define iteration counts for chain programs
-    let chain_iteration_counts = vec![8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+    let chain_iteration_counts = vec![64, 128, 256, 512, 1024, 2048];
 
     // Define iteration counts for non-chain programs (this is just a dummy value)
     let non_chain_iterations = vec![0];

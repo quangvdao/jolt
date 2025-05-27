@@ -650,4 +650,4 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
 
 criterion_group!(spartan_sumcheck_benches, bench_spartan_sumchecks_in_file);
 criterion_group!(spartan_svo_components, bench_spartan_svo_components);
-criterion_main!(spartan_svo_components);
+criterion_main!(spartan_sumcheck_benches);

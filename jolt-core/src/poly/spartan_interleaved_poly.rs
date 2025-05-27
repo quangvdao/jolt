@@ -613,7 +613,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 // Perhaps we could estimate first
                 // TODO: get a better estimation
                 // println!("Shard data len: {}", shard_data.len());
-                let estimated_capacity_bound_coeffs = shard_data.len() / 2;
+                let estimated_capacity_bound_coeffs = shard_data.len();
                 let mut task_bound_coeffs = Vec::with_capacity(estimated_capacity_bound_coeffs);
                 let mut task_sum_contrib_0 = F::zero();
                 let mut task_sum_contrib_infty = F::zero();

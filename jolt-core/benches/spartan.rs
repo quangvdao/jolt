@@ -12,13 +12,12 @@ use jolt_core::{
     poly::{
         commitment::hyperkzg::HyperKZG, multilinear_polynomial::MultilinearPolynomial,
         spartan_interleaved_poly::NewSpartanInterleavedPolynomial,
-        split_eq_poly::GruenSplitEqPolynomial,
+        split_eq_poly::{GruenSplitEqPolynomial, SplitEqPolynomial},
     },
     r1cs::{
         builder::CombinedUniformBuilder,
         inputs::{ConstraintInput, JoltR1CSInputs},
         key::UniformSpartanKey,
-        spartan::small_value_optimization::NUM_SVO_ROUNDS,
     },
     subprotocols::sumcheck::{process_eq_sumcheck_round, SumcheckInstanceProof},
     utils::transcript::{KeccakTranscript, Transcript},
@@ -99,6 +98,11 @@ fn setup_for_spartan(
     (jolt_polynomials, transcript, r1cs_builder, spartan_key)
 }
 
+/// This bench compares the performance of three versions of Spartan sumcheck:
+/// 1. Original (before Gruen's or small-value optimization). This is the version in Jolt before our changes
+/// 2. Gruen (no small-value optimization). This is the middle version for ``fair'' benchmarking that
+/// takes into account only the speedup due to SVO.
+/// 3. Gruen + 3 SVO rounds (NewSpartanInterleaved + NewSplitEq). This is our optimized implementation.
 fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
     // Define programs to benchmark
     let programs = vec![
@@ -108,7 +112,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
     ];
 
     // Define iteration counts for chain programs
-    let chain_iteration_counts = vec![64, 128, 256, 512, 1024, 2048];
+    let chain_iteration_counts = vec![8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
     // Define iteration counts for non-chain programs (this is just a dummy value)
     let non_chain_iterations = vec![0];
@@ -167,7 +171,32 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
             group.sampling_mode(SamplingMode::Flat);
 
             group.bench_function(
-                "Gruen (SpartanInterleaved + GruenSplitEq)",
+                "Original (SpartanInterleaved + SplitEq)",
+                |b: &mut Bencher| {
+                    b.iter_batched(
+                        || {
+                            let new_transcript = transcript.clone();
+                            return new_transcript;
+                        },
+                        |mut transcript| {
+                            let mut eq_poly = SplitEqPolynomial::new(&tau);
+
+                            let mut az_bz_cz_poly =
+                                black_box(r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys));
+                            black_box(SumcheckInstanceProof::prove_spartan_cubic_original(
+                                num_rounds_x,
+                                black_box(&mut eq_poly),
+                                black_box(&mut az_bz_cz_poly),
+                                black_box(&mut transcript),
+                            ));
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+
+            group.bench_function(
+                "Gruen (GruenSpartanInterleaved + GruenSplitEq)",
                 |b: &mut Bencher| {
                     b.iter_batched(
                         || {
@@ -178,7 +207,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                             let mut eq_poly = GruenSplitEqPolynomial::new(&tau);
 
                             let mut az_bz_cz_poly =
-                                black_box(r1cs_builder.compute_spartan_Az_Bz_Cz(&flattened_polys));
+                                black_box(r1cs_builder.compute_spartan_Az_Bz_Cz_gruen(&flattened_polys));
                             black_box(SumcheckInstanceProof::prove_spartan_cubic_with_gruen(
                                 num_rounds_x,
                                 black_box(&mut eq_poly),

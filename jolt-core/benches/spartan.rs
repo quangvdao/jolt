@@ -167,8 +167,8 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
                 num_iters
             ));
 
-            group.sample_size(10);
-            group.sampling_mode(SamplingMode::Flat);
+            group.sample_size(20);
+            // group.sampling_mode(SamplingMode::Flat);
 
             group.bench_function(
                 "Original (SpartanInterleaved + SplitEq)",
@@ -324,7 +324,7 @@ fn bench_spartan_sumchecks_in_file(c: &mut Criterion) {
 fn bench_spartan_svo_components(c: &mut Criterion) {
     // Define the program and iteration counts to test
     let program_name = "sha2-chain-guest";
-    let iteration_counts = vec![16, 32, 64, 128, 256, 512]; // Include small and large iterations for comparison
+    let iteration_counts = vec![65];
 
     for &num_iters in &iteration_counts {
         println!(
@@ -650,4 +650,4 @@ fn bench_spartan_svo_components(c: &mut Criterion) {
 
 criterion_group!(spartan_sumcheck_benches, bench_spartan_sumchecks_in_file);
 criterion_group!(spartan_svo_components, bench_spartan_svo_components);
-criterion_main!(spartan_sumcheck_benches);
+criterion_main!(spartan_svo_components);

@@ -48,8 +48,6 @@ pub struct NewSpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltF
     pub(crate) bound_coeffs: Vec<SparseCoefficient<F>>,
 
     binding_scratch_space: Vec<SparseCoefficient<F>>,
-
-    pub(crate) dense_len: usize,
 }
 
 impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<NUM_SVO_ROUNDS, F> {
@@ -268,7 +266,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 let max_ab_coeffs_capacity = 2 * cycles_per_chunk * constraints_per_cycle;
                 // NOTE: this seems to be the case (60% of max capacity) for the current implementation
                 // We need to revisit this number in the Twist-Shout change
-                let estimated_ab_coeffs_capacity = (max_ab_coeffs_capacity * 6) / 10;
+                let estimated_ab_coeffs_capacity = (max_ab_coeffs_capacity * 8) / 10;
                 let mut chunk_ab_coeffs = Vec::with_capacity(estimated_ab_coeffs_capacity);
 
                 let mut chunk_svo_accums_zero = [F::zero(); NUM_ACCUMS_EVAL_ZERO];
@@ -524,7 +522,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                 ab_unbound_coeffs_shards: final_ab_unbound_coeffs_shards,
                 bound_coeffs: vec![],
                 binding_scratch_space: vec![],
-                dense_len: num_steps * padded_num_constraints,
             },
         )
     }
@@ -612,7 +609,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let collected_chunk_outputs: Vec<StreamingTaskOutput<F>> = shards_to_process // Use the taken vec
             .into_par_iter() // Consumes and gives ownership to closures
             .map(|shard_data: Vec<SparseCoefficient<i128>>| { // shard_data is now owned Vec
-                let mut task_bound_coeffs = Vec::new();
+                // This vector of coefficients should have far fewer items
+                // Perhaps we could estimate first
+                // TODO: get a better estimation
+                // println!("Shard data len: {}", shard_data.len());
+                let estimated_capacity_bound_coeffs = shard_data.len() / 2;
+                let mut task_bound_coeffs = Vec::with_capacity(estimated_capacity_bound_coeffs);
                 let mut task_sum_contrib_0 = F::zero();
                 let mut task_sum_contrib_infty = F::zero();
 
@@ -624,6 +626,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     }
 
                     let current_block_id = logical_block_coeffs[0].index / Y_SVO_RELATED_COEFF_BLOCK_SIZE;
+                    let current_block_global_idx = 6 * current_block_id;
 
                     let x_out_val_stream = current_block_id >> num_streaming_x_in_vars;
                     let x_in_val_stream = current_block_id & ((1 << num_streaming_x_in_vars) - 1);
@@ -678,7 +681,9 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                                     bz_orig_for_this_az = next_coeff.value;
                                     let next_local_offset = next_coeff.index % Y_SVO_RELATED_COEFF_BLOCK_SIZE;
                                     let next_x_next_val = (next_local_offset / 2) / Y_SVO_SPACE_SIZE;
-                                    debug_assert_eq!(x_next_val, next_x_next_val, "Paired Az/Bz should share x_next_val. Current idx {}, next idx {}, current x_next {}, next x_next {}", current_coeff.index, next_coeff.index, x_next_val, next_x_next_val);
+                                    debug_assert_eq!(x_next_val, next_x_next_val,
+                                        "Paired Az/Bz should share x_next_val. Current idx {}, next idx {}, current x_next {}, next x_next {}",
+                                        current_coeff.index, next_coeff.index, x_next_val, next_x_next_val);
 
                                     match x_next_val { // x_next_val of the current Az
                                         0 => bz0_at_r += eq_r_y.mul_i128_1_optimized(bz_orig_for_this_az),
@@ -703,22 +708,22 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     }
 
                     if !az0_at_r.is_zero() {
-                        task_bound_coeffs.push((6 * current_block_id, az0_at_r).into());
+                        task_bound_coeffs.push((current_block_global_idx, az0_at_r).into());
                     }
                     if !bz0_at_r.is_zero() {
-                        task_bound_coeffs.push((6 * current_block_id + 1, bz0_at_r).into());
+                        task_bound_coeffs.push((current_block_global_idx + 1, bz0_at_r).into());
                     }
                     if !cz0_at_r.is_zero() {
-                        task_bound_coeffs.push((6 * current_block_id + 2, cz0_at_r).into());
+                        task_bound_coeffs.push((current_block_global_idx + 2, cz0_at_r).into());
                     }
                     if !az1_at_r.is_zero() {
-                        task_bound_coeffs.push((6 * current_block_id + 3, az1_at_r).into());
+                        task_bound_coeffs.push((current_block_global_idx + 3, az1_at_r).into());
                     }
                     if !bz1_at_r.is_zero() {
-                        task_bound_coeffs.push((6 * current_block_id + 4, bz1_at_r).into());
+                        task_bound_coeffs.push((current_block_global_idx + 4, bz1_at_r).into());
                     }
                     if !cz1_at_r.is_zero() {
-                        task_bound_coeffs.push((6 * current_block_id + 5, cz1_at_r).into());
+                        task_bound_coeffs.push((current_block_global_idx + 5, cz1_at_r).into());
                     }
 
                     let p_at_xk0 = az0_at_r * bz0_at_r - cz0_at_r;
@@ -730,13 +735,14 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
                     task_sum_contrib_infty += e_out_val * e_in_val * p_slope_term;
                 }
 
+                // println!("Task bound coeffs len: {}", task_bound_coeffs.len()); // Added print
                 StreamingTaskOutput {
                     bound_coeffs_local: task_bound_coeffs,
                     sumcheck_eval_at_0_local: task_sum_contrib_0,
                     sumcheck_eval_at_infty_local: task_sum_contrib_infty,
                 }
-            })
-            .collect();
+            }) // End .map() over chunks
+            .collect(); // Collect all chunk outputs
 
         drop(_main_processing_guard);
 
@@ -894,8 +900,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
         let _swap_guard = swap_span.enter();
         std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
         drop(_swap_guard);
-
-        self.dense_len = eq_poly.len();
 
         drop(_bind_coeffs_guard);
         drop(_top_level_guard);
@@ -1140,7 +1144,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> NewSpartanInterleavedPolynomial<
             });
 
         std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
-        self.dense_len /= 2;
         drop(_bind_coeffs_guard);
         drop(_top_level_guard);
     }

@@ -8,13 +8,26 @@ Jolt is a zkVM (zero-knowledge virtual machine) for RISC-V, built to be the simp
 
 The Jolt [paper](https://eprint.iacr.org/2023/1217.pdf) was written by Arasu Arun, Srinath Setty, and Justin Thaler.
 
+## Branch for benchmarking small-value optimization
+
+This branch is customized to benchmark only the first sum-check of Spartan. We collect three algorithms:
+1. The original one in the Jolt codebase (up to commit `9372e6ab7fb7735141bfc5a12f65ee25c9a6cf93`). This algorithm has the split-eq-poly optimization, but neither of Gruen's optimization nor small-value optimization.
+2. The improved one (merged into Jolt on commit `3b37a374a93398dbaac8a106394c3a6e3ccb68c2`). This algorithm implements Gruen's optimization & better handling of coefficient chunks, but no small-value optimization.
+3. The most optimized one (merged into Jolt on commit `ffea13a9c0a465e8ab33dc25336a5cec7633354c`). This algorithm implements small-value optimization (set at 3 rounds) in addition to all previously mentioned speedups.
+
+We benchmark these algorithms on proving SHA-2 chains, with number of iterations ranging from 8 to 1024 (in powers of two), and with 10 samples for each configuration. Our setup is a M4 Macbook Air with 10 cores and 24GB of RAM. We put experimental results in [BENCHMARKS.md](BENCHMARKS.md). We went up to 1024 iterations since the prior two methods reached max memory usage with 2048 iters.
+
+You can run the following to re-derive the benchmark:
+
+```cargo bench -p jolt-core --bench spartan```
+
 ## Resources
 
 - [Docs](https://jolt.a16zcrypto.com/) (The Jolt Book)
 - Blog posts
   - [Accelerating the world computer: Implementing Jolt, a new state-of-the-art zkVM](https://a16zcrypto.com/posts/article/accelerating-the-world-computer-implementing-jolt)
   - [Building Jolt: A fast, easy-to-use zkVM](https://a16zcrypto.com/posts/article/building-jolt/)
-  - [FAQs on Jolt’s initial implementation](https://a16zcrypto.com/posts/article/faqs-on-jolts-initial-implementation)
+  - [FAQs on Jolt's initial implementation](https://a16zcrypto.com/posts/article/faqs-on-jolts-initial-implementation)
   - [A new era in SNARK design: Releasing Jolt](https://a16zcrypto.com/posts/article/a-new-era-in-snark-design-releasing-jolt)
   - [Introducing Lasso and Jolt](https://a16zcrypto.com/posts/article/introducing-lasso-and-jolt/)
   - [Understanding Lasso and Jolt, from theory to code](https://a16zcrypto.com/posts/article/building-on-lasso-and-jolt/)

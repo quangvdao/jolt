@@ -45,9 +45,10 @@
     *   Gruen: N/A (OOM / Timeout)
     *   Gruen + 3 SVO: ~48.20 s (Comparison N/A as Gruen data unavailable for 2048 iters)
 
+Plot of the above:
+![Prover Runtime of Jolt's Spartan Sumcheck](jolt_spartan_sumcheck_benchmark.png)
 
-**Key Observations (New Run):**
+**Key Observations:**
 *   "Gruen + 3 SVO" consistently provides a very significant speedup over "Gruen" alone, especially at higher iteration counts.
 *   "Gruen" consistently improves upon the "Original" implementation.
-*   All methods show increased absolute times compared to the previously reported benchmark, suggesting a different environment or load during this run. However, the relative improvements hold.
 *   The "Gruen + 3 SVO" method is the only one able to complete 2048 iterations within reasonable time/memory constraints. 

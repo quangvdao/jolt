@@ -42,42 +42,53 @@ gruen_svo_times_ms = np.array([
     48200   # 2048 iters (48.20s)
 ])
 
-# Create the plot
-plt.figure(figsize=(10, 7)) # Adjusted figure size for better legend placement
+# Set font to Times New Roman for academic look
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman', 'Times', 'DejaVu Serif', 'serif']
+plt.rcParams['font.size'] = 16  # Increased base font size
+
+# Create the plot with more space for title
+plt.figure(figsize=(10, 7))
 
 # Plotting the data
-plt.plot(original_iters, original_times_ms, marker='^', linestyle='-', color='royalblue', label='Original')
-plt.plot(gruen_iters, gruen_times_ms, marker='^', linestyle='-', color='teal', label='Gruen')
-plt.plot(gruen_svo_iters, gruen_svo_times_ms, marker='^', linestyle='-', color='darkorange', label='Gruen+SVO')
+plt.plot(original_iters, original_times_ms, marker='^', linestyle='-', color='blue', label='Original', linewidth=2, markersize=8)
+plt.plot(gruen_iters, gruen_times_ms, marker='^', linestyle='-', color='teal', label='Gruen', linewidth=2, markersize=8)
+plt.plot(gruen_svo_iters, gruen_svo_times_ms, marker='^', linestyle='-', color='darkorange', label='Gruen+SVO', linewidth=2, markersize=8)
 
 # Setting scales
 plt.xscale('log', base=2)
-plt.yscale('log') # Default base 10
+plt.yscale('log')
 
-# Setting ticks
-plt.xticks(iterations, labels=[str(it) for it in iterations])
-# Matplotlib will auto-generate y-ticks, which is usually fine for log scale.
-# If you need specific y-ticks, you can set them, e.g.:
-# plt.yticks([100, 1000, 10000, 100000, 1000000], labels=['100', '1k', '10k', '100k', '1M'])
+# Setting ticks - show all x-axis values with tighter spacing
+plt.xticks(iterations, labels=[str(it) for it in iterations], fontsize=14)
+plt.yticks(fontsize=14)
 
+# Adjust x-axis to make spacing between iterations smaller
+ax = plt.gca()
+ax.set_xlim(6, 2500)  # Tighter x-axis limits
 
-# Labels and Title
-plt.xlabel('Number of SHA-256 Iterations')
-plt.ylabel('Runtime (ms)')
-plt.title("Prover Runtime of Jolt's Spartan Sumcheck")
+# Remove minor grid lines and only show major grid lines
+plt.grid(True, which="major", ls="-", alpha=0.3, color='gray')
 
-# Legend - placed below the plot as in the example
-# Adjust bbox_to_anchor and ncol as needed
-plt.legend(loc='lower center', bbox_to_anchor=(0.5, -0.25), ncol=3, frameon=False)
+# Configure y-axis to only show major ticks with minor tick marks
+ax.yaxis.set_minor_locator(plt.LogLocator(base=10, subs='auto', numticks=12))
+ax.tick_params(which='minor', length=3, width=0.5, direction='in')  # Small tick marks pointing inward
+ax.tick_params(which='major', length=6, width=1, direction='in')    # Larger tick marks for major
 
-# Grid
-plt.grid(True, which="both", ls="-", alpha=0.6) # Grid for both major and minor ticks
+# Labels and Title with more spacing
+plt.xlabel('Number of SHA-256 Iterations', fontsize=18, labelpad=15)
+plt.ylabel('Runtime (ms)', fontsize=18, labelpad=15)
+plt.title("Prover Runtime of Jolt's Spartan Sumcheck", fontsize=20, fontweight='bold', pad=25)
 
-# Adjust layout to make space for the legend if it's outside
-plt.tight_layout(rect=[0, 0.05, 1, 1]) # rect=[left, bottom, right, top]
+# Legend - positioned away from the bottom right corner
+plt.legend(loc='center right', bbox_to_anchor=(0.95, 0.25), frameon=True, fancybox=True, shadow=True, fontsize=16)
+
+# Adjust layout with more space at top
+plt.tight_layout()
+plt.subplots_adjust(top=0.9)  # Add more space at the top for title
 
 # To save the figure:
-plt.savefig('jolt_spartan_sumcheck_benchmark.png', bbox_inches='tight')
+plt.savefig('jolt_spartan_sumcheck_benchmark.png', bbox_inches='tight', dpi=300)
 
 # To display the figure:
 # plt.show()

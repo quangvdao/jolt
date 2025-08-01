@@ -8,6 +8,7 @@ use std::fmt::Write;
 /// relative to the parent) into an array of nodes.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MleAstNode {
+    UnsignedScalar(u128),
     /// A constant value. We use i128 here in order to support negative scalars.
     Scalar(i128),
     /// A variable, represented by a one-character register name and an index into that register
@@ -144,7 +145,8 @@ impl<const NUM_NODES: usize> crate::util::ZkLeanReprField for MleAst<NUM_NODES> 
     fn evaluate<F: JoltField>(&self, vars: &[F]) -> F {
         fn helper<F: JoltField>(vars: &[F], nodes: &[Option<MleAstNode>], root: usize) -> F {
             match nodes[root] {
-                Some(MleAstNode::Scalar(f)) => F::from_u64(f as u64), // TODO: handle negative scalars?
+                Some(MleAstNode::Scalar(f)) => F::from_i128(f),
+                Some(MleAstNode::UnsignedScalar(f)) => F::from_u128(f),
                 Some(MleAstNode::Var(_, var)) => vars[var], // TODO: handle multiple registers?
                 Some(MleAstNode::Neg(next_root)) => -helper(vars, nodes, root - next_root),
                 Some(MleAstNode::Inv(next_root)) => helper(vars, nodes, root - next_root)
@@ -321,6 +323,7 @@ impl<const NUM_NODES: usize> std::fmt::Display for MleAst<NUM_NODES> {
         ) -> std::fmt::Result {
             match nodes[root] {
                 Some(MleAstNode::Scalar(scalar)) => write!(f, "{scalar}")?,
+                Some(MleAstNode::UnsignedScalar(scalar)) => write!(f, "{scalar}")?,
                 Some(MleAstNode::Var(name, index)) => write!(f, "{name}[{index}]")?,
                 Some(MleAstNode::Neg(index)) => {
                     write!(f, "-")?;
@@ -411,6 +414,10 @@ impl<const NUM_NODES: usize> JoltField for MleAst<NUM_NODES> {
     fn from_i64(val: i64) -> Self {
         Self::new_with_root(MleAstNode::Scalar(val as i128))
     }
+
+    // fn from_u128(val: u128) -> Self {
+    //     Self::new_with_root(MleAstNode::UnsignedScalar(val))
+    // }
 
     fn from_i128(val: i128) -> Self {
         Self::new_with_root(MleAstNode::Scalar(val))

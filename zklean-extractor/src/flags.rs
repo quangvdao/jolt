@@ -1,7 +1,7 @@
 use crate::constants::JoltParameterSet;
 use crate::instruction::ZkLeanInstruction;
 use crate::modules::{AsModule, Module};
-use jolt_core::r1cs::inputs::JoltR1CSInputs;
+use jolt_core::zkvm::r1cs::inputs::JoltR1CSInputs;
 
 use crate::{r1cs::input_to_field_name, util::indent};
 

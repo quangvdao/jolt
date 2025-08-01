@@ -1,4 +1,4 @@
-use jolt_core::jolt::{subtable::LassoSubtable, vm::rv32im_vm::RV32ISubtables};
+use jolt_core::zkvm::lookup_table::{JoltLookupTable, LookupTables};
 use strum::IntoEnumIterator as _;
 
 use crate::{
@@ -7,18 +7,17 @@ use crate::{
     util::{indent, ZkLeanReprField},
 };
 
-/// Wrapper around a LassoSubtable
-// TODO: Make generic over LassoSubtableSet
+/// Wrapper around a JoltLookupTable
 #[derive(Debug)]
-pub struct ZkLeanSubtable<F: ZkLeanReprField, J> {
-    subtables: RV32ISubtables<F>,
-    phantom: std::marker::PhantomData<J>,
+pub struct ZkLeanLookupTable<F: ZkLeanReprField, J> {
+    table: LookupTables,
+    phantom: std::marker::PhantomData<(F, J)>,
 }
 
-impl<F: ZkLeanReprField, J> From<RV32ISubtables<F>> for ZkLeanSubtable<F, J> {
-    fn from(value: RV32ISubtables<F>) -> Self {
+impl<F: ZkLeanReprField, J> From<LookupTables> for ZkLeanLookupTable<F, J> {
+    fn from(value: LookupTables) -> Self {
         Self {
-            subtables: value,
+            table: value,
             phantom: std::marker::PhantomData,
         }
     }
@@ -61,12 +60,12 @@ impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanSubtable<F, J> {
         let mle = self.evaluate_mle('x').as_computation();
 
         f.write_fmt(format_args!(
-            "{}def {name} [Field f] : Subtable f {log_m} :=\n",
+            "{}def {name} [Field f] : LookupTable f {log_m} :=\n",
             indent(indent_level),
         ))?;
         indent_level += 1;
         f.write_fmt(format_args!(
-            "{}subtableFromMLE (fun x => {mle})\n",
+            "{}lookupTableFromMLE (fun x => {mle})\n",
             indent(indent_level),
         ))?;
 
@@ -74,15 +73,15 @@ impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanSubtable<F, J> {
     }
 }
 
-pub struct ZkLeanSubtables<F: ZkLeanReprField, J> {
-    subtables: Vec<ZkLeanSubtable<F, J>>,
+pub struct ZkLeanLookupTables<F: ZkLeanReprField, J> {
+    tables: Vec<ZkLeanLookupTable<F, J>>,
     phantom: std::marker::PhantomData<J>,
 }
 
-impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanSubtables<F, J> {
+impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanLookupTables<F, J> {
     pub fn extract() -> Self {
         Self {
-            subtables: ZkLeanSubtable::<F, J>::iter().collect(),
+            tables: ZkLeanLookupTable::<F, J>::iter().collect(),
             phantom: std::marker::PhantomData,
         }
     }
@@ -92,8 +91,8 @@ impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanSubtables<F, J> {
         f: &mut impl std::io::Write,
         indent_level: usize,
     ) -> std::io::Result<()> {
-        for subtable in &self.subtables {
-            subtable.zklean_pretty_print(f, indent_level)?;
+        for table in &self.tables {
+            table.zklean_pretty_print(f, indent_level)?;
         }
         Ok(())
     }
@@ -103,13 +102,13 @@ impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanSubtables<F, J> {
     }
 }
 
-impl<F: ZkLeanReprField, J: JoltParameterSet> AsModule for ZkLeanSubtables<F, J> {
+impl<F: ZkLeanReprField, J: JoltParameterSet> AsModule for ZkLeanLookupTables<F, J> {
     fn as_module(&self) -> std::io::Result<Module> {
         let mut contents: Vec<u8> = vec![];
         self.zklean_pretty_print(&mut contents, 0)?;
 
         Ok(Module {
-            name: String::from("Subtables"),
+            name: String::from("LookupTables"),
             imports: self.zklean_imports(),
             contents,
         })
@@ -121,7 +120,7 @@ mod test {
     use super::*;
     use crate::util::arb_field_elem;
 
-    use jolt_core::{field::JoltField, jolt::subtable::LassoSubtable};
+    use jolt_core::{field::JoltField, zkvm::lookup_table::LookupTables};
 
     use proptest::{collection::vec, prelude::*};
     use strum::EnumCount as _;
@@ -130,24 +129,27 @@ mod test {
     type TestField = crate::mle_ast::MleAst<4096>;
     type ParamSet = crate::constants::RV32IParameterSet;
 
-    struct TestableSubtable<R: JoltField, T: ZkLeanReprField, J: JoltParameterSet> {
-        reference: RV32ISubtables<R>,
-        test: ZkLeanSubtable<T, J>,
+    struct TestableLookupTable<R: JoltField, T: ZkLeanReprField, J: JoltParameterSet> {
+        reference: LookupTables,
+        test: ZkLeanLookupTable<T, J>,
     }
 
     impl<R: JoltField, T: ZkLeanReprField, J: JoltParameterSet> std::fmt::Debug
-        for TestableSubtable<R, T, J>
+        for TestableLookupTable<R, T, J>
     {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_fmt(format_args!("{}", self.test.name()))
         }
     }
 
-    impl<R: JoltField, T: ZkLeanReprField, J: JoltParameterSet> TestableSubtable<R, T, J> {
+    impl<R: JoltField, T: ZkLeanReprField, J: JoltParameterSet> TestableLookupTable<R, T, J> {
         fn iter() -> impl Iterator<Item = Self> {
-            RV32ISubtables::iter()
-                .zip(ZkLeanSubtable::iter())
-                .map(|(reference, test)| Self { reference, test })
+            LookupTables::iter()
+                .zip(ZkLeanLookupTable::iter())
+                .map(|(reference, test)| Self {
+                    reference,
+                    test,
+                })
         }
 
         fn reference_evaluate_mle(&self, inputs: &[R]) -> R {
@@ -164,20 +166,20 @@ mod test {
         }
     }
 
-    fn arb_subtable<R: JoltField, T: ZkLeanReprField, J: JoltParameterSet>(
-    ) -> impl Strategy<Value = TestableSubtable<R, T, J>> {
-        (0..RV32ISubtables::<R>::COUNT).prop_map(|n| TestableSubtable::iter().nth(n).unwrap())
+    fn arb_lookup_table<R: JoltField, T: ZkLeanReprField, J: JoltParameterSet>(
+    ) -> impl Strategy<Value = TestableLookupTable<R, T, J>> {
+        (0..LookupTables::<R>::COUNT).prop_map(|n| TestableLookupTable::iter().nth(n).unwrap())
     }
 
     proptest! {
         #[test]
         fn evaluate_mle(
-            subtable in arb_subtable::<RefField, TestField, ParamSet>(),
+            lookup_table in arb_lookup_table::<RefField, TestField, ParamSet>(),
             inputs in vec(arb_field_elem::<RefField>(), ParamSet::LOG_M),
         ) {
             prop_assert_eq!(
-                subtable.test_evaluate_mle(&inputs),
-                subtable.reference_evaluate_mle(&inputs),
+                lookup_table.test_evaluate_mle(&inputs),
+                lookup_table.reference_evaluate_mle(&inputs),
             );
         }
     }

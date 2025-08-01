@@ -7,7 +7,7 @@ use strum::IntoEnumIterator as _;
 use crate::{
     constants::JoltParameterSet,
     modules::{AsModule, Module},
-    subtable::ZkLeanSubtable,
+    lookup_table::ZkLeanLookupTable,
     util::{indent, ZkLeanReprField},
     MleAst,
 };

@@ -1,5 +1,5 @@
-use common::rv_trace::MemoryLayout;
-use jolt_core::r1cs::{
+use common::jolt_device::MemoryLayout;
+use jolt_core::zkvm::r1cs::{
     builder::{Constraint, OffsetEqConstraint, OffsetLC, R1CSBuilder},
     constraints::R1CSConstraints,
     inputs::{ConstraintInput as _, JoltR1CSInputs},
@@ -14,12 +14,12 @@ use crate::{
 };
 
 type F = ark_bn254::Fr;
-type CS = jolt_core::r1cs::constraints::JoltRV32IMConstraints;
+type CS = jolt_core::zkvm::r1cs::constraints::JoltRV32IMConstraints;
 
 pub struct ZkLeanR1CSConstraints<J> {
     inputs: Vec<JoltR1CSInputs>,
     uniform_constraints: Vec<Constraint>,
-    non_uniform_constraints: Vec<OffsetEqConstraint>,
+    // non_uniform_constraints: Vec<OffsetEqConstraint>,
     phantom: std::marker::PhantomData<J>,
 }
 
@@ -32,21 +32,21 @@ where
 
         // XXX Make max input/output sizes configurable?
         let uniform_constraints = {
-            let memory_layout = MemoryLayout::new(&J::MEMORY_CONFIG);
+            // let memory_layout = MemoryLayout::new(&J::MEMORY_CONFIG);
 
             let mut r1cs_builder = R1CSBuilder::<{ J::C }, F, JoltR1CSInputs>::new();
-            CS::uniform_constraints(&mut r1cs_builder, memory_layout.input_start);
+            CS::uniform_constraints(&mut r1cs_builder);
 
             r1cs_builder.get_constraints()
         };
 
-        let non_uniform_constraints =
-            <CS as R1CSConstraints<{ J::C }, F>>::cross_step_constraints();
+        // let non_uniform_constraints =
+        //     <CS as R1CSConstraints<{ J::C }, F>>::cross_step_constraints();
 
         Self {
             inputs,
             uniform_constraints,
-            non_uniform_constraints,
+            // non_uniform_constraints,
             phantom: std::marker::PhantomData,
         }
     }
@@ -144,30 +144,31 @@ where
                 indent(indent_level),
         ))?;
         indent_level += 1;
-        for OffsetEqConstraint { cond, a, b } in &self.non_uniform_constraints {
-            // NOTE: See comments on `materialize_offset_eq` and `OffsetLC`. An offset constraint is three
-            // `OffsetLC`s, cond, a, and b. An `OffsetLC` is an `LC` and a `bool`. If the bool is true,
-            // then the variables in the LC come from the *next* step. The cond, a, and b `LC`s resolve to
-            // a constraint as
-            // A: a - b
-            // B: cond
-            // C: 0
-            f.write_fmt(format_args!("{}constrainR1CS\n", indent(indent_level),))?;
-            indent_level += 1;
-            f.write_fmt(format_args!(
-                "{}({} - {})\n",
-                indent(indent_level),
-                pretty_print_offset_lc::<{ J::C }>("jolt_inputs", "jolt_offset_inputs", a),
-                pretty_print_offset_lc::<{ J::C }>("jolt_inputs", "jolt_offset_inputs", b),
-            ))?;
-            f.write_fmt(format_args!(
-                "{}{}\n",
-                indent(indent_level),
-                pretty_print_offset_lc::<{ J::C }>("jolt_inputs", "jolt_offset_inputs", cond),
-            ))?;
-            f.write_fmt(format_args!("{}0\n", indent(indent_level),))?;
-            indent_level -= 1;
-        }
+
+        // for OffsetEqConstraint { cond, a, b } in &self.non_uniform_constraints {
+        //     // NOTE: See comments on `materialize_offset_eq` and `OffsetLC`. An offset constraint is three
+        //     // `OffsetLC`s, cond, a, and b. An `OffsetLC` is an `LC` and a `bool`. If the bool is true,
+        //     // then the variables in the LC come from the *next* step. The cond, a, and b `LC`s resolve to
+        //     // a constraint as
+        //     // A: a - b
+        //     // B: cond
+        //     // C: 0
+        //     f.write_fmt(format_args!("{}constrainR1CS\n", indent(indent_level),))?;
+        //     indent_level += 1;
+        //     f.write_fmt(format_args!(
+        //         "{}({} - {})\n",
+        //         indent(indent_level),
+        //         pretty_print_offset_lc::<{ J::C }>("jolt_inputs", "jolt_offset_inputs", a),
+        //         pretty_print_offset_lc::<{ J::C }>("jolt_inputs", "jolt_offset_inputs", b),
+        //     ))?;
+        //     f.write_fmt(format_args!(
+        //         "{}{}\n",
+        //         indent(indent_level),
+        //         pretty_print_offset_lc::<{ J::C }>("jolt_inputs", "jolt_offset_inputs", cond),
+        //     ))?;
+        //     f.write_fmt(format_args!("{}0\n", indent(indent_level),))?;
+        //     indent_level -= 1;
+        // }
 
         Ok(())
     }

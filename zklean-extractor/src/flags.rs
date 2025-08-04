@@ -11,6 +11,11 @@ pub struct ZkLeanInstructionFlags<J> {
     instruction: ZkLeanInstruction<J>,
 }
 
+pub struct ZkLeanCircuitFlags<J> {
+    r1cs_input: JoltR1CSInputs,
+    instruction: ZkLeanInstruction<J>,
+}
+
 impl<J: JoltParameterSet> ZkLeanInstructionFlags<J> {
     /// Extract the [`JoltR1CSInputs::InstructionFlags`] variable for a given instruction.
     pub fn from_instruction(instruction: ZkLeanInstruction<J>) -> Self {

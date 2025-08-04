@@ -1,7 +1,8 @@
 use jolt_core::{
     field::JoltField,
-    jolt::{instruction::JoltInstruction, vm::rv32im_vm::RV32I},
+    zkvm::{instruction::{InstructionLookup, LookupQuery}, JoltRV32IM},
 };
+use tracer::instruction::{RV32IMCycle, RV32IMInstruction};
 use strum::IntoEnumIterator as _;
 
 use crate::{
@@ -15,13 +16,13 @@ use crate::{
 /// Wrapper around a JoltInstruction
 // TODO: Make this generic over the instruction set
 #[derive(Debug, Clone)]
-pub struct ZkLeanInstruction<J> {
-    instruction: RV32I,
+pub struct ZkLeanInstruction<J, const WORD_SIZE: usize> {
+    instruction: LookupQuery<WORD_SIZE>,
     phantom: std::marker::PhantomData<J>,
 }
 
-impl<J> From<RV32I> for ZkLeanInstruction<J> {
-    fn from(value: RV32I) -> Self {
+impl<J, const WORD_SIZE: usize> From<RV32IMInstruction> for ZkLeanInstruction<J, WORD_SIZE> {
+    fn from(value: RV32IMInstruction) -> Self {
         Self {
             instruction: value,
             phantom: std::marker::PhantomData,
@@ -29,49 +30,36 @@ impl<J> From<RV32I> for ZkLeanInstruction<J> {
     }
 }
 
-impl<J: JoltParameterSet> ZkLeanInstruction<J> {
+impl<J: JoltParameterSet, const WORD_SIZE: usize> ZkLeanInstruction<J, WORD_SIZE> {
     pub fn name(&self) -> String {
         let name = <&'static str>::from(&self.instruction);
-        let word_size = J::WORD_SIZE;
-        let c = J::C;
-        let log_m = J::LOG_M;
+        let word_size = WORD_SIZE;
 
-        format!("{name}_{word_size}_{c}_{log_m}")
-    }
-
-    /// The number of field elements in the input to `combine_lookups`. See the doc comment for
-    /// [`JoltInstruction::combine_lookups`] for more info.
-    fn num_lookups<F: JoltField>(&self) -> usize {
-        // We need one wire for each subtable evaluation, i.e., one wire per subtable, per chunk
-        self.instruction
-            .subtables::<F>(J::C, 1 << J::LOG_M)
-            .iter()
-            .flat_map(|(_, ixs)| ixs.iter())
-            .count()
+        format!("{name}_{word_size}")
     }
 
     fn combine_lookups<F: ZkLeanReprField>(&self, reg_name: char) -> F {
         let reg_size = self.num_lookups::<F>();
         let reg = F::register(reg_name, reg_size);
-        self.instruction.combine_lookups(&reg, J::C, 1 << J::LOG_M)
+        self.instruction.combine(&reg)
     }
 
-    fn subtables<F: ZkLeanReprField>(&self) -> impl Iterator<Item = (ZkLeanSubtable<F, J>, usize)> {
+    fn subtables<F: ZkLeanReprField>(&self) -> impl Iterator<Item = (ZkLeanLookupTable<F, J>, usize)> {
         self.instruction
             .subtables(J::C, 1 << J::LOG_M)
             .into_iter()
             .flat_map(|(subtable, ixs)| {
                 ixs.iter()
-                    .map(|ix| (ZkLeanSubtable::<F, J>::from(&subtable), ix))
+                    .map(|ix| (ZkLeanLookupTable::<F, J>::from(&subtable), ix))
                     .collect::<Vec<_>>()
             })
     }
 
     pub fn iter() -> impl Iterator<Item = Self> {
-        RV32I::iter().map(Self::from)
+        JoltRV32IM::iter().map(Self::from)
     }
 
-    pub fn to_instruction_set(&self) -> RV32I {
+    pub fn to_instruction_set(&self) -> JoltRV32IM {
         self.instruction
     }
 
@@ -162,9 +150,9 @@ mod test {
     type TestField = crate::mle_ast::MleAst<2048>;
     type ParamSet = crate::constants::RV32IParameterSet;
 
-    #[derive(Clone)]
+    // #[derive(Clone)]
     struct TestableInstruction<J: JoltParameterSet> {
-        reference: RV32I,
+        reference: JoltInstruction<J::WORD_SIZE>,
         test: ZkLeanInstruction<J>,
     }
 
@@ -176,15 +164,15 @@ mod test {
 
     impl<J: JoltParameterSet> TestableInstruction<J> {
         fn iter() -> impl Iterator<Item = Self> {
-            RV32I::iter()
+            JoltRV32IM::iter()
                 .zip(ZkLeanInstruction::iter())
                 .map(|(reference, test)| Self { reference, test })
         }
 
-        fn reference_combine_lookups<R: JoltField>(&self, inputs: &[R]) -> R {
+        fn reference_combine<R: JoltField>(&self, inputs: &[R]) -> R {
             assert_eq!(inputs.len(), self.test.num_lookups::<R>());
 
-            self.reference.combine_lookups(inputs, J::C, J::M)
+            self.reference.combine(inputs)
         }
 
         fn test_combine_lookups<R: JoltField, T: ZkLeanReprField>(&self, inputs: &[R]) -> R {
@@ -196,7 +184,7 @@ mod test {
     }
 
     fn arb_instruction<J: JoltParameterSet>() -> impl Strategy<Value = TestableInstruction<J>> {
-        (0..RV32I::COUNT).prop_map(|n| TestableInstruction::iter().nth(n).unwrap())
+        (0..JoltRV32IM::COUNT).prop_map(|n| TestableInstruction::iter().nth(n).unwrap())
     }
 
     fn arb_instruction_and_input<J: JoltParameterSet + Clone, R: JoltField>(

@@ -23,12 +23,10 @@ pub struct ZkLeanR1CSConstraints<J> {
     phantom: std::marker::PhantomData<J>,
 }
 
-impl<J: JoltParameterSet> ZkLeanR1CSConstraints<J>
-where
-    [(); J::C]:,
+impl<J: JoltParameterSet, const WORD_SIZE: usize> ZkLeanR1CSConstraints<J, WORD_SIZE>
 {
     pub fn extract() -> Self {
-        let inputs = JoltR1CSInputs::flatten::<{ J::C }>();
+        let inputs = JoltR1CSInputs::flatten::<WORD_SIZE>();
 
         // XXX Make max input/output sizes configurable?
         let uniform_constraints = {

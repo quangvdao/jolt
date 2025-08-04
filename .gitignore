@@ -27,3 +27,9 @@ temp_file
 .vscode
 
 *.patch
+
+.notes/*
+.latex/*
+
+# Lean build artifacts
+*/.lake/*

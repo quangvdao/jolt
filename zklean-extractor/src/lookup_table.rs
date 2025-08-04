@@ -9,13 +9,13 @@ use crate::{
 
 /// Wrapper around a JoltLookupTable
 #[derive(Debug)]
-pub struct ZkLeanLookupTable<F: ZkLeanReprField, J> {
-    table: LookupTables,
+pub struct ZkLeanLookupTable<F: ZkLeanReprField, J, const WORD_SIZE: usize> {
+    table: LookupTables<WORD_SIZE>,
     phantom: std::marker::PhantomData<(F, J)>,
 }
 
-impl<F: ZkLeanReprField, J> From<LookupTables> for ZkLeanLookupTable<F, J> {
-    fn from(value: LookupTables) -> Self {
+impl<F: ZkLeanReprField, J, const WORD_SIZE: usize> From<LookupTables<WORD_SIZE>> for ZkLeanLookupTable<F, J, WORD_SIZE> {
+    fn from(value: LookupTables<WORD_SIZE>) -> Self {
         Self {
             table: value,
             phantom: std::marker::PhantomData,
@@ -23,18 +23,18 @@ impl<F: ZkLeanReprField, J> From<LookupTables> for ZkLeanLookupTable<F, J> {
     }
 }
 
-impl<F: ZkLeanReprField, J> From<&Box<dyn LassoSubtable<F>>> for ZkLeanSubtable<F, J> {
-    fn from(value: &Box<dyn LassoSubtable<F>>) -> Self {
+impl<F: ZkLeanReprField, J, const WORD_SIZE: usize> From<JoltLookupTable<F, WORD_SIZE>> for ZkLeanLookupTable<F, J, WORD_SIZE> {
+    fn from(value: JoltLookupTable<F, WORD_SIZE>) -> Self {
         Self {
-            subtables: value.subtable_id().into(),
+            table: value.into(),
             phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanSubtable<F, J> {
+impl<F: ZkLeanReprField, J: JoltParameterSet, const WORD_SIZE: usize> ZkLeanLookupTable<F, J, WORD_SIZE> {
     pub fn name(&self) -> String {
-        let name = <&'static str>::from(&self.subtables);
+        let name = <&'static str>::from(&self.table);
         let log_m = J::LOG_M;
 
         format!("{name}_{log_m}")
@@ -46,7 +46,7 @@ impl<F: ZkLeanReprField, J: JoltParameterSet> ZkLeanSubtable<F, J> {
     }
 
     pub fn iter() -> impl Iterator<Item = Self> {
-        RV32ISubtables::iter().map(Self::from)
+        LookupTables::<WORD_SIZE>::iter().map(Self::from)
     }
 
     /// Pretty print a subtable as a ZkLean `Subtable`.

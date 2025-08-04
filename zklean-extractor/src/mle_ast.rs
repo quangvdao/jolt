@@ -146,7 +146,7 @@ impl<const NUM_NODES: usize> crate::util::ZkLeanReprField for MleAst<NUM_NODES> 
         fn helper<F: JoltField>(vars: &[F], nodes: &[Option<MleAstNode>], root: usize) -> F {
             match nodes[root] {
                 Some(MleAstNode::Scalar(f)) => F::from_i128(f),
-                Some(MleAstNode::UnsignedScalar(f)) => F::from_u128(f),
+                Some(MleAstNode::UnsignedScalar(f)) => F::from_i128(f as i128),
                 Some(MleAstNode::Var(_, var)) => vars[var], // TODO: handle multiple registers?
                 Some(MleAstNode::Neg(next_root)) => -helper(vars, nodes, root - next_root),
                 Some(MleAstNode::Inv(next_root)) => helper(vars, nodes, root - next_root)

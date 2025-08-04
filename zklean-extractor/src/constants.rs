@@ -1,12 +1,9 @@
 use common::{constants, jolt_device::MemoryConfig};
-use jolt_core::zkvm;
 
 /// Groups the constants used for a specific instruction set / decomposition strategy / memory
 /// layout. Jolt currently just has one of these, but we abstract over them here for future
 /// compatibility.
 pub trait JoltParameterSet {
-    /// The number of chunks used when decomposing instructions
-    const C: usize;
     /// The memory config to use
     const MEMORY_CONFIG: MemoryConfig;
 }
@@ -16,7 +13,6 @@ pub trait JoltParameterSet {
 pub struct RV32IParameterSet;
 
 impl JoltParameterSet for RV32IParameterSet {
-    const C: usize = rv32i_vm::C;
     const MEMORY_CONFIG: MemoryConfig = MemoryConfig {
         max_input_size: constants::DEFAULT_MAX_INPUT_SIZE,
         max_output_size: constants::DEFAULT_MAX_OUTPUT_SIZE,

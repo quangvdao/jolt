@@ -20,6 +20,8 @@ use super::{
     multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
     split_eq_poly::GruenSplitEqPolynomial,
 };
+// Experimental streaming interface (mockup)
+use super::streaming::{RlcStreamingPolynomial, StreamingMLE};
 use crate::{
     field::JoltField,
     poly::{
@@ -264,6 +266,10 @@ impl<F: JoltField> DensePolynomialProverOpening<F> {
 pub enum ProverOpening<F: JoltField> {
     Dense(DensePolynomialProverOpening<F>),
     OneHot(OneHotPolynomialProverOpening<F>),
+    /// Experimental: a streaming RLC polynomial that avoids materializing
+    /// dense vectors in memory. Not yet wired into callers.
+    #[allow(dead_code)]
+    DenseStreaming(RlcStreamingPolynomial<F>),
 }
 
 #[derive(Clone)]

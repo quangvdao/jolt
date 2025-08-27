@@ -8,7 +8,10 @@ use crate::poly::multilinear_polynomial::{BindingOrder, MultilinearPolynomial};
 use crate::poly::opening_proof::{
     OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator, BIG_ENDIAN,
 };
-use crate::poly::spartan_interleaved_poly::{SpartanInterleavedPolynomial, GruenSpartanInterleavedPolynomial};
+use crate::poly::spartan_interleaved_poly::{
+    GruenSpartanInterleavedPolynomial, LegacySpartanInterleavedPolynomial,
+    SpartanInterleavedPolynomial,
+};
 use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::transcripts::{AppendToTranscript, Transcript};
@@ -493,6 +496,44 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                     &mut claim,
                 );
             }
+        }
+
+        (
+            SumcheckInstanceProof::new(polys),
+            r,
+            az_bz_cz_poly.final_sumcheck_evals(),
+        )
+    }
+
+    /// Version of `prove_spartan_small_value` that uses the legacy baseline (no SVO, no i128)
+    #[tracing::instrument(skip_all, name = "Spartan::prove_spartan_with_legacy")]
+    pub fn prove_spartan_with_legacy(
+        num_rounds: usize,
+        padded_num_constraints: usize,
+        uniform_constraints: &[Constraint],
+        flattened_polys: &[MultilinearPolynomial<F>],
+        tau: &[F],
+        transcript: &mut ProofTranscript,
+    ) -> (Self, Vec<F>, [F; 3]) {
+        let mut r = Vec::new();
+        let mut polys = Vec::new();
+        let mut claim = F::zero();
+
+        let mut az_bz_cz_poly = LegacySpartanInterleavedPolynomial::<F>::new(
+            uniform_constraints,
+            flattened_polys,
+            padded_num_constraints,
+        );
+        let mut eq_poly = GruenSplitEqPolynomial::new(tau, BindingOrder::LowToHigh);
+
+        for _ in 0..num_rounds {
+            az_bz_cz_poly.subsequent_sumcheck_round(
+                &mut eq_poly,
+                transcript,
+                &mut r,
+                &mut polys,
+                &mut claim,
+            );
         }
 
         (

@@ -1054,7 +1054,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
             // Create and set G2 cache
             (*setup_ptr).g2_cache = Some(G2Cache::new(&g2_elements, Some(&g_fin_element)));
 
-            println!("Cache initialization completed successfully.");
+            // println!("Cache initialization completed successfully.");
         }
 
         prover_setup

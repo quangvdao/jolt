@@ -1505,8 +1505,7 @@ fn extrapolate_with_recurrence_into<F: JoltField>(values_uk: &[F], h: usize, out
 mod tests {
     use super::*;
     use ark_bn254::Fr as BN254;
-    use ark_ff::AdditiveGroup;
-    use ark_std::{One, Zero};
+    use ark_std::Zero;
 
     #[test]
     fn test_extrapolate_uk_to_uh_fast_paths() {

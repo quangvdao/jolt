@@ -105,7 +105,36 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
     for num_iterations in num_iters {
         let bench_name = format!("sha2-chain-{}", num_iterations);
 
-        group.bench_function(&format!("svo/{}", bench_name), |b| {
+        // group.bench_function(&format!("svo/{}", bench_name), |b| {
+        //     b.iter_batched(
+        //         || setup_for_spartan("sha2-chain-guest", num_iterations),
+        //         |(
+        //             flattened_polys,
+        //             uniform_constraints,
+        //             num_rounds,
+        //             padded_num_constraints,
+        //             mut transcript,
+        //         )| {
+        //             let tau: Vec<F> = (0..num_rounds)
+        //                 .map(|_| F::from(rand::random::<u64>()))
+        //                 .collect();
+
+        //             black_box(
+        //                 SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
+        //                     num_rounds,
+        //                     padded_num_constraints,
+        //                     &uniform_constraints,
+        //                     &flattened_polys,
+        //                     &tau,
+        //                     &mut transcript,
+        //                 ),
+        //             );
+        //         },
+        //         BatchSize::SmallInput,
+        //     );
+        // });
+
+        group.bench_function(&format!("gruen/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -120,7 +149,36 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         .collect();
 
                     black_box(
-                        SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
+                        SumcheckInstanceProof::prove_spartan_with_gruen(
+                            num_rounds,
+                            padded_num_constraints,
+                            &uniform_constraints,
+                            &flattened_polys,
+                            &tau,
+                            &mut transcript,
+                        ),
+                    );
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_function(&format!("legacy/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(
+                    flattened_polys,
+                    uniform_constraints,
+                    num_rounds,
+                    padded_num_constraints,
+                    mut transcript,
+                )| {
+                    let tau: Vec<F> = (0..num_rounds)
+                        .map(|_| F::from(rand::random::<u64>()))
+                        .collect();
+
+                    black_box(
+                        SumcheckInstanceProof::prove_spartan_with_legacy(
                             num_rounds,
                             padded_num_constraints,
                             &uniform_constraints,

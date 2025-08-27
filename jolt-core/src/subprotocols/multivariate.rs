@@ -1206,7 +1206,7 @@ mod tests {
     use super::*;
     use ark_bn254::Fr as BN254;
     use ark_ff::{Field, UniformRand};
-    use ark_std::{One, Zero};
+    use ark_std::One;
 
     fn random_polys_01<F: Field>(v: usize, d: usize) -> Vec<Vec<F>> {
         let n = 1usize << v;

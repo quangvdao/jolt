@@ -12,6 +12,7 @@ use std::iter::{Product, Sum};
 use std::ops::{Add, Deref, DerefMut, Div, Mul, Sub};
 use std::ops::{AddAssign, MulAssign, Neg, SubAssign};
 use std::sync::atomic::Ordering;
+use ark_ff::BigInteger;
 
 #[derive(
     Clone, Default, Copy, PartialEq, Eq, Hash, Debug, CanonicalSerialize, CanonicalDeserialize,
@@ -335,6 +336,47 @@ impl JoltField for TrackedFr {
     fn mul_i128(&self, n: i128) -> Self {
         MULT_COUNT.fetch_add(1, Ordering::Relaxed);
         TrackedFr(self.0.mul_i128::<5, 6>(n))
+    }
+
+    #[inline(always)]
+    fn linear_combination_u64(pairs: &[(Self, u64)]) -> Self {
+        // Unreduced accumulation in BigInt, then one reduction
+        let mut tmp = ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&pairs[0].0.0.0, pairs[0].1);
+        for (a, b) in &pairs[1..] {
+            let carry = tmp.add_with_carry(&ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&a.0.0, *b));
+            debug_assert!(!carry, "carry in linear_combination_u64");
+        }
+        TrackedFr(ark_ff::Fp::from_unchecked_nplus1(tmp))
+    }
+
+    #[inline(always)]
+    fn linear_combination_i64(pos: &[(Self, u64)], neg: &[(Self, u64)]) -> Self {
+        // Unreduced pos sum
+        let mut pos_lc = ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&pos[0].0.0.0, pos[0].1);
+        for (a, b) in &pos[1..] {
+            let carry = pos_lc.add_with_carry(&ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&a.0.0, *b));
+            debug_assert!(!carry, "carry in linear_combination_i64(+)");
+        }
+        // Unreduced neg sum
+        let mut neg_lc = ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&neg[0].0.0.0, neg[0].1);
+        for (a, b) in &neg[1..] {
+            let carry = neg_lc.add_with_carry(&ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&a.0.0, *b));
+            debug_assert!(!carry, "carry in linear_combination_i64(-)");
+        }
+        // Subtract and reduce once
+        match pos_lc.cmp(&neg_lc) {
+            core::cmp::Ordering::Greater => {
+                let borrow = pos_lc.sub_with_borrow(&neg_lc);
+                debug_assert!(!borrow, "borrow in linear_combination_i64");
+                TrackedFr(ark_ff::Fp::from_unchecked_nplus1(pos_lc))
+            }
+            core::cmp::Ordering::Less => {
+                let borrow = neg_lc.sub_with_borrow(&pos_lc);
+                debug_assert!(!borrow, "borrow in linear_combination_i64");
+                TrackedFr(-ark_ff::Fp::from_unchecked_nplus1(neg_lc))
+            }
+            core::cmp::Ordering::Equal => TrackedFr(ark_ff::Fp::zero()),
+        }
     }
 }
 

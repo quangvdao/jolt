@@ -43,19 +43,19 @@ use crate::{
 
 #[derive(Allocative)]
 pub struct RASumCheck<F: JoltField> {
-    r_cycle: Vec<F>,
-    r_address_chunks: Vec<Vec<F>>,
-    eq_ra_claim: F,
-    d: usize,
-    T: usize,
-    prover_state: Option<RAProverState<F>>,
+    pub r_cycle: Vec<F>,
+    pub r_address_chunks: Vec<Vec<F>>,
+    pub eq_ra_claim: F,
+    pub d: usize,
+    pub T: usize,
+    pub prover_state: Option<RAProverState<F>>,
 }
 
 #[derive(Allocative)]
 pub struct RAProverState<F: JoltField> {
-    ra_i_polys: Vec<MultilinearPolynomial<F>>,
-    E_table: Vec<Vec<F>>,
-    eq_factor: F,
+    pub ra_i_polys: Vec<MultilinearPolynomial<F>>,
+    pub E_table: Vec<Vec<F>>,
+    pub eq_factor: F,
 }
 
 impl<F: JoltField> RASumCheck<F> {

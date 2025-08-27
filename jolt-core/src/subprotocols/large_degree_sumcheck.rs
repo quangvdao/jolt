@@ -17,7 +17,7 @@ use crate::{
     subprotocols::{
         karatsuba::{coeff_kara_16, coeff_kara_32, coeff_kara_4, coeff_kara_8},
         sumcheck::SumcheckInstanceProof,
-        toom::product_eval_univariate_full_zero_based,
+        univariate::product_eval_univariate_accumulate,
     },
     transcripts::{AppendToTranscript, Transcript},
     utils::{errors::ProofVerifyError, math::Math},
@@ -72,6 +72,7 @@ pub fn compute_mle_product_coeffs_toom<F: JoltField, const D: usize, const D_PLU
     factor: &F,
     E_table: &[Vec<F>],
 ) -> Vec<F> {
+    // Process each j in parallel, then reduce the results
     let evals = (0..(log_T - round - 1).pow2())
         .into_par_iter()
         .map(|j| {
@@ -81,40 +82,45 @@ pub fn compute_mle_product_coeffs_toom<F: JoltField, const D: usize, const D_PLU
                 *factor
             };
 
-            // let span = tracing::span!(tracing::Level::INFO, "Initialize left and right arrays");
-            // let _guard = span.enter();
+            // Build polynomial pairs for this j
             let polys = (0..D)
                 .map(|i| {
+                    let length = mle_vec[i].len();
                     if i == 0 {
                         (
                             j_factor.mul_1_optimized(mle_vec[i].get_bound_coeff(j)),
                             j_factor.mul_1_optimized(
-                                mle_vec[i].get_bound_coeff(j + mle_vec[i].len() / 2),
+                                mle_vec[i].get_bound_coeff(j + length / 2),
                             ),
                         )
                     } else {
                         (
                             mle_vec[i].get_bound_coeff(j),
-                            mle_vec[i].get_bound_coeff(j + mle_vec[i].len() / 2),
+                            mle_vec[i].get_bound_coeff(j + length / 2),
                         )
                     }
                 })
                 .collect::<Vec<_>>();
 
-            // drop(_guard);
-            // drop(span);
-
-            // let span = tracing::span!(tracing::Level::INFO, "Karatsuba step");
-            // let _guard = span.enter();
-
-            let pairs: Vec<(F, F)> = (0..D).map(|i| polys[i]).collect();
-            let table = product_eval_univariate_full_zero_based::<F>(&pairs);
-            let res: [F; D_PLUS_ONE] = table[..].try_into().unwrap();
-
-            // drop(_guard);
-            // drop(span);
-
-            res
+            // Use the optimized accumulate API that produces [1..D-1, ∞] layout
+            let pairs: [(F, F); D] = polys.try_into().unwrap();
+            let mut temp = [F::zero(); D]; // [1..D-1, ∞] layout
+            product_eval_univariate_accumulate::<F, D>(&pairs, &mut temp);
+            
+            // Convert to [0..D-1, ∞] layout for UniPoly constructor
+            let mut result = [F::zero(); D_PLUS_ONE];
+            // g(0) = product of all p(0) values
+            let mut g0 = F::one();
+            for (a0, _) in pairs.iter().copied() {
+                g0 *= a0;
+            }
+            result[0] = g0;
+            // Copy [1..D-1, ∞] to [1..D-1, ∞] positions
+            for i in 0..D {
+                result[i + 1] = temp[i];
+            }
+            
+            result
         })
         .reduce(
             || [F::zero(); D_PLUS_ONE],
@@ -126,8 +132,8 @@ pub fn compute_mle_product_coeffs_toom<F: JoltField, const D: usize, const D_PLU
             },
         );
 
-    let univariate_poly = UniPoly::from_evals_zero_based_with_infinity(&evals);
-    univariate_poly.coeffs
+    // Convert to Vec for UniPoly constructor
+    evals.to_vec()
 }
 
 pub fn compute_mle_product_coeffs_karatsuba<
@@ -261,7 +267,7 @@ pub struct LargeDMulSumCheckProof<F: JoltField, ProofTranscript: Transcript> {
 }
 
 impl<F: JoltField, ProofTranscript: Transcript> LargeDMulSumCheckProof<F, ProofTranscript> {
-    #[tracing::instrument(skip_all, name = "KaratsubaSumCheckProof::prove")]
+    #[tracing::instrument(skip_all, name = "ToomSumCheckProof::prove")]
     pub fn prove(
         mle_vec: &mut Vec<MultilinearPolynomial<F>>,
         r_cycle: &[F],
@@ -297,10 +303,10 @@ impl<F: JoltField, ProofTranscript: Transcript> LargeDMulSumCheckProof<F, ProofT
             let _guard = inner_span.enter();
 
             let mle_product_coeffs = match mle_vec.len() {
-                32 => compute_mle_product_coeffs_karatsuba::<F, 32, 33>(
+                32 => compute_mle_product_coeffs_toom::<F, 32, 33>(
                     mle_vec, round, log_T, &eq_factor, &E_table,
                 ),
-                16 => compute_mle_product_coeffs_karatsuba::<F, 16, 17>(
+                16 => compute_mle_product_coeffs_toom::<F, 16, 17>(
                     mle_vec, round, log_T, &eq_factor, &E_table,
                 ),
                 8 => compute_mle_product_coeffs_toom::<F, 8, 9>(
@@ -615,11 +621,12 @@ impl<F: JoltField, ProofTranscript: Transcript> AppendixCSumCheckProof<F, ProofT
 
                     let res: [(F, F); D_MINUS_ONE] = std::array::from_fn(|i| {
                         let entry = cur;
+                        let length = mle_vec[i + 1].len();
                         if i < D_MINUS_ONE - 1 {
                             cur = (
                                 cur.0 * mle_vec[i + 1].get_bound_coeff(j),
                                 cur.1
-                                    * mle_vec[i + 1].get_bound_coeff(j + mle_vec[i + 1].len() / 2),
+                                    * mle_vec[i + 1].get_bound_coeff(j + length / 2),
                             );
                         }
 

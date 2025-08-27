@@ -23,7 +23,7 @@ use crate::{
     },
     subprotocols::{
         large_degree_sumcheck::{
-            compute_eq_mle_product_univariate, compute_mle_product_coeffs_karatsuba,
+            compute_eq_mle_product_univariate, compute_mle_product_coeffs_toom,
         },
         sumcheck::SumcheckInstance,
     },
@@ -213,21 +213,21 @@ impl<F: JoltField> SumcheckInstance<F> for RASumCheck<F> {
 
         // TODO: we should really use Toom-Cook for d = 4 and 8 but that requires F to implement the SmallFieldMul trait. Need to rethink the interface.
         let mle_product_coeffs = match self.d {
-            4 => compute_mle_product_coeffs_karatsuba::<F, 4, 5>(
+            4 => compute_mle_product_coeffs_toom::<F, 4, 5>(
                 ra_i_polys,
                 round,
                 self.T.log_2(),
                 &prover_state.eq_factor,
                 &prover_state.E_table,
             ),
-            8 => compute_mle_product_coeffs_karatsuba::<F, 8, 9>(
+            8 => compute_mle_product_coeffs_toom::<F, 8, 9>(
                 ra_i_polys,
                 round,
                 self.T.log_2(),
                 &prover_state.eq_factor,
                 &prover_state.E_table,
             ),
-            16 => compute_mle_product_coeffs_karatsuba::<F, 16, 17>(
+            16 => compute_mle_product_coeffs_toom::<F, 16, 17>(
                 ra_i_polys,
                 round,
                 self.T.log_2(),

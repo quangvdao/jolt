@@ -8,7 +8,12 @@ use crate::poly::multilinear_polynomial::{BindingOrder, MultilinearPolynomial};
 use crate::poly::opening_proof::{
     OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator, BIG_ENDIAN,
 };
+#[cfg(feature = "spartan_svo")]
 use crate::poly::spartan_interleaved_poly::SpartanInterleavedPolynomial;
+#[cfg(feature = "spartan_gruen")]
+use crate::poly::spartan_interleaved_poly::GruenSpartanInterleavedPolynomial;
+#[cfg(feature = "spartan_legacy")]
+use crate::poly::spartan_interleaved_poly::LegacySpartanInterleavedPolynomial;
 use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::transcripts::{AppendToTranscript, Transcript};
@@ -403,7 +408,8 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         let mut polys = Vec::new();
         let mut claim = F::zero();
 
-        // First, precompute the accumulators and also the `SpartanInterleavedPolynomial`
+        // First, precompute the accumulators and also the polynomial implementation
+        #[cfg(feature = "spartan_svo")]
         let (accums_zero, accums_infty, mut az_bz_cz_poly) =
             SpartanInterleavedPolynomial::<NUM_SVO_ROUNDS, F>::new_with_precompute(
                 padded_num_constraints,
@@ -411,11 +417,43 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
                 flattened_polys,
                 tau,
             );
+
+        #[cfg(feature = "spartan_gruen")]
+        let (accums_zero, accums_infty, mut az_bz_cz_poly) = {
+            // No SVO accumulators for the baseline; use zeros
+            let zero = F::zero();
+            let acc0 = [zero; 0];
+            let acc1 = [zero; 0];
+            let _ = (padded_num_constraints, tau); // keep params used across cfg
+            let _ = acc0;
+            let _ = acc1;
+            let _poly = GruenSpartanInterleavedPolynomial::<F>::new(
+                uniform_constraints,
+                flattened_polys,
+                padded_num_constraints,
+            );
+            // adapter: we still use the same flow; SVO rounds are effectively zero
+            // but process_svo_sumcheck_rounds will use empty accumulators
+            ([], [], _poly)
+        };
+
+        #[cfg(feature = "spartan_legacy")]
+        let (accums_zero, accums_infty, mut az_bz_cz_poly) = {
+            let zero = F::zero();
+            let _ = (padded_num_constraints, tau);
+            let _poly = LegacySpartanInterleavedPolynomial::<F>::new(
+                uniform_constraints,
+                flattened_polys,
+                padded_num_constraints,
+            );
+            ([], [], _poly)
+        };
         #[cfg(feature = "allocative")]
         print_data_structure_heap_usage("SpartanInterleavedPolynomial", &az_bz_cz_poly);
 
         let mut eq_poly = GruenSplitEqPolynomial::new(tau, BindingOrder::LowToHigh);
 
+        #[cfg(feature = "spartan_svo")]
         process_svo_sumcheck_rounds::<NUM_SVO_ROUNDS, F, ProofTranscript>(
             &accums_zero,
             &accums_infty,
@@ -426,18 +464,33 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
             &mut eq_poly,
         );
 
-        // Round NUM_SVO_ROUNDS : do the streaming sumcheck to compute cached values
-        az_bz_cz_poly.streaming_sumcheck_round(
-            &mut eq_poly,
-            transcript,
-            &mut r,
-            &mut polys,
-            &mut claim,
-        );
+        #[cfg(feature = "spartan_svo")]
+        {
+            // Round NUM_SVO_ROUNDS : do the streaming sumcheck to compute cached values
+            az_bz_cz_poly.streaming_sumcheck_round(
+                &mut eq_poly,
+                transcript,
+                &mut r,
+                &mut polys,
+                &mut claim,
+            );
+        }
 
         // Round (NUM_SVO_ROUNDS + 1)..num_rounds : do the linear time sumcheck
+        #[cfg(feature = "spartan_svo")]
         for _ in (NUM_SVO_ROUNDS + 1)..num_rounds {
             az_bz_cz_poly.remaining_sumcheck_round(
+                &mut eq_poly,
+                transcript,
+                &mut r,
+                &mut polys,
+                &mut claim,
+            );
+        }
+
+        #[cfg(any(feature = "spartan_gruen", feature = "spartan_legacy"))]
+        for _ in 0..num_rounds {
+            az_bz_cz_poly.subsequent_sumcheck_round(
                 &mut eq_poly,
                 transcript,
                 &mut r,

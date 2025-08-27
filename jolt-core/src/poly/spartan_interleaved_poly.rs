@@ -49,6 +49,7 @@ impl<T> From<(usize, T)> for SparseCoefficient<T> {
 }
 
 #[derive(Clone, Debug, Allocative)]
+#[cfg(feature = "spartan_svo")]
 pub struct SpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltField> {
     /// A list of sparse vectors representing the (interleaved) coefficients for the Az, Bz polynomials
     /// Generated from binary evaluations. Each inner Vec is sorted by index.
@@ -63,6 +64,7 @@ pub struct SpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltFiel
     binding_scratch_space: Vec<SparseCoefficient<F>>,
 }
 
+#[cfg(feature = "spartan_svo")]
 impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM_SVO_ROUNDS, F> {
     /// Compute the unbound coefficients for the Az and Bz polynomials (no Cz coefficients are
     /// needed), along with the accumulators for the small value optimization (SVO) rounds.
@@ -1049,6 +1051,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
 }
 
 // Baseline 1: Gruen-only interleaved polynomial (no SVO, but i128 first round)
+#[cfg(feature = "spartan_gruen")]
 #[derive(Default, Debug, Clone)]
 pub struct GruenSpartanInterleavedPolynomial<F: JoltField> {
     pub(crate) unbound_coeffs_shards: Vec<Vec<SparseCoefficient<i128>>>,
@@ -1057,6 +1060,7 @@ pub struct GruenSpartanInterleavedPolynomial<F: JoltField> {
     dense_len: usize,
 }
 
+#[cfg(feature = "spartan_gruen")]
 impl<F: JoltField> GruenSpartanInterleavedPolynomial<F> {
     pub fn new(
         uniform_constraints: &[Constraint],
@@ -1506,6 +1510,7 @@ impl<F: JoltField> GruenSpartanInterleavedPolynomial<F> {
 }
 
 // Baseline 2: Original-style interleaved polynomial (single Vec storage)
+#[cfg(feature = "spartan_legacy")]
 #[derive(Default, Debug, Clone)]
 pub struct LegacySpartanInterleavedPolynomial<F: JoltField> {
     pub(crate) unbound_coeffs: Vec<SparseCoefficient<i128>>,
@@ -1514,6 +1519,7 @@ pub struct LegacySpartanInterleavedPolynomial<F: JoltField> {
     dense_len: usize,
 }
 
+#[cfg(feature = "spartan_legacy")]
 impl<F: JoltField> LegacySpartanInterleavedPolynomial<F> {
     pub fn new(
         uniform_constraints: &[Constraint],

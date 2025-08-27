@@ -33,6 +33,7 @@ fn gen_mles<F: JoltField>(d: usize, t: usize) -> Vec<MultilinearPolynomial<F>> {
     mles
 }
 
+#[allow(unused)]
 fn naive_coeffs<F: JoltField>(
     mles: &[MultilinearPolynomial<F>],
     round: usize,

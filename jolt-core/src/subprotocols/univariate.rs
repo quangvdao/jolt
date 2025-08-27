@@ -1680,3 +1680,41 @@ const FACTORIALS: [u64; 17] = [
     1307674368000,
     20922789888000,
 ];
+
+/// Skip-1 wrapper that produces [g(0), g(2)..g(D-1), g(∞)] layout for RA use cases
+/// This omits index 1 when RA wants skip-1 behavior, working directly with the 1-based grid
+/// to avoid unnecessary array copying.
+///
+/// Inputs:
+/// - `pairs[j] = (p_j(0), p_j(1))` for D factors
+/// - `output`: mutable slice of length D to store [g(0), g(2)..g(D-1), g(∞)]
+///
+/// Effects:
+/// - Writes [g(0), g(2)..g(D-1), g(∞)] where g = ∏ p_j
+///
+/// Precondition:
+/// - `output.len() == D`
+#[inline]
+pub fn product_eval_univariate_accumulate_skip1_zero_based<F: JoltField, const D: usize>(
+    pairs: &[(F, F); D],
+    output: &mut [F],
+) {
+    assert_eq!(output.len(), D);
+    
+    // Compute g(0) = product of all p(0) values
+    let mut g0 = F::one();
+    for (a0, _) in pairs.iter().copied() {
+        g0 *= a0;
+    }
+    output[0] = g0;
+    
+    // Use the optimized accumulate function that produces [1..D-1, ∞] layout
+    let mut temp = [F::zero(); D];
+    product_eval_univariate_accumulate::<F, D>(pairs, &mut temp);
+    
+    // Copy [2..D-1, ∞] to output positions [1..D-2, D-1], skipping g(1)
+    for i in 1..D-1 {
+        output[i] = temp[i]; // temp[i] = g(i+1), output[i] = g(i+1) for i+1 ≥ 2
+    }
+    output[D-1] = temp[D-1]; // g(∞)
+}

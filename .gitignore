@@ -37,3 +37,5 @@ temp_file
 
 # act executable
 bin/act
+
+.notes/*

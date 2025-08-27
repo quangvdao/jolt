@@ -906,11 +906,11 @@ mod tests {
             let lookup_index = LookupQuery::<WORD_SIZE>::to_lookup_index(cycle);
             let table: Option<LookupTables<WORD_SIZE>> = cycle.lookup_table();
             if let Some(table) = table {
-                rv_claim += eq_r_cycle[i].mul_u64(table.materialize_entry(lookup_index));
+                rv_claim += eq_r_cycle[i].mul_u64::<5>(table.materialize_entry(lookup_index));
             }
             let (lo, ro) = LookupQuery::<WORD_SIZE>::to_lookup_operands(cycle);
-            left_operand_claim += eq_r_cycle[i].mul_u64(lo);
-            right_operand_claim += eq_r_cycle[i].mul_u64(ro);
+            left_operand_claim += eq_r_cycle[i].mul_u64::<5>(lo);
+            right_operand_claim += eq_r_cycle[i].mul_u64::<5>(ro);
         }
 
         let prover_accumulator = prover_sm.get_prover_accumulator();

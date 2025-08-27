@@ -21,7 +21,7 @@ license-file = "LICENSE"
 keywords = ["SNARK", "cryptography", "proofs", "zkVM"]
 
 [features]
-default = ["host", "spartan_svo"]
+default = ["host"]
 host = [
     "dep:reqwest",
     "dep:tokio",
@@ -41,10 +41,6 @@ parallel = [
 allocative = ["dep:inferno", "ark-ff/allocative"]
 test_incremental = []
 
-# Spartan implementation selection (mutually exclusive; default spartan_svo)
-spartan_svo = []
-spartan_gruen = []
-spartan_legacy = []
 
 [dependencies]
 ark-bn254 = "0.5.0"
@@ -159,6 +155,10 @@ harness = false
 
 [[bench]]
 name = "multivariate_product"
+harness = false
+
+[[bench]]
+name = "spartan_sumcheck"
 harness = false
 
 [lib]

@@ -10,13 +10,19 @@ use jolt_core::{
     utils::{math::Math, small_value::NUM_SVO_ROUNDS},
     zkvm::{
         r1cs::{
+            builder::CombinedUniformBuilder,
             constraints::{JoltRV32IMConstraints, R1CSConstraints},
+            inputs::ALL_R1CS_INPUTS,
             key::UniformSpartanKey,
         },
-        witness::{AllCommittedPolynomials, CommittedPolynomial},
+        witness::AllCommittedPolynomials,
         Jolt, JoltProverPreprocessing, JoltRV32IM,
     },
 };
+use rayon::prelude::*;
+
+#[cfg(feature = "host")]
+extern crate sha2_inline;
 
 type F = Fr;
 type PCS = DoryCommitmentScheme;
@@ -28,7 +34,6 @@ fn setup_for_spartan(
 ) -> (
     Vec<MultilinearPolynomial<F>>,
     Vec<jolt_core::zkvm::r1cs::builder::Constraint>,
-    UniformSpartanKey<F>,
     usize,
     usize,
     ProofTranscript,
@@ -60,119 +65,78 @@ fn setup_for_spartan(
         padded_trace_length,
     );
 
+    // This is needed to initialize the global list of committed polynomials, required for witness generation.
     let ram_d = jolt_core::zkvm::witness::compute_d_parameter(io_device.memory_layout.memory_end as usize);
     let bytecode_d =
         jolt_core::zkvm::witness::compute_d_parameter(preprocessing.shared.bytecode.code_size);
     let _all_committed_polys_handle = AllCommittedPolynomials::initialize(ram_d, bytecode_d);
 
-    let mut flattened_polys: Vec<MultilinearPolynomial<F>> = Vec::new();
-    let mut witness_polys = CommittedPolynomial::generate_witness_batch(
-        &AllCommittedPolynomials::iter().cloned().collect::<Vec<_>>(),
-        &preprocessing,
-        &trace,
-    );
+    let flattened_polys: Vec<MultilinearPolynomial<F>> = ALL_R1CS_INPUTS
+        .par_iter()
+        .map(|input| input.generate_witness(&trace, &preprocessing))
+        .collect();
 
-    for poly in AllCommittedPolynomials::iter() {
-        flattened_polys.push(witness_polys.remove(poly).unwrap());
-    }
-
-    let uniform_builder =
+    let uniform_builder: CombinedUniformBuilder<F> =
         JoltRV32IMConstraints::construct_constraints(padded_trace_length);
     let uniform_constraints = uniform_builder.uniform_builder.get_constraints();
     let uniform_key = UniformSpartanKey::from_builder(&uniform_builder);
-    let num_rounds_x = uniform_key.num_steps.log_2();
+
+    let num_rounds = uniform_key.num_steps.log_2() + uniform_key.num_cons_total.log_2();
     let padded_num_constraints = uniform_key.num_cons_total;
     let transcript = ProofTranscript::new(b"Jolt transcript");
 
     (
         flattened_polys,
         uniform_constraints,
-        uniform_key,
-        num_rounds_x,
+        num_rounds,
         padded_num_constraints,
         transcript,
     )
 }
 
-fn bench_spartan_svo(c: &mut Criterion) {
-    let mut group = c.benchmark_group("spartan_svo");
+fn bench_spartan_sumcheck(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Spartan Sumcheck");
     group.sampling_mode(SamplingMode::Flat);
     group.sample_size(10);
 
-    group.bench_function("sha2-chain-100", |b| {
-        b.iter_batched(
-            || setup_for_spartan("sha2-chain-guest", 100),
-            |(
-                flattened_polys,
-                uniform_constraints,
-                _uniform_key,
-                num_rounds_x,
-                padded_num_constraints,
-                mut transcript,
-            )| {
-                let tau: Vec<F> = (0..num_rounds_x)
-                    .map(|_| F::from(rand::random::<u64>()))
-                    .collect();
+    // powers of 2
+    let num_iters = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
-                let (proof, r, final_evals) = black_box(
-                    SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
-                        num_rounds_x,
-                        padded_num_constraints,
-                        &uniform_constraints,
-                        &flattened_polys,
-                        &tau,
-                        &mut transcript,
-                    ),
-                );
+    for num_iterations in num_iters {
+        let bench_name = format!("sha2-chain-{}", num_iterations);
 
-                (proof, r, final_evals)
-            },
-            BatchSize::SmallInput,
-        );
-    });
+        group.bench_function(&format!("svo/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(
+                    flattened_polys,
+                    uniform_constraints,
+                    num_rounds,
+                    padded_num_constraints,
+                    mut transcript,
+                )| {
+                    let tau: Vec<F> = (0..num_rounds)
+                        .map(|_| F::from(rand::random::<u64>()))
+                        .collect();
+
+                    black_box(
+                        SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
+                            num_rounds,
+                            padded_num_constraints,
+                            &uniform_constraints,
+                            &flattened_polys,
+                            &tau,
+                            &mut transcript,
+                        ),
+                    );
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
 
     group.finish();
 }
 
-fn bench_spartan_gruen(c: &mut Criterion) {
-    let mut group = c.benchmark_group("spartan_gruen");
-    group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(10);
-
-    group.bench_function("sha2-chain-100", |b| {
-        b.iter_batched(
-            || setup_for_spartan("sha2-chain-guest", 100),
-            |(
-                flattened_polys,
-                uniform_constraints,
-                _uniform_key,
-                num_rounds_x,
-                padded_num_constraints,
-                mut transcript,
-            )| {
-                let tau: Vec<F> = (0..num_rounds_x)
-                    .map(|_| F::from(rand::random::<u64>()))
-                    .collect();
-
-                let (proof, r, final_evals) = black_box(
-                    SumcheckInstanceProof::prove_spartan_with_gruen(
-                        num_rounds_x,
-                        padded_num_constraints,
-                        &uniform_constraints,
-                        &flattened_polys,
-                        &tau,
-                        &mut transcript,
-                    ),
-                );
-
-                (proof, r, final_evals)
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.finish();
-}
-
-criterion_group!(benches, bench_spartan_svo, bench_spartan_gruen);
+criterion_group!(benches, bench_spartan_sumcheck);
 criterion_main!(benches);

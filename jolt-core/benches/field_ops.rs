@@ -1,10 +1,7 @@
 use ark_bn254::Fr;
-use ark_ff::{BigInteger, UniformRand};
-use ark_std::{
-    rand::{rngs::StdRng, Rng, SeedableRng},
-    One, Zero,
-};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use ark_ff::{UniformRand, BigInteger};
+use ark_std::rand::{rngs::StdRng, SeedableRng, Rng};
+use criterion::{criterion_group, criterion_main, Criterion, black_box};
 use jolt_core::field::JoltField;
 
 /// Benchmark 1: Primitive finite field operations
@@ -17,12 +14,12 @@ fn bench_primitive_field_ops(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0u64);
 
     // Generate random field elements
-    let a_samples: Vec<Fr> = (0..SAMPLES).map(|_| Fr::random(&mut rng)).collect();
-    let b_samples: Vec<Fr> = (0..SAMPLES).map(|_| Fr::random(&mut rng)).collect();
+    let a_samples: Vec<Fr> = (0..SAMPLES).map(|_| Fr::rand(&mut rng)).collect();
+    let b_samples: Vec<Fr> = (0..SAMPLES).map(|_| Fr::rand(&mut rng)).collect();
 
     // Generate small values for small-small and small-big multiplications
     let small_u64_samples: Vec<u64> = (0..SAMPLES).map(|_| rng.gen_range(0..1000)).collect();
-    let small_i64_samples: Vec<i64> = (0..SAMPLES).map(|_| rng.gen_range(-1000..1000)).collect();
+    // let small_i64_samples: Vec<i64> = (0..SAMPLES).map(|_| rng.gen_range(-1000..1000)).collect();
 
     let mut group = c.benchmark_group("Primitive Field Operations");
 
@@ -83,11 +80,13 @@ fn bench_primitive_field_ops(c: &mut Criterion) {
         })
     });
 
-    // Small-big multiplication: u64 using JoltField
+    // Small-big multiplication: u64
     group.bench_function("small_big_mul_u64", |bench| {
         let a = a_samples[0];
         let small = small_u64_samples[0];
-        bench.iter(|| <Fr as JoltField>::mul_u64(&a, black_box(small)))
+        bench.iter(|| {
+            <Fr as JoltField>::mul_u64(&black_box(a), black_box(small))
+        })
     });
 
     // Small-big multiplication: u64 (10 operations)
@@ -96,101 +95,167 @@ fn bench_primitive_field_ops(c: &mut Criterion) {
         let small = small_u64_samples[0];
         bench.iter(|| {
             for _ in 0..10 {
-                let result = <Fr as JoltField>::mul_u64(&a, black_box(small));
+                let result = <Fr as JoltField>::mul_u64(&black_box(a), black_box(small));
                 black_box(result);
             }
         })
     });
 
-    // Small-big multiplication: i64 using JoltField
-    group.bench_function("small_big_mul_i64", |bench| {
+    // // Small-big multiplication: i64
+    // group.bench_function("small_big_mul_i64", |bench| {
+    //     let a = a_samples[0];
+    //     let small = small_i64_samples[0];
+    //     bench.iter(|| {
+    //         <Fr as JoltField>::mul_i64(black_box(a), black_box(small))
+    //     })
+    // });
+
+    // // Small-big multiplication: i64 (10 operations)
+    // group.bench_function("small_big_mul_i64_10x", |bench| {
+    //     let a = a_samples[0];
+    //     let small = small_i64_samples[0];
+    //     bench.iter(|| {
+    //         for _ in 0..10 {
+    //             _ = <Fr as JoltField>::mul_i64(black_box(a), black_box(small));
+    //         }
+    //     })
+    // });
+
+    // Breakdown of mul_u64: BigInt multiplication + Barrett reduction
+    group.bench_function("bigint_mul_u64_w_carry (1st half of mul_u64)", |bench| {
         let a = a_samples[0];
-        let small = small_i64_samples[0];
-        bench.iter(|| <Fr as JoltField>::mul_i64(&a, black_box(small)))
-    });
-
-    // Small-big multiplication: i64 (10 operations)
-    group.bench_function("small_big_mul_i64_10x", |bench| {
-        let a = a_samples[0];
-        let small = small_i64_samples[0];
-        bench.iter(|| {
-            for _ in 0..10 {
-                let result = <Fr as JoltField>::mul_i64(&a, black_box(small));
-                black_box(result);
-            }
-        })
-    });
-
-    // Small-big multiplication: u128 using JoltField
-    group.bench_function("small_big_mul_u128", |bench| {
-        let a = a_samples[0];
-        let small = small_u64_samples[0] as u128;
-        bench.iter(|| <Fr as JoltField>::mul_u128(&a, black_box(small)))
-    });
-
-    // Small-big multiplication: i128 using JoltField
-    group.bench_function("small_big_mul_i128", |bench| {
-        let a = a_samples[0];
-        let small = small_i64_samples[0] as i128;
-        bench.iter(|| <Fr as JoltField>::mul_i128(&a, black_box(small)))
-    });
-
-    // Field conversion benchmarks using JoltField
-    group.bench_function("field_from_u64", |bench| {
-        let small = small_u64_samples[0];
-        bench.iter(|| black_box(<Fr as JoltField>::from_u64(black_box(small))))
-    });
-
-    // Field conversion from u64 (10 operations)
-    group.bench_function("field_from_u64_10x", |bench| {
         let small = small_u64_samples[0];
         bench.iter(|| {
-            let mut result = Fr::zero();
-            for _ in 0..10 {
-                result = black_box(<Fr as JoltField>::from_u64(black_box(small)));
-            }
-            black_box(result)
+            // Extract the BigInt from the field element and multiply
+            ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&black_box(a.0), black_box(small))
         })
     });
 
-    group.bench_function("field_from_i64", |bench| {
-        let mut i = 0;
-        bench.iter(|| {
-            i = (i + 1) % SAMPLES;
-            black_box(<Fr as JoltField>::from_i64(black_box(small_i64_samples[i])))
-        })
-    });
-
-    // Field conversion from i64 (10 operations)
-    group.bench_function("field_from_i64_10x", |bench| {
-        let small = small_i64_samples[0];
-        bench.iter(|| {
-            let mut result = Fr::one();
-            for _ in 0..10 {
-                result = black_box(<Fr as JoltField>::from_i64(black_box(small)));
-            }
-            black_box(result)
-        })
-    });
-
-    // Power of 2 multiplication using JoltField
-    group.bench_function("mul_pow_2", |bench| {
+    // BigInt multiplication (10 operations)
+    group.bench_function("bigint_mul_u64_w_carry_10x", |bench| {
         let a = a_samples[0];
-        let pow = 64usize;
-        bench.iter(|| <Fr as JoltField>::mul_pow_2(&a, black_box(pow)))
-    });
-
-    // Power of 2 multiplication (10 operations)
-    group.bench_function("mul_pow_2_10x", |bench| {
-        let a = a_samples[0];
-        let pow = 64usize;
+        let small = small_u64_samples[0];
         bench.iter(|| {
             for _ in 0..10 {
-                let result = <Fr as JoltField>::mul_pow_2(&a, black_box(pow));
+                let result = ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&black_box(a.0), black_box(small));
                 black_box(result);
             }
         })
     });
+
+    group.bench_function("barrett_reduce_nplus1 (2nd half of mul_u64)", |bench| {
+        // Pre-compute BigInt<5> values for reduction
+        let bigint_nplus1_samples: Vec<_> = (0..SAMPLES).map(|i| {
+            ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&a_samples[i].0, small_u64_samples[i])
+        }).collect();
+
+        bench.iter(|| {
+            Fr::from_unchecked_nplus1::<5>(black_box(bigint_nplus1_samples[0]))
+        })
+    });
+
+    // Barrett reduction (10 operations)
+    group.bench_function("barrett_reduce_nplus1_10x", |bench| {
+        // Pre-compute BigInt<5> values for reduction
+        let bigint_nplus1_samples: Vec<_> = (0..SAMPLES).map(|i| {
+            ark_ff::BigInt::<4>::mul_u64_w_carry::<5>(&a_samples[i].0, small_u64_samples[i])
+        }).collect();
+
+        bench.iter(|| {
+            for _ in 0..10 {
+                let result = Fr::from_unchecked_nplus1::<5>(black_box(bigint_nplus1_samples[0]));
+                black_box(result);
+            }
+        })
+    });
+
+    // Breakdown of regular field multiplication: BigInt multiplication + Montgomery reduction
+    group.bench_function("bigint_mul_nxn_to_2n (1st half of field mul)", |bench| {
+        let a = a_samples[0];
+        let b = b_samples[0];
+        bench.iter(|| {
+            // N x N -> 2N limb multiplication
+            black_box(a.0).mul_trunc::<4,8>(black_box(&b.0))
+        })
+    });
+
+    // BigInt multiplication NxN->2N (10 operations)
+    group.bench_function("bigint_mul_nxn_to_2n_10x", |bench| {
+        let a = a_samples[0].0;
+        let b = b_samples[0].0;
+        bench.iter(|| {
+            for _ in 0..10 {
+                let result = black_box(a).mul_trunc::<4,8>(black_box(&b));
+                black_box(result);
+            }
+        })
+    });
+
+    group.bench_function("montgomery_reduce_2n (2nd half of field mul)", |bench| {
+        // Pre-compute BigInt<8> values (2N limbs) for Montgomery reduction
+        let bigint_2n_samples: Vec<ark_ff::BigInt<8>> = (0..SAMPLES).map(|i| {
+            a_samples[i].0.mul_trunc::<4,8>(&b_samples[i].0)
+        }).collect();
+
+        bench.iter(|| {
+            Fr::montgomery_reduce_2n::<8>(black_box(bigint_2n_samples[0]))
+        })
+    });
+
+    // Montgomery reduction (10 operations)
+    group.bench_function("montgomery_reduce_2n_10x", |bench| {
+        // Pre-compute BigInt<8> values (2N limbs) for Montgomery reduction
+        let bigint_2n_samples: Vec<ark_ff::BigInt<8>> = (0..SAMPLES).map(|i| {
+            a_samples[i].0.mul_trunc::<4,8>(&b_samples[i].0)
+        }).collect();
+
+        let sample = bigint_2n_samples[0];
+        bench.iter(|| {
+            for _ in 0..10 {
+                let result = Fr::montgomery_reduce_2n::<8>(black_box(sample));
+                black_box(result);
+            }
+        })
+    });
+
+    // // Field conversion benchmarks
+    // group.bench_function("field_from_u64", |bench| {
+    //     bench.iter(|| {
+    //         black_box(<Fr as JoltField>::from_u64(black_box(small_u64_samples[0])))
+    //     })
+    // });
+
+    // // Field conversion from u64 (10 operations)
+    // group.bench_function("field_from_u64_10x", |bench| {
+    //     let small = small_u64_samples[0];
+    //     bench.iter(|| {
+    //         let mut result = Fr::from(0u64);
+    //         for _ in 0..10 {
+    //             result = black_box(<Fr as JoltField>::from_u64(black_box(small)));
+    //         }
+    //         black_box(result)
+    //     })
+    // });
+
+    // group.bench_function("field_from_i64", |bench| {
+    //     let mut i = 0;
+    //     bench.iter(|| {
+    //         i = (i + 1) % SAMPLES;
+    //         black_box(<Fr as JoltField>::mul_i64(black_box(Fr::from(1u64)), black_box(small_i64_samples[i])))
+    //     })
+    // });
+
+    // // Field conversion from i64 (10 operations)
+    // group.bench_function("field_from_i64_10x", |bench| {
+    //     let small = small_i64_samples[0];
+    //     bench.iter(|| {
+    //         let mut result = Fr::from(1u64);
+    //         for _ in 0..10 {
+    //             result = black_box(<Fr as JoltField>::mul_i64(black_box(result), black_box(small)));
+    //         }
+    //         black_box(result)
+    //     })
+    // });
 
     group.finish();
 }

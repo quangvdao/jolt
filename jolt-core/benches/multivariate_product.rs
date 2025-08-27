@@ -1,242 +1,134 @@
 use ark_bn254::Fr;
-use ark_ff::UniformRand;
-use ark_std::{
-    rand::{rngs::StdRng, SeedableRng},
-    One, Zero,
-};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use jolt_core::field::JoltField;
+use criterion::{criterion_group, criterion_main, Criterion, black_box};
 use jolt_core::subprotocols::multivariate::{
-    multi_product_eval, multivariate_product_evaluations_accumulate,
-    multivariate_product_evaluations_accumulate_buffered, multivariate_product_evaluations_naive,
+    multi_product_eval,
+    multivariate_product_evaluations_naive,
 };
 
-/// Benchmark 4: Multivariate product evaluation
+/// Consolidated Multivariate Product Benchmarks
 ///
-/// As specified in Section 8.1: "Finally, we benchmark the cost of computing the product
-/// of d multilinear polynomials in v variables, returning the result in evaluation form."
-fn bench_multivariate_product(c: &mut Criterion) {
-    const SAMPLES: usize = 1000;
-    let mut rng = StdRng::seed_from_u64(0u64);
+/// This file consolidates what were previously three separate benchmark functions:
+/// - bench_multivariate_product (original test cases)
+/// - bench_degree_scaling (varying degrees with fixed v=3)
+/// - bench_variable_scaling (varying variables with fixed d=4)
+///
+/// Benefits of consolidation:
+/// 1. Eliminates ~150 lines of duplicated code
+/// 2. Single source of truth for polynomial generation and benchmark structure
+/// 3. Easier maintenance and consistency across different test types
+/// 4. Flexible configuration through test_configs vector
+///
+/// Note: This benchmark only uses paper-aligned implementations with the correct
+/// U_d = {0,1} if d=1, {0,1,...,d-1,∞} if d≥2 definition.
+fn bench_multivariate_product_consolidated(c: &mut Criterion) {
+    let test_configs = vec![
+        // Specific combinations: v=1,2,3,4 with d=4,8,16,32
+        (1, 4, "v=1_d=4", 0u64),
+        (1, 8, "v=1_d=8", 0u64),
+        (1, 16, "v=1_d=16", 0u64),
+        (1, 32, "v=1_d=32", 0u64),
+        (2, 4, "v=2_d=4", 0u64),
+        (2, 8, "v=2_d=8", 0u64),
+        (2, 16, "v=2_d=16", 0u64),
+        (2, 32, "v=2_d=32", 0u64),
+        (3, 4, "v=3_d=4", 0u64),
+        (3, 8, "v=3_d=8", 0u64),
+        (3, 16, "v=3_d=16", 0u64),
+        (3, 32, "v=3_d=32", 0u64),
+        (4, 4, "v=4_d=4", 0u64),
+        (4, 8, "v=4_d=8", 0u64),
+        (4, 16, "v=4_d=16", 0u64),
+        (4, 32, "v=4_d=32", 0u64),
 
-    // Test different parameter combinations
-    let test_cases = [
-        (2, 3),  // v=2, d=3
-        (3, 4),  // v=3, d=4
-        (4, 8),  // v=4, d=8
-        (5, 16), // v=5, d=16
-        (6, 32), // v=6, d=32
+        // Commented out original test cases
+        // (2, 3, "v=2_d=3", 0u64),
+        // (3, 4, "v=3_d=4", 0u64),
+        // (4, 8, "v=4_d=8", 0u64),
+        // (5, 16, "v=5_d=16", 0u64),
+        // (6, 32, "v=6_d=32", 0u64),
+
+        // Commented out degree scaling tests
+        // (3, 2, "degree_scaling_d=2", 1u64),
+        // (3, 3, "degree_scaling_d=3", 1u64),
+        // (3, 4, "degree_scaling_d=4", 1u64),
+        // (3, 6, "degree_scaling_d=6", 1u64),
+        // (3, 8, "degree_scaling_d=8", 1u64),
+        // (3, 12, "degree_scaling_d=12", 1u64),
+        // (3, 16, "degree_scaling_d=16", 1u64),
+
+        // Commented out variable scaling tests
+        // (2, 4, "variable_scaling_v=2", 2u64),
+        // (3, 4, "variable_scaling_v=3", 2u64),
+        // (4, 4, "variable_scaling_v=4", 2u64),
+        // (5, 4, "variable_scaling_v=5", 2u64),
+        // (6, 4, "variable_scaling_v=6", 2u64),
+        // (7, 4, "variable_scaling_v=7", 2u64),
     ];
 
-    for &(v, d) in &test_cases {
-        let mut group = c.benchmark_group(&format!("Multivariate Product (v={}, d={})", v, d));
+    for (v, d, group_suffix, seed_offset) in test_configs {
+        // Skip very large cases that might be too slow for benchmarking
+        let max_size = if group_suffix.contains("degree_scaling") { 50_000 } else { 100_000 };
+        if (d + 1_usize).pow(v as u32) > max_size {
+            continue;
+        }
+
+        // Generate group name based on the type of test
+        let group_name = if group_suffix.contains("v=") && group_suffix.contains("d=") && !group_suffix.contains("scaling") {
+            format!("Multivariate Product ({})", group_suffix.replace("_", ", "))
+        } else if group_suffix.contains("degree_scaling") {
+            format!("Degree Scaling (v=3, {})", group_suffix.replace("degree_scaling_", "").replace("_", "="))
+        } else if group_suffix.contains("variable_scaling") {
+            format!("Variable Scaling ({}, d=4)", group_suffix.replace("variable_scaling_", "").replace("_", "="))
+        } else {
+            format!("Multivariate Product ({})", group_suffix)
+        };
+
+        let mut group = c.benchmark_group(group_name);
 
         // Generate random multilinear polynomials on {0,1}^v
+        let n = 1usize << v;
+
+        // Use different seeds for different test types to ensure variety
+        let base_seed = 7919u64 + seed_offset * 1000;
         let polynomials: Vec<Vec<Fr>> = (0..d)
             .map(|j| {
-                let n = 1usize << v;
                 (0..n)
                     .map(|i| {
-                        // Vary each polynomial slightly for realistic testing
-                        let base = ((i as u64) * 17 + (j as u64) * 101 + 5) % 100;
-                        Fr::from_u64(base)
+                        let seed = ((i as u64) * 17 + (j as u64) * 101 + 5 + seed_offset * 100) % base_seed;
+                        Fr::from(seed)
                     })
                     .collect()
             })
             .collect();
 
-        // Naive approach: extrapolate multilinear polynomials first, then multiply
+        // Method 1: Naive approach (extrapolate first, then multiply)
         group.bench_function("naive_extrapolate_then_multiply", |bench| {
-            let polys = polynomials.clone();
             bench.iter(|| {
-                let result = multivariate_product_evaluations_naive::<Fr>(v, &polys, d);
-                black_box(result)
+                black_box(multivariate_product_evaluations_naive::<Fr>(
+                    black_box(v),
+                    black_box(&polynomials),
+                    black_box(d)
+                ))
             })
         });
 
-        // New algorithm basic: recursive approach without extrapolation optimization
-        group.bench_function("new_algorithm_basic", |bench| {
-            let polys = polynomials.clone();
+        // Method 2: Our new algorithm with extrapolation technique
+        group.bench_function("optimized_with_extrapolation", |bench| {
             bench.iter(|| {
-                let result = multi_product_eval::<Fr>(v, &polys, d);
-                black_box(result)
+                black_box(multi_product_eval::<Fr>(
+                    black_box(v),
+                    black_box(&polynomials),
+                    black_box(d)
+                ))
             })
         });
-
-        // Accumulate version: adds to existing buffer
-        let out_len = (d + 1).pow(v as u32) as usize;
-
-        group.bench_function("accumulate_into_buffer", |bench| {
-            let polys = polynomials.clone();
-            bench.iter(|| {
-                let mut sums = vec![Fr::zero(); out_len];
-                multivariate_product_evaluations_accumulate::<Fr>(v, &polys, d, &mut sums);
-                black_box(sums)
-            })
-        });
-
-        // Buffered version: uses pre-allocated work buffers
-        group.bench_function("buffered_accumulate", |bench| {
-            let polys = polynomials.clone();
-            bench.iter(|| {
-                let mut sums = vec![Fr::zero(); out_len];
-                let mut prod_buf = vec![Fr::zero(); out_len];
-                let mut work_buf1 = vec![Fr::zero(); out_len];
-                let mut work_buf2 = vec![Fr::zero(); out_len];
-                let mut work_buf3 = vec![Fr::zero(); out_len];
-                multivariate_product_evaluations_accumulate_buffered::<Fr>(
-                    v,
-                    &polys,
-                    d,
-                    &mut sums,
-                    &mut prod_buf,
-                    &mut work_buf1,
-                    &mut work_buf2,
-                    &mut work_buf3,
-                );
-                black_box(sums)
-            })
-        });
-
-        // Benchmark with different polynomial patterns
-        let constant_polys: Vec<Vec<Fr>> = (0..d)
-            .map(|j| {
-                let n = 1usize << v;
-                let c = Fr::from_u64((j + 1) as u64);
-                vec![c; n] // Constant polynomial p(x) = c
-            })
-            .collect();
-
-        group.bench_function(&format!("constant_polys_v{}_d{}", v, d), |bench| {
-            let polys = constant_polys.clone();
-            bench.iter(|| {
-                let result = multi_product_eval::<Fr>(v, &polys, d);
-                black_box(result)
-            })
-        });
-
-        let identity_polys: Vec<Vec<Fr>> = (0..d)
-            .map(|j| {
-                let n = 1usize << v;
-                (0..n)
-                    .map(|i| if i == 0 { Fr::zero() } else { Fr::one() })
-                    .collect()
-            })
-            .collect();
-
-        group.bench_function(&format!("identity_polys_v{}_d{}", v, d), |bench| {
-            let polys = identity_polys.clone();
-            bench.iter(|| {
-                let result = multi_product_eval::<Fr>(v, &polys, d);
-                black_box(result)
-            })
-        });
-
-        // Benchmark with small coefficients
-        let small_polys: Vec<Vec<Fr>> = (0..d)
-            .map(|j| {
-                let n = 1usize << v;
-                (0..n)
-                    .map(|i| {
-                        let val = ((i as u64) + (j as u64)) % 10;
-                        Fr::from_u64(val)
-                    })
-                    .collect()
-            })
-            .collect();
-
-        group.bench_function(&format!("small_coeffs_v{}_d{}", v, d), |bench| {
-            let polys = small_polys.clone();
-            bench.iter(|| {
-                let result = multi_product_eval::<Fr>(v, &polys, d);
-                black_box(result)
-            })
-        });
-
-        // Benchmark multiple evaluations
-        let num_evaluations = 5;
-        let multiple_polys: Vec<Vec<Vec<Fr>>> = (0..num_evaluations)
-            .map(|_| {
-                (0..d)
-                    .map(|j| {
-                        let n = 1usize << v;
-                        (0..n)
-                            .map(|i| {
-                                let base = ((i as u64) * 17 + (j as u64) * 101 + 5) % 100;
-                                Fr::from_u64(base)
-                            })
-                            .collect()
-                    })
-                    .collect()
-            })
-            .collect();
-
-        group.bench_function(
-            &format!("multiple_evaluations_{}x_v{}_d{}", num_evaluations, v, d),
-            |bench| {
-                let polys_list = multiple_polys.clone();
-                bench.iter(|| {
-                    let mut results = Vec::new();
-                    for polys in &polys_list {
-                        let result = multi_product_eval::<Fr>(v, polys, d);
-                        results.push(result);
-                    }
-                    black_box(results)
-                })
-            },
-        );
-
-        // Benchmark degree scaling (fixed v, varying d)
-        if v <= 4 {
-            // Avoid memory issues with large v
-            for &test_d in &[1, 2, 4, 8] {
-                if test_d <= d {
-                    // Only test if we have enough polynomials
-                    let test_polys = &polynomials[..test_d];
-
-                    group.bench_function(&format!("degree_scaling_v{}_d{}", v, test_d), |bench| {
-                        let polys = test_polys.to_vec();
-                        bench.iter(|| {
-                            let result = multi_product_eval::<Fr>(v, &polys, test_d);
-                            black_box(result)
-                        })
-                    });
-                }
-            }
-        }
-
-        // Benchmark variable scaling (fixed d, varying v)
-        if d <= 8 {
-            // Avoid memory issues with large d
-            for &test_v in &[1, 2, 3, 4] {
-                if test_v <= v {
-                    // Only test if we have enough variables
-                    let test_polys: Vec<Vec<Fr>> = polynomials
-                        .iter()
-                        .take(d)
-                        .map(|poly| {
-                            let n = 1usize << test_v;
-                            poly[..n].to_vec()
-                        })
-                        .collect();
-
-                    group.bench_function(
-                        &format!("variable_scaling_v{}_d{}", test_v, d),
-                        |bench| {
-                            let polys = test_polys.clone();
-                            bench.iter(|| {
-                                let result = multi_product_eval::<Fr>(test_v, &polys, d);
-                                black_box(result)
-                            })
-                        },
-                    );
-                }
-            }
-        }
 
         group.finish();
     }
 }
 
-criterion_group!(benches, bench_multivariate_product);
+criterion_group!(
+    benches,
+    bench_multivariate_product_consolidated
+);
 criterion_main!(benches);

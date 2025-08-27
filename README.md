@@ -1,10 +1,31 @@
-# Jolt
+# Jolt - Custom Evaluation Branch
 
 ![imgs/jolt_alpha.png](imgs/jolt_alpha.png)
 
+**⚠️ IMPORTANT: This is a custom branch for evaluating the performance results from our paper. This is NOT the main Jolt repository.**
+
 Just One Lookup Table.
 
-Jolt is a zkVM (zero-knowledge virtual machine) for RISC-V, built to be the simplest, fastest, and most extensible general-purpose of its kind. This repository currently contains an implementation of Jolt for the RISC-V 32-bit Base Integer Instruction Set + M Standard Extension for Integer Multiplication and Division (RV32IM). _Contributors are welcome!_
+Jolt is a zkVM (zero-knowledge virtual machine) for RISC-V, built to be the simplest, fastest, and most extensible general-purpose of its kind. This repository currently contains an implementation of Jolt for the RISC-V 32-bit Base Integer Instruction Set + M Standard Extension for Integer Multiplication and Division (RV32IM).
+
+**This branch contains custom benchmarks and modifications specifically designed to reproduce the performance measurements presented in our paper. For the official Jolt implementation, please visit the main repository.**
+
+## Benchmarking
+
+> **📊 Paper Evaluation Focus**: This branch contains custom benchmarks specifically designed to reproduce the performance results from our paper. The benchmarks have been optimized and consolidated for research evaluation purposes.
+
+To reproduce the performance results from the Jolt paper, run the benchmarks using the instructions in [`INSTRUCTIONS.md`](./INSTRUCTIONS.md). These benchmarks measure:
+
+- **Field Operations**: Primitive finite field arithmetic and optimizations
+- **Linear Combinations**: Small-coefficient linear combinations with different approaches  
+- **Univariate Products**: Polynomial product evaluation in univariate form
+- **Multivariate Products**: Multilinear polynomial product evaluation
+- **RA Sumcheck**: Random access sumcheck protocol performance
+
+Quick start:
+```bash
+cargo bench -p jolt-core
+```
 
 ## Resources
 

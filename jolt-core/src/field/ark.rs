@@ -160,6 +160,11 @@ impl JoltField for ark_bn254::Fr {
     }
 
     #[inline(always)]
+    fn mul_u128(&self, n: u128) -> Self {
+        ark_ff::Fp::mul_u128::<5, 6>(*self, n)
+    }
+
+    #[inline(always)]
     fn mul_i128(&self, n: i128) -> Self {
         if n == 0 || self.is_zero() {
             Self::zero()
@@ -168,7 +173,7 @@ impl JoltField for ark_bn254::Fr {
         } else if self.is_one() {
             <Self as JoltField>::from_i128(n)
         } else {
-            ark_ff::Fp::mul_i128::<5,6>(*self, n)
+            ark_ff::Fp::mul_i128::<5, 6>(*self, n)
         }
     }
 

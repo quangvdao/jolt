@@ -17,7 +17,7 @@ use crate::{
     subprotocols::{
         karatsuba::{coeff_kara_16, coeff_kara_32, coeff_kara_4, coeff_kara_8},
         sumcheck::SumcheckInstanceProof,
-        toom::{eval_toom16, eval_toom4, eval_toom8, FieldMulSmall},
+        toom::product_eval_univariate_full_zero_based,
     },
     transcripts::{AppendToTranscript, Transcript},
     utils::{errors::ProofVerifyError, math::Math},
@@ -65,11 +65,7 @@ pub fn compute_eq_mle_product_univariate<F: JoltField>(
 }
 
 #[inline(always)]
-pub fn compute_mle_product_coeffs_toom<
-    F: FieldMulSmall,
-    const D: usize,
-    const D_PLUS_ONE: usize,
->(
+pub fn compute_mle_product_coeffs_toom<F: JoltField, const D: usize, const D_PLUS_ONE: usize>(
     mle_vec: &[MultilinearPolynomial<F>],
     round: usize,
     log_T: usize,
@@ -111,18 +107,9 @@ pub fn compute_mle_product_coeffs_toom<
             // let span = tracing::span!(tracing::Level::INFO, "Karatsuba step");
             // let _guard = span.enter();
 
-            let res: [F; D_PLUS_ONE] = match D {
-                16 => eval_toom16(polys[..16].try_into().unwrap())[..]
-                    .try_into()
-                    .unwrap(),
-                8 => eval_toom8(polys[..8].try_into().unwrap())[..]
-                    .try_into()
-                    .unwrap(),
-                4 => eval_toom4(polys[..4].try_into().unwrap())[..]
-                    .try_into()
-                    .unwrap(),
-                _ => panic!("Unsupported number of polynomials, got {D} and expected 16, 8, or 4"),
-            };
+            let pairs: Vec<(F, F)> = (0..D).map(|i| polys[i]).collect();
+            let table = product_eval_univariate_full_zero_based::<F>(&pairs);
+            let res: [F; D_PLUS_ONE] = table[..].try_into().unwrap();
 
             // drop(_guard);
             // drop(span);
@@ -139,11 +126,11 @@ pub fn compute_mle_product_coeffs_toom<
             },
         );
 
-    let univariate_poly = UniPoly::from_evals_toom(&evals);
+    let univariate_poly = UniPoly::from_evals_zero_based_with_infinity(&evals);
     univariate_poly.coeffs
 }
 
-pub fn compute_mle_product_coeffs_katatsuba<
+pub fn compute_mle_product_coeffs_karatsuba<
     F: JoltField,
     const D: usize,
     const D_PLUS_ONE: usize,
@@ -273,7 +260,7 @@ pub struct LargeDMulSumCheckProof<F: JoltField, ProofTranscript: Transcript> {
     mle_claims: Vec<F>,
 }
 
-impl<F: FieldMulSmall, ProofTranscript: Transcript> LargeDMulSumCheckProof<F, ProofTranscript> {
+impl<F: JoltField, ProofTranscript: Transcript> LargeDMulSumCheckProof<F, ProofTranscript> {
     #[tracing::instrument(skip_all, name = "KaratsubaSumCheckProof::prove")]
     pub fn prove(
         mle_vec: &mut Vec<MultilinearPolynomial<F>>,
@@ -310,10 +297,10 @@ impl<F: FieldMulSmall, ProofTranscript: Transcript> LargeDMulSumCheckProof<F, Pr
             let _guard = inner_span.enter();
 
             let mle_product_coeffs = match mle_vec.len() {
-                32 => compute_mle_product_coeffs_katatsuba::<F, 32, 33>(
+                32 => compute_mle_product_coeffs_karatsuba::<F, 32, 33>(
                     mle_vec, round, log_T, &eq_factor, &E_table,
                 ),
-                16 => compute_mle_product_coeffs_katatsuba::<F, 16, 17>(
+                16 => compute_mle_product_coeffs_karatsuba::<F, 16, 17>(
                     mle_vec, round, log_T, &eq_factor, &E_table,
                 ),
                 8 => compute_mle_product_coeffs_toom::<F, 8, 9>(

@@ -82,6 +82,7 @@ pub trait JoltField:
     fn mul_i64(&self, n: i64) -> Self {
         *self * Self::from_i64(n)
     }
+    fn mul_u128(&self, n: u128) -> Self;
     #[inline(always)]
     fn mul_i128(&self, n: i128) -> Self {
         *self * Self::from_i128(n)

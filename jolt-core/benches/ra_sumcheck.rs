@@ -4,21 +4,20 @@ use ark_std::{One, Zero};
 use criterion::Criterion;
 use jolt_core::{
     field::JoltField,
-    poly::{
-        eq_poly::EqPolynomial,
-        multilinear_polynomial::MultilinearPolynomial,
-    },
+    poly::{eq_poly::EqPolynomial, multilinear_polynomial::MultilinearPolynomial},
     subprotocols::{
-        large_degree_sumcheck::compute_eq_mle_product_univariate,
+        large_degree_sumcheck::{
+            compute_eq_mle_product_univariate, compute_mle_product_coeffs_toom,
+        },
         sumcheck::SumcheckInstance,
     },
     transcripts::KeccakTranscript,
 };
 
-use jolt_core::zkvm::instruction_lookups::ra_virtual::{RAProverState, RASumCheck};
 use jolt_core::field::OptimizedMul;
-use jolt_core::utils::math::Math;
 use jolt_core::transcripts::Transcript;
+use jolt_core::utils::math::Math;
+use jolt_core::zkvm::instruction_lookups::ra_virtual::{RAProverState, RASumCheck};
 use rand_core::RngCore;
 
 fn gen_mles<F: JoltField>(d: usize, t: usize) -> Vec<MultilinearPolynomial<F>> {
@@ -55,7 +54,11 @@ fn naive_coeffs<F: JoltField>(
         for (i, mle) in mles.iter().enumerate() {
             let a0 = mle.get_bound_coeff(j);
             let a1 = mle.get_bound_coeff(j + mle.len() / 2) - a0;
-            let (c, s) = if i == 0 { (a0 * j_factor, a1 * j_factor) } else { (a0, a1) };
+            let (c, s) = if i == 0 {
+                (a0 * j_factor, a1 * j_factor)
+            } else {
+                (a0, a1)
+            };
 
             // acc *= (c + s x)
             let mut next = vec![F::zero(); acc.len() + 1];
@@ -66,7 +69,65 @@ fn naive_coeffs<F: JoltField>(
             acc = next;
         }
 
-        for i in 0..=d { total[i] += acc[i]; }
+        for i in 0..=d {
+            total[i] += acc[i];
+        }
+    }
+
+    total
+}
+
+fn naive_coeffs_parallel<F: JoltField>(
+    mles: &[MultilinearPolynomial<F>],
+    round: usize,
+    log_t: usize,
+    factor: &F,
+    e_table: &[Vec<F>],
+) -> Vec<F> {
+    let d = mles.len();
+    let num_iterations = (log_t - round - 1).pow2();
+
+    // Use parallel iteration but keep naive algorithm
+    use rayon::prelude::*;
+    let partial_sums: Vec<Vec<F>> = (0..num_iterations)
+        .into_par_iter()
+        .map(|j| {
+            let j_factor = if round < log_t - 1 {
+                factor.mul_1_optimized(e_table[round][j])
+            } else {
+                *factor
+            };
+
+            // Build D linear polynomials (constant, slope)
+            let mut acc: Vec<F> = vec![F::one()];
+            for (i, mle) in mles.iter().enumerate() {
+                let a0 = mle.get_bound_coeff(j);
+                let a1 = mle.get_bound_coeff(j + mle.len() / 2) - a0;
+                let (c, s) = if i == 0 {
+                    (a0 * j_factor, a1 * j_factor)
+                } else {
+                    (a0, a1)
+                };
+
+                // acc *= (c + s x)
+                let mut next = vec![F::zero(); acc.len() + 1];
+                for ii in 0..acc.len() {
+                    next[ii] += acc[ii] * c;
+                    next[ii + 1] += acc[ii] * s;
+                }
+                acc = next;
+            }
+
+            acc
+        })
+        .collect();
+
+    // Sum up all partial results
+    let mut total = vec![F::zero(); d + 1];
+    for partial in partial_sums {
+        for i in 0..=d {
+            total[i] += partial[i];
+        }
     }
 
     total
@@ -106,13 +167,51 @@ fn bench_round_kernel<const D: usize>(c: &mut Criterion, log_t: usize) {
         );
     });
 
-    // Naive kernel: same math without Karatsuba
-    c.bench_function(&format!("ra_virtual_round_naive_d{}_T{}", D, t), |b| {
+    // Optimized flow but swap Karatsuba core with Toom
+    c.bench_function(&format!("ra_virtual_round_opt_toom_d{}_T{}", D, t), |b| {
         b.iter_with_setup(
-            || (ra.clone(), r_cycle.clone(), e_table.clone()),
-            |(mles, r, et): (Vec<MultilinearPolynomial<Fr>>, Vec<Fr>, Vec<Vec<Fr>>)| {
-                let coeffs = naive_coeffs(&mles, 0, log_t, &Fr::one(), &et);
-                let uni = compute_eq_mle_product_univariate(coeffs, 0, &r);
+            || RASumCheck::<Fr> {
+                r_cycle: r_cycle.clone(),
+                r_address_chunks: vec![vec![]; D],
+                eq_ra_claim: Fr::zero(),
+                d: D,
+                T: t,
+                prover_state: Some(RAProverState {
+                    ra_i_polys: ra.clone(),
+                    E_table: e_table.clone(),
+                    eq_factor: Fr::one(),
+                }),
+            },
+            |s| {
+                let ps = s.prover_state.as_ref().unwrap();
+                let coeffs = match D {
+                    4 => compute_mle_product_coeffs_toom::<Fr, 4, 5>(
+                        &ps.ra_i_polys,
+                        0,
+                        log_t,
+                        &ps.eq_factor,
+                        &ps.E_table,
+                    ),
+                    8 => compute_mle_product_coeffs_toom::<Fr, 8, 9>(
+                        &ps.ra_i_polys,
+                        0,
+                        log_t,
+                        &ps.eq_factor,
+                        &ps.E_table,
+                    ),
+                    16 => compute_mle_product_coeffs_toom::<Fr, 16, 17>(
+                        &ps.ra_i_polys,
+                        0,
+                        log_t,
+                        &ps.eq_factor,
+                        &ps.E_table,
+                    ),
+                    _ => panic!(
+                        "Unsupported number of polynomials, got {} and expected 4, 8, or 16",
+                        D
+                    ),
+                };
+                let uni = compute_eq_mle_product_univariate(coeffs, 0, &s.r_cycle);
                 let _vals: Vec<Fr> = (0..uni.coeffs.len())
                     .filter(|i| *i != 1)
                     .map(|i| uni.evaluate(&Fr::from_u32(i as u32)))
@@ -121,6 +220,41 @@ fn bench_round_kernel<const D: usize>(c: &mut Criterion, log_t: usize) {
             },
         );
     });
+
+    // // Naive kernel: same math without Karatsuba or parallelization
+    // c.bench_function(&format!("ra_virtual_round_naive_d{}_T{}", D, t), |b| {
+    //     b.iter_with_setup(
+    //         || (ra.clone(), r_cycle.clone(), e_table.clone()),
+    //         |(mles, r, et): (Vec<MultilinearPolynomial<Fr>>, Vec<Fr>, Vec<Vec<Fr>>)| {
+    //             let coeffs = naive_coeffs(&mles, 0, log_t, &Fr::one(), &et);
+    //             let uni = compute_eq_mle_product_univariate(coeffs, 0, &r);
+    //             let _vals: Vec<Fr> = (0..uni.coeffs.len())
+    //                 .filter(|i| *i != 1)
+    //                 .map(|i| uni.evaluate(&Fr::from_u32(i as u32)))
+    //                 .collect();
+    //             criterion::black_box(_vals);
+    //         },
+    //     );
+    // });
+
+    // Naive kernel with parallelization (fairer comparison)
+    c.bench_function(
+        &format!("ra_virtual_round_naive_parallel_d{}_T{}", D, t),
+        |b| {
+            b.iter_with_setup(
+                || (ra.clone(), r_cycle.clone(), e_table.clone()),
+                |(mles, r, et): (Vec<MultilinearPolynomial<Fr>>, Vec<Fr>, Vec<Vec<Fr>>)| {
+                    let coeffs = naive_coeffs_parallel(&mles, 0, log_t, &Fr::one(), &et);
+                    let uni = compute_eq_mle_product_univariate(coeffs, 0, &r);
+                    let _vals: Vec<Fr> = (0..uni.coeffs.len())
+                        .filter(|i| *i != 1)
+                        .map(|i| uni.evaluate(&Fr::from_u32(i as u32)))
+                        .collect();
+                    criterion::black_box(_vals);
+                },
+            );
+        },
+    );
 }
 
 fn bench_full_prover<const D: usize>(c: &mut Criterion, log_t: usize) {
@@ -169,13 +303,13 @@ fn main() {
         .configure_from_args()
         .warm_up_time(std::time::Duration::from_secs(5));
 
-    let log_t = 18; // adjust if memory-bound
-    bench_round_kernel::<4>(&mut c, log_t);
-    bench_round_kernel::<8>(&mut c, log_t);
-    bench_round_kernel::<16>(&mut c, log_t);
-    bench_full_prover::<8>(&mut c, log_t);
+    let log_ts = [18usize, 20, 22, 24, 26];
+    for &log_t in &log_ts {
+        bench_round_kernel::<4>(&mut c, log_t);
+        bench_round_kernel::<8>(&mut c, log_t);
+        bench_round_kernel::<16>(&mut c, log_t);
+        bench_full_prover::<8>(&mut c, log_t);
+    }
 
     c.final_summary();
 }
-
-

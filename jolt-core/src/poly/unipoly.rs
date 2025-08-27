@@ -88,6 +88,41 @@ impl<F: JoltField> UniPoly<F> {
         }
     }
 
+    /// Interpolate a polynomial of degree `n-1` from evaluations at x = 0..n-2
+    /// and the leading coefficient provided as the final "infinity" entry.
+    ///
+    /// Input layout: [f(0), f(1), ..., f(n-2), f(∞)]
+    pub fn from_evals_zero_based_with_infinity(evals: &[F]) -> Self {
+        let n = evals.len();
+        let deg = n - 1;
+
+        let mut interpol_mat: Vec<Vec<F>> = Vec::with_capacity(n);
+        // Rows for finite points x = 0..deg-1
+        for x_u in 0..deg {
+            let x = F::from_u64(x_u as u64);
+            let mut row = Vec::with_capacity(n + 1);
+            row.push(F::one());
+            row.push(x);
+            for j in 2..n {
+                row.push(row[j - 1] * x);
+            }
+            row.push(evals[x_u]);
+            interpol_mat.push(row);
+        }
+        // Final row encodes the leading coefficient constraint from f(∞)
+        let mut row = Vec::with_capacity(n + 1);
+        for _ in 0..deg {
+            row.push(F::zero());
+        }
+        row.push(F::one());
+        row.push(evals[deg]);
+        interpol_mat.push(row);
+
+        UniPoly {
+            coeffs: gaussian_elimination(&mut interpol_mat),
+        }
+    }
+
     fn vandermonde_interpolation(evals: &[F]) -> Vec<F> {
         let n = evals.len();
         let xs: Vec<F> = (0..evals.len()).map(|x| F::from_u64(x as u64)).collect();

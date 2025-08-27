@@ -4,12 +4,9 @@ use criterion::Criterion;
 use jolt_core::{
     field::JoltField,
     poly::multilinear_polynomial::MultilinearPolynomial,
-    subprotocols::{
-        large_degree_sumcheck::{
-            compute_initial_eval_claim, AppendixCSumCheckProof, LargeDMulSumCheckProof,
-            NaiveSumCheckProof,
-        },
-        toom::FieldMulSmall,
+    subprotocols::large_degree_sumcheck::{
+        compute_initial_eval_claim, AppendixCSumCheckProof, LargeDMulSumCheckProof,
+        NaiveSumCheckProof,
     },
     transcripts::{KeccakTranscript, Transcript},
     utils::{math::Math, thread::unsafe_allocate_zero_vec},
@@ -63,7 +60,7 @@ fn benchmark_appendix_c_sumcheck<const D1: usize>(c: &mut Criterion, d: usize, t
     );
 }
 
-fn benchmark_karatsuba_sumcheck<F: FieldMulSmall>(c: &mut Criterion, d: usize, t: usize) {
+fn benchmark_karatsuba_sumcheck<F: JoltField>(c: &mut Criterion, d: usize, t: usize) {
     let ra = test_func_data(d, t);
 
     let mut transcript = KeccakTranscript::new(b"test_transcript");
@@ -120,10 +117,13 @@ fn main() {
         .configure_from_args()
         .warm_up_time(std::time::Duration::from_secs(10));
 
-    let t = 1 << 20;
-
-    benchmark_karatsuba_sumcheck::<Fr>(&mut criterion, 16, t);
-    benchmark_naive_sumcheck::<Fr>(&mut criterion, 16, t);
+    let log_ts = [18usize, 20, 22, 24, 26];
+    for &log_t in &log_ts {
+        let t = 1 << log_t;
+        benchmark_karatsuba_sumcheck::<Fr>(&mut criterion, 16, t);
+        benchmark_naive_sumcheck::<Fr>(&mut criterion, 16, t);
+        benchmark_appendix_c_sumcheck::<15>(&mut criterion, 16, t);
+    }
 
     criterion.final_summary();
 }

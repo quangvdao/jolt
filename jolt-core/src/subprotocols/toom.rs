@@ -24,42 +24,20 @@ pub fn toom_eval_points<F: JoltField>(n: usize) -> Vec<F> {
     points
 }
 
-/// Extension trait exposing small integer multiplication for field elements.
-/// Implement only for concrete field types that have an efficient intrinsic.
-/// Default (blanket) implementation deliberately omitted so that code that
-/// relies on these functions only compiles when the type truly supports it.
-pub trait FieldMulSmall: JoltField {
-    /// Multiply by an unsigned 64-bit constant efficiently.
-    fn mul_u64(self, n: u64) -> Self;
-
-    /// Multiply by an unsigned 128-bit constant efficiently.
-    fn mul_u128(self, n: u128) -> Self;
-}
-
-// Efficient backend in arkworks for BN254.
-impl FieldMulSmall for ark_bn254::Fr {
-    #[inline(always)]
-    fn mul_u64(self, n: u64) -> Self {
-        // `Fp` impl is in ark-ff; call through via inherent method.
-        ark_ff::Fp::mul_u64::<5>(self, n)
-    }
-
-    #[inline(always)]
-    fn mul_u128(self, n: u128) -> Self {
-        // `Fp` impl is in ark-ff; call through via inherent method.
-        ark_ff::Fp::mul_u128::<5, 6>(self, n)
-    }
-}
-
 /// doubling & tripling helpers (cheaper than generic scalar mul)
 #[inline]
-fn dbl<F: FieldMulSmall>(x: F) -> F {
+fn dbl<F: JoltField>(x: F) -> F {
     double(&x)
 }
 #[allow(dead_code)]
 #[inline]
-fn tpl<F: FieldMulSmall>(x: F) -> F {
+fn tpl<F: JoltField>(x: F) -> F {
     double(&x) + x
+}
+
+#[inline]
+fn mul6<F: JoltField>(x: F) -> F {
+    x.mul_u64(6)
 }
 
 // -----------------------------------------------------------------------------
@@ -69,7 +47,7 @@ fn tpl<F: FieldMulSmall>(x: F) -> F {
 //  total: 3 mults
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom2<F: FieldMulSmall>((p0, p1): (F, F), (q0, q1): (F, F)) -> (F, F, F) {
+pub fn eval_toom2<F: JoltField>((p0, p1): (F, F), (q0, q1): (F, F)) -> (F, F, F) {
     // 3 field multiplications
     let r0 = p0 * q0; // p(0) q(0)
     let r1 = p1 * q1; // p(1) q(1)
@@ -85,7 +63,7 @@ pub fn eval_toom2<F: FieldMulSmall>((p0, p1): (F, F), (q0, q1): (F, F)) -> (F, F
 //  total: 9 mults
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom2_2<F: FieldMulSmall>(p: [F; 4], q: [F; 4]) -> [F; 9] {
+pub fn eval_toom2_2<F: JoltField>(p: [F; 4], q: [F; 4]) -> [F; 9] {
     // ---- precompute forward differences for p ----
     let p_x0 = p[1] - p[0]; // x-slope at y = 0
     let p_x1 = p[3] - p[2]; // x-slope at y = 1
@@ -123,7 +101,7 @@ pub fn eval_toom2_2<F: FieldMulSmall>(p: [F; 4], q: [F; 4]) -> [F; 9] {
 //  • outputs: product on {0,1,−1,∞}² (16 points), row-major x-order [0,1,−1,∞]
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom3_2<F: FieldMulSmall>(polys: [[F; 4]; 3]) -> [F; 16] {
+pub fn eval_toom3_2<F: JoltField>(polys: [[F; 4]; 3]) -> [F; 16] {
     // Step 1: quadratic grid from first two polys
     let a = eval_toom2_2(polys[0], polys[1]);
     let idx3 = |x: usize, y: usize| -> usize { y * 3 + x };
@@ -131,7 +109,7 @@ pub fn eval_toom3_2<F: FieldMulSmall>(polys: [[F; 4]; 3]) -> [F; 16] {
     let mut a_grid = [[F::zero(); 4]; 4];
     // helper closure for x-extension
     #[inline]
-    fn quad_x_m1<F: FieldMulSmall>(a0: F, a1: F, a_inf: F) -> F {
+    fn quad_x_m1<F: JoltField>(a0: F, a1: F, a_inf: F) -> F {
         dbl(a0) - a1 + dbl(a_inf)
     }
     // rows y=0,1,∞
@@ -203,7 +181,7 @@ pub fn eval_toom3_2<F: FieldMulSmall>(polys: [[F; 4]; 3]) -> [F; 16] {
 //  Complexity:  n·3^n additions, 3^n multiplications.
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom2_n<F: FieldMulSmall>(p_vals: &[F], q_vals: &[F]) -> Vec<F> {
+pub fn eval_toom2_n<F: JoltField>(p_vals: &[F], q_vals: &[F]) -> Vec<F> {
     assert_eq!(p_vals.len(), q_vals.len(), "p and q must have same length");
     let len2 = p_vals.len();
     assert!(len2.is_power_of_two(), "input length must be 2^n");
@@ -274,7 +252,7 @@ pub fn eval_toom2_n<F: FieldMulSmall>(p_vals: &[F], q_vals: &[F]) -> Vec<F> {
 //  total: 3 mults (prod2) + 4 mults (evals) = 7 mults
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom3<F: FieldMulSmall>(p: [(F, F); 3]) -> (F, F, F, F) {
+pub fn eval_toom3<F: JoltField>(p: [(F, F); 3]) -> (F, F, F, F) {
     // ---- step 1: combine first two linear terms into quadratic ----
     let (a0, a1, a_inf) = eval_toom2(p[0], p[1]); // quadratic A on {0,1,∞}
 
@@ -310,7 +288,7 @@ pub fn eval_toom3<F: FieldMulSmall>(p: [(F, F); 3]) -> (F, F, F, F) {
 //  total: 3 * 2 + 5 = 11 mults
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom4<F: FieldMulSmall>(p: [(F, F); 4]) -> [F; 5] {
+pub fn eval_toom4<F: JoltField>(p: [(F, F); 4]) -> [F; 5] {
     // ---- first level:  two independent quadratic products ----
     let (a0, a1, a_inf) = eval_toom2(p[0], p[1]); // A on {0,1,∞}
     let (b0, b1, b_inf) = eval_toom2(p[2], p[3]); // B on {0,1,∞}
@@ -355,10 +333,10 @@ pub fn eval_toom4<F: FieldMulSmall>(p: [(F, F); 4]) -> [F; 5] {
 //  Total: 18 + 25 = 43 mults (vs naïve 75).
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom4_2<F: FieldMulSmall>(polys: [[F; 4]; 4]) -> [F; 25] {
+pub fn eval_toom4_2<F: JoltField>(polys: [[F; 4]; 4]) -> [F; 25] {
     // helper closure: extend one quadratic row (x-dimension)
     #[inline]
-    fn quad_extend_row<F: FieldMulSmall>(a0: F, a1: F, a_inf: F) -> [F; 5] {
+    fn quad_extend_row<F: JoltField>(a0: F, a1: F, a_inf: F) -> [F; 5] {
         let a_m1 = dbl(a0) - a1 + dbl(a_inf); // X = −1
         let a_2 = dbl(a1 + a_inf) - a0; // X = 2
         [a0, a1, a_m1, a_2, a_inf]
@@ -433,7 +411,7 @@ pub fn eval_toom4_2<F: FieldMulSmall>(polys: [[F; 4]; 4]) -> [F; 25] {
 // total: 3 + 7 + 6 = 16 mults
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom5<F: FieldMulSmall>(p: [(F, F); 5]) -> (F, F, F, F, F, F) {
+pub fn eval_toom5<F: JoltField>(p: [(F, F); 5]) -> (F, F, F, F, F, F) {
     // ---- step 1: compute sub-products ----
     let (a0, a1, a_inf) = eval_toom2(p[0], p[1]); // quadratic A on {0,1,∞}
     let (b0, b1, b_m1, b_inf) = eval_toom3([p[2], p[3], p[4]]); // cubic B on {0,1,-1,∞}
@@ -474,7 +452,7 @@ pub fn eval_toom5<F: FieldMulSmall>(p: [(F, F); 5]) -> (F, F, F, F, F, F) {
 //  d = 8  (two quartics C,D;  5-point grid becomes 9-point grid)
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom8<F: FieldMulSmall>(p: [(F, F); 8]) -> [F; 9] {
+pub fn eval_toom8<F: JoltField>(p: [(F, F); 8]) -> [F; 9] {
     // ---- first level: two quartic blocks ----------------------------------
     let [c0, c1, c_m1, c2, c_inf] = eval_toom4(p[0..4].try_into().unwrap());
     let [d0, d1, d_m1, d2, d_inf] = eval_toom4(p[4..8].try_into().unwrap());
@@ -482,13 +460,7 @@ pub fn eval_toom8<F: FieldMulSmall>(p: [(F, F); 8]) -> [F; 9] {
     // ---- compute C(x) & D(x) on the four extra x values -------------------
     // Optimized: batch compute all 4 extra points for both C and D to avoid redundant computation
     #[inline]
-    fn quartic_eval_batch<F: FieldMulSmall>(
-        f0: F,
-        f1: F,
-        f_m1: F,
-        f2: F,
-        f_inf: F,
-    ) -> (F, F, F, F) {
+    fn quartic_eval_batch<F: JoltField>(f0: F, f1: F, f_m1: F, f2: F, f_inf: F) -> (F, F, F, F) {
         // shared work for everything
         let f_inf6 = f_inf.mul_u64(6);
         // shared work for m2 and m3
@@ -532,7 +504,7 @@ pub fn eval_toom8<F: FieldMulSmall>(p: [(F, F); 8]) -> [F; 9] {
 //  d = 16  (two octics C,D;  9-point grid becomes 17-point grid)
 // -----------------------------------------------------------------------------
 #[inline]
-pub fn eval_toom16<F: FieldMulSmall>(p: [(F, F); 16]) -> [F; 17] {
+pub fn eval_toom16<F: JoltField>(p: [(F, F); 16]) -> [F; 17] {
     // ---- first level: two octic blocks ------------------------------------
     let c = eval_toom8(p[0..8].try_into().unwrap()); // C(x) on 9 points
     let d = eval_toom8(p[8..16].try_into().unwrap()); // D(x) on 9 points
@@ -540,7 +512,7 @@ pub fn eval_toom16<F: FieldMulSmall>(p: [(F, F); 16]) -> [F; 17] {
     // ---- compute C(x) & D(x) on the eight extra x values ------------------
     // Optimized: batch compute all 8 extra points for both C and D to avoid redundant computation
     #[inline]
-    fn octic_eval_batch<F: FieldMulSmall>(vals: &[F; 9]) -> [F; 8] {
+    fn octic_eval_batch<F: JoltField>(vals: &[F; 9]) -> [F; 8] {
         // unpack for readability: [0,1,−1,2,−2,3,−3,4,∞]
         let f0 = vals[0];
         let f1 = vals[1];
@@ -643,6 +615,225 @@ pub fn eval_toom16<F: FieldMulSmall>(p: [(F, F); 16]) -> [F; 17] {
     // ∞ point goes last
     r[16] = c[8] * d[8];
     r
+}
+
+// -----------------------------------------------------------------------------
+// Optimized univariate product cores on zero-based grid [0..D-1, ∞]
+// -----------------------------------------------------------------------------
+
+#[inline]
+fn eval_inter2<F: JoltField>((p0, p1): (F, F), (q0, q1): (F, F)) -> (F, F, F) {
+    let p_inf = p1 - p0;
+    let p2 = p_inf + p1;
+    let q_inf = q1 - q0;
+    let q2 = q_inf + q1;
+    let r1 = p1 * q1;
+    let r2 = p2 * q2;
+    let r_inf = p_inf * q_inf;
+    (r1, r2, r_inf)
+}
+
+#[inline]
+fn eval_inter2_final<F: JoltField>((p0, p1): (F, F), (q0, q1): (F, F)) -> (F, F) {
+    let r1 = p1 * q1;
+    let r_inf = (p1 - p0) * (q1 - q0);
+    (r1, r_inf)
+}
+
+#[inline]
+fn eval_inter4<F: JoltField>(p: [(F, F); 4]) -> (F, F, F, F, F) {
+    #[inline]
+    fn helper<F: JoltField>(fx0: F, fx1: F, f_inf: F) -> F {
+        dbl(fx1 + f_inf) - fx0
+    }
+    let (a1, a2, a_inf) = eval_inter2(p[0], p[1]);
+    let a3 = helper(a1, a2, a_inf);
+    let a4 = helper(a2, a3, a_inf);
+    let (b1, b2, b_inf) = eval_inter2(p[2], p[3]);
+    let b3 = helper(b1, b2, b_inf);
+    let b4 = helper(b2, b3, b_inf);
+    (a1 * b1, a2 * b2, a3 * b3, a4 * b4, a_inf * b_inf)
+}
+
+#[inline]
+fn eval_inter4_final<F: JoltField>(p: [(F, F); 4]) -> (F, F, F, F) {
+    #[inline]
+    fn helper<F: JoltField>(fx0: F, fx1: F, f_inf: F) -> F {
+        dbl(fx1 + f_inf) - fx0
+    }
+    let (a1, a2, a_inf) = eval_inter2(p[0], p[1]);
+    let a3 = helper(a1, a2, a_inf);
+    let (b1, b2, b_inf) = eval_inter2(p[2], p[3]);
+    let b3 = helper(b1, b2, b_inf);
+    (a1 * b1, a2 * b2, a3 * b3, a_inf * b_inf)
+}
+
+#[inline]
+fn eval_inter3<F: JoltField>(p: [(F, F); 3]) -> [F; 4] {
+    #[inline]
+    fn helper<F: JoltField>(fx0: F, fx1: F, f_inf: F) -> F {
+        dbl(fx1 + f_inf) - fx0
+    }
+    let (a1, a2, a_inf) = eval_inter2(p[0], p[1]);
+    let a3 = helper(a1, a2, a_inf);
+    let (c0, c1) = p[2];
+    let c_inf = c1 - c0;
+    let c2 = c1 + c_inf;
+    let c3 = c2 + c_inf;
+    [a1 * c1, a2 * c2, a3 * c3, a_inf * c_inf]
+}
+
+#[inline(always)]
+fn eval_inter8_final<F: JoltField>(p: [(F, F); 8]) -> [F; 8] {
+    #[inline]
+    fn helper_pair<F: JoltField>(f: &[F; 4], f_inf6: F) -> (F, F) {
+        let f3m2 = f[3] - f[2];
+        let f4 = dbl(dbl(f_inf6 + f3m2 + f[1]) - f[2]) - f[0];
+        let f5 = dbl(dbl(f4 - f3m2 + f_inf6) - f[3]) - f[1];
+        (f4, f5)
+    }
+    #[inline]
+    fn batch_helper<F: JoltField>(f0: F, f1: F, f2: F, f3: F, f_inf: F) -> (F, F, F) {
+        let f_inf6 = mul6(f_inf);
+        let (f4, f5) = helper_pair(&[f0, f1, f2, f3], f_inf6);
+        let f6 = dbl(dbl(f_inf6 + f5 - f4 + f3) - f4) - f2;
+        (f4, f5, f6)
+    }
+    let (a1, a2, a3, a4, a_inf) = eval_inter4(unsafe { *(p[0..4].as_ptr() as *const [(F, F); 4]) });
+    let (a5, a6, a7) = batch_helper(a1, a2, a3, a4, a_inf);
+    let (b1, b2, b3, b4, b_inf) = eval_inter4(unsafe { *(p[4..8].as_ptr() as *const [(F, F); 4]) });
+    let (b5, b6, b7) = batch_helper(b1, b2, b3, b4, b_inf);
+    [
+        a1 * b1,
+        a2 * b2,
+        a3 * b3,
+        a4 * b4,
+        a5 * b5,
+        a6 * b6,
+        a7 * b7,
+        a_inf * b_inf,
+    ]
+}
+
+#[inline]
+fn eval_inter16_final<F: JoltField>(p: [(F, F); 16]) -> [F; 16] {
+    #[inline]
+    fn helper_idx<F: JoltField>(f: &[F; 16], b: usize, f_inf40320: F) -> F {
+        let a1 = f[b - 7] + f[b - 1];
+        let a2 = f[b - 5] + f[b - 3];
+        let n1 = f[b - 6] + f[b - 2];
+        let n2 = f[b - 4];
+        let n3 = f[b - 8];
+        F::linear_combination_i64(
+            &[(a1, 8), (a2, 56), (f_inf40320, 1)],
+            &[(n1, 28), (n2, 70), (n3, 1)],
+        )
+    }
+    #[inline]
+    fn batch_helper<F: JoltField>(vals: &[F; 9]) -> [F; 16] {
+        let mut f = [F::zero(); 16];
+        for i in 0..8 {
+            f[i] = vals[i];
+        }
+        f[15] = vals[8];
+        let f_inf40320 = vals[8].mul_u64(40320);
+        for i in 8..15 {
+            f[i] = helper_idx(&f, i, f_inf40320);
+        }
+        f
+    }
+    let mut a = batch_helper(&eval_toom8(unsafe {
+        *(p[0..8].as_ptr() as *const [(F, F); 8])
+    }));
+    let b = batch_helper(&eval_toom8(unsafe {
+        *(p[8..16].as_ptr() as *const [(F, F); 8])
+    }));
+    for i in 0..16 {
+        a[i] *= b[i];
+    }
+    a
+}
+
+/// Compute full table [g(0)..g(D-1), g(∞)] for product of D linear polys given as (p(0), p(1)).
+#[inline]
+pub fn product_eval_univariate_full_zero_based<F: JoltField>(pairs: &[(F, F)]) -> Vec<F> {
+    let d = pairs.len();
+    assert!(d >= 1);
+    if d == 1 {
+        return vec![pairs[0].0, pairs[0].1];
+    }
+    if d == 2 {
+        let arr: [(F, F); 2] = unsafe { *(pairs.as_ptr() as *const [(F, F); 2]) };
+        let (r1, r_inf) = eval_inter2_final(arr[0], arr[1]);
+        let g0 = arr[0].0 * arr[1].0;
+        return vec![g0, r1, r_inf];
+    }
+    if d == 3 {
+        let arr: [(F, F); 3] = unsafe { *(pairs.as_ptr() as *const [(F, F); 3]) };
+        let r = eval_inter3(arr);
+        let mut g0 = F::one();
+        for (a0, _) in arr.iter().copied() {
+            g0 *= a0;
+        }
+        return vec![g0, r[0], r[1], r[3]];
+    }
+    if d == 4 {
+        let arr: [(F, F); 4] = unsafe { *(pairs.as_ptr() as *const [(F, F); 4]) };
+        let (r1, r2, r3, r_inf) = eval_inter4_final(arr);
+        let mut g0 = F::one();
+        for (a0, _) in arr.iter().copied() {
+            g0 *= a0;
+        }
+        return vec![g0, r1, r2, r3, r_inf];
+    }
+    if d == 8 {
+        let arr: [(F, F); 8] = unsafe { *(pairs.as_ptr() as *const [(F, F); 8]) };
+        let r = eval_inter8_final(arr);
+        let mut out = vec![F::zero(); 9];
+        let mut g0 = F::one();
+        for (a0, _) in arr.iter().copied() {
+            g0 *= a0;
+        }
+        out[0] = g0;
+        for i in 0..7 {
+            out[1 + i] = r[i];
+        }
+        out[8] = r[7];
+        return out;
+    }
+    if d == 16 {
+        let arr: [(F, F); 16] = unsafe { *(pairs.as_ptr() as *const [(F, F); 16]) };
+        let r = eval_inter16_final(arr);
+        let mut out = vec![F::zero(); 17];
+        let mut g0 = F::one();
+        for (a0, _) in arr.iter().copied() {
+            g0 *= a0;
+        }
+        out[0] = g0;
+        for i in 0..15 {
+            out[1 + i] = r[i];
+        }
+        out[16] = r[15];
+        return out;
+    }
+    // Fallback: naive evaluation on 0..D-1 and infinity
+    let mut out = vec![F::zero(); d + 1];
+    for k in 0..d {
+        let kf = F::from_u64(k as u64);
+        let mut prod = F::one();
+        for &(a0, a1) in pairs.iter() {
+            let slope = a1 - a0;
+            prod *= a0 + slope * kf;
+        }
+        out[k] = prod;
+    }
+    let mut prod_inf = F::one();
+    for &(a0, a1) in pairs.iter() {
+        let slope = a1 - a0;
+        prod_inf *= slope;
+    }
+    out[d] = prod_inf;
+    out
 }
 
 #[cfg(test)]

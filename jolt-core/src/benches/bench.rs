@@ -1,9 +1,9 @@
+use crate::field::JoltField;
 use crate::host;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::subprotocols::large_degree_sumcheck::{
     compute_initial_eval_claim, AppendixCSumCheckProof, LargeDMulSumCheckProof, NaiveSumCheckProof,
 };
-use crate::subprotocols::toom::FieldMulSmall;
 use crate::transcripts::{Blake2bTranscript, Transcript};
 use crate::utils::math::Math;
 use crate::utils::thread::unsafe_allocate_zero_vec;
@@ -100,24 +100,27 @@ fn prove_example(
 
 fn large_d_sumcheck<F, ProofTranscript>() -> Vec<(tracing::Span, Box<dyn FnOnce()>)>
 where
-    F: FieldMulSmall,
+    F: JoltField,
     ProofTranscript: Transcript,
 {
     let mut tasks = Vec::new();
 
-    let T = 1 << 20;
+    let log_ts = [18usize, 20, 22, 24, 26];
+    for &log_t in &log_ts {
+        let T = 1 << log_t;
 
-    let task = move || {
-        compare_sumcheck_implementations::<F, ProofTranscript, 31>(32, T);
-        compare_sumcheck_implementations::<F, ProofTranscript, 15>(16, T);
-        compare_sumcheck_implementations::<F, ProofTranscript, 7>(8, T);
-        compare_sumcheck_implementations::<F, ProofTranscript, 3>(4, T);
-    };
+        let task = move || {
+            compare_sumcheck_implementations::<F, ProofTranscript, 31>(32, T);
+            compare_sumcheck_implementations::<F, ProofTranscript, 15>(16, T);
+            compare_sumcheck_implementations::<F, ProofTranscript, 7>(8, T);
+            compare_sumcheck_implementations::<F, ProofTranscript, 3>(4, T);
+        };
 
-    tasks.push((
-        tracing::info_span!("large_d_e2e"),
-        Box::new(task) as Box<dyn FnOnce()>,
-    ));
+        tasks.push((
+            tracing::info_span!("large_d_e2e", log_t),
+            Box::new(task) as Box<dyn FnOnce()>,
+        ));
+    }
 
     tasks
 }
@@ -126,7 +129,7 @@ fn compare_sumcheck_implementations<F, ProofTranscript, const D_MINUS_ONE: usize
     D: usize,
     T: usize,
 ) where
-    F: FieldMulSmall,
+    F: JoltField,
     ProofTranscript: Transcript,
 {
     let NUM_COPIES: usize = 3;

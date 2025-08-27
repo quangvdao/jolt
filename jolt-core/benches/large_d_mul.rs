@@ -5,12 +5,12 @@ use jolt_core::{
     field::JoltField,
     subprotocols::{
         karatsuba::{coeff_kara_16, coeff_kara_32, coeff_kara_4, coeff_kara_8, coeff_naive},
-        toom::{eval_toom16, eval_toom4, eval_toom8, FieldMulSmall},
+        toom::{eval_toom16, eval_toom4, eval_toom8},
     },
 };
 use rand_core::SeedableRng;
 
-fn toom_branch<F: FieldMulSmall, const D: usize>(polys: &[(F, F); D]) {
+fn toom_branch<F: JoltField, const D: usize>(polys: &[(F, F); D]) {
     if D == 4 {
         eval_toom4(polys[..4].try_into().unwrap());
     } else if D == 8 {

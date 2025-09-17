@@ -12,7 +12,7 @@ use crate::{
 use ark_bn254::{Bn254, Fr, G1Projective, G2Projective};
 use ark_ec::{
     pairing::{MillerLoopOutput, Pairing as ArkPairing, PairingOutput},
-    AffineRepr, CurveGroup,
+    AffineRepr, CurveGroup, PrimeGroup,
 };
 use ark_ff::{CyclotomicMultSubgroup, Field, One, PrimeField, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -178,6 +178,13 @@ impl<F: JoltField> DoryField for JoltFieldWrapper<F> {
 
     fn from_i64(val: i64) -> Self {
         JoltFieldWrapper(F::from_i64(val))
+    }
+
+    fn mul_u128(self, other: [u64; 2]) -> Self {
+        // Construct u128 from two little-endian u64 limbs safely
+        let lo = other[0] as u128;
+        let hi = (other[1] as u128) << 64;
+        JoltFieldWrapper(self.0.mul_u128(lo + hi))
     }
 }
 
@@ -401,6 +408,75 @@ impl DoryMultiScalarMul<JoltGroupWrapper<G1Projective>> for JoltMsmG1 {
         // Use `jolt-optimizations`: v[i] = scalar * v[i] + gamma[i]
         jolt_optimizations::vector_scalar_mul_add_gamma_g1_online(vs_proj, scalar.0, addends_proj);
     }
+
+    fn fixed_scalar_variable_with_add_small(
+        bases: &[JoltGroupWrapper<G1Projective>],
+        vs: &mut [JoltGroupWrapper<G1Projective>],
+        scalar_le2: [u64; 2],
+    ) {
+        assert_eq!(bases.len(), vs.len(), "bases and vs must have same length");
+        // Convert limbs to Fr once and reuse the optimized vector path
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&scalar_le2[0].to_le_bytes());
+        bytes[8..16].copy_from_slice(&scalar_le2[1].to_le_bytes());
+        let scalar = JoltFieldWrapper(Fr::from_le_bytes_mod_order(&bytes));
+        Self::fixed_scalar_variable_with_add(bases, vs, &scalar);
+    }
+
+    fn fixed_scalar_variable_with_add_cached_small(
+        bases_count: usize,
+        g1_cache: Option<&dory::curve::G1Cache>,
+        _g2_cache: Option<&dory::curve::G2Cache>,
+        vs: &mut [JoltGroupWrapper<G1Projective>],
+        scalar_le2: [u64; 2],
+    ) {
+        assert_eq!(bases_count, vs.len(), "bases_count must equal vs length");
+        // Convert limbs to Fr and reuse the cached path
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&scalar_le2[0].to_le_bytes());
+        bytes[8..16].copy_from_slice(&scalar_le2[1].to_le_bytes());
+        let scalar = JoltFieldWrapper(Fr::from_le_bytes_mod_order(&bytes));
+        Self::fixed_scalar_variable_with_add_cached(bases_count, g1_cache, None, vs, &scalar);
+    }
+
+    fn fixed_scalar_scale_with_add_small(
+        vs: &mut [JoltGroupWrapper<G1Projective>],
+        addends: &[JoltGroupWrapper<G1Projective>],
+        scalar_le2: [u64; 2],
+    ) {
+        assert_eq!(vs.len(), addends.len(), "vs and addends must have same length");
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&scalar_le2[0].to_le_bytes());
+        bytes[8..16].copy_from_slice(&scalar_le2[1].to_le_bytes());
+        let scalar = JoltFieldWrapper(Fr::from_le_bytes_mod_order(&bytes));
+
+        // # Safety: repr(transparent)
+        let vs_proj: &mut [G1Projective] = unsafe {
+            std::slice::from_raw_parts_mut(vs.as_mut_ptr() as *mut G1Projective, vs.len())
+        };
+        let addends_proj: &[G1Projective] = unsafe {
+            std::slice::from_raw_parts(addends.as_ptr() as *const G1Projective, addends.len())
+        };
+
+        jolt_optimizations::vector_scalar_mul_add_gamma_g1_online(vs_proj, scalar.0, addends_proj);
+    }
+}
+
+// Implement SmallScalarMul for any projective-wrapped group by delegating to mul_bigint
+impl<G> dory::curve::SmallScalarMul for JoltGroupWrapper<G>
+where
+    G: CurveGroup + PrimeGroup,
+{
+    fn scale_u128(&self, limbs_le2: [u64; 2]) -> Self {
+        JoltGroupWrapper(self.0.mul_bigint(limbs_le2))
+    }
+}
+
+// Implement SmallScalarMul for GT wrapper by delegating to underlying pow
+impl<P: ArkPairing> dory::curve::SmallScalarMul for JoltGTWrapper<P> {
+    fn scale_u128(&self, limbs_le2: [u64; 2]) -> Self {
+        JoltGTWrapper(self.0.pow(limbs_le2))
+    }
 }
 
 // G2 MSM implementation with jolt-optimizations
@@ -538,6 +614,58 @@ impl DoryMultiScalarMul<JoltGroupWrapper<G2Projective>> for JoltMsmG2 {
         };
 
         // Use jolt-optimizations function: v[i] = scalar * v[i] + gamma[i]
+        jolt_optimizations::vector_scalar_mul_add_gamma_g2_online(vs_proj, scalar.0, addends_proj);
+    }
+
+    fn fixed_scalar_variable_with_add_small(
+        bases: &[JoltGroupWrapper<G2Projective>],
+        vs: &mut [JoltGroupWrapper<G2Projective>],
+        scalar_le2: [u64; 2],
+    ) {
+        assert_eq!(bases.len(), vs.len(), "bases and vs must have same length");
+        // Convert limbs to Fr once and reuse the optimized vector path
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&scalar_le2[0].to_le_bytes());
+        bytes[8..16].copy_from_slice(&scalar_le2[1].to_le_bytes());
+        let scalar = JoltFieldWrapper(Fr::from_le_bytes_mod_order(&bytes));
+        Self::fixed_scalar_variable_with_add(bases, vs, &scalar);
+    }
+
+    fn fixed_scalar_variable_with_add_cached_small(
+        bases_count: usize,
+        _g1_cache: Option<&dory::curve::G1Cache>,
+        g2_cache: Option<&dory::curve::G2Cache>,
+        vs: &mut [JoltGroupWrapper<G2Projective>],
+        scalar_le2: [u64; 2],
+    ) {
+        assert_eq!(bases_count, vs.len(), "bases_count must equal vs length");
+        // Convert limbs to Fr and reuse the cached path
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&scalar_le2[0].to_le_bytes());
+        bytes[8..16].copy_from_slice(&scalar_le2[1].to_le_bytes());
+        let scalar = JoltFieldWrapper(Fr::from_le_bytes_mod_order(&bytes));
+        Self::fixed_scalar_variable_with_add_cached(bases_count, None, g2_cache, vs, &scalar);
+    }
+
+    fn fixed_scalar_scale_with_add_small(
+        vs: &mut [JoltGroupWrapper<G2Projective>],
+        addends: &[JoltGroupWrapper<G2Projective>],
+        scalar_le2: [u64; 2],
+    ) {
+        assert_eq!(vs.len(), addends.len(), "vs and addends must have same length");
+        let mut bytes = [0u8; 16];
+        bytes[0..8].copy_from_slice(&scalar_le2[0].to_le_bytes());
+        bytes[8..16].copy_from_slice(&scalar_le2[1].to_le_bytes());
+        let scalar = JoltFieldWrapper(Fr::from_le_bytes_mod_order(&bytes));
+
+        // # Safety: repr(transparent)
+        let vs_proj: &mut [G2Projective] = unsafe {
+            std::slice::from_raw_parts_mut(vs.as_mut_ptr() as *mut G2Projective, vs.len())
+        };
+        let addends_proj: &[G2Projective] = unsafe {
+            std::slice::from_raw_parts(addends.as_ptr() as *const G2Projective, addends.len())
+        };
+
         jolt_optimizations::vector_scalar_mul_add_gamma_g2_online(vs_proj, scalar.0, addends_proj);
     }
 }
@@ -988,6 +1116,15 @@ impl<'a, F: JoltField, T: Transcript> DoryTranscript for JoltToDoryTranscriptRef
             .as_mut()
             .expect("Transcript not initialized");
         JoltFieldWrapper(transcript.challenge_scalar::<F>())
+    }
+
+    fn challenge_u128(&mut self, _label: &[u8]) -> [u64; 2] {
+        let transcript = self
+            .transcript
+            .as_mut()
+            .expect("Transcript not initialized");
+        let challenge = transcript.challenge_u128();
+        [(challenge & 0xFFFFFFFFFFFFFFFF) as u64, (challenge >> 64) as u64]
     }
 
     fn reset(&mut self, _domain_label: &[u8]) {

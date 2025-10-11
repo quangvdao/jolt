@@ -8,7 +8,7 @@ use crate::{
     field::JoltField,
     transcripts::Transcript,
     utils::small_value::accum::{SignedUnreducedAccum, UnreducedProduct},
-    utils::thread::{drop_in_background_thread, unsafe_allocate_zero_vec},
+    utils::thread::{drop_in_background_thread,unsafe_allocate_uninit_vec},
     utils::{math::Math, small_value::svo_helpers},
     zkvm::r1cs::{
         constraints::{eval_az_bz_batch_from_row, CzKind, UNIFORM_R1CS},
@@ -440,10 +440,6 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
     /// store them in `bound_coeffs`. which is still in sparse format (the eval at 1 will be eval
     /// at 0 + eval at ∞). We then derive the next challenge from the transcript, and bind these
     /// bound coeffs for the next round.
-    #[tracing::instrument(
-        skip_all,
-        name = "SpartanInterleavedPolynomial::streaming_sumcheck_round"
-    )]
     pub fn streaming_sumcheck_round<ProofTranscript: Transcript>(
         &mut self,
         preprocess: &JoltSharedPreprocessing,
@@ -526,19 +522,31 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
             0
         };
 
+        // Hoist E_out/E_in slices and lengths for inner loops
+        let e_out_slice = eq_poly.E_out_current();
+        let e_out_len = e_out_slice.len();
+        let e_in_slice = eq_poly.E_in_current();
+        let e_in_len = e_in_slice.len();
+        let e_in_zero = e_in_len == 0;
+        let e_in_one = e_in_len == 1;
+        let num_streaming_x_in_vars = eq_poly.E_in_current_len().log_2();
+        
         // Pre-allocate global low/slope buffers for Az/Bz across all steps and block pairs.
         let num_blocks_total = num_steps * num_block_pairs_per_step;
-        let mut az_low_global: Vec<F> = unsafe_allocate_zero_vec(num_blocks_total);
-        let mut az_slope_global: Vec<F> = unsafe_allocate_zero_vec(num_blocks_total);
-        let mut bz_low_global: Vec<F> = unsafe_allocate_zero_vec(num_blocks_total);
-        let mut bz_slope_global: Vec<F> = unsafe_allocate_zero_vec(num_blocks_total);
+        // Use uninitialized allocation to avoid zeroing the whole region up front.
+        // We'll fill all used indices and zero the unused tail once post-compute.
+        let mut az_low_global: Vec<F> = unsafe_allocate_uninit_vec(num_blocks_total);
+        let mut az_slope_global: Vec<F> = unsafe_allocate_uninit_vec(num_blocks_total);
+        let mut bz_low_global: Vec<F> = unsafe_allocate_uninit_vec(num_blocks_total);
+        let mut bz_slope_global: Vec<F> = unsafe_allocate_uninit_vec(num_blocks_total);
+        
 
         // Capture raw pointers for parallel writes into disjoint indices
         let az_low_addr = az_low_global.as_mut_ptr() as usize;
         let az_slope_addr = az_slope_global.as_mut_ptr() as usize;
         let bz_low_addr = bz_low_global.as_mut_ptr() as usize;
         let bz_slope_addr = bz_slope_global.as_mut_ptr() as usize;
-
+        
         let results: Vec<TaskOut<F>> = (0..num_parallel_chunks)
             .into_par_iter()
             .map(|chunk_idx| {
@@ -605,9 +613,9 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
                                     // Cz gate by row kind using recovered row id
                                     let row_in_step =
                                         (chunk_index << NUM_SVO_ROUNDS) + idx_in_svo_block;
-                                    if row_in_step < UNIFORM_R1CS.len()
-                                        && matches!(UNIFORM_R1CS[row_in_step].cz, CzKind::NonZero)
-                                    {
+                                    let is_cz_nonzero = row_in_step < UNIFORM_R1CS.len()
+                                        && matches!(UNIFORM_R1CS[row_in_step].cz, CzKind::NonZero);
+                                    if is_cz_nonzero && !az.is_zero() && !bz.is_zero() {
                                         let prod = az * bz;
                                         cz_acc[x_next_val].fmadd_prod::<F>(&eq, prod);
                                     }
@@ -630,21 +638,20 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
                             let current_block_id =
                                 current_step_idx * num_block_pairs_per_step + block_pair_idx;
 
-                            let num_streaming_x_in_vars = eq_poly.E_in_current_len().log_2();
                             let x_out_idx = current_block_id >> num_streaming_x_in_vars;
                             let x_in_idx = current_block_id & ((1 << num_streaming_x_in_vars) - 1);
 
-                            let e_out = if x_out_idx < eq_poly.E_out_current_len() {
-                                eq_poly.E_out_current()[x_out_idx]
+                            let e_out = if x_out_idx < e_out_len {
+                                e_out_slice[x_out_idx]
                             } else {
                                 F::zero()
                             };
-                            let e_in = if eq_poly.E_in_current_len() == 0 {
+                            let e_in = if e_in_zero {
                                 F::one()
-                            } else if eq_poly.E_in_current_len() == 1 {
-                                eq_poly.E_in_current()[0]
-                            } else if x_in_idx < eq_poly.E_in_current_len() {
-                                eq_poly.E_in_current()[x_in_idx]
+                            } else if e_in_one {
+                                e_in_slice[0]
+                            } else if x_in_idx < e_in_len {
+                                e_in_slice[x_in_idx]
                             } else {
                                 F::zero()
                             };
@@ -683,11 +690,12 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
                 }
             })
             .collect();
-
+        
         // Aggregate totals and derive r_i
         let totals = results.iter().fold((F::zero(), F::zero()), |acc, t| {
             (acc.0 + t.sum0, acc.1 + t.sumInf)
         });
+        
         let r_i = process_eq_sumcheck_round(
             totals,
             eq_poly,
@@ -696,31 +704,65 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
             claim,
             transcript,
         );
+        
+ 
+        // Bind Az/Bz in-place at y=r only over used indices (avoid full-domain pass)
+        (0..num_parallel_chunks)
+            .into_par_iter()
+            .for_each(|chunk_idx| {
+                let x_out_start = chunk_idx * x_out_chunk_size;
+                let x_out_end = core::cmp::min((chunk_idx + 1) * x_out_chunk_size, num_x_out_vals);
 
-        // Assemble dense Az/Bz at y=r using global low/slope buffers; Cz stays sparse
-        let mut az_dense: Vec<F> = unsafe_allocate_zero_vec(num_blocks_total);
-        let mut bz_dense: Vec<F> = unsafe_allocate_zero_vec(num_blocks_total);
+                for x_out_val in x_out_start..x_out_end {
+                    for x_in_step_val in 0..num_x_in_step_vals {
+                        let current_step_idx =
+                            (x_out_val << iter_num_x_in_step_vars) | x_in_step_val;
+                        for block_pair_idx in 0..max_pairs_this_step {
+                            let offset = block_pair_idx;
+                            let global_idx = current_step_idx * num_block_pairs_per_step + offset;
+                            debug_assert!(global_idx < num_blocks_total);
+                            unsafe {
+                                let az_low_ptr = az_low_addr as *mut F;
+                                let az_slope_ptr = az_slope_addr as *mut F;
+                                let bz_low_ptr = bz_low_addr as *mut F;
+                                let bz_slope_ptr = bz_slope_addr as *mut F;
 
-        // Compute az/bz at r in parallel
-        az_dense
-            .par_iter_mut()
-            .zip_eq(bz_dense.par_iter_mut())
-            .enumerate()
-            .for_each(|(idx, (az_out, bz_out))| {
-                let azl = unsafe { *az_low_global.get_unchecked(idx) };
-                let azs = unsafe { *az_slope_global.get_unchecked(idx) };
-                let bzl = unsafe { *bz_low_global.get_unchecked(idx) };
-                let bzs = unsafe { *bz_slope_global.get_unchecked(idx) };
-                *az_out = azl + r_i * azs;
-                *bz_out = bzl + r_i * bzs;
+                                let azl = *az_low_ptr.add(global_idx);
+                                let azs = *az_slope_ptr.add(global_idx);
+                                *az_low_ptr.add(global_idx) = azl + r_i * azs;
+
+                                let bzl = *bz_low_ptr.add(global_idx);
+                                let bzs = *bz_slope_ptr.add(global_idx);
+                                *bz_low_ptr.add(global_idx) = bzl + r_i * bzs;
+                            }
+                        }
+                    }
+                }
             });
-
-        // We no longer need the low/slope buffers; drop them in background to free memory fast
-        drop_in_background_thread(az_low_global);
+        
+        // Drop only slope buffers; low buffers now hold bound values
         drop_in_background_thread(az_slope_global);
-        drop_in_background_thread(bz_low_global);
         drop_in_background_thread(bz_slope_global);
-
+        
+ 
+        // Zero the unused tail region that wasn't written because we only used up to
+        // num_steps * max_pairs_this_step per step, but buffers are sized to padded pairs.
+        if max_pairs_this_step < num_block_pairs_per_step {
+            let used_per_step = max_pairs_this_step;
+            let pad_per_step = num_block_pairs_per_step - used_per_step;
+            if pad_per_step > 0 {
+                // For each step, zero the tail [used_per_step .. num_block_pairs_per_step)
+                use crate::utils::thread::unsafe_zero_slice;
+                for step in 0..num_steps {
+                    let start = step * num_block_pairs_per_step + used_per_step;
+                    let end = (step + 1) * num_block_pairs_per_step;
+                    unsafe_zero_slice(&mut az_low_global[start..end]);
+                    unsafe_zero_slice(&mut bz_low_global[start..end]);
+                }
+            }
+        }
+        
+ 
         // Assemble Cz in parallel from the collected low/slope components.
         let cz_sparse: Vec<SparseCoefficient<F>> = results
             .par_iter()
@@ -737,9 +779,11 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
                 }
             })
             .collect();
-
-        self.az = DensePolynomial::new(az_dense);
-        self.bz = DensePolynomial::new(bz_dense);
+        
+ 
+        // Move in-place bound buffers into dense polynomials
+        self.az = DensePolynomial::new(az_low_global);
+        self.bz = DensePolynomial::new(bz_low_global);
         self.cz_sparse = cz_sparse;
     }
 

@@ -37,6 +37,23 @@ pub fn unsafe_allocate_zero_vec<F: JoltField + Sized>(size: usize) -> Vec<F> {
     result
 }
 
+pub fn unsafe_allocate_uninit_vec<F: JoltField + Sized>(size: usize) -> Vec<F> {
+    // Allocate uninitialized memory for size elements of F.
+    // Caller must fully initialize before any read.
+    let result: Vec<F>;
+    unsafe {
+        let layout = std::alloc::Layout::array::<F>(size).unwrap();
+        let ptr = std::alloc::alloc(layout) as *mut F;
+
+        if ptr.is_null() {
+            panic!("Uninitialized vec allocation failed");
+        }
+
+        result = Vec::from_raw_parts(ptr, size, size);
+    }
+    result
+}
+
 #[tracing::instrument(skip_all)]
 pub fn unsafe_zero_slice<F: JoltField + Sized>(slice: &mut [F]) {
     #[cfg(test)]

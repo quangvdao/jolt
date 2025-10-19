@@ -14,7 +14,7 @@ use core::ops::Index;
 use rand_core::{CryptoRng, RngCore};
 use rayon::prelude::*;
 
-use super::multilinear_polynomial::{BindingOrder, MultilinearPolynomial};
+use super::multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBindingMany};
 
 #[derive(Default, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize, Allocative)]
 pub struct DensePolynomial<F: JoltField> {
@@ -83,6 +83,50 @@ impl<F: JoltField> DensePolynomial<F> {
             BindingOrder::LowToHigh => self.bound_poly_var_bot_01_optimized(&r),
             BindingOrder::HighToLow => self.bound_poly_var_top_zero_optimized(&r),
         }
+    }
+
+    /// Gather the 8 binary corners for the least-significant three variables (Z fastest).
+    /// base ranges over [0, len/8). Returns corners in MSB-first order: idx8(x,y,z) = (x<<2)|(y<<1)|z.
+    #[inline]
+    pub fn gather_3cube_corners_lsb(&self, base: usize) -> [F; 8] {
+        let len = self.len();
+        debug_assert!(len >= 8 && len % 8 == 0);
+        let start = base * 8;
+        debug_assert!(start + 8 <= len);
+        // Layout of the 8 contiguous entries matches idx8(x,y,z) with z as LSB in idx.
+        [
+            self.Z[start],     // 000
+            self.Z[start + 1], // 001
+            self.Z[start + 2], // 010
+            self.Z[start + 3], // 011
+            self.Z[start + 4], // 100
+            self.Z[start + 5], // 101
+            self.Z[start + 6], // 110
+            self.Z[start + 7], // 111
+        ]
+    }
+
+    /// Gather the 8 binary corners for the most-significant three variables (X MSB).
+    /// base ranges over [0, len/8). Returns corners in MSB-first order: idx8(x,y,z) = (x<<2)|(y<<1)|z.
+    #[inline]
+    pub fn gather_3cube_corners_msb(&self, base: usize) -> [F; 8] {
+        let len = self.len();
+        debug_assert!(len >= 8 && (len & (len - 1)) == 0);
+        let stride0 = len / 2; // X
+        let stride1 = len / 4; // Y
+        let stride2 = len / 8; // Z
+        debug_assert!(base < len / 8);
+        let b = base;
+        [
+            self.Z[b],
+            self.Z[b + stride2],
+            self.Z[b + stride1],
+            self.Z[b + stride1 + stride2],
+            self.Z[b + stride0],
+            self.Z[b + stride0 + stride2],
+            self.Z[b + stride0 + stride1],
+            self.Z[b + stride0 + stride1 + stride2],
+        ]
     }
 
     pub fn bound_poly_var_top(&mut self, r: &F::Challenge) {
@@ -496,6 +540,88 @@ impl<F: JoltField> DensePolynomial<F> {
     }
 }
 
+impl<F: JoltField> PolynomialBindingMany<F> for DensePolynomial<F> {
+    /// Generic N-variable bind using EQ weights on {0,1}^N.
+    /// For N == 1, defers to bind_parallel for optimal single-var behavior.
+    /// For N > 1, performs parallel dot-products over each 2^N hypercube using EQ weights on {0,1}^N.
+    /// If number of variables is less than N, only binds the remaining variables.
+    #[tracing::instrument(skip_all, name = "DensePolynomial::bind_many")]
+    fn bind_many<const N: usize>(&mut self, r: [F::Challenge; N], order: BindingOrder) {
+        // N' = min(N, num_remaining_vars)
+        let N_prime = core::cmp::min(N, self.get_num_vars());
+        if N_prime == 0 {
+            return;
+        }
+        if N_prime == 1 {
+            self.bind_parallel(r[0], order);
+            return;
+        }
+
+        let len = self.len();
+        let block = 1 << N_prime; // 2^N_prime
+        let new_len = len >> N_prime;
+        if self.binding_scratch_space.is_none() {
+            self.binding_scratch_space = Some(unsafe_allocate_zero_vec(new_len));
+        }
+        let scratch_space = self.binding_scratch_space.as_mut().unwrap();
+        // Resize to exactly new_len for clear parallel fill
+        if scratch_space.len() != new_len {
+            scratch_space.resize(new_len, F::zero());
+        }
+
+        // Build EQ weights on {0,1}^N'. For LowToHigh, reverse r once to align chunk layout.
+        let mut r_for_eq: Vec<F::Challenge> = r[..N_prime].to_vec();
+        if matches!(order, BindingOrder::LowToHigh) {
+            r_for_eq.reverse();
+        }
+        let weights = EqPolynomial::evals(&r_for_eq);
+        debug_assert_eq!(weights.len(), block);
+
+        match order {
+            BindingOrder::LowToHigh => {
+                scratch_space
+                    .par_iter_mut()
+                    .take(new_len)
+                    .enumerate()
+                    .for_each(|(i, out)| {
+                        let base = i * block;
+                        let mut acc = F::zero();
+                        for j in 0..block {
+                            acc += self.Z[base + j] * weights[j];
+                        }
+                        *out = acc;
+                    });
+            }
+            BindingOrder::HighToLow => {
+                // Compute strides for the `N_prime` most significant variables: len/2, len/4, ..., len/2^N_prime
+                let strides: Vec<usize> = (0..N_prime).map(|k| len >> (k + 1)).collect();
+                scratch_space
+                    .par_iter_mut()
+                    .take(new_len)
+                    .enumerate()
+                    .for_each(|(i, out)| {
+                        let base = i;
+                        let mut acc = F::zero();
+                        for j in 0..block {
+                            let mut off = 0usize;
+                            // Map bit (MSB first) to stride index
+                            for k in 0..N_prime {
+                                let bit = (j >> (N_prime - 1 - k)) & 1;
+                                off += bit * strides[k];
+                            }
+                            acc += self.Z[base + off] * weights[j];
+                        }
+                        *out = acc;
+                    });
+            }
+        }
+
+        std::mem::swap(&mut self.Z, scratch_space);
+        self.num_vars -= N_prime;
+        self.len = new_len;
+    }
+}
+
 impl<F: JoltField> Clone for DensePolynomial<F> {
     fn clone(&self) -> Self {
         Self::new(self.Z[0..self.len].to_vec())
@@ -709,5 +835,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn run_bind_many_vs_iter<const N: usize>(order: BindingOrder) {
+        let mut rng = test_rng();
+        for m in 0..=6 {
+            let len = 1usize << m;
+            let evals: Vec<Fr> = (0..len).map(|_| Fr::random(&mut rng)).collect();
+            let mut poly_many = DensePolynomial::<Fr>::new(evals.clone());
+            let mut poly_iter = DensePolynomial::<Fr>::new(evals);
+
+            let r_arr: [<Fr as JoltField>::Challenge; N] =
+                std::array::from_fn(|_| <Fr as JoltField>::Challenge::random(&mut rng));
+
+            let to_bind = core::cmp::min(N, m);
+
+            // Apply generic N-bind
+            poly_many.bind_many::<N>(r_arr, order);
+
+            // Apply single-variable binds iteratively
+            for k in 0..to_bind {
+                poly_iter.bind_parallel(r_arr[k], order);
+            }
+
+            assert_eq!(poly_many.len(), poly_iter.len());
+            assert_eq!(poly_many.num_vars, poly_iter.num_vars);
+            assert_eq!(poly_many.Z, poly_iter.Z);
+        }
+    }
+
+    #[test]
+    fn test_bind_many_matches_iter_low_to_high() {
+        run_bind_many_vs_iter::<1>(BindingOrder::LowToHigh);
+        run_bind_many_vs_iter::<2>(BindingOrder::LowToHigh);
+        run_bind_many_vs_iter::<3>(BindingOrder::LowToHigh);
+        run_bind_many_vs_iter::<4>(BindingOrder::LowToHigh);
+    }
+
+    #[test]
+    fn test_bind_many_matches_iter_high_to_low() {
+        run_bind_many_vs_iter::<1>(BindingOrder::HighToLow);
+        run_bind_many_vs_iter::<2>(BindingOrder::HighToLow);
+        run_bind_many_vs_iter::<3>(BindingOrder::HighToLow);
+        run_bind_many_vs_iter::<4>(BindingOrder::HighToLow);
     }
 }

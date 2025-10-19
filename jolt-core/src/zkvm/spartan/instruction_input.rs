@@ -9,13 +9,19 @@ use crate::{
     poly::{
         commitment::commitment_scheme::CommitmentScheme,
         eq_poly::EqPolynomial,
-        multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
+        multilinear_polynomial::{
+            BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialBindingMany,
+        },
         opening_proof::{
             OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
             BIG_ENDIAN,
         },
         split_eq_poly::GruenSplitEqPolynomial,
         unipoly::UniPoly,
+    },
+    subprotocols::round_compression::{
+        aggregate_over_xy, aggregate_over_xz, aggregate_over_yz, extend8_to_27_mul_accumulate,
+        idx8, lagrange_weights_deg2,
     },
     subprotocols::sumcheck::SumcheckInstance,
     transcripts::Transcript,
@@ -87,7 +93,15 @@ impl<F: JoltField> InstructionInputSumcheck<F> {
         let input_sample_stage_2 = (r_cycle_stage_2, claim_stage_2);
 
         let (_, trace, _, _) = state_manager.get_prover_data();
-        let prover_state = ProverState::gen(trace, &input_sample_stage_1, &input_sample_stage_2);
+        let mut prover_state =
+            ProverState::gen(trace, &input_sample_stage_1, &input_sample_stage_2);
+
+        // Initialize RC3 s-grids
+        prover_state.init_round_compression(
+            &input_sample_stage_1.0,
+            &input_sample_stage_2.0,
+            gamma,
+        );
 
         Self {
             input_sample_stage_1,
@@ -154,6 +168,120 @@ impl<F: JoltField, T: Transcript> SumcheckInstance<F, T> for InstructionInputSum
     #[tracing::instrument(skip_all, name = "InstructionInputSumcheck::compute_prover_message")]
     fn compute_prover_message(&mut self, _round: usize, _previous_claim: F) -> Vec<F> {
         let state = self.prover_state.as_mut().unwrap();
+
+        // RC3 fast path for first 3 rounds
+        if let Some(rc) = state.rc.as_mut() {
+            if rc.enabled && rc.rc_round_idx < 3 {
+                match rc.rc_round_idx {
+                    0 => {
+                        let wy1 = lagrange_weights_deg2(&rc.r_cycle_stage_1_prefix[1].into());
+                        let wz1 = lagrange_weights_deg2(&rc.r_cycle_stage_1_prefix[2].into());
+                        let wy2 = lagrange_weights_deg2(&rc.r_cycle_stage_2_prefix[1].into());
+                        let wz2 = lagrange_weights_deg2(&rc.r_cycle_stage_2_prefix[2].into());
+                        let p1_1 = aggregate_over_yz(&rc.s_grid_stage_1, &wy1, &wz1);
+                        let p1_2 = aggregate_over_yz(&rc.s_grid_stage_2, &wy2, &wz2);
+                        let eval_at_0_for_stage_1 = p1_1[0];
+                        let eval_at_inf_for_stage_1 = p1_1[2];
+                        let eval_at_0_for_stage_2 = p1_2[0];
+                        let eval_at_inf_for_stage_2 = p1_2[2];
+                        let univariate_evals_stage_1 = state.eq_r_cycle_stage_1.gruen_evals_deg_3(
+                            eval_at_0_for_stage_1,
+                            eval_at_inf_for_stage_1,
+                            state.prev_claim_stage_1,
+                        );
+                        let univariate_evals_stage_2 = state.eq_r_cycle_stage_2.gruen_evals_deg_3(
+                            eval_at_0_for_stage_2,
+                            eval_at_inf_for_stage_2,
+                            state.prev_claim_stage_2,
+                        );
+                        state.prev_round_poly_stage_1 = Some(UniPoly::from_evals_and_hint(
+                            state.prev_claim_stage_1,
+                            &univariate_evals_stage_1,
+                        ));
+                        state.prev_round_poly_stage_2 = Some(UniPoly::from_evals_and_hint(
+                            state.prev_claim_stage_2,
+                            &univariate_evals_stage_2,
+                        ));
+                        return univariate_evals_stage_1
+                            .into_iter()
+                            .zip(univariate_evals_stage_2.into_iter())
+                            .map(|(a, b)| a + self.gamma.square() * b)
+                            .collect();
+                    }
+                    1 => {
+                        let wx1 = lagrange_weights_deg2(&rc.r_x.expect("r_x not set").into());
+                        let wz1 = lagrange_weights_deg2(&rc.r_cycle_stage_1_prefix[2].into());
+                        let wx2 = lagrange_weights_deg2(&rc.r_x.expect("r_x not set").into());
+                        let wz2 = lagrange_weights_deg2(&rc.r_cycle_stage_2_prefix[2].into());
+                        let p2_1 = aggregate_over_xz(&rc.s_grid_stage_1, &wx1, &wz1);
+                        let p2_2 = aggregate_over_xz(&rc.s_grid_stage_2, &wx2, &wz2);
+                        let eval_at_0_for_stage_1 = p2_1[0];
+                        let eval_at_inf_for_stage_1 = p2_1[2];
+                        let eval_at_0_for_stage_2 = p2_2[0];
+                        let eval_at_inf_for_stage_2 = p2_2[2];
+                        let univariate_evals_stage_1 = state.eq_r_cycle_stage_1.gruen_evals_deg_3(
+                            eval_at_0_for_stage_1,
+                            eval_at_inf_for_stage_1,
+                            state.prev_claim_stage_1,
+                        );
+                        let univariate_evals_stage_2 = state.eq_r_cycle_stage_2.gruen_evals_deg_3(
+                            eval_at_0_for_stage_2,
+                            eval_at_inf_for_stage_2,
+                            state.prev_claim_stage_2,
+                        );
+                        state.prev_round_poly_stage_1 = Some(UniPoly::from_evals_and_hint(
+                            state.prev_claim_stage_1,
+                            &univariate_evals_stage_1,
+                        ));
+                        state.prev_round_poly_stage_2 = Some(UniPoly::from_evals_and_hint(
+                            state.prev_claim_stage_2,
+                            &univariate_evals_stage_2,
+                        ));
+                        return univariate_evals_stage_1
+                            .into_iter()
+                            .zip(univariate_evals_stage_2.into_iter())
+                            .map(|(a, b)| a + self.gamma.square() * b)
+                            .collect();
+                    }
+                    2 => {
+                        let wx1 = lagrange_weights_deg2(&rc.r_x.expect("r_x not set").into());
+                        let wy1 = lagrange_weights_deg2(&rc.r_y.expect("r_y not set").into());
+                        let wx2 = lagrange_weights_deg2(&rc.r_x.expect("r_x not set").into());
+                        let wy2 = lagrange_weights_deg2(&rc.r_y.expect("r_y not set").into());
+                        let p3_1 = aggregate_over_xy(&rc.s_grid_stage_1, &wx1, &wy1);
+                        let p3_2 = aggregate_over_xy(&rc.s_grid_stage_2, &wx2, &wy2);
+                        let eval_at_0_for_stage_1 = p3_1[0];
+                        let eval_at_inf_for_stage_1 = p3_1[2];
+                        let eval_at_0_for_stage_2 = p3_2[0];
+                        let eval_at_inf_for_stage_2 = p3_2[2];
+                        let univariate_evals_stage_1 = state.eq_r_cycle_stage_1.gruen_evals_deg_3(
+                            eval_at_0_for_stage_1,
+                            eval_at_inf_for_stage_1,
+                            state.prev_claim_stage_1,
+                        );
+                        let univariate_evals_stage_2 = state.eq_r_cycle_stage_2.gruen_evals_deg_3(
+                            eval_at_0_for_stage_2,
+                            eval_at_inf_for_stage_2,
+                            state.prev_claim_stage_2,
+                        );
+                        state.prev_round_poly_stage_1 = Some(UniPoly::from_evals_and_hint(
+                            state.prev_claim_stage_1,
+                            &univariate_evals_stage_1,
+                        ));
+                        state.prev_round_poly_stage_2 = Some(UniPoly::from_evals_and_hint(
+                            state.prev_claim_stage_2,
+                            &univariate_evals_stage_2,
+                        ));
+                        return univariate_evals_stage_1
+                            .into_iter()
+                            .zip(univariate_evals_stage_2.into_iter())
+                            .map(|(a, b)| a + self.gamma.square() * b)
+                            .collect();
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         let out_evals_r_cycle_stage_1 = state.eq_r_cycle_stage_1.E_out_current();
         let in_evals_r_cycle_stage_1 = state.eq_r_cycle_stage_1.E_in_current();
@@ -276,6 +404,66 @@ impl<F: JoltField, T: Transcript> SumcheckInstance<F, T> for InstructionInputSum
 
     #[tracing::instrument(skip_all, name = "InstructionInputSumcheck::bind")]
     fn bind(&mut self, r_j: F::Challenge, _round: usize) {
+        let state = self.prover_state.as_mut().unwrap();
+        if let Some(rc) = state.rc.as_mut() {
+            if rc.enabled && rc.rc_round_idx < 3 {
+                match rc.rc_round_idx {
+                    0 => {
+                        rc.r_x = Some(r_j);
+                    }
+                    1 => {
+                        rc.r_y = Some(r_j);
+                    }
+                    2 => {
+                        let r_x = rc.r_x.expect("r_x not set before RC round 2");
+                        let r_y = rc.r_y.expect("r_y not set before RC round 2");
+                        let r_z = r_j;
+                        // Triple bind all 8 MLEs
+                        state
+                            .rs1_value_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        state
+                            .unexpanded_pc_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        state
+                            .rs2_value_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        state
+                            .imm_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        state
+                            .left_is_rs1_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        state
+                            .left_is_pc_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        state
+                            .right_is_rs2_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        state
+                            .right_is_imm_poly
+                            .bind_many::<3>([r_x, r_y, r_z], BindingOrder::HighToLow);
+                        // Bind eq polynomials in order
+                        state.eq_r_cycle_stage_1.bind(r_x);
+                        state.eq_r_cycle_stage_1.bind(r_y);
+                        state.eq_r_cycle_stage_1.bind(r_z);
+                        state.eq_r_cycle_stage_2.bind(r_x);
+                        state.eq_r_cycle_stage_2.bind(r_y);
+                        state.eq_r_cycle_stage_2.bind(r_z);
+                        rc.enabled = false;
+                    }
+                    _ => {}
+                }
+                // Finalize claims from prev round polys
+                state.prev_claim_stage_1 =
+                    state.prev_round_poly_stage_1.take().unwrap().evaluate(&r_j);
+                state.prev_claim_stage_2 =
+                    state.prev_round_poly_stage_2.take().unwrap().evaluate(&r_j);
+                rc.rc_round_idx += 1;
+                return;
+            }
+        }
+
         let ProverState {
             left_is_rs1_poly,
             left_is_pc_poly,
@@ -291,7 +479,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstance<F, T> for InstructionInputSum
             prev_claim_stage_2,
             prev_round_poly_stage_1,
             prev_round_poly_stage_2,
-        } = self.prover_state.as_mut().unwrap();
+            ..
+        } = state;
         left_is_rs1_poly.bind_parallel(r_j, BindingOrder::HighToLow);
         left_is_pc_poly.bind_parallel(r_j, BindingOrder::HighToLow);
         right_is_rs2_poly.bind_parallel(r_j, BindingOrder::HighToLow);
@@ -510,6 +699,7 @@ struct ProverState<F: JoltField> {
     prev_claim_stage_2: F,
     prev_round_poly_stage_1: Option<UniPoly<F>>,
     prev_round_poly_stage_2: Option<UniPoly<F>>,
+    rc: Option<RoundCompressionState<F>>, // RC3 state
 }
 
 impl<F: JoltField> ProverState<F> {
@@ -585,6 +775,148 @@ impl<F: JoltField> ProverState<F> {
             prev_claim_stage_2: sample_stage_2.1,
             prev_round_poly_stage_1: None,
             prev_round_poly_stage_2: None,
+            rc: None,
         }
     }
+
+    fn init_round_compression(
+        &mut self,
+        input_stage_1: &OpeningPoint<BIG_ENDIAN, F>,
+        input_stage_2: &OpeningPoint<BIG_ENDIAN, F>,
+        gamma: F,
+    ) {
+        // Snapshot first three MSB r entries for each stage
+        let r1_prefix = [input_stage_1.r[0], input_stage_1.r[1], input_stage_1.r[2]];
+        let r2_prefix = [input_stage_2.r[0], input_stage_2.r[1], input_stage_2.r[2]];
+
+        // Fetch current EQ tables
+        let out1 = self.eq_r_cycle_stage_1.E_out_current();
+        let in1 = self.eq_r_cycle_stage_1.E_in_current();
+        let out2 = self.eq_r_cycle_stage_2.E_out_current();
+        let in2 = self.eq_r_cycle_stage_2.E_in_current();
+
+        let out_len = out1.len();
+        let in_len = in1.len();
+        let out_n_vars = out_len.ilog2();
+        let total_len = out_len * in_len;
+        let m = self.rs1_value_poly.get_num_vars();
+        assert!(m >= 3, "Need at least 3 vars to RC3");
+
+        // Per-MLE 8-corner accumulators for stage1/stage2
+        let mut corners_rs2_s1 = [F::zero(); 8];
+        let mut corners_rs2_s2 = [F::zero(); 8];
+        let mut corners_imm_s1 = [F::zero(); 8];
+        let mut corners_imm_s2 = [F::zero(); 8];
+        let mut corners_rs1_s1 = [F::zero(); 8];
+        let mut corners_rs1_s2 = [F::zero(); 8];
+        let mut corners_pc_s1 = [F::zero(); 8];
+        let mut corners_pc_s2 = [F::zero(); 8];
+
+        let half_n = self.rs1_value_poly.len() / 2;
+
+        for j in 0..total_len {
+            let j_lo = j & ((1 << out_n_vars) - 1);
+            let j_hi = j >> out_n_vars;
+            let w1 = out1[j_lo] * in1[j_hi];
+            let w2 = out2[j_lo] * in2[j_hi];
+
+            // MSB-first top-3 bits
+            let x = ((j >> (m - 1)) & 1) as usize;
+            let y = ((j >> (m - 2)) & 1) as usize;
+            let z = ((j >> (m - 3)) & 1) as usize;
+            let corner = idx8(x, y, z);
+
+            // Flags and values at j and j + half_n for forward diffs
+            let rs2_0 = self.rs2_value_poly.get_bound_coeff(j);
+            let rs2_1 = self.rs2_value_poly.get_bound_coeff(j + half_n);
+            let rs2_i = rs2_1 - rs2_0;
+
+            let rs1_0 = self.rs1_value_poly.get_bound_coeff(j);
+            let rs1_1 = self.rs1_value_poly.get_bound_coeff(j + half_n);
+            let rs1_i = rs1_1 - rs1_0;
+
+            let imm_0 = self.imm_poly.get_bound_coeff(j);
+            let imm_1 = self.imm_poly.get_bound_coeff(j + half_n);
+            let imm_i = imm_1 - imm_0;
+
+            let pc_0 = self.unexpanded_pc_poly.get_bound_coeff(j);
+            let pc_1 = self.unexpanded_pc_poly.get_bound_coeff(j + half_n);
+            let pc_i = pc_1 - pc_0;
+
+            let r_is_rs2_0 = self.right_is_rs2_poly.get_bound_coeff(j);
+            let r_is_rs2_1 = self.right_is_rs2_poly.get_bound_coeff(j + half_n);
+            let _r_is_rs2_i = r_is_rs2_1 - r_is_rs2_0;
+
+            let r_is_imm_0 = self.right_is_imm_poly.get_bound_coeff(j);
+            let r_is_imm_1 = self.right_is_imm_poly.get_bound_coeff(j + half_n);
+            let _r_is_imm_i = r_is_imm_1 - r_is_imm_0;
+
+            let l_is_rs1_0 = self.left_is_rs1_poly.get_bound_coeff(j);
+            let l_is_rs1_1 = self.left_is_rs1_poly.get_bound_coeff(j + half_n);
+            let _l_is_rs1_i = l_is_rs1_1 - l_is_rs1_0;
+
+            let l_is_pc_0 = self.left_is_pc_poly.get_bound_coeff(j);
+            let l_is_pc_1 = self.left_is_pc_poly.get_bound_coeff(j + half_n);
+            let _l_is_pc_i = l_is_pc_1 - l_is_pc_0;
+
+            // Accumulate raw corners for each base MLE (extend will derive 1 and ∞ later)
+            // We only store the binary corners; extension handles {1,∞} via differences.
+            corners_rs2_s1[corner] += rs2_0 * w1;
+            corners_rs2_s2[corner] += rs2_0 * w2;
+            corners_imm_s1[corner] += imm_0 * w1;
+            corners_imm_s2[corner] += imm_0 * w2;
+            corners_rs1_s1[corner] += rs1_0 * w1;
+            corners_rs1_s2[corner] += rs1_0 * w2;
+            corners_pc_s1[corner] += pc_0 * w1;
+            corners_pc_s2[corner] += pc_0 * w2;
+            let _ = (rs2_i, rs1_i, imm_i, pc_i); // kept to emphasize extend uses diffs
+        }
+
+        // Form s-grids directly by extending and multiplying into accumulators
+        let mut s_grid_stage_1 = [F::zero(); 27];
+        let mut s_grid_stage_2 = [F::zero(); 27];
+        // Right side
+        extend8_to_27_mul_accumulate(
+            &corners_rs2_s1,
+            &corners_imm_s1,
+            &mut s_grid_stage_1,
+            F::one(),
+        );
+        extend8_to_27_mul_accumulate(
+            &corners_rs2_s2,
+            &corners_imm_s2,
+            &mut s_grid_stage_2,
+            F::one(),
+        );
+        // Left side scaled by gamma
+        extend8_to_27_mul_accumulate(&corners_rs1_s1, &corners_pc_s1, &mut s_grid_stage_1, gamma);
+        extend8_to_27_mul_accumulate(&corners_rs1_s2, &corners_pc_s2, &mut s_grid_stage_2, gamma);
+
+        self.rc = Some(RoundCompressionState {
+            s_grid_stage_1,
+            s_grid_stage_2,
+            rc_round_idx: 0,
+            r_x: None,
+            r_y: None,
+            enabled: true,
+            r_cycle_stage_1_prefix: r1_prefix,
+            r_cycle_stage_2_prefix: r2_prefix,
+        });
+    }
+}
+
+#[derive(Allocative)]
+struct RoundCompressionState<F: JoltField> {
+    s_grid_stage_1: [F; 27],
+    s_grid_stage_2: [F; 27],
+    rc_round_idx: usize,
+    #[allocative(skip)]
+    r_x: Option<F::Challenge>,
+    #[allocative(skip)]
+    r_y: Option<F::Challenge>,
+    enabled: bool,
+    #[allocative(skip)]
+    r_cycle_stage_1_prefix: [F::Challenge; 3],
+    #[allocative(skip)]
+    r_cycle_stage_2_prefix: [F::Challenge; 3],
 }

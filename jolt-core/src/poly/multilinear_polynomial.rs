@@ -94,6 +94,40 @@ impl<F: JoltField> MultilinearPolynomial<F> {
         }
     }
 
+    /// Wrapper to gather 8 corners for LSB 3 variables.
+    #[inline]
+    pub fn gather_3cube_corners_lsb(&self, base: usize) -> [F; 8] {
+        match self {
+            MultilinearPolynomial::LargeScalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::BoolScalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::U8Scalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::U16Scalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::U32Scalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::U64Scalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::I64Scalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::I128Scalars(p) => p.gather_3cube_corners_lsb(base),
+            MultilinearPolynomial::U128Scalars(p) => p.gather_3cube_corners_lsb(base),
+            _ => unimplemented!("Unsupported MultilinearPolynomial variant"),
+        }
+    }
+
+    /// Wrapper to gather 8 corners for MSB 3 variables.
+    #[inline]
+    pub fn gather_3cube_corners_msb(&self, base: usize) -> [F; 8] {
+        match self {
+            MultilinearPolynomial::LargeScalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::BoolScalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::U8Scalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::U16Scalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::U32Scalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::U64Scalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::I64Scalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::I128Scalars(p) => p.gather_3cube_corners_msb(base),
+            MultilinearPolynomial::U128Scalars(p) => p.gather_3cube_corners_msb(base),
+            _ => unimplemented!("Unsupported MultilinearPolynomial variant"),
+        }
+    }
+
     /// The current length of the polynomial
     pub fn len(&self) -> usize {
         match self {
@@ -574,6 +608,14 @@ pub trait PolynomialBinding<F: JoltField> {
     fn final_sumcheck_claim(&self) -> F;
 }
 
+/// Trait for binding multiple variables at once in polynomial sumcheck
+pub trait PolynomialBindingMany<F: JoltField> {
+    /// Binds min(N, num_remaining_vars) variables at once
+    /// Note that the order of challenge being round is ALWAYS r[0], r[1], etc., regardless of
+    /// the binding order (that only determines from which end we bind these variables)
+    fn bind_many<const N: usize>(&mut self, r: [F::Challenge; N], order: BindingOrder);
+}
+
 pub trait PolynomialEvaluation<F: JoltField> {
     /// Returns the final sumcheck claim about the polynomial.
     /// This uses the algorithm in Lemma 4.3 in Thaler, Proofs and
@@ -660,6 +702,56 @@ impl<F: JoltField> PolynomialBinding<F> for MultilinearPolynomial<F> {
             MultilinearPolynomial::I128Scalars(poly) => poly.final_sumcheck_claim(),
             MultilinearPolynomial::U128Scalars(poly) => poly.final_sumcheck_claim(),
             _ => unimplemented!("Unexpected MultilinearPolynomial variant"),
+        }
+    }
+}
+
+impl<F: JoltField> PolynomialBindingMany<F> for MultilinearPolynomial<F> {
+    fn bind_many<const N: usize>(&mut self, r: [F::Challenge; N], order: BindingOrder) {
+        // Bind up to the remaining number of variables; do not panic if N is larger.
+        let to_bind = core::cmp::min(N, self.get_num_vars());
+        if to_bind == 0 {
+            return;
+        }
+        if to_bind == 1 {
+            self.bind_parallel(r[0], order);
+            return;
+        }
+
+        match self {
+            MultilinearPolynomial::LargeScalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::BoolScalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::U8Scalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::U16Scalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::U32Scalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::U64Scalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::I64Scalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::I128Scalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            MultilinearPolynomial::U128Scalars(poly) => {
+                poly.bind_many::<N>(r, order);
+            }
+            // Default fallback: bind N times one-by-one
+            _ => {
+                for k in 0..N {
+                    self.bind_parallel(r[k], order);
+                }
+            }
         }
     }
 }

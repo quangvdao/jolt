@@ -1,4 +1,5 @@
 use crate::field::{JoltField, OptimizedMul};
+use crate::poly::eq_poly::EqPolynomial;
 use crate::utils::math::Math;
 use crate::utils::small_scalar::SmallScalar;
 use crate::utils::thread::unsafe_allocate_zero_vec;
@@ -8,7 +9,7 @@ use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::ops::Index;
 
-use super::multilinear_polynomial::{BindingOrder, PolynomialBinding};
+use super::multilinear_polynomial::{BindingOrder, PolynomialBinding, PolynomialBindingMany};
 
 /// Compact polynomials are used to store coefficients of small scalars.
 /// They have two representations:
@@ -174,6 +175,75 @@ impl<T: SmallScalar, F: JoltField> CompactPolynomial<T, F> {
                 });
         }
         current[0]
+    }
+
+    /// Gather the 8 binary corners for the least-significant three variables (Z fastest).
+    /// base ranges over [0, len/8). Returns corners in MSB-first order: idx8(x,y,z).
+    #[inline]
+    pub fn gather_3cube_corners_lsb(&self, base: usize) -> [F; 8] {
+        let len = self.len();
+        debug_assert!(len >= 8 && len % 8 == 0);
+        let start = base * 8;
+        debug_assert!(start + 8 <= len);
+        if self.is_bound() {
+            [
+                self.bound_coeffs[start],
+                self.bound_coeffs[start + 1],
+                self.bound_coeffs[start + 2],
+                self.bound_coeffs[start + 3],
+                self.bound_coeffs[start + 4],
+                self.bound_coeffs[start + 5],
+                self.bound_coeffs[start + 6],
+                self.bound_coeffs[start + 7],
+            ]
+        } else {
+            [
+                self.coeffs[start].to_field(),
+                self.coeffs[start + 1].to_field(),
+                self.coeffs[start + 2].to_field(),
+                self.coeffs[start + 3].to_field(),
+                self.coeffs[start + 4].to_field(),
+                self.coeffs[start + 5].to_field(),
+                self.coeffs[start + 6].to_field(),
+                self.coeffs[start + 7].to_field(),
+            ]
+        }
+    }
+
+    /// Gather the 8 binary corners for the most-significant three variables (X MSB).
+    /// base ranges over [0, len/8). Returns corners in MSB-first order: idx8(x,y,z).
+    #[inline]
+    pub fn gather_3cube_corners_msb(&self, base: usize) -> [F; 8] {
+        let len = self.len();
+        debug_assert!(len >= 8 && (len & (len - 1)) == 0);
+        let stride0 = len / 2; // X
+        let stride1 = len / 4; // Y
+        let stride2 = len / 8; // Z
+        debug_assert!(base < len / 8);
+        let b = base;
+        if self.is_bound() {
+            [
+                self.bound_coeffs[b],
+                self.bound_coeffs[b + stride2],
+                self.bound_coeffs[b + stride1],
+                self.bound_coeffs[b + stride1 + stride2],
+                self.bound_coeffs[b + stride0],
+                self.bound_coeffs[b + stride0 + stride2],
+                self.bound_coeffs[b + stride0 + stride1],
+                self.bound_coeffs[b + stride0 + stride1 + stride2],
+            ]
+        } else {
+            [
+                self.coeffs[b].to_field(),
+                self.coeffs[b + stride2].to_field(),
+                self.coeffs[b + stride1].to_field(),
+                self.coeffs[b + stride1 + stride2].to_field(),
+                self.coeffs[b + stride0].to_field(),
+                self.coeffs[b + stride0 + stride2].to_field(),
+                self.coeffs[b + stride0 + stride1].to_field(),
+                self.coeffs[b + stride0 + stride1 + stride2].to_field(),
+            ]
+        }
     }
 }
 
@@ -344,6 +414,128 @@ impl<T: SmallScalar, F: JoltField> PolynomialBinding<F> for CompactPolynomial<T,
     fn final_sumcheck_claim(&self) -> F {
         assert_eq!(self.len, 1);
         self.bound_coeffs[0]
+    }
+}
+
+impl<T: SmallScalar, F: JoltField> PolynomialBindingMany<F> for CompactPolynomial<T, F> {
+    #[tracing::instrument(skip_all, name = "CompactPolynomial::bind_many")]
+    fn bind_many<const N: usize>(&mut self, r: [F::Challenge; N], order: BindingOrder) {
+        // N' = min(N, num_remaining_vars)
+        let N_prime = core::cmp::min(N, self.get_num_vars());
+        if N_prime == 0 {
+            return;
+        }
+        if N_prime == 1 {
+            self.bind_parallel(r[0], order);
+            return;
+        }
+
+        let len = self.len();
+        let block = 1 << N_prime;
+        let new_len = len >> N_prime;
+
+        let was_bound = self.is_bound();
+
+        if self.binding_scratch_space.is_none() {
+            self.binding_scratch_space = Some(unsafe_allocate_zero_vec(new_len));
+        }
+        let scratch = self.binding_scratch_space.as_mut().unwrap();
+        if scratch.len() != new_len {
+            scratch.resize(new_len, F::zero());
+        }
+
+        // Build EQ weights once. For LowToHigh, reverse r to align contiguous layout.
+        let mut r_for_eq: Vec<F::Challenge> = r[..N_prime].to_vec();
+        if matches!(order, BindingOrder::LowToHigh) {
+            r_for_eq.reverse();
+        }
+        let weights = EqPolynomial::evals(&r_for_eq);
+        debug_assert_eq!(weights.len(), block);
+
+        if was_bound {
+            match order {
+                BindingOrder::LowToHigh => {
+                    let src = &self.bound_coeffs;
+                    scratch
+                        .par_iter_mut()
+                        .take(new_len)
+                        .enumerate()
+                        .for_each(|(i, out)| {
+                            let base = i * block;
+                            let mut acc = F::zero();
+                            for j in 0..block {
+                                acc += src[base + j] * weights[j];
+                            }
+                            *out = acc;
+                        });
+                }
+                BindingOrder::HighToLow => {
+                    let strides: Vec<usize> = (0..N_prime).map(|k| len >> (k + 1)).collect();
+                    let src = &self.bound_coeffs;
+                    scratch
+                        .par_iter_mut()
+                        .take(new_len)
+                        .enumerate()
+                        .for_each(|(i, out)| {
+                            let base = i;
+                            let mut acc = F::zero();
+                            for j in 0..block {
+                                let mut off = 0usize;
+                                for k in 0..N_prime {
+                                    let bit = (j >> (N_prime - 1 - k)) & 1;
+                                    off += bit * strides[k];
+                                }
+                                acc += src[base + off] * weights[j];
+                            }
+                            *out = acc;
+                        });
+                }
+            }
+        } else {
+            match order {
+                BindingOrder::LowToHigh => {
+                    let src = &self.coeffs;
+                    scratch
+                        .par_iter_mut()
+                        .take(new_len)
+                        .enumerate()
+                        .for_each(|(i, out)| {
+                            let base = i * block;
+                            let mut acc = F::zero();
+                            for j in 0..block {
+                                acc += src[base + j].field_mul(weights[j]);
+                            }
+                            *out = acc;
+                        });
+                }
+                BindingOrder::HighToLow => {
+                    let strides: Vec<usize> = (0..N_prime).map(|k| len >> (k + 1)).collect();
+                    let src = &self.coeffs;
+                    scratch
+                        .par_iter_mut()
+                        .take(new_len)
+                        .enumerate()
+                        .for_each(|(i, out)| {
+                            let base = i;
+                            let mut acc = F::zero();
+                            for j in 0..block {
+                                let mut off = 0usize;
+                                for k in 0..N_prime {
+                                    let bit = (j >> (N_prime - 1 - k)) & 1;
+                                    off += bit * strides[k];
+                                }
+                                acc += src[base + off].field_mul(weights[j]);
+                            }
+                            *out = acc;
+                        });
+                }
+            }
+        }
+
+        // Move results into bound_coeffs and update metadata
+        std::mem::swap(&mut self.bound_coeffs, scratch);
+        self.num_vars -= N_prime;
+        self.len = new_len;
     }
 }
 

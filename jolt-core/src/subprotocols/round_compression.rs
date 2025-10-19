@@ -76,6 +76,239 @@ pub const fn num_non_binary_points(n: usize) -> usize {
     pow(3, n) - pow(2, n)
 }
 
+// ===================== 3D extension helpers (round compression) =====================
+
+#[inline(always)]
+pub const fn idx8(x: usize, y: usize, z: usize) -> usize {
+    debug_assert!(x < 2 && y < 2 && z < 2);
+    (x << 2) | (y << 1) | z
+}
+
+#[inline(always)]
+const fn idx27(ix: usize, iy: usize, iz: usize) -> usize {
+    debug_assert!(ix < 3 && iy < 3 && iz < 3);
+    ix * 9 + iy * 3 + iz
+}
+
+/// Given the 8 binary corner values of a trivariate multilinear function f(X,Y,Z),
+/// return all 27 evaluations on {0,1,∞}^3 in MSB-first order (X major, then Y, then Z).
+/// Infinity corresponds to the forward difference along that variable:
+/// f(∞, y, z) = f(1, y, z) - f(0, y, z), etc.
+pub fn extend8_to_27<F: JoltField>(corners: &[F; 8]) -> [F; 27] {
+    // Stage 1: extend along Z (per (x,y)) → 2 × 2 × 3
+    let mut ext_z: [F; 12] = [F::zero(); 12];
+    for x in 0..2 {
+        for y in 0..2 {
+            let v0 = corners[idx8(x, y, 0)];
+            let v1 = corners[idx8(x, y, 1)];
+            let base = (x * 2 + y) * 3;
+            ext_z[base] = v0; // z = 0
+            ext_z[base + 1] = v1; // z = 1
+            ext_z[base + 2] = v1 - v0; // z = ∞
+        }
+    }
+
+    // Stage 2: extend along Y (per (x, z_trit)) → 2 × 3 × 3
+    let mut ext_y: [F; 18] = [F::zero(); 18];
+    for x in 0..2 {
+        for zt in 0..3 {
+            // fetch y=0 and y=1 from ext_z
+            let y0 = ext_z[(x * 2) * 3 + zt];
+            let y1 = ext_z[(x * 2 + 1) * 3 + zt];
+            let base = (x * 3 + zt) * 3;
+            ext_y[base] = y0; // y = 0
+            ext_y[base + 1] = y1; // y = 1
+            ext_y[base + 2] = y1 - y0; // y = ∞
+        }
+    }
+
+    // Stage 3: extend along X (per (y_trit, z_trit)) → 3 × 3 × 3
+    let mut out: [F; 27] = [F::zero(); 27];
+    for yt in 0..3 {
+        for zt in 0..3 {
+            // fetch x=0 and x=1 from ext_y
+            let x0 = ext_y[zt * 3 + yt];
+            let x1 = ext_y[(1 * 3 + zt) * 3 + yt];
+
+            // X = 0,1,∞ at fixed (Y=yt, Z=zt)
+            out[idx27(0, yt, zt)] = x0;
+            out[idx27(1, yt, zt)] = x1;
+            out[idx27(2, yt, zt)] = x1 - x0;
+        }
+    }
+    out
+}
+
+/// Extend two trivariate multilinears from their 8 binary corners to {0,1,∞}^3,
+/// multiply pointwise, and accumulate (scaled) into `target`.
+/// For the X-axis entries, we add values at X=0 and X=1 directly, and at X=∞ we add
+/// the forward difference: prod(1, y, z) - prod(0, y, z).
+#[inline]
+pub fn extend8_to_27_mul_accumulate<F: JoltField>(
+    corners_p: &[F; 8],
+    corners_q: &[F; 8],
+    target: &mut [F; 27],
+    scale: F,
+) {
+    for yt in 0..3 {
+        for zt in 0..3 {
+            // For x = 0: compute y0,y1 along z, then y-extend
+            let (y0_p_x0, y1_p_x0) = match zt {
+                0 => (corners_p[idx8(0, 0, 0)], corners_p[idx8(0, 1, 0)]),
+                1 => (corners_p[idx8(0, 0, 1)], corners_p[idx8(0, 1, 1)]),
+                _ => (
+                    corners_p[idx8(0, 0, 1)] - corners_p[idx8(0, 0, 0)],
+                    corners_p[idx8(0, 1, 1)] - corners_p[idx8(0, 1, 0)],
+                ),
+            };
+            let x0_p = match yt {
+                0 => y0_p_x0,
+                1 => y1_p_x0,
+                _ => y1_p_x0 - y0_p_x0,
+            };
+
+            // For x = 1
+            let (y0_p_x1, y1_p_x1) = match zt {
+                0 => (corners_p[idx8(1, 0, 0)], corners_p[idx8(1, 1, 0)]),
+                1 => (corners_p[idx8(1, 0, 1)], corners_p[idx8(1, 1, 1)]),
+                _ => (
+                    corners_p[idx8(1, 0, 1)] - corners_p[idx8(1, 0, 0)],
+                    corners_p[idx8(1, 1, 1)] - corners_p[idx8(1, 1, 0)],
+                ),
+            };
+            let x1_p = match yt {
+                0 => y0_p_x1,
+                1 => y1_p_x1,
+                _ => y1_p_x1 - y0_p_x1,
+            };
+
+            // Repeat for q
+            let (y0_q_x0, y1_q_x0) = match zt {
+                0 => (corners_q[idx8(0, 0, 0)], corners_q[idx8(0, 1, 0)]),
+                1 => (corners_q[idx8(0, 0, 1)], corners_q[idx8(0, 1, 1)]),
+                _ => (
+                    corners_q[idx8(0, 0, 1)] - corners_q[idx8(0, 0, 0)],
+                    corners_q[idx8(0, 1, 1)] - corners_q[idx8(0, 1, 0)],
+                ),
+            };
+            let x0_q = match yt {
+                0 => y0_q_x0,
+                1 => y1_q_x0,
+                _ => y1_q_x0 - y0_q_x0,
+            };
+
+            let (y0_q_x1, y1_q_x1) = match zt {
+                0 => (corners_q[idx8(1, 0, 0)], corners_q[idx8(1, 1, 0)]),
+                1 => (corners_q[idx8(1, 0, 1)], corners_q[idx8(1, 1, 1)]),
+                _ => (
+                    corners_q[idx8(1, 0, 1)] - corners_q[idx8(1, 0, 0)],
+                    corners_q[idx8(1, 1, 1)] - corners_q[idx8(1, 1, 0)],
+                ),
+            };
+            let x1_q = match yt {
+                0 => y0_q_x1,
+                1 => y1_q_x1,
+                _ => y1_q_x1 - y0_q_x1,
+            };
+
+            // Product at X=0,1 and forward difference at ∞
+            let s0 = x0_p * x0_q;
+            let s1 = x1_p * x1_q;
+            let sI = s1 - s0;
+
+            let base0 = idx27(0, yt, zt);
+            let base1 = idx27(1, yt, zt);
+            let baseI = idx27(2, yt, zt);
+            target[base0] += scale * s0;
+            target[base1] += scale * s1;
+            target[baseI] += scale * sI;
+        }
+    }
+}
+
+/// Convenience: 3D MSB-first ternary index for a single triple.
+#[inline]
+pub fn idx27_msb_from_points(x: SVOEvalPoint, y: SVOEvalPoint, z: SVOEvalPoint) -> usize {
+    let coords = [x, y, z];
+    svo_coords_msb_to_k_ternary_idx::<3>(&coords)
+}
+
+/// Aggregate p(X,Y,Z) over Y,Z using 3-term Lagrange weights per dimension.
+/// Given a 27-grid `grid[idx27(x,y,z)]` and weights `wy[3]`, `wz[3]`, returns a
+/// 3-vector (for X=0,1,∞) of the aggregated values:
+///     P_x = sum_{y,z in {0,1,∞}} wy[y] * wz[z] * grid[idx27(x,y,z)]
+#[inline]
+pub fn aggregate_over_yz<F: JoltField>(grid: &[F; 27], wy: &[F; 3], wz: &[F; 3]) -> [F; 3] {
+    let mut out: [F; 3] = [F::zero(), F::zero(), F::zero()];
+    for x in 0..3 {
+        let mut acc = F::zero();
+        for y in 0..3 {
+            for z in 0..3 {
+                acc += wy[y] * wz[z] * grid[idx27(x, y, z)];
+            }
+        }
+        out[x] = acc;
+    }
+    out
+}
+
+/// Aggregate p(X,Y,Z) over X,Z using 3-term Lagrange weights per dimension.
+/// Given a 27-grid `grid[idx27(x,y,z)]` and weights `wx[3]`, `wz[3]`, returns a
+/// 3-vector (for Y=0,1,∞) of the aggregated values:
+///     P_y = sum_{x,z in {0,1,∞}} wx[x] * wz[z] * grid[idx27(x,y,z)]
+#[inline]
+pub fn aggregate_over_xz<F: JoltField>(grid: &[F; 27], wx: &[F; 3], wz: &[F; 3]) -> [F; 3] {
+    let mut out: [F; 3] = [F::zero(), F::zero(), F::zero()];
+    for y in 0..3 {
+        let mut acc = F::zero();
+        for x in 0..3 {
+            for z in 0..3 {
+                acc += wx[x] * wz[z] * grid[idx27(x, y, z)];
+            }
+        }
+        out[y] = acc;
+    }
+    out
+}
+
+/// Aggregate p(X,Y,Z) over X,Y using 3-term Lagrange weights per dimension.
+/// Given a 27-grid `grid[idx27(x,y,z)]` and weights `wx[3]`, `wy[3]`, returns a
+/// 3-vector (for Z=0,1,∞) of the aggregated values:
+///     P_z = sum_{x,y in {0,1,∞}} wx[x] * wy[y] * grid[idx27(x,y,z)]
+#[inline]
+pub fn aggregate_over_xy<F: JoltField>(grid: &[F; 27], wx: &[F; 3], wy: &[F; 3]) -> [F; 3] {
+    let mut out: [F; 3] = [F::zero(), F::zero(), F::zero()];
+    for z in 0..3 {
+        let mut acc = F::zero();
+        for x in 0..3 {
+            for y in 0..3 {
+                acc += wx[x] * wy[y] * grid[idx27(x, y, z)];
+            }
+        }
+        out[z] = acc;
+    }
+    out
+}
+
+/// Degree-2 Lagrange weights on support {0, 1, ∞} evaluated at r.
+/// Returns [L0(r), L1(r), L∞(r)] with L0(r)=1-r, L1(r)=r, L∞(r)=r(r-1).
+#[inline]
+pub fn lagrange_weights_deg2<F: JoltField>(r: &F) -> [F; 3] {
+    let l0 = F::one() - *r;
+    let l1 = *r;
+    let li = *r * (*r - F::one());
+    [l0, l1, li]
+}
+
+/// Compute p1(X) = ∑_{y,z in {0,1,∞}} L_y(r_y) L_z(r_z) s(X,y,z)
+/// Returns [p1(0), p1(1), p1(∞)].
+#[inline]
+pub fn project_p1_from_sgrid<F: JoltField>(grid: &[F; 27], r_y: &F, r_z: &F) -> [F; 3] {
+    let wy = lagrange_weights_deg2(r_y);
+    let wz = lagrange_weights_deg2(r_z);
+    aggregate_over_yz(grid, &wy, &wz)
+}
+
 // Wrapper shim: perform fmadd into separate pos/neg 8-limb accumulators using the Acc8Signed API.
 #[inline(always)]
 fn fmadd_unreduced<F: JoltField>(
@@ -1148,12 +1381,15 @@ mod tests {
     use super::{
         compute_and_update_tA_inplace, compute_and_update_tA_inplace_1,
         compute_and_update_tA_inplace_2, compute_and_update_tA_inplace_3,
-        compute_and_update_tA_inplace_const,
+        compute_and_update_tA_inplace_const, extend8_to_27, idx27, idx27_msb_from_points,
+        SVOEvalPoint,
     };
+    use crate::subprotocols::round_compression::idx8;
 
     use crate::{field::JoltField, poly::eq_poly::EqPolynomial};
     use ark_bn254::Fr;
     use ark_ff::biginteger::{I8OrI96, S160};
+    use num_traits::Zero;
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
 
@@ -1178,6 +1414,49 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_extend8_to_27_basic_identities() {
+        use SVOEvalPoint::*;
+        // Simple corners so we can predict results easily
+        // corners[x][y][z] = x + 2y + 4z as field elements
+        let mut corners = [Fr::zero(); 8];
+        for x in 0..2 {
+            for y in 0..2 {
+                for z in 0..2 {
+                    let v = (x as u64) + 2 * (y as u64) + 4 * (z as u64);
+                    corners[idx8(x, y, z)] = Fr::from(v);
+                }
+            }
+        }
+        let grid = extend8_to_27(&corners);
+
+        // Check that the 8 binary points match exactly
+        for x in 0..2 {
+            for y in 0..2 {
+                for z in 0..2 {
+                    let idx = idx27(x, y, z);
+                    assert_eq!(grid[idx], corners[idx8(x, y, z)]);
+                }
+            }
+        }
+
+        // Check Infinity along Z: f(∞, y, z) = f(1,y,z) - f(0,y,z)
+        for y in 0..3 {
+            // y in {0,1,∞}
+            let i0 = idx27(0, y, 2);
+            let i1 = idx27(1, y, 2);
+            let iI = idx27(2, y, 2);
+            assert_eq!(grid[iI], grid[i1] - grid[i0]);
+        }
+
+        // Spot-check a mixed point using inclusion-exclusion: (0, ∞, ∞)
+        let p = idx27_msb_from_points(Zero, Infinity, Infinity);
+        let v = grid[p];
+        let exp = grid[idx27(0, 1, 1)] - grid[idx27(0, 0, 1)] - grid[idx27(0, 1, 0)]
+            + grid[idx27(0, 0, 0)];
+        assert_eq!(v, exp);
     }
 
     fn random_bz_value<R: Rng>(rng: &mut R) -> S160 {

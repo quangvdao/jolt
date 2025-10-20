@@ -1,5 +1,5 @@
 use crate::field::{AccumulateInPlace, DeferredProducts, FmaddTrunc, JoltField};
-use ark_ff::biginteger::{S128, S160, S192, S256};
+use ark_ff::biginteger::{S128, S160, S192, S256, S64};
 use ark_std::Zero;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,9 +173,9 @@ impl<F: JoltField> AccumulateInPlace<F, bool> for Acc6U<F> {
 impl<F: JoltField> DeferredProducts<F, u64> for Acc6U<F> {
     /// Use a 6-limb word for safer accumulation of many terms.
     /// This avoids potential overflow when summing multiple 5-limb products.
-    type Word = <F as JoltField>::Unreduced<6>;
+    type Accumulator = <F as JoltField>::Unreduced<6>;
     #[inline(always)]
-    fn product(field: &F, other: &u64) -> Self::Word {
+    fn product(field: &F, other: &u64) -> Self::Accumulator {
         if *other == 0 {
             return <F as JoltField>::Unreduced::<6>::from([0u64; 6]);
         }
@@ -183,15 +183,15 @@ impl<F: JoltField> DeferredProducts<F, u64> for Acc6U<F> {
         (*field).mul_u128_unreduced(*other as u128)
     }
     #[inline(always)]
-    fn zero() -> Self::Word {
+    fn zero() -> Self::Accumulator {
         <F as JoltField>::Unreduced::<6>::from([0u64; 6])
     }
     #[inline(always)]
-    fn add_in_place(sum: &mut Self::Word, add: &Self::Word) {
+    fn add_in_place(sum: &mut Self::Accumulator, add: &Self::Accumulator) {
         *sum += *add;
     }
     #[inline(always)]
-    fn reduce(sum: &Self::Word) -> F {
+    fn reduce(sum: &Self::Accumulator) -> F {
         F::from_barrett_reduce(*sum)
     }
 }
@@ -234,32 +234,6 @@ impl<F: JoltField> Acc6S<F> {
     }
 }
 
-impl<F: JoltField> AccumulateInPlace<F, i128> for Acc6S<F> {
-    #[inline(always)]
-    fn fmadd(&mut self, field: &F, other: &i128) {
-        let v = *other;
-        if v == 0 {
-            return;
-        }
-        let abs = v.unsigned_abs();
-        let term = (*field).mul_u128_unreduced(abs);
-        if v > 0 {
-            self.pos += term;
-        } else {
-            self.neg += term;
-        }
-    }
-    #[inline(always)]
-    fn reduce(&self) -> F {
-        Acc6S::<F>::reduce(self)
-    }
-    #[inline(always)]
-    fn combine(&mut self, other: &Self) {
-        self.pos += other.pos;
-        self.neg += other.neg;
-    }
-}
-
 // Support bool flags for Acc6S: add +field when true
 impl<F: JoltField> AccumulateInPlace<F, bool> for Acc6S<F> {
     #[inline(always)]
@@ -289,6 +263,57 @@ impl<F: JoltField> AccumulateInPlace<F, u8> for Acc6S<F> {
             return;
         }
         self.pos += (*field).mul_u64_unreduced(v);
+    }
+    #[inline(always)]
+    fn reduce(&self) -> F {
+        Acc6S::<F>::reduce(self)
+    }
+    #[inline(always)]
+    fn combine(&mut self, other: &Self) {
+        self.pos += other.pos;
+        self.neg += other.neg;
+    }
+}
+
+impl<F: JoltField> AccumulateInPlace<F, S64> for Acc6S<F> {
+    #[inline(always)]
+    fn fmadd(&mut self, field: &F, other: &S64) {
+        if other.is_zero() {
+            return;
+        }
+        let limbs = other.magnitude_as_u64();
+        let result = (*field).mul_u64_unreduced(limbs);
+        if other.is_positive {
+            self.pos += result;
+        } else {
+            self.neg += result;
+        }
+    }
+    #[inline(always)]
+    fn reduce(&self) -> F {
+        Acc6S::<F>::reduce(self)
+    }
+    #[inline(always)]
+    fn combine(&mut self, other: &Self) {
+        self.pos += other.pos;
+        self.neg += other.neg;
+    }
+}
+
+impl<F: JoltField> AccumulateInPlace<F, i128> for Acc6S<F> {
+    #[inline(always)]
+    fn fmadd(&mut self, field: &F, other: &i128) {
+        let v = *other;
+        if v == 0 {
+            return;
+        }
+        let abs = v.unsigned_abs();
+        let term = (*field).mul_u128_unreduced(abs);
+        if v > 0 {
+            self.pos += term;
+        } else {
+            self.neg += term;
+        }
     }
     #[inline(always)]
     fn reduce(&self) -> F {
@@ -508,12 +533,12 @@ impl<F: JoltField> AccumulateInPlace<F, S192> for Acc7S<F> {
 }
 
 impl<F: JoltField> DeferredProducts<F, S160> for Acc7S<F> {
-    type Word = (
+    type Accumulator = (
         <F as JoltField>::Unreduced<7>,
         <F as JoltField>::Unreduced<7>,
     );
     #[inline(always)]
-    fn product(field: &F, other: &S160) -> Self::Word {
+    fn product(field: &F, other: &S160) -> Self::Accumulator {
         if other.is_zero() {
             return (
                 <F as JoltField>::Unreduced::<7>::from([0u64; 7]),
@@ -533,19 +558,19 @@ impl<F: JoltField> DeferredProducts<F, S160> for Acc7S<F> {
         (pos, neg)
     }
     #[inline(always)]
-    fn zero() -> Self::Word {
+    fn zero() -> Self::Accumulator {
         (
             <F as JoltField>::Unreduced::<7>::from([0u64; 7]),
             <F as JoltField>::Unreduced::<7>::from([0u64; 7]),
         )
     }
     #[inline(always)]
-    fn add_in_place(sum: &mut Self::Word, add: &Self::Word) {
+    fn add_in_place(sum: &mut Self::Accumulator, add: &Self::Accumulator) {
         sum.0 += add.0;
         sum.1 += add.1;
     }
     #[inline(always)]
-    fn reduce(sum: &Self::Word) -> F {
+    fn reduce(sum: &Self::Accumulator) -> F {
         let result = if sum.0 >= sum.1 {
             F::from_barrett_reduce(sum.0 - sum.1)
         } else {
@@ -562,12 +587,12 @@ impl<F: JoltField> DeferredProducts<F, S160> for Acc7S<F> {
 }
 
 impl<F: JoltField> DeferredProducts<F, S192> for Acc7S<F> {
-    type Word = (
+    type Accumulator = (
         <F as JoltField>::Unreduced<7>,
         <F as JoltField>::Unreduced<7>,
     );
     #[inline(always)]
-    fn product(field: &F, other: &S192) -> Self::Word {
+    fn product(field: &F, other: &S192) -> Self::Accumulator {
         if other.magnitude_limbs() == [0u64; 3] {
             return (
                 <F as JoltField>::Unreduced::<7>::from([0u64; 7]),
@@ -586,19 +611,19 @@ impl<F: JoltField> DeferredProducts<F, S192> for Acc7S<F> {
         (pos, neg)
     }
     #[inline(always)]
-    fn zero() -> Self::Word {
+    fn zero() -> Self::Accumulator {
         (
             <F as JoltField>::Unreduced::<7>::from([0u64; 7]),
             <F as JoltField>::Unreduced::<7>::from([0u64; 7]),
         )
     }
     #[inline(always)]
-    fn add_in_place(sum: &mut Self::Word, add: &Self::Word) {
+    fn add_in_place(sum: &mut Self::Accumulator, add: &Self::Accumulator) {
         sum.0 += add.0;
         sum.1 += add.1;
     }
     #[inline(always)]
-    fn reduce(sum: &Self::Word) -> F {
+    fn reduce(sum: &Self::Accumulator) -> F {
         let result = if sum.0 >= sum.1 {
             F::from_barrett_reduce(sum.0 - sum.1)
         } else {
@@ -626,12 +651,12 @@ impl<F: JoltField> DeferredProducts<F, S192> for Acc7S<F> {
 // ------------------------------
 
 /// Unsigned 8-limb accumulator word used by Acc8Signed
-pub type Acc8SignedWord<F> = <F as JoltField>::Unreduced<8>;
+pub type Acc8SignedAccumulator<F> = <F as JoltField>::Unreduced<8>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Acc8Signed<F: JoltField> {
-    pub pos: Acc8SignedWord<F>,
-    pub neg: Acc8SignedWord<F>,
+    pub pos: Acc8SignedAccumulator<F>,
+    pub neg: Acc8SignedAccumulator<F>,
 }
 
 impl<F: JoltField> Default for Acc8Signed<F> {

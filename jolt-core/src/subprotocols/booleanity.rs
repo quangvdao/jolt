@@ -14,7 +14,7 @@ use crate::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN,
         },
-        ra_poly::RaPolynomial,
+        ra_poly::{RaPolynomial, RaSharedTables},
         split_eq_poly::GruenSplitEqPolynomial,
     },
     subprotocols::{
@@ -389,12 +389,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for BooleanitySum
             if round == self.params.log_k_chunk - 1 {
                 self.eq_r_r = self.B.get_current_scalar();
 
-                // Initialize H polynomials using RaPolynomial
+                // Initialize H polynomials using shared tables (one F for all ra_i)
                 let F = std::mem::take(&mut self.F);
+                let shared = Arc::new(RaSharedTables::new(F));
                 let H_indices = std::mem::take(&mut self.H_indices);
                 self.H = H_indices
                     .into_iter()
-                    .map(|indices| RaPolynomial::new(Arc::new(indices), F.clone()))
+                    .map(|indices| RaPolynomial::new_shared(Arc::new(indices), shared.clone()))
                     .collect();
 
                 // Drop G arrays as they're no longer needed

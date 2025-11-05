@@ -13,6 +13,7 @@ pub mod math;
 pub mod monitor;
 pub mod profiling;
 pub mod small_scalar;
+pub mod small_value;
 pub mod thread;
 
 /// Converts an integer value to a bitvector (all values {0,1}) of field elements.

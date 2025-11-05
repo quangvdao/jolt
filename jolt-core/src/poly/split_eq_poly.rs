@@ -89,6 +89,68 @@ impl<F: JoltField> GruenSplitEqPolynomial<F> {
         Self::new_with_scaling(w, binding_order, None)
     }
 
+    /// Compute the split equality polynomial specialized for small value optimization (SVO).
+    ///
+    /// Splits w into three parts with lengths (num_x_out_vars, num_x_in_vars, num_small_value_rounds):
+    /// - E_out is built from concatenating the x_out prefix and the suffix after x_in (excluding the last variable)
+    ///   and then taking the last `num_small_value_rounds` cached layers, reversed so that the first
+    ///   layer corresponds to the smallest prefix.
+    /// - E_in contains a single vector for the x_in middle slice, optionally scaled by `scaling_factor`.
+    #[tracing::instrument(skip_all, name = "GruenSplitEqPolynomial::new_for_small_value")]
+    pub fn new_for_small_value(
+        w: &[F::Challenge],
+        num_x_out_vars: usize,
+        num_x_in_vars: usize,
+        num_small_value_rounds: usize,
+        scaling_factor: Option<F>,
+    ) -> Self {
+        let n = w.len();
+        assert!(n > 0, "length of w must be positive for the split to be valid.");
+        assert!(
+            num_x_out_vars + num_x_in_vars + num_small_value_rounds == n,
+            "num_x_out_vars + num_x_in_vars + num_small_value_rounds must equal w.len()",
+        );
+
+        let split_point_x_out = num_x_out_vars;
+        let split_point_x_in = split_point_x_out + num_x_in_vars;
+
+        // E_in slice is the middle segment
+        let w_E_in_vars: Vec<F::Challenge> = w[split_point_x_out..split_point_x_in].to_vec();
+
+        // Build E_out vars by concatenating prefix and suffix (excluding last variable when SVO>0)
+        let suffix_slice_end = if num_small_value_rounds == 0 {
+            split_point_x_in
+        } else {
+            n - 1
+        };
+        let num_actual_suffix_vars = suffix_slice_end.saturating_sub(split_point_x_in);
+        let mut w_E_out_vars: Vec<F::Challenge> =
+            Vec::with_capacity(num_x_out_vars + num_actual_suffix_vars);
+        w_E_out_vars.extend_from_slice(&w[0..split_point_x_out]);
+        if split_point_x_in < suffix_slice_end {
+            w_E_out_vars.extend_from_slice(&w[split_point_x_in..suffix_slice_end]);
+        }
+
+        // Cached layers for E_out; scaled E_in to match typed accumulation semantics if provided
+        let (mut E_out_vec, E_in) = rayon::join(
+            || EqPolynomial::evals_cached(&w_E_out_vars),
+            || EqPolynomial::evals_with_scaling(&w_E_in_vars, scaling_factor),
+        );
+
+        // Keep only the last L layers for E_out, reversed so index 0 is the smallest prefix
+        E_out_vec.reverse();
+        E_out_vec.truncate(num_small_value_rounds);
+
+        Self {
+            current_index: num_x_out_vars,
+            current_scalar: F::one(),
+            w: w.to_vec(),
+            E_in_vec: vec![E_in],
+            E_out_vec,
+            binding_order: BindingOrder::LowToHigh,
+        }
+    }
+
     pub fn get_num_vars(&self) -> usize {
         self.w.len()
     }

@@ -105,7 +105,10 @@ impl<F: JoltField> GruenSplitEqPolynomial<F> {
         scaling_factor: Option<F>,
     ) -> Self {
         let n = w.len();
-        assert!(n > 0, "length of w must be positive for the split to be valid.");
+        assert!(
+            n > 0,
+            "length of w must be positive for the split to be valid."
+        );
         assert!(
             num_x_out_vars + num_x_in_vars + num_small_value_rounds == n,
             "num_x_out_vars + num_x_in_vars + num_small_value_rounds must equal w.len()",

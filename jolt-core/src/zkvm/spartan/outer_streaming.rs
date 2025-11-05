@@ -507,7 +507,9 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterRemainingStreamingSumcheckProver<F> {
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
+    for OuterRemainingStreamingSumcheckProver<F>
+{
     fn degree(&self) -> usize {
         OUTER_REMAINING_DEGREE_BOUND
     }

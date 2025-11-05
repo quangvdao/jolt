@@ -63,11 +63,11 @@ pub mod accum {
         #[inline(always)]
         pub fn fmadd_az(&mut self, field: &F, az: I8OrI96) {
             if az.is_zero() {
-              return;
+                return;
             };
 
             if az == I8OrI96::one() {
-              self.pos += *field.as_unreduced_ref();
+                self.pos += *field.as_unreduced_ref();
             } else {
                 let abs = az.unsigned_abs();
                 let term = (*field).mul_u128_unreduced(abs);
@@ -131,10 +131,6 @@ pub mod accum {
 pub mod svo_helpers {
     use super::accum::{fmadd_unreduced, UnreducedProduct};
     use super::*;
-    use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
-    use crate::poly::unipoly::CompressedUniPoly;
-    use crate::zkvm::spartan::outer_round_batched::process_eq_sumcheck_round;
-    use crate::transcripts::Transcript;
     use ark_ff::biginteger::{I8OrI96, S160};
 
     // SVOEvalPoint enum definition
@@ -379,27 +375,6 @@ pub mod svo_helpers {
             s_p += 1;
         }
         (offsets_infty, offsets_zero)
-    }
-
-    #[inline]
-    fn get_v_config_digits(mut k_global: usize, num_vars: usize) -> Vec<usize> {
-        if num_vars == 0 {
-            return vec![];
-        }
-        let mut digits = vec![0; num_vars];
-        let mut i = num_vars;
-        while i > 0 {
-            // Fill from LSB of digits vec, which corresponds to LSB of k_global
-            digits[i - 1] = k_global % 3;
-            k_global /= 3;
-            i -= 1;
-        }
-        digits
-    }
-
-    #[inline]
-    fn is_v_config_non_binary(v_config: &[usize]) -> bool {
-        v_config.contains(&2)
     }
 
     /// Converts MSB-first SVOEvalPoint coordinates to their global ternary index k.
@@ -1342,113 +1317,6 @@ pub mod svo_helpers {
                     }
                     SVOEvalPoint::One => {}
                 }
-            }
-        }
-    }
-
-    /// Process the first few sum-check rounds using small value optimization (SVO)
-    /// We take in the pre-computed accumulator values, and use them to compute the quadratic
-    /// evaluations (and thus cubic polynomials) for the first few sum-check rounds.
-    pub fn process_svo_sumcheck_rounds<
-        const NUM_SVO_ROUNDS: usize,
-        F: JoltField,
-        ProofTranscript: Transcript,
-    >(
-        accums_zero: &[F],
-        accums_infty: &[F],
-        r_challenges: &mut Vec<F::Challenge>,
-        round_polys: &mut Vec<CompressedUniPoly<F>>,
-        claim: &mut F,
-        transcript: &mut ProofTranscript,
-        eq_poly: &mut GruenSplitEqPolynomial<F>,
-    ) {
-        // Assert lengths of accumulator slices based on NUM_SVO_ROUNDS
-        let expected_accums_zero_len = num_accums_eval_zero(NUM_SVO_ROUNDS);
-        let expected_accums_infty_len = num_accums_eval_infty(NUM_SVO_ROUNDS);
-        assert_eq!(
-            accums_zero.len(),
-            expected_accums_zero_len,
-            "accums_zero length mismatch"
-        );
-        assert_eq!(
-            accums_infty.len(),
-            expected_accums_infty_len,
-            "accums_infty length mismatch"
-        );
-
-        let mut lagrange_coeffs: Vec<F> = vec![F::one()];
-        let mut current_acc_zero_offset = 0;
-        let mut current_acc_infty_offset = 0;
-
-        for i in 0..NUM_SVO_ROUNDS {
-            let mut quadratic_eval_0 = F::zero();
-            let mut quadratic_eval_infty = F::zero();
-
-            let num_vars_in_v_config = i; // v_config is (v_0, ..., v_{i-1})
-            let num_lagrange_coeffs_for_round = pow(3, num_vars_in_v_config);
-
-            // Compute quadratic_eval_infty
-            let num_accs_infty_curr_round = pow(3, num_vars_in_v_config);
-            if num_accs_infty_curr_round > 0
-                && current_acc_infty_offset + num_accs_infty_curr_round <= accums_infty.len()
-            {
-                let accums_infty_slice = &accums_infty[current_acc_infty_offset
-                    ..current_acc_infty_offset + num_accs_infty_curr_round];
-                for k in 0..num_lagrange_coeffs_for_round {
-                    if k < accums_infty_slice.len() && k < lagrange_coeffs.len() {
-                        quadratic_eval_infty += accums_infty_slice[k] * lagrange_coeffs[k];
-                    }
-                }
-            }
-            current_acc_infty_offset += num_accs_infty_curr_round;
-
-            // Compute quadratic_eval_0
-            let num_accs_zero_curr_round = if num_vars_in_v_config == 0 {
-                0 // 3^0 - 2^0 = 0
-            } else {
-                pow(3, num_vars_in_v_config) - pow(2, num_vars_in_v_config)
-            };
-
-            if num_accs_zero_curr_round > 0
-                && current_acc_zero_offset + num_accs_zero_curr_round <= accums_zero.len()
-            {
-                let accums_zero_slice = &accums_zero
-                    [current_acc_zero_offset..current_acc_zero_offset + num_accs_zero_curr_round];
-                let mut non_binary_v_config_counter = 0;
-                for k_global in 0..num_lagrange_coeffs_for_round {
-                    let v_config = get_v_config_digits(k_global, num_vars_in_v_config);
-                    if is_v_config_non_binary(&v_config)
-                        && non_binary_v_config_counter < accums_zero_slice.len()
-                        && k_global < lagrange_coeffs.len()
-                    {
-                        quadratic_eval_0 += accums_zero_slice[non_binary_v_config_counter]
-                            * lagrange_coeffs[k_global];
-                        non_binary_v_config_counter += 1;
-                    }
-                }
-                current_acc_zero_offset += num_accs_zero_curr_round;
-            }
-
-            let r_i = process_eq_sumcheck_round(
-                (quadratic_eval_0, quadratic_eval_infty),
-                eq_poly,
-                round_polys,
-                r_challenges,
-                claim,
-                transcript,
-            );
-
-            let lagrange_coeffs_r_i: [F; 3] = [F::one() - r_i, r_i.into(), r_i * (r_i - F::one())];
-
-            if i < NUM_SVO_ROUNDS.saturating_sub(1) {
-                lagrange_coeffs = lagrange_coeffs_r_i
-                    .iter()
-                    .flat_map(|lagrange_coeff| {
-                        lagrange_coeffs
-                            .iter()
-                            .map(move |coeff| *lagrange_coeff * *coeff)
-                    })
-                    .collect();
             }
         }
     }

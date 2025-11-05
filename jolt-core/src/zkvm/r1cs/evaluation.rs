@@ -45,25 +45,25 @@ use tracer::instruction::Cycle;
 
 use crate::field::{BarrettReduce, FMAdd, JoltField};
 use crate::poly::eq_poly::EqPolynomial;
-use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::lagrange_poly::LagrangeHelper;
+use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::subprotocols::univariate_skip::uniskip_targets;
+#[cfg(test)]
+use crate::utils::small_scalar::SmallScalar;
 use crate::utils::{
     accumulation::{Acc5U, Acc6S, Acc6U, Acc7S, Acc7U, S128Sum, S192Sum},
     math::s64_from_diff_u64s,
 };
-#[cfg(test)]
-use crate::utils::small_scalar::SmallScalar;
 use crate::zkvm::instruction::{CircuitFlags, NUM_CIRCUIT_FLAGS};
 use crate::zkvm::r1cs::inputs::ProductCycleInputs;
 use crate::zkvm::JoltSharedPreprocessing;
 
+use super::constraints::{NamedR1CSConstraint, R1CSConstraintLabel};
 use super::constraints::{
     NUM_PRODUCT_VIRTUAL, OUTER_UNIVARIATE_SKIP_DEGREE, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
     PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
 use super::inputs::{JoltR1CSInputs, R1CSCycleInputs, NUM_R1CS_INPUTS};
-use super::constraints::{NamedR1CSConstraint, R1CSConstraintLabel};
 
 pub(crate) const UNISKIP_TARGETS: [i64; OUTER_UNIVARIATE_SKIP_DEGREE] =
     uniskip_targets::<OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE, OUTER_UNIVARIATE_SKIP_DEGREE>();
@@ -935,7 +935,6 @@ impl ProductVirtualEval {
     }
 }
 
-
 // Old stuff to run Spartan with SVO done via round batching / compression (SVO_ROUNDS=3)
 
 // (old LC::evaluate_row_with removed; the new codebase does not expose the row->field adapter)
@@ -1172,7 +1171,9 @@ fn r1cs_input_to_field<F: JoltField>(inputs: &R1CSCycleInputs, var: JoltR1CSInpu
         JoltR1CSInputs::LookupOutput => inputs.lookup_output.to_field::<F>(),
         JoltR1CSInputs::ShouldJump => inputs.should_jump.to_field::<F>(),
         JoltR1CSInputs::ShouldBranch => inputs.should_branch.to_field::<F>(),
-        JoltR1CSInputs::WriteLookupOutputToRD => inputs.write_lookup_output_to_rd_addr.to_field::<F>(),
+        JoltR1CSInputs::WriteLookupOutputToRD => {
+            inputs.write_lookup_output_to_rd_addr.to_field::<F>()
+        }
         JoltR1CSInputs::WritePCtoRD => inputs.write_pc_to_rd_addr.to_field::<F>(),
         JoltR1CSInputs::OpFlags(flag) => inputs.flags[flag as usize].to_field::<F>(),
     }

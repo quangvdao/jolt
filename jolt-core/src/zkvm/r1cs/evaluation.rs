@@ -45,12 +45,15 @@ use tracer::instruction::Cycle;
 
 use crate::field::{BarrettReduce, FMAdd, JoltField};
 use crate::poly::eq_poly::EqPolynomial;
+use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::lagrange_poly::LagrangeHelper;
 use crate::subprotocols::univariate_skip::uniskip_targets;
 use crate::utils::{
     accumulation::{Acc5U, Acc6S, Acc6U, Acc7S, Acc7U, S128Sum, S192Sum},
     math::s64_from_diff_u64s,
 };
+#[cfg(test)]
+use crate::utils::small_scalar::SmallScalar;
 use crate::zkvm::instruction::{CircuitFlags, NUM_CIRCUIT_FLAGS};
 use crate::zkvm::r1cs::inputs::ProductCycleInputs;
 use crate::zkvm::JoltSharedPreprocessing;
@@ -1124,5 +1127,70 @@ pub fn eval_az_bz_batch_from_row<F: JoltField>(
     for (i, constraint) in constraints.iter().enumerate() {
         az_output[i] = eval_az_by_name::<F>(constraint, row);
         bz_output[i] = eval_bz_by_name::<F>(constraint, row);
+    }
+}
+
+// Lightweight adapters from the old branch (kept here to ease testing and tooling)
+
+impl super::constraints::R1CSConstraint {
+    /// Evaluate this constraint's (A, B) linear combinations at a specific row in the witness polynomials.
+    /// Returns (a_eval, b_eval).
+    #[inline]
+    pub fn evaluate_row<F: JoltField>(
+        &self,
+        flattened_polynomials: &[MultilinearPolynomial<F>],
+        row: usize,
+    ) -> (F, F) {
+        let a_eval = self.a.evaluate_row(flattened_polynomials, row);
+        let b_eval = self.b.evaluate_row(flattened_polynomials, row);
+        (a_eval, b_eval)
+    }
+}
+
+#[cfg(test)]
+#[inline]
+fn r1cs_input_to_field<F: JoltField>(inputs: &R1CSCycleInputs, var: JoltR1CSInputs) -> F {
+    match var {
+        JoltR1CSInputs::PC => inputs.pc.to_field::<F>(),
+        JoltR1CSInputs::UnexpandedPC => inputs.unexpanded_pc.to_field::<F>(),
+        JoltR1CSInputs::Imm => inputs.imm.to_field::<F>(),
+        JoltR1CSInputs::RamAddress => inputs.ram_addr.to_field::<F>(),
+        JoltR1CSInputs::Rs1Value => inputs.rs1_read_value.to_field::<F>(),
+        JoltR1CSInputs::Rs2Value => inputs.rs2_read_value.to_field::<F>(),
+        JoltR1CSInputs::RdWriteValue => inputs.rd_write_value.to_field::<F>(),
+        JoltR1CSInputs::RamReadValue => inputs.ram_read_value.to_field::<F>(),
+        JoltR1CSInputs::RamWriteValue => inputs.ram_write_value.to_field::<F>(),
+        JoltR1CSInputs::LeftInstructionInput => inputs.left_input.to_field::<F>(),
+        JoltR1CSInputs::RightInstructionInput => inputs.right_input.to_field::<F>(),
+        JoltR1CSInputs::LeftLookupOperand => inputs.left_lookup.to_field::<F>(),
+        JoltR1CSInputs::RightLookupOperand => inputs.right_lookup.to_field::<F>(),
+        JoltR1CSInputs::Product => inputs.product.to_field::<F>(),
+        JoltR1CSInputs::NextUnexpandedPC => inputs.next_unexpanded_pc.to_field::<F>(),
+        JoltR1CSInputs::NextPC => inputs.next_pc.to_field::<F>(),
+        JoltR1CSInputs::NextIsVirtual => inputs.next_is_virtual.to_field::<F>(),
+        JoltR1CSInputs::NextIsFirstInSequence => inputs.next_is_first_in_sequence.to_field::<F>(),
+        JoltR1CSInputs::LookupOutput => inputs.lookup_output.to_field::<F>(),
+        JoltR1CSInputs::ShouldJump => inputs.should_jump.to_field::<F>(),
+        JoltR1CSInputs::ShouldBranch => inputs.should_branch.to_field::<F>(),
+        JoltR1CSInputs::WriteLookupOutputToRD => inputs.write_lookup_output_to_rd_addr.to_field::<F>(),
+        JoltR1CSInputs::WritePCtoRD => inputs.write_pc_to_rd_addr.to_field::<F>(),
+        JoltR1CSInputs::OpFlags(flag) => inputs.flags[flag as usize].to_field::<F>(),
+    }
+}
+
+impl super::ops::LC {
+    /// Evaluate this LC given the inputs for a R1CS cycle, using field semantics (test-only).
+    #[cfg(test)]
+    pub fn evaluate_row_with<F: JoltField>(&self, inputs: &R1CSCycleInputs) -> F {
+        let mut result = F::zero();
+        self.for_each_term(|input_index, coeff| {
+            let var = JoltR1CSInputs::from_index(input_index);
+            let val = r1cs_input_to_field::<F>(inputs, var);
+            result += coeff.field_mul(val);
+        });
+        if let Some(c) = self.const_term() {
+            result += c.to_field::<F>();
+        }
+        result
     }
 }

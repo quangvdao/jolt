@@ -41,7 +41,6 @@ pub mod inner;
 pub mod instruction_input;
 pub mod outer;
 pub mod outer_baseline;
-pub mod outer_linear_time;
 pub mod outer_round_batched;
 pub mod outer_streaming;
 pub mod product;

@@ -1,23 +1,17 @@
 use ark_bn254::Fr;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, SamplingMode};
 use jolt_core::{
-    poly::commitment::dory::DoryCommitmentScheme,
-    subprotocols::sumcheck::BatchedSumcheck,
-    subprotocols::univariate_skip::{prove_uniskip_round, UniSkipState},
+    poly::{commitment::dory::DoryCommitmentScheme, opening_proof::ProverOpeningAccumulator},
+    subprotocols::{sumcheck::BatchedSumcheck, sumcheck_prover::SumcheckInstanceProver, univariate_skip::{UniSkipState, prove_uniskip_round}},
     transcripts::{KeccakTranscript, Transcript},
     utils::math::Math,
     zkvm::{
-        dag::state_manager::StateManager,
-        spartan::{outer::OuterUniSkipInstanceProver, outer_streaming::OuterRemainingStreamingSumcheckProver},
-        spartan::SpartanDagProver,
-        witness::AllCommittedPolynomials,
-        JoltProverPreprocessing, JoltRV32IM,
-    },
-    poly::opening_proof::ProverOpeningAccumulator,
-    subprotocols::sumcheck_prover::SumcheckInstanceProver
+        Jolt, JoltProverPreprocessing, JoltRV64IMAC, dag::state_manager::StateManager, spartan::{
+            SpartanDagProver, outer::{OuterRemainingSumcheckProver, OuterUniSkipInstanceProver}, outer_round_batched::OuterRoundBatchedSumcheckProver, outer_streaming::OuterRemainingStreamingSumcheckProver
+        }, witness::AllCommittedPolynomials
+    }
 };
-use rayon::prelude::*;
-
+use jolt_core::zkvm::dag::stage::SumcheckStagesProver;
 
 type F = Fr;
 type PCS = DoryCommitmentScheme;
@@ -50,7 +44,7 @@ fn setup_for_spartan(
     let padded_trace_length = (trace.len() + 1).next_power_of_two();
     trace.resize(padded_trace_length, tracer::instruction::Cycle::NoOp);
 
-    let preprocessing: JoltProverPreprocessing<F, PCS> = JoltRV32IM::prover_preprocess(
+    let preprocessing: JoltProverPreprocessing<F, PCS> = JoltRV64IMAC::prover_preprocess(
         bytecode,
         io_device.memory_layout.clone(),
         memory_init,
@@ -90,7 +84,7 @@ fn setup_for_spartan(
     let mut transcript = ProofTranscript::new(b"Jolt transcript");
     // Initialize opening accumulator and preamble here for callers
     let opening_bits = state_manager.get_trace_len().log_2();
-    let mut opening_accumulator =
+    let opening_accumulator =
         jolt_core::poly::opening_proof::ProverOpeningAccumulator::<F>::new(opening_bits);
     // FS preamble must be applied before any challenges are derived
     state_manager.fiat_shamir_preamble(&mut transcript);
@@ -109,35 +103,6 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
     for num_iterations in num_iters {
         let bench_name = format!("sha2-chain-{}", num_iterations);
 
-        // group.bench_function(&format!("svo/{}", bench_name), |b| {
-        //     b.iter_batched(
-        //         || setup_for_spartan("sha2-chain-guest", num_iterations),
-        //         |(
-        //             flattened_polys,
-        //             uniform_constraints,
-        //             num_rounds,
-        //             padded_num_constraints,
-        //             mut transcript,
-        //         )| {
-        //             let tau: Vec<F> = (0..num_rounds)
-        //                 .map(|_| F::from(rand::random::<u64>()))
-        //                 .collect();
-
-        //             black_box(
-        //                 SumcheckInstanceProof::prove_spartan_small_value::<NUM_SVO_ROUNDS>(
-        //                     num_rounds,
-        //                     padded_num_constraints,
-        //                     &uniform_constraints,
-        //                     &flattened_polys,
-        //                     &tau,
-        //                     &mut transcript,
-        //                 ),
-        //             );
-        //         },
-        //         BatchSize::SmallInput,
-        //     );
-        // });
-
         group.bench_function(&format!("outer-current/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
@@ -155,8 +120,10 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         &mut opening_accumulator,
                         &mut transcript,
                     );
-                    let mut instance_refs: Vec<_> =
-                        instances.iter_mut().map(|b| &mut **b).collect();
+                    debug_assert_eq!(instances.len(), 1);
+                    let mut only = instances.pop().expect("expected one outer remaining instance");
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut *only];
                     black_box(BatchedSumcheck::prove(
                         instance_refs,
                         &mut opening_accumulator,
@@ -187,7 +154,59 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         num_cycles_bits,
                         &uni,
                     );
-                    let mut instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut instance];
+
+                    black_box(BatchedSumcheck::prove(
+                        instance_refs,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_function(&format!("outer-round-batched/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(mut state_manager, _padded_trace_length, mut opening_accumulator, mut transcript)| {
+                    let mut instance = OuterRoundBatchedSumcheckProver::<F>::gen::<PCS, ProofTranscript>(
+                        &mut state_manager,
+                        &mut transcript,
+                    );
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut instance];
+                    black_box(BatchedSumcheck::prove(
+                        instance_refs,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_function(&format!("outer-baseline/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(mut state_manager, _padded_trace_length, mut opening_accumulator, mut transcript)| {
+                    // Uni-skip first round (same initialization pattern as outer-streaming)
+                    let num_rows_bits = state_manager.get_trace_len().log_2();
+                    let tau = transcript.challenge_vector_optimized::<F>(num_rows_bits);
+                    let mut uniskip_instance = OuterUniSkipInstanceProver::gen(&mut state_manager, &tau);
+                    let (_first_round_proof, r0, claim_after_first) =
+                        prove_uniskip_round(&mut uniskip_instance, &mut transcript);
+                    let uni = UniSkipState { claim_after_first, r0, tau };
+
+                    // Baseline remaining instance (non-streaming implementation)
+                    let num_cycles_bits = state_manager.get_trace_len().log_2();
+                    let mut instance = OuterRemainingSumcheckProver::gen(
+                        &mut state_manager,
+                        num_cycles_bits,
+                        &uni,
+                    );
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
                         vec![&mut instance];
 
                     black_box(BatchedSumcheck::prove(

@@ -3,7 +3,7 @@ use crate::poly::{
     eq_poly::EqPolynomial, split_eq_poly::GruenSplitEqPolynomial, unipoly::{CompressedUniPoly, UniPoly},
 };
 use crate::{
-    field::{JoltField, OptimizedMul},
+    field::JoltField,
     transcripts::{Transcript, AppendToTranscript},
     utils::small_value::accum::{SignedUnreducedAccum, UnreducedProduct},
     utils::{math::Math, small_value::svo_helpers},
@@ -424,16 +424,30 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
         round_polys: &mut Vec<CompressedUniPoly<F>>,
         claim: &mut F,
     ) {
-        let num_y_svo_vars = r_challenges.len();
-        debug_assert_eq!(
-            num_y_svo_vars, NUM_SVO_ROUNDS,
-            "r_challenges length mismatch with NUM_SVO_ROUNDS"
+        // Refactored: compute endpoints and cached [az0,bz0,az1,bz1] using helper
+        let (totals, block4) = compute_streaming_endpoints_and_block4::<F>(
+            preprocess,
+            trace,
+            eq_poly,
+            r_challenges,
         );
-        let mut r_rev = r_challenges.clone();
-        r_rev.reverse();
-        // Scale eq(r, y) by R^2 so unreduced fmadd reductions match field semantics
-        let eq_r_evals =
-            EqPolynomial::<F>::evals_with_scaling(&r_rev, Some(F::MONTGOMERY_R_SQUARE));
+
+        // Derive r_i and bind eq poly for next round
+        let r_i = process_eq_sumcheck_round(
+            totals,
+            eq_poly,
+            round_polys,
+            r_challenges,
+            claim,
+            transcript,
+        );
+
+        // Bind cached four-at-r into bound Az/Bz at this r_i
+        self.bound_coeffs = bind_block4_at_r::<F>(&block4, r_i);
+        return;
+        /*
+
+        let eq_r_evals: Vec<F> = Vec::new();
 
         // Derive partition from current eq_poly lengths and static SVO params
         let padded_num_constraints = self.padded_num_constraints;
@@ -735,6 +749,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
             });
 
         core::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
+        */
     }
 
     /// This function computes the polynomial for each of the remaining rounds, using the
@@ -781,107 +796,8 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField> SpartanInterleavedPolynomial<NUM
             .par_chunk_by(|x, y| x.index / block_size == y.index / block_size)
             .collect();
 
-        // If `E_in` is fully bound, then we simply sum over `E_out`
-        let quadratic_evals = if eq_poly.E_in_current_len() == 1 {
-            let evals: (F, F) = chunks
-                .par_iter()
-                .flat_map_iter(|chunk| {
-                    chunk
-                        .chunk_by(|x, y| x.index / 4 == y.index / 4)
-                        .map(|sparse_block| {
-                            let block_index = sparse_block[0].index / 4;
-                            let mut block = [F::zero(); 4];
-                            for coeff in sparse_block {
-                                block[coeff.index % 4] = coeff.value;
-                            }
-
-                            let az = (block[0], block[2]);
-                            let bz = (block[1], block[3]);
-
-                            let az_eval_infty = az.1 - az.0;
-                            let bz_eval_infty = bz.1 - bz.0;
-
-                            let eq_evals = eq_poly.E_out_current()[block_index];
-
-                            (
-                                eq_evals.mul_0_optimized(az.0.mul_0_optimized(bz.0)),
-                                eq_evals
-                                    .mul_0_optimized(az_eval_infty.mul_0_optimized(bz_eval_infty)),
-                            )
-                        })
-                })
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                );
-            evals
-        } else {
-            // If `E_in` is not fully bound, then we have to collect the sum over `E_out` as well
-            let num_x1_bits = eq_poly.E_in_current_len().log_2();
-            let x1_bitmask = (1 << num_x1_bits) - 1;
-
-            let evals: (F, F) = chunks
-                .par_iter()
-                .map(|chunk| {
-                    let mut eval_point_0 = F::zero();
-                    let mut eval_point_infty = F::zero();
-
-                    let mut inner_sums = (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero());
-                    let mut prev_x2 = 0;
-
-                    for sparse_block in chunk.chunk_by(|x, y| x.index / 4 == y.index / 4) {
-                        let block_index = sparse_block[0].index / 4;
-                        let x1 = block_index & x1_bitmask;
-                        let E_in_evals = eq_poly.E_in_current()[x1];
-                        let x2 = block_index >> num_x1_bits;
-
-                        if x2 != prev_x2 {
-                            let reduced_inner_sums = (
-                                F::from_montgomery_reduce(inner_sums.0),
-                                F::from_montgomery_reduce(inner_sums.1),
-                            );
-                            eval_point_0 += eq_poly.E_out_current()[prev_x2] * reduced_inner_sums.0;
-                            eval_point_infty +=
-                                eq_poly.E_out_current()[prev_x2] * reduced_inner_sums.1;
-
-                            inner_sums = (F::Unreduced::zero(), F::Unreduced::zero());
-                            prev_x2 = x2;
-                        }
-
-                        let mut block = [F::zero(); 4];
-                        for coeff in sparse_block {
-                            block[coeff.index % 4] = coeff.value;
-                        }
-
-                        let az = (block[0], block[2]);
-                        let bz = (block[1], block[3]);
-
-                        let az_eval_infty = az.1 - az.0;
-                        let bz_eval_infty = bz.1 - bz.0;
-
-                        let abc_term_0 = az.0.mul_0_optimized(bz.0);
-                        let abc_term_infty = az_eval_infty.mul_0_optimized(bz_eval_infty);
-
-                        inner_sums.0 += E_in_evals.mul_unreduced::<9>(abc_term_0);
-                        inner_sums.1 += E_in_evals.mul_unreduced::<9>(abc_term_infty);
-                    }
-
-                    let reduced_inner_sums = (
-                        F::from_montgomery_reduce(inner_sums.0),
-                        F::from_montgomery_reduce(inner_sums.1),
-                    );
-
-                    eval_point_0 += eq_poly.E_out_current()[prev_x2] * reduced_inner_sums.0;
-                    eval_point_infty += eq_poly.E_out_current()[prev_x2] * reduced_inner_sums.1;
-
-                    (eval_point_0, eval_point_infty)
-                })
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |sum, evals| (sum.0 + evals.0, sum.1 + evals.1),
-                );
-            evals
-        };
+        // Refactored: compute endpoints from bound coeffs using helper
+        let quadratic_evals = compute_remaining_endpoints_from_bound_coeffs::<F>(eq_poly, &self.bound_coeffs);
 
         // Use the helper function to process the rest of the sumcheck round
         let r_i = process_eq_sumcheck_round(
@@ -1055,6 +971,234 @@ pub fn process_eq_sumcheck_round<F: JoltField, ProofTranscript: Transcript>(
     r_i
 }
 
+/// Compute-only helper for the streaming round (right after SVO rounds):
+/// - Returns (t(0), t(∞)) endpoints and the sparse [az0,bz0,az1,bz1] per block at y=r_svo
+#[inline]
+pub fn compute_streaming_endpoints_and_block4<F: JoltField>(
+    preprocess: &JoltSharedPreprocessing,
+    trace: &[Cycle],
+    eq_poly: &GruenSplitEqPolynomial<F>,
+    r_challenges: &[F::Challenge],
+) -> ((F, F), Vec<SparseCoefficient<F>>) {
+    let mut r_rev = r_challenges.to_vec();
+    r_rev.reverse();
+    let eq_r_evals = EqPolynomial::<F>::evals_with_scaling(&r_rev, Some(F::MONTGOMERY_R_SQUARE));
+
+    let num_x_out_vals = eq_poly.E_out_current_len();
+    let iter_num_x_out_vars = if num_x_out_vals > 0 { num_x_out_vals.log_2() } else { 0 };
+    let num_steps = trace.len();
+    let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
+    debug_assert!(iter_num_x_out_vars <= num_step_vars);
+    let iter_num_x_in_step_vars = num_step_vars - iter_num_x_out_vars;
+    let num_x_in_step_vals = if iter_num_x_in_step_vars > 0 { 1usize << iter_num_x_in_step_vars } else { 1 };
+
+    let num_uniform_r1cs_constraints = R1CS_CONSTRAINTS.len();
+    let y_blocks_in_constraints = if num_uniform_r1cs_constraints > 0 {
+        num_uniform_r1cs_constraints.div_ceil(Y_SVO_SPACE_SIZE)
+    } else {
+        0
+    };
+    let num_block_pairs_per_step = (R1CS_CONSTRAINTS.len().next_power_of_two()) >> (NUM_SVO_ROUNDS + 1);
+
+    let mut sum0 = F::zero();
+    let mut sumInf = F::zero();
+    let mut out: Vec<SparseCoefficient<F>> = Vec::new();
+
+    for x_out_val in 0..num_x_out_vals {
+        let mut inner_sum0 = F::Unreduced::<9>::zero();
+        let mut inner_sumInf = F::Unreduced::<9>::zero();
+        for x_in_step_val in 0..num_x_in_step_vals {
+            let current_step_idx = (x_out_val << iter_num_x_in_step_vars) | x_in_step_val;
+            let row_inputs = R1CSCycleInputs::from_trace::<F>(preprocess, trace, current_step_idx);
+
+            for block_pair_idx in 0..num_block_pairs_per_step {
+                let mut az_acc = [SignedUnreducedAccum::<F>::new(), SignedUnreducedAccum::<F>::new()];
+                let mut bz_acc = [SignedUnreducedAccum::<F>::new(), SignedUnreducedAccum::<F>::new()];
+
+                for k in 0..2 {
+                    let chunk_index = (block_pair_idx << 1) | k;
+                    if chunk_index >= y_blocks_in_constraints { continue; }
+                    let start = chunk_index * Y_SVO_SPACE_SIZE;
+                    let end = core::cmp::min(start + Y_SVO_SPACE_SIZE, num_uniform_r1cs_constraints);
+                    let uniform_svo_chunk = &R1CS_CONSTRAINTS[start..end];
+                    let chunk_size = uniform_svo_chunk.len();
+
+                    let mut binary_az_block = [I8OrI96::zero(); Y_SVO_SPACE_SIZE];
+                    let mut binary_bz_block = [S160::zero(); Y_SVO_SPACE_SIZE];
+                    eval_az_bz_batch_from_row::<F>(
+                        uniform_svo_chunk,
+                        &row_inputs,
+                        &mut binary_az_block[..chunk_size],
+                        &mut binary_bz_block[..chunk_size],
+                    );
+
+                    let x_next_val = k;
+                    for idx_in_svo_block in 0..chunk_size {
+                        let eq = eq_r_evals[idx_in_svo_block];
+                        let az = binary_az_block[idx_in_svo_block];
+                        let bz = binary_bz_block[idx_in_svo_block];
+                        az_acc[x_next_val].fmadd_az(&eq, az);
+                        bz_acc[x_next_val].fmadd_bz(&eq, bz);
+                    }
+                }
+
+                let az0 = az_acc[0].reduce_to_field();
+                let bz0 = bz_acc[0].reduce_to_field();
+                let az1 = az_acc[1].reduce_to_field();
+                let bz1 = bz_acc[1].reduce_to_field();
+
+                let p0 = az0 * bz0;
+                let slope = (az1 - az0) * (bz1 - bz0);
+
+                let current_block_id = current_step_idx * num_block_pairs_per_step + block_pair_idx;
+                let num_streaming_x_in_vars = eq_poly.E_in_current_len().log_2();
+                let x_out_idx = current_block_id >> num_streaming_x_in_vars;
+                let x_in_idx = current_block_id & ((1 << num_streaming_x_in_vars) - 1);
+
+                let e_out = if x_out_idx < eq_poly.E_out_current_len() { eq_poly.E_out_current()[x_out_idx] } else { F::zero() };
+                let e_in = if eq_poly.E_in_current_len() == 0 {
+                    F::one()
+                } else if eq_poly.E_in_current_len() == 1 {
+                    eq_poly.E_in_current()[0]
+                } else if x_in_idx < eq_poly.E_in_current_len() {
+                    eq_poly.E_in_current()[x_in_idx]
+                } else {
+                    F::zero()
+                };
+
+                inner_sum0 += e_in.mul_unreduced::<9>(p0);
+                inner_sumInf += e_in.mul_unreduced::<9>(slope);
+
+                let block_id = current_block_id;
+                if !az0.is_zero() { out.push((4 * block_id, az0).into()); }
+                if !bz0.is_zero() { out.push((4 * block_id + 1, bz0).into()); }
+                if !az1.is_zero() { out.push((4 * block_id + 2, az1).into()); }
+                if !bz1.is_zero() { out.push((4 * block_id + 3, bz1).into()); }
+
+                let red0 = F::from_montgomery_reduce::<9>(inner_sum0);
+                let redi = F::from_montgomery_reduce::<9>(inner_sumInf);
+                sum0 += e_out * red0;
+                sumInf += e_out * redi;
+                inner_sum0 = F::Unreduced::zero();
+                inner_sumInf = F::Unreduced::zero();
+            }
+        }
+    }
+
+    ((sum0, sumInf), out)
+}
+
+/// Bind [az0,bz0,az1,bz1] blocks at r to [az(r), bz(r)] pairs
+#[inline]
+pub fn bind_block4_at_r<F: JoltField>(
+    block4_at_r: &[SparseCoefficient<F>],
+    r_i: F::Challenge,
+) -> Vec<SparseCoefficient<F>> {
+    let mut out: Vec<SparseCoefficient<F>> = Vec::with_capacity(block4_at_r.len() / 2);
+    let mut sorted = block4_at_r.to_vec();
+    sorted.sort_by_key(|c| c.index / 4);
+    let mut i = 0usize;
+    while i < sorted.len() {
+        let blk = sorted[i].index / 4;
+        let mut az0 = F::zero();
+        let mut bz0 = F::zero();
+        let mut az1 = F::zero();
+        let mut bz1 = F::zero();
+        while i < sorted.len() && sorted[i].index / 4 == blk {
+            match sorted[i].index % 4 {
+                0 => az0 = sorted[i].value,
+                1 => bz0 = sorted[i].value,
+                2 => az1 = sorted[i].value,
+                3 => bz1 = sorted[i].value,
+                _ => {}
+            }
+            i += 1;
+        }
+        let azb = az0 + r_i * (az1 - az0);
+        if !azb.is_zero() { out.push((2 * blk, azb).into()); }
+        let bzb = bz0 + r_i * (bz1 - bz0);
+        if !bzb.is_zero() { out.push((2 * blk + 1, bzb).into()); }
+    }
+    out
+}
+
+/// Compute-only helper for remaining rounds endpoints from bound sparse coeffs
+#[inline]
+pub fn compute_remaining_endpoints_from_bound_coeffs<F: JoltField>(
+    eq_poly: &GruenSplitEqPolynomial<F>,
+    bound_coeffs: &[SparseCoefficient<F>],
+) -> (F, F) {
+    if eq_poly.E_in_current_len() == 1 {
+        // groups are pairs (0,1) per block
+        let groups = bound_coeffs.len().div_ceil(4);
+        let (t0_unr, tinf_unr) = (0..groups)
+            .into_par_iter()
+            .map(|g| {
+                let base = 4 * g;
+                let mut az0 = F::zero();
+                let mut az1 = F::zero();
+                let mut bz0 = F::zero();
+                let mut bz1 = F::zero();
+                for j in 0..4 {
+                    if let Some(c) = bound_coeffs.get(base + j) {
+                        match c.index % 2 {
+                            0 => if c.index % 4 == 0 { az0 = c.value } else { az1 = c.value },
+                            1 => if c.index % 4 == 1 { bz0 = c.value } else { bz1 = c.value },
+                            _ => {}
+                        }
+                    }
+                }
+                let eq = eq_poly.E_out_current()[g];
+                let p0 = az0 * bz0;
+                let slope = (az1 - az0) * (bz1 - bz0);
+                (eq.mul_unreduced::<9>(p0), eq.mul_unreduced::<9>(slope))
+            })
+            .reduce(
+                || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
+                |a, b| (a.0 + b.0, a.1 + b.1),
+            );
+        (
+            F::from_montgomery_reduce::<9>(t0_unr),
+            F::from_montgomery_reduce::<9>(tinf_unr),
+        )
+    } else {
+        let num_x1_bits = eq_poly.E_in_current_len().log_2();
+        let x1_len = eq_poly.E_in_current_len();
+        let x2_len = eq_poly.E_out_current_len();
+        let (sum0_unr, suminf_unr) = (0..x2_len)
+            .into_par_iter()
+            .map(|x2| {
+                let mut inner0_unr = F::Unreduced::<9>::zero();
+                let mut inner_inf_unr = F::Unreduced::<9>::zero();
+                for x1 in 0..x1_len {
+                    let g = (x2 << num_x1_bits) | x1;
+                    // indices for az0,bz0,az1,bz1
+                    let az0 = bound_coeffs.iter().find(|c| c.index == 2 * g).map(|c| c.value).unwrap_or(F::zero());
+                    let bz0 = bound_coeffs.iter().find(|c| c.index == 2 * g + 1).map(|c| c.value).unwrap_or(F::zero());
+                    let az1 = bound_coeffs.iter().find(|c| c.index == 2 * g + 2).map(|c| c.value).unwrap_or(F::zero());
+                    let bz1 = bound_coeffs.iter().find(|c| c.index == 2 * g + 3).map(|c| c.value).unwrap_or(F::zero());
+                    let e_in = eq_poly.E_in_current()[x1];
+                    let p0 = az0 * bz0;
+                    let slope = (az1 - az0) * (bz1 - bz0);
+                    inner0_unr += e_in.mul_unreduced::<9>(p0);
+                    inner_inf_unr += e_in.mul_unreduced::<9>(slope);
+                }
+                let e_out = eq_poly.E_out_current()[x2];
+                let inner0_red = F::from_montgomery_reduce::<9>(inner0_unr);
+                let inner_inf_red = F::from_montgomery_reduce::<9>(inner_inf_unr);
+                (e_out.mul_unreduced::<9>(inner0_red), e_out.mul_unreduced::<9>(inner_inf_red))
+            })
+            .reduce(
+                || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
+                |a, b| (a.0 + b.0, a.1 + b.1),
+            );
+        (
+            F::from_montgomery_reduce::<9>(sum0_unr),
+            F::from_montgomery_reduce::<9>(suminf_unr),
+        )
+    }
+}
+
 // =======================
 // SumcheckInstance (Prover) for outer_round_batched (no uni-skip)
 // =======================
@@ -1181,249 +1325,6 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
         }
         (eval_zero, eval_inf)
     }
-
-    #[inline]
-    fn ensure_streaming_cache_and_quadratic(&mut self) -> (F, F) {
-        if self.block4_at_r.is_empty() {
-            // Build eq(r, y) over Y_SVO subspace using collected r_svo
-            let mut r_rev = self.r_svo.clone();
-            r_rev.reverse();
-            let eq_r_evals = EqPolynomial::<F>::evals_with_scaling(
-                &r_rev,
-                Some(F::MONTGOMERY_R_SQUARE),
-            );
-
-            let num_x_out_vals = self.eq_poly.E_out_current_len();
-            let iter_num_x_out_vars = if num_x_out_vals > 0 { num_x_out_vals.log_2() } else { 0 };
-            let num_steps = self.trace.len();
-            let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
-            debug_assert!(iter_num_x_out_vars <= num_step_vars);
-            let iter_num_x_in_step_vars = num_step_vars - iter_num_x_out_vars;
-            let num_x_in_step_vals = if iter_num_x_in_step_vars > 0 {
-                1usize << iter_num_x_in_step_vars
-            } else {
-                1
-            };
-
-            let num_uniform_r1cs_constraints = R1CS_CONSTRAINTS.len();
-            let y_blocks_in_constraints = if num_uniform_r1cs_constraints > 0 {
-                num_uniform_r1cs_constraints.div_ceil(Y_SVO_SPACE_SIZE)
-            } else {
-                0
-            };
-            let num_block_pairs_per_step = self.spartan_poly.padded_num_constraints >> (NUM_SVO_ROUNDS + 1);
-
-            let mut sum0 = F::zero();
-            let mut sumInf = F::zero();
-            let mut out: Vec<SparseCoefficient<F>> = Vec::new();
-
-            for x_out_val in 0..num_x_out_vals {
-                let mut inner_sum0 = F::Unreduced::<9>::zero();
-                let mut inner_sumInf = F::Unreduced::<9>::zero();
-                for x_in_step_val in 0..num_x_in_step_vals {
-                    let current_step_idx = (x_out_val << iter_num_x_in_step_vars) | x_in_step_val;
-                    let row_inputs = R1CSCycleInputs::from_trace::<F>(&self.preprocess, &self.trace, current_step_idx);
-
-                    for block_pair_idx in 0..num_block_pairs_per_step {
-                        let mut az_acc = [SignedUnreducedAccum::<F>::new(), SignedUnreducedAccum::<F>::new()];
-                        let mut bz_acc = [SignedUnreducedAccum::<F>::new(), SignedUnreducedAccum::<F>::new()];
-
-                        for k in 0..2 {
-                            let chunk_index = (block_pair_idx << 1) | k;
-                            if chunk_index >= y_blocks_in_constraints { continue; }
-                            let start = chunk_index * Y_SVO_SPACE_SIZE;
-                            let end = core::cmp::min(start + Y_SVO_SPACE_SIZE, num_uniform_r1cs_constraints);
-                            let uniform_svo_chunk = &R1CS_CONSTRAINTS[start..end];
-                            let chunk_size = uniform_svo_chunk.len();
-
-                            let mut binary_az_block = [I8OrI96::zero(); Y_SVO_SPACE_SIZE];
-                            let mut binary_bz_block = [S160::zero(); Y_SVO_SPACE_SIZE];
-                            eval_az_bz_batch_from_row::<F>(
-                                uniform_svo_chunk,
-                                &row_inputs,
-                                &mut binary_az_block[..chunk_size],
-                                &mut binary_bz_block[..chunk_size],
-                            );
-
-                            let x_next_val = k;
-                            for idx_in_svo_block in 0..chunk_size {
-                                let eq = eq_r_evals[idx_in_svo_block];
-                                let az = binary_az_block[idx_in_svo_block];
-                                let bz = binary_bz_block[idx_in_svo_block];
-                                az_acc[x_next_val].fmadd_az(&eq, az);
-                                bz_acc[x_next_val].fmadd_bz(&eq, bz);
-                            }
-                        }
-
-                        let az0 = az_acc[0].reduce_to_field();
-                        let bz0 = bz_acc[0].reduce_to_field();
-                        let az1 = az_acc[1].reduce_to_field();
-                        let bz1 = bz_acc[1].reduce_to_field();
-
-                        let p0 = az0 * bz0;
-                        let slope = (az1 - az0) * (bz1 - bz0);
-
-                        let current_block_id = current_step_idx * num_block_pairs_per_step + block_pair_idx;
-                        let num_streaming_x_in_vars = self.eq_poly.E_in_current_len().log_2();
-                        let x_out_idx = current_block_id >> num_streaming_x_in_vars;
-                        let x_in_idx = current_block_id & ((1 << num_streaming_x_in_vars) - 1);
-
-                        let e_out = if x_out_idx < self.eq_poly.E_out_current_len() { self.eq_poly.E_out_current()[x_out_idx] } else { F::zero() };
-                        let e_in = if self.eq_poly.E_in_current_len() == 0 {
-                            F::one()
-                        } else if self.eq_poly.E_in_current_len() == 1 {
-                            self.eq_poly.E_in_current()[0]
-                        } else if x_in_idx < self.eq_poly.E_in_current_len() {
-                            self.eq_poly.E_in_current()[x_in_idx]
-                        } else {
-                            F::zero()
-                        };
-
-                        inner_sum0 += e_in.mul_unreduced::<9>(p0);
-                        inner_sumInf += e_in.mul_unreduced::<9>(slope);
-
-                        let block_id = current_block_id;
-                        if !az0.is_zero() { out.push((4 * block_id, az0).into()); }
-                        if !bz0.is_zero() { out.push((4 * block_id + 1, bz0).into()); }
-                        if !az1.is_zero() { out.push((4 * block_id + 2, az1).into()); }
-                        if !bz1.is_zero() { out.push((4 * block_id + 3, bz1).into()); }
-                        // accumulate to totals weighted by E_out
-                        let red0 = F::from_montgomery_reduce::<9>(inner_sum0);
-                        let redi = F::from_montgomery_reduce::<9>(inner_sumInf);
-                        sum0 += e_out * red0;
-                        sumInf += e_out * redi;
-                        inner_sum0 = F::Unreduced::zero();
-                        inner_sumInf = F::Unreduced::zero();
-                    }
-                }
-            }
-
-            self.block4_at_r = out;
-            return (sum0, sumInf);
-        }
-        // If already computed, recompute totals quickly
-        // We don't re-scan trace; recompute is not needed in normal flow
-        (F::zero(), F::zero())
-    }
-
-    #[inline]
-    fn remaining_quadratic_evals(&self) -> (F, F) {
-        let eq_poly = &self.eq_poly;
-        let n = self.spartan_poly.bound_coeffs.len();
-        if eq_poly.E_in_current_len() == 1 {
-            let groups = n / 2;
-            let (t0_unr, tinf_unr) = (0..groups)
-                .into_par_iter()
-                .map(|g| {
-                    let base = 2 * g;
-                    let az0 = self.spartan_poly.bound_coeffs.get(base).map(|c| c.value).unwrap_or(F::zero());
-                    let az1 = self.spartan_poly.bound_coeffs.get(base + 2).map(|c| c.value).unwrap_or(F::zero());
-                    let bz0 = self.spartan_poly.bound_coeffs.get(base + 1).map(|c| c.value).unwrap_or(F::zero());
-                    let bz1 = self.spartan_poly.bound_coeffs.get(base + 3).map(|c| c.value).unwrap_or(F::zero());
-                    let eq = eq_poly.E_out_current()[g];
-                    let p0 = az0 * bz0;
-                    let slope = (az1 - az0) * (bz1 - bz0);
-                    (eq.mul_unreduced::<9>(p0), eq.mul_unreduced::<9>(slope))
-                })
-                .reduce(
-                    || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                );
-            (
-                F::from_montgomery_reduce::<9>(t0_unr),
-                F::from_montgomery_reduce::<9>(tinf_unr),
-            )
-        } else {
-            let num_x1_bits = eq_poly.E_in_current_len().log_2();
-            let x1_len = eq_poly.E_in_current_len();
-            let x2_len = eq_poly.E_out_current_len();
-            let (sum0_unr, suminf_unr) = (0..x2_len)
-                .into_par_iter()
-                .map(|x2| {
-                    let mut inner0_unr = F::Unreduced::<9>::zero();
-                    let mut inner_inf_unr = F::Unreduced::<9>::zero();
-                    for x1 in 0..x1_len {
-                        let g = (x2 << num_x1_bits) | x1;
-                        let base = 2 * g;
-                        let az0 = self.spartan_poly
-                            .bound_coeffs
-                            .iter()
-                            .find(|c| c.index == base)
-                            .map(|c| c.value)
-                            .unwrap_or(F::zero());
-                        let az1 = self.spartan_poly
-                            .bound_coeffs
-                            .iter()
-                            .find(|c| c.index == base + 2)
-                            .map(|c| c.value)
-                            .unwrap_or(F::zero());
-                        let bz0 = self.spartan_poly
-                            .bound_coeffs
-                            .iter()
-                            .find(|c| c.index == base + 1)
-                            .map(|c| c.value)
-                            .unwrap_or(F::zero());
-                        let bz1 = self.spartan_poly
-                            .bound_coeffs
-                            .iter()
-                            .find(|c| c.index == base + 3)
-                            .map(|c| c.value)
-                            .unwrap_or(F::zero());
-                        let e_in = eq_poly.E_in_current()[x1];
-                        let p0 = az0 * bz0;
-                        let slope = (az1 - az0) * (bz1 - bz0);
-                        inner0_unr += e_in.mul_unreduced::<9>(p0);
-                        inner_inf_unr += e_in.mul_unreduced::<9>(slope);
-                    }
-                    let e_out = eq_poly.E_out_current()[x2];
-                    let inner0_red = F::from_montgomery_reduce::<9>(inner0_unr);
-                    let inner_inf_red = F::from_montgomery_reduce::<9>(inner_inf_unr);
-                    (e_out.mul_unreduced::<9>(inner0_red), e_out.mul_unreduced::<9>(inner_inf_red))
-                })
-                .reduce(
-                    || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                );
-            (
-                F::from_montgomery_reduce::<9>(sum0_unr),
-                F::from_montgomery_reduce::<9>(suminf_unr),
-            )
-        }
-    }
-
-    #[inline]
-    fn bind_streaming_block4(&mut self, r_i: F::Challenge) {
-        if self.block4_at_r.is_empty() {
-            return;
-        }
-        // Ensure sorted by block
-        self.block4_at_r.sort_by_key(|c| c.index / 4);
-        let mut out: Vec<SparseCoefficient<F>> = Vec::with_capacity(self.block4_at_r.len() / 2);
-        let mut i = 0usize;
-        while i < self.block4_at_r.len() {
-            let blk = self.block4_at_r[i].index / 4;
-            let mut az0 = F::zero();
-            let mut bz0 = F::zero();
-            let mut az1 = F::zero();
-            let mut bz1 = F::zero();
-            while i < self.block4_at_r.len() && self.block4_at_r[i].index / 4 == blk {
-                match self.block4_at_r[i].index % 4 {
-                    0 => az0 = self.block4_at_r[i].value,
-                    1 => bz0 = self.block4_at_r[i].value,
-                    2 => az1 = self.block4_at_r[i].value,
-                    3 => bz1 = self.block4_at_r[i].value,
-                    _ => {}
-                }
-                i += 1;
-            }
-            let azb = az0 + r_i * (az1 - az0);
-            if !azb.is_zero() { out.push((2 * blk, azb).into()); }
-            let bzb = bz0 + r_i * (bz1 - bz0);
-            if !bzb.is_zero() { out.push((2 * blk + 1, bzb).into()); }
-        }
-        self.spartan_poly.bound_coeffs = out;
-        self.block4_at_r.clear();
-    }
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterRoundBatchedSumcheckProver<F> {
@@ -1436,9 +1337,16 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterRoundBat
         let (t0, tinf) = if round < NUM_SVO_ROUNDS {
             self.compute_svo_quadratic_evals(round)
         } else if round == NUM_SVO_ROUNDS {
-            self.ensure_streaming_cache_and_quadratic()
+            let ((a, b), block4) = compute_streaming_endpoints_and_block4::<F>(
+                &self.preprocess,
+                &self.trace,
+                &self.eq_poly,
+                &self.r_svo,
+            );
+            self.block4_at_r = block4;
+            (a, b)
         } else {
-            self.remaining_quadratic_evals()
+            compute_remaining_endpoints_from_bound_coeffs::<F>(&self.eq_poly, &self.spartan_poly.bound_coeffs)
         };
         let evals = self.eq_poly.gruen_evals_deg_3(t0, tinf, previous_claim);
         vec![evals[0], evals[1], evals[2]]
@@ -1463,7 +1371,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterRoundBat
 
         if round == NUM_SVO_ROUNDS {
             // Bind cached 4-at-r coefficients into Az/Bz at this r_j
-            self.bind_streaming_block4(r_j);
+            let bound = bind_block4_at_r::<F>(&self.block4_at_r, r_j);
+            self.spartan_poly.bound_coeffs = bound;
+            self.block4_at_r.clear();
             self.eq_poly.bind(r_j);
             return;
         }

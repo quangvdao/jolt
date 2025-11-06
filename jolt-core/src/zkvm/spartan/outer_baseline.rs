@@ -42,7 +42,6 @@ pub struct BaselineSpartanInterleavedPolynomial<F: JoltField> {
     pub(crate) unbound_coeffs: Vec<SparseCoefficient<F>>,
     pub(crate) bound_coeffs: Vec<SparseCoefficient<F>>,
     binding_scratch_space: Vec<SparseCoefficient<F>>,
-    dense_len: usize,
 }
 
 impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
@@ -323,7 +322,6 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
 
             self.unbound_coeffs.clear();
             self.unbound_coeffs.shrink_to_fit();
-            self.dense_len /= 2;
         } else {
             // Remaining rounds: bind bound coeffs using r into scratch, then swap
             let block_size = self
@@ -400,7 +398,6 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
                 });
 
             std::mem::swap(&mut self.bound_coeffs, &mut self.binding_scratch_space);
-            self.dense_len /= 2;
         }
     }
     pub fn new(
@@ -441,7 +438,6 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
             unbound_coeffs,
             bound_coeffs: vec![],
             binding_scratch_space: vec![],
-            dense_len: num_steps * padded_num_constraints,
         }
     }
 
@@ -503,8 +499,6 @@ pub struct OuterBaselineSumcheckProver<F: JoltField> {
     poly: BaselineSpartanInterleavedPolynomial<F>,
     /// Total rounds = step_vars + constraint_vars
     total_rounds: usize,
-    /// Number of cycle bits (step vars)
-    num_cycle_bits: usize,
 }
 
 impl<F: JoltField> OuterBaselineSumcheckProver<F> {
@@ -542,7 +536,6 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
             eq_poly,
             poly,
             total_rounds: total_num_vars,
-            num_cycle_bits: num_step_vars,
         }
     }
 }

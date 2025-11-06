@@ -17,8 +17,8 @@ use crate::{
     },
     zkvm::JoltSharedPreprocessing,
 };
-// (no verifier-side here)
 use allocative::Allocative;
+use crate::zkvm::spartan::outer_baseline::SparseCoefficient;
 use ark_ff::biginteger::{I8OrI96, S160};
 use num_traits::Zero;
 use rayon::prelude::*;
@@ -26,10 +26,8 @@ use tracer::instruction::Cycle;
 
 /// Number of rounds to use for small value optimization.
 /// Testing & estimation shows that 3 rounds is the best tradeoff
-/// TODO: this will change once we integrate univariate skip
 pub const NUM_SVO_ROUNDS: usize = 3;
 
-pub const TOTAL_NUM_ACCUMS: usize = svo_helpers::total_num_accums(NUM_SVO_ROUNDS);
 pub const NUM_NONTRIVIAL_TERNARY_POINTS: usize =
     svo_helpers::num_non_trivial_ternary_points(NUM_SVO_ROUNDS);
 pub const NUM_ACCUMS_EVAL_ZERO: usize = svo_helpers::num_accums_eval_zero(NUM_SVO_ROUNDS);
@@ -54,29 +52,6 @@ pub const Y_SVO_RELATED_COEFF_BLOCK_SIZE_SHIFT: usize = 2 + NUM_SVO_ROUNDS;
 /// Use this to extract local offsets via bit-and, instead of modulo.
 pub const Y_SVO_RELATED_COEFF_BLOCK_SIZE_MASK: usize =
     (1usize << Y_SVO_RELATED_COEFF_BLOCK_SIZE_SHIFT) - 1;
-
-// Modifications for streaming version:
-// 1. Do not have the `unbound_coeffs` in the struct
-// 2. Do streaming rounds until we get to a small enough cached size that we can store `bound_coeffs`
-
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
-pub struct SparseCoefficient<T> {
-    pub(crate) index: usize,
-    pub(crate) value: T,
-}
-
-impl<T> Allocative for SparseCoefficient<T> {
-    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
-}
-
-impl<T> From<(usize, T)> for SparseCoefficient<T> {
-    fn from(x: (usize, T)) -> Self {
-        Self {
-            index: x.0,
-            value: x.1,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Allocative)]
 pub struct RoundBatchedSpartanInterleavedPolynomial<const NUM_SVO_ROUNDS: usize, F: JoltField> {

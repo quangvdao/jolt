@@ -339,7 +339,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
-                    mut state_manager,
+                    state_manager,
                     _padded_trace_length,
                     mut opening_accumulator,
                     mut transcript,

@@ -19,7 +19,7 @@ use crate::{
         sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
     },
     transcripts::Transcript,
-    utils::{expanding_table::ExpandingTable, math::Math},
+    utils::math::Math,
     zkvm::{
         dag::state_manager::StateManager,
         ram::remap_address,
@@ -75,10 +75,6 @@ pub struct OutputSumcheckProver<F: JoltField> {
     /// i.e. io_mask(k) = 1 if k is in the "IO" region of memory,
     /// and 0 otherwise.
     io_mask: MultilinearPolynomial<F>,
-    /// Updated to contain the table of evaluations
-    /// EQ(x_1, ..., x_k, r_1, ..., r_k), where r_i is the
-    /// random challenge for the i'th round of sumcheck.
-    eq_table: ExpandingTable<F>,
     #[allocative(skip)]
     params: OutputSumcheckParams<F>,
 }
@@ -91,7 +87,8 @@ impl<F: JoltField> OutputSumcheckProver<F> {
         state_manager: &mut StateManager<'_, F, impl CommitmentScheme<Field = F>>,
         transcript: &mut impl Transcript,
     ) -> Self {
-        let params = OutputSumcheckParams::new(state_manager, transcript);
+        let (_, _, _, program_io, _) = state_manager.get_prover_data();
+        let params = OutputSumcheckParams::new(state_manager.ram_K, program_io, transcript);
 
         let K = final_ram_state.len();
         debug_assert_eq!(initial_ram_state.len(), final_ram_state.len());
@@ -120,17 +117,12 @@ impl<F: JoltField> OutputSumcheckProver<F> {
             .par_iter_mut()
             .for_each(|k| *k = true);
 
-        // Initialize the EQ table
-        let mut eq_table = ExpandingTable::new(K);
-        eq_table.reset(F::one());
-
         Self {
             val_init: initial_ram_state.to_vec().into(),
             val_final: final_ram_state.to_vec().into(),
             val_io: val_io.into(),
             eq_poly: EqPolynomial::<F>::evals(&params.r_address).into(),
             io_mask: io_mask.into(),
-            eq_table,
             params,
         }
     }
@@ -212,16 +204,16 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OutputSumchec
             val_io,
             eq_poly,
             io_mask,
-            eq_table,
             ..
         } = self;
 
         // We bind Val_init here despite the fact that it is not used in `compute_prover_message`
         // because we'll need Val_init(r) in `ValFinalSumcheck`
-        [val_init, val_final, val_io, eq_poly, io_mask]
-            .into_par_iter()
-            .for_each(|poly| poly.bind_parallel(r_j, BindingOrder::LowToHigh));
-        eq_table.update(r_j);
+        val_init.bind_parallel(r_j, BindingOrder::LowToHigh);
+        val_final.bind_parallel(r_j, BindingOrder::LowToHigh);
+        val_io.bind_parallel(r_j, BindingOrder::LowToHigh);
+        eq_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        io_mask.bind_parallel(r_j, BindingOrder::LowToHigh);
     }
 
     fn cache_openings(
@@ -263,11 +255,8 @@ pub struct OutputSumcheckVerifier<F: JoltField> {
 }
 
 impl<F: JoltField> OutputSumcheckVerifier<F> {
-    pub fn new(
-        state_manager: &mut StateManager<'_, F, impl CommitmentScheme<Field = F>>,
-        transcript: &mut impl Transcript,
-    ) -> Self {
-        let params = OutputSumcheckParams::new(state_manager, transcript);
+    pub fn new(ram_K: usize, program_io: &JoltDevice, transcript: &mut impl Transcript) -> Self {
+        let params = OutputSumcheckParams::new(ram_K, program_io, transcript);
         Self { params }
     }
 }
@@ -364,17 +353,12 @@ struct OutputSumcheckParams<F: JoltField> {
 }
 
 impl<F: JoltField> OutputSumcheckParams<F> {
-    pub fn new(
-        state_manager: &mut StateManager<'_, F, impl CommitmentScheme<Field = F>>,
-        transcript: &mut impl Transcript,
-    ) -> Self {
-        let program_io = state_manager.program_io.clone();
-        let K = state_manager.ram_K;
-        let r_address = transcript.challenge_vector_optimized::<F>(K.log_2());
+    pub fn new(ram_K: usize, program_io: &JoltDevice, transcript: &mut impl Transcript) -> Self {
+        let r_address = transcript.challenge_vector_optimized::<F>(ram_K.log_2());
         Self {
-            K,
+            K: ram_K,
             r_address,
-            program_io,
+            program_io: program_io.clone(),
         }
     }
 
@@ -568,11 +552,11 @@ pub struct ValFinalSumcheckVerifier<F: JoltField> {
 impl<F: JoltField> ValFinalSumcheckVerifier<F> {
     pub fn new(
         initial_ram_state: &[u64],
-        state_manager: &mut StateManager<'_, F, impl CommitmentScheme<Field = F>>,
+        program_io: &JoltDevice,
+        trace_len: usize,
+        ram_K: usize,
         opening_accumulator: &VerifierOpeningAccumulator<F>,
     ) -> Self {
-        let (_, program_io, T) = state_manager.get_verifier_data();
-
         let r_address = opening_accumulator
             .get_virtual_polynomial_opening(
                 VirtualPolynomial::RamValFinal,
@@ -581,6 +565,8 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
             .0
             .r;
 
+        let n_memory_vars = ram_K.log_2();
+
         {
             // Verify that val_evaluation and output_check use the same opening point for initial_ram_state.
             // This allows us to reuse a single untrusted_advice opening instead of providing two.
@@ -588,11 +574,9 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
                 VirtualPolynomial::RamVal,
                 SumcheckId::RamReadWriteChecking,
             );
-            let (r_address_val_evaluation, _) = r.split_at(state_manager.ram_K.log_2());
+            let (r_address_val_evaluation, _) = r.split_at(n_memory_vars);
             assert_eq!(r_address_val_evaluation.r, r_address);
         }
-
-        let total_memory_vars = state_manager.ram_K.log_2();
 
         let untrusted_advice_contribution = super::calculate_advice_memory_evaluation(
             opening_accumulator.get_untrusted_advice_opening(),
@@ -602,7 +586,7 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
             program_io.memory_layout.untrusted_advice_start,
             &program_io.memory_layout,
             &r_address,
-            total_memory_vars,
+            n_memory_vars,
         );
 
         let trusted_advice_contribution = super::calculate_advice_memory_evaluation(
@@ -613,7 +597,7 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
             program_io.memory_layout.trusted_advice_start,
             &program_io.memory_layout,
             &r_address,
-            total_memory_vars,
+            n_memory_vars,
         );
 
         // Compute the public part of val_init evaluation
@@ -625,7 +609,10 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
             + trusted_advice_contribution
             + val_init_public.evaluate(&r_address);
 
-        let params = ValFinalSumcheckParams { T, val_init_eval };
+        let params = ValFinalSumcheckParams {
+            T: trace_len,
+            val_init_eval,
+        };
 
         Self { params }
     }

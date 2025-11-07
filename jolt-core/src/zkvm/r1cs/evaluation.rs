@@ -54,9 +54,9 @@ use crate::utils::{
     accumulation::{Acc5U, Acc6S, Acc6U, Acc7S, Acc7U, S128Sum, S192Sum},
     math::s64_from_diff_u64s,
 };
+use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::instruction::{CircuitFlags, NUM_CIRCUIT_FLAGS};
 use crate::zkvm::r1cs::inputs::ProductCycleInputs;
-use crate::zkvm::JoltSharedPreprocessing;
 
 use super::constraints::{NamedR1CSConstraint, R1CSConstraintLabel};
 use super::constraints::{
@@ -620,7 +620,7 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
     /// materializing P_i. Returns `[P_0(r_cycle), P_1(r_cycle), ...]` in input order.
     #[tracing::instrument(skip_all, name = "R1CSEval::compute_claimed_inputs")]
     pub fn compute_claimed_inputs(
-        preprocessing: &JoltSharedPreprocessing,
+        bytecode_preprocessing: &BytecodePreprocessing,
         trace: &[Cycle],
         r_cycle: &[F::Challenge],
     ) -> [F; NUM_R1CS_INPUTS] {
@@ -668,7 +668,7 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
                 for x2 in 0..eq_two_len {
                     let e_in = eq_two[x2];
                     let idx = x1 * eq_two_len + x2;
-                    let row = R1CSCycleInputs::from_trace::<F>(preprocessing, trace, idx);
+                    let row = R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, idx);
 
                     acc_left_input.fmadd(&e_in, &row.left_input);
                     acc_right_input.fmadd(&e_in, &row.right_input.to_i128());

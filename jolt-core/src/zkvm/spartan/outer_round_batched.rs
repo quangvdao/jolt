@@ -15,13 +15,14 @@ use crate::{
         constraints::R1CS_CONSTRAINTS, evaluation::eval_az_bz_batch_from_row,
         inputs::R1CSCycleInputs,
     },
-    zkvm::JoltSharedPreprocessing,
+    zkvm::bytecode::BytecodePreprocessing,
 };
 use allocative::Allocative;
 use crate::zkvm::spartan::outer_baseline::SparseCoefficient;
 use ark_ff::biginteger::{I8OrI96, S160};
 use num_traits::Zero;
 use rayon::prelude::*;
+use std::sync::Arc;
 use tracer::instruction::Cycle;
 
 /// Number of rounds to use for small value optimization.
@@ -110,7 +111,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField>
         name = "RoundBatchedSpartanInterleavedPolynomial::svo_sumcheck_round"
     )]
     pub fn svo_sumcheck_round(
-        preprocess: &JoltSharedPreprocessing,
+        preprocess: &BytecodePreprocessing,
         trace: &[Cycle],
         tau: &[F::Challenge],
     ) -> ([F; NUM_ACCUMS_EVAL_ZERO], [F; NUM_ACCUMS_EVAL_INFTY], Self) {
@@ -417,7 +418,7 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField>
 /// Returns ((t(0), t(∞)), block4_at_r).
 #[inline]
 pub fn compute_streaming_endpoints_and_block4<F: JoltField>(
-    preprocess: &JoltSharedPreprocessing,
+    preprocess: &BytecodePreprocessing,
     trace: &[Cycle],
     eq_poly: &GruenSplitEqPolynomial<F>,
     r_challenges: &[F::Challenge],
@@ -719,9 +720,9 @@ pub fn compute_remaining_endpoints_from_bound_coeffs<F: JoltField>(
 #[derive(Allocative)]
 pub struct OuterRoundBatchedSumcheckProver<F: JoltField> {
     #[allocative(skip)]
-    preprocess: JoltSharedPreprocessing,
+    preprocess: BytecodePreprocessing,
     #[allocative(skip)]
-    trace: Vec<Cycle>,
+    trace: Arc<Vec<Cycle>>,
     /// Split-eq helper tracking binding state
     eq_poly: GruenSplitEqPolynomial<F>,
     /// Interleaved Az/Bz holder and binding workspace
@@ -771,7 +772,7 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
             NUM_SVO_ROUNDS,
             F,
         >::svo_sumcheck_round(
-            &preprocessing.shared, trace, &tau
+            &preprocessing.bytecode, trace, &tau
         );
 
         // Reconstruct the same split-eq partition used in svo_sumcheck_round
@@ -789,8 +790,8 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
         // Bind nothing yet; SVO and subsequent rounds will bind via SumcheckInstanceProver::bind
         // Prepare instance
         Self {
-            preprocess: preprocessing.shared.clone(),
-            trace: trace.to_vec(),
+            preprocess: preprocessing.bytecode.clone(),
+            trace: state_manager.get_trace_arc(),
             eq_poly,
             spartan_poly,
             svo_accums_zero: svo_zero,

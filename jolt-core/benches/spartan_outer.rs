@@ -27,6 +27,12 @@ use jolt_core::{
     },
 };
 use tracer::instruction::Cycle;
+use jolt_core::zkvm::instruction::CircuitFlags;
+use strum::IntoEnumIterator;
+
+// Ensure SHA2 inline library is linked so its #[ctor] auto-registers builders
+#[cfg(feature = "host")]
+use jolt_inlines_sha2 as _;
 
 type F = Fr;
 type PCS = DoryCommitmentScheme;
@@ -116,107 +122,150 @@ fn build_flattened_polynomials<F: jolt_core::field::JoltField>(
     trace: &Vec<Cycle>,
 ) -> Vec<jolt_core::poly::multilinear_polynomial::MultilinearPolynomial<F>> {
     let n = trace.len();
+
+    // Pre-allocate per-input buffers
+    let mut left_instruction_input: Vec<u64> = Vec::with_capacity(n);
+    let mut right_instruction_input: Vec<i128> = Vec::with_capacity(n);
+    let mut product: Vec<S128> = Vec::with_capacity(n);
+
+    let mut left_lookup_operand: Vec<u64> = Vec::with_capacity(n);
+    let mut right_lookup_operand: Vec<u128> = Vec::with_capacity(n);
+    let mut lookup_output: Vec<u64> = Vec::with_capacity(n);
+
+    let mut pc: Vec<u64> = Vec::with_capacity(n);
+    let mut unexpanded_pc: Vec<u64> = Vec::with_capacity(n);
+    let mut next_pc: Vec<u64> = Vec::with_capacity(n);
+    let mut next_unexpanded_pc: Vec<u64> = Vec::with_capacity(n);
+
+    let mut imm: Vec<i128> = Vec::with_capacity(n);
+
+    let mut ram_addr: Vec<u64> = Vec::with_capacity(n);
+    let mut ram_read_value: Vec<u64> = Vec::with_capacity(n);
+    let mut ram_write_value: Vec<u64> = Vec::with_capacity(n);
+
+    let mut rs1_read_value: Vec<u64> = Vec::with_capacity(n);
+    let mut rs2_read_value: Vec<u64> = Vec::with_capacity(n);
+    let mut rd_write_value: Vec<u64> = Vec::with_capacity(n);
+
+    let mut write_lookup_output_to_rd_addr: Vec<bool> = Vec::with_capacity(n);
+    let mut write_pc_to_rd_addr: Vec<bool> = Vec::with_capacity(n);
+    let mut should_branch: Vec<bool> = Vec::with_capacity(n);
+    let mut should_jump: Vec<bool> = Vec::with_capacity(n);
+    let mut next_is_virtual: Vec<bool> = Vec::with_capacity(n);
+    let mut next_is_first_in_sequence: Vec<bool> = Vec::with_capacity(n);
+
+    // Per-flag buffers
+    let mut opflag_vecs: [Vec<bool>; jolt_core::zkvm::instruction::NUM_CIRCUIT_FLAGS] =
+        std::array::from_fn(|_| Vec::with_capacity(n));
+
+    // Single pass over the trace
+    for t in 0..n {
+        let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
+
+        // Instruction inputs and product
+        left_instruction_input.push(row.left_input);
+        right_instruction_input.push(row.right_input.to_i128());
+        product.push(row.product);
+
+        // Lookup operands and output
+        left_lookup_operand.push(row.left_lookup);
+        right_lookup_operand.push(row.right_lookup);
+        lookup_output.push(row.lookup_output);
+
+        // Registers
+        rs1_read_value.push(row.rs1_read_value);
+        rs2_read_value.push(row.rs2_read_value);
+        rd_write_value.push(row.rd_write_value);
+
+        // RAM
+        ram_addr.push(row.ram_addr);
+        ram_read_value.push(row.ram_read_value);
+        ram_write_value.push(row.ram_write_value);
+
+        // PCs
+        pc.push(row.pc);
+        next_pc.push(row.next_pc);
+        unexpanded_pc.push(row.unexpanded_pc);
+        next_unexpanded_pc.push(row.next_unexpanded_pc);
+
+        // Immediate
+        imm.push(row.imm.to_i128());
+
+        // Derived booleans
+        write_lookup_output_to_rd_addr.push(row.write_lookup_output_to_rd_addr);
+        write_pc_to_rd_addr.push(row.write_pc_to_rd_addr);
+        should_branch.push(row.should_branch);
+        should_jump.push(row.should_jump);
+        next_is_virtual.push(row.next_is_virtual);
+        next_is_first_in_sequence.push(row.next_is_first_in_sequence);
+
+        // Op flags
+        for flag in CircuitFlags::iter() {
+            let idx = flag as usize;
+            opflag_vecs[idx].push(row.flags[flag]);
+        }
+    }
+
+    // Assemble output in ALL_R1CS_INPUTS canonical order
     let mut out: Vec<jolt_core::poly::multilinear_polynomial::MultilinearPolynomial<F>> =
         Vec::with_capacity(ALL_R1CS_INPUTS.len());
+
     for input in ALL_R1CS_INPUTS.iter() {
         match input {
-            JoltR1CSInputs::LeftInstructionInput
-            | JoltR1CSInputs::LeftLookupOperand
-            | JoltR1CSInputs::LookupOutput
-            | JoltR1CSInputs::PC
-            | JoltR1CSInputs::UnexpandedPC
-            | JoltR1CSInputs::RamAddress
-            | JoltR1CSInputs::Rs1Value
-            | JoltR1CSInputs::Rs2Value
-            | JoltR1CSInputs::RdWriteValue
-            | JoltR1CSInputs::RamReadValue
-            | JoltR1CSInputs::RamWriteValue
-            | JoltR1CSInputs::NextPC
-            | JoltR1CSInputs::NextUnexpandedPC => {
-                let mut v: Vec<u64> = Vec::with_capacity(n);
-                for t in 0..n {
-                    let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
-                    let val = match input {
-                        JoltR1CSInputs::LeftInstructionInput => row.left_input,
-                        JoltR1CSInputs::LeftLookupOperand => row.left_lookup,
-                        JoltR1CSInputs::LookupOutput => row.lookup_output,
-                        JoltR1CSInputs::PC => row.pc,
-                        JoltR1CSInputs::UnexpandedPC => row.unexpanded_pc,
-                        JoltR1CSInputs::RamAddress => row.ram_addr,
-                        JoltR1CSInputs::Rs1Value => row.rs1_read_value,
-                        JoltR1CSInputs::Rs2Value => row.rs2_read_value,
-                        JoltR1CSInputs::RdWriteValue => row.rd_write_value,
-                        JoltR1CSInputs::RamReadValue => row.ram_read_value,
-                        JoltR1CSInputs::RamWriteValue => row.ram_write_value,
-                        JoltR1CSInputs::NextPC => row.next_pc,
-                        JoltR1CSInputs::NextUnexpandedPC => row.next_unexpanded_pc,
-                        _ => 0,
-                    };
-                    v.push(val);
-                }
-                out.push(v.into());
+            JoltR1CSInputs::LeftInstructionInput => {
+                out.push(std::mem::take(&mut left_instruction_input).into())
             }
-            JoltR1CSInputs::RightInstructionInput | JoltR1CSInputs::Imm => {
-                let mut v: Vec<i128> = Vec::with_capacity(n);
-                for t in 0..n {
-                    let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
-                    let val = match input {
-                        JoltR1CSInputs::RightInstructionInput => row.right_input.to_i128(),
-                        JoltR1CSInputs::Imm => row.imm.to_i128(),
-                        _ => 0,
-                    };
-                    v.push(val);
-                }
-                out.push(v.into());
+            JoltR1CSInputs::RightInstructionInput => {
+                out.push(std::mem::take(&mut right_instruction_input).into())
             }
-            JoltR1CSInputs::Product => {
-                let mut v: Vec<S128> = Vec::with_capacity(n);
-                for t in 0..n {
-                    let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
-                    v.push(row.product);
-                }
-                out.push(v.into());
+            JoltR1CSInputs::Product => out.push(std::mem::take(&mut product).into()),
+            JoltR1CSInputs::WriteLookupOutputToRD => {
+                out.push(std::mem::take(&mut write_lookup_output_to_rd_addr).into())
+            }
+            JoltR1CSInputs::WritePCtoRD => {
+                out.push(std::mem::take(&mut write_pc_to_rd_addr).into())
+            }
+            JoltR1CSInputs::ShouldBranch => {
+                out.push(std::mem::take(&mut should_branch).into())
+            }
+            JoltR1CSInputs::PC => out.push(std::mem::take(&mut pc).into()),
+            JoltR1CSInputs::UnexpandedPC => out.push(std::mem::take(&mut unexpanded_pc).into()),
+            JoltR1CSInputs::Imm => out.push(std::mem::take(&mut imm).into()),
+            JoltR1CSInputs::RamAddress => out.push(std::mem::take(&mut ram_addr).into()),
+            JoltR1CSInputs::Rs1Value => out.push(std::mem::take(&mut rs1_read_value).into()),
+            JoltR1CSInputs::Rs2Value => out.push(std::mem::take(&mut rs2_read_value).into()),
+            JoltR1CSInputs::RdWriteValue => out.push(std::mem::take(&mut rd_write_value).into()),
+            JoltR1CSInputs::RamReadValue => out.push(std::mem::take(&mut ram_read_value).into()),
+            JoltR1CSInputs::RamWriteValue => out.push(std::mem::take(&mut ram_write_value).into()),
+            JoltR1CSInputs::LeftLookupOperand => {
+                out.push(std::mem::take(&mut left_lookup_operand).into())
             }
             JoltR1CSInputs::RightLookupOperand => {
-                let mut v: Vec<u128> = Vec::with_capacity(n);
-                for t in 0..n {
-                    let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
-                    v.push(row.right_lookup);
-                }
-                out.push(v.into());
+                out.push(std::mem::take(&mut right_lookup_operand).into())
             }
-            JoltR1CSInputs::WriteLookupOutputToRD
-            | JoltR1CSInputs::WritePCtoRD
-            | JoltR1CSInputs::ShouldBranch
-            | JoltR1CSInputs::NextIsVirtual
-            | JoltR1CSInputs::NextIsFirstInSequence
-            | JoltR1CSInputs::ShouldJump => {
-                let mut v: Vec<bool> = Vec::with_capacity(n);
-                for t in 0..n {
-                    let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
-                    let val = match input {
-                        JoltR1CSInputs::WriteLookupOutputToRD => row.write_lookup_output_to_rd_addr,
-                        JoltR1CSInputs::WritePCtoRD => row.write_pc_to_rd_addr,
-                        JoltR1CSInputs::ShouldBranch => row.should_branch,
-                        JoltR1CSInputs::NextIsVirtual => row.next_is_virtual,
-                        JoltR1CSInputs::NextIsFirstInSequence => row.next_is_first_in_sequence,
-                        JoltR1CSInputs::ShouldJump => row.should_jump,
-                        _ => false,
-                    };
-                    v.push(val);
-                }
-                out.push(v.into());
+            JoltR1CSInputs::NextUnexpandedPC => {
+                out.push(std::mem::take(&mut next_unexpanded_pc).into())
+            }
+            JoltR1CSInputs::NextPC => out.push(std::mem::take(&mut next_pc).into()),
+            JoltR1CSInputs::NextIsVirtual => {
+                out.push(std::mem::take(&mut next_is_virtual).into())
+            }
+            JoltR1CSInputs::NextIsFirstInSequence => {
+                out.push(std::mem::take(&mut next_is_first_in_sequence).into())
+            }
+            JoltR1CSInputs::LookupOutput => {
+                out.push(std::mem::take(&mut lookup_output).into())
+            }
+            JoltR1CSInputs::ShouldJump => {
+                out.push(std::mem::take(&mut should_jump).into())
             }
             JoltR1CSInputs::OpFlags(flag) => {
-                let mut v: Vec<bool> = Vec::with_capacity(n);
-                for t in 0..n {
-                    let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
-                    v.push(row.flags[*flag as usize]);
-                }
-                out.push(v.into());
+                let idx = *flag as usize;
+                out.push(std::mem::take(&mut opflag_vecs[idx]).into());
             }
         }
     }
+
     out
 }
 

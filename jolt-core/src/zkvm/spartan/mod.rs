@@ -20,11 +20,21 @@ use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::spartan::inner::InnerSumcheckProver;
 use crate::zkvm::spartan::instruction_input::InstructionInputSumcheckProver;
 use crate::zkvm::spartan::outer::{OuterRemainingSumcheckProver, OuterUniSkipInstanceProver};
+use crate::zkvm::spartan::outer_baseline::OuterBaselineSumcheckProver;
+use crate::zkvm::spartan::outer_round_batched::OuterRoundBatchedSumcheckProver;
+use crate::zkvm::spartan::outer_streaming::OuterRemainingStreamingSumcheckProver;
 use crate::zkvm::spartan::product::{
     ProductVirtualInnerProver, ProductVirtualRemainderProver, ProductVirtualUniSkipInstanceParams,
 };
 use crate::zkvm::spartan::shift::ShiftSumcheckProver;
 use crate::zkvm::witness::VirtualPolynomial;
+use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+use crate::zkvm::r1cs::constraints::{R1CSConstraint, R1CS_CONSTRAINTS};
+use crate::zkvm::r1cs::inputs::{JoltR1CSInputs, ALL_R1CS_INPUTS};
+use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::transcripts::AppendToTranscript;
+use tracer::instruction::Cycle;
+use ark_ff::biginteger::S128;
 
 use product::{
     ProductVirtualUniSkipInstanceProver, PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS,
@@ -35,10 +45,22 @@ pub mod inner;
 pub mod instruction_input;
 pub mod outer;
 pub mod outer_baseline;
+pub mod outer_naive;
 pub mod outer_round_batched;
 pub mod outer_streaming;
 pub mod product;
 pub mod shift;
+
+/// Select which outer-remaining implementation to use.
+#[derive(Copy, Clone, Debug)]
+pub enum OuterImpl {
+    Current,
+    Streaming,
+    Baseline,
+    RoundBatched,
+}
+/// Global selection for Spartan Stage 1 remainder.
+pub const OUTER_IMPL: OuterImpl = OuterImpl::Streaming;
 
 pub struct SpartanDagProver<F: JoltField> {
     /// Cached key to avoid recomputation across stages
@@ -65,6 +87,14 @@ impl<F: JoltField> SpartanDagProver<F> {
         _opening_accumulator: &mut ProverOpeningAccumulator<F>,
         transcript: &mut T,
     ) -> UniSkipFirstRoundProof<F, T> {
+        // For Baseline and RoundBatched, do not perform uni-skip: append a trivial zero polynomial.
+        if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched) {
+            let zero_poly = crate::poly::unipoly::UniPoly::<F>::from_coeff(vec![F::zero()]);
+            // Keep transcript alignment: append the polynomial and derive r0
+            zero_poly.append_to_transcript(transcript);
+            let _ = transcript.challenge_scalar_optimized::<F>();
+            return UniSkipFirstRoundProof::new(zero_poly);
+        }
         let num_rounds_x: usize = self.key.num_rows_bits();
 
         // Transcript and tau
@@ -117,6 +147,136 @@ impl<F: JoltField> SpartanDagProver<F> {
     }
 }
 
+/// Build flattened polynomials (per R1CS input) from the trace, for baseline outer prover.
+#[allow(clippy::too_many_lines)]
+fn build_flattened_polynomials<F: JoltField>(
+    preprocess: &BytecodePreprocessing,
+    trace: &Vec<Cycle>,
+) -> Vec<MultilinearPolynomial<F>> {
+    let n = trace.len();
+
+    // Pre-allocate per-input buffers
+    let mut left_instruction_input: Vec<u64> = Vec::with_capacity(n);
+    let mut right_instruction_input: Vec<i128> = Vec::with_capacity(n);
+    let mut product: Vec<S128> = Vec::with_capacity(n);
+
+    let mut left_lookup_operand: Vec<u64> = Vec::with_capacity(n);
+    let mut right_lookup_operand: Vec<u128> = Vec::with_capacity(n);
+    let mut lookup_output: Vec<u64> = Vec::with_capacity(n);
+
+    let mut pc: Vec<u64> = Vec::with_capacity(n);
+    let mut unexpanded_pc: Vec<u64> = Vec::with_capacity(n);
+    let mut next_pc: Vec<u64> = Vec::with_capacity(n);
+    let mut next_unexpanded_pc: Vec<u64> = Vec::with_capacity(n);
+
+    let mut imm: Vec<i128> = Vec::with_capacity(n);
+
+    let mut ram_addr: Vec<u64> = Vec::with_capacity(n);
+    let mut ram_read_value: Vec<u64> = Vec::with_capacity(n);
+    let mut ram_write_value: Vec<u64> = Vec::with_capacity(n);
+
+    let mut rs1_read_value: Vec<u64> = Vec::with_capacity(n);
+    let mut rs2_read_value: Vec<u64> = Vec::with_capacity(n);
+    let mut rd_write_value: Vec<u64> = Vec::with_capacity(n);
+
+    let mut write_lookup_output_to_rd_addr: Vec<bool> = Vec::with_capacity(n);
+    let mut write_pc_to_rd_addr: Vec<bool> = Vec::with_capacity(n);
+    let mut should_branch: Vec<bool> = Vec::with_capacity(n);
+    let mut should_jump: Vec<bool> = Vec::with_capacity(n);
+    let mut next_is_virtual: Vec<bool> = Vec::with_capacity(n);
+    let mut next_is_first_in_sequence: Vec<bool> = Vec::with_capacity(n);
+
+    // Per-flag buffers
+    let mut opflag_vecs: [Vec<bool>; crate::zkvm::instruction::NUM_CIRCUIT_FLAGS] =
+        std::array::from_fn(|_| Vec::with_capacity(n));
+
+    // Single pass over the trace
+    for t in 0..n {
+        let row = crate::zkvm::r1cs::inputs::R1CSCycleInputs::from_trace::<F>(preprocess, trace, t);
+
+        // Instruction inputs and product
+        left_instruction_input.push(row.left_input);
+        right_instruction_input.push(row.right_input.to_i128());
+        product.push(row.product);
+
+        // Lookup operands and output
+        left_lookup_operand.push(row.left_lookup);
+        right_lookup_operand.push(row.right_lookup);
+        lookup_output.push(row.lookup_output);
+
+        // Registers
+        rs1_read_value.push(row.rs1_read_value);
+        rs2_read_value.push(row.rs2_read_value);
+        rd_write_value.push(row.rd_write_value);
+
+        // RAM
+        ram_addr.push(row.ram_addr);
+        ram_read_value.push(row.ram_read_value);
+        ram_write_value.push(row.ram_write_value);
+
+        // PCs
+        pc.push(row.pc);
+        next_pc.push(row.next_pc);
+        unexpanded_pc.push(row.unexpanded_pc);
+        next_unexpanded_pc.push(row.next_unexpanded_pc);
+
+        // Immediate
+        imm.push(row.imm.to_i128());
+
+        // Derived booleans
+        write_lookup_output_to_rd_addr.push(row.write_lookup_output_to_rd_addr);
+        write_pc_to_rd_addr.push(row.write_pc_to_rd_addr);
+        should_branch.push(row.should_branch);
+        should_jump.push(row.should_jump);
+        next_is_virtual.push(row.next_is_virtual);
+        next_is_first_in_sequence.push(row.next_is_first_in_sequence);
+
+        // Op flags
+        for idx in 0..crate::zkvm::instruction::NUM_CIRCUIT_FLAGS {
+            opflag_vecs[idx].push(row.flags[idx]);
+        }
+    }
+
+    // Assemble output in ALL_R1CS_INPUTS canonical order
+    let mut out: Vec<MultilinearPolynomial<F>> = Vec::with_capacity(ALL_R1CS_INPUTS.len());
+    for input in ALL_R1CS_INPUTS.iter() {
+        match input {
+            JoltR1CSInputs::LeftInstructionInput => out.push(left_instruction_input.clone().into()),
+            JoltR1CSInputs::RightInstructionInput => out.push(right_instruction_input.clone().into()),
+            JoltR1CSInputs::Product => out.push(product.clone().into()),
+            JoltR1CSInputs::WriteLookupOutputToRD => {
+                out.push(write_lookup_output_to_rd_addr.clone().into())
+            }
+            JoltR1CSInputs::WritePCtoRD => out.push(write_pc_to_rd_addr.clone().into()),
+            JoltR1CSInputs::ShouldBranch => out.push(should_branch.clone().into()),
+            JoltR1CSInputs::PC => out.push(pc.clone().into()),
+            JoltR1CSInputs::UnexpandedPC => out.push(unexpanded_pc.clone().into()),
+            JoltR1CSInputs::Imm => out.push(imm.clone().into()),
+            JoltR1CSInputs::RamAddress => out.push(ram_addr.clone().into()),
+            JoltR1CSInputs::Rs1Value => out.push(rs1_read_value.clone().into()),
+            JoltR1CSInputs::Rs2Value => out.push(rs2_read_value.clone().into()),
+            JoltR1CSInputs::RdWriteValue => out.push(rd_write_value.clone().into()),
+            JoltR1CSInputs::RamReadValue => out.push(ram_read_value.clone().into()),
+            JoltR1CSInputs::RamWriteValue => out.push(ram_write_value.clone().into()),
+            JoltR1CSInputs::LeftLookupOperand => out.push(left_lookup_operand.clone().into()),
+            JoltR1CSInputs::RightLookupOperand => out.push(right_lookup_operand.clone().into()),
+            JoltR1CSInputs::NextUnexpandedPC => out.push(next_unexpanded_pc.clone().into()),
+            JoltR1CSInputs::NextPC => out.push(next_pc.clone().into()),
+            JoltR1CSInputs::NextIsVirtual => out.push(next_is_virtual.clone().into()),
+            JoltR1CSInputs::NextIsFirstInSequence => {
+                out.push(next_is_first_in_sequence.clone().into())
+            }
+            JoltR1CSInputs::LookupOutput => out.push(lookup_output.clone().into()),
+            JoltR1CSInputs::ShouldJump => out.push(should_jump.clone().into()),
+            JoltR1CSInputs::OpFlags(flag) => {
+                let idx = *flag as usize;
+                out.push(opflag_vecs[idx].clone().into());
+            }
+        }
+    }
+    out
+}
+
 impl<F, ProofTranscript, PCS> SumcheckStagesProver<F, ProofTranscript, PCS> for SpartanDagProver<F>
 where
     F: JoltField,
@@ -127,15 +287,52 @@ where
         &mut self,
         state_manager: &mut StateManager<'_, F, PCS>,
         _opening_accumulator: &mut ProverOpeningAccumulator<F>,
-        _transcript: &mut ProofTranscript,
+        transcript: &mut ProofTranscript,
     ) -> Vec<Box<dyn SumcheckInstanceProver<F, ProofTranscript>>> {
         // Stage 1 remainder: outer-remaining
         let mut instances: Vec<Box<dyn SumcheckInstanceProver<F, ProofTranscript>>> = Vec::new();
-        if let Some(st) = self.uni_skip_state.take() {
-            let n_cycle_vars = self.key.num_cycle_vars();
-            let outer_remaining =
-                OuterRemainingSumcheckProver::gen(state_manager, n_cycle_vars, &st);
-            instances.push(Box::new(outer_remaining));
+        let n_cycles = self.key.num_cycle_vars();
+        match OUTER_IMPL {
+            OuterImpl::Streaming => {
+                let st = self
+                    .uni_skip_state
+                    .take()
+                    .expect("stage1_uni_skip must run before Streaming outer instances");
+                let outer_remaining =
+                    OuterRemainingStreamingSumcheckProver::gen(state_manager, n_cycles, &st);
+                instances.push(Box::new(outer_remaining));
+            }
+            OuterImpl::Current => {
+                let st = self
+                    .uni_skip_state
+                    .take()
+                    .expect("stage1_uni_skip must run before Current outer instances");
+                let outer_remaining =
+                    OuterRemainingSumcheckProver::gen(state_manager, n_cycles, &st);
+                instances.push(Box::new(outer_remaining));
+            }
+            OuterImpl::Baseline => {
+                // No uni-skip: build flattened polynomials from the trace and constraints
+                let (preprocessing, _lazy_trace, trace, _program_io, _final_mem) =
+                    state_manager.get_prover_data();
+                let flattened = build_flattened_polynomials::<F>(&preprocessing.bytecode, trace);
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                let constraints_vec: Vec<R1CSConstraint> =
+                    R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+                let outer_baseline = OuterBaselineSumcheckProver::<F>::gen_from_polys(
+                    &constraints_vec,
+                    &flattened,
+                    padded_num_constraints,
+                    transcript,
+                );
+                instances.push(Box::new(outer_baseline));
+            }
+            OuterImpl::RoundBatched => {
+                // No uni-skip: directly instantiate round-batched prover
+                let outer_round_batched =
+                    OuterRoundBatchedSumcheckProver::<F>::gen(state_manager, transcript);
+                instances.push(Box::new(outer_round_batched));
+            }
         }
         instances
     }

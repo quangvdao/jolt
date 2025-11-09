@@ -43,6 +43,9 @@ pub struct OneHotPolynomial<F: JoltField> {
     /// The array described in Section 6.3 of the Twist/Shout paper.
     G: Vec<F>,
     /// The array described in Section 6.3 of the Twist/Shout paper.
+    /// Memory note: if `H` (below) is fully materialized for T cycles,
+    /// it stores T field elements. For a 32-byte field and T = 2^20,
+    /// that is 2^20 * 32 = 33,554,432 bytes ≈ 32 MiB.
     H: Arc<RwLock<RaPolynomial<u8, F>>>,
 }
 

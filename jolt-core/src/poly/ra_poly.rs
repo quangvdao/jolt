@@ -26,12 +26,68 @@ pub enum RaPolynomial<I: Into<usize> + Copy + Default + Send + Sync + 'static, F
     RoundN(MultilinearPolynomial<F>),
 }
 
+/// Strategy for initializing an `RaPolynomial`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RaInitStrategy {
+    /// Start in `Round1` (lazy), using specialized memory-efficient stages.
+    Lazy,
+    /// Materialize the full MLE immediately and start in `RoundN`.
+    Materialized,
+}
+
+/// Default cycle threshold for eager materialization in Auto mode (~32MB per poly at 2^20).
+const DEFAULT_RA_MATERIALIZE_THRESHOLD: usize = 1 << 20;
+
 impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField> RaPolynomial<I, F> {
+    /// Create a new RA polynomial using the default auto-selection policy (by length threshold).
     pub fn new(lookup_indices: Arc<Vec<Option<I>>>, eq_evals: Vec<F>) -> Self {
-        Self::Round1(RaPolynomialRound1 {
-            F: eq_evals,
-            lookup_indices,
-        })
+        let len = lookup_indices.len();
+        if len <= DEFAULT_RA_MATERIALIZE_THRESHOLD {
+            tracing::debug!(
+                "Materializing RA polynomial: len={} <= threshold={}",
+                len,
+                DEFAULT_RA_MATERIALIZE_THRESHOLD
+            );
+            let values = materialize_full_mle::<I, F>(&lookup_indices, &eq_evals);
+            Self::RoundN(values.into())
+        } else {
+            tracing::debug!(
+                "Lazy RA polynomial: len={} > threshold={}",
+                len,
+                DEFAULT_RA_MATERIALIZE_THRESHOLD
+            );
+            Self::Round1(RaPolynomialRound1 {
+                F: eq_evals,
+                lookup_indices,
+            })
+        }
+    }
+
+    /// Create with an explicit initialization strategy.
+    ///
+    /// - `Lazy`: identical to `new`, deferring materialization.
+    /// - `Materialized`: builds the full MLE immediately and returns `RoundN`.
+    pub fn new_with_strategy(
+        lookup_indices: Arc<Vec<Option<I>>>,
+        eq_evals: Vec<F>,
+        strategy: RaInitStrategy,
+    ) -> Self {
+        match strategy {
+            RaInitStrategy::Lazy => Self::Round1(RaPolynomialRound1 {
+                F: eq_evals,
+                lookup_indices,
+            }),
+            RaInitStrategy::Materialized => {
+                let values = materialize_full_mle::<I, F>(&lookup_indices, &eq_evals);
+                Self::RoundN(values.into())
+            }
+        }
+    }
+
+    /// Convenience constructor to force eager materialization.
+    pub fn new_materialized(lookup_indices: Arc<Vec<Option<I>>>, eq_evals: Vec<F>) -> Self {
+        let values = materialize_full_mle::<I, F>(&lookup_indices, &eq_evals);
+        Self::RoundN(values.into())
     }
 
     #[inline]
@@ -401,4 +457,21 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
             }
         }
     }
+}
+
+/// Build the full MLE values for `ra_i(r, x)` for all `x` directly.
+///
+/// This mirrors `RaPolynomialRound1::get_bound_coeff` over the full domain,
+/// producing the vector used by `MultilinearPolynomial`.
+fn materialize_full_mle<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>(
+    lookup_indices: &Arc<Vec<Option<I>>>,
+    eq_evals: &[F],
+) -> Vec<F> {
+    let n = lookup_indices.len();
+    let mut values = unsafe_allocate_zero_vec(n);
+    values
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(j, v)| *v = lookup_indices[j].map_or(F::zero(), |i| eq_evals[i.into()]));
+    values
 }

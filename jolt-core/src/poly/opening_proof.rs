@@ -346,6 +346,9 @@ where
         claim: F,
         log_T: usize,
     ) -> Self {
+        // Memory note (one-hot): if the underlying one-hot RA polynomial `H` is fully
+        // materialized for T cycles, it stores T field elements. For a 32-byte field and
+        // T = 2^20, that is 2^20 * 32 = 33,554,432 bytes ≈ 32 MiB per polynomial.
         let opening = OneHotPolynomialProverOpening::new(eq_address, eq_cycle);
         Self {
             polynomial,

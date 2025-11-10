@@ -2,6 +2,7 @@ use ark_bn254::Fr;
 use ark_ff::biginteger::S128;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, SamplingMode};
 use jolt_core::zkvm::dag::stage::SumcheckStagesProver;
+use jolt_core::zkvm::instruction::CircuitFlags;
 use jolt_core::{
     poly::{commitment::dory::DoryCommitmentScheme, opening_proof::ProverOpeningAccumulator},
     subprotocols::{
@@ -13,6 +14,7 @@ use jolt_core::{
     utils::math::Math,
     zkvm::{
         dag::state_manager::StateManager,
+        bytecode::BytecodePreprocessing,
         r1cs::{
             constraints::{R1CSConstraint, R1CS_CONSTRAINTS},
             inputs::{JoltR1CSInputs, R1CSCycleInputs, ALL_R1CS_INPUTS},
@@ -23,12 +25,11 @@ use jolt_core::{
             outer_streaming::OuterRemainingStreamingSumcheckProver, SpartanDagProver,
         },
         witness::AllCommittedPolynomials,
-        Jolt, JoltProverPreprocessing, JoltRV64IMAC, JoltSharedPreprocessing,
+        Jolt, JoltProverPreprocessing, JoltRV64IMAC,
     },
 };
-use tracer::instruction::Cycle;
-use jolt_core::zkvm::instruction::CircuitFlags;
 use strum::IntoEnumIterator;
+use tracer::instruction::Cycle;
 
 // Ensure SHA2 inline library is linked so its #[ctor] auto-registers builders
 #[cfg(feature = "host")]
@@ -75,8 +76,7 @@ fn setup_for_spartan(
     // This is needed to initialize the global list of committed polynomials, required for witness generation.
     let ram_d =
         jolt_core::zkvm::witness::compute_d_parameter(io_device.memory_layout.memory_end as usize);
-    let bytecode_d =
-        jolt_core::zkvm::witness::compute_d_parameter(preprocessing.shared.bytecode.code_size);
+    let bytecode_d = jolt_core::zkvm::witness::compute_d_parameter(preprocessing.bytecode.code_size);
     let _all_committed_polys_handle = AllCommittedPolynomials::initialize(ram_d, bytecode_d);
 
     // truncate trailing zeros on device outputs (defensive)
@@ -103,11 +103,16 @@ fn setup_for_spartan(
 
     let mut transcript = ProofTranscript::new(b"Jolt transcript");
     // Initialize opening accumulator and preamble here for callers
-    let opening_bits = state_manager.get_trace_len().log_2();
+    let opening_bits = padded_trace_length.log_2();
     let opening_accumulator =
         jolt_core::poly::opening_proof::ProverOpeningAccumulator::<F>::new(opening_bits);
     // FS preamble must be applied before any challenges are derived
-    state_manager.fiat_shamir_preamble(&mut transcript);
+    jolt_core::zkvm::dag::state_manager::fiat_shamir_preamble(
+        &state_manager.program_io,
+        state_manager.ram_K,
+        padded_trace_length,
+        &mut transcript,
+    );
 
     (
         state_manager,
@@ -118,7 +123,7 @@ fn setup_for_spartan(
 }
 
 fn build_flattened_polynomials<F: jolt_core::field::JoltField>(
-    preprocess: &JoltSharedPreprocessing,
+    preprocess: &BytecodePreprocessing,
     trace: &Vec<Cycle>,
 ) -> Vec<jolt_core::poly::multilinear_polynomial::MultilinearPolynomial<F>> {
     let n = trace.len();
@@ -225,9 +230,7 @@ fn build_flattened_polynomials<F: jolt_core::field::JoltField>(
             JoltR1CSInputs::WritePCtoRD => {
                 out.push(std::mem::take(&mut write_pc_to_rd_addr).into())
             }
-            JoltR1CSInputs::ShouldBranch => {
-                out.push(std::mem::take(&mut should_branch).into())
-            }
+            JoltR1CSInputs::ShouldBranch => out.push(std::mem::take(&mut should_branch).into()),
             JoltR1CSInputs::PC => out.push(std::mem::take(&mut pc).into()),
             JoltR1CSInputs::UnexpandedPC => out.push(std::mem::take(&mut unexpanded_pc).into()),
             JoltR1CSInputs::Imm => out.push(std::mem::take(&mut imm).into()),
@@ -247,18 +250,12 @@ fn build_flattened_polynomials<F: jolt_core::field::JoltField>(
                 out.push(std::mem::take(&mut next_unexpanded_pc).into())
             }
             JoltR1CSInputs::NextPC => out.push(std::mem::take(&mut next_pc).into()),
-            JoltR1CSInputs::NextIsVirtual => {
-                out.push(std::mem::take(&mut next_is_virtual).into())
-            }
+            JoltR1CSInputs::NextIsVirtual => out.push(std::mem::take(&mut next_is_virtual).into()),
             JoltR1CSInputs::NextIsFirstInSequence => {
                 out.push(std::mem::take(&mut next_is_first_in_sequence).into())
             }
-            JoltR1CSInputs::LookupOutput => {
-                out.push(std::mem::take(&mut lookup_output).into())
-            }
-            JoltR1CSInputs::ShouldJump => {
-                out.push(std::mem::take(&mut should_jump).into())
-            }
+            JoltR1CSInputs::LookupOutput => out.push(std::mem::take(&mut lookup_output).into()),
+            JoltR1CSInputs::ShouldJump => out.push(std::mem::take(&mut should_jump).into()),
             JoltR1CSInputs::OpFlags(flag) => {
                 let idx = *flag as usize;
                 out.push(std::mem::take(&mut opflag_vecs[idx]).into());
@@ -322,12 +319,12 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
                     mut state_manager,
-                    _padded_trace_length,
+                    padded_trace_length,
                     mut opening_accumulator,
                     mut transcript,
                 )| {
                     // Uni-skip first round (manual, to get UniSkipState)
-                    let num_rows_bits = state_manager.get_trace_len().log_2();
+                    let num_rows_bits = padded_trace_length.log_2();
                     let tau = transcript.challenge_vector_optimized::<F>(num_rows_bits);
                     let mut uniskip_instance =
                         OuterUniSkipInstanceProver::gen(&mut state_manager, &tau);
@@ -340,7 +337,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                     };
 
                     // Streaming outer-remaining instance
-                    let num_cycles_bits = state_manager.get_trace_len().log_2();
+                    let num_cycles_bits = padded_trace_length.log_2();
                     let mut instance = OuterRemainingStreamingSumcheckProver::gen(
                         &mut state_manager,
                         num_cycles_bits,
@@ -387,16 +384,11 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
         group.bench_function(&format!("outer-baseline/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(
-                    state_manager,
-                    _padded_trace_length,
-                    mut opening_accumulator,
-                    mut transcript,
-                )| {
+                |(state_manager, _padded_trace_length, mut opening_accumulator, mut transcript)| {
                     // Baseline (no uni-skip): build flattened polynomials and instantiate baseline prover
                     let (preprocessing, _lazy_trace, trace, _program_io, _final_mem) =
                         state_manager.get_prover_data();
-                    let flattened = build_flattened_polynomials::<F>(&preprocessing.shared, trace);
+                    let flattened = build_flattened_polynomials::<F>(&preprocessing.bytecode, trace);
                     let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                     let constraints_vec: Vec<R1CSConstraint> =
                         R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();

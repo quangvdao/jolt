@@ -2,7 +2,6 @@
 
 use allocative::Allocative;
 use ark_std::Zero;
-use rayon::prelude::*;
 use std::sync::Arc;
 use tracer::instruction::Cycle;
 
@@ -29,8 +28,8 @@ use crate::zkvm::r1cs::{
     evaluation::R1CSEval,
     inputs::{R1CSCycleInputs, ALL_R1CS_INPUTS},
 };
-use crate::zkvm::witness::VirtualPolynomial;
 use crate::zkvm::spartan::outer::OuterRemainingSumcheckParams;
+use crate::zkvm::witness::VirtualPolynomial;
 #[cfg(feature = "allocative")]
 use allocative::FlameGraphBuilder;
 
@@ -232,7 +231,7 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
     /// bound evals, to compute the multiquadratic evals for the current window (which this one is a
     /// part of), and optionally store the bound evals if needed. This is invoked at the beginning of
     /// every window.
-    /// 
+    ///
     /// We make this to be mutable on self only for now, cuz self contains all the needed info.
     /// May make things more implicit later on.
     fn compute_window_evals_for_new_window(&mut self, current_round: usize) {
@@ -300,54 +299,96 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
         }
 
         // 3) Fold over split-eq weights, expand {0,1}^ω → {0,1,∞}^ω, accumulate unreduced
-        let e_out = self.split_eq_poly.E_out_current();
-        let e_in = self.split_eq_poly.E_in_current();
-        let in_len = self.split_eq_poly.E_in_current_len();
-        let mut acc_unreduced: Vec<F::Unreduced<9>> = vec![F::Unreduced::<9>::zero(); grid_len];
-        for x_out in 0..e_out.len() {
-            let mut inner: Vec<F::Unreduced<9>> = vec![F::Unreduced::<9>::zero(); grid_len];
-            if in_len <= 1 {
-                // Fully bound inner
-                let e_in_val = F::one();
-                // Placeholder Az,Bz over {0,1}^ω
-                let a_bool = vec![F::zero(); 1usize << omega];
-                let b_bool = vec![F::zero(); 1usize << omega];
+        let bool_len = 1usize << omega;
+        // Optional materialization buffers: [groups_exact][2^ω] laid out colex over boolean cube
+        let num_x_out_vals = self.split_eq_poly.E_out_current_len();
+        let num_x_in_vals = self.split_eq_poly.E_in_current_len();
+        let groups_exact = num_x_out_vals
+            .checked_mul(num_x_in_vals)
+            .expect("overflow computing groups_exact");
+        let mut materialized_az: Option<Vec<F>> = if will_materialize {
+            Some(unsafe_allocate_zero_vec(groups_exact * bool_len))
+        } else {
+            None
+        };
+        let mut materialized_bz: Option<Vec<F>> = if will_materialize {
+            Some(unsafe_allocate_zero_vec(groups_exact * bool_len))
+        } else {
+            None
+        };
+        // Raw addresses for optional unsafe writes inside the parallel fold (use usize for Sync capture)
+        let az_addr: usize = materialized_az
+            .as_mut()
+            .map(|v| v.as_mut_ptr() as usize)
+            .unwrap_or(0);
+        let bz_addr: usize = materialized_bz
+            .as_mut()
+            .map(|v| v.as_mut_ptr() as usize)
+            .unwrap_or(0);
+        let acc_unreduced: Vec<F::Unreduced<9>> = self.split_eq_poly.par_fold_out_in(
+            || vec![F::Unreduced::<9>::zero(); grid_len], // make_inner
+            |inner: &mut Vec<F::Unreduced<9>>, g: usize, _x_in: usize, e_in: F| {
+                // Fetch or produce Az,Bz over {0,1}^ω for this group (x_out, x_in), as Vec<(F,F)>
+                let ab_pairs = if let Some(p) = self.fetch_materialized_group_bool_evals(g, omega) {
+                    p
+                } else {
+                    self.compute_group_bool_evals_from_trace(g, omega)
+                };
+                debug_assert_eq!(ab_pairs.len(), bool_len);
+                // Split into separate a/b for expansion
+                let mut a_bool: Vec<F> = unsafe_allocate_zero_vec(bool_len);
+                let mut b_bool: Vec<F> = unsafe_allocate_zero_vec(bool_len);
+                for i in 0..bool_len {
+                    let (a, b) = ab_pairs[i];
+                    a_bool[i] = a;
+                    b_bool[i] = b;
+                }
+                // Optional materialization: UNSAFE disjoint writes into [g * 2^ω ..)
+                if az_addr != 0 {
+                    unsafe {
+                        let az_ptr = az_addr as *mut F;
+                        let dst = az_ptr.add(g * bool_len);
+                        for i in 0..bool_len {
+                            core::ptr::write(dst.add(i), a_bool[i]);
+                        }
+                    }
+                }
+                if bz_addr != 0 {
+                    unsafe {
+                        let bz_ptr = bz_addr as *mut F;
+                        let dst = bz_ptr.add(g * bool_len);
+                        for i in 0..bool_len {
+                            core::ptr::write(dst.add(i), b_bool[i]);
+                        }
+                    }
+                }
+
+                // Expand to ternary grid and accumulate into inner
                 let q_grid = Self::expand_boolean_to_ternary_straightline(
-                    &a_bool,
-                    &b_bool,
-                    &w_bool,
-                    omega,
-                    omit_ones,
+                    &a_bool, &b_bool, &w_bool, omega, omit_ones,
                 );
                 debug_assert_eq!(q_grid.len(), grid_len);
                 for i in 0..grid_len {
-                    inner[i] += e_in_val.mul_unreduced::<9>(q_grid[i]);
+                    inner[i] += e_in.mul_unreduced::<9>(q_grid[i]);
                 }
-            } else {
-                for x_in in 0..in_len {
-                    let e_in_val = e_in[x_in];
-                    // Placeholder Az,Bz over {0,1}^ω for this (x_out, x_in)
-                    let a_bool = vec![F::zero(); 1usize << omega];
-                    let b_bool = vec![F::zero(); 1usize << omega];
-                    let q_grid = Self::expand_boolean_to_ternary_straightline(
-                        &a_bool,
-                        &b_bool,
-                        &w_bool,
-                        omega,
-                        omit_ones,
-                    );
-                    debug_assert_eq!(q_grid.len(), grid_len);
-                    for i in 0..grid_len {
-                        inner[i] += e_in_val.mul_unreduced::<9>(q_grid[i]);
-                    }
+            },
+            |_x_out: usize, e_out: F, inner: Vec<F::Unreduced<9>>| {
+                // Scale reduced inner by e_out into an outer vector
+                let mut outer = vec![F::Unreduced::<9>::zero(); grid_len];
+                for i in 0..grid_len {
+                    let reduced = F::from_montgomery_reduce::<9>(inner[i]);
+                    outer[i] = e_out.mul_unreduced::<9>(reduced);
                 }
-            }
-            let e_out_val = e_out[x_out];
-            for i in 0..grid_len {
-                let reduced = F::from_montgomery_reduce::<9>(inner[i]);
-                acc_unreduced[i] += e_out_val.mul_unreduced::<9>(reduced);
-            }
-        }
+                outer
+            },
+            |mut a: Vec<F::Unreduced<9>>, b: Vec<F::Unreduced<9>>| {
+                debug_assert_eq!(a.len(), b.len());
+                for i in 0..a.len() {
+                    a[i] = a[i] + b[i];
+                }
+                a
+            },
+        );
 
         // 4) Reduce and store window polynomial
         let mut evals = unsafe_allocate_zero_vec::<F>(grid_len);
@@ -372,17 +413,38 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
 
     /// Attempt to fetch pre-materialized Az,Bz boolean-base evals for group g (length 2^omega each).
     #[inline]
-    fn fetch_materialized_group_bool_evals(&self, _g: usize, _omega: usize) -> Option<(Vec<F>, Vec<F>)> {
-        // Stub: no cache by default.
-        None
+    fn fetch_materialized_group_bool_evals(
+        &self,
+        _g: usize,
+        _omega: usize,
+    ) -> Option<Vec<(F, F)>> {
+        let (az, bz) = match (&self.az, &self.bz) {
+            (Some(az), Some(bz)) => (az, bz),
+            _ => return None,
+        };
+        let bool_len = 1usize << _omega;
+        let start = _g.checked_mul(bool_len)?;
+        let end = start.checked_add(bool_len)?;
+        if end > az.len() || end > bz.len() {
+            return None;
+        }
+        let mut out: Vec<(F, F)> = Vec::with_capacity(bool_len);
+        for i in start..end {
+            out.push((az[i], bz[i]));
+        }
+        Some(out)
     }
 
     /// Compute Az,Bz boolean-base evals for group g by streaming the trace across the bound slice.
     #[inline]
-    fn compute_group_bool_evals_from_trace(&self, _g: usize, omega: usize) -> (Vec<F>, Vec<F>) {
-        // Stub: return zeroed vectors of the correct length. Replace with trace iteration.
+    fn compute_group_bool_evals_from_trace(&self, _g: usize, omega: usize) -> Vec<(F, F)> {
+        // Stub: return zeroed pairs of the correct length. Replace with trace iteration.
         let len = 1usize << omega;
-        (vec![F::zero(); len], vec![F::zero(); len])
+        let mut v: Vec<(F, F)> = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push((F::zero(), F::zero()));
+        }
+        v
     }
 
     /// Optionally store the computed boolean-base evals to support reuse in this window.
@@ -391,8 +453,7 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
         &mut self,
         _g: usize,
         _omega: usize,
-        _a_bool: &[F],
-        _b_bool: &[F],
+        _ab_pairs: &[(F, F)],
     ) {
         // Stub: no-op by default.
     }
@@ -400,7 +461,8 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
     /// Return weights on {0,1}^ω (colex, X_1 LSD) for the active window variables only.
     #[inline]
     fn compute_active_window_bool_weights(&self, omega: usize) -> Vec<F> {
-        // Stub: uniform weights as placeholder; replace with correct active-window eq weights.
+        // TODO: derive from split-eq by carving out active ω variables and evaluating eq on {0,1}^ω.
+        // For now, use uniform weights.
         vec![F::one(); 1usize << omega]
     }
 
@@ -408,6 +470,19 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
     #[inline]
     fn finalize_materialization_for_window(&mut self, _window_idx: usize, _omega: usize) {
         // Stub: no-op by default.
+    }
+
+    /// Return the static group counts outside the active window:
+    /// (num_x_out_vals, num_x_in_vals) over which we fold with split-eq.
+    /// This must be consistent with `group_index(x_out, x_in)`.
+    #[inline]
+    fn get_window_static_group_counts(&self, _omega: usize) -> (usize, usize) {
+        // TODO: for ω>1, shift E_in/E_out layers to ensure static dims are outside the active window.
+        // Current behavior uses the existing E_out_current/E_in_current as the static dims.
+        (
+            self.split_eq_poly.E_out_current_len(),
+            self.split_eq_poly.E_in_current_len(),
+        )
     }
 
     /// Produce the 3 evaluations for the current round from the window grid.
@@ -455,7 +530,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         }
         // Use the window grid to compute this round's prover message (stubbed)
         self.get_prover_message_from_window_evals(previous_claim)
-        
+
         // Old stuff, commetned out
         // let (t0, t_inf) = if round == 0 {
         //     let lagrange_evals_r = LagrangePolynomial::<F>::evals::<

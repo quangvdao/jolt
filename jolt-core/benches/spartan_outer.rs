@@ -13,8 +13,8 @@ use jolt_core::{
     transcripts::{KeccakTranscript, Transcript},
     utils::math::Math,
     zkvm::{
-        dag::state_manager::StateManager,
         bytecode::BytecodePreprocessing,
+        dag::state_manager::StateManager,
         r1cs::{
             constraints::{R1CSConstraint, R1CS_CONSTRAINTS},
             inputs::{JoltR1CSInputs, R1CSCycleInputs, ALL_R1CS_INPUTS},
@@ -76,7 +76,8 @@ fn setup_for_spartan(
     // This is needed to initialize the global list of committed polynomials, required for witness generation.
     let ram_d =
         jolt_core::zkvm::witness::compute_d_parameter(io_device.memory_layout.memory_end as usize);
-    let bytecode_d = jolt_core::zkvm::witness::compute_d_parameter(preprocessing.bytecode.code_size);
+    let bytecode_d =
+        jolt_core::zkvm::witness::compute_d_parameter(preprocessing.bytecode.code_size);
     let _all_committed_polys_handle = AllCommittedPolynomials::initialize(ram_d, bytecode_d);
 
     // truncate trailing zeros on device outputs (defensive)
@@ -388,7 +389,8 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                     // Baseline (no uni-skip): build flattened polynomials and instantiate baseline prover
                     let (preprocessing, _lazy_trace, trace, _program_io, _final_mem) =
                         state_manager.get_prover_data();
-                    let flattened = build_flattened_polynomials::<F>(&preprocessing.bytecode, trace);
+                    let flattened =
+                        build_flattened_polynomials::<F>(&preprocessing.bytecode, trace);
                     let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                     let constraints_vec: Vec<R1CSConstraint> =
                         R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();

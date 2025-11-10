@@ -22,6 +22,7 @@ use crate::utils::math::Math;
 #[cfg(feature = "allocative")]
 use crate::utils::profiling::print_data_structure_heap_usage;
 use crate::utils::thread::unsafe_allocate_zero_vec;
+use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::dag::state_manager::StateManager;
 use crate::zkvm::r1cs::{
     constraints::OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
@@ -29,7 +30,7 @@ use crate::zkvm::r1cs::{
     inputs::{R1CSCycleInputs, ALL_R1CS_INPUTS},
 };
 use crate::zkvm::witness::VirtualPolynomial;
-use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::zkvm::spartan::outer::OuterRemainingSumcheckParams;
 #[cfg(feature = "allocative")]
 use allocative::FlameGraphBuilder;
 
@@ -37,6 +38,24 @@ use allocative::FlameGraphBuilder;
 use crate::zkvm::r1cs::constraints::{R1CS_CONSTRAINTS_FIRST_GROUP, R1CS_CONSTRAINTS_SECOND_GROUP};
 #[cfg(test)]
 use crate::zkvm::r1cs::inputs::JoltR1CSInputs;
+
+// DO NOT DELETE
+// One algorithm to rule them all: arbitrary bind & eval next rounds, taking source from either original trace or already-bound poly evals
+// Then we specialize to these cases.
+// General outline:
+// A. `bind` can simply:
+//   - ingest challenge and store them for later use
+//   - bind the current window evals to the challenge (evals are guaranteed to exist by the time this is called, via some previous call to `compute_prover_message`)
+// B. `compute_prover_message` is the real work
+// 1. Determine if we are at the start of a new window
+// 2. If so, we need to compute the evaluations needed for this window,
+//    - If we are in materialized mode, we will use the already-bound poly evals
+//    - If we are not, we will need to stream each bound poly eval from trace, and:
+//        - If we need to materialize for this window, we will store the just-computed bound evals
+//        - Otherwise, we throw them away
+//        - In either case, we collect enough of these evals at once (2^window_size), do extrapolation, multiply, and add
+//          them to the current window evals
+// 3. Now that the bound window evals are guaranteed to exist, we will use that to compute the evaluations for this round
 
 /// Degree bound of the sumcheck round polynomials for [`OuterRemainingStreamingSumcheckVerifier`].
 const OUTER_REMAINING_DEGREE_BOUND: usize = 3;
@@ -51,14 +70,16 @@ pub struct OuterRemainingStreamingSumcheckProver<F: JoltField> {
     #[allocative(skip)]
     trace: Arc<Vec<Cycle>>,
     split_eq_poly: GruenSplitEqPolynomial<F>,
-    az: DensePolynomial<F>,
-    bz: DensePolynomial<F>,
-    /// The first round evals (t0, t_inf) computed from a streaming pass over the trace
-    first_round_evals: (F, F),
+    az: Option<DensePolynomial<F>>,
+    bz: Option<DensePolynomial<F>>,
     #[allocative(skip)]
-    params: OuterRemainingStreamingSumcheckParams<F>,
+    params: OuterRemainingSumcheckParams<F>,
     /// Challenges received via bind() (latest is last)
     received_challenges: Vec<F::Challenge>,
+    /// Window schedule encoded as exclusive end indices for post-uniskip rounds
+    /// Invariant: strictly increasing, last == num_cycles_bits
+    #[allow(dead_code)]
+    schedule: WindowSchedule,
     /// Index of the current window in the schedule (post-uniskip rounds). Additive scaffolding.
     #[allow(dead_code)]
     current_window_idx: usize,
@@ -66,9 +87,6 @@ pub struct OuterRemainingStreamingSumcheckProver<F: JoltField> {
     #[allocative(skip)]
     #[allow(dead_code)]
     window_poly: Option<MultiQuadraticPolynomial<F>>,
-    /// If true, materialize windows from already-bound az/bz (linear-time mode).
-    /// If false, build windows by streaming from the trace (streaming mode).
-    materialize_mode: bool,
 }
 
 impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
@@ -158,18 +176,14 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
         }
         q
     }
+
     #[tracing::instrument(skip_all, name = "OuterRemainingStreamingSumcheckProver::gen")]
     pub fn gen<PCS: CommitmentScheme<Field = F>>(
         state_manager: &mut StateManager<'_, F, PCS>,
         num_cycles_bits: usize,
         uni: &UniSkipState<F>,
     ) -> Self {
-        let (preprocessing, _, trace, _program_io, _final_mem) = state_manager.get_prover_data();
-
-        let lagrange_evals_r = LagrangePolynomial::<F>::evals::<
-            F::Challenge,
-            OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
-        >(&uni.r0);
+        let (preprocessing, _, _trace, _program_io, _final_mem) = state_manager.get_prover_data();
 
         let tau_high = uni.tau[uni.tau.len() - 1];
         let tau_low = &uni.tau[..uni.tau.len() - 1];
@@ -186,386 +200,224 @@ impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
                 Some(lagrange_tau_r0),
             );
 
-        let (t0, t_inf, az_bound, bz_bound) =
-            Self::compute_first_quadratic_evals_and_bound_polys(
-                &preprocessing.bytecode,
-                trace,
-                &lagrange_evals_r,
-                &split_eq_poly,
-            );
-
         Self {
             split_eq_poly,
             bytecode_preprocessing: preprocessing.bytecode.clone(),
             trace: state_manager.get_trace_arc(),
-            az: az_bound,
-            bz: bz_bound,
-            first_round_evals: (t0, t_inf),
-            params: OuterRemainingStreamingSumcheckParams::new(num_cycles_bits, uni),
+            // Dummy az and bz polynomials, to be populated in the window start where materialization happens
+            az: None,
+            bz: None,
+            params: OuterRemainingSumcheckParams::new(num_cycles_bits, uni),
             received_challenges: Vec::new(),
+            // Linear-time only schedule for now
+            schedule: WindowSchedule::single_rounds(num_cycles_bits),
             current_window_idx: 0,
             window_poly: None,
-            materialize_mode: false,
-        }
-    }
-
-    /// Switch between streaming (false) and materialized (true) window construction.
-    #[inline]
-    pub fn set_materialize_mode(&mut self, enabled: bool) {
-        self.materialize_mode = enabled;
-    }
-
-    #[inline]
-    fn enter_window(&mut self, round_in_instance: usize) {
-        let s = OuterRemainingStreamingSumcheckParams::<F>::schedule_round_index(round_in_instance);
-        self.current_window_idx = self.params.schedule.window_index(s);
-        // For ω=1 windows, materialize a single-variable Q by aggregating q(0) and q(∞) (quadratic coeff).
-        // We deliberately omit q(1) for ω=1; gruen_evals_deg_3 derives it from the previous-claim s(0)+s(1).
-        let omega = self.params.window_length(round_in_instance);
-        if omega == 1 {
-            let (q0, qinf) = if round_in_instance == 0 {
-                self.first_round_evals
-            } else {
-                self.remaining_quadratic_evals()
-            };
-            self.window_poly = Some(MultiQuadraticPolynomial::new_omega1_from_q0_and_e(q0, qinf));
-        } else if omega >= 2 {
-            // Derive group binding (if any). For the very first streaming round there is no group bind yet.
-            let r_group_opt = if self.received_challenges.is_empty() {
-                None
-            } else {
-                Some(self.received_challenges[0])
-            };
-            let poly = self.materialize_window_poly_omegak(omega, r_group_opt);
-            self.window_poly = Some(poly);
-        } else {
-            // No window to enter (ω=0).
-            self.window_poly = None;
-        }
-    }
-
-    /// Materialize an `omega`-variate MultiQuadraticPolynomial Q at an arbitrary window start.
-    ///
-    /// For each x_out in parallel:
-    ///   - Iterate over x_in blocks of size 2^omega (colex with X_1 LSD).
-    ///   - For each block, enumerate boolean corners m ∈ {0,1}^omega, build
-    ///     A_bool[m], B_bool[m] at r_uniskip with group gating:
-    ///       * If `r_group_opt` is Some(rg): combine with rg.
-    ///       * Else: select group by the LSB of the full x_in index (group bit).
-    ///     W_bool[m] is taken from `E_in_current` slice for that corner.
-    ///   - Expand boolean arrays to ternary {0,1,∞}^omega via straightline expansion
-    ///     and accumulate across blocks; multiply once by E_out[x_out].
-    /// Reduce across x_out by summation; return colex (X_1 LSD) `MultiQuadraticPolynomial`.
-    fn materialize_window_poly_omegak(
-        &self,
-        omega: usize,
-        r_group_opt: Option<F::Challenge>,
-    ) -> MultiQuadraticPolynomial<F> {
-        // Precompute Lagrange weights over the uniskip base domain at r0 (used in streaming path)
-        let lagrange_evals_r =
-            LagrangePolynomial::<F>::evals::<F::Challenge, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE>(
-                &self.params.r0_uniskip,
-            );
-        let eout = self.split_eq_poly.E_out_current();
-        let ein = self.split_eq_poly.E_in_current();
-
-        // Require enough window bits (placeholder restriction: window must fit inside current E_in tail)
-        let in_len = ein.len();
-        let block_len = 1usize << omega;
-        if in_len < block_len || (in_len % block_len != 0) {
-            debug_assert!(
-                false,
-                "materialize_window_poly_omegak: unsupported layout (omega={}, E_in_len={})",
-                omega,
-                in_len
-            );
-            let mut ternary_len = 1usize;
-            for _ in 0..omega { ternary_len *= 3; }
-            return MultiQuadraticPolynomial::new(vec![F::zero(); ternary_len], omega);
-        }
-        let in_blocks = in_len / block_len;
-
-        let out_len = eout.len();
-        let iter_num_x_in_vars = in_len.log_2();
-
-        // Parallel per x_out; locally accumulate ternary grid length 3^omega
-        let q_vec: Vec<F> = (0..out_len)
-            .into_par_iter()
-            .map(|x_out| {
-                let weight_out = eout[x_out];
-                let mut ternary_len = 1usize;
-                for _ in 0..omega { ternary_len *= 3; }
-                let mut loc_q: Vec<F> = vec![F::zero(); ternary_len];
-                for g in 0..in_blocks {
-                    let base = g << omega;
-                    // Deep switch: choose source of (A,B) per-corner inside the tightest loop.
-                    let mut a_bool: Vec<F> = unsafe_allocate_zero_vec(block_len);
-                    let mut b_bool: Vec<F> = unsafe_allocate_zero_vec(block_len);
-                    let mut w_bool: Vec<F> = unsafe_allocate_zero_vec(block_len);
-                    for corner in 0..block_len {
-                        let idx_in = base | corner;
-                        let g_idx = (x_out << iter_num_x_in_vars) | idx_in;
-                        let (a, b) = if self.materialize_mode {
-                            // Use bound az/bz pairs at (x_out, idx_in)
-                            let az0 = self.az[2 * g_idx];
-                            let az1 = self.az[2 * g_idx + 1];
-                            let bz0 = self.bz[2 * g_idx];
-                            let bz1 = self.bz[2 * g_idx + 1];
-                            if let Some(rg) = r_group_opt {
-                                (az0 + rg * (az1 - az0), bz0 + rg * (bz1 - bz0))
-                            } else {
-                                if (idx_in & 1) == 0 { (az0, bz0) } else { (az1, bz1) }
-                            }
-                        } else {
-                            // Stream from the trace at the physical row index
-                            let row_idx = g_idx;
-                                        let row = R1CSCycleInputs::from_trace::<F>(
-                                            &self.bytecode_preprocessing,
-                                            &self.trace,
-                                            row_idx,
-                                        );
-                            let eval = R1CSEval::<F>::from_cycle_inputs(&row);
-                            let a0 = eval.az_at_r_first_group(&lagrange_evals_r);
-                            let b0 = eval.bz_at_r_first_group(&lagrange_evals_r);
-                            let a1 = eval.az_at_r_second_group(&lagrange_evals_r);
-                            let b1 = eval.bz_at_r_second_group(&lagrange_evals_r);
-                            if let Some(rg) = r_group_opt {
-                                (a0 + rg * (a1 - a0), b0 + rg * (b1 - b0))
-                            } else {
-                                if (idx_in & 1) == 0 { (a0, b0) } else { (a1, b1) }
-                            }
-                        };
-                        a_bool[corner] = a;
-                        b_bool[corner] = b;
-                        w_bool[corner] = ein[idx_in];
-                    }
-                    let q_block = Self::expand_boolean_to_ternary_straightline(
-                        &a_bool,
-                        &b_bool,
-                        &w_bool,
-                        omega,
-                        false, // keep q(1, ·) for in-window collapse
-                    );
-                    for i in 0..ternary_len {
-                        loc_q[i] += q_block[i];
-                    }
-                }
-                for i in 0..loc_q.len() {
-                    loc_q[i] = weight_out * loc_q[i];
-                }
-                loc_q
-            })
-            .reduce(
-                || {
-                    let mut ternary_len = 1usize;
-                    for _ in 0..omega { ternary_len *= 3; }
-                    vec![F::zero(); ternary_len]
-                },
-                |mut a, b| {
-                    for i in 0..a.len() { a[i] += b[i]; }
-                    a
-                }
-            );
-        MultiQuadraticPolynomial::new(q_vec, omega)
-    }
-
-    /// Compute the quadratic evaluations for the streaming round (right after univariate skip).
-    ///
-    /// This uses the streaming algorithm to compute the sum-check polynomial for the round
-    /// right after the univariate skip round.
-    ///
-    /// Recall that we need to compute
-    ///
-    /// `t_i(0) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] *
-    ///       unbound_coeffs_a(x_out, x_in, 0, r) * unbound_coeffs_b(x_out, x_in, 0, r)`
-    ///
-    /// and
-    ///
-    /// `t_i(∞) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] * (unbound_coeffs_a(x_out,
-    /// x_in, ∞, r) * unbound_coeffs_b(x_out, x_in, ∞, r))`
-    ///
-    /// Here the "_a,b" subscript indicates the coefficients of `unbound_coeffs` corresponding to
-    /// Az and Bz respectively. Note that we index with x_out being the MSB here.
-    ///
-    /// Importantly, since the eval at `r` is not cached, we will need to recompute it via another
-    /// sum
-    ///
-    /// `unbound_coeffs_{a,b}(x_out, x_in, {0,∞}, r) = \sum_{y in D} Lagrange(r, y) *
-    /// unbound_coeffs_{a,b}(x_out, x_in, {0,∞}, y)`
-    ///
-    /// (and the eval at ∞ is computed as (eval at 1) - (eval at 0))
-    #[inline]
-    fn compute_first_quadratic_evals_and_bound_polys(
-        preprocess: &BytecodePreprocessing,
-        trace: &[Cycle],
-        lagrange_evals_r: &[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE],
-        split_eq_poly: &GruenSplitEqPolynomial<F>,
-    ) -> (F, F, DensePolynomial<F>, DensePolynomial<F>) {
-        let num_x_out_vals = split_eq_poly.E_out_current_len();
-        let num_x_in_vals = split_eq_poly.E_in_current_len();
-        let iter_num_x_in_vars = num_x_in_vals.log_2();
-
-        let groups_exact = num_x_out_vals
-            .checked_mul(num_x_in_vals)
-            .expect("overflow computing groups_exact");
-
-        // Preallocate interleaved buffers once ([lo, hi] per entry)
-        let mut az_bound: Vec<F> = unsafe_allocate_zero_vec(2 * groups_exact);
-        let mut bz_bound: Vec<F> = unsafe_allocate_zero_vec(2 * groups_exact);
-
-        // Parallel over x_out groups using exact-sized mutable chunks, with per-worker fold
-        let (t0_acc_unr, t_inf_acc_unr) = az_bound
-            .par_chunks_exact_mut(2 * num_x_in_vals)
-            .zip(bz_bound.par_chunks_exact_mut(2 * num_x_in_vals))
-            .enumerate()
-            .fold(
-                || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
-                |(mut acc0, mut acci), (x_out_val, (az_chunk, bz_chunk))| {
-                    let mut inner_sum0 = F::Unreduced::<9>::zero();
-                    let mut inner_sum_inf = F::Unreduced::<9>::zero();
-                    for x_in_val in 0..num_x_in_vals {
-                        let current_step_idx = (x_out_val << iter_num_x_in_vars) | x_in_val;
-                        let row_inputs = R1CSCycleInputs::from_trace::<F>(
-                            preprocess,
-                            trace,
-                            current_step_idx,
-                        );
-                        let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
-                        let az0 = eval.az_at_r_first_group(lagrange_evals_r);
-                        let bz0 = eval.bz_at_r_first_group(lagrange_evals_r);
-                        let az1 = eval.az_at_r_second_group(lagrange_evals_r);
-                        let bz1 = eval.bz_at_r_second_group(lagrange_evals_r);
-                        let p0 = az0 * bz0;
-                        let slope = (az1 - az0) * (bz1 - bz0);
-                        let e_in = split_eq_poly.E_in_current()[x_in_val];
-                        inner_sum0 += e_in.mul_unreduced::<9>(p0);
-                        inner_sum_inf += e_in.mul_unreduced::<9>(slope);
-                        let off = 2 * x_in_val;
-                        az_chunk[off] = az0;
-                        az_chunk[off + 1] = az1;
-                        bz_chunk[off] = bz0;
-                        bz_chunk[off + 1] = bz1;
-                    }
-                    let e_out = split_eq_poly.E_out_current()[x_out_val];
-                    let reduced0 = F::from_montgomery_reduce::<9>(inner_sum0);
-                    let reduced_inf = F::from_montgomery_reduce::<9>(inner_sum_inf);
-                    acc0 += e_out.mul_unreduced::<9>(reduced0);
-                    acci += e_out.mul_unreduced::<9>(reduced_inf);
-                    (acc0, acci)
-                },
-            )
-            .reduce(
-                || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
-                |a, b| (a.0 + b.0, a.1 + b.1),
-            );
-
-        (
-            F::from_montgomery_reduce::<9>(t0_acc_unr),
-            F::from_montgomery_reduce::<9>(t_inf_acc_unr),
-            DensePolynomial::new(az_bound),
-            DensePolynomial::new(bz_bound),
-        )
-    }
-
-    // No special binding path needed; az/bz hold interleaved [lo,hi] ready for binding
-
-    /// Compute the polynomial for each of the remaining rounds, using the
-    /// linear-time algorithm with split-eq optimizations.
-    ///
-    /// At this point, we have computed the `bound_coeffs` for the current round.
-    /// We need to compute:
-    ///
-    /// `t_i(0) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] *
-    /// (az_bound[x_out, x_in, 0] * bz_bound[x_out, x_in, 0] - cz_bound[x_out, x_in, 0])`
-    ///
-    /// and
-    ///
-    /// `t_i(∞) = \sum_{x_out} E_out[x_out] \sum_{x_in} E_in[x_in] *
-    /// az_bound[x_out, x_in, ∞] * bz_bound[x_out, x_in, ∞]`
-    ///
-    /// (ordering of indices is MSB to LSB, so x_out is the MSB and x_in is the LSB)
-    #[inline]
-    fn remaining_quadratic_evals(&self) -> (F, F) {
-        let eq_poly = &self.split_eq_poly;
-
-        let n = self.az.len();
-        debug_assert_eq!(n, self.bz.len());
-        if eq_poly.E_in_current_len() == 1 {
-            // groups are pairs (0,1)
-            let groups = n / 2;
-            let (t0_unr, tinf_unr) = (0..groups)
-                .into_par_iter()
-                .map(|g| {
-                    let az0 = self.az[2 * g];
-                    let az1 = self.az[2 * g + 1];
-                    let bz0 = self.bz[2 * g];
-                    let bz1 = self.bz[2 * g + 1];
-                    let eq = eq_poly.E_out_current()[g];
-                    let p0 = az0 * bz0;
-                    let slope = (az1 - az0) * (bz1 - bz0);
-                    let t0_unr = eq.mul_unreduced::<9>(p0);
-                    let tinf_unr = eq.mul_unreduced::<9>(slope);
-                    (t0_unr, tinf_unr)
-                })
-                .reduce(
-                    || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                );
-            (
-                F::from_montgomery_reduce::<9>(t0_unr),
-                F::from_montgomery_reduce::<9>(tinf_unr),
-            )
-        } else {
-            let num_x1_bits = eq_poly.E_in_current_len().log_2();
-            let x1_len = eq_poly.E_in_current_len();
-            let x2_len = eq_poly.E_out_current_len();
-            let (sum0_unr, suminf_unr) = (0..x2_len)
-                .into_par_iter()
-                .map(|x2| {
-                    let mut inner0_unr = F::Unreduced::<9>::zero();
-                    let mut inner_inf_unr = F::Unreduced::<9>::zero();
-                    for x1 in 0..x1_len {
-                        let g = (x2 << num_x1_bits) | x1;
-                        let az0 = self.az[2 * g];
-                        let az1 = self.az[2 * g + 1];
-                        let bz0 = self.bz[2 * g];
-                        let bz1 = self.bz[2 * g + 1];
-                        let e_in = eq_poly.E_in_current()[x1];
-                        let p0 = az0 * bz0;
-                        let slope = (az1 - az0) * (bz1 - bz0);
-                        inner0_unr += e_in.mul_unreduced::<9>(p0);
-                        inner_inf_unr += e_in.mul_unreduced::<9>(slope);
-                    }
-                    let e_out = eq_poly.E_out_current()[x2];
-                    let inner0_red = F::from_montgomery_reduce::<9>(inner0_unr);
-                    let inner_inf_red = F::from_montgomery_reduce::<9>(inner_inf_unr);
-                    let t0_unr = e_out.mul_unreduced::<9>(inner0_red);
-                    let tinf_unr = e_out.mul_unreduced::<9>(inner_inf_red);
-                    (t0_unr, tinf_unr)
-                })
-                .reduce(
-                    || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                );
-            (
-                F::from_montgomery_reduce::<9>(sum0_unr),
-                F::from_montgomery_reduce::<9>(suminf_unr),
-            )
         }
     }
 
     pub fn final_sumcheck_evals(&self) -> [F; 2] {
-        let az0 = if !self.az.is_empty() {
-            self.az[0]
-        } else {
-            F::zero()
+        let az0 = match &self.az {
+            Some(az) if !az.is_empty() => az[0],
+            _ => F::zero(),
         };
-        let bz0 = if !self.bz.is_empty() {
-            self.bz[0]
-        } else {
-            F::zero()
+        let bz0 = match &self.bz {
+            Some(bz) if !bz.is_empty() => bz[0],
+            _ => F::zero(),
         };
         [az0, bz0]
+    }
+
+    /// NEW! All-in-one function that either: iterate over the trace, OR use the already-computed
+    /// bound evals, to compute the multiquadratic evals for the current window (which this one is a
+    /// part of), and optionally store the bound evals if needed. This is invoked at the beginning of
+    /// every window.
+    /// 
+    /// We make this to be mutable on self only for now, cuz self contains all the needed info.
+    /// May make things more implicit later on.
+    fn compute_window_evals_for_new_window(&mut self, current_round: usize) {
+        // Pseudo-code: (DO NOT DELETE, IMPLEMENT BELOW THIS COMMENT)
+        // 1. Check two flags: (cross-check with window schedule)
+        //   - whether az / bz are already present
+        //   - if az/bz are None, whether in this window we need to materialize az & bz
+        //     If we need to materialize, we will allocate vectors for az_bound/bz_bound for this round.
+        // 2. Look at the window schedule - what is the current round, and what is the length of the window?
+        //   - This will determine the right split of E_out and E_in. NOTE: if window size is MORE than one round,
+        //     the current `E_in_current` will NOT be correct. We need to shift it based on the window length.
+        // 3. Key thing to keep in mind: we partition the number of variables into 4 groups
+        //   - out variables
+        //   - in variables
+        //   - active variables (the ones within this window length)
+        //   - bound variables (the ones that are already bound)
+        // SpartanOuter specific: when we start in RemainingSumcheck, we ALREADY have one variable bound (r0_uniskip)
+        // Picture to keep in mind: [x_out, x_in, X_ACTIVE, r_bound]
+        // where X_ACTIVE = (X_w, ..., X_1), and r_bound = (..., r0_uniskip)
+        // 3. Main loop:
+        //   - Parallel iteration over x_out
+        //   - For each x_out, iterate over x_in (assuming x_in isn't already fully bound; if it is,
+        //     we can collapse / skip this iteration)
+        //   - Now we iterate over 2^w to build the bound evals over all x_active_base \in {0,1}^w
+        //     Recall that each eval has the form: {Az, Bz}(x_out, x_in, x_active_base, r_bound)
+        //   - Here we special case:
+        //     - if az/bz are already present, we can grab this eval directly from az/bz
+        //     - if az/bz are not present, we need to compute this eval from the trace
+        //       - This computation will call an auxiliary function that iterates over the trace PRECISELY
+        //         over the 2^|num_bound_vars| slice corresponding to (x_out, x_in, x_active_base),
+        //         and computes the eval for the given (x_out, x_in, x_active_base, r_bound).
+        //       - If we need to materialize az/bz in this window, we store the evals in the right index of az_bound/bz_bound
+        //       (will need to use `unsafe` here cuz the compiler isn't smart enough to figure out writes are safe / disjoint between threads)
+        //   - Now we have the az/bz evals for all x_active_base \in {0,1}^w.
+        //     Initialize accumulators (e.g. extended evals) for all {0,1,infty}^w.
+        //     We call an auxiliary function that:
+        //     - Iterates over all ternary indices starting from the base and extending to the {0,1,infty}^w grid
+        //     - For each ternary index x_active_ext, computes the az/bz eval for the given (x_out, x_in, x_active_ext, r_bound), using the memoized evals from the previous indices
+        //     - Do a fused multiply-accumulate to compute
+        //       accum[x_active_ext] += e_in.mul_unreduced::<9>(az_ext * bz_ext)
+        //   - Now the accumulators for the x_in are fully computed. We reduce them, then unreduced-multiply by E_out, sum them up, then reduce them at the end.
+        // 4. Now we are done: the final accumulated values are the evals for the MultiQuadraticPolynomial.
+
+        // 0) Identify window; only act at window starts
+        let window_idx = self.schedule.window_index(current_round);
+        let (win_start, win_end) = self.schedule.window_bounds(window_idx);
+        if current_round != win_start {
+            return;
+        }
+        let omega = win_end - win_start;
+        debug_assert!(omega > 0, "window must contain at least one round");
+
+        // 1) Decide materialization policy for this window
+        let will_materialize = self.schedule_requires_materialization(window_idx);
+
+        // 2) Build weights on {0,1}^ω for the active window
+        let w_bool = self.compute_active_window_bool_weights(omega);
+        debug_assert_eq!(w_bool.len(), 1 << omega, "w_bool must be 2^omega");
+        let omit_ones = true;
+
+        // 3^omega length
+        let mut grid_len = 1usize;
+        for _ in 0..omega {
+            grid_len = grid_len.checked_mul(3).expect("overflow in 3^omega");
+        }
+
+        // 3) Fold over split-eq weights, expand {0,1}^ω → {0,1,∞}^ω, accumulate unreduced
+        let e_out = self.split_eq_poly.E_out_current();
+        let e_in = self.split_eq_poly.E_in_current();
+        let in_len = self.split_eq_poly.E_in_current_len();
+        let mut acc_unreduced: Vec<F::Unreduced<9>> = vec![F::Unreduced::<9>::zero(); grid_len];
+        for x_out in 0..e_out.len() {
+            let mut inner: Vec<F::Unreduced<9>> = vec![F::Unreduced::<9>::zero(); grid_len];
+            if in_len <= 1 {
+                // Fully bound inner
+                let e_in_val = F::one();
+                // Placeholder Az,Bz over {0,1}^ω
+                let a_bool = vec![F::zero(); 1usize << omega];
+                let b_bool = vec![F::zero(); 1usize << omega];
+                let q_grid = Self::expand_boolean_to_ternary_straightline(
+                    &a_bool,
+                    &b_bool,
+                    &w_bool,
+                    omega,
+                    omit_ones,
+                );
+                debug_assert_eq!(q_grid.len(), grid_len);
+                for i in 0..grid_len {
+                    inner[i] += e_in_val.mul_unreduced::<9>(q_grid[i]);
+                }
+            } else {
+                for x_in in 0..in_len {
+                    let e_in_val = e_in[x_in];
+                    // Placeholder Az,Bz over {0,1}^ω for this (x_out, x_in)
+                    let a_bool = vec![F::zero(); 1usize << omega];
+                    let b_bool = vec![F::zero(); 1usize << omega];
+                    let q_grid = Self::expand_boolean_to_ternary_straightline(
+                        &a_bool,
+                        &b_bool,
+                        &w_bool,
+                        omega,
+                        omit_ones,
+                    );
+                    debug_assert_eq!(q_grid.len(), grid_len);
+                    for i in 0..grid_len {
+                        inner[i] += e_in_val.mul_unreduced::<9>(q_grid[i]);
+                    }
+                }
+            }
+            let e_out_val = e_out[x_out];
+            for i in 0..grid_len {
+                let reduced = F::from_montgomery_reduce::<9>(inner[i]);
+                acc_unreduced[i] += e_out_val.mul_unreduced::<9>(reduced);
+            }
+        }
+
+        // 4) Reduce and store window polynomial
+        let mut evals = unsafe_allocate_zero_vec::<F>(grid_len);
+        for i in 0..grid_len {
+            evals[i] = F::from_montgomery_reduce::<9>(acc_unreduced[i]);
+        }
+        self.window_poly = Some(MultiQuadraticPolynomial::new(evals, omega));
+        self.current_window_idx = window_idx;
+
+        // 5) Finalize any materialization if requested
+        if will_materialize {
+            self.finalize_materialization_for_window(window_idx, omega);
+        }
+    }
+
+    /// Decide whether this window should materialize bound Az/Bz for reuse.
+    #[inline]
+    fn schedule_requires_materialization(&self, _window_idx: usize) -> bool {
+        // Stub policy: default to not materializing. Customize when wiring full schedule logic.
+        false
+    }
+
+    /// Attempt to fetch pre-materialized Az,Bz boolean-base evals for group g (length 2^omega each).
+    #[inline]
+    fn fetch_materialized_group_bool_evals(&self, _g: usize, _omega: usize) -> Option<(Vec<F>, Vec<F>)> {
+        // Stub: no cache by default.
+        None
+    }
+
+    /// Compute Az,Bz boolean-base evals for group g by streaming the trace across the bound slice.
+    #[inline]
+    fn compute_group_bool_evals_from_trace(&self, _g: usize, omega: usize) -> (Vec<F>, Vec<F>) {
+        // Stub: return zeroed vectors of the correct length. Replace with trace iteration.
+        let len = 1usize << omega;
+        (vec![F::zero(); len], vec![F::zero(); len])
+    }
+
+    /// Optionally store the computed boolean-base evals to support reuse in this window.
+    #[inline]
+    fn maybe_store_materialized_group_bool_evals(
+        &mut self,
+        _g: usize,
+        _omega: usize,
+        _a_bool: &[F],
+        _b_bool: &[F],
+    ) {
+        // Stub: no-op by default.
+    }
+
+    /// Return weights on {0,1}^ω (colex, X_1 LSD) for the active window variables only.
+    #[inline]
+    fn compute_active_window_bool_weights(&self, omega: usize) -> Vec<F> {
+        // Stub: uniform weights as placeholder; replace with correct active-window eq weights.
+        vec![F::one(); 1usize << omega]
+    }
+
+    /// Finalize any persistent state after materializing this window (e.g., prepare az/bz layout).
+    #[inline]
+    fn finalize_materialization_for_window(&mut self, _window_idx: usize, _omega: usize) {
+        // Stub: no-op by default.
+    }
+
+    /// Produce the 3 evaluations for the current round from the window grid.
+    ///
+    /// Stubbed for now: replace with logic that reads the first-dimension triples
+    /// of `self.window_poly` and combines with `previous_claim` and split-eq weights.
+    #[inline]
+    fn get_prover_message_from_window_evals(&self, _previous_claim: F) -> Vec<F> {
+        // Stub: return zeros; wire with actual computation later.
+        vec![F::zero(), F::zero(), F::zero()]
     }
 }
 
@@ -584,57 +436,87 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         self.params.input_claim
     }
 
-    #[tracing::instrument(skip_all, name = "OuterRemainingStreamingSumcheckProver::compute_prover_message")]
+    #[tracing::instrument(
+        skip_all,
+        name = "OuterRemainingStreamingSumcheckProver::compute_prover_message"
+    )]
     fn compute_prover_message(&mut self, round: usize, previous_claim: F) -> Vec<F> {
-        // Enter a new window if this round is the start of one (after applying prior binding)
-        if self.params.is_window_start(round) {
-            self.enter_window(round);
+        // Pseudo-code: (DO NOT DELETE, IMPLEMENT BELOW THIS COMMENT)
+        // 1. Check whether this round is the first in the next window (using the window schedule)
+        //   - If so, we need to compute the evaluations needed for this window.
+        //     - We call the auxiliary function `compute_window_evals_for_new_window` to do this.
+        // 2. Now that the bound window evals are guaranteed to exist, we will use that to compute the evaluations for this round
+        //    - We call an auxiliary function `get_prover_message_from_window_evals` to do this,
+        //      which will return the three evaluations for the current round (e.g., this needs to generalize the `gruen_evals_deg_3` function)
+
+        // If this is a window start, materialize the window grid
+        if self.schedule.is_window_start(round) {
+            self.compute_window_evals_for_new_window(round);
         }
-        // If a window poly exists, use it to answer this round (ω>=1); else fall back to legacy paths.
-        // For ω=1, window_poly stores q(0) and q(∞) explicitly; for ω>=2, sum over all triples.
-        let (t0, t_inf) = if let Some(w) = self.window_poly.as_ref() {
-            if w.num_vars() == 1 {
-                let (q0, qinf) = w.omega1_q0_and_e();
-                (q0, qinf)
-            } else {
-                // Aggregate t(0) and t(∞) by summing over the first-dimension triples across the full grid.
-                // q(1) aggregate is derived by the verifier via previous_claim (gruen_evals_deg_3).
-                let mut sum_q0 = F::zero();
-                let mut sum_qinf = F::zero();
-                for triple in w.chunks_dim0() {
-                    sum_q0 += triple[0];
-                    sum_qinf += triple[2];
-                }
-                (sum_q0, sum_qinf)
-            }
-        } else if round == 0 {
-            self.first_round_evals
-        } else {
-            self.remaining_quadratic_evals()
-        };
-        let evals = self
-            .split_eq_poly
-            .gruen_evals_deg_3(t0, t_inf, previous_claim);
-        vec![evals[0], evals[1], evals[2]]
+        // Use the window grid to compute this round's prover message (stubbed)
+        self.get_prover_message_from_window_evals(previous_claim)
+        
+        // Old stuff, commetned out
+        // let (t0, t_inf) = if round == 0 {
+        //     let lagrange_evals_r = LagrangePolynomial::<F>::evals::<
+        //         F::Challenge,
+        //         OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
+        //     >(&self.params.r0_uniskip);
+        //     let (t0, t_inf, az_bound, bz_bound) =
+        //         Self::compute_first_quadratic_evals_and_bound_polys(
+        //             &self.bytecode_preprocessing,
+        //             &self.trace,
+        //             &lagrange_evals_r,
+        //             &self.split_eq_poly,
+        //         );
+        //     self.az = az_bound;
+        //     self.bz = bz_bound;
+        //     (t0, t_inf)
+        // } else {
+        //     self.remaining_quadratic_evals()
+        // };
+        // let evals = self
+        //     .split_eq_poly
+        //     .gruen_evals_deg_3(t0, t_inf, previous_claim);
+        // vec![evals[0], evals[1], evals[2]]
     }
 
     #[tracing::instrument(skip_all, name = "OuterRemainingStreamingSumcheckProver::bind")]
-    fn bind(&mut self, r_j: F::Challenge, _round: usize) {
+    fn bind(&mut self, r_j: F::Challenge, round: usize) {
+        // Pseudo-code: (DO NOT DELETE, IMPLEMENT BELOW THIS COMMENT)
+        // 1. Ingest challenge
+        // 2. If this round is in the middle of a window (i.e. if it's [a,b)), then
+        //   - Bind the multi-quadratic evals
+        // 3. If az & bz are already materialized (e.g. not `None`), bind them
+        // 4. Bind the eq_poly for next round
+
         // Ingest challenge
         self.received_challenges.push(r_j);
-        // Apply binding immediately each round (canonical sumcheck ordering)
+        // If materialized, apply binding (no-op if empty)
         rayon::join(
-            || self.az.bind_parallel(r_j, BindingOrder::LowToHigh),
-            || self.bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+            || {
+                if let Some(az) = self.az.as_mut() {
+                    az.bind_parallel(r_j, BindingOrder::LowToHigh)
+                }
+            },
+            || {
+                if let Some(bz) = self.bz.as_mut() {
+                    bz.bind_parallel(r_j, BindingOrder::LowToHigh)
+                }
+            },
         );
         self.split_eq_poly.bind(r_j);
         // If we have a window grid, collapse along the first (LSD) dimension using degree-2 Lagrange basis on {0,1,∞}.
+        // TODO: think about encapsulating this better, expose a `bind` method for `w`, only pass in `r`
         if let Some(w) = self.window_poly.as_mut() {
-            let r: F = r_j.into();
-            let l0 = F::one() - r;
-            let l1 = r;
-            let linf = r * r - r;
-            w.collapse_first_dim_in_place(|(q0, q1, qinf)| l0 * q0 + l1 * q1 + linf * qinf);
+            // Only collapse during the interior of the window; at the next window start a new grid is built.
+            if !self.schedule.is_window_start(round) {
+                let r: F = r_j.into();
+                let l0 = F::one() - r;
+                let l1 = r;
+                let linf = r * r - r;
+                w.collapse_first_dim_in_place(|(q0, q1, qinf)| l0 * q0 + l1 * q1 + linf * qinf);
+            }
         }
     }
 
@@ -750,111 +632,54 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
     }
 }
 
-
-struct OuterRemainingStreamingSumcheckParams<F: JoltField> {
-    /// Number of cycle bits for splitting opening points (consistent across prover/verifier)
-    /// Total number of rounds is `1 + num_cycles_bits`
-    num_cycles_bits: usize,
-    /// Window schedule encoded as exclusive end indices for post-uniskip rounds
-    /// Invariant: strictly increasing, last == num_cycles_bits
-    #[allow(dead_code)]
-    schedule: WindowSchedule,
-    /// The tau vector (length `2 + num_cycles_bits`, sampled at the beginning for Lagrange + eq poly)
-    #[allow(dead_code)]
-    tau: Vec<F::Challenge>,
-    /// The univariate-skip first round challenge
-    r0_uniskip: F::Challenge,
-    /// Claim after the univariate-skip first round, updated every round
-    input_claim: F,
-}
-
-impl<F: JoltField> OuterRemainingStreamingSumcheckParams<F> {
-    fn new(num_cycles_bits: usize, uni: &UniSkipState<F>) -> Self {
-        Self {
-            num_cycles_bits,
-            schedule: WindowSchedule::single_rounds(num_cycles_bits),
-            tau: uni.tau.clone(),
-            r0_uniskip: uni.r0,
-            input_claim: uni.claim_after_first,
-        }
-    }
-
-    fn num_rounds(&self) -> usize {
-        // After the uni-skip first round, this instance covers exactly the
-        // cycle-bit rounds. The streaming round (round 0 here) is the first of
-        // these, so the total number of rounds equals the number of cycle bits.
-        self.num_cycles_bits
-    }
-
-    fn get_opening_point(
-        &self,
-        sumcheck_challenges: &[F::Challenge],
-    ) -> OpeningPoint<BIG_ENDIAN, F> {
-        let r_tail = sumcheck_challenges;
-        let r_full = [&[self.r0_uniskip], r_tail].concat();
-        OpeningPoint::<LITTLE_ENDIAN, F>::new(r_full).match_endianness()
-    }
-
-    /// Map a round index within this instance to the schedule index.
-    /// This instance covers only post-uniskip rounds, starting at 0.
-    #[allow(dead_code)]
-    fn schedule_round_index(round_in_instance: usize) -> usize {
-        round_in_instance
-    }
-
-    /// Get the (start,end) window bounds for a given schedule round index.
-    #[allow(dead_code)]
-    fn window_bounds_for_schedule_round(&self, sched_round: usize) -> (usize, usize) {
-        let idx = self.schedule.window_index(sched_round);
-        self.schedule.window_bounds(idx)
-    }
-
-    /// Return true if `round_in_instance` is the first round of its window.
-    #[allow(dead_code)]
-    fn is_window_start(&self, round_in_instance: usize) -> bool {
-        let s = Self::schedule_round_index(round_in_instance);
-        let (start, _) = self.window_bounds_for_schedule_round(s);
-        s == start
-    }
-
-    /// Return window length ω for the window containing `round_in_instance`.
-    #[allow(dead_code)]
-    fn window_length(&self, round_in_instance: usize) -> usize {
-        let s = Self::schedule_round_index(round_in_instance);
-        let (start, end) = self.window_bounds_for_schedule_round(s);
-        end - start
-    }
-}
-
 /// Window schedule for streaming prover: exclusive end indices per window.
+/// Also stores the round index at which to materialize the window (must be one of the ends)
 /// For example, with `ends = [2, 5, 8]`, windows are [0,2), [2,5), [5,8).
+/// If `materialize_round = 5`, the window is materialized at round 5.
+#[derive(Allocative)]
 struct WindowSchedule {
     ends: Vec<usize>,
+    materialize_round: usize,
 }
 
 impl WindowSchedule {
-    /// Construct a schedule where each window contains exactly one round.
-    /// This preserves the legacy per-round behavior.
+    /// Construct a schedule where each window contains exactly one round,
+    /// and materialization happens right away.
+    /// This gives the linear-time sum-check behavior.
     fn single_rounds(num_cycles_bits: usize) -> Self {
         let mut ends = Vec::with_capacity(num_cycles_bits);
         for i in 1..=num_cycles_bits {
             ends.push(i);
         }
-        let sched = Self { ends };
-        sched.validate(num_cycles_bits);
+        let sched = Self {
+            ends,
+            materialize_round: 0,
+        };
+        #[cfg(test)]
+        {
+            sched.validate(num_cycles_bits);
+        }
         sched
     }
 
     /// Validate invariants under debug builds.
+    #[cfg(test)]
     fn validate(&self, num_cycles_bits: usize) {
         if self.ends.is_empty() {
-            debug_assert!(num_cycles_bits == 0, "empty schedule only valid when num_cycles_bits == 0");
+            debug_assert!(
+                num_cycles_bits == 0,
+                "empty schedule only valid when num_cycles_bits == 0"
+            );
             return;
         }
         // Strictly increasing and ends last matches num_cycles_bits
         let mut prev = 0usize;
         for (i, &e) in self.ends.iter().enumerate() {
-            debug_assert!(e > prev, "WindowSchedule.ends must be strictly increasing at index {}", i);
+            debug_assert!(
+                e > prev,
+                "WindowSchedule.ends must be strictly increasing at index {}",
+                i
+            );
             prev = e;
         }
         debug_assert_eq!(
@@ -884,6 +709,36 @@ impl WindowSchedule {
         let start = if idx == 0 { 0 } else { self.ends[idx - 1] };
         let end = self.ends[idx];
         (start, end)
+    }
+
+    /// Return window length ω for the window containing `round_in_instance`.
+    #[allow(dead_code)]
+    fn window_length(&self, round_in_instance: usize) -> usize {
+        let s = Self::schedule_round_index(round_in_instance);
+        let (start, end) = self.window_bounds_for_schedule_round(s);
+        end - start
+    }
+
+    /// Map a round index within this instance to the schedule index.
+    /// This instance covers only post-uniskip rounds, starting at 0.
+    #[allow(dead_code)]
+    fn schedule_round_index(round_in_instance: usize) -> usize {
+        round_in_instance
+    }
+
+    /// Get the (start,end) window bounds for a given schedule round index.
+    #[allow(dead_code)]
+    fn window_bounds_for_schedule_round(&self, sched_round: usize) -> (usize, usize) {
+        let idx = self.window_index(sched_round);
+        self.window_bounds(idx)
+    }
+
+    /// Return true if `round_in_instance` is the first round of its window.
+    #[allow(dead_code)]
+    fn is_window_start(&self, round_in_instance: usize) -> bool {
+        let s = Self::schedule_round_index(round_in_instance);
+        let (start, _) = self.window_bounds_for_schedule_round(s);
+        s == start
     }
 }
 

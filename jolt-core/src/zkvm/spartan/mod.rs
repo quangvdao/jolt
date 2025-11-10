@@ -2,20 +2,25 @@ use std::sync::Arc;
 
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::opening_proof::{
     OpeningAccumulator, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
 };
 use crate::subprotocols::sumcheck::UniSkipFirstRoundProof;
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::univariate_skip::{prove_uniskip_round, UniSkipState};
+use crate::transcripts::AppendToTranscript;
 use crate::transcripts::Transcript;
 #[cfg(feature = "allocative")]
 use crate::utils::profiling::print_data_structure_heap_usage;
+use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::dag::stage::SumcheckStagesProver;
 use crate::zkvm::dag::state_manager::StateManager;
+use crate::zkvm::r1cs::constraints::{R1CSConstraint, R1CS_CONSTRAINTS};
 use crate::zkvm::r1cs::constraints::{
     OUTER_FIRST_ROUND_POLY_NUM_COEFFS, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
+use crate::zkvm::r1cs::inputs::{JoltR1CSInputs, ALL_R1CS_INPUTS};
 use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::spartan::inner::InnerSumcheckProver;
 use crate::zkvm::spartan::instruction_input::InstructionInputSumcheckProver;
@@ -28,13 +33,8 @@ use crate::zkvm::spartan::product::{
 };
 use crate::zkvm::spartan::shift::ShiftSumcheckProver;
 use crate::zkvm::witness::VirtualPolynomial;
-use crate::poly::multilinear_polynomial::MultilinearPolynomial;
-use crate::zkvm::r1cs::constraints::{R1CSConstraint, R1CS_CONSTRAINTS};
-use crate::zkvm::r1cs::inputs::{JoltR1CSInputs, ALL_R1CS_INPUTS};
-use crate::zkvm::bytecode::BytecodePreprocessing;
-use crate::transcripts::AppendToTranscript;
-use tracer::instruction::Cycle;
 use ark_ff::biginteger::S128;
+use tracer::instruction::Cycle;
 
 use product::{
     ProductVirtualUniSkipInstanceProver, PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS,
@@ -242,7 +242,9 @@ fn build_flattened_polynomials<F: JoltField>(
     for input in ALL_R1CS_INPUTS.iter() {
         match input {
             JoltR1CSInputs::LeftInstructionInput => out.push(left_instruction_input.clone().into()),
-            JoltR1CSInputs::RightInstructionInput => out.push(right_instruction_input.clone().into()),
+            JoltR1CSInputs::RightInstructionInput => {
+                out.push(right_instruction_input.clone().into())
+            }
             JoltR1CSInputs::Product => out.push(product.clone().into()),
             JoltR1CSInputs::WriteLookupOutputToRD => {
                 out.push(write_lookup_output_to_rd_addr.clone().into())

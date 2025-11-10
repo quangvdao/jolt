@@ -5,20 +5,20 @@ use crate::poly::opening_proof::{
 use crate::poly::{eq_poly::EqPolynomial, split_eq_poly::GruenSplitEqPolynomial};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::zkvm::r1cs::evaluation::R1CSEval;
+use crate::zkvm::spartan::outer_baseline::SparseCoefficient;
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{
     field::JoltField,
     transcripts::Transcript,
     utils::small_value::accum::{SignedUnreducedAccum, UnreducedProduct},
     utils::{math::Math, small_value::svo_helpers},
+    zkvm::bytecode::BytecodePreprocessing,
     zkvm::r1cs::{
         constraints::R1CS_CONSTRAINTS, evaluation::eval_az_bz_batch_from_row,
         inputs::R1CSCycleInputs,
     },
-    zkvm::bytecode::BytecodePreprocessing,
 };
 use allocative::Allocative;
-use crate::zkvm::spartan::outer_baseline::SparseCoefficient;
 use ark_ff::biginteger::{I8OrI96, S160};
 use num_traits::Zero;
 use rayon::prelude::*;

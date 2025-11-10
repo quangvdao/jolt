@@ -128,6 +128,40 @@ impl<F: JoltField> UniformSpartanKey<F> {
         evals
     }
 
+    /// Evaluate the RLC of A_small, B_small with regular row-axis semantics:
+    /// Each row variable is linear (no univariate skip). `rx_constr` length must be
+    /// log2(R1CS_CONSTRAINTS.len().next_power_of_two()).
+    #[tracing::instrument(
+        skip_all,
+        name = "UniformSpartanKey::evaluate_small_matrix_rlc_regular"
+    )]
+    pub fn evaluate_small_matrix_rlc_regular(
+        &self,
+        rx_constr: &[F::Challenge],
+        r_rlc: F::Challenge,
+    ) -> Vec<F> {
+        let num_rows = R1CS_CONSTRAINTS.len();
+        let padded_rows = num_rows.next_power_of_two();
+        debug_assert_eq!(rx_constr.len(), padded_rows.log_2());
+
+        // Row-axis eq basis over padded_rows; ignore weights beyond real rows.
+        let eq_rx = EqPolynomial::<F>::evals(rx_constr);
+
+        let num_vars = Self::num_vars();
+        let num_vars_padded = num_vars.next_power_of_two();
+        let mut evals = unsafe_allocate_zero_vec(num_vars_padded);
+
+        for i in 0..num_rows {
+            let row = &R1CS_CONSTRAINTS[i].cons;
+            let wr = eq_rx[i];
+            row.a.accumulate_evaluations(&mut evals, wr, num_vars);
+            row.b
+                .accumulate_evaluations(&mut evals, wr * r_rlc, num_vars);
+        }
+
+        evals
+    }
+
     /// (Verifier) Evaluates the full expanded witness vector at 'r' using evaluations of segments.
     #[tracing::instrument(
         skip_all,
@@ -227,6 +261,56 @@ impl<F: JoltField> UniformSpartanKey<F> {
         }
 
         acc_first_group + r_stream * (acc_second_group - acc_first_group)
+    }
+
+    /// Regular-row semantics: evaluate a uniform matrix at (rx_constr, ry_var) where row
+    /// variables are linear and span `log2(padded_rows)`.
+    #[tracing::instrument(
+        skip_all,
+        name = "UniformSpartanKey::evaluate_uniform_matrix_at_point_regular"
+    )]
+    fn evaluate_uniform_matrix_at_point_regular(
+        &self,
+        select: impl Fn(&R1CSConstraint) -> &LC,
+        rx_constr: &[F::Challenge],
+        ry_var: &[F::Challenge],
+    ) -> F {
+        let num_rows = R1CS_CONSTRAINTS.len();
+        let padded_rows = num_rows.next_power_of_two();
+        debug_assert_eq!(rx_constr.len(), padded_rows.log_2());
+
+        // Row eq basis over padded_rows; ignore weights beyond real rows
+        let eq_rx = EqPolynomial::<F>::evals(rx_constr);
+        // Column eq basis
+        let eq_ry = EqPolynomial::<F>::evals(ry_var);
+        let num_vars = JoltR1CSInputs::num_inputs();
+        debug_assert!(num_vars < eq_ry.len());
+
+        let mut acc = F::zero();
+        for i in 0..num_rows {
+            let row = &R1CS_CONSTRAINTS[i].cons;
+            let lc = select(row);
+            let col_contrib = lc.dot_eq_ry::<F>(&eq_ry, num_vars);
+            acc += eq_rx[i] * col_contrib;
+        }
+        acc
+    }
+
+    /// Regular-row semantics wrappers
+    pub fn evaluate_uniform_a_at_point_regular(
+        &self,
+        rx_constr: &[F::Challenge],
+        ry_var: &[F::Challenge],
+    ) -> F {
+        self.evaluate_uniform_matrix_at_point_regular(|row| &row.a, rx_constr, ry_var)
+    }
+
+    pub fn evaluate_uniform_b_at_point_regular(
+        &self,
+        rx_constr: &[F::Challenge],
+        ry_var: &[F::Challenge],
+    ) -> F {
+        self.evaluate_uniform_matrix_at_point_regular(|row| &row.b, rx_constr, ry_var)
     }
 
     /// Returns the digest of the R1CS "shape" derived from compile-time constants

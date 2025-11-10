@@ -16,6 +16,8 @@ use crate::utils::math::Math;
 use crate::zkvm::r1cs::inputs::{JoltR1CSInputs, ALL_R1CS_INPUTS};
 use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::witness::VirtualPolynomial;
+use crate::zkvm::spartan::{OuterImpl, OUTER_IMPL};
+use crate::zkvm::r1cs::constraints::R1CS_CONSTRAINTS;
 
 use rayon::prelude::*;
 
@@ -48,11 +50,20 @@ impl<F: JoltField> InnerSumcheckProver<F> {
         let (outer_sumcheck_r, _) = opening_accumulator
             .get_virtual_polynomial_opening(VirtualPolynomial::SpartanAz, SumcheckId::SpartanOuter);
 
-        let (_r_cycle, rx_var) = outer_sumcheck_r.r.split_at(num_cycles_bits);
+        let (_r_cycle, rx_tail) = outer_sumcheck_r.r.split_at(num_cycles_bits);
 
-        // Evaluate A_small, B_small combined with RLC at point rx_var
-        let poly_abc_small =
-            DensePolynomial::new(key.evaluate_small_matrix_rlc(rx_var, params.gamma));
+        // Evaluate A_small, B_small combined with RLC at point on row-axis
+        let poly_abc_small = if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched)
+        {
+            // Regular semantics: each row variable linear. Use full constraint bits.
+            let num_constraint_vars = R1CS_CONSTRAINTS.len().next_power_of_two().log_2();
+            debug_assert_eq!(rx_tail.len(), num_constraint_vars);
+            DensePolynomial::new(key.evaluate_small_matrix_rlc_regular(rx_tail, params.gamma))
+        } else {
+            // Uni-skip semantics: rx_tail must be [r_stream, r0]
+            debug_assert_eq!(rx_tail.len(), 2);
+            DensePolynomial::new(key.evaluate_small_matrix_rlc(rx_tail, params.gamma))
+        };
 
         let span = span!(Level::INFO, "binding_z_second_sumcheck");
         let _guard = span.enter();
@@ -220,14 +231,28 @@ impl<'a, F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             .rev()
             .collect::<Vec<_>>();
 
-        // Get rx_var from the outer sumcheck opening point in accumulator
+        // Get row-axis tail from the outer sumcheck opening point in accumulator
         let (outer_sumcheck_opening, _) = accumulator
             .get_virtual_polynomial_opening(VirtualPolynomial::SpartanAz, SumcheckId::SpartanOuter);
         let num_cycles_bits = self.key.num_steps.log_2();
-        let (_r_cycle, rx_var) = outer_sumcheck_opening.r.split_at(num_cycles_bits);
+        let (_r_cycle, rx_tail) = outer_sumcheck_opening.r.split_at(num_cycles_bits);
 
-        // assert rx var is of length 2
-        assert_eq!(rx_var.len(), 2);
+        // Branch semantics based on outer implementation
+        let (eval_a, eval_b) = if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched)
+        {
+            // Regular semantics over constraint bits
+            let num_constraint_vars = R1CS_CONSTRAINTS.len().next_power_of_two().log_2();
+            debug_assert_eq!(rx_tail.len(), num_constraint_vars);
+            let ea = self.key.evaluate_uniform_a_at_point_regular(rx_tail, &r);
+            let eb = self.key.evaluate_uniform_b_at_point_regular(rx_tail, &r);
+            (ea, eb)
+        } else {
+            // Uni-skip semantics: expect 2
+            debug_assert_eq!(rx_tail.len(), 2);
+            let ea = self.key.evaluate_uniform_a_at_point(rx_tail, &r);
+            let eb = self.key.evaluate_uniform_b_at_point(rx_tail, &r);
+            (ea, eb)
+        };
 
         // Pull claimed witness evaluations from the accumulator
         let claimed_witness_evals: Vec<F> = ALL_R1CS_INPUTS
@@ -243,10 +268,6 @@ impl<'a, F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
         // The verifier needs to compute:
         // (A_small(rx_var, r) + gamma * B_small(rx_var, r)) * z(r)
-
-        // Evaluate uniform matrices A_small and B_small at point (rx_var, r)
-        let eval_a = self.key.evaluate_uniform_a_at_point(rx_var, &r);
-        let eval_b = self.key.evaluate_uniform_b_at_point(rx_var, &r);
 
         let left_expected = eval_a + self.params.gamma * eval_b;
 

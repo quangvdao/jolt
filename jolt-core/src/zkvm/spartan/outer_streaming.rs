@@ -71,6 +71,11 @@ pub struct OuterRemainingStreamingSumcheckProver<F: JoltField> {
     split_eq_poly: GruenSplitEqPolynomial<F>,
     az: Option<DensePolynomial<F>>,
     bz: Option<DensePolynomial<F>>,
+    /// Optional precomputed evaluation-basis grid for the current window
+    #[allocative(skip)]
+    #[allow(dead_code)]
+    // 3^omega
+    window_poly: Option<MultiQuadraticPolynomial<F>>,
     #[allocative(skip)]
     params: OuterRemainingSumcheckParams<F>,
     /// Challenges received via bind() (latest is last)
@@ -79,13 +84,9 @@ pub struct OuterRemainingStreamingSumcheckProver<F: JoltField> {
     /// Invariant: strictly increasing, last == num_cycles_bits
     #[allow(dead_code)]
     schedule: WindowSchedule,
-    /// Index of the current window in the schedule (post-uniskip rounds). Additive scaffolding.
+    /// Index of the current window in the schedule (post-uniskip rounds)
     #[allow(dead_code)]
     current_window_idx: usize,
-    /// Optional precomputed evaluation-basis grid for the current window. Additive scaffolding.
-    #[allocative(skip)]
-    #[allow(dead_code)]
-    window_poly: Option<MultiQuadraticPolynomial<F>>,
 }
 
 impl<F: JoltField> OuterRemainingStreamingSumcheckProver<F> {
@@ -530,30 +531,6 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         }
         // Use the window grid to compute this round's prover message (stubbed)
         self.get_prover_message_from_window_evals(previous_claim)
-
-        // Old stuff, commetned out
-        // let (t0, t_inf) = if round == 0 {
-        //     let lagrange_evals_r = LagrangePolynomial::<F>::evals::<
-        //         F::Challenge,
-        //         OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
-        //     >(&self.params.r0_uniskip);
-        //     let (t0, t_inf, az_bound, bz_bound) =
-        //         Self::compute_first_quadratic_evals_and_bound_polys(
-        //             &self.bytecode_preprocessing,
-        //             &self.trace,
-        //             &lagrange_evals_r,
-        //             &self.split_eq_poly,
-        //         );
-        //     self.az = az_bound;
-        //     self.bz = bz_bound;
-        //     (t0, t_inf)
-        // } else {
-        //     self.remaining_quadratic_evals()
-        // };
-        // let evals = self
-        //     .split_eq_poly
-        //     .gruen_evals_deg_3(t0, t_inf, previous_claim);
-        // vec![evals[0], evals[1], evals[2]]
     }
 
     #[tracing::instrument(skip_all, name = "OuterRemainingStreamingSumcheckProver::bind")]

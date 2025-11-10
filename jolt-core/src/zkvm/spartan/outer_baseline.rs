@@ -1,12 +1,16 @@
-use crate::poly::multilinear_polynomial::BindingOrder;
+use crate::poly::multilinear_polynomial::{BindingOrder, PolynomialEvaluation};
 use crate::poly::opening_proof::{
-    OpeningPoint, ProverOpeningAccumulator, SumcheckId, LITTLE_ENDIAN,
+    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
+    SumcheckId, LITTLE_ENDIAN,
 };
 use crate::poly::{
-    multilinear_polynomial::MultilinearPolynomial, split_eq_poly::GruenSplitEqPolynomial,
+    eq_poly::EqPolynomial, multilinear_polynomial::MultilinearPolynomial,
+    split_eq_poly::GruenSplitEqPolynomial,
 };
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
+use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 
+use crate::zkvm::r1cs::inputs::ALL_R1CS_INPUTS;
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{
     field::{JoltField, OptimizedMul},
@@ -21,6 +25,93 @@ use rayon::prelude::*;
 pub struct SparseCoefficient<T> {
     pub(crate) index: usize,
     pub(crate) value: T,
+}
+
+// =======================
+// SumcheckInstance (Verifier) for baseline outer (no uni-skip)
+// =======================
+pub struct OuterBaselineSumcheckVerifier<F: JoltField> {
+    num_step_bits: usize,
+    total_rounds: usize,
+    tau: Vec<F::Challenge>,
+    _phantom: core::marker::PhantomData<F>,
+}
+
+impl<F: JoltField> OuterBaselineSumcheckVerifier<F> {
+    pub fn new(
+        num_step_bits: usize,
+        num_constraint_bits: usize,
+        tau: Vec<F::Challenge>,
+    ) -> Self {
+        Self {
+            num_step_bits,
+            total_rounds: num_step_bits + num_constraint_bits,
+            tau,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+    for OuterBaselineSumcheckVerifier<F>
+{
+    fn degree(&self) -> usize {
+        3
+    }
+    fn num_rounds(&self) -> usize {
+        self.total_rounds
+    }
+    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+        F::zero()
+    }
+    fn expected_output_claim(
+        &self,
+        accumulator: &VerifierOpeningAccumulator<F>,
+        sumcheck_challenges: &[F::Challenge],
+    ) -> F {
+        let (_, claim_Az) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanAz, SumcheckId::SpartanOuter);
+        let (_, claim_Bz) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanBz, SumcheckId::SpartanOuter);
+        // Binding order low-to-high: reverse r for Eq MLE
+        let r_reversed: Vec<F::Challenge> = sumcheck_challenges.iter().copied().rev().collect();
+        let eq = EqPolynomial::<F>::mle(&self.tau, &r_reversed);
+        eq * claim_Az * claim_Bz
+    }
+    fn cache_openings(
+        &self,
+        accumulator: &mut crate::poly::opening_proof::VerifierOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        let opening_point =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
+
+        // Az, Bz at full point
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::SpartanAz,
+            SumcheckId::SpartanOuter,
+            opening_point.clone(),
+        );
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::SpartanBz,
+            SumcheckId::SpartanOuter,
+            opening_point.clone(),
+        );
+
+        // Witness openings at r_cycle
+        let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_bits);
+        ALL_R1CS_INPUTS.iter().for_each(|input| {
+            accumulator.append_virtual(
+                transcript,
+                VirtualPolynomial::from(input),
+                SumcheckId::SpartanOuter,
+                OpeningPoint::new(r_cycle.to_vec()),
+            );
+        });
+    }
 }
 
 impl<T> Allocative for SparseCoefficient<T> {
@@ -499,6 +590,10 @@ pub struct OuterBaselineSumcheckProver<F: JoltField> {
     poly: BaselineSpartanInterleavedPolynomial<F>,
     /// Total rounds = step_vars + constraint_vars
     total_rounds: usize,
+    /// Number of step/cycle variables (used to split r_cycle from full opening point)
+    num_step_vars: usize,
+    /// Flattened polynomials for all R1CS inputs (in ALL_R1CS_INPUTS order)
+    flattened_polynomials: Vec<MultilinearPolynomial<F>>,
 }
 
 impl<F: JoltField> OuterBaselineSumcheckProver<F> {
@@ -536,6 +631,8 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
             eq_poly,
             poly,
             total_rounds: total_num_vars,
+            num_step_vars: num_step_vars,
+            flattened_polynomials: flattened_polynomials.to_vec(),
         }
     }
 }
@@ -591,8 +688,23 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
             transcript,
             VirtualPolynomial::SpartanBz,
             SumcheckId::SpartanOuter,
-            opening_point,
+            opening_point.clone(),
             claims[1],
         );
+
+        // Handle witness openings at r_cycle (use consistent split length)
+        let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);
+
+        // Evaluate all flattened polynomials at r_cycle and append virtual openings
+        for (i, input) in ALL_R1CS_INPUTS.iter().enumerate() {
+            let claimed_eval = self.flattened_polynomials[i].evaluate(r_cycle);
+            accumulator.append_virtual(
+                transcript,
+                VirtualPolynomial::from(input),
+                SumcheckId::SpartanOuter,
+                OpeningPoint::new(r_cycle.to_vec()),
+                claimed_eval,
+            );
+        }
     }
 }

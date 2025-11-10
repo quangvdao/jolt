@@ -1,12 +1,15 @@
 #![allow(clippy::too_many_arguments)]
 use crate::poly::opening_proof::{
-    OpeningPoint, ProverOpeningAccumulator, SumcheckId, LITTLE_ENDIAN,
+    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
+    SumcheckId, LITTLE_ENDIAN,
 };
 use crate::poly::{eq_poly::EqPolynomial, split_eq_poly::GruenSplitEqPolynomial};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
+use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 use crate::zkvm::r1cs::evaluation::R1CSEval;
 use crate::zkvm::spartan::outer_baseline::SparseCoefficient;
 use crate::zkvm::witness::VirtualPolynomial;
+use crate::zkvm::r1cs::inputs::ALL_R1CS_INPUTS;
 use crate::{
     field::JoltField,
     transcripts::Transcript,
@@ -1053,5 +1056,87 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
     #[cfg(feature = "allocative")]
     fn update_flamegraph(&self, flamegraph: &mut allocative::FlameGraphBuilder) {
         flamegraph.visit_root(self);
+    }
+}
+
+// =======================
+// SumcheckInstance (Verifier) for outer_round_batched (no uni-skip)
+// =======================
+pub struct OuterRoundBatchedSumcheckVerifier<F: JoltField> {
+    num_cycle_bits: usize,
+    total_rounds: usize,
+    tau: Vec<F::Challenge>,
+    _phantom: core::marker::PhantomData<F>,
+}
+
+impl<F: JoltField> OuterRoundBatchedSumcheckVerifier<F> {
+    pub fn new(num_cycle_bits: usize, num_constraint_bits: usize, tau: Vec<F::Challenge>) -> Self {
+        Self {
+            num_cycle_bits,
+            total_rounds: num_cycle_bits + num_constraint_bits,
+            tau,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+    for OuterRoundBatchedSumcheckVerifier<F>
+{
+    fn degree(&self) -> usize {
+        3
+    }
+    fn num_rounds(&self) -> usize {
+        self.total_rounds
+    }
+    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+        F::zero()
+    }
+    fn expected_output_claim(
+        &self,
+        accumulator: &VerifierOpeningAccumulator<F>,
+        sumcheck_challenges: &[F::Challenge],
+    ) -> F {
+        let (_, claim_Az) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanAz, SumcheckId::SpartanOuter);
+        let (_, claim_Bz) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanBz, SumcheckId::SpartanOuter);
+        let r_reversed: Vec<F::Challenge> = sumcheck_challenges.iter().copied().rev().collect();
+        let eq = EqPolynomial::<F>::mle(&self.tau, &r_reversed);
+        eq * claim_Az * claim_Bz
+    }
+    fn cache_openings(
+        &self,
+        accumulator: &mut VerifierOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        let opening_point =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
+
+        // Az, Bz openings at full point
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::SpartanAz,
+            SumcheckId::SpartanOuter,
+            opening_point.clone(),
+        );
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::SpartanBz,
+            SumcheckId::SpartanOuter,
+            opening_point.clone(),
+        );
+
+        // Witness openings at r_cycle
+        let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_cycle_bits);
+        ALL_R1CS_INPUTS.iter().for_each(|input| {
+            accumulator.append_virtual(
+                transcript,
+                VirtualPolynomial::from(input),
+                SumcheckId::SpartanOuter,
+                OpeningPoint::new(r_cycle.to_vec()),
+            );
+        });
     }
 }

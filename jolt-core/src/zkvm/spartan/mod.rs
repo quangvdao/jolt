@@ -60,7 +60,7 @@ pub enum OuterImpl {
     RoundBatched,
 }
 /// Global selection for Spartan Stage 1 remainder.
-pub const OUTER_IMPL: OuterImpl = OuterImpl::Streaming;
+pub const OUTER_IMPL: OuterImpl = OuterImpl::Baseline;
 
 pub struct SpartanDagProver<F: JoltField> {
     /// Cached key to avoid recomputation across stages
@@ -89,6 +89,10 @@ impl<F: JoltField> SpartanDagProver<F> {
     ) -> UniSkipFirstRoundProof<F, T> {
         // For Baseline and RoundBatched, do not perform uni-skip: append a trivial zero polynomial.
         if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched) {
+            // Consume the same tau vector as the verifier to keep the transcript aligned
+            let num_rounds_x: usize = self.key.num_rows_bits();
+            let _ = transcript.challenge_vector_optimized::<F>(num_rounds_x);
+
             let zero_poly = crate::poly::unipoly::UniPoly::<F>::from_coeff(vec![F::zero()]);
             // Keep transcript alignment: append the polynomial and derive r0
             zero_poly.append_to_transcript(transcript);
@@ -296,6 +300,7 @@ where
         let n_cycles = self.key.num_cycle_vars();
         match OUTER_IMPL {
             OuterImpl::Streaming => {
+                tracing::info!("Stage1 Prover using OuterImpl::Streaming");
                 let st = self
                     .uni_skip_state
                     .take()
@@ -305,6 +310,7 @@ where
                 instances.push(Box::new(outer_remaining));
             }
             OuterImpl::Current => {
+                tracing::info!("Stage1 Prover using OuterImpl::Current");
                 let st = self
                     .uni_skip_state
                     .take()
@@ -314,6 +320,7 @@ where
                 instances.push(Box::new(outer_remaining));
             }
             OuterImpl::Baseline => {
+                tracing::info!("Stage1 Prover using OuterImpl::Baseline");
                 // No uni-skip: build flattened polynomials from the trace and constraints
                 let (preprocessing, _lazy_trace, trace, _program_io, _final_mem) =
                     state_manager.get_prover_data();
@@ -330,6 +337,7 @@ where
                 instances.push(Box::new(outer_baseline));
             }
             OuterImpl::RoundBatched => {
+                tracing::info!("Stage1 Prover using OuterImpl::RoundBatched");
                 // No uni-skip: directly instantiate round-batched prover
                 let outer_round_batched =
                     OuterRoundBatchedSumcheckProver::<F>::gen(state_manager, transcript);
@@ -408,9 +416,21 @@ pub fn verify_stage1_uni_skip<F: JoltField, T: Transcript>(
     transcript: &mut T,
 ) -> Result<UniSkipState<F>, anyhow::Error> {
     let num_rounds_x = key.num_rows_bits();
-
     let tau = transcript.challenge_vector_optimized::<F>(num_rounds_x);
 
+    // For Baseline and RoundBatched, there is no true uni-skip; keep transcript alignment only.
+    if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched) {
+        let zero_poly = crate::poly::unipoly::UniPoly::<F>::from_coeff(vec![F::zero()]);
+        zero_poly.append_to_transcript(transcript);
+        let r0 = transcript.challenge_scalar_optimized::<F>();
+        return Ok(UniSkipState {
+            claim_after_first: F::zero(),
+            r0,
+            tau,
+        });
+    }
+
+    // Current/Streaming implementations use uni-skip verification.
     let input_claim = F::zero();
     let (r0, claim_after_first) = proof
         .verify::<OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE, OUTER_FIRST_ROUND_POLY_NUM_COEFFS>(

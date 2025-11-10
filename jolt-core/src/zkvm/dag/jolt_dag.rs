@@ -47,7 +47,6 @@ use crate::zkvm::registers::val_evaluation::ValEvaluationSumcheckVerifier as Reg
 use crate::zkvm::registers::RegistersDagProver;
 use crate::zkvm::spartan::inner::InnerSumcheckVerifier;
 use crate::zkvm::spartan::instruction_input::InstructionInputSumcheckVerifier;
-use crate::zkvm::spartan::outer::OuterRemainingSumcheckVerifier;
 use crate::zkvm::spartan::product::ProductVirtualInnerVerifier;
 use crate::zkvm::spartan::product::ProductVirtualRemainderVerifier;
 use crate::zkvm::spartan::shift::ShiftSumcheckVerifier;
@@ -602,12 +601,57 @@ impl<'a, 'b, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Fi
         .context("Stage 1 univariate skip first round")?;
 
         let n_cycle_vars = self.proof.trace_length.log_2();
-        let spartan_outer_remaining =
-            OuterRemainingSumcheckVerifier::new(n_cycle_vars, &spartan_outer_uni_skip_state);
+        // Select verifier for Stage 1 remainder based on OUTER_IMPL
+        use crate::zkvm::spartan::{OuterImpl, OUTER_IMPL};
+        let verifier_instances: Vec<Box<
+            dyn crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier<F, ProofTranscript>,
+        >> =
+            if matches!(OUTER_IMPL, OuterImpl::Baseline) {
+                tracing::info!("Stage1 Verifier using OuterImpl::Baseline");
+                // Baseline: regular sumcheck (no uni-skip semantics)
+                let num_constraint_bits = crate::zkvm::r1cs::constraints::R1CS_CONSTRAINTS
+                    .len()
+                    .next_power_of_two()
+                    .log_2();
+                let total_vars = n_cycle_vars + num_constraint_bits;
+                // Consume the same tau vector as prover's baseline constructor and pass to verifier
+                let tau = self.transcript.challenge_vector_optimized::<F>(total_vars);
+                let baseline_verifier = crate::zkvm::spartan::outer_baseline::OuterBaselineSumcheckVerifier::<F>::new(
+                    n_cycle_vars,
+                    num_constraint_bits,
+                    tau,
+                );
+                vec![Box::new(baseline_verifier)]
+            } else if matches!(OUTER_IMPL, OuterImpl::RoundBatched) {
+                tracing::info!("Stage1 Verifier using OuterImpl::RoundBatched");
+                // RoundBatched: regular sumcheck semantics with SVO/streaming on prover, but verifier claim is eq(tau)*Az*Bz
+                let num_constraint_bits = crate::zkvm::r1cs::constraints::R1CS_CONSTRAINTS
+                    .len()
+                    .next_power_of_two()
+                    .log_2();
+                let total_vars = n_cycle_vars + num_constraint_bits;
+                let tau = self.transcript.challenge_vector_optimized::<F>(total_vars);
+                let rb_verifier =
+                    crate::zkvm::spartan::outer_round_batched::OuterRoundBatchedSumcheckVerifier::<F>::new(
+                        n_cycle_vars,
+                        num_constraint_bits,
+                        tau,
+                    );
+                vec![Box::new(rb_verifier)]
+            } else {
+                tracing::info!("Stage1 Verifier using OuterImpl::Current/Streaming");
+                // Current/Streaming: uni-skip remains
+                let outer_remaining =
+                    crate::zkvm::spartan::outer::OuterRemainingSumcheckVerifier::new(
+                        n_cycle_vars,
+                        &spartan_outer_uni_skip_state,
+                    );
+                vec![Box::new(outer_remaining)]
+            };
 
         let _r_stage1 = BatchedSumcheck::verify(
             &self.proof.stage1_sumcheck_proof,
-            vec![&spartan_outer_remaining],
+            verifier_instances.iter().map(|b| &**b).collect(),
             &mut self.opening_accumulator,
             self.transcript,
         )

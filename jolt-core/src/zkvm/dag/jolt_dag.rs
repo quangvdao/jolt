@@ -125,6 +125,11 @@ pub fn prove_jolt_dag<
         transcript.append_serializable(commitment);
     }
 
+    // The lazy trace is only used for streaming commitments above; free it now.
+    if let Some(prover_state) = state_manager.prover_state.as_mut() {
+        prover_state.lazy_trace = None;
+    }
+
     // Append untrusted_advice commitment to transcript if it exists
     if let Some(ref untrusted_advice_commitment) = state_manager.untrusted_advice_commitment {
         transcript.append_serializable(untrusted_advice_commitment);
@@ -447,11 +452,23 @@ pub fn prove_jolt_dag<
     drop(span);
 
     // Batch-prove all openings (Stage 7)
+    // Free the per-stage DAG provers before moving on to the final openings.
+    drop(spartan_dag);
+    drop(lookups_dag);
+    drop(registers_dag);
+    drop(ram_dag);
+    drop(bytecode_dag);
+
     let (_, _, trace, _, _) = state_manager.get_prover_data();
 
     let all_polys: Vec<CommittedPolynomial> = AllCommittedPolynomials::iter().copied().collect();
     let polynomials_map =
         CommittedPolynomial::generate_witness_batch(&all_polys, preprocessing, trace);
+
+    // Drop the heavy execution trace; keep only its length for proof metadata.
+    if let Some(prover_state) = state_manager.prover_state.as_mut() {
+        prover_state.trace = std::sync::Arc::<Vec<Cycle>>::new(Vec::new());
+    }
 
     #[cfg(feature = "allocative")]
     print_data_structure_heap_usage("Committed polynomials map", &polynomials_map);
@@ -524,7 +541,7 @@ pub fn prove_jolt_dag<
         trusted_advice_proof,
         untrusted_advice_proof,
         reduced_opening_proof,
-        trace_length: prover_state.trace.len(),
+        trace_length: trace_length,
         ram_K: state_manager.ram_K,
         bytecode_d: prover_state.preprocessing.bytecode.d,
         twist_sumcheck_switch_index: state_manager.twist_sumcheck_switch_index,
@@ -1011,7 +1028,12 @@ fn generate_trusted_advice_proof<
     let prover_state = state_manager.prover_state.as_ref().unwrap();
     let trusted_advice_poly = prover_state.trusted_advice_polynomial.as_ref().unwrap();
     let (point, _) = opening_accumulator.get_trusted_advice_opening().unwrap();
-    PCS::prove_without_hint(generators, trusted_advice_poly, &point.r, transcript)
+    let proof = PCS::prove_without_hint(generators, trusted_advice_poly, &point.r, transcript);
+    // Free trusted advice polynomial once the proof is constructed.
+    if let Some(ps) = state_manager.prover_state.as_mut() {
+        ps.trusted_advice_polynomial = None;
+    }
+    proof
 }
 
 fn generate_untrusted_advice_proof<
@@ -1027,5 +1049,10 @@ fn generate_untrusted_advice_proof<
     let prover_state = state_manager.prover_state.as_ref().unwrap();
     let untrusted_advice_poly = prover_state.untrusted_advice_polynomial.as_ref().unwrap();
     let (point, _) = opening_accumulator.get_untrusted_advice_opening().unwrap();
-    PCS::prove_without_hint(generators, untrusted_advice_poly, &point.r, transcript)
+    let proof = PCS::prove_without_hint(generators, untrusted_advice_poly, &point.r, transcript);
+    // Free untrusted advice polynomial once the proof is constructed.
+    if let Some(ps) = state_manager.prover_state.as_mut() {
+        ps.untrusted_advice_polynomial = None;
+    }
+    proof
 }

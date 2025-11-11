@@ -209,8 +209,10 @@ pub struct PrefixSuffixDecomposition<F: JoltField, const ORDER: usize> {
     P: [Option<Arc<RwLock<CachedPolynomial<F>>>>; ORDER],
     /// Q[i] = suffix polynomial i, recomputed each phase from trace indices.
     Q: [DensePolynomial<F>; ORDER],
-    /// Number of variables per chunk (typically LOG_M).
-    chunk_len: usize,
+    /// Number of variables per chunk for each phase (typically per-phase LOG_M).
+    chunk_lens: Box<[usize]>,
+    /// Prefix sums over chunk_lens, with length chunk_lens.len() + 1
+    phase_offsets: Box<[usize]>,
     /// Total number of variables (typically LOG_K).
     total_len: usize,
     /// Current phase in multi-phase decomposition.
@@ -225,15 +227,55 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
         chunk_len: usize,
         total_len: usize,
     ) -> Self {
-        assert!(
-            total_len.is_multiple_of(chunk_len),
-            "total_len must be a multiple of chunk_len"
-        );
+        // Backwards-compatible constructor: equal-sized chunks
+        let num_chunks = total_len / chunk_len;
+        assert!(total_len.is_multiple_of(chunk_len), "total_len must be a multiple of chunk_len");
+        let lens = vec![chunk_len; num_chunks].into_boxed_slice();
+        let mut offsets = vec![0usize; num_chunks + 1].into_boxed_slice();
+        let mut i = 0;
+        while i < num_chunks {
+            offsets[i + 1] = offsets[i] + lens[i];
+            i += 1;
+        }
         Self {
             poly,
             P: std::array::from_fn(|_| None),
             Q: Self::alloc_Q(chunk_len.pow2()),
-            chunk_len,
+            chunk_lens: lens,
+            phase_offsets: offsets,
+            total_len,
+            phase: 0,
+            round: 0,
+        }
+    }
+
+    pub fn new_variable(
+        poly: Box<dyn PrefixSuffixPolynomial<F, ORDER> + Send + Sync>,
+        chunk_lens: &[usize],
+        total_len: usize,
+    ) -> Self {
+        // Ensure total_len equals sum of chunk_lens
+        let mut sum = 0usize;
+        let mut i = 0;
+        while i < chunk_lens.len() {
+            sum += chunk_lens[i];
+            i += 1;
+        }
+        assert!(sum == total_len, "sum(chunk_lens) must equal total_len");
+        let lens = chunk_lens.to_vec().into_boxed_slice();
+        let mut offsets = vec![0usize; lens.len() + 1].into_boxed_slice();
+        let mut j = 0;
+        while j < lens.len() {
+            offsets[j + 1] = offsets[j] + lens[j];
+            j += 1;
+        }
+        let first_len = lens[0];
+        Self {
+            poly,
+            P: std::array::from_fn(|_| None),
+            Q: Self::alloc_Q(first_len.pow2()),
+            chunk_lens: lens,
+            phase_offsets: offsets,
             total_len,
             phase: 0,
             round: 0,
@@ -242,13 +284,17 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
 
     #[inline(always)]
     pub fn suffix_len(&self) -> usize {
-        let total_chunks = self.total_len / self.chunk_len;
-        let suffix_chunks = total_chunks - self.phase - 1;
-        suffix_chunks * self.chunk_len
+        // suffix after current phase
+        self.total_len - self.phase_offsets[self.phase + 1]
     }
 
     pub fn prefix_len(&self) -> usize {
-        (self.phase + 1) * self.chunk_len
+        self.phase_offsets[self.phase + 1]
+    }
+
+    #[inline(always)]
+    fn current_chunk_len(&self) -> usize {
+        self.chunk_lens[self.phase]
     }
 
     fn alloc_Q(m: usize) -> [DensePolynomial<F>; ORDER] {
@@ -266,7 +312,7 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
     pub fn init_P(&mut self, prefix_registry: &mut PrefixRegistry<F>) {
         self.P = self
             .poly
-            .prefixes(self.chunk_len, self.phase, prefix_registry);
+            .prefixes(self.current_chunk_len(), self.phase, prefix_registry);
     }
 
     /// Q array is defined as Q[x] = \sum_{y \in {0, 1}^m} u(x || y) * suffix(y)
@@ -274,7 +320,7 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
     /// https://eprint.iacr.org/2025/611.pdf
     #[tracing::instrument(skip_all, name = "PrefixSuffix::init_Q")]
     pub fn init_Q(&mut self, u_evals: &[F], indices: &[usize], lookup_bits: &[LookupBits]) {
-        let poly_len = self.chunk_len.pow2();
+        let poly_len = self.current_chunk_len().pow2();
         let suffix_len = self.suffix_len();
         let suffixes = self.poly.suffixes();
 
@@ -337,11 +383,11 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
         indices: &[usize],
         lookup_bits: &[LookupBits],
     ) {
-        debug_assert_eq!(left.chunk_len, right.chunk_len);
+        debug_assert_eq!(left.current_chunk_len(), right.current_chunk_len());
         debug_assert_eq!(left.total_len, right.total_len);
         debug_assert_eq!(left.phase, right.phase);
 
-        let poly_len = left.chunk_len.pow2();
+        let poly_len = left.current_chunk_len().pow2();
         let suffix_len = left.suffix_len();
         let suffixes_left = left.poly.suffixes();
         let suffixes_right = right.poly.suffixes();
@@ -517,8 +563,9 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
             }
         });
         self.round += 1;
-        if self.round.is_multiple_of(self.chunk_len) {
+        if self.round == self.current_chunk_len() {
             self.phase += 1;
+            self.round = 0;
         }
     }
 

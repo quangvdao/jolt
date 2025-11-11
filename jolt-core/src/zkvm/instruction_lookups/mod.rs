@@ -31,8 +31,68 @@ pub mod read_raf_checking;
 
 const LOG_K: usize = XLEN * 2;
 const PHASES: usize = 8;
-pub const LOG_M: usize = LOG_K / PHASES;
-const M: usize = 1 << LOG_M;
+// Variable per-phase bit-lengths (even) summing to LOG_K = 2*XLEN.
+// Strategy: split XLEN across PHASES as evenly as possible: first ceil(XLEN/PHASES) half-chunks,
+// then floor(XLEN/PHASES) half-chunks, and double to keep per-phase lengths even.
+const fn compute_log_m_phases() -> [usize; PHASES] {
+    let xlen_half = XLEN; // LOG_K = 2 * XLEN
+    let base = xlen_half / PHASES;
+    let rem = xlen_half % PHASES;
+    let mut arr = [0usize; PHASES];
+    let mut i = 0;
+    while i < PHASES {
+        let half_chunks = if i < rem { base + 1 } else { base };
+        arr[i] = 2 * half_chunks;
+        i += 1;
+    }
+    arr
+}
+pub const LOG_M_PHASES: [usize; PHASES] = compute_log_m_phases();
+
+const fn compute_phase_offsets(log_ms: [usize; PHASES]) -> [usize; PHASES + 1] {
+    let mut offsets = [0usize; PHASES + 1];
+    let mut i = 0;
+    while i < PHASES {
+        offsets[i + 1] = offsets[i] + log_ms[i];
+        i += 1;
+    }
+    offsets
+}
+pub const PHASE_OFFSETS: [usize; PHASES + 1] = compute_phase_offsets(LOG_M_PHASES);
+
+const fn pow2(n: usize) -> usize {
+    1usize << n
+}
+pub const M_PHASES: [usize; PHASES] = {
+    let mut arr = [0usize; PHASES];
+    let mut i = 0;
+    while i < PHASES {
+        arr[i] = pow2(LOG_M_PHASES[i]);
+        i += 1;
+    }
+    arr
+};
+// Helper: number of suffix bits after completing a given phase
+pub const SUFFIX_LEN_AFTER_PHASE: [usize; PHASES] = {
+    let mut arr = [0usize; PHASES];
+    let mut i = 0;
+    while i < PHASES {
+        // suffix after phase i = LOG_K - prefix through phase i
+        arr[i] = LOG_K - PHASE_OFFSETS[i + 1];
+        i += 1;
+    }
+    arr
+};
+
+#[inline(always)]
+pub fn phase_for_round(round: usize) -> usize {
+    // Find smallest p such that round < PHASE_OFFSETS[p+1]
+    let mut p = 0usize;
+    while p + 1 < PHASES && round >= PHASE_OFFSETS[p + 1] {
+        p += 1;
+    }
+    p
+}
 pub const D: usize = 16;
 pub const LOG_K_CHUNK: usize = LOG_K / D;
 pub const K_CHUNK: usize = 1 << LOG_K_CHUNK;

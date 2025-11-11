@@ -147,67 +147,85 @@ impl<F: JoltField> OneHotPolynomialProverOpening<F> {
         // (described in Section 6.3 of the Twist/Shout paper)
         // Custom parallelization: parallel over E_out, sequential over E_in and the last bit.
         // This avoids nested Rayon layers while still computing d_j on-the-fly from the split representation.
-        let E_in = eq.D.E_in_current();
-        let E_out = eq.D.E_out_current();
-        let x_in_bits = E_in.len().log_2();
         let w_current = eq.D.get_current_w();
         let factor_0 = F::one() - w_current;
         let factor_1: F = w_current.into();
 
-        let G = E_out
-            .par_iter()
-            .enumerate()
-            .map(|(x_out, &high)| {
-                let mut local_unreduced: Vec<F::Unreduced<9>> =
-                    unsafe_allocate_zero_vec(polynomial.K);
-                let mut touched_indices: Vec<usize> = Vec::new();
-                let mut touched_flags: Vec<u8> = vec![0u8; polynomial.K];
-                let x_out_base = x_out << (x_in_bits + 1);
+        // Use the split-eq helper to parallelize over x_out and fold over x_in
+        struct InnerAcc<T> {
+            local_unreduced: Vec<T>,
+            touched_indices: Vec<usize>,
+            touched_flags: Vec<u8>,
+        }
 
-                for (x_in, &low) in E_in.iter().enumerate() {
-                    let j0 = x_out_base + (x_in << 1);
-                    let j1 = j0 + 1;
-                    let add0_unr = low.mul_unreduced::<9>(factor_0);
-                    let add1_unr = low.mul_unreduced::<9>(factor_1);
+        // Precompute e_in scaled factors once to avoid per-iteration mul_unreduced
+        let e_in = eq.D.E_in_current();
+        let in_len = e_in.len();
+        let e_in0_unr: Vec<F::Unreduced<9>> = if in_len <= 1 {
+            vec![F::one().mul_unreduced::<9>(factor_0)]
+        } else {
+            e_in
+                .iter()
+                .map(|&v| v.mul_unreduced::<9>(factor_0))
+                .collect()
+        };
+        let e_in1_unr: Vec<F::Unreduced<9>> = if in_len <= 1 {
+            vec![F::one().mul_unreduced::<9>(factor_1)]
+        } else {
+            e_in
+                .iter()
+                .map(|&v| v.mul_unreduced::<9>(factor_1))
+                .collect()
+        };
 
-                    if let Some(k0) = nonzero_indices[j0] {
-                        let idx = k0 as usize;
-                        if touched_flags[idx] == 0 {
-                            touched_flags[idx] = 1;
-                            touched_indices.push(idx);
-                        }
-                        local_unreduced[idx] += add0_unr;
+        let G = eq.D.par_fold_out_in(
+            || InnerAcc {
+                local_unreduced: unsafe_allocate_zero_vec::<F::Unreduced<9>>(polynomial.K),
+                touched_indices: Vec::new(),
+                touched_flags: vec![0u8; polynomial.K],
+            },
+            |inner: &mut InnerAcc<F::Unreduced<9>>, g, x_in, _e_in| {
+                // j indices split by the current bit: j0 = (g << 1), j1 = j0 + 1
+                let j0 = g << 1;
+                let j1 = j0 + 1;
+                let add0_unr = e_in0_unr[x_in];
+                let add1_unr = e_in1_unr[x_in];
+
+                if let Some(k0) = nonzero_indices[j0] {
+                    let idx = k0 as usize;
+                    if inner.touched_flags[idx] == 0 {
+                        inner.touched_flags[idx] = 1;
+                        inner.touched_indices.push(idx);
                     }
-                    if let Some(k1) = nonzero_indices[j1] {
-                        let idx = k1 as usize;
-                        if touched_flags[idx] == 0 {
-                            touched_flags[idx] = 1;
-                            touched_indices.push(idx);
-                        }
-                        local_unreduced[idx] += add1_unr;
-                    }
+                    inner.local_unreduced[idx] += add0_unr;
                 }
-                // Materialize as reduced F and apply the high factor only for touched indices
+                if let Some(k1) = nonzero_indices[j1] {
+                    let idx = k1 as usize;
+                    if inner.touched_flags[idx] == 0 {
+                        inner.touched_flags[idx] = 1;
+                        inner.touched_indices.push(idx);
+                    }
+                    inner.local_unreduced[idx] += add1_unr;
+                }
+            },
+            |_x_out, e_out, inner| {
+                // Materialize as reduced F and apply the outer factor
                 let mut local_g: Vec<F> = unsafe_allocate_zero_vec(polynomial.K);
-                if high.is_zero() {
-                    return local_g;
-                }
-                let apply_high = high != F::one();
-                for idx in touched_indices {
-                    let reduced = F::from_montgomery_reduce::<9>(local_unreduced[idx]);
-                    local_g[idx] = if apply_high { high * reduced } else { reduced };
+                if !e_out.is_zero() {
+                    for idx in inner.touched_indices {
+                        let reduced = F::from_montgomery_reduce::<9>(inner.local_unreduced[idx]);
+                        local_g[idx] = e_out * reduced;
+                    }
                 }
                 local_g
-            })
-            .reduce(
-                || unsafe_allocate_zero_vec(polynomial.K),
-                |mut a, b| {
-                    for (x, y) in a.iter_mut().zip(b) {
-                        *x += y;
-                    }
-                    a
-                },
-            );
+            },
+            |mut a: Vec<F>, b: Vec<F>| {
+                for (x, y) in a.iter_mut().zip(b) {
+                    *x += y;
+                }
+                a
+            },
+        );
 
         polynomial.G = G;
         self.polynomial = polynomial;

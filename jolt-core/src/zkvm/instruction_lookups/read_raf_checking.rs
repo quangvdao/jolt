@@ -471,36 +471,29 @@ impl<'a, F: JoltField> ReadRafSumcheckProver<F> {
                 let suffixes = table.suffixes();
                 let unreduced_polys = lookup_indices
                     .par_chunks(chunk_size)
-                    .fold(
-                        || {
-                            // Accumulator layout: [M][suffix]
-                            vec![unsafe_allocate_zero_vec::<F::Unreduced<6>>(suffixes.len()); M]
-                        },
-                        |mut acc, chunk| {
-                            for j in chunk {
-                                let k = self.lookup_indices[*j];
-                                let (prefix_bits, suffix_bits) =
-                                    k.split((PHASES - 1 - phase) * LOG_M);
-                                // Compute r_index once: low LOG_M bits of prefix_bits
-                                let r_index: usize = (u128::from(&prefix_bits) as usize) & (M - 1);
-                                let u = self.u_evals_rv[*j];
-                                for (suffix_idx, suffix) in suffixes.iter().enumerate() {
-                                    let t = suffix.suffix_mle::<XLEN>(suffix_bits);
-                                    if t != 0 {
-                                        acc[r_index][suffix_idx] += u.mul_u64_unreduced(t);
-                                    }
+                    .map(|chunk| {
+                        let mut chunk_result: Vec<Vec<F::Unreduced<6>>> =
+                            vec![unsafe_allocate_zero_vec(M); suffixes.len()];
+
+                        for j in chunk {
+                            let k = self.lookup_indices[*j];
+                            let (prefix_bits, suffix_bits) = k.split((PHASES - 1 - phase) * LOG_M);
+                            for (suffix, result) in suffixes.iter().zip(chunk_result.iter_mut()) {
+                                let t = suffix.suffix_mle::<XLEN>(suffix_bits);
+                                if t != 0 {
+                                    let u = self.u_evals_rv[*j];
+                                    result[prefix_bits % M] += u.mul_u64_unreduced(t);
                                 }
                             }
-                            acc
-                        },
-                    )
+                        }
+
+                        chunk_result
+                    })
                     .reduce(
-                        || vec![unsafe_allocate_zero_vec::<F::Unreduced<6>>(suffixes.len()); M],
+                        || vec![unsafe_allocate_zero_vec(M); suffixes.len()],
                         |mut acc, new| {
-                            // Element-wise add: iterate r_index, then suffix index
-                            for (acc_row, new_row) in acc.iter_mut().zip(new.iter()) {
-                                for (acc_coeff, new_coeff) in acc_row.iter_mut().zip(new_row.iter())
-                                {
+                            for (acc_i, new_i) in acc.iter_mut().zip(new.iter()) {
+                                for (acc_coeff, new_coeff) in acc_i.iter_mut().zip(new_i.iter()) {
                                     *acc_coeff += new_coeff;
                                 }
                             }
@@ -509,14 +502,15 @@ impl<'a, F: JoltField> ReadRafSumcheckProver<F> {
                     );
 
                 // Reduce the unreduced values to field elements
-                // Transpose back to suffix-major: for each suffix, collect M coefficients
-                (0..suffixes.len())
-                    .map(|s_idx| {
-                        (0..M)
-                            .map(|r_idx| F::from_barrett_reduce(unreduced_polys[r_idx][s_idx]))
+                unreduced_polys
+                    .into_iter()
+                    .map(|unreduced_coeffs| {
+                        unreduced_coeffs
+                            .into_iter()
+                            .map(F::from_barrett_reduce)
                             .collect::<Vec<F>>()
                     })
-                    .collect::<Vec<Vec<F>>>()
+                    .collect::<Vec<_>>()
             })
             .collect();
 

@@ -430,7 +430,8 @@ impl<'a, F: JoltField> ReadRafSumcheckProver<F> {
                 .for_each(|((k, u), u_raf)| {
                     let suffix_len = LOG_K - PHASE_OFFSETS[phase];
                     let (prefix, _) = k.split(suffix_len);
-                    let k_bound: usize = prefix % M_PHASES[phase - 1];
+                    let mask = M_PHASES[phase - 1] - 1;
+                    let k_bound: usize = usize::from(prefix) & mask;
                     *u *= self.v[phase - 1][k_bound];
                     *u_raf *= self.v[phase - 1][k_bound];
                 });
@@ -471,59 +472,69 @@ impl<'a, F: JoltField> ReadRafSumcheckProver<F> {
     /// sized to M = 2^{LOG_M_PHASES[phase]}.
     #[tracing::instrument(skip_all, name = "InstructionReadRafProver::init_suffix_polys")]
     fn init_suffix_polys(&mut self, phase: usize) {
-        let num_chunks = rayon::current_num_threads().next_power_of_two();
-        let chunk_size = (self.lookup_indices.len() / num_chunks).max(1);
-
         let new_suffix_polys: Vec<_> = LookupTables::<XLEN>::iter()
             .collect::<Vec<_>>()
             .par_iter()
             .zip(self.lookup_indices_by_table.par_iter())
             .map(|(table, lookup_indices)| {
                 let suffixes = table.suffixes();
-                let unreduced_polys = lookup_indices
-                    .par_chunks(chunk_size)
-                    .map(|chunk| {
-                        let mut chunk_result: Vec<Vec<F::Unreduced<6>>> =
-                            vec![unsafe_allocate_zero_vec(M_PHASES[phase]); suffixes.len()];
+                let m = M_PHASES[phase];
+                let mask = m - 1;
+                let suffix_len = LOG_K - PHASE_OFFSETS[phase + 1];
 
-                        for j in chunk {
-                            let k = self.lookup_indices[*j];
-                            let suffix_len = LOG_K - PHASE_OFFSETS[phase + 1];
-                            let (prefix_bits, suffix_bits) = k.split(suffix_len);
-                            for (suffix, result) in suffixes.iter().zip(chunk_result.iter_mut()) {
+                // Counting-sort bucketing of indices by bucket = prefix_bits & mask
+                let mut counts = vec![0usize; m];
+                for j in lookup_indices.iter() {
+                    let k = self.lookup_indices[*j];
+                    let (prefix_bits, _) = k.split(suffix_len);
+                    let bucket = usize::from(prefix_bits) & mask;
+                    counts[bucket] += 1;
+                }
+                let mut starts = vec![0usize; m + 1];
+                for b in 0..m {
+                    starts[b + 1] = starts[b] + counts[b];
+                }
+                let mut next = starts[..m].to_vec();
+                let mut bucketed_indices = vec![0usize; lookup_indices.len()];
+                for j in lookup_indices.iter() {
+                    let k = self.lookup_indices[*j];
+                    let (prefix_bits, _) = k.split(suffix_len);
+                    let bucket = usize::from(prefix_bits) & mask;
+                    let pos = next[bucket];
+                    bucketed_indices[pos] = *j;
+                    next[bucket] += 1;
+                }
+
+                // Accumulate per suffix in parallel; per-suffix writes are disjoint
+                let mut polys: Vec<Vec<F>> = (0..suffixes.len())
+                    .map(|_| unsafe_allocate_zero_vec(m))
+                    .collect();
+                polys
+                    .par_iter_mut()
+                    .zip(suffixes.par_iter())
+                    .for_each(|(out, suffix)| {
+                        for b in 0..m {
+                            let begin = starts[b];
+                            let end = starts[b + 1];
+                            if begin == end {
+                                out[b] = F::zero();
+                                continue;
+                            }
+                            let mut acc = F::Unreduced::<6>::zero();
+                            for pos in begin..end {
+                                let j = bucketed_indices[pos];
+                                let k = self.lookup_indices[j];
+                                let (_, suffix_bits) = k.split(suffix_len);
                                 let t = suffix.suffix_mle::<XLEN>(suffix_bits);
                                 if t != 0 {
-                                    let u = self.u_evals_rv[*j];
-                                    result[prefix_bits % M_PHASES[phase]] +=
-                                        u.mul_u64_unreduced(t);
+                                    let u = self.u_evals_rv[j];
+                                    acc += u.mul_u64_unreduced(t);
                                 }
                             }
+                            out[b] = F::from_barrett_reduce(acc);
                         }
-
-                        chunk_result
-                    })
-                    .reduce(
-                        || vec![unsafe_allocate_zero_vec(M_PHASES[phase]); suffixes.len()],
-                        |mut acc, new| {
-                            for (acc_i, new_i) in acc.iter_mut().zip(new.iter()) {
-                                for (acc_coeff, new_coeff) in acc_i.iter_mut().zip(new_i.iter()) {
-                                    *acc_coeff += new_coeff;
-                                }
-                            }
-                            acc
-                        },
-                    );
-
-                // Reduce the unreduced values to field elements
-                unreduced_polys
-                    .into_iter()
-                    .map(|unreduced_coeffs| {
-                        unreduced_coeffs
-                            .into_iter()
-                            .map(F::from_barrett_reduce)
-                            .collect::<Vec<F>>()
-                    })
-                    .collect::<Vec<_>>()
+                    });
+                polys
             })
             .collect();
 
@@ -568,7 +579,8 @@ impl<'a, F: JoltField> ReadRafSumcheckProver<F> {
                         .map(|phase| {
                             let suffix_len = LOG_K - PHASE_OFFSETS[phase + 1];
                             let (prefix, _) = k.split(suffix_len);
-                            let k_bound: usize = prefix % M_PHASES[phase];
+                            let mask = M_PHASES[phase] - 1;
+                            let k_bound: usize = usize::from(prefix) & mask;
                             self.v[phase][k_bound]
                         })
                         .product::<F>()

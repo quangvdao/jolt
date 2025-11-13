@@ -1,3 +1,4 @@
+use num::Integer;
 use num_traits::Zero;
 
 use crate::poly::opening_proof::OpeningAccumulator;
@@ -6,7 +7,7 @@ use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 use crate::utils::hashmap_or_vec::HashMapOrVec;
-use crate::zkvm::ram::sparse_val_poly::{MatrixEntry, SparseValPolynomial};
+use crate::zkvm::ram::sparse_matrix_poly::{MatrixEntry, SparseMatrixPolynomial};
 use crate::{
     field::{JoltField, OptimizedMul},
     poly::{
@@ -90,7 +91,7 @@ pub struct RamReadWriteCheckingProver<F: JoltField> {
     val_checkpoints_new: Vec<HashMapOrVec<u64>>,
     data_buffers: Vec<DataBuffers<F>>,
     I: Vec<Vec<(usize, usize, F, i128)>>,
-    sparse_val: SparseValPolynomial<F>,
+    sparse_val: SparseMatrixPolynomial<F>,
     A: Vec<F>,
     gruens_eq_r_prime: GruenSplitEqPolynomial<F>,
     inc_cycle: MultilinearPolynomial<F>,
@@ -358,7 +359,7 @@ impl<F: JoltField> RamReadWriteCheckingProver<F> {
             })
             .collect();
 
-        let sparse_val = SparseValPolynomial::new(&trace, &preprocessing.memory_layout);
+        let sparse_val = SparseMatrixPolynomial::new(&trace, &preprocessing.memory_layout);
 
         Self {
             ram_addresses,
@@ -376,6 +377,31 @@ impl<F: JoltField> RamReadWriteCheckingProver<F> {
             val: None,
             params,
         }
+    }
+
+    fn phase1_compute_prover_message_alt(&mut self, round: usize, previous_claim: F) -> Vec<F> {
+        let Self {
+            ram_addresses,
+            A,
+            sparse_val,
+            val_checkpoints_new,
+            inc_cycle,
+            gruens_eq_r_prime,
+            params,
+            ..
+        } = self;
+
+        if gruens_eq_r_prime.E_in_current_len() == 1 {
+            // sparse_val
+            //     .entries
+            //     .par_chunk_by(|x, y| x.row / 2 == y.row / 2)
+            //     .map(|rows| {
+            //         let odd_row_start_index = rows.partition_point(|entry| entry.row.is_even());
+            //         let (even_row, odd_row) = rows.split_at(odd_row_start_index);
+            //     });
+        } else {
+        }
+        todo!()
     }
 
     #[tracing::instrument(skip_all, name = "phase1_compute_prover_message")]

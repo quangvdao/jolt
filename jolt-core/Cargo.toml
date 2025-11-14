@@ -157,6 +157,7 @@ harness = false
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
 
 [[bin]]
 name = "jolt-core"

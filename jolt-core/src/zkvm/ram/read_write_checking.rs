@@ -32,10 +32,11 @@ use rayon::prelude::*;
 // RAM read-write checking sumcheck
 //
 // Proves the relation:
-//   Σ_{k,j} eq(r', (j, k)) ⋅ ra(k, j) ⋅ (Val(k, j) + γ ⋅ (inc(j) + Val(k, j)))
+//   Σ_{k,j} eq(r_cycle, j) ⋅ ra(k, j) ⋅ (Val(k, j) + γ ⋅ (inc(j) + Val(k, j)))
 //   = rv_claim + γ ⋅ wv_claim
 // where:
-// - r' are the fresh challenges for this sumcheck
+// - r_cycle are the fresh challenges for the cycle variables in this sumcheck
+// - eq(r_cycle, j) is the equality polynomial over the cycle index j only
 // - ra(k, j) = 1 if memory address k is accessed at cycle j, and 0 otherwise
 // - Val(k, j) is the value at memory address k right before cycle j
 // - inc(j) is the change in value at cycle j if a write occurs, and 0 otherwise
@@ -491,11 +492,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct ReadWriteCheckingParams<F: JoltField> {
-    K: usize,
-    T: usize,
-    gamma: F,
-    r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
+pub struct ReadWriteCheckingParams<F: JoltField> {
+    pub K: usize,
+    pub T: usize,
+    pub gamma: F,
+    pub r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
 }
 
 impl<F: JoltField> ReadWriteCheckingParams<F> {
@@ -518,11 +519,11 @@ impl<F: JoltField> ReadWriteCheckingParams<F> {
         }
     }
 
-    fn num_rounds(&self) -> usize {
+    pub fn num_rounds(&self) -> usize {
         self.K.log_2() + self.T.log_2()
     }
 
-    fn input_claim(&self, accumulator: &dyn OpeningAccumulator<F>) -> F {
+    pub fn input_claim(&self, accumulator: &dyn OpeningAccumulator<F>) -> F {
         let (_, rv_input_claim) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::RamReadValue,
             SumcheckId::SpartanOuter,
@@ -534,7 +535,7 @@ impl<F: JoltField> ReadWriteCheckingParams<F> {
         rv_input_claim + self.gamma * wv_input_claim
     }
 
-    fn get_opening_point(
+    pub fn get_opening_point(
         &self,
         sumcheck_challenges: &[F::Challenge],
     ) -> OpeningPoint<BIG_ENDIAN, F> {

@@ -27,6 +27,7 @@ use crate::{
             ra_virtual::RaSumcheckProver,
             raf_evaluation::RafEvaluationSumcheckProver,
             read_write_checking::RamReadWriteCheckingProver,
+            read_write_checking_addr_first::RamReadWriteCheckingProverAddrFirst,
             val_evaluation::ValEvaluationSumcheckProver,
         },
         witness::{compute_d_parameter, CommittedPolynomial, VirtualPolynomial, DTH_ROOT_OF_K},
@@ -48,8 +49,12 @@ pub mod output_check;
 pub mod ra_virtual;
 pub mod raf_evaluation;
 pub mod read_write_checking;
+pub mod read_write_checking_addr_first;
+pub mod sparse_matrix_poly_addr_first;
 pub mod sparse_matrix_poly;
 pub mod val_evaluation;
+
+const RAM_RW_USE_ADDRESS_FIRST: bool = true;
 
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RAMPreprocessing {
@@ -476,12 +481,29 @@ where
     ) -> Vec<Box<dyn SumcheckInstanceProver<F, ProofTranscript>>> {
         let raf_evaluation = RafEvaluationSumcheckProver::gen(state_manager, opening_accumulator);
 
-        let read_write_checking = RamReadWriteCheckingProver::gen(
-            &self.initial_memory_state,
-            state_manager,
-            opening_accumulator,
-            transcript,
-        );
+        let read_write_checking: Box<
+            dyn SumcheckInstanceProver<F, ProofTranscript>,
+        > = if RAM_RW_USE_ADDRESS_FIRST {
+            let prover = RamReadWriteCheckingProverAddrFirst::gen(
+                &self.initial_memory_state,
+                state_manager,
+                opening_accumulator,
+                transcript,
+            );
+            #[cfg(feature = "allocative")]
+            print_data_structure_heap_usage("RAM RamReadWriteCheckingAddrFirst", &prover);
+            Box::new(prover)
+        } else {
+            let prover = RamReadWriteCheckingProver::gen(
+                &self.initial_memory_state,
+                state_manager,
+                opening_accumulator,
+                transcript,
+            );
+            #[cfg(feature = "allocative")]
+            print_data_structure_heap_usage("RAM RamReadWriteChecking", &prover);
+            Box::new(prover)
+        };
 
         let output_check = OutputSumcheckProver::gen(
             &self.initial_memory_state,
@@ -493,13 +515,12 @@ where
         #[cfg(feature = "allocative")]
         {
             print_data_structure_heap_usage("RAM RafEvaluationSumcheck", &raf_evaluation);
-            print_data_structure_heap_usage("RAM RamReadWriteChecking", &read_write_checking);
             print_data_structure_heap_usage("RAM OutputSumcheck", &output_check);
         }
 
         vec![
             Box::new(raf_evaluation),
-            Box::new(read_write_checking),
+            read_write_checking,
             Box::new(output_check),
         ]
     }

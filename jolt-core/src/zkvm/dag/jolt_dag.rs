@@ -606,9 +606,9 @@ impl<'a, 'b, F: JoltField, ProofTranscript: Transcript, PCS: CommitmentScheme<Fi
         let verifier_instances: Vec<Box<
             dyn crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier<F, ProofTranscript>,
         >> =
-            if matches!(OUTER_IMPL, OuterImpl::Baseline) {
-                tracing::info!("Stage1 Verifier using OuterImpl::Baseline");
-                // Baseline: regular sumcheck (no uni-skip semantics)
+            if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::Naive) {
+                tracing::info!("Stage1 Verifier using OuterImpl::Baseline/Naive");
+                // Baseline/Naive: regular sumcheck (no uni-skip semantics)
                 let num_constraint_bits = crate::zkvm::r1cs::constraints::R1CS_CONSTRAINTS
                     .len()
                     .next_power_of_two()

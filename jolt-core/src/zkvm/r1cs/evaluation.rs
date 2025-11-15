@@ -62,7 +62,7 @@ use super::constraints::{
     NUM_PRODUCT_VIRTUAL, OUTER_UNIVARIATE_SKIP_DEGREE, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
     PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
-use super::inputs::{JoltR1CSInputs, R1CSCycleInputs, NUM_R1CS_INPUTS};
+use super::inputs::{JoltR1CSInputs, R1CSCycleInputs, ALL_R1CS_INPUTS, NUM_R1CS_INPUTS};
 
 pub(crate) const UNISKIP_TARGETS: [i64; OUTER_UNIVARIATE_SKIP_DEGREE] =
     uniskip_targets::<OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE, OUTER_UNIVARIATE_SKIP_DEGREE>();
@@ -614,6 +614,64 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
         debug_assert!((!az.should_branch) || bz.next_unexp_pc_minus_pc_plus_imm == 0);
         debug_assert!((!az.not_jump_or_branch) || bz.next_unexp_pc_minus_expected.is_zero());
     }
+
+    /// Naive baseline version of claimed-input computation.
+    ///
+    /// This directly converts each trace value to the field and accumulates
+    /// \[
+    ///   z_i(r_\text{cycle}) = \sum_t \mathrm{eq}(r_\text{cycle}, t) \cdot P_i(t)
+    /// \]
+    /// for all inputs \(i\), without any small-value accumulators or delayed
+    /// Montgomery reduction.
+    #[tracing::instrument(skip_all, name = "R1CSEval::compute_claimed_inputs_naive")]
+    pub fn compute_claimed_inputs_naive(
+        bytecode_preprocessing: &BytecodePreprocessing,
+        trace: &[Cycle],
+        r_cycle: &[F::Challenge],
+    ) -> [F; NUM_R1CS_INPUTS] {
+        let m = r_cycle.len() / 2;
+        let (r2, r1) = r_cycle.split_at(m);
+        let (eq_one, eq_two) =
+            rayon::join(|| EqPolynomial::evals(r2), || EqPolynomial::evals(r1));
+
+        let eq_two_len = eq_two.len();
+
+        (0..eq_one.len())
+            .into_par_iter()
+            .map(|x1| {
+                let eq1_val = eq_one[x1];
+                let mut local_sums = [F::zero(); NUM_R1CS_INPUTS];
+
+                for x2 in 0..eq_two_len {
+                    let e_in = eq_two[x2];
+                    let weight = eq1_val * e_in;
+                    let idx = x1 * eq_two_len + x2;
+                    let row =
+                        R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, idx);
+
+                    for (i, var) in ALL_R1CS_INPUTS.iter().enumerate() {
+                        // Baseline semantics: direct conversion to field element.
+                        let val =
+                            BaselineConstraintEval::input_to_field::<F>(&row, *var);
+                        local_sums[i] += weight * val;
+                    }
+                }
+
+                local_sums
+            })
+            .reduce(
+                || [F::zero(); NUM_R1CS_INPUTS],
+                |mut acc, item| {
+                    for i in 0..NUM_R1CS_INPUTS {
+                        acc[i] += item[i];
+                    }
+                    acc
+                },
+            )
+    }
+
+    // Optimized claimed-input computation using small-value accumulators and
+    // delayed reduction.
 
     /// Compute `z(r_cycle) = Σ_t eq(r_cycle, t) * P_i(t)` for all inputs i, without
     /// materializing P_i. Returns `[P_0(r_cycle), P_1(r_cycle), ...]` in input order.

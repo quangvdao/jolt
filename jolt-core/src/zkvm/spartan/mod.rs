@@ -53,6 +53,7 @@ pub enum OuterImpl {
     Streaming,
     Baseline,
     RoundBatched,
+    Naive,
 }
 /// Global selection for Spartan Stage 1 remainder.
 pub const OUTER_IMPL: OuterImpl = OuterImpl::Baseline;
@@ -82,8 +83,11 @@ impl<F: JoltField> SpartanDagProver<F> {
         _opening_accumulator: &mut ProverOpeningAccumulator<F>,
         transcript: &mut T,
     ) -> UniSkipFirstRoundProof<F, T> {
-        // For Baseline and RoundBatched, do not perform uni-skip: append a trivial zero polynomial.
-        if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched) {
+        // For Baseline, Naive and RoundBatched, do not perform uni-skip: append a trivial zero polynomial.
+        if matches!(
+            OUTER_IMPL,
+            OuterImpl::Baseline | OuterImpl::RoundBatched | OuterImpl::Naive
+        ) {
             // Consume the same tau vector as the verifier to keep the transcript aligned
             let num_rounds_x: usize = self.key.num_rows_bits();
             let _ = transcript.challenge_vector_optimized::<F>(num_rounds_x);
@@ -200,6 +204,24 @@ where
                 );
                 instances.push(Box::new(outer_baseline));
             }
+            OuterImpl::Naive => {
+                tracing::info!("Stage1 Prover using OuterImpl::Naive (streaming baseline, direct field Az/Bz)");
+                // Same as Baseline for now: streaming from trace with baseline Az/Bz evaluation.
+                let (preprocessing, _lazy_trace, _trace, _program_io, _final_mem) =
+                    state_manager.get_prover_data();
+                let trace_arc = state_manager.get_trace_arc();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                let constraints_vec: Vec<R1CSConstraint> =
+                    R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+                let outer_baseline = OuterBaselineSumcheckProver::<F>::gen(
+                    &preprocessing.bytecode,
+                    trace_arc,
+                    &constraints_vec,
+                    padded_num_constraints,
+                    transcript,
+                );
+                instances.push(Box::new(outer_baseline));
+            }
             OuterImpl::RoundBatched => {
                 tracing::info!("Stage1 Prover using OuterImpl::RoundBatched");
                 // No uni-skip: directly instantiate round-batched prover
@@ -282,8 +304,11 @@ pub fn verify_stage1_uni_skip<F: JoltField, T: Transcript>(
     let num_rounds_x = key.num_rows_bits();
     let tau = transcript.challenge_vector_optimized::<F>(num_rounds_x);
 
-    // For Baseline and RoundBatched, there is no true uni-skip; keep transcript alignment only.
-    if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched) {
+    // For Baseline, Naive and RoundBatched, there is no true uni-skip; keep transcript alignment only.
+    if matches!(
+        OUTER_IMPL,
+        OuterImpl::Baseline | OuterImpl::RoundBatched | OuterImpl::Naive
+    ) {
         let zero_poly = crate::poly::unipoly::UniPoly::<F>::from_coeff(vec![F::zero()]);
         zero_poly.append_to_transcript(transcript);
         let r0 = transcript.challenge_scalar_optimized::<F>();

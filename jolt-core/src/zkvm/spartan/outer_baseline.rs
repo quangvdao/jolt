@@ -4,8 +4,8 @@ use crate::poly::opening_proof::{
     SumcheckId, LITTLE_ENDIAN,
 };
 use crate::poly::{
-    eq_poly::EqPolynomial, multilinear_polynomial::MultilinearPolynomial,
-    split_eq_poly::GruenSplitEqPolynomial,
+    dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial,
+    multilinear_polynomial::MultilinearPolynomial, split_eq_poly::GruenSplitEqPolynomial,
 };
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
@@ -598,8 +598,9 @@ pub struct OuterBaselineSumcheckProver<F: JoltField> {
     trace: Arc<Vec<Cycle>>,
     /// Split-eq helper tracking binding state
     eq_poly: GruenSplitEqPolynomial<F>,
-    /// Dense interleaved [az0, bz0, az1, bz1] coefficients for current sumcheck state
-    az_bz_interleaved: Vec<F>,
+    /// Dense Az, Bz multilinear polynomials over (cycle, constraint) variables
+    az: DensePolynomial<F>,
+    bz: DensePolynomial<F>,
     /// Total rounds = step_vars + constraint_vars
     total_rounds: usize,
     /// Number of step/cycle variables (used to split r_cycle from full opening point)
@@ -632,14 +633,16 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
         // Sample tau for entire outer sumcheck (no uni-skip)
         let tau: Vec<F::Challenge> = transcript.challenge_vector_optimized::<F>(total_num_vars);
 
-        // Initialize eq-poly (no SVO partitioning)
+        // Initialize eq-poly (no uni-skip / small-value scaling)
         let eq_poly = GruenSplitEqPolynomial::new(&tau, BindingOrder::LowToHigh);
 
-        // Compute initial interleaved [az0, bz0, az1, bz1, ...] from trace (streaming, no caching)
-        let az_bz_interleaved = Self::compute_initial_interleaved(
+        // Build dense Az, Bz polynomials over the (cycle, constraint) Boolean cube.
+        let (az, bz) = Self::build_dense_polynomials(
             bytecode_preprocessing,
             &trace,
             uniform_constraints,
+            num_step_vars,
+            num_constraint_vars,
             padded_num_constraints,
         );
 
@@ -647,7 +650,8 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
             bytecode_preprocessing: bytecode_preprocessing.clone(),
             trace,
             eq_poly,
-            az_bz_interleaved,
+            az,
+            bz,
             total_rounds: total_num_vars,
             num_step_vars,
             uniform_constraints: uniform_constraints.to_vec(),
@@ -655,33 +659,73 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
         }
     }
 
-    /// Compute initial interleaved coefficients [az0, bz0, az1, bz1, ...] by streaming over trace
-    fn compute_initial_interleaved(
+    /// Build dense Az, Bz polynomials over (cycle, constraint) variables by streaming over the trace.
+    ///
+    /// Domain layout (big-endian in bit order):
+    /// - Let `num_step_vars = log2(num_steps_padded)` and `num_constraint_vars = log2(padded_num_constraints)`.
+    /// - For each index `d in [0, 2^{num_step_vars + num_constraint_vars})`:
+    ///     - Interpret the high `num_step_vars` bits of `d` as the cycle/step index.
+    ///     - Interpret the low `num_constraint_vars` bits as the constraint index.
+    ///     - Evaluate Az, Bz at that (step, constraint) pair, or 0 if out-of-range (padding).
+    fn build_dense_polynomials(
         bytecode_preprocessing: &BytecodePreprocessing,
         trace: &[Cycle],
         uniform_constraints: &[R1CSConstraint],
+        num_step_vars: usize,
+        num_constraint_vars: usize,
         padded_num_constraints: usize,
-    ) -> Vec<F> {
+    ) -> (DensePolynomial<F>, DensePolynomial<F>) {
         let num_steps = trace.len();
-        let total_groups = num_steps * padded_num_constraints;
-        let mut result = vec![F::zero(); 4 * total_groups];
+        let num_cycles_padded = if num_step_vars == 0 {
+            1usize
+        } else {
+            1usize << num_step_vars
+        };
 
-        result
-            .par_chunks_exact_mut(4 * padded_num_constraints)
+        let domain_size = num_cycles_padded
+            .checked_mul(padded_num_constraints)
+            .expect("overflow computing baseline outer domain size");
+
+        // Sanity: the live trace is a prefix of the padded cycle domain.
+        debug_assert!(
+            num_steps <= num_cycles_padded,
+            "trace length ({num_steps}) must be <= padded cycles ({num_cycles_padded})"
+        );
+
+        let total_vars = num_step_vars + num_constraint_vars;
+        debug_assert_eq!(
+            domain_size,
+            1usize << total_vars,
+            "baseline outer: domain_size != 2^{total_vars}"
+        );
+
+        let mut az_vals = vec![F::zero(); domain_size];
+        let mut bz_vals = vec![F::zero(); domain_size];
+
+        az_vals
+            .par_iter_mut()
+            .zip(bz_vals.par_iter_mut())
             .enumerate()
-            .for_each(|(step_idx, chunk)| {
-                let row = R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, step_idx);
-                for (constraint_idx, constraint) in uniform_constraints.iter().enumerate() {
-                    let base = 4 * constraint_idx;
-                    // [az0, bz0, az1, bz1] layout
-                    chunk[base] = BaselineConstraintEval::eval_az(constraint, &row);
-                    chunk[base + 1] = BaselineConstraintEval::eval_bz(constraint, &row);
-                    chunk[base + 2] = chunk[base]; // initially az1 = az0
-                    chunk[base + 3] = chunk[base + 1]; // initially bz1 = bz0
+            .for_each(|(d, (az_ref, bz_ref))| {
+                let step_idx = d / padded_num_constraints;
+                let constraint_idx = d % padded_num_constraints;
+
+                if step_idx < num_steps && constraint_idx < uniform_constraints.len() {
+                    let row = R1CSCycleInputs::from_trace::<F>(
+                        bytecode_preprocessing,
+                        trace,
+                        step_idx,
+                    );
+                    let cons = &uniform_constraints[constraint_idx];
+                    *az_ref = BaselineConstraintEval::eval_az(cons, &row);
+                    *bz_ref = BaselineConstraintEval::eval_bz(cons, &row);
+                } else {
+                    *az_ref = F::zero();
+                    *bz_ref = F::zero();
                 }
             });
 
-        result
+        (DensePolynomial::new(az_vals), DensePolynomial::new(bz_vals))
     }
 }
 
@@ -705,7 +749,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
 
     #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::bind")]
     fn bind(&mut self, r_j: F::Challenge, _round: usize) {
-        self.bind_interleaved(r_j);
+        // Bind Az, Bz and the split-eq helper in lockstep (standard dense-poly binding).
+        rayon::join(
+            || self.az.bind_parallel(r_j, BindingOrder::LowToHigh),
+            || self.bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+        );
         self.eq_poly.bind(r_j);
     }
 
@@ -718,12 +766,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
         let opening_point =
             OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
-        // Final Az, Bz claims from bound interleaved buffer
-        let (az_final, bz_final) = if self.az_bz_interleaved.len() >= 2 {
-            (self.az_bz_interleaved[0], self.az_bz_interleaved[1])
-        } else {
-            (F::zero(), F::zero())
-        };
+        // Final Az, Bz claims from bound dense polynomials
+        let [az_final, bz_final] = self.final_sumcheck_evals();
 
         accumulator.append_virtual(
             transcript,
@@ -742,8 +786,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
 
         // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);
-        let claimed_witness_evals =
-            R1CSEval::compute_claimed_inputs(&self.bytecode_preprocessing, &self.trace, r_cycle);
+        let claimed_witness_evals = R1CSEval::compute_claimed_inputs_naive(
+            &self.bytecode_preprocessing,
+            &self.trace,
+            r_cycle,
+        );
 
         for (i, input) in ALL_R1CS_INPUTS.iter().enumerate() {
             accumulator.append_virtual(
@@ -758,22 +805,28 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
 }
 
 impl<F: JoltField> OuterBaselineSumcheckProver<F> {
-    /// Compute (t0, t_inf) endpoints for current round from dense interleaved buffer
+    /// Compute (t0, t_inf) endpoints for current round from dense Az/Bz polynomials.
+    ///
+    /// This mirrors `OuterRemainingSumcheckProver::remaining_quadratic_evals`, but
+    /// uses direct field arithmetic (no delayed Montgomery reduction).
     fn compute_endpoints(&self) -> (F, F) {
         let eq_poly = &self.eq_poly;
-        let n = self.az_bz_interleaved.len() / 4; // number of groups
+
+        let n = self.az.len();
+        debug_assert_eq!(n, self.bz.len());
 
         if eq_poly.E_in_current_len() == 1 {
-            // Simple case: E_in is scalar
-            (0..n)
+            // groups are pairs (0,1)
+            let groups = n / 2;
+            (0..groups)
                 .into_par_iter()
                 .map(|g| {
-                    let base = 4 * g;
-                    let az0 = self.az_bz_interleaved[base];
-                    let bz0 = self.az_bz_interleaved[base + 1];
-                    let az1 = self.az_bz_interleaved[base + 2];
-                    let bz1 = self.az_bz_interleaved[base + 3];
+                    let az0 = self.az[2 * g];
+                    let az1 = self.az[2 * g + 1];
+                    let bz0 = self.bz[2 * g];
+                    let bz1 = self.bz[2 * g + 1];
                     let eq = eq_poly.E_out_current()[g];
+
                     let p0 = az0 * bz0;
                     let slope = (az1 - az0) * (bz1 - bz0);
                     (eq * p0, eq * slope)
@@ -783,30 +836,28 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
                     |a, b| (a.0 + b.0, a.1 + b.1),
                 )
         } else {
-            // Split eq case
-            let num_x_in_bits = eq_poly.E_in_current_len().log_2();
-            let x_in_len = eq_poly.E_in_current_len();
-            let x_out_len = eq_poly.E_out_current_len();
+            let num_x1_bits = eq_poly.E_in_current_len().log_2();
+            let x1_len = eq_poly.E_in_current_len();
+            let x2_len = eq_poly.E_out_current_len();
 
-            (0..x_out_len)
+            (0..x2_len)
                 .into_par_iter()
-                .map(|x_out| {
+                .map(|x2| {
                     let mut inner0 = F::zero();
                     let mut inner_inf = F::zero();
-                    for x_in in 0..x_in_len {
-                        let g = (x_out << num_x_in_bits) | x_in;
-                        let base = 4 * g;
-                        let az0 = self.az_bz_interleaved[base];
-                        let bz0 = self.az_bz_interleaved[base + 1];
-                        let az1 = self.az_bz_interleaved[base + 2];
-                        let bz1 = self.az_bz_interleaved[base + 3];
-                        let e_in = eq_poly.E_in_current()[x_in];
+                    for x1 in 0..x1_len {
+                        let g = (x2 << num_x1_bits) | x1;
+                        let az0 = self.az[2 * g];
+                        let az1 = self.az[2 * g + 1];
+                        let bz0 = self.bz[2 * g];
+                        let bz1 = self.bz[2 * g + 1];
+                        let e_in = eq_poly.E_in_current()[x1];
                         let p0 = az0 * bz0;
                         let slope = (az1 - az0) * (bz1 - bz0);
                         inner0 += e_in * p0;
                         inner_inf += e_in * slope;
                     }
-                    let e_out = eq_poly.E_out_current()[x_out];
+                    let e_out = eq_poly.E_out_current()[x2];
                     (e_out * inner0, e_out * inner_inf)
                 })
                 .reduce(
@@ -816,21 +867,18 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
         }
     }
 
-    /// Bind interleaved [az0, bz0, az1, bz1, ...] by challenge r
-    fn bind_interleaved(&mut self, r: F::Challenge) {
-        self.az_bz_interleaved
-            .par_chunks_exact_mut(4)
-            .for_each(|block| {
-                let az0 = block[0];
-                let bz0 = block[1];
-                let az1 = block[2];
-                let bz1 = block[3];
-                // After binding: new_az0 = az0 + r*(az1 - az0), new_bz0 = bz0 + r*(bz1 - bz0)
-                block[0] = az0 + r * (az1 - az0);
-                block[1] = bz0 + r * (bz1 - bz0);
-                // Copy for next round
-                block[2] = block[0];
-                block[3] = block[1];
-            });
+    /// Final Az, Bz evaluations after all bindings (at the full opening point).
+    fn final_sumcheck_evals(&self) -> [F; 2] {
+        let az0 = if !self.az.is_empty() {
+            self.az[0]
+        } else {
+            F::zero()
+        };
+        let bz0 = if !self.bz.is_empty() {
+            self.bz[0]
+        } else {
+            F::zero()
+        };
+        [az0, bz0]
     }
 }

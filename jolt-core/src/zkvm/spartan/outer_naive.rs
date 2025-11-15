@@ -3,7 +3,8 @@ use crate::poly::opening_proof::{
     OpeningPoint, ProverOpeningAccumulator, SumcheckId, LITTLE_ENDIAN,
 };
 use crate::poly::{
-    multilinear_polynomial::MultilinearPolynomial, split_eq_poly::GruenSplitEqPolynomial,
+    dense_mlpoly::DensePolynomial, multilinear_polynomial::MultilinearPolynomial,
+    split_eq_poly::GruenSplitEqPolynomial,
 };
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 
@@ -495,48 +496,89 @@ impl<F: JoltField> NaiveSpartanInterleavedPolynomial<F> {
 pub struct OuterBaselineSumcheckProver<F: JoltField> {
     /// Split-eq helper tracking binding state
     eq_poly: GruenSplitEqPolynomial<F>,
-    /// Interleaved Az/Bz holder and binding workspace
-    poly: NaiveSpartanInterleavedPolynomial<F>,
+    /// Dense Az, Bz multilinear polynomials over (cycle, constraint) variables
+    az: DensePolynomial<F>,
+    bz: DensePolynomial<F>,
     /// Total rounds = step_vars + constraint_vars
     total_rounds: usize,
 }
 
 impl<F: JoltField> OuterBaselineSumcheckProver<F> {
-    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::gen_from_polys")]
-    pub fn gen_from_polys<ProofTranscript: Transcript>(
-        uniform_constraints: &[R1CSConstraint],
-        flattened_polynomials: &[MultilinearPolynomial<F>],
-        padded_num_constraints: usize,
-        transcript: &mut ProofTranscript,
-    ) -> Self {
-        // Determine step and constraint vars
-        let num_steps = flattened_polynomials[0].len();
-        let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
-        let num_constraint_vars = if padded_num_constraints > 0 {
-            padded_num_constraints.log_2()
+    /// Compute (t0, t_inf) endpoints for current round from dense Az/Bz polynomials.
+    ///
+    /// This mirrors `OuterRemainingSumcheckProver::remaining_quadratic_evals`, but uses
+    /// direct field arithmetic (no delayed Montgomery reduction).
+    fn compute_endpoints(&self) -> (F, F) {
+        let eq_poly = &self.eq_poly;
+
+        let n = self.az.len();
+        debug_assert_eq!(n, self.bz.len());
+
+        if eq_poly.E_in_current_len() == 1 {
+            // groups are pairs (0,1)
+            let groups = n / 2;
+            (0..groups)
+                .into_par_iter()
+                .map(|g| {
+                    let az0 = self.az[2 * g];
+                    let az1 = self.az[2 * g + 1];
+                    let bz0 = self.bz[2 * g];
+                    let bz1 = self.bz[2 * g + 1];
+                    let eq = eq_poly.E_out_current()[g];
+
+                    let p0 = az0 * bz0;
+                    let slope = (az1 - az0) * (bz1 - bz0);
+                    (eq * p0, eq * slope)
+                })
+                .reduce(
+                    || (F::zero(), F::zero()),
+                    |a, b| (a.0 + b.0, a.1 + b.1),
+                )
         } else {
-            0
-        };
-        let total_num_vars = num_step_vars + num_constraint_vars;
+            let num_x1_bits = eq_poly.E_in_current_len().log_2();
+            let x1_len = eq_poly.E_in_current_len();
+            let x2_len = eq_poly.E_out_current_len();
 
-        // Sample tau for entire outer sumcheck (no uni-skip)
-        let tau: Vec<F::Challenge> = transcript.challenge_vector_optimized::<F>(total_num_vars);
-
-        // Initialize eq-poly (no SVO partitioning)
-        let eq_poly = GruenSplitEqPolynomial::new(&tau, BindingOrder::LowToHigh);
-
-        // Materialize baseline interleaved polynomial
-        let poly = NaiveSpartanInterleavedPolynomial::new(
-            uniform_constraints,
-            flattened_polynomials,
-            padded_num_constraints,
-        );
-
-        Self {
-            eq_poly,
-            poly,
-            total_rounds: total_num_vars,
+            (0..x2_len)
+                .into_par_iter()
+                .map(|x2| {
+                    let mut inner0 = F::zero();
+                    let mut inner_inf = F::zero();
+                    for x1 in 0..x1_len {
+                        let g = (x2 << num_x1_bits) | x1;
+                        let az0 = self.az[2 * g];
+                        let az1 = self.az[2 * g + 1];
+                        let bz0 = self.bz[2 * g];
+                        let bz1 = self.bz[2 * g + 1];
+                        let e_in = eq_poly.E_in_current()[x1];
+                        let p0 = az0 * bz0;
+                        let slope = (az1 - az0) * (bz1 - bz0);
+                        inner0 += e_in * p0;
+                        inner_inf += e_in * slope;
+                    }
+                    let e_out = eq_poly.E_out_current()[x2];
+                    (e_out * inner0, e_out * inner_inf)
+                })
+                .reduce(
+                    || (F::zero(), F::zero()),
+                    |a, b| (a.0 + b.0, a.1 + b.1),
+                )
         }
+    }
+
+    /// Final Az, Bz evaluations after all bindings (at the full opening point).
+    fn final_sumcheck_evals(&self) -> [F; 2] {
+        let az0 = if !self.az.is_empty() {
+            self.az[0]
+        } else {
+            F::zero()
+        };
+        let bz0 = if !self.bz.is_empty() {
+            self.bz[0]
+        } else {
+            F::zero()
+        };
+        [az0, bz0]
     }
 }
 
@@ -553,18 +595,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
 
     #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::compute_prover_message")]
     fn compute_prover_message(&mut self, _round: usize, previous_claim: F) -> Vec<F> {
-        let (t0, tinf) = if !self.poly.is_bound() {
-            self.poly.endpoints_unbound_first_round(&self.eq_poly)
-        } else {
-            self.poly.endpoints_bound_remaining(&self.eq_poly)
-        };
+        let (t0, tinf) = self.compute_endpoints();
         let evals = self.eq_poly.gruen_evals_deg_3(t0, tinf, previous_claim);
         vec![evals[0], evals[1], evals[2]]
     }
 
     #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::bind")]
     fn bind(&mut self, r_j: F::Challenge, _round: usize) {
-        self.poly.bind_inplace(r_j);
+        // Bind Az, Bz and the split-eq helper in lockstep (standard dense-poly binding).
+        rayon::join(
+            || self.az.bind_parallel(r_j, BindingOrder::LowToHigh),
+            || self.bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+        );
         self.eq_poly.bind(r_j);
     }
 
@@ -579,7 +621,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
             OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
         // Append Az, Bz claims and corresponding opening point
-        let claims = self.poly.final_sumcheck_evals();
+        let claims = self.final_sumcheck_evals();
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::SpartanAz,

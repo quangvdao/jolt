@@ -53,8 +53,10 @@ impl<F: JoltField> InnerSumcheckProver<F> {
         let (_r_cycle, rx_tail) = outer_sumcheck_r.r.split_at(num_cycles_bits);
 
         // Evaluate A_small, B_small combined with RLC at point on row-axis
-        let poly_abc_small = if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched)
-        {
+        let poly_abc_small = if matches!(
+            OUTER_IMPL,
+            OuterImpl::Baseline | OuterImpl::RoundBatched | OuterImpl::Naive
+        ) {
             // Regular semantics: each row variable linear. Use full constraint bits.
             let num_constraint_vars = R1CS_CONSTRAINTS.len().next_power_of_two().log_2();
             debug_assert_eq!(rx_tail.len(), num_constraint_vars);
@@ -238,8 +240,10 @@ impl<'a, F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         let (_r_cycle, rx_tail) = outer_sumcheck_opening.r.split_at(num_cycles_bits);
 
         // Branch semantics based on outer implementation
-        let (eval_a, eval_b) = if matches!(OUTER_IMPL, OuterImpl::Baseline | OuterImpl::RoundBatched)
-        {
+        let (eval_a, eval_b) = if matches!(
+            OUTER_IMPL,
+            OuterImpl::Baseline | OuterImpl::RoundBatched | OuterImpl::Naive
+        ) {
             // Regular semantics over constraint bits
             let num_constraint_vars = R1CS_CONSTRAINTS.len().next_power_of_two().log_2();
             debug_assert_eq!(rx_tail.len(), num_constraint_vars);

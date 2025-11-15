@@ -1,4 +1,4 @@
-use crate::poly::multilinear_polynomial::{BindingOrder, PolynomialEvaluation};
+use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
     SumcheckId, LITTLE_ENDIAN,
@@ -10,7 +10,9 @@ use crate::poly::{
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 
-use crate::zkvm::r1cs::inputs::ALL_R1CS_INPUTS;
+use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::zkvm::r1cs::evaluation::{BaselineConstraintEval, R1CSEval};
+use crate::zkvm::r1cs::inputs::{R1CSCycleInputs, ALL_R1CS_INPUTS};
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{
     field::{JoltField, OptimizedMul},
@@ -20,6 +22,8 @@ use crate::{
 };
 use allocative::Allocative;
 use rayon::prelude::*;
+use std::sync::Arc;
+use tracer::instruction::Cycle;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub struct SparseCoefficient<T> {
@@ -27,7 +31,7 @@ pub struct SparseCoefficient<T> {
     pub(crate) value: T,
 }
 
-// =======================
+// =======================o
 // SumcheckInstance (Verifier) for baseline outer (no uni-skip)
 // =======================
 pub struct OuterBaselineSumcheckVerifier<F: JoltField> {
@@ -579,33 +583,44 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
 }
 
 // =======================
-// SumcheckInstance (Prover) for outer_linear_time (no uni-skip, no SVO)
+// Streaming Baseline: No materialized polys, no optimizations
+// =======================
+
+// =======================
+// SumcheckInstance (Prover) for outer_baseline (no uni-skip, no optimizations, streaming)
 // =======================
 
 #[derive(Allocative)]
 pub struct OuterBaselineSumcheckProver<F: JoltField> {
+    #[allocative(skip)]
+    bytecode_preprocessing: BytecodePreprocessing,
+    #[allocative(skip)]
+    trace: Arc<Vec<Cycle>>,
     /// Split-eq helper tracking binding state
     eq_poly: GruenSplitEqPolynomial<F>,
-    /// Interleaved Az/Bz holder and binding workspace
-    poly: BaselineSpartanInterleavedPolynomial<F>,
+    /// Dense interleaved [az0, bz0, az1, bz1] coefficients for current sumcheck state
+    az_bz_interleaved: Vec<F>,
     /// Total rounds = step_vars + constraint_vars
     total_rounds: usize,
     /// Number of step/cycle variables (used to split r_cycle from full opening point)
     num_step_vars: usize,
-    /// Flattened polynomials for all R1CS inputs (in ALL_R1CS_INPUTS order)
-    flattened_polynomials: Vec<MultilinearPolynomial<F>>,
+    /// Uniform constraints (all cycles use same constraint set)
+    #[allocative(skip)]
+    uniform_constraints: Vec<R1CSConstraint>,
+    /// Padded number of constraints
+    padded_num_constraints: usize,
 }
 
 impl<F: JoltField> OuterBaselineSumcheckProver<F> {
-    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::gen_from_polys")]
-    pub fn gen_from_polys<ProofTranscript: Transcript>(
+    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::gen")]
+    pub fn gen<ProofTranscript: Transcript>(
+        bytecode_preprocessing: &BytecodePreprocessing,
+        trace: Arc<Vec<Cycle>>,
         uniform_constraints: &[R1CSConstraint],
-        flattened_polynomials: &[MultilinearPolynomial<F>],
         padded_num_constraints: usize,
         transcript: &mut ProofTranscript,
     ) -> Self {
-        // Determine step and constraint vars
-        let num_steps = flattened_polynomials[0].len();
+        let num_steps = trace.len();
         let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
         let num_constraint_vars = if padded_num_constraints > 0 {
             padded_num_constraints.log_2()
@@ -620,20 +635,53 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
         // Initialize eq-poly (no SVO partitioning)
         let eq_poly = GruenSplitEqPolynomial::new(&tau, BindingOrder::LowToHigh);
 
-        // Materialize baseline interleaved polynomial
-        let poly = BaselineSpartanInterleavedPolynomial::new(
+        // Compute initial interleaved [az0, bz0, az1, bz1, ...] from trace (streaming, no caching)
+        let az_bz_interleaved = Self::compute_initial_interleaved(
+            bytecode_preprocessing,
+            &trace,
             uniform_constraints,
-            flattened_polynomials,
             padded_num_constraints,
         );
 
         Self {
+            bytecode_preprocessing: bytecode_preprocessing.clone(),
+            trace,
             eq_poly,
-            poly,
+            az_bz_interleaved,
             total_rounds: total_num_vars,
-            num_step_vars: num_step_vars,
-            flattened_polynomials: flattened_polynomials.to_vec(),
+            num_step_vars,
+            uniform_constraints: uniform_constraints.to_vec(),
+            padded_num_constraints,
         }
+    }
+
+    /// Compute initial interleaved coefficients [az0, bz0, az1, bz1, ...] by streaming over trace
+    fn compute_initial_interleaved(
+        bytecode_preprocessing: &BytecodePreprocessing,
+        trace: &[Cycle],
+        uniform_constraints: &[R1CSConstraint],
+        padded_num_constraints: usize,
+    ) -> Vec<F> {
+        let num_steps = trace.len();
+        let total_groups = num_steps * padded_num_constraints;
+        let mut result = vec![F::zero(); 4 * total_groups];
+
+        result
+            .par_chunks_exact_mut(4 * padded_num_constraints)
+            .enumerate()
+            .for_each(|(step_idx, chunk)| {
+                let row = R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, step_idx);
+                for (constraint_idx, constraint) in uniform_constraints.iter().enumerate() {
+                    let base = 4 * constraint_idx;
+                    // [az0, bz0, az1, bz1] layout
+                    chunk[base] = BaselineConstraintEval::eval_az(constraint, &row);
+                    chunk[base + 1] = BaselineConstraintEval::eval_bz(constraint, &row);
+                    chunk[base + 2] = chunk[base]; // initially az1 = az0
+                    chunk[base + 3] = chunk[base + 1]; // initially bz1 = bz0
+                }
+            });
+
+        result
     }
 }
 
@@ -650,18 +698,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
 
     #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::compute_prover_message")]
     fn compute_prover_message(&mut self, _round: usize, previous_claim: F) -> Vec<F> {
-        let (t0, tinf) = if !self.poly.is_bound() {
-            self.poly.endpoints_unbound_first_round(&self.eq_poly)
-        } else {
-            self.poly.endpoints_bound_remaining(&self.eq_poly)
-        };
+        let (t0, tinf) = self.compute_endpoints();
         let evals = self.eq_poly.gruen_evals_deg_3(t0, tinf, previous_claim);
         vec![evals[0], evals[1], evals[2]]
     }
 
     #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::bind")]
     fn bind(&mut self, r_j: F::Challenge, _round: usize) {
-        self.poly.bind_inplace(r_j);
+        self.bind_interleaved(r_j);
         self.eq_poly.bind(r_j);
     }
 
@@ -671,40 +715,122 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
-        // Opening point uses the sumcheck challenges; endianness matched by OpeningPoint impl
         let opening_point =
             OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
-        // Append Az, Bz claims and corresponding opening point
-        let claims = self.poly.final_sumcheck_evals();
+        // Final Az, Bz claims from bound interleaved buffer
+        let (az_final, bz_final) = if self.az_bz_interleaved.len() >= 2 {
+            (self.az_bz_interleaved[0], self.az_bz_interleaved[1])
+        } else {
+            (F::zero(), F::zero())
+        };
+
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::SpartanAz,
             SumcheckId::SpartanOuter,
             opening_point.clone(),
-            claims[0],
+            az_final,
         );
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::SpartanBz,
             SumcheckId::SpartanOuter,
             opening_point.clone(),
-            claims[1],
+            bz_final,
         );
 
-        // Handle witness openings at r_cycle (use consistent split length)
+        // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);
+        let claimed_witness_evals =
+            R1CSEval::compute_claimed_inputs(&self.bytecode_preprocessing, &self.trace, r_cycle);
 
-        // Evaluate all flattened polynomials at r_cycle and append virtual openings
         for (i, input) in ALL_R1CS_INPUTS.iter().enumerate() {
-            let claimed_eval = self.flattened_polynomials[i].evaluate(r_cycle);
             accumulator.append_virtual(
                 transcript,
                 VirtualPolynomial::from(input),
                 SumcheckId::SpartanOuter,
                 OpeningPoint::new(r_cycle.to_vec()),
-                claimed_eval,
+                claimed_witness_evals[i],
             );
         }
+    }
+}
+
+impl<F: JoltField> OuterBaselineSumcheckProver<F> {
+    /// Compute (t0, t_inf) endpoints for current round from dense interleaved buffer
+    fn compute_endpoints(&self) -> (F, F) {
+        let eq_poly = &self.eq_poly;
+        let n = self.az_bz_interleaved.len() / 4; // number of groups
+
+        if eq_poly.E_in_current_len() == 1 {
+            // Simple case: E_in is scalar
+            (0..n)
+                .into_par_iter()
+                .map(|g| {
+                    let base = 4 * g;
+                    let az0 = self.az_bz_interleaved[base];
+                    let bz0 = self.az_bz_interleaved[base + 1];
+                    let az1 = self.az_bz_interleaved[base + 2];
+                    let bz1 = self.az_bz_interleaved[base + 3];
+                    let eq = eq_poly.E_out_current()[g];
+                    let p0 = az0 * bz0;
+                    let slope = (az1 - az0) * (bz1 - bz0);
+                    (eq * p0, eq * slope)
+                })
+                .reduce(
+                    || (F::zero(), F::zero()),
+                    |a, b| (a.0 + b.0, a.1 + b.1),
+                )
+        } else {
+            // Split eq case
+            let num_x_in_bits = eq_poly.E_in_current_len().log_2();
+            let x_in_len = eq_poly.E_in_current_len();
+            let x_out_len = eq_poly.E_out_current_len();
+
+            (0..x_out_len)
+                .into_par_iter()
+                .map(|x_out| {
+                    let mut inner0 = F::zero();
+                    let mut inner_inf = F::zero();
+                    for x_in in 0..x_in_len {
+                        let g = (x_out << num_x_in_bits) | x_in;
+                        let base = 4 * g;
+                        let az0 = self.az_bz_interleaved[base];
+                        let bz0 = self.az_bz_interleaved[base + 1];
+                        let az1 = self.az_bz_interleaved[base + 2];
+                        let bz1 = self.az_bz_interleaved[base + 3];
+                        let e_in = eq_poly.E_in_current()[x_in];
+                        let p0 = az0 * bz0;
+                        let slope = (az1 - az0) * (bz1 - bz0);
+                        inner0 += e_in * p0;
+                        inner_inf += e_in * slope;
+                    }
+                    let e_out = eq_poly.E_out_current()[x_out];
+                    (e_out * inner0, e_out * inner_inf)
+                })
+                .reduce(
+                    || (F::zero(), F::zero()),
+                    |a, b| (a.0 + b.0, a.1 + b.1),
+                )
+        }
+    }
+
+    /// Bind interleaved [az0, bz0, az1, bz1, ...] by challenge r
+    fn bind_interleaved(&mut self, r: F::Challenge) {
+        self.az_bz_interleaved
+            .par_chunks_exact_mut(4)
+            .for_each(|block| {
+                let az0 = block[0];
+                let bz0 = block[1];
+                let az1 = block[2];
+                let bz1 = block[3];
+                // After binding: new_az0 = az0 + r*(az1 - az0), new_bz0 = bz0 + r*(bz1 - bz0)
+                block[0] = az0 + r * (az1 - az0);
+                block[1] = bz0 + r * (bz1 - bz0);
+                // Copy for next round
+                block[2] = block[0];
+                block[3] = block[1];
+            });
     }
 }

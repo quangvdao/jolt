@@ -48,7 +48,6 @@ use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::lagrange_poly::LagrangeHelper;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::subprotocols::univariate_skip::uniskip_targets;
-#[cfg(test)]
 use crate::utils::small_scalar::SmallScalar;
 use crate::utils::{
     accumulation::{Acc5U, Acc6S, Acc6U, Acc7S, Acc7U, S128Sum, S192Sum},
@@ -1193,5 +1192,78 @@ impl super::ops::LC {
             result += c.to_field::<F>();
         }
         result
+    }
+}
+
+/// Baseline constraint evaluator: converts trace values directly to field (no small-value opts)
+pub struct BaselineConstraintEval;
+
+impl BaselineConstraintEval {
+    /// Evaluate Az for a single constraint from raw trace inputs (baseline: direct field conversion)
+    #[inline]
+    pub fn eval_az<F: JoltField>(
+        constraint: &super::constraints::R1CSConstraint,
+        row: &R1CSCycleInputs,
+    ) -> F {
+        let mut result = F::zero();
+        constraint.a.for_each_term(|input_index, coeff| {
+            let var = JoltR1CSInputs::from_index(input_index);
+            let val = Self::input_to_field::<F>(row, var);
+            result += coeff.field_mul(val);
+        });
+        if let Some(c) = constraint.a.const_term() {
+            result += c.to_field::<F>();
+        }
+        result
+    }
+
+    /// Evaluate Bz for a single constraint from raw trace inputs (baseline: direct field conversion)
+    #[inline]
+    pub fn eval_bz<F: JoltField>(
+        constraint: &super::constraints::R1CSConstraint,
+        row: &R1CSCycleInputs,
+    ) -> F {
+        let mut result = F::zero();
+        constraint.b.for_each_term(|input_index, coeff| {
+            let var = JoltR1CSInputs::from_index(input_index);
+            let val = Self::input_to_field::<F>(row, var);
+            result += coeff.field_mul(val);
+        });
+        if let Some(c) = constraint.b.const_term() {
+            result += c.to_field::<F>();
+        }
+        result
+    }
+
+    /// Convert R1CS input to field element (baseline: no small-value optimizations)
+    #[inline]
+    fn input_to_field<F: JoltField>(row: &R1CSCycleInputs, var: JoltR1CSInputs) -> F {
+        use crate::utils::small_scalar::SmallScalar;
+        match var {
+            JoltR1CSInputs::PC => row.pc.to_field::<F>(),
+            JoltR1CSInputs::UnexpandedPC => row.unexpanded_pc.to_field::<F>(),
+            JoltR1CSInputs::Imm => row.imm.to_field::<F>(),
+            JoltR1CSInputs::RamAddress => row.ram_addr.to_field::<F>(),
+            JoltR1CSInputs::Rs1Value => row.rs1_read_value.to_field::<F>(),
+            JoltR1CSInputs::Rs2Value => row.rs2_read_value.to_field::<F>(),
+            JoltR1CSInputs::RdWriteValue => row.rd_write_value.to_field::<F>(),
+            JoltR1CSInputs::RamReadValue => row.ram_read_value.to_field::<F>(),
+            JoltR1CSInputs::RamWriteValue => row.ram_write_value.to_field::<F>(),
+            JoltR1CSInputs::LeftInstructionInput => row.left_input.to_field::<F>(),
+            JoltR1CSInputs::RightInstructionInput => row.right_input.to_field::<F>(),
+            JoltR1CSInputs::LeftLookupOperand => row.left_lookup.to_field::<F>(),
+            JoltR1CSInputs::RightLookupOperand => row.right_lookup.to_field::<F>(),
+            JoltR1CSInputs::Product => row.product.to_field::<F>(),
+            JoltR1CSInputs::NextUnexpandedPC => row.next_unexpanded_pc.to_field::<F>(),
+            JoltR1CSInputs::NextPC => row.next_pc.to_field::<F>(),
+            JoltR1CSInputs::NextIsVirtual => row.next_is_virtual.to_field::<F>(),
+            JoltR1CSInputs::NextIsFirstInSequence => row.next_is_first_in_sequence.to_field::<F>(),
+            JoltR1CSInputs::LookupOutput => row.lookup_output.to_field::<F>(),
+            JoltR1CSInputs::ShouldJump => row.should_jump.to_field::<F>(),
+            JoltR1CSInputs::ShouldBranch => row.should_branch.to_field::<F>(),
+            JoltR1CSInputs::WriteLookupOutputToRD => row.write_lookup_output_to_rd_addr.to_field::<F>(),
+            JoltR1CSInputs::WritePCtoRD => row.write_pc_to_rd_addr.to_field::<F>(),
+            JoltR1CSInputs::OpFlags(flag) => row.flags[flag as usize].to_field::<F>(),
+        }
     }
 }

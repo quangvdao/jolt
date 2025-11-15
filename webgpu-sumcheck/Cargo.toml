@@ -1,0 +1,11 @@
+[package]
+name = "webgpu-sumcheck"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "0.20"
+pollster = "0.3"
+rand = { workspace = true, features = ["std", "std_rng"] }
+bytemuck = { version = "1.16", features = ["derive"] }
+rayon = { workspace = true }

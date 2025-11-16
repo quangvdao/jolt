@@ -553,4 +553,39 @@ impl<F: JoltField> ReadWriteCheckingParams<F> {
             .collect::<Vec<_>>();
         [r_address, r_cycle].concat().into()
     }
+
+    /// Opening point mapping for the address-first variant of the RAM
+    /// read-write sumcheck.
+    ///
+    /// In this schedule, we bind **address** variables in the first K rounds
+    /// (low-to-high), followed by **cycle** variables in the remaining T
+    /// rounds (also low-to-high). The final evaluation point for the virtual
+    /// polynomials is still ordered as [r_address, r_cycle] in big-endian
+    /// form, but the split between address and cycle challenges is different.
+    pub fn get_opening_point_addr_first(
+        &self,
+        sumcheck_challenges: &[F::Challenge],
+    ) -> OpeningPoint<BIG_ENDIAN, F> {
+        let num_addr_rounds = self.K.log_2();
+        let num_cycle_rounds = self.T.log_2();
+        debug_assert_eq!(
+            sumcheck_challenges.len(),
+            num_addr_rounds + num_cycle_rounds
+        );
+
+        // Address variables are bound in the first K rounds, low-to-high.
+        let r_address = sumcheck_challenges[..num_addr_rounds]
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        // Cycle variables are bound in the remaining T rounds, low-to-high.
+        let r_cycle = sumcheck_challenges[num_addr_rounds..]
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        [r_address, r_cycle].concat().into()
+    }
 }

@@ -99,54 +99,41 @@ impl<F: JoltField> RamReadWriteCheckingProverAddrFirst<F> {
             params,
         }
     }
-}
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
-    for RamReadWriteCheckingProverAddrFirst<F>
-{
-    fn degree(&self) -> usize {
-        DEGREE_BOUND
-    }
+    /// Phase 1 (address rounds) prover message: bind current address bit only.
+    fn phase1_compute_prover_message(
+        &mut self,
+        _round: usize,
+        _previous_claim: F,
+    ) -> Vec<F> {
+        // Address-binding phase: current variable is an address bit.
+        //
+        // We keep the address phase purely sparse and independent of the
+        // eq(r_cycle, j) weights. At this stage the polynomial being
+        // checked is still a function of both address and cycle bits,
+        // but eq is only attached in the cycle phase via `eq_cycle_split`.
+        //
+        // Concretely, we compute a degree-≤2 univariate in the address bit:
+        //
+        //   g_addr(t) = Σ_j Σ_{address pairs in row j}
+        //                   RA_t(j) ⋅ (VAL_t(j) + γ ⋅ (inc(j) + VAL_t(j)))
+        //
+        // for t ∈ {0, 2, 3}. The dependency on cycle bits (through inc and
+        // the row index) is carried symbolically and will be combined with
+        // eq(r_cycle, ·) in the later cycle phase.
+        //
+        // This loop is parallelized over rows; each row produces its local
+        // [g(0), g(2), g(3)] triple which we then sum.
+        let gamma = self.params.gamma;
+        let inc = &self.inc;
 
-    fn num_rounds(&self) -> usize {
-        self.params.num_rounds()
-    }
-
-    fn input_claim(&self, accumulator: &ProverOpeningAccumulator<F>) -> F {
-        self.params.input_claim(accumulator)
-    }
-
-    #[tracing::instrument(
-        skip_all,
-        name = "RamReadWriteCheckingProverAddrFirst::compute_prover_message"
-    )]
-    fn compute_prover_message(&mut self, round: usize, previous_claim: F) -> Vec<F> {
-        let num_addr_rounds = self.params.K.log_2();
-
-        if round < num_addr_rounds {
-            let _ = previous_claim;
-            // Address-binding phase: current variable is an address bit.
-            //
-            // We compute a degree-≤2 univariate in this bit by:
-            //   g(t) = Σ_{j} eq(r_cycle, j) ⋅
-            //             Σ_{address pairs in row j} RA_t ⋅
-            //                 (VAL_t + γ ⋅ (inc(j) + VAL_t)),
-            // for t ∈ {0, 2, 3}. Address pairs are (2u, 2u+1) at the current
-            // level of binding; `SparseMatrixPolynomialAddrFirst` already
-            // stores the merged entries for all previously bound address bits.
-            let mut evals = [F::zero(); 3]; // evaluations at t = 0, 2, 3
-
-            let gamma = self.params.gamma;
-            let inc = &self.inc;
-            let eq_cycle = &self.eq_cycle_evals;
-
-            for row_entries in self
-                .sparse_matrix
-                .entries
-                .chunk_by(|a, b| a.row == b.row)
-            {
+        let evals = self
+            .sparse_matrix
+            .entries
+            .par_chunk_by(|a, b| a.row == b.row)
+            .map(|row_entries| {
+                debug_assert!(!row_entries.is_empty());
                 let row = row_entries[0].row;
-                let eq_j = eq_cycle[row];
                 let inc_j = inc.get_coeff(row);
 
                 let mut row_evals = [F::zero(); 3];
@@ -231,58 +218,145 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
                     }
                 }
 
-                evals[0] += eq_j * row_evals[0];
-                evals[1] += eq_j * row_evals[1];
-                evals[2] += eq_j * row_evals[2];
-            }
+                row_evals
+            })
+            .reduce(
+                || [F::zero(); 3],
+                |mut acc, row_evals| {
+                    acc[0] += row_evals[0];
+                    acc[1] += row_evals[1];
+                    acc[2] += row_evals[2];
+                    acc
+                },
+            );
 
-            evals.to_vec()
+        evals.to_vec()
+    }
+
+    /// Phase 2 (cycle rounds) prover message: work over dense ra/Val/inc with split-eq.
+    fn phase2_compute_prover_message(&mut self, previous_claim: F) -> Vec<F> {
+        // Cycle-binding phase: use dense ra/Val/inc over cycles together
+        // with the Gruen split eq polynomial. We follow the same pattern
+        // as `HammingBooleanitySumcheckProver`, computing only the
+        // constant and quadratic coefficients of the inner polynomial and
+        // letting `gruen_evals_deg_3` handle the cubic lift.
+        let ra = self
+            .ra_cycles
+            .as_ref()
+            .expect("ra_cycles must be materialized before cycle phase");
+        let val = self
+            .val_cycles
+            .as_ref()
+            .expect("val_cycles must be materialized before cycle phase");
+
+        let gamma = self.params.gamma;
+
+        // Accumulate constant term c0 and quadratic coefficient e of
+        // q(X) = Σ_j ra(j, X) * (Val(j, X) + γ (inc(j, X) + Val(j, X))).
+        //
+        // For each group g we look at cycles (2g, 2g+1) and encode the
+        // inner polynomial via evaluations at 0 and ∞ (direction), exactly
+        // as in `SparseMatrixPolynomial::prover_message_contribution`.
+        let [q_constant, q_quadratic] =
+            self.eq_cycle_split
+                .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|g| {
+                    let j0 = 2 * g;
+                    let j1 = j0 + 1;
+
+                    let ra0 = ra.get_bound_coeff(j0);
+                    let ra1 = ra.get_bound_coeff(j1);
+                    let val0 = val.get_bound_coeff(j0);
+                    let val1 = val.get_bound_coeff(j1);
+                    let inc0 = self.inc.get_bound_coeff(j0);
+                    let inc1 = self.inc.get_bound_coeff(j1);
+
+                    // Encode as value at 0 and "direction" at ∞.
+                    let ra_evals = [ra0, ra1 - ra0];
+                    let val_evals = [val0, val1 - val0];
+                    let inc_evals = [inc0, inc1 - inc0];
+
+                    [
+                        ra_evals[0]
+                            * (val_evals[0]
+                                + gamma * (inc_evals[0] + val_evals[0])),
+                        ra_evals[1]
+                            * (val_evals[1]
+                                + gamma * (inc_evals[1] + val_evals[1])),
+                    ]
+                });
+
+        let evals = self
+            .eq_cycle_split
+            .gruen_evals_deg_3(q_constant, q_quadratic, previous_claim);
+        evals.to_vec()
+    }
+
+    /// Phase 1 (address rounds) binding: bind current address bit in the sparse matrix.
+    /// On the final address round we also materialize dense `ra(j)` and `Val(j)`
+    /// over cycles for use in Phase 2.
+    fn phase1_bind(&mut self, r_j: F::Challenge, round: usize) {
+        self.sparse_matrix.bind_address_bit(r_j);
+
+        let num_addr_rounds = self.params.K.log_2();
+        if round == num_addr_rounds - 1 {
+            // All address bits have been bound. At this point each row
+            // corresponds to a single virtual address, so we can materialize
+            // dense polynomials over cycles.
+            debug_assert!(self.ra_cycles.is_none());
+            debug_assert!(self.val_cycles.is_none());
+
+            let sparse = std::mem::take(&mut self.sparse_matrix);
+            let (ra_ml, val_ml) = sparse.materialize_over_cycles(self.params.T);
+            self.ra_cycles = Some(ra_ml);
+            self.val_cycles = Some(val_ml);
+        }
+    }
+
+    /// Phase 2 (cycle rounds) binding: materialize and then bind dense polynomials.
+    fn phase2_bind(&mut self, r_j: F::Challenge, _cycle_round: usize) {
+        // Bind dense polynomials over cycle variables.
+        let ra = self
+            .ra_cycles
+            .as_mut()
+            .expect("ra_cycles must be materialized before cycle binding");
+        let val = self
+            .val_cycles
+            .as_mut()
+            .expect("val_cycles must be materialized before cycle binding");
+
+        ra.bind_parallel(r_j, BindingOrder::LowToHigh);
+        val.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.inc.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.eq_cycle_split.bind(r_j);
+    }
+}
+
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
+    for RamReadWriteCheckingProverAddrFirst<F>
+{
+    fn degree(&self) -> usize {
+        DEGREE_BOUND
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.params.num_rounds()
+    }
+
+    fn input_claim(&self, accumulator: &ProverOpeningAccumulator<F>) -> F {
+        self.params.input_claim(accumulator)
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        name = "RamReadWriteCheckingProverAddrFirst::compute_prover_message"
+    )]
+    fn compute_prover_message(&mut self, round: usize, previous_claim: F) -> Vec<F> {
+        let num_addr_rounds = self.params.K.log_2();
+
+        if round < num_addr_rounds {
+            self.phase1_compute_prover_message(round, previous_claim)
         } else {
-            // Cycle-binding phase: use dense ra/Val over cycles together with
-            // the Gruen split eq polynomial.
-            let ra = self
-                .ra_cycles
-                .as_ref()
-                .expect("ra_cycles must be materialized before cycle phase");
-            let val = self
-                .val_cycles
-                .as_ref()
-                .expect("val_cycles must be materialized before cycle phase");
-
-            let len = ra.len() / 2;
-            let mut q0 = F::zero();
-            let mut q1 = F::zero();
-            let mut q2 = F::zero();
-            let gamma = self.params.gamma;
-
-            for idx in 0..len {
-                let ra_evals = ra.sumcheck_evals_array::<3>(idx, BindingOrder::LowToHigh);
-                let val_evals = val.sumcheck_evals_array::<3>(idx, BindingOrder::LowToHigh);
-                let inc_evals = self
-                    .inc
-                    .sumcheck_evals_array::<3>(idx, BindingOrder::LowToHigh);
-
-                let eval_at = |ra_eval: F, val_eval: F, inc_eval: F| {
-                    ra_eval * (val_eval + gamma * (inc_eval + val_eval))
-                };
-
-                q0 += eval_at(ra_evals[0], val_evals[0], inc_evals[0]);
-                q1 += eval_at(ra_evals[1], val_evals[1], inc_evals[1]);
-                q2 += eval_at(ra_evals[2], val_evals[2], inc_evals[2]);
-            }
-
-            // Solve for the quadratic coefficient c from q(0), q(1), q(2).
-            // q(0) = a
-            // q(1) = a + b + c
-            // q(2) = a + 2b + 4c
-            // => 2c = q(2) - 2*q(1) + q(0)
-            let two_inv = F::from_u64(2).inverse().expect("field characteristic is 2");
-            let q_quadratic = (q2 - q1 - q1 + q0) * two_inv;
-
-            let evals = self
-                .eq_cycle_split
-                .gruen_evals_deg_3(q0, q_quadratic, previous_claim);
-            evals.to_vec()
+            self.phase2_compute_prover_message(previous_claim)
         }
     }
 
@@ -294,58 +368,66 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         let num_addr_rounds = self.params.K.log_2();
 
         if round < num_addr_rounds {
-            // Address rounds: bind the current address bit in the sparse matrix.
-            self.sparse_matrix.bind_address_bit(r_j);
+            self.phase1_bind(r_j, round);
         } else {
-            // Cycle rounds:
-            // On the first cycle round, materialize over cycles to obtain
-            // dense ra'(j) and Val'(j). On subsequent rounds, bind these
-            // dense polynomials (and inc) over cycle variables.
             let cycle_round = round - num_addr_rounds;
-
-            if cycle_round == 0 {
-                // Materialize ra(j) and Val(j) over cycles from the sparse
-                // matrix. At this point all address bits have been bound.
-                debug_assert!(self.ra_cycles.is_none());
-                debug_assert!(self.val_cycles.is_none());
-
-                let sparse = std::mem::take(&mut self.sparse_matrix);
-                let (ra_ml, val_ml) =
-                    sparse.materialize_over_cycles(self.params.T);
-                self.ra_cycles = Some(ra_ml);
-                self.val_cycles = Some(val_ml);
-            }
-
-            // Bind dense polynomials over cycle variables.
-            let ra = self
-                .ra_cycles
-                .as_mut()
-                .expect("ra_cycles must be materialized before cycle binding");
-            let val = self
-                .val_cycles
-                .as_mut()
-                .expect("val_cycles must be materialized before cycle binding");
-
-            ra.bind_parallel(r_j, BindingOrder::LowToHigh);
-            val.bind_parallel(r_j, BindingOrder::LowToHigh);
-            self.inc.bind_parallel(r_j, BindingOrder::LowToHigh);
-            self.eq_cycle_split.bind(r_j);
+            self.phase2_bind(r_j, cycle_round);
         }
     }
 
     fn cache_openings(
         &self,
-        _accumulator: &mut ProverOpeningAccumulator<F>,
-        _transcript: &mut T,
-        _sumcheck_challenges: &[F::Challenge],
+        accumulator: &mut ProverOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
     ) {
-        // TODO: once the prover message / binding logic are implemented,
-        // this should mirror the behavior of the cycle-first checker:
+        // Mirror the cycle-first checker: at the end of sumcheck we open
+        // RamVal and RamRa as virtual polynomials over (address, cycle)
+        // and RamInc as a dense committed polynomial over cycles.
         //
-        // - append virtual openings for RamVal and RamRa at the final
-        //   opening point over (address, cycle) variables.
-        // - append dense opening for RamInc over cycle variables.
-        unimplemented!("address-first RAM read-write cache_openings not yet implemented")
+        // For the addr-first variant, `ra_cycles` and `val_cycles` are dense
+        // polynomials over cycle variables only. After all rounds they have
+        // been fully bound, so their final_sumcheck_claims give the values
+        // used in the sumcheck polynomial at the final cycle point.
+        let opening_point = self
+            .params
+            .get_opening_point_addr_first(sumcheck_challenges);
+
+        let val_claim = self
+            .val_cycles
+            .as_ref()
+            .expect("val_cycles must be materialized before cache_openings")
+            .final_sumcheck_claim();
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::RamVal,
+            SumcheckId::RamReadWriteChecking,
+            opening_point.clone(),
+            val_claim,
+        );
+
+        let ra_claim = self
+            .ra_cycles
+            .as_ref()
+            .expect("ra_cycles must be materialized before cache_openings")
+            .final_sumcheck_claim();
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::RamRa,
+            SumcheckId::RamReadWriteChecking,
+            opening_point.clone(),
+            ra_claim,
+        );
+
+        let (_, r_cycle) = opening_point.split_at(self.params.K.log_2());
+        let inc_claim = self.inc.final_sumcheck_claim();
+        accumulator.append_dense(
+            transcript,
+            CommittedPolynomial::RamInc,
+            SumcheckId::RamReadWriteChecking,
+            r_cycle.r,
+            inc_claim,
+        );
     }
 
     #[cfg(feature = "allocative")]
@@ -410,7 +492,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         // As the address-first prover is completed, this method should remain
         // the same, since reordering sumcheck variables does not change the
         // target polynomial.
-        let r = self.params.get_opening_point(sumcheck_challenges);
+        let r = self
+            .params
+            .get_opening_point_addr_first(sumcheck_challenges);
         let (_, r_cycle) = r.split_at(self.params.K.log_2());
 
         let eq_eval_cycle = EqPolynomial::mle_endian(&self.params.r_cycle_stage_1, &r_cycle);
@@ -440,7 +524,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         // Mirror the cycle-first verifier: we expect RamVal and RamRa as
         // virtual polynomials over (address, cycle), and RamInc as a dense
         // committed polynomial over cycles.
-        let opening_point = self.params.get_opening_point(sumcheck_challenges);
+        let opening_point = self
+            .params
+            .get_opening_point_addr_first(sumcheck_challenges);
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::RamVal,

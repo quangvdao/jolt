@@ -64,15 +64,6 @@ fn packed64_to_fr(p: &FrPacked64) -> Fr {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Params {
-    len: u32,
-    phase: u32,
-    iters: u32,
-    _pad0: u32,
-}
-
-#[repr(C)]
 #[derive(Clone, Copy, bytemuck::Zeroable)]
 struct SumcheckParams {
     len: u32,
@@ -128,9 +119,6 @@ const SHADER_SRC_BN254_U64: &str = include_str!("../../shaders/bn254_sum_u64.wgs
 struct GpuBn254Context {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    bind_group_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
-    params_buffer: wgpu::Buffer,
     // Sumcheck-specific
     sumcheck_bind_group_layout: wgpu::BindGroupLayout,
     sumcheck_eval_bind_pipeline: wgpu::ComputePipeline,
@@ -140,9 +128,6 @@ struct GpuBn254Context {
 struct GpuBn254ContextU64 {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    bind_group_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
-    params_buffer: wgpu::Buffer,
     // Sumcheck-specific
     sumcheck_bind_group_layout: wgpu::BindGroupLayout,
     sumcheck_eval_bind_pipeline: wgpu::ComputePipeline,
@@ -191,73 +176,6 @@ impl GpuBn254Context {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bn254-sum-shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER_SRC_BN254.into()),
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bn254-sum-bind-group-layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("bn254-sum-pipeline-layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("bn254-sum-pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: "main",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-sum-params-buffer"),
-            size: std::mem::size_of::<Params>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         // Sumcheck bind group layout mirrors the BN254 sumcheck bindings in WGSL.
@@ -382,9 +300,6 @@ impl GpuBn254Context {
         Self {
             device,
             queue,
-            bind_group_layout,
-            pipeline,
-            params_buffer,
             sumcheck_bind_group_layout,
             sumcheck_eval_bind_pipeline,
             sumcheck_params_buffer,
@@ -681,151 +596,103 @@ impl GpuBn254Context {
 
         (g0, g1, g2)
     }
-    fn sum_products_bn254(&self, p: &[Fr], q: &[Fr], iters: u32) -> Fr {
-        assert_eq!(p.len(), q.len(), "p and q must have same length");
-        let n = p.len();
-        if n == 0 {
-            return Fr::from(0u64);
-        }
 
-        let encoded_p: Vec<FrPacked> = p
-            .iter()
-            .copied()
-            .map(fr_to_limbs)
-            .map(FrPacked::from)
-            .collect();
-        let encoded_q: Vec<FrPacked> = q
-            .iter()
-            .copied()
-            .map(fr_to_limbs)
-            .map(FrPacked::from)
-            .collect();
+    /// Same as `sumcheck_eval_bind_round`, but only measures the GPU kernel work:
+    /// it does not read back g0, g1, g2 to the CPU. Intended for "kernel-only"
+    /// timing baselines.
+    fn sumcheck_eval_bind_round_kernel_only(
+        &self,
+        state: &mut GpuBn254SumcheckState,
+        r: Fr,
+    ) {
+        assert!(
+            state.current_len >= 2,
+            "sumcheck_eval_bind_round_kernel_only requires at least one pair"
+        );
+        assert_eq!(
+            state.current_len % 2,
+            0,
+            "current_len must be even in sumcheck_eval_bind_round_kernel_only"
+        );
 
-        let element_size = std::mem::size_of::<FrPacked>() as u64;
-        let buffer_size_bytes = (n as u64) * element_size;
+        let len = state.current_len;
+        let pairs = len / 2;
+        let workgroups =
+            ((pairs as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
+        let workgroups_u32 = workgroups as u32;
 
-        let p_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-p-buffer"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let q_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-q-buffer"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-out-buffer"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
+        let r_packed: FrPacked = fr_to_limbs(r).into();
+        let params = SumcheckParams {
+            len,
+            _pad0: 0,
+            r: r_packed,
+        };
         self.queue
-            .write_buffer(&p_buf, 0, bytemuck::cast_slice(&encoded_p));
-        self.queue
-            .write_buffer(&q_buf, 0, bytemuck::cast_slice(&encoded_q));
+            .write_buffer(&self.sumcheck_params_buffer, 0, as_bytes(&params));
 
-        let mut current_len = n as u32;
-        let mut input_buf = &p_buf;
-        let mut output_buf = &out_buf;
-
-        while current_len > 1 {
-            let workgroups =
-                ((current_len as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
-            let workgroups_u32 = workgroups as u32;
-
-            let params = Params {
-                len: current_len,
-                phase: if current_len == n as u32 { 0 } else { 1 },
-                iters,
-                _pad0: 0,
-            };
-            self.queue
-                .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
-
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("bn254-sum-bind-group"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: input_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: q_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: output_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.params_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bn254-sum-encoder"),
-                });
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("bn254-sum-pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.pipeline);
-                cpass.set_bind_group(0, &bind_group, &[]);
-                cpass.dispatch_workgroups(workgroups_u32, 1, 1);
-            }
-
-            self.queue.submit(Some(encoder.finish()));
-
-            current_len = workgroups_u32;
-            std::mem::swap(&mut input_buf, &mut output_buf);
-        }
-
-        let result_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-sum-result-buffer"),
-            size: element_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bn254-sumcheck-eval-bind-kernel-only-bind-group"),
+            layout: &self.sumcheck_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: state.p_in.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: state.p_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: state.q_in.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: state.q_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: state.g0_partial.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: state.g1_partial.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: state.g2_partial.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.sumcheck_params_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bn254-sum-readback-encoder"),
+                label: Some("bn254-sumcheck-eval-bind-kernel-only-encoder"),
             });
-        encoder.copy_buffer_to_buffer(input_buf, 0, &result_buffer, 0, element_size);
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bn254-sumcheck-eval-bind-kernel-only-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.sumcheck_eval_bind_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(workgroups_u32, 1, 1);
+        }
+
+        // Submit and wait for GPU completion but do not read back results.
         self.queue.submit(Some(encoder.finish()));
-
-        let slice = result_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            tx.send(res).ok();
-        });
         self.device.poll(wgpu::Maintain::Wait);
-        rx.recv()
-            .expect("bn254: failed to receive map_async")
-            .expect("bn254: failed to map result buffer");
 
-        let data = slice.get_mapped_range();
-        let packed: FrPacked = *bytemuck::from_bytes(&data[..std::mem::size_of::<FrPacked>()]);
-        drop(data);
-        result_buffer.unmap();
-
-        limbs_to_fr(&FrLimbs::from(packed))
+        // Swap buffers and halve the current length, like the regular variant.
+        std::mem::swap(&mut state.p_in, &mut state.p_out);
+        std::mem::swap(&mut state.q_in, &mut state.q_out);
+        state.current_len = pairs;
     }
 }
 
@@ -856,73 +723,6 @@ impl GpuBn254ContextU64 {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bn254-sum-shader-u64"),
             source: wgpu::ShaderSource::Wgsl(SHADER_SRC_BN254_U64.into()),
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bn254-sum-bind-group-layout-u64"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("bn254-sum-pipeline-layout-u64"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("bn254-sum-pipeline-u64"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: "main",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
-
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-sum-params-buffer-u64"),
-            size: std::mem::size_of::<Params>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         // Sumcheck bind group layout mirrors the BN254 sumcheck bindings in WGSL.
@@ -1047,9 +847,6 @@ impl GpuBn254ContextU64 {
         Self {
             device,
             queue,
-            bind_group_layout,
-            pipeline,
-            params_buffer,
             sumcheck_bind_group_layout,
             sumcheck_eval_bind_pipeline,
             sumcheck_params_buffer,
@@ -1336,152 +1133,239 @@ impl GpuBn254ContextU64 {
         (g0, g1, g2)
     }
 
-    fn sum_products_bn254(&self, p: &[Fr], q: &[Fr], iters: u32) -> Fr {
-        assert_eq!(p.len(), q.len(), "p and q must have same length (u64)");
-        let n = p.len();
-        if n == 0 {
-            return Fr::from(0u64);
-        }
+    /// Kernel-only variant for the u64 path: runs the fused eval+bind on GPU
+    /// but does not read back g0, g1, g2 to the CPU.
+    fn sumcheck_eval_bind_round_kernel_only(
+        &self,
+        state: &mut GpuBn254SumcheckState,
+        r: Fr,
+    ) {
+        assert!(
+            state.current_len >= 2,
+            "sumcheck_eval_bind_round_kernel_only (u64): need at least one pair"
+        );
+        assert_eq!(
+            state.current_len % 2,
+            0,
+            "sumcheck_eval_bind_round_kernel_only (u64): len must be even"
+        );
 
-        let encoded_p: Vec<FrPacked64> = p.iter().copied().map(fr_to_packed64).collect();
-        let encoded_q: Vec<FrPacked64> = q.iter().copied().map(fr_to_packed64).collect();
+        let len = state.current_len;
+        let pairs = len / 2;
+        let workgroups =
+            ((pairs as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
+        let workgroups_u32 = workgroups as u32;
 
-        let element_size = std::mem::size_of::<FrPacked64>() as u64;
-        let buffer_size_bytes = (n as u64) * element_size;
-
-        let p_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-p-buffer-u64"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let q_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-q-buffer-u64"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let out_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-out-buffer-u64"),
-            size: buffer_size_bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
+        let r_packed: FrPacked64 = fr_to_packed64(r);
+        let params = SumcheckParams64 {
+            len,
+            _pad0: 0,
+            r: r_packed,
+        };
         self.queue
-            .write_buffer(&p_buf, 0, bytemuck::cast_slice(&encoded_p));
-        self.queue
-            .write_buffer(&q_buf, 0, bytemuck::cast_slice(&encoded_q));
+            .write_buffer(&self.sumcheck_params_buffer, 0, as_bytes(&params));
 
-        let mut current_len = n as u32;
-        let mut input_buf = &p_buf;
-        let mut output_buf = &out_buf;
-
-        while current_len > 1 {
-            let workgroups =
-                ((current_len as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
-            let workgroups_u32 = workgroups as u32;
-
-            let params = Params {
-                len: current_len,
-                phase: if current_len == n as u32 { 0 } else { 1 },
-                iters,
-                _pad0: 0,
-            };
-            self.queue
-                .write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
-
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("bn254-sum-bind-group-u64"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: input_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: q_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: output_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.params_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bn254-sum-encoder-u64"),
-                });
-
-            {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("bn254-sum-pass-u64"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.pipeline);
-                cpass.set_bind_group(0, &bind_group, &[]);
-                cpass.dispatch_workgroups(workgroups_u32, 1, 1);
-            }
-
-            self.queue.submit(Some(encoder.finish()));
-
-            current_len = workgroups_u32;
-            std::mem::swap(&mut input_buf, &mut output_buf);
-        }
-
-        let result_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bn254-sum-result-buffer-u64"),
-            size: element_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bn254-sumcheck-eval-bind-kernel-only-bind-group-u64"),
+            layout: &self.sumcheck_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: state.p_in.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: state.p_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: state.q_in.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: state.q_out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: state.g0_partial.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: state.g1_partial.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: state.g2_partial.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.sumcheck_params_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bn254-sum-readback-encoder-u64"),
+                label: Some("bn254-sumcheck-eval-bind-kernel-only-encoder-u64"),
             });
-        encoder.copy_buffer_to_buffer(input_buf, 0, &result_buffer, 0, element_size);
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bn254-sumcheck-eval-bind-kernel-only-pass-u64"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.sumcheck_eval_bind_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.dispatch_workgroups(workgroups_u32, 1, 1);
+        }
+
+        // Submit and wait for GPU completion but do not read back results.
         self.queue.submit(Some(encoder.finish()));
-
-        let slice = result_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            tx.send(res).ok();
-        });
         self.device.poll(wgpu::Maintain::Wait);
-        rx.recv()
-            .expect("bn254 u64: failed to receive map_async")
-            .expect("bn254 u64: failed to map result buffer");
 
-        let data = slice.get_mapped_range();
-        let packed: FrPacked64 = *bytemuck::from_bytes(&data[..std::mem::size_of::<FrPacked64>()]);
-        drop(data);
-        result_buffer.unmap();
-
-        packed64_to_fr(&packed)
+        // Swap buffers and halve the current length.
+        std::mem::swap(&mut state.p_in, &mut state.p_out);
+        std::mem::swap(&mut state.q_in, &mut state.q_out);
+        state.current_len = pairs;
     }
 }
 
+/// Sequential CPU implementation of the BN254 sumcheck over vectors `p`, `q`.
+/// Uses a pre-sampled list of verifier challenges `challenges` (one per round).
+fn sumcheck_cpu_seq(p: &[Fr], q: &[Fr], challenges: &[Fr]) -> Vec<(Fr, Fr, Fr)> {
+    assert_eq!(p.len(), q.len(), "sumcheck_cpu_seq: p and q must have same length");
+    let n = p.len();
+    assert!(n.is_power_of_two(), "sumcheck_cpu_seq: length must be power of two");
+    assert_eq!(
+        challenges.len(),
+        n.trailing_zeros() as usize,
+        "sumcheck_cpu_seq: challenges length must equal log2(len)"
+    );
+
+    let mut p_sc = p.to_vec();
+    let mut q_sc = q.to_vec();
+    let mut len_sc = n;
+
+    let mut per_round = Vec::with_capacity(challenges.len());
+
+    for &r_j in challenges {
+        let pairs = len_sc / 2;
+        let mut g0 = Fr::from(0u64);
+        let mut g1 = Fr::from(0u64);
+        let mut g2 = Fr::from(0u64);
+
+        // Compute g0, g1, g2 for this round (sequential).
+        for i in 0..pairs {
+            let p0 = p_sc[2 * i];
+            let p1 = p_sc[2 * i + 1];
+            let q0 = q_sc[2 * i];
+            let q1 = q_sc[2 * i + 1];
+            let dp = p1 - p0;
+            let dq = q1 - q0;
+            let a = p0 * q0;
+            let b = p0 * dq + q0 * dp;
+            let c = dp * dq;
+            g0 += a;
+            g1 += b;
+            g2 += c;
+        }
+
+        // Bind with challenge r_j to obtain p_{j+1}, q_{j+1}.
+        for i in 0..pairs {
+            let p0 = p_sc[2 * i];
+            let p1 = p_sc[2 * i + 1];
+            let q0 = q_sc[2 * i];
+            let q1 = q_sc[2 * i + 1];
+            let dp = p1 - p0;
+            let dq = q1 - q0;
+            p_sc[i] = p0 + r_j * dp;
+            q_sc[i] = q0 + r_j * dq;
+        }
+
+        len_sc /= 2;
+        per_round.push((g0, g1, g2));
+    }
+
+    assert_eq!(len_sc, 1, "sumcheck_cpu_seq: did not reduce to single element");
+    per_round
+}
+
+/// Rayon-parallel CPU implementation of the BN254 sumcheck.
+fn sumcheck_cpu_par(p: &[Fr], q: &[Fr], challenges: &[Fr]) -> Vec<(Fr, Fr, Fr)> {
+    assert_eq!(p.len(), q.len(), "sumcheck_cpu_par: p and q must have same length");
+    let n = p.len();
+    assert!(n.is_power_of_two(), "sumcheck_cpu_par: length must be power of two");
+    assert_eq!(
+        challenges.len(),
+        n.trailing_zeros() as usize,
+        "sumcheck_cpu_par: challenges length must equal log2(len)"
+    );
+
+    let mut p_sc = p.to_vec();
+    let mut q_sc = q.to_vec();
+    let mut len_sc = n;
+
+    let mut per_round = Vec::with_capacity(challenges.len());
+
+    for &r_j in challenges {
+        let pairs = len_sc / 2;
+
+        let p_view = &p_sc[..len_sc];
+        let q_view = &q_sc[..len_sc];
+
+        let mut p_next = vec![Fr::from(0u64); pairs];
+        let mut q_next = vec![Fr::from(0u64); pairs];
+
+        let (g0, g1, g2) = p_next
+            .par_iter_mut()
+            .zip(q_next.par_iter_mut())
+            .enumerate()
+            .map(|(i, (p_out, q_out))| {
+                let p0 = p_view[2 * i];
+                let p1 = p_view[2 * i + 1];
+                let q0 = q_view[2 * i];
+                let q1 = q_view[2 * i + 1];
+                let dp = p1 - p0;
+                let dq = q1 - q0;
+
+                // Bind for next round.
+                *p_out = p0 + r_j * dp;
+                *q_out = q0 + r_j * dq;
+
+                // Per-pair contributions to g(X) = g0 + g1 X + g2 X^2.
+                let a = p0 * q0;
+                let b = p0 * dq + q0 * dp;
+                let c = dp * dq;
+                (a, b, c)
+            })
+            .reduce(
+                || (Fr::from(0u64), Fr::from(0u64), Fr::from(0u64)),
+                |(g0_acc, g1_acc, g2_acc), (a, b, c)| {
+                    (g0_acc + a, g1_acc + b, g2_acc + c)
+                },
+            );
+
+        per_round.push((g0, g1, g2));
+
+        p_sc = p_next;
+        q_sc = q_next;
+        len_sc /= 2;
+    }
+
+    assert_eq!(len_sc, 1, "sumcheck_cpu_par: did not reduce to single element");
+    per_round
+}
+
 fn main() {
-    // Minimal BN254 inner-product experiment:
-    //  - Sample random Fr vectors p, q
-    //  - Compute sum_i p_i * q_i on CPU
-    //  - Compute the same sum on GPU using bn254_sum.wgsl
-    //  - Compare for equality and print timings.
+    // BN254 sumcheck experiment only:
+    //  - Sample random Fr vectors p, q of length 2^log2_len
+    //  - Run a sumcheck protocol on CPU (sequential and Rayon-parallel)
+    //  - Run the same protocol on GPU (32-bit and 64-bit limb representations)
+    //  - Check round-by-round agreement and print timings.
     let mut args = std::env::args();
     args.next(); // program name
+
     let log2_len: u32 = args
         .next()
         .and_then(|s| {
@@ -1492,183 +1376,129 @@ fn main() {
                 cleaned.parse().ok()
             }
         })
-        .unwrap_or(20);
-    assert!(log2_len <= 24, "log2_len too large for bn254 demo");
-    let n: usize = 1usize << log2_len;
+        .unwrap_or(16);
 
-    // Optional second CLI arg: number of repeated multiplications per pair.
-    // Example:
-    //   cargo run -p webgpu-sumcheck --bin bn254_sumcheck -- 20 1024
-    let iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    // For the sumcheck demo we keep sizes modest so all GPU buffers fit easily.
+    assert!(
+        log2_len <= 16,
+        "BN254 sumcheck demo currently supports log2_len <= 16"
+    );
+
+    let n: usize = 1usize << log2_len;
 
     let mut rng = rand::thread_rng();
     let p: Vec<Fr> = (0..n).map(|_| Fr::from(rng.gen::<u64>())).collect();
     let q: Vec<Fr> = (0..n).map(|_| Fr::from(rng.gen::<u64>())).collect();
 
-    // CPU baselines: sequential and Rayon-parallel.
-    // We perform `iters` multiplications per input pair, matching the GPU work.
-    let start_cpu_seq = Instant::now();
-    let cpu_sum_seq: Fr = p
-        .iter()
-        .zip(q.iter())
-        .map(|(a, b)| {
-            let prod = *a * *b;
-            let mut acc = Fr::from(0u64);
-            for _ in 0..iters {
-                acc += prod;
-            }
-            acc
-        })
-        .fold(Fr::from(0u64), |acc, x| acc + x);
-    let cpu_time_seq = start_cpu_seq.elapsed();
-
-    let start_cpu_par = Instant::now();
-    let cpu_sum_par: Fr = p
-        .par_iter()
-        .zip(&q)
-        .map(|(a, b)| {
-            let prod = *a * *b;
-            let mut acc = Fr::from(0u64);
-            for _ in 0..iters {
-                acc += prod;
-            }
-            acc
-        })
-        .reduce(|| Fr::from(0u64), |acc, x| acc + x);
-    let cpu_time_par = start_cpu_par.elapsed();
-
-    let start_gpu_setup = Instant::now();
+    // GPU contexts used for the sumcheck experiment.
     let ctx = pollster::block_on(GpuBn254Context::new());
-    let gpu_setup_time = start_gpu_setup.elapsed();
-
-    let start_gpu_u32 = Instant::now();
-    let gpu_sum_u32 = ctx.sum_products_bn254(&p, &q, iters);
-    let gpu_time_u32 = start_gpu_u32.elapsed();
-
-    let start_gpu_setup_u64 = Instant::now();
     let ctx_u64 = pollster::block_on(GpuBn254ContextU64::new());
-    let gpu_setup_time_u64 = start_gpu_setup_u64.elapsed();
 
-    let start_gpu_u64 = Instant::now();
-    let gpu_sum_u64 = ctx_u64.sum_products_bn254(&p, &q, iters);
-    let gpu_time_u64 = start_gpu_u64.elapsed();
+    // Pre-sample verifier challenges so all implementations see the same r_j.
+    let mut rng_ch = rand::thread_rng();
+    let rounds = log2_len as usize;
+    let challenges: Vec<Fr> = (0..rounds)
+        .map(|_| Fr::from(rng_ch.gen::<u64>()))
+        .collect();
 
-    println!("BN254 inner-product experiment");
-    println!("log2_len: {}", log2_len);
-    println!("length: {}", n);
-    println!("iters per pair: {}", iters);
-    println!("CPU sum (seq): {:?}", cpu_sum_seq);
-    println!("CPU sum (par): {:?}", cpu_sum_par);
-    println!("GPU sum (8×u32): {:?}", gpu_sum_u32);
-    println!("GPU sum (4×u64): {:?}", gpu_sum_u64);
-    let match_all =
-        cpu_sum_seq == cpu_sum_par && cpu_sum_seq == gpu_sum_u32 && cpu_sum_seq == gpu_sum_u64;
-    println!(
-        "Match (CPU seq vs CPU par vs 8×u32 vs 4×u64): {}",
-        match_all
-    );
-    println!("CPU 1-thread time: {:?}", cpu_time_seq);
-    println!("CPU Rayon time:    {:?}", cpu_time_par);
-    println!("GPU setup time (8×u32): {:?}", gpu_setup_time);
-    println!("GPU sum time (8×u32): {:?}", gpu_time_u32);
-    println!("GPU setup time (4×u64): {:?}", gpu_setup_time_u64);
-    println!("GPU sum time (4×u64): {:?}", gpu_time_u64);
-    let total_mul = (n as f64) * (iters as f64);
-    let cpu_seq_mps = total_mul / cpu_time_seq.as_secs_f64() / 1e6;
-    let cpu_par_mps = total_mul / cpu_time_par.as_secs_f64() / 1e6;
-    let gpu_u32_mps = total_mul / gpu_time_u32.as_secs_f64() / 1e6;
-    let gpu_u64_mps = total_mul / gpu_time_u64.as_secs_f64() / 1e6;
-    println!("CPU 1-thread mult throughput: {:.3} Mmul/s", cpu_seq_mps);
-    println!("CPU Rayon mult throughput:    {:.3} Mmul/s", cpu_par_mps);
-    println!(
-        "GPU mult throughput (8×u32 limbs): {:.3} Mmul/s",
-        gpu_u32_mps
-    );
-    println!(
-        "GPU mult throughput (4×u64 limbs): {:.3} Mmul/s",
-        gpu_u64_mps
-    );
+    // CPU sumcheck (sequential).
+    let start_sc_cpu_seq = Instant::now();
+    let sc_cpu_seq = sumcheck_cpu_seq(&p, &q, &challenges);
+    let sc_cpu_seq_time = start_sc_cpu_seq.elapsed();
 
-    // BN254 sumcheck experiment (minimal, re-uses the same p, q).
-    if log2_len <= 16 {
-        let mut sc_state = ctx.sumcheck_start(&p, &q);
-        let mut sc_state_u64 = ctx_u64.sumcheck_start(&p, &q);
+    // CPU sumcheck (Rayon-parallel).
+    let start_sc_cpu_par = Instant::now();
+    let sc_cpu_par = sumcheck_cpu_par(&p, &q, &challenges);
+    let sc_cpu_par_time = start_sc_cpu_par.elapsed();
 
-        let mut p_sc = p.clone();
-        let mut q_sc = q.clone();
-        let mut len_sc = n;
-        let mut rng_ch = rand::thread_rng();
-
-        let mut ok = true;
-
-        for round in 0..log2_len {
-            // CPU reference for this round, using the current p_sc, q_sc (p_j, q_j).
-            let slice_len = len_sc;
-            let pairs = slice_len / 2;
-            let mut g0_cpu = Fr::from(0u64);
-            let mut g1_cpu = Fr::from(0u64);
-            let mut g2_cpu = Fr::from(0u64);
-            for i in 0..pairs {
-                let p0 = p_sc[2 * i];
-                let p1 = p_sc[2 * i + 1];
-                let q0 = q_sc[2 * i];
-                let q1 = q_sc[2 * i + 1];
-                let dp = p1 - p0;
-                let dq = q1 - q0;
-                let a = p0 * q0;
-                let b = p0 * dq + q0 * dp;
-                let c = dp * dq;
-                g0_cpu += a;
-                g1_cpu += b;
-                g2_cpu += c;
-            }
-
-            // Sample verifier challenge r_j on CPU.
-            let r_j: Fr = Fr::from(rng_ch.gen::<u64>());
-
-            // GPU: fused eval + bind for this round using the same r_j.
-            let (g0_gpu, g1_gpu, g2_gpu) = ctx.sumcheck_eval_bind_round(&mut sc_state, r_j);
-            let (g0_gpu_u64, g1_gpu_u64, g2_gpu_u64) =
-                ctx_u64.sumcheck_eval_bind_round(&mut sc_state_u64, r_j);
-
-            if g0_cpu != g0_gpu
-                || g1_cpu != g1_gpu
-                || g2_cpu != g2_gpu
-                || g0_cpu != g0_gpu_u64
-                || g1_cpu != g1_gpu_u64
-                || g2_cpu != g2_gpu_u64
-            {
-                println!(
-                    "sumcheck round {} mismatch:\n  CPU   ({:?}, {:?}, {:?})\n  GPU32({:?}, {:?}, {:?})\n  GPU64({:?}, {:?}, {:?})",
-                    round,
-                    g0_cpu,
-                    g1_cpu,
-                    g2_cpu,
-                    g0_gpu,
-                    g1_gpu,
-                    g2_gpu,
-                    g0_gpu_u64,
-                    g1_gpu_u64,
-                    g2_gpu_u64
-                );
-                ok = false;
-                break;
-            }
-
-            // CPU bind
-            for i in 0..pairs {
-                let p0 = p_sc[2 * i];
-                let p1 = p_sc[2 * i + 1];
-                let q0 = q_sc[2 * i];
-                let q1 = q_sc[2 * i + 1];
-                let dp = p1 - p0;
-                let dq = q1 - q0;
-                p_sc[i] = p0 + r_j * dp;
-                q_sc[i] = q0 + r_j * dq;
-            }
-            len_sc /= 2;
+    // Check that sequential and parallel CPU implementations agree.
+    let mut ok_cpu = true;
+    for (round, (seq, par)) in sc_cpu_seq.iter().zip(sc_cpu_par.iter()).enumerate() {
+        if seq != par {
+            println!(
+                "sumcheck CPU seq vs par mismatch at round {}:\n  seq: {:?}\n  par: {:?}",
+                round, seq, par
+            );
+            ok_cpu = false;
+            break;
         }
-
-        println!("BN254 sumcheck round-by-round match: {}", ok);
     }
+
+    // GPU sumcheck using fused eval+bind kernel, checked against CPU seq.
+    let mut sc_state = ctx.sumcheck_start(&p, &q);
+    let mut sc_state_u64 = ctx_u64.sumcheck_start(&p, &q);
+
+    let start_sc_gpu = Instant::now();
+    let mut ok_gpu = true;
+
+    for (round, &r_j) in challenges.iter().enumerate() {
+        let (g0_cpu, g1_cpu, g2_cpu) = sc_cpu_seq[round];
+
+        // GPU: fused eval + bind for this round using the same r_j.
+        let (g0_gpu, g1_gpu, g2_gpu) = ctx.sumcheck_eval_bind_round(&mut sc_state, r_j);
+        let (g0_gpu_u64, g1_gpu_u64, g2_gpu_u64) =
+            ctx_u64.sumcheck_eval_bind_round(&mut sc_state_u64, r_j);
+
+        if g0_cpu != g0_gpu
+            || g1_cpu != g1_gpu
+            || g2_cpu != g2_gpu
+            || g0_cpu != g0_gpu_u64
+            || g1_cpu != g1_gpu_u64
+            || g2_cpu != g2_gpu_u64
+        {
+            println!(
+                "sumcheck round {} mismatch:\n  CPU   ({:?}, {:?}, {:?})\n  GPU32({:?}, {:?}, {:?})\n  GPU64({:?}, {:?}, {:?})",
+                round,
+                g0_cpu,
+                g1_cpu,
+                g2_cpu,
+                g0_gpu,
+                g1_gpu,
+                g2_gpu,
+                g0_gpu_u64,
+                g1_gpu_u64,
+                g2_gpu_u64
+            );
+            ok_gpu = false;
+            break;
+        }
+    }
+    let sc_gpu_time = start_sc_gpu.elapsed();
+
+    // GPU sumcheck (kernel-only, no readbacks) for both 8×u32 and 4×u64 paths.
+    let mut sc_state_kernel_u32 = ctx.sumcheck_start(&p, &q);
+    let start_sc_gpu_kernel_u32 = Instant::now();
+    for &r_j in &challenges {
+        ctx.sumcheck_eval_bind_round_kernel_only(&mut sc_state_kernel_u32, r_j);
+    }
+    let sc_gpu_kernel_time_u32 = start_sc_gpu_kernel_u32.elapsed();
+
+    let mut sc_state_kernel_u64 = ctx_u64.sumcheck_start(&p, &q);
+    let start_sc_gpu_kernel_u64 = Instant::now();
+    for &r_j in &challenges {
+        ctx_u64.sumcheck_eval_bind_round_kernel_only(&mut sc_state_kernel_u64, r_j);
+    }
+    let sc_gpu_kernel_time_u64 = start_sc_gpu_kernel_u64.elapsed();
+
+    println!("BN254 sumcheck experiment");
+    println!("  log2_len: {}", log2_len);
+    println!("  length:   {}", n);
+    println!(
+        "BN254 sumcheck round-by-round match (CPU seq vs par vs GPU32 vs GPU64): {}",
+        ok_cpu && ok_gpu
+    );
+    println!("  Sumcheck CPU 1-thread time: {:?}", sc_cpu_seq_time);
+    println!("  Sumcheck CPU Rayon time:    {:?}", sc_cpu_par_time);
+    println!(
+        "  Sumcheck GPU fused time (4×u64 limbs, including readbacks): {:?}",
+        sc_gpu_time
+    );
+    println!(
+        "  Sumcheck GPU fused time (8×u32 limbs, kernel-only, no readbacks): {:?}",
+        sc_gpu_kernel_time_u32
+    );
+    println!(
+        "  Sumcheck GPU fused time (4×u64 limbs, kernel-only, no readbacks): {:?}",
+        sc_gpu_kernel_time_u64
+    );
 }

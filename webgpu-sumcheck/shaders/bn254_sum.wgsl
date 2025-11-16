@@ -18,6 +18,8 @@ struct Buffer {
 struct Params {
     len: u32,
     phase: u32,
+    iters: u32,
+    _pad: u32,
 };
 
 @group(0) @binding(0)
@@ -443,7 +445,19 @@ fn main(
         if (params.phase == 0u) {
             let a = p_buf.data[idx];
             let b = q_buf.data[idx];
-            acc = fr_mul(a, b);
+
+            // Perform `iters` BN254 multiplications per element, accumulating
+            // the products. This mirrors the CPU benchmark, which repeats
+            // `p_i * q_i` `iters` times per element.
+            var i: u32 = 0u;
+            loop {
+                if (i >= params.iters) {
+                    break;
+                }
+                let prod = fr_mul(a, b);
+                acc = fr_add(acc, prod);
+                i = i + 1u;
+            }
         } else {
             acc = p_buf.data[idx];
         }
@@ -509,6 +523,91 @@ fn sumcheck_eval_round(
         acc0 = fr_add(acc0, a);
         acc1 = fr_add(acc1, b);
         acc2 = fr_add(acc2, c);
+    }
+
+    sc_shared_g0[local] = acc0;
+    sc_shared_g1[local] = acc1;
+    sc_shared_g2[local] = acc2;
+    workgroupBarrier();
+
+    var stride: u32 = WORKGROUP_SIZE / 2u;
+    loop {
+        if (stride == 0u) {
+            break;
+        }
+
+        if (local < stride) {
+            sc_shared_g0[local] =
+                fr_add(sc_shared_g0[local], sc_shared_g0[local + stride]);
+            sc_shared_g1[local] =
+                fr_add(sc_shared_g1[local], sc_shared_g1[local + stride]);
+            sc_shared_g2[local] =
+                fr_add(sc_shared_g2[local], sc_shared_g2[local + stride]);
+        }
+
+        workgroupBarrier();
+        stride = stride / 2u;
+    }
+
+    if (local == 0u) {
+        sc_g0_partial.data[workgroup_id.x] = sc_shared_g0[0u];
+        sc_g1_partial.data[workgroup_id.x] = sc_shared_g1[0u];
+        sc_g2_partial.data[workgroup_id.x] = sc_shared_g2[0u];
+    }
+}
+
+// Fused kernel: in a single pass over memory, compute per-workgroup partial
+// sums of A, B, C coefficients *and* apply the verifier challenge r to bind
+// one variable:
+//   - Inputs:  sc_p_in, sc_q_in, sc_params.r
+//   - Outputs: sc_g{0,1,2}_partial (like sumcheck_eval_round) and
+//              sc_p_out, sc_q_out (like sumcheck_bind_round).
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn sumcheck_eval_bind_round(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+) {
+    let local = local_id.x;
+    let len = sc_params.len;
+    let pair_idx = global_id.x;
+
+    var acc0: Fr = fr_zero(); // sum of A coefficients
+    var acc1: Fr = fr_zero(); // sum of B coefficients
+    var acc2: Fr = fr_zero(); // sum of C coefficients
+
+    let base = 2u * pair_idx;
+    if (base + 1u < len) {
+        let p0 = sc_p_in.data[base];
+        let p1 = sc_p_in.data[base + 1u];
+        let q0 = sc_q_in.data[base];
+        let q1 = sc_q_in.data[base + 1u];
+
+        let dp = fr_sub(p1, p0);
+        let dq = fr_sub(q1, q0);
+
+        // A, B, C contributions for this pair.
+        let a = fr_mul(p0, q0);
+        let b1 = fr_mul(p0, dq);
+        let b2 = fr_mul(q0, dp);
+        let b = fr_add(b1, b2);
+        let c = fr_mul(dp, dq);
+
+        acc0 = fr_add(acc0, a);
+        acc1 = fr_add(acc1, b);
+        acc2 = fr_add(acc2, c);
+
+        // Apply challenge r to bind this variable:
+        //   p_next = p0 + r * (p1 - p0)
+        //   q_next = q0 + r * (q1 - q0)
+        let r = sc_params.r;
+        let rp = fr_mul(r, dp);
+        let rq = fr_mul(r, dq);
+        let p_next = fr_add(p0, rp);
+        let q_next = fr_add(q0, rq);
+
+        sc_p_out.data[pair_idx] = p_next;
+        sc_q_out.data[pair_idx] = q_next;
     }
 
     sc_shared_g0[local] = acc0;

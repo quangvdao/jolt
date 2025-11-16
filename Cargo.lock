@@ -4895,6 +4895,8 @@ dependencies = [
 name = "webgpu-sumcheck"
 version = "0.1.0"
 dependencies = [
+ "ark-bn254",
+ "ark-ff",
  "bytemuck",
  "pollster",
  "rand 0.8.5",

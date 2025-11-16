@@ -421,6 +421,62 @@ fn sumcheck_eval_round(
     }
 }
 
+// Reduction kernel for the univariate coefficients:
+//  - Input:  sc_g0_partial[0..len), sc_g1_partial[0..len), sc_g2_partial[0..len)
+//  - Output: per-workgroup partial sums written back into the same buffers at
+//            indices [0..num_workgroups). Repeated application reduces the
+//            arrays down to length 1.
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn sumcheck_reduce_coeffs(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+) {
+    let local = local_id.x;
+    let len = sc_params.len;
+    let idx = global_id.x;
+
+    var acc0: U128 = zero_u128();
+    var acc1: U128 = zero_u128();
+    var acc2: U128 = zero_u128();
+
+    if (idx < len) {
+        acc0 = sc_g0_partial.data[idx];
+        acc1 = sc_g1_partial.data[idx];
+        acc2 = sc_g2_partial.data[idx];
+    }
+
+    sc_shared_g0[local] = acc0;
+    sc_shared_g1[local] = acc1;
+    sc_shared_g2[local] = acc2;
+    workgroupBarrier();
+
+    var stride: u32 = WORKGROUP_SIZE / 2u;
+    loop {
+        if (stride == 0u) {
+            break;
+        }
+
+        if (local < stride) {
+            sc_shared_g0[local] =
+                add_u128(sc_shared_g0[local], sc_shared_g0[local + stride]);
+            sc_shared_g1[local] =
+                add_u128(sc_shared_g1[local], sc_shared_g1[local + stride]);
+            sc_shared_g2[local] =
+                add_u128(sc_shared_g2[local], sc_shared_g2[local + stride]);
+        }
+
+        workgroupBarrier();
+        stride = stride / 2u;
+    }
+
+    if (local == 0u) {
+        sc_g0_partial.data[workgroup_id.x] = sc_shared_g0[0u];
+        sc_g1_partial.data[workgroup_id.x] = sc_shared_g1[0u];
+        sc_g2_partial.data[workgroup_id.x] = sc_shared_g2[0u];
+    }
+}
+
 // Second kernel for a sumcheck round:
 //  - Input:  sc_p_in[0..len), sc_q_in[0..len)
 //  - Uniform: sc_params.r is the challenge r

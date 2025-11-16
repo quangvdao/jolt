@@ -27,8 +27,9 @@ struct Params {
 struct SumcheckParams {
     len: u32,
     _pad0: u32,
-    r: U128Limbs,
+    // Pad so that `r` starts at offset 16 to match WGSL's `vec4<u32>` alignment.
     _pad1: [u32; 2],
+    r: U128Limbs,
 }
 
 fn u128_to_limbs(x: u128) -> U128Limbs {
@@ -49,6 +50,67 @@ fn limbs_to_u128(l: &U128Limbs) -> u128 {
         x |= (l.limbs[i]) as u128;
     }
     x
+}
+
+/// CPU reference: evaluate one sumcheck round for f = p * q on the current
+/// evaluation tables for p and q, returning coefficients (g0, g1, g2) of
+/// g(X) = g0 + g1 X + g2 X^2.
+#[allow(dead_code)]
+fn cpu_sumcheck_eval_round(p: &[u128], q: &[u128]) -> (u128, u128, u128) {
+    assert_eq!(p.len(), q.len(), "cpu_sumcheck_eval_round: p,q length mismatch");
+    assert!(
+        p.len() % 2 == 0,
+        "cpu_sumcheck_eval_round: length must be even"
+    );
+    let mut g0 = 0u128;
+    let mut g1 = 0u128;
+    let mut g2 = 0u128;
+    let pairs = p.len() / 2;
+    for i in 0..pairs {
+        let p0 = p[2 * i];
+        let p1 = p[2 * i + 1];
+        let q0 = q[2 * i];
+        let q1 = q[2 * i + 1];
+        let dp = p1.wrapping_sub(p0);
+        let dq = q1.wrapping_sub(q0);
+
+        let a = p0.wrapping_mul(q0);
+        let b1 = p0.wrapping_mul(dq);
+        let b2 = q0.wrapping_mul(dp);
+        let b = b1.wrapping_add(b2);
+        let c = dp.wrapping_mul(dq);
+
+        g0 = g0.wrapping_add(a);
+        g1 = g1.wrapping_add(b);
+        g2 = g2.wrapping_add(c);
+    }
+    (g0, g1, g2)
+}
+
+/// CPU reference: bind one variable with challenge `r` into the evaluation
+/// tables for p and q in place. The first half of each table is updated with
+/// p_next[i] = p0 + r * (p1 - p0), q_next[i] = q0 + r * (q1 - q0), where
+/// p0 = p[2*i], p1 = p[2*i+1], etc. The length is halved by the caller.
+#[allow(dead_code)]
+fn cpu_sumcheck_apply_challenge(p: &mut [u128], q: &mut [u128], r: u128) {
+    assert_eq!(p.len(), q.len(), "cpu_sumcheck_apply_challenge: p,q length mismatch");
+    assert!(
+        p.len() % 2 == 0,
+        "cpu_sumcheck_apply_challenge: length must be even"
+    );
+    let pairs = p.len() / 2;
+    for i in 0..pairs {
+        let p0 = p[2 * i];
+        let p1 = p[2 * i + 1];
+        let q0 = q[2 * i];
+        let q1 = q[2 * i + 1];
+        let dp = p1.wrapping_sub(p0);
+        let dq = q1.wrapping_sub(q0);
+        let rp = r.wrapping_mul(dp);
+        let rq = r.wrapping_mul(dq);
+        p[i] = p0.wrapping_add(rp);
+        q[i] = q0.wrapping_add(rq);
+    }
 }
 
 /// Basic binding step for a multilinear polynomial with u128 coefficients.
@@ -150,6 +212,7 @@ struct GpuSumContext {
     sumcheck_bind_group_layout: wgpu::BindGroupLayout,
     sumcheck_eval_pipeline: wgpu::ComputePipeline,
     sumcheck_bind_pipeline: wgpu::ComputePipeline,
+    sumcheck_reduce_pipeline: wgpu::ComputePipeline,
     sumcheck_params_buffer: wgpu::Buffer,
     p_buffer: Option<wgpu::Buffer>,
     q_buffer: Option<wgpu::Buffer>,
@@ -381,6 +444,15 @@ impl GpuSumContext {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             });
 
+        let sumcheck_reduce_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("sumcheck-reduce-pipeline"),
+                layout: Some(&sumcheck_pipeline_layout),
+                module: &shader,
+                entry_point: "sumcheck_reduce_coeffs",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
+
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sum-params-buffer"),
             size: std::mem::size_of::<Params>() as u64,
@@ -411,6 +483,7 @@ impl GpuSumContext {
             sumcheck_bind_group_layout,
             sumcheck_eval_pipeline,
             sumcheck_bind_pipeline,
+            sumcheck_reduce_pipeline,
             sumcheck_params_buffer,
             p_buffer: None,
             q_buffer: None,
@@ -710,6 +783,54 @@ impl GpuSumContext {
 
         total
     }
+
+    /// Debug helper: read back `len` U128Limbs elements from a GPU buffer and
+    /// decode them into u128 values. Intended for small instances to compare
+    /// GPU state against CPU reference implementations.
+    fn debug_read_u128_vector(&self, buffer: &wgpu::Buffer, len: u32) -> Vec<u128> {
+        if len == 0 {
+            return Vec::new();
+        }
+        let element_size = std::mem::size_of::<U128Limbs>() as u64;
+        let size_bytes = (len as u64) * element_size;
+
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("debug-readback-buffer"),
+            size: size_bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("debug-readback-encoder"),
+                });
+        encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, size_bytes);
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = readback.slice(..size_bytes);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            tx.send(res).ok();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .expect("Failed to receive map_async result for debug_read_u128_vector")
+            .expect("Failed to map debug_readback buffer");
+
+        let data = slice.get_mapped_range();
+        let limbs_slice: &[U128Limbs] = bytemuck::cast_slice(&data);
+        let mut out = Vec::with_capacity(len as usize);
+        for i in 0..(len as usize) {
+            out.push(limbs_to_u128(&limbs_slice[i]));
+        }
+
+        drop(data);
+        readback.unmap();
+
+        out
+    }
 }
 
 /// State for a GPU-backed sumcheck for f = p * q, where p and q are multilinear
@@ -723,7 +844,7 @@ struct GpuSumcheckState {
     g1_partial: wgpu::Buffer,
     g2_partial: wgpu::Buffer,
     current_len: u32,
-    log2_len: u32,
+    // log2_len: u32,
 }
 
 impl GpuSumContext {
@@ -745,7 +866,6 @@ impl GpuSumContext {
             0,
             "sumcheck_start expects length to be a power of two"
         );
-        let log2_len = (len as u32).trailing_zeros();
 
         let encoded_p: Vec<U128Limbs> = p.iter().copied().map(u128_to_limbs).collect();
         let encoded_q: Vec<U128Limbs> = q.iter().copied().map(u128_to_limbs).collect();
@@ -838,7 +958,7 @@ impl GpuSumContext {
             g1_partial,
             g2_partial,
             current_len: len as u32,
-            log2_len,
+            // log2_len,
         }
     }
 
@@ -865,10 +985,10 @@ impl GpuSumContext {
         let params = SumcheckParams {
             len,
             _pad0: 0,
+            _pad1: [0u32; 2],
             r: U128Limbs {
                 limbs: [0u32; NUM_LIMBS],
             },
-            _pad1: [0u32; 2],
         };
 
         self.queue
@@ -919,6 +1039,7 @@ impl GpuSumContext {
                 label: Some("sumcheck-eval-encoder"),
             });
 
+        // First pass: compute per-workgroup partial sums of A, B, C.
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("sumcheck-eval-pass"),
@@ -929,52 +1050,127 @@ impl GpuSumContext {
             cpass.dispatch_workgroups(workgroup_count_u32, 1, 1);
         }
 
-        // Copy partial sums into temporary readback buffers.
+        // Subsequent passes: reduce the partial sums on GPU until one triple remains.
+        let mut partial_len = workgroup_count_u32;
+        while partial_len > 1 {
+            let reduce_workgroups = ((partial_len as u64) + (WORKGROUP_SIZE as u64) - 1)
+                / (WORKGROUP_SIZE as u64);
+            let reduce_workgroups_u32 = reduce_workgroups as u32;
+
+            let reduce_params = SumcheckParams {
+                len: partial_len,
+                _pad0: 0,
+                _pad1: [0u32; 2],
+                r: U128Limbs {
+                    limbs: [0u32; NUM_LIMBS],
+                },
+            };
+
+            self.queue.write_buffer(
+                &self.sumcheck_params_buffer,
+                0,
+                bytemuck::bytes_of(&reduce_params),
+            );
+
+            let reduce_bind_group =
+                self.device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("sumcheck-reduce-bind-group"),
+                        layout: &self.sumcheck_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: state.p_in.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: state.p_out.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: state.q_in.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: state.q_out.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: state.g0_partial.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: state.g1_partial.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: state.g2_partial.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 7,
+                                resource: self.sumcheck_params_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+
+            {
+                let mut cpass =
+                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("sumcheck-reduce-pass"),
+                        timestamp_writes: None,
+                    });
+                cpass.set_pipeline(&self.sumcheck_reduce_pipeline);
+                cpass.set_bind_group(0, &reduce_bind_group, &[]);
+                cpass.dispatch_workgroups(reduce_workgroups_u32, 1, 1);
+            }
+
+            partial_len = reduce_workgroups_u32;
+        }
+
+        // Read back the single remaining triple (three U128Limbs).
         let element_size = std::mem::size_of::<U128Limbs>() as u64;
-        let partial_size_bytes = (workgroup_count as u64) * element_size;
 
         let g0_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sumcheck-g0-readback"),
-            size: partial_size_bytes,
+            size: element_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
         let g1_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sumcheck-g1-readback"),
-            size: partial_size_bytes,
+            size: element_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
         let g2_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sumcheck-g2-readback"),
-            size: partial_size_bytes,
+            size: element_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        encoder.copy_buffer_to_buffer(&state.g0_partial, 0, &g0_readback, 0, partial_size_bytes);
-        encoder.copy_buffer_to_buffer(&state.g1_partial, 0, &g1_readback, 0, partial_size_bytes);
-
-        encoder.copy_buffer_to_buffer(&state.g2_partial, 0, &g2_readback, 0, partial_size_bytes);
+        encoder.copy_buffer_to_buffer(&state.g0_partial, 0, &g0_readback, 0, element_size);
+        encoder.copy_buffer_to_buffer(&state.g1_partial, 0, &g1_readback, 0, element_size);
+        encoder.copy_buffer_to_buffer(&state.g2_partial, 0, &g2_readback, 0, element_size);
 
         self.queue.submit(Some(encoder.finish()));
 
-        // Map and reduce g0.
-        let g0_slice = g0_readback.slice(..partial_size_bytes);
+        // Map and decode the three coefficients.
+        let g0_slice = g0_readback.slice(..element_size);
         let (g0_tx, g0_rx) = std::sync::mpsc::channel();
         g0_slice.map_async(wgpu::MapMode::Read, move |res| {
             g0_tx.send(res).ok();
         });
 
-        let g1_slice = g1_readback.slice(..partial_size_bytes);
+        let g1_slice = g1_readback.slice(..element_size);
         let (g1_tx, g1_rx) = std::sync::mpsc::channel();
         g1_slice.map_async(wgpu::MapMode::Read, move |res| {
             g1_tx.send(res).ok();
         });
 
-        let g2_slice = g2_readback.slice(..partial_size_bytes);
+        let g2_slice = g2_readback.slice(..element_size);
         let (g2_tx, g2_rx) = std::sync::mpsc::channel();
         g2_slice.map_async(wgpu::MapMode::Read, move |res| {
             g2_tx.send(res).ok();
@@ -999,18 +1195,16 @@ impl GpuSumContext {
         let g1_data = g1_slice.get_mapped_range();
         let g2_data = g2_slice.get_mapped_range();
 
-        let g0_partials: &[U128Limbs] = bytemuck::cast_slice(&g0_data);
-        let g1_partials: &[U128Limbs] = bytemuck::cast_slice(&g1_data);
-        let g2_partials: &[U128Limbs] = bytemuck::cast_slice(&g2_data);
+        let g0_limbs: &U128Limbs =
+            bytemuck::from_bytes(&g0_data[..std::mem::size_of::<U128Limbs>()]);
+        let g1_limbs: &U128Limbs =
+            bytemuck::from_bytes(&g1_data[..std::mem::size_of::<U128Limbs>()]);
+        let g2_limbs: &U128Limbs =
+            bytemuck::from_bytes(&g2_data[..std::mem::size_of::<U128Limbs>()]);
 
-        let mut g0: u128 = 0;
-        let mut g1: u128 = 0;
-        let mut g2: u128 = 0;
-        for i in 0..(workgroup_count as usize) {
-            g0 = g0.wrapping_add(limbs_to_u128(&g0_partials[i]));
-            g1 = g1.wrapping_add(limbs_to_u128(&g1_partials[i]));
-            g2 = g2.wrapping_add(limbs_to_u128(&g2_partials[i]));
-        }
+        let g0 = limbs_to_u128(g0_limbs);
+        let g1 = limbs_to_u128(g1_limbs);
+        let g2 = limbs_to_u128(g2_limbs);
 
         drop(g0_data);
         drop(g1_data);
@@ -1047,8 +1241,8 @@ impl GpuSumContext {
         let params = SumcheckParams {
             len,
             _pad0: 0,
-            r: r_limbs,
             _pad1: [0u32; 2],
+            r: r_limbs,
         };
 
         self.queue
@@ -1147,6 +1341,13 @@ fn main() {
     );
     let n: usize = 1usize << log2_len;
 
+    // Pre-sample verifier challenges for the sumcheck rounds so that both the
+    // CPU reference and GPU implementations use the same sequence.
+    let mut challenge_rng = rand::thread_rng();
+    let challenges: Vec<u128> = (0..log2_len)
+        .map(|_| challenge_rng.gen::<u128>())
+        .collect();
+
     // Try to load cached polynomials for this size; if missing or invalid, generate and cache.
     let (p, q, rng_time, load_time, used_cache) =
         if let Some((p, q, load_time)) = try_load_cached_polys(log2_len, n) {
@@ -1198,12 +1399,122 @@ fn main() {
     let gpu_sum_time = start_gpu_sum.elapsed();
     let gpu_sum_time_per_iter = gpu_sum_time / iterations;
 
+    // Optional CPU reference sumcheck to sanity-check the algebraic recurrence
+    // and compare GPU state against CPU state round-by-round. Only enabled for
+    // small instances to keep debug output manageable.
+    if n <= 32 {
+        let mut p_cpu = p.clone();
+        let mut q_cpu = q.clone();
+        let mut len_cpu = n;
+        let mut prev_g_cpu: Option<(u128, u128, u128, u128)> = None;
+        let mut cpu_sumcheck_ok = true;
+
+        // Separate GPU state used only for this debug comparison.
+        let mut sc_state_debug = gpu_ctx.sumcheck_start(&p, &q);
+        let mut gpu_state_ok = true;
+
+        for round in 0..log2_len {
+            let slice_len = len_cpu;
+            let (g0_cpu, g1_cpu, g2_cpu) =
+                cpu_sumcheck_eval_round(&p_cpu[..slice_len], &q_cpu[..slice_len]);
+
+            let g_at_0_cpu = g0_cpu;
+            let g_at_1_cpu = g0_cpu
+                .wrapping_add(g1_cpu)
+                .wrapping_add(g2_cpu);
+
+            let (g0_gpu, g1_gpu, g2_gpu) = gpu_ctx.sumcheck_eval_round(&sc_state_debug);
+
+            if g0_cpu != g0_gpu || g1_cpu != g1_gpu || g2_cpu != g2_gpu {
+                println!(
+                    "[DEBUG] round {}: CPU g = ({:#034x}, {:#034x}, {:#034x}), \
+                     GPU g = ({:#034x}, {:#034x}, {:#034x})",
+                    round, g0_cpu, g1_cpu, g2_cpu, g0_gpu, g1_gpu, g2_gpu
+                );
+                cpu_sumcheck_ok = false;
+                gpu_state_ok = false;
+                break;
+            }
+
+            if round == 0 {
+                let total = g_at_0_cpu.wrapping_add(g_at_1_cpu);
+                if total != cpu_sum {
+                    cpu_sumcheck_ok = false;
+                }
+                println!(
+                    "[CPU] round 0: g0={:#034x}, g1={:#034x}, g2={:#034x}",
+                    g0_cpu, g1_cpu, g2_cpu
+                );
+                println!(
+                    "[CPU] round 0: g(0)+g(1)={:#034x}, cpu_sum={:#034x}",
+                    total, cpu_sum
+                );
+            } else if let Some((prev_g0, prev_g1, prev_g2, r_prev)) = prev_g_cpu {
+                let r_prev_sq = r_prev.wrapping_mul(r_prev);
+                let prev_val = prev_g0
+                    .wrapping_add(r_prev.wrapping_mul(prev_g1))
+                    .wrapping_add(r_prev_sq.wrapping_mul(prev_g2));
+                let total = g_at_0_cpu.wrapping_add(g_at_1_cpu);
+                if total != prev_val {
+                    cpu_sumcheck_ok = false;
+                }
+                println!(
+                    "[CPU] round {}: g0={:#034x}, g1={:#034x}, g2={:#034x}",
+                    round, g0_cpu, g1_cpu, g2_cpu
+                );
+                println!(
+                    "[CPU] round {}: g(0)+g(1)={:#034x}, g_prev(r_prev)={:#034x}",
+                    round, total, prev_val
+                );
+            }
+
+            let r_j: u128 = challenges[round as usize];
+            prev_g_cpu = Some((g0_cpu, g1_cpu, g2_cpu, r_j));
+
+            // Apply the same challenge on CPU and GPU.
+            cpu_sumcheck_apply_challenge(
+                &mut p_cpu[..slice_len],
+                &mut q_cpu[..slice_len],
+                r_j,
+            );
+            len_cpu /= 2;
+
+            gpu_ctx.sumcheck_apply_challenge(&mut sc_state_debug, r_j);
+
+            // Compare full evaluation tables after binding.
+            let p_gpu = gpu_ctx.debug_read_u128_vector(&sc_state_debug.p_in, len_cpu as u32);
+            let q_gpu = gpu_ctx.debug_read_u128_vector(&sc_state_debug.q_in, len_cpu as u32);
+            for i in 0..len_cpu {
+                if p_cpu[i] != p_gpu[i] || q_cpu[i] != q_gpu[i] {
+                    println!(
+                        "[DEBUG] round {}: mismatch at index {}: \
+                         p_cpu={:#034x}, p_gpu={:#034x}, \
+                         q_cpu={:#034x}, q_gpu={:#034x}",
+                        round,
+                        i,
+                        p_cpu[i],
+                        p_gpu[i],
+                        q_cpu[i],
+                        q_gpu[i],
+                    );
+                    gpu_state_ok = false;
+                    break;
+                }
+            }
+            if !gpu_state_ok {
+                break;
+            }
+        }
+
+        println!("[CPU] sumcheck consistency: {}", cpu_sumcheck_ok);
+        println!("[DEBUG] GPU state matches CPU after binding: {}", gpu_state_ok);
+    }
+
     // Run a GPU-backed sumcheck for f = p * q, where p and q are multilinear
     // and f has degree 2 in each variable. The prover messages are degree-2
     // univariates g_j(X) = g0 + g1 X + g2 X^2.
     let start_sumcheck = Instant::now();
     let mut sc_state = gpu_ctx.sumcheck_start(&p, &q);
-    let mut sc_rng = rand::thread_rng();
     let mut prev_g: Option<(u128, u128, u128, u128)> = None;
     let mut sumcheck_ok = true;
 
@@ -1251,7 +1562,7 @@ fn main() {
         }
 
         // Sample verifier challenge r_j and bind p_j, q_j → p_{j+1}, q_{j+1} on GPU.
-        let r_j: u128 = sc_rng.gen();
+        let r_j: u128 = challenges[round as usize];
         prev_g = Some((g0, g1, g2, r_j));
         gpu_ctx.sumcheck_apply_challenge(&mut sc_state, r_j);
     }

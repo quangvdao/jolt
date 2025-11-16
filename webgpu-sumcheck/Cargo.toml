@@ -9,3 +9,5 @@ pollster = "0.3"
 rand = { workspace = true, features = ["std", "std_rng"] }
 bytemuck = { version = "1.16", features = ["derive"] }
 rayon = { workspace = true }
+ark-bn254 = { workspace = true, features = ["scalar_field"] }
+ark-ff = { workspace = true }

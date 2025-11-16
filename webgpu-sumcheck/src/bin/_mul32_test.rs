@@ -23,9 +23,7 @@ fn mul32_emulated(a: u32, b: u32) -> (u32, u32) {
     let carry0 = if carry_low0 { 1u32 } else { 0u32 };
 
     let lo = low_tmp;
-    let hi = c2
-        .wrapping_add(m1_high_total)
-        .wrapping_add(carry0);
+    let hi = c2.wrapping_add(m1_high_total).wrapping_add(carry0);
 
     (lo, hi)
 }
@@ -49,5 +47,3 @@ fn main() {
     }
     println!("mul32_emulated passed 1e6 random tests");
 }
-
-

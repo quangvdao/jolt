@@ -211,7 +211,10 @@ fn main() {
         .collect();
     let cpu_mt_time = start_cpu_mt.elapsed();
 
-    assert_eq!(out_cpu, out_cpu_mt, "single-threaded and Rayon results differ");
+    assert_eq!(
+        out_cpu, out_cpu_mt,
+        "single-threaded and Rayon results differ"
+    );
 
     // -------------------------
     // GPU setup
@@ -461,5 +464,3 @@ fn main() {
     println!("  GPU setup time: {:?}", gpu_setup_time);
     println!("  GPU submit-only (no map): {:?}", gpu_submit_time);
 }
-
-

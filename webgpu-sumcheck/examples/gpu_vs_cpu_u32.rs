@@ -146,7 +146,10 @@ fn main() {
         .collect();
     let cpu_mt_time = start_cpu_mt.elapsed();
 
-    assert_eq!(out_cpu, out_cpu_mt, "single-threaded and Rayon results differ");
+    assert_eq!(
+        out_cpu, out_cpu_mt,
+        "single-threaded and Rayon results differ"
+    );
 
     // -------------------------
     // GPU setup
@@ -314,8 +317,7 @@ fn main() {
     // -------------------------
     // GPU compute + readback
     // -------------------------
-    let workgroup_count =
-        ((len as u32) + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+    let workgroup_count = ((len as u32) + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
     let max_workgroups = device.limits().max_compute_workgroups_per_dimension;
     assert!(
         workgroup_count <= max_workgroups,
@@ -378,7 +380,11 @@ fn main() {
         "Results (all perform {} u32 ops: half add, half mul):",
         total_ops as u64
     );
-    println!("  CPU 1-thread:   {:?}  ({:.3} Gops/s)", cpu_time, cpu_ops_per_sec / 1e9);
+    println!(
+        "  CPU 1-thread:   {:?}  ({:.3} Gops/s)",
+        cpu_time,
+        cpu_ops_per_sec / 1e9
+    );
     println!(
         "  CPU Rayon MT:   {:?}  ({:.3} Gops/s)",
         cpu_mt_time,
@@ -392,5 +398,3 @@ fn main() {
     println!("  GPU setup time: {:?}", gpu_setup_time);
     println!("  GPU submit-only (no map): {:?}", gpu_submit_time);
 }
-
-

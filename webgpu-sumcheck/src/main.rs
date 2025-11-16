@@ -57,7 +57,11 @@ fn limbs_to_u128(l: &U128Limbs) -> u128 {
 /// g(X) = g0 + g1 X + g2 X^2.
 #[allow(dead_code)]
 fn cpu_sumcheck_eval_round(p: &[u128], q: &[u128]) -> (u128, u128, u128) {
-    assert_eq!(p.len(), q.len(), "cpu_sumcheck_eval_round: p,q length mismatch");
+    assert_eq!(
+        p.len(),
+        q.len(),
+        "cpu_sumcheck_eval_round: p,q length mismatch"
+    );
     assert!(
         p.len() % 2 == 0,
         "cpu_sumcheck_eval_round: length must be even"
@@ -93,7 +97,11 @@ fn cpu_sumcheck_eval_round(p: &[u128], q: &[u128]) -> (u128, u128, u128) {
 /// p0 = p[2*i], p1 = p[2*i+1], etc. The length is halved by the caller.
 #[allow(dead_code)]
 fn cpu_sumcheck_apply_challenge(p: &mut [u128], q: &mut [u128], r: u128) {
-    assert_eq!(p.len(), q.len(), "cpu_sumcheck_apply_challenge: p,q length mismatch");
+    assert_eq!(
+        p.len(),
+        q.len(),
+        "cpu_sumcheck_apply_challenge: p,q length mismatch"
+    );
     assert!(
         p.len() % 2 == 0,
         "cpu_sumcheck_apply_challenge: length must be even"
@@ -801,11 +809,11 @@ impl GpuSumContext {
             mapped_at_creation: false,
         });
 
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("debug-readback-encoder"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("debug-readback-encoder"),
+            });
         encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, size_bytes);
         self.queue.submit(Some(encoder.finish()));
 
@@ -1053,8 +1061,8 @@ impl GpuSumContext {
         // Subsequent passes: reduce the partial sums on GPU until one triple remains.
         let mut partial_len = workgroup_count_u32;
         while partial_len > 1 {
-            let reduce_workgroups = ((partial_len as u64) + (WORKGROUP_SIZE as u64) - 1)
-                / (WORKGROUP_SIZE as u64);
+            let reduce_workgroups =
+                ((partial_len as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
             let reduce_workgroups_u32 = reduce_workgroups as u32;
 
             let reduce_params = SumcheckParams {
@@ -1072,53 +1080,50 @@ impl GpuSumContext {
                 bytemuck::bytes_of(&reduce_params),
             );
 
-            let reduce_bind_group =
-                self.device
-                    .create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("sumcheck-reduce-bind-group"),
-                        layout: &self.sumcheck_bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: state.p_in.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: state.p_out.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: state.q_in.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: state.q_out.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: state.g0_partial.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: state.g1_partial.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 6,
-                                resource: state.g2_partial.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 7,
-                                resource: self.sumcheck_params_buffer.as_entire_binding(),
-                            },
-                        ],
-                    });
+            let reduce_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sumcheck-reduce-bind-group"),
+                layout: &self.sumcheck_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: state.p_in.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: state.p_out.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: state.q_in.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: state.q_out.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: state.g0_partial.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: state.g1_partial.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: state.g2_partial.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.sumcheck_params_buffer.as_entire_binding(),
+                    },
+                ],
+            });
 
             {
-                let mut cpass =
-                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("sumcheck-reduce-pass"),
-                        timestamp_writes: None,
-                    });
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("sumcheck-reduce-pass"),
+                    timestamp_writes: None,
+                });
                 cpass.set_pipeline(&self.sumcheck_reduce_pipeline);
                 cpass.set_bind_group(0, &reduce_bind_group, &[]);
                 cpass.dispatch_workgroups(reduce_workgroups_u32, 1, 1);
@@ -1344,9 +1349,7 @@ fn main() {
     // Pre-sample verifier challenges for the sumcheck rounds so that both the
     // CPU reference and GPU implementations use the same sequence.
     let mut challenge_rng = rand::thread_rng();
-    let challenges: Vec<u128> = (0..log2_len)
-        .map(|_| challenge_rng.gen::<u128>())
-        .collect();
+    let challenges: Vec<u128> = (0..log2_len).map(|_| challenge_rng.gen::<u128>()).collect();
 
     // Try to load cached polynomials for this size; if missing or invalid, generate and cache.
     let (p, q, rng_time, load_time, used_cache) =
@@ -1419,9 +1422,7 @@ fn main() {
                 cpu_sumcheck_eval_round(&p_cpu[..slice_len], &q_cpu[..slice_len]);
 
             let g_at_0_cpu = g0_cpu;
-            let g_at_1_cpu = g0_cpu
-                .wrapping_add(g1_cpu)
-                .wrapping_add(g2_cpu);
+            let g_at_1_cpu = g0_cpu.wrapping_add(g1_cpu).wrapping_add(g2_cpu);
 
             let (g0_gpu, g1_gpu, g2_gpu) = gpu_ctx.sumcheck_eval_round(&sc_state_debug);
 
@@ -1472,11 +1473,7 @@ fn main() {
             prev_g_cpu = Some((g0_cpu, g1_cpu, g2_cpu, r_j));
 
             // Apply the same challenge on CPU and GPU.
-            cpu_sumcheck_apply_challenge(
-                &mut p_cpu[..slice_len],
-                &mut q_cpu[..slice_len],
-                r_j,
-            );
+            cpu_sumcheck_apply_challenge(&mut p_cpu[..slice_len], &mut q_cpu[..slice_len], r_j);
             len_cpu /= 2;
 
             gpu_ctx.sumcheck_apply_challenge(&mut sc_state_debug, r_j);
@@ -1490,12 +1487,7 @@ fn main() {
                         "[DEBUG] round {}: mismatch at index {}: \
                          p_cpu={:#034x}, p_gpu={:#034x}, \
                          q_cpu={:#034x}, q_gpu={:#034x}",
-                        round,
-                        i,
-                        p_cpu[i],
-                        p_gpu[i],
-                        q_cpu[i],
-                        q_gpu[i],
+                        round, i, p_cpu[i], p_gpu[i], q_cpu[i], q_gpu[i],
                     );
                     gpu_state_ok = false;
                     break;
@@ -1507,7 +1499,10 @@ fn main() {
         }
 
         println!("[CPU] sumcheck consistency: {}", cpu_sumcheck_ok);
-        println!("[DEBUG] GPU state matches CPU after binding: {}", gpu_state_ok);
+        println!(
+            "[DEBUG] GPU state matches CPU after binding: {}",
+            gpu_state_ok
+        );
     }
 
     // Run a GPU-backed sumcheck for f = p * q, where p and q are multilinear

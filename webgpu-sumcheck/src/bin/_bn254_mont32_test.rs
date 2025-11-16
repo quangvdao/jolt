@@ -75,9 +75,7 @@ fn mul32_emulated(a: u32, b: u32) -> (u32, u32) {
     let carry0 = if carry_low0 { 1u32 } else { 0u32 };
 
     let lo = low_tmp;
-    let hi = c2
-        .wrapping_add(m1_high_total)
-        .wrapping_add(carry0);
+    let hi = c2.wrapping_add(m1_high_total).wrapping_add(carry0);
 
     (lo, hi)
 }
@@ -158,8 +156,7 @@ fn mont_mul(a: &Fr32, b: &Fr32, inv32: u32) -> Fr32 {
             let c0 = tmp1.carry + tmp2.carry; // 0,1,2
 
             t[j] = tmp2.sum;
-            carry = prod_hi
-                .wrapping_add(c0);
+            carry = prod_hi.wrapping_add(c0);
         }
         t[N_LIMBS] = t[N_LIMBS].wrapping_add(carry);
 
@@ -176,8 +173,7 @@ fn mont_mul(a: &Fr32, b: &Fr32, inv32: u32) -> Fr32 {
             let c0 = tmp1.carry + tmp2.carry;
 
             t[j] = tmp2.sum;
-            carry2 = prod_hi
-                .wrapping_add(c0);
+            carry2 = prod_hi.wrapping_add(c0);
         }
         t[N_LIMBS] = t[N_LIMBS].wrapping_add(carry2);
 
@@ -216,13 +212,13 @@ fn main() {
         let c_from32 = fr32_mont_to_fr(&c32);
 
         if c != c_from32 {
-            eprintln!("Mismatch:\na = {:?}\nb = {:?}\nCPU c = {:?}\nGPU-style c32 = {:?}\nback = {:?}",
-                      a, b, c, c32.limbs, c_from32);
+            eprintln!(
+                "Mismatch:\na = {:?}\nb = {:?}\nCPU c = {:?}\nGPU-style c32 = {:?}\nback = {:?}",
+                a, b, c, c32.limbs, c_from32
+            );
             std::process::exit(1);
         }
     }
 
     println!("BN254 Montgomery 8x32-bit mul matches ark_bn254::Fr for 10k random tests");
 }
-
-

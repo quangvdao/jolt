@@ -161,12 +161,7 @@ struct GpuBn254SumcheckState {
 }
 
 fn as_bytes<T>(v: &T) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            (v as *const T) as *const u8,
-            std::mem::size_of::<T>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts((v as *const T) as *const u8, std::mem::size_of::<T>()) }
 }
 
 impl GpuBn254Context {
@@ -398,12 +393,30 @@ impl GpuBn254Context {
 
     fn sumcheck_start(&self, p: &[Fr], q: &[Fr]) -> GpuBn254SumcheckState {
         assert!(!p.is_empty(), "sumcheck_start requires non-empty input");
-        assert_eq!(p.len(), q.len(), "sumcheck_start: p and q must have same length");
+        assert_eq!(
+            p.len(),
+            q.len(),
+            "sumcheck_start: p and q must have same length"
+        );
         let len = p.len();
-        assert_eq!(len & (len - 1), 0, "sumcheck_start: length must be power of two");
+        assert_eq!(
+            len & (len - 1),
+            0,
+            "sumcheck_start: length must be power of two"
+        );
 
-        let encoded_p: Vec<FrPacked> = p.iter().copied().map(fr_to_limbs).map(FrPacked::from).collect();
-        let encoded_q: Vec<FrPacked> = q.iter().copied().map(fr_to_limbs).map(FrPacked::from).collect();
+        let encoded_p: Vec<FrPacked> = p
+            .iter()
+            .copied()
+            .map(fr_to_limbs)
+            .map(FrPacked::from)
+            .collect();
+        let encoded_q: Vec<FrPacked> = q
+            .iter()
+            .copied()
+            .map(fr_to_limbs)
+            .map(FrPacked::from)
+            .collect();
 
         let element_size = std::mem::size_of::<FrPacked>() as u64;
         let buffer_size_bytes = (len as u64) * element_size;
@@ -489,17 +502,12 @@ impl GpuBn254Context {
         }
     }
 
-
     /// Fused variant: for a given round j (len current_len, len/2 pairs), compute
     /// the degree-2 coefficients g0, g1, g2 *and* apply the verifier challenge r
     /// to bind p_j, q_j -> p_{j+1}, q_{j+1} on the GPU. The resulting
     /// p_{j+1}, q_{j+1} are stored in `state.p_in`, `state.q_in`, and
     /// `state.current_len` is halved.
-    fn sumcheck_eval_bind_round(
-        &self,
-        state: &mut GpuBn254SumcheckState,
-        r: Fr,
-    ) -> (Fr, Fr, Fr) {
+    fn sumcheck_eval_bind_round(&self, state: &mut GpuBn254SumcheckState, r: Fr) -> (Fr, Fr, Fr) {
         assert!(
             state.current_len >= 2,
             "sumcheck_eval_bind_round requires at least one pair"
@@ -512,8 +520,7 @@ impl GpuBn254Context {
 
         let len = state.current_len;
         let pairs = len / 2;
-        let workgroups =
-            ((pairs as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
+        let workgroups = ((pairs as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
         let workgroups_u32 = workgroups as u32;
 
         let r_packed: FrPacked = fr_to_limbs(r).into();
@@ -604,27 +611,9 @@ impl GpuBn254Context {
             mapped_at_creation: false,
         });
 
-        encoder.copy_buffer_to_buffer(
-            &state.g0_partial,
-            0,
-            &g0_readback,
-            0,
-            partial_size_bytes,
-        );
-        encoder.copy_buffer_to_buffer(
-            &state.g1_partial,
-            0,
-            &g1_readback,
-            0,
-            partial_size_bytes,
-        );
-        encoder.copy_buffer_to_buffer(
-            &state.g2_partial,
-            0,
-            &g2_readback,
-            0,
-            partial_size_bytes,
-        );
+        encoder.copy_buffer_to_buffer(&state.g0_partial, 0, &g0_readback, 0, partial_size_bytes);
+        encoder.copy_buffer_to_buffer(&state.g1_partial, 0, &g1_readback, 0, partial_size_bytes);
+        encoder.copy_buffer_to_buffer(&state.g2_partial, 0, &g2_readback, 0, partial_size_bytes);
 
         self.queue.submit(Some(encoder.finish()));
 
@@ -646,9 +635,18 @@ impl GpuBn254Context {
         });
 
         self.device.poll(wgpu::Maintain::Wait);
-        g0_rx.recv().expect("map g0 fused").expect("map g0 failed fused");
-        g1_rx.recv().expect("map g1 fused").expect("map g1 failed fused");
-        g2_rx.recv().expect("map g2 fused").expect("map g2 failed fused");
+        g0_rx
+            .recv()
+            .expect("map g0 fused")
+            .expect("map g0 failed fused");
+        g1_rx
+            .recv()
+            .expect("map g1 fused")
+            .expect("map g1 failed fused");
+        g2_rx
+            .recv()
+            .expect("map g2 fused")
+            .expect("map g2 failed fused");
 
         let g0_data = g0_slice.get_mapped_range();
         let g1_data = g1_slice.get_mapped_range();
@@ -690,8 +688,18 @@ impl GpuBn254Context {
             return Fr::from(0u64);
         }
 
-        let encoded_p: Vec<FrPacked> = p.iter().copied().map(fr_to_limbs).map(FrPacked::from).collect();
-        let encoded_q: Vec<FrPacked> = q.iter().copied().map(fr_to_limbs).map(FrPacked::from).collect();
+        let encoded_p: Vec<FrPacked> = p
+            .iter()
+            .copied()
+            .map(fr_to_limbs)
+            .map(FrPacked::from)
+            .collect();
+        let encoded_q: Vec<FrPacked> = q
+            .iter()
+            .copied()
+            .map(fr_to_limbs)
+            .map(FrPacked::from)
+            .collect();
 
         let element_size = std::mem::size_of::<FrPacked>() as u64;
         let buffer_size_bytes = (n as u64) * element_size;
@@ -1049,10 +1057,21 @@ impl GpuBn254ContextU64 {
     }
 
     fn sumcheck_start(&self, p: &[Fr], q: &[Fr]) -> GpuBn254SumcheckState {
-        assert!(!p.is_empty(), "sumcheck_start (u64) requires non-empty input");
-        assert_eq!(p.len(), q.len(), "sumcheck_start (u64): p and q must have same length");
+        assert!(
+            !p.is_empty(),
+            "sumcheck_start (u64) requires non-empty input"
+        );
+        assert_eq!(
+            p.len(),
+            q.len(),
+            "sumcheck_start (u64): p and q must have same length"
+        );
         let len = p.len();
-        assert_eq!(len & (len - 1), 0, "sumcheck_start (u64): length must be power of two");
+        assert_eq!(
+            len & (len - 1),
+            0,
+            "sumcheck_start (u64): length must be power of two"
+        );
 
         let encoded_p: Vec<FrPacked64> = p.iter().copied().map(fr_to_packed64).collect();
         let encoded_q: Vec<FrPacked64> = q.iter().copied().map(fr_to_packed64).collect();
@@ -1141,14 +1160,9 @@ impl GpuBn254ContextU64 {
         }
     }
 
-
     /// Fused variant for the u64 path: compute g0, g1, g2 and apply the
     /// verifier challenge r to bind one variable in a single GPU pass.
-    fn sumcheck_eval_bind_round(
-        &self,
-        state: &mut GpuBn254SumcheckState,
-        r: Fr,
-    ) -> (Fr, Fr, Fr) {
+    fn sumcheck_eval_bind_round(&self, state: &mut GpuBn254SumcheckState, r: Fr) -> (Fr, Fr, Fr) {
         assert!(
             state.current_len >= 2,
             "sumcheck_eval_bind_round (u64): need at least one pair"
@@ -1161,8 +1175,7 @@ impl GpuBn254ContextU64 {
 
         let len = state.current_len;
         let pairs = len / 2;
-        let workgroups =
-            ((pairs as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
+        let workgroups = ((pairs as u64) + (WORKGROUP_SIZE as u64) - 1) / (WORKGROUP_SIZE as u64);
         let workgroups_u32 = workgroups as u32;
 
         let r_packed: FrPacked64 = fr_to_packed64(r);
@@ -1253,27 +1266,9 @@ impl GpuBn254ContextU64 {
             mapped_at_creation: false,
         });
 
-        encoder.copy_buffer_to_buffer(
-            &state.g0_partial,
-            0,
-            &g0_readback,
-            0,
-            partial_size_bytes,
-        );
-        encoder.copy_buffer_to_buffer(
-            &state.g1_partial,
-            0,
-            &g1_readback,
-            0,
-            partial_size_bytes,
-        );
-        encoder.copy_buffer_to_buffer(
-            &state.g2_partial,
-            0,
-            &g2_readback,
-            0,
-            partial_size_bytes,
-        );
+        encoder.copy_buffer_to_buffer(&state.g0_partial, 0, &g0_readback, 0, partial_size_bytes);
+        encoder.copy_buffer_to_buffer(&state.g1_partial, 0, &g1_readback, 0, partial_size_bytes);
+        encoder.copy_buffer_to_buffer(&state.g2_partial, 0, &g2_readback, 0, partial_size_bytes);
 
         self.queue.submit(Some(encoder.finish()));
 
@@ -1340,7 +1335,6 @@ impl GpuBn254ContextU64 {
 
         (g0, g1, g2)
     }
-
 
     fn sum_products_bn254(&self, p: &[Fr], q: &[Fr], iters: u32) -> Fr {
         assert_eq!(p.len(), q.len(), "p and q must have same length (u64)");
@@ -1472,8 +1466,7 @@ impl GpuBn254ContextU64 {
             .expect("bn254 u64: failed to map result buffer");
 
         let data = slice.get_mapped_range();
-        let packed: FrPacked64 =
-            *bytemuck::from_bytes(&data[..std::mem::size_of::<FrPacked64>()]);
+        let packed: FrPacked64 = *bytemuck::from_bytes(&data[..std::mem::size_of::<FrPacked64>()]);
         drop(data);
         result_buffer.unmap();
 
@@ -1506,10 +1499,7 @@ fn main() {
     // Optional second CLI arg: number of repeated multiplications per pair.
     // Example:
     //   cargo run -p webgpu-sumcheck --bin bn254_sumcheck -- 20 1024
-    let iters: u32 = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+    let iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
 
     let mut rng = rand::thread_rng();
     let p: Vec<Fr> = (0..n).map(|_| Fr::from(rng.gen::<u64>())).collect();
@@ -1588,14 +1578,8 @@ fn main() {
     let cpu_par_mps = total_mul / cpu_time_par.as_secs_f64() / 1e6;
     let gpu_u32_mps = total_mul / gpu_time_u32.as_secs_f64() / 1e6;
     let gpu_u64_mps = total_mul / gpu_time_u64.as_secs_f64() / 1e6;
-    println!(
-        "CPU 1-thread mult throughput: {:.3} Mmul/s",
-        cpu_seq_mps
-    );
-    println!(
-        "CPU Rayon mult throughput:    {:.3} Mmul/s",
-        cpu_par_mps
-    );
+    println!("CPU 1-thread mult throughput: {:.3} Mmul/s", cpu_seq_mps);
+    println!("CPU Rayon mult throughput:    {:.3} Mmul/s", cpu_par_mps);
     println!(
         "GPU mult throughput (8×u32 limbs): {:.3} Mmul/s",
         gpu_u32_mps
@@ -1643,8 +1627,7 @@ fn main() {
             let r_j: Fr = Fr::from(rng_ch.gen::<u64>());
 
             // GPU: fused eval + bind for this round using the same r_j.
-            let (g0_gpu, g1_gpu, g2_gpu) =
-                ctx.sumcheck_eval_bind_round(&mut sc_state, r_j);
+            let (g0_gpu, g1_gpu, g2_gpu) = ctx.sumcheck_eval_bind_round(&mut sc_state, r_j);
             let (g0_gpu_u64, g1_gpu_u64, g2_gpu_u64) =
                 ctx_u64.sumcheck_eval_bind_round(&mut sc_state_u64, r_j);
 
@@ -1689,5 +1672,3 @@ fn main() {
         println!("BN254 sumcheck round-by-round match: {}", ok);
     }
 }
-
-

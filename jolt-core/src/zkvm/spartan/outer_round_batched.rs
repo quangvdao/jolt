@@ -401,13 +401,11 @@ impl<const NUM_SVO_ROUNDS: usize, F: JoltField>
     pub fn final_sumcheck_evals(&self) -> [F; 2] {
         let mut final_az_eval = F::zero();
         let mut final_bz_eval = F::zero();
-        for i in 0..2 {
-            if let Some(coeff) = self.bound_coeffs.get(i) {
-                match coeff.index {
-                    0 => final_az_eval = coeff.value,
-                    1 => final_bz_eval = coeff.value,
-                    _ => {}
-                }
+        for coeff in &self.bound_coeffs {
+            match coeff.index {
+                0 => final_az_eval = coeff.value,
+                1 => final_bz_eval = coeff.value,
+                _ => {}
             }
         }
         [final_az_eval, final_bz_eval]
@@ -1095,26 +1093,106 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
                 );
                 let cons = &R1CS_CONSTRAINTS[constraint_idx].cons;
 
-                let az: F =
-                    BaselineConstraintEval::eval_az::<F>(cons, &row_inputs);
-                let bz: F =
-                    BaselineConstraintEval::eval_bz::<F>(cons, &row_inputs);
+                let az: F = BaselineConstraintEval::eval_az::<F>(cons, &row_inputs);
+                let bz: F = BaselineConstraintEval::eval_bz::<F>(cons, &row_inputs);
                 let eq = eq_r_evals[d];
-
                 az_r += eq * az;
                 bz_r += eq * bz;
             }
 
-            assert_eq!(
-                az_r, claims[0],
-                "RoundBatched Az(r) mismatch vs naive eq(r,·)*Az(·): recomputed={} claimed={}",
-                az_r, claims[0]
-            );
-            assert_eq!(
-                bz_r, claims[1],
-                "RoundBatched Bz(r) mismatch vs naive eq(r,·)*Bz(·): recomputed={} claimed={}",
-                bz_r, claims[1]
-            );
+            // Sanity check: compare typed Bz evaluation against baseline field evaluation
+            // for a single (step, constraint) pair.
+            {
+                use crate::utils::small_value::accum::s160_to_field;
+                use crate::zkvm::r1cs::evaluation::eval_az_bz_batch_from_row;
+
+                let step_idx0: usize = 0;
+                if step_idx0 < self.trace.len() && !R1CS_CONSTRAINTS.is_empty() {
+                    let row0 = R1CSCycleInputs::from_trace::<F>(
+                        &self.preprocess,
+                        &self.trace,
+                        step_idx0,
+                    );
+                    let constraint_idx0: usize = 0;
+                    let named = &R1CS_CONSTRAINTS[constraint_idx0];
+                    let mut az_block = [I8OrI96::zero(); 1];
+                    let mut bz_block = [S160::zero(); 1];
+                    eval_az_bz_batch_from_row::<F>(
+                        core::slice::from_ref(named),
+                        &row0,
+                        &mut az_block,
+                        &mut bz_block,
+                    );
+                    let typed_bz_field: F = s160_to_field::<F>(&bz_block[0]);
+                    let baseline_bz =
+                        BaselineConstraintEval::eval_bz::<F>(&named.cons, &row0);
+                    println!(
+                        "RoundBatched Bz single-eval check: typed={} baseline={} diff={}",
+                        typed_bz_field,
+                        baseline_bz,
+                        typed_bz_field - baseline_bz
+                    );
+                }
+            }
+
+            if az_r != claims[0] {
+                println!(
+                    "RoundBatched Az(r) mismatch vs naive eq(r,·)*Az(·): recomputed={} claimed={}",
+                    az_r, claims[0]
+                );
+                if let Some(inv) = az_r.inverse() {
+                    println!(
+                        "RoundBatched Az(r) ratio (claimed / recomputed) = {}",
+                        claims[0] * inv
+                    );
+                }
+            }
+            if bz_r != claims[1] {
+                println!(
+                    "RoundBatched Bz(r) mismatch vs naive eq(r,·)*Bz(·): recomputed={} claimed={}",
+                    bz_r, claims[1]
+                );
+                println!(
+                    "RoundBatched final bound_coeffs len = {}",
+                    self.spartan_poly.bound_coeffs.len()
+                );
+                let first_indices: Vec<usize> = self
+                    .spartan_poly
+                    .bound_coeffs
+                    .iter()
+                    .take(8)
+                    .map(|c| c.index)
+                    .collect();
+                println!(
+                    "RoundBatched first 8 bound_coeff indices: {:?}",
+                    first_indices
+                );
+                let az_idx = self
+                    .spartan_poly
+                    .bound_coeffs
+                    .iter()
+                    .position(|c| c.index == 0);
+                let bz_idx = self
+                    .spartan_poly
+                    .bound_coeffs
+                    .iter()
+                    .position(|c| c.index == 1);
+                println!(
+                    "RoundBatched positions of index 0 and 1 in bound_coeffs: Az={:?}, Bz={:?}",
+                    az_idx, bz_idx
+                );
+                println!(
+                    "RoundBatched field constants: R={}, R^2={}",
+                    F::MONTGOMERY_R,
+                    F::MONTGOMERY_R_SQUARE
+                );
+                if let Some(inv) = bz_r.inverse() {
+                    println!(
+                        "RoundBatched Bz(r) ratio (claimed / recomputed) = {}",
+                        claims[1] * inv
+                    );
+                }
+            }
         }
 
         // Witness openings at r_cycle

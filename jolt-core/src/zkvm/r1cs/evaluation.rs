@@ -1076,12 +1076,9 @@ pub fn eval_bz_by_name<F: JoltField>(c: &NamedR1CSConstraint, row: &R1CSCycleInp
     use R1CSConstraintLabel as N;
     match c.label {
         N::RamAddrEqRs1PlusImmIfLoadStore => {
-            // B: (Rs1Value + Imm) - 0 (true_val - false_val from if-else)
-            if row.imm.is_positive {
-                S160::from(row.rs1_read_value as u128 + row.imm.magnitude_as_u64() as u128)
-            } else {
-                S160::from(row.rs1_read_value as i128 - row.imm.magnitude_as_u64() as i128)
-            }
+            // B: RamAddress - (Rs1Value + Imm) (baseline R1CS B linear combination)
+            let imm_i128 = row.imm.to_i128();
+            S160::from(row.ram_addr as i128 - (row.rs1_read_value as i128 + imm_i128))
         }
         N::RamAddrEqZeroIfNotLoadStore => {
             // B: RamAddress - 0
@@ -1093,8 +1090,8 @@ pub fn eval_bz_by_name<F: JoltField>(c: &NamedR1CSConstraint, row: &R1CSCycleInp
         N::RamReadEqRdWriteIfLoad => S160::from_diff_u64(row.ram_read_value, row.rd_write_value),
         // B: Rs2Value - RamWriteValue (u64 bit-pattern difference)
         N::Rs2EqRamWriteIfStore => S160::from_diff_u64(row.rs2_read_value, row.ram_write_value),
-        // B: 0 - LeftInstructionInput (true_val - false_val from if-else)
-        N::LeftLookupZeroUnlessAddSubMul => -S160::from(row.left_input),
+        // B: LeftLookupOperand - 0 (baseline R1CS B linear combination)
+        N::LeftLookupZeroUnlessAddSubMul => S160::from(row.left_lookup),
         N::LeftLookupEqLeftInputOtherwise => {
             // B: LeftLookupOperand - LeftInstructionInput
             S160::from(row.left_lookup) - S160::from(row.left_input)
@@ -1165,7 +1162,8 @@ pub fn eval_bz_by_name<F: JoltField>(c: &NamedR1CSConstraint, row: &R1CSCycleInp
             S160::from(row.next_pc as i128 - (row.pc as i128 + 1))
         }
         N::MustStartSequenceFromBeginning => {
-            S160::from(row.flags[CircuitFlags::DoNotUpdateUnexpandedPC] as i128 - 1)
+            // B: 1 - DoNotUpdateUnexpandedPC (baseline R1CS B linear combination)
+            S160::from(1i128 - row.flags[CircuitFlags::DoNotUpdateUnexpandedPC] as i128)
         }
     }
 }

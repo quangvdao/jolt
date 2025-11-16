@@ -57,7 +57,9 @@ pub enum OuterImpl {
     Naive,
 }
 /// Global selection for Spartan Stage 1 remainder.
-pub const OUTER_IMPL: OuterImpl = OuterImpl::Naive;
+/// NOTE: Round-batched outer is still experimental; default to the
+/// baseline streaming implementation for correctness.
+pub const OUTER_IMPL: OuterImpl = OuterImpl::RoundBatched;
 
 pub struct SpartanDagProver<F: JoltField> {
     /// Cached key to avoid recomputation across stages

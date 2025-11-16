@@ -3,7 +3,11 @@ use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
     SumcheckId, LITTLE_ENDIAN,
 };
-use crate::poly::{eq_poly::EqPolynomial, split_eq_poly::GruenSplitEqPolynomial};
+use crate::poly::{
+    eq_poly::EqPolynomial,
+    multilinear_polynomial::BindingOrder,
+    split_eq_poly::GruenSplitEqPolynomial,
+};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 use crate::zkvm::r1cs::evaluation::R1CSEval;
@@ -726,8 +730,10 @@ pub struct OuterRoundBatchedSumcheckProver<F: JoltField> {
     preprocess: BytecodePreprocessing,
     #[allocative(skip)]
     trace: Arc<Vec<Cycle>>,
-    /// Split-eq helper tracking binding state
+    /// Split-eq helper tracking binding state for the main outer Eq_τ polynomial
     eq_poly: GruenSplitEqPolynomial<F>,
+    /// Static split-eq helper specialized for small-value optimization (no binding)
+    eq_small_value: GruenSplitEqPolynomial<F>,
     /// Interleaved Az/Bz holder and binding workspace
     spartan_poly: RoundBatchedSpartanInterleavedPolynomial<NUM_SVO_ROUNDS, F>,
     /// Precomputed SVO accumulators across rounds
@@ -778,24 +784,33 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
             &preprocessing.bytecode, trace, &tau
         );
 
-        // Reconstruct the same split-eq partition used in svo_sumcheck_round
+        // Eq helper for the sumcheck itself: use standard split-eq semantics over all variables.
+        // Small-value optimization only changes how we _evaluate_ Az·Bz in early rounds, not the
+        // outer Eq_τ(·) polynomial, so we keep the regular layout here.
+        let eq_poly = GruenSplitEqPolynomial::new(&tau, BindingOrder::LowToHigh);
+
+        // Static split-eq structure matching the partition used in `svo_sumcheck_round`.
+        // This is used only for weighting blocks in the streaming + remaining rounds; it
+        // is never mutated or bound.
         let potential_x_out_vars = total_num_vars / 2 - NUM_SVO_ROUNDS;
         let iter_num_x_out_vars = core::cmp::min(potential_x_out_vars, num_step_vars);
         let iter_num_x_in_vars = (num_step_vars + num_constraint_vars - NUM_SVO_ROUNDS)
             .saturating_sub(iter_num_x_out_vars);
-        let eq_poly = GruenSplitEqPolynomial::new_for_small_value(
+        let eq_small_value = GruenSplitEqPolynomial::new_for_small_value(
             &tau,
             iter_num_x_out_vars,
             iter_num_x_in_vars,
             NUM_SVO_ROUNDS,
             Some(F::MONTGOMERY_R_SQUARE),
         );
-        // Bind nothing yet; SVO and subsequent rounds will bind via SumcheckInstanceProver::bind
-        // Prepare instance
+
+        // Bind nothing yet; all rounds (SVO + streaming + remaining) will bind via
+        // `SumcheckInstanceProver::bind`. Prepare instance:
         Self {
             preprocess: preprocessing.bytecode.clone(),
             trace: state_manager.get_trace_arc(),
             eq_poly,
+            eq_small_value,
             spartan_poly,
             svo_accums_zero: svo_zero,
             svo_accums_infty: svo_infty,
@@ -1034,6 +1049,73 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             opening_point.clone(),
             claims[1],
         );
+
+        #[cfg(test)]
+        {
+            // Naively recompute Az(r), Bz(r) as Σ_{(step,constraint)} Az(z)·eq(r,z), Bz(z)·eq(r,z)
+            // using the baseline row semantics, and compare to the claimed Az,Bz from
+            // the round-batched interleaved polynomial. This validates that the
+            // RoundBatched wiring for Az,Bz is consistent with the intended outer product.
+            let num_steps = self.trace.len();
+            let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
+            let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+            let num_constraint_vars = if padded_num_constraints > 0 {
+                padded_num_constraints.log_2()
+            } else {
+                0
+            };
+            let total_num_vars = num_step_vars + num_constraint_vars;
+            let domain_size = 1usize << total_num_vars;
+            debug_assert_eq!(
+                opening_point.r.len(),
+                total_num_vars,
+                "RoundBatched: opening point length mismatch"
+            );
+
+            // eq_r[d] = eq(r, z_d) over all vertices z_d
+            let eq_r_evals: Vec<F> = EqPolynomial::<F>::evals(&opening_point.r);
+
+            let mut az_r = F::zero();
+            let mut bz_r = F::zero();
+
+            use crate::zkvm::r1cs::evaluation::BaselineConstraintEval;
+
+            for d in 0..domain_size {
+                let step_idx = d / padded_num_constraints;
+                let constraint_idx = d % padded_num_constraints;
+
+                if step_idx >= num_steps || constraint_idx >= R1CS_CONSTRAINTS.len() {
+                    continue;
+                }
+
+                let row_inputs = R1CSCycleInputs::from_trace::<F>(
+                    &self.preprocess,
+                    &self.trace,
+                    step_idx,
+                );
+                let cons = &R1CS_CONSTRAINTS[constraint_idx].cons;
+
+                let az: F =
+                    BaselineConstraintEval::eval_az::<F>(cons, &row_inputs);
+                let bz: F =
+                    BaselineConstraintEval::eval_bz::<F>(cons, &row_inputs);
+                let eq = eq_r_evals[d];
+
+                az_r += eq * az;
+                bz_r += eq * bz;
+            }
+
+            assert_eq!(
+                az_r, claims[0],
+                "RoundBatched Az(r) mismatch vs naive eq(r,·)*Az(·): recomputed={} claimed={}",
+                az_r, claims[0]
+            );
+            assert_eq!(
+                bz_r, claims[1],
+                "RoundBatched Bz(r) mismatch vs naive eq(r,·)*Bz(·): recomputed={} claimed={}",
+                bz_r, claims[1]
+            );
+        }
 
         // Witness openings at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_cycle_bits);

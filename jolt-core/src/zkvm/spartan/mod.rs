@@ -23,6 +23,7 @@ use crate::zkvm::spartan::inner::InnerSumcheckProver;
 use crate::zkvm::spartan::instruction_input::InstructionInputSumcheckProver;
 use crate::zkvm::spartan::outer::{OuterRemainingSumcheckProver, OuterUniSkipInstanceProver};
 use crate::zkvm::spartan::outer_baseline::OuterBaselineSumcheckProver;
+use crate::zkvm::spartan::outer_naive::OuterNaiveSumcheckProver;
 use crate::zkvm::spartan::outer_round_batched::OuterRoundBatchedSumcheckProver;
 use crate::zkvm::spartan::outer_streaming::OuterRemainingStreamingSumcheckProver;
 use crate::zkvm::spartan::product::{
@@ -56,7 +57,7 @@ pub enum OuterImpl {
     Naive,
 }
 /// Global selection for Spartan Stage 1 remainder.
-pub const OUTER_IMPL: OuterImpl = OuterImpl::Baseline;
+pub const OUTER_IMPL: OuterImpl = OuterImpl::Naive;
 
 pub struct SpartanDagProver<F: JoltField> {
     /// Cached key to avoid recomputation across stages
@@ -205,22 +206,22 @@ where
                 instances.push(Box::new(outer_baseline));
             }
             OuterImpl::Naive => {
-                tracing::info!("Stage1 Prover using OuterImpl::Naive (streaming baseline, direct field Az/Bz)");
-                // Same as Baseline for now: streaming from trace with baseline Az/Bz evaluation.
+                tracing::info!("Stage1 Prover using OuterImpl::Naive (dense eq, no split-eq optimizations)");
+                // Naive: build dense eq, Az, Bz over (cycle, constraint) and run fully naive degree-3 sumcheck.
                 let (preprocessing, _lazy_trace, _trace, _program_io, _final_mem) =
                     state_manager.get_prover_data();
                 let trace_arc = state_manager.get_trace_arc();
                 let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                 let constraints_vec: Vec<R1CSConstraint> =
                     R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
-                let outer_baseline = OuterBaselineSumcheckProver::<F>::gen(
+                let outer_naive = OuterNaiveSumcheckProver::<F>::gen(
                     &preprocessing.bytecode,
                     trace_arc,
                     &constraints_vec,
                     padded_num_constraints,
                     transcript,
                 );
-                instances.push(Box::new(outer_baseline));
+                instances.push(Box::new(outer_naive));
             }
             OuterImpl::RoundBatched => {
                 tracing::info!("Stage1 Prover using OuterImpl::RoundBatched");

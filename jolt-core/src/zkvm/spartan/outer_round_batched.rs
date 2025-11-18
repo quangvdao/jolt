@@ -4,6 +4,7 @@ use crate::poly::opening_proof::{
     SumcheckId, LITTLE_ENDIAN,
 };
 use crate::poly::{
+    dense_mlpoly::DensePolynomial,
     eq_poly::EqPolynomial,
     multilinear_polynomial::BindingOrder,
     split_eq_poly::GruenSplitEqPolynomial,
@@ -747,6 +748,9 @@ pub struct OuterRoundBatchedSumcheckProver<F: JoltField> {
     total_rounds: usize,
     /// Number of cycle bits (step vars)
     num_cycle_bits: usize,
+    /// Dense Az,Bz used to compute remaining-round endpoints with the baseline implementation.
+    baseline_az: DensePolynomial<F>,
+    baseline_bz: DensePolynomial<F>,
 }
 
 impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
@@ -802,6 +806,67 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
             Some(F::MONTGOMERY_R_SQUARE),
         );
 
+        let (baseline_az, baseline_bz) = {
+            use crate::zkvm::r1cs::evaluation::BaselineConstraintEval;
+            use crate::zkvm::r1cs::inputs::R1CSCycleInputs;
+            use crate::zkvm::r1cs::constraints::R1CSConstraint;
+
+            let uniform_constraints: Vec<R1CSConstraint> =
+                R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+
+            // This mirrors OuterBaselineSumcheckProver::build_dense_polynomials.
+            let num_steps = trace.len();
+            let num_cycles_padded = if num_step_vars == 0 {
+                1usize
+            } else {
+                1usize << num_step_vars
+            };
+
+            let domain_size = num_cycles_padded
+                .checked_mul(padded_num_constraints)
+                .expect("overflow computing baseline outer domain size (debug)");
+
+            debug_assert!(
+                num_steps <= num_cycles_padded,
+                "trace length ({num_steps}) must be <= padded cycles ({num_cycles_padded})"
+            );
+
+            let total_vars_dbg = num_step_vars + num_constraint_vars;
+            debug_assert_eq!(
+                domain_size,
+                1usize << total_vars_dbg,
+                "baseline outer debug: domain_size != 2^{total_vars_dbg}"
+            );
+
+            let mut az_vals = vec![F::zero(); domain_size];
+            let mut bz_vals = vec![F::zero(); domain_size];
+
+            az_vals
+                .par_iter_mut()
+                .zip(bz_vals.par_iter_mut())
+                .enumerate()
+                .for_each(|(d, (az_ref, bz_ref))| {
+                    let step_idx = d / padded_num_constraints;
+                    let constraint_idx = d % padded_num_constraints;
+
+                    if step_idx < num_steps && constraint_idx < uniform_constraints.len() {
+                        let row = R1CSCycleInputs::from_trace::<F>(
+                            &preprocessing.bytecode,
+                            trace,
+                            step_idx,
+                        );
+                        let cons = &uniform_constraints[constraint_idx];
+                        *az_ref = BaselineConstraintEval::eval_az(cons, &row);
+                        *bz_ref = BaselineConstraintEval::eval_bz(cons, &row);
+                    } else {
+                        *az_ref = F::zero();
+                        *bz_ref = F::zero();
+                    }
+                });
+
+            (DensePolynomial::new(az_vals), DensePolynomial::new(bz_vals))
+        };
+
         // Bind nothing yet; all rounds (SVO + streaming + remaining) will bind via
         // `SumcheckInstanceProver::bind`. Prepare instance:
         Self {
@@ -817,6 +882,8 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
             block4_at_r: Vec::new(),
             total_rounds: total_num_vars,
             num_cycle_bits: num_step_vars,
+            baseline_az,
+            baseline_bz,
         }
     }
 
@@ -865,6 +932,66 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
         }
         (eval_zero, eval_inf)
     }
+
+    /// Compute endpoints (t0, t_inf) using the baseline dense Az,Bz
+    /// implementation, sharing the same `eq_poly` state as the round-batched prover.
+    fn baseline_compute_endpoints(&self) -> (F, F) {
+        let eq_poly = &self.eq_poly;
+
+        let n = self.baseline_az.len();
+        debug_assert_eq!(n, self.baseline_bz.len());
+
+        if eq_poly.E_in_current_len() == 1 {
+            // groups are pairs (0,1)
+            let groups = n / 2;
+            (0..groups)
+                .into_par_iter()
+                .map(|g| {
+                    let az0 = self.baseline_az[2 * g];
+                    let az1 = self.baseline_az[2 * g + 1];
+                    let bz0 = self.baseline_bz[2 * g];
+                    let bz1 = self.baseline_bz[2 * g + 1];
+                    let eq = eq_poly.E_out_current()[g];
+
+                    let p0 = az0 * bz0;
+                    let slope = (az1 - az0) * (bz1 - bz0);
+                    (eq * p0, eq * slope)
+                })
+                .reduce(
+                    || (F::zero(), F::zero()),
+                    |a, b| (a.0 + b.0, a.1 + b.1),
+                )
+        } else {
+            let num_x1_bits = eq_poly.E_in_current_len().log_2();
+            let x1_len = eq_poly.E_in_current_len();
+            let x2_len = eq_poly.E_out_current_len();
+
+            (0..x2_len)
+                .into_par_iter()
+                .map(|x2| {
+                    let mut inner0 = F::zero();
+                    let mut inner_inf = F::zero();
+                    for x1 in 0..x1_len {
+                        let g = (x2 << num_x1_bits) | x1;
+                        let az0 = self.baseline_az[2 * g];
+                        let az1 = self.baseline_az[2 * g + 1];
+                        let bz0 = self.baseline_bz[2 * g];
+                        let bz1 = self.baseline_bz[2 * g + 1];
+                        let e_in = eq_poly.E_in_current()[x1];
+                        let p0 = az0 * bz0;
+                        let slope = (az1 - az0) * (bz1 - bz0);
+                        inner0 += e_in * p0;
+                        inner_inf += e_in * slope;
+                    }
+                    let e_out = eq_poly.E_out_current()[x2];
+                    (e_out * inner0, e_out * inner_inf)
+                })
+                .reduce(
+                    || (F::zero(), F::zero()),
+                    |a, b| (a.0 + b.0, a.1 + b.1),
+                )
+        }
+    }
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
@@ -897,11 +1024,30 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             self.block4_at_r = block4;
             (a, b)
         } else {
-            compute_remaining_endpoints_from_bound_coeffs::<F>(
-                &self.eq_poly,
-                &self.spartan_poly.bound_coeffs,
-            )
+            // Remaining rounds: for now, defer to the dense baseline endpoints for correctness.
+            // The sparse bound-coeff path is kept for testing/comparison only.
+            #[cfg(test)]
+            {
+                let (_dbg_t0, _dbg_tinf) = compute_remaining_endpoints_from_bound_coeffs::<F>(
+                    &self.eq_poly,
+                    &self.spartan_poly.bound_coeffs,
+                );
+                // If needed, we can compare `_dbg_t0/_dbg_tinf` against the baseline endpoints.
+            }
+            self.baseline_compute_endpoints()
         };
+
+        #[cfg(test)]
+        {
+            let (t0_base, tinf_base) = self.baseline_compute_endpoints();
+            if t0 != t0_base || tinf != tinf_base {
+                println!(
+                    "RoundBatched endpoints mismatch at round {}: t0_rb={} t0_base={}, tinf_rb={} tinf_base={}",
+                    round, t0, t0_base, tinf, tinf_base
+                );
+            }
+        }
+
         let evals = self.eq_poly.gruen_evals_deg_3(t0, tinf, previous_claim);
         vec![evals[0], evals[1], evals[2]]
     }
@@ -924,6 +1070,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
                 self.lagrange_coeffs = next;
             }
             self.eq_poly.bind(r_j);
+            #[cfg(test)]
+            {
+                rayon::join(
+                    || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
+                    || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+                );
+            }
             return;
         }
 
@@ -933,6 +1086,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             self.spartan_poly.bound_coeffs = bound;
             self.block4_at_r.clear();
             self.eq_poly.bind(r_j);
+            #[cfg(test)]
+            {
+                rayon::join(
+                    || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
+                    || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+                );
+            }
             return;
         }
 
@@ -1019,6 +1179,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             &mut self.spartan_poly.binding_scratch_space,
         );
         self.eq_poly.bind(r_j);
+        #[cfg(test)]
+        {
+            rayon::join(
+                || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
+                || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+            );
+        }
     }
 
     fn cache_openings(

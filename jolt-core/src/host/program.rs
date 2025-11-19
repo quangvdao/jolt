@@ -55,6 +55,20 @@ impl Program {
         self.set_max_output_size(memory_config.max_output_size);
     }
 
+    pub fn get_memory_config(&self) -> MemoryConfig {
+        let elf_contents = self.get_elf_contents().unwrap();
+        let program_size = self.get_program_size(&elf_contents);
+        MemoryConfig {
+            memory_size: self.memory_size,
+            stack_size: self.stack_size,
+            max_input_size: self.max_input_size,
+            max_trusted_advice_size: self.max_trusted_advice_size,
+            max_untrusted_advice_size: self.max_untrusted_advice_size,
+            max_output_size: self.max_output_size,
+            program_size: Some(program_size),
+        }
+    }
+
     pub fn set_memory_size(&mut self, len: u64) {
         self.memory_size = len;
     }
@@ -223,6 +237,15 @@ impl Program {
         }
     }
 
+    pub fn load_elf(&mut self, path: &str) {
+        self.elf = Some(PathBuf::from_str(path).unwrap());
+    }
+
+    fn get_program_size(&self, elf_contents: &[u8]) -> u64 {
+        let (_, _, program_end, _) = tracer::decode(&elf_contents);
+        program_end - RAM_START_ADDRESS
+    }
+
     pub fn get_elf_contents(&self) -> Option<Vec<u8>> {
         if let Some(elf) = &self.elf {
             let mut elf_file =
@@ -259,8 +282,7 @@ impl Program {
             File::open(elf).unwrap_or_else(|_| panic!("could not open elf file: {elf:?}"));
         let mut elf_contents = Vec::new();
         elf_file.read_to_end(&mut elf_contents).unwrap();
-        let (_, _, program_end, _) = tracer::decode(&elf_contents);
-        let program_size = program_end - RAM_START_ADDRESS;
+        let program_size = self.get_program_size(&elf_contents);
 
         let memory_config = MemoryConfig {
             memory_size: self.memory_size,

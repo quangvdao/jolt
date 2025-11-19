@@ -26,6 +26,8 @@ pub mod lookup_table;
 pub mod proof_serialization;
 #[cfg(feature = "prover")]
 pub mod prover;
+#[cfg(feature = "prover")]
+pub use prover::{JoltAdvice, JoltProverPreprocessing};
 pub mod r1cs;
 pub mod ram;
 pub mod registers;

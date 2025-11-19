@@ -29,7 +29,7 @@ use crate::{
 pub struct GruenSplitEqPolynomial<F: JoltField> {
     pub(crate) current_index: usize,
     pub(crate) current_scalar: F,
-    pub(crate) w: Vec<F::Challenge>,
+    pub w: Vec<F::Challenge>,
     pub(crate) E_in_vec: Vec<Vec<F>>,
     pub(crate) E_out_vec: Vec<Vec<F>>,
     pub(crate) binding_order: BindingOrder,

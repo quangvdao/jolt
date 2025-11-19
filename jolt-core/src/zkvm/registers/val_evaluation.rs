@@ -51,7 +51,7 @@ const LOG_K: usize = REGISTER_COUNT.ilog2() as usize;
 const DEGREE_BOUND: usize = 3;
 
 #[derive(Allocative)]
-pub(crate) struct ValEvaluationSumcheckProver<F: JoltField> {
+pub struct ValEvaluationSumcheckProver<F: JoltField> {
     inc: MultilinearPolynomial<F>,
     wa: RaPolynomial<u8, F>,
     lt: LtPolynomial<F>,

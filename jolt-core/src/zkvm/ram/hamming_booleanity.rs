@@ -32,9 +32,9 @@ const DEGREE_BOUND: usize = 3;
 
 #[derive(Allocative)]
 pub struct HammingBooleanitySumcheckProver<F: JoltField> {
-    eq_r_cycle: GruenSplitEqPolynomial<F>,
-    H: MultilinearPolynomial<F>,
-    log_T: usize,
+    pub eq_r_cycle: GruenSplitEqPolynomial<F>,
+    pub H: MultilinearPolynomial<F>,
+    pub log_T: usize,
 }
 
 impl<F: JoltField> HammingBooleanitySumcheckProver<F> {
@@ -109,12 +109,15 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
+        // TODO: Refactor
+        let final_claim = self.H.final_sumcheck_claim();
+
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::RamHammingWeight,
             SumcheckId::RamHammingBooleanity,
             get_opening_point(sumcheck_challenges),
-            self.H.final_sumcheck_claim(),
+            final_claim,
         );
     }
 

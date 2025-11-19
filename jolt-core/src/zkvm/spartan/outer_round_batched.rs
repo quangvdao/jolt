@@ -1,20 +1,22 @@
 #![allow(clippy::too_many_arguments)]
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
-    SumcheckId, LITTLE_ENDIAN,
+    SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::{
     dense_mlpoly::DensePolynomial,
     eq_poly::EqPolynomial,
     multilinear_polynomial::BindingOrder,
     split_eq_poly::GruenSplitEqPolynomial,
+    unipoly::UniPoly,
 };
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 use crate::zkvm::r1cs::evaluation::R1CSEval;
+use crate::zkvm::r1cs::inputs::ALL_R1CS_INPUTS;
+use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::spartan::outer_baseline::SparseCoefficient;
 use crate::zkvm::witness::VirtualPolynomial;
-use crate::zkvm::r1cs::inputs::ALL_R1CS_INPUTS;
 use crate::{
     field::JoltField,
     transcripts::Transcript,
@@ -755,14 +757,11 @@ pub struct OuterRoundBatchedSumcheckProver<F: JoltField> {
 
 impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
     #[tracing::instrument(skip_all, name = "OuterRoundBatchedSumcheckProver::gen")]
-    pub fn gen<
-        PCS: crate::poly::commitment::commitment_scheme::CommitmentScheme<Field = F>,
-        T: Transcript,
-    >(
-        state_manager: &mut crate::zkvm::dag::state_manager::StateManager<'_, F, PCS>,
+    pub fn gen<T: Transcript>(
+        trace: Arc<Vec<Cycle>>,
+        bytecode_preprocessing: &BytecodePreprocessing,
         transcript: &mut T,
     ) -> Self {
-        let (preprocessing, _, trace, _program_io, _final_mem) = state_manager.get_prover_data();
 
         // Determine step and constraint vars
         let num_steps = trace.len();
@@ -783,7 +782,9 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
             NUM_SVO_ROUNDS,
             F,
         >::svo_sumcheck_round(
-            &preprocessing.bytecode, trace, &tau
+            bytecode_preprocessing,
+            trace.as_ref(),
+            &tau,
         );
 
         // Eq helper for the sumcheck itself: use standard split-eq semantics over all variables.
@@ -851,8 +852,8 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
 
                     if step_idx < num_steps && constraint_idx < uniform_constraints.len() {
                         let row = R1CSCycleInputs::from_trace::<F>(
-                            &preprocessing.bytecode,
-                            trace,
+                            bytecode_preprocessing,
+                            trace.as_ref(),
                             step_idx,
                         );
                         let cons = &uniform_constraints[constraint_idx];
@@ -870,8 +871,8 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
         // Bind nothing yet; all rounds (SVO + streaming + remaining) will bind via
         // `SumcheckInstanceProver::bind`. Prepare instance:
         Self {
-            preprocess: preprocessing.bytecode.clone(),
-            trace: state_manager.get_trace_arc(),
+            preprocess: bytecode_preprocessing.clone(),
+            trace,
             eq_poly,
             eq_small_value,
             spartan_poly,
@@ -1009,9 +1010,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
 
     #[tracing::instrument(
         skip_all,
-        name = "OuterRoundBatchedSumcheckProver::compute_prover_message"
+        name = "OuterRoundBatchedSumcheckProver::compute_message"
     )]
-    fn compute_prover_message(&mut self, round: usize, previous_claim: F) -> Vec<F> {
+    fn compute_message(&mut self, round: usize, previous_claim: F) -> UniPoly<F> {
         let (t0, tinf) = if round < NUM_SVO_ROUNDS {
             self.compute_svo_quadratic_evals(round)
         } else if round == NUM_SVO_ROUNDS {
@@ -1048,12 +1049,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             }
         }
 
-        let evals = self.eq_poly.gruen_evals_deg_3(t0, tinf, previous_claim);
-        vec![evals[0], evals[1], evals[2]]
+        self.eq_poly
+            .gruen_poly_deg_3(t0, tinf, previous_claim)
     }
 
-    #[tracing::instrument(skip_all, name = "OuterRoundBatchedSumcheckProver::bind")]
-    fn bind(&mut self, r_j: F::Challenge, round: usize) {
+    #[tracing::instrument(skip_all, name = "OuterRoundBatchedSumcheckProver::ingest_challenge")]
+    fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize) {
         if round < NUM_SVO_ROUNDS {
             // Update SVO prefix state
             self.r_svo.push(r_j);
@@ -1195,177 +1196,16 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         sumcheck_challenges: &[F::Challenge],
     ) {
         // Opening point uses the sumcheck challenges; endianness matched by OpeningPoint impl
-        let opening_point =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
-
-        // Append Az, Bz claims and corresponding opening point
-        let claims = self.spartan_poly.final_sumcheck_evals();
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanAz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-            claims[0],
-        );
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanBz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-            claims[1],
-        );
-
-        #[cfg(test)]
-        {
-            // Naively recompute Az(r), Bz(r) as Σ_{(step,constraint)} Az(z)·eq(r,z), Bz(z)·eq(r,z)
-            // using the baseline row semantics, and compare to the claimed Az,Bz from
-            // the round-batched interleaved polynomial. This validates that the
-            // RoundBatched wiring for Az,Bz is consistent with the intended outer product.
-            let num_steps = self.trace.len();
-            let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
-            let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
-            let num_constraint_vars = if padded_num_constraints > 0 {
-                padded_num_constraints.log_2()
-            } else {
-                0
-            };
-            let total_num_vars = num_step_vars + num_constraint_vars;
-            let domain_size = 1usize << total_num_vars;
-            debug_assert_eq!(
-                opening_point.r.len(),
-                total_num_vars,
-                "RoundBatched: opening point length mismatch"
-            );
-
-            // eq_r[d] = eq(r, z_d) over all vertices z_d
-            let eq_r_evals: Vec<F> = EqPolynomial::<F>::evals(&opening_point.r);
-
-            let mut az_r = F::zero();
-            let mut bz_r = F::zero();
-
-            use crate::zkvm::r1cs::evaluation::BaselineConstraintEval;
-
-            for d in 0..domain_size {
-                let step_idx = d / padded_num_constraints;
-                let constraint_idx = d % padded_num_constraints;
-
-                if step_idx >= num_steps || constraint_idx >= R1CS_CONSTRAINTS.len() {
-                    continue;
-                }
-
-                let row_inputs = R1CSCycleInputs::from_trace::<F>(
-                    &self.preprocess,
-                    &self.trace,
-                    step_idx,
-                );
-                let cons = &R1CS_CONSTRAINTS[constraint_idx].cons;
-
-                let az: F = BaselineConstraintEval::eval_az::<F>(cons, &row_inputs);
-                let bz: F = BaselineConstraintEval::eval_bz::<F>(cons, &row_inputs);
-                let eq = eq_r_evals[d];
-                az_r += eq * az;
-                bz_r += eq * bz;
-            }
-
-            // Sanity check: compare typed Bz evaluation against baseline field evaluation
-            // for a single (step, constraint) pair.
-            {
-                use crate::utils::small_value::accum::s160_to_field;
-                use crate::zkvm::r1cs::evaluation::eval_az_bz_batch_from_row;
-
-                let step_idx0: usize = 0;
-                if step_idx0 < self.trace.len() && !R1CS_CONSTRAINTS.is_empty() {
-                    let row0 = R1CSCycleInputs::from_trace::<F>(
-                        &self.preprocess,
-                        &self.trace,
-                        step_idx0,
-                    );
-                    let constraint_idx0: usize = 0;
-                    let named = &R1CS_CONSTRAINTS[constraint_idx0];
-                    let mut az_block = [I8OrI96::zero(); 1];
-                    let mut bz_block = [S160::zero(); 1];
-                    eval_az_bz_batch_from_row::<F>(
-                        core::slice::from_ref(named),
-                        &row0,
-                        &mut az_block,
-                        &mut bz_block,
-                    );
-                    let typed_bz_field: F = s160_to_field::<F>(&bz_block[0]);
-                    let baseline_bz =
-                        BaselineConstraintEval::eval_bz::<F>(&named.cons, &row0);
-                    println!(
-                        "RoundBatched Bz single-eval check: typed={} baseline={} diff={}",
-                        typed_bz_field,
-                        baseline_bz,
-                        typed_bz_field - baseline_bz
-                    );
-                }
-            }
-
-            if az_r != claims[0] {
-                println!(
-                    "RoundBatched Az(r) mismatch vs naive eq(r,·)*Az(·): recomputed={} claimed={}",
-                    az_r, claims[0]
-                );
-                if let Some(inv) = az_r.inverse() {
-                    println!(
-                        "RoundBatched Az(r) ratio (claimed / recomputed) = {}",
-                        claims[0] * inv
-                    );
-                }
-            }
-            if bz_r != claims[1] {
-                println!(
-                    "RoundBatched Bz(r) mismatch vs naive eq(r,·)*Bz(·): recomputed={} claimed={}",
-                    bz_r, claims[1]
-                );
-                println!(
-                    "RoundBatched final bound_coeffs len = {}",
-                    self.spartan_poly.bound_coeffs.len()
-                );
-                let first_indices: Vec<usize> = self
-                    .spartan_poly
-                    .bound_coeffs
-                    .iter()
-                    .take(8)
-                    .map(|c| c.index)
-                    .collect();
-                println!(
-                    "RoundBatched first 8 bound_coeff indices: {:?}",
-                    first_indices
-                );
-                let az_idx = self
-                    .spartan_poly
-                    .bound_coeffs
-                    .iter()
-                    .position(|c| c.index == 0);
-                let bz_idx = self
-                    .spartan_poly
-                    .bound_coeffs
-                    .iter()
-                    .position(|c| c.index == 1);
-                println!(
-                    "RoundBatched positions of index 0 and 1 in bound_coeffs: Az={:?}, Bz={:?}",
-                    az_idx, bz_idx
-                );
-                println!(
-                    "RoundBatched field constants: R={}, R^2={}",
-                    F::MONTGOMERY_R,
-                    F::MONTGOMERY_R_SQUARE
-                );
-                if let Some(inv) = bz_r.inverse() {
-                    println!(
-                        "RoundBatched Bz(r) ratio (claimed / recomputed) = {}",
-                        claims[1] * inv
-                    );
-                }
-            }
-        }
+        let opening_point: OpeningPoint<BIG_ENDIAN, F> =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
+                .match_endianness();
 
         // Witness openings at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_cycle_bits);
+        let r_cycle_point =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(r_cycle.to_vec()).match_endianness();
         let claimed_witness_evals =
-            R1CSEval::compute_claimed_inputs(&self.preprocess, &self.trace, r_cycle);
+            R1CSEval::compute_claimed_inputs(&self.preprocess, &self.trace, &r_cycle_point);
         for (i, input) in crate::zkvm::r1cs::inputs::ALL_R1CS_INPUTS
             .iter()
             .enumerate()
@@ -1374,7 +1214,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
                 transcript,
                 VirtualPolynomial::from(input),
                 SumcheckId::SpartanOuter,
-                OpeningPoint::new(r_cycle.to_vec()),
+                r_cycle_point.clone(),
                 claimed_witness_evals[i],
             );
         }
@@ -1393,15 +1233,22 @@ pub struct OuterRoundBatchedSumcheckVerifier<F: JoltField> {
     num_cycle_bits: usize,
     total_rounds: usize,
     tau: Vec<F::Challenge>,
+    key: UniformSpartanKey<F>,
     _phantom: core::marker::PhantomData<F>,
 }
 
 impl<F: JoltField> OuterRoundBatchedSumcheckVerifier<F> {
-    pub fn new(num_cycle_bits: usize, num_constraint_bits: usize, tau: Vec<F::Challenge>) -> Self {
+    pub fn new(
+        num_cycle_bits: usize,
+        num_constraint_bits: usize,
+        tau: Vec<F::Challenge>,
+        key: UniformSpartanKey<F>,
+    ) -> Self {
         Self {
             num_cycle_bits,
             total_rounds: num_cycle_bits + num_constraint_bits,
             tau,
+            key,
             _phantom: core::marker::PhantomData,
         }
     }
@@ -1424,13 +1271,31 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         accumulator: &VerifierOpeningAccumulator<F>,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
-        let (_, claim_Az) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanAz, SumcheckId::SpartanOuter);
-        let (_, claim_Bz) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanBz, SumcheckId::SpartanOuter);
-        let r_reversed: Vec<F::Challenge> = sumcheck_challenges.iter().copied().rev().collect();
-        let eq = EqPolynomial::<F>::mle(&self.tau, &r_reversed);
-        eq * claim_Az * claim_Bz
+        // Recover all z_i(r_cycle) openings registered for Spartan outer.
+        let r1cs_input_evals = ALL_R1CS_INPUTS.map(|input| {
+            accumulator
+                .get_virtual_polynomial_opening((&input).into(), SumcheckId::SpartanOuter)
+                .1
+        });
+
+        // Inner sum-product over R1CS rows at a row-binding point derived from the
+        // first two sumcheck challenges (streaming bit followed by a row bit).
+        debug_assert!(
+            sumcheck_challenges.len() >= 2,
+            "round-batched outer: expected at least two challenges for row binding"
+        );
+        let rx_constr = &[sumcheck_challenges[0], sumcheck_challenges[1]];
+        let inner_sum_prod = self
+            .key
+            .evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+
+        // Eq kernel over all remaining outer variables (cycle + constraint bits),
+        // using the same τ layout as the round-batched prover.
+        let r_rev: Vec<F::Challenge> =
+            sumcheck_challenges.iter().rev().copied().collect();
+        let eq_tau_r = EqPolynomial::<F>::mle(&self.tau, &r_rev);
+
+        eq_tau_r * inner_sum_prod
     }
     fn cache_openings(
         &self,
@@ -1438,22 +1303,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
-        let opening_point =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
-
-        // Az, Bz openings at full point
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanAz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-        );
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanBz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-        );
+        let opening_point: OpeningPoint<BIG_ENDIAN, F> =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
+                .match_endianness();
 
         // Witness openings at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_cycle_bits);

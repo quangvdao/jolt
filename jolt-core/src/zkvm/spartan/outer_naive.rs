@@ -1,8 +1,8 @@
 use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
-    OpeningPoint, ProverOpeningAccumulator, SumcheckId, LITTLE_ENDIAN,
+    OpeningPoint, ProverOpeningAccumulator, SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
 };
-use crate::poly::{dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial};
+use crate::poly::{dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial, unipoly::UniPoly};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 
 use crate::utils::thread::unsafe_allocate_zero_vec;
@@ -157,14 +157,14 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
 
     /// Naively compute evaluations of the current round sumcheck polynomial
     ///   g(t) = Σ_x eq(r_1,..,r_{j-1}, t, x) · Az(r_1,..,r_{j-1}, t, x) · Bz(...)
-    /// at t ∈ {0, 2, 3}, using only the current dense coeffs and the linearity
+    /// at t ∈ {0, 1, 2, 3}, using only the current dense coeffs and the linearity
     /// of each multilinear polynomial in the current variable (no cloning).
     ///
     /// For any multilinear f in this variable, with f(0) = low, f(1) = high:
     ///   diff = high - low,
     ///   f(2) = f(1) + diff,
     ///   f(3) = f(2) + diff.
-    fn naive_round_evals(&self) -> [F; 3] {
+    fn naive_round_evals(&self) -> [F; 4] {
         let len = self.eq.len();
         debug_assert_eq!(len, self.az.len());
         debug_assert_eq!(len, self.bz.len());
@@ -172,7 +172,7 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
 
         let num_pairs = len / 2;
 
-        let (g0, g2, g3) = (0..num_pairs)
+        let (g0, g1, g2, g3) = (0..num_pairs)
             .into_par_iter()
             .map(|j| {
                 let i0 = 2 * j;
@@ -191,6 +191,8 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
 
                 // t = 0
                 let g0 = eq0 * az0 * bz0;
+                // t = 1
+                let g1 = eq1 * az1 * bz1;
 
                 // t = 2: f(2) = f(1) + diff
                 let eq2 = eq1 + eq_diff;
@@ -204,29 +206,14 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
                 let bz3 = bz2 + bz_diff;
                 let g3 = eq3 * az3 * bz3;
 
-                (g0, g2, g3)
+                (g0, g1, g2, g3)
             })
             .reduce(
-                || (F::zero(), F::zero(), F::zero()),
-                |(a0, a2, a3), (b0, b2, b3)| (a0 + b0, a2 + b2, a3 + b3),
+                || (F::zero(), F::zero(), F::zero(), F::zero()),
+                |(a0, a1, a2, a3), (b0, b1, b2, b3)| (a0 + b0, a1 + b1, a2 + b2, a3 + b3),
             );
 
-        [g0, g2, g3]
-    }
-
-    /// Final Az, Bz evaluations after all bindings (at the full opening point).
-    fn final_sumcheck_evals(&self) -> [F; 2] {
-        let az0 = if !self.az.is_empty() {
-            self.az[0]
-        } else {
-            F::zero()
-        };
-        let bz0 = if !self.bz.is_empty() {
-            self.bz[0]
-        } else {
-            F::zero()
-        };
-        [az0, bz0]
+        [g0, g1, g2, g3]
     }
 }
 
@@ -241,16 +228,19 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterNaiveSum
         F::zero()
     }
 
-    #[tracing::instrument(skip_all, name = "OuterNaiveSumcheckProver::compute_prover_message")]
-    fn compute_prover_message(&mut self, _round: usize, _previous_claim: F) -> Vec<F> {
-        // Naive version: directly evaluate g(t) at t = 0, 2, 3 using dense eq, Az, Bz,
+    #[tracing::instrument(skip_all, name = "OuterNaiveSumcheckProver::compute_message")]
+    fn compute_message(&mut self, _round: usize, _previous_claim: F) -> UniPoly<F> {
+        // Naive version: directly evaluate g(t) at t = 0,1,2,3 using dense eq, Az, Bz,
         // exploiting linearity in the current variable (no split-eq shortcuts).
         let evals = self.naive_round_evals();
-        vec![evals[0], evals[1], evals[2]]
+        debug_assert_eq!(evals.len(), 4);
+        // Sanity: previous_claim should equal g(0) + g(1); we trust the caller and
+        // reconstruct the cubic from the four explicit evaluations.
+        UniPoly::from_evals(&evals)
     }
 
-    #[tracing::instrument(skip_all, name = "OuterNaiveSumcheckProver::bind")]
-    fn bind(&mut self, r_j: F::Challenge, _round: usize) {
+    #[tracing::instrument(skip_all, name = "OuterNaiveSumcheckProver::ingest_challenge")]
+    fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         // Bind eq, Az, Bz in lockstep (standard dense-poly binding).
         self.eq.bind_parallel(r_j, BindingOrder::LowToHigh);
         rayon::join(
@@ -266,25 +256,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterNaiveSum
         sumcheck_challenges: &[F::Challenge],
     ) {
         // Opening point uses the sumcheck challenges; endianness matched by OpeningPoint impl
-        let opening_point =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
-
-        // Append Az, Bz claims and corresponding opening point
-        let claims = self.final_sumcheck_evals();
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanAz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-            claims[0],
-        );
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanBz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-            claims[1],
-        );
+        let opening_point: OpeningPoint<BIG_ENDIAN, F> =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
+                .match_endianness();
 
         // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);

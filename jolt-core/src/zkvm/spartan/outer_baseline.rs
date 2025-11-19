@@ -1,11 +1,12 @@
 use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
-    SumcheckId, LITTLE_ENDIAN,
+    SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::{
     dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial,
     multilinear_polynomial::MultilinearPolynomial, split_eq_poly::GruenSplitEqPolynomial,
+    unipoly::UniPoly,
 };
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
@@ -13,6 +14,7 @@ use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::r1cs::evaluation::{BaselineConstraintEval, R1CSEval};
 use crate::zkvm::r1cs::inputs::{R1CSCycleInputs, ALL_R1CS_INPUTS};
+use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{
     field::{JoltField, OptimizedMul},
@@ -38,6 +40,7 @@ pub struct OuterBaselineSumcheckVerifier<F: JoltField> {
     num_step_bits: usize,
     total_rounds: usize,
     tau: Vec<F::Challenge>,
+    key: UniformSpartanKey<F>,
     _phantom: core::marker::PhantomData<F>,
 }
 
@@ -46,11 +49,13 @@ impl<F: JoltField> OuterBaselineSumcheckVerifier<F> {
         num_step_bits: usize,
         num_constraint_bits: usize,
         tau: Vec<F::Challenge>,
+        key: UniformSpartanKey<F>,
     ) -> Self {
         Self {
             num_step_bits,
             total_rounds: num_step_bits + num_constraint_bits,
             tau,
+            key,
             _phantom: core::marker::PhantomData,
         }
     }
@@ -73,14 +78,32 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         accumulator: &VerifierOpeningAccumulator<F>,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
-        let (_, claim_Az) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanAz, SumcheckId::SpartanOuter);
-        let (_, claim_Bz) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::SpartanBz, SumcheckId::SpartanOuter);
-        // Binding order low-to-high: reverse r for Eq MLE
-        let r_reversed: Vec<F::Challenge> = sumcheck_challenges.iter().copied().rev().collect();
-        let eq = EqPolynomial::<F>::mle(&self.tau, &r_reversed);
-        eq * claim_Az * claim_Bz
+        // Recover all z_i(r_cycle) openings for the Spartan outer instance.
+        let r1cs_input_evals = ALL_R1CS_INPUTS.map(|input| {
+            accumulator
+                .get_virtual_polynomial_opening((&input).into(), SumcheckId::SpartanOuter)
+                .1
+        });
+
+        // Inner sum-product over R1CS rows at a row-binding point derived from the
+        // first two sumcheck challenges.  This matches the layout expected by
+        // `UniformSpartanKey::evaluate_inner_sum_product_at_point`.
+        debug_assert!(
+            sumcheck_challenges.len() >= 2,
+            "baseline outer: expected at least two challenges for row binding"
+        );
+        let rx_constr = &[sumcheck_challenges[0], sumcheck_challenges[1]];
+        let inner_sum_prod = self
+            .key
+            .evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+
+        // Full Eq kernel over the (cycle,constraint) variables, using the same
+        // τ vector that parameterizes the baseline prover's equality polynomial.
+        let r_rev: Vec<F::Challenge> =
+            sumcheck_challenges.iter().rev().copied().collect();
+        let eq_tau_r = EqPolynomial::<F>::mle(&self.tau, &r_rev);
+
+        eq_tau_r * inner_sum_prod
     }
     fn cache_openings(
         &self,
@@ -88,22 +111,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
-        let opening_point =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
-
-        // Az, Bz at full point
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanAz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-        );
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanBz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-        );
+        let opening_point: OpeningPoint<BIG_ENDIAN, F> =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
+                .match_endianness();
 
         // Witness openings at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_bits);
@@ -740,15 +750,16 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
         F::zero()
     }
 
-    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::compute_prover_message")]
-    fn compute_prover_message(&mut self, _round: usize, previous_claim: F) -> Vec<F> {
+    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::compute_message")]
+    fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         let (t0, tinf) = self.compute_endpoints();
-        let evals = self.eq_poly.gruen_evals_deg_3(t0, tinf, previous_claim);
-        vec![evals[0], evals[1], evals[2]]
+        // Use the same Gruen helper as the canonical outer to build the cubic round polynomial.
+        self.eq_poly
+            .gruen_poly_deg_3(t0, tinf, previous_claim)
     }
 
-    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::bind")]
-    fn bind(&mut self, r_j: F::Challenge, _round: usize) {
+    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::ingest_challenge")]
+    fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         // Bind Az, Bz and the split-eq helper in lockstep (standard dense-poly binding).
         rayon::join(
             || self.az.bind_parallel(r_j, BindingOrder::LowToHigh),
@@ -763,26 +774,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
         transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
-        let opening_point =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
-
-        // Final Az, Bz claims from bound dense polynomials
-        let [az_final, bz_final] = self.final_sumcheck_evals();
-
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanAz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-            az_final,
-        );
-        accumulator.append_virtual(
-            transcript,
-            VirtualPolynomial::SpartanBz,
-            SumcheckId::SpartanOuter,
-            opening_point.clone(),
-            bz_final,
-        );
+        let opening_point: OpeningPoint<BIG_ENDIAN, F> =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
+                .match_endianness();
 
         // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);
@@ -865,20 +859,5 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
                     |a, b| (a.0 + b.0, a.1 + b.1),
                 )
         }
-    }
-
-    /// Final Az, Bz evaluations after all bindings (at the full opening point).
-    fn final_sumcheck_evals(&self) -> [F; 2] {
-        let az0 = if !self.az.is_empty() {
-            self.az[0]
-        } else {
-            F::zero()
-        };
-        let bz0 = if !self.bz.is_empty() {
-            self.bz[0]
-        } else {
-            F::zero()
-        };
-        [az0, bz0]
     }
 }

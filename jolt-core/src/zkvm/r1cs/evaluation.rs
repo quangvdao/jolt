@@ -47,6 +47,7 @@ use crate::field::{BarrettReduce, FMAdd, JoltField};
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::lagrange_poly::LagrangeHelper;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
 use crate::subprotocols::univariate_skip::uniskip_targets;
 use crate::utils::small_scalar::SmallScalar;
 use crate::utils::{
@@ -679,10 +680,10 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
     pub fn compute_claimed_inputs(
         bytecode_preprocessing: &BytecodePreprocessing,
         trace: &[Cycle],
-        r_cycle: &[F::Challenge],
+        r_cycle: &OpeningPoint<BIG_ENDIAN, F>,
     ) -> [F; NUM_R1CS_INPUTS] {
         let m = r_cycle.len() / 2;
-        let (r2, r1) = r_cycle.split_at(m);
+        let (r2, r1) = r_cycle.split_at_r(m);
         let (eq_one, eq_two) = rayon::join(|| EqPolynomial::evals(r2), || EqPolynomial::evals(r1));
 
         (0..eq_one.len())
@@ -922,10 +923,10 @@ impl ProductVirtualEval {
     #[tracing::instrument(skip_all, name = "ProductVirtualEval::compute_claimed_factors")]
     pub fn compute_claimed_factors<F: JoltField>(
         trace: &[tracer::instruction::Cycle],
-        r_cycle: &[<F as JoltField>::Challenge],
+        r_cycle: &OpeningPoint<BIG_ENDIAN, F>,
     ) -> [F; 8] {
         let m = r_cycle.len() / 2;
-        let (r2, r1) = r_cycle.split_at(m);
+        let (r2, r1) = r_cycle.split_at_r(m);
         let (eq_one, eq_two) = rayon::join(|| EqPolynomial::evals(r2), || EqPolynomial::evals(r1));
 
         let eq_two_len = eq_two.len();

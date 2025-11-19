@@ -158,6 +158,10 @@ harness = false
 name = "spartan_outer"
 harness = false
 
+[[bench]]
+name = "degree2_sumcheck"
+harness = false
+
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"

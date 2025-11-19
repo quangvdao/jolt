@@ -39,7 +39,7 @@ pub enum OuterImpl {
 /// Global selection for Spartan Stage 1 remainder.
 /// NOTE: Round-batched outer is still experimental; default to the
 /// baseline streaming implementation for correctness.
-pub const OUTER_IMPL: OuterImpl = OuterImpl::RoundBatched;
+pub const OUTER_IMPL: OuterImpl = OuterImpl::Baseline;
 
 // Stage 1: Outer sumcheck with uni-skip first round (non-DAG pipeline helper).
 pub fn prove_stage1_uni_skip<F: JoltField, T: Transcript>(

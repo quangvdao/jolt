@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ark_bn254::Fr;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, SamplingMode};
 use jolt_core::{
-    poly::{commitment::dory::DoryCommitmentScheme, opening_proof::ProverOpeningAccumulator},
+    poly::opening_proof::ProverOpeningAccumulator,
     subprotocols::{
         sumcheck::BatchedSumcheck,
         sumcheck_prover::SumcheckInstanceProver,
@@ -17,6 +17,7 @@ use jolt_core::{
         spartan::{
             outer::OuterRemainingSumcheckProver,
             outer_baseline::OuterBaselineSumcheckProver as OuterBaselineStreamingSumcheckProver,
+            outer_naive::OuterNaiveSumcheckProver,
             outer_round_batched::OuterRoundBatchedSumcheckProver,
             outer_streaming::OuterRemainingStreamingSumcheckProver,
             prove_stage1_uni_skip,
@@ -32,7 +33,6 @@ use jolt_inlines_sha2 as _;
 use jolt_core::host;
 
 type F = Fr;
-type PCS = DoryCommitmentScheme;
 type ProofTranscript = KeccakTranscript;
 
 fn setup_for_spartan(
@@ -74,7 +74,7 @@ fn setup_for_spartan(
             .map_or(0, |pos| pos + 1),
     );
 
-    let mut transcript = ProofTranscript::new(b"Jolt transcript");
+    let transcript = ProofTranscript::new(b"Jolt transcript");
     let opening_bits = padded_trace_length.log_2();
     let opening_accumulator = ProverOpeningAccumulator::<F>::new(opening_bits);
 
@@ -176,6 +176,33 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                     let constraints_vec: Vec<R1CSConstraint> =
                         R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
                     let mut instance = OuterBaselineStreamingSumcheckProver::<F>::gen(
+                        &bytecode_pp,
+                        Arc::clone(&trace),
+                        &constraints_vec,
+                        padded_num_constraints,
+                        &mut transcript,
+                    );
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut instance];
+
+                    black_box(BatchedSumcheck::prove(
+                        instance_refs,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_function(&format!("outer-naive/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(trace, bytecode_pp, _padded_trace_length, mut opening_accumulator, mut transcript)| {
+                    let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                    let constraints_vec: Vec<R1CSConstraint> =
+                        R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+                    let mut instance = OuterNaiveSumcheckProver::<F>::gen(
                         &bytecode_pp,
                         Arc::clone(&trace),
                         &constraints_vec,

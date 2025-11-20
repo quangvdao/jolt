@@ -11,11 +11,15 @@ use crate::zkvm::r1cs::constraints::{
     PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
 use crate::zkvm::r1cs::key::UniformSpartanKey;
-use crate::zkvm::spartan::outer::{OuterRemainingSumcheckProver, OuterUniSkipInstanceProver};
+use crate::zkvm::spartan::outer::OuterUniSkipInstanceProver;
 use crate::zkvm::spartan::product::{
     ProductVirtualUniSkipInstanceParams, ProductVirtualUniSkipInstanceProver,
 };
 use crate::zkvm::witness::VirtualPolynomial;
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Validate, Valid,
+};
+use std::io::{Read, Write};
 use tracer::instruction::Cycle;
 
 pub mod instruction_input;
@@ -28,7 +32,7 @@ pub mod product;
 pub mod shift;
 
 /// Select which outer-remaining implementation to use.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OuterImpl {
     Current,
     Streaming,
@@ -160,4 +164,42 @@ pub fn verify_stage2_uni_skip<F: JoltField, T: Transcript>(
         r0,
         tau,
     })
+}
+
+impl CanonicalSerialize for OuterImpl {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        (*self as u8).serialize_with_mode(&mut writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        (*self as u8).serialized_size(compress)
+    }
+}
+
+impl CanonicalDeserialize for OuterImpl {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let value = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        match value {
+            0 => Ok(OuterImpl::Current),
+            1 => Ok(OuterImpl::Streaming),
+            2 => Ok(OuterImpl::Baseline),
+            3 => Ok(OuterImpl::RoundBatched),
+            4 => Ok(OuterImpl::Naive),
+            _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
+
+impl Valid for OuterImpl {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
 }

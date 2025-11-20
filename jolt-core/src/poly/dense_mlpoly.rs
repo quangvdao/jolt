@@ -218,13 +218,7 @@ impl<F: JoltField> DensePolynomial<F> {
             .with_min_len(512)
             .for_each(|(bound_coeff, coeffs)| {
                 let m = coeffs[1] - coeffs[0];
-                bound_coeff.write(if m.is_zero() {
-                    coeffs[0]
-                } else if m.is_one() {
-                    coeffs[0] + *r
-                } else {
-                    coeffs[0] + *r * m
-                });
+                bound_coeff.write(coeffs[0] + *r * m);
             });
         unsafe { bound_Z.set_len(n) };
         self.Z = bound_Z;

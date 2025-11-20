@@ -573,26 +573,4 @@ impl<F: JoltField> OuterRemainingSumcheckParams<F> {
         let r_cycle = sumcheck_challenges[1..].to_vec();
         OpeningPoint::<LITTLE_ENDIAN, F>::new(r_cycle).match_endianness()
     }
-
-    /// Returns the number of cycle bits (shared between prover and verifier).
-    pub(crate) fn num_cycles_bits(&self) -> usize {
-        self.num_cycles_bits
-    }
-
-    /// Returns the input claim carried from the univariate-skip first round.
-    pub(crate) fn input_claim(&self) -> F {
-        self.input_claim
-    }
-
-    /// Expose the univariate-skip first-round challenge r0 for testing/streaming helpers.
-    #[cfg(test)]
-    pub(crate) fn r0_uniskip(&self) -> F::Challenge {
-        self.r0_uniskip
-    }
-
-    /// Expose the tau vector used by the outer-remaining instance.
-    #[cfg(test)]
-    pub(crate) fn tau(&self) -> &[F::Challenge] {
-        &self.tau
-    }
 }

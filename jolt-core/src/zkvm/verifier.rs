@@ -16,7 +16,10 @@ use crate::zkvm::{
         read_raf_checking::ReadRafSumcheckVerifier as LookupsReadRafSumcheckVerifier,
     },
     proof_serialization::JoltProof,
-    r1cs::key::UniformSpartanKey,
+    r1cs::{
+        constraints::R1CS_CONSTRAINTS,
+        key::UniformSpartanKey,
+    },
     ram::{
         self, hamming_booleanity::HammingBooleanitySumcheckVerifier,
         output_check::OutputSumcheckVerifier, output_check::ValFinalSumcheckVerifier,
@@ -31,9 +34,14 @@ use crate::zkvm::{
         val_evaluation::ValEvaluationSumcheckVerifier as RegistersValEvaluationSumcheckVerifier,
     },
     spartan::{
-        instruction_input::InstructionInputSumcheckVerifier, outer::OuterRemainingSumcheckVerifier,
-        product::ProductVirtualRemainderVerifier, shift::ShiftSumcheckVerifier,
-        verify_stage1_uni_skip, verify_stage2_uni_skip,
+        instruction_input::InstructionInputSumcheckVerifier,
+        outer::OuterRemainingSumcheckVerifier,
+        outer_baseline::OuterBaselineSumcheckVerifier,
+        product::ProductVirtualRemainderVerifier,
+        shift::ShiftSumcheckVerifier,
+        verify_stage1_uni_skip,
+        verify_stage2_uni_skip,
+        OuterImpl,
     },
     witness::AllCommittedPolynomials,
     ProverDebugInfo, Serializable,
@@ -46,7 +54,7 @@ use crate::{
     transcripts::Transcript,
     utils::{errors::ProofVerifyError, math::Math},
 };
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
 use itertools::Itertools;
@@ -175,8 +183,21 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     }
 
     fn verify_stage1(&mut self) -> Result<(), anyhow::Error> {
+        match self.proof.stage1_outer_impl {
+            OuterImpl::Baseline => self.verify_stage1_baseline(),
+            _ => self.verify_stage1_uniskip(),
+        }
+    }
+
+    fn verify_stage1_uniskip(&mut self) -> Result<(), anyhow::Error> {
+        let uni_skip_proof = self
+            .proof
+            .stage1_uni_skip_first_round_proof
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing Stage 1 uni-skip proof"))?;
+
         let spartan_outer_uni_skip_state = verify_stage1_uni_skip(
-            &self.proof.stage1_uni_skip_first_round_proof,
+            uni_skip_proof,
             &self.spartan_key,
             &mut self.transcript,
         )
@@ -189,13 +210,50 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             self.spartan_key,
         );
 
-        let _r_stage1 = BatchedSumcheck::verify(
+        BatchedSumcheck::verify(
             &self.proof.stage1_sumcheck_proof,
             vec![&spartan_outer_remaining],
             &mut self.opening_accumulator,
             &mut self.transcript,
         )
         .context("Stage 1")?;
+
+        Ok(())
+    }
+
+    fn verify_stage1_baseline(&mut self) -> Result<(), anyhow::Error> {
+        if self.proof.stage1_uni_skip_first_round_proof.is_some() {
+            return Err(anyhow!(
+                "baseline outer should not include uni-skip first round proof"
+            ));
+        }
+
+        let num_step_bits = self.proof.trace_length.log_2();
+        let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+        let num_constraint_bits = if padded_num_constraints > 0 {
+            padded_num_constraints.log_2()
+        } else {
+            0
+        };
+
+        let tau = self
+            .transcript
+            .challenge_vector_optimized::<F>(num_step_bits + num_constraint_bits);
+
+        let baseline_verifier = OuterBaselineSumcheckVerifier::new(
+            num_step_bits,
+            num_constraint_bits,
+            tau,
+            self.spartan_key,
+        );
+
+        BatchedSumcheck::verify(
+            &self.proof.stage1_sumcheck_proof,
+            vec![&baseline_verifier],
+            &mut self.opening_accumulator,
+            &mut self.transcript,
+        )
+        .context("Stage 1 baseline")?;
 
         Ok(())
     }

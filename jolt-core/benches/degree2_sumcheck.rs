@@ -1,10 +1,10 @@
 use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, black_box};
 use rayon::prelude::*;
 
-use jolt_core::field::JoltField;
+use jolt_core::field::{JoltField, MulTrunc};
 use jolt_core::poly::dense_mlpoly::DensePolynomial;
 use jolt_core::poly::multilinear_polynomial::BindingOrder;
 use jolt_core::poly::opening_proof::ProverOpeningAccumulator;
@@ -43,8 +43,10 @@ struct Degree2ProductSumcheckProver<F: JoltField> {
 /// is linear: g(t) with
 ///   g(0) = eval at bit = 0
 ///   g(1) = eval at bit = 1
-/// We want evaluations at t = 0 and t = 2, and use the identity
-///   g(2) = 2 * g(1) - g(0).
+/// We return:
+///   - g(0)
+///   - g(∞) = g(1) - g(0)  (the slope, i.e. the leading coefficient)
+#[inline(always)]
 fn dense_sumcheck_evals_degree2<F: JoltField>(
     poly: &DensePolynomial<F>,
     index: usize,
@@ -52,24 +54,42 @@ fn dense_sumcheck_evals_degree2<F: JoltField>(
 ) -> [F; 2] {
     debug_assert!(index < poly.len() / 2);
 
-    let mut evals = [F::zero(); 2];
     match order {
         BindingOrder::HighToLow => {
             let eval_at_0 = poly[index];
             let eval_at_1 = poly[index + poly.len() / 2];
-            let eval_at_2 = eval_at_1 + eval_at_1 - eval_at_0;
-            evals[0] = eval_at_0;
-            evals[1] = eval_at_2;
+            [eval_at_0, eval_at_1 - eval_at_0]
         }
         BindingOrder::LowToHigh => {
             let eval_at_0 = poly[2 * index];
             let eval_at_1 = poly[2 * index + 1];
-            let eval_at_2 = eval_at_1 + eval_at_1 - eval_at_0;
-            evals[0] = eval_at_0;
-            evals[1] = eval_at_2;
+            [eval_at_0, eval_at_1 - eval_at_0]
         }
+    }
+}
+
+/// Computes `{g(0), g(∞)}` for the degree-2 helper but keeps every intermediate in
+/// `F::Unreduced<4>` so that later batch products can stay one reduction behind.
+#[inline(always)]
+fn dense_sumcheck_evals_degree2_unreduced<F: JoltField>(
+    poly: &DensePolynomial<F>,
+    index: usize,
+    order: BindingOrder,
+) -> [F::Unreduced::<4>; 2] {
+    debug_assert!(index < poly.len() / 2);
+
+    let (eval_at_0, eval_at_1) = match order {
+        BindingOrder::HighToLow => (poly[index], poly[index + poly.len() / 2]),
+        BindingOrder::LowToHigh => (poly[2 * index], poly[2 * index + 1]),
     };
-    evals
+
+    let eval_at_0_unr = *eval_at_0.as_unreduced_ref();
+    let eval_at_1_unr = *eval_at_1.as_unreduced_ref();
+
+    let mut eval_at_inf_unr = eval_at_1_unr;
+    eval_at_inf_unr -= eval_at_0_unr;
+
+    [eval_at_0_unr, eval_at_inf_unr]
 }
 
 fn initial_claim<F: JoltField>(p: &DensePolynomial<F>, q: &DensePolynomial<F>) -> F {
@@ -117,19 +137,24 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for Degree2Produc
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         let half_n = self.p.len() / 2;
 
-        let evals_0_and_2: [F; DEGREE_BOUND] = match self.mul_mode {
+        // We work with the quadratic round polynomial s(t) induced by binding a single bit.
+        // For each group we compute:
+        //   s(0)  = p(0) * q(0)
+        //   s(∞)  = (p(1) − p(0)) * (q(1) − q(0))   (leading coefficient)
+        let evals_0_and_inf: [F; DEGREE_BOUND] = match self.mul_mode {
             MulMode::Plain => {
                 // Baseline: regular field multiplication, reduced every time.
                 (0..half_n)
                     .into_par_iter()
+                    .with_min_len(512)
                     .map(|i| {
                         let p_evals =
                             dense_sumcheck_evals_degree2::<F>(&self.p, i, BindingOrder::LowToHigh);
                         let q_evals =
                             dense_sumcheck_evals_degree2::<F>(&self.q, i, BindingOrder::LowToHigh);
                         [
-                            p_evals[0] * q_evals[0], // eval at 0
-                            p_evals[1] * q_evals[1], // eval at 2
+                            p_evals[0] * q_evals[0], // s(0)
+                            p_evals[1] * q_evals[1], // s(∞)
                         ]
                     })
                     .reduce(
@@ -145,14 +170,21 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for Degree2Produc
                 // Optimized: accumulate in unreduced form and Montgomery-reduce once.
                 let (sum0_unr, sum2_unr) = (0..half_n)
                     .into_par_iter()
+                    .with_min_len(512)
                     .map(|i| {
-                        let p_evals =
-                            dense_sumcheck_evals_degree2::<F>(&self.p, i, BindingOrder::LowToHigh);
-                        let q_evals =
-                            dense_sumcheck_evals_degree2::<F>(&self.q, i, BindingOrder::LowToHigh);
-                        let prod0_unr = p_evals[0].mul_unreduced::<9>(q_evals[0]);
-                        let prod2_unr = p_evals[1].mul_unreduced::<9>(q_evals[1]);
-                        (prod0_unr, prod2_unr)
+                        let p_evals = dense_sumcheck_evals_degree2_unreduced::<F>(
+                            &self.p,
+                            i,
+                            BindingOrder::LowToHigh,
+                        );
+                        let q_evals = dense_sumcheck_evals_degree2_unreduced::<F>(
+                            &self.q,
+                            i,
+                            BindingOrder::LowToHigh,
+                        );
+                        let prod0_unr = p_evals[0].mul_trunc::<4, 9>(&q_evals[0]);
+                        let prod_inf_unr = p_evals[1].mul_trunc::<4, 9>(&q_evals[1]);
+                        (prod0_unr, prod_inf_unr)
                     })
                     .reduce(
                         || (Default::default(), Default::default()),
@@ -170,8 +202,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for Degree2Produc
             }
         };
 
-        // Interpolate from g(0), g(2) and the hint g(0) + g(1) = previous_claim.
-        UniPoly::from_evals_and_hint(previous_claim, &evals_0_and_2)
+        let s0 = evals_0_and_inf[0];
+        let a = evals_0_and_inf[1];
+        // previous_claim = s(0) + s(1) = a + b + 2c, with c = s0, a = leading coeff
+        let b = previous_claim - a - s0 - s0;
+        UniPoly::from_coeff(vec![s0, b, a])
     }
 
     fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
@@ -218,7 +253,7 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
     group.sample_size(10);
 
     // Use a few sizes to showcase scaling; keep reasonably small for quick runs.
-    for &num_vars in &[12usize, 14usize, 16usize, 18usize, 20usize, 22usize, 24usize] {
+    for &num_vars in &[14usize, 16usize, 18usize, 20usize, 22usize, 24usize] {
         let mut rng = StdRng::seed_from_u64(42 + num_vars as u64);
         let p = random_dense_polynomial(num_vars, &mut rng);
         let q = random_dense_polynomial(num_vars, &mut rng);
@@ -229,7 +264,12 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
             &num_vars,
             |b, &n| {
                 b.iter(|| {
-                    run_degree2_sumcheck_once(n, &p, &q, MulMode::Plain);
+                    run_degree2_sumcheck_once(
+                        black_box(n),
+                        black_box(&p),
+                        black_box(&q),
+                        MulMode::Plain,
+                    );
                 })
             },
         );
@@ -240,7 +280,12 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
             &num_vars,
             |b, &n| {
                 b.iter(|| {
-                    run_degree2_sumcheck_once(n, &p, &q, MulMode::Unreduced);
+                    run_degree2_sumcheck_once(
+                        black_box(n),
+                        black_box(&p),
+                        black_box(&q),
+                        MulMode::Unreduced,
+                    );
                 })
             },
         );

@@ -8,7 +8,7 @@ use ark_serialize::{
 };
 use num::FromPrimitive;
 
-use crate::zkvm::witness::AllCommittedPolynomials;
+use crate::zkvm::{spartan::OuterImpl, witness::AllCommittedPolynomials};
 use crate::{
     field::JoltField,
     poly::{
@@ -23,7 +23,8 @@ use crate::{
 pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> {
     pub opening_claims: Claims<F>,
     pub commitments: Vec<PCS::Commitment>,
-    pub stage1_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
+    pub stage1_outer_impl: OuterImpl,
+    pub stage1_uni_skip_first_round_proof: Option<UniSkipFirstRoundProof<F, FS>>,
     pub stage1_sumcheck_proof: SumcheckInstanceProof<F, FS>,
     pub stage2_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
     pub stage2_sumcheck_proof: SumcheckInstanceProof<F, FS>,
@@ -60,6 +61,8 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalSe
             .serialize_with_mode(&mut writer, compress)?;
         self.untrusted_advice_commitment
             .serialize_with_mode(&mut writer, compress)?;
+        self.stage1_outer_impl
+            .serialize_with_mode(&mut writer, compress)?;
         self.stage1_uni_skip_first_round_proof
             .serialize_with_mode(&mut writer, compress)?;
         self.stage1_sumcheck_proof
@@ -92,6 +95,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalSe
         self.opening_claims.serialized_size(compress)
             + self.commitments.serialized_size(compress)
             + self.untrusted_advice_commitment.serialized_size(compress)
+            + self.stage1_outer_impl.serialized_size(compress)
             + self
                 .stage1_uni_skip_first_round_proof
                 .serialized_size(compress)
@@ -121,6 +125,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> Valid
         self.opening_claims.check()?;
         self.commitments.check()?;
         self.untrusted_advice_commitment.check()?;
+        self.stage1_outer_impl.check()?;
         self.stage1_uni_skip_first_round_proof.check()?;
         self.stage1_sumcheck_proof.check()?;
         self.stage2_uni_skip_first_round_proof.check()?;
@@ -157,6 +162,8 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalDe
         let commitments = <_>::deserialize_with_mode(&mut reader, compress, validate)?;
         let untrusted_advice_commitment =
             <_>::deserialize_with_mode(&mut reader, compress, validate)?;
+        let stage1_outer_impl =
+            <_>::deserialize_with_mode(&mut reader, compress, validate)?;
         let stage1_uni_skip_first_round =
             <_>::deserialize_with_mode(&mut reader, compress, validate)?;
         let stage1_sumcheck = <_>::deserialize_with_mode(&mut reader, compress, validate)?;
@@ -179,6 +186,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalDe
             opening_claims,
             commitments,
             untrusted_advice_commitment,
+            stage1_outer_impl,
             stage1_uni_skip_first_round_proof: stage1_uni_skip_first_round,
             stage1_sumcheck_proof: stage1_sumcheck,
             stage2_uni_skip_first_round_proof: stage2_uni_skip_first_round,

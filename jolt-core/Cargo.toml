@@ -164,6 +164,10 @@ harness = false
 name = "degree2_sumcheck"
 harness = false
 
+[[bench]]
+name = "degree2_with_eq_sumcheck"
+harness = false
+
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"

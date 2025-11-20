@@ -46,7 +46,10 @@ use crate::{
             read_raf_checking::ReadRafSumcheckProver as LookupsReadRafSumcheckProver,
         },
         proof_serialization::{Claims, JoltProof},
-        r1cs::key::UniformSpartanKey,
+        r1cs::{
+            constraints::{R1CS_CONSTRAINTS, R1CSConstraint},
+            key::UniformSpartanKey,
+        },
         ram::{
             self, gen_ram_memory_states,
             hamming_booleanity::HammingBooleanitySumcheckProver,
@@ -63,9 +66,15 @@ use crate::{
             val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
         },
         spartan::{
-            instruction_input::InstructionInputSumcheckProver, outer::OuterRemainingSumcheckProver,
-            product::ProductVirtualRemainderProver, prove_stage1_uni_skip, prove_stage2_uni_skip,
+            instruction_input::InstructionInputSumcheckProver,
+            outer::OuterRemainingSumcheckProver,
+            outer_baseline::OuterBaselineSumcheckProver,
+            product::ProductVirtualRemainderProver,
+            prove_stage1_uni_skip,
+            prove_stage2_uni_skip,
             shift::ShiftSumcheckProver,
+            OuterImpl,
+            OUTER_IMPL,
         },
         witness::{compute_d_parameter, AllCommittedPolynomials, CommittedPolynomial},
         ProverDebugInfo, Serializable,
@@ -310,6 +319,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             opening_claims: Claims(self.opening_accumulator.openings.clone()),
             commitments,
             untrusted_advice_commitment,
+            stage1_outer_impl: OUTER_IMPL,
             stage1_uni_skip_first_round_proof,
             stage1_sumcheck_proof,
             stage2_uni_skip_first_round_proof,
@@ -480,13 +490,25 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
     fn prove_stage1(
         &mut self,
     ) -> (
-        UniSkipFirstRoundProof<F, ProofTranscript>,
+        Option<UniSkipFirstRoundProof<F, ProofTranscript>>,
+        SumcheckInstanceProof<F, ProofTranscript>,
+    ) {
+        match OUTER_IMPL {
+            OuterImpl::Baseline => self.prove_stage1_baseline(),
+            _ => self.prove_stage1_uniskip(),
+        }
+    }
+
+    fn prove_stage1_uniskip(
+        &mut self,
+    ) -> (
+        Option<UniSkipFirstRoundProof<F, ProofTranscript>>,
         SumcheckInstanceProof<F, ProofTranscript>,
     ) {
         #[cfg(not(target_arch = "wasm32"))]
-        print_current_memory_usage("Stage 1 baseline");
+        print_current_memory_usage("Stage 1 (uni-skip outer)");
 
-        tracing::info!("Stage 1 proving");
+        tracing::info!("Stage 1 proving (uni-skip outer)");
         let (uni_skip_state, first_round_proof) = prove_stage1_uni_skip(
             &self.trace,
             &self.preprocessing.bytecode,
@@ -506,7 +528,37 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &mut self.transcript,
         );
 
-        (first_round_proof, sumcheck_proof)
+        (Some(first_round_proof), sumcheck_proof)
+    }
+
+    fn prove_stage1_baseline(
+        &mut self,
+    ) -> (
+        Option<UniSkipFirstRoundProof<F, ProofTranscript>>,
+        SumcheckInstanceProof<F, ProofTranscript>,
+    ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        print_current_memory_usage("Stage 1 (baseline outer)");
+
+        tracing::info!("Stage 1 proving (baseline outer)");
+        let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+        let constraints_vec: Vec<R1CSConstraint> =
+            R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+        let mut instance = OuterBaselineSumcheckProver::<F>::gen(
+            &self.preprocessing.bytecode,
+            Arc::clone(&self.trace),
+            &constraints_vec,
+            padded_num_constraints,
+            &mut self.transcript,
+        );
+
+        let (sumcheck_proof, _r_stage1) = BatchedSumcheck::prove(
+            vec![&mut instance],
+            &mut self.opening_accumulator,
+            &mut self.transcript,
+        );
+
+        (None, sumcheck_proof)
     }
 
     #[tracing::instrument(skip_all)]

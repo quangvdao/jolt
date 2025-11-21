@@ -170,7 +170,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for Degree2Produc
                 // Optimized: accumulate in unreduced form and Montgomery-reduce once.
                 let (sum0_unr, sum2_unr) = (0..half_n)
                     .into_par_iter()
-                    .with_min_len(512)
+                    .with_min_len(256)
                     .map(|i| {
                         let p_evals = dense_sumcheck_evals_degree2_unreduced::<F>(
                             &self.p,
@@ -253,7 +253,7 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
     group.sample_size(10);
 
     // Use a few sizes to showcase scaling; keep reasonably small for quick runs.
-    for &num_vars in &[14usize, 16usize, 18usize, 20usize, 22usize, 24usize] {
+    for &num_vars in &[14usize, 16usize, 18usize, 20usize, 22usize, 24usize, 26usize] {
         let mut rng = StdRng::seed_from_u64(42 + num_vars as u64);
         let p = random_dense_polynomial(num_vars, &mut rng);
         let q = random_dense_polynomial(num_vars, &mut rng);

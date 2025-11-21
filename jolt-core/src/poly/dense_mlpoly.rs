@@ -215,7 +215,7 @@ impl<F: JoltField> DensePolynomial<F> {
         let mut bound_Z = Vec::with_capacity(n);
         (bound_Z.spare_capacity_mut(), self.Z.par_chunks_exact(2))
             .into_par_iter()
-            .with_min_len(512)
+            .with_min_len(256)
             .for_each(|(bound_coeff, coeffs)| {
                 let m = coeffs[1] - coeffs[0];
                 bound_coeff.write(coeffs[0] + *r * m);

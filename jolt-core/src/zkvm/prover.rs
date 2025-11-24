@@ -1,4 +1,3 @@
-use crate::zkvm::witness::DTH_ROOT_OF_K;
 use std::{
     collections::HashMap,
     fs::File,
@@ -31,7 +30,11 @@ use crate::{
     },
     transcripts::Transcript,
     utils::{math::Math, thread::drop_in_background_thread},
-    zkvm::{ram::populate_memory_states, verifier::JoltVerifierPreprocessing},
+    zkvm::{
+        config::{get_log_k_chunk, OneHotParams},
+        ram::populate_memory_states,
+        verifier::JoltVerifierPreprocessing,
+    },
 };
 use crate::{
     poly::commitment::commitment_scheme::CommitmentScheme,
@@ -76,7 +79,7 @@ use crate::{
             OuterImpl,
             OUTER_IMPL,
         },
-        witness::{compute_d_parameter, AllCommittedPolynomials, CommittedPolynomial},
+        witness::{AllCommittedPolynomials, CommittedPolynomial},
         ProverDebugInfo, Serializable,
     },
 };
@@ -105,7 +108,6 @@ pub struct JoltCpuProver<
     pub trace: Arc<Vec<Cycle>>,
     pub advice: JoltAdvice<F, PCS>,
     pub twist_sumcheck_switch_index: usize,
-    pub ram_K: usize,
     pub unpadded_trace_len: usize,
     pub padded_trace_len: usize,
     pub transcript: ProofTranscript,
@@ -113,6 +115,7 @@ pub struct JoltCpuProver<
     pub spartan_key: UniformSpartanKey<F>,
     pub initial_ram_state: Vec<u64>,
     pub final_ram_state: Vec<u64>,
+    pub one_hot_params: OneHotParams,
 }
 
 impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscript: Transcript>
@@ -252,7 +255,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 trusted_advice_polynomial: None,
             },
             twist_sumcheck_switch_index,
-            ram_K,
             unpadded_trace_len,
             padded_trace_len,
             transcript,
@@ -260,6 +262,11 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             spartan_key,
             initial_ram_state,
             final_ram_state,
+            one_hot_params: OneHotParams::new(
+                padded_trace_len.log_2(),
+                preprocessing.bytecode.code_size,
+                ram_K,
+            ),
         }
     }
 
@@ -275,7 +282,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let start = Instant::now();
         fiat_shamir_preamble(
             &self.program_io,
-            self.ram_K,
+            self.one_hot_params.ram_k,
             self.trace.len(),
             &mut self.transcript,
         );
@@ -332,8 +339,9 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             untrusted_advice_proof,
             reduced_opening_proof,
             trace_length: self.trace.len(),
-            ram_K: self.ram_K,
-            bytecode_d: self.preprocessing.bytecode.d,
+            ram_K: self.one_hot_params.ram_k,
+            bytecode_K: self.one_hot_params.bytecode_k,
+            log_k_chunk: self.one_hot_params.log_k_chunk,
             twist_sumcheck_switch_index: self.twist_sumcheck_switch_index,
         };
 
@@ -356,10 +364,9 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         Vec<PCS::Commitment>,
         HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
     ) {
-        let bytecode_d = self.preprocessing.bytecode.d;
         let _guard = (
-            DoryGlobals::initialize(DTH_ROOT_OF_K, self.padded_trace_len),
-            AllCommittedPolynomials::initialize(self.ram_K, bytecode_d),
+            DoryGlobals::initialize(1 << self.one_hot_params.log_k_chunk, self.padded_trace_len),
+            AllCommittedPolynomials::initialize(&self.one_hot_params),
         );
 
         // Generate and commit to all witness polynomials using streaming tier1/tier2 pattern
@@ -378,7 +385,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         // Tier 1: Compute row commitments for each polynomial
         let mut row_commitments: Vec<Vec<PCS::ChunkState>> = vec![vec![]; num_rows];
-        let ram_d = compute_d_parameter(self.ram_K);
 
         self.lazy_trace
             .clone()
@@ -394,7 +400,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                             &self.preprocessing.generators,
                             self.preprocessing,
                             &chunk,
-                            ram_d,
+                            &self.one_hot_params,
                         )
                     })
                     .collect();
@@ -417,7 +423,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             .into_par_iter()
             .zip(polys)
             .map(|(tier1_commitments, poly)| {
-                let onehot_k = poly.get_onehot_k(self.preprocessing);
+                let onehot_k = poly.get_onehot_k(&self.one_hot_params);
                 PCS::aggregate_chunks(&self.preprocessing.generators, onehot_k, &tier1_commitments)
             })
             .unzip();
@@ -583,8 +589,8 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             ProductVirtualRemainderProver::gen(Arc::clone(&self.trace), &uni_skip_state);
         let ram_raf_evaluation = RamRafEvaluationSumcheckProver::gen(
             &self.trace,
+            &self.one_hot_params,
             &self.program_io.memory_layout,
-            self.ram_K,
             &self.opening_accumulator,
         );
         let ram_read_write_checking = RamReadWriteCheckingProver::gen(
@@ -592,7 +598,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.preprocessing.bytecode,
             &self.program_io.memory_layout,
             &self.trace,
-            self.ram_K,
+            &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
@@ -600,7 +606,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.initial_ram_state,
             &self.final_ram_state,
             &self.program_io,
-            self.ram_K,
+            &self.one_hot_params,
             &mut self.transcript,
         );
 
@@ -690,7 +696,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.trace,
             &self.preprocessing.bytecode,
             &self.program_io.memory_layout,
-            self.ram_K,
             self.twist_sumcheck_switch_index,
             &self.opening_accumulator,
             &mut self.transcript,
@@ -699,14 +704,14 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.advice.untrusted_advice_polynomial,
             &self.advice.trusted_advice_polynomial,
             &self.program_io.memory_layout,
-            self.ram_K,
+            &self.one_hot_params,
             &mut self.opening_accumulator,
             &mut self.transcript,
         );
         let ram_ra_booleanity = ram::gen_ra_booleanity_prover(
             &self.trace,
             &self.program_io.memory_layout,
-            self.ram_K,
+            &self.one_hot_params,
             &mut self.transcript,
         );
         let ram_val_evaluation = RamValEvaluationSumcheckProver::gen(
@@ -714,14 +719,13 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.preprocessing.bytecode,
             &self.program_io.memory_layout,
             &self.initial_ram_state,
-            self.ram_K,
+            &self.one_hot_params,
             &self.opening_accumulator,
         );
         let ram_val_final = ValFinalSumcheckProver::gen(
             &self.trace,
             &self.preprocessing.bytecode,
             &self.program_io.memory_layout,
-            self.ram_K,
             &self.opening_accumulator,
         );
 
@@ -767,7 +771,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.trace,
             &self.preprocessing.bytecode,
             &self.program_io.memory_layout,
-            self.ram_K,
             &self.opening_accumulator,
         );
         let ram_hamming_booleanity =
@@ -775,7 +778,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let ram_ra_virtual = RamRaSumcheckProver::gen(
             &self.trace,
             &self.program_io.memory_layout,
-            self.ram_K,
+            &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
@@ -829,27 +832,33 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let bytecode_read_raf = BytecodeReadRafSumcheckProver::gen(
             &self.trace,
             &self.preprocessing.bytecode,
+            &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
         let (bytecode_hamming_weight, bytecode_booleanity) = bytecode::gen_ra_one_hot_provers(
             &self.trace,
             &self.preprocessing.bytecode,
+            &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
         let ram_hamming_weight = ram::gen_ra_hamming_weight_prover(
             &self.trace,
             &self.program_io.memory_layout,
-            self.ram_K,
+            &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
-        let lookups_ra_virtual =
-            LookupsRaSumcheckProver::gen(&self.trace, &self.opening_accumulator);
+        let lookups_ra_virtual = LookupsRaSumcheckProver::gen(
+            &self.trace,
+            &self.one_hot_params,
+            &self.opening_accumulator,
+        );
         let (lookups_ra_booleanity, lookups_ra_hamming_weight) =
             instruction_lookups::gen_ra_one_hot_provers(
                 &self.trace,
+                &self.one_hot_params,
                 &self.opening_accumulator,
                 &mut self.transcript,
             );
@@ -949,10 +958,9 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         &mut self,
         opening_proof_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
     ) -> ReducedOpeningProof<F, PCS, ProofTranscript> {
-        let bytecode_d = self.preprocessing.bytecode.d;
         let _guard = (
-            DoryGlobals::initialize(DTH_ROOT_OF_K, self.padded_trace_len),
-            AllCommittedPolynomials::initialize(self.ram_K, bytecode_d),
+            DoryGlobals::initialize(self.one_hot_params.k_chunk, self.padded_trace_len),
+            AllCommittedPolynomials::initialize(&self.one_hot_params),
         );
 
         let all_polys: Vec<CommittedPolynomial> =
@@ -961,16 +969,15 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &all_polys,
             self.preprocessing,
             &self.trace,
+            &self.one_hot_params,
         );
 
         #[cfg(feature = "allocative")]
         print_data_structure_heap_usage("Committed polynomials map", &polynomials_map);
 
-        let ram_d = compute_d_parameter(self.ram_K);
         let streaming_data = Arc::new(RLCStreamingData {
             bytecode: self.preprocessing.bytecode.clone(),
             memory_layout: self.preprocessing.memory_layout.clone(),
-            ram_d,
         });
 
         self.opening_accumulator.reduce_and_prove(
@@ -978,7 +985,11 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             opening_proof_hints,
             &self.preprocessing.generators,
             &mut self.transcript,
-            Some((self.lazy_trace.clone(), streaming_data)),
+            Some((
+                self.lazy_trace.clone(),
+                streaming_data,
+                self.one_hot_params.clone(),
+            )),
         )
     }
 }
@@ -1009,11 +1020,13 @@ where
         memory_init: Vec<(u64, u8)>,
         max_trace_length: usize,
     ) -> JoltProverPreprocessing<F, PCS> {
+        let max_T: usize = max_trace_length.next_power_of_two();
+        let log_chunk = get_log_k_chunk(max_T);
+
         let bytecode = BytecodePreprocessing::preprocess(bytecode);
         let ram = RAMPreprocessing::preprocess(memory_init);
 
-        let max_T: usize = max_trace_length.next_power_of_two();
-        let generators = PCS::setup_prover(DTH_ROOT_OF_K.log_2() + max_T.log_2());
+        let generators = PCS::setup_prover(log_chunk + max_T.log_2());
 
         JoltProverPreprocessing {
             generators,
@@ -1078,7 +1091,6 @@ mod tests {
     use crate::poly::commitment::dory::DoryCommitmentScheme;
     use crate::zkvm::prover::JoltProverPreprocessing;
     use crate::zkvm::verifier::{JoltVerifier, JoltVerifierPreprocessing};
-    use crate::zkvm::witness::DTH_ROOT_OF_K;
     use crate::zkvm::{RV64IMACProver, RV64IMACVerifier};
     use ark_bn254::Fr;
     use serial_test::serial;
@@ -1132,13 +1144,14 @@ mod tests {
         );
         let elf_contents_opt = program.get_elf_contents();
         let elf_contents = elf_contents_opt.as_deref().expect("elf contents is None");
+        let log_chunk = 8; // Use default log_chunk for tests
         let prover =
             RV64IMACProver::gen_from_elf(&preprocessing, elf_contents, &inputs, &[], &[], None);
 
         assert!(
-            prover.padded_trace_len <= DTH_ROOT_OF_K,
-            "Test requires T <= DTH_ROOT_OF_K ({}), got T = {}",
-            DTH_ROOT_OF_K,
+            prover.padded_trace_len <= (1 << log_chunk),
+            "Test requires T <= chunk_size ({}), got T = {}",
+            1 << log_chunk,
             prover.padded_trace_len
         );
 

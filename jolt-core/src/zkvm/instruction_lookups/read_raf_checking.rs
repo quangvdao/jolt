@@ -167,7 +167,7 @@ pub struct ReadRafSumcheckProver<F: JoltField> {
     combined_raf_val_polynomial: Option<MultilinearPolynomial<F>>,
 
     #[allocative(skip)]
-    params: ReadRafSumcheckParams<F>,
+    pub params: ReadRafSumcheckParams<F>,
 }
 
 impl<F: JoltField> ReadRafSumcheckProver<F> {

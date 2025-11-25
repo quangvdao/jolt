@@ -116,7 +116,7 @@ pub struct ReadRafSumcheckProver<F: JoltField> {
     /// Program counter per cycle, used to materialize chunked RA polynomials.
     pc: Vec<usize>,
     #[allocative(skip)]
-    params: ReadRafSumcheckParams<F>,
+    pub params: ReadRafSumcheckParams<F>,
 }
 
 impl<F: JoltField> ReadRafSumcheckProver<F> {

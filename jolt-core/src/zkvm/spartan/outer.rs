@@ -79,9 +79,9 @@ const OUTER_REMAINING_DEGREE_BOUND: usize = 3;
 /// Uni-skip instance for Spartan outer sumcheck, computing the first-round polynomial only.
 #[derive(Allocative)]
 pub struct OuterUniSkipInstanceProver<F: JoltField> {
-    tau: Vec<F::Challenge>,
+    pub tau: Vec<F::Challenge>,
     /// Evaluations of t1(Z) at the extended univariate-skip targets (outside base window)
-    extended_evals: [F; OUTER_UNIVARIATE_SKIP_DEGREE],
+    pub extended_evals: [F; OUTER_UNIVARIATE_SKIP_DEGREE],
 }
 
 impl<F: JoltField> OuterUniSkipInstanceProver<F> {
@@ -211,16 +211,16 @@ impl<F: JoltField, T: Transcript> UniSkipFirstRoundInstanceProver<F, T>
 #[derive(Allocative)]
 pub struct OuterRemainingSumcheckProver<F: JoltField> {
     #[allocative(skip)]
-    bytecode_preprocessing: BytecodePreprocessing,
+    pub bytecode_preprocessing: BytecodePreprocessing,
     #[allocative(skip)]
-    trace: Arc<Vec<Cycle>>,
-    split_eq_poly: GruenSplitEqPolynomial<F>,
-    az: DensePolynomial<F>,
-    bz: DensePolynomial<F>,
+    pub trace: Arc<Vec<Cycle>>,
+    pub split_eq_poly: GruenSplitEqPolynomial<F>,
+    pub az: DensePolynomial<F>,
+    pub bz: DensePolynomial<F>,
     /// The first round evals (t0, t_inf) computed from a streaming pass over the trace
-    first_round_evals: (F, F),
+    pub first_round_evals: (F, F),
     #[allocative(skip)]
-    params: OuterRemainingSumcheckParams<F>,
+    pub params: OuterRemainingSumcheckParams<F>,
 }
 
 impl<F: JoltField> OuterRemainingSumcheckProver<F> {

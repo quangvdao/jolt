@@ -268,15 +268,15 @@ pub struct OpeningProofReductionSumcheckProver<F>
 where
     F: JoltField,
 {
-    prover_state: ProverOpening<F>,
+    pub prover_state: ProverOpening<F>,
     /// Represents the polynomial opened.
-    polynomial: CommittedPolynomial,
+    pub polynomial: CommittedPolynomial,
     /// The ID of the sumcheck these openings originated from
-    sumcheck_id: SumcheckId,
-    input_claim: F,
-    opening_point: Vec<F::Challenge>,
-    sumcheck_claim: Option<F>,
-    log_T: usize,
+    pub sumcheck_id: SumcheckId,
+    pub input_claim: F,
+    pub opening_point: Vec<F::Challenge>,
+    pub sumcheck_claim: Option<F>,
+    pub log_T: usize,
 }
 
 impl<F> OpeningProofReductionSumcheckProver<F>

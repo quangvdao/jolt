@@ -84,21 +84,21 @@ pub struct ReadWriteSumcheckClaims<F: JoltField> {
 
 #[derive(Allocative)]
 pub struct RamReadWriteCheckingProver<F: JoltField> {
-    ram_addresses: Vec<Option<u64>>,
-    chunk_size: usize,
-    val_checkpoints: Vec<u64>,
-    data_buffers: Vec<DataBuffers<F>>,
-    I: Vec<Vec<(usize, usize, F, i128)>>,
-    A: Vec<F>,
-    gruens_eq_r_prime: GruenSplitEqPolynomial<F>,
-    inc_cycle: MultilinearPolynomial<F>,
+    pub ram_addresses: Vec<Option<u64>>,
+    pub chunk_size: usize,
+    pub val_checkpoints: Vec<u64>,
+    pub data_buffers: Vec<DataBuffers<F>>,
+    pub I: Vec<Vec<(usize, usize, F, i128)>>,
+    pub A: Vec<F>,
+    pub gruens_eq_r_prime: GruenSplitEqPolynomial<F>,
+    pub inc_cycle: MultilinearPolynomial<F>,
     // The following polynomials are instantiated after
     // the first phase
-    eq_r_prime: Option<MultilinearPolynomial<F>>,
-    ra: Option<MultilinearPolynomial<F>>,
-    val: Option<MultilinearPolynomial<F>>,
+    pub eq_r_prime: Option<MultilinearPolynomial<F>>,
+    pub ra: Option<MultilinearPolynomial<F>>,
+    pub val: Option<MultilinearPolynomial<F>>,
     #[allocative(skip)]
-    params: ReadWriteCheckingParams<F>,
+    pub params: ReadWriteCheckingParams<F>,
 }
 
 impl<F: JoltField> RamReadWriteCheckingProver<F> {

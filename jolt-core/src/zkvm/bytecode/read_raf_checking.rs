@@ -99,22 +99,22 @@ const N_STAGES: usize = 5;
 pub struct ReadRafSumcheckProver<F: JoltField> {
     /// Per-stage address MLEs F_i(k) built from eq(r_cycle_stage_i, (chunk_index, j)),
     /// bound high-to-low during the address-binding phase.
-    F: [MultilinearPolynomial<F>; N_STAGES],
+    pub F: [MultilinearPolynomial<F>; N_STAGES],
     /// Chunked RA polynomials over address variables (one per dimension `d`), used to form
     /// the product ∏_i ra_i during the cycle-binding phase.
-    ra: Vec<RaPolynomial<u8, F>>,
+    pub ra: Vec<RaPolynomial<u8, F>>,
     /// Binding challenges for the first log_K variables of the sumcheck
-    r_address_prime: Vec<F::Challenge>,
+    pub r_address_prime: Vec<F::Challenge>,
     /// Per-stage Gruen-split eq polynomials over cycle vars (low-to-high binding order).
-    gruen_eq_polys: [GruenSplitEqPolynomial<F>; N_STAGES],
+    pub gruen_eq_polys: [GruenSplitEqPolynomial<F>; N_STAGES],
     /// Previous-round claims s_i(0)+s_i(1) per stage, needed for degree-3 univariate recovery.
-    prev_round_claims: [F; N_STAGES],
+    pub prev_round_claims: [F; N_STAGES],
     /// Round polynomials per stage for advancing to the next claim at r_j.
-    prev_round_polys: Option<[UniPoly<F>; N_STAGES]>,
+    pub prev_round_polys: Option<[UniPoly<F>; N_STAGES]>,
     /// Final sumcheck claims of stage Val polynomials (with RAF Int folded where applicable).
-    bound_val_evals: Option<[F; N_STAGES]>,
+    pub bound_val_evals: Option<[F; N_STAGES]>,
     /// Program counter per cycle, used to materialize chunked RA polynomials.
-    pc: Vec<usize>,
+    pub pc: Vec<usize>,
     #[allocative(skip)]
     pub params: ReadRafSumcheckParams<F>,
 }

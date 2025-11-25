@@ -55,11 +55,11 @@ const DEGREE_BOUND: usize = 3;
 /// Sumcheck prover for [`ValEvaluationSumcheckVerifier`].
 #[derive(Allocative)]
 pub struct ValEvaluationSumcheckProver<F: JoltField> {
-    inc: MultilinearPolynomial<F>,
-    wa: RaPolynomial<usize, F>,
-    lt: LtPolynomial<F>,
+    pub inc: MultilinearPolynomial<F>,
+    pub wa: RaPolynomial<usize, F>,
+    pub lt: LtPolynomial<F>,
     #[allocative(skip)]
-    params: ValEvaluationSumcheckParams<F>,
+    pub params: ValEvaluationSumcheckParams<F>,
 }
 
 impl<F: JoltField> ValEvaluationSumcheckProver<F> {

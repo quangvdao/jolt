@@ -33,22 +33,22 @@ const DEGREE_BOUND: usize = 3;
 // TODO: do 3 round compression SVO on each of the 8 multilinears, then bind directly
 #[derive(Allocative)]
 pub struct InstructionInputSumcheckProver<F: JoltField> {
-    left_is_rs1_poly: MultilinearPolynomial<F>,
-    left_is_pc_poly: MultilinearPolynomial<F>,
-    right_is_rs2_poly: MultilinearPolynomial<F>,
-    right_is_imm_poly: MultilinearPolynomial<F>,
-    rs1_value_poly: MultilinearPolynomial<F>,
-    rs2_value_poly: MultilinearPolynomial<F>,
-    imm_poly: MultilinearPolynomial<F>,
-    unexpanded_pc_poly: MultilinearPolynomial<F>,
-    eq_r_cycle_stage_1: GruenSplitEqPolynomial<F>,
-    eq_r_cycle_stage_2: GruenSplitEqPolynomial<F>,
-    prev_claim_stage_1: F,
-    prev_claim_stage_2: F,
-    prev_round_poly_stage_1: Option<UniPoly<F>>,
-    prev_round_poly_stage_2: Option<UniPoly<F>>,
+    pub left_is_rs1_poly: MultilinearPolynomial<F>,
+    pub left_is_pc_poly: MultilinearPolynomial<F>,
+    pub right_is_rs2_poly: MultilinearPolynomial<F>,
+    pub right_is_imm_poly: MultilinearPolynomial<F>,
+    pub rs1_value_poly: MultilinearPolynomial<F>,
+    pub rs2_value_poly: MultilinearPolynomial<F>,
+    pub imm_poly: MultilinearPolynomial<F>,
+    pub unexpanded_pc_poly: MultilinearPolynomial<F>,
+    pub eq_r_cycle_stage_1: GruenSplitEqPolynomial<F>,
+    pub eq_r_cycle_stage_2: GruenSplitEqPolynomial<F>,
+    pub prev_claim_stage_1: F,
+    pub prev_claim_stage_2: F,
+    pub prev_round_poly_stage_1: Option<UniPoly<F>>,
+    pub prev_round_poly_stage_2: Option<UniPoly<F>>,
     #[allocative(skip)]
-    params: InstructionInputParams<F>,
+    pub params: InstructionInputParams<F>,
 }
 
 impl<F: JoltField> InstructionInputSumcheckProver<F> {

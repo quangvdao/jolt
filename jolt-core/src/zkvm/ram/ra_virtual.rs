@@ -47,11 +47,11 @@ use rayon::prelude::*;
 #[derive(Allocative)]
 pub struct RaSumcheckProver<F: JoltField> {
     /// `ra` polys to be constructed based addresses
-    ra_i_polys: Vec<RaPolynomial<u8, F>>,
+    pub ra_i_polys: Vec<RaPolynomial<u8, F>>,
     /// eq poly
-    eq_poly: MultilinearPolynomial<F>,
+    pub eq_poly: MultilinearPolynomial<F>,
     #[allocative(skip)]
-    params: RaSumcheckParams<F>,
+    pub params: RaSumcheckParams<F>,
 }
 
 impl<F: JoltField> RaSumcheckProver<F> {

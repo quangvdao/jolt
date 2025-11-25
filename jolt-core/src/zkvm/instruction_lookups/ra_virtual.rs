@@ -43,10 +43,10 @@ const DEGREE_BOUND: usize = D + 1;
 
 #[derive(Allocative)]
 pub struct RaSumcheckProver<F: JoltField> {
-    ra_i_polys: Vec<RaPolynomial<u8, F>>,
-    eq_poly: GruenSplitEqPolynomial<F>,
+    pub ra_i_polys: Vec<RaPolynomial<u8, F>>,
+    pub eq_poly: GruenSplitEqPolynomial<F>,
     #[allocative(skip)]
-    params: RaSumcheckParams<F>,
+    pub params: RaSumcheckParams<F>,
 }
 
 impl<F: JoltField> RaSumcheckProver<F> {

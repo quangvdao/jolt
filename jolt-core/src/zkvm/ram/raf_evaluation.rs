@@ -45,11 +45,11 @@ const DEGREE_BOUND: usize = 2;
 #[derive(Allocative)]
 pub struct RafEvaluationSumcheckProver<F: JoltField> {
     /// The ra polynomial
-    ra: MultilinearPolynomial<F>,
+    pub ra: MultilinearPolynomial<F>,
     /// The unmap polynomial
-    unmap: UnmapRamAddressPolynomial<F>,
+    pub unmap: UnmapRamAddressPolynomial<F>,
     #[allocative(skip)]
-    params: RafEvaluationSumcheckParams<F>,
+    pub params: RafEvaluationSumcheckParams<F>,
 }
 
 impl<F: JoltField> RafEvaluationSumcheckProver<F> {

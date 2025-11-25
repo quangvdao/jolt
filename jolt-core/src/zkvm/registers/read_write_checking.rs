@@ -86,29 +86,29 @@ struct DataBuffers<F: JoltField> {
 /// Sumcheck prover for [`RegistersReadWriteCheckingVerifier`].
 #[derive(Allocative)]
 pub struct RegistersReadWriteCheckingProver<F: JoltField> {
-    addresses: Vec<(u8, u8, u8)>,
-    chunk_size: usize,
-    val_checkpoints: Vec<u64>,
-    data_buffers: Vec<DataBuffers<F>>,
-    I: Vec<Vec<(usize, u8, F, i128)>>,
-    A: Vec<F>,
-    gruen_eq_r_cycle_stage_1: GruenSplitEqPolynomial<F>,
-    gruen_eq_r_cycle_stage_3: GruenSplitEqPolynomial<F>,
-    inc_cycle: MultilinearPolynomial<F>,
-    prev_claim_stage_1: F,
-    prev_claim_stage_3: F,
-    prev_round_poly_stage_1: Option<UniPoly<F>>,
-    prev_round_poly_stage_3: Option<UniPoly<F>>,
+    pub addresses: Vec<(u8, u8, u8)>,
+    pub chunk_size: usize,
+    pub val_checkpoints: Vec<u64>,
+    pub data_buffers: Vec<DataBuffers<F>>,
+    pub I: Vec<Vec<(usize, u8, F, i128)>>,
+    pub A: Vec<F>,
+    pub gruen_eq_r_cycle_stage_1: GruenSplitEqPolynomial<F>,
+    pub gruen_eq_r_cycle_stage_3: GruenSplitEqPolynomial<F>,
+    pub inc_cycle: MultilinearPolynomial<F>,
+    pub prev_claim_stage_1: F,
+    pub prev_claim_stage_3: F,
+    pub prev_round_poly_stage_1: Option<UniPoly<F>>,
+    pub prev_round_poly_stage_3: Option<UniPoly<F>>,
     // The following polynomials are instantiated after
     // the first phase
-    eq_r_cycle_stage_1: Option<MultilinearPolynomial<F>>,
-    eq_r_cycle_stage_3: Option<MultilinearPolynomial<F>>,
-    rs1_ra: Option<MultilinearPolynomial<F>>,
-    rs2_ra: Option<MultilinearPolynomial<F>>,
-    rd_wa: Option<MultilinearPolynomial<F>>,
-    val: Option<MultilinearPolynomial<F>>,
+    pub eq_r_cycle_stage_1: Option<MultilinearPolynomial<F>>,
+    pub eq_r_cycle_stage_3: Option<MultilinearPolynomial<F>>,
+    pub rs1_ra: Option<MultilinearPolynomial<F>>,
+    pub rs2_ra: Option<MultilinearPolynomial<F>>,
+    pub rd_wa: Option<MultilinearPolynomial<F>>,
+    pub val: Option<MultilinearPolynomial<F>>,
     #[allocative(skip)]
-    params: RegistersReadWriteCheckingParams<F>,
+    pub params: RegistersReadWriteCheckingParams<F>,
 }
 
 impl<F: JoltField> RegistersReadWriteCheckingProver<F> {

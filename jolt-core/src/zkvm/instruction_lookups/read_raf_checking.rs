@@ -109,62 +109,62 @@ const DEGREE_BOUND: usize = 3;
 pub struct ReadRafSumcheckProver<F: JoltField> {
     /// Materialized `ra(k, j)` MLE over (address, cycle) after the first log(K) rounds.
     /// Present only in the last log(T) rounds.
-    ra: Option<MultilinearPolynomial<F>>,
+    pub ra: Option<MultilinearPolynomial<F>>,
     /// Running list of sumcheck challenges r_j (address then cycle) in binding order.
-    r: Vec<F::Challenge>,
+    pub r: Vec<F::Challenge>,
 
     /// Precomputed lookup keys k (bit-packed) per cycle j.
-    lookup_indices: Vec<LookupBits>,
+    pub lookup_indices: Vec<LookupBits>,
     /// Indices of cycles grouped by selected lookup table; used to form per-table flags.
-    lookup_indices_by_table: Vec<Vec<usize>>,
+    pub lookup_indices_by_table: Vec<Vec<usize>>,
     /// Cycle indices with interleaved operands (used for left/right operand prefix-suffix Q).
-    lookup_indices_uninterleave: Vec<usize>,
+    pub lookup_indices_uninterleave: Vec<usize>,
     /// Cycle indices with identity path (non-interleaved) used as the RAF flag source.
-    lookup_indices_identity: Vec<usize>,
+    pub lookup_indices_identity: Vec<usize>,
     /// Per-cycle flag: instruction uses interleaved operands.
-    is_interleaved_operands: Vec<bool>,
+    pub is_interleaved_operands: Vec<bool>,
     #[allocative(skip)]
     /// Per-cycle optional lookup table chosen by the instruction; None if no lookup.
-    lookup_tables: Vec<Option<LookupTables<XLEN>>>,
+    pub lookup_tables: Vec<Option<LookupTables<XLEN>>>,
 
     /// Prefix checkpoints for each registered `Prefix` variant, updated every two rounds.
-    prefix_checkpoints: Vec<PrefixCheckpoint<F>>,
+    pub prefix_checkpoints: Vec<PrefixCheckpoint<F>>,
     /// For each lookup table, dense polynomials holding suffix contributions in the current phase.
-    suffix_polys: Vec<Vec<DensePolynomial<F>>>,
+    pub suffix_polys: Vec<Vec<DensePolynomial<F>>>,
     /// Expanding tables accumulating address-prefix products per phase (see `u_evals_*`).
-    v: [ExpandingTable<F>; PHASES],
+    pub v: [ExpandingTable<F>; PHASES],
     /// u_evals for read-checking part: eq(r_spartan,j) + gamma·eq(r_branch,j).
-    u_evals_rv: Vec<F>,
+    pub u_evals_rv: Vec<F>,
     /// u_evals for RAF part: eq(r_spartan,j).
-    u_evals_raf: Vec<F>,
+    pub u_evals_raf: Vec<F>,
 
     // State related to Gruen EQ optimization
     /// Gruen-split equality polynomial over cycle vars for Spartan part (high-to-low binding).
-    eq_r_spartan: GruenSplitEqPolynomial<F>,
+    pub eq_r_spartan: GruenSplitEqPolynomial<F>,
     /// Gruen-split equality polynomial over cycle vars for Branch/ProductVirtualization part.
-    eq_r_branch: GruenSplitEqPolynomial<F>,
+    pub eq_r_branch: GruenSplitEqPolynomial<F>,
     /// Previous-round sumcheck claim s_spartan(0)+s_spartan(1) for degree-3 univariate recovery.
-    prev_claim_spartan: Option<F>,
+    pub prev_claim_spartan: Option<F>,
     /// Previous-round sumcheck claim s_branch(0)+s_branch(1) for degree-3 univariate recovery.
-    prev_claim_branch: Option<F>,
+    pub prev_claim_branch: Option<F>,
     /// Previous round polynomial for Spartan part, used to derive next claim at r_j.
-    prev_round_poly_spartan: Option<UniPoly<F>>,
+    pub prev_round_poly_spartan: Option<UniPoly<F>>,
     /// Previous round polynomial for Branch part, used to derive next claim at r_j.
-    prev_round_poly_branch: Option<UniPoly<F>>,
+    pub prev_round_poly_branch: Option<UniPoly<F>>,
 
     /// Registry holding prefix checkpoint values for `PrefixSuffixDecomposition` instances.
-    prefix_registry: PrefixRegistry<F>,
+    pub prefix_registry: PrefixRegistry<F>,
     /// Prefix-suffix decomposition for right operand identity polynomial family.
-    right_operand_ps: PrefixSuffixDecomposition<F, 2>,
+    pub right_operand_ps: PrefixSuffixDecomposition<F, 2>,
     /// Prefix-suffix decomposition for left operand identity polynomial family.
-    left_operand_ps: PrefixSuffixDecomposition<F, 2>,
+    pub left_operand_ps: PrefixSuffixDecomposition<F, 2>,
     /// Prefix-suffix decomposition for the instruction-identity path (RAF flag path).
-    identity_ps: PrefixSuffixDecomposition<F, 2>,
+    pub identity_ps: PrefixSuffixDecomposition<F, 2>,
 
     /// Materialized Val_j(k) over (address, cycle) after phase transitions.
-    combined_val_polynomial: Option<MultilinearPolynomial<F>>,
+    pub combined_val_polynomial: Option<MultilinearPolynomial<F>>,
     /// Materialized RafVal_j(k) (with γ-weights folded into prefixes) over (address, cycle).
-    combined_raf_val_polynomial: Option<MultilinearPolynomial<F>>,
+    pub combined_raf_val_polynomial: Option<MultilinearPolynomial<F>>,
 
     #[allocative(skip)]
     pub params: ReadRafSumcheckParams<F>,

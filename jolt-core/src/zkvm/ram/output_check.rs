@@ -62,22 +62,22 @@ const VAL_FINAL_SUMCHECK_DEGREE_BOUND: usize = 2;
 #[derive(Allocative)]
 pub struct OutputSumcheckProver<F: JoltField> {
     /// Val(k, 0)
-    val_init: MultilinearPolynomial<F>,
+    pub val_init: MultilinearPolynomial<F>,
     /// The MLE of the final RAM state
-    val_final: MultilinearPolynomial<F>,
+    pub val_final: MultilinearPolynomial<F>,
     /// Val_io(k) = Val_final(k) if k is in the "IO" region of memory,
     /// and 0 otherwise.
     /// Equivalently, Val_io(k) = Val(k, T) * io_mask(k) for
     /// k \in {0, 1}^log(K)
-    val_io: MultilinearPolynomial<F>,
+    pub val_io: MultilinearPolynomial<F>,
     /// Split-EQ structure over the address variables (Gruen + Dao-Thaler)
-    eq_r_address: GruenSplitEqPolynomial<F>,
+    pub eq_r_address: GruenSplitEqPolynomial<F>,
     /// io_mask(k) serves as a "mask" for the IO region of memory,
     /// i.e. io_mask(k) = 1 if k is in the "IO" region of memory,
     /// and 0 otherwise.
-    io_mask: MultilinearPolynomial<F>,
+    pub io_mask: MultilinearPolynomial<F>,
     #[allocative(skip)]
-    params: OutputSumcheckParams<F>,
+    pub params: OutputSumcheckParams<F>,
 }
 
 impl<F: JoltField> OutputSumcheckProver<F> {
@@ -352,10 +352,10 @@ fn get_output_sumcheck_opening_point<F: JoltField>(
 
 #[derive(Allocative)]
 pub struct ValFinalSumcheckProver<F: JoltField> {
-    inc: MultilinearPolynomial<F>,
-    wa: MultilinearPolynomial<F>,
+    pub inc: MultilinearPolynomial<F>,
+    pub wa: MultilinearPolynomial<F>,
     #[allocative(skip)]
-    params: ValFinalSumcheckParams<F>,
+    pub params: ValFinalSumcheckParams<F>,
 }
 
 impl<F: JoltField> ValFinalSumcheckProver<F> {

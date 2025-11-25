@@ -24,10 +24,10 @@ const DEGREE_BOUND: usize = 2;
 /// Sumcheck prover for [`InnerSumcheckVerifier`].
 #[derive(Allocative)]
 pub struct InnerSumcheckProver<F: JoltField> {
-    poly_abc_small: MultilinearPolynomial<F>,
-    poly_z: MultilinearPolynomial<F>,
+    pub poly_abc_small: MultilinearPolynomial<F>,
+    pub poly_z: MultilinearPolynomial<F>,
     #[allocative(skip)]
-    params: InnerSumcheckParams<F>,
+    pub params: InnerSumcheckParams<F>,
 }
 
 impl<F: JoltField> InnerSumcheckProver<F> {

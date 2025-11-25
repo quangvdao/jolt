@@ -71,9 +71,9 @@ const PRODUCT_VIRTUAL_REMAINDER_DEGREE: usize = 3;
 #[derive(Allocative)]
 pub struct ProductVirtualUniSkipInstanceProver<F: JoltField> {
     /// Evaluations of t1(Z) at the extended univariate-skip targets (outside base window)
-    extended_evals: [F; PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE],
+    pub extended_evals: [F; PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE],
     #[allocative(skip)]
-    params: ProductVirtualUniSkipInstanceParams<F>,
+    pub params: ProductVirtualUniSkipInstanceParams<F>,
 }
 
 impl<F: JoltField> ProductVirtualUniSkipInstanceProver<F> {
@@ -266,14 +266,14 @@ impl<F: JoltField> ProductVirtualUniSkipInstanceParams<F> {
 #[derive(Allocative)]
 pub struct ProductVirtualRemainderProver<F: JoltField> {
     #[allocative(skip)]
-    trace: Arc<Vec<Cycle>>,
-    split_eq_poly: GruenSplitEqPolynomial<F>,
-    left: DensePolynomial<F>,
-    right: DensePolynomial<F>,
+    pub trace: Arc<Vec<Cycle>>,
+    pub split_eq_poly: GruenSplitEqPolynomial<F>,
+    pub left: DensePolynomial<F>,
+    pub right: DensePolynomial<F>,
     /// The first round evals (t0, t_inf) computed from a streaming pass over the trace
-    first_round_evals: (F, F),
+    pub first_round_evals: (F, F),
     #[allocative(skip)]
-    params: ProductVirtualRemainderParams<F>,
+    pub params: ProductVirtualRemainderParams<F>,
 }
 
 impl<F: JoltField> ProductVirtualRemainderProver<F> {
@@ -669,7 +669,7 @@ impl<F: JoltField> ProductVirtualRemainderParams<F> {
 #[derive(Allocative)]
 pub struct ProductVirtualInnerProver<F: JoltField> {
     #[allocative(skip)]
-    params: ProductVirtualInnerParams<F>,
+    pub params: ProductVirtualInnerParams<F>,
 }
 
 impl<F: JoltField> ProductVirtualInnerProver<F> {

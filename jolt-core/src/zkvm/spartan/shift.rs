@@ -364,17 +364,17 @@ fn get_opening_point<F: JoltField>(
 ///
 /// Performs prefix-suffix sumcheck. See <https://eprint.iacr.org/2025/611.pdf> (Appendix A).
 #[derive(Allocative)]
-struct Phase1Prover<F: JoltField> {
+pub struct Phase1Prover<F: JoltField> {
     // All prefix-suffix (P, Q) buffers for this sumcheck.
-    prefix_suffix_pairs: Vec<(MultilinearPolynomial<F>, MultilinearPolynomial<F>)>,
+    pub prefix_suffix_pairs: Vec<(MultilinearPolynomial<F>, MultilinearPolynomial<F>)>,
     // Below all stored to gen phase 2 prover.
     #[allocative(skip)]
-    trace: Arc<Vec<Cycle>>,
+    pub trace: Arc<Vec<Cycle>>,
     #[allocative(skip)]
-    bytecode_preprocessing: BytecodePreprocessing,
-    sumcheck_challenges: Vec<F::Challenge>,
+    pub bytecode_preprocessing: BytecodePreprocessing,
+    pub sumcheck_challenges: Vec<F::Challenge>,
     #[allocative(skip)]
-    params: ShiftSumcheckParams<F>,
+    pub params: ShiftSumcheckParams<F>,
 }
 
 impl<F: JoltField> Phase1Prover<F> {
@@ -515,16 +515,16 @@ impl<F: JoltField> Phase1Prover<F> {
 
 /// Prover for 2nd half of the rounds.
 #[derive(Allocative)]
-struct Phase2Prover<F: JoltField> {
-    unexpanded_pc_poly: MultilinearPolynomial<F>,
-    pc_poly: MultilinearPolynomial<F>,
-    is_virtual_poly: MultilinearPolynomial<F>,
-    is_first_in_sequence_poly: MultilinearPolynomial<F>,
-    is_noop_poly: MultilinearPolynomial<F>,
-    eq_plus_one_r_cycle: MultilinearPolynomial<F>,
-    eq_plus_one_r_product: MultilinearPolynomial<F>,
+pub struct Phase2Prover<F: JoltField> {
+    pub unexpanded_pc_poly: MultilinearPolynomial<F>,
+    pub pc_poly: MultilinearPolynomial<F>,
+    pub is_virtual_poly: MultilinearPolynomial<F>,
+    pub is_first_in_sequence_poly: MultilinearPolynomial<F>,
+    pub is_noop_poly: MultilinearPolynomial<F>,
+    pub eq_plus_one_r_cycle: MultilinearPolynomial<F>,
+    pub eq_plus_one_r_product: MultilinearPolynomial<F>,
     #[allocative(skip)]
-    params: ShiftSumcheckParams<F>,
+    pub params: ShiftSumcheckParams<F>,
 }
 
 impl<F: JoltField> Phase2Prover<F> {

@@ -27,9 +27,9 @@ const DEGREE_BOUND: usize = 1;
 
 #[derive(Allocative)]
 pub struct HammingWeightSumcheckProver<F: JoltField> {
-    ra: Vec<MultilinearPolynomial<F>>,
+    pub ra: Vec<MultilinearPolynomial<F>>,
     #[allocative(skip)]
-    params: HammingWeightSumcheckParams<F>,
+    pub params: HammingWeightSumcheckParams<F>,
 }
 
 impl<F: JoltField> HammingWeightSumcheckProver<F> {

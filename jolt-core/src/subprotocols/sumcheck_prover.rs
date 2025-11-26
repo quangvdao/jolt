@@ -33,6 +33,8 @@ pub trait SumcheckInstanceProver<F: JoltField, T: Transcript>:
         sumcheck_challenges: &[F::Challenge],
     );
 
+    fn finalize(&mut self) {}
+
     #[cfg(feature = "allocative")]
     fn update_flamegraph(&self, flamegraph: &mut allocative::FlameGraphBuilder);
 }

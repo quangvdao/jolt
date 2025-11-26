@@ -1194,7 +1194,7 @@ impl<F: JoltField> ReadRafSumcheckParams<F> {
         self.rv_claim
     }
 
-    fn get_opening_point(
+    pub fn get_opening_point(
         &self,
         sumcheck_challenges: &[F::Challenge],
     ) -> OpeningPoint<BIG_ENDIAN, F> {

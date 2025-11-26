@@ -323,9 +323,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OutputSumch
     }
 }
 
-struct OutputSumcheckParams<F: JoltField> {
+pub struct OutputSumcheckParams<F: JoltField> {
     K: usize,
-    r_address: Vec<F::Challenge>,
+    pub r_address: Vec<F::Challenge>,
     program_io: JoltDevice,
 }
 
@@ -339,7 +339,7 @@ impl<F: JoltField> OutputSumcheckParams<F> {
         }
     }
 
-    fn num_rounds(&self) -> usize {
+    pub fn num_rounds(&self) -> usize {
         self.K.log_2()
     }
 }
@@ -435,7 +435,11 @@ impl<F: JoltField> ValFinalSumcheckProver<F> {
             )
             .1;
 
-        let params = ValFinalSumcheckParams { T, val_init_eval };
+        let params = ValFinalSumcheckParams {
+            T,
+            val_init_eval,
+            r_address,
+        };
 
         Self { wa, inc, params }
     }
@@ -595,6 +599,7 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
         let params = ValFinalSumcheckParams {
             T: trace_len,
             val_init_eval,
+            r_address,
         };
 
         Self { params }
@@ -664,13 +669,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ValFinalSum
     }
 }
 
-struct ValFinalSumcheckParams<F: JoltField> {
+pub struct ValFinalSumcheckParams<F: JoltField> {
     T: usize,
     val_init_eval: F,
+    pub r_address: Vec<F::Challenge>,
 }
 
 impl<F: JoltField> ValFinalSumcheckParams<F> {
-    fn num_rounds(&self) -> usize {
+    pub fn num_rounds(&self) -> usize {
         self.T.log_2()
     }
 

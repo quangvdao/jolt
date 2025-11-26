@@ -85,7 +85,12 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
             MultilinearPolynomial::from(initial_ram_state.to_vec());
         let init_eval = val_init.evaluate(&r_address.r);
 
-        let params = ValEvaluationSumcheckParams { init_eval, T, K };
+        let params = ValEvaluationSumcheckParams {
+            init_eval,
+            r_address: r_address.r.clone(),
+            T,
+            K,
+        };
 
         // Compute the size-K table storing all eq(r_address, k) evaluations for
         // k \in {0, 1}^log(K)
@@ -274,6 +279,7 @@ impl<F: JoltField> ValEvaluationSumcheckVerifier<F> {
 
         let params = ValEvaluationSumcheckParams {
             init_eval,
+            r_address: r_address.r.clone(),
             T: trace_len,
             K: ram_K,
         };
@@ -359,9 +365,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct ValEvaluationSumcheckParams<F: JoltField> {
+pub struct ValEvaluationSumcheckParams<F: JoltField> {
     /// Initial evaluation to subtract (for RAM).
     init_eval: F,
+    pub r_address: Vec<F::Challenge>,
     /// Trace length.
     T: usize,
     /// Ram K parameter.
@@ -369,7 +376,7 @@ struct ValEvaluationSumcheckParams<F: JoltField> {
 }
 
 impl<F: JoltField> ValEvaluationSumcheckParams<F> {
-    fn num_rounds(&self) -> usize {
+    pub fn num_rounds(&self) -> usize {
         self.T.log_2()
     }
 

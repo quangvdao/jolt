@@ -50,7 +50,7 @@ pub struct RaSumcheckProver<F: JoltField> {
     /// eq poly
     pub eq_poly: MultilinearPolynomial<F>,
     #[allocative(skip)]
-    pub params: RaSumcheckParams<F>,
+    params: RaSumcheckParams<F>,
 }
 
 impl<F: JoltField> RaSumcheckProver<F> {

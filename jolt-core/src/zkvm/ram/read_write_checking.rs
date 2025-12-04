@@ -86,8 +86,8 @@ pub struct RamReadWriteCheckingProver<F: JoltField> {
 /// all address vars in phase 2) may cause verification failures.
 ///
 /// TODO: make the implementation works for all configurations.
-fn phase1_num_rounds(_K: usize, T: usize) -> usize {
-    T.log_2()
+fn phase1_num_rounds(_K: usize, _T: usize) -> usize {
+    0 // Skip phase 1, go directly to address binding (matches C++ implementation)
 }
 
 /// Number of address variables to bind in Phase 2 (using AddressMajor sparse matrix).

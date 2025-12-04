@@ -92,7 +92,7 @@ pub struct RamReadWriteCheckingProver<F: JoltField> {
     pub ra: Option<MultilinearPolynomial<F>>,
     pub val: Option<MultilinearPolynomial<F>>,
     #[allocative(skip)]
-    params: ReadWriteCheckingParams<F>,
+    pub params: ReadWriteCheckingParams<F>,
 }
 
 impl<F: JoltField> RamReadWriteCheckingProver<F> {

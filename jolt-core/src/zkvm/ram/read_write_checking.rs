@@ -496,11 +496,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct ReadWriteCheckingParams<F: JoltField> {
-    K: usize,
-    T: usize,
-    gamma: F,
-    r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
+pub struct ReadWriteCheckingParams<F: JoltField> {
+    pub K: usize,
+    pub T: usize,
+    pub gamma: F,
+    pub r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
 }
 
 impl<F: JoltField> ReadWriteCheckingParams<F> {

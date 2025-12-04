@@ -242,9 +242,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for RaSumcheckV
     }
 }
 
-struct RaSumcheckParams<F: JoltField> {
-    r_cycle: OpeningPoint<BIG_ENDIAN, F>,
-    one_hot_params: OneHotParams,
+pub struct RaSumcheckParams<F: JoltField> {
+    pub r_cycle: OpeningPoint<BIG_ENDIAN, F>,
+    pub one_hot_params: OneHotParams,
 }
 
 impl<F: JoltField> RaSumcheckParams<F> {

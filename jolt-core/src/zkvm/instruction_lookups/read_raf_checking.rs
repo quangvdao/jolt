@@ -1284,14 +1284,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ReadRafSumc
     }
 }
 
-struct ReadRafSumcheckParams<F: JoltField> {
+pub struct ReadRafSumcheckParams<F: JoltField> {
     /// γ and its square (γ^2) used for batching rv/branch/raf components.
-    gamma: F,
-    gamma_sqr: F,
+    pub gamma: F,
+    pub gamma_sqr: F,
     /// log2(T): number of cycle variables (last rounds bind cycles).
-    log_T: usize,
+    pub log_T: usize,
     /// Number of phases for instruction lookups.
-    phases: usize,
+    pub phases: usize,
 }
 
 impl<F: JoltField> ReadRafSumcheckParams<F> {

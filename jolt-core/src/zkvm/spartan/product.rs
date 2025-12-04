@@ -621,15 +621,15 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct ProductVirtualRemainderParams<F: JoltField> {
+pub struct ProductVirtualRemainderParams<F: JoltField> {
     /// Number of cycle variables to bind in this remainder (equals log2(T))
-    n_cycle_vars: usize,
+    pub n_cycle_vars: usize,
     /// The univariate-skip first round challenge r0
-    r0_uniskip: F::Challenge,
+    pub r0_uniskip: F::Challenge,
     /// Claim after the univariate-skip first round, updated every round
-    input_claim: F,
+    pub input_claim: F,
     /// The tau vector (length 1 + n_cycle_vars), available to prover and verifier
-    tau: Vec<F::Challenge>,
+    pub tau: Vec<F::Challenge>,
 }
 
 impl<F: JoltField> ProductVirtualRemainderParams<F> {

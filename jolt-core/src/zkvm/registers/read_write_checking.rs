@@ -61,7 +61,7 @@ const DEGREE_BOUND: usize = 3;
 /// rounds of sumcheck. There is one `DataBuffers` struct per thread/chunk, reused
 /// across all log(T / num_chunks) rounds.
 #[derive(Allocative)]
-struct DataBuffers<F: JoltField> {
+pub struct DataBuffers<F: JoltField> {
     /// Contains
     ///     Val(k, j', 0, ..., 0)
     /// as we iterate over rows j' \in {0, 1}^(log(T) - i)
@@ -1541,13 +1541,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct RegistersReadWriteCheckingParams<F: JoltField> {
-    gamma: F,
+pub struct RegistersReadWriteCheckingParams<F: JoltField> {
+    pub gamma: F,
     /// Equals `gamma^3`.
-    gamma_cub: F,
-    n_cycle_vars: usize, // = log(T)
-    r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
-    r_cycle_stage_3: OpeningPoint<BIG_ENDIAN, F>,
+    pub gamma_cub: F,
+    pub n_cycle_vars: usize, // = log(T)
+    pub r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
+    pub r_cycle_stage_3: OpeningPoint<BIG_ENDIAN, F>,
 }
 
 impl<F: JoltField> RegistersReadWriteCheckingParams<F> {

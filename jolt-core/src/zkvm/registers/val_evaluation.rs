@@ -297,11 +297,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct ValEvaluationSumcheckParams<F: JoltField> {
+pub struct ValEvaluationSumcheckParams<F: JoltField> {
+    #[allow(dead_code)]
     pub r_address: Vec<F::Challenge>,
+    #[allow(dead_code)]
     pub r_cycle: Vec<F::Challenge>,
-    n_cycle_vars: usize,
-    _phantom: PhantomData<F>,
+    pub n_cycle_vars: usize,
+    pub _phantom: PhantomData<F>,
 }
 
 impl<F: JoltField> ValEvaluationSumcheckParams<F> {

@@ -72,7 +72,7 @@ pub struct RamReadWriteCheckingProver<F: JoltField> {
     pub val: Option<MultilinearPolynomial<F>>,
     pub merged_eq: Option<MultilinearPolynomial<F>>,
     #[allocative(skip)]
-    params: ReadWriteCheckingParams<F>,
+    pub params: ReadWriteCheckingParams<F>,
 }
 
 /// Number of cycle variables to bind in Phase 1 (using CycleMajor sparse matrix).
@@ -646,11 +646,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct ReadWriteCheckingParams<F: JoltField> {
-    K: usize,
-    T: usize,
-    gamma: F,
-    r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
+pub struct ReadWriteCheckingParams<F: JoltField> {
+    pub K: usize,
+    pub T: usize,
+    pub gamma: F,
+    pub r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
 }
 
 impl<F: JoltField> ReadWriteCheckingParams<F> {

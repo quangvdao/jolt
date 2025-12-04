@@ -89,6 +89,7 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
         let params = ValEvaluationSumcheckParams {
             init_eval,
             r_address: r_address.r.clone(),
+            r_cycle: r_cycle.r.clone(),
             T,
             K,
         };
@@ -280,6 +281,7 @@ impl<F: JoltField> ValEvaluationSumcheckVerifier<F> {
         let params = ValEvaluationSumcheckParams {
             init_eval,
             r_address: r_address.r.clone(),
+            r_cycle: vec![],
             T: trace_len,
             K: ram_K,
         };
@@ -369,6 +371,7 @@ pub struct ValEvaluationSumcheckParams<F: JoltField> {
     /// Initial evaluation to subtract (for RAM).
     init_eval: F,
     pub r_address: Vec<F::Challenge>,
+    pub r_cycle: Vec<F::Challenge>,
     /// Trace length.
     T: usize,
     /// Ram K parameter.

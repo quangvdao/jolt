@@ -74,7 +74,11 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
         );
         let (r_address, r_cycle) = registers_val_input_sample.0.split_at(LOG_K);
 
-        let params = ValEvaluationSumcheckParams::new(trace.len().log_2());
+        let params = ValEvaluationSumcheckParams::new(
+            r_address.r.clone(),
+            r_cycle.r.clone(),
+            trace.len().log_2(),
+        );
         let inc = CommittedPolynomial::RdInc.generate_witness(
             bytecode_preprocessing,
             memory_layout,
@@ -208,7 +212,7 @@ pub struct ValEvaluationSumcheckVerifier<F: JoltField> {
 
 impl<F: JoltField> ValEvaluationSumcheckVerifier<F> {
     pub fn new(n_cycle_vars: usize) -> Self {
-        let params = ValEvaluationSumcheckParams::new(n_cycle_vars);
+        let params = ValEvaluationSumcheckParams::new(vec![], vec![], n_cycle_vars);
         Self { params }
     }
 }
@@ -294,13 +298,21 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 }
 
 struct ValEvaluationSumcheckParams<F: JoltField> {
+    pub r_address: Vec<F::Challenge>,
+    pub r_cycle: Vec<F::Challenge>,
     n_cycle_vars: usize,
     _phantom: PhantomData<F>,
 }
 
 impl<F: JoltField> ValEvaluationSumcheckParams<F> {
-    pub fn new(n_cycle_vars: usize) -> Self {
+    pub fn new(
+        r_address: Vec<F::Challenge>,
+        r_cycle: Vec<F::Challenge>,
+        n_cycle_vars: usize,
+    ) -> Self {
         Self {
+            r_address,
+            r_cycle,
             n_cycle_vars,
             _phantom: PhantomData,
         }

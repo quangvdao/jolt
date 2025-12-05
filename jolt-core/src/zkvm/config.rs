@@ -3,15 +3,17 @@ use crate::utils::math::Math;
 use crate::zkvm::instruction_lookups::LOG_K;
 
 /// Helper to get log_k_chunk based on log_T
+/// NOTE: for GPU integration, we want constant k_chunk size = 8
 #[inline]
-pub const fn get_log_k_chunk(log_T: usize) -> usize {
-    if log_T <= 21 {
-        6
-    } else if log_T <= 24 {
-        7
-    } else {
-        8
-    }
+pub const fn get_log_k_chunk(_log_T: usize) -> usize {
+    8
+    // if log_T <= 21 {
+    //     6
+    // } else if log_T <= 24 {
+    //     7
+    // } else {
+    //     8
+    // }
     // NOTE: extrapolated benchmarking shows that LOG_K_CHUNK=9 might be better for traces starting from 2^31
 }
 
@@ -19,13 +21,15 @@ pub const fn get_log_k_chunk(log_T: usize) -> usize {
 /// For traces below 2^23 cycles we want to use 16 phases, otherwise 8.
 /// TODO: explore using other number of phases
 /// NOTE: currently only divisors of 128 are supported
+/// NOTE: for GPU integration, we want constant number of phases = 8
 #[inline]
-pub const fn instruction_sumcheck_phases(log_T: usize) -> usize {
-    if log_T < 23 {
-        16
-    } else {
-        8
-    }
+pub const fn instruction_sumcheck_phases(_log_T: usize) -> usize {
+    8
+    // if log_T < 23 {
+    //     16
+    // } else {
+    //     8
+    // }
 }
 
 /// Helper to compute d (number of chunks) from log_k and log_k_chunk.

@@ -33,21 +33,21 @@ const DEGREE_BOUND: usize = 3;
 #[derive(Allocative)]
 pub struct BooleanitySumcheckProver<F: JoltField> {
     /// B: split-eq over address-chunk variables (phase 1, LowToHigh).
-    B: GruenSplitEqPolynomial<F>,
+    pub B: GruenSplitEqPolynomial<F>,
     /// D: split-eq over time/cycle variables (phase 2, LowToHigh).
-    D: GruenSplitEqPolynomial<F>,
+    pub D: GruenSplitEqPolynomial<F>,
     /// G as in the Twist and Shout paper
-    G: Vec<Vec<F>>,
+    pub G: Vec<Vec<F>>,
     /// H as in the Twist and Shout paper
-    H: Vec<RaPolynomial<u16, F>>,
+    pub H: Vec<RaPolynomial<u16, F>>,
     /// F: Expanding table
-    F: ExpandingTable<F>,
+    pub F: ExpandingTable<F>,
     /// eq_r_r
-    eq_r_r: F,
+    pub eq_r_r: F,
     /// Indices for H polynomials
-    H_indices: Vec<Vec<Option<u16>>>,
+    pub H_indices: Vec<Vec<Option<u16>>>,
     #[allocative(skip)]
-    params: BooleanitySumcheckParams<F>,
+    pub params: BooleanitySumcheckParams<F>,
 }
 
 impl<F: JoltField> BooleanitySumcheckProver<F> {
@@ -179,7 +179,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for BooleanitySum
         DEGREE_BOUND
     }
 
-    fn num_rounds(&self) -> usize {
+    pub fn num_rounds(&self) -> usize {
         self.params.num_rounds()
     }
 
@@ -369,7 +369,7 @@ impl<F: JoltField> BooleanitySumcheckParams<F> {
         }
     }
 
-    fn get_opening_point(
+    pub fn get_opening_point(
         &self,
         sumcheck_challenges: &[F::Challenge],
     ) -> OpeningPoint<BIG_ENDIAN, F> {

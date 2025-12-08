@@ -22,7 +22,7 @@ use crate::{
     utils::math::Math,
     zkvm::{
         bytecode::BytecodePreprocessing,
-        witness::{compute_d_parameter, CommittedPolynomial, VirtualPolynomial},
+        witness::{CommittedPolynomial, VirtualPolynomial},
     },
 };
 use allocative::Allocative;
@@ -65,7 +65,6 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
         trace: &[Cycle],
         bytecode_preprocessing: &BytecodePreprocessing,
         memory_layout: &MemoryLayout,
-        ram_K: usize,
         opening_accumulator: &ProverOpeningAccumulator<F>,
     ) -> Self {
         // The opening point is r_address || r_cycle
@@ -80,12 +79,11 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
             r_cycle.r.clone(),
             trace.len().log_2(),
         );
-        let ram_d = compute_d_parameter(ram_K);
         let inc = CommittedPolynomial::RdInc.generate_witness(
             bytecode_preprocessing,
             memory_layout,
             trace,
-            ram_d,
+            None,
         );
 
         let eq_r_address = EqPolynomial::evals(&r_address.r);
@@ -299,11 +297,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct ValEvaluationSumcheckParams<F: JoltField> {
+pub struct ValEvaluationSumcheckParams<F: JoltField> {
+    #[allow(dead_code)]
     pub r_address: Vec<F::Challenge>,
+    #[allow(dead_code)]
     pub r_cycle: Vec<F::Challenge>,
-    n_cycle_vars: usize,
-    _phantom: PhantomData<F>,
+    pub n_cycle_vars: usize,
+    pub _phantom: PhantomData<F>,
 }
 
 impl<F: JoltField> ValEvaluationSumcheckParams<F> {

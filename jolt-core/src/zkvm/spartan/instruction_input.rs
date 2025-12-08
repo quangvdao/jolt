@@ -551,10 +551,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     }
 }
 
-struct InstructionInputParams<F: JoltField> {
-    r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
-    r_cycle_stage_2: OpeningPoint<BIG_ENDIAN, F>,
-    gamma: F,
+pub struct InstructionInputParams<F: JoltField> {
+    pub r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
+    pub r_cycle_stage_2: OpeningPoint<BIG_ENDIAN, F>,
+    pub gamma: F,
 }
 
 impl<F: JoltField> InstructionInputParams<F> {

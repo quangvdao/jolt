@@ -106,7 +106,7 @@ pub struct RamRaReductionSumcheckProver<F: JoltField> {
     prev_round_poly_val: Option<UniPoly<F>>,
 
     #[allocative(skip)]
-    params: RaReductionParams<F>,
+    pub params: RaReductionParams<F>,
 }
 
 /// RAM RA reduction sumcheck verifier.
@@ -116,36 +116,36 @@ pub struct RamRaReductionSumcheckVerifier<F: JoltField> {
 
 /// Shared parameters between prover and verifier.
 #[derive(Clone)]
-struct RaReductionParams<F: JoltField> {
+pub struct RaReductionParams<F: JoltField> {
     /// γ coefficient for combining claims
-    gamma: F,
+    pub gamma: F,
     /// γ² coefficient
-    gamma_squared: F,
+    pub gamma_squared: F,
     /// γ³ coefficient
-    gamma_cubed: F,
+    pub gamma_cubed: F,
 
     /// r_address_1 = r_address_raf (from RafEvaluation/OutputCheck)
-    r_address_1: Vec<F::Challenge>,
+    pub r_address_1: Vec<F::Challenge>,
     /// r_address_2 = r_address_rw (from ReadWriteChecking)
-    r_address_2: Vec<F::Challenge>,
+    pub r_address_2: Vec<F::Challenge>,
 
     /// r_cycle_raf (from SpartanOuter via RafEvaluation)
-    r_cycle_raf: Vec<F::Challenge>,
+    pub r_cycle_raf: Vec<F::Challenge>,
     /// r_cycle_rw (from ReadWriteChecking phase 1)
-    r_cycle_rw: Vec<F::Challenge>,
+    pub r_cycle_rw: Vec<F::Challenge>,
     /// r_cycle_val (from ValEvaluation/ValFinal in Stage 4)
-    r_cycle_val: Vec<F::Challenge>,
+    pub r_cycle_val: Vec<F::Challenge>,
 
     /// The four input claims
-    claim_raf: F,
-    claim_val_final: F,
-    claim_rw: F,
-    claim_val_eval: F,
+    pub claim_raf: F,
+    pub claim_val_final: F,
+    pub claim_rw: F,
+    pub claim_val_eval: F,
 
     /// log_2(K) - number of address rounds
-    log_K: usize,
+    pub log_K: usize,
     /// log_2(T) - number of cycle rounds
-    log_T: usize,
+    pub log_T: usize,
 }
 
 impl<F: JoltField> RaReductionParams<F> {

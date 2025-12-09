@@ -140,7 +140,7 @@ pub struct RegistersReadWriteCheckingProverNew<F: JoltField> {
     /// Increment polynomial (rd_inc).
     inc_cycle: MultilinearPolynomial<F>,
     /// Batching challenge gamma.
-    gamma: F,
+    pub gamma: F,
     /// gamma^3 for stage 3 batching.
     gamma_cub: F,
 
@@ -151,9 +151,9 @@ pub struct RegistersReadWriteCheckingProverNew<F: JoltField> {
     prev_round_poly_stage_3: Option<UniPoly<F>>,
 
     // Parameters
-    n_cycle_vars: usize, // log(T)
+    pub n_cycle_vars: usize, // log(T)
     #[allocative(skip)]
-    r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
+    pub r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
     #[allocative(skip)]
     r_cycle_stage_3: OpeningPoint<BIG_ENDIAN, F>,
 }

@@ -155,7 +155,7 @@ pub struct RegistersReadWriteCheckingProverNew<F: JoltField> {
     #[allocative(skip)]
     pub r_cycle_stage_1: OpeningPoint<BIG_ENDIAN, F>,
     #[allocative(skip)]
-    r_cycle_stage_3: OpeningPoint<BIG_ENDIAN, F>,
+    pub r_cycle_stage_3: OpeningPoint<BIG_ENDIAN, F>,
 }
 
 impl<F: JoltField> RegistersReadWriteCheckingProverNew<F> {

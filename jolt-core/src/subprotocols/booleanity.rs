@@ -179,7 +179,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for BooleanitySum
         DEGREE_BOUND
     }
 
-    pub fn num_rounds(&self) -> usize {
+    fn num_rounds(&self) -> usize {
         self.params.num_rounds()
     }
 

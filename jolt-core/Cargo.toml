@@ -156,6 +156,10 @@ harness = false
 name = "challenge_mult_performance"
 harness = false
 
+[[bench]]
+name = "msm_performance"
+harness = false
+
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"

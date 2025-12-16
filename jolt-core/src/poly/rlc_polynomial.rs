@@ -12,7 +12,6 @@ use crate::zkvm::{bytecode::BytecodePreprocessing, witness::CommittedPolynomial}
 use allocative::Allocative;
 use ark_bn254::{Fr, G1Projective};
 use ark_ec::CurveGroup;
-use ark_std::Zero;
 use common::constants::XLEN;
 use common::jolt_device::MemoryLayout;
 use itertools::Itertools;
@@ -606,11 +605,22 @@ impl<F: JoltField> RLCPolynomial<F> {
         let bytecode = &ctx.preprocessing.bytecode;
         let memory_layout = &ctx.preprocessing.memory_layout;
 
-        chunk_ranges
+        let (dense_accs, onehot_accs) = chunk_ranges
             .into_par_iter()
             .map(|(row_start, row_end)| {
-                // One allocation per chunk (<= num_threads)
-                let mut acc: Vec<F> = unsafe_allocate_zero_vec(num_columns);
+                // One allocation per chunk (<= num_threads):
+                // - dense_accs accumulates scaled (post-pre) increments in 6-limb signed form
+                // - onehot_accs accumulates field products in 9-limb form (Montgomery domain)
+                let mut dense_accs: Vec<Acc6S<F>> = if has_dense {
+                    unsafe_allocate_zero_vec(num_columns)
+                } else {
+                    Vec::new()
+                };
+                let mut onehot_accs: Vec<F::Unreduced<9>> = if has_onehot {
+                    unsafe_allocate_zero_vec(num_columns)
+                } else {
+                    Vec::new()
+                };
 
                 for row_idx in row_start..row_end {
                     let chunk_start = row_idx * num_columns;
@@ -639,13 +649,12 @@ impl<F: JoltField> RLCPolynomial<F> {
 
                     // Process valid trace elements (no branch needed)
                     for (col_idx, cycle) in row_cycles.iter().enumerate() {
-                        let mut val = F::zero();
-
                         // ----------------
                         // Dense polynomials: accumulate scaled_coeff * (post - pre) via Acc6S + S64 diffs.
+                        // Delay Barrett reduction to the end of the full VMV.
                         // ----------------
                         if has_dense {
-                            let mut dense_acc: Acc6S<F> = Default::default();
+                            let dense_acc = &mut dense_accs[col_idx];
 
                             if let Some(scaled) = &scaled_rd_inc {
                                 let (_, pre_value, post_value) = cycle.rd_write();
@@ -656,27 +665,23 @@ impl<F: JoltField> RLCPolynomial<F> {
                             if let Some(scaled) = &scaled_ram_inc {
                                 match cycle.ram_access() {
                                     tracer::instruction::RAMAccess::Write(write) => {
-                                        let diff = s64_from_diff_u64s(
-                                            write.post_value,
-                                            write.pre_value,
-                                        );
+                                        let diff =
+                                            s64_from_diff_u64s(write.post_value, write.pre_value);
                                         dense_acc.fmadd(scaled, &diff);
                                     }
                                     tracer::instruction::RAMAccess::Read(_)
                                     | tracer::instruction::RAMAccess::NoOp => {}
                                 }
                             }
-
-                            val += dense_acc.barrett_reduce();
                         }
 
                         // ----------------
-                        // One-hot polynomials: accumulate coeff * left_vec[k * num_rows + row_idx]
-                        // in unreduced 9-limb form, then montgomery-reduce once.
+                        // One-hot polynomials: accumulate field products in 9-limb form.
+                        // Delay Montgomery reduction to the end of the full VMV.
                         // ----------------
                         if has_onehot {
                             let row_base_ptr = row_base_ptr.expect("row_base_ptr missing");
-                            let mut onehot_acc = F::Unreduced::<9>::zero();
+                            let onehot_acc = &mut onehot_accs[col_idx];
 
                             if !instruction_ra.is_empty() {
                                 let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
@@ -686,7 +691,7 @@ impl<F: JoltField> RLCPolynomial<F> {
                                     let k = ((lookup_index >> shift) & k_chunk_mask_u128) as usize;
                                     // SAFETY: k < K and debug_assert above ensures bounds.
                                     let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-                                    onehot_acc += left_val.mul_unreduced::<9>(*coeff);
+                                    *onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                 }
                             }
 
@@ -697,7 +702,7 @@ impl<F: JoltField> RLCPolynomial<F> {
                                     let shift = log_k_chunk * (bytecode_d - 1 - *idx);
                                     let k = (pc >> shift) & k_chunk_mask_usize;
                                     let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-                                    onehot_acc += left_val.mul_unreduced::<9>(*coeff);
+                                    *onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                 }
                             }
 
@@ -709,15 +714,11 @@ impl<F: JoltField> RLCPolynomial<F> {
                                         let shift = log_k_chunk * (ram_d - 1 - *idx);
                                         let k = ((remapped >> shift) & k_chunk_mask_u64) as usize;
                                         let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-                                        onehot_acc += left_val.mul_unreduced::<9>(*coeff);
+                                        *onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                     }
                                 }
                             }
-
-                            val += F::from_montgomery_reduce::<9>(onehot_acc);
                         }
-
-                        acc[col_idx] += val;
                     }
 
                     // Process padding (NoOp cycles) - typically rare or none
@@ -766,17 +767,51 @@ impl<F: JoltField> RLCPolynomial<F> {
                     }
                 }
 
-                acc
+                (dense_accs, onehot_accs)
             })
             .reduce(
-                || unsafe_allocate_zero_vec(num_columns),
-                |mut a, b| {
-                    for (x, y) in a.iter_mut().zip(b.iter()) {
-                        *x += *y;
-                    }
-                    a
+                || {
+                    let dense_accs: Vec<Acc6S<F>> = if has_dense {
+                        unsafe_allocate_zero_vec(num_columns)
+                    } else {
+                        Vec::new()
+                    };
+                    let onehot_accs: Vec<F::Unreduced<9>> = if has_onehot {
+                        unsafe_allocate_zero_vec(num_columns)
+                    } else {
+                        Vec::new()
+                    };
+                    (dense_accs, onehot_accs)
                 },
-            )
+                |(mut dense_a, mut onehot_a), (dense_b, onehot_b)| {
+                    if has_dense {
+                        for (a, b) in dense_a.iter_mut().zip(dense_b.iter()) {
+                            *a = *a + *b;
+                        }
+                    }
+                    if has_onehot {
+                        for (a, b) in onehot_a.iter_mut().zip(onehot_b.iter()) {
+                            *a += *b;
+                        }
+                    }
+                    (dense_a, onehot_a)
+                },
+            );
+
+        // Finalize: reduce once per column and combine dense + onehot contributions (parallel).
+        (0..num_columns)
+            .into_par_iter()
+            .map(|col_idx| {
+                let mut val = F::zero();
+                if has_dense {
+                    val += dense_accs[col_idx].barrett_reduce();
+                }
+                if has_onehot {
+                    val += F::from_montgomery_reduce::<9>(onehot_accs[col_idx]);
+                }
+                val
+            })
+            .collect()
     }
 
     /// Lazy VMV over lazy trace iterator (experimental, re-runs tracer).
@@ -842,14 +877,26 @@ impl<F: JoltField> RLCPolynomial<F> {
         let bytecode = &ctx.preprocessing.bytecode;
         let memory_layout = &ctx.preprocessing.memory_layout;
 
-        lazy_trace
+        let (dense_accs, onehot_accs) = lazy_trace
             .pad_using(T, |_| Cycle::NoOp)
             .iter_chunks(num_columns)
             .enumerate()
             .par_bridge()
             .fold(
-                || unsafe_allocate_zero_vec::<F>(num_columns),
-                |mut acc, (row_idx, chunk)| {
+                || {
+                    let dense_accs: Vec<Acc6S<F>> = if has_dense {
+                        unsafe_allocate_zero_vec(num_columns)
+                    } else {
+                        Vec::new()
+                    };
+                    let onehot_accs: Vec<F::Unreduced<9>> = if has_onehot {
+                        unsafe_allocate_zero_vec(num_columns)
+                    } else {
+                        Vec::new()
+                    };
+                    (dense_accs, onehot_accs)
+                },
+                |(mut dense_accs, mut onehot_accs), (row_idx, chunk)| {
                     let row_weight = left_vec[row_idx];
                     let scaled_rd_inc = rd_inc_coeff.map(|c| row_weight * c);
                     let scaled_ram_inc = ram_inc_coeff.map(|c| row_weight * c);
@@ -861,10 +908,8 @@ impl<F: JoltField> RLCPolynomial<F> {
 
                     // Process columns within chunk sequentially (avoid nested parallelism).
                     for (col_idx, cycle) in chunk.iter().enumerate() {
-                        let mut val = F::zero();
-
                         if has_dense {
-                            let mut dense_acc: Acc6S<F> = Default::default();
+                            let dense_acc = &mut dense_accs[col_idx];
 
                             if let Some(scaled) = &scaled_rd_inc {
                                 let (_, pre_value, post_value) = cycle.rd_write();
@@ -875,23 +920,19 @@ impl<F: JoltField> RLCPolynomial<F> {
                             if let Some(scaled) = &scaled_ram_inc {
                                 match cycle.ram_access() {
                                     tracer::instruction::RAMAccess::Write(write) => {
-                                        let diff = s64_from_diff_u64s(
-                                            write.post_value,
-                                            write.pre_value,
-                                        );
+                                        let diff =
+                                            s64_from_diff_u64s(write.post_value, write.pre_value);
                                         dense_acc.fmadd(scaled, &diff);
                                     }
                                     tracer::instruction::RAMAccess::Read(_)
                                     | tracer::instruction::RAMAccess::NoOp => {}
                                 }
                             }
-
-                            val += dense_acc.barrett_reduce();
                         }
 
                         if has_onehot {
                             let row_base_ptr = row_base_ptr.expect("row_base_ptr missing");
-                            let mut onehot_acc = F::Unreduced::<9>::zero();
+                            let onehot_acc = &mut onehot_accs[col_idx];
 
                             if !instruction_ra.is_empty() {
                                 let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
@@ -900,7 +941,7 @@ impl<F: JoltField> RLCPolynomial<F> {
                                     let shift = log_k_chunk * (instruction_d - 1 - *idx);
                                     let k = ((lookup_index >> shift) & k_chunk_mask_u128) as usize;
                                     let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-                                    onehot_acc += left_val.mul_unreduced::<9>(*coeff);
+                                    *onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                 }
                             }
 
@@ -911,7 +952,7 @@ impl<F: JoltField> RLCPolynomial<F> {
                                     let shift = log_k_chunk * (bytecode_d - 1 - *idx);
                                     let k = (pc >> shift) & k_chunk_mask_usize;
                                     let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-                                    onehot_acc += left_val.mul_unreduced::<9>(*coeff);
+                                    *onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                 }
                             }
 
@@ -923,28 +964,58 @@ impl<F: JoltField> RLCPolynomial<F> {
                                         let shift = log_k_chunk * (ram_d - 1 - *idx);
                                         let k = ((remapped >> shift) & k_chunk_mask_u64) as usize;
                                         let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-                                        onehot_acc += left_val.mul_unreduced::<9>(*coeff);
+                                        *onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                     }
                                 }
                             }
-
-                            val += F::from_montgomery_reduce::<9>(onehot_acc);
                         }
-
-                        acc[col_idx] += val;
                     }
 
-                    acc
+                    (dense_accs, onehot_accs)
                 },
             )
             .reduce(
-                || unsafe_allocate_zero_vec(num_columns),
-                |mut a, b| {
-                    a.par_iter_mut()
-                        .zip(b.par_iter())
-                        .for_each(|(a_val, b_val)| *a_val += *b_val);
-                    a
+                || {
+                    let dense_accs: Vec<Acc6S<F>> = if has_dense {
+                        unsafe_allocate_zero_vec(num_columns)
+                    } else {
+                        Vec::new()
+                    };
+                    let onehot_accs: Vec<F::Unreduced<9>> = if has_onehot {
+                        unsafe_allocate_zero_vec(num_columns)
+                    } else {
+                        Vec::new()
+                    };
+                    (dense_accs, onehot_accs)
                 },
-            )
+                |(mut dense_a, mut onehot_a), (dense_b, onehot_b)| {
+                    if has_dense {
+                        for (a, b) in dense_a.iter_mut().zip(dense_b.iter()) {
+                            *a = *a + *b;
+                        }
+                    }
+                    if has_onehot {
+                        for (a, b) in onehot_a.iter_mut().zip(onehot_b.iter()) {
+                            *a += *b;
+                        }
+                    }
+                    (dense_a, onehot_a)
+                },
+            );
+
+        // Finalize: reduce once per column and combine dense + onehot contributions (parallel).
+        (0..num_columns)
+            .into_par_iter()
+            .map(|col_idx| {
+                let mut val = F::zero();
+                if has_dense {
+                    val += dense_accs[col_idx].barrett_reduce();
+                }
+                if has_onehot {
+                    val += F::from_montgomery_reduce::<9>(onehot_accs[col_idx]);
+                }
+                val
+            })
+            .collect()
     }
 }

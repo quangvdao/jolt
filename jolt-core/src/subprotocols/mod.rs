@@ -1,4 +1,5 @@
 pub mod booleanity;
+pub mod booleanity_new;
 pub mod mles_product_sum;
 pub mod read_write_matrix;
 pub mod sumcheck;

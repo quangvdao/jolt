@@ -109,7 +109,7 @@ impl<F: JoltField> PolynomialEvaluation<F> for IdentityPolynomial<F> {
 }
 
 impl<F: JoltField> PrefixSuffixPolynomial<F, 2> for IdentityPolynomial<F> {
-    fn suffixes(&self) -> [Box<dyn SuffixPolynomial<F> + Sync>; 2] {
+    fn suffixes(&self) -> [Box<dyn SuffixPolynomial<F> + Send + Sync>; 2] {
         [Box::new(ShiftSuffixPolynomial), Box::new(self.clone())]
     }
 
@@ -320,7 +320,7 @@ impl<F: JoltField> PolynomialEvaluation<F> for OperandPolynomial<F> {
 }
 
 impl<F: JoltField> PrefixSuffixPolynomial<F, 2> for OperandPolynomial<F> {
-    fn suffixes(&self) -> [Box<dyn SuffixPolynomial<F> + Sync>; 2] {
+    fn suffixes(&self) -> [Box<dyn SuffixPolynomial<F> + Send + Sync>; 2] {
         [Box::new(ShiftHalfSuffixPolynomial), Box::new(self.clone())]
     }
 

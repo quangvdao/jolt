@@ -195,7 +195,7 @@ pub trait PrefixSuffixPolynomial<F: JoltField, const ORDER: usize> {
         phase: usize,
         prefix_registry: &mut PrefixRegistry<F>,
     ) -> [Option<Arc<RwLock<CachedPolynomial<F>>>>; ORDER];
-    fn suffixes(&self) -> [Box<dyn SuffixPolynomial<F> + Sync>; ORDER];
+    fn suffixes(&self) -> [Box<dyn SuffixPolynomial<F> + Send + Sync>; ORDER];
 }
 
 #[derive(Allocative)]
@@ -204,6 +204,9 @@ pub struct PrefixSuffixDecomposition<F: JoltField, const ORDER: usize> {
     #[allocative(skip)]
     /// Original polynomial to decompose (e.g., OperandPolynomial, IdentityPolynomial).
     poly: Box<dyn PrefixSuffixPolynomial<F, ORDER> + Send + Sync>,
+    #[allocative(skip)]
+    /// Cached suffix polynomials (avoid per-call `Box` allocations from `poly.suffixes()`).
+    suffixes: [Box<dyn SuffixPolynomial<F> + Send + Sync>; ORDER],
     #[allocative(skip)]
     /// P[i] = prefix polynomial i, computed from registry and cached for reuse.
     P: [Option<Arc<RwLock<CachedPolynomial<F>>>>; ORDER],
@@ -229,8 +232,10 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
             total_len.is_multiple_of(chunk_len),
             "total_len must be a multiple of chunk_len"
         );
+        let suffixes = poly.suffixes();
         Self {
             poly,
+            suffixes,
             P: std::array::from_fn(|_| None),
             Q: Self::alloc_Q(chunk_len.pow2()),
             chunk_len,
@@ -276,55 +281,72 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
     pub fn init_Q(&mut self, u_evals: &[F], indices: &[usize], lookup_bits: &[LookupBits]) {
         let poly_len = self.chunk_len.pow2();
         let suffix_len = self.suffix_len();
-        let suffixes = self.poly.suffixes();
+        let suffixes = &self.suffixes;
+        let poly_mask = poly_len - 1;
+        let suffix_mask: u128 = if suffix_len == 0 {
+            0
+        } else {
+            (1u128 << suffix_len) - 1
+        };
 
         let num_chunks = rayon::current_num_threads().next_power_of_two();
         let chunk_size = (indices.len() / num_chunks).max(1);
 
-        // Accumulate in row-major for write locality: rows are r_index in [0, poly_len)
-        let new_Q_rows: Vec<[F::Unreduced<7>; ORDER]> = indices
+        // Accumulate in row-major for write locality: row = r_index in [0, poly_len),
+        // with ORDER entries per row stored contiguously.
+        let new_Q_rows: Vec<F::Unreduced<7>> = indices
             .par_chunks(chunk_size)
             .fold(
-                || vec![[F::Unreduced::<7>::zero(); ORDER]; poly_len],
+                || unsafe_allocate_zero_vec::<F::Unreduced<7>>(poly_len * ORDER),
                 |mut acc, chunk| {
                     for j in chunk {
-                        let k = lookup_bits[*j];
-                        let (prefix_bits, suffix_bits) = k.split(suffix_len);
-                        let r_index: usize = (u128::from(&prefix_bits) as usize) & (poly_len - 1);
-                        if let Some(u) = u_evals.get(*j) {
+                        let j = *j;
+                        if j >= u_evals.len() {
+                            continue;
+                        }
+                        let u = u_evals[j];
+
+                        let k_u: u128 = (&lookup_bits[j]).into();
+                        let r_index: usize = ((k_u >> suffix_len) as usize) & poly_mask;
+                        let suffix_bits_u = if suffix_len == 0 { 0 } else { k_u & suffix_mask };
+                        let suffix_bits = LookupBits::new(suffix_bits_u, suffix_len);
+
+                            let base = r_index * ORDER;
                             for (s_idx, suffix) in suffixes.iter().enumerate() {
                                 let t = suffix.suffix_mle(suffix_bits);
                                 if t != 0 {
-                                    acc[r_index][s_idx] += u.mul_u128_unreduced(t);
+                                    acc[base + s_idx] += u.mul_u128_unreduced(t);
                                 }
                             }
-                        }
                     }
                     acc
                 },
             )
             .reduce(
-                || vec![[F::Unreduced::<7>::zero(); ORDER]; poly_len],
+                || unsafe_allocate_zero_vec::<F::Unreduced<7>>(poly_len * ORDER),
                 |mut acc, new| {
-                    for (acc_row, new_row) in acc.iter_mut().zip(new.iter()) {
-                        for s in 0..ORDER {
-                            acc_row[s] += new_row[s];
-                        }
+                    for (x, y) in acc.iter_mut().zip(new.iter()) {
+                        *x += *y;
                     }
                     acc
                 },
             );
 
-        // Transpose rows back to suffix-major and reduce to field
-        let mut reduced_Q: [Vec<F>; ORDER] =
-            std::array::from_fn(|_| unsafe_allocate_zero_vec(poly_len));
+        // Write directly into existing suffix-major Q buffers (avoid allocating temp Vecs).
+        for s in 0..ORDER {
+            let q = &mut self.Q[s];
+            if q.Z.len() != poly_len {
+                q.Z = unsafe_allocate_zero_vec(poly_len);
+            }
+            q.len = poly_len;
+            q.num_vars = self.chunk_len;
+        }
         for r_idx in 0..poly_len {
+            let base = r_idx * ORDER;
             for s in 0..ORDER {
-                reduced_Q[s][r_idx] = F::from_barrett_reduce(new_Q_rows[r_idx][s]);
+                self.Q[s].Z[r_idx] = F::from_barrett_reduce(new_Q_rows[base + s]);
             }
         }
-
-        self.Q = std::array::from_fn(|i| DensePolynomial::new(std::mem::take(&mut reduced_Q[i])));
     }
 
     /// Initialize Q for two PrefixSuffixDecomposition instances in a single pass over indices
@@ -345,46 +367,59 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
 
         let poly_len = left.chunk_len.pow2();
         let suffix_len = left.suffix_len();
-        let suffixes_left = left.poly.suffixes();
-        let suffixes_right = right.poly.suffixes();
+        let suffixes_left = &left.suffixes;
+        let suffixes_right = &right.suffixes;
+        let poly_mask = poly_len - 1;
+        let suffix_mask: u128 = if suffix_len == 0 {
+            0
+        } else {
+            (1u128 << suffix_len) - 1
+        };
 
         let num_chunks = rayon::current_num_threads().next_power_of_two();
         let chunk_size = (indices.len() / num_chunks).max(1);
 
         #[allow(clippy::type_complexity)]
         let (new_left_rows, new_right_rows): (
-            Vec<[F::Unreduced<7>; ORDER]>,
-            Vec<[F::Unreduced<7>; ORDER]>,
+            Vec<F::Unreduced<7>>,
+            Vec<F::Unreduced<7>>,
         ) = indices
             .par_chunks(chunk_size)
             .fold(
                 || {
                     (
-                        vec![[F::Unreduced::<7>::zero(); ORDER]; poly_len],
-                        vec![[F::Unreduced::<7>::zero(); ORDER]; poly_len],
+                        unsafe_allocate_zero_vec::<F::Unreduced<7>>(poly_len * ORDER),
+                        unsafe_allocate_zero_vec::<F::Unreduced<7>>(poly_len * ORDER),
                     )
                 },
                 |(mut acc_l, mut acc_r), chunk| {
                     for j in chunk {
-                        let k = lookup_bits[*j];
-                        let (prefix_bits, suffix_bits) = k.split(suffix_len);
-                        let r_index: usize = (u128::from(&prefix_bits) as usize) & (poly_len - 1);
-                        if let Some(u) = u_evals.get(*j) {
+                        let j = *j;
+                        if j >= u_evals.len() {
+                            continue;
+                        }
+                        let u = u_evals[j];
+
+                        let k_u: u128 = (&lookup_bits[j]).into();
+                        let r_index: usize = ((k_u >> suffix_len) as usize) & poly_mask;
+                        let suffix_bits_u = if suffix_len == 0 { 0 } else { k_u & suffix_mask };
+                        let suffix_bits = LookupBits::new(suffix_bits_u, suffix_len);
+
+                            let base = r_index * ORDER;
                             // Left
                             for (s_idx, suffix) in suffixes_left.iter().enumerate() {
                                 let t = suffix.suffix_mle(suffix_bits);
                                 if t != 0 {
-                                    acc_l[r_index][s_idx] += u.mul_u128_unreduced(t);
+                                    acc_l[base + s_idx] += u.mul_u128_unreduced(t);
                                 }
                             }
                             // Right
                             for (s_idx, suffix) in suffixes_right.iter().enumerate() {
                                 let t = suffix.suffix_mle(suffix_bits);
                                 if t != 0 {
-                                    acc_r[r_index][s_idx] += u.mul_u128_unreduced(t);
+                                    acc_r[base + s_idx] += u.mul_u128_unreduced(t);
                                 }
                             }
-                        }
                     }
                     (acc_l, acc_r)
                 },
@@ -392,45 +427,44 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
             .reduce(
                 || {
                     (
-                        vec![[F::Unreduced::<7>::zero(); ORDER]; poly_len],
-                        vec![[F::Unreduced::<7>::zero(); ORDER]; poly_len],
+                        unsafe_allocate_zero_vec::<F::Unreduced<7>>(poly_len * ORDER),
+                        unsafe_allocate_zero_vec::<F::Unreduced<7>>(poly_len * ORDER),
                     )
                 },
                 |(mut acc_l, mut acc_r), (new_l, new_r)| {
-                    for (acc_row, new_row) in acc_l.iter_mut().zip(new_l.iter()) {
-                        for s in 0..ORDER {
-                            acc_row[s] += new_row[s];
-                        }
+                    for (x, y) in acc_l.iter_mut().zip(new_l.iter()) {
+                        *x += *y;
                     }
-                    for (acc_row, new_row) in acc_r.iter_mut().zip(new_r.iter()) {
-                        for s in 0..ORDER {
-                            acc_row[s] += new_row[s];
-                        }
+                    for (x, y) in acc_r.iter_mut().zip(new_r.iter()) {
+                        *x += *y;
                     }
                     (acc_l, acc_r)
                 },
             );
 
-        // Reduce to field for left and right (transpose rows to suffix-major)
-        let mut reduced_left: [Vec<F>; ORDER] =
-            std::array::from_fn(|_| unsafe_allocate_zero_vec(poly_len));
-        for r_idx in 0..poly_len {
-            for s in 0..ORDER {
-                reduced_left[s][r_idx] = F::from_barrett_reduce(new_left_rows[r_idx][s]);
+        // Write directly into existing suffix-major Q buffers (avoid allocating temp Vecs).
+        for s in 0..ORDER {
+            let ql = &mut left.Q[s];
+            if ql.Z.len() != poly_len {
+                ql.Z = unsafe_allocate_zero_vec(poly_len);
             }
-        }
-        let mut reduced_right: [Vec<F>; ORDER] =
-            std::array::from_fn(|_| unsafe_allocate_zero_vec(poly_len));
-        for r_idx in 0..poly_len {
-            for s in 0..ORDER {
-                reduced_right[s][r_idx] = F::from_barrett_reduce(new_right_rows[r_idx][s]);
-            }
-        }
+            ql.len = poly_len;
+            ql.num_vars = left.chunk_len;
 
-        left.Q =
-            std::array::from_fn(|i| DensePolynomial::new(std::mem::take(&mut reduced_left[i])));
-        right.Q =
-            std::array::from_fn(|i| DensePolynomial::new(std::mem::take(&mut reduced_right[i])));
+            let qr = &mut right.Q[s];
+            if qr.Z.len() != poly_len {
+                qr.Z = unsafe_allocate_zero_vec(poly_len);
+            }
+            qr.len = poly_len;
+            qr.num_vars = right.chunk_len;
+        }
+        for r_idx in 0..poly_len {
+            let base = r_idx * ORDER;
+            for s in 0..ORDER {
+                left.Q[s].Z[r_idx] = F::from_barrett_reduce(new_left_rows[base + s]);
+                right.Q[s].Z[r_idx] = F::from_barrett_reduce(new_right_rows[base + s]);
+            }
+        }
     }
 
     /// Returns evaluation at 0 and at 2 at index
@@ -493,7 +527,7 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
     pub fn final_sumcheck_claim(&self) -> F {
         self.P
             .par_iter()
-            .zip(self.poly.suffixes().par_iter())
+            .zip(self.suffixes.par_iter())
             .map(|(p, suffix)| {
                 let suff = suffix.suffix_mle(LookupBits::new(0, 0));
                 if suff == 0 {

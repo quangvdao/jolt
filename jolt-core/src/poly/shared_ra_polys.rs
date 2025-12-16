@@ -173,7 +173,7 @@ impl RaIndices {
 
     /// Extract the index for polynomial `poly_idx` in the unified ordering:
     /// [instruction_0..d, bytecode_0..d, ram_0..d]
-    #[inline]
+    #[inline(always)]
     pub fn get_index(&self, poly_idx: usize, one_hot_params: &OneHotParams) -> Option<u16> {
         let instruction_d = one_hot_params.instruction_d;
         let bytecode_d = one_hot_params.bytecode_d;

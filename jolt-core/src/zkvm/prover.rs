@@ -27,7 +27,7 @@ use crate::{
     },
     pprof_scope,
     subprotocols::{
-        booleanity::{BooleanitySumcheckParams, BooleanitySumcheckProver},
+        booleanity_new::{BooleanitySumcheckParams, BooleanitySumcheckProver},
         sumcheck::{BatchedSumcheck, SumcheckInstanceProof},
         sumcheck_prover::SumcheckInstanceProver,
         univariate_skip::{prove_uniskip_round, UniSkipFirstRoundProof},

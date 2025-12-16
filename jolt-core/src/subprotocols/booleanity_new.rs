@@ -202,33 +202,6 @@ impl<F: JoltField> GammaBasisSharedRaPolynomials<F> {
         }
     }
 
-    #[inline]
-    fn is_materialized(&self) -> bool {
-        matches!(self, Self::RoundN(_))
-    }
-
-    #[inline]
-    fn get_bound_coeff_unscaled(&self, poly_idx: usize, j: usize) -> F {
-        match self {
-            Self::Round1(r) => r.get_scaled(0, poly_idx, j),
-            Self::Round2(r) => r.get_scaled(0, poly_idx, j),
-            Self::Round3(r) => r.get_scaled(0, poly_idx, j),
-            Self::RoundN(polys) => polys[poly_idx].get_bound_coeff(j),
-        }
-    }
-
-    #[inline]
-    fn get_bound_coeff_scaled(&self, basis_idx: usize, poly_idx: usize, j: usize) -> F {
-        match self {
-            Self::Round1(r) => r.get_scaled(basis_idx, poly_idx, j),
-            Self::Round2(r) => r.get_scaled(basis_idx, poly_idx, j),
-            Self::Round3(r) => r.get_scaled(basis_idx, poly_idx, j),
-            Self::RoundN(_) => {
-                panic!("get_bound_coeff_scaled called after materialization (RoundN)")
-            }
-        }
-    }
-
     fn final_sumcheck_claim(&self, poly_idx: usize) -> F {
         match self {
             Self::RoundN(polys) => polys[poly_idx].final_sumcheck_claim(),
@@ -258,13 +231,6 @@ impl<F: JoltField> GammaBasisSharedRaPolynomials<F> {
 }
 
 impl<F: JoltField> GammaBasisRound1<F> {
-    #[inline]
-    fn get_scaled(&self, basis_idx: usize, poly_idx: usize, j: usize) -> F {
-        self.indices[j]
-            .get_index(poly_idx, &self.one_hot_params)
-            .map_or(F::zero(), |k| self.tables[basis_idx * self.k_chunk + k as usize])
-    }
-
     fn bind(self, r0: F::Challenge, order: BindingOrder) -> GammaBasisRound2<F> {
         let eq_0_r0 = EqPolynomial::mle(&[F::zero()], &[r0]);
         let eq_1_r0 = EqPolynomial::mle(&[F::one()], &[r0]);
@@ -290,31 +256,6 @@ impl<F: JoltField> GammaBasisRound1<F> {
 }
 
 impl<F: JoltField> GammaBasisRound2<F> {
-    #[inline]
-    fn get_scaled(&self, basis_idx: usize, poly_idx: usize, j: usize) -> F {
-        match self.binding_order {
-            BindingOrder::HighToLow => {
-                let mid = self.indices.len() / 2;
-                let h_0 = self.indices[j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_0[basis_idx * self.k_chunk + k as usize]);
-                let h_1 = self.indices[mid + j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_1[basis_idx * self.k_chunk + k as usize]);
-                h_0 + h_1
-            }
-            BindingOrder::LowToHigh => {
-                let h_0 = self.indices[2 * j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_0[basis_idx * self.k_chunk + k as usize]);
-                let h_1 = self.indices[2 * j + 1]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_1[basis_idx * self.k_chunk + k as usize]);
-                h_0 + h_1
-            }
-        }
-    }
-
     fn bind(self, r1: F::Challenge, order: BindingOrder) -> GammaBasisRound3<F> {
         assert_eq!(order, self.binding_order);
         let eq_0_r1 = EqPolynomial::mle(&[F::zero()], &[r1]);
@@ -356,44 +297,6 @@ impl<F: JoltField> GammaBasisRound2<F> {
 }
 
 impl<F: JoltField> GammaBasisRound3<F> {
-    #[inline]
-    fn get_scaled(&self, basis_idx: usize, poly_idx: usize, j: usize) -> F {
-        match self.binding_order {
-            BindingOrder::HighToLow => {
-                let quarter = self.indices.len() / 4;
-                let h_00 = self.indices[j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_00[basis_idx * self.k_chunk + k as usize]);
-                let h_01 = self.indices[quarter + j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_01[basis_idx * self.k_chunk + k as usize]);
-                let h_10 = self.indices[2 * quarter + j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_10[basis_idx * self.k_chunk + k as usize]);
-                let h_11 = self.indices[3 * quarter + j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_11[basis_idx * self.k_chunk + k as usize]);
-                h_00 + h_01 + h_10 + h_11
-            }
-            BindingOrder::LowToHigh => {
-                // Offset bits are (r2,r1,r0) with r0 bound first; Round3 tables are indexed by (r1,r0).
-                let h_00 = self.indices[4 * j]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_00[basis_idx * self.k_chunk + k as usize]);
-                let h_10 = self.indices[4 * j + 1]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_10[basis_idx * self.k_chunk + k as usize]);
-                let h_01 = self.indices[4 * j + 2]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_01[basis_idx * self.k_chunk + k as usize]);
-                let h_11 = self.indices[4 * j + 3]
-                    .get_index(poly_idx, &self.one_hot_params)
-                    .map_or(F::zero(), |k| self.tables_11[basis_idx * self.k_chunk + k as usize]);
-                h_00 + h_10 + h_01 + h_11
-            }
-        }
-    }
-
     #[tracing::instrument(skip_all, name = "GammaBasisRound3::bind")]
     fn bind(self, r2: F::Challenge, order: BindingOrder) -> Vec<MultilinearPolynomial<F>> {
         assert_eq!(order, self.binding_order);
@@ -510,6 +413,8 @@ pub struct BooleanitySumcheckParams<F: JoltField> {
     pub gamma_basis_pows: Vec<F>,
     /// Per-polynomial Sidon decomposition indices (a_idx, b_idx) into `gamma_basis_*`
     pub gamma_pairs: Vec<(u8, u8)>,
+    /// Per-polynomial precomputed data for the Sidon-basis fast path (phase 2, rounds 1–3).
+    pub gamma_pair_data: Vec<GammaPairData<F>>,
     /// Per-polynomial batching weights w_i = γ^(s_a + s_b)
     pub weights: Vec<F>,
     /// Address binding point (shared across all families)
@@ -518,6 +423,14 @@ pub struct BooleanitySumcheckParams<F: JoltField> {
     pub r_cycle: Vec<F::Challenge>,
     /// Polynomial types for all families
     pub polynomial_types: Vec<CommittedPolynomial>,
+}
+
+/// Precomputed per-polynomial Sidon-basis data used in phase-2 fast paths.
+#[derive(Clone, Copy, Debug)]
+pub struct GammaPairData<F: JoltField> {
+    pub base_a: usize,
+    pub base_b: usize,
+    pub gamma_b: F,
 }
 
 impl<F: JoltField> SumcheckInstanceParams<F> for BooleanitySumcheckParams<F> {
@@ -646,6 +559,21 @@ impl<F: JoltField> BooleanitySumcheckParams<F> {
         );
         let gamma_pairs: Vec<(u8, u8)> = all_pairs.into_iter().take(total_d).collect();
 
+        // Precompute base offsets into flattened tables (basis_idx * K) and γ^{s_b}.
+        let k_chunk = one_hot_params.k_chunk;
+        let gamma_pair_data: Vec<GammaPairData<F>> = gamma_pairs
+            .iter()
+            .map(|&(a, b)| {
+                let a = a as usize;
+                let b = b as usize;
+                GammaPairData {
+                    base_a: a * k_chunk,
+                    base_b: b * k_chunk,
+                    gamma_b: gamma_basis_pows[b],
+                }
+            })
+            .collect();
+
         // weights[i] = γ^(s_a + s_b) = γ^s_a * γ^s_b
         let weights: Vec<F> = gamma_pairs
             .iter()
@@ -662,6 +590,7 @@ impl<F: JoltField> BooleanitySumcheckParams<F> {
             gamma_basis_exponents: basis_exponents,
             gamma_basis_pows,
             gamma_pairs,
+            gamma_pair_data,
             weights,
             r_address,
             r_cycle,
@@ -801,62 +730,255 @@ impl<F: JoltField> BooleanitySumcheckProver<F> {
         let D = &self.D;
         let H = self.H.as_ref().expect("H should be initialized in phase 2");
         let num_polys = H.num_polys();
-        let use_gamma_basis_tables = !H.is_materialized();
 
         // Compute quadratic coefficients via generic split-eq fold (handles both E_in cases).
-        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = D
-            .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
-                // Accumulate in unreduced form to minimize per-term reductions
-                let mut acc_c = F::Unreduced::<9>::zero();
-                let mut acc_e = F::Unreduced::<9>::zero();
-                if use_gamma_basis_tables {
+        //
+        // Performance note: We match on the `H` representation once here and run a
+        // variant-specialized inner loop to avoid repeated enum dispatch for each lookup.
+        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = match H {
+            GammaBasisSharedRaPolynomials::Round1(r) => {
+                let tables = &r.tables;
+                let indices = &r.indices;
+                let one_hot_params = &r.one_hot_params;
+
+                D.par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
+                    let mut acc_c = F::Unreduced::<9>::zero();
+                    let mut acc_e = F::Unreduced::<9>::zero();
+
+                    let j0 = 2 * j_prime;
+                    let j1 = j0 + 1;
+
                     for i in 0..num_polys {
-                        let (a_idx_u8, b_idx_u8) = self.params.gamma_pairs[i];
-                        let a_idx = a_idx_u8 as usize;
-                        let b_idx = b_idx_u8 as usize;
+                        let GammaPairData {
+                            base_a,
+                            base_b,
+                            gamma_b,
+                        } = self.params.gamma_pair_data[i];
 
-                        // Lookup scaled coefficients:
-                        //   h0_a = γ^{s_a} h0, h0_b = γ^{s_b} h0
-                        //   h1_a = γ^{s_a} h1, h1_b = γ^{s_b} h1
-                        let j0 = 2 * j_prime;
-                        let j1 = j0 + 1;
-                        let h0_a = H.get_bound_coeff_scaled(a_idx, i, j0);
-                        let h0_b = H.get_bound_coeff_scaled(b_idx, i, j0);
-                        let h1_a = H.get_bound_coeff_scaled(a_idx, i, j1);
-                        let h1_b = H.get_bound_coeff_scaled(b_idx, i, j1);
+                        let k0 = indices[j0].get_index(i, one_hot_params);
+                        let k1 = indices[j1].get_index(i, one_hot_params);
 
-                        // c term:
-                        //   γ^{a+b} (h0^2 - h0) = (γ^a h0) * (γ^b h0 - γ^b)
-                        let inner = h0_b - self.params.gamma_basis_pows[b_idx];
+                        let (h0_a, h0_b) = match k0 {
+                            Some(k) => {
+                                let k = k as usize;
+                                (tables[base_a + k], tables[base_b + k])
+                            }
+                            None => (F::zero(), F::zero()),
+                        };
+                        let (h1_a, h1_b) = match k1 {
+                            Some(k) => {
+                                let k = k as usize;
+                                (tables[base_a + k], tables[base_b + k])
+                            }
+                            None => (F::zero(), F::zero()),
+                        };
+
+                        // γ^{a+b}(h0^2-h0) = (γ^a h0) * (γ^b h0 - γ^b)
+                        let inner = h0_b - gamma_b;
                         acc_c += h0_a.mul_unreduced::<9>(inner);
 
-                        // e term:
-                        //   γ^{a+b} b^2 = (γ^a b) * (γ^b b)
-                        // where b = h1 - h0 and (γ^a b) = (γ^a h1) - (γ^a h0)
+                        // γ^{a+b}b^2 = (γ^a b) * (γ^b b)
                         let da = h1_a - h0_a;
                         let db = h1_b - h0_b;
                         acc_e += da.mul_unreduced::<9>(db);
                     }
-                } else {
-                    // After materialization (RoundN), fall back to multiplying by full field weights.
+
+                    [
+                        F::from_montgomery_reduce::<9>(acc_c),
+                        F::from_montgomery_reduce::<9>(acc_e),
+                    ]
+                })
+            }
+            GammaBasisSharedRaPolynomials::Round2(r) => {
+                debug_assert_eq!(r.binding_order, BindingOrder::LowToHigh);
+                let tables_0 = &r.tables_0;
+                let tables_1 = &r.tables_1;
+                let indices = &r.indices;
+                let one_hot_params = &r.one_hot_params;
+
+                D.par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
+                    let mut acc_c = F::Unreduced::<9>::zero();
+                    let mut acc_e = F::Unreduced::<9>::zero();
+
+                    // In Round2 (LowToHigh), get_scaled(basis, poly, j) uses indices[2*j], indices[2*j+1].
+                    // We need h0/h1 at j0=2*j' and j1=2*j'+1, so the underlying indices are in blocks of 4.
+                    let base0 = 4 * j_prime;
+
+                    for i in 0..num_polys {
+                        let GammaPairData {
+                            base_a,
+                            base_b,
+                            gamma_b,
+                        } = self.params.gamma_pair_data[i];
+
+                        // h0 uses indices[base0 + 0], [base0 + 1]
+                        let k00 = indices[base0].get_index(i, one_hot_params);
+                        let k01 = indices[base0 + 1].get_index(i, one_hot_params);
+                        // h1 uses indices[base0 + 2], [base0 + 3]
+                        let k10 = indices[base0 + 2].get_index(i, one_hot_params);
+                        let k11 = indices[base0 + 3].get_index(i, one_hot_params);
+
+                        let mut h0_a = F::zero();
+                        let mut h0_b = F::zero();
+                        if let Some(k) = k00 {
+                            let k = k as usize;
+                            h0_a += tables_0[base_a + k];
+                            h0_b += tables_0[base_b + k];
+                        }
+                        if let Some(k) = k01 {
+                            let k = k as usize;
+                            h0_a += tables_1[base_a + k];
+                            h0_b += tables_1[base_b + k];
+                        }
+
+                        let mut h1_a = F::zero();
+                        let mut h1_b = F::zero();
+                        if let Some(k) = k10 {
+                            let k = k as usize;
+                            h1_a += tables_0[base_a + k];
+                            h1_b += tables_0[base_b + k];
+                        }
+                        if let Some(k) = k11 {
+                            let k = k as usize;
+                            h1_a += tables_1[base_a + k];
+                            h1_b += tables_1[base_b + k];
+                        }
+
+                        let inner = h0_b - gamma_b;
+                        acc_c += h0_a.mul_unreduced::<9>(inner);
+
+                        let da = h1_a - h0_a;
+                        let db = h1_b - h0_b;
+                        acc_e += da.mul_unreduced::<9>(db);
+                    }
+
+                    [
+                        F::from_montgomery_reduce::<9>(acc_c),
+                        F::from_montgomery_reduce::<9>(acc_e),
+                    ]
+                })
+            }
+            GammaBasisSharedRaPolynomials::Round3(r) => {
+                debug_assert_eq!(r.binding_order, BindingOrder::LowToHigh);
+                let tables_00 = &r.tables_00;
+                let tables_01 = &r.tables_01;
+                let tables_10 = &r.tables_10;
+                let tables_11 = &r.tables_11;
+                let indices = &r.indices;
+                let one_hot_params = &r.one_hot_params;
+
+                D.par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
+                    let mut acc_c = F::Unreduced::<9>::zero();
+                    let mut acc_e = F::Unreduced::<9>::zero();
+
+                    // In Round3 (LowToHigh), get_scaled(basis, poly, j) sums 4 consecutive indices.
+                    // We need h0/h1 at j0=2*j' and j1=2*j'+1, so the underlying indices are in blocks of 8.
+                    let base0 = 8 * j_prime;
+
+                    for i in 0..num_polys {
+                        let GammaPairData {
+                            base_a,
+                            base_b,
+                            gamma_b,
+                        } = self.params.gamma_pair_data[i];
+
+                        // h0 uses indices[base0 + 0..4)
+                        let k000 = indices[base0].get_index(i, one_hot_params);
+                        let k001 = indices[base0 + 1].get_index(i, one_hot_params);
+                        let k002 = indices[base0 + 2].get_index(i, one_hot_params);
+                        let k003 = indices[base0 + 3].get_index(i, one_hot_params);
+                        // h1 uses indices[base0 + 4..8)
+                        let k100 = indices[base0 + 4].get_index(i, one_hot_params);
+                        let k101 = indices[base0 + 5].get_index(i, one_hot_params);
+                        let k102 = indices[base0 + 6].get_index(i, one_hot_params);
+                        let k103 = indices[base0 + 7].get_index(i, one_hot_params);
+
+                        let mut h0_a = F::zero();
+                        let mut h0_b = F::zero();
+                        if let Some(k) = k000 {
+                            let k = k as usize;
+                            h0_a += tables_00[base_a + k];
+                            h0_b += tables_00[base_b + k];
+                        }
+                        if let Some(k) = k001 {
+                            let k = k as usize;
+                            h0_a += tables_10[base_a + k];
+                            h0_b += tables_10[base_b + k];
+                        }
+                        if let Some(k) = k002 {
+                            let k = k as usize;
+                            h0_a += tables_01[base_a + k];
+                            h0_b += tables_01[base_b + k];
+                        }
+                        if let Some(k) = k003 {
+                            let k = k as usize;
+                            h0_a += tables_11[base_a + k];
+                            h0_b += tables_11[base_b + k];
+                        }
+
+                        let mut h1_a = F::zero();
+                        let mut h1_b = F::zero();
+                        if let Some(k) = k100 {
+                            let k = k as usize;
+                            h1_a += tables_00[base_a + k];
+                            h1_b += tables_00[base_b + k];
+                        }
+                        if let Some(k) = k101 {
+                            let k = k as usize;
+                            h1_a += tables_10[base_a + k];
+                            h1_b += tables_10[base_b + k];
+                        }
+                        if let Some(k) = k102 {
+                            let k = k as usize;
+                            h1_a += tables_01[base_a + k];
+                            h1_b += tables_01[base_b + k];
+                        }
+                        if let Some(k) = k103 {
+                            let k = k as usize;
+                            h1_a += tables_11[base_a + k];
+                            h1_b += tables_11[base_b + k];
+                        }
+
+                        let inner = h0_b - gamma_b;
+                        acc_c += h0_a.mul_unreduced::<9>(inner);
+
+                        let da = h1_a - h0_a;
+                        let db = h1_b - h0_b;
+                        acc_e += da.mul_unreduced::<9>(db);
+                    }
+
+                    [
+                        F::from_montgomery_reduce::<9>(acc_c),
+                        F::from_montgomery_reduce::<9>(acc_e),
+                    ]
+                })
+            }
+            GammaBasisSharedRaPolynomials::RoundN(polys) => D
+                .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
+                    let mut acc_c = F::Unreduced::<9>::zero();
+                    let mut acc_e = F::Unreduced::<9>::zero();
+
+                    let j0 = 2 * j_prime;
+                    let j1 = j0 + 1;
+
                     for (i, weight) in self.params.weights.iter().enumerate().take(num_polys) {
-                        let h_0 = H.get_bound_coeff_unscaled(i, 2 * j_prime);
-                        let h_1 = H.get_bound_coeff_unscaled(i, 2 * j_prime + 1);
+                        let h_0 = polys[i].get_bound_coeff(j0);
+                        let h_1 = polys[i].get_bound_coeff(j1);
                         let b = h_1 - h_0;
 
                         let w_h0 = *weight * h_0;
-                        let c_unr = w_h0.mul_unreduced::<9>(h_0 - F::one());
-                        acc_c += c_unr;
+                        acc_c += w_h0.mul_unreduced::<9>(h_0 - F::one());
 
                         let w_b = *weight * b;
                         acc_e += w_b.mul_unreduced::<9>(b);
                     }
-                }
-                [
-                    F::from_montgomery_reduce::<9>(acc_c),
-                    F::from_montgomery_reduce::<9>(acc_e),
-                ]
-            });
+
+                    [
+                        F::from_montgomery_reduce::<9>(acc_c),
+                        F::from_montgomery_reduce::<9>(acc_e),
+                    ]
+                }),
+        };
 
         // previous_claim is s(0)+s(1) of the scaled polynomial; divide out eq_r_r to get inner claim
         let adjusted_claim = previous_claim * self.eq_r_r.inverse().unwrap();

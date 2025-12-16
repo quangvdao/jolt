@@ -515,6 +515,7 @@ impl<F: JoltField> RLCPolynomial<F> {
     }
 
     /// Single-pass VMV over materialized trace. Parallelizes by dividing rows evenly across threads.
+    #[tracing::instrument(skip_all)]
     fn materialized_vector_matrix_product(
         &self,
         left_vec: &[F],
@@ -641,6 +642,7 @@ impl<F: JoltField> RLCPolynomial<F> {
     }
 
     /// Lazy VMV over lazy trace iterator (experimental, re-runs tracer).
+    #[tracing::instrument(skip_all)]
     fn lazy_vector_matrix_product(
         &self,
         left_vec: &[F],

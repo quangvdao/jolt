@@ -532,7 +532,11 @@ impl<F: JoltField> ReadRafSumcheckProver<F> {
                 for &j in indices.iter() {
                     let k_u: u128 = (&lookup_indices[j]).into();
                     let bucket = ((k_u >> suffix_len) as usize) & m_mask;
-                    let suffix_bits_u = if suffix_len == 0 { 0 } else { k_u & suffix_mask };
+                    let suffix_bits_u = if suffix_len == 0 {
+                        0
+                    } else {
+                        k_u & suffix_mask
+                    };
                     let suffix_bits = LookupBits::new(suffix_bits_u, suffix_len);
 
                     let u = u_evals[j];

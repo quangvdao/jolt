@@ -308,16 +308,20 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
 
                         let k_u: u128 = (&lookup_bits[j]).into();
                         let r_index: usize = ((k_u >> suffix_len) as usize) & poly_mask;
-                        let suffix_bits_u = if suffix_len == 0 { 0 } else { k_u & suffix_mask };
+                        let suffix_bits_u = if suffix_len == 0 {
+                            0
+                        } else {
+                            k_u & suffix_mask
+                        };
                         let suffix_bits = LookupBits::new(suffix_bits_u, suffix_len);
 
-                            let base = r_index * ORDER;
-                            for (s_idx, suffix) in suffixes.iter().enumerate() {
-                                let t = suffix.suffix_mle(suffix_bits);
-                                if t != 0 {
-                                    acc[base + s_idx] += u.mul_u128_unreduced(t);
-                                }
+                        let base = r_index * ORDER;
+                        for (s_idx, suffix) in suffixes.iter().enumerate() {
+                            let t = suffix.suffix_mle(suffix_bits);
+                            if t != 0 {
+                                acc[base + s_idx] += u.mul_u128_unreduced(t);
                             }
+                        }
                     }
                     acc
                 },
@@ -380,10 +384,7 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
         let chunk_size = (indices.len() / num_chunks).max(1);
 
         #[allow(clippy::type_complexity)]
-        let (new_left_rows, new_right_rows): (
-            Vec<F::Unreduced<7>>,
-            Vec<F::Unreduced<7>>,
-        ) = indices
+        let (new_left_rows, new_right_rows): (Vec<F::Unreduced<7>>, Vec<F::Unreduced<7>>) = indices
             .par_chunks(chunk_size)
             .fold(
                 || {
@@ -402,24 +403,28 @@ impl<F: JoltField, const ORDER: usize> PrefixSuffixDecomposition<F, ORDER> {
 
                         let k_u: u128 = (&lookup_bits[j]).into();
                         let r_index: usize = ((k_u >> suffix_len) as usize) & poly_mask;
-                        let suffix_bits_u = if suffix_len == 0 { 0 } else { k_u & suffix_mask };
+                        let suffix_bits_u = if suffix_len == 0 {
+                            0
+                        } else {
+                            k_u & suffix_mask
+                        };
                         let suffix_bits = LookupBits::new(suffix_bits_u, suffix_len);
 
-                            let base = r_index * ORDER;
-                            // Left
-                            for (s_idx, suffix) in suffixes_left.iter().enumerate() {
-                                let t = suffix.suffix_mle(suffix_bits);
-                                if t != 0 {
-                                    acc_l[base + s_idx] += u.mul_u128_unreduced(t);
-                                }
+                        let base = r_index * ORDER;
+                        // Left
+                        for (s_idx, suffix) in suffixes_left.iter().enumerate() {
+                            let t = suffix.suffix_mle(suffix_bits);
+                            if t != 0 {
+                                acc_l[base + s_idx] += u.mul_u128_unreduced(t);
                             }
-                            // Right
-                            for (s_idx, suffix) in suffixes_right.iter().enumerate() {
-                                let t = suffix.suffix_mle(suffix_bits);
-                                if t != 0 {
-                                    acc_r[base + s_idx] += u.mul_u128_unreduced(t);
-                                }
+                        }
+                        // Right
+                        for (s_idx, suffix) in suffixes_right.iter().enumerate() {
+                            let t = suffix.suffix_mle(suffix_bits);
+                            if t != 0 {
+                                acc_r[base + s_idx] += u.mul_u128_unreduced(t);
                             }
+                        }
                     }
                     (acc_l, acc_r)
                 },

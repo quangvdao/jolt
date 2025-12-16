@@ -581,7 +581,8 @@ impl<F: JoltField> RLCPolynomial<F> {
         }
 
         let has_dense = rd_inc_coeff.is_some() || ram_inc_coeff.is_some();
-        let has_onehot = !instruction_ra.is_empty() || !bytecode_ra.is_empty() || !ram_ra.is_empty();
+        let has_onehot =
+            !instruction_ra.is_empty() || !bytecode_ra.is_empty() || !ram_ra.is_empty();
         if has_onehot {
             // OneHotPolynomial::vector_matrix_product indexes left_vec as k * rows_per_k + row_idx.
             // Here rows_per_k == num_rows and k is in [0, K).
@@ -648,7 +649,7 @@ impl<F: JoltField> RLCPolynomial<F> {
 
                             if let Some(scaled) = &scaled_rd_inc {
                                 let (_, pre_value, post_value) = cycle.rd_write();
-                                let diff = s64_from_diff_u64s(post_value as u64, pre_value as u64);
+                                let diff = s64_from_diff_u64s(post_value, pre_value);
                                 dense_acc.fmadd(scaled, &diff);
                             }
 
@@ -656,8 +657,8 @@ impl<F: JoltField> RLCPolynomial<F> {
                                 match cycle.ram_access() {
                                     tracer::instruction::RAMAccess::Write(write) => {
                                         let diff = s64_from_diff_u64s(
-                                            write.post_value as u64,
-                                            write.pre_value as u64,
+                                            write.post_value,
+                                            write.pre_value,
                                         );
                                         dense_acc.fmadd(scaled, &diff);
                                     }
@@ -694,7 +695,7 @@ impl<F: JoltField> RLCPolynomial<F> {
                                 for (idx, coeff) in bytecode_ra.iter() {
                                     debug_assert!(*idx < bytecode_d);
                                     let shift = log_k_chunk * (bytecode_d - 1 - *idx);
-                                    let k = ((pc >> shift) & k_chunk_mask_usize) as usize;
+                                    let k = (pc >> shift) & k_chunk_mask_usize;
                                     let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
                                     onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                 }
@@ -702,9 +703,7 @@ impl<F: JoltField> RLCPolynomial<F> {
 
                             if !ram_ra.is_empty() {
                                 let address = cycle.ram_access().address() as u64;
-                                if let Some(remapped) =
-                                    remap_address(address, memory_layout)
-                                {
+                                if let Some(remapped) = remap_address(address, memory_layout) {
                                     for (idx, coeff) in ram_ra.iter() {
                                         debug_assert!(*idx < ram_d);
                                         let shift = log_k_chunk * (ram_d - 1 - *idx);
@@ -820,7 +819,8 @@ impl<F: JoltField> RLCPolynomial<F> {
         }
 
         let has_dense = rd_inc_coeff.is_some() || ram_inc_coeff.is_some();
-        let has_onehot = !instruction_ra.is_empty() || !bytecode_ra.is_empty() || !ram_ra.is_empty();
+        let has_onehot =
+            !instruction_ra.is_empty() || !bytecode_ra.is_empty() || !ram_ra.is_empty();
         if has_onehot {
             debug_assert!(
                 left_vec.len() >= ctx.one_hot_params.k_chunk * num_rows,
@@ -868,7 +868,7 @@ impl<F: JoltField> RLCPolynomial<F> {
 
                             if let Some(scaled) = &scaled_rd_inc {
                                 let (_, pre_value, post_value) = cycle.rd_write();
-                                let diff = s64_from_diff_u64s(post_value as u64, pre_value as u64);
+                                let diff = s64_from_diff_u64s(post_value, pre_value);
                                 dense_acc.fmadd(scaled, &diff);
                             }
 
@@ -876,8 +876,8 @@ impl<F: JoltField> RLCPolynomial<F> {
                                 match cycle.ram_access() {
                                     tracer::instruction::RAMAccess::Write(write) => {
                                         let diff = s64_from_diff_u64s(
-                                            write.post_value as u64,
-                                            write.pre_value as u64,
+                                            write.post_value,
+                                            write.pre_value,
                                         );
                                         dense_acc.fmadd(scaled, &diff);
                                     }
@@ -909,7 +909,7 @@ impl<F: JoltField> RLCPolynomial<F> {
                                 for (idx, coeff) in bytecode_ra.iter() {
                                     debug_assert!(*idx < bytecode_d);
                                     let shift = log_k_chunk * (bytecode_d - 1 - *idx);
-                                    let k = ((pc >> shift) & k_chunk_mask_usize) as usize;
+                                    let k = (pc >> shift) & k_chunk_mask_usize;
                                     let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
                                     onehot_acc += left_val.mul_unreduced::<9>(*coeff);
                                 }
@@ -917,9 +917,7 @@ impl<F: JoltField> RLCPolynomial<F> {
 
                             if !ram_ra.is_empty() {
                                 let address = cycle.ram_access().address() as u64;
-                                if let Some(remapped) =
-                                    remap_address(address, memory_layout)
-                                {
+                                if let Some(remapped) = remap_address(address, memory_layout) {
                                     for (idx, coeff) in ram_ra.iter() {
                                         debug_assert!(*idx < ram_d);
                                         let shift = log_k_chunk * (ram_d - 1 - *idx);

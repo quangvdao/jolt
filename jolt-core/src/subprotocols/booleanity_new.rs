@@ -358,7 +358,9 @@ impl<F: JoltField> GammaBasisRound3<F> {
             },
         );
 
-        let f_tables = [&f_000, &f_100, &f_010, &f_110, &f_001, &f_101, &f_011, &f_111];
+        let f_tables = [
+            &f_000, &f_100, &f_010, &f_110, &f_001, &f_101, &f_011, &f_111,
+        ];
 
         let num_polys = self.num_polys;
         let indices = &self.indices;
@@ -549,7 +551,11 @@ impl<F: JoltField> BooleanitySumcheckParams<F> {
         }
 
         let gamma_basis_pows: Vec<F> = basis_exponents.iter().map(|&e| pow_cache[e]).collect();
-        debug_assert_eq!(gamma_basis_pows[0], F::one(), "basis must start with exponent 0");
+        debug_assert_eq!(
+            gamma_basis_pows[0],
+            F::one(),
+            "basis must start with exponent 0"
+        );
 
         let all_pairs = sidon_pairs_sorted_by_sum(&basis_exponents);
         assert!(

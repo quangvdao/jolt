@@ -2289,8 +2289,9 @@ mod tests {
 
         // Use enough variables to exercise the split-eq inner loop (E_in_len > 1).
         let n_vars = 6;
-        let w: Vec<<Fr as JoltField>::Challenge> =
-            (0..n_vars).map(|_| <Fr as JoltField>::Challenge::rand(&mut rng)).collect();
+        let w: Vec<<Fr as JoltField>::Challenge> = (0..n_vars)
+            .map(|_| <Fr as JoltField>::Challenge::rand(&mut rng))
+            .collect();
         let mut eq_poly = GruenSplitEqPolynomial::new(&w, BindingOrder::LowToHigh);
 
         // Number of product terms to sum; keep small for test runtime.

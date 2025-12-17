@@ -15,7 +15,7 @@ use crate::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
         },
-        ra_poly::RaPolynomial,
+        ra_poly::{build_bitset_parallel, RaPolynomial},
         unipoly::UniPoly,
     },
     subprotocols::{
@@ -198,15 +198,21 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
         let span = tracing::span!(tracing::Level::INFO, "compute wa(r_address, j)");
         let _guard = span.enter();
 
-        // Compute the wa polynomial using the above table
-        let wa_indices: Vec<Option<usize>> = trace
+        // Compute the wa polynomial using the above table.
+        // Single parallel pass: extract (index_or_default, is_present) directly from trace.
+        let (wa_indices, present_bits): (Vec<usize>, Vec<bool>) = trace
             .par_iter()
             .map(|cycle| {
-                remap_address(cycle.ram_access().address() as u64, memory_layout)
-                    .map(|k| k as usize)
+                match remap_address(cycle.ram_access().address() as u64, memory_layout) {
+                    Some(k) => (k as usize, true),
+                    None => (0, false),
+                }
             })
-            .collect();
-        let wa = RaPolynomial::new(Arc::new(wa_indices), eq_r_address);
+            .unzip();
+
+        let present = build_bitset_parallel(trace.len(), present_bits.into_par_iter());
+        let present = Arc::new(present);
+        let wa = RaPolynomial::new_masked(Arc::new(wa_indices), present, eq_r_address);
 
         drop(_guard);
         drop(span);

@@ -2,6 +2,7 @@ use allocative::Allocative;
 #[cfg(feature = "allocative")]
 use allocative::FlameGraphBuilder;
 use ark_std::Zero;
+use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
 use std::{iter::zip, sync::Arc};
 
@@ -89,7 +90,10 @@ pub struct BooleanitySumcheckProver<F: JoltField> {
     /// eq_r_r
     eq_r_r: F,
     /// Indices for H polynomials
-    H_indices: Vec<Vec<Option<u8>>>,
+    H_indices: Vec<Vec<u8>>,
+    /// Optional shared presence mask for sparse rows (RAM only).
+    #[allocative(skip)]
+    H_present: Option<Arc<FixedBitSet>>,
     #[allocative(skip)]
     params: BooleanitySumcheckParams<F>,
 }
@@ -98,7 +102,8 @@ impl<F: JoltField> BooleanitySumcheckProver<F> {
     pub fn gen(
         params: BooleanitySumcheckParams<F>,
         G: Vec<Vec<F>>,
-        H_indices: Vec<Vec<Option<u8>>>,
+        H_indices: Vec<Vec<u8>>,
+        H_present: Option<Arc<FixedBitSet>>,
     ) -> Self {
         let B = GruenSplitEqPolynomial::new(&params.r_address, BindingOrder::LowToHigh);
         let D_poly = GruenSplitEqPolynomial::new(&params.r_cycle, BindingOrder::LowToHigh);
@@ -112,6 +117,7 @@ impl<F: JoltField> BooleanitySumcheckProver<F> {
             D: D_poly,
             G,
             H_indices,
+            H_present,
             H: vec![],
             F,
             eq_r_r: F::zero(),
@@ -250,9 +256,17 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for BooleanitySum
                 // Initialize H polynomials using RaPolynomial
                 let F = std::mem::take(&mut self.F);
                 let H_indices = std::mem::take(&mut self.H_indices);
+                let H_present = self.H_present.take();
                 self.H = H_indices
                     .into_iter()
-                    .map(|indices| RaPolynomial::new(Arc::new(indices), F.clone_values()))
+                    .map(|indices| match &H_present {
+                        None => RaPolynomial::new_dense(Arc::new(indices), F.clone_values()),
+                        Some(mask) => RaPolynomial::new_masked(
+                            Arc::new(indices),
+                            mask.clone(),
+                            F.clone_values(),
+                        ),
+                    })
                     .collect();
 
                 // Drop G arrays as they're no longer needed

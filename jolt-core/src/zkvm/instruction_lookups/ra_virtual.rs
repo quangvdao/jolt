@@ -139,13 +139,13 @@ impl<F: JoltField> InstructionRaSumcheckProver<F> {
             .one_hot_params
             .compute_r_address_chunks::<F>(&params.r_address.r);
 
-        let H_indices: Vec<Vec<Option<u8>>> = (0..params.one_hot_params.instruction_d)
+        let H_indices: Vec<Vec<u8>> = (0..params.one_hot_params.instruction_d)
             .map(|i| {
                 trace
                     .par_iter()
                     .map(|cycle| {
                         let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
-                        Some(params.one_hot_params.lookup_index_chunk(lookup_index, i))
+                        params.one_hot_params.lookup_index_chunk(lookup_index, i)
                     })
                     .collect()
             })
@@ -172,7 +172,7 @@ impl<F: JoltField> InstructionRaSumcheckProver<F> {
                         eq_evals.par_iter_mut().for_each(|v| *v *= gamma);
                     }
                 }
-                RaPolynomial::new(Arc::new(lookup_indices), eq_evals)
+                RaPolynomial::new_dense(Arc::new(lookup_indices), eq_evals)
             })
             .collect();
 

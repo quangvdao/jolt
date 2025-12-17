@@ -117,14 +117,14 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
         );
 
         let eq_r_address = EqPolynomial::evals(&params.r_address.r);
-        let wa: Vec<Option<u8>> = trace
+        let wa: Vec<u8> = trace
             .par_iter()
             .map(|cycle| {
                 let instr = cycle.instruction().normalize();
-                Some(instr.operands.rd)
+                instr.operands.rd
             })
             .collect();
-        let wa = RaPolynomial::new(Arc::new(wa), eq_r_address);
+        let wa = RaPolynomial::new_dense(Arc::new(wa), eq_r_address);
         let lt = LtPolynomial::new(&params.r_cycle);
 
         Self {

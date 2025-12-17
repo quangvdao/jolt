@@ -704,6 +704,7 @@ mod tests {
     fn dense_polynomial_equivalence<const LOG_K: usize, const LOG_T: usize>() {
         let K: usize = 1 << LOG_K;
         let T: usize = 1 << LOG_T;
+        DoryGlobals::reset();
         let _guard = DoryGlobals::initialize(K, T);
 
         let mut rng = test_rng();
@@ -829,6 +830,7 @@ mod tests {
     fn evaluate_test<const LOG_K: usize, const LOG_T: usize>() {
         let K: usize = 1 << LOG_K;
         let T: usize = 1 << LOG_T;
+        DoryGlobals::reset();
         let _guard = DoryGlobals::initialize(K, T);
 
         let mut rng = test_rng();

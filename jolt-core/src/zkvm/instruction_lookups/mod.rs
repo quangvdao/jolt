@@ -94,7 +94,7 @@ pub fn gen_ra_one_hot_provers<F: JoltField>(
 
     (
         HammingWeightSumcheckProver::gen(hamming_weight_params, ra_evals.clone()),
-        BooleanitySumcheckProver::gen(booleanity_params, ra_evals, H_indices),
+        BooleanitySumcheckProver::gen(booleanity_params, ra_evals, H_indices, None),
     )
 }
 
@@ -118,17 +118,14 @@ pub fn new_ra_one_hot_verifiers<F: JoltField>(
 }
 
 #[tracing::instrument(skip_all, name = "instruction_lookups::compute_instruction_h_indices")]
-fn compute_instruction_h_indices(
-    trace: &[Cycle],
-    one_hot_params: &OneHotParams,
-) -> Vec<Vec<Option<u8>>> {
+fn compute_instruction_h_indices(trace: &[Cycle], one_hot_params: &OneHotParams) -> Vec<Vec<u8>> {
     (0..one_hot_params.instruction_d)
         .map(|i| {
             trace
                 .par_iter()
                 .map(|cycle| {
                     let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
-                    Some(one_hot_params.lookup_index_chunk(lookup_index, i))
+                    one_hot_params.lookup_index_chunk(lookup_index, i)
                 })
                 .collect()
         })

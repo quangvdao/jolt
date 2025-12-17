@@ -1,7 +1,9 @@
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{iter::zip, mem, sync::Arc};
 
 use allocative::Allocative;
+use fixedbitset::FixedBitSet;
 
 use crate::{
     field::{ChallengeFieldOps, FieldChallengeOps, JoltField},
@@ -13,6 +15,149 @@ use crate::{
     },
     utils::thread::{drop_in_background_thread, unsafe_allocate_zero_vec},
 };
+
+/// Build a `FixedBitSet` from a parallel iterator of booleans.
+///
+/// This uses atomic operations to allow parallel insertion without locks.
+pub fn build_bitset_parallel<I>(len: usize, present_iter: I) -> FixedBitSet
+where
+    I: IndexedParallelIterator<Item = bool>,
+{
+    let bits_per_block = usize::BITS as usize;
+    let n_blocks = len.div_ceil(bits_per_block);
+
+    // Use atomics for lock-free parallel writes
+    let atomic_blocks: Vec<AtomicUsize> = (0..n_blocks).map(|_| AtomicUsize::new(0)).collect();
+
+    present_iter.enumerate().for_each(|(j, is_present)| {
+        if is_present {
+            let block = j / bits_per_block;
+            let offset = j % bits_per_block;
+            atomic_blocks[block].fetch_or(1 << offset, Ordering::Relaxed);
+        }
+    });
+
+    // Convert atomics to FixedBitSet
+    let blocks: Vec<usize> = atomic_blocks.into_iter().map(|a| a.into_inner()).collect();
+
+    // Safety: we've constructed blocks with the correct length and bit layout
+    let mut bitset = FixedBitSet::with_capacity(len);
+    for (i, &block) in blocks.iter().enumerate() {
+        for bit in 0..bits_per_block {
+            let j = i * bits_per_block + bit;
+            if j >= len {
+                break;
+            }
+            if (block >> bit) & 1 == 1 {
+                bitset.insert(j);
+            }
+        }
+    }
+
+    bitset
+}
+
+/// Lookup indices for RA polynomials, specialized for dense vs sparse access patterns.
+///
+/// - `Dense`: All rows are present; no presence mask needed.
+/// - `Masked`: Some rows are absent; uses a shared `FixedBitSet` to track presence.
+#[derive(Allocative, Clone, Debug, PartialEq)]
+pub enum LookupIndices<I> {
+    Dense {
+        indices: Arc<Vec<I>>,
+    },
+    Masked {
+        indices: Arc<Vec<I>>,
+        #[allocative(skip)]
+        present: Arc<FixedBitSet>,
+    },
+}
+
+impl<I> LookupIndices<I>
+where
+    I: Into<usize> + Copy + Default + Send + Sync + 'static,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Dense { indices } => indices.len(),
+            Self::Masked { indices, .. } => indices.len(),
+        }
+    }
+
+    #[inline]
+    pub fn dense(indices: Arc<Vec<I>>) -> Self {
+        Self::Dense { indices }
+    }
+
+    #[inline]
+    pub fn masked(indices: Arc<Vec<I>>, present: Arc<FixedBitSet>) -> Self {
+        debug_assert_eq!(indices.len(), present.len());
+        Self::Masked { indices, present }
+    }
+
+    /// Convert from a vector of `Option<I>` to `LookupIndices`.
+    ///
+    /// Uses parallel iteration. If all elements are `Some`, returns `Dense`.
+    /// Otherwise, returns `Masked` with a presence bitset built in parallel.
+    #[inline]
+    pub fn from_options(indices: Arc<Vec<Option<I>>>) -> Self {
+        let len = indices.len();
+
+        // Single parallel pass: extract (index_or_default, is_present) pairs
+        let (dense, present_bits): (Vec<I>, Vec<bool>) = indices
+            .par_iter()
+            .map(|opt| match opt {
+                Some(i) => (*i, true),
+                None => (I::default(), false),
+            })
+            .unzip();
+
+        // Check if all present (can short-circuit with parallel any)
+        let has_none = present_bits.par_iter().any(|&b| !b);
+
+        if !has_none {
+            return Self::Dense {
+                indices: Arc::new(dense),
+            };
+        }
+
+        // Build the bitset in parallel using atomic operations
+        let present = build_bitset_parallel(len, present_bits.into_par_iter());
+
+        Self::Masked {
+            indices: Arc::new(dense),
+            present: Arc::new(present),
+        }
+    }
+
+    /// Lookup value from table, returning zero if row is absent.
+    /// Specialized for Dense (no branch) vs Masked (bitset check).
+    #[inline(always)]
+    pub fn lookup_or_zero<F: JoltField>(&self, j: usize, table: &[F]) -> F {
+        match self {
+            Self::Dense { indices } => table[indices[j].into()],
+            Self::Masked { indices, present } => {
+                if present.contains(j) {
+                    table[indices[j].into()]
+                } else {
+                    F::zero()
+                }
+            }
+        }
+    }
+}
+
+impl<I> Default for LookupIndices<I>
+where
+    I: Into<usize> + Copy + Default + Send + Sync + 'static,
+{
+    fn default() -> Self {
+        Self::Dense {
+            indices: Arc::new(Vec::new()),
+        }
+    }
+}
 
 /// Represents the state of an `ra_i` polynomial during the last log(T) sumcheck rounds.
 ///
@@ -27,10 +172,36 @@ pub enum RaPolynomial<I: Into<usize> + Copy + Default + Send + Sync + 'static, F
 }
 
 impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField> RaPolynomial<I, F> {
+    /// Constructs a polynomial from sparse lookup indices.
+    ///
+    /// This is kept for backwards compatibility; internally it converts the `Option` vector
+    /// into a dense index vector plus an optional presence mask.
     pub fn new(lookup_indices: Arc<Vec<Option<I>>>, eq_evals: Vec<F>) -> Self {
         Self::Round1(RaPolynomialRound1 {
             F: eq_evals,
-            lookup_indices,
+            lookup_indices: LookupIndices::from_options(lookup_indices),
+        })
+    }
+
+    /// Constructs a polynomial from dense lookup indices (all rows present).
+    pub fn new_dense(lookup_indices: Arc<Vec<I>>, eq_evals: Vec<F>) -> Self {
+        Self::Round1(RaPolynomialRound1 {
+            F: eq_evals,
+            lookup_indices: LookupIndices::dense(lookup_indices),
+        })
+    }
+
+    /// Constructs a polynomial from dense lookup indices with a shared presence mask.
+    ///
+    /// Rows where `present[j] == 0` are treated as zero (absent).
+    pub fn new_masked(
+        lookup_indices: Arc<Vec<I>>,
+        present: Arc<FixedBitSet>,
+        eq_evals: Vec<F>,
+    ) -> Self {
+        Self::Round1(RaPolynomialRound1 {
+            F: eq_evals,
+            lookup_indices: LookupIndices::masked(lookup_indices, present),
         })
     }
 
@@ -147,7 +318,7 @@ pub struct RaPolynomialRound1<I: Into<usize> + Copy + Default + Send + Sync + 's
 {
     // Index `x` stores `eq(x, r)`.
     F: Vec<F>,
-    lookup_indices: Arc<Vec<Option<I>>>,
+    lookup_indices: LookupIndices<I>,
 }
 
 impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
@@ -177,10 +348,7 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
     #[inline]
     fn get_bound_coeff(&self, j: usize) -> F {
         // Lookup ra_i(r, j).
-        self.lookup_indices
-            .get(j)
-            .expect("j out of bounds")
-            .map_or(F::zero(), |i| self.F[i.into()])
+        self.lookup_indices.lookup_or_zero(j, &self.F)
     }
 }
 
@@ -194,7 +362,7 @@ pub struct RaPolynomialRound2<I: Into<usize> + Copy + Default + Send + Sync + 's
     F_0: Vec<F>,
     // Index `x` stores `eq(x, r_address_chunk_i) * eq(1, r0)`.
     F_1: Vec<F>,
-    lookup_indices: Arc<Vec<Option<I>>>,
+    lookup_indices: LookupIndices<I>,
     r0: F::Challenge,
     binding_order: BindingOrder,
 }
@@ -238,15 +406,15 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
         let mid = self.lookup_indices.len() / 2;
         match self.binding_order {
             BindingOrder::HighToLow => {
-                let H_0 = self.lookup_indices[j].map_or(F::zero(), |i| self.F_0[i.into()]);
-                let H_1 = self.lookup_indices[mid + j].map_or(F::zero(), |i| self.F_1[i.into()]);
+                let H_0 = self.lookup_indices.lookup_or_zero(j, &self.F_0);
+                let H_1 = self.lookup_indices.lookup_or_zero(mid + j, &self.F_1);
                 // Compute ra_i(r, r0, j) = eq(0, r0) * ra_i(r, 0, j) +
                 //                          eq(1, r0) * ra_i(r, 1, j)
                 H_0 + H_1
             }
             BindingOrder::LowToHigh => {
-                let H_0 = self.lookup_indices[2 * j].map_or(F::zero(), |i| self.F_0[i.into()]);
-                let H_1 = self.lookup_indices[2 * j + 1].map_or(F::zero(), |i| self.F_1[i.into()]);
+                let H_0 = self.lookup_indices.lookup_or_zero(2 * j, &self.F_0);
+                let H_1 = self.lookup_indices.lookup_or_zero(2 * j + 1, &self.F_1);
                 // Compute ra_i(r, r0, j) = eq(0, r0) * ra_i(r, 0, j) +
                 //                          eq(1, r0) * ra_i(r, 1, j)
                 H_0 + H_1
@@ -269,7 +437,7 @@ pub struct RaPolynomialRound3<I: Into<usize> + Copy + Default + Send + Sync + 's
     F_10: Vec<F>,
     // Index `x` stores `eq(x, r_address_chunk_i) * eq(11, r0 r1)`.
     F_11: Vec<F>,
-    lookup_indices: Arc<Vec<Option<I>>>,
+    lookup_indices: LookupIndices<I>,
     r1: F::Challenge,
     binding_order: BindingOrder,
 }
@@ -304,33 +472,28 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
         F_101.par_iter_mut().for_each(|f| *f *= eq_1_r2);
         F_111.par_iter_mut().for_each(|f| *f *= eq_1_r2);
 
-        let lookup_indices = &self.lookup_indices;
+        let binding_order = self.binding_order;
+        let lookup_indices = self.lookup_indices;
         let n = lookup_indices.len() / 8;
         let mut res = unsafe_allocate_zero_vec(n);
 
         let chunk_size = 1 << 16;
 
         // Eval ra_i(r, r0, r1, j) for all j in the hypercube.
-        match self.binding_order {
+        match binding_order {
             BindingOrder::HighToLow => {
                 res.par_chunks_mut(chunk_size).enumerate().for_each(
                     |(chunk_index, evals_chunk)| {
+                        let lookup_indices = &lookup_indices;
                         for (j, eval) in zip(chunk_index * chunk_size.., evals_chunk) {
-                            let H_000 = lookup_indices[j].map_or(F::zero(), |i| F_000[i.into()]);
-                            let H_001 =
-                                lookup_indices[j + n].map_or(F::zero(), |i| F_001[i.into()]);
-                            let H_010 =
-                                lookup_indices[j + n * 2].map_or(F::zero(), |i| F_010[i.into()]);
-                            let H_011 =
-                                lookup_indices[j + n * 3].map_or(F::zero(), |i| F_011[i.into()]);
-                            let H_100 =
-                                lookup_indices[j + n * 4].map_or(F::zero(), |i| F_100[i.into()]);
-                            let H_101 =
-                                lookup_indices[j + n * 5].map_or(F::zero(), |i| F_101[i.into()]);
-                            let H_110 =
-                                lookup_indices[j + n * 6].map_or(F::zero(), |i| F_110[i.into()]);
-                            let H_111 =
-                                lookup_indices[j + n * 7].map_or(F::zero(), |i| F_111[i.into()]);
+                            let H_000 = lookup_indices.lookup_or_zero(j, &F_000);
+                            let H_001 = lookup_indices.lookup_or_zero(j + n, &F_001);
+                            let H_010 = lookup_indices.lookup_or_zero(j + n * 2, &F_010);
+                            let H_011 = lookup_indices.lookup_or_zero(j + n * 3, &F_011);
+                            let H_100 = lookup_indices.lookup_or_zero(j + n * 4, &F_100);
+                            let H_101 = lookup_indices.lookup_or_zero(j + n * 5, &F_101);
+                            let H_110 = lookup_indices.lookup_or_zero(j + n * 6, &F_110);
+                            let H_111 = lookup_indices.lookup_or_zero(j + n * 7, &F_111);
                             *eval = H_000 + H_010 + H_100 + H_110 + H_001 + H_011 + H_101 + H_111;
                         }
                     },
@@ -339,23 +502,16 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
             BindingOrder::LowToHigh => {
                 res.par_chunks_mut(chunk_size).enumerate().for_each(
                     |(chunk_index, evals_chunk)| {
+                        let lookup_indices = &lookup_indices;
                         for (j, eval) in zip(chunk_index * chunk_size.., evals_chunk) {
-                            let H_000 =
-                                lookup_indices[8 * j].map_or(F::zero(), |i| F_000[i.into()]);
-                            let H_100 =
-                                lookup_indices[8 * j + 1].map_or(F::zero(), |i| F_100[i.into()]);
-                            let H_010 =
-                                lookup_indices[8 * j + 2].map_or(F::zero(), |i| F_010[i.into()]);
-                            let H_110 =
-                                lookup_indices[8 * j + 3].map_or(F::zero(), |i| F_110[i.into()]);
-                            let H_001 =
-                                lookup_indices[8 * j + 4].map_or(F::zero(), |i| F_001[i.into()]);
-                            let H_101 =
-                                lookup_indices[8 * j + 5].map_or(F::zero(), |i| F_101[i.into()]);
-                            let H_011 =
-                                lookup_indices[8 * j + 6].map_or(F::zero(), |i| F_011[i.into()]);
-                            let H_111 =
-                                lookup_indices[8 * j + 7].map_or(F::zero(), |i| F_111[i.into()]);
+                            let H_000 = lookup_indices.lookup_or_zero(8 * j, &F_000);
+                            let H_100 = lookup_indices.lookup_or_zero(8 * j + 1, &F_100);
+                            let H_010 = lookup_indices.lookup_or_zero(8 * j + 2, &F_010);
+                            let H_110 = lookup_indices.lookup_or_zero(8 * j + 3, &F_110);
+                            let H_001 = lookup_indices.lookup_or_zero(8 * j + 4, &F_001);
+                            let H_101 = lookup_indices.lookup_or_zero(8 * j + 5, &F_101);
+                            let H_011 = lookup_indices.lookup_or_zero(8 * j + 6, &F_011);
+                            let H_111 = lookup_indices.lookup_or_zero(8 * j + 7, &F_111);
                             *eval = H_000 + H_010 + H_100 + H_110 + H_001 + H_011 + H_101 + H_111;
                         }
                     },
@@ -363,7 +519,16 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
             }
         }
 
-        drop_in_background_thread(self.lookup_indices);
+        // Drop the lookup indices and optional presence mask once we're done materializing.
+        match lookup_indices {
+            LookupIndices::Dense { indices } => {
+                drop_in_background_thread(indices);
+            }
+            LookupIndices::Masked { indices, present } => {
+                drop_in_background_thread(indices);
+                drop_in_background_thread(present);
+            }
+        }
         drop_in_background_thread(F_000);
         drop_in_background_thread(F_100);
         drop_in_background_thread(F_010);
@@ -381,22 +546,17 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
         match self.binding_order {
             BindingOrder::HighToLow => {
                 let n = self.lookup_indices.len() / 4;
-                let H_00 = self.lookup_indices[j].map_or(F::zero(), |i| self.F_00[i.into()]);
-                let H_01 = self.lookup_indices[j + n].map_or(F::zero(), |i| self.F_01[i.into()]);
-                let H_10 =
-                    self.lookup_indices[j + n * 2].map_or(F::zero(), |i| self.F_10[i.into()]);
-                let H_11 =
-                    self.lookup_indices[j + n * 3].map_or(F::zero(), |i| self.F_11[i.into()]);
+                let H_00 = self.lookup_indices.lookup_or_zero(j, &self.F_00);
+                let H_01 = self.lookup_indices.lookup_or_zero(j + n, &self.F_01);
+                let H_10 = self.lookup_indices.lookup_or_zero(j + n * 2, &self.F_10);
+                let H_11 = self.lookup_indices.lookup_or_zero(j + n * 3, &self.F_11);
                 H_00 + H_10 + H_01 + H_11
             }
             BindingOrder::LowToHigh => {
-                let H_00 = self.lookup_indices[4 * j].map_or(F::zero(), |i| self.F_00[i.into()]);
-                let H_10 =
-                    self.lookup_indices[4 * j + 1].map_or(F::zero(), |i| self.F_10[i.into()]);
-                let H_01 =
-                    self.lookup_indices[4 * j + 2].map_or(F::zero(), |i| self.F_01[i.into()]);
-                let H_11 =
-                    self.lookup_indices[4 * j + 3].map_or(F::zero(), |i| self.F_11[i.into()]);
+                let H_00 = self.lookup_indices.lookup_or_zero(4 * j, &self.F_00);
+                let H_10 = self.lookup_indices.lookup_or_zero(4 * j + 1, &self.F_10);
+                let H_01 = self.lookup_indices.lookup_or_zero(4 * j + 2, &self.F_01);
+                let H_11 = self.lookup_indices.lookup_or_zero(4 * j + 3, &self.F_11);
                 H_00 + H_10 + H_01 + H_11
             }
         }

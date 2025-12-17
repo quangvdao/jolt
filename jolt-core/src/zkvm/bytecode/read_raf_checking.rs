@@ -273,12 +273,12 @@ impl<F: JoltField> ReadRafSumcheckProver<F> {
             .iter()
             .enumerate()
             .map(|(i, r_address_chunk)| {
-                let ra_i: Vec<Option<u8>> = self
+                let ra_i: Vec<u8> = self
                     .pc
                     .par_iter()
-                    .map(|pc| Some(self.params.one_hot_params.bytecode_pc_chunk(*pc, i)))
+                    .map(|pc| self.params.one_hot_params.bytecode_pc_chunk(*pc, i))
                     .collect();
-                RaPolynomial::new(Arc::new(ra_i), EqPolynomial::evals(r_address_chunk))
+                RaPolynomial::new_dense(Arc::new(ra_i), EqPolynomial::evals(r_address_chunk))
             })
             .collect();
     }

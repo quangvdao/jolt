@@ -59,12 +59,14 @@ use crate::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN,
         },
+        ra_poly::build_bitset_parallel,
     },
     transcripts::Transcript,
     utils::{math::Math, thread::unsafe_allocate_zero_vec},
     zkvm::witness::{CommittedPolynomial, VirtualPolynomial},
 };
-use std::vec;
+use fixedbitset::FixedBitSet;
+use std::{sync::Arc, vec};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::{
@@ -615,8 +617,8 @@ pub fn gen_ra_booleanity_prover<F: JoltField>(
     // Compute G and H for RAM
     let eq_r_cycle = EqPolynomial::<F>::evals(&params.r_cycle);
     let G = compute_ram_ra_evals(trace, memory_layout, &eq_r_cycle, one_hot_params);
-    let H_indices = compute_ram_h_indices(trace, memory_layout, one_hot_params);
-    BooleanitySumcheckProver::gen(params, G, H_indices)
+    let (H_indices, H_present) = compute_ram_h_indices(trace, memory_layout, one_hot_params);
+    BooleanitySumcheckProver::gen(params, G, H_indices, Some(H_present))
 }
 
 pub fn ra_hamming_weight_params<F: JoltField>(
@@ -728,18 +730,27 @@ fn compute_ram_h_indices(
     trace: &[Cycle],
     memory_layout: &MemoryLayout,
     one_hot_params: &OneHotParams,
-) -> Vec<Vec<Option<u8>>> {
+) -> (Vec<Vec<u8>>, Arc<FixedBitSet>) {
     let addresses: Vec<Option<u64>> = trace
         .par_iter()
         .map(|cycle| remap_address(cycle.ram_access().address() as u64, memory_layout))
         .collect();
 
-    (0..one_hot_params.ram_d)
+    let present = build_bitset_parallel(trace.len(), addresses.par_iter().map(|addr| addr.is_some()));
+    let present = Arc::new(present);
+
+    let indices = (0..one_hot_params.ram_d)
         .map(|i| {
             addresses
                 .par_iter()
-                .map(|address| address.map(|address| one_hot_params.ram_address_chunk(address, i)))
+                .map(|address| {
+                    address.map_or(u8::default(), |address| {
+                        one_hot_params.ram_address_chunk(address, i)
+                    })
+                })
                 .collect()
         })
-        .collect()
+        .collect();
+
+    (indices, present)
 }

@@ -53,7 +53,7 @@ use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
     VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
 };
-use crate::poly::ra_poly::RaPolynomial;
+use crate::poly::ra_poly::{build_bitset_parallel, RaPolynomial};
 use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 use crate::poly::unipoly::UniPoly;
 use crate::subprotocols::mles_product_sum::compute_mles_product_sum;
@@ -172,18 +172,28 @@ impl<F: JoltField> RamRaVirtualSumcheckProver<F> {
         let eq_poly = GruenSplitEqPolynomial::new(&params.r_cycle.r, BindingOrder::LowToHigh);
 
         // Create ra_i polynomials for each decomposition chunk
+        let remapped_addresses: Vec<Option<u64>> = trace
+            .par_iter()
+            .map(|cycle| remap_address(cycle.ram_access().address() as u64, memory_layout))
+            .collect();
+
+        let present =
+            build_bitset_parallel(trace.len(), remapped_addresses.par_iter().map(|addr| addr.is_some()));
+        let present = Arc::new(present);
+
         let ra_i_polys: Vec<RaPolynomial<u8, F>> = (0..params.d)
             .into_par_iter()
             .zip(eq_tables.into_par_iter())
             .map(|(i, eq_table)| {
-                let ra_i_indices: Vec<Option<u8>> = trace
+                let ra_i_indices: Vec<u8> = remapped_addresses
                     .par_iter()
-                    .map(|cycle| {
-                        remap_address(cycle.ram_access().address() as u64, memory_layout)
-                            .map(|address| one_hot_params.ram_address_chunk(address, i))
+                    .map(|address| {
+                        address.map_or(u8::default(), |address| {
+                            one_hot_params.ram_address_chunk(address, i)
+                        })
                     })
                     .collect();
-                RaPolynomial::new(Arc::new(ra_i_indices), eq_table)
+                RaPolynomial::new_masked(Arc::new(ra_i_indices), present.clone(), eq_table)
             })
             .collect();
 

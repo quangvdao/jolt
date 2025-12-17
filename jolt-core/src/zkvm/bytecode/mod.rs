@@ -185,7 +185,7 @@ pub fn gen_ra_one_hot_provers<F: JoltField>(
     let H_indices = compute_bytecode_h_indices(bytecode_preprocessing, trace, one_hot_params);
     (
         HammingWeightSumcheckProver::gen(hamming_weight_params, G.clone()),
-        BooleanitySumcheckProver::gen(booleanity_params, G, H_indices),
+        BooleanitySumcheckProver::gen(booleanity_params, G, H_indices, None),
     )
 }
 
@@ -214,7 +214,7 @@ fn compute_bytecode_h_indices(
     preprocessing: &BytecodePreprocessing,
     trace: &[Cycle],
     one_hot_params: &OneHotParams,
-) -> Vec<Vec<Option<u8>>> {
+) -> Vec<Vec<u8>> {
     (0..one_hot_params.bytecode_d)
         .into_par_iter()
         .map(|i| {
@@ -222,7 +222,7 @@ fn compute_bytecode_h_indices(
                 .par_iter()
                 .map(|cycle| {
                     let k = preprocessing.get_pc(cycle);
-                    Some(one_hot_params.bytecode_pc_chunk(k, i))
+                    one_hot_params.bytecode_pc_chunk(k, i)
                 })
                 .collect()
         })

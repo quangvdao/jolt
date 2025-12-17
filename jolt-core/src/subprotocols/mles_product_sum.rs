@@ -122,21 +122,96 @@ macro_rules! impl_mles_product_sum_evals_d {
 
             let current_scalar = eq_poly.get_current_scalar();
 
-            let sum_evals_arr: [F; $d] = eq_poly.par_fold_out_in_unreduced::<9, $d>(&|g| {
-                // Build pairs[(p0, p1); D] on the stack.
-                let pairs: [(F, F); $d] = core::array::from_fn(|i| {
-                    let p0 = mles[i].get_bound_coeff(2 * g);
-                    let p1 = mles[i].get_bound_coeff(2 * g + 1);
-                    (p0, p1)
-                });
+            // Peel a few suffix bits of E_in so we can pre-scale their fixed eq-weights
+            // into the per-g values and reduce the number of `e_in * value` multiplications.
+            //
+            // Tweak for benchmarking; does not affect transcript.
+            const E_IN_PRESCALE_BITS: usize = 2;
 
-                // Evaluate the product of the D linear polynomials on the
-                // D-point grid [1, 2, ..., D - 1, ∞] using the specialized
-                // kernel.
-                let mut endpoints = [F::zero(); $d];
-                $eval_prod::<F>(&pairs, &mut endpoints);
-                endpoints
-            });
+            let e_active = eq_poly.e_in_active_evals(E_IN_PRESCALE_BITS);
+
+            let sum_evals_arr: [F; $d] = if e_active.len() == 1 {
+                eq_poly.par_fold_out_in_unreduced::<9, $d>(&|g| {
+                    // Build pairs[(p0, p1); D] on the stack.
+                    let pairs: [(F, F); $d] = core::array::from_fn(|i| {
+                        let p0 = mles[i].get_bound_coeff(2 * g);
+                        let p1 = mles[i].get_bound_coeff(2 * g + 1);
+                        (p0, p1)
+                    });
+
+                    // Evaluate the product of the D linear polynomials on the
+                    // D-point grid [1, 2, ..., D - 1, ∞] using the specialized
+                    // kernel.
+                    let mut endpoints = [F::zero(); $d];
+                    $eval_prod::<F>(&pairs, &mut endpoints);
+                    endpoints
+                })
+            } else {
+                // True "table pre-scaling": incorporate `e_active[b]` by scaling the internal
+                // lookup tables of a single factor once per `b` (per round), instead of doing
+                // `p0 *= scale; p1 *= scale` for every `g`.
+                //
+                // This is only cheap before the polynomials are fully materialized (Round1/2/3).
+                // Once we reach RoundN, we fall back to per-g scaling.
+                let mut scaled_factor: Vec<RaPolynomial<u16, F>> = Vec::with_capacity(e_active.len());
+                let mut can_prescale_tables = true;
+                for &s in e_active.iter() {
+                    match mles[0].try_clone_with_scaled_tables(s) {
+                        Some(p) => scaled_factor.push(p),
+                        None => {
+                            can_prescale_tables = false;
+                            break;
+                        }
+                    }
+                }
+
+                if can_prescale_tables {
+                    eq_poly.par_fold_out_in_unreduced_peel_in_bits::<9, $d>(
+                        E_IN_PRESCALE_BITS,
+                        &|g, b| {
+                            // Build pairs[(p0, p1); D] on the stack. The first factor is
+                            // read from the pre-scaled table for this branch.
+                            let p0_0 = scaled_factor[b].get_bound_coeff(2 * g);
+                            let p0_1 = scaled_factor[b].get_bound_coeff(2 * g + 1);
+                            let pairs: [(F, F); $d] = core::array::from_fn(|i| {
+                                if i == 0 {
+                                    (p0_0, p0_1)
+                                } else {
+                                    let p0 = mles[i].get_bound_coeff(2 * g);
+                                    let p1 = mles[i].get_bound_coeff(2 * g + 1);
+                                    (p0, p1)
+                                }
+                            });
+
+                            // Evaluate the product of the D linear polynomials on the
+                            // D-point grid [1, 2, ..., D - 1, ∞] using the specialized kernel.
+                            let mut endpoints = [F::zero(); $d];
+                            $eval_prod::<F>(&pairs, &mut endpoints);
+                            endpoints
+                        },
+                    )
+                } else {
+                    // Fallback: scale one factor per-g.
+                    eq_poly.par_fold_out_in_unreduced_peel_in_bits::<9, $d>(
+                        E_IN_PRESCALE_BITS,
+                        &|g, b| {
+                            let scale = e_active[b];
+                            let pairs: [(F, F); $d] = core::array::from_fn(|i| {
+                                let mut p0 = mles[i].get_bound_coeff(2 * g);
+                                let mut p1 = mles[i].get_bound_coeff(2 * g + 1);
+                                if i == 0 {
+                                    p0 *= scale;
+                                    p1 *= scale;
+                                }
+                                (p0, p1)
+                            });
+                            let mut endpoints = [F::zero(); $d];
+                            $eval_prod::<F>(&pairs, &mut endpoints);
+                            endpoints
+                        },
+                    )
+                }
+            };
 
             sum_evals_arr
                 .into_iter()

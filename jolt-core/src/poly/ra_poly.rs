@@ -34,6 +34,28 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField> RaPo
         })
     }
 
+    /// Create a variant of this polynomial with its internal lookup tables scaled by `scalar`.
+    ///
+    /// This is intended for prover-side pre-scaling optimizations where a fixed scalar (e.g. a
+    /// peeled `E_in` weight) should be fused into table lookups **once per round**, instead of
+    /// multiplying in every inner-loop iteration.
+    ///
+    /// - For [`RaPolynomial::Round1`], this scales the single eq table `F`.
+    /// - For [`RaPolynomial::Round2`], this scales both `F_0` and `F_1`.
+    /// - For [`RaPolynomial::Round3`], this scales `F_00`, `F_01`, `F_10`, `F_11`.
+    /// - For [`RaPolynomial::RoundN`], returns `None` (scaling would require touching the full
+    ///   materialized polynomial coefficients, which is usually too expensive).
+    #[inline]
+    pub fn try_clone_with_scaled_tables(&self, scalar: F) -> Option<Self> {
+        match self {
+            Self::None => Some(Self::None),
+            Self::Round1(r1) => Some(Self::Round1(r1.clone_with_scaled_tables(scalar))),
+            Self::Round2(r2) => Some(Self::Round2(r2.clone_with_scaled_tables(scalar))),
+            Self::Round3(r3) => Some(Self::Round3(r3.clone_with_scaled_tables(scalar))),
+            Self::RoundN(_) => None,
+        }
+    }
+
     #[inline]
     pub fn get_bound_coeff(&self, j: usize) -> F {
         match self {
@@ -182,6 +204,19 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
             .expect("j out of bounds")
             .map_or(F::zero(), |i| self.F[i.into()])
     }
+
+    #[inline]
+    fn clone_with_scaled_tables(&self, scalar: F) -> Self {
+        if scalar.is_one() {
+            return self.clone();
+        }
+        let mut F = self.F.clone();
+        F.par_iter_mut().for_each(|v| *v *= scalar);
+        Self {
+            F,
+            lookup_indices: self.lookup_indices.clone(),
+        }
+    }
 }
 
 /// Represents `ra_i` during the 2nd of the last log(T) sumcheck rounds.
@@ -251,6 +286,26 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
                 //                          eq(1, r0) * ra_i(r, 1, j)
                 H_0 + H_1
             }
+        }
+    }
+
+    #[inline]
+    fn clone_with_scaled_tables(&self, scalar: F) -> Self {
+        if scalar.is_one() {
+            return self.clone();
+        }
+        let mut F_0 = self.F_0.clone();
+        let mut F_1 = self.F_1.clone();
+        rayon::join(
+            || F_0.par_iter_mut().for_each(|v| *v *= scalar),
+            || F_1.par_iter_mut().for_each(|v| *v *= scalar),
+        );
+        Self {
+            F_0,
+            F_1,
+            lookup_indices: self.lookup_indices.clone(),
+            r0: self.r0,
+            binding_order: self.binding_order,
         }
     }
 }
@@ -399,6 +454,42 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
                     self.lookup_indices[4 * j + 3].map_or(F::zero(), |i| self.F_11[i.into()]);
                 H_00 + H_10 + H_01 + H_11
             }
+        }
+    }
+
+    #[inline]
+    fn clone_with_scaled_tables(&self, scalar: F) -> Self {
+        if scalar.is_one() {
+            return self.clone();
+        }
+        let mut F_00 = self.F_00.clone();
+        let mut F_01 = self.F_01.clone();
+        let mut F_10 = self.F_10.clone();
+        let mut F_11 = self.F_11.clone();
+
+        rayon::join(
+            || {
+                rayon::join(
+                    || F_00.par_iter_mut().for_each(|v| *v *= scalar),
+                    || F_01.par_iter_mut().for_each(|v| *v *= scalar),
+                )
+            },
+            || {
+                rayon::join(
+                    || F_10.par_iter_mut().for_each(|v| *v *= scalar),
+                    || F_11.par_iter_mut().for_each(|v| *v *= scalar),
+                )
+            },
+        );
+
+        Self {
+            F_00,
+            F_01,
+            F_10,
+            F_11,
+            lookup_indices: self.lookup_indices.clone(),
+            r1: self.r1,
+            binding_order: self.binding_order,
         }
     }
 }

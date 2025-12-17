@@ -432,6 +432,24 @@ pub enum SharedRaPolynomials<F: JoltField> {
     RoundN(Vec<MultilinearPolynomial<F>>),
 }
 
+/// A bank of pre-scaled shared eq tables for [`SharedRaPolynomials`].
+///
+/// This is used by optimizations that want to "push" a fixed scalar \(s\) into the
+/// address-equality tables so that downstream code can obtain both `h` and `s*h`
+/// via lookups (no per-lookup multiplication by `s`), while sharing the same
+/// `indices` array.
+#[derive(Clone, Allocative)]
+pub enum SharedRaEqTableBank<F: JoltField> {
+    Round1 { F: Vec<F> },
+    Round2 { F_0: Vec<F>, F_1: Vec<F> },
+    Round3 {
+        F_00: Vec<F>,
+        F_01: Vec<F>,
+        F_10: Vec<F>,
+        F_11: Vec<F>,
+    },
+}
+
 /// Round 1 state: single shared eq table
 #[derive(Allocative, Default)]
 pub struct SharedRaRound1<F: JoltField> {
@@ -519,6 +537,51 @@ impl<F: JoltField> SharedRaPolynomials<F> {
         }
     }
 
+    /// Precompute scaled eq-table banks (one per scalar), without duplicating `indices`.
+    ///
+    /// Returns `None` for `RoundN` (no shared eq tables exist anymore).
+    pub fn precompute_scaled_eq_tables(&self, scalars: &[F]) -> Option<Vec<SharedRaEqTableBank<F>>> {
+        match self {
+            Self::Round1(r) => Some(r.precompute_scaled_eq_tables(scalars)),
+            Self::Round2(r) => Some(r.precompute_scaled_eq_tables(scalars)),
+            Self::Round3(r) => Some(r.precompute_scaled_eq_tables(scalars)),
+            Self::RoundN(_) => None,
+        }
+    }
+
+    /// Like [`SharedRaPolynomials::get_bound_coeff`], but uses a caller-provided eq-table bank.
+    ///
+    /// This allows callers to obtain `s*h` via a lookup, instead of computing `s*h` with a
+    /// multiplication per access.
+    #[inline]
+    pub fn get_bound_coeff_with_scaled_tables(
+        &self,
+        poly_idx: usize,
+        j: usize,
+        tables: &SharedRaEqTableBank<F>,
+    ) -> F {
+        match (self, tables) {
+            (Self::Round1(r), SharedRaEqTableBank::Round1 { F }) => {
+                r.get_bound_coeff_from_table(poly_idx, j, F)
+            }
+            (Self::Round2(r), SharedRaEqTableBank::Round2 { F_0, F_1 }) => {
+                r.get_bound_coeff_from_tables(poly_idx, j, F_0, F_1)
+            }
+            (
+                Self::Round3(r),
+                SharedRaEqTableBank::Round3 {
+                    F_00,
+                    F_01,
+                    F_10,
+                    F_11,
+                },
+            ) => r.get_bound_coeff_from_tables(poly_idx, j, F_00, F_01, F_10, F_11),
+            _ => panic!(
+                "get_bound_coeff_with_scaled_tables: table bank variant does not match SharedRaPolynomials state"
+            ),
+        }
+    }
+
     /// Get final sumcheck claim for polynomial `poly_idx`
     pub fn final_sumcheck_claim(&self, poly_idx: usize) -> F {
         match self {
@@ -563,6 +626,26 @@ impl<F: JoltField> SharedRaRound1<F> {
             .map_or(F::zero(), |k| self.F[k as usize])
     }
 
+    #[inline]
+    fn get_bound_coeff_from_table(&self, poly_idx: usize, j: usize, table: &[F]) -> F {
+        self.indices[j]
+            .get_index(poly_idx, &self.one_hot_params)
+            .map_or(F::zero(), |k| table[k as usize])
+    }
+
+    fn precompute_scaled_eq_tables(&self, scalars: &[F]) -> Vec<SharedRaEqTableBank<F>> {
+        scalars
+            .iter()
+            .map(|&s| {
+                let mut F = self.F.clone();
+                if !s.is_one() {
+                    F.par_iter_mut().for_each(|v| *v *= s);
+                }
+                SharedRaEqTableBank::Round1 { F }
+            })
+            .collect()
+    }
+
     fn bind(self, r0: F::Challenge, order: BindingOrder) -> SharedRaRound2<F> {
         let eq_0_r0 = EqPolynomial::mle(&[F::zero()], &[r0]);
         let eq_1_r0 = EqPolynomial::mle(&[F::one()], &[r0]);
@@ -605,6 +688,48 @@ impl<F: JoltField> SharedRaRound2<F> {
                 h_0 + h_1
             }
         }
+    }
+
+    #[inline]
+    fn get_bound_coeff_from_tables(&self, poly_idx: usize, j: usize, F_0: &[F], F_1: &[F]) -> F {
+        match self.binding_order {
+            BindingOrder::HighToLow => {
+                let mid = self.indices.len() / 2;
+                let h_0 = self.indices[j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_0[k as usize]);
+                let h_1 = self.indices[mid + j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_1[k as usize]);
+                h_0 + h_1
+            }
+            BindingOrder::LowToHigh => {
+                let h_0 = self.indices[2 * j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_0[k as usize]);
+                let h_1 = self.indices[2 * j + 1]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_1[k as usize]);
+                h_0 + h_1
+            }
+        }
+    }
+
+    fn precompute_scaled_eq_tables(&self, scalars: &[F]) -> Vec<SharedRaEqTableBank<F>> {
+        scalars
+            .iter()
+            .map(|&s| {
+                let mut F_0 = self.F_0.clone();
+                let mut F_1 = self.F_1.clone();
+                if !s.is_one() {
+                    rayon::join(
+                        || F_0.par_iter_mut().for_each(|v| *v *= s),
+                        || F_1.par_iter_mut().for_each(|v| *v *= s),
+                    );
+                }
+                SharedRaEqTableBank::Round2 { F_0, F_1 }
+            })
+            .collect()
     }
 
     fn bind(self, r1: F::Challenge, order: BindingOrder) -> SharedRaRound3<F> {
@@ -683,6 +808,85 @@ impl<F: JoltField> SharedRaRound3<F> {
                 h_00 + h_10 + h_01 + h_11
             }
         }
+    }
+
+    #[inline]
+    fn get_bound_coeff_from_tables(
+        &self,
+        poly_idx: usize,
+        j: usize,
+        F_00: &[F],
+        F_01: &[F],
+        F_10: &[F],
+        F_11: &[F],
+    ) -> F {
+        match self.binding_order {
+            BindingOrder::HighToLow => {
+                let quarter = self.indices.len() / 4;
+                let h_00 = self.indices[j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_00[k as usize]);
+                let h_01 = self.indices[quarter + j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_01[k as usize]);
+                let h_10 = self.indices[2 * quarter + j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_10[k as usize]);
+                let h_11 = self.indices[3 * quarter + j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_11[k as usize]);
+                h_00 + h_01 + h_10 + h_11
+            }
+            BindingOrder::LowToHigh => {
+                let h_00 = self.indices[4 * j]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_00[k as usize]);
+                let h_10 = self.indices[4 * j + 1]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_10[k as usize]);
+                let h_01 = self.indices[4 * j + 2]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_01[k as usize]);
+                let h_11 = self.indices[4 * j + 3]
+                    .get_index(poly_idx, &self.one_hot_params)
+                    .map_or(F::zero(), |k| F_11[k as usize]);
+                h_00 + h_10 + h_01 + h_11
+            }
+        }
+    }
+
+    fn precompute_scaled_eq_tables(&self, scalars: &[F]) -> Vec<SharedRaEqTableBank<F>> {
+        scalars
+            .iter()
+            .map(|&s| {
+                let mut F_00 = self.F_00.clone();
+                let mut F_01 = self.F_01.clone();
+                let mut F_10 = self.F_10.clone();
+                let mut F_11 = self.F_11.clone();
+                if !s.is_one() {
+                    rayon::join(
+                        || {
+                            rayon::join(
+                                || F_00.par_iter_mut().for_each(|v| *v *= s),
+                                || F_01.par_iter_mut().for_each(|v| *v *= s),
+                            )
+                        },
+                        || {
+                            rayon::join(
+                                || F_10.par_iter_mut().for_each(|v| *v *= s),
+                                || F_11.par_iter_mut().for_each(|v| *v *= s),
+                            )
+                        },
+                    );
+                }
+                SharedRaEqTableBank::Round3 {
+                    F_00,
+                    F_01,
+                    F_10,
+                    F_11,
+                }
+            })
+            .collect()
     }
 
     #[tracing::instrument(skip_all, name = "SharedRaRound3::bind")]

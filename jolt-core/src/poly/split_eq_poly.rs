@@ -579,6 +579,151 @@ impl<F: JoltField> GruenSplitEqPolynomial<F> {
         )
         .map(F::from_montgomery_reduce::<LIMBS>)
     }
+
+    /// Compute the eq table over the **peeled suffix** of the current `E_in` bits.
+    ///
+    /// This is used by optimizations that "pre-scale" some fixed (pre-sumcheck) eq factors
+    /// into other tables/coefficients, so we can reduce the number of per-iteration multiplies
+    /// by `E_in`.
+    ///
+    /// Semantics (BindingOrder::LowToHigh):
+    /// - Let `E_in_current` correspond to `in_bits = log2(|E_in_current|)` unbound "in" variables.
+    /// - Let `active_bits = min(peel_bits, in_bits)` and split those `in_bits` as:
+    ///     - head bits: the first `in_bits - active_bits`,
+    ///     - active bits: the last  `active_bits` (closest to the current linear variable).
+    /// - This returns `E_active` of length `2^active_bits` where `E_active[b] = eq(w_active, b)`.
+    ///
+    /// When `active_bits = 0`, this returns `[1]`.
+    #[inline]
+    pub fn e_in_active_evals(&self, peel_bits: usize) -> Vec<F> {
+        if self.binding_order != BindingOrder::LowToHigh {
+            // Currently only implemented for LowToHigh (the only binding order used in
+            // the hot zkVM sumchecks). For other orders, fall back to "no peeling".
+            return vec![F::one()];
+        }
+
+        let in_bits = self.E_in_current_len().log_2();
+        let active_bits = core::cmp::min(peel_bits, in_bits);
+        if active_bits == 0 {
+            return vec![F::one()];
+        }
+
+        // LowToHigh layout:
+        //   w = [w_out (m bits), w_in (n-1-m bits), w_last]
+        // where E_in tables are prefixes of `w_in`.
+        let n = self.w.len();
+        let m = n / 2;
+        let in_head_bits = in_bits - active_bits;
+
+        let w_in_start = m;
+        let w_active_start = w_in_start + in_head_bits;
+        let w_active_end = w_in_start + in_bits;
+        debug_assert!(w_active_end <= n - 1, "w_active slice exceeds w_in region");
+
+        EqPolynomial::<F>::evals(&self.w[w_active_start..w_active_end])
+    }
+
+    /// Variant of [`par_fold_out_in_unreduced`] that peels `peel_bits` **suffix bits** of `E_in`.
+    ///
+    /// The intended use is to reduce the number of multiplications by the fixed `E_in` weights
+    /// by a factor of `2^active_bits`, where `active_bits = min(peel_bits, log2(|E_in_current|))`.
+    ///
+    /// How it works:
+    /// - Split `x_in` into `(x_in_head, b)` where `b` ranges over `active_bits` low bits.
+    /// - The caller is expected to incorporate the peeled eq weight `E_active[b]`
+    ///   *inside* `per_g_values` (e.g., by using branch-scaled batching coefficients).
+    /// - This method then multiplies by `E_in_head[x_in_head]` **once per head index** (not once
+    ///   per full `x_in`), sums over `b`, and proceeds with the usual outer scaling by `E_out`.
+    ///
+    /// The closure is called as `per_g_values(g_full, b)` where:
+    /// - `g_full` is the same group index you would pass to the unpeeled fold, and
+    /// - `b` is the peeled suffix index in `[0, 2^active_bits)`.
+    pub fn par_fold_out_in_unreduced_peel_in_bits<const LIMBS: usize, const NUM_OUT: usize>(
+        &self,
+        peel_bits: usize,
+        per_g_values: &(impl Fn(usize, usize) -> [F; NUM_OUT] + Sync + Send),
+    ) -> [F; NUM_OUT] {
+        if self.binding_order != BindingOrder::LowToHigh {
+            // Not implemented for HighToLow; fall back to the standard fold.
+            return self.par_fold_out_in_unreduced::<LIMBS, NUM_OUT>(&|g| per_g_values(g, 0));
+        }
+
+        let e_out = self.E_out_current();
+        let out_len = e_out.len();
+
+        // Number of bits represented by the current in-table.
+        let in_bits = self.E_in_current_len().log_2();
+        let active_bits = core::cmp::min(peel_bits, in_bits);
+        if active_bits == 0 {
+            // Fall back to the standard fold (no peeling).
+            return self.par_fold_out_in_unreduced::<LIMBS, NUM_OUT>(&|g| per_g_values(g, 0));
+        }
+
+        // E_in_head corresponds to the prefix of the current `w_in` of length `in_head_bits`.
+        let in_head_bits = in_bits - active_bits;
+        debug_assert!(
+            in_head_bits < self.E_in_vec.len(),
+            "in_head_bits={} out of bounds for E_in_vec.len()={}",
+            in_head_bits,
+            self.E_in_vec.len()
+        );
+        let e_in_head = &self.E_in_vec[in_head_bits];
+        let in_head_len = e_in_head.len();
+
+        let active_len = 1usize << active_bits;
+
+        (0..out_len)
+            .into_par_iter()
+            .map(|x_out| {
+                // Accumulator over x_in_head (unreduced for delayed reduction).
+                let mut inner_acc: [F::Unreduced::<LIMBS>; NUM_OUT] =
+                    [F::Unreduced::<LIMBS>::zero(); NUM_OUT];
+
+                for x_in_head in 0..in_head_len {
+                    // Sum over the peeled suffix bits `b` without multiplying by eq weights here.
+                    // The caller should have incorporated `E_active[b]` into `per_g_values`.
+                    let mut sum_b: [F; NUM_OUT] = [F::zero(); NUM_OUT];
+
+                    // Base index for this (x_out, x_in_head) pair.
+                    let g_base = (x_out << in_head_bits) | x_in_head;
+
+                    for b in 0..active_len {
+                        let g_full = (g_base << active_bits) | b;
+                        let vals = per_g_values(g_full, b);
+                        for k in 0..NUM_OUT {
+                            sum_b[k] += vals[k];
+                        }
+                    }
+
+                    // Multiply by the head weight once per x_in_head.
+                    let w_head = e_in_head[x_in_head];
+                    for k in 0..NUM_OUT {
+                        inner_acc[k] += w_head.mul_unreduced::<LIMBS>(sum_b[k]);
+                    }
+                }
+
+                // Reduce inner accumulator and scale by e_out (unreduced).
+                let mut outer: [F::Unreduced::<LIMBS>; NUM_OUT] =
+                    [F::Unreduced::<LIMBS>::zero(); NUM_OUT];
+                let w_out = e_out[x_out];
+                for k in 0..NUM_OUT {
+                    let inner_red = F::from_montgomery_reduce::<LIMBS>(inner_acc[k]);
+                    outer[k] = w_out.mul_unreduced::<LIMBS>(inner_red);
+                }
+
+                outer
+            })
+            .reduce(
+                || [F::Unreduced::<LIMBS>::zero(); NUM_OUT],
+                |mut a, b| {
+                    for k in 0..NUM_OUT {
+                        a[k] += b[k];
+                    }
+                    a
+                },
+            )
+            .map(F::from_montgomery_reduce::<LIMBS>)
+    }
 }
 
 #[cfg(test)]
@@ -809,5 +954,51 @@ mod tests {
             assert_eq!(split_eq.E_out_vec[0], vec![Fr::one()]);
             assert_eq!(split_eq.E_in_vec[0], vec![Fr::one()]);
         }
+    }
+
+    /// Peeling suffix bits off `E_in` and requiring the caller to incorporate those
+    /// peeled weights should reproduce the original `par_fold_out_in_unreduced`.
+    #[test]
+    fn peel_in_bits_matches_original_fold() {
+        use ark_std::UniformRand;
+
+        const NUM_VARS: usize = 16;
+        const NUM_OUT: usize = 3;
+        const PEEL_BITS: usize = 2;
+
+        let mut rng = test_rng();
+
+        let w: Vec<<Fr as JoltField>::Challenge> =
+            std::iter::repeat_with(|| <Fr as JoltField>::Challenge::random(&mut rng))
+                .take(NUM_VARS)
+                .collect();
+
+        let split_eq = GruenSplitEqPolynomial::<Fr>::new(&w, BindingOrder::LowToHigh);
+
+        // Random per-g values (no scaling).
+        let out_len = split_eq.E_out_current_len();
+        let in_len = split_eq.E_in_current_len();
+        let g_len = out_len * in_len;
+        let raw: Vec<[Fr; NUM_OUT]> = (0..g_len)
+            .map(|_| core::array::from_fn(|_| Fr::rand(&mut rng)))
+            .collect();
+
+        let original =
+            split_eq.par_fold_out_in_unreduced::<9, NUM_OUT>(&|g| raw[g]);
+
+        let e_active = split_eq.e_in_active_evals(PEEL_BITS);
+        let peeled = split_eq.par_fold_out_in_unreduced_peel_in_bits::<9, NUM_OUT>(
+            PEEL_BITS,
+            &|g, b| {
+                let mut v = raw[g];
+                let s = e_active[b];
+                for k in 0..NUM_OUT {
+                    v[k] *= s;
+                }
+                v
+            },
+        );
+
+        assert_eq!(original, peeled);
     }
 }

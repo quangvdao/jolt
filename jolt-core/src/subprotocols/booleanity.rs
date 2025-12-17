@@ -28,7 +28,7 @@ use common::jolt_device::MemoryLayout;
 use tracer::instruction::Cycle;
 
 use crate::{
-    field::JoltField,
+    field::{JoltField, OptimizedMul},
     poly::{
         eq_poly::EqPolynomial,
         multilinear_polynomial::BindingOrder,
@@ -36,7 +36,7 @@ use crate::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN,
         },
-        shared_ra_polys::{compute_all_G_and_ra_indices, RaIndices, SharedRaPolynomials},
+        shared_ra_polys::{compute_all_G_and_ra_indices, RaIndices, SharedRaEqTableBank, SharedRaPolynomials},
         split_eq_poly::GruenSplitEqPolynomial,
         unipoly::UniPoly,
     },
@@ -55,6 +55,13 @@ use crate::{
 
 /// Degree bound of the sumcheck round polynomials.
 const DEGREE_BOUND: usize = 3;
+
+/// Number of suffix bits of `E_in` to peel and pre-scale into batching coefficients.
+///
+/// This is a pure prover-side optimization knob (no transcript impact). Increasing this trades
+/// a small amount of extra preprocessing (scaling `gammas` by a tiny `E_active` table) for a
+/// ~`2^bits` reduction in the number of `E_in * value` multiplications inside the split-eq fold.
+const E_IN_PRESCALE_BITS: usize = 2;
 
 /// Parameters for the booleanity sumcheck.
 pub struct BooleanitySumcheckParams<F: JoltField> {
@@ -257,54 +264,69 @@ impl<F: JoltField> BooleanitySumcheckProver<F> {
         let B = &self.B;
         let N = self.params.polynomial_types.len();
 
-        // Compute quadratic coefficients via generic split-eq fold
-        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = B
-            .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|k_prime| {
-                let coeffs = (0..N)
-                    .into_par_iter()
-                    .map(|i| {
-                        let G_i = &self.G[i];
-                        let inner_sum = G_i[k_prime << m..(k_prime + 1) << m]
-                            .par_iter()
-                            .enumerate()
-                            .map(|(k, &G_k)| {
-                                let k_m = k >> (m - 1);
-                                let F_k = self.F[k & ((1 << (m - 1)) - 1)];
-                                let G_times_F = G_k * F_k;
+        // Peel a few fixed `E_in` bits and fold their weights into the batching coefficients.
+        // This reduces the number of `E_in * value` multiplications in the split-eq fold.
+        let e_active = B.e_in_active_evals(E_IN_PRESCALE_BITS);
+        let gammas_scaled: Vec<Vec<F>> = e_active
+            .iter()
+            .map(|&s| {
+                self.params
+                    .gammas
+                    .iter()
+                    .map(|&gamma| gamma.mul_01_optimized(s))
+                    .collect()
+            })
+            .collect();
 
-                                let eval_infty = G_times_F * F_k;
-                                let eval_0 = if k_m == 0 {
-                                    eval_infty - G_times_F
-                                } else {
-                                    F::zero()
-                                };
-                                [eval_0, eval_infty]
-                            })
-                            .fold_with(
-                                [F::Unreduced::<5>::zero(); DEGREE_BOUND - 1],
-                                |running, new| {
-                                    [
-                                        running[0] + new[0].as_unreduced_ref(),
-                                        running[1] + new[1].as_unreduced_ref(),
-                                    ]
-                                },
-                            )
-                            .reduce(
-                                || [F::Unreduced::zero(); DEGREE_BOUND - 1],
-                                |running, new| [running[0] + new[0], running[1] + new[1]],
-                            );
+        // Compute quadratic coefficients via split-eq fold (with peeled suffix bits).
+        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = B.par_fold_out_in_unreduced_peel_in_bits::<
+            9,
+            { DEGREE_BOUND - 1 },
+        >(E_IN_PRESCALE_BITS, &|k_prime, active_idx| {
+            let gammas = &gammas_scaled[active_idx];
+            let coeffs = (0..N)
+                .into_par_iter()
+                .map(|i| {
+                    let G_i = &self.G[i];
+                    let inner_sum = G_i[k_prime << m..(k_prime + 1) << m]
+                        .par_iter()
+                        .enumerate()
+                        .map(|(k, &G_k)| {
+                            let k_m = k >> (m - 1);
+                            let F_k = self.F[k & ((1 << (m - 1)) - 1)];
+                            let G_times_F = G_k * F_k;
 
-                        [
-                            self.params.gammas[i] * F::from_barrett_reduce(inner_sum[0]),
-                            self.params.gammas[i] * F::from_barrett_reduce(inner_sum[1]),
-                        ]
-                    })
-                    .reduce(
-                        || [F::zero(); DEGREE_BOUND - 1],
-                        |running, new| [running[0] + new[0], running[1] + new[1]],
-                    );
-                coeffs
-            });
+                            let eval_infty = G_times_F * F_k;
+                            let eval_0 = if k_m == 0 {
+                                eval_infty - G_times_F
+                            } else {
+                                F::zero()
+                            };
+                            [eval_0, eval_infty]
+                        })
+                        .fold_with(
+                            [F::Unreduced::<5>::zero(); DEGREE_BOUND - 1],
+                            |running, new| {
+                                [
+                                    running[0] + new[0].as_unreduced_ref(),
+                                    running[1] + new[1].as_unreduced_ref(),
+                                ]
+                            },
+                        )
+                        .reduce(
+                            || [F::Unreduced::zero(); DEGREE_BOUND - 1],
+                            |running, new| [running[0] + new[0], running[1] + new[1]],
+                        );
+
+                    [gammas[i] * F::from_barrett_reduce(inner_sum[0]), gammas[i]
+                        * F::from_barrett_reduce(inner_sum[1])]
+                })
+                .reduce(
+                    || [F::zero(); DEGREE_BOUND - 1],
+                    |running, new| [running[0] + new[0], running[1] + new[1]],
+                );
+            coeffs
+        });
 
         B.gruen_poly_deg_3(quadratic_coeffs[0], quadratic_coeffs[1], previous_claim)
     }
@@ -314,33 +336,70 @@ impl<F: JoltField> BooleanitySumcheckProver<F> {
         let H = self.H.as_ref().expect("H should be initialized in phase 2");
         let num_polys = H.num_polys();
 
-        // Compute quadratic coefficients via generic split-eq fold (handles both E_in cases).
-        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = D
-            .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
-                // Accumulate in unreduced form to minimize per-term reductions
-                let mut acc_c = F::Unreduced::<9>::zero();
-                let mut acc_e = F::Unreduced::<9>::zero();
-                for (i, gamma) in self.params.gammas.iter().enumerate().take(num_polys) {
-                    let h_0 = H.get_bound_coeff(i, 2 * j_prime);
-                    let h_1 = H.get_bound_coeff(i, 2 * j_prime + 1);
-                    let b = h_1 - h_0;
+        // Peel a few fixed `E_in` bits. We'll push these peeled weights into *address eq tables*
+        // (SharedRaPolynomials) rather than into `gammas`, so that `gamma` stays a Challenge and
+        // we keep the MontChallenge optimized multiplication in the hot loop.
+        let e_active = D.e_in_active_evals(E_IN_PRESCALE_BITS);
 
-                    // Compute gamma * h0, then a single unreduced multiply by (h0 - 1)
-                    let g_h0 = *gamma * h_0;
-                    let h0_minus_one = h_0 - F::one();
-                    let c_unr = g_h0.mul_unreduced::<9>(h0_minus_one);
-                    acc_c += c_unr;
+        // Precompute `s * eq(r_address, ·)` (and its Round2/3 variants) for each peeled scalar s.
+        // This shares the same `indices` array as `H`, i.e., does not duplicate per-cycle data.
+        let scaled_tables: Option<Vec<SharedRaEqTableBank<F>>> = H.precompute_scaled_eq_tables(&e_active);
 
-                    // Compute gamma * b, then a single unreduced multiply by b
-                    let g_b = *gamma * b;
-                    let e_unr = g_b.mul_unreduced::<9>(b);
-                    acc_e += e_unr;
-                }
-                [
-                    F::from_montgomery_reduce::<9>(acc_c),
-                    F::from_montgomery_reduce::<9>(acc_e),
-                ]
-            });
+        let gammas = &self.params.gammas[..num_polys];
+
+        // Compute quadratic coefficients via split-eq fold (with peeled suffix bits).
+        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = D.par_fold_out_in_unreduced_peel_in_bits::<
+            9,
+            { DEGREE_BOUND - 1 },
+        >(E_IN_PRESCALE_BITS, &|j_prime, active_idx| {
+            // If we no longer have shared eq tables (RoundN), fall back to multiplying by s
+            // directly inside this per-g computation. This is late in the sumcheck when the
+            // fold is small, so it's acceptable.
+            let s = e_active[active_idx];
+
+            // Accumulate with a small Barrett accumulator (we're summing field elements, not
+            // unreduced Montgomery products).
+            let mut acc_c = F::Unreduced::<5>::zero();
+            let mut acc_e = F::Unreduced::<5>::zero();
+
+            for (i, &gamma) in gammas.iter().enumerate() {
+                // Unscaled h values.
+                let h0 = H.get_bound_coeff(i, 2 * j_prime);
+                let h1 = H.get_bound_coeff(i, 2 * j_prime + 1);
+                let delta = h1 - h0;
+
+                // Scaled h values (s * h) via pre-scaled eq tables if available.
+                let (sh0, sh1) = if let Some(ref banks) = scaled_tables {
+                    let sh0 = H.get_bound_coeff_with_scaled_tables(i, 2 * j_prime, &banks[active_idx]);
+                    let sh1 =
+                        H.get_bound_coeff_with_scaled_tables(i, 2 * j_prime + 1, &banks[active_idx]);
+                    (sh0, sh1)
+                } else {
+                    (s * h0, s * h1)
+                };
+
+                // Compute s * (h0^2 - h0) using h0 and (s*h0):
+                //   s*(h0^2 - h0) = (s*h0)*h0 - (s*h0) = (s*h0)*(h0 - 1)
+                let c_val = sh0 * (h0 - F::one());
+
+                // Compute s * (delta^2) using delta and s*delta:
+                //   s*delta^2 = delta*(s*delta), where s*delta = (s*h1) - (s*h0)
+                let sdelta = sh1 - sh0;
+                let e_val = delta * sdelta;
+
+                // Keep gamma as Challenge and use its optimized mul path.
+                let c_term = gamma.mul_01_optimized(c_val);
+                let e_term = gamma.mul_01_optimized(e_val);
+
+                acc_c += *c_term.as_unreduced_ref();
+                acc_e += *e_term.as_unreduced_ref();
+            }
+
+            [
+                F::from_barrett_reduce::<5>(acc_c),
+                F::from_barrett_reduce::<5>(acc_e),
+            ]
+        });
 
         // previous_claim is s(0)+s(1) of the scaled polynomial; divide out eq_r_r to get inner claim
         let adjusted_claim = previous_claim * self.eq_r_r.inverse().unwrap();

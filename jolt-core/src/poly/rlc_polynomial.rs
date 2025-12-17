@@ -27,6 +27,44 @@ use tracing::trace_span;
 // VMV Helper Types - Preprocessed coefficients for streaming vector-matrix product
 // ============================================================================
 
+/// Precomputed tables for the one-hot VMV fast path that **folds per-polynomial coefficients
+/// (γ-powers) into the K-sized eq table**.
+///
+/// Let `left_vec` (length `K * rows_per_k`) be the Dory left-side Lagrange vector, arranged as
+/// `left_vec[k * rows_per_k + row]`.
+///
+/// When `T >= K` (the typical Jolt regime), the row index bits are `[k_bits || row_bits]`, so:
+///
+/// ```text
+/// left_vec[k,row] = eq_k[k] * eq_row[row]
+/// ```
+///
+/// We can precompute `eq_k` from `left_vec` and build per-polynomial tables:
+///
+/// ```text
+/// table_poly[k] = coeff_poly * eq_k[k]
+/// ```
+///
+/// Then for any cycle in row `row`, the one-hot contribution is:
+///
+/// ```text
+/// sum_poly coeff_poly * left_vec[k_poly,row]
+///   = eq_row[row] * sum_poly table_poly[k_poly]
+/// ```
+///
+/// This moves γ-multiplications out of the hot per-cycle loop (O(T * #polys) multiplications)
+/// into a tiny precompute (O(K * #polys) multiplications).
+struct VmvFoldedOneHotTables<F: JoltField> {
+    k_chunk: usize,
+    instruction_d: usize,
+    bytecode_d: usize,
+    ram_d: usize,
+    /// Flattened tables in unified polynomial order:
+    /// `[instruction_0..d, bytecode_0..d, ram_0..d]`, each table has length `k_chunk`.
+    /// Index: `tables[(poly_idx * k_chunk) + k]`.
+    tables: Vec<F>,
+}
+
 /// Preprocessed coefficients for VMV computation.
 ///
 /// **Invariant**: ALL CommittedPolynomials (except advice) are always present.
@@ -63,6 +101,111 @@ struct VmvCoeffs<'a, F: JoltField> {
 }
 
 impl<'a, F: JoltField> VmvCoeffs<'a, F> {
+    /// Compute `(row_factors, eq_k)` from the Dory left vector.
+    ///
+    /// - `eq_k[k] = Σ_row left_vec[k,row]`
+    /// - `row_factors[row] = Σ_k left_vec[k,row]`
+    ///
+    /// In the typical `T >= K` regime, these correspond to `eq_k` over the address bits and
+    /// `eq_row` over the cycle high bits respectively, and satisfy:
+    /// `left_vec[k,row] = eq_k[k] * row_factors[row]`.
+    #[inline]
+    fn compute_row_factors_and_eq_k(
+        left_vec: &[F],
+        rows_per_k: usize,
+        k_chunk: usize,
+    ) -> (Vec<F>, Vec<F>) {
+        debug_assert!(
+            left_vec.len() >= k_chunk * rows_per_k,
+            "left_vec too short: len={} need_at_least={}",
+            left_vec.len(),
+            k_chunk * rows_per_k
+        );
+
+        // Row factors: length rows_per_k, zero-initialized.
+        let mut row_factors: Vec<F> = unsafe_allocate_zero_vec(rows_per_k);
+        // Eq table over k: length k_chunk.
+        let mut eq_k: Vec<F> = unsafe_allocate_zero_vec(k_chunk);
+
+        // Single sequential pass for good cache behavior: scan left_vec contiguously.
+        for k in 0..k_chunk {
+            let base = k * rows_per_k;
+            let mut sum_k = F::zero();
+            for row in 0..rows_per_k {
+                let v = left_vec[base + row];
+                sum_k += v;
+                row_factors[row] += v;
+            }
+            eq_k[k] = sum_k;
+        }
+
+        (row_factors, eq_k)
+    }
+
+    /// Build per-polynomial folded one-hot tables: `table_poly[k] = coeff_poly * eq_k[k]`.
+    #[inline]
+    fn build_folded_onehot_tables(&self, eq_k: &[F]) -> VmvFoldedOneHotTables<F> {
+        let k_chunk = eq_k.len();
+        debug_assert_eq!(
+            k_chunk,
+            self.k_chunk_mask_usize + 1,
+            "eq_k length must match k_chunk"
+        );
+
+        let instruction_d = self.instruction_d;
+        let bytecode_d = self.bytecode_d;
+        let ram_d = self.ram_d;
+        let num_polys = instruction_d + bytecode_d + ram_d;
+
+        let mut tables: Vec<F> = unsafe_allocate_zero_vec(num_polys * k_chunk);
+
+        // Instruction tables
+        for i in 0..instruction_d {
+            let coeff = self.instruction_coeffs[i];
+            if coeff.is_zero() {
+                continue;
+            }
+            let base = i * k_chunk;
+            for k in 0..k_chunk {
+                tables[base + k] = coeff * eq_k[k];
+            }
+        }
+
+        // Bytecode tables
+        let bytecode_base_poly = instruction_d;
+        for i in 0..bytecode_d {
+            let coeff = self.bytecode_coeffs[i];
+            if coeff.is_zero() {
+                continue;
+            }
+            let base = (bytecode_base_poly + i) * k_chunk;
+            for k in 0..k_chunk {
+                tables[base + k] = coeff * eq_k[k];
+            }
+        }
+
+        // RAM tables
+        let ram_base_poly = instruction_d + bytecode_d;
+        for i in 0..ram_d {
+            let coeff = self.ram_coeffs[i];
+            if coeff.is_zero() {
+                continue;
+            }
+            let base = (ram_base_poly + i) * k_chunk;
+            for k in 0..k_chunk {
+                tables[base + k] = coeff * eq_k[k];
+            }
+        }
+
+        VmvFoldedOneHotTables {
+            k_chunk,
+            instruction_d,
+            bytecode_d,
+            ram_d,
+            tables,
+        }
+    }
+
     /// Build preprocessed coefficients from streaming context.
     /// Assumes ALL CommittedPolynomials are present.
     fn new(ctx: &'a StreamingRLCContext<F>) -> Self {
@@ -136,15 +279,15 @@ impl<'a, F: JoltField> VmvCoeffs<'a, F> {
     }
 
     /// Process a single cycle, accumulating into dense and one-hot accumulators.
-    /// No conditional checks - always processes both dense and one-hot.
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     fn process_cycle(
         &self,
         cycle: &Cycle,
         scaled_rd_inc: F,
         scaled_ram_inc: F,
-        row_base_ptr: *const F,
-        num_rows: usize,
+        row_factor: F,
+        folded_tables: &VmvFoldedOneHotTables<F>,
         dense_acc: &mut Acc6S<F>,
         onehot_acc: &mut F::Unreduced<9>,
     ) {
@@ -158,34 +301,43 @@ impl<'a, F: JoltField> VmvCoeffs<'a, F> {
             dense_acc.fmadd(&scaled_ram_inc, &diff);
         }
 
-        // One-hot polynomials: always process all chunks
+        // One-hot polynomials (γ-folded): accumulate inner sum using the pre-folded K tables,
+        // then multiply once by the per-row factor.
+        let k_chunk = folded_tables.k_chunk;
+        let tables = &folded_tables.tables;
+
+        let mut inner_sum = F::zero();
 
         // Instruction RA chunks
         let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
-        for i in 0..self.instruction_d {
+        for i in 0..folded_tables.instruction_d {
             let k =
                 ((lookup_index >> self.instruction_shifts[i]) & self.k_chunk_mask_u128) as usize;
-            let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-            *onehot_acc += left_val.mul_unreduced::<9>(self.instruction_coeffs[i]);
+            debug_assert!(k < k_chunk);
+            inner_sum += tables[i * k_chunk + k];
         }
 
         // Bytecode RA chunks
         let pc = self.bytecode.get_pc(cycle);
-        for i in 0..self.bytecode_d {
+        let bytecode_base = folded_tables.instruction_d;
+        for i in 0..folded_tables.bytecode_d {
             let k = (pc >> self.bytecode_shifts[i]) & self.k_chunk_mask_usize;
-            let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-            *onehot_acc += left_val.mul_unreduced::<9>(self.bytecode_coeffs[i]);
+            debug_assert!(k < k_chunk);
+            inner_sum += tables[(bytecode_base + i) * k_chunk + k];
         }
 
         // RAM RA chunks (may be None for non-memory cycles)
         let address = cycle.ram_access().address() as u64;
         if let Some(remapped) = remap_address(address, self.memory_layout) {
-            for i in 0..self.ram_d {
+            let ram_base = folded_tables.instruction_d + folded_tables.bytecode_d;
+            for i in 0..folded_tables.ram_d {
                 let k = ((remapped >> self.ram_shifts[i]) & self.k_chunk_mask_u64) as usize;
-                let left_val = unsafe { *row_base_ptr.add(k * num_rows) };
-                *onehot_acc += left_val.mul_unreduced::<9>(self.ram_coeffs[i]);
+                debug_assert!(k < k_chunk);
+                inner_sum += tables[(ram_base + i) * k_chunk + k];
             }
         }
+
+        *onehot_acc += row_factor.mul_unreduced::<9>(inner_sum);
     }
 
     /// Create empty accumulators for a VMV reduction. Always creates both.
@@ -740,12 +892,19 @@ impl<F: JoltField> RLCPolynomial<F> {
 
         // Preprocess coefficients once (hoisted out of parallel work).
         let coeffs = VmvCoeffs::new(ctx);
+        let k_chunk = ctx.one_hot_params.k_chunk;
+
+        // Precompute per-row factors and eq_k (size K) from the Dory left vector, then
+        // fold γ-coefficients into K-sized per-polynomial tables.
+        let (row_factors, eq_k) =
+            VmvCoeffs::<F>::compute_row_factors_and_eq_k(left_vec, num_rows, k_chunk);
+        let folded_onehot = coeffs.build_folded_onehot_tables(&eq_k);
 
         debug_assert!(
-            left_vec.len() >= ctx.one_hot_params.k_chunk * num_rows,
+            left_vec.len() >= k_chunk * num_rows,
             "left_vec too short for one-hot VMV: len={} need_at_least={}",
             left_vec.len(),
-            ctx.one_hot_params.k_chunk * num_rows
+            k_chunk * num_rows
         );
 
         // Divide rows evenly among threads.
@@ -769,13 +928,11 @@ impl<F: JoltField> RLCPolynomial<F> {
                 for row_idx in row_start..row_end {
                     let chunk_start = row_idx * num_columns;
                     let row_weight = left_vec[row_idx];
+                    let row_factor = row_factors[row_idx];
 
                     // Row-scaled dense coefficients (always present).
                     let scaled_rd_inc = row_weight * coeffs.rd_inc_coeff;
                     let scaled_ram_inc = row_weight * coeffs.ram_inc_coeff;
-
-                    // For one-hot access: left_vec[k * num_rows + row_idx]
-                    let row_base_ptr = unsafe { left_vec.as_ptr().add(row_idx) };
 
                     // Split into valid trace range vs padding range.
                     let valid_end = std::cmp::min(chunk_start + num_columns, trace_len);
@@ -791,8 +948,8 @@ impl<F: JoltField> RLCPolynomial<F> {
                             cycle,
                             scaled_rd_inc,
                             scaled_ram_inc,
-                            row_base_ptr,
-                            num_rows,
+                            row_factor,
+                            &folded_onehot,
                             &mut dense_accs[col_idx],
                             &mut onehot_accs[col_idx],
                         );
@@ -860,12 +1017,17 @@ impl<F: JoltField> RLCPolynomial<F> {
 
         // Preprocess coefficients once (hoisted out of parallel work).
         let coeffs = VmvCoeffs::new(ctx);
+        let k_chunk = ctx.one_hot_params.k_chunk;
+
+        let (row_factors, eq_k) =
+            VmvCoeffs::<F>::compute_row_factors_and_eq_k(left_vec, num_rows, k_chunk);
+        let folded_onehot = coeffs.build_folded_onehot_tables(&eq_k);
 
         debug_assert!(
-            left_vec.len() >= ctx.one_hot_params.k_chunk * num_rows,
+            left_vec.len() >= k_chunk * num_rows,
             "left_vec too short for one-hot VMV: len={} need_at_least={}",
             left_vec.len(),
-            ctx.one_hot_params.k_chunk * num_rows
+            k_chunk * num_rows
         );
 
         let (dense_accs, onehot_accs) = lazy_trace
@@ -877,9 +1039,9 @@ impl<F: JoltField> RLCPolynomial<F> {
                 || VmvCoeffs::<F>::create_accumulators(num_columns),
                 |(mut dense_accs, mut onehot_accs), (row_idx, chunk)| {
                     let row_weight = left_vec[row_idx];
+                    let row_factor = row_factors[row_idx];
                     let scaled_rd_inc = row_weight * coeffs.rd_inc_coeff;
                     let scaled_ram_inc = row_weight * coeffs.ram_inc_coeff;
-                    let row_base_ptr = unsafe { left_vec.as_ptr().add(row_idx) };
 
                     // Process columns within chunk sequentially.
                     for (col_idx, cycle) in chunk.iter().enumerate() {
@@ -887,8 +1049,8 @@ impl<F: JoltField> RLCPolynomial<F> {
                             cycle,
                             scaled_rd_inc,
                             scaled_ram_inc,
-                            row_base_ptr,
-                            num_rows,
+                            row_factor,
+                            &folded_onehot,
                             &mut dense_accs[col_idx],
                             &mut onehot_accs[col_idx],
                         );

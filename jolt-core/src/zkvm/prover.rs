@@ -147,9 +147,6 @@ pub struct JoltCpuProver<
     pub initial_ram_state: Vec<u64>,
     pub final_ram_state: Vec<u64>,
     pub one_hot_params: OneHotParams,
-    /// Joint commitment for testing (computed in Stage 7, used in proof for verification)
-    #[cfg(test)]
-    joint_commitment_for_test: Option<PCS::Commitment>,
 }
 impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscript: Transcript>
     JoltCpuProver<'a, F, PCS, ProofTranscript>
@@ -294,8 +291,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 preprocessing.bytecode.code_size,
                 ram_K,
             ),
-            #[cfg(test)]
-            joint_commitment_for_test: None,
         }
     }
 
@@ -372,8 +367,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             untrusted_advice_val_final_proof,
             stage7_sumcheck_proof,
             joint_opening_proof,
-            #[cfg(test)]
-            joint_commitment_for_test: self.joint_commitment_for_test.clone(),
             trace_length: self.trace.len(),
             ram_K: self.one_hot_params.ram_k,
             bytecode_K: self.one_hot_params.bytecode_k,
@@ -761,7 +754,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         print_current_memory_usage("Stage 4 baseline");
 
         let registers_read_write_checking_params = RegistersReadWriteCheckingParams::new(
-            self.trace.len().log_2(),
+            self.trace.len(),
             &self.opening_accumulator,
             &mut self.transcript,
         );
@@ -785,7 +778,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         let registers_read_write_checking = RegistersReadWriteCheckingProver::initialize(
             registers_read_write_checking_params,
-            &self.trace,
+            self.trace.clone(),
             &self.preprocessing.bytecode,
             &self.program_io.memory_layout,
         );

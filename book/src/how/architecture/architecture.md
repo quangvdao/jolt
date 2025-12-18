@@ -59,7 +59,6 @@ Similar to RAM, Jolt uses the Twist memory checking argument to handle reads/wri
 
 *For more details: [Registers](./registers.md)*
 
-
 #### Instruction execution
 
 To handle the "execute" part of the fetch-decode-execute loop, Jolt invokes the Shout lookup argument. The lookup table, in this case, effectively maps every instruction to its correct output.
@@ -110,9 +109,11 @@ It follows that input claims can be viewed as in-edges and output claims as out-
 
 ![dag](../../imgs/jolt_dag.png)
 
+> **Note:** For a detailed, up-to-date version of this DAG with edge labels showing the specific polynomials passed between sumchecks, see [Jolt Prover DAG](./jolt_dag.md).
+
 Note the white boxes corresponding to the five components of Jolt under the CPU paradigm –– plus an extra component for the [opening proof](./opening-proof.md), which doesn't have a CPU analogue.
 
-In the diagaram above, sumchecks are color-coded based on "batch"; sumchecks in the same batch are "run in parallel" (see [Batched sumcheck](../optimizations/batched-sumcheck.md)).
+In the diagram above, sumchecks are color-coded based on "batch"; sumchecks in the same batch are "run in parallel" (see [Batched sumcheck](../optimizations/batched-sumcheck.md)).
 Note that a given component may include sumchecks in different batches. For example, the three sumchecks in Spartan span stages 1, 2, and 3.
 
 This is codified by the `SumcheckStages` trait, which defines methods `stage1_prove`, `stage1_verify`, `stage2_prove`, `stage2_verify`, etc.

@@ -82,6 +82,15 @@ jobs:
         with:
           files: .
 
+  check-dag:
+    name: Check DAG documentation is up-to-date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Check DAG is up-to-date
+        run: cargo run -p jolt-core --bin generate-dag -- --check book/src/how/architecture/jolt_dag.md
+
   test-sdk:
     name: jolt binary check
     runs-on: ubuntu-latest

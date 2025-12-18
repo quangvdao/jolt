@@ -131,6 +131,7 @@ where
     FromPrimitive,
     Allocative,
     strum_macros::EnumCount,
+    strum_macros::EnumIter,
 )]
 #[repr(u8)]
 pub enum SumcheckId {

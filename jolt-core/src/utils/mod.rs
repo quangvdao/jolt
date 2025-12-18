@@ -4,6 +4,7 @@ use rayon::prelude::*;
 
 pub mod accumulation;
 pub mod counters;
+pub mod dag_generator;
 pub mod errors;
 pub mod expanding_table;
 pub mod gaussian_elimination;

@@ -1989,6 +1989,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rand_distr",
  "rayon",
+ "regex",
  "reqwest",
  "serde",
  "serial_test",

@@ -7,3 +7,6 @@ title = "JoltBook"
 
 [preprocessor.katex]
 after = ["links"]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

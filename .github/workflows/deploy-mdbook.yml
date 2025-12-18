@@ -28,6 +28,12 @@ jobs:
     - name: Install mdbook-katex
       run: cargo install mdbook-katex
 
+    - name: Install mdbook-mermaid
+      run: cargo install mdbook-mermaid
+
+    - name: Check DAG is up-to-date
+      run: cargo run -p jolt-core --bin generate-dag -- --check book/src/how/architecture/jolt_dag.md
+
     - run: mdbook build ./book
 
     - name: Deploy to Google Cloud Storage
@@ -44,6 +50,12 @@ jobs:
           mdbook-version: '0.4.10'
       - name: Install mdbook-katex
         run: cargo install mdbook-katex
+
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid
+
+      - name: Check DAG is up-to-date
+        run: cargo run -p jolt-core --bin generate-dag -- --check book/src/how/architecture/jolt_dag.md
 
       - run: mdbook build ./book
 

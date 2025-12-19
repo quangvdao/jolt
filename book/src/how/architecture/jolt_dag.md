@@ -84,20 +84,73 @@ flowchart TD
     %% ============ Stage 1 → Stage 2 ============
     SpartanOuter -->|"Product"| SpartanProductVirt
     %% ============ Stage 1 → Stage 3 ============
-    SpartanOuter -->|"NextPC"| SpartanShift
-    SpartanOuter -->|"Rs1Value, Rs2Value"| RegClaimRed
+    SpartanOuter -->|"NextIsFirstInSequence, NextIsVirtual, NextPC, NextUnexpandedPC"| SpartanShift
+    %% ============ Stage 1 → Stage 2 ============
+    SpartanOuter -->|"LeftLookupOperand, LookupOutput, RightLookupOperand"| InstrClaimRed
+    %% ============ Stage 1 → Stage 3 ============
+    SpartanOuter -->|"LeftInstructionInput, RightInstructionInput"| InstrInputVirt
+    %% ============ Stage 1 → Stage 2 ============
+    SpartanOuter -->|"RamReadValue, RamWriteValue"| RamRWCheck
+    SpartanOuter -->|"RamAddress"| RamRafEval
     %% ============ Stage 1 → Stage 6 ============
-    SpartanOuter -->|"Imm, PC"| BytecodeReadRaf
+    SpartanOuter -->|"LookupOutput"| RamHammingBool
+    %% ============ Stage 1 → Stage 3 ============
+    SpartanOuter -->|"LookupOutput, RdWriteValue, Rs1Value, Rs2Value"| RegClaimRed
+    %% ============ Stage 1 → Stage 6 ============
+    SpartanOuter -->|"Imm, OpFlags, PC, UnexpandedPC"| BytecodeReadRaf
+    %% ============ Stage 2 → Stage 3 ============
+    SpartanProductVirt -->|"NextIsNoop"| SpartanShift
+    SpartanProductVirt -->|"LeftInstructionInput, RightInstructionInput"| InstrInputVirt
+    %% ============ Stage 2 → Stage 5 ============
+    SpartanProductVirt -->|"LookupOutput"| InstrReadRaf
+    %% ============ Stage 2 → Stage 6 ============
+    SpartanProductVirt -->|"InstructionFlags, OpFlags"| BytecodeReadRaf
     %% ============ Stage 3 → Stage 6 ============
-    SpartanShift -->|"PC"| BytecodeReadRaf
+    SpartanShift -->|"InstructionFlags, OpFlags, PC, UnexpandedPC"| BytecodeReadRaf
+    %% ============ Stage 2 → Stage 5 ============
+    InstrClaimRed -->|"LeftLookupOperand, LookupOutput, RightLookupOperand"| InstrReadRaf
+    %% ============ Stage 3 → Stage 4 ============
+    InstrInputVirt -->|"Rs1Value, Rs2Value"| RegRWCheck
+    %% ============ Stage 3 → Stage 6 ============
+    InstrInputVirt -->|"Imm, InstructionFlags, UnexpandedPC"| BytecodeReadRaf
+    %% ============ Stage 5 → Stage 6 ============
+    InstrReadRaf -->|"InstructionRa"| InstrRaVirt
+    InstrReadRaf -->|"InstructionRafFlag, LookupTableFlag"| BytecodeReadRaf
+    InstrReadRaf -->|"InstructionRa"| Booleanity
+    %% ============ Stage 2 → Stage 4 ============
+    RamRWCheck -->|"RamVal"| RamValEval
+    %% ============ Stage 2 → Stage 5 ============
+    RamRWCheck -->|"RamRa"| RamRaClaimRed
+    %% ============ Stage 2 → Stage 6 ============
+    RamRWCheck -->|"RamInc"| IncClaimRed
     %% ============ Stage 2 → Stage 5 ============
     RamRafEval -->|"RamRa"| RamRaClaimRed
+    %% ============ Stage 2 → Stage 4 ============
+    RamOutCheck -->|"RamValFinal, RamValInit"| RamValFinal
     %% ============ Stage 4 → Stage 5 ============
     RamValEval -->|"RamRa"| RamRaClaimRed
     %% ============ Stage 4 → Stage 6 ============
-    RegRWCheck -->|"(deps)"| BytecodeReadRaf
+    RamValEval -->|"RamInc"| IncClaimRed
+    %% ============ Stage 4 → Stage 5 ============
+    RamValFinal -->|"RamRa"| RamRaClaimRed
+    %% ============ Stage 4 → Stage 6 ============
+    RamValFinal -->|"RamInc"| IncClaimRed
+    %% ============ Stage 5 → Stage 6 ============
+    RamRaClaimRed -->|"RamRa"| RamRaVirt
     %% ============ Stage 6 → Stage 7 ============
-    Booleanity -->|"(deps)"| HWClaimRed
+    RamHammingBool -->|"RamHammingWeight"| HWClaimRed
+    %% ============ Stage 3 → Stage 4 ============
+    RegClaimRed -->|"RdWriteValue, Rs1Value, Rs2Value"| RegRWCheck
+    %% ============ Stage 4 → Stage 5 ============
+    RegRWCheck -->|"RegistersVal"| RegValEval
+    %% ============ Stage 4 → Stage 6 ============
+    RegRWCheck -->|"RdWa, Rs1Ra"| BytecodeReadRaf
+    RegRWCheck -->|"RdInc"| IncClaimRed
+    %% ============ Stage 5 → Stage 6 ============
+    RegValEval -->|"RdWa"| BytecodeReadRaf
+    RegValEval -->|"RdInc"| IncClaimRed
+    %% ============ Stage 6 → Stage 7 ============
+    Booleanity -->|"InstructionRa"| HWClaimRed
 
     %% ============ Stage 7 → Stage 8 ============
     HWClaimRed -->|"All RA polys"| BatchOpening

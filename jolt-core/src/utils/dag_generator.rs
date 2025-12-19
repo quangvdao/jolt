@@ -177,6 +177,14 @@ pub fn sumcheck_display_name(id: SumcheckId) -> &'static str {
 }
 
 /// Parse a SumcheckId from its string representation
+/// Normalize function calls by collapsing newlines and extra whitespace
+/// This makes it easier to match multiline function calls with regex
+fn normalize_function_calls(content: &str) -> String {
+    // Replace newlines and multiple spaces with single space
+    let re = Regex::new(r"\s+").unwrap();
+    re.replace_all(content, " ").to_string()
+}
+
 fn parse_sumcheck_id(s: &str) -> Option<SumcheckId> {
     match s {
         "SpartanOuter" => Some(SumcheckId::SpartanOuter),
@@ -297,16 +305,18 @@ impl SumcheckDag {
         let file_mapping = file_to_sumcheck_mapping();
 
         // Regex to find get_*_opening calls with SumcheckId
+        // Uses (?s) for DOTALL mode so . matches newlines
         // Matches patterns like:
         //   get_virtual_polynomial_opening(VirtualPolynomial::X, SumcheckId::Y)
         //   .get_committed_polynomial_opening(CommittedPolynomial::X, SumcheckId::Y)
+        // even when split across multiple lines
         let opening_pattern = Regex::new(
-            r"get_(?:virtual|committed)_polynomial_opening\s*\(\s*(?:VirtualPolynomial|CommittedPolynomial)::(\w+)(?:\([^)]*\))?\s*,\s*SumcheckId::(\w+)\s*\)"
+            r"(?s)get_(?:virtual|committed)_polynomial_opening\s*\(\s*(?:VirtualPolynomial|CommittedPolynomial)::(\w+)(?:\([^)]*\))?\s*,\s*SumcheckId::(\w+)"
         ).unwrap();
 
-        // Also match the simpler pattern where polynomial is a variable
-        let opening_pattern_var = Regex::new(
-            r"get_(?:virtual|committed)_polynomial_opening\s*\([^,]+,\s*SumcheckId::(\w+)\s*\)"
+        // Also match pattern where SumcheckId is on the next line after the poly type
+        let opening_pattern_multiline = Regex::new(
+            r"(?s)get_(?:virtual|committed)_polynomial_opening\s*\([^,]+,\s*SumcheckId::(\w+)"
         ).unwrap();
 
         // Collect all edges: (from_sumcheck, to_sumcheck, polynomial_name)
@@ -327,8 +337,12 @@ impl SumcheckDag {
                 }
             };
 
+            // First, normalize content by collapsing newlines within function calls
+            // This makes regex matching easier
+            let normalized = normalize_function_calls(&content);
+
             // Find all get_*_opening calls with explicit polynomial type
-            for cap in opening_pattern.captures_iter(&content) {
+            for cap in opening_pattern.captures_iter(&normalized) {
                 let poly_name = cap.get(1).map(|m| m.as_str()).unwrap_or("unknown");
                 let source_sumcheck_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
@@ -346,7 +360,7 @@ impl SumcheckDag {
             }
 
             // Also find calls where polynomial is a variable (we can't extract the poly name)
-            for cap in opening_pattern_var.captures_iter(&content) {
+            for cap in opening_pattern_multiline.captures_iter(&normalized) {
                 let source_sumcheck_str = cap.get(1).map(|m| m.as_str()).unwrap_or("");
 
                 if let Some(source_sumcheck) = parse_sumcheck_id(source_sumcheck_str) {

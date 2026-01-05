@@ -17,4 +17,5 @@ pub mod range_mask_polynomial;
 pub mod rlc_polynomial;
 pub mod shared_ra_polys;
 pub mod split_eq_poly;
+pub mod split_lt_poly;
 pub mod unipoly;

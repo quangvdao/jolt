@@ -6,13 +6,13 @@ use crate::{
     field::JoltField,
     poly::{
         eq_poly::EqPolynomial,
-        lt_poly::LtPolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
         },
         ra_poly::RaPolynomial,
+        split_lt_poly::SplitLtPolynomial,
         unipoly::UniPoly,
     },
     subprotocols::{
@@ -97,7 +97,7 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RegistersValEvaluationSumcheckP
 pub struct ValEvaluationSumcheckProver<F: JoltField> {
     inc: MultilinearPolynomial<F>,
     wa: RaPolynomial<u8, F>,
-    lt: LtPolynomial<F>,
+    lt: SplitLtPolynomial<F>,
     pub params: RegistersValEvaluationSumcheckParams<F>,
 }
 
@@ -125,7 +125,7 @@ impl<F: JoltField> ValEvaluationSumcheckProver<F> {
             })
             .collect();
         let wa = RaPolynomial::new(Arc::new(wa), eq_r_address);
-        let lt = LtPolynomial::new(&params.r_cycle);
+        let lt = SplitLtPolynomial::new(&params.r_cycle.r, BindingOrder::LowToHigh);
 
         Self {
             inc,
@@ -146,6 +146,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ValEvaluation
         name = "RegistersValEvaluationSumcheckProver::compute_message"
     )]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
+        // Standard 3-point evaluation using split-LT structure for efficient LT lookups
         let [eval_at_1, eval_at_2, eval_at_inf] = (0..self.inc.len() / 2)
             .into_par_iter()
             .map(|j| {
@@ -157,6 +158,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ValEvaluation
                 let wa_at_inf_j = wa_at_1_j - self.wa.get_bound_coeff(2 * j);
                 let wa_at_2_j = wa_at_1_j + wa_at_inf_j;
 
+                // Use split-LT's get_bound_coeff for efficient LT lookups
                 let lt_at_1_j = self.lt.get_bound_coeff(2 * j + 1);
                 let lt_at_inf_j = lt_at_1_j - self.lt.get_bound_coeff(2 * j);
                 let lt_at_2_j = lt_at_1_j + lt_at_inf_j;
@@ -185,7 +187,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ValEvaluation
     fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         self.inc.bind_parallel(r_j, BindingOrder::LowToHigh);
         self.wa.bind_parallel(r_j, BindingOrder::LowToHigh);
-        self.lt.bind(r_j, BindingOrder::LowToHigh);
+        self.lt.bind(r_j);
     }
 
     fn cache_openings(

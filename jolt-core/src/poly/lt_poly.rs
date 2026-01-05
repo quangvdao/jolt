@@ -74,7 +74,7 @@ impl<F: JoltField> LtPolynomial<F> {
 /// where the sum runs from MSB to LSB.
 ///
 /// This function computes `[LT(0, r), LT(1, r), ..., LT(2^n - 1, r)]`.
-fn lt_evals<F: JoltField>(r: &OpeningPoint<BIG_ENDIAN, F>) -> Vec<F> {
+pub fn lt_evals<F: JoltField>(r: &OpeningPoint<BIG_ENDIAN, F>) -> Vec<F> {
     let mut evals: Vec<F> = vec![F::zero(); 1 << r.len()];
     for (i, r) in r.r.iter().rev().enumerate() {
         let (evals_left, evals_right) = evals.split_at_mut(1 << i);
@@ -84,6 +84,69 @@ fn lt_evals<F: JoltField>(r: &OpeningPoint<BIG_ENDIAN, F>) -> Vec<F> {
         });
     }
     evals
+}
+
+/// Returns LT suffix tables and EQ suffix tables for the given challenges.
+///
+/// The tables are built from LSB to MSB (processing r[n-1] first, then r[n-2], etc.),
+/// which matches the index ordering used by [`lt_evals`].
+///
+/// - `lt_result[k]` = LT evals over the last k variables (r[n-k:])
+/// - `eq_result[k]` = EQ evals over the last k variables (r[n-k:])
+///
+/// Index convention matches [`lt_evals`]:
+/// - `lt_result[0] = [0]` (LT over 0 vars is always 0)
+/// - `eq_result[0] = [1]` (EQ over 0 vars is always 1)
+/// - `lt_result[k]` has `2^k` entries
+///
+/// The recurrence (processing from LSB r[n-1] to MSB r[0]):
+/// For x with new MSB = 0: new_LT = old_LT * (1 - r_new) + r_new
+/// For x with new MSB = 1: new_LT = old_LT * r_new
+pub fn lt_evals_cached<F: JoltField>(
+    r: &[F::Challenge],
+) -> (Vec<Vec<F>>, Vec<Vec<F>>) {
+    let n = r.len();
+    let mut lt_tables: Vec<Vec<F>> = Vec::with_capacity(n + 1);
+    let mut eq_tables: Vec<Vec<F>> = Vec::with_capacity(n + 1);
+
+    // Base case: 0 variables
+    lt_tables.push(vec![F::zero()]); // LT over 0 vars is 0
+    eq_tables.push(vec![F::one()]); // EQ over 0 vars is 1
+
+    // Build tables from LSB (r[n-1]) to MSB (r[0]), matching lt_evals
+    for k in 0..n {
+        let r_k: F = r[n - 1 - k].into(); // Process from end to start
+        let one_minus_r_k = F::one() - r_k;
+        let prev_size = 1 << k;
+
+        // Allocate new tables with doubled size
+        let mut lt_curr = vec![F::zero(); prev_size * 2];
+        let mut eq_curr = vec![F::zero(); prev_size * 2];
+
+        let lt_prev = &lt_tables[k];
+        let eq_prev = &eq_tables[k];
+
+        // For each previous index, extend with new MSB bit
+        for i in 0..prev_size {
+            let lt_old = lt_prev[i];
+            let eq_old = eq_prev[i];
+
+            // Index i stays at position i (new MSB = 0)
+            // new_LT = old_LT * (1 - r_k) + r_k
+            lt_curr[i] = lt_old * one_minus_r_k + r_k;
+            eq_curr[i] = eq_old * one_minus_r_k;
+
+            // Index i + prev_size gets new MSB = 1
+            // new_LT = old_LT * r_k
+            lt_curr[i + prev_size] = lt_old * r_k;
+            eq_curr[i + prev_size] = eq_old * r_k;
+        }
+
+        lt_tables.push(lt_curr);
+        eq_tables.push(eq_curr);
+    }
+
+    (lt_tables, eq_tables)
 }
 
 #[cfg(test)]
@@ -98,7 +161,7 @@ mod tests {
         },
     };
 
-    use super::{lt_evals, LtPolynomial};
+    use super::{lt_evals, lt_evals_cached, LtPolynomial};
 
     #[test]
     fn test_bind_low_to_high_works() {
@@ -136,5 +199,64 @@ mod tests {
         lt_poly.bind(r3, BindingOrder::HighToLow);
 
         assert_eq!(lt_poly.get_bound_coeff(0), lt_poly_gt.evaluate(&r.r));
+    }
+
+    #[test]
+    fn test_lt_evals_cached() {
+        use crate::poly::eq_poly::EqPolynomial;
+
+        // Test that lt_evals_cached produces correct suffix tables
+        // Tables are built from LSB to MSB, so lt_tables[k] represents
+        // LT over the last k variables (r[n-k:])
+        let r_cycle: OpeningPoint<BIG_ENDIAN, Fr> =
+            OpeningPoint::new([9, 5, 7, 1].map(MontU128Challenge::from).to_vec());
+        let (lt_tables, eq_tables) = lt_evals_cached::<Fr>(&r_cycle.r);
+        let n = r_cycle.len();
+
+        // Should have n+1 tables (0 to n variables)
+        assert_eq!(lt_tables.len(), n + 1);
+        assert_eq!(eq_tables.len(), n + 1);
+
+        // Base case checks
+        assert_eq!(lt_tables[0], vec![Fr::from(0u64)]);
+        assert_eq!(eq_tables[0], vec![Fr::from(1u64)]);
+
+        // Verify each suffix table matches the direct computation
+        // lt_tables[k] = LT over r[n-k:]
+        for k in 1..=n {
+            let r_suffix = OpeningPoint::<BIG_ENDIAN, Fr>::new(r_cycle.r[n - k..].to_vec());
+            let lt_direct = lt_evals::<Fr>(&r_suffix);
+            let eq_direct = EqPolynomial::<Fr>::evals(&r_suffix.r);
+
+            assert_eq!(
+                lt_tables[k], lt_direct,
+                "LT table mismatch at k={k}"
+            );
+            assert_eq!(
+                eq_tables[k], eq_direct,
+                "EQ table mismatch at k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lt_evals_cached_final_matches_lt_evals() {
+        type Challenge = MontU128Challenge<Fr>;
+        // Verify the final table of lt_evals_cached matches lt_evals
+        for num_vars in 1..=8 {
+            let r: Vec<Challenge> = (0..num_vars)
+                .map(|i| Challenge::from((i * 7 + 3) as u128))
+                .collect();
+            let r_point = OpeningPoint::<BIG_ENDIAN, Fr>::new(r.clone());
+
+            let (lt_tables, _) = lt_evals_cached::<Fr>(&r);
+            let lt_direct = lt_evals::<Fr>(&r_point);
+
+            assert_eq!(
+                *lt_tables.last().unwrap(),
+                lt_direct,
+                "Final LT table mismatch for num_vars={num_vars}"
+            );
+        }
     }
 }

@@ -5,11 +5,54 @@ use crate::field::JoltField;
 // Accumulation primitives for SVO (moved from zkvm/r1cs/types.rs)
 pub mod accum {
     use crate::field::{JoltField, MulTrunc};
-    use ark_ff::biginteger::{I8OrI96, S160, S224};
+    use ark_ff::biginteger::{BigInt, BigInteger, S96 as I8OrI96, S160, S224};
     use num_traits::Zero;
 
     /// Final unreduced product after multiplying by a 256-bit field element (512-bit unsigned)
     pub type UnreducedProduct<F> = <F as JoltField>::Unreduced<8>;
+
+    /// Widening multiplication `Az (<=96b) * Bz (<=160b) -> S224`.
+    ///
+    /// Newer `ark-ff` versions removed `I8OrI96` and do not provide a mixed-width `Mul`
+    /// for `S96 * S160`. This helper reproduces the old behavior by packing magnitudes
+    /// into `BigInt<4>` (u256), multiplying via `mul_low`, and then packing into `S224`.
+    #[inline(always)]
+    pub fn mul_az_bz_widen(az: I8OrI96, bz: S160) -> S224 {
+        if az.is_zero() || bz.is_zero() {
+            return S224::zero();
+        }
+
+        let is_positive = az.is_positive() == bz.is_positive();
+
+        // Pack magnitudes into u256 limbs.
+        // For SignedBigIntHi32, the 32-bit head is stored separately; treat it as an extra u64 limb.
+        let az_mag = BigInt::<4>([
+            az.magnitude_lo()[0],
+            az.magnitude_hi() as u64,
+            0u64,
+            0u64,
+        ]);
+        let bz_mag = BigInt::<4>([
+            bz.magnitude_lo()[0],
+            bz.magnitude_lo()[1],
+            bz.magnitude_hi() as u64,
+            0u64,
+        ]);
+
+        // Product is exact as long as it fits in the low 256 bits (true under our SVO bounds).
+        let prod = az_mag.mul_low(&bz_mag);
+        debug_assert_eq!(
+            prod.0[3] >> 32,
+            0,
+            "Az*Bz overflowed S224 head (top 32 bits of limb3 must be zero)"
+        );
+
+        S224::new(
+            [prod.0[0], prod.0[1], prod.0[2]],
+            (prod.0[3] & 0xFFFF_FFFF) as u32,
+            is_positive,
+        )
+    }
 
     /// Fused multiply-add into unreduced accumulators.
     #[inline(always)]
@@ -59,7 +102,7 @@ pub mod accum {
             self.neg = UnreducedProduct::<F>::zero();
         }
 
-        /// fmadd with an `I8OrI96` (signed, up to 2 limbs)
+        /// fmadd with an `I8OrI96`-compatible value (now `S96` in arkworks)
         #[inline(always)]
         pub fn fmadd_az(&mut self, field: &F, az: I8OrI96) {
             if az.is_zero() {
@@ -69,9 +112,12 @@ pub mod accum {
             if az == I8OrI96::one() {
                 self.pos += *field.as_unreduced_ref();
             } else {
-                let abs = az.unsigned_abs();
+                // S96 is sign-magnitude with a 32-bit head: total width is 96 bits.
+                // Convert magnitude to u128 for mul_u128_unreduced.
+                let abs: u128 =
+                    (az.magnitude_lo()[0] as u128) | ((az.magnitude_hi() as u128) << 64);
                 let term = (*field).mul_u128_unreduced(abs);
-                if az.to_i128() >= 0 {
+                if az.is_positive() {
                     self.pos += term;
                 } else {
                     self.neg += term;
@@ -129,9 +175,9 @@ pub mod accum {
 }
 
 pub mod svo_helpers {
-    use super::accum::{fmadd_unreduced, UnreducedProduct};
+    use super::accum::{fmadd_unreduced, mul_az_bz_widen, UnreducedProduct};
     use super::*;
-    use ark_ff::biginteger::{I8OrI96, S160};
+    use ark_ff::biginteger::{S96 as I8OrI96, S160};
 
     // SVOEvalPoint enum definition
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -523,7 +569,7 @@ pub mod svo_helpers {
             // No need for this - `bz_ext` is less likely to be zero than `az_ext`
             // if bz_ext.is_zero() { continue; }
 
-            let prod = az_ext * bz_ext;
+            let prod = mul_az_bz_widen(az_ext, bz_ext);
             fmadd_unreduced::<F>(
                 &mut tA_pos_acc[i_temp_tA],
                 &mut tA_neg_acc[i_temp_tA],
@@ -570,25 +616,25 @@ pub mod svo_helpers {
 
         // 1. (0,I) -> tA[0]
         if !az_0i.is_zero() && !bz_0i.is_zero() {
-            let prod = az_0i * bz_0i;
+            let prod = mul_az_bz_widen(az_0i, bz_0i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[0], &mut tA_neg_acc[0], e_in_val, prod);
         }
 
         // 2. (1,I) -> tA[1]
         if !az_1i.is_zero() && !bz_1i.is_zero() {
-            let prod = az_1i * bz_1i;
+            let prod = mul_az_bz_widen(az_1i, bz_1i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[1], &mut tA_neg_acc[1], e_in_val, prod);
         }
 
         // 3. (I,0) -> tA[2]
         if !az_i0.is_zero() && !bz_i0.is_zero() {
-            let prod = az_i0 * bz_i0;
+            let prod = mul_az_bz_widen(az_i0, bz_i0);
             fmadd_unreduced::<F>(&mut tA_pos_acc[2], &mut tA_neg_acc[2], e_in_val, prod);
         }
 
         // 4. (I,1) -> tA[3]
         if !az_i1.is_zero() && !bz_i1.is_zero() {
-            let prod = az_i1 * bz_i1;
+            let prod = mul_az_bz_widen(az_i1, bz_i1);
             fmadd_unreduced::<F>(&mut tA_pos_acc[3], &mut tA_neg_acc[3], e_in_val, prod);
         }
 
@@ -596,7 +642,7 @@ pub mod svo_helpers {
         let az_ii = az_1i - az_0i;
         let bz_ii = bz_1i - bz_0i;
         if !az_ii.is_zero() && !bz_ii.is_zero() {
-            let prod = az_ii * bz_ii;
+            let prod = mul_az_bz_widen(az_ii, bz_ii);
             fmadd_unreduced::<F>(&mut tA_pos_acc[4], &mut tA_neg_acc[4], e_in_val, prod);
         }
     }
@@ -637,133 +683,133 @@ pub mod svo_helpers {
         let az_00i = az001 - az000;
         let bz_00i = bz001 - bz000;
         if !az_00i.is_zero() && !bz_00i.is_zero() {
-            let prod = az_00i * bz_00i;
+            let prod = mul_az_bz_widen(az_00i, bz_00i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[0], &mut tA_neg_acc[0], e_in_val, prod);
         }
 
         let az_01i = az011 - az010;
         let bz_01i = bz011 - bz010;
         if !az_01i.is_zero() && !bz_01i.is_zero() {
-            let prod = az_01i * bz_01i;
+            let prod = mul_az_bz_widen(az_01i, bz_01i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[1], &mut tA_neg_acc[1], e_in_val, prod);
         }
 
         let az_0i0 = az010 - az000;
         let bz_0i0 = bz010 - bz000;
         if !az_0i0.is_zero() && !bz_0i0.is_zero() {
-            let prod = az_0i0 * bz_0i0;
+            let prod = mul_az_bz_widen(az_0i0, bz_0i0);
             fmadd_unreduced::<F>(&mut tA_pos_acc[2], &mut tA_neg_acc[2], e_in_val, prod);
         }
 
         let az_0i1 = az011 - az001;
         let bz_0i1 = bz011 - bz001;
         if !az_0i1.is_zero() && !bz_0i1.is_zero() {
-            let prod = az_0i1 * bz_0i1;
+            let prod = mul_az_bz_widen(az_0i1, bz_0i1);
             fmadd_unreduced::<F>(&mut tA_pos_acc[3], &mut tA_neg_acc[3], e_in_val, prod);
         }
 
         let az_0ii = az_01i - az_00i;
         let bz_0ii = bz_01i - bz_00i;
         if !az_0ii.is_zero() && !bz_0ii.is_zero() {
-            let prod = az_0ii * bz_0ii;
+            let prod = mul_az_bz_widen(az_0ii, bz_0ii);
             fmadd_unreduced::<F>(&mut tA_pos_acc[4], &mut tA_neg_acc[4], e_in_val, prod);
         }
 
         let az_10i = az101 - az100;
         let bz_10i = bz101 - bz100;
         if !az_10i.is_zero() && !bz_10i.is_zero() {
-            let prod = az_10i * bz_10i;
+            let prod = mul_az_bz_widen(az_10i, bz_10i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[5], &mut tA_neg_acc[5], e_in_val, prod);
         }
 
         let az_11i = az111 - az110;
         let bz_11i = bz111 - bz110;
         if !az_11i.is_zero() && !bz_11i.is_zero() {
-            let prod = az_11i * bz_11i;
+            let prod = mul_az_bz_widen(az_11i, bz_11i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[6], &mut tA_neg_acc[6], e_in_val, prod);
         }
 
         let az_1i0 = az110 - az100;
         let bz_1i0 = bz110 - bz100;
         if !az_1i0.is_zero() && !bz_1i0.is_zero() {
-            let prod = az_1i0 * bz_1i0;
+            let prod = mul_az_bz_widen(az_1i0, bz_1i0);
             fmadd_unreduced::<F>(&mut tA_pos_acc[7], &mut tA_neg_acc[7], e_in_val, prod);
         }
 
         let az_1i1 = az111 - az101;
         let bz_1i1 = bz111 - bz101;
         if !az_1i1.is_zero() && !bz_1i1.is_zero() {
-            let prod = az_1i1 * bz_1i1;
+            let prod = mul_az_bz_widen(az_1i1, bz_1i1);
             fmadd_unreduced::<F>(&mut tA_pos_acc[8], &mut tA_neg_acc[8], e_in_val, prod);
         }
 
         let az_1ii = az_11i - az_10i;
         let bz_1ii = bz_11i - bz_10i;
         if !az_1ii.is_zero() && !bz_1ii.is_zero() {
-            let prod = az_1ii * bz_1ii;
+            let prod = mul_az_bz_widen(az_1ii, bz_1ii);
             fmadd_unreduced::<F>(&mut tA_pos_acc[9], &mut tA_neg_acc[9], e_in_val, prod);
         }
 
         let az_i00 = az100 - az000;
         let bz_i00 = bz100 - bz000;
         if !az_i00.is_zero() && !bz_i00.is_zero() {
-            let prod = az_i00 * bz_i00;
+            let prod = mul_az_bz_widen(az_i00, bz_i00);
             fmadd_unreduced::<F>(&mut tA_pos_acc[10], &mut tA_neg_acc[10], e_in_val, prod);
         }
 
         let az_i01 = az101 - az001;
         let bz_i01 = bz101 - bz001;
         if !az_i01.is_zero() && !bz_i01.is_zero() {
-            let prod = az_i01 * bz_i01;
+            let prod = mul_az_bz_widen(az_i01, bz_i01);
             fmadd_unreduced::<F>(&mut tA_pos_acc[11], &mut tA_neg_acc[11], e_in_val, prod);
         }
 
         let az_i0i = az_i01 - az_i00;
         let bz_i0i = bz_i01 - bz_i00;
         if !az_i0i.is_zero() && !bz_i0i.is_zero() {
-            let prod = az_i0i * bz_i0i;
+            let prod = mul_az_bz_widen(az_i0i, bz_i0i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[12], &mut tA_neg_acc[12], e_in_val, prod);
         }
 
         let az_i10 = az110 - az010;
         let bz_i10 = bz110 - bz010;
         if !az_i10.is_zero() && !bz_i10.is_zero() {
-            let prod = az_i10 * bz_i10;
+            let prod = mul_az_bz_widen(az_i10, bz_i10);
             fmadd_unreduced::<F>(&mut tA_pos_acc[13], &mut tA_neg_acc[13], e_in_val, prod);
         }
 
         let az_i11 = az111 - az011;
         let bz_i11 = bz111 - bz011;
         if !az_i11.is_zero() && !bz_i11.is_zero() {
-            let prod = az_i11 * bz_i11;
+            let prod = mul_az_bz_widen(az_i11, bz_i11);
             fmadd_unreduced::<F>(&mut tA_pos_acc[14], &mut tA_neg_acc[14], e_in_val, prod);
         }
 
         let az_i1i = az_i11 - az_i10;
         let bz_i1i = bz_i11 - bz_i10;
         if !az_i1i.is_zero() && !bz_i1i.is_zero() {
-            let prod = az_i1i * bz_i1i;
+            let prod = mul_az_bz_widen(az_i1i, bz_i1i);
             fmadd_unreduced::<F>(&mut tA_pos_acc[15], &mut tA_neg_acc[15], e_in_val, prod);
         }
 
         let az_ii0 = az_1i0 - az_0i0;
         let bz_ii0 = bz_1i0 - bz_0i0;
         if !az_ii0.is_zero() && !bz_ii0.is_zero() {
-            let prod = az_ii0 * bz_ii0;
+            let prod = mul_az_bz_widen(az_ii0, bz_ii0);
             fmadd_unreduced::<F>(&mut tA_pos_acc[16], &mut tA_neg_acc[16], e_in_val, prod);
         }
 
         let az_ii1 = az_1i1 - az_0i1;
         let bz_ii1 = bz_1i1 - bz_0i1;
         if !az_ii1.is_zero() && !bz_ii1.is_zero() {
-            let prod = az_ii1 * bz_ii1;
+            let prod = mul_az_bz_widen(az_ii1, bz_ii1);
             fmadd_unreduced::<F>(&mut tA_pos_acc[17], &mut tA_neg_acc[17], e_in_val, prod);
         }
 
         let az_iii = az_1ii - az_0ii;
         let bz_iii = bz_1ii - bz_0ii;
         if !az_iii.is_zero() && !bz_iii.is_zero() {
-            let prod = az_iii * bz_iii;
+            let prod = mul_az_bz_widen(az_iii, bz_iii);
             fmadd_unreduced::<F>(&mut tA_pos_acc[18], &mut tA_neg_acc[18], e_in_val, prod);
         }
     }
@@ -843,7 +889,7 @@ pub mod svo_helpers {
         if !az_I.is_zero() {
             let bz_I = binary_bz_evals[1] - binary_bz_evals[0];
             if !bz_I.is_zero() {
-                let prod = az_I * bz_I;
+                let prod = mul_az_bz_widen(az_I, bz_I);
                 fmadd_unreduced::<F>(&mut tA_pos_acc[0], &mut tA_neg_acc[0], e_in_val, prod);
             }
         }
@@ -1483,16 +1529,25 @@ mod tests {
 
     use crate::{field::JoltField, poly::eq_poly::EqPolynomial};
     use ark_bn254::Fr;
-    use ark_ff::biginteger::{I8OrI96, S160};
+    use ark_ff::biginteger::{S96 as I8OrI96, S160};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
 
+    #[inline]
+    fn i8_or_i96_from_i128(val: i128) -> I8OrI96 {
+        let is_positive = val.is_positive();
+        let mag: u128 = val.unsigned_abs();
+        let lo = mag as u64;
+        let hi = (mag >> 64) as u32;
+        I8OrI96::new([lo], hi, is_positive)
+    }
+
     fn random_az_value<R: Rng>(rng: &mut R) -> I8OrI96 {
         match rng.gen_range(0..5) {
-            0 => I8OrI96::from_i8(rng.gen()),
-            1 => I8OrI96::from_i8(0), // zero
-            2 => I8OrI96::from_i8(1), // one
-            3 => I8OrI96::from_i128(rng.gen::<i64>() as i128),
+            0 => I8OrI96::from(rng.gen::<i8>() as i64),
+            1 => I8OrI96::from(0i64), // zero
+            2 => I8OrI96::one(),      // one
+            3 => I8OrI96::from(rng.gen::<i64>()),
             4 => {
                 // Bounded 90-bit magnitude to ensure it always fits in I8OrI96,
                 // and give headroom so differences during extension remain within 96 bits.
@@ -1504,7 +1559,7 @@ mod tests {
                 };
                 let mag = (rng.gen::<u128>() & mask) as i128;
                 let val = if rng.gen::<bool>() { mag } else { -mag };
-                I8OrI96::from_i128(val)
+                i8_or_i96_from_i128(val)
             }
             _ => unreachable!(),
         }

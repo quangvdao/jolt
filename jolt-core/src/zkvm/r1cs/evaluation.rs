@@ -37,7 +37,7 @@
 //! - Test-only `assert_constraints` methods validate that Az guards imply zero
 //!   Bz magnitudes for both groups.
 
-use ark_ff::biginteger::{I8OrI96, S128, S160, S192, S256, S64};
+use ark_ff::biginteger::{S128, S160, S192, S256, S64};
 use ark_std::Zero;
 use rayon::prelude::*;
 use strum::IntoEnumIterator;
@@ -46,23 +46,23 @@ use tracer::instruction::Cycle;
 use crate::field::{BarrettReduce, FMAdd, JoltField};
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::lagrange_poly::LagrangeHelper;
-use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
 use crate::subprotocols::univariate_skip::uniskip_targets;
-use crate::utils::small_scalar::SmallScalar;
 use crate::utils::{
     accumulation::{Acc5U, Acc6S, Acc6U, Acc7S, Acc7U, S128Sum, S192Sum},
     math::s64_from_diff_u64s,
+    small_scalar::SmallScalar,
 };
 use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::instruction::{CircuitFlags, NUM_CIRCUIT_FLAGS};
 use crate::zkvm::r1cs::inputs::ProductCycleInputs;
 
-use super::constraints::{NamedR1CSConstraint, R1CSConstraintLabel};
 use super::constraints::{
     NUM_PRODUCT_VIRTUAL, OUTER_UNIVARIATE_SKIP_DEGREE, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
     PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
+#[cfg(test)]
+use super::constraints::{R1CS_CONSTRAINTS_FIRST_GROUP, R1CS_CONSTRAINTS_SECOND_GROUP};
 use super::inputs::{JoltR1CSInputs, R1CSCycleInputs, ALL_R1CS_INPUTS, NUM_R1CS_INPUTS};
 
 pub(crate) const UNISKIP_TARGETS: [i64; OUTER_UNIVARIATE_SKIP_DEGREE] =
@@ -141,6 +141,29 @@ pub struct AzFirstGroup {
     pub must_start_sequence: bool, // NextIsVirtual && !NextIsFirstInSequence
 }
 
+impl AzFirstGroup {
+    /// Fused multiply-add into an unreduced accumulator using Lagrange weights `w`
+    /// over the univariate-skip base window. This mirrors `az_at_r_first_group`
+    /// but keeps the result in an `Acc5U` accumulator without reducing.
+    #[inline(always)]
+    pub fn fmadd_at_r<F: JoltField>(
+        &self,
+        w: &[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE],
+        acc: &mut Acc5U<F>,
+    ) {
+        acc.fmadd(&w[0], &self.not_load_store);
+        acc.fmadd(&w[1], &self.load_a);
+        acc.fmadd(&w[2], &self.load_b);
+        acc.fmadd(&w[3], &self.store);
+        acc.fmadd(&w[4], &self.add_sub_mul);
+        acc.fmadd(&w[5], &self.not_add_sub_mul);
+        acc.fmadd(&w[6], &self.assert_flag);
+        acc.fmadd(&w[7], &self.should_jump);
+        acc.fmadd(&w[8], &self.virtual_instruction);
+        acc.fmadd(&w[9], &self.must_start_sequence);
+    }
+}
+
 /// Magnitudes for the first group (kept small: bool/u64/S64)
 #[derive(Clone, Copy, Debug)]
 pub struct BzFirstGroup {
@@ -154,6 +177,29 @@ pub struct BzFirstGroup {
     pub next_unexp_pc_minus_lookup_output: S64,      // NextUnexpandedPC - LookupOutput
     pub next_pc_minus_pc_plus_one: S64,              // NextPC - (PC + 1)
     pub one_minus_do_not_update_unexpanded_pc: bool, // 1 - DoNotUpdateUnexpandedPC
+}
+
+impl BzFirstGroup {
+    /// Fused multiply-add into an unreduced accumulator using Lagrange weights `w`
+    /// over the univariate-skip base window. This mirrors `bz_at_r_first_group`
+    /// but keeps the result in an `Acc6S` accumulator without reducing.
+    #[inline(always)]
+    pub fn fmadd_at_r<F: JoltField>(
+        &self,
+        w: &[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE],
+        acc: &mut Acc6S<F>,
+    ) {
+        acc.fmadd(&w[0], &self.ram_addr);
+        acc.fmadd(&w[1], &self.ram_read_minus_ram_write);
+        acc.fmadd(&w[2], &self.ram_read_minus_rd_write);
+        acc.fmadd(&w[3], &self.rs2_minus_ram_write);
+        acc.fmadd(&w[4], &self.left_lookup);
+        acc.fmadd(&w[5], &self.left_lookup_minus_left_input);
+        acc.fmadd(&w[6], &self.lookup_output_minus_one);
+        acc.fmadd(&w[7], &self.next_unexp_pc_minus_lookup_output);
+        acc.fmadd(&w[8], &self.next_pc_minus_pc_plus_one);
+        acc.fmadd(&w[9], &self.one_minus_do_not_update_unexpanded_pc);
+    }
 }
 
 /// Guards for the second group (all booleans except two u8 flags)
@@ -170,6 +216,28 @@ pub struct AzSecondGroup {
     pub not_jump_or_branch: bool,     // !(Jump || ShouldBranch)
 }
 
+impl AzSecondGroup {
+    /// Fused multiply-add into an unreduced accumulator using Lagrange weights `w`
+    /// over the univariate-skip base window. This mirrors `az_at_r_second_group`
+    /// but keeps the result in an `Acc5U` accumulator without reducing.
+    #[inline(always)]
+    pub fn fmadd_at_r<F: JoltField>(
+        &self,
+        w: &[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE],
+        acc: &mut Acc5U<F>,
+    ) {
+        acc.fmadd(&w[0], &self.load_or_store);
+        acc.fmadd(&w[1], &self.add);
+        acc.fmadd(&w[2], &self.sub);
+        acc.fmadd(&w[3], &self.mul);
+        acc.fmadd(&w[4], &self.not_add_sub_mul_advice);
+        acc.fmadd(&w[5], &self.write_lookup_to_rd);
+        acc.fmadd(&w[6], &self.write_pc_to_rd);
+        acc.fmadd(&w[7], &self.should_branch);
+        acc.fmadd(&w[8], &self.not_jump_or_branch);
+    }
+}
+
 /// Magnitudes for the second group (mixed precision up to S160)
 #[derive(Clone, Copy, Debug)]
 pub struct BzSecondGroup {
@@ -182,6 +250,28 @@ pub struct BzSecondGroup {
     pub rd_write_minus_pc_plus_const: S64, // RdWrite - (UnexpandedPC + const)
     pub next_unexp_pc_minus_pc_plus_imm: i128, // NextUnexpandedPC - (UnexpandedPC + Imm)
     pub next_unexp_pc_minus_expected: S64, // NextUnexpandedPC - (UnexpandedPC + const)
+}
+
+impl BzSecondGroup {
+    /// Fused multiply-add into an unreduced accumulator using Lagrange weights `w`
+    /// over the univariate-skip base window. This mirrors `bz_at_r_second_group`
+    /// but keeps the result in an `Acc7S` accumulator without reducing.
+    #[inline(always)]
+    pub fn fmadd_at_r<F: JoltField>(
+        &self,
+        w: &[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE],
+        acc: &mut Acc7S<F>,
+    ) {
+        acc.fmadd(&w[0], &self.ram_addr_minus_rs1_plus_imm);
+        acc.fmadd(&w[1], &self.right_lookup_minus_add_result);
+        acc.fmadd(&w[2], &self.right_lookup_minus_sub_result);
+        acc.fmadd(&w[3], &self.right_lookup_minus_product);
+        acc.fmadd(&w[4], &self.right_lookup_minus_right_input);
+        acc.fmadd(&w[5], &self.rd_write_minus_lookup_output);
+        acc.fmadd(&w[6], &self.rd_write_minus_pc_plus_const);
+        acc.fmadd(&w[7], &self.next_unexp_pc_minus_pc_plus_imm);
+        acc.fmadd(&w[8], &self.next_unexp_pc_minus_expected);
+    }
 }
 
 /// Unified evaluator wrapper with typed accessors for both groups
@@ -296,8 +386,27 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
         acc.barrett_reduce()
     }
 
+    /// Fused accumulate of first-group Az and Bz into unreduced accumulators using
+    /// Lagrange weights `w`. This keeps everything in unreduced form; callers are
+    /// responsible for reducing at the end.
+    #[inline]
+    pub fn fmadd_first_group_at_r(
+        &self,
+        w: &[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE],
+        acc_az: &mut Acc5U<F>,
+        acc_bz: &mut Acc6S<F>,
+    ) {
+        let az = self.eval_az_first_group();
+        az.fmadd_at_r(w, acc_az);
+        let bz = self.eval_bz_first_group();
+        bz.fmadd_at_r(w, acc_bz);
+    }
+
     /// Product Az·Bz at the j-th extended uniskip target for the first group (uses precomputed weights).
     pub fn extended_azbz_product_first_group(&self, j: usize) -> S192 {
+        #[cfg(test)]
+        self.assert_constraints_first_group();
+
         let coeffs_i32: &[i32; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE] = &COEFFS_PER_J[j];
         let az = self.eval_az_first_group();
         let bz = self.eval_bz_first_group();
@@ -380,19 +489,57 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
     }
 
     #[cfg(test)]
+    fn assert_constraint_first_group(&self, index: usize, guard: bool, satisfied: bool) {
+        if guard && !satisfied {
+            let mut constraint_string = String::new();
+            let _ = R1CS_CONSTRAINTS_FIRST_GROUP[index]
+                .pretty_fmt_with_row(&mut constraint_string, self.row);
+            println!("{constraint_string}");
+            panic!(
+                "First group constraint {} ({:?}) violated",
+                index, R1CS_CONSTRAINTS_FIRST_GROUP[index].label
+            );
+        }
+    }
+
+    #[cfg(test)]
     pub fn assert_constraints_first_group(&self) {
         let az = self.eval_az_first_group();
         let bz = self.eval_bz_first_group();
-        debug_assert!((!az.not_load_store) || bz.ram_addr == 0);
-        debug_assert!((!az.load_a) || bz.ram_read_minus_ram_write.to_i128() == 0);
-        debug_assert!((!az.load_b) || bz.ram_read_minus_rd_write.to_i128() == 0);
-        debug_assert!((!az.store) || bz.rs2_minus_ram_write.to_i128() == 0);
-        debug_assert!((!az.add_sub_mul) || bz.left_lookup == 0);
-        debug_assert!((!az.not_add_sub_mul) || bz.left_lookup_minus_left_input.to_i128() == 0);
-        debug_assert!((!az.assert_flag) || bz.lookup_output_minus_one.to_i128() == 0);
-        debug_assert!((!az.should_jump) || bz.next_unexp_pc_minus_lookup_output.to_i128() == 0);
-        debug_assert!((!az.virtual_instruction) || bz.next_pc_minus_pc_plus_one.to_i128() == 0);
-        debug_assert!((!az.must_start_sequence) || bz.one_minus_do_not_update_unexpanded_pc);
+        self.assert_constraint_first_group(0, az.not_load_store, bz.ram_addr == 0);
+        self.assert_constraint_first_group(
+            1,
+            az.load_a,
+            bz.ram_read_minus_ram_write.to_i128() == 0,
+        );
+        self.assert_constraint_first_group(2, az.load_b, bz.ram_read_minus_rd_write.to_i128() == 0);
+        self.assert_constraint_first_group(3, az.store, bz.rs2_minus_ram_write.to_i128() == 0);
+        self.assert_constraint_first_group(4, az.add_sub_mul, bz.left_lookup == 0);
+        self.assert_constraint_first_group(
+            5,
+            az.not_add_sub_mul,
+            bz.left_lookup_minus_left_input.to_i128() == 0,
+        );
+        self.assert_constraint_first_group(
+            6,
+            az.assert_flag,
+            bz.lookup_output_minus_one.to_i128() == 0,
+        );
+        self.assert_constraint_first_group(
+            7,
+            az.should_jump,
+            bz.next_unexp_pc_minus_lookup_output.to_i128() == 0,
+        );
+        self.assert_constraint_first_group(
+            8,
+            az.virtual_instruction,
+            bz.next_pc_minus_pc_plus_one.to_i128() == 0,
+        );
+        self.assert_constraint_first_group(
+            9,
+            az.must_start_sequence,
+            !bz.one_minus_do_not_update_unexpanded_pc,
+        );
     }
     // ---------- Second group ----------
 
@@ -522,6 +669,22 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
         acc.barrett_reduce()
     }
 
+    /// Fused accumulate of second-group Az and Bz into unreduced accumulators
+    /// using Lagrange weights `w`. This keeps everything in unreduced form; callers
+    /// are responsible for reducing at the end.
+    #[inline]
+    pub fn fmadd_second_group_at_r(
+        &self,
+        w: &[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE],
+        acc_az: &mut Acc5U<F>,
+        acc_bz: &mut Acc7S<F>,
+    ) {
+        let az = self.eval_az_second_group();
+        az.fmadd_at_r(w, acc_az);
+        let bz = self.eval_bz_second_group();
+        bz.fmadd_at_r(w, acc_bz);
+    }
+
     /// Product Az·Bz at the j-th extended uniskip target for the second group (uses precomputed weights).
     pub fn extended_azbz_product_second_group(&self, j: usize) -> S192 {
         #[cfg(test)]
@@ -602,21 +765,59 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
     }
 
     #[cfg(test)]
+    fn assert_constraint_second_group(&self, index: usize, guard: bool, satisfied: bool) {
+        if guard && !satisfied {
+            let mut constraint_string = String::new();
+            let _ = R1CS_CONSTRAINTS_SECOND_GROUP[index]
+                .pretty_fmt_with_row(&mut constraint_string, self.row);
+            println!("{constraint_string}");
+            panic!(
+                "Second group constraint {} ({:?}) violated",
+                index, R1CS_CONSTRAINTS_SECOND_GROUP[index].label
+            );
+        }
+    }
+
+    #[cfg(test)]
     pub fn assert_constraints_second_group(&self) {
         let az = self.eval_az_second_group();
         let bz = self.eval_bz_second_group();
-        debug_assert!((!az.load_or_store) || bz.ram_addr_minus_rs1_plus_imm == 0i128);
-        debug_assert!((!az.add) || bz.right_lookup_minus_add_result.is_zero());
-        debug_assert!((!az.sub) || bz.right_lookup_minus_sub_result.is_zero());
-        debug_assert!((!az.mul) || bz.right_lookup_minus_product.is_zero());
-        debug_assert!((!az.not_add_sub_mul_advice) || bz.right_lookup_minus_right_input.is_zero());
-        debug_assert!((!az.write_lookup_to_rd) || bz.rd_write_minus_lookup_output.is_zero());
-        debug_assert!((!az.write_pc_to_rd) || bz.rd_write_minus_pc_plus_const.is_zero());
-        debug_assert!((!az.should_branch) || bz.next_unexp_pc_minus_pc_plus_imm == 0);
-        debug_assert!((!az.not_jump_or_branch) || bz.next_unexp_pc_minus_expected.is_zero());
+        self.assert_constraint_second_group(
+            0,
+            az.load_or_store,
+            bz.ram_addr_minus_rs1_plus_imm == 0i128,
+        );
+        self.assert_constraint_second_group(1, az.add, bz.right_lookup_minus_add_result.is_zero());
+        self.assert_constraint_second_group(2, az.sub, bz.right_lookup_minus_sub_result.is_zero());
+        self.assert_constraint_second_group(3, az.mul, bz.right_lookup_minus_product.is_zero());
+        self.assert_constraint_second_group(
+            4,
+            az.not_add_sub_mul_advice,
+            bz.right_lookup_minus_right_input.is_zero(),
+        );
+        self.assert_constraint_second_group(
+            5,
+            az.write_lookup_to_rd,
+            bz.rd_write_minus_lookup_output.is_zero(),
+        );
+        self.assert_constraint_second_group(
+            6,
+            az.write_pc_to_rd,
+            bz.rd_write_minus_pc_plus_const.is_zero(),
+        );
+        self.assert_constraint_second_group(
+            7,
+            az.should_branch,
+            bz.next_unexp_pc_minus_pc_plus_imm == 0,
+        );
+        self.assert_constraint_second_group(
+            8,
+            az.not_jump_or_branch,
+            bz.next_unexp_pc_minus_expected.is_zero(),
+        );
     }
 
-    /// Naive baseline version of claimed-input computation.
+    /// Naive baseline version of claimed-input computation (for benchmarking).
     ///
     /// This directly converts each trace value to the field and accumulates
     /// \[
@@ -628,12 +829,11 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
     pub fn compute_claimed_inputs_naive(
         bytecode_preprocessing: &BytecodePreprocessing,
         trace: &[Cycle],
-        r_cycle: &[F::Challenge],
+        r_cycle: &OpeningPoint<BIG_ENDIAN, F>,
     ) -> [F; NUM_R1CS_INPUTS] {
         let m = r_cycle.len() / 2;
-        let (r2, r1) = r_cycle.split_at(m);
-        let (eq_one, eq_two) =
-            rayon::join(|| EqPolynomial::evals(r2), || EqPolynomial::evals(r1));
+        let (r2, r1) = r_cycle.split_at_r(m);
+        let (eq_one, eq_two) = rayon::join(|| EqPolynomial::evals(r2), || EqPolynomial::evals(r1));
 
         let eq_two_len = eq_two.len();
 
@@ -650,11 +850,9 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
                     let row =
                         R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, idx);
 
-                    for (i, var) in ALL_R1CS_INPUTS.iter().enumerate() {
-                        // Baseline semantics: direct conversion to field element.
-                        let val =
-                            BaselineConstraintEval::input_to_field::<F>(&row, *var);
-                        local_sums[i] += weight * val;
+                    for var in ALL_R1CS_INPUTS {
+                        let val = Self::input_to_field_naive(&row, var);
+                        local_sums[var.to_index()] += weight * val;
                     }
                 }
 
@@ -671,8 +869,35 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
             )
     }
 
-    // Optimized claimed-input computation using small-value accumulators and
-    // delayed reduction.
+    #[inline]
+    fn input_to_field_naive(row: &R1CSCycleInputs, var: JoltR1CSInputs) -> F {
+        match var {
+            JoltR1CSInputs::PC => row.pc.to_field::<F>(),
+            JoltR1CSInputs::UnexpandedPC => row.unexpanded_pc.to_field::<F>(),
+            JoltR1CSInputs::Imm => row.imm.to_field::<F>(),
+            JoltR1CSInputs::RamAddress => row.ram_addr.to_field::<F>(),
+            JoltR1CSInputs::Rs1Value => row.rs1_read_value.to_field::<F>(),
+            JoltR1CSInputs::Rs2Value => row.rs2_read_value.to_field::<F>(),
+            JoltR1CSInputs::RdWriteValue => row.rd_write_value.to_field::<F>(),
+            JoltR1CSInputs::RamReadValue => row.ram_read_value.to_field::<F>(),
+            JoltR1CSInputs::RamWriteValue => row.ram_write_value.to_field::<F>(),
+            JoltR1CSInputs::LeftInstructionInput => row.left_input.to_field::<F>(),
+            JoltR1CSInputs::RightInstructionInput => row.right_input.to_field::<F>(),
+            JoltR1CSInputs::LeftLookupOperand => row.left_lookup.to_field::<F>(),
+            JoltR1CSInputs::RightLookupOperand => row.right_lookup.to_field::<F>(),
+            JoltR1CSInputs::Product => row.product.to_field::<F>(),
+            JoltR1CSInputs::WriteLookupOutputToRD => row.write_lookup_output_to_rd_addr.to_field(),
+            JoltR1CSInputs::WritePCtoRD => row.write_pc_to_rd_addr.to_field(),
+            JoltR1CSInputs::ShouldBranch => row.should_branch.to_field(),
+            JoltR1CSInputs::NextUnexpandedPC => row.next_unexpanded_pc.to_field::<F>(),
+            JoltR1CSInputs::NextPC => row.next_pc.to_field::<F>(),
+            JoltR1CSInputs::NextIsVirtual => row.next_is_virtual.to_field(),
+            JoltR1CSInputs::NextIsFirstInSequence => row.next_is_first_in_sequence.to_field(),
+            JoltR1CSInputs::LookupOutput => row.lookup_output.to_field::<F>(),
+            JoltR1CSInputs::ShouldJump => row.should_jump.to_field(),
+            JoltR1CSInputs::OpFlags(flag) => row.flags[flag as usize].to_field(),
+        }
+    }
 
     /// Compute `z(r_cycle) = Σ_t eq(r_cycle, t) * P_i(t)` for all inputs i, without
     /// materializing P_i. Returns `[P_0(r_cycle), P_1(r_cycle), ...]` in input order.
@@ -990,337 +1215,5 @@ impl ProductVirtualEval {
                 },
             )
             .map(|unr| F::from_montgomery_reduce::<9>(unr))
-    }
-}
-
-// Old stuff to run Spartan with SVO done via round batching / compression (SVO_ROUNDS=3)
-
-// (old LC::evaluate_row_with removed; the new codebase does not expose the row->field adapter)
-
-/// Evaluate Az by label using fully materialized `R1CSCycleInputs`
-pub fn eval_az_by_name<F: JoltField>(c: &NamedR1CSConstraint, row: &R1CSCycleInputs) -> I8OrI96 {
-    use R1CSConstraintLabel as N;
-    match c.label {
-        N::RamAddrEqRs1PlusImmIfLoadStore => {
-            // Az: Load OR Store flag (0/1)
-            (row.flags[CircuitFlags::Load] || row.flags[CircuitFlags::Store]).into()
-        }
-        N::RamAddrEqZeroIfNotLoadStore => {
-            // Az: !(Load || Store)
-            (!(row.flags[CircuitFlags::Load] || row.flags[CircuitFlags::Store])).into()
-        }
-        // Az: Load flag (0/1)
-        N::RamReadEqRamWriteIfLoad => row.flags[CircuitFlags::Load].into(),
-        // Az: Load flag (0/1)
-        N::RamReadEqRdWriteIfLoad => row.flags[CircuitFlags::Load].into(),
-        // Az: Store flag (0/1)
-        N::Rs2EqRamWriteIfStore => row.flags[CircuitFlags::Store].into(),
-        N::LeftLookupZeroUnlessAddSubMul => {
-            // NOTE: these are exclusive circuit flags (validated in tests)
-            let add = row.flags[CircuitFlags::AddOperands];
-            let sub = row.flags[CircuitFlags::SubtractOperands];
-            let mul = row.flags[CircuitFlags::MultiplyOperands];
-            (add || sub || mul).into()
-        }
-        N::LeftLookupEqLeftInputOtherwise => {
-            let add = row.flags[CircuitFlags::AddOperands];
-            let sub = row.flags[CircuitFlags::SubtractOperands];
-            let mul = row.flags[CircuitFlags::MultiplyOperands];
-            (!(add || sub || mul)).into()
-        }
-        // Az: AddOperands flag (0/1)
-        N::RightLookupAdd => row.flags[CircuitFlags::AddOperands].into(),
-        // Az: SubtractOperands flag (0/1)
-        N::RightLookupSub => row.flags[CircuitFlags::SubtractOperands].into(),
-        // Az: MultiplyOperands flag (0/1)
-        N::RightLookupEqProductIfMul => row.flags[CircuitFlags::MultiplyOperands].into(),
-        N::RightLookupEqRightInputOtherwise => {
-            // NOTE: relies on exclusivity of circuit flags (validated in tests):
-            // return 1 only if none of add/sub/mul/adv is set
-            let add = row.flags[CircuitFlags::AddOperands];
-            let sub = row.flags[CircuitFlags::SubtractOperands];
-            let mul = row.flags[CircuitFlags::MultiplyOperands];
-            let adv = row.flags[CircuitFlags::Advice];
-            (!(add || sub || mul || adv)).into()
-        }
-        // Az: Assert flag (0/1)
-        N::AssertLookupOne => row.flags[CircuitFlags::Assert].into(),
-        // Az: WriteLookupOutputToRD indicator (0/1)
-        N::RdWriteEqLookupIfWriteLookupToRd => {
-            I8OrI96::from_i8(row.write_lookup_output_to_rd_addr as i8)
-        }
-        // Az: WritePCtoRD indicator (0/1)
-        N::RdWriteEqPCPlusConstIfWritePCtoRD => I8OrI96::from_i8(row.write_pc_to_rd_addr as i8),
-        // Az: ShouldJump indicator (0/1)
-        N::NextUnexpPCEqLookupIfShouldJump => row.should_jump.into(),
-        // Note: Az uses ShouldBranch in the u64 domain (product Branch * LookupOutput)
-        // Az: ShouldBranch indicator (0/1)
-        N::NextUnexpPCEqPCPlusImmIfShouldBranch => I8OrI96::from(row.should_branch),
-        N::NextUnexpPCUpdateOtherwise => {
-            // Az encodes 1 - ShouldBranch - Jump = (1 - Jump) - ShouldBranch.
-            let jump = row.flags[CircuitFlags::Jump];
-            let not_jump: i128 = if jump { 0 } else { 1 };
-            let diff = not_jump - (row.should_branch as i128);
-            I8OrI96::from(diff)
-        }
-        // Az: VirtualInstruction flag (0/1)
-        N::NextPCEqPCPlusOneIfInline => row.flags[CircuitFlags::VirtualInstruction].into(),
-        // Az: Next instruction is virtual but not the first in its sequence
-        N::MustStartSequenceFromBeginning => {
-            (row.next_is_virtual && !row.next_is_first_in_sequence).into()
-        }
-    }
-}
-
-/// Evaluate Bz by label using fully materialized `R1CSCycleInputs`
-pub fn eval_bz_by_name<F: JoltField>(c: &NamedR1CSConstraint, row: &R1CSCycleInputs) -> S160 {
-    use R1CSConstraintLabel as N;
-    match c.label {
-        N::RamAddrEqRs1PlusImmIfLoadStore => {
-            // B: RamAddress - (Rs1Value + Imm) (baseline R1CS B linear combination)
-            let imm_i128 = row.imm.to_i128();
-            S160::from(row.ram_addr as i128 - (row.rs1_read_value as i128 + imm_i128))
-        }
-        N::RamAddrEqZeroIfNotLoadStore => {
-            // B: RamAddress - 0
-            S160::from(row.ram_addr)
-        }
-        // B: RamReadValue - RamWriteValue (u64 bit-pattern difference)
-        N::RamReadEqRamWriteIfLoad => S160::from_diff_u64(row.ram_read_value, row.ram_write_value),
-        // B: RamReadValue - RdWriteValue (u64 bit-pattern difference)
-        N::RamReadEqRdWriteIfLoad => S160::from_diff_u64(row.ram_read_value, row.rd_write_value),
-        // B: Rs2Value - RamWriteValue (u64 bit-pattern difference)
-        N::Rs2EqRamWriteIfStore => S160::from_diff_u64(row.rs2_read_value, row.ram_write_value),
-        // B: LeftLookupOperand - 0 (baseline R1CS B linear combination)
-        N::LeftLookupZeroUnlessAddSubMul => S160::from(row.left_lookup),
-        N::LeftLookupEqLeftInputOtherwise => {
-            // B: LeftLookupOperand - LeftInstructionInput
-            S160::from(row.left_lookup) - S160::from(row.left_input)
-        }
-        N::RightLookupAdd => {
-            // B: RightLookupOperand - (LeftInstructionInput + RightInstructionInput) with full-width integer semantics
-            let expected_i128 = (row.left_input as i128) + row.right_input.to_i128();
-            S160::from(row.right_lookup) - S160::from(expected_i128)
-        }
-        N::RightLookupSub => {
-            // B: RightLookupOperand - (LeftInstructionInput - RightInstructionInput + 2^64)
-            // with full-width integer semantics (matches the +2^64 in the uniform constraint)
-            let expected_i128 =
-                (row.left_input as i128) - row.right_input.to_i128() + (1i128 << 64);
-            S160::from(row.right_lookup) - S160::from(expected_i128)
-        }
-        N::RightLookupEqProductIfMul => {
-            // B: RightLookupOperand - Product with full 128-bit semantics
-            S160::from(row.right_lookup) - S160::from(row.product)
-        }
-        N::RightLookupEqRightInputOtherwise => {
-            // B: RightLookupOperand - RightInstructionInput with exact integer semantics
-            S160::from(row.right_lookup) - S160::from(row.right_input)
-        }
-        // B: LookupOutput - 1 (i128 arithmetic)
-        N::AssertLookupOne => S160::from(row.lookup_output as i128 - 1),
-        N::RdWriteEqLookupIfWriteLookupToRd => {
-            // B: RdWriteValue - LookupOutput (u64 bit-pattern difference)
-            S160::from_diff_u64(row.rd_write_value, row.lookup_output)
-        }
-        N::RdWriteEqPCPlusConstIfWritePCtoRD => {
-            // B: RdWriteValue - (UnexpandedPC + (4 - 2*IsCompressed)) (i128 arithmetic)
-            let const_term = 4 - if row.flags[CircuitFlags::IsCompressed] {
-                2
-            } else {
-                0
-            };
-            S160::from(
-                row.rd_write_value as i128 - (row.unexpanded_pc as i128 + const_term as i128),
-            )
-        }
-        N::NextUnexpPCEqLookupIfShouldJump => {
-            // Note: B uses u64 bit-pattern difference here (matches accessor variant)
-            // B: NextUnexpandedPC - LookupOutput (i128 arithmetic)
-            S160::from_diff_u64(row.next_unexpanded_pc, row.lookup_output)
-        }
-        // B: NextUnexpandedPC - (UnexpandedPC + Imm) (i128 arithmetic)
-        N::NextUnexpPCEqPCPlusImmIfShouldBranch => S160::from(
-            row.next_unexpanded_pc as i128 - (row.unexpanded_pc as i128 + row.imm.to_i128()),
-        ),
-        N::NextUnexpPCUpdateOtherwise => {
-            // B: NextUnexpandedPC - target, where target = UnexpandedPC + 4 - 4*DoNotUpdateUnexpandedPC - 2*IsCompressed (i128 arithmetic)
-            let const_term =
-                4 - if row.flags[CircuitFlags::DoNotUpdateUnexpandedPC] {
-                    4
-                } else {
-                    0
-                } - if row.flags[CircuitFlags::IsCompressed] {
-                    2
-                } else {
-                    0
-                };
-            let target = row.unexpanded_pc as i128 + const_term;
-            S160::from(row.next_unexpanded_pc as i128 - target)
-        }
-        N::NextPCEqPCPlusOneIfInline => {
-            // B: NextPC - (PC + 1) (i128 arithmetic)
-            S160::from(row.next_pc as i128 - (row.pc as i128 + 1))
-        }
-        N::MustStartSequenceFromBeginning => {
-            // B: 1 - DoNotUpdateUnexpandedPC (baseline R1CS B linear combination)
-            S160::from(1i128 - row.flags[CircuitFlags::DoNotUpdateUnexpandedPC] as i128)
-        }
-    }
-}
-
-/// Batched evaluation using a fully materialized R1CS cycle inputs. This avoids any repeated
-/// reads from the trace or bytecode and computes all constraints.
-pub fn eval_az_bz_batch_from_row<F: JoltField>(
-    constraints: &[NamedR1CSConstraint],
-    row: &R1CSCycleInputs,
-    az_output: &mut [I8OrI96],
-    bz_output: &mut [S160],
-) {
-    assert_eq!(constraints.len(), az_output.len());
-    assert_eq!(constraints.len(), bz_output.len());
-    for (i, constraint) in constraints.iter().enumerate() {
-        az_output[i] = eval_az_by_name::<F>(constraint, row);
-        bz_output[i] = eval_bz_by_name::<F>(constraint, row);
-    }
-}
-
-// Lightweight adapters from the old branch (kept here to ease testing and tooling)
-
-impl super::constraints::R1CSConstraint {
-    /// Evaluate this constraint's (A, B) linear combinations at a specific row in the witness polynomials.
-    /// Returns (a_eval, b_eval).
-    #[inline]
-    pub fn evaluate_row<F: JoltField>(
-        &self,
-        flattened_polynomials: &[MultilinearPolynomial<F>],
-        row: usize,
-    ) -> (F, F) {
-        let a_eval = self.a.evaluate_row(flattened_polynomials, row);
-        let b_eval = self.b.evaluate_row(flattened_polynomials, row);
-        (a_eval, b_eval)
-    }
-}
-
-#[cfg(test)]
-#[inline]
-fn r1cs_input_to_field<F: JoltField>(inputs: &R1CSCycleInputs, var: JoltR1CSInputs) -> F {
-    match var {
-        JoltR1CSInputs::PC => inputs.pc.to_field::<F>(),
-        JoltR1CSInputs::UnexpandedPC => inputs.unexpanded_pc.to_field::<F>(),
-        JoltR1CSInputs::Imm => inputs.imm.to_field::<F>(),
-        JoltR1CSInputs::RamAddress => inputs.ram_addr.to_field::<F>(),
-        JoltR1CSInputs::Rs1Value => inputs.rs1_read_value.to_field::<F>(),
-        JoltR1CSInputs::Rs2Value => inputs.rs2_read_value.to_field::<F>(),
-        JoltR1CSInputs::RdWriteValue => inputs.rd_write_value.to_field::<F>(),
-        JoltR1CSInputs::RamReadValue => inputs.ram_read_value.to_field::<F>(),
-        JoltR1CSInputs::RamWriteValue => inputs.ram_write_value.to_field::<F>(),
-        JoltR1CSInputs::LeftInstructionInput => inputs.left_input.to_field::<F>(),
-        JoltR1CSInputs::RightInstructionInput => inputs.right_input.to_field::<F>(),
-        JoltR1CSInputs::LeftLookupOperand => inputs.left_lookup.to_field::<F>(),
-        JoltR1CSInputs::RightLookupOperand => inputs.right_lookup.to_field::<F>(),
-        JoltR1CSInputs::Product => inputs.product.to_field::<F>(),
-        JoltR1CSInputs::NextUnexpandedPC => inputs.next_unexpanded_pc.to_field::<F>(),
-        JoltR1CSInputs::NextPC => inputs.next_pc.to_field::<F>(),
-        JoltR1CSInputs::NextIsVirtual => inputs.next_is_virtual.to_field::<F>(),
-        JoltR1CSInputs::NextIsFirstInSequence => inputs.next_is_first_in_sequence.to_field::<F>(),
-        JoltR1CSInputs::LookupOutput => inputs.lookup_output.to_field::<F>(),
-        JoltR1CSInputs::ShouldJump => inputs.should_jump.to_field::<F>(),
-        JoltR1CSInputs::ShouldBranch => inputs.should_branch.to_field::<F>(),
-        JoltR1CSInputs::WriteLookupOutputToRD => {
-            inputs.write_lookup_output_to_rd_addr.to_field::<F>()
-        }
-        JoltR1CSInputs::WritePCtoRD => inputs.write_pc_to_rd_addr.to_field::<F>(),
-        JoltR1CSInputs::OpFlags(flag) => inputs.flags[flag as usize].to_field::<F>(),
-    }
-}
-
-impl super::ops::LC {
-    /// Evaluate this LC given the inputs for a R1CS cycle, using field semantics (test-only).
-    #[cfg(test)]
-    pub fn evaluate_row_with<F: JoltField>(&self, inputs: &R1CSCycleInputs) -> F {
-        let mut result = F::zero();
-        self.for_each_term(|input_index, coeff| {
-            let var = JoltR1CSInputs::from_index(input_index);
-            let val = r1cs_input_to_field::<F>(inputs, var);
-            result += coeff.field_mul(val);
-        });
-        if let Some(c) = self.const_term() {
-            result += c.to_field::<F>();
-        }
-        result
-    }
-}
-
-/// Baseline constraint evaluator: converts trace values directly to field (no small-value opts)
-pub struct BaselineConstraintEval;
-
-impl BaselineConstraintEval {
-    /// Evaluate Az for a single constraint from raw trace inputs (baseline: direct field conversion)
-    #[inline]
-    pub fn eval_az<F: JoltField>(
-        constraint: &super::constraints::R1CSConstraint,
-        row: &R1CSCycleInputs,
-    ) -> F {
-        let mut result = F::zero();
-        constraint.a.for_each_term(|input_index, coeff| {
-            let var = JoltR1CSInputs::from_index(input_index);
-            let val = Self::input_to_field::<F>(row, var);
-            result += coeff.field_mul(val);
-        });
-        if let Some(c) = constraint.a.const_term() {
-            result += c.to_field::<F>();
-        }
-        result
-    }
-
-    /// Evaluate Bz for a single constraint from raw trace inputs (baseline: direct field conversion)
-    #[inline]
-    pub fn eval_bz<F: JoltField>(
-        constraint: &super::constraints::R1CSConstraint,
-        row: &R1CSCycleInputs,
-    ) -> F {
-        let mut result = F::zero();
-        constraint.b.for_each_term(|input_index, coeff| {
-            let var = JoltR1CSInputs::from_index(input_index);
-            let val = Self::input_to_field::<F>(row, var);
-            result += coeff.field_mul(val);
-        });
-        if let Some(c) = constraint.b.const_term() {
-            result += c.to_field::<F>();
-        }
-        result
-    }
-
-    /// Convert R1CS input to field element (baseline: no small-value optimizations)
-    #[inline]
-    fn input_to_field<F: JoltField>(row: &R1CSCycleInputs, var: JoltR1CSInputs) -> F {
-        use crate::utils::small_scalar::SmallScalar;
-        match var {
-            JoltR1CSInputs::PC => row.pc.to_field::<F>(),
-            JoltR1CSInputs::UnexpandedPC => row.unexpanded_pc.to_field::<F>(),
-            JoltR1CSInputs::Imm => row.imm.to_field::<F>(),
-            JoltR1CSInputs::RamAddress => row.ram_addr.to_field::<F>(),
-            JoltR1CSInputs::Rs1Value => row.rs1_read_value.to_field::<F>(),
-            JoltR1CSInputs::Rs2Value => row.rs2_read_value.to_field::<F>(),
-            JoltR1CSInputs::RdWriteValue => row.rd_write_value.to_field::<F>(),
-            JoltR1CSInputs::RamReadValue => row.ram_read_value.to_field::<F>(),
-            JoltR1CSInputs::RamWriteValue => row.ram_write_value.to_field::<F>(),
-            JoltR1CSInputs::LeftInstructionInput => row.left_input.to_field::<F>(),
-            JoltR1CSInputs::RightInstructionInput => row.right_input.to_field::<F>(),
-            JoltR1CSInputs::LeftLookupOperand => row.left_lookup.to_field::<F>(),
-            JoltR1CSInputs::RightLookupOperand => row.right_lookup.to_field::<F>(),
-            JoltR1CSInputs::Product => row.product.to_field::<F>(),
-            JoltR1CSInputs::NextUnexpandedPC => row.next_unexpanded_pc.to_field::<F>(),
-            JoltR1CSInputs::NextPC => row.next_pc.to_field::<F>(),
-            JoltR1CSInputs::NextIsVirtual => row.next_is_virtual.to_field::<F>(),
-            JoltR1CSInputs::NextIsFirstInSequence => row.next_is_first_in_sequence.to_field::<F>(),
-            JoltR1CSInputs::LookupOutput => row.lookup_output.to_field::<F>(),
-            JoltR1CSInputs::ShouldJump => row.should_jump.to_field::<F>(),
-            JoltR1CSInputs::ShouldBranch => row.should_branch.to_field::<F>(),
-            JoltR1CSInputs::WriteLookupOutputToRD => row.write_lookup_output_to_rd_addr.to_field::<F>(),
-            JoltR1CSInputs::WritePCtoRD => row.write_pc_to_rd_addr.to_field::<F>(),
-            JoltR1CSInputs::OpFlags(flag) => row.flags[flag as usize].to_field::<F>(),
-        }
     }
 }

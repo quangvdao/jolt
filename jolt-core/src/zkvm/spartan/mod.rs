@@ -28,6 +28,8 @@ pub mod outer_baseline;
 pub mod outer_naive;
 pub mod outer_round_batched;
 pub mod outer_streaming;
+// Checkpoint: pre-streaming outer uni-skip + linear-time-only implementation (kept for benchmarking/regression).
+pub mod outer_uni_skip_linear;
 pub mod product;
 pub mod shift;
 

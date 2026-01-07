@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_arguments)]
+#![cfg(feature = "prover")]
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
     SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
@@ -29,7 +30,7 @@ use crate::{
     },
 };
 use allocative::Allocative;
-use ark_ff::biginteger::{I8OrI96, S160};
+use ark_ff::biginteger::{S96 as I8OrI96, S160};
 use num_traits::Zero;
 use rayon::prelude::*;
 use std::sync::Arc;

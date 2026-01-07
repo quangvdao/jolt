@@ -1,3 +1,4 @@
+#![cfg(feature = "prover")]
 use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
@@ -525,8 +526,12 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
                         let global_index =
                             2 * (step_index * padded_num_constraints + constraint_index);
 
-                        let (az_coeff, bz_coeff) =
-                            constraint.evaluate_row(flattened_polynomials, step_index);
+                        let az_coeff = constraint
+                            .a
+                            .evaluate_row(flattened_polynomials, step_index);
+                        let bz_coeff = constraint
+                            .b
+                            .evaluate_row(flattened_polynomials, step_index);
                         if !az_coeff.is_zero() {
                             coeffs.push((global_index, az_coeff).into());
                         }
@@ -780,10 +785,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
 
         // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);
+        let r_cycle_point: OpeningPoint<BIG_ENDIAN, F> = OpeningPoint::new(r_cycle.to_vec());
         let claimed_witness_evals = R1CSEval::compute_claimed_inputs_naive(
             &self.bytecode_preprocessing,
             &self.trace,
-            r_cycle,
+            &r_cycle_point,
         );
 
         for (i, input) in ALL_R1CS_INPUTS.iter().enumerate() {

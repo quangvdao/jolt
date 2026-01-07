@@ -16,11 +16,9 @@ use crate::poly::opening_proof::{
 };
 use crate::poly::split_eq_poly::GruenSplitEqPolynomial;
 use crate::poly::unipoly::UniPoly;
-use crate::subprotocols::sumcheck_prover::{
-    SumcheckInstanceProver, UniSkipFirstRoundInstanceProver,
-};
+use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
-use crate::subprotocols::univariate_skip::{build_uniskip_first_round_poly, UniSkipState};
+use crate::subprotocols::univariate_skip::build_uniskip_first_round_poly;
 use crate::transcripts::Transcript;
 use crate::utils::accumulation::Acc8S;
 use crate::utils::math::Math;
@@ -31,12 +29,14 @@ use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::r1cs::{
     constraints::{
-        OUTER_FIRST_ROUND_POLY_NUM_COEFFS, OUTER_UNIVARIATE_SKIP_DEGREE,
-        OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE, OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE,
+        OUTER_FIRST_ROUND_POLY_DEGREE_BOUND, OUTER_FIRST_ROUND_POLY_NUM_COEFFS,
+        OUTER_UNIVARIATE_SKIP_DEGREE, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
+        OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE,
     },
     evaluation::R1CSEval,
     inputs::{R1CSCycleInputs, ALL_R1CS_INPUTS},
 };
+use crate::zkvm::spartan::outer::OuterUniSkipParams;
 use crate::zkvm::witness::VirtualPolynomial;
 #[cfg(feature = "allocative")]
 use allocative::FlameGraphBuilder;
@@ -78,6 +78,8 @@ pub struct OuterUniSkipInstanceProver<F: JoltField> {
     tau: Vec<F::Challenge>,
     /// Evaluations of t1(Z) at the extended univariate-skip targets (outside base window)
     extended_evals: [F; OUTER_UNIVARIATE_SKIP_DEGREE],
+    /// Prover message for this univariate skip round (needed to compute the opening claim at r0)
+    uni_poly: Option<UniPoly<F>>,
 }
 
 impl<F: JoltField> OuterUniSkipInstanceProver<F> {
@@ -93,6 +95,7 @@ impl<F: JoltField> OuterUniSkipInstanceProver<F> {
         let instance = Self {
             tau: tau.to_vec(),
             extended_evals: extended,
+            uni_poly: None,
         };
 
         #[cfg(feature = "allocative")]
@@ -176,28 +179,70 @@ impl<F: JoltField> OuterUniSkipInstanceProver<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> UniSkipFirstRoundInstanceProver<F, T>
-    for OuterUniSkipInstanceProver<F>
-{
-    fn input_claim(&self) -> F {
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterUniSkipInstanceProver<F> {
+    fn degree(&self) -> usize {
+        OUTER_FIRST_ROUND_POLY_DEGREE_BOUND
+    }
+
+    fn num_rounds(&self) -> usize {
+        1
+    }
+
+    fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
         F::zero()
     }
 
-    #[tracing::instrument(skip_all, name = "OuterUniSkipInstanceProver::compute_poly")]
-    fn compute_poly(&mut self) -> UniPoly<F> {
+    #[tracing::instrument(skip_all, name = "OuterUniSkipInstanceProver::compute_message")]
+    fn compute_message(&mut self, _round: usize, _previous_claim: F) -> UniPoly<F> {
         // Load extended univariate-skip evaluations from prover state
         let extended_evals = &self.extended_evals;
 
         let tau_high = self.tau[self.tau.len() - 1];
 
         // Compute the univariate-skip first round polynomial s1(Y) = L(τ_high, Y) · t1(Y)
-        build_uniskip_first_round_poly::<
+        let uni_poly = build_uniskip_first_round_poly::<
             F,
             OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
             OUTER_UNIVARIATE_SKIP_DEGREE,
             OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE,
             OUTER_FIRST_ROUND_POLY_NUM_COEFFS,
-        >(None, extended_evals, tau_high)
+        >(None, extended_evals, tau_high);
+
+        self.uni_poly = Some(uni_poly.clone());
+        uni_poly
+    }
+
+    fn ingest_challenge(&mut self, _r_j: F::Challenge, _round: usize) {
+        // Nothing to do
+    }
+
+    fn cache_openings(
+        &self,
+        accumulator: &mut ProverOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        let opening_point: OpeningPoint<BIG_ENDIAN, F> = sumcheck_challenges.to_vec().into();
+        debug_assert_eq!(opening_point.len(), 1);
+
+        let claim = self
+            .uni_poly
+            .as_ref()
+            .expect("OuterUniSkipInstanceProver::compute_message must be called before cache_openings")
+            .evaluate(&opening_point[0]);
+
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::UnivariateSkip,
+            SumcheckId::SpartanOuter,
+            opening_point,
+            claim,
+        );
+    }
+
+    #[cfg(feature = "allocative")]
+    fn update_flamegraph(&self, flamegraph: &mut FlameGraphBuilder) {
+        flamegraph.visit_root(self);
     }
 }
 
@@ -224,22 +269,30 @@ impl<F: JoltField> OuterRemainingSumcheckProverNonStreaming<F> {
     pub fn gen(
         trace: Arc<Vec<Cycle>>,
         bytecode_preprocessing: &BytecodePreprocessing,
-        uni: &UniSkipState<F>,
+        uni_skip_params: OuterUniSkipParams<F>,
+        opening_accumulator: &dyn OpeningAccumulator<F>,
     ) -> Self {
         let bytecode_preprocessing = bytecode_preprocessing.clone();
+
+        let (r_uni_skip, _uni_skip_claim) = opening_accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::UnivariateSkip,
+            SumcheckId::SpartanOuter,
+        );
+        debug_assert_eq!(r_uni_skip.len(), 1);
+        let r0 = r_uni_skip[0];
 
         let lagrange_evals_r = LagrangePolynomial::<F>::evals::<
             F::Challenge,
             OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
-        >(&uni.r0);
+        >(&r0);
 
-        let tau_high = uni.tau[uni.tau.len() - 1];
-        let tau_low = &uni.tau[..uni.tau.len() - 1];
+        let tau_high = uni_skip_params.tau[uni_skip_params.tau.len() - 1];
+        let tau_low = &uni_skip_params.tau[..uni_skip_params.tau.len() - 1];
 
         let lagrange_tau_r0 = LagrangePolynomial::<F>::lagrange_kernel::<
             F::Challenge,
             OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
-        >(&uni.r0, &tau_high);
+        >(&r0, &tau_high);
 
         let split_eq_poly: GruenSplitEqPolynomial<F> =
             GruenSplitEqPolynomial::<F>::new_with_scaling(
@@ -264,7 +317,11 @@ impl<F: JoltField> OuterRemainingSumcheckProverNonStreaming<F> {
             az: az_bound,
             bz: bz_bound,
             first_round_evals: (t0, t_inf),
-            params: OuterRemainingSumcheckParamsNonStreaming::new(n_cycle_vars, uni),
+            params: OuterRemainingSumcheckParamsNonStreaming::new(
+                n_cycle_vars,
+                uni_skip_params,
+                opening_accumulator,
+            ),
         }
     }
 
@@ -473,8 +530,17 @@ pub struct OuterRemainingSumcheckVerifierNonStreaming<F: JoltField> {
 }
 
 impl<F: JoltField> OuterRemainingSumcheckVerifierNonStreaming<F> {
-    pub fn new(num_cycles_bits: usize, uni: &UniSkipState<F>, key: UniformSpartanKey<F>) -> Self {
-        let params = OuterRemainingSumcheckParamsNonStreaming::new(num_cycles_bits, uni);
+    pub fn new(
+        key: UniformSpartanKey<F>,
+        trace_len: usize,
+        uni_skip_params: OuterUniSkipParams<F>,
+        opening_accumulator: &VerifierOpeningAccumulator<F>,
+    ) -> Self {
+        let params = OuterRemainingSumcheckParamsNonStreaming::new(
+            trace_len.log_2(),
+            uni_skip_params,
+            opening_accumulator,
+        );
         Self { params, key }
     }
 }
@@ -557,12 +623,21 @@ pub(crate) struct OuterRemainingSumcheckParamsNonStreaming<F: JoltField> {
 }
 
 impl<F: JoltField> OuterRemainingSumcheckParamsNonStreaming<F> {
-    pub(crate) fn new(num_cycles_bits: usize, uni: &UniSkipState<F>) -> Self {
+    pub(crate) fn new(
+        num_cycles_bits: usize,
+        uni_skip_params: OuterUniSkipParams<F>,
+        opening_accumulator: &dyn OpeningAccumulator<F>,
+    ) -> Self {
+        let (r_uni_skip, uni_skip_claim) = opening_accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::UnivariateSkip,
+            SumcheckId::SpartanOuter,
+        );
+        debug_assert_eq!(r_uni_skip.len(), 1);
         Self {
             num_cycles_bits,
-            tau: uni.tau.clone(),
-            r0_uniskip: uni.r0,
-            input_claim: uni.claim_after_first,
+            tau: uni_skip_params.tau,
+            r0_uniskip: r_uni_skip[0],
+            input_claim: uni_skip_claim,
         }
     }
 

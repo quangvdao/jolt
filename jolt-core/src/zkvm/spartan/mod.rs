@@ -13,9 +13,14 @@ use crate::zkvm::spartan::product::{ProductVirtualUniSkipParams, ProductVirtualU
 pub mod instruction_input;
 pub mod outer;
 // Checkpoint: pre-streaming outer uni-skip + linear-time-only implementation (kept for benchmarking/regression).
-// NOTE: this is gated because `main` evolves sumcheck APIs; enable the feature when needed.
-#[cfg(feature = "non_streaming_outer_checkpoint")]
 pub mod outer_uni_skip_linear;
+// Benchmarking-only outer prover variants (require prover feature; kept for benches/regressions).
+#[cfg(feature = "prover")]
+pub mod outer_baseline;
+#[cfg(feature = "prover")]
+pub mod outer_naive;
+#[cfg(feature = "prover")]
+pub mod outer_round_batched;
 pub mod product;
 pub mod shift;
 

@@ -5,8 +5,10 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use jolt_core::{
     poly::opening_proof::ProverOpeningAccumulator,
     subprotocols::{
+        streaming_schedule::{HalfSplitSchedule, LinearOnlySchedule},
         sumcheck::BatchedSumcheck,
         sumcheck_prover::SumcheckInstanceProver,
+        univariate_skip::prove_uniskip_round,
     },
     transcripts::{KeccakTranscript, Transcript},
     utils::math::Math,
@@ -15,12 +17,10 @@ use jolt_core::{
         r1cs::constraints::{R1CSConstraint, R1CS_CONSTRAINTS},
         r1cs::key::UniformSpartanKey,
         spartan::{
-            outer::OuterRemainingSumcheckProver,
             outer_baseline::OuterBaselineSumcheckProver as OuterBaselineStreamingSumcheckProver,
             outer_naive::OuterNaiveSumcheckProver,
             outer_round_batched::OuterRoundBatchedSumcheckProver,
-            outer_streaming::OuterRemainingStreamingSumcheckProver,
-            prove_stage1_uni_skip,
+            outer::{OuterRemainingStreamingSumcheck, OuterSharedState, OuterUniSkipParams, OuterUniSkipProver},
         },
     },
 };
@@ -96,13 +96,26 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(trace, bytecode_pp, padded_trace_length, mut opening_accumulator, mut transcript)| {
-                    // Stage 1 (Outer): UniSkip first round + remaining rounds using canonical outer
+                    // Stage 1 (Outer): UniSkip first round + remaining rounds in linear-only mode
                     let key = UniformSpartanKey::<F>::new(padded_trace_length);
-                    let (uni, _) =
-                        prove_stage1_uni_skip::<F, ProofTranscript>(&trace, &bytecode_pp, &key, &mut transcript);
+                    let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
+                    let mut uni_skip = OuterUniSkipProver::<F>::initialize(
+                        uni_skip_params.clone(),
+                        trace.as_ref(),
+                        &bytecode_pp,
+                    );
+                    let _ = prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
 
-                    let mut instance =
-                        OuterRemainingSumcheckProver::<F>::gen(Arc::clone(&trace), &bytecode_pp, &uni);
+                    // Remaining outer rounds: linear-only schedule (no streaming windows).
+                    let schedule = LinearOnlySchedule::new(uni_skip_params.tau.len() - 1);
+                    let shared = OuterSharedState::<F>::new(
+                        Arc::clone(&trace),
+                        &bytecode_pp,
+                        &uni_skip_params,
+                        &opening_accumulator,
+                    );
+                    let mut instance: OuterRemainingStreamingSumcheck<F, LinearOnlySchedule> =
+                        OuterRemainingStreamingSumcheck::new(shared, schedule);
                     let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
                         vec![&mut instance];
                     black_box(BatchedSumcheck::prove(
@@ -119,19 +132,27 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(trace, bytecode_pp, padded_trace_length, mut opening_accumulator, mut transcript)| {
-                    // Uni-skip first round (to get UniSkipState shared with streaming outer)
+                    // Uni-skip first round
                     let key = UniformSpartanKey::<F>::new(padded_trace_length);
-                    let (uni, _) =
-                        prove_stage1_uni_skip::<F, ProofTranscript>(&trace, &bytecode_pp, &key, &mut transcript);
+                    let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
+                    let mut uni_skip = OuterUniSkipProver::<F>::initialize(
+                        uni_skip_params.clone(),
+                        trace.as_ref(),
+                        &bytecode_pp,
+                    );
+                    let _ = prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
 
-                    // Streaming outer-remaining instance (currently a thin wrapper around canonical outer)
-                    let num_cycles_bits = padded_trace_length.log_2();
-                    let mut instance = OuterRemainingStreamingSumcheckProver::gen(
+                    // Remaining outer rounds: streaming schedule for degree-3 messages.
+                    let num_rounds = uni_skip_params.tau.len() - 1;
+                    let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                    let shared = OuterSharedState::<F>::new(
                         Arc::clone(&trace),
                         &bytecode_pp,
-                        num_cycles_bits,
-                        &uni,
+                        &uni_skip_params,
+                        &opening_accumulator,
                     );
+                    let mut instance: OuterRemainingStreamingSumcheck<F, HalfSplitSchedule> =
+                        OuterRemainingStreamingSumcheck::new(shared, schedule);
                     let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
                         vec![&mut instance];
 

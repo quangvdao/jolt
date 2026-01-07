@@ -8,6 +8,46 @@ use common::constants::{
     INSTRUCTION_PHASES_THRESHOLD_LOG_T, ONEHOT_CHUNK_THRESHOLD_LOG_T, REGISTER_COUNT,
 };
 
+/// Runtime selection for which implementation to use for Spartan **outer stage 1 remainder**
+/// (i.e., the sumcheck after the univariate-skip first round).
+///
+/// This is intended for benchmarking and does **not** affect proof format: all implementations
+/// should produce identical stage-1 sumcheck messages and openings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OuterStage1RemainderImpl {
+    /// Use the `main` streaming-sumcheck implementation in `spartan/outer.rs`.
+    Streaming,
+    /// Use the checkpointed non-streaming implementation in `spartan/outer_uni_skip_linear.rs`.
+    NonStreamingCheckpoint,
+}
+
+/// Runtime selection for the streaming schedule (only relevant when
+/// [`OuterStage1RemainderImpl::Streaming`] is chosen).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OuterStreamingScheduleKind {
+    /// Disable streaming windows entirely (materialize immediately).
+    LinearOnly,
+    /// Use the half-split streaming schedule (cost-optimal windows, then linear).
+    HalfSplit,
+}
+
+/// Runtime configuration for stage 1 outer remainder prover implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OuterStage1Config {
+    pub remainder_impl: OuterStage1RemainderImpl,
+    pub streaming_schedule: OuterStreamingScheduleKind,
+}
+
+impl Default for OuterStage1Config {
+    fn default() -> Self {
+        // Preserve current behavior in `zkvm/prover.rs`: streaming remainder with a linear-only schedule.
+        Self {
+            remainder_impl: OuterStage1RemainderImpl::Streaming,
+            streaming_schedule: OuterStreamingScheduleKind::LinearOnly,
+        }
+    }
+}
+
 /// Returns the number of phases for instruction sumcheck based on trace length.
 ///
 /// For shorter traces (log_T < threshold), uses 16 phases for better parallelism.

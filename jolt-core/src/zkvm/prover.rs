@@ -1,4 +1,4 @@
-use crate::subprotocols::streaming_schedule::LinearOnlySchedule;
+use crate::subprotocols::streaming_schedule::{HalfSplitSchedule, LinearOnlySchedule};
 use std::{
     collections::HashMap,
     fs::File,
@@ -10,7 +10,9 @@ use std::{
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-use crate::zkvm::config::ReadWriteConfig;
+use crate::zkvm::config::{
+    OuterStage1Config, OuterStage1RemainderImpl, OuterStreamingScheduleKind, ReadWriteConfig,
+};
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::zkvm::Serializable;
 
@@ -148,6 +150,7 @@ pub struct JoltCpuProver<
     pub final_ram_state: Vec<u64>,
     pub one_hot_params: OneHotParams,
     pub rw_config: ReadWriteConfig,
+    pub outer_stage1_config: OuterStage1Config,
 }
 impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscript: Transcript>
     JoltCpuProver<'a, F, PCS, ProofTranscript>
@@ -299,7 +302,17 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             final_ram_state,
             one_hot_params,
             rw_config,
+            outer_stage1_config: OuterStage1Config::default(),
         }
+    }
+
+    /// Override runtime configuration for the Spartan outer stage-1 remainder prover implementation.
+    ///
+    /// Intended for benchmarking; the proof should still verify under the standard verifier
+    /// (all implementations are meant to be semantically equivalent).
+    pub fn with_outer_stage1_config(mut self, outer_stage1_config: OuterStage1Config) -> Self {
+        self.outer_stage1_config = outer_stage1_config;
+        self
     }
 
     #[allow(clippy::type_complexity)]
@@ -549,26 +562,60 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &mut self.transcript,
         );
 
-        // Every sum-check with num_rounds > 1 requires a schedule
-        // which dictates the compute_message and bind methods.
-        // Using LinearOnlySchedule to benchmark linear-only mode (no streaming).
-        // Outer remaining sumcheck has degree 3 (multiquadratic)
-        // Number of rounds = tau.len() - 1 (cycle variables only)
-        let schedule = LinearOnlySchedule::new(uni_skip_params.tau.len() - 1);
-        let shared = OuterSharedState::new(
-            Arc::clone(&self.trace),
-            &self.preprocessing.shared.bytecode,
-            &uni_skip_params,
-            &self.opening_accumulator,
-        );
-        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<_, _> =
-            OuterRemainingStreamingSumcheck::new(shared, schedule);
+        let (sumcheck_proof, _r_stage1) = match self.outer_stage1_config.remainder_impl {
+            OuterStage1RemainderImpl::Streaming => {
+                // Every sum-check with num_rounds > 1 requires a schedule.
+                // Outer remaining sumcheck has degree 3 (cubic) and number of rounds = tau.len() - 1.
+                let num_rounds = uni_skip_params.tau.len() - 1;
 
-        let (sumcheck_proof, _r_stage1) = BatchedSumcheck::prove(
-            vec![&mut spartan_outer_remaining],
-            &mut self.opening_accumulator,
-            &mut self.transcript,
-        );
+                let shared = OuterSharedState::new(
+                    Arc::clone(&self.trace),
+                    &self.preprocessing.shared.bytecode,
+                    &uni_skip_params,
+                    &self.opening_accumulator,
+                );
+
+                match self.outer_stage1_config.streaming_schedule {
+                    OuterStreamingScheduleKind::LinearOnly => {
+                        let schedule = LinearOnlySchedule::new(num_rounds);
+                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<_, _> =
+                            OuterRemainingStreamingSumcheck::new(shared, schedule);
+                        BatchedSumcheck::prove(
+                            vec![&mut spartan_outer_remaining],
+                            &mut self.opening_accumulator,
+                            &mut self.transcript,
+                        )
+                    }
+                    OuterStreamingScheduleKind::HalfSplit => {
+                        // Degree bound for this outer remainder sumcheck is 3.
+                        let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<_, _> =
+                            OuterRemainingStreamingSumcheck::new(shared, schedule);
+                        BatchedSumcheck::prove(
+                            vec![&mut spartan_outer_remaining],
+                            &mut self.opening_accumulator,
+                            &mut self.transcript,
+                        )
+                    }
+                }
+            }
+            OuterStage1RemainderImpl::NonStreamingCheckpoint => {
+                use crate::zkvm::spartan::outer_uni_skip_linear::OuterRemainingSumcheckProverNonStreaming;
+
+                let mut spartan_outer_remaining = OuterRemainingSumcheckProverNonStreaming::gen(
+                    Arc::clone(&self.trace),
+                    &self.preprocessing.shared.bytecode,
+                    uni_skip_params,
+                    &self.opening_accumulator,
+                );
+
+                BatchedSumcheck::prove(
+                    vec![&mut spartan_outer_remaining],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                )
+            }
+        };
 
         (first_round_proof, sumcheck_proof)
     }

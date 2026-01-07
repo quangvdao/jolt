@@ -1,3 +1,4 @@
+#![cfg(feature = "prover")]
 use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
     OpeningPoint, ProverOpeningAccumulator, SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
@@ -262,10 +263,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterNaiveSum
 
         // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);
+        let r_cycle_point: OpeningPoint<BIG_ENDIAN, F> = OpeningPoint::new(r_cycle.to_vec());
         let claimed_witness_evals = R1CSEval::compute_claimed_inputs_naive(
             &self.bytecode_preprocessing,
             &self.trace,
-            r_cycle,
+            &r_cycle_point,
         );
 
         for (i, input) in ALL_R1CS_INPUTS.iter().enumerate() {

@@ -113,6 +113,8 @@ impl MultilinearLagrange<ArkFr> for MultilinearPolynomial<Fr> {
 
         let wrapped_left_side: Vec<Fr> = left_vec.iter().map(ark_to_jolt).collect();
 
+        // Dense polynomials always use row-major layout: coeff_idx = row * num_cols + col
+        // The CycleMajor vs AddressMajor distinction only applies to OneHot polynomials
         macro_rules! compute_vector_matrix_product {
             ($poly:expr, $field_mul_method:ident) => {
                 (0..num_cols)
@@ -209,6 +211,9 @@ where
         .map(|g| g.0.into_affine())
         .collect();
 
+    // Dense polynomials always use row-major layout (par_chunks).
+    // The CycleMajor vs AddressMajor distinction only affects OneHot polynomials,
+    // which have their own commit_rows implementation that respects the layout.
     macro_rules! compute_msm {
         ($coeffs:expr, $msm_method:ident) => {
             $coeffs
@@ -223,13 +228,27 @@ where
             compute_msm!(&poly.Z, msm_field_elements)
         }
         MultilinearPolynomial::U8Scalars(poly) => compute_msm!(&poly.coeffs, msm_u8),
-        MultilinearPolynomial::U16Scalars(poly) => compute_msm!(&poly.coeffs, msm_u16),
-        MultilinearPolynomial::U32Scalars(poly) => compute_msm!(&poly.coeffs, msm_u32),
-        MultilinearPolynomial::U64Scalars(poly) => compute_msm!(&poly.coeffs, msm_u64),
-        MultilinearPolynomial::I64Scalars(poly) => compute_msm!(&poly.coeffs, msm_i64),
-        MultilinearPolynomial::I128Scalars(poly) => compute_msm!(&poly.coeffs, msm_i128),
-        MultilinearPolynomial::U128Scalars(poly) => compute_msm!(&poly.coeffs, msm_u128),
-        MultilinearPolynomial::S128Scalars(poly) => compute_msm!(&poly.coeffs, msm_s128),
+        MultilinearPolynomial::U16Scalars(poly) => {
+            compute_msm!(&poly.coeffs, msm_u16)
+        }
+        MultilinearPolynomial::U32Scalars(poly) => {
+            compute_msm!(&poly.coeffs, msm_u32)
+        }
+        MultilinearPolynomial::U64Scalars(poly) => {
+            compute_msm!(&poly.coeffs, msm_u64)
+        }
+        MultilinearPolynomial::I64Scalars(poly) => {
+            compute_msm!(&poly.coeffs, msm_i64)
+        }
+        MultilinearPolynomial::I128Scalars(poly) => {
+            compute_msm!(&poly.coeffs, msm_i128)
+        }
+        MultilinearPolynomial::U128Scalars(poly) => {
+            compute_msm!(&poly.coeffs, msm_u128)
+        }
+        MultilinearPolynomial::S128Scalars(poly) => {
+            compute_msm!(&poly.coeffs, msm_s128)
+        }
         MultilinearPolynomial::BoolScalars(poly) => poly
             .coeffs
             .par_chunks(row_len)
@@ -242,6 +261,8 @@ where
                 ArkG1(result)
             })
             .collect(),
+        // OneHot and RLC polynomials have their own commit_rows implementations
+        // that respect the DoryLayout setting (CycleMajor vs AddressMajor)
         MultilinearPolynomial::OneHot(poly) => {
             poly.commit_rows(&bases).into_iter().map(ArkG1).collect()
         }

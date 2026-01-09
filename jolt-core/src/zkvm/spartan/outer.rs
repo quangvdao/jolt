@@ -888,12 +888,10 @@ impl<F: JoltField> OuterLinearStage<F> {
                         let start_pair = chunk_idx * pairs_per_chunk;
                         let end_pair = (start_pair + pairs_per_chunk).min(output_size);
 
-                        let mut az_grid = vec![F::zero(); 2];
-                        let mut bz_grid = vec![F::zero(); 2];
-
-                        let mut acc_az: Vec<Acc5U<F>> = vec![Acc5U::zero(); 2];
-                        let mut acc_bz_first: Vec<Acc6S<F>> = vec![Acc6S::zero(); 2];
-                        let mut acc_bz_second: Vec<Acc7S<F>> = vec![Acc7S::zero(); 2];
+                        // Use stack-allocated arrays instead of heap Vecs
+                        let mut acc_az = [Acc5U::<F>::zero(), Acc5U::<F>::zero()];
+                        let mut acc_bz_first = [Acc6S::<F>::zero(), Acc6S::<F>::zero()];
+                        let mut acc_bz_second = [Acc7S::<F>::zero(), Acc7S::<F>::zero()];
 
                         let mut local_t0 = F::zero();
                         let mut local_t_inf = F::zero();
@@ -959,15 +957,12 @@ impl<F: JoltField> OuterLinearStage<F> {
                             let az1 = acc_az[1].barrett_reduce();
                             let bz1 = acc_bz_first[1].barrett_reduce() + acc_bz_second[1].barrett_reduce();
 
-                            az_grid[0] = az0;
-                            az_grid[1] = az1;
-                            bz_grid[0] = bz0;
-                            bz_grid[1] = bz1;
-
+                            // Write directly to chunk, no intermediate buffer needed
                             let buffer_offset = 2 * (pair_idx - start_pair);
-                            let end = buffer_offset + 2;
-                            az_chunk[buffer_offset..end].copy_from_slice(&az_grid);
-                            bz_chunk[buffer_offset..end].copy_from_slice(&bz_grid);
+                            az_chunk[buffer_offset] = az0;
+                            az_chunk[buffer_offset + 1] = az1;
+                            bz_chunk[buffer_offset] = bz0;
+                            bz_chunk[buffer_offset + 1] = bz1;
 
                             let e_in = E_in[x_in_val];
                             let p0 = az0 * bz0;
@@ -1137,29 +1132,105 @@ impl<F: JoltField> OuterLinearStage<F> {
         )
     }
 
+    /// Materialize Az/Bz at round 0 (no r_grid folding needed) and compute t_prime_poly.
+    /// For window_size=1, fuses (t0, t_inf) computation with materialization.
     #[tracing::instrument(
         skip_all,
-        name = "OuterLinearStage::materialise_polynomials_round_zero"
+        name = "OuterLinearStage::fused_materialise_polynomials_round_zero"
     )]
-    fn materialise_polynomials_round_zero(
+    fn fused_materialise_polynomials_round_zero(
         shared: &mut OuterSharedState<F>,
-        num_vars: usize,
+        window_size: usize,
     ) -> (DensePolynomial<F>, DensePolynomial<F>) {
         let eq_poly = &shared.split_eq_poly;
-
-        let grid_size = 1 << num_vars;
-        let (E_out, E_in) = eq_poly.E_out_in_for_window(num_vars);
+        let grid_size = 1 << window_size;
+        let (E_out, E_in) = eq_poly.E_out_in_for_window(window_size);
 
         let num_evals_az = E_out.len() * E_in.len() * grid_size;
         let mut az: Vec<F> = unsafe_allocate_zero_vec(num_evals_az);
         let mut bz: Vec<F> = unsafe_allocate_zero_vec(num_evals_az);
 
-        if E_in.len() == 1 {
-            az.par_chunks_exact_mut(grid_size)
-                .zip(bz.par_chunks_exact_mut(grid_size))
-                .enumerate()
-                .for_each(|(i, (az_chunk, bz_chunk))| {
-                    if grid_size >= 2 {
+        if window_size == 1 {
+            // Fused path: materialize and compute (t0, t_inf) in one pass
+            let (t0, t_inf) = if E_in.len() == 1 {
+                az.par_chunks_exact_mut(2)
+                    .zip(bz.par_chunks_exact_mut(2))
+                    .enumerate()
+                    .map(|(i, (az_chunk, bz_chunk))| {
+                        let time_step_idx = i;
+                        let row_inputs = R1CSCycleInputs::from_trace::<F>(
+                            &shared.bytecode_preprocessing,
+                            &shared.trace,
+                            time_step_idx,
+                        );
+                        let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
+
+                        let az0 = eval.az_at_r_first_group(&shared.lagrange_evals_r0);
+                        let bz0 = eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
+                        let az1 = eval.az_at_r_second_group(&shared.lagrange_evals_r0);
+                        let bz1 = eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
+
+                        az_chunk[0] = az0;
+                        az_chunk[1] = az1;
+                        bz_chunk[0] = bz0;
+                        bz_chunk[1] = bz1;
+
+                        let p0 = az0 * bz0;
+                        let slope = (az1 - az0) * (bz1 - bz0);
+                        let e_out = E_out[i];
+                        (p0 * e_out, slope * e_out)
+                    })
+                    .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
+            } else {
+                let num_xin_bits = E_in.len().log_2();
+                az.par_chunks_exact_mut(2 * E_in.len())
+                    .zip(bz.par_chunks_exact_mut(2 * E_in.len()))
+                    .enumerate()
+                    .map(|(x_out, (az_outer_chunk, bz_outer_chunk))| {
+                        let mut local_t0 = F::zero();
+                        let mut local_t_inf = F::zero();
+
+                        for x_in in 0..E_in.len() {
+                            let i = (x_out << num_xin_bits) | x_in;
+                            let time_step_idx = i;
+
+                            let row_inputs = R1CSCycleInputs::from_trace::<F>(
+                                &shared.bytecode_preprocessing,
+                                &shared.trace,
+                                time_step_idx,
+                            );
+                            let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
+
+                            let az0 = eval.az_at_r_first_group(&shared.lagrange_evals_r0);
+                            let bz0 = eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
+                            let az1 = eval.az_at_r_second_group(&shared.lagrange_evals_r0);
+                            let bz1 = eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
+
+                            let offset = x_in * 2;
+                            az_outer_chunk[offset] = az0;
+                            az_outer_chunk[offset + 1] = az1;
+                            bz_outer_chunk[offset] = bz0;
+                            bz_outer_chunk[offset + 1] = bz1;
+
+                            let p0 = az0 * bz0;
+                            let slope = (az1 - az0) * (bz1 - bz0);
+                            let e_in = E_in[x_in];
+                            local_t0 += p0 * e_in;
+                            local_t_inf += slope * e_in;
+                        }
+                        let e_out = E_out[x_out];
+                        (local_t0 * e_out, local_t_inf * e_out)
+                    })
+                    .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
+            };
+            shared.t_prime_poly = Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
+        } else {
+            // General path for window_size > 1 (not used by LinearOnlySchedule)
+            if E_in.len() == 1 {
+                az.par_chunks_exact_mut(grid_size)
+                    .zip(bz.par_chunks_exact_mut(grid_size))
+                    .enumerate()
+                    .for_each(|(i, (az_chunk, bz_chunk))| {
                         let mut j = 0;
                         while j < grid_size {
                             let full_idx = grid_size * i + j;
@@ -1172,60 +1243,22 @@ impl<F: JoltField> OuterLinearStage<F> {
                             );
                             let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
 
-                            let az0 = eval.az_at_r_first_group(&shared.lagrange_evals_r0);
-                            let bz0 = eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
-
-                            let az1 = eval.az_at_r_second_group(&shared.lagrange_evals_r0);
-                            let bz1 = eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
-
-                            az_chunk[j] = az0;
-                            bz_chunk[j] = bz0;
-
-                            az_chunk[j + 1] = az1;
-                            bz_chunk[j + 1] = bz1;
+                            az_chunk[j] = eval.az_at_r_first_group(&shared.lagrange_evals_r0);
+                            bz_chunk[j] = eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
+                            az_chunk[j + 1] = eval.az_at_r_second_group(&shared.lagrange_evals_r0);
+                            bz_chunk[j + 1] = eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
 
                             j += 2;
                         }
-                    } else {
-                        for j in 0..grid_size {
-                            let full_idx = grid_size * i + j;
-                            let time_step_idx = full_idx >> 1;
-                            let selector = (full_idx & 1) == 1;
-
-                            let row_inputs = R1CSCycleInputs::from_trace::<F>(
-                                &shared.bytecode_preprocessing,
-                                &shared.trace,
-                                time_step_idx,
-                            );
-                            let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
-
-                            let (az_at_full_idx, bz_at_full_idx) = if !selector {
-                                (
-                                    eval.az_at_r_first_group(&shared.lagrange_evals_r0),
-                                    eval.bz_at_r_first_group(&shared.lagrange_evals_r0),
-                                )
-                            } else {
-                                (
-                                    eval.az_at_r_second_group(&shared.lagrange_evals_r0),
-                                    eval.bz_at_r_second_group(&shared.lagrange_evals_r0),
-                                )
-                            };
-
-                            az_chunk[j] = az_at_full_idx;
-                            bz_chunk[j] = bz_at_full_idx;
-                        }
-                    }
-                });
-        } else {
-            let num_xin_bits = E_in.len().log_2();
-            az.par_chunks_exact_mut(grid_size * E_in.len())
-                .zip(bz.par_chunks_exact_mut(grid_size * E_in.len()))
-                .enumerate()
-                .for_each(|(x_out, (az_outer_chunk, bz_outer_chunk))| {
-                    for x_in in 0..E_in.len() {
-                        let i = (x_out << num_xin_bits) | x_in;
-
-                        if grid_size >= 2 {
+                    });
+            } else {
+                let num_xin_bits = E_in.len().log_2();
+                az.par_chunks_exact_mut(grid_size * E_in.len())
+                    .zip(bz.par_chunks_exact_mut(grid_size * E_in.len()))
+                    .enumerate()
+                    .for_each(|(x_out, (az_outer_chunk, bz_outer_chunk))| {
+                        for x_in in 0..E_in.len() {
+                            let i = (x_out << num_xin_bits) | x_in;
                             let mut j = 0;
                             while j < grid_size {
                                 let full_idx = grid_size * i + j;
@@ -1238,53 +1271,20 @@ impl<F: JoltField> OuterLinearStage<F> {
                                 );
                                 let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
 
-                                let az0 = eval.az_at_r_first_group(&shared.lagrange_evals_r0);
-                                let bz0 = eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
-
-                                let az1 = eval.az_at_r_second_group(&shared.lagrange_evals_r0);
-                                let bz1 = eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
-
-                                let offset_in_chunk = x_in * grid_size + j;
-                                az_outer_chunk[offset_in_chunk] = az0;
-                                bz_outer_chunk[offset_in_chunk] = bz0;
-
-                                az_outer_chunk[offset_in_chunk + 1] = az1;
-                                bz_outer_chunk[offset_in_chunk + 1] = bz1;
+                                let offset = x_in * grid_size + j;
+                                az_outer_chunk[offset] = eval.az_at_r_first_group(&shared.lagrange_evals_r0);
+                                bz_outer_chunk[offset] = eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
+                                az_outer_chunk[offset + 1] = eval.az_at_r_second_group(&shared.lagrange_evals_r0);
+                                bz_outer_chunk[offset + 1] = eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
 
                                 j += 2;
                             }
-                        } else {
-                            for j in 0..grid_size {
-                                let full_idx = grid_size * i + j;
-                                let time_step_idx = full_idx >> 1;
-                                let selector = (full_idx & 1) == 1;
-
-                                let row_inputs = R1CSCycleInputs::from_trace::<F>(
-                                    &shared.bytecode_preprocessing,
-                                    &shared.trace,
-                                    time_step_idx,
-                                );
-                                let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
-
-                                let (az_at_full_idx, bz_at_full_idx) = if !selector {
-                                    (
-                                        eval.az_at_r_first_group(&shared.lagrange_evals_r0),
-                                        eval.bz_at_r_first_group(&shared.lagrange_evals_r0),
-                                    )
-                                } else {
-                                    (
-                                        eval.az_at_r_second_group(&shared.lagrange_evals_r0),
-                                        eval.bz_at_r_second_group(&shared.lagrange_evals_r0),
-                                    )
-                                };
-
-                                let offset_in_chunk = x_in * grid_size + j;
-                                az_outer_chunk[offset_in_chunk] = az_at_full_idx;
-                                bz_outer_chunk[offset_in_chunk] = bz_at_full_idx;
-                            }
                         }
-                    }
-                });
+                    });
+            }
+            // For window_size > 1 at round 0, t_prime_poly must be computed separately
+            // This path is not used by LinearOnlySchedule
+            shared.t_prime_poly = None;
         }
         (DensePolynomial::new(az), DensePolynomial::new(bz))
     }
@@ -1445,28 +1445,13 @@ impl<F: JoltField> LinearSumcheckStage<F> for OuterLinearStage<F> {
         shared: &mut Self::Shared,
         window_size: usize,
     ) -> Self {
-        let is_not_first_round_of_sumcheck = shared.split_eq_poly.num_challenges() > 0;
-        let (az, bz) = if is_not_first_round_of_sumcheck {
-            // This sets t_prime_poly for us
+        // Both functions set t_prime_poly, so no extra logic needed
+        let (az, bz) = if shared.split_eq_poly.num_challenges() > 0 {
             Self::fused_materialise_polynomials_general_with_multiquadratic(shared, window_size)
         } else {
-            // This only materializes az/bz, doesn't set t_prime_poly
-            Self::materialise_polynomials_round_zero(shared, window_size)
+            Self::fused_materialise_polynomials_round_zero(shared, window_size)
         };
-
-        let stage = Self { az, bz };
-
-        // For round 0, we need to compute t_prime_poly after materializing az/bz
-        if !is_not_first_round_of_sumcheck {
-            if window_size == 1 {
-                let (t0, t_inf) = stage.compute_linear_step_optimized(&shared.split_eq_poly);
-                shared.t_prime_poly = Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
-            } else {
-                stage.compute_evaluation_grid_from_polynomials_parallel(shared, window_size);
-            }
-        }
-
-        stage
+        Self { az, bz }
     }
 
     #[tracing::instrument(skip_all, name = "OuterLinearStage::next_window")]

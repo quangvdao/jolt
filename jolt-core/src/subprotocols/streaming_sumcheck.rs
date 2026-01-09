@@ -132,7 +132,7 @@ where
             }
             Ordering::Equal => {
                 // SWITCHING TO LINEAR MODE
-                assert!(
+                debug_assert!(
                     self.schedule.is_window_start(round),
                     "switch over is not a window start"
                 );
@@ -144,7 +144,7 @@ where
             }
             Ordering::Greater => {
                 // LINEAR MODE
-                assert!(
+                debug_assert!(
                     self.schedule.is_window_start(round),
                     "round is not a window start in linear mode"
                 );

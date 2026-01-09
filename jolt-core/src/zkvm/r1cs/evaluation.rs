@@ -167,73 +167,128 @@ pub fn eval_az_bz_batch_from_row<F: JoltField>(
     debug_assert_eq!(constraints.len(), out_bz.len());
 
     for (i, named) in constraints.iter().enumerate() {
-        let az_i128 = eval_lc_i128(&named.cons.a, row);
-        let bz_i128 = eval_lc_i128(&named.cons.b, row);
-        out_az[i] = s96_from_i128(az_i128);
-        out_bz[i] = S160::from(bz_i128);
+        // Evaluate LC in S160 semantics directly (avoid lossy i128 conversions:
+        // some witnesses (e.g. `Product`) can exceed i128 range).
+        let az_s160 = eval_lc_s160(&named.cons.a, row);
+        let bz_s160 = eval_lc_s160(&named.cons.b, row);
+        out_az[i] = s96_from_s160(az_s160);
+        out_bz[i] = bz_s160;
     }
 }
 
 #[inline]
-fn eval_lc_i128(lc: &super::ops::LC, row: &R1CSCycleInputs) -> i128 {
-    let mut acc: i128 = 0;
+fn eval_lc_s160(lc: &super::ops::LC, row: &R1CSCycleInputs) -> S160 {
+    let mut acc = S160::zero();
 
     for i in 0..lc.num_terms() {
         if let Some(term) = lc.term(i) {
             let input = JoltR1CSInputs::from_index(term.input_index);
-            let v = input_to_i128(row, input);
-            acc = acc.saturating_add(term.coeff.saturating_mul(v));
+            let v = input_to_s160(row, input);
+            let c = s160_from_i128(term.coeff);
+            acc += mul_s160_checked(v, c);
         }
     }
 
     if let Some(c) = lc.const_term() {
-        acc = acc.saturating_add(c);
+        acc += s160_from_i128(c);
     }
 
     acc
 }
 
 #[inline]
-fn input_to_i128(row: &R1CSCycleInputs, input: JoltR1CSInputs) -> i128 {
+fn input_to_s160(row: &R1CSCycleInputs, input: JoltR1CSInputs) -> S160 {
     match input {
-        JoltR1CSInputs::PC => row.pc as i128,
-        JoltR1CSInputs::UnexpandedPC => row.unexpanded_pc as i128,
-        JoltR1CSInputs::Imm => row.imm.to_i128(),
-        JoltR1CSInputs::RamAddress => row.ram_addr as i128,
-        JoltR1CSInputs::Rs1Value => row.rs1_read_value as i128,
-        JoltR1CSInputs::Rs2Value => row.rs2_read_value as i128,
-        JoltR1CSInputs::RdWriteValue => row.rd_write_value as i128,
-        JoltR1CSInputs::RamReadValue => row.ram_read_value as i128,
-        JoltR1CSInputs::RamWriteValue => row.ram_write_value as i128,
-        JoltR1CSInputs::LeftInstructionInput => row.left_input as i128,
-        JoltR1CSInputs::RightInstructionInput => row.right_input.to_i128(),
-        JoltR1CSInputs::LeftLookupOperand => row.left_lookup as i128,
-        JoltR1CSInputs::RightLookupOperand => row.right_lookup as i128,
-        JoltR1CSInputs::Product => row
-            .product
-            .to_i128()
-            .expect("R1CSCycleInputs::product does not fit in i128"),
-        JoltR1CSInputs::WriteLookupOutputToRD => row.write_lookup_output_to_rd_addr as i128,
-        JoltR1CSInputs::WritePCtoRD => row.write_pc_to_rd_addr as i128,
-        JoltR1CSInputs::ShouldBranch => row.should_branch as i128,
-        JoltR1CSInputs::NextUnexpandedPC => row.next_unexpanded_pc as i128,
-        JoltR1CSInputs::NextPC => row.next_pc as i128,
-        JoltR1CSInputs::NextIsVirtual => row.next_is_virtual as i128,
-        JoltR1CSInputs::NextIsFirstInSequence => row.next_is_first_in_sequence as i128,
-        JoltR1CSInputs::LookupOutput => row.lookup_output as i128,
-        JoltR1CSInputs::ShouldJump => row.should_jump as i128,
-        JoltR1CSInputs::OpFlags(flag) => row.flags[flag as usize] as i128,
+        JoltR1CSInputs::PC => s160_from_u64(row.pc),
+        JoltR1CSInputs::UnexpandedPC => s160_from_u64(row.unexpanded_pc),
+        JoltR1CSInputs::Imm => s160_from_s64(row.imm),
+        JoltR1CSInputs::RamAddress => s160_from_u64(row.ram_addr),
+        JoltR1CSInputs::Rs1Value => s160_from_u64(row.rs1_read_value),
+        JoltR1CSInputs::Rs2Value => s160_from_u64(row.rs2_read_value),
+        JoltR1CSInputs::RdWriteValue => s160_from_u64(row.rd_write_value),
+        JoltR1CSInputs::RamReadValue => s160_from_u64(row.ram_read_value),
+        JoltR1CSInputs::RamWriteValue => s160_from_u64(row.ram_write_value),
+        JoltR1CSInputs::LeftInstructionInput => s160_from_u64(row.left_input),
+        JoltR1CSInputs::RightInstructionInput => s160_from_s64(row.right_input),
+        JoltR1CSInputs::LeftLookupOperand => s160_from_u64(row.left_lookup),
+        JoltR1CSInputs::RightLookupOperand => s160_from_u128(row.right_lookup),
+        JoltR1CSInputs::Product => s160_from_s128(row.product),
+        JoltR1CSInputs::WriteLookupOutputToRD => s160_from_bool(row.write_lookup_output_to_rd_addr),
+        JoltR1CSInputs::WritePCtoRD => s160_from_bool(row.write_pc_to_rd_addr),
+        JoltR1CSInputs::ShouldBranch => s160_from_bool(row.should_branch),
+        JoltR1CSInputs::NextUnexpandedPC => s160_from_u64(row.next_unexpanded_pc),
+        JoltR1CSInputs::NextPC => s160_from_u64(row.next_pc),
+        JoltR1CSInputs::NextIsVirtual => s160_from_bool(row.next_is_virtual),
+        JoltR1CSInputs::NextIsFirstInSequence => s160_from_bool(row.next_is_first_in_sequence),
+        JoltR1CSInputs::LookupOutput => s160_from_u64(row.lookup_output),
+        JoltR1CSInputs::ShouldJump => s160_from_bool(row.should_jump),
+        JoltR1CSInputs::OpFlags(flag) => s160_from_bool(row.flags[flag as usize]),
     }
 }
 
 #[inline]
-fn s96_from_i128(val: i128) -> I8OrI96 {
-    let is_positive = val.is_positive();
-    let mag: u128 = val.unsigned_abs();
-    debug_assert_eq!(mag >> 96, 0, "Az value exceeds 96-bit magnitude");
-    let lo = mag as u64;
-    let hi = (mag >> 64) as u32;
-    I8OrI96::new([lo], hi, is_positive)
+fn s160_from_bool(b: bool) -> S160 {
+    s160_from_u64(b as u64)
+}
+
+#[inline]
+fn s160_from_u64(x: u64) -> S160 {
+    S160::new([x, 0u64], 0u32, true)
+}
+
+#[inline]
+fn s160_from_u128(x: u128) -> S160 {
+    S160::new([x as u64, (x >> 64) as u64], 0u32, true)
+}
+
+#[inline]
+fn s160_from_s64(x: S64) -> S160 {
+    S160::new([x.magnitude.0[0], 0u64], 0u32, x.is_positive)
+}
+
+#[inline]
+fn s160_from_s128(x: S128) -> S160 {
+    S160::new([x.magnitude.0[0], x.magnitude.0[1]], 0u32, x.is_positive)
+}
+
+#[inline]
+fn s160_from_i128(x: i128) -> S160 {
+    let is_positive = x.is_positive();
+    let mag: u128 = x.unsigned_abs();
+    S160::new([mag as u64, (mag >> 64) as u64], 0u32, is_positive)
+}
+
+#[inline]
+fn s96_from_s160(x: S160) -> I8OrI96 {
+    // S96 has 64 + 32 bits of magnitude. Ensure S160 fits in that range.
+    let lo = *x.magnitude_lo();
+    assert!(
+        x.magnitude_hi() == 0 && (lo[1] >> 32) == 0,
+        "Az value exceeds 96-bit magnitude"
+    );
+    let hi32 = (lo[1] & 0xFFFF_FFFF) as u32;
+    I8OrI96::new([lo[0]], hi32, x.is_positive())
+}
+
+#[inline]
+fn mul_s160_checked(a: S160, b: S160) -> S160 {
+    use ark_ff::biginteger::BigInt;
+
+    if a.is_zero() || b.is_zero() {
+        return S160::zero();
+    }
+
+    let sign = a.is_positive() == b.is_positive();
+    let a_lo = *a.magnitude_lo();
+    let b_lo = *b.magnitude_lo();
+    let a_mag = BigInt::<3>([a_lo[0], a_lo[1], a.magnitude_hi() as u64]);
+    let b_mag = BigInt::<3>([b_lo[0], b_lo[1], b.magnitude_hi() as u64]);
+    let prod = a_mag.mul_trunc::<3, 3>(&b_mag);
+    assert!(
+        (prod.0[2] >> 32) == 0,
+        "S160 multiplication overflow (magnitude exceeds 160 bits)"
+    );
+    S160::new([prod.0[0], prod.0[1]], (prod.0[2] & 0xFFFF_FFFF) as u32, sign)
 }
 
 pub(crate) const COEFFS_PER_J: [[i32; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE];

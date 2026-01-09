@@ -1072,13 +1072,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
                 self.lagrange_coeffs = next;
             }
             self.eq_poly.bind(r_j);
-            #[cfg(test)]
-            {
-                rayon::join(
-                    || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
-                    || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
-                );
-            }
+            // Keep the baseline dense polynomials bound in lockstep with `eq_poly`,
+            // since `compute_message` defers to `baseline_compute_endpoints` for rounds
+            // after the streaming phase.
+            rayon::join(
+                || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
+                || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+            );
             return;
         }
 
@@ -1088,13 +1088,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             self.spartan_poly.bound_coeffs = bound;
             self.block4_at_r.clear();
             self.eq_poly.bind(r_j);
-            #[cfg(test)]
-            {
-                rayon::join(
-                    || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
-                    || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
-                );
-            }
+            rayon::join(
+                || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
+                || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+            );
             return;
         }
 
@@ -1181,13 +1178,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             &mut self.spartan_poly.binding_scratch_space,
         );
         self.eq_poly.bind(r_j);
-        #[cfg(test)]
-        {
-            rayon::join(
-                || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
-                || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
-            );
-        }
+        rayon::join(
+            || self.baseline_az.bind_parallel(r_j, BindingOrder::LowToHigh),
+            || self.baseline_bz.bind_parallel(r_j, BindingOrder::LowToHigh),
+        );
     }
 
     fn cache_openings(

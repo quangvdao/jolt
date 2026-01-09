@@ -21,6 +21,7 @@ use jolt_core::{
             outer_naive::OuterNaiveSumcheckProver,
             outer_round_batched::OuterRoundBatchedSumcheckProver,
             outer::{OuterRemainingStreamingSumcheck, OuterSharedState, OuterUniSkipParams, OuterUniSkipProver},
+            outer_uni_skip_linear::{OuterRemainingSumcheckProverNonStreaming, OuterUniSkipInstanceProver},
         },
     },
 };
@@ -140,7 +141,8 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         trace.as_ref(),
                         &bytecode_pp,
                     );
-                    let _ = prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
+                    let _ =
+                        prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
 
                     // Remaining outer rounds: streaming schedule for degree-3 messages.
                     let num_rounds = uni_skip_params.tau.len() - 1;
@@ -166,16 +168,51 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
+        group.bench_function(&format!("outer-uni-skip/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(trace, bytecode_pp, padded_trace_length, mut opening_accumulator, mut transcript)| {
+                    // Stage 1 (Outer): uni-skip first round + remaining rounds using the specialized
+                    // streaming-first-then-linear prover (no arbitrary window schedule machinery).
+                    let key = UniformSpartanKey::<F>::new(padded_trace_length);
+                    let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
+
+                    // Uni-skip first round (checkpoint implementation)
+                    let mut uni_skip = OuterUniSkipInstanceProver::<F>::gen(
+                        trace.as_ref(),
+                        &bytecode_pp,
+                        &uni_skip_params.tau,
+                    );
+                    let _ = prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
+
+                    // Remaining rounds (checkpoint implementation)
+                    let mut instance = OuterRemainingSumcheckProverNonStreaming::<F>::gen(
+                        Arc::clone(&trace),
+                        &bytecode_pp,
+                        uni_skip_params,
+                        &opening_accumulator,
+                    );
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut instance];
+                    black_box(BatchedSumcheck::prove(
+                        instance_refs,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
         group.bench_function(&format!("outer-round-batched/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(trace, bytecode_pp, _padded_trace_length, mut opening_accumulator, mut transcript)| {
-                    let mut instance =
-                        OuterRoundBatchedSumcheckProver::<F>::gen::<ProofTranscript>(
-                            Arc::clone(&trace),
-                            &bytecode_pp,
-                            &mut transcript,
-                        );
+                    let mut instance = OuterRoundBatchedSumcheckProver::<F>::gen::<ProofTranscript>(
+                        Arc::clone(&trace),
+                        &bytecode_pp,
+                        &mut transcript,
+                    );
                     let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
                         vec![&mut instance];
                     black_box(BatchedSumcheck::prove(

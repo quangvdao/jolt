@@ -17,6 +17,11 @@ use common::constants::{
 pub enum OuterStage1RemainderImpl {
     /// Use the `main` streaming-sumcheck implementation in `spartan/outer.rs`.
     Streaming,
+    /// Use the experimental streaming implementation that stores Baweja-style
+    /// cross-product tables `M[β1,β2]` (size 4^w per window).
+    ///
+    /// Intended for benchmarking; should be semantically equivalent to `Streaming`.
+    StreamingMTable,
     /// Use the checkpointed non-streaming implementation in `spartan/outer_uni_skip_linear.rs`.
     NonStreamingCheckpoint,
 }

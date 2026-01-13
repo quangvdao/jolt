@@ -5,7 +5,7 @@ use crate::field::JoltField;
 // Accumulation primitives for SVO (moved from zkvm/r1cs/types.rs)
 pub mod accum {
     use crate::field::{JoltField, MulTrunc};
-    use ark_ff::biginteger::{BigInt, BigInteger, S96 as I8OrI96, S160, S224};
+    use ark_ff::biginteger::{BigInt, BigInteger, S160, S224, S96 as I8OrI96};
     use num_traits::Zero;
 
     /// Final unreduced product after multiplying by a 256-bit field element (512-bit unsigned)
@@ -26,12 +26,7 @@ pub mod accum {
 
         // Pack magnitudes into u256 limbs.
         // For SignedBigIntHi32, the 32-bit head is stored separately; treat it as an extra u64 limb.
-        let az_mag = BigInt::<4>([
-            az.magnitude_lo()[0],
-            az.magnitude_hi() as u64,
-            0u64,
-            0u64,
-        ]);
+        let az_mag = BigInt::<4>([az.magnitude_lo()[0], az.magnitude_hi() as u64, 0u64, 0u64]);
         let bz_mag = BigInt::<4>([
             bz.magnitude_lo()[0],
             bz.magnitude_lo()[1],
@@ -177,7 +172,7 @@ pub mod accum {
 pub mod svo_helpers {
     use super::accum::{fmadd_unreduced, mul_az_bz_widen, UnreducedProduct};
     use super::*;
-    use ark_ff::biginteger::{S96 as I8OrI96, S160};
+    use ark_ff::biginteger::{S160, S96 as I8OrI96};
 
     // SVOEvalPoint enum definition
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1529,7 +1524,7 @@ mod tests {
 
     use crate::{field::JoltField, poly::eq_poly::EqPolynomial};
     use ark_bn254::Fr;
-    use ark_ff::biginteger::{S96 as I8OrI96, S160};
+    use ark_ff::biginteger::{S160, S96 as I8OrI96};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
 

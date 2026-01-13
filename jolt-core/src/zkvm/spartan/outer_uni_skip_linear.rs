@@ -228,7 +228,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterUniSkipI
         let claim = self
             .uni_poly
             .as_ref()
-            .expect("OuterUniSkipInstanceProver::compute_message must be called before cache_openings")
+            .expect(
+                "OuterUniSkipInstanceProver::compute_message must be called before cache_openings",
+            )
             .evaluate(&opening_point[0]);
 
         accumulator.append_virtual(
@@ -281,10 +283,8 @@ impl<F: JoltField> OuterRemainingSumcheckProverNonStreaming<F> {
         debug_assert_eq!(r_uni_skip.len(), 1);
         let r0 = r_uni_skip[0];
 
-        let lagrange_evals_r = LagrangePolynomial::<F>::evals::<
-            F::Challenge,
-            OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
-        >(&r0);
+        let lagrange_evals_r =
+            LagrangePolynomial::<F>::evals::<F::Challenge, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE>(&r0);
 
         let tau_high = uni_skip_params.tau[uni_skip_params.tau.len() - 1];
         let tau_low = &uni_skip_params.tau[..uni_skip_params.tau.len() - 1];
@@ -472,7 +472,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         self.params.input_claim
     }
 
-    #[tracing::instrument(skip_all, name = "OuterRemainingSumcheckProverNonStreaming::compute_message")]
+    #[tracing::instrument(
+        skip_all,
+        name = "OuterRemainingSumcheckProverNonStreaming::compute_message"
+    )]
     fn compute_message(&mut self, round: usize, previous_claim: F) -> UniPoly<F> {
         let (t0, t_inf) = if round == 0 {
             self.first_round_evals
@@ -483,7 +486,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             .gruen_poly_deg_3(t0, t_inf, previous_claim)
     }
 
-    #[tracing::instrument(skip_all, name = "OuterRemainingSumcheckProverNonStreaming::ingest_challenge")]
+    #[tracing::instrument(
+        skip_all,
+        name = "OuterRemainingSumcheckProverNonStreaming::ingest_challenge"
+    )]
     fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         rayon::join(
             || self.az.bind_parallel(r_j, BindingOrder::LowToHigh),

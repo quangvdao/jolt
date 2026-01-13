@@ -37,7 +37,7 @@
 //! - Test-only `assert_constraints` methods validate that Az guards imply zero
 //!   Bz magnitudes for both groups.
 
-use ark_ff::biginteger::{S96 as I8OrI96, S128, S160, S192, S256, S64};
+use ark_ff::biginteger::{S128, S160, S192, S256, S64, S96 as I8OrI96};
 use ark_std::Zero;
 use rayon::prelude::*;
 use strum::IntoEnumIterator;
@@ -288,7 +288,11 @@ fn mul_s160_checked(a: S160, b: S160) -> S160 {
         (prod.0[2] >> 32) == 0,
         "S160 multiplication overflow (magnitude exceeds 160 bits)"
     );
-    S160::new([prod.0[0], prod.0[1]], (prod.0[2] & 0xFFFF_FFFF) as u32, sign)
+    S160::new(
+        [prod.0[0], prod.0[1]],
+        (prod.0[2] & 0xFFFF_FFFF) as u32,
+        sign,
+    )
 }
 
 pub(crate) const COEFFS_PER_J: [[i32; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE];
@@ -1058,8 +1062,7 @@ impl<'a, F: JoltField> R1CSEval<'a, F> {
                     let e_in = eq_two[x2];
                     let weight = eq1_val * e_in;
                     let idx = x1 * eq_two_len + x2;
-                    let row =
-                        R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, idx);
+                    let row = R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, idx);
 
                     for var in ALL_R1CS_INPUTS {
                         let val = Self::input_to_field_naive(&row, var);

@@ -689,7 +689,6 @@ impl<F: JoltField> GruenSplitEqPolynomial<F> {
         )
         .map(F::from_montgomery_reduce::<LIMBS>)
     }
-
 }
 
 #[cfg(test)]

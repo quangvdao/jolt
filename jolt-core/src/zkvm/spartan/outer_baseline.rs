@@ -1,8 +1,8 @@
 #![cfg(feature = "prover")]
 use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
-    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
-    SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
+    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
+    VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::{
     dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial,
@@ -100,8 +100,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
         // Full Eq kernel over the (cycle,constraint) variables, using the same
         // τ vector that parameterizes the baseline prover's equality polynomial.
-        let r_rev: Vec<F::Challenge> =
-            sumcheck_challenges.iter().rev().copied().collect();
+        let r_rev: Vec<F::Challenge> = sumcheck_challenges.iter().rev().copied().collect();
         let eq_tau_r = EqPolynomial::<F>::mle(&self.tau, &r_rev);
 
         eq_tau_r * inner_sum_prod
@@ -113,8 +112,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         sumcheck_challenges: &[F::Challenge],
     ) {
         let opening_point: OpeningPoint<BIG_ENDIAN, F> =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
-                .match_endianness();
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
         // Witness openings at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_bits);
@@ -526,12 +524,8 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
                         let global_index =
                             2 * (step_index * padded_num_constraints + constraint_index);
 
-                        let az_coeff = constraint
-                            .a
-                            .evaluate_row(flattened_polynomials, step_index);
-                        let bz_coeff = constraint
-                            .b
-                            .evaluate_row(flattened_polynomials, step_index);
+                        let az_coeff = constraint.a.evaluate_row(flattened_polynomials, step_index);
+                        let bz_coeff = constraint.b.evaluate_row(flattened_polynomials, step_index);
                         if !az_coeff.is_zero() {
                             coeffs.push((global_index, az_coeff).into());
                         }
@@ -726,11 +720,8 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
                 let constraint_idx = d % padded_num_constraints;
 
                 if step_idx < num_steps && constraint_idx < uniform_constraints.len() {
-                    let row = R1CSCycleInputs::from_trace::<F>(
-                        bytecode_preprocessing,
-                        trace,
-                        step_idx,
-                    );
+                    let row =
+                        R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, step_idx);
                     let cons = &uniform_constraints[constraint_idx];
                     *az_ref = BaselineConstraintEval::eval_az(cons, &row);
                     *bz_ref = BaselineConstraintEval::eval_bz(cons, &row);
@@ -759,8 +750,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         let (t0, tinf) = self.compute_endpoints();
         // Use the same Gruen helper as the canonical outer to build the cubic round polynomial.
-        self.eq_poly
-            .gruen_poly_deg_3(t0, tinf, previous_claim)
+        self.eq_poly.gruen_poly_deg_3(t0, tinf, previous_claim)
     }
 
     #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::ingest_challenge")]
@@ -780,8 +770,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
         sumcheck_challenges: &[F::Challenge],
     ) {
         let opening_point: OpeningPoint<BIG_ENDIAN, F> =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
-                .match_endianness();
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
         // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);
@@ -831,10 +820,7 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
                     let slope = (az1 - az0) * (bz1 - bz0);
                     (eq * p0, eq * slope)
                 })
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                )
+                .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
         } else {
             let num_x1_bits = eq_poly.E_in_current_len().log_2();
             let x1_len = eq_poly.E_in_current_len();
@@ -860,10 +846,7 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
                     let e_out = eq_poly.E_out_current()[x2];
                     (e_out * inner0, e_out * inner_inf)
                 })
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                )
+                .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
         }
     }
 }

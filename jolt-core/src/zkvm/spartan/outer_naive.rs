@@ -8,15 +8,11 @@ use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 
 use crate::utils::thread::unsafe_allocate_zero_vec;
 use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::zkvm::r1cs::constraints::R1CSConstraint;
 use crate::zkvm::r1cs::evaluation::{BaselineConstraintEval, R1CSEval};
 use crate::zkvm::r1cs::inputs::{R1CSCycleInputs, ALL_R1CS_INPUTS};
-use crate::zkvm::r1cs::constraints::R1CSConstraint;
 use crate::zkvm::witness::VirtualPolynomial;
-use crate::{
-    field::JoltField,
-    transcripts::Transcript,
-    utils::math::Math,
-};
+use crate::{field::JoltField, transcripts::Transcript, utils::math::Math};
 use allocative::Allocative;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -139,11 +135,8 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
                 let constraint_idx = d % padded_num_constraints;
 
                 if step_idx < num_steps && constraint_idx < uniform_constraints.len() {
-                    let row = R1CSCycleInputs::from_trace::<F>(
-                        bytecode_preprocessing,
-                        trace,
-                        step_idx,
-                    );
+                    let row =
+                        R1CSCycleInputs::from_trace::<F>(bytecode_preprocessing, trace, step_idx);
                     let cons = &uniform_constraints[constraint_idx];
                     *az_ref = BaselineConstraintEval::eval_az(cons, &row);
                     *bz_ref = BaselineConstraintEval::eval_bz(cons, &row);
@@ -258,8 +251,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterNaiveSum
     ) {
         // Opening point uses the sumcheck challenges; endianness matched by OpeningPoint impl
         let opening_point: OpeningPoint<BIG_ENDIAN, F> =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
-                .match_endianness();
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
         // Witness openings at r_cycle: stream from trace and evaluate at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_vars);

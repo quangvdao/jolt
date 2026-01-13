@@ -1,15 +1,12 @@
 #![allow(clippy::too_many_arguments)]
 #![cfg(feature = "prover")]
 use crate::poly::opening_proof::{
-    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, VerifierOpeningAccumulator,
-    SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
+    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
+    VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::{
-    dense_mlpoly::DensePolynomial,
-    eq_poly::EqPolynomial,
-    multilinear_polynomial::BindingOrder,
-    split_eq_poly::GruenSplitEqPolynomial,
-    unipoly::UniPoly,
+    dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial, multilinear_polynomial::BindingOrder,
+    split_eq_poly::GruenSplitEqPolynomial, unipoly::UniPoly,
 };
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
@@ -30,7 +27,7 @@ use crate::{
     },
 };
 use allocative::Allocative;
-use ark_ff::biginteger::{S96 as I8OrI96, S160};
+use ark_ff::biginteger::{S160, S96 as I8OrI96};
 use num_traits::Zero;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -763,7 +760,6 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
         bytecode_preprocessing: &BytecodePreprocessing,
         transcript: &mut T,
     ) -> Self {
-
         // Determine step and constraint vars
         let num_steps = trace.len();
         let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
@@ -783,9 +779,7 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
             NUM_SVO_ROUNDS,
             F,
         >::svo_sumcheck_round(
-            bytecode_preprocessing,
-            trace.as_ref(),
-            &tau,
+            bytecode_preprocessing, trace.as_ref(), &tau
         );
 
         // Eq helper for the sumcheck itself: use standard split-eq semantics over all variables.
@@ -809,9 +803,9 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
         );
 
         let (baseline_az, baseline_bz) = {
+            use crate::zkvm::r1cs::constraints::R1CSConstraint;
             use crate::zkvm::r1cs::evaluation::BaselineConstraintEval;
             use crate::zkvm::r1cs::inputs::R1CSCycleInputs;
-            use crate::zkvm::r1cs::constraints::R1CSConstraint;
 
             let uniform_constraints: Vec<R1CSConstraint> =
                 R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
@@ -959,10 +953,7 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
                     let slope = (az1 - az0) * (bz1 - bz0);
                     (eq * p0, eq * slope)
                 })
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                )
+                .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
         } else {
             let num_x1_bits = eq_poly.E_in_current_len().log_2();
             let x1_len = eq_poly.E_in_current_len();
@@ -988,10 +979,7 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
                     let e_out = eq_poly.E_out_current()[x2];
                     (e_out * inner0, e_out * inner_inf)
                 })
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                )
+                .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
         }
     }
 }
@@ -1009,10 +997,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         F::zero()
     }
 
-    #[tracing::instrument(
-        skip_all,
-        name = "OuterRoundBatchedSumcheckProver::compute_message"
-    )]
+    #[tracing::instrument(skip_all, name = "OuterRoundBatchedSumcheckProver::compute_message")]
     fn compute_message(&mut self, round: usize, previous_claim: F) -> UniPoly<F> {
         let (t0, tinf) = if round < NUM_SVO_ROUNDS {
             self.compute_svo_quadratic_evals(round)
@@ -1050,8 +1035,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             }
         }
 
-        self.eq_poly
-            .gruen_poly_deg_3(t0, tinf, previous_claim)
+        self.eq_poly.gruen_poly_deg_3(t0, tinf, previous_claim)
     }
 
     #[tracing::instrument(skip_all, name = "OuterRoundBatchedSumcheckProver::ingest_challenge")]
@@ -1192,8 +1176,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
     ) {
         // Opening point uses the sumcheck challenges; endianness matched by OpeningPoint impl
         let opening_point: OpeningPoint<BIG_ENDIAN, F> =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
-                .match_endianness();
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
         // Witness openings at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_cycle_bits);
@@ -1286,8 +1269,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
         // Eq kernel over all remaining outer variables (cycle + constraint bits),
         // using the same τ layout as the round-batched prover.
-        let r_rev: Vec<F::Challenge> =
-            sumcheck_challenges.iter().rev().copied().collect();
+        let r_rev: Vec<F::Challenge> = sumcheck_challenges.iter().rev().copied().collect();
         let eq_tau_r = EqPolynomial::<F>::mle(&self.tau, &r_rev);
 
         eq_tau_r * inner_sum_prod
@@ -1299,8 +1281,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         sumcheck_challenges: &[F::Challenge],
     ) {
         let opening_point: OpeningPoint<BIG_ENDIAN, F> =
-            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec())
-                .match_endianness();
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
 
         // Witness openings at r_cycle
         let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_cycle_bits);

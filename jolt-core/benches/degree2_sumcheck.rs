@@ -1,7 +1,7 @@
 use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, black_box};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rayon::prelude::*;
 
 use jolt_core::field::{JoltField, MulTrunc};
@@ -75,7 +75,7 @@ fn dense_sumcheck_evals_degree2_unreduced<F: JoltField>(
     poly: &DensePolynomial<F>,
     index: usize,
     order: BindingOrder,
-) -> [F::Unreduced::<4>; 2] {
+) -> [F::Unreduced<4>; 2] {
     debug_assert!(index < poly.len() / 2);
 
     let (eval_at_0, eval_at_1) = match order {
@@ -242,8 +242,7 @@ fn run_degree2_sumcheck_once(
     let mut prover_acc = ProverOpeningAccumulator::<Fr>::new(num_vars);
     let mut prover_tr = Blake2bTranscript::new(b"degree2_sumcheck");
 
-    let instances: Vec<&mut dyn SumcheckInstanceProver<Fr, Blake2bTranscript>> =
-        vec![&mut prover];
+    let instances: Vec<&mut dyn SumcheckInstanceProver<Fr, Blake2bTranscript>> = vec![&mut prover];
     let _ = BatchedSumcheck::prove(instances, &mut prover_acc, &mut prover_tr);
 }
 
@@ -253,7 +252,9 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
     group.sample_size(10);
 
     // Use a few sizes to showcase scaling; keep reasonably small for quick runs.
-    for &num_vars in &[14usize, 16usize, 18usize, 20usize, 22usize, 24usize, 26usize] {
+    for &num_vars in &[
+        14usize, 16usize, 18usize, 20usize, 22usize, 24usize, 26usize,
+    ] {
         let mut rng = StdRng::seed_from_u64(42 + num_vars as u64);
         let p = random_dense_polynomial(num_vars, &mut rng);
         let q = random_dense_polynomial(num_vars, &mut rng);
@@ -296,5 +297,3 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
 
 criterion_group!(benches, degree2_sumcheck_bench);
 criterion_main!(benches);
-
-

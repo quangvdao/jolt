@@ -17,11 +17,17 @@ use jolt_core::{
         r1cs::constraints::{R1CSConstraint, R1CS_CONSTRAINTS},
         r1cs::key::UniformSpartanKey,
         spartan::{
+            outer::{
+                OuterRemainingStreamingSumcheck, OuterRemainingStreamingSumcheckCoeffMul,
+                OuterRemainingStreamingSumcheckMTable, OuterSharedState, OuterUniSkipParams,
+                OuterUniSkipProver,
+            },
             outer_baseline::OuterBaselineSumcheckProver as OuterBaselineStreamingSumcheckProver,
             outer_naive::OuterNaiveSumcheckProver,
             outer_round_batched::OuterRoundBatchedSumcheckProver,
-            outer::{OuterRemainingStreamingSumcheck, OuterSharedState, OuterUniSkipParams, OuterUniSkipProver},
-            outer_uni_skip_linear::{OuterRemainingSumcheckProverNonStreaming, OuterUniSkipInstanceProver},
+            outer_uni_skip_linear::{
+                OuterRemainingSumcheckProverNonStreaming, OuterUniSkipInstanceProver,
+            },
         },
     },
 };
@@ -29,9 +35,9 @@ use tracer::instruction::Cycle;
 
 // Ensure SHA2 inline library is linked so its #[ctor] auto-registers builders
 #[cfg(feature = "host")]
-use jolt_inlines_sha2 as _;
-#[cfg(feature = "host")]
 use jolt_core::host;
+#[cfg(feature = "host")]
+use jolt_inlines_sha2 as _;
 
 type F = Fr;
 type ProofTranscript = KeccakTranscript;
@@ -79,7 +85,13 @@ fn setup_for_spartan(
     let opening_bits = padded_trace_length.log_2();
     let opening_accumulator = ProverOpeningAccumulator::<F>::new(opening_bits);
 
-    (Arc::new(trace), bytecode_pp, padded_trace_length, opening_accumulator, transcript)
+    (
+        Arc::new(trace),
+        bytecode_pp,
+        padded_trace_length,
+        opening_accumulator,
+        transcript,
+    )
 }
 
 fn bench_spartan_sumcheck(c: &mut Criterion) {
@@ -96,7 +108,13 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
         group.bench_function(&format!("outer-current/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(trace, bytecode_pp, padded_trace_length, mut opening_accumulator, mut transcript)| {
+                |(
+                    trace,
+                    bytecode_pp,
+                    padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
                     // Stage 1 (Outer): UniSkip first round + remaining rounds in linear-only mode
                     let key = UniformSpartanKey::<F>::new(padded_trace_length);
                     let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
@@ -105,7 +123,11 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         trace.as_ref(),
                         &bytecode_pp,
                     );
-                    let _ = prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
+                    let _ = prove_uniskip_round(
+                        &mut uni_skip,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    );
 
                     // Remaining outer rounds: linear-only schedule (no streaming windows).
                     let schedule = LinearOnlySchedule::new(uni_skip_params.tau.len() - 1);
@@ -132,7 +154,13 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
         group.bench_function(&format!("outer-streaming/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(trace, bytecode_pp, padded_trace_length, mut opening_accumulator, mut transcript)| {
+                |(
+                    trace,
+                    bytecode_pp,
+                    padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
                     // Uni-skip first round
                     let key = UniformSpartanKey::<F>::new(padded_trace_length);
                     let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
@@ -141,8 +169,11 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         trace.as_ref(),
                         &bytecode_pp,
                     );
-                    let _ =
-                        prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
+                    let _ = prove_uniskip_round(
+                        &mut uni_skip,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    );
 
                     // Remaining outer rounds: streaming schedule for degree-3 messages.
                     let num_rounds = uni_skip_params.tau.len() - 1;
@@ -168,10 +199,114 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
+        group.bench_function(&format!("outer-streaming-coeffmul/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(
+                    trace,
+                    bytecode_pp,
+                    padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
+                    // Uni-skip first round
+                    let key = UniformSpartanKey::<F>::new(padded_trace_length);
+                    let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
+                    let mut uni_skip = OuterUniSkipProver::<F>::initialize(
+                        uni_skip_params.clone(),
+                        trace.as_ref(),
+                        &bytecode_pp,
+                    );
+                    let _ = prove_uniskip_round(
+                        &mut uni_skip,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    );
+
+                    // Remaining outer rounds: same schedule, but coeff-based window multiplication.
+                    let num_rounds = uni_skip_params.tau.len() - 1;
+                    let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                    let shared = OuterSharedState::<F>::new(
+                        Arc::clone(&trace),
+                        &bytecode_pp,
+                        &uni_skip_params,
+                        &opening_accumulator,
+                    );
+                    let mut instance: OuterRemainingStreamingSumcheckCoeffMul<
+                        F,
+                        HalfSplitSchedule,
+                    > = OuterRemainingStreamingSumcheckCoeffMul::new(shared, schedule);
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut instance];
+
+                    black_box(BatchedSumcheck::prove(
+                        instance_refs,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_function(&format!("outer-streaming-mtable/{}", bench_name), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(
+                    trace,
+                    bytecode_pp,
+                    padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
+                    // Uni-skip first round
+                    let key = UniformSpartanKey::<F>::new(padded_trace_length);
+                    let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
+                    let mut uni_skip = OuterUniSkipProver::<F>::initialize(
+                        uni_skip_params.clone(),
+                        trace.as_ref(),
+                        &bytecode_pp,
+                    );
+                    let _ = prove_uniskip_round(
+                        &mut uni_skip,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    );
+
+                    // Remaining outer rounds: same schedule, but store Baweja-style M tables (4^w).
+                    let num_rounds = uni_skip_params.tau.len() - 1;
+                    let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                    let shared = OuterSharedState::<F>::new(
+                        Arc::clone(&trace),
+                        &bytecode_pp,
+                        &uni_skip_params,
+                        &opening_accumulator,
+                    );
+                    let mut instance: OuterRemainingStreamingSumcheckMTable<F, HalfSplitSchedule> =
+                        OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut instance];
+
+                    black_box(BatchedSumcheck::prove(
+                        instance_refs,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
         group.bench_function(&format!("outer-uni-skip/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(trace, bytecode_pp, padded_trace_length, mut opening_accumulator, mut transcript)| {
+                |(
+                    trace,
+                    bytecode_pp,
+                    padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
                     // Stage 1 (Outer): uni-skip first round + remaining rounds using the specialized
                     // streaming-first-then-linear prover (no arbitrary window schedule machinery).
                     let key = UniformSpartanKey::<F>::new(padded_trace_length);
@@ -183,7 +318,11 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         &bytecode_pp,
                         &uni_skip_params.tau,
                     );
-                    let _ = prove_uniskip_round(&mut uni_skip, &mut opening_accumulator, &mut transcript);
+                    let _ = prove_uniskip_round(
+                        &mut uni_skip,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    );
 
                     // Remaining rounds (checkpoint implementation)
                     let mut instance = OuterRemainingSumcheckProverNonStreaming::<F>::gen(
@@ -207,7 +346,13 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
         group.bench_function(&format!("outer-round-batched/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(trace, bytecode_pp, _padded_trace_length, mut opening_accumulator, mut transcript)| {
+                |(
+                    trace,
+                    bytecode_pp,
+                    _padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
                     let mut instance = OuterRoundBatchedSumcheckProver::<F>::gen::<ProofTranscript>(
                         Arc::clone(&trace),
                         &bytecode_pp,
@@ -228,7 +373,13 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
         group.bench_function(&format!("outer-baseline/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(trace, bytecode_pp, _padded_trace_length, mut opening_accumulator, mut transcript)| {
+                |(
+                    trace,
+                    bytecode_pp,
+                    _padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
                     // Baseline (no uni-skip): build dense Az/Bz over (cycle,constraint)
                     let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                     let constraints_vec: Vec<R1CSConstraint> =
@@ -256,7 +407,13 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
         group.bench_function(&format!("outer-naive/{}", bench_name), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(trace, bytecode_pp, _padded_trace_length, mut opening_accumulator, mut transcript)| {
+                |(
+                    trace,
+                    bytecode_pp,
+                    _padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
                     let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                     let constraints_vec: Vec<R1CSConstraint> =
                         R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();

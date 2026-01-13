@@ -115,7 +115,10 @@ use crate::{
         },
         spartan::{
             instruction_input::InstructionInputSumcheckProver,
-            outer::{OuterRemainingStreamingSumcheck, OuterSharedState},
+            outer::{
+                OuterRemainingStreamingSumcheck, OuterRemainingStreamingSumcheckMTable,
+                OuterSharedState,
+            },
             product::ProductVirtualRemainderProver,
             shift::ShiftSumcheckProver,
         },
@@ -709,6 +712,43 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                         let schedule = HalfSplitSchedule::new(num_rounds, 3);
                         let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<_, _> =
                             OuterRemainingStreamingSumcheck::new(shared, schedule);
+                        BatchedSumcheck::prove(
+                            vec![&mut spartan_outer_remaining],
+                            &mut self.opening_accumulator,
+                            &mut self.transcript,
+                        )
+                    }
+                }
+            }
+            OuterStage1RemainderImpl::StreamingMTable => {
+                let num_rounds = uni_skip_params.tau.len() - 1;
+
+                let shared = OuterSharedState::new(
+                    Arc::clone(&self.trace),
+                    &self.preprocessing.shared.bytecode,
+                    &uni_skip_params,
+                    &self.opening_accumulator,
+                );
+
+                match self.outer_stage1_config.streaming_schedule {
+                    OuterStreamingScheduleKind::LinearOnly => {
+                        let schedule = LinearOnlySchedule::new(num_rounds);
+                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheckMTable<
+                            _,
+                            _,
+                        > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
+                        BatchedSumcheck::prove(
+                            vec![&mut spartan_outer_remaining],
+                            &mut self.opening_accumulator,
+                            &mut self.transcript,
+                        )
+                    }
+                    OuterStreamingScheduleKind::HalfSplit => {
+                        let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheckMTable<
+                            _,
+                            _,
+                        > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
                         BatchedSumcheck::prove(
                             vec![&mut spartan_outer_remaining],
                             &mut self.opening_accumulator,

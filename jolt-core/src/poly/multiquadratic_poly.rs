@@ -128,6 +128,276 @@ impl<F: JoltField> MultiquadraticPolynomial<F> {
         }
     }
 
+    /// Multiply two multilinear polynomials given by their evaluations on `{0,1}^dim`,
+    /// and write the multiquadratic product in the `{0,1,∞}^dim` encoding used by
+    /// [`MultiquadraticPolynomial`], *via coefficient convolution*.
+    ///
+    /// This is the "coefficient-based" approach (naive convolution) that performs
+    /// \(4^{\text{dim}}\) field multiplications for the product step (plus lower-order
+    /// transforms), in contrast with the eval-basis approach that needs only \(3^{\text{dim}}\)
+    /// pointwise multiplications after [`expand_linear_grid_to_multiquadratic`].
+    ///
+    /// # Inputs / Outputs
+    /// - `a_evals`, `b_evals`: length `2^dim`, lexicographic with the least-significant bit
+    ///   corresponding to the least-significant / fastest variable `z_0`.
+    /// - `out_evals`: length `3^dim`, base-3 layout (again with `z_0` as the least-significant digit),
+    ///   where each coordinate digit is interpreted as:
+    ///   - `0`: evaluate at `z_i = 0`
+    ///   - `1`: evaluate at `z_i = 1`
+    ///   - `2` (∞): take the leading coefficient in `z_i` (degree-2 for the product)
+    ///
+    /// # Scratch
+    /// - `coeff_a`, `coeff_b`: length `2^dim` scratch buffers used to hold multilinear monomial
+    ///   coefficients for `a` and `b` (computed via Möbius transform).
+    #[inline]
+    pub fn mul_linear_grids_via_coeffs(
+        a_evals: &[F],
+        b_evals: &[F],
+        out_evals: &mut [F],
+        coeff_a: &mut [F],
+        coeff_b: &mut [F],
+        dim: usize,
+    ) {
+        let in_size = 1usize << dim;
+        let out_size = 3usize.pow(dim as u32);
+        debug_assert_eq!(a_evals.len(), in_size);
+        debug_assert_eq!(b_evals.len(), in_size);
+        debug_assert_eq!(out_evals.len(), out_size);
+        debug_assert_eq!(coeff_a.len(), in_size);
+        debug_assert_eq!(coeff_b.len(), in_size);
+
+        // 1) evals -> multilinear monomial coeffs (ANF) via Möbius transform on the subset lattice.
+        coeff_a.copy_from_slice(a_evals);
+        coeff_b.copy_from_slice(b_evals);
+        Self::mobius_evals_to_multilinear_coeffs_in_place(coeff_a, dim);
+        Self::mobius_evals_to_multilinear_coeffs_in_place(coeff_b, dim);
+
+        // 2) Multiply in monomial coefficient space: (2^dim) x (2^dim) -> 3^dim coefficients.
+        out_evals.fill(F::zero());
+        for a_mask in 0..in_size {
+            let a_val = coeff_a[a_mask];
+            if a_val.is_zero() {
+                continue;
+            }
+            for b_mask in 0..in_size {
+                let b_val = coeff_b[b_mask];
+                if b_val.is_zero() {
+                    continue;
+                }
+
+                // Map exponent vector e_i = bit(a,i)+bit(b,i) into base-3 index.
+                let mut idx = 0usize;
+                let mut pow3 = 1usize;
+                let mut aa = a_mask;
+                let mut bb = b_mask;
+                for _ in 0..dim {
+                    let digit = (aa & 1) + (bb & 1); // ∈ {0,1,2}
+                    idx += digit * pow3;
+                    pow3 *= 3;
+                    aa >>= 1;
+                    bb >>= 1;
+                }
+
+                out_evals[idx] += a_val * b_val;
+            }
+        }
+
+        // 3) Convert monomial coefficients (0/1/2 exponents) to the mixed {0,1,∞} encoding:
+        // along each variable, map [c0,c1,c2] -> [q(0)=c0, q(1)=c0+c1+c2, q(∞)=c2].
+        Self::multiquadratic_coeffs_to_infty_evals_in_place(out_evals, dim);
+    }
+
+    /// Multiply two multilinear polynomials given by their evaluations on `{0,1}^dim`,
+    /// producing the multiquadratic product in the `{0,1,∞}^dim` encoding used by
+    /// [`MultiquadraticPolynomial`], **using pairwise products of hypercube evaluations**.
+    ///
+    /// This corresponds to treating the input evaluation vectors as coefficients in the
+    /// multilinear Lagrange / χ-basis on `{0,1}^dim`, forming the full cross-product table
+    /// of size \(4^{\text{dim}}\) (all pairs of Boolean assignments), and then applying a
+    /// per-variable linear map to obtain the `{0,1,∞}` representation of the product.
+    ///
+    /// Concretely, for one variable (dim = 1) with `p = [p(0), p(1)]`, `q = [q(0), q(1)]`,
+    /// we form:
+    /// - `M00 = p(0)q(0)`, `M01 = p(0)q(1)`, `M10 = p(1)q(0)`, `M11 = p(1)q(1)` (4 products)
+    ///
+    /// And output:
+    /// - `r(0)   = M00`
+    /// - `r(1)   = M11`
+    /// - `r(∞)   = M00 - M01 - M10 + M11 = (p(1)-p(0))·(q(1)-q(0))` (leading coeff of x^2)
+    ///
+    /// For `dim > 1`, this mapping is the tensor product of the same 1D transform across
+    /// all variables.
+    ///
+    /// # Scratch
+    /// - `pair_products` and `tmp` must both be length `4^dim`.
+    #[inline]
+    pub fn mul_linear_grids_via_eval_pairs(
+        a_evals: &[F],
+        b_evals: &[F],
+        out_evals: &mut [F],
+        pair_products: &mut [F],
+        tmp: &mut [F],
+        dim: usize,
+    ) {
+        let in_size = 1usize << dim;
+        let out_size = 3usize.pow(dim as u32);
+        let pair_size = 4usize.pow(dim as u32);
+
+        debug_assert_eq!(a_evals.len(), in_size);
+        debug_assert_eq!(b_evals.len(), in_size);
+        debug_assert_eq!(out_evals.len(), out_size);
+        debug_assert_eq!(pair_products.len(), pair_size);
+        debug_assert_eq!(tmp.len(), pair_size);
+
+        if dim == 0 {
+            out_evals[0] = a_evals[0] * b_evals[0];
+            return;
+        }
+
+        // Step 1: build the full cross-product table M[α,β] = a(α)·b(β) in base-4 layout,
+        // digit_i encodes (α_i, β_i) as 00,01,10,11 -> {0,1,2,3}.
+        //
+        // Index formula: idx = (spread(a_mask) << 1) | spread(b_mask)
+        // where spread(x) puts bit i of x at bit position 2i (even positions).
+        // This avoids the O(dim) loop per product.
+        for a_mask in 0..in_size {
+            let a_spread = Self::spread_bits(a_mask) << 1;
+            let a_val = a_evals[a_mask];
+            for b_mask in 0..in_size {
+                let idx = a_spread | Self::spread_bits(b_mask);
+                pair_products[idx] = a_val * b_evals[b_mask];
+            }
+        }
+
+        // Step 2: apply the tensor-product (4 -> 3) transform along each variable:
+        // [M00,M01,M10,M11] -> [r(0)=M00, r(1)=M11, r(∞)=M00-M01-M10+M11].
+        //
+        // For small window sizes (dim ≤ 7, so ≤16K elements), sequential is faster
+        // than parallelization due to rayon overhead. We only parallelize when the
+        // block size is large enough (stride >= 64) to amortize the overhead.
+        const PAR_THRESHOLD: usize = 64;
+
+        let mut cur_len = pair_size; // = 4^dim initially
+        let mut stride = 1usize; // = 3^i after i transformed variables
+        let mut cur: &mut [F] = pair_products;
+        let mut next: &mut [F] = tmp;
+
+        for _ in 0..dim {
+            let next_len = (cur_len / 4) * 3;
+            let blocks = cur_len / (4 * stride);
+
+            if stride >= PAR_THRESHOLD && blocks > 1 {
+                // Parallel path for large strides
+                let block_size_in = 4 * stride;
+                let block_size_out = 3 * stride;
+                let cur_slice: &[F] = &cur[..cur_len];
+
+                next[..next_len]
+                    .par_chunks_mut(block_size_out)
+                    .enumerate()
+                    .for_each(|(b, out_chunk)| {
+                        let in_base = b * block_size_in;
+                        for off in 0..stride {
+                            let v0 = cur_slice[in_base + off];
+                            let v1 = cur_slice[in_base + stride + off];
+                            let v2 = cur_slice[in_base + 2 * stride + off];
+                            let v3 = cur_slice[in_base + 3 * stride + off];
+
+                            out_chunk[off] = v0;
+                            out_chunk[stride + off] = v3;
+                            out_chunk[2 * stride + off] = v0 - v1 - v2 + v3;
+                        }
+                    });
+            } else {
+                // Sequential path for small strides (avoids rayon overhead)
+                for b in 0..blocks {
+                    let in_base = b * 4 * stride;
+                    let out_base = b * 3 * stride;
+                    for off in 0..stride {
+                        let v0 = cur[in_base + off];
+                        let v1 = cur[in_base + stride + off];
+                        let v2 = cur[in_base + 2 * stride + off];
+                        let v3 = cur[in_base + 3 * stride + off];
+
+                        next[out_base + off] = v0;
+                        next[out_base + stride + off] = v3;
+                        next[out_base + 2 * stride + off] = v0 - v1 - v2 + v3;
+                    }
+                }
+            }
+
+            std::mem::swap(&mut cur, &mut next);
+            cur_len = next_len;
+            stride *= 3;
+        }
+
+        debug_assert_eq!(cur_len, out_size);
+        out_evals.copy_from_slice(&cur[..out_size]);
+    }
+
+    /// Spread bits of `x` so that bit i moves to bit position 2i.
+    ///
+    /// For example: `0b_a2_a1_a0` -> `0b_0_a2_0_a1_0_a0`.
+    ///
+    /// Supports up to 8 input bits (for dim ≤ 8, i.e. 2^8 = 256 hypercube points).
+    #[inline(always)]
+    fn spread_bits(mut x: usize) -> usize {
+        // Standard bit-spreading via parallel prefix:
+        // After each step, the bits are spaced further apart.
+        x = (x | (x << 4)) & 0x0F0F;
+        x = (x | (x << 2)) & 0x3333;
+        x = (x | (x << 1)) & 0x5555;
+        x
+    }
+
+    /// In-place Möbius transform that converts evaluations on `{0,1}^dim` to multilinear
+    /// monomial coefficients (algebraic normal form) in the basis \(\prod_{i\in S} z_i\).
+    #[inline]
+    fn mobius_evals_to_multilinear_coeffs_in_place(buf: &mut [F], dim: usize) {
+        let n = 1usize << dim;
+        debug_assert_eq!(buf.len(), n);
+        for i in 0..dim {
+            let bit = 1usize << i;
+            for mask in 0..n {
+                if (mask & bit) != 0 {
+                    let without = mask ^ bit;
+                    buf[mask] -= buf[without];
+                }
+            }
+        }
+    }
+
+    /// In-place conversion from monomial multiquadratic coefficients (base-3 exponent layout)
+    /// to the `{0,1,∞}` encoding used by this module (base-3 digit layout).
+    ///
+    /// For each variable independently: `[c0,c1,c2] -> [c0, c0+c1+c2, c2]`.
+    #[inline]
+    fn multiquadratic_coeffs_to_infty_evals_in_place(buf: &mut [F], dim: usize) {
+        if dim == 0 {
+            return;
+        }
+        let expected = 3usize.pow(dim as u32);
+        debug_assert_eq!(buf.len(), expected);
+
+        let mut stride = 1usize; // 3^i
+        for _ in 0..dim {
+            let block = 3 * stride;
+            let num_blocks = buf.len() / block;
+            for b in 0..num_blocks {
+                let base = b * block;
+                for off in 0..stride {
+                    let c0 = buf[base + off];
+                    let c1 = buf[base + stride + off];
+                    let c2 = buf[base + 2 * stride + off];
+                    buf[base + off] = c0;
+                    buf[base + stride + off] = c0 + c1 + c2;
+                    buf[base + 2 * stride + off] = c2;
+                }
+            }
+            stride *= 3;
+        }
+    }
+
     #[inline(always)]
     fn expand_linear_dim1(input: &[F], output: &mut [F]) {
         debug_assert_eq!(input.len(), 2);
@@ -378,5 +648,103 @@ impl<F: JoltField> PolynomialBinding<F> for MultiquadraticPolynomial<F> {
         debug_assert!(self.is_bound());
         debug_assert_eq!(self.evals.len(), 1);
         self.evals[0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bn254::Fr;
+    use ark_ff::UniformRand;
+    use ark_ff::Zero;
+    use ark_std::test_rng;
+
+    #[test]
+    fn coeff_mul_matches_eval_basis_mul_small_dims() {
+        let mut rng = test_rng();
+
+        for dim in 0..=5 {
+            let in_size = 1usize << dim;
+            let out_size = 3usize.pow(dim as u32);
+
+            let a_evals: Vec<Fr> = (0..in_size).map(|_| Fr::rand(&mut rng)).collect();
+            let b_evals: Vec<Fr> = (0..in_size).map(|_| Fr::rand(&mut rng)).collect();
+
+            // Eval-basis path: expand each to {0,1,∞}^dim then pointwise multiply.
+            let mut a_ext = vec![Fr::zero(); out_size];
+            let mut b_ext = vec![Fr::zero(); out_size];
+            let mut tmp = vec![Fr::zero(); out_size];
+            MultiquadraticPolynomial::<Fr>::expand_linear_grid_to_multiquadratic(
+                &a_evals, &mut a_ext, &mut tmp, dim,
+            );
+            MultiquadraticPolynomial::<Fr>::expand_linear_grid_to_multiquadratic(
+                &b_evals, &mut b_ext, &mut tmp, dim,
+            );
+            let eval_basis_prod: Vec<Fr> = a_ext
+                .iter()
+                .zip(b_ext.iter())
+                .map(|(x, y)| *x * *y)
+                .collect();
+
+            // Coeff-basis path.
+            let mut coeff_basis_prod = vec![Fr::zero(); out_size];
+            let mut coeff_a = vec![Fr::zero(); in_size];
+            let mut coeff_b = vec![Fr::zero(); in_size];
+            MultiquadraticPolynomial::<Fr>::mul_linear_grids_via_coeffs(
+                &a_evals,
+                &b_evals,
+                &mut coeff_basis_prod,
+                &mut coeff_a,
+                &mut coeff_b,
+                dim,
+            );
+
+            assert_eq!(eval_basis_prod, coeff_basis_prod, "mismatch at dim={dim}");
+        }
+    }
+
+    #[test]
+    fn eval_pair_mul_matches_eval_basis_mul_small_dims() {
+        let mut rng = test_rng();
+
+        for dim in 0..=6 {
+            let in_size = 1usize << dim;
+            let out_size = 3usize.pow(dim as u32);
+            let pair_size = 4usize.pow(dim as u32);
+
+            let a_evals: Vec<Fr> = (0..in_size).map(|_| Fr::rand(&mut rng)).collect();
+            let b_evals: Vec<Fr> = (0..in_size).map(|_| Fr::rand(&mut rng)).collect();
+
+            // Eval-basis reference.
+            let mut a_ext = vec![Fr::zero(); out_size];
+            let mut b_ext = vec![Fr::zero(); out_size];
+            let mut tmp = vec![Fr::zero(); out_size];
+            MultiquadraticPolynomial::<Fr>::expand_linear_grid_to_multiquadratic(
+                &a_evals, &mut a_ext, &mut tmp, dim,
+            );
+            MultiquadraticPolynomial::<Fr>::expand_linear_grid_to_multiquadratic(
+                &b_evals, &mut b_ext, &mut tmp, dim,
+            );
+            let eval_basis_prod: Vec<Fr> = a_ext
+                .iter()
+                .zip(b_ext.iter())
+                .map(|(x, y)| *x * *y)
+                .collect();
+
+            // Pairwise-eval baseline.
+            let mut out = vec![Fr::zero(); out_size];
+            let mut pair_products = vec![Fr::zero(); pair_size];
+            let mut tmp_pair = vec![Fr::zero(); pair_size];
+            MultiquadraticPolynomial::<Fr>::mul_linear_grids_via_eval_pairs(
+                &a_evals,
+                &b_evals,
+                &mut out,
+                &mut pair_products,
+                &mut tmp_pair,
+                dim,
+            );
+
+            assert_eq!(eval_basis_prod, out, "mismatch at dim={dim}");
+        }
     }
 }

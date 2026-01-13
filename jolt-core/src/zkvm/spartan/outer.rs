@@ -496,6 +496,29 @@ impl<F: JoltField> OuterStreamingProverParams<F> {
 pub type OuterRemainingStreamingSumcheck<F, S> =
     StreamingSumcheck<F, S, OuterSharedState<F>, OuterStreamingWindow<F>, OuterLinearStage<F>>;
 
+/// Experimental variant of [`OuterRemainingStreamingSumcheck`] that computes the per-window
+/// multiquadratic product grid via coefficient convolution (≈ \(4^w\) products) instead of
+/// eval-basis multiplication on `{0,1,∞}^w` (≈ \(3^w\) products).
+#[cfg(feature = "prover")]
+pub type OuterRemainingStreamingSumcheckCoeffMul<F, S> = StreamingSumcheck<
+    F,
+    S,
+    OuterSharedState<F>,
+    OuterStreamingWindowCoeffMul<F>,
+    OuterLinearStageCoeffMul<F>,
+>;
+
+/// Experimental variant that stores the Baweja-style cross-product table \(M\) (size \(4^w\))
+/// per window and derives round endpoints from it.
+#[cfg(feature = "prover")]
+pub type OuterRemainingStreamingSumcheckMTable<F, S> = StreamingSumcheck<
+    F,
+    S,
+    OuterSharedState<F>,
+    OuterStreamingWindowMTable<F>,
+    OuterLinearStageMTable<F>,
+>;
+
 #[derive(Allocative)]
 pub struct OuterSharedState<F: JoltField> {
     #[allocative(skip)]
@@ -558,9 +581,9 @@ impl<F: JoltField> OuterSharedState<F> {
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         skip_all,
-        name = "OuterSharedState::extrapolate_from_binary_grid_to_tertiary_grid"
+        name = "OuterSharedState::materialize_az_bz_on_boolean_hypercube"
     )]
-    fn extrapolate_from_binary_grid_to_tertiary_grid(
+    fn materialize_az_bz_on_boolean_hypercube(
         &self,
         acc_az: &mut [Acc5U<F>],
         acc_bz_first: &mut [Acc6S<F>],
@@ -689,7 +712,7 @@ impl<F: JoltField> OuterSharedState<F> {
 
                     grid_a.fill(F::zero());
                     grid_b.fill(F::zero());
-                    self.extrapolate_from_binary_grid_to_tertiary_grid(
+                    self.materialize_az_bz_on_boolean_hypercube(
                         &mut acc_az,
                         &mut acc_bz_first,
                         &mut acc_bz_second,
@@ -748,6 +771,249 @@ impl<F: JoltField> OuterSharedState<F> {
             .map(|unr| F::from_montgomery_reduce::<9>(unr))
             .collect();
         self.t_prime_poly = Some(MultiquadraticPolynomial::new(window_size, res));
+    }
+
+    /// Same as [`Self::compute_evaluation_grid_from_trace`], but computes the
+    /// multiquadratic product grid via **coefficient convolution** (≈ \(4^w\)
+    /// products for a window of size \(w\)), instead of via the `{0,1,∞}^w`
+    /// eval-basis multiplication (≈ \(3^w\) products).
+    ///
+    /// Intended for experiments / benchmarking against coefficient-based window multiplication.
+    #[cfg(feature = "prover")]
+    #[tracing::instrument(
+        skip_all,
+        name = "OuterSharedState::compute_evaluation_grid_from_trace_coeff_mul"
+    )]
+    pub fn compute_evaluation_grid_from_trace_coeff_mul(&mut self, window_size: usize) {
+        let split_eq = &self.split_eq_poly;
+
+        let three_pow_dim = 3_usize.pow(window_size as u32);
+        let jlen = 1 << window_size;
+        let klen = 1 << split_eq.num_challenges();
+
+        // Keep the w=1 fast path identical to the eval-basis implementation:
+        // we only need indices 0 and ∞ (2), and never consume the bound value.
+        if window_size == 1 {
+            self.compute_evaluation_grid_from_trace(window_size);
+            return;
+        }
+
+        let lagrange_evals_r = &self.lagrange_evals_r0;
+        let r_grid = &self.r_grid;
+        let scaled_w: Vec<[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE]> = if klen > 1 {
+            debug_assert_eq!(klen, r_grid.len());
+            (0..klen)
+                .into_par_iter()
+                .map(|k| {
+                    let weight = r_grid[k];
+                    let mut row = [F::zero(); OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE];
+                    for t in 0..OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE {
+                        row[t] = lagrange_evals_r[t] * weight;
+                    }
+                    row
+                })
+                .collect()
+        } else {
+            debug_assert_eq!(klen, 1);
+            let mut row = [F::zero(); OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE];
+            row.copy_from_slice(lagrange_evals_r);
+            vec![row]
+        };
+
+        let (e_out, e_in) = split_eq.E_out_in_for_window(window_size);
+        let e_in_len = e_in.len();
+
+        let res_unr = e_out
+            .par_iter()
+            .enumerate()
+            .map(|(out_idx, out_val)| {
+                let mut local_res_unr = vec![F::Unreduced::<9>::zero(); three_pow_dim];
+
+                // Binary grids for Az/Bz over {0,1}^w
+                let mut grid_a = vec![F::zero(); jlen];
+                let mut grid_b = vec![F::zero(); jlen];
+                let mut acc_az = vec![Acc5U::<F>::zero(); jlen];
+                let mut acc_bz_first = vec![Acc6S::<F>::zero(); jlen];
+                let mut acc_bz_second = vec![Acc7S::<F>::zero(); jlen];
+
+                // Scratch for eval-pair (χ-basis) multiplication:
+                // - pair_products/tmp_pair hold the 4^w cross-product table and transform scratch
+                // - prod holds the multiquadratic product in {0,1,∞}^w encoding (size 3^w)
+                let four_pow_dim = 4_usize.pow(window_size as u32);
+                let mut pair_products = vec![F::zero(); four_pow_dim];
+                let mut tmp_pair = vec![F::zero(); four_pow_dim];
+                let mut prod = vec![F::zero(); three_pow_dim];
+
+                for (in_idx, in_val) in e_in.iter().enumerate() {
+                    let i = out_idx * e_in_len + in_idx;
+
+                    grid_a.fill(F::zero());
+                    grid_b.fill(F::zero());
+                    self.materialize_az_bz_on_boolean_hypercube(
+                        &mut acc_az,
+                        &mut acc_bz_first,
+                        &mut acc_bz_second,
+                        &mut grid_a,
+                        &mut grid_b,
+                        jlen,
+                        klen,
+                        i * jlen * klen,
+                        &scaled_w,
+                    );
+
+                    // Compute the {0,1,∞}^w product grid via 4^w pairwise products of
+                    // hypercube evaluations (χ-basis cross-product table), as in Baweja et al.
+                    MultiquadraticPolynomial::<F>::mul_linear_grids_via_eval_pairs(
+                        &grid_a,
+                        &grid_b,
+                        &mut prod,
+                        &mut pair_products,
+                        &mut tmp_pair,
+                        window_size,
+                    );
+
+                    let e_in_val = *in_val;
+                    for idx in 0..three_pow_dim {
+                        local_res_unr[idx] += e_in_val.mul_unreduced::<9>(prod[idx]);
+                    }
+                }
+
+                let e_out_val = *out_val;
+                for idx in 0..three_pow_dim {
+                    let inner_red = F::from_montgomery_reduce::<9>(local_res_unr[idx]);
+                    local_res_unr[idx] = e_out_val.mul_unreduced::<9>(inner_red);
+                }
+                local_res_unr
+            })
+            .reduce(
+                || vec![F::Unreduced::<9>::zero(); three_pow_dim],
+                |mut acc, local| {
+                    for idx in 0..three_pow_dim {
+                        acc[idx] += local[idx];
+                    }
+                    acc
+                },
+            );
+
+        let res: Vec<F> = res_unr
+            .into_iter()
+            .map(|unr| F::from_montgomery_reduce::<9>(unr))
+            .collect();
+        self.t_prime_poly = Some(MultiquadraticPolynomial::new(window_size, res));
+    }
+
+    /// Compute the Baweja-style cross-product table \(M\) for a window of size `window_size`.
+    ///
+    /// The table is indexed by two Boolean assignments \(\beta_1,\beta_2 \in \{0,1\}^{w}\):
+    ///
+    /// \[
+    ///   M[\beta_1,\beta_2] \;:=\; \sum_{\text{head}} \text{Eq(head)} \cdot
+    ///     A(\beta_1,\text{head}) \cdot B(\beta_2,\text{head})
+    /// \]
+    ///
+    /// where "head" denotes the variables outside the current window (already factored by
+    /// `E_out_in_for_window`), and `A`,`B` are the two multilinear factors (Az and Bz in outer).
+    ///
+    /// Layout: row-major with `beta1` as the slow dimension:
+    /// `idx = (beta1 << window_size) | beta2`.
+    ///
+    /// This is the exact \(4^w\)-sized state table used in Baweja et al. (2025) ProductSC,
+    /// and is intended as an experimental baseline.
+    #[cfg(feature = "prover")]
+    #[tracing::instrument(skip_all, name = "OuterSharedState::compute_m_table_from_trace")]
+    pub fn compute_m_table_from_trace(&self, window_size: usize) -> Vec<F> {
+        let split_eq = &self.split_eq_poly;
+
+        let jlen = 1usize << window_size; // 2^w
+        let mlen = jlen * jlen; // 4^w
+        let klen = 1 << split_eq.num_challenges();
+
+        let lagrange_evals_r = &self.lagrange_evals_r0;
+        let r_grid = &self.r_grid;
+        let scaled_w: Vec<[F; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE]> = if klen > 1 {
+            debug_assert_eq!(klen, r_grid.len());
+            (0..klen)
+                .into_par_iter()
+                .map(|k| {
+                    let weight = r_grid[k];
+                    let mut row = [F::zero(); OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE];
+                    for t in 0..OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE {
+                        row[t] = lagrange_evals_r[t] * weight;
+                    }
+                    row
+                })
+                .collect()
+        } else {
+            debug_assert_eq!(klen, 1);
+            let mut row = [F::zero(); OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE];
+            row.copy_from_slice(lagrange_evals_r);
+            vec![row]
+        };
+
+        let (e_out, e_in) = split_eq.E_out_in_for_window(window_size);
+        let e_in_len = e_in.len();
+
+        let m_unr = e_out
+            .par_iter()
+            .enumerate()
+            .map(|(out_idx, out_val)| {
+                let mut local_m_unr = vec![F::Unreduced::<9>::zero(); mlen];
+
+                let mut grid_a = vec![F::zero(); jlen];
+                let mut grid_b = vec![F::zero(); jlen];
+                let mut acc_az = vec![Acc5U::<F>::zero(); jlen];
+                let mut acc_bz_first = vec![Acc6S::<F>::zero(); jlen];
+                let mut acc_bz_second = vec![Acc7S::<F>::zero(); jlen];
+
+                for (in_idx, in_val) in e_in.iter().enumerate() {
+                    let i = out_idx * e_in_len + in_idx;
+                    grid_a.fill(F::zero());
+                    grid_b.fill(F::zero());
+                    self.materialize_az_bz_on_boolean_hypercube(
+                        &mut acc_az,
+                        &mut acc_bz_first,
+                        &mut acc_bz_second,
+                        &mut grid_a,
+                        &mut grid_b,
+                        jlen,
+                        klen,
+                        i * jlen * klen,
+                        &scaled_w,
+                    );
+
+                    let e_in_val = *in_val;
+                    // Row-major: beta1 selects from grid_a, beta2 selects from grid_b.
+                    for beta1 in 0..jlen {
+                        let a = grid_a[beta1];
+                        let row_off = beta1 << window_size;
+                        for beta2 in 0..jlen {
+                            let idx = row_off | beta2;
+                            local_m_unr[idx] += e_in_val.mul_unreduced::<9>(a * grid_b[beta2]);
+                        }
+                    }
+                }
+
+                let e_out_val = *out_val;
+                for idx in 0..mlen {
+                    let inner_red = F::from_montgomery_reduce::<9>(local_m_unr[idx]);
+                    local_m_unr[idx] = e_out_val.mul_unreduced::<9>(inner_red);
+                }
+                local_m_unr
+            })
+            .reduce(
+                || vec![F::Unreduced::<9>::zero(); mlen],
+                |mut acc, local| {
+                    for idx in 0..mlen {
+                        acc[idx] += local[idx];
+                    }
+                    acc
+                },
+            );
+
+        m_unr
+            .into_iter()
+            .map(|unr| F::from_montgomery_reduce::<9>(unr))
+            .collect()
     }
 
     #[tracing::instrument(skip_all, name = "OuterSharedState::compute_t_evals")]
@@ -821,6 +1087,351 @@ impl<F: JoltField> StreamingSumcheckWindow<F> for OuterStreamingWindow<F> {
         }
 
         shared.r_grid.update(r_j);
+    }
+}
+
+/// Streaming window that is identical to [`OuterStreamingWindow`] but uses the
+/// coefficient-based product engine to compute the multiquadratic grid.
+#[cfg(feature = "prover")]
+#[derive(Allocative)]
+#[allocative(bound = "")]
+pub struct OuterStreamingWindowCoeffMul<F: JoltField> {
+    _phantom: PhantomData<F>,
+}
+
+#[cfg(feature = "prover")]
+impl<F: JoltField> StreamingSumcheckWindow<F> for OuterStreamingWindowCoeffMul<F> {
+    type Shared = OuterSharedState<F>;
+
+    #[tracing::instrument(skip_all, name = "OuterStreamingWindowCoeffMul::initialize")]
+    fn initialize(shared: &mut Self::Shared, window_size: usize) -> Self {
+        shared.compute_evaluation_grid_from_trace_coeff_mul(window_size);
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterStreamingWindowCoeffMul::compute_message")]
+    fn compute_message(
+        &self,
+        shared: &Self::Shared,
+        window_size: usize,
+        previous_claim: F,
+    ) -> UniPoly<F> {
+        let (t_prime_0, t_prime_inf) = shared.compute_t_evals(window_size);
+        shared
+            .split_eq_poly
+            .gruen_poly_deg_3(t_prime_0, t_prime_inf, previous_claim)
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterStreamingWindowCoeffMul::ingest_challenge")]
+    fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, _round: usize) {
+        shared.split_eq_poly.bind(r_j);
+
+        if let Some(t_prime_poly) = shared.t_prime_poly.as_mut() {
+            t_prime_poly.bind(r_j, BindingOrder::LowToHigh);
+        }
+
+        shared.r_grid.update(r_j);
+    }
+}
+
+/// Streaming window that stores the Baweja-style cross-product table \(M[\beta_1,\beta_2]\)
+/// (size \(4^w\)) and derives the per-round quadratic endpoints from it, rather than
+/// storing the `{0,1,∞}^w` evaluation table (size \(3^w\)).
+///
+/// This is intended as an experimental baseline: it keeps `M` fixed for the duration of
+/// a window and updates only the χ-coefficient table for the challenges seen inside the window,
+/// matching the spirit of the ProductSC cross-product approach.
+#[cfg(feature = "prover")]
+#[derive(Allocative)]
+#[allocative(bound = "")]
+pub struct OuterStreamingWindowMTable<F: JoltField> {
+    w_start: usize,
+    #[allocative(skip)]
+    m_table: Vec<F>,
+    #[allocative(skip)]
+    chi: Vec<F>,
+    _phantom: PhantomData<F>,
+}
+
+#[cfg(feature = "prover")]
+impl<F: JoltField> OuterStreamingWindowMTable<F> {
+    #[inline]
+    fn update_chi_in_place(chi: &mut Vec<F>, r: F::Challenge) {
+        let len = chi.len();
+        debug_assert!(len.is_power_of_two());
+        chi.resize(len * 2, F::zero());
+        let (left, right) = chi.split_at_mut(len);
+        left.par_iter_mut()
+            .zip(right.par_iter_mut())
+            .for_each(|(x, y)| {
+                *y = *x * r;
+                *x -= *y;
+            });
+    }
+
+    /// Compute the quadratic endpoints q(0) and q(∞) for the current round from the
+    /// stored `M` table and the χ-table for in-window challenges.
+    ///
+    /// - `window_size` is the number of remaining unbound vars in this window (w - Δ).
+    /// - `delta = w_start - window_size` is the number of already-bound vars in this window.
+    #[inline]
+    fn endpoints_from_m_table(&self, e_active: &[F], window_size: usize) -> (F, F) {
+        let w = self.w_start;
+        debug_assert!(window_size >= 1);
+        debug_assert!(window_size <= w);
+        let delta = w - window_size;
+        debug_assert_eq!(self.chi.len(), 1usize << delta);
+
+        let future_len = window_size - 1; // remaining vars excluding the current one
+        debug_assert_eq!(e_active.len(), 1usize << future_len);
+
+        let jlen_total = 1usize << w;
+        debug_assert_eq!(self.m_table.len(), jlen_total * jlen_total);
+
+        let num_prefix = 1usize << delta;
+        let num_future = 1usize << future_len;
+        // Parallelize over b1 (prefix assignments for the left χ-coeffs). This is the
+        // outermost independent loop in Baweja's per-round formulas.
+        (0..num_prefix)
+            .into_par_iter()
+            .map(|b1| {
+                let chi1 = self.chi[b1];
+                let mut local_q0 = F::zero();
+                let mut local_qinf = F::zero();
+                for b2 in 0..num_prefix {
+                    let weight = chi1 * self.chi[b2];
+
+                    let mut sum00 = F::zero();
+                    let mut sum01 = F::zero();
+                    let mut sum10 = F::zero();
+                    let mut sum11 = F::zero();
+
+                    for b in 0..num_future {
+                        let e = e_active[b];
+
+                        let beta1_0 = b1 | (b << (delta + 1));
+                        let beta1_1 = b1 | (1usize << delta) | (b << (delta + 1));
+                        let beta2_0 = b2 | (b << (delta + 1));
+                        let beta2_1 = b2 | (1usize << delta) | (b << (delta + 1));
+
+                        let idx00 = (beta1_0 << w) | beta2_0;
+                        let idx01 = (beta1_0 << w) | beta2_1;
+                        let idx10 = (beta1_1 << w) | beta2_0;
+                        let idx11 = (beta1_1 << w) | beta2_1;
+
+                        sum00 += e * self.m_table[idx00];
+                        sum01 += e * self.m_table[idx01];
+                        sum10 += e * self.m_table[idx10];
+                        sum11 += e * self.m_table[idx11];
+                    }
+
+                    local_q0 += weight * sum00;
+                    local_qinf += weight * (sum00 - sum01 - sum10 + sum11);
+                }
+                (local_q0, local_qinf)
+            })
+            .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
+    }
+}
+
+#[cfg(feature = "prover")]
+impl<F: JoltField> StreamingSumcheckWindow<F> for OuterStreamingWindowMTable<F> {
+    type Shared = OuterSharedState<F>;
+
+    #[tracing::instrument(skip_all, name = "OuterStreamingWindowMTable::initialize")]
+    fn initialize(shared: &mut Self::Shared, window_size: usize) -> Self {
+        let m_table = shared.compute_m_table_from_trace(window_size);
+        Self {
+            w_start: window_size,
+            m_table,
+            chi: vec![F::one()],
+            _phantom: PhantomData,
+        }
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterStreamingWindowMTable::compute_message")]
+    fn compute_message(
+        &self,
+        shared: &Self::Shared,
+        window_size: usize,
+        previous_claim: F,
+    ) -> UniPoly<F> {
+        let e_active = shared.split_eq_poly.E_active_for_window(window_size);
+        let (t0, tinf) = self.endpoints_from_m_table(&e_active, window_size);
+        shared
+            .split_eq_poly
+            .gruen_poly_deg_3(t0, tinf, previous_claim)
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterStreamingWindowMTable::ingest_challenge")]
+    fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, _round: usize) {
+        // Update eq state for next round
+        shared.split_eq_poly.bind(r_j);
+        shared.r_grid.update(r_j);
+
+        // Grow χ-table for in-window challenges (Baweja-style)
+        Self::update_chi_in_place(&mut self.chi, r_j);
+    }
+}
+
+/// Thin wrapper around [`OuterLinearStage`] that only changes the associated `Streaming`
+/// type to match [`OuterStreamingWindowMTable`]. All logic is delegated to the canonical
+/// [`OuterLinearStage`] implementation.
+#[cfg(feature = "prover")]
+#[derive(Allocative)]
+#[allocative(bound = "")]
+pub struct OuterLinearStageMTable<F: JoltField> {
+    #[allocative(skip)]
+    inner: OuterLinearStage<F>,
+}
+
+#[cfg(feature = "prover")]
+impl<F: JoltField> LinearSumcheckStage<F> for OuterLinearStageMTable<F> {
+    type Shared = OuterSharedState<F>;
+    type Streaming = OuterStreamingWindowMTable<F>;
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageMTable::initialize")]
+    fn initialize(
+        _streaming: Option<Self::Streaming>,
+        shared: &mut Self::Shared,
+        window_size: usize,
+    ) -> Self {
+        let inner =
+            <OuterLinearStage<F> as LinearSumcheckStage<F>>::initialize(None, shared, window_size);
+        Self { inner }
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageMTable::next_window")]
+    fn next_window(&mut self, shared: &mut Self::Shared, window_size: usize) {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::next_window(
+            &mut self.inner,
+            shared,
+            window_size,
+        );
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageMTable::compute_message")]
+    fn compute_message(
+        &self,
+        shared: &Self::Shared,
+        window_size: usize,
+        previous_claim: F,
+    ) -> UniPoly<F> {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::compute_message(
+            &self.inner,
+            shared,
+            window_size,
+            previous_claim,
+        )
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageMTable::ingest_challenge")]
+    fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, round: usize) {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::ingest_challenge(
+            &mut self.inner,
+            shared,
+            r_j,
+            round,
+        )
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageMTable::cache_openings")]
+    fn cache_openings<T: Transcript>(
+        &self,
+        shared: &Self::Shared,
+        accumulator: &mut ProverOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::cache_openings(
+            &self.inner,
+            shared,
+            accumulator,
+            transcript,
+            sumcheck_challenges,
+        )
+    }
+}
+
+/// Thin wrapper around [`OuterLinearStage`] that only changes the associated `Streaming`
+/// type to match [`OuterStreamingWindowCoeffMul`]. All logic is delegated to the
+/// canonical [`OuterLinearStage`] implementation.
+#[cfg(feature = "prover")]
+#[derive(Allocative)]
+#[allocative(bound = "")]
+pub struct OuterLinearStageCoeffMul<F: JoltField> {
+    #[allocative(skip)]
+    inner: OuterLinearStage<F>,
+}
+
+#[cfg(feature = "prover")]
+impl<F: JoltField> LinearSumcheckStage<F> for OuterLinearStageCoeffMul<F> {
+    type Shared = OuterSharedState<F>;
+    type Streaming = OuterStreamingWindowCoeffMul<F>;
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageCoeffMul::initialize")]
+    fn initialize(
+        _streaming: Option<Self::Streaming>,
+        shared: &mut Self::Shared,
+        window_size: usize,
+    ) -> Self {
+        // Delegate to the canonical linear stage; it ignores the streaming window anyway.
+        let inner =
+            <OuterLinearStage<F> as LinearSumcheckStage<F>>::initialize(None, shared, window_size);
+        Self { inner }
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageCoeffMul::next_window")]
+    fn next_window(&mut self, shared: &mut Self::Shared, window_size: usize) {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::next_window(
+            &mut self.inner,
+            shared,
+            window_size,
+        );
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageCoeffMul::compute_message")]
+    fn compute_message(
+        &self,
+        shared: &Self::Shared,
+        window_size: usize,
+        previous_claim: F,
+    ) -> UniPoly<F> {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::compute_message(
+            &self.inner,
+            shared,
+            window_size,
+            previous_claim,
+        )
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageCoeffMul::ingest_challenge")]
+    fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, round: usize) {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::ingest_challenge(
+            &mut self.inner,
+            shared,
+            r_j,
+            round,
+        )
+    }
+
+    #[tracing::instrument(skip_all, name = "OuterLinearStageCoeffMul::cache_openings")]
+    fn cache_openings<T: Transcript>(
+        &self,
+        shared: &Self::Shared,
+        accumulator: &mut ProverOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        <OuterLinearStage<F> as LinearSumcheckStage<F>>::cache_openings(
+            &self.inner,
+            shared,
+            accumulator,
+            transcript,
+            sumcheck_challenges,
+        )
     }
 }
 
@@ -953,9 +1564,11 @@ impl<F: JoltField> OuterLinearStage<F> {
                             }
 
                             let az0 = acc_az[0].barrett_reduce();
-                            let bz0 = acc_bz_first[0].barrett_reduce() + acc_bz_second[0].barrett_reduce();
+                            let bz0 = acc_bz_first[0].barrett_reduce()
+                                + acc_bz_second[0].barrett_reduce();
                             let az1 = acc_az[1].barrett_reduce();
-                            let bz1 = acc_bz_first[1].barrett_reduce() + acc_bz_second[1].barrett_reduce();
+                            let bz1 = acc_bz_first[1].barrett_reduce()
+                                + acc_bz_second[1].barrett_reduce();
 
                             // Write directly to chunk, no intermediate buffer needed
                             let buffer_offset = 2 * (pair_idx - start_pair);
@@ -978,14 +1591,12 @@ impl<F: JoltField> OuterLinearStage<F> {
                         acc_t
                     },
                 )
-                .reduce(
-                    || (F::zero(), F::zero()),
-                    |a, b| (a.0 + b.0, a.1 + b.1),
-                );
+                .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1));
 
             // Store as a trivial 3-element MultiquadraticPolynomial.
             // Index 1 is unused by project_to_first_variable (only 0 and 2 are read).
-            shared.t_prime_poly = Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
+            shared.t_prime_poly =
+                Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
         } else {
             let ans = az_bound
                 .par_chunks_mut(chunk_size)
@@ -1031,7 +1642,8 @@ impl<F: JoltField> OuterLinearStage<F> {
                                 acc_bz_second[x_val] = Acc7S::zero();
                             }
 
-                            let base_idx = (x_out_val << (num_x_in_bits + window_size + num_r_bits))
+                            let base_idx = (x_out_val
+                                << (num_x_in_bits + window_size + num_r_bits))
                                 | (x_in_val << (window_size + num_r_bits));
 
                             for x_val in 0..grid_size {
@@ -1107,7 +1719,8 @@ impl<F: JoltField> OuterLinearStage<F> {
 
                         let e_out = E_out[current_x_out];
                         for idx in 0..three_pow_dim {
-                            local_ans[idx] += F::from_montgomery_reduce::<9>(inner_sum[idx]) * e_out;
+                            local_ans[idx] +=
+                                F::from_montgomery_reduce::<9>(inner_sum[idx]) * e_out;
                         }
 
                         local_ans
@@ -1223,7 +1836,8 @@ impl<F: JoltField> OuterLinearStage<F> {
                     })
                     .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1))
             };
-            shared.t_prime_poly = Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
+            shared.t_prime_poly =
+                Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
         } else {
             // General path for window_size > 1 (not used by LinearOnlySchedule)
             if E_in.len() == 1 {
@@ -1272,10 +1886,14 @@ impl<F: JoltField> OuterLinearStage<F> {
                                 let eval = R1CSEval::<F>::from_cycle_inputs(&row_inputs);
 
                                 let offset = x_in * grid_size + j;
-                                az_outer_chunk[offset] = eval.az_at_r_first_group(&shared.lagrange_evals_r0);
-                                bz_outer_chunk[offset] = eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
-                                az_outer_chunk[offset + 1] = eval.az_at_r_second_group(&shared.lagrange_evals_r0);
-                                bz_outer_chunk[offset + 1] = eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
+                                az_outer_chunk[offset] =
+                                    eval.az_at_r_first_group(&shared.lagrange_evals_r0);
+                                bz_outer_chunk[offset] =
+                                    eval.bz_at_r_first_group(&shared.lagrange_evals_r0);
+                                az_outer_chunk[offset + 1] =
+                                    eval.az_at_r_second_group(&shared.lagrange_evals_r0);
+                                bz_outer_chunk[offset + 1] =
+                                    eval.bz_at_r_second_group(&shared.lagrange_evals_r0);
 
                                 j += 2;
                             }
@@ -1415,10 +2033,7 @@ impl<F: JoltField> OuterLinearStage<F> {
     ///
     /// This exactly matches the memory access pattern of `outer_uni_skip_linear`.
     #[tracing::instrument(skip_all, name = "OuterLinearStage::compute_linear_step_optimized")]
-    fn compute_linear_step_optimized(
-        &self,
-        split_eq_poly: &GruenSplitEqPolynomial<F>,
-    ) -> (F, F) {
+    fn compute_linear_step_optimized(&self, split_eq_poly: &GruenSplitEqPolynomial<F>) -> (F, F) {
         let n = self.az.len();
         debug_assert_eq!(n, self.bz.len());
 
@@ -1459,7 +2074,8 @@ impl<F: JoltField> LinearSumcheckStage<F> for OuterLinearStage<F> {
         if window_size == 1 {
             // Optimized path: compute (t0, t_inf) directly and store as trivial MultiquadraticPolynomial
             let (t0, t_inf) = self.compute_linear_step_optimized(&shared.split_eq_poly);
-            shared.t_prime_poly = Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
+            shared.t_prime_poly =
+                Some(MultiquadraticPolynomial::new(1, vec![t0, F::zero(), t_inf]));
         } else {
             self.compute_evaluation_grid_from_polynomials_parallel(shared, window_size);
         }

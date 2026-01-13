@@ -1,7 +1,7 @@
 use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_std::rand::{rngs::StdRng, SeedableRng};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, black_box};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use jolt_core::field::JoltField;
 use jolt_core::poly::dense_mlpoly::DensePolynomial;
@@ -87,12 +87,10 @@ impl<F: JoltField> Degree2EqProductSumcheckProver<F> {
 
     #[inline(always)]
     fn quadratic_endpoints_unreduced(&self) -> (F, F) {
-        let [t0, t_inf] = self
-            .eq
-            .par_fold_out_in_unreduced::<9, 2>(&|g| {
-                let (constant, quadratic) = self.per_group_terms(g);
-                [constant, quadratic]
-            });
+        let [t0, t_inf] = self.eq.par_fold_out_in_unreduced::<9, 2>(&|g| {
+            let (constant, quadratic) = self.per_group_terms(g);
+            [constant, quadratic]
+        });
         (t0, t_inf)
     }
 }
@@ -162,8 +160,7 @@ fn run_degree2_eq_sumcheck_once(
         Degree2EqProductSumcheckProver::new(p_original.clone(), q_original.clone(), tau, mul_mode);
     let mut prover_acc = ProverOpeningAccumulator::<Fr>::new(num_vars);
     let mut prover_tr = Blake2bTranscript::new(b"degree2_eq_sumcheck");
-    let instances: Vec<&mut dyn SumcheckInstanceProver<Fr, Blake2bTranscript>> =
-        vec![&mut prover];
+    let instances: Vec<&mut dyn SumcheckInstanceProver<Fr, Blake2bTranscript>> = vec![&mut prover];
     let _ = BatchedSumcheck::prove(instances, &mut prover_acc, &mut prover_tr);
 }
 

@@ -709,7 +709,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                     }
                     OuterStreamingScheduleKind::HalfSplit => {
                         // Degree bound for this outer remainder sumcheck is 3.
-                        let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                        let schedule = HalfSplitSchedule::new(num_rounds, 2);
                         let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<_, _> =
                             OuterRemainingStreamingSumcheck::new(shared, schedule);
                         BatchedSumcheck::prove(
@@ -744,7 +744,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                         )
                     }
                     OuterStreamingScheduleKind::HalfSplit => {
-                        let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                        let schedule = HalfSplitSchedule::new(num_rounds, 2);
                         let mut spartan_outer_remaining: OuterRemainingStreamingSumcheckMTable<
                             _,
                             _,

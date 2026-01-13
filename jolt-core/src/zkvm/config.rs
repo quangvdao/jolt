@@ -45,10 +45,10 @@ pub struct OuterStage1Config {
 
 impl Default for OuterStage1Config {
     fn default() -> Self {
-        // Preserve current behavior in `zkvm/prover.rs`: streaming remainder with a linear-only schedule.
+        // Use M-table streaming with half-split schedule for benchmarking
         Self {
-            remainder_impl: OuterStage1RemainderImpl::Streaming,
-            streaming_schedule: OuterStreamingScheduleKind::LinearOnly,
+            remainder_impl: OuterStage1RemainderImpl::StreamingMTable,
+            streaming_schedule: OuterStreamingScheduleKind::HalfSplit,
         }
     }
 }

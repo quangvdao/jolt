@@ -579,10 +579,6 @@ impl<F: JoltField> OuterSharedState<F> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(
-        skip_all,
-        name = "OuterSharedState::materialize_az_bz_on_boolean_hypercube"
-    )]
     fn materialize_az_bz_on_boolean_hypercube(
         &self,
         acc_az: &mut [Acc5U<F>],

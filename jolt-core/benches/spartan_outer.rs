@@ -175,9 +175,11 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         &mut transcript,
                     );
 
-                    // Remaining outer rounds: streaming schedule for degree-3 messages.
+                    // Remaining outer rounds: streaming schedule for degree-2 (multiquadratic) windows.
+                    // The round polynomial is degree-3 (eq × t), but eq is handled via Gruen's trick,
+                    // so the streaming data structure only needs degree-2.
                     let num_rounds = uni_skip_params.tau.len() - 1;
-                    let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                    let schedule = HalfSplitSchedule::new(num_rounds, 2);
                     let shared = OuterSharedState::<F>::new(
                         Arc::clone(&trace),
                         &bytecode_pp,
@@ -223,9 +225,9 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         &mut transcript,
                     );
 
-                    // Remaining outer rounds: same schedule, but coeff-based window multiplication.
+                    // Remaining outer rounds: same schedule (degree-2), but coeff-based window multiplication.
                     let num_rounds = uni_skip_params.tau.len() - 1;
-                    let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                    let schedule = HalfSplitSchedule::new(num_rounds, 2);
                     let shared = OuterSharedState::<F>::new(
                         Arc::clone(&trace),
                         &bytecode_pp,
@@ -273,9 +275,9 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                         &mut transcript,
                     );
 
-                    // Remaining outer rounds: same schedule, but store Baweja-style M tables (4^w).
+                    // Remaining outer rounds: same schedule (degree-2), but store Baweja-style M tables (4^w).
                     let num_rounds = uni_skip_params.tau.len() - 1;
-                    let schedule = HalfSplitSchedule::new(num_rounds, 3);
+                    let schedule = HalfSplitSchedule::new(num_rounds, 2);
                     let shared = OuterSharedState::<F>::new(
                         Arc::clone(&trace),
                         &bytecode_pp,

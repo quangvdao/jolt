@@ -1,5 +1,7 @@
 use allocative::Allocative;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
+};
 
 use crate::field::JoltField;
 use crate::utils::math::Math;
@@ -26,6 +28,47 @@ pub enum OuterStage1RemainderImpl {
     NonStreamingCheckpoint,
 }
 
+impl CanonicalSerialize for OuterStage1RemainderImpl {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        let tag: u8 = match self {
+            Self::Streaming => 0,
+            Self::StreamingMTable => 1,
+            Self::NonStreamingCheckpoint => 2,
+        };
+        tag.serialize_with_mode(&mut writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        0u8.serialized_size(compress)
+    }
+}
+
+impl Valid for OuterStage1RemainderImpl {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for OuterStage1RemainderImpl {
+    fn deserialize_with_mode<R: std::io::Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        match tag {
+            0 => Ok(Self::Streaming),
+            1 => Ok(Self::StreamingMTable),
+            2 => Ok(Self::NonStreamingCheckpoint),
+            _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
+
 /// Runtime selection for the streaming schedule (only relevant when
 /// [`OuterStage1RemainderImpl::Streaming`] is chosen).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +79,44 @@ pub enum OuterStreamingScheduleKind {
     HalfSplit,
 }
 
+impl CanonicalSerialize for OuterStreamingScheduleKind {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        let tag: u8 = match self {
+            Self::LinearOnly => 0,
+            Self::HalfSplit => 1,
+        };
+        tag.serialize_with_mode(&mut writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        0u8.serialized_size(compress)
+    }
+}
+
+impl Valid for OuterStreamingScheduleKind {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for OuterStreamingScheduleKind {
+    fn deserialize_with_mode<R: std::io::Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        match tag {
+            0 => Ok(Self::LinearOnly),
+            1 => Ok(Self::HalfSplit),
+            _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
 /// Runtime configuration for stage 1 outer remainder prover implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterStage1Config {

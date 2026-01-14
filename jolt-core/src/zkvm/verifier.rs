@@ -27,7 +27,8 @@ use crate::zkvm::{
         ra_virtual::RaSumcheckVerifier as LookupsRaSumcheckVerifier,
         read_raf_checking::InstructionReadRafSumcheckVerifier,
     },
-    proof_serialization::JoltProof,
+    proof_serialization::{JoltProof, SpartanOuterStage1Kind, Stage1Proof},
+    r1cs::constraints::R1CS_CONSTRAINTS,
     r1cs::key::UniformSpartanKey,
     ram::{
         self, hamming_booleanity::HammingBooleanitySumcheckVerifier,
@@ -43,6 +44,8 @@ use crate::zkvm::{
     },
     spartan::{
         instruction_input::InstructionInputSumcheckVerifier, outer::OuterRemainingSumcheckVerifier,
+        outer_baseline::OuterBaselineSumcheckVerifier, outer_naive::OuterNaiveSumcheckVerifier,
+        outer_round_batched::OuterRoundBatchedSumcheckVerifier,
         product::ProductVirtualRemainderVerifier, shift::ShiftSumcheckVerifier,
         verify_stage1_uni_skip, verify_stage2_uni_skip,
     },
@@ -63,7 +66,7 @@ use crate::{
     utils::{errors::ProofVerifyError, math::Math},
     zkvm::witness::CommittedPolynomial,
 };
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
 use itertools::Itertools;
@@ -211,30 +214,122 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     }
 
     fn verify_stage1(&mut self) -> Result<(), anyhow::Error> {
-        let uni_skip_params = verify_stage1_uni_skip(
-            &self.proof.stage1_uni_skip_first_round_proof,
-            &self.spartan_key,
-            &mut self.opening_accumulator,
-            &mut self.transcript,
-        )
-        .context("Stage 1 univariate skip first round")?;
+        match (self.proof.stage1_kind, &self.proof.stage1_proof) {
+            (
+                SpartanOuterStage1Kind::UniSkipPlusRemainder { .. },
+                Stage1Proof::UniSkipPlusRemainder {
+                    uni_skip,
+                    remainder,
+                },
+            ) => {
+                let uni_skip_params = verify_stage1_uni_skip(
+                    uni_skip,
+                    &self.spartan_key,
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                )
+                .context("Stage 1 univariate skip first round")?;
 
-        let spartan_outer_remaining = OuterRemainingSumcheckVerifier::new(
-            self.spartan_key,
-            self.proof.trace_length,
-            uni_skip_params,
-            &self.opening_accumulator,
-        );
+                let spartan_outer_remaining = OuterRemainingSumcheckVerifier::new(
+                    self.spartan_key,
+                    self.proof.trace_length,
+                    uni_skip_params,
+                    &self.opening_accumulator,
+                );
 
-        let _r_stage1 = BatchedSumcheck::verify(
-            &self.proof.stage1_sumcheck_proof,
-            vec![&spartan_outer_remaining],
-            &mut self.opening_accumulator,
-            &mut self.transcript,
-        )
-        .context("Stage 1")?;
+                let _r_stage1 = BatchedSumcheck::verify(
+                    remainder,
+                    vec![&spartan_outer_remaining],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                )
+                .context("Stage 1 (uniskip+remainder)")?;
 
-        Ok(())
+                Ok(())
+            }
+            (SpartanOuterStage1Kind::FullBaseline, Stage1Proof::FullOuter { sumcheck }) => {
+                let num_step_bits = self.proof.trace_length.log_2();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                let num_constraint_bits = padded_num_constraints.log_2();
+                let total_num_vars = num_step_bits + num_constraint_bits;
+                let tau: Vec<F::Challenge> = self
+                    .transcript
+                    .challenge_vector_optimized::<F>(total_num_vars);
+
+                let spartan_outer_full = OuterBaselineSumcheckVerifier::new(
+                    num_step_bits,
+                    num_constraint_bits,
+                    tau,
+                    self.spartan_key,
+                );
+
+                let _r_stage1 = BatchedSumcheck::verify(
+                    sumcheck,
+                    vec![&spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                )
+                .context("Stage 1 (full-baseline)")?;
+
+                Ok(())
+            }
+            (SpartanOuterStage1Kind::FullNaive, Stage1Proof::FullOuter { sumcheck }) => {
+                let num_step_bits = self.proof.trace_length.log_2();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                let num_constraint_bits = padded_num_constraints.log_2();
+                let total_num_vars = num_step_bits + num_constraint_bits;
+                let tau: Vec<F::Challenge> = self
+                    .transcript
+                    .challenge_vector_optimized::<F>(total_num_vars);
+
+                let spartan_outer_full = OuterNaiveSumcheckVerifier::new(
+                    num_step_bits,
+                    num_constraint_bits,
+                    tau,
+                    self.spartan_key,
+                );
+
+                let _r_stage1 = BatchedSumcheck::verify(
+                    sumcheck,
+                    vec![&spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                )
+                .context("Stage 1 (full-naive)")?;
+
+                Ok(())
+            }
+            (SpartanOuterStage1Kind::FullRoundBatched, Stage1Proof::FullOuter { sumcheck }) => {
+                let num_step_bits = self.proof.trace_length.log_2();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                let num_constraint_bits = padded_num_constraints.log_2();
+                let total_num_vars = num_step_bits + num_constraint_bits;
+                let tau: Vec<F::Challenge> = self
+                    .transcript
+                    .challenge_vector_optimized::<F>(total_num_vars);
+
+                let spartan_outer_full = OuterRoundBatchedSumcheckVerifier::new(
+                    num_step_bits,
+                    num_constraint_bits,
+                    tau,
+                    self.spartan_key,
+                );
+
+                let _r_stage1 = BatchedSumcheck::verify(
+                    sumcheck,
+                    vec![&spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                )
+                .context("Stage 1 (full-round-batched)")?;
+
+                Ok(())
+            }
+            _ => Err(anyhow!(
+                "stage1_kind ({:?}) does not match stage1_proof variant",
+                self.proof.stage1_kind
+            )),
+        }
     }
 
     fn verify_stage2(&mut self) -> Result<(), anyhow::Error> {

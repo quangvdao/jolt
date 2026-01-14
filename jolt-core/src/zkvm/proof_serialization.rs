@@ -19,18 +19,207 @@ use crate::{
     subprotocols::sumcheck::SumcheckInstanceProof,
     transcripts::Transcript,
     zkvm::{
-        config::{OneHotConfig, ReadWriteConfig},
+        config::{
+            OneHotConfig, OuterStage1RemainderImpl, OuterStreamingScheduleKind, ReadWriteConfig,
+        },
         instruction::{CircuitFlags, InstructionFlags},
         witness::{CommittedPolynomial, VirtualPolynomial},
     },
 };
 
+/// Proof-level selector for which Spartan outer Stage 1 protocol was used.
+///
+/// This is stored in the proof so the verifier can dispatch to the matching logic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpartanOuterStage1Kind {
+    /// Current production Stage 1:
+    /// univariate-skip first round (Spartan outer) + remainder sumcheck.
+    UniSkipPlusRemainder {
+        remainder_impl: OuterStage1RemainderImpl,
+        schedule: OuterStreamingScheduleKind,
+    },
+
+    /// Full-outer protocols (no uni-skip split).
+    FullBaseline,
+    FullNaive,
+    FullRoundBatched,
+}
+
+/// Stage 1 proof payload, tagged by its protocol family.
+pub enum Stage1Proof<F: JoltField, FS: Transcript> {
+    UniSkipPlusRemainder {
+        uni_skip: UniSkipFirstRoundProof<F, FS>,
+        remainder: SumcheckInstanceProof<F, FS>,
+    },
+    FullOuter {
+        sumcheck: SumcheckInstanceProof<F, FS>,
+    },
+}
+
+impl CanonicalSerialize for SpartanOuterStage1Kind {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        match self {
+            Self::UniSkipPlusRemainder {
+                remainder_impl,
+                schedule,
+            } => {
+                0u8.serialize_with_mode(&mut writer, compress)?;
+                remainder_impl.serialize_with_mode(&mut writer, compress)?;
+                schedule.serialize_with_mode(&mut writer, compress)
+            }
+            Self::FullBaseline => 1u8.serialize_with_mode(&mut writer, compress),
+            Self::FullNaive => 2u8.serialize_with_mode(&mut writer, compress),
+            Self::FullRoundBatched => 3u8.serialize_with_mode(&mut writer, compress),
+        }
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        match self {
+            Self::UniSkipPlusRemainder {
+                remainder_impl,
+                schedule,
+            } => {
+                0u8.serialized_size(compress)
+                    + remainder_impl.serialized_size(compress)
+                    + schedule.serialized_size(compress)
+            }
+            Self::FullBaseline | Self::FullNaive | Self::FullRoundBatched => {
+                0u8.serialized_size(compress)
+            }
+        }
+    }
+}
+
+impl Valid for SpartanOuterStage1Kind {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for SpartanOuterStage1Kind {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        match tag {
+            0 => {
+                let remainder_impl = OuterStage1RemainderImpl::deserialize_with_mode(
+                    &mut reader,
+                    compress,
+                    validate,
+                )?;
+                let schedule = OuterStreamingScheduleKind::deserialize_with_mode(
+                    &mut reader,
+                    compress,
+                    validate,
+                )?;
+                Ok(Self::UniSkipPlusRemainder {
+                    remainder_impl,
+                    schedule,
+                })
+            }
+            1 => Ok(Self::FullBaseline),
+            2 => Ok(Self::FullNaive),
+            3 => Ok(Self::FullRoundBatched),
+            _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
+
+impl<F: JoltField, FS: Transcript> CanonicalSerialize for Stage1Proof<F, FS> {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        match self {
+            Self::UniSkipPlusRemainder {
+                uni_skip,
+                remainder,
+            } => {
+                0u8.serialize_with_mode(&mut writer, compress)?;
+                uni_skip.serialize_with_mode(&mut writer, compress)?;
+                remainder.serialize_with_mode(&mut writer, compress)
+            }
+            Self::FullOuter { sumcheck } => {
+                1u8.serialize_with_mode(&mut writer, compress)?;
+                sumcheck.serialize_with_mode(&mut writer, compress)
+            }
+        }
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        match self {
+            Self::UniSkipPlusRemainder {
+                uni_skip,
+                remainder,
+            } => {
+                0u8.serialized_size(compress)
+                    + uni_skip.serialized_size(compress)
+                    + remainder.serialized_size(compress)
+            }
+            Self::FullOuter { sumcheck } => {
+                0u8.serialized_size(compress) + sumcheck.serialized_size(compress)
+            }
+        }
+    }
+}
+
+impl<F: JoltField, FS: Transcript> Valid for Stage1Proof<F, FS> {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl<F: JoltField, FS: Transcript> CanonicalDeserialize for Stage1Proof<F, FS> {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        match tag {
+            0 => {
+                let uni_skip = UniSkipFirstRoundProof::<F, FS>::deserialize_with_mode(
+                    &mut reader,
+                    compress,
+                    validate,
+                )?;
+                let remainder = SumcheckInstanceProof::<F, FS>::deserialize_with_mode(
+                    &mut reader,
+                    compress,
+                    validate,
+                )?;
+                Ok(Self::UniSkipPlusRemainder {
+                    uni_skip,
+                    remainder,
+                })
+            }
+            1 => {
+                let sumcheck = SumcheckInstanceProof::<F, FS>::deserialize_with_mode(
+                    &mut reader,
+                    compress,
+                    validate,
+                )?;
+                Ok(Self::FullOuter { sumcheck })
+            }
+            _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
+
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> {
     pub opening_claims: Claims<F>,
     pub commitments: Vec<PCS::Commitment>,
-    pub stage1_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
-    pub stage1_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub stage1_kind: SpartanOuterStage1Kind,
+    pub stage1_proof: Stage1Proof<F, FS>,
     pub stage2_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
     pub stage2_sumcheck_proof: SumcheckInstanceProof<F, FS>,
     pub stage3_sumcheck_proof: SumcheckInstanceProof<F, FS>,

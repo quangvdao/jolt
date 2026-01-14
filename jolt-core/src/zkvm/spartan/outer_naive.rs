@@ -1,15 +1,18 @@
 use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
-    OpeningPoint, ProverOpeningAccumulator, SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
+    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
+    VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::{dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial, unipoly::UniPoly};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
+use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 
 use crate::utils::thread::unsafe_allocate_zero_vec;
 use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::r1cs::constraints::R1CSConstraint;
 use crate::zkvm::r1cs::evaluation::{BaselineConstraintEval, R1CSEval};
 use crate::zkvm::r1cs::inputs::{R1CSCycleInputs, ALL_R1CS_INPUTS};
+use crate::zkvm::r1cs::key::UniformSpartanKey;
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{field::JoltField, transcripts::Transcript, utils::math::Math};
 use allocative::Allocative;
@@ -38,6 +41,92 @@ pub struct OuterNaiveSumcheckProver<F: JoltField> {
     total_rounds: usize,
     /// Number of step/cycle variables (used to split r_cycle from full opening point)
     num_step_vars: usize,
+}
+
+// =======================
+// SumcheckInstance (Verifier) for naive outer (no uni-skip)
+// =======================
+pub struct OuterNaiveSumcheckVerifier<F: JoltField> {
+    num_step_bits: usize,
+    total_rounds: usize,
+    tau: Vec<F::Challenge>,
+    key: UniformSpartanKey<F>,
+    _phantom: core::marker::PhantomData<F>,
+}
+
+impl<F: JoltField> OuterNaiveSumcheckVerifier<F> {
+    pub fn new(
+        num_step_bits: usize,
+        num_constraint_bits: usize,
+        tau: Vec<F::Challenge>,
+        key: UniformSpartanKey<F>,
+    ) -> Self {
+        Self {
+            num_step_bits,
+            total_rounds: num_step_bits + num_constraint_bits,
+            tau,
+            key,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OuterNaiveSumcheckVerifier<F> {
+    fn degree(&self) -> usize {
+        3
+    }
+    fn num_rounds(&self) -> usize {
+        self.total_rounds
+    }
+    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+        F::zero()
+    }
+    fn expected_output_claim(
+        &self,
+        accumulator: &VerifierOpeningAccumulator<F>,
+        sumcheck_challenges: &[F::Challenge],
+    ) -> F {
+        // Recover all z_i(r_cycle) openings registered for Spartan outer.
+        let r1cs_input_evals = ALL_R1CS_INPUTS.map(|input| {
+            accumulator
+                .get_virtual_polynomial_opening((&input).into(), SumcheckId::SpartanOuter)
+                .1
+        });
+
+        debug_assert!(
+            sumcheck_challenges.len() >= 2,
+            "naive outer: expected at least two challenges for row binding"
+        );
+        let rx_constr = &[sumcheck_challenges[0], sumcheck_challenges[1]];
+        let inner_sum_prod = self
+            .key
+            .evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+
+        let r_rev: Vec<F::Challenge> = sumcheck_challenges.iter().rev().copied().collect();
+        let eq_tau_r = EqPolynomial::<F>::mle(&self.tau, &r_rev);
+
+        eq_tau_r * inner_sum_prod
+    }
+    fn cache_openings(
+        &self,
+        accumulator: &mut VerifierOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        let opening_point: OpeningPoint<BIG_ENDIAN, F> =
+            OpeningPoint::<LITTLE_ENDIAN, F>::new(sumcheck_challenges.to_vec()).match_endianness();
+
+        // Witness openings at r_cycle
+        let (r_cycle, _rx_var) = opening_point.r.split_at(self.num_step_bits);
+        ALL_R1CS_INPUTS.iter().for_each(|input| {
+            accumulator.append_virtual(
+                transcript,
+                VirtualPolynomial::from(input),
+                SumcheckId::SpartanOuter,
+                OpeningPoint::new(r_cycle.to_vec()),
+            );
+        });
+    }
 }
 
 impl<F: JoltField> OuterNaiveSumcheckProver<F> {

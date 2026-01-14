@@ -100,7 +100,8 @@ use crate::{
             ra_virtual::InstructionRaSumcheckProver as LookupsRaSumcheckProver,
             read_raf_checking::InstructionReadRafSumcheckProver,
         },
-        proof_serialization::{Claims, JoltProof},
+        proof_serialization::{Claims, JoltProof, SpartanOuterStage1Kind, Stage1Proof},
+        r1cs::constraints::R1CS_CONSTRAINTS,
         r1cs::key::UniformSpartanKey,
         ram::{
             gen_ram_memory_states, hamming_booleanity::HammingBooleanitySumcheckProver,
@@ -119,6 +120,9 @@ use crate::{
                 OuterRemainingStreamingSumcheck, OuterRemainingStreamingSumcheckMTable,
                 OuterSharedState,
             },
+            outer_baseline::OuterBaselineSumcheckProver,
+            outer_naive::OuterNaiveSumcheckProver,
+            outer_round_batched::OuterRoundBatchedSumcheckProver,
             product::ProductVirtualRemainderProver,
             shift::ShiftSumcheckProver,
         },
@@ -162,6 +166,7 @@ pub struct JoltCpuProver<
     pub one_hot_params: OneHotParams,
     pub rw_config: ReadWriteConfig,
     pub outer_stage1_config: OuterStage1Config,
+    pub spartan_outer_stage1_kind: SpartanOuterStage1Kind,
 }
 impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscript: Transcript>
     JoltCpuProver<'a, F, PCS, ProofTranscript>
@@ -417,6 +422,10 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             one_hot_params,
             rw_config,
             outer_stage1_config: OuterStage1Config::default(),
+            spartan_outer_stage1_kind: SpartanOuterStage1Kind::UniSkipPlusRemainder {
+                remainder_impl: OuterStage1Config::default().remainder_impl,
+                schedule: OuterStage1Config::default().streaming_schedule,
+            },
         }
     }
 
@@ -426,6 +435,31 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
     /// (all implementations are meant to be semantically equivalent).
     pub fn with_outer_stage1_config(mut self, outer_stage1_config: OuterStage1Config) -> Self {
         self.outer_stage1_config = outer_stage1_config;
+        self.spartan_outer_stage1_kind = SpartanOuterStage1Kind::UniSkipPlusRemainder {
+            remainder_impl: outer_stage1_config.remainder_impl,
+            schedule: outer_stage1_config.streaming_schedule,
+        };
+        self
+    }
+
+    /// Override which Spartan outer Stage 1 protocol is used (and stored in the proof).
+    ///
+    /// Intended for benchmarking; the proof and verifier will dispatch based on the stored kind.
+    pub fn with_spartan_outer_stage1_kind(
+        mut self,
+        spartan_outer_stage1_kind: SpartanOuterStage1Kind,
+    ) -> Self {
+        if let SpartanOuterStage1Kind::UniSkipPlusRemainder {
+            remainder_impl,
+            schedule,
+        } = spartan_outer_stage1_kind
+        {
+            self.outer_stage1_config = OuterStage1Config {
+                remainder_impl,
+                streaming_schedule: schedule,
+            };
+        }
+        self.spartan_outer_stage1_kind = spartan_outer_stage1_kind;
         self
     }
 
@@ -464,7 +498,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             opening_proof_hints.insert(CommittedPolynomial::UntrustedAdvice, hint);
         }
 
-        let (stage1_uni_skip_first_round_proof, stage1_sumcheck_proof) = self.prove_stage1();
+        let (stage1_kind, stage1_proof) = self.prove_stage1();
         let (stage2_uni_skip_first_round_proof, stage2_sumcheck_proof) = self.prove_stage2();
         let stage3_sumcheck_proof = self.prove_stage3();
         let stage4_sumcheck_proof = self.prove_stage4();
@@ -497,8 +531,8 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             opening_claims: Claims(self.opening_accumulator.openings.clone()),
             commitments,
             untrusted_advice_commitment,
-            stage1_uni_skip_first_round_proof,
-            stage1_sumcheck_proof,
+            stage1_kind,
+            stage1_proof,
             stage2_uni_skip_first_round_proof,
             stage2_sumcheck_proof,
             stage3_sumcheck_proof,
@@ -661,121 +695,208 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
     }
 
     #[tracing::instrument(skip_all)]
-    fn prove_stage1(
-        &mut self,
-    ) -> (
-        UniSkipFirstRoundProof<F, ProofTranscript>,
-        SumcheckInstanceProof<F, ProofTranscript>,
-    ) {
+    fn prove_stage1(&mut self) -> (SpartanOuterStage1Kind, Stage1Proof<F, ProofTranscript>) {
         #[cfg(not(target_arch = "wasm32"))]
         print_current_memory_usage("Stage 1 baseline");
 
         tracing::info!("Stage 1 proving");
-        let uni_skip_params = OuterUniSkipParams::new(&self.spartan_key, &mut self.transcript);
-        let mut uni_skip = OuterUniSkipProver::initialize(
-            uni_skip_params.clone(),
-            &self.trace,
-            &self.preprocessing.shared.bytecode,
-        );
-        let first_round_proof = prove_uniskip_round(
-            &mut uni_skip,
-            &mut self.opening_accumulator,
-            &mut self.transcript,
-        );
-
-        let (sumcheck_proof, _r_stage1) = match self.outer_stage1_config.remainder_impl {
-            OuterStage1RemainderImpl::Streaming => {
-                // Every sum-check with num_rounds > 1 requires a schedule.
-                // Outer remaining sumcheck has degree 3 (cubic) and number of rounds = tau.len() - 1.
-                let num_rounds = uni_skip_params.tau.len() - 1;
-
-                let shared = OuterSharedState::new(
-                    Arc::clone(&self.trace),
+        match self.spartan_outer_stage1_kind {
+            SpartanOuterStage1Kind::UniSkipPlusRemainder {
+                remainder_impl,
+                schedule,
+            } => {
+                let uni_skip_params =
+                    OuterUniSkipParams::new(&self.spartan_key, &mut self.transcript);
+                let mut uni_skip = OuterUniSkipProver::initialize(
+                    uni_skip_params.clone(),
+                    &self.trace,
                     &self.preprocessing.shared.bytecode,
-                    &uni_skip_params,
-                    &self.opening_accumulator,
                 );
-
-                match self.outer_stage1_config.streaming_schedule {
-                    OuterStreamingScheduleKind::LinearOnly => {
-                        let schedule = LinearOnlySchedule::new(num_rounds);
-                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<_, _> =
-                            OuterRemainingStreamingSumcheck::new(shared, schedule);
-                        BatchedSumcheck::prove(
-                            vec![&mut spartan_outer_remaining],
-                            &mut self.opening_accumulator,
-                            &mut self.transcript,
-                        )
-                    }
-                    OuterStreamingScheduleKind::HalfSplit => {
-                        // Degree bound for this outer remainder sumcheck is 3.
-                        let schedule = HalfSplitSchedule::new(num_rounds, 2);
-                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<_, _> =
-                            OuterRemainingStreamingSumcheck::new(shared, schedule);
-                        BatchedSumcheck::prove(
-                            vec![&mut spartan_outer_remaining],
-                            &mut self.opening_accumulator,
-                            &mut self.transcript,
-                        )
-                    }
-                }
-            }
-            OuterStage1RemainderImpl::StreamingMTable => {
-                let num_rounds = uni_skip_params.tau.len() - 1;
-
-                let shared = OuterSharedState::new(
-                    Arc::clone(&self.trace),
-                    &self.preprocessing.shared.bytecode,
-                    &uni_skip_params,
-                    &self.opening_accumulator,
-                );
-
-                match self.outer_stage1_config.streaming_schedule {
-                    OuterStreamingScheduleKind::LinearOnly => {
-                        let schedule = LinearOnlySchedule::new(num_rounds);
-                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheckMTable<
-                            _,
-                            _,
-                        > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
-                        BatchedSumcheck::prove(
-                            vec![&mut spartan_outer_remaining],
-                            &mut self.opening_accumulator,
-                            &mut self.transcript,
-                        )
-                    }
-                    OuterStreamingScheduleKind::HalfSplit => {
-                        let schedule = HalfSplitSchedule::new(num_rounds, 2);
-                        let mut spartan_outer_remaining: OuterRemainingStreamingSumcheckMTable<
-                            _,
-                            _,
-                        > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
-                        BatchedSumcheck::prove(
-                            vec![&mut spartan_outer_remaining],
-                            &mut self.opening_accumulator,
-                            &mut self.transcript,
-                        )
-                    }
-                }
-            }
-            OuterStage1RemainderImpl::NonStreamingCheckpoint => {
-                use crate::zkvm::spartan::outer_uni_skip_linear::OuterRemainingSumcheckProverNonStreaming;
-
-                let mut spartan_outer_remaining = OuterRemainingSumcheckProverNonStreaming::gen(
-                    Arc::clone(&self.trace),
-                    &self.preprocessing.shared.bytecode,
-                    uni_skip_params,
-                    &self.opening_accumulator,
-                );
-
-                BatchedSumcheck::prove(
-                    vec![&mut spartan_outer_remaining],
+                let first_round_proof = prove_uniskip_round(
+                    &mut uni_skip,
                     &mut self.opening_accumulator,
                     &mut self.transcript,
+                );
+
+                let (sumcheck_proof, _r_stage1) = match remainder_impl {
+                    OuterStage1RemainderImpl::Streaming => {
+                        // Every sum-check with num_rounds > 1 requires a schedule.
+                        // Outer remaining sumcheck has degree 3 (cubic) and number of rounds = tau.len() - 1.
+                        let num_rounds = uni_skip_params.tau.len() - 1;
+
+                        let shared = OuterSharedState::new(
+                            Arc::clone(&self.trace),
+                            &self.preprocessing.shared.bytecode,
+                            &uni_skip_params,
+                            &self.opening_accumulator,
+                        );
+
+                        match schedule {
+                            OuterStreamingScheduleKind::LinearOnly => {
+                                let schedule = LinearOnlySchedule::new(num_rounds);
+                                let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<
+                                    _,
+                                    _,
+                                > = OuterRemainingStreamingSumcheck::new(shared, schedule);
+                                BatchedSumcheck::prove(
+                                    vec![&mut spartan_outer_remaining],
+                                    &mut self.opening_accumulator,
+                                    &mut self.transcript,
+                                )
+                            }
+                            OuterStreamingScheduleKind::HalfSplit => {
+                                // Degree bound for this outer remainder sumcheck is 3.
+                                let schedule = HalfSplitSchedule::new(num_rounds, 2);
+                                let mut spartan_outer_remaining: OuterRemainingStreamingSumcheck<
+                                    _,
+                                    _,
+                                > = OuterRemainingStreamingSumcheck::new(shared, schedule);
+                                BatchedSumcheck::prove(
+                                    vec![&mut spartan_outer_remaining],
+                                    &mut self.opening_accumulator,
+                                    &mut self.transcript,
+                                )
+                            }
+                        }
+                    }
+                    OuterStage1RemainderImpl::StreamingMTable => {
+                        let num_rounds = uni_skip_params.tau.len() - 1;
+
+                        let shared = OuterSharedState::new(
+                            Arc::clone(&self.trace),
+                            &self.preprocessing.shared.bytecode,
+                            &uni_skip_params,
+                            &self.opening_accumulator,
+                        );
+
+                        match schedule {
+                            OuterStreamingScheduleKind::LinearOnly => {
+                                let schedule = LinearOnlySchedule::new(num_rounds);
+                                let mut spartan_outer_remaining: OuterRemainingStreamingSumcheckMTable<
+                                    _,
+                                    _,
+                                > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
+                                BatchedSumcheck::prove(
+                                    vec![&mut spartan_outer_remaining],
+                                    &mut self.opening_accumulator,
+                                    &mut self.transcript,
+                                )
+                            }
+                            OuterStreamingScheduleKind::HalfSplit => {
+                                let schedule = HalfSplitSchedule::new(num_rounds, 2);
+                                let mut spartan_outer_remaining: OuterRemainingStreamingSumcheckMTable<
+                                    _,
+                                    _,
+                                > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
+                                BatchedSumcheck::prove(
+                                    vec![&mut spartan_outer_remaining],
+                                    &mut self.opening_accumulator,
+                                    &mut self.transcript,
+                                )
+                            }
+                        }
+                    }
+                    OuterStage1RemainderImpl::NonStreamingCheckpoint => {
+                        use crate::zkvm::spartan::outer_uni_skip_linear::OuterRemainingSumcheckProverNonStreaming;
+
+                        let mut spartan_outer_remaining =
+                            OuterRemainingSumcheckProverNonStreaming::gen(
+                                Arc::clone(&self.trace),
+                                &self.preprocessing.shared.bytecode,
+                                uni_skip_params,
+                                &self.opening_accumulator,
+                            );
+
+                        BatchedSumcheck::prove(
+                            vec![&mut spartan_outer_remaining],
+                            &mut self.opening_accumulator,
+                            &mut self.transcript,
+                        )
+                    }
+                };
+
+                (
+                    SpartanOuterStage1Kind::UniSkipPlusRemainder {
+                        remainder_impl,
+                        schedule,
+                    },
+                    Stage1Proof::UniSkipPlusRemainder {
+                        uni_skip: first_round_proof,
+                        remainder: sumcheck_proof,
+                    },
                 )
             }
-        };
+            SpartanOuterStage1Kind::FullBaseline => {
+                let uniform_constraints: Vec<_> = R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
 
-        (first_round_proof, sumcheck_proof)
+                let mut spartan_outer_full = OuterBaselineSumcheckProver::gen(
+                    &self.preprocessing.shared.bytecode,
+                    Arc::clone(&self.trace),
+                    &uniform_constraints,
+                    padded_num_constraints,
+                    &mut self.transcript,
+                );
+
+                let (sumcheck_proof, _r_stage1) = BatchedSumcheck::prove(
+                    vec![&mut spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                );
+
+                (
+                    SpartanOuterStage1Kind::FullBaseline,
+                    Stage1Proof::FullOuter {
+                        sumcheck: sumcheck_proof,
+                    },
+                )
+            }
+            SpartanOuterStage1Kind::FullNaive => {
+                let uniform_constraints: Vec<_> = R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+
+                let mut spartan_outer_full = OuterNaiveSumcheckProver::gen(
+                    &self.preprocessing.shared.bytecode,
+                    Arc::clone(&self.trace),
+                    &uniform_constraints,
+                    padded_num_constraints,
+                    &mut self.transcript,
+                );
+
+                let (sumcheck_proof, _r_stage1) = BatchedSumcheck::prove(
+                    vec![&mut spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                );
+
+                (
+                    SpartanOuterStage1Kind::FullNaive,
+                    Stage1Proof::FullOuter {
+                        sumcheck: sumcheck_proof,
+                    },
+                )
+            }
+            SpartanOuterStage1Kind::FullRoundBatched => {
+                let mut spartan_outer_full = OuterRoundBatchedSumcheckProver::gen(
+                    Arc::clone(&self.trace),
+                    &self.preprocessing.shared.bytecode,
+                    &mut self.transcript,
+                );
+
+                let (sumcheck_proof, _r_stage1) = BatchedSumcheck::prove(
+                    vec![&mut spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                );
+
+                (
+                    SpartanOuterStage1Kind::FullRoundBatched,
+                    Stage1Proof::FullOuter {
+                        sumcheck: sumcheck_proof,
+                    },
+                )
+            }
+        }
     }
 
     #[tracing::instrument(skip_all)]

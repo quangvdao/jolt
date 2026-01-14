@@ -99,6 +99,30 @@ fn setup_tracing(enable_chrome: bool, trace_name: &str) -> Option<tracing_chrome
     }
 }
 
+fn stage1_label_from_env() -> String {
+    let stage1_kind_raw = std::env::var("SPARTAN_OUTER_STAGE1_KIND")
+        .unwrap_or_else(|_| "uniskip".to_string())
+        .to_lowercase();
+
+    match stage1_kind_raw.as_str() {
+        "uniskip" => {
+            let remainder_impl = std::env::var("OUTER_STAGE1_REMAINDER_IMPL")
+                .unwrap_or_else(|_| "streaming".to_string())
+                .to_lowercase();
+            let schedule = std::env::var("OUTER_STAGE1_SCHEDULE")
+                .unwrap_or_else(|_| "linear-only".to_string())
+                .to_lowercase();
+            format!("stage1_uniskip_{remainder_impl}_{schedule}")
+        }
+        "full-baseline" | "full_baseline" => "stage1_full_baseline".to_string(),
+        "full-naive" | "full_naive" => "stage1_full_naive".to_string(),
+        "full-round-batched" | "full_round_batched" | "full-roundbatched" => {
+            "stage1_full_round_batched".to_string()
+        }
+        other => format!("stage1_unknown_{other}"),
+    }
+}
+
 pub fn main() {
     // Configuration
     let num_runs: usize = std::env::var("BENCH_RUNS")
@@ -107,6 +131,10 @@ pub fn main() {
         .unwrap_or(3);
 
     let enable_trace = std::env::var("TRACE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    let bench_all_stage1_configs = std::env::var("BENCH_ALL_STAGE1_CONFIGS")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false);
 
@@ -159,7 +187,21 @@ pub fn main() {
         "raN_default".to_string()
     };
     let kernel_label = if naive_ra_kernel { "naive" } else { "opt" };
-    let trace_name = format!("sha2_chain_scale{scale}_{ra_label}_{kernel_label}_{timestamp}");
+    let stage1_label = stage1_label_from_env();
+
+    let trace_name = if bench_all_stage1_configs {
+        format!("sha2_chain_scale{scale}_{ra_label}_{kernel_label}_stage1_multi_{timestamp}")
+    } else {
+        format!("sha2_chain_scale{scale}_{ra_label}_{kernel_label}_{stage1_label}_{timestamp}")
+    };
+
+    let enable_trace = if enable_trace && bench_all_stage1_configs {
+        println!(">>> NOTE: TRACE is disabled when BENCH_ALL_STAGE1_CONFIGS=1 (single output trace file would mix configs).");
+        false
+    } else {
+        enable_trace
+    };
+
     let _trace_guard = setup_tracing(enable_trace, &trace_name);
 
     println!("=== SHA2-Chain Benchmark ===");
@@ -194,6 +236,10 @@ pub fn main() {
             "optimized"
         }
     );
+    println!("  Stage 1 protocol: {stage1_label}");
+    if bench_all_stage1_configs {
+        println!("  Stage 1 sweep:   BENCH_ALL_STAGE1_CONFIGS=1");
+    }
 
     // ========== PREPROCESSING (done once) ==========
     println!("\n>>> Preprocessing (one-time)...");
@@ -222,29 +268,116 @@ pub fn main() {
     let input = [5u8; 32];
     let native_output = guest::sha2_chain(input, iters);
 
-    let mut prove_stats = BenchStats::new();
+    #[derive(Clone, Copy)]
+    struct Stage1Cfg {
+        kind: &'static str,
+        remainder_impl: Option<&'static str>,
+        schedule: Option<&'static str>,
+        label: &'static str,
+    }
 
-    for run in 1..=num_runs {
-        println!("\n--- Run {run}/{num_runs} ---");
+    let stage1_cfgs: Vec<Stage1Cfg> = if bench_all_stage1_configs {
+        vec![
+            Stage1Cfg {
+                kind: "uniskip",
+                remainder_impl: Some("streaming"),
+                schedule: Some("linear-only"),
+                label: "uniskip_streaming_linear-only",
+            },
+            Stage1Cfg {
+                kind: "uniskip",
+                remainder_impl: Some("streaming"),
+                schedule: Some("half-split"),
+                label: "uniskip_streaming_half-split",
+            },
+            Stage1Cfg {
+                kind: "uniskip",
+                remainder_impl: Some("streaming-mtable"),
+                schedule: Some("linear-only"),
+                label: "uniskip_streaming-mtable_linear-only",
+            },
+            Stage1Cfg {
+                kind: "uniskip",
+                remainder_impl: Some("streaming-mtable"),
+                schedule: Some("half-split"),
+                label: "uniskip_streaming-mtable_half-split",
+            },
+            Stage1Cfg {
+                kind: "uniskip",
+                remainder_impl: Some("checkpoint"),
+                schedule: Some("linear-only"),
+                label: "uniskip_checkpoint_linear-only",
+            },
+            Stage1Cfg {
+                kind: "full-baseline",
+                remainder_impl: None,
+                schedule: None,
+                label: "full-baseline",
+            },
+            Stage1Cfg {
+                kind: "full-naive",
+                remainder_impl: None,
+                schedule: None,
+                label: "full-naive",
+            },
+            Stage1Cfg {
+                kind: "full-round-batched",
+                remainder_impl: None,
+                schedule: None,
+                label: "full-round-batched",
+            },
+        ]
+    } else {
+        vec![Stage1Cfg {
+            kind: "env",
+            remainder_impl: None,
+            schedule: None,
+            label: "env",
+        }]
+    };
 
-        let prove_start = Instant::now();
-        let (output, proof, program_io) = prove_sha2_chain(input, iters);
-        let prove_time = prove_start.elapsed();
+    for cfg in stage1_cfgs {
+        println!("\n========== Stage 1 config: {} ==========", cfg.label);
 
-        prove_stats.record(prove_time);
-        info!("  Prove time: {:.3} s", prove_time.as_secs_f64());
-
-        // Verify correctness (at least on first run)
-        if run == 1 {
-            assert_eq!(output, native_output, "output mismatch");
-            let is_valid = verify_sha2_chain(input, iters, output, program_io.panic, proof);
-            assert!(is_valid, "proof verification failed");
-            info!("  Verification: PASSED");
+        if cfg.kind != "env" {
+            std::env::set_var("SPARTAN_OUTER_STAGE1_KIND", cfg.kind);
+            match cfg.remainder_impl {
+                Some(v) => std::env::set_var("OUTER_STAGE1_REMAINDER_IMPL", v),
+                None => std::env::remove_var("OUTER_STAGE1_REMAINDER_IMPL"),
+            }
+            match cfg.schedule {
+                Some(v) => std::env::set_var("OUTER_STAGE1_SCHEDULE", v),
+                None => std::env::remove_var("OUTER_STAGE1_SCHEDULE"),
+            }
         }
+
+        let stage1_label = stage1_label_from_env();
+        println!("  Stage 1 protocol: {stage1_label}");
+
+        let mut prove_stats = BenchStats::new();
+        for run in 1..=num_runs {
+            println!("\n--- Run {run}/{num_runs} ---");
+
+            let prove_start = Instant::now();
+            let (output, proof, program_io) = prove_sha2_chain(input, iters);
+            let prove_time = prove_start.elapsed();
+
+            prove_stats.record(prove_time);
+            info!("  Prove time: {:.3} s", prove_time.as_secs_f64());
+
+            // Verify correctness on first run for each config
+            if run == 1 {
+                assert_eq!(output, native_output, "output mismatch");
+                let is_valid = verify_sha2_chain(input, iters, output, program_io.panic, proof);
+                assert!(is_valid, "proof verification failed");
+                info!("  Verification: PASSED");
+            }
+        }
+
+        prove_stats.report(&format!("Proving Time ({})", cfg.label));
     }
 
     // ========== REPORT ==========
-    prove_stats.report("Proving Time");
     println!(
         "\nPreprocessing time (one-time): {:.3} s",
         preprocess_time.as_secs_f64()

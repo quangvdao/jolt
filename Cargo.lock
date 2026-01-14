@@ -3658,11 +3658,13 @@ dependencies = [
 name = "sha2-chain"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hex",
  "jolt-inlines-sha2",
  "jolt-sdk",
  "sha2-chain-guest",
  "tracing",
+ "tracing-chrome",
  "tracing-subscriber",
 ]
 

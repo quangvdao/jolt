@@ -45,10 +45,10 @@ pub struct OuterStage1Config {
 
 impl Default for OuterStage1Config {
     fn default() -> Self {
-        // Use M-table streaming with half-split schedule for benchmarking
+        // Use linear-only schedule (no streaming windows)
         Self {
-            remainder_impl: OuterStage1RemainderImpl::StreamingMTable,
-            streaming_schedule: OuterStreamingScheduleKind::HalfSplit,
+            remainder_impl: OuterStage1RemainderImpl::Streaming,
+            streaming_schedule: OuterStreamingScheduleKind::LinearOnly,
         }
     }
 }

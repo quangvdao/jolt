@@ -3,10 +3,20 @@ name = "sha2-chain"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "sha2-chain"
+path = "src/main.rs"
+
+[[bin]]
+name = "sha2-chain-bench"
+path = "src/bench.rs"
+
 [dependencies]
 jolt-sdk = { workspace = true, features = ["host"] }
 tracing-subscriber.workspace = true
 tracing.workspace = true
+tracing-chrome.workspace = true
+chrono.workspace = true
 jolt-inlines-sha2 = { workspace = true, features = ["host"] }
 guest = { package = "sha2-chain-guest", path = "./guest" }
 

@@ -15,41 +15,71 @@ different sumcheck implementations, providing a breakdown of:
 import json
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 
-def parse_trace(trace_path: str) -> dict:
-    """Parse a Chrome trace JSON file and return timing statistics."""
-    
+@dataclass(frozen=True)
+class Span:
+    name: str
+    cat: str
+    file: Optional[str]
+    pid: int
+    tid: int
+    dur_ms: float
+
+
+def _iter_events(trace_obj: Any) -> Iterable[Dict[str, Any]]:
+    """Yield dict trace events from either [..] or {traceEvents:[..]} format."""
+    if isinstance(trace_obj, dict) and 'traceEvents' in trace_obj:
+        trace_obj = trace_obj['traceEvents']
+    if isinstance(trace_obj, list):
+        for e in trace_obj:
+            if isinstance(e, dict):
+                yield e
+
+
+def parse_trace(trace_path: str) -> List[Span]:
+    """Parse a Chrome trace JSON file and return completed spans (durations)."""
     with open(trace_path, 'r') as f:
-        events = json.load(f)
-    
-    # Handle both array format and object format with traceEvents key
-    if isinstance(events, dict) and 'traceEvents' in events:
-        events = events['traceEvents']
-    
-    # Match B/E pairs by thread and name
-    stacks = defaultdict(list)  # (pid, tid) -> stack of (name, start_ts)
-    durations = defaultdict(list)  # name -> [duration_ms, ...]
-    
-    for e in events:
-        if not isinstance(e, dict):
-            continue
-        
+        trace_obj = json.load(f)
+
+    # Match B/E pairs by thread and (name, cat) so nested spans with the same
+    # name from different crates (e.g. jolt_core::...::prove vs dory_pcs::prove)
+    # don't collide.
+    stacks: DefaultDict[Tuple[int, int], List[Tuple[Tuple[str, str], float, Optional[str]]]] = defaultdict(list)
+    spans: List[Span] = []
+
+    for e in _iter_events(trace_obj):
         ph = e.get('ph')
         name = e.get('name', '')
-        tid = (e.get('pid', 0), e.get('tid', 0))
-        ts = e.get('ts', 0)  # microseconds
-        
+        cat = e.get('cat', '') or ''
+        file = e.get('.file')
+        pid = int(e.get('pid', 0) or 0)
+        tid = int(e.get('tid', 0) or 0)
+        key = (name, cat)
+        thread = (pid, tid)
+
+        # Chrome trace timestamps are microseconds.
+        ts = float(e.get('ts', 0) or 0)
+
         if ph == 'B':
-            stacks[tid].append((name, ts))
+            stacks[thread].append((key, ts, file))
         elif ph == 'E':
-            if stacks[tid] and stacks[tid][-1][0] == name:
-                start_name, start_ts = stacks[tid].pop()
-                dur_ms = (ts - start_ts) / 1000
-                durations[name].append(dur_ms)
-    
-    return durations
+            if stacks[thread] and stacks[thread][-1][0] == key:
+                (_, start_ts, start_file) = stacks[thread].pop()
+                dur_ms = (ts - start_ts) / 1000.0
+                spans.append(Span(name=name, cat=cat, file=start_file or file, pid=pid, tid=tid, dur_ms=dur_ms))
+        elif ph == 'X':
+            # Complete event (has explicit duration in microseconds).
+            dur_us = e.get('dur')
+            if dur_us is None:
+                continue
+            dur_ms = float(dur_us) / 1000.0
+            spans.append(Span(name=name, cat=cat, file=file, pid=pid, tid=tid, dur_ms=dur_ms))
+
+    return spans
 
 
 def categorize_span(name: str) -> str:
@@ -96,23 +126,37 @@ def categorize_span(name: str) -> str:
     return None
 
 
-def analyze_sumchecks(durations: dict) -> dict:
-    """Extract sumcheck-related timings from duration data."""
-    
+def is_jolt_span(span: Span) -> bool:
+    """Heuristic filter: keep only Jolt-internal spans for accounting."""
+    if span.cat.startswith("jolt_core"):
+        return True
+    if span.file and span.file.startswith("jolt-core/"):
+        return True
+    return False
+
+
+def analyze_sumchecks(spans: List[Span]) -> dict:
+    """Extract sumcheck-related timings from span list."""
     # Aggregate by sumcheck type
-    sumcheck_times = defaultdict(float)
-    sumcheck_counts = defaultdict(int)
-    sumcheck_spans = defaultdict(list)  # category -> [(span_name, total_ms, count)]
-    
-    for name, times in durations.items():
-        category = categorize_span(name)
+    sumcheck_times: DefaultDict[str, float] = defaultdict(float)
+    sumcheck_counts: DefaultDict[str, int] = defaultdict(int)
+    by_category_and_name: DefaultDict[str, DefaultDict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+
+    for s in spans:
+        if not is_jolt_span(s):
+            continue
+        category = categorize_span(s.name)
         if category:
-            total_ms = sum(times)
-            count = len(times)
-            sumcheck_times[category] += total_ms
-            sumcheck_counts[category] += count
-            sumcheck_spans[category].append((name, total_ms, count))
-    
+            sumcheck_times[category] += s.dur_ms
+            sumcheck_counts[category] += 1
+            by_category_and_name[category][s.name].append(s.dur_ms)
+
+    sumcheck_spans: Dict[str, List[Tuple[str, float, int]]] = {}
+    for category, name_map in by_category_and_name.items():
+        sumcheck_spans[category] = [
+            (name, sum(times), len(times)) for name, times in name_map.items()
+        ]
+
     return {
         'sumcheck_times': dict(sumcheck_times),
         'sumcheck_counts': dict(sumcheck_counts),
@@ -120,17 +164,35 @@ def analyze_sumchecks(durations: dict) -> dict:
     }
 
 
-def get_total_proving_time(durations: dict) -> float:
-    """Get total proving time from the 'prove' span."""
-    if 'prove' in durations:
-        return sum(durations['prove'])
-    return 0.0
+def get_total_proving_time(spans: List[Span]) -> float:
+    """
+    Get total proving time from the zkVM prover's 'prove' span only.
+
+    Important: other crates (e.g. dory_pcs) also emit spans named 'prove'.
+    Summing all of them by name would double-count nested work and skew percentages.
+    """
+    total = 0.0
+    for s in spans:
+        if s.name != "prove":
+            continue
+        if s.cat == "jolt_core::zkvm::prover" or (s.file == "jolt-core/src/zkvm/prover.rs"):
+            total += s.dur_ms
+    return total
 
 
-def print_report(trace_path: str, durations: dict, analysis: dict):
+def _durations_by_name(spans: List[Span]) -> Dict[str, List[float]]:
+    d: DefaultDict[str, List[float]] = defaultdict(list)
+    for s in spans:
+        if not is_jolt_span(s):
+            continue
+        d[s.name].append(s.dur_ms)
+    return dict(d)
+
+
+def print_report(trace_path: str, spans: List[Span], analysis: dict):
     """Print a formatted timing report."""
-    
-    total_prove_ms = get_total_proving_time(durations)
+    total_prove_ms = get_total_proving_time(spans)
+    durations = _durations_by_name(spans)
     
     print(f"\n{'='*70}")
     print(f"Trace Analysis: {Path(trace_path).name}")
@@ -259,9 +321,9 @@ def main():
     
     for trace_path in sys.argv[1:]:
         try:
-            durations = parse_trace(trace_path)
-            analysis = analyze_sumchecks(durations)
-            print_report(trace_path, durations, analysis)
+            spans = parse_trace(trace_path)
+            analysis = analyze_sumchecks(spans)
+            print_report(trace_path, spans, analysis)
         except FileNotFoundError:
             print(f"Error: File not found: {trace_path}")
         except json.JSONDecodeError as e:

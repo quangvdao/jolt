@@ -16,8 +16,11 @@ use crate::{
     subprotocols::{
         mles_product_sum::{
             compute_mles_product_sum_evals_sum_of_products_d16,
+            compute_mles_product_sum_evals_sum_of_products_d32,
             compute_mles_product_sum_evals_sum_of_products_d4,
-            compute_mles_product_sum_evals_sum_of_products_d8, finish_mles_product_sum_from_evals,
+            compute_mles_product_sum_evals_sum_of_products_d8,
+            compute_mles_product_sum_evals_sum_of_products_naive,
+            finish_mles_product_sum_from_evals,
         },
         sumcheck_prover::SumcheckInstanceProver,
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
@@ -196,27 +199,61 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for InstructionRa
     #[tracing::instrument(skip_all, name = "InstructionRaSumcheckProver::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         let eq_poly = &self.eq_poly;
+        let use_naive = std::env::var("NAIVE_RA_KERNEL").is_ok();
 
         // Compute q(X) = Σ_i ∏_j ra_{i,j}(X,·) on the U_D grid using a *single*
         // split-eq fold. The per-batch γ^i weights have already been absorbed by
         // pre-scaling the first polynomial in each batch (see `initialize`).
-        let evals = match self.params.n_committed_per_virtual {
-            4 => compute_mles_product_sum_evals_sum_of_products_d4(
-                &self.ra_i_polys,
-                self.params.n_virtual_ra_polys,
-                eq_poly,
-            ),
-            8 => compute_mles_product_sum_evals_sum_of_products_d8(
-                &self.ra_i_polys,
-                self.params.n_virtual_ra_polys,
-                eq_poly,
-            ),
-            16 => compute_mles_product_sum_evals_sum_of_products_d16(
-                &self.ra_i_polys,
-                self.params.n_virtual_ra_polys,
-                eq_poly,
-            ),
-            n => unimplemented!("{n}"),
+        let evals = if use_naive {
+            // Use O(D²) naive kernel for benchmarking comparison.
+            match self.params.n_committed_per_virtual {
+                4 => compute_mles_product_sum_evals_sum_of_products_naive::<F, 4>(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                8 => compute_mles_product_sum_evals_sum_of_products_naive::<F, 8>(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                16 => compute_mles_product_sum_evals_sum_of_products_naive::<F, 16>(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                32 => compute_mles_product_sum_evals_sum_of_products_naive::<F, 32>(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                n => unimplemented!("{n}"),
+            }
+        } else {
+            // Use specialized O(D log D) kernels.
+            match self.params.n_committed_per_virtual {
+                4 => compute_mles_product_sum_evals_sum_of_products_d4(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                8 => compute_mles_product_sum_evals_sum_of_products_d8(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                16 => compute_mles_product_sum_evals_sum_of_products_d16(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                32 => compute_mles_product_sum_evals_sum_of_products_d32(
+                    &self.ra_i_polys,
+                    self.params.n_virtual_ra_polys,
+                    eq_poly,
+                ),
+                n => unimplemented!("{n}"),
+            }
         };
 
         finish_mles_product_sum_from_evals(&evals, previous_claim, eq_poly)

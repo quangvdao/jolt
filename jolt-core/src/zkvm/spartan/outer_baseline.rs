@@ -1,4 +1,3 @@
-#![cfg(feature = "prover")]
 use crate::poly::multilinear_polynomial::BindingOrder;
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
@@ -369,8 +368,13 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
                 .collect();
 
             let total_output_len: usize = output_sizes.iter().sum();
-            self.bound_coeffs = Vec::with_capacity(total_output_len);
-            unsafe { self.bound_coeffs.set_len(total_output_len) }
+            self.bound_coeffs = vec![
+                SparseCoefficient {
+                    index: 0,
+                    value: F::zero()
+                };
+                total_output_len
+            ];
 
             let mut output_slices: Vec<&mut [SparseCoefficient<F>]> =
                 Vec::with_capacity(chunks.len());
@@ -444,10 +448,13 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
                 .collect();
 
             let total_output_len: usize = output_sizes.iter().sum();
-            if self.binding_scratch_space.is_empty() {
-                self.binding_scratch_space = Vec::with_capacity(total_output_len);
-            }
-            unsafe { self.binding_scratch_space.set_len(total_output_len) }
+            self.binding_scratch_space.resize(
+                total_output_len,
+                SparseCoefficient {
+                    index: 0,
+                    value: F::zero(),
+                },
+            );
 
             let mut output_slices: Vec<&mut [SparseCoefficient<F>]> =
                 Vec::with_capacity(chunks.len());

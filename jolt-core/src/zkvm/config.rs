@@ -177,13 +177,47 @@ pub struct OneHotConfig {
 
 impl OneHotConfig {
     /// Create a OneHotConfig with default values based on trace length.
+    ///
+    /// Environment variable overrides:
+    /// - `RA_VIRTUAL_POLYS=N`: Set number of virtual RA polynomials (1, 2, 4, or 8).
+    ///   This controls the sumcheck degree: degree = (LOG_K / N) / log_k_chunk + 1
+    ///   - N=8 → 8 × degree-5 (default for small traces)
+    ///   - N=4 → 4 × degree-9
+    ///   - N=2 → 2 × degree-17
+    ///   - N=1 → 1 × degree-33
+    /// - `HIGH_DEGREE_RA=1`: Shortcut for N=1 (single high-degree sumcheck)
     pub fn new(log_T: usize) -> Self {
         let log_k_chunk = if log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
             4
         } else {
             8
         };
-        let lookups_ra_virtual_log_k_chunk = if log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
+
+        // Check for explicit RA_VIRTUAL_POLYS setting (1, 2, 4, or 8)
+        let n_virtual_polys = std::env::var("RA_VIRTUAL_POLYS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+
+        // Check if high-degree RA mode is enabled (shortcut for N=1)
+        let high_degree_ra = std::env::var("HIGH_DEGREE_RA")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        let lookups_ra_virtual_log_k_chunk = if let Some(n) = n_virtual_polys {
+            // User specified number of virtual polys directly
+            // lookups_ra_virtual_log_k_chunk = LOG_K / n
+            assert!(
+                n == 1 || n == 2 || n == 4 || n == 8,
+                "RA_VIRTUAL_POLYS must be 1, 2, 4, or 8"
+            );
+            assert!(
+                LOG_K % n == 0,
+                "LOG_K must be divisible by RA_VIRTUAL_POLYS"
+            );
+            LOG_K / n
+        } else if high_degree_ra {
+            LOG_K // Single virtual RA poly → degree 33 (or 17 with log_k_chunk=8)
+        } else if log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
             LOG_K / 8
         } else {
             LOG_K / 4

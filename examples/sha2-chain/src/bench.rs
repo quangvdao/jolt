@@ -55,7 +55,7 @@ impl BenchStats {
     }
 
     fn report(&self, name: &str) {
-        println!("\n========== {} ==========", name);
+        println!("\n========== {name} ==========");
         println!("  Runs:    {}", self.times.len());
         println!("  Mean:    {:.3} s", self.mean().as_secs_f64());
         println!("  Std Dev: {:.3} s", self.std_dev());
@@ -75,8 +75,8 @@ impl BenchStats {
 fn setup_tracing(enable_chrome: bool, trace_name: &str) -> Option<tracing_chrome::FlushGuard> {
     if enable_chrome {
         let trace_dir = "benchmark-runs/traces";
-        std::fs::create_dir_all(trace_dir).ok();
-        let trace_path = format!("{}/{}.json", trace_dir, trace_name);
+        std::fs::create_dir_all(trace_dir).expect("failed to create benchmark-runs/traces");
+        let trace_path = format!("{trace_dir}/{trace_name}.json");
 
         let (chrome_layer, guard) = ChromeLayerBuilder::new()
             .file(&trace_path)
@@ -85,12 +85,13 @@ fn setup_tracing(enable_chrome: bool, trace_name: &str) -> Option<tracing_chrome
 
         tracing_subscriber::registry()
             .with(chrome_layer)
-            .with(tracing_subscriber::fmt::layer().with_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-            ))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_filter(tracing_subscriber::EnvFilter::from_default_env()),
+            )
             .init();
 
-        println!(">>> Chrome tracing enabled, will write to: {}", trace_path);
+        println!(">>> Chrome tracing enabled, will write to: {trace_path}");
         Some(guard)
     } else {
         tracing_subscriber::fmt::init();
@@ -134,28 +135,65 @@ pub fn main() {
         // Estimate scale from iters
         let est_cycles = iters as f64 * CYCLES_PER_SHA256;
         let est_scale = (est_cycles.log2().ceil() as usize).max(16);
-        (iters, est_scale, format!("manual ({} iters)", iters))
+        (iters, est_scale, format!("manual ({iters} iters)"))
     } else {
         // Default to scale 22 (similar to guest's max_trace_length = 4194304 = 2^22)
         let default_scale = 22;
         let iters = scale_to_iters(default_scale);
-        (iters, default_scale, format!("default 2^{}", default_scale))
+        (iters, default_scale, format!("default 2^{default_scale}"))
     };
 
     // Setup tracing
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let trace_name = format!("sha2_chain_scale{}_{}", scale, timestamp);
+    let ra_virtual_polys = std::env::var("RA_VIRTUAL_POLYS").ok();
+    let high_degree_ra = std::env::var("HIGH_DEGREE_RA")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+    let naive_ra_kernel = std::env::var("NAIVE_RA_KERNEL").is_ok();
+
+    let ra_label = if let Some(n) = ra_virtual_polys.as_deref() {
+        format!("raN{n}")
+    } else if high_degree_ra {
+        "raN1_high".to_string()
+    } else {
+        "raN_default".to_string()
+    };
+    let kernel_label = if naive_ra_kernel { "naive" } else { "opt" };
+    let trace_name = format!("sha2_chain_scale{scale}_{ra_label}_{kernel_label}_{timestamp}");
     let _trace_guard = setup_tracing(enable_trace, &trace_name);
 
     println!("=== SHA2-Chain Benchmark ===");
-    println!("  Scale:           {}", scale_info);
-    println!("  SHA2 iterations: {}", iters);
+    println!("  Scale:           {scale_info}");
+    println!("  SHA2 iterations: {iters}");
     println!(
         "  Est. cycles:     {:.2}M",
         iters as f64 * CYCLES_PER_SHA256 / 1_000_000.0
     );
-    println!("  Benchmark runs:  {}", num_runs);
-    println!("  Chrome tracing:  {}", if enable_trace { "enabled" } else { "disabled" });
+    println!("  Benchmark runs:  {num_runs}");
+    println!(
+        "  Chrome tracing:  {}",
+        if enable_trace { "enabled" } else { "disabled" }
+    );
+    println!(
+        "  RA virtualization: {}{}",
+        ra_virtual_polys
+            .as_deref()
+            .map(|n| format!("RA_VIRTUAL_POLYS={n}"))
+            .unwrap_or_else(|| "default".to_string()),
+        if high_degree_ra {
+            " (HIGH_DEGREE_RA=1)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  RA kernel:       {}",
+        if naive_ra_kernel {
+            "NAIVE_RA_KERNEL=1"
+        } else {
+            "optimized"
+        }
+    );
 
     // ========== PREPROCESSING (done once) ==========
     println!("\n>>> Preprocessing (one-time)...");
@@ -187,7 +225,7 @@ pub fn main() {
     let mut prove_stats = BenchStats::new();
 
     for run in 1..=num_runs {
-        println!("\n--- Run {}/{} ---", run, num_runs);
+        println!("\n--- Run {run}/{num_runs} ---");
 
         let prove_start = Instant::now();
         let (output, proof, program_io) = prove_sha2_chain(input, iters);
@@ -214,6 +252,6 @@ pub fn main() {
 
     if enable_trace {
         println!("\n>>> Trace file saved. Run analysis with:");
-        println!("    python3 scripts/analyze_trace.py benchmark-runs/traces/{}.json", trace_name);
+        println!("    python3 scripts/analyze_trace.py benchmark-runs/traces/{trace_name}.json",);
     }
 }

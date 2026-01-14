@@ -235,13 +235,13 @@ impl BatchedSumcheck {
             {
                 // Extra diagnostics in tests to help debug mismatched sumcheck instances.
                 eprintln!("Sumcheck verification mismatch:");
-                eprintln!("  output_claim    = {:?}", output_claim);
-                eprintln!("  expected_claim  = {:?}", expected_output_claim);
-                eprintln!("  num_rounds      = {}", max_num_rounds);
-                eprintln!("  max_degree      = {}", max_degree);
+                eprintln!("  output_claim    = {output_claim:?}");
+                eprintln!("  expected_claim  = {expected_output_claim:?}");
+                eprintln!("  num_rounds      = {max_num_rounds}");
+                eprintln!("  max_degree      = {max_degree}");
                 eprintln!("  r_sumcheck (len = {}):", r_sumcheck.len());
                 for (i, r) in r_sumcheck.iter().enumerate() {
-                    eprintln!("    r[{}] = {:?}", i, r);
+                    eprintln!("    r[{i}] = {r:?}");
                 }
             }
             return Err(ProofVerifyError::SumcheckVerificationError);

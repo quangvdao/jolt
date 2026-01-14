@@ -226,6 +226,60 @@ impl_mles_sum_of_products_evals_d!(
     16,
     eval_prod_16_assign
 );
+impl_mles_sum_of_products_evals_d!(
+    compute_mles_product_sum_evals_sum_of_products_d32,
+    32,
+    eval_prod_32_assign
+);
+
+/// Naive version of sum-of-products evaluation using O(D²) multiplication.
+///
+/// This is intended for benchmarking to compare against the optimized kernels.
+/// Set `NAIVE_RA_KERNEL=1` to use this instead of the specialized kernels.
+#[inline]
+pub fn compute_mles_product_sum_evals_sum_of_products_naive<F: JoltField, const D: usize>(
+    mles: &[RaPolynomial<u8, F>],
+    n_products: usize,
+    eq_poly: &GruenSplitEqPolynomial<F>,
+) -> Vec<F> {
+    debug_assert!(n_products > 0);
+    debug_assert_eq!(mles.len(), n_products * D);
+
+    let current_scalar = eq_poly.get_current_scalar();
+
+    let sum_evals_arr: [F; D] = eq_poly.par_fold_out_in_unreduced::<9, D>(&|g| {
+        let mut sums = [F::zero(); D];
+
+        for t in 0..n_products {
+            let base = t * D;
+
+            // Build pairs[(p0, p1); D] as a Vec for the naive kernel.
+            let pairs: Vec<(F, F)> = (0..D)
+                .map(|i| {
+                    let p0 = mles[base + i].get_bound_coeff(2 * g);
+                    let p1 = mles[base + i].get_bound_coeff(2 * g + 1);
+                    (p0, p1)
+                })
+                .collect();
+
+            // Evaluate ∏ p_i(x) on U_D using the NAIVE O(D²) kernel.
+            let mut endpoints = vec![F::zero(); D];
+            eval_linear_prod_naive_assign(&pairs, &mut endpoints);
+
+            // Accumulate across product terms.
+            for k in 0..D {
+                sums[k] += endpoints[k];
+            }
+        }
+
+        sums
+    });
+
+    sum_evals_arr
+        .into_iter()
+        .map(|x| x * current_scalar)
+        .collect()
+}
 
 /// Given the evaluations of `g(X) / eq(X, r[round])` on the grid
 /// `[1, 2, ..., d - 1, ∞]`, recover the full univariate polynomial

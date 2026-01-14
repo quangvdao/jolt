@@ -1,5 +1,4 @@
 #![allow(clippy::too_many_arguments)]
-#![cfg(feature = "prover")]
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
     VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
@@ -1029,8 +1028,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             let (t0_base, tinf_base) = self.baseline_compute_endpoints();
             if t0 != t0_base || tinf != tinf_base {
                 println!(
-                    "RoundBatched endpoints mismatch at round {}: t0_rb={} t0_base={}, tinf_rb={} tinf_base={}",
-                    round, t0, t0_base, tinf, tinf_base
+                    "RoundBatched endpoints mismatch at round {round}: t0_rb={t0} t0_base={t0_base}, tinf_rb={tinf} tinf_base={tinf_base}",
                 );
             }
         }

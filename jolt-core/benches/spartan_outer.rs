@@ -103,9 +103,9 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
     let num_iters = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
     for num_iterations in num_iters {
-        let bench_name = format!("sha2-chain-{}", num_iterations);
+        let bench_name = format!("sha2-chain-{num_iterations}");
 
-        group.bench_function(&format!("outer-current/{}", bench_name), |b| {
+        group.bench_function(format!("outer-current/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -151,7 +151,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(&format!("outer-streaming/{}", bench_name), |b| {
+        group.bench_function(format!("outer-streaming/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -201,7 +201,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(&format!("outer-streaming-coeffmul/{}", bench_name), |b| {
+        group.bench_function(format!("outer-streaming-coeffmul/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -251,7 +251,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(&format!("outer-streaming-mtable/{}", bench_name), |b| {
+        group.bench_function(format!("outer-streaming-mtable/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -299,7 +299,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(&format!("outer-uni-skip/{}", bench_name), |b| {
+        group.bench_function(format!("outer-uni-skip/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -345,7 +345,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(&format!("outer-round-batched/{}", bench_name), |b| {
+        group.bench_function(format!("outer-round-batched/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -372,7 +372,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(&format!("outer-baseline/{}", bench_name), |b| {
+        group.bench_function(format!("outer-baseline/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -406,7 +406,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(&format!("outer-naive/{}", bench_name), |b| {
+        group.bench_function(format!("outer-naive/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(

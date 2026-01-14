@@ -12,8 +12,6 @@ pprof/
 # pprof files
 *.pb
 
-benchmark-runs/
-
 # flamegraphs
 **/*.svg
 
@@ -55,9 +53,9 @@ bin/act
 *.joltinline
 
 # Benchmark runs and profiling
-benchmark-runs/
-/perfetto_traces/
-*.pb
+benchmark-runs/traces/
+benchmark-runs/perfetto_traces/
+benchmark-runs/results/
 
 # verifier test fixtures
 jolt-sdk/tests/fixtures

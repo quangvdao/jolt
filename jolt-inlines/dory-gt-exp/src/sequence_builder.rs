@@ -10,12 +10,16 @@
 //! - Step 2: build Fq2/Fq6/Fq12 ops + tests
 //! - Step 3: wire into `BN254_GT_EXP` (starting with exp==2 => square) + differential tests
 
+#![allow(dead_code)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::too_many_arguments)]
+
 use core::array;
 
 use tracer::instruction::{
     add::ADD, addi::ADDI, format::format_inline::FormatInline, ld::LD, mul::MUL, mulhu::MULHU,
-    sd::SD, sltu::SLTU, srli::SRLI, sub::SUB, Instruction,
-    virtual_assert_eq::VirtualAssertEQ,
+    sd::SD, sltu::SLTU, srli::SRLI, sub::SUB, virtual_assert_eq::VirtualAssertEQ, Instruction,
 };
 use tracer::utils::{inline_helpers::InstrAssembler, virtual_registers::VirtualRegisterGuard};
 
@@ -168,7 +172,7 @@ impl FqScratch {
 fn fq_mac(asm: &mut InstrAssembler, out: u8, a: u8, b: u8, c: u8, carry: u8, s: &FqScratch) {
     mul_u64_wide(asm, s.mul_lo, s.mul_hi, b, c);
     add_u64_set_carry(asm, out, a, s.mul_lo, s.c0, s.t3); // c0 is carry bit (0/1)
-    // carry = mul_hi + c0
+                                                          // carry = mul_hi + c0
     asm.emit_r::<ADD>(carry, s.mul_hi, s.c0);
 }
 
@@ -218,10 +222,10 @@ fn select_u64_masked(asm: &mut InstrAssembler, dst: u8, a: u8, b: u8, mask: u8, 
     asm.emit_r::<SUB>(s.t0, a, 0); // t0 = a (copy via SUB with x0)
     asm.emit_r::<SUB>(s.t1, b, 0); // t1 = b
     asm.emit_r::<SUB>(dst, a, 0); // dst = a
-    // t2 = a ^ b
-    // We don't have XOR imported; avoid expanding scope until needed.
-    // For now, use arithmetic select below in the Fq-level functions.
-    // (Kept here as a placeholder for future constant-time selects.)
+                                  // t2 = a ^ b
+                                  // We don't have XOR imported; avoid expanding scope until needed.
+                                  // For now, use arithmetic select below in the Fq-level functions.
+                                  // (Kept here as a placeholder for future constant-time selects.)
     let _ = (s.t0, s.t1, mask);
 }
 
@@ -234,11 +238,11 @@ fn fq_add_mod(asm: &mut InstrAssembler, out: FqRegs, a: FqRegs, b: FqRegs, s: &F
     for i in 0..4 {
         // out[i] = a[i] + b[i]
         add_u64_set_carry(asm, out[i], a[i], b[i], s.c0, s.t3); // c0 = carry1
-        // out[i] = out[i] + carry_in
+                                                                // out[i] = out[i] + carry_in
         mov(asm, s.t3, out[i]); // save out_old
         asm.emit_r::<ADD>(out[i], out[i], s.c2);
         asm.emit_r::<SLTU>(s.c1, out[i], s.t3); // carry2
-        // carry_out = carry1 + carry2
+                                                // carry_out = carry1 + carry2
         asm.emit_r::<ADD>(s.c2, s.c0, s.c1);
     }
 
@@ -848,48 +852,48 @@ fn fq6_mul_karatsuba_mem(
     store_fq2(asm, out_ptr, slot(2), w.out);
 
     // --- x = (e+f)*(b+c) - be - cf ---
-    load_fq2(asm, w.a, lhs_ptr, lhs_off + 64);  // e
+    load_fq2(asm, w.a, lhs_ptr, lhs_off + 64); // e
     load_fq2(asm, w.b, lhs_ptr, lhs_off + 128); // f
-    fq2_add_mod(asm, w.a, w.a, w.b, s);         // a = e+f
-    load_fq2(asm, w.b, rhs_ptr, rhs_off + 64);  // b
+    fq2_add_mod(asm, w.a, w.a, w.b, s); // a = e+f
+    load_fq2(asm, w.b, rhs_ptr, rhs_off + 64); // b
     load_fq2(asm, w.out, rhs_ptr, rhs_off + 128); // c
-    fq2_add_mod(asm, w.b, w.b, w.out, s);       // b = b+c
+    fq2_add_mod(asm, w.b, w.b, w.out, s); // b = b+c
     fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s); // out = (e+f)*(b+c)
-    load_fq2(asm, w.a, out_ptr, slot(1));       // be
+    load_fq2(asm, w.a, out_ptr, slot(1)); // be
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
-    load_fq2(asm, w.a, out_ptr, slot(2));       // cf
+    load_fq2(asm, w.a, out_ptr, slot(2)); // cf
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
-    store_fq2(asm, out_ptr, slot(3), w.out);    // x
+    store_fq2(asm, out_ptr, slot(3), w.out); // x
 
     // --- y = (d+e)*(a+b) - ad - be ---
-    load_fq2(asm, w.a, lhs_ptr, lhs_off + 0);   // d
-    load_fq2(asm, w.b, lhs_ptr, lhs_off + 64);  // e
-    fq2_add_mod(asm, w.a, w.a, w.b, s);         // a = d+e
-    load_fq2(asm, w.b, rhs_ptr, rhs_off + 0);   // a
+    load_fq2(asm, w.a, lhs_ptr, lhs_off + 0); // d
+    load_fq2(asm, w.b, lhs_ptr, lhs_off + 64); // e
+    fq2_add_mod(asm, w.a, w.a, w.b, s); // a = d+e
+    load_fq2(asm, w.b, rhs_ptr, rhs_off + 0); // a
     load_fq2(asm, w.out, rhs_ptr, rhs_off + 64); // b
-    fq2_add_mod(asm, w.b, w.b, w.out, s);       // b = a+b
+    fq2_add_mod(asm, w.b, w.b, w.out, s); // b = a+b
     fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s);
-    load_fq2(asm, w.a, out_ptr, slot(0));       // ad
+    load_fq2(asm, w.a, out_ptr, slot(0)); // ad
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
-    load_fq2(asm, w.a, out_ptr, slot(1));       // be
+    load_fq2(asm, w.a, out_ptr, slot(1)); // be
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
-    store_fq2(asm, out_ptr, slot(4), w.out);    // y
+    store_fq2(asm, out_ptr, slot(4), w.out); // y
 
     // --- z = (d+f)*(a+c) - ad + be - cf ---
-    load_fq2(asm, w.a, lhs_ptr, lhs_off + 0);   // d
+    load_fq2(asm, w.a, lhs_ptr, lhs_off + 0); // d
     load_fq2(asm, w.b, lhs_ptr, lhs_off + 128); // f
-    fq2_add_mod(asm, w.a, w.a, w.b, s);         // a = d+f
-    load_fq2(asm, w.b, rhs_ptr, rhs_off + 0);   // a
+    fq2_add_mod(asm, w.a, w.a, w.b, s); // a = d+f
+    load_fq2(asm, w.b, rhs_ptr, rhs_off + 0); // a
     load_fq2(asm, w.out, rhs_ptr, rhs_off + 128); // c
-    fq2_add_mod(asm, w.b, w.b, w.out, s);       // b = a+c
+    fq2_add_mod(asm, w.b, w.b, w.out, s); // b = a+c
     fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s);
-    load_fq2(asm, w.a, out_ptr, slot(0));       // ad
+    load_fq2(asm, w.a, out_ptr, slot(0)); // ad
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
-    load_fq2(asm, w.a, out_ptr, slot(1));       // be
+    load_fq2(asm, w.a, out_ptr, slot(1)); // be
     fq2_add_mod(asm, w.out, w.out, w.a, s);
-    load_fq2(asm, w.a, out_ptr, slot(2));       // cf
+    load_fq2(asm, w.a, out_ptr, slot(2)); // cf
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
-    store_fq2(asm, out_ptr, slot(5), w.out);    // z
+    store_fq2(asm, out_ptr, slot(5), w.out); // z
 
     // --- c0 = ad + ξ*x ---
     load_fq2(asm, w.a, out_ptr, slot(3)); // x
@@ -962,7 +966,7 @@ fn fq_mul_mont(asm: &mut InstrAssembler, out: FqRegs, a: FqRegs, b: FqRegs, s: &
     for i in 0..4 {
         // diff1 = out[i] - mod[i]
         sub_u64_set_borrow(asm, s.t3, out[i], s.mod_limb[i], s.c0, s.c2); // c0 = borrow1
-        // out[i] = diff1 - borrow_in
+                                                                          // out[i] = diff1 - borrow_in
         asm.emit_r::<SUB>(out[i], s.t3, s.t2);
         // borrow2 = diff1 < borrow_in
         asm.emit_r::<SLTU>(s.c1, s.t3, s.t2);
@@ -974,7 +978,7 @@ fn fq_mul_mont(asm: &mut InstrAssembler, out: FqRegs, a: FqRegs, b: FqRegs, s: &
     li(asm, s.c2, 0); // carry
     for i in 0..4 {
         asm.emit_r::<MUL>(s.t3, s.t2, s.mod_limb[i]); // t3 = borrow * mod[i]
-        // out[i] = out[i] + t3 + carry
+                                                      // out[i] = out[i] + t3 + carry
         add_u64_set_carry(asm, out[i], out[i], s.t3, s.c0, s.t1);
         asm.emit_r::<ADD>(out[i], out[i], s.c2);
         asm.emit_r::<SLTU>(s.c1, out[i], s.c2);
@@ -995,8 +999,18 @@ struct Fq12Regs {
 #[inline(always)]
 fn fq12_regs_from_flat(flat: &[u8; 48]) -> Fq12Regs {
     let fq2 = |base: usize| Fq2Regs {
-        c0: [flat[base + 0], flat[base + 1], flat[base + 2], flat[base + 3]],
-        c1: [flat[base + 4], flat[base + 5], flat[base + 6], flat[base + 7]],
+        c0: [
+            flat[base + 0],
+            flat[base + 1],
+            flat[base + 2],
+            flat[base + 3],
+        ],
+        c1: [
+            flat[base + 4],
+            flat[base + 5],
+            flat[base + 6],
+            flat[base + 7],
+        ],
     };
     Fq12Regs {
         c0: Fq6Regs {
@@ -1015,7 +1029,13 @@ fn fq12_regs_from_flat(flat: &[u8; 48]) -> Fq12Regs {
 /// In-place Fq12 squaring: `acc := acc^2`.
 ///
 /// Uses `out_ptr[..384]` as scratch memory during computation.
-fn fq12_square_in_place(asm: &mut InstrAssembler, acc: Fq12Regs, out_ptr: u8, w: Fq2WorkTight, s: &FqScratch) {
+fn fq12_square_in_place(
+    asm: &mut InstrAssembler,
+    acc: Fq12Regs,
+    out_ptr: u8,
+    w: Fq2WorkTight,
+    s: &FqScratch,
+) {
     // Layout in `out_ptr` scratch:
     // - [0..192): v2 = c0*c1
     // - [192..384): staging for c0_sq and c1_sq
@@ -1060,6 +1080,137 @@ fn fq12_square_in_place(asm: &mut InstrAssembler, acc: Fq12Regs, out_ptr: u8, w:
     load_fq2(asm, w.a, out_ptr, 0 + 128);
     fq2_add_mod(asm, w.a, w.a, w.a, s);
     copy_fq2(asm, acc.c1.c2, w.a);
+}
+
+/// In-place *cyclotomic* Fq12 squaring: `acc := acc^2`, specialized for BN254 GT elements.
+///
+/// This implements the same algorithm as arkworks'
+/// `Fp12::<P>::cyclotomic_square_in_place()` for the `p^2 mod 6 == 1` case
+/// (Granger-Scott "Faster Squaring in the Cyclotomic Subgroup of Sixth Degree Extensions").
+///
+/// # Safety / correctness contract
+/// This is only correct when `acc` is in the cyclotomic subgroup of Fq12 (which includes BN254 GT).
+///
+/// # Scratch
+/// Uses `out_ptr[..384]` as scratch memory to store intermediate Fq2 values.
+fn fq12_cyclotomic_square_in_place(
+    asm: &mut InstrAssembler,
+    acc: Fq12Regs,
+    out_ptr: u8,
+    w: Fq2WorkTight,
+    s: &FqScratch,
+) {
+    // Coefficient mapping matches arkworks' `fp12_2over3over2.rs`:
+    // r0 = c0.c0, r4 = c0.c1, r3 = c0.c2, r2 = c1.c0, r1 = c1.c1, r5 = c1.c2.
+    let r0 = acc.c0.c0;
+    let r4 = acc.c0.c1;
+    let r3 = acc.c0.c2;
+    let r2 = acc.c1.c0;
+    let r1 = acc.c1.c1;
+    let r5 = acc.c1.c2;
+
+    // Scratch layout in out_ptr (6 x Fq2 = 384 bytes):
+    // slot0: t0, slot1: t1, slot2: t2, slot3: t3, slot4: t4, slot5: t5.
+    let slot = |i: i64| i * 64;
+
+    // Helper: compute (t_even, t_odd) for a pair (a,b) and store into (even_slot, odd_slot).
+    //
+    // Given (a, b) in Fq2, compute:
+    //   tmp = a*b
+    //   t_even = (a + b) * (xi*b + a) - tmp - xi*tmp
+    //   t_odd  = 2*tmp
+    // where xi is the Fq6 nonresidue (BN254: 9 + u).
+    let mut pair = |a: Fq2Regs, b: Fq2Regs, even_slot: i64, odd_slot: i64| {
+        // tmp = a*b
+        copy_fq2(asm, w.a, a);
+        copy_fq2(asm, w.b, b);
+        fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+
+        // Store tmp to even_slot (will be overwritten by t_even later).
+        store_fq2(asm, out_ptr, even_slot, w.out);
+
+        // t_odd = 2*tmp
+        copy_fq2(asm, w.a, w.out);
+        fq2_double_in_place(asm, w.a, s);
+        store_fq2(asm, out_ptr, odd_slot, w.a);
+
+        // y = xi*b + a  (compute in w.b; use w.a as temps for mul_by_xi)
+        copy_fq2(asm, w.b, b);
+        fq2_mul_by_xi_in_place(asm, w.b, w.a.c0, w.a.c1, s);
+        fq2_add_mod(asm, w.b, w.b, a, s);
+
+        // x = a + b  (compute in w.a)
+        copy_fq2(asm, w.a, a);
+        fq2_add_mod(asm, w.a, w.a, b, s);
+
+        // prod = x*y
+        fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+
+        // prod -= tmp
+        load_fq2(asm, w.a, out_ptr, even_slot);
+        fq2_sub_mod(asm, w.out, w.out, w.a, s);
+
+        // prod -= xi*tmp
+        copy_fq2(asm, w.b, w.a);
+        fq2_mul_by_xi_in_place(asm, w.b, w.a.c0, w.a.c1, s); // clobbers w.a; ok
+        fq2_sub_mod(asm, w.out, w.out, w.b, s);
+
+        // Store t_even.
+        store_fq2(asm, out_ptr, even_slot, w.out);
+    };
+
+    // Compute t0..t5.
+    // (r0, r1) -> (t0, t1)
+    pair(r0, r1, slot(0), slot(1));
+    // (r2, r3) -> (t2, t3)
+    pair(r2, r3, slot(2), slot(3));
+    // (r4, r5) -> (t4, t5)
+    pair(r4, r5, slot(4), slot(5));
+
+    // Update coefficients in-place.
+    let z0 = acc.c0.c0;
+    let z4 = acc.c0.c1;
+    let z3 = acc.c0.c2;
+    let z2 = acc.c1.c0;
+    let z1 = acc.c1.c1;
+    let z5 = acc.c1.c2;
+
+    // z0 = 3*t0 - 2*z0
+    load_fq2(asm, w.a, out_ptr, slot(0));
+    fq2_sub_mod(asm, z0, w.a, z0, s);
+    fq2_double_in_place(asm, z0, s);
+    fq2_add_mod(asm, z0, z0, w.a, s);
+
+    // z1 = 3*t1 + 2*z1
+    load_fq2(asm, w.a, out_ptr, slot(1));
+    fq2_add_mod(asm, z1, w.a, z1, s);
+    fq2_double_in_place(asm, z1, s);
+    fq2_add_mod(asm, z1, z1, w.a, s);
+
+    // z2 = 3*(xi*t5) + 2*z2
+    load_fq2(asm, w.b, out_ptr, slot(5));
+    fq2_mul_by_xi_in_place(asm, w.b, w.a.c0, w.a.c1, s);
+    fq2_add_mod(asm, z2, z2, w.b, s);
+    fq2_double_in_place(asm, z2, s);
+    fq2_add_mod(asm, z2, z2, w.b, s);
+
+    // z3 = 3*t4 - 2*z3
+    load_fq2(asm, w.a, out_ptr, slot(4));
+    fq2_sub_mod(asm, z3, w.a, z3, s);
+    fq2_double_in_place(asm, z3, s);
+    fq2_add_mod(asm, z3, z3, w.a, s);
+
+    // z4 = 3*t2 - 2*z4
+    load_fq2(asm, w.a, out_ptr, slot(2));
+    fq2_sub_mod(asm, z4, w.a, z4, s);
+    fq2_double_in_place(asm, z4, s);
+    fq2_add_mod(asm, z4, z4, w.a, s);
+
+    // z5 = 3*t3 + 2*z5
+    load_fq2(asm, w.a, out_ptr, slot(3));
+    fq2_add_mod(asm, z5, z5, w.a, s);
+    fq2_double_in_place(asm, z5, s);
+    fq2_add_mod(asm, z5, z5, w.a, s);
 }
 
 /// Fq12 multiplication: `out_ptr[..384] := lhs * rhs`, where `lhs` is in regs and `rhs` is in memory.
@@ -1117,7 +1268,10 @@ fn fq12_mul_regmem_to_mem(
 ///   `acc_next = acc_sq + bit * (acc_sq*base - acc_sq)`.
 /// - Uses `out_ptr[..384]` as scratch during computation.
 /// - Temporarily rejects the aliasing case `out_ptr == base_ptr` (see assertion below).
-pub fn bn254_gt_exp_sequence_builder(mut asm: InstrAssembler, operands: FormatInline) -> Vec<Instruction> {
+pub fn bn254_gt_exp_sequence_builder(
+    mut asm: InstrAssembler,
+    operands: FormatInline,
+) -> Vec<Instruction> {
     // Allocate base-field scratch (14 regs) and initialize constants.
     let fq_scratch_vr: [VirtualRegisterGuard; 14] =
         array::from_fn(|_| asm.allocator.allocate_for_inline());
@@ -1125,9 +1279,12 @@ pub fn bn254_gt_exp_sequence_builder(mut asm: InstrAssembler, operands: FormatIn
     fq_scratch.init_constants(&mut asm);
 
     // Allocate tight Fq2 work regs (24 regs) for Fq6/Fq12 ops.
-    let work_a_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-    let work_b_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-    let work_out_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work_a_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work_b_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work_out_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
     let work = Fq2WorkTight {
         a: Fq2Regs {
             c0: [*work_a_vr[0], *work_a_vr[1], *work_a_vr[2], *work_a_vr[3]],
@@ -1138,13 +1295,24 @@ pub fn bn254_gt_exp_sequence_builder(mut asm: InstrAssembler, operands: FormatIn
             c1: [*work_b_vr[4], *work_b_vr[5], *work_b_vr[6], *work_b_vr[7]],
         },
         out: Fq2Regs {
-            c0: [*work_out_vr[0], *work_out_vr[1], *work_out_vr[2], *work_out_vr[3]],
-            c1: [*work_out_vr[4], *work_out_vr[5], *work_out_vr[6], *work_out_vr[7]],
+            c0: [
+                *work_out_vr[0],
+                *work_out_vr[1],
+                *work_out_vr[2],
+                *work_out_vr[3],
+            ],
+            c1: [
+                *work_out_vr[4],
+                *work_out_vr[5],
+                *work_out_vr[6],
+                *work_out_vr[7],
+            ],
         },
     };
 
     // Accumulator in registers (48 limbs in ABI flatten order).
-    let acc_vr: [VirtualRegisterGuard; 48] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let acc_vr: [VirtualRegisterGuard; 48] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
     let acc_flat: [u8; 48] = array::from_fn(|i| *acc_vr[i]);
     let acc = fq12_regs_from_flat(&acc_flat);
 
@@ -1242,15 +1410,186 @@ pub fn bn254_gt_exp_sequence_builder(mut asm: InstrAssembler, operands: FormatIn
     asm.finalize_inline()
 }
 
+/// Sequence builder for `BN254_GT_MUL`.
+///
+/// Computes `out := lhs * rhs` where:
+/// - `rs1` = `lhs_ptr` (48 x u64 limbs, Montgomery form)
+/// - `rs2` = `rhs_ptr` (48 x u64 limbs, Montgomery form)
+/// - `rs3` = `out_ptr` (48 x u64 limbs, Montgomery form)
+///
+/// Aliasing: we currently reject `out_ptr == rhs_ptr` because the implementation streams `rhs`
+/// from memory while writing `out` into the same region.
+pub fn bn254_gt_mul_sequence_builder(
+    mut asm: InstrAssembler,
+    operands: FormatInline,
+) -> Vec<Instruction> {
+    // Allocate base-field scratch (14 regs) and initialize constants.
+    let fq_scratch_vr: [VirtualRegisterGuard; 14] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let fq_scratch = FqScratch::new(&fq_scratch_vr);
+    fq_scratch.init_constants(&mut asm);
+
+    // Allocate tight Fq2 work regs (24 regs) for Fq6/Fq12 ops.
+    let work_a_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work_b_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work_out_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work = Fq2WorkTight {
+        a: Fq2Regs {
+            c0: [*work_a_vr[0], *work_a_vr[1], *work_a_vr[2], *work_a_vr[3]],
+            c1: [*work_a_vr[4], *work_a_vr[5], *work_a_vr[6], *work_a_vr[7]],
+        },
+        b: Fq2Regs {
+            c0: [*work_b_vr[0], *work_b_vr[1], *work_b_vr[2], *work_b_vr[3]],
+            c1: [*work_b_vr[4], *work_b_vr[5], *work_b_vr[6], *work_b_vr[7]],
+        },
+        out: Fq2Regs {
+            c0: [
+                *work_out_vr[0],
+                *work_out_vr[1],
+                *work_out_vr[2],
+                *work_out_vr[3],
+            ],
+            c1: [
+                *work_out_vr[4],
+                *work_out_vr[5],
+                *work_out_vr[6],
+                *work_out_vr[7],
+            ],
+        },
+    };
+
+    // LHS in registers (48 limbs in ABI flatten order).
+    let lhs_vr: [VirtualRegisterGuard; 48] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let lhs_flat: [u8; 48] = array::from_fn(|i| *lhs_vr[i]);
+    let lhs = fq12_regs_from_flat(&lhs_flat);
+
+    let lhs_ptr = operands.rs1;
+    let rhs_ptr = operands.rs2;
+    let out_ptr = operands.rs3;
+
+    // Reject aliasing: rhs_ptr must not equal out_ptr (we stream rhs from memory while writing out).
+    // Assert `rhs_ptr != out_ptr` via: (rhs < out) + (out < rhs) == 1.
+    asm.emit_r::<SLTU>(fq_scratch.c0, rhs_ptr, out_ptr);
+    asm.emit_r::<SLTU>(fq_scratch.c1, out_ptr, rhs_ptr);
+    asm.emit_r::<ADD>(fq_scratch.c2, fq_scratch.c0, fq_scratch.c1);
+    li(&mut asm, fq_scratch.t3, 1);
+    asm.emit_b::<VirtualAssertEQ>(fq_scratch.c2, fq_scratch.t3, 0);
+
+    // Load lhs into registers.
+    for i in 0..48 {
+        asm.emit_ld::<LD>(lhs_flat[i], lhs_ptr, (i as i64) * 8);
+    }
+
+    // out := lhs * rhs
+    fq12_mul_regmem_to_mem(&mut asm, out_ptr, lhs, rhs_ptr, 0, work, &fq_scratch);
+
+    // Cleanup: drop all guards before finalizing.
+    drop(lhs_vr);
+    drop(work_a_vr);
+    drop(work_b_vr);
+    drop(work_out_vr);
+    drop(fq_scratch_vr);
+
+    asm.finalize_inline()
+}
+
+/// Sequence builder for `BN254_GT_SQR`.
+///
+/// Computes `out := in^2` where:
+/// - `rs1` = `in_ptr`  (48 x u64 limbs, Montgomery form)
+/// - `rs3` = `out_ptr` (48 x u64 limbs, Montgomery form)
+///
+/// The instruction encoding duplicates `in_ptr` into `rs2`, but the builder ignores `rs2`.
+pub fn bn254_gt_sqr_sequence_builder(
+    mut asm: InstrAssembler,
+    operands: FormatInline,
+) -> Vec<Instruction> {
+    // Allocate base-field scratch (14 regs) and initialize constants.
+    let fq_scratch_vr: [VirtualRegisterGuard; 14] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let fq_scratch = FqScratch::new(&fq_scratch_vr);
+    fq_scratch.init_constants(&mut asm);
+
+    // Allocate tight Fq2 work regs (24 regs) for Fq6/Fq12 ops.
+    let work_a_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work_b_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work_out_vr: [VirtualRegisterGuard; 8] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let work = Fq2WorkTight {
+        a: Fq2Regs {
+            c0: [*work_a_vr[0], *work_a_vr[1], *work_a_vr[2], *work_a_vr[3]],
+            c1: [*work_a_vr[4], *work_a_vr[5], *work_a_vr[6], *work_a_vr[7]],
+        },
+        b: Fq2Regs {
+            c0: [*work_b_vr[0], *work_b_vr[1], *work_b_vr[2], *work_b_vr[3]],
+            c1: [*work_b_vr[4], *work_b_vr[5], *work_b_vr[6], *work_b_vr[7]],
+        },
+        out: Fq2Regs {
+            c0: [
+                *work_out_vr[0],
+                *work_out_vr[1],
+                *work_out_vr[2],
+                *work_out_vr[3],
+            ],
+            c1: [
+                *work_out_vr[4],
+                *work_out_vr[5],
+                *work_out_vr[6],
+                *work_out_vr[7],
+            ],
+        },
+    };
+
+    // Input/accumulator in registers (48 limbs in ABI flatten order).
+    let acc_vr: [VirtualRegisterGuard; 48] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let acc_flat: [u8; 48] = array::from_fn(|i| *acc_vr[i]);
+    let acc = fq12_regs_from_flat(&acc_flat);
+
+    let in_ptr = operands.rs1;
+    let out_ptr = operands.rs3;
+
+    // Load input into registers.
+    for i in 0..48 {
+        asm.emit_ld::<LD>(acc_flat[i], in_ptr, (i as i64) * 8);
+    }
+
+    // acc := acc^2 (cyclotomic, GT-specialized; uses out_ptr as scratch during computation)
+    fq12_cyclotomic_square_in_place(&mut asm, acc, out_ptr, work, &fq_scratch);
+
+    // Store result to out_ptr.
+    for i in 0..48 {
+        asm.emit_s::<SD>(out_ptr, acc_flat[i], (i as i64) * 8);
+    }
+
+    // Cleanup: drop all guards before finalizing.
+    drop(acc_vr);
+    drop(work_a_vr);
+    drop(work_b_vr);
+    drop(work_out_vr);
+    drop(fq_scratch_vr);
+
+    asm.finalize_inline()
+}
+
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use super::*;
 
-    use ark_bn254::{Fq, Fq12, Fq2, Fq6, Fq6Config};
+    use ark_bn254::{Bn254, Fq, Fq12, Fq2, Fq6, Fq6Config, G1Projective, G2Projective};
+    use ark_ec::pairing::Pairing;
     use ark_ff::{AdditiveGroup, Field, Fp6Config, UniformRand};
     use ark_std::test_rng;
     use tracer::emulator::cpu::Xlen;
-    use tracer::utils::inline_test_harness::{InlineMemoryLayout, InlineTestHarness, INLINE_RS1, INLINE_RS2, INLINE_RS3};
+    use tracer::utils::inline_test_harness::{
+        InlineMemoryLayout, InlineTestHarness, INLINE_RS1, INLINE_RS2, INLINE_RS3,
+    };
 
     fn fq_to_limbs_mont(x: &Fq) -> [u64; 4] {
         // arkworks Fp elements store the Montgomery form in the inner BigInt.
@@ -1268,9 +1607,8 @@ mod tests {
         let c1 = fq2_to_limbs_mont(&x.c1);
         let c2 = fq2_to_limbs_mont(&x.c2);
         [
-            c0[0], c0[1], c0[2], c0[3], c0[4], c0[5], c0[6], c0[7], c1[0], c1[1], c1[2],
-            c1[3], c1[4], c1[5], c1[6], c1[7], c2[0], c2[1], c2[2], c2[3], c2[4], c2[5], c2[6],
-            c2[7],
+            c0[0], c0[1], c0[2], c0[3], c0[4], c0[5], c0[6], c0[7], c1[0], c1[1], c1[2], c1[3],
+            c1[4], c1[5], c1[6], c1[7], c2[0], c2[1], c2[2], c2[3], c2[4], c2[5], c2[6], c2[7],
         ]
     }
 
@@ -1292,13 +1630,18 @@ mod tests {
         harness.load_input2_64(&b);
 
         // Build instruction sequence: load a,b; fq_mul_mont; store out.
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
 
         // Allocate regs: a(4), b(4), out(4), scratch(14).
-        let a_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let b_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let out_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let a_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let b_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let out_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
@@ -1352,11 +1695,16 @@ mod tests {
         harness.load_input64(&a);
         harness.load_input2_64(&b);
 
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
-        let a_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let b_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let out_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let a_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let b_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let out_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
@@ -1395,11 +1743,16 @@ mod tests {
         harness.load_input64(&a);
         harness.load_input2_64(&b);
 
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
-        let a_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let b_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let out_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let a_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let b_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let out_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
@@ -1438,10 +1791,14 @@ mod tests {
         // For `single_input`, rs1=output, rs2=input; we'll load input from rs2 mapping.
         harness.load_input64(&a);
 
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
-        let a_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let out_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let a_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let out_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
@@ -1501,15 +1858,23 @@ mod tests {
         harness.load_input64(&a);
         harness.load_input2_64(&b);
 
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
 
-        let a_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let b_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let out_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t0_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t1_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t2_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let a_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let b_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let out_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t0_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t1_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t2_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
@@ -1569,12 +1934,17 @@ mod tests {
         harness.setup_registers();
         harness.load_input64(&a);
 
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
 
-        let fe_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t0_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t1_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let fe_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t0_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t1_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
@@ -1639,19 +2009,27 @@ mod tests {
         harness.load_input64(&a);
         harness.load_input2_64(&b);
 
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
 
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
         // Work regs for Fq2 ops.
-        let a_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let b_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let out_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t0_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t1_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t2_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let a_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let b_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let out_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t0_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t1_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t2_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let w = Fq2Work {
             a: Fq2Regs {
                 c0: [*a_vr[0], *a_vr[1], *a_vr[2], *a_vr[3]],
@@ -1670,7 +2048,9 @@ mod tests {
             t2: [*t2_vr[0], *t2_vr[1], *t2_vr[2], *t2_vr[3]],
         };
 
-        fq6_mul_karatsuba_mem(&mut asm, INLINE_RS3, 0, INLINE_RS1, 0, INLINE_RS2, 0, w, &scratch);
+        fq6_mul_karatsuba_mem(
+            &mut asm, INLINE_RS3, 0, INLINE_RS1, 0, INLINE_RS2, 0, w, &scratch,
+        );
 
         drop(a_vr);
         drop(b_vr);
@@ -1684,10 +2064,30 @@ mod tests {
         harness.execute_sequence(&sequence);
         let out_vec = harness.read_output64(24);
         [
-            out_vec[0], out_vec[1], out_vec[2], out_vec[3], out_vec[4], out_vec[5], out_vec[6],
-            out_vec[7], out_vec[8], out_vec[9], out_vec[10], out_vec[11], out_vec[12], out_vec[13],
-            out_vec[14], out_vec[15], out_vec[16], out_vec[17], out_vec[18], out_vec[19],
-            out_vec[20], out_vec[21], out_vec[22], out_vec[23],
+            out_vec[0],
+            out_vec[1],
+            out_vec[2],
+            out_vec[3],
+            out_vec[4],
+            out_vec[5],
+            out_vec[6],
+            out_vec[7],
+            out_vec[8],
+            out_vec[9],
+            out_vec[10],
+            out_vec[11],
+            out_vec[12],
+            out_vec[13],
+            out_vec[14],
+            out_vec[15],
+            out_vec[16],
+            out_vec[17],
+            out_vec[18],
+            out_vec[19],
+            out_vec[20],
+            out_vec[21],
+            out_vec[22],
+            out_vec[23],
         ]
     }
 
@@ -1697,19 +2097,25 @@ mod tests {
         harness.setup_registers();
         harness.load_input64(&a);
 
-        let mut asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
-        let scratch_vr: [VirtualRegisterGuard; 14] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let mut asm =
+            InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let scratch_vr: [VirtualRegisterGuard; 14] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
-        let fe_vr: [VirtualRegisterGuard; 24] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let fe_vr: [VirtualRegisterGuard; 24] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
         for i in 0..24 {
             asm.emit_ld::<tracer::instruction::ld::LD>(*fe_vr[i], INLINE_RS2, (i as i64) * 8);
         }
 
-        let tmp_fq2_vr: [VirtualRegisterGuard; 8] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t0_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t1_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let tmp_fq2_vr: [VirtualRegisterGuard; 8] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t0_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
+        let t1_vr: [VirtualRegisterGuard; 4] =
+            array::from_fn(|_| asm.allocator.allocate_for_inline());
 
         let fe = Fq6Regs {
             c0: Fq2Regs {
@@ -1726,8 +2132,18 @@ mod tests {
             },
         };
         let tmp_fq2 = Fq2Regs {
-            c0: [*tmp_fq2_vr[0], *tmp_fq2_vr[1], *tmp_fq2_vr[2], *tmp_fq2_vr[3]],
-            c1: [*tmp_fq2_vr[4], *tmp_fq2_vr[5], *tmp_fq2_vr[6], *tmp_fq2_vr[7]],
+            c0: [
+                *tmp_fq2_vr[0],
+                *tmp_fq2_vr[1],
+                *tmp_fq2_vr[2],
+                *tmp_fq2_vr[3],
+            ],
+            c1: [
+                *tmp_fq2_vr[4],
+                *tmp_fq2_vr[5],
+                *tmp_fq2_vr[6],
+                *tmp_fq2_vr[7],
+            ],
         };
 
         fq6_mul_by_nonresidue_v_in_place(
@@ -1753,10 +2169,30 @@ mod tests {
         harness.execute_sequence(&sequence);
         let out_vec = harness.read_output64(24);
         [
-            out_vec[0], out_vec[1], out_vec[2], out_vec[3], out_vec[4], out_vec[5], out_vec[6],
-            out_vec[7], out_vec[8], out_vec[9], out_vec[10], out_vec[11], out_vec[12], out_vec[13],
-            out_vec[14], out_vec[15], out_vec[16], out_vec[17], out_vec[18], out_vec[19],
-            out_vec[20], out_vec[21], out_vec[22], out_vec[23],
+            out_vec[0],
+            out_vec[1],
+            out_vec[2],
+            out_vec[3],
+            out_vec[4],
+            out_vec[5],
+            out_vec[6],
+            out_vec[7],
+            out_vec[8],
+            out_vec[9],
+            out_vec[10],
+            out_vec[11],
+            out_vec[12],
+            out_vec[13],
+            out_vec[14],
+            out_vec[15],
+            out_vec[16],
+            out_vec[17],
+            out_vec[18],
+            out_vec[19],
+            out_vec[20],
+            out_vec[21],
+            out_vec[22],
+            out_vec[23],
         ]
     }
 
@@ -1790,13 +2226,63 @@ mod tests {
         harness.load_input2_64(&base);
 
         let asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
-        let sequence = bn254_gt_exp_sequence_builder(asm, FormatInline { rs1: INLINE_RS1, rs2: INLINE_RS2, rs3: INLINE_RS3 });
+        let sequence = bn254_gt_exp_sequence_builder(
+            asm,
+            FormatInline {
+                rs1: INLINE_RS1,
+                rs2: INLINE_RS2,
+                rs3: INLINE_RS3,
+            },
+        );
 
         harness.execute_sequence(&sequence);
         let out_vec = harness.read_output64(48);
         let mut out = [0u64; 48];
         out.copy_from_slice(&out_vec);
         out
+    }
+
+    fn run_gt_sqr_inline(x: [u64; 48], layout: InlineMemoryLayout) -> [u64; 48] {
+        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+        harness.setup_registers();
+
+        // rs1 = in_ptr (48 limbs), rs2 = ignored (we duplicate input), rs3 = out_ptr (48 limbs)
+        harness.load_input64(&x);
+        harness.load_input2_64(&x);
+
+        let asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let sequence = bn254_gt_sqr_sequence_builder(
+            asm,
+            FormatInline {
+                rs1: INLINE_RS1,
+                rs2: INLINE_RS2,
+                rs3: INLINE_RS3,
+            },
+        );
+
+        harness.execute_sequence(&sequence);
+        let out_vec = harness.read_output64(48);
+        let mut out = [0u64; 48];
+        out.copy_from_slice(&out_vec);
+        out
+    }
+
+    #[test]
+    fn gt_sqr_pairing_output_matches_arkworks_square() {
+        let mut rng = test_rng();
+        for _ in 0..4 {
+            // Pairing outputs are in BN254 GT ⊂ cyclotomic subgroup, so cyclotomic square must match `square()`.
+            let g1 = G1Projective::rand(&mut rng);
+            let g2 = G2Projective::rand(&mut rng);
+            let gt: Fq12 = Bn254::pairing(g1, g2).0;
+
+            let expected = fq12_to_limbs_mont(&gt.square());
+            let got = run_gt_sqr_inline(
+                fq12_to_limbs_mont(&gt),
+                InlineMemoryLayout::two_inputs(384, 384, 384),
+            );
+            assert_eq!(got, expected, "GT sqr mismatch vs arkworks Fq12::square()");
+        }
     }
 
     #[test]
@@ -1810,7 +2296,10 @@ mod tests {
                 [2u64, 0, 0, 0],
                 InlineMemoryLayout::two_inputs(32, 384, 384),
             );
-            assert_eq!(got, expected, "GT exp (exp=2) mismatch vs arkworks Fq12::square()");
+            assert_eq!(
+                got, expected,
+                "GT exp (exp=2) mismatch vs arkworks Fq12::square()"
+            );
         }
     }
 
@@ -1839,7 +2328,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn gt_exp_exp2_rejects_out_eq_base_aliasing() {
-        use tracer::utils::inline_test_harness::{RegisterMapping};
+        use tracer::utils::inline_test_harness::RegisterMapping;
 
         let mut rng = test_rng();
         let a = Fq12::rand(&mut rng);
@@ -1861,4 +2350,3 @@ mod tests {
         let _ = run_gt_exp_inline(fq12_to_limbs_mont(&a), [2u64, 0, 0, 0], layout);
     }
 }
-

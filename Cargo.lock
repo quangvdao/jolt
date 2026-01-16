@@ -2087,6 +2087,7 @@ name = "jolt-inlines-dory-gt-exp"
 version = "0.1.0"
 dependencies = [
  "ark-bn254",
+ "ark-ec",
  "ark-ff",
  "ark-std",
  "ctor 0.2.9",

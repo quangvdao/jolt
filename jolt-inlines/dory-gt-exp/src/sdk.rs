@@ -23,6 +23,42 @@ pub fn bn254_gt_exp(base: [u64; GT_LIMBS_U64], exp: [u64; FR_LIMBS_U64]) -> [u64
     out
 }
 
+/// Safe wrapper: computes `out = lhs * rhs`.
+#[inline(always)]
+pub fn bn254_gt_mul(lhs: [u64; GT_LIMBS_U64], rhs: [u64; GT_LIMBS_U64]) -> [u64; GT_LIMBS_U64] {
+    let mut out = [0u64; GT_LIMBS_U64];
+    bn254_gt_mul_into(&mut out, &lhs, &rhs);
+    out
+}
+
+/// Writes `out = lhs * rhs` without moving/copying the input arrays.
+#[inline(always)]
+pub fn bn254_gt_mul_into(
+    out: &mut [u64; GT_LIMBS_U64],
+    lhs: &[u64; GT_LIMBS_U64],
+    rhs: &[u64; GT_LIMBS_U64],
+) {
+    unsafe {
+        bn254_gt_mul_inline(lhs.as_ptr(), rhs.as_ptr(), out.as_mut_ptr());
+    }
+}
+
+/// Safe wrapper: computes `out = x^2`.
+#[inline(always)]
+pub fn bn254_gt_sqr(x: [u64; GT_LIMBS_U64]) -> [u64; GT_LIMBS_U64] {
+    let mut out = [0u64; GT_LIMBS_U64];
+    bn254_gt_sqr_into(&mut out, &x);
+    out
+}
+
+/// Writes `out = x^2` without moving/copying the input arrays.
+#[inline(always)]
+pub fn bn254_gt_sqr_into(out: &mut [u64; GT_LIMBS_U64], x: &[u64; GT_LIMBS_U64]) {
+    unsafe {
+        bn254_gt_sqr_inline(x.as_ptr(), out.as_mut_ptr());
+    }
+}
+
 /// Low-level interface to the BN254 GT exponentiation inline instruction.
 ///
 /// # Arguments
@@ -54,12 +90,81 @@ pub unsafe fn bn254_gt_exp_inline(exp: *const u64, base: *const u64, out: *mut u
     );
 }
 
+/// Low-level interface to the BN254 GT multiplication inline instruction.
+///
+/// ABI:
+/// - rs1 = lhs_ptr (48 x u64 limbs)
+/// - rs2 = rhs_ptr (48 x u64 limbs)
+/// - rd  = out_ptr (48 x u64 limbs)
+#[cfg(not(feature = "host"))]
+#[inline(always)]
+pub unsafe fn bn254_gt_mul_inline(lhs: *const u64, rhs: *const u64, out: *mut u64) {
+    use crate::{BN254_GT_MUL_FUNCT3, BN254_GT_MUL_FUNCT7, INLINE_OPCODE};
+    core::arch::asm!(
+        ".insn r {opcode}, {funct3}, {funct7}, {rd}, {rs1}, {rs2}",
+        opcode = const INLINE_OPCODE,
+        funct3 = const BN254_GT_MUL_FUNCT3,
+        funct7 = const BN254_GT_MUL_FUNCT7,
+        rd = in(reg) out, // rd/rs3 - output address
+        rs1 = in(reg) lhs, // rs1 - lhs address
+        rs2 = in(reg) rhs, // rs2 - rhs address
+        options(nostack)
+    );
+}
+
+/// Low-level interface to the BN254 GT squaring inline instruction.
+///
+/// ABI:
+/// - rs1 = in_ptr  (48 x u64 limbs)
+/// - rs2 = in_ptr  (duplicated; unused by the current builder)
+/// - rd  = out_ptr (48 x u64 limbs)
+#[cfg(not(feature = "host"))]
+#[inline(always)]
+pub unsafe fn bn254_gt_sqr_inline(input: *const u64, out: *mut u64) {
+    use crate::{BN254_GT_SQR_FUNCT3, BN254_GT_SQR_FUNCT7, INLINE_OPCODE};
+    core::arch::asm!(
+        ".insn r {opcode}, {funct3}, {funct7}, {rd}, {rs1}, {rs2}",
+        opcode = const INLINE_OPCODE,
+        funct3 = const BN254_GT_SQR_FUNCT3,
+        funct7 = const BN254_GT_SQR_FUNCT7,
+        rd = in(reg) out, // rd/rs3 - output address
+        rs1 = in(reg) input, // rs1 - input address
+        rs2 = in(reg) input, // rs2 - input address (duplicated)
+        options(nostack)
+    );
+}
+
 /// Host build placeholder: until we implement a full host executor, fail loudly if called.
 ///
 /// The inline is not expected to run on host; it expands via `sequence_builder` within the tracer.
+///
+/// # Safety
+/// This function is `unsafe` to match the guest ABI, but on host builds it always panics and
+/// performs no memory accesses.
 #[cfg(feature = "host")]
 #[inline(always)]
 pub unsafe fn bn254_gt_exp_inline(_exp: *const u64, _base: *const u64, _out: *mut u64) {
     panic!("bn254_gt_exp_inline(host) is a placeholder; use tracer execution");
 }
 
+/// Host build placeholder (see `bn254_gt_exp_inline`).
+///
+/// # Safety
+/// This function is `unsafe` to match the guest ABI, but on host builds it always panics and
+/// performs no memory accesses.
+#[cfg(feature = "host")]
+#[inline(always)]
+pub unsafe fn bn254_gt_mul_inline(_lhs: *const u64, _rhs: *const u64, _out: *mut u64) {
+    panic!("bn254_gt_mul_inline(host) is a placeholder; use tracer execution");
+}
+
+/// Host build placeholder (see `bn254_gt_exp_inline`).
+///
+/// # Safety
+/// This function is `unsafe` to match the guest ABI, but on host builds it always panics and
+/// performs no memory accesses.
+#[cfg(feature = "host")]
+#[inline(always)]
+pub unsafe fn bn254_gt_sqr_inline(_input: *const u64, _out: *mut u64) {
+    panic!("bn254_gt_sqr_inline(host) is a placeholder; use tracer execution");
+}

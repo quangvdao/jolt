@@ -25,4 +25,5 @@ ark-ff = { workspace = true, optional = true, features = ["std"] }
 [dev-dependencies]
 tracer = { workspace = true, features = ["std", "test-utils"] }
 ark-std = { workspace = true, features = ["std"] }
+ark-ec = { workspace = true, features = ["std"] }
 rand_chacha = { workspace = true, features = ["std"] }

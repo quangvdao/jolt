@@ -1,9 +1,9 @@
 //! Global state management for Dory parameters
 
 use crate::utils::math::Math;
-use dory::backends::arkworks::{ArkG1, ArkG2};
 #[cfg(feature = "prover")]
 use dory::backends::arkworks::{init_cache, is_cached};
+use dory::backends::arkworks::{ArkG1, ArkG2};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     OnceLock,

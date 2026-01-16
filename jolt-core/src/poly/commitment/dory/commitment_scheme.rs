@@ -16,25 +16,26 @@ use crate::{
 use ark_bn254::{G1Affine, G1Projective};
 use ark_ec::CurveGroup;
 use ark_ff::Zero;
+use core::hint::black_box;
 use dory::primitives::{
     arithmetic::{Group, PairingCurve},
     poly::Polynomial,
 };
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use std::borrow::Borrow;
 use tracing::trace_span;
-use core::hint::black_box;
 
 #[cfg(not(feature = "host"))]
 fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
     use ark_bn254::{Fq, Fq12, Fq2, Fq6};
-    use ark_ff::{BigInt, PrimeField};
+    use ark_ff::{BigInt, One, PrimeField};
     use core::marker::PhantomData;
-    use jolt_inlines_dory_gt_exp::{bn254_gt_exp, FR_LIMBS_U64, GT_LIMBS_U64};
+    use jolt_inlines_dory_gt_exp::sdk::{bn254_gt_mul_into, bn254_gt_sqr_into};
+    use jolt_inlines_dory_gt_exp::{FR_LIMBS_U64, GT_LIMBS_U64};
 
     #[inline(always)]
     fn fq_to_limbs_mont(x: &Fq) -> [u64; 4] {
@@ -80,10 +81,12 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
                 limbs[0], limbs[1], limbs[2], limbs[3], limbs[4], limbs[5], limbs[6], limbs[7],
             ]),
             c1: fq2_from_limbs_mont([
-                limbs[8], limbs[9], limbs[10], limbs[11], limbs[12], limbs[13], limbs[14], limbs[15],
+                limbs[8], limbs[9], limbs[10], limbs[11], limbs[12], limbs[13], limbs[14],
+                limbs[15],
             ]),
             c2: fq2_from_limbs_mont([
-                limbs[16], limbs[17], limbs[18], limbs[19], limbs[20], limbs[21], limbs[22], limbs[23],
+                limbs[16], limbs[17], limbs[18], limbs[19], limbs[20], limbs[21], limbs[22],
+                limbs[23],
             ]),
         }
     }
@@ -108,8 +111,30 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
 
     let exp_limbs: [u64; FR_LIMBS_U64] = coeff.0.into_bigint().0;
     let base_limbs: [u64; GT_LIMBS_U64] = fq12_to_limbs_mont(&base.0);
-    let out_limbs = bn254_gt_exp(base_limbs, exp_limbs);
-    ArkGT(fq12_from_limbs_mont(out_limbs))
+
+    // Square-and-multiply in guest code using smaller inlines (avoids the `u16` inline-length limit).
+    // acc := 1 in Fq12 (Montgomery form)
+    let one_limbs = fq_to_limbs_mont(&Fq::one());
+    let mut acc_limbs = [0u64; GT_LIMBS_U64];
+    acc_limbs[0..4].copy_from_slice(&one_limbs);
+
+    let mut tmp = [0u64; GT_LIMBS_U64];
+    for limb_idx in (0..FR_LIMBS_U64).rev() {
+        let limb = exp_limbs[limb_idx];
+        for bit_idx in (0..64usize).rev() {
+            // acc := acc^2
+            bn254_gt_sqr_into(&mut tmp, &acc_limbs);
+            core::mem::swap(&mut acc_limbs, &mut tmp);
+
+            // If the bit is set, acc := acc * base
+            if ((limb >> bit_idx) & 1) == 1 {
+                bn254_gt_mul_into(&mut tmp, &acc_limbs, &base_limbs);
+                core::mem::swap(&mut acc_limbs, &mut tmp);
+            }
+        }
+    }
+
+    ArkGT(fq12_from_limbs_mont(acc_limbs))
 }
 
 #[derive(Clone)]
@@ -302,7 +327,6 @@ impl CommitmentScheme for DoryCommitmentScheme {
         b"Dory"
     }
 
-
     /// In Dory, the opening proof hint consists of the Pedersen commitments to the rows
     /// of the polynomial coefficient matrix. In the context of a batch opening proof, we
     /// can homomorphically combine the row commitments for multiple polynomials into the
@@ -356,11 +380,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
         const GT_MUL_SPAN: &str = "dory_gt_mul_ops";
         let exp_ops = coeffs.len() as u64;
         let mul_ops = coeffs.len().saturating_sub(1) as u64;
-        jolt_platform::jolt_println!(
-            "dory_gt_combine_counts: exp={}, mul={}",
-            exp_ops,
-            mul_ops
-        );
+        jolt_platform::jolt_println!("dory_gt_combine_counts: exp={}, mul={}", exp_ops, mul_ops);
         start_cycle_tracking(GT_EXP_SPAN);
 
         // Combine GT elements using parallel RLC

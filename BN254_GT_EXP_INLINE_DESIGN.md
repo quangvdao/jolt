@@ -21,27 +21,22 @@ This is intentionally scoped to **single exponentiation only** (no multi-exp) an
 
 ### Current status (as of 2026-01-16)
 
-- **Implemented a correctness-first `BN254_GT_EXP`** in `jolt-inlines/dory-gt-exp/src/sequence_builder.rs`:
-  - `bn254_gt_exp_sequence_builder`: `jolt-inlines/dory-gt-exp/src/sequence_builder.rs` ~`1112:1242`
-  - **Algorithm**: fixed 256-bit MSB→LSB schedule with **branchless conditional multiply** using a delta update:
-    \[
-    acc \leftarrow acc^2;\quad
-    \Delta \leftarrow acc\cdot base - acc;\quad
-    acc \leftarrow acc + bit \cdot \Delta
-    \]
-  - **Register plan**: `acc` = 48 regs, plus `FqScratch` (14 regs), `Fq2WorkTight` (24 regs), and 1 `exp_limb` reg.
-- **Aliasing**: the inline currently **asserts** `base_ptr != out_ptr` (in-place update is not supported yet).
-  - See `bn254_gt_exp_sequence_builder`: `jolt-inlines/dory-gt-exp/src/sequence_builder.rs` ~`1159:1165`.
-- **Differential tests** exist for:
-  - exp==2 vs `arkworks Fq12::square()`
-  - random exp vs `arkworks Fq12::pow()`
-  - See `jolt-inlines/dory-gt-exp/src/sequence_builder.rs` ~`1802:1862`.
-- **Integrated into the recursion guest verifier (measurement path)**:
-  - GT exponentiation in Dory `combine_commitments` calls the inline on guest (`cfg(not(feature="host"))`).
-  - See `jolt-core/src/poly/commitment/dory/commitment_scheme.rs` ~`32:113` and ~`347:382`.
-- **Measured performance (recursion trace, fibonacci embed)**:
-  - `dory_gt_exp_ops`: **1,401,740,725 virtual cycles** for 41 exps ⇒ **~34.2M virtual cycles / exp**
-  - Baseline prior to this work (from `BN254_GT_INLINES.md`): ~9.97M virtual cycles / exp, so this version is **slower**.
+- **Status summary**: we do **GT exponentiation in guest code** (windowed) using the smaller `BN254_GT_SQR`/`BN254_GT_MUL` inlines to avoid the `u16` inline-length limit and to allow exponent-dependent control flow in Rust.
+  - Guest exponentiation: `jolt-core/src/poly/commitment/dory/commitment_scheme.rs:32-203`
+  - Inline ops used by guest exp:
+    - `BN254_GT_SQR` (cyclotomic squaring): `jolt-inlines/dory-gt-exp/src/sequence_builder.rs:1624-1702`
+    - `BN254_GT_MUL` (Fq12 mul): `jolt-inlines/dory-gt-exp/src/sequence_builder.rs:1539-1615`
+
+- **Fq12 multiplication optimization (new default)**: `fq12_mul_regmem_to_mem` now uses **Karatsuba at the Fq12 layer** (3×Fq6 mul instead of 4×), and this is the implementation used by `BN254_GT_MUL`.
+  - `jolt-inlines/dory-gt-exp/src/sequence_builder.rs:1233-1374`
+
+- **Performance (“stick” = arkworks baseline)**:
+  - **Arkworks baseline** (prior measurements): ~**9.97M virtual cycles / GT exp** (≈ **409M** for 41 exps).
+  - **Current (windowed + cyclotomic sqr + Fq12 Karatsuba mul)**: `dory_gt_exp_ops` = **352,538,786** virtual cycles for 41 exps ⇒ **~8.60M / exp**.
+  - **Delta**: ~**13.7% faster** than arkworks on the same recursion trace.
+
+- **Still present (not currently used in recursion/proving)**: a correctness-first monolithic `BN254_GT_EXP` inline exists in the inline crate, but is not used on the guest verification hot path.
+  - `bn254_gt_exp_sequence_builder`: `jolt-inlines/dory-gt-exp/src/sequence_builder.rs:1388-1537`
 
 ### Hard constraints imposed by Jolt’s current inline machinery
 

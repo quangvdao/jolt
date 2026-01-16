@@ -83,7 +83,7 @@ impl ScalarMultiplicationSteps {
         // Perform double-and-add algorithm and collect values
         // For each bit b_i (i = 1 to 256), compute:
         // T_i = [2]A_{i-1} and A_i = T_i + b_i * P
-        for (_i, &bit) in bits_msb.iter().enumerate() {
+        for &bit in bits_msb.iter() {
             // Double: T_{i+1} = [2]A_i
             let doubled = accumulator + accumulator;
             let t_affine: G1Affine = doubled.into();
@@ -181,6 +181,13 @@ impl ScalarMultiplicationSteps {
         let y_t = self.y_t_mles[0][step]; // y-coord of T_i
         let x_a_next = self.x_a_next_mles[0][step]; // x-coord of A_{i+1}' = T_i + P
         let y_a_next = self.y_a_next_mles[0][step]; // y-coord of A_{i+1}' = T_i + P
+
+        // Special case: if A_i is the point at infinity, the affine formulas used by C1-C4
+        // are not applicable. In the sumcheck, this case is handled separately via the
+        // infinity indicator. Here we just enforce that doubling preserves infinity.
+        if x_a.is_zero() && y_a.is_zero() {
+            return x_t.is_zero() && y_t.is_zero();
+        }
 
         // Base point coordinates
         let x_p = self.point_base.x;

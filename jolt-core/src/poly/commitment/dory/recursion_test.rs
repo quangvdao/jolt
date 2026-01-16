@@ -19,6 +19,7 @@ mod recursion_tests {
     use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_witness_generation_for_gt_exp() {
         let mut rng = thread_rng();
 
@@ -59,6 +60,7 @@ mod recursion_tests {
     }
 
     #[test]
+    #[serial]
     fn test_special_cases() {
         let mut rng = thread_rng();
         let base = ArkGT(Fq12::rand(&mut rng));

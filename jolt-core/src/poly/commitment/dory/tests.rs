@@ -771,6 +771,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_dory_layout_address_cycle_conversions() {
         let K = 4; // 4 addresses
         let T = 8; // 8 cycles
@@ -914,6 +915,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_dory_layout_enum_methods() {
         let K = 8; // addresses
         let T = 16; // cycles

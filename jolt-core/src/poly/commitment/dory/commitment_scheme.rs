@@ -354,7 +354,7 @@ impl StreamingCommitmentScheme for DoryCommitmentScheme {
 /// - Row (left) vector gets cycle variables (matching AddressMajor row indexing)
 ///
 /// For CycleMajor layout, returns the point unchanged.
-fn reorder_opening_point_for_layout<F: JoltField>(
+pub(crate) fn reorder_opening_point_for_layout<F: JoltField>(
     opening_point: &[F::Challenge],
 ) -> Vec<F::Challenge> {
     if DoryGlobals::get_layout() == DoryLayout::AddressMajor {

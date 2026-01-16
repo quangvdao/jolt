@@ -20,6 +20,7 @@ use crate::{
 use ark_bn254::{Fq, Fr};
 use ark_ff::{UniformRand, Zero};
 use ark_std::test_rng;
+use serial_test::serial;
 
 /// Convert index to binary representation
 fn index_to_binary<F: JoltField>(idx: usize, num_vars: usize) -> Vec<F> {
@@ -35,6 +36,7 @@ fn index_to_binary<F: JoltField>(idx: usize, num_vars: usize) -> Vec<F> {
 }
 
 #[test]
+#[serial]
 fn test_sumcheck_relation_with_mapping() {
     // Initialize Dory
     DoryGlobals::reset();

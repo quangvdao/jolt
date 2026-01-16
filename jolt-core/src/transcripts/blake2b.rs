@@ -68,9 +68,14 @@ impl Blake2bTranscript {
         #[cfg(test)]
         {
             if let Some(expected_state_history) = &self.expected_state_history {
+                let idx = self.n_rounds as usize;
+                let expected = expected_state_history.get(idx).copied();
                 assert!(
-                    new_state == expected_state_history[self.n_rounds as usize],
-                    "Fiat-Shamir transcript mismatch"
+                    expected == Some(new_state),
+                    "Fiat-Shamir transcript mismatch at round {idx} (expected_len={}); expected={:02x?} actual={:02x?}",
+                    expected_state_history.len(),
+                    expected.unwrap_or([0u8; 32]),
+                    new_state
                 );
             }
             self.state_history.push(new_state);

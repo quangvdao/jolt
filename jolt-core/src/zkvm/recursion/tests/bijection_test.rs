@@ -329,6 +329,7 @@ fn test_out_of_bounds_access() {
 }
 
 #[test]
+#[serial]
 fn test_jagged_bijection_with_real_dory_proof() {
     use crate::poly::{
         commitment::{

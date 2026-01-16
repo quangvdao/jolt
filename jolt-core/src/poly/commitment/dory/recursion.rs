@@ -268,7 +268,11 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         commitment: &ArkGT,
     ) -> Result<(Self::Witness, Self::Hint), ProofVerifyError> {
         // Convert Jolt types to dory types
-        let ark_point: Vec<ArkFr> = point
+        let reordered_point =
+            crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout::<Fr>(
+                point,
+            );
+        let ark_point: Vec<ArkFr> = reordered_point
             .iter()
             .rev() // Reverse for dory endianness
             .map(|c| {
@@ -321,7 +325,11 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         hint: &Self::Hint,
     ) -> Result<(), ProofVerifyError> {
         // Convert point for dory
-        let ark_point: Vec<ArkFr> = point
+        let reordered_point =
+            crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout::<Fr>(
+                point,
+            );
+        let ark_point: Vec<ArkFr> = reordered_point
             .iter()
             .rev() // Reverse for dory endianness
             .map(|c| {

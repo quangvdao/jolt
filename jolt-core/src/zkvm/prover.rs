@@ -195,6 +195,7 @@ pub struct JoltCpuProver<
     pub one_hot_params: OneHotParams,
     pub rw_config: ReadWriteConfig,
     pub commitments: Vec<PCS::Commitment>,
+    pub untrusted_advice_commitment: Option<PCS::Commitment>,
 }
 impl<
         'a,
@@ -451,6 +452,7 @@ where
             one_hot_params,
             rw_config,
             commitments: vec![],
+            untrusted_advice_commitment: None,
         }
     }
 
@@ -477,11 +479,10 @@ where
             self.preprocessing.shared.bytecode.code_size
         );
 
-        let (commitments, opening_proof_hints) = self.generate_and_commit_witness_polynomials();
-        self.commitments = commitments.clone();
         let (commitments, mut opening_proof_hints) = self.generate_and_commit_witness_polynomials();
         self.commitments = commitments.clone();
         let untrusted_advice_commitment = self.generate_and_commit_untrusted_advice();
+        self.untrusted_advice_commitment = untrusted_advice_commitment.clone();
         self.generate_and_commit_trusted_advice();
 
         // Add advice hints for batched Stage 8 opening
@@ -1581,6 +1582,10 @@ where
             advice_polys,
         );
 
+        // Ensure Dory is in the Main context for proving the joint opening.
+        // (Some helper paths may temporarily switch contexts for advice handling.)
+        let _ctx_main = DoryGlobals::with_context(DoryContext::Main);
+
         // Fork the transcript state if we need to generate recursion hint
         let witness_gen_transcript = if generate_recursion_hint {
             Some(self.transcript.clone())
@@ -1612,6 +1617,27 @@ where
             );
             for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
                 commitments_map.insert(poly, commitment.clone());
+            }
+
+            // Include advice commitments if they were folded into the Stage 8 RLC.
+            if state
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+            {
+                if let Some(ref commitment) = self.advice.trusted_advice_commitment {
+                    commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                }
+            }
+            if state
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+            {
+                if let Some(ref commitment) = self.untrusted_advice_commitment {
+                    commitments_map
+                        .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                }
             }
 
             // Compute RLC coefficients using shared utility

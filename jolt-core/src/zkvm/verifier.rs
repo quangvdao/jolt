@@ -766,6 +766,32 @@ where
                 polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
             }
 
+            // Advice polynomials (if present): fold into the Stage 8 batch via a Lagrange embedding
+            // so the verifier samples the same gamma powers as the prover.
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
+            {
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::TrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
+            }
+
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
+            {
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::UntrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
+            }
+
             let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
             (opening_point, polynomial_claims, claims)
         };
@@ -1040,6 +1066,7 @@ where
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn verify_trusted_advice_opening_proofs(&mut self) -> Result<(), anyhow::Error> {
         if let Some(ref commitment) = self.trusted_advice_commitment {
             // Verify at RamValEvaluation point
@@ -1102,6 +1129,7 @@ where
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn verify_untrusted_advice_opening_proofs(&mut self) -> Result<(), anyhow::Error> {
         use crate::poly::opening_proof::SumcheckId;
         if let Some(ref commitment) = self.proof.untrusted_advice_commitment {

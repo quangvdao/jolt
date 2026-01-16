@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod recursion_tests {
     use super::super::recursion::{JoltWitness, JoltWitnessGenerator};
-    use super::super::{DoryCommitmentScheme, DoryGlobals, BN254};
+    use super::super::{DoryCommitmentScheme, DoryContext, DoryGlobals, BN254};
     use crate::{
         field::JoltField,
         poly::{
@@ -116,7 +116,8 @@ mod recursion_tests {
         DoryGlobals::reset();
         let K = 1 << 2; // 2^2 = 4
         let T = 1 << 2; // 2^2 = 4
-        DoryGlobals::initialize(K, T);
+        DoryGlobals::initialize_context(K, T, DoryContext::Main, None);
+        DoryGlobals::initialize_context(K, T, DoryContext::Main, None);
 
         // Setup
         let num_vars = 4;
@@ -193,7 +194,7 @@ mod recursion_tests {
         DoryGlobals::reset();
         let K = 1 << 2;
         let T = 1 << 2;
-        DoryGlobals::initialize(K, T);
+        DoryGlobals::initialize_context(K, T, DoryContext::Main, None);
 
         // Setup
         let num_vars = 4;

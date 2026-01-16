@@ -81,6 +81,7 @@ impl JaggedSumcheckParams {
 }
 
 /// Stage 3 prover that reduces sparse matrix claims to dense polynomial claims
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
 pub struct JaggedSumcheckProver<F: JoltField, T: Transcript> {
     /// Parameters
     pub params: JaggedSumcheckParams,

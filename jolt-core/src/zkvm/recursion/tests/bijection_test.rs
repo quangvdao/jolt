@@ -8,7 +8,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryGlobals},
+            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
         },
         eq_poly::EqPolynomial,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
@@ -342,7 +342,7 @@ fn test_jagged_bijection_with_real_dory_proof() {
     use ark_ff::UniformRand;
 
     DoryGlobals::reset();
-    DoryGlobals::initialize(1 << 2, 1 << 2);
+    DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 
     let num_vars = 4;
     let mut rng = StdRng::seed_from_u64(42);
@@ -631,7 +631,7 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
     use crate::poly::commitment::dory::wrappers::ArkDoryProof;
 
     DoryGlobals::reset();
-    DoryGlobals::initialize(1 << 2, 1 << 2);
+    DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 
     let mut rng = test_rng();
 
@@ -793,7 +793,8 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
 
     // Only test GtMul constraints for zero padding (PackedGtExp uses full 12-var, no padding)
     for constraint_idx in 0..3.min(constraint_system.constraints.len()) {
-        if let ConstraintType::GtMul = &constraint_system.constraints[constraint_idx].constraint_type
+        if let ConstraintType::GtMul =
+            &constraint_system.constraints[constraint_idx].constraint_type
         {
             let matrix_row = constraint_system
                 .matrix

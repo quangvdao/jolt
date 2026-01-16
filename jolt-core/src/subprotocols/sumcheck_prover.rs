@@ -67,5 +67,5 @@ pub trait SumcheckInstanceProver<F: JoltField, T: Transcript>:
     );
 
     #[cfg(feature = "allocative")]
-    fn update_flamegraph(&self, flamegraph: &mut allocative::FlameGraphBuilder);
+    fn update_flamegraph(&self, _flamegraph: &mut allocative::FlameGraphBuilder) {}
 }

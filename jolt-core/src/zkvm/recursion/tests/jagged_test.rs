@@ -5,7 +5,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryGlobals},
+            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
         },
         dense_mlpoly::DensePolynomial,
         eq_poly::EqPolynomial,
@@ -176,7 +176,7 @@ fn test_jagged_relation_small() {
 fn test_jagged_relation_dory_witness() {
     // Initialize Dory for creating a real witness
     DoryGlobals::reset();
-    DoryGlobals::initialize(1 << 2, 1 << 2);
+    DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 
     let mut rng = test_rng();
 

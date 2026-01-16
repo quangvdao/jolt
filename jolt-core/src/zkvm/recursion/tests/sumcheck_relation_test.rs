@@ -5,7 +5,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryGlobals},
+            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
         },
         dense_mlpoly::DensePolynomial,
         eq_poly::EqPolynomial,
@@ -38,7 +38,7 @@ fn index_to_binary<F: JoltField>(idx: usize, num_vars: usize) -> Vec<F> {
 fn test_sumcheck_relation_with_mapping() {
     // Initialize Dory
     DoryGlobals::reset();
-    DoryGlobals::initialize(1 << 2, 1 << 2);
+    DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 
     let mut rng = test_rng();
 

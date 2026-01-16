@@ -5,7 +5,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryGlobals},
+            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
             hyrax::Hyrax,
         },
         dense_mlpoly::DensePolynomial,
@@ -28,7 +28,7 @@ fn test_recursion_snark_e2e_with_dory() {
 
     // Initialize test environment
     DoryGlobals::reset();
-    DoryGlobals::initialize(1 << 2, 1 << 2);
+    DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 
     let mut rng = test_rng();
 

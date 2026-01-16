@@ -9,11 +9,13 @@ use ark_grumpkin::Projective as GrumpkinProjective;
 
 use crate::poly::commitment::{
     commitment_scheme::{CommitmentScheme, RecursionExt},
+    dory::{DoryContext, DoryGlobals},
     hyrax::{Hyrax, PedersenGenerators},
 };
 use crate::poly::opening_proof::OpeningId;
 use crate::subprotocols::sumcheck::BatchedSumcheck;
 use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::zkvm::claim_reductions::advice::ReductionPhase;
 use crate::zkvm::claim_reductions::RegistersClaimReductionSumcheckVerifier;
 use crate::zkvm::config::OneHotParams;
 #[cfg(feature = "prover")]
@@ -25,9 +27,9 @@ use crate::zkvm::Serializable;
 use crate::zkvm::{
     bytecode::read_raf_checking::BytecodeReadRafSumcheckVerifier,
     claim_reductions::{
-        AdviceClaimReductionPhase1Verifier, AdviceClaimReductionPhase2Verifier, AdviceKind,
-        HammingWeightClaimReductionVerifier, IncClaimReductionSumcheckVerifier,
-        InstructionLookupsClaimReductionSumcheckVerifier, RamRaClaimReductionSumcheckVerifier,
+        AdviceClaimReductionVerifier, AdviceKind, HammingWeightClaimReductionVerifier,
+        IncClaimReductionSumcheckVerifier, InstructionLookupsClaimReductionSumcheckVerifier,
+        RamRaClaimReductionSumcheckVerifier,
     },
     fiat_shamir_preamble,
     instruction_lookups::{
@@ -85,9 +87,12 @@ pub struct JoltVerifier<'a, F: JoltField, PCS: RecursionExt<F>, ProofTranscript:
     pub preprocessing: &'a JoltVerifierPreprocessing<F, PCS>,
     pub transcript: ProofTranscript,
     pub opening_accumulator: VerifierOpeningAccumulator<F>,
-    /// Phase-bridge randomness for two-phase advice claim reduction.
-    advice_reduction_gamma_trusted: Option<F>,
-    advice_reduction_gamma_untrusted: Option<F>,
+    /// The advice claim reduction sumcheck effectively spans two stages (6 and 7).
+    /// Cache the verifier state here between stages.
+    advice_reduction_verifier_trusted: Option<AdviceClaimReductionVerifier<F>>,
+    /// The advice claim reduction sumcheck effectively spans two stages (6 and 7).
+    /// Cache the verifier state here between stages.
+    advice_reduction_verifier_untrusted: Option<AdviceClaimReductionVerifier<F>>,
     pub spartan_key: UniformSpartanKey<F>,
     pub one_hot_params: OneHotParams,
 }
@@ -173,8 +178,8 @@ where
             preprocessing,
             transcript,
             opening_accumulator,
-            advice_reduction_gamma_trusted: None,
-            advice_reduction_gamma_untrusted: None,
+            advice_reduction_verifier_trusted: None,
+            advice_reduction_verifier_untrusted: None,
             spartan_key,
             one_hot_params,
         })
@@ -183,7 +188,6 @@ where
     #[tracing::instrument(skip_all)]
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
-        // Parameters are computed from trace length as needed
 
         fiat_shamir_preamble(
             &self.program_io,
@@ -449,31 +453,29 @@ where
         );
 
         // Advice claim reduction (Phase 1 in Stage 6): trusted and untrusted are separate instances.
-        let trusted_advice_phase1 = AdviceClaimReductionPhase1Verifier::new(
-            AdviceKind::Trusted,
-            &self.program_io.memory_layout,
-            self.proof.trace_length,
-            &self.opening_accumulator,
-            &mut self.transcript,
-            self.proof
-                .rw_config
-                .needs_single_advice_opening(self.proof.trace_length.log_2()),
-        );
-        if let Some(ref v) = trusted_advice_phase1 {
-            self.advice_reduction_gamma_trusted = Some(v.gamma());
+        if self.trusted_advice_commitment.is_some() {
+            self.advice_reduction_verifier_trusted = Some(AdviceClaimReductionVerifier::new(
+                AdviceKind::Trusted,
+                &self.program_io.memory_layout,
+                self.proof.trace_length,
+                &self.opening_accumulator,
+                &mut self.transcript,
+                self.proof
+                    .rw_config
+                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
+            ));
         }
-        let untrusted_advice_phase1 = AdviceClaimReductionPhase1Verifier::new(
-            AdviceKind::Untrusted,
-            &self.program_io.memory_layout,
-            self.proof.trace_length,
-            &self.opening_accumulator,
-            &mut self.transcript,
-            self.proof
-                .rw_config
-                .needs_single_advice_opening(self.proof.trace_length.log_2()),
-        );
-        if let Some(ref v) = untrusted_advice_phase1 {
-            self.advice_reduction_gamma_untrusted = Some(v.gamma());
+        if self.proof.untrusted_advice_commitment.is_some() {
+            self.advice_reduction_verifier_untrusted = Some(AdviceClaimReductionVerifier::new(
+                AdviceKind::Untrusted,
+                &self.program_io.memory_layout,
+                self.proof.trace_length,
+                &self.opening_accumulator,
+                &mut self.transcript,
+                self.proof
+                    .rw_config
+                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
+            ));
         }
 
         let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> = vec![
@@ -484,10 +486,10 @@ where
             &lookups_ra_virtual,
             &inc_reduction,
         ];
-        if let Some(ref advice) = trusted_advice_phase1 {
+        if let Some(ref advice) = self.advice_reduction_verifier_trusted {
             instances.push(advice);
         }
-        if let Some(ref advice) = untrusted_advice_phase1 {
+        if let Some(ref advice) = self.advice_reduction_verifier_untrusted {
             instances.push(advice);
         }
 
@@ -512,41 +514,29 @@ where
             &mut self.transcript,
         );
 
-        // 3. Verify Stage 7 batched sumcheck (address rounds only).
-        // Includes HammingWeightClaimReduction plus Phase 2 advice reduction instances (if needed).
-        let trusted_advice_phase2 = self.advice_reduction_gamma_trusted.and_then(|gamma| {
-            AdviceClaimReductionPhase2Verifier::new(
-                AdviceKind::Trusted,
-                &self.program_io.memory_layout,
-                self.proof.trace_length,
-                gamma,
-                &self.opening_accumulator,
-                self.proof
-                    .rw_config
-                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
-            )
-        });
-        let untrusted_advice_phase2 = self.advice_reduction_gamma_untrusted.and_then(|gamma| {
-            AdviceClaimReductionPhase2Verifier::new(
-                AdviceKind::Untrusted,
-                &self.program_io.memory_layout,
-                self.proof.trace_length,
-                gamma,
-                &self.opening_accumulator,
-                self.proof
-                    .rw_config
-                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
-            )
-        });
-
         let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> =
             vec![&hw_verifier];
-        if let Some(ref v) = trusted_advice_phase2 {
-            instances.push(v);
+        if let Some(advice_reduction_verifier_trusted) =
+            self.advice_reduction_verifier_trusted.as_mut()
+        {
+            let mut params = advice_reduction_verifier_trusted.params.borrow_mut();
+            if params.num_address_phase_rounds() > 0 {
+                // Transition phase
+                params.phase = ReductionPhase::AddressVariables;
+                instances.push(advice_reduction_verifier_trusted);
+            }
         }
-        if let Some(ref v) = untrusted_advice_phase2 {
-            instances.push(v);
+        if let Some(advice_reduction_verifier_untrusted) =
+            self.advice_reduction_verifier_untrusted.as_mut()
+        {
+            let mut params = advice_reduction_verifier_untrusted.params.borrow_mut();
+            if params.num_address_phase_rounds() > 0 {
+                // Transition phase
+                params.phase = ReductionPhase::AddressVariables;
+                instances.push(advice_reduction_verifier_untrusted);
+            }
         }
+
         let _r_address_stage7 = BatchedSumcheck::verify(
             &self.proof.stage7_sumcheck_proof,
             instances,
@@ -561,6 +551,15 @@ where
     /// Stage 8: Dory batch opening verification.
     #[allow(dead_code)]
     fn verify_stage8(&mut self) -> Result<(), anyhow::Error> {
+        // Initialize DoryGlobals with the layout from the proof
+        // This ensures the verifier uses the same layout as the prover
+        let _guard = DoryGlobals::initialize_context(
+            1 << self.one_hot_params.log_k_chunk,
+            self.proof.trace_length.next_power_of_two(),
+            DoryContext::Main,
+            Some(self.proof.dory_layout),
+        );
+
         // Get the unified opening point from HammingWeightClaimReduction
         // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
         let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
@@ -618,22 +617,22 @@ where
         // them in the top-left block of the main Dory matrix.
         if let Some((advice_point, advice_claim)) = self
             .opening_accumulator
-            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReductionPhase2)
+            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
         {
             let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, advice_point.len());
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
             polynomial_claims.push((
                 CommittedPolynomial::TrustedAdvice,
                 advice_claim * lagrange_factor,
             ));
         }
 
-        if let Some((advice_point, advice_claim)) = self.opening_accumulator.get_advice_opening(
-            AdviceKind::Untrusted,
-            SumcheckId::AdviceClaimReductionPhase2,
-        ) {
+        if let Some((advice_point, advice_claim)) = self
+            .opening_accumulator
+            .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
+        {
             let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, advice_point.len());
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
             polynomial_claims.push((
                 CommittedPolynomial::UntrustedAdvice,
                 advice_claim * lagrange_factor,
@@ -773,7 +772,8 @@ where
 
         // 2. Sample gamma and compute powers for RLC
         let gamma_powers: Vec<F> = {
-            let _span = tracing::info_span!("stage8_gamma_powers", num_claims = claims.len()).entered();
+            let _span =
+                tracing::info_span!("stage8_gamma_powers", num_claims = claims.len()).entered();
             self.transcript.append_scalars(&claims);
             self.transcript.challenge_scalar_powers(claims.len())
         };
@@ -884,16 +884,20 @@ where
         // Extract constraint counts from the opening claims in recursion_proof
         // We can infer the structure from the types of virtual polynomials
         let (_num_gt_exp, _num_gt_mul, _num_g1_scalar_mul) = {
-            let _span = tracing::info_span!("stage8_count_constraint_types", num_claims = recursion_proof.opening_claims.len()).entered();
+            let _span = tracing::info_span!(
+                "stage8_count_constraint_types",
+                num_claims = recursion_proof.opening_claims.len()
+            )
+            .entered();
             let mut num_gt_exp = 0;
             let mut num_gt_mul = 0;
             let mut num_g1_scalar_mul = 0;
 
-        // Count constraint types based on the virtual polynomial types in opening claims
-        for (key, _) in &recursion_proof.opening_claims {
-            match key {
-                OpeningId::Virtual(poly, _) => {
-                    match poly {
+            // Count constraint types based on the virtual polynomial types in opening claims
+            for (key, _) in &recursion_proof.opening_claims {
+                match key {
+                    OpeningId::Virtual(poly, _) => {
+                        match poly {
                         crate::zkvm::witness::VirtualPolynomial::RecursionBase(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionRhoPrev(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionRhoCurr(_)
@@ -947,10 +951,10 @@ where
                         }
                         _ => {} // Ignore other virtual polynomial types
                     }
+                    }
+                    _ => {} // Ignore non-virtual openings
                 }
-                _ => {} // Ignore non-virtual openings
             }
-        }
             (num_gt_exp, num_gt_mul, num_g1_scalar_mul)
         };
 
@@ -1046,7 +1050,7 @@ where
             };
             let Some((point, eval)) = self
                 .opening_accumulator
-                .get_trusted_advice_opening(SumcheckId::RamValEvaluation)
+                .get_advice_opening(AdviceKind::Trusted, SumcheckId::RamValEvaluation)
             else {
                 return Err(anyhow::anyhow!("Trusted advice opening not found"));
             };
@@ -1073,7 +1077,7 @@ where
                 };
                 let Some((point_val_final, eval_val_final)) = self
                     .opening_accumulator
-                    .get_trusted_advice_opening(SumcheckId::RamValFinalEvaluation)
+                    .get_advice_opening(AdviceKind::Trusted, SumcheckId::RamValFinalEvaluation)
                 else {
                     return Err(anyhow::anyhow!(
                         "Trusted advice val final opening not found"
@@ -1109,7 +1113,7 @@ where
             };
             let Some((point, eval)) = self
                 .opening_accumulator
-                .get_untrusted_advice_opening(SumcheckId::RamValEvaluation)
+                .get_advice_opening(AdviceKind::Untrusted, SumcheckId::RamValEvaluation)
             else {
                 return Err(anyhow::anyhow!("Untrusted advice opening not found"));
             };
@@ -1138,7 +1142,7 @@ where
                 };
                 let Some((point_val_final, eval_val_final)) = self
                     .opening_accumulator
-                    .get_untrusted_advice_opening(SumcheckId::RamValFinalEvaluation)
+                    .get_advice_opening(AdviceKind::Untrusted, SumcheckId::RamValFinalEvaluation)
                 else {
                     return Err(anyhow::anyhow!(
                         "Untrusted advice val final opening not found"
@@ -1301,7 +1305,8 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         type HyraxPCS = Hyrax<1, GrumpkinProjective>;
         let hyrax_prover_setup =
             <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
-        let hyrax_recursion_setup = <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
+        let hyrax_recursion_setup =
+            <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
 
         Self {
             generators,

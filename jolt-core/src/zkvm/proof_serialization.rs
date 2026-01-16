@@ -13,7 +13,7 @@ use crate::subprotocols::univariate_skip::UniSkipFirstRoundProof;
 use crate::{
     field::JoltField,
     poly::{
-        commitment::{commitment_scheme::RecursionExt, hyrax::Hyrax},
+        commitment::{commitment_scheme::RecursionExt, dory::DoryLayout, hyrax::Hyrax},
         opening_proof::{OpeningId, OpeningPoint, Openings, SumcheckId},
     },
     subprotocols::sumcheck::SumcheckInstanceProof,
@@ -109,6 +109,41 @@ pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
     pub bytecode_K: usize,
     pub rw_config: ReadWriteConfig,
     pub one_hot_config: OneHotConfig,
+    pub dory_layout: DoryLayout,
+}
+
+impl CanonicalSerialize for DoryLayout {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        u8::from(*self).serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        u8::from(*self).serialized_size(compress)
+    }
+}
+
+impl Valid for DoryLayout {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for DoryLayout {
+    fn deserialize_with_mode<R: Read>(
+        reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let value = u8::deserialize_with_mode(reader, compress, validate)?;
+        if value > 1 {
+            return Err(SerializationError::InvalidData);
+        }
+        Ok(DoryLayout::from(value))
+    }
 }
 
 impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
@@ -168,15 +203,21 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
         self.rw_config.serialize_with_mode(&mut writer, compress)?;
         self.one_hot_config
             .serialize_with_mode(&mut writer, compress)?;
+        self.dory_layout
+            .serialize_with_mode(&mut writer, compress)?;
         Ok(())
     }
 
     fn serialized_size(&self, compress: Compress) -> usize {
         self.opening_claims.serialized_size(compress)
             + self.commitments.serialized_size(compress)
-            + self.stage1_uni_skip_first_round_proof.serialized_size(compress)
+            + self
+                .stage1_uni_skip_first_round_proof
+                .serialized_size(compress)
             + self.stage1_sumcheck_proof.serialized_size(compress)
-            + self.stage2_uni_skip_first_round_proof.serialized_size(compress)
+            + self
+                .stage2_uni_skip_first_round_proof
+                .serialized_size(compress)
             + self.stage2_sumcheck_proof.serialized_size(compress)
             + self.stage3_sumcheck_proof.serialized_size(compress)
             + self.stage4_sumcheck_proof.serialized_size(compress)
@@ -188,22 +229,29 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             + self.stage9_pcs_hint.serialized_size(compress)
             + self.stage10_recursion_metadata.serialized_size(compress)
             + self.recursion_proof.serialized_size(compress)
-            + self.trusted_advice_val_evaluation_proof.serialized_size(compress)
-            + self.trusted_advice_val_final_proof.serialized_size(compress)
-            + self.untrusted_advice_val_evaluation_proof.serialized_size(compress)
-            + self.untrusted_advice_val_final_proof.serialized_size(compress)
+            + self
+                .trusted_advice_val_evaluation_proof
+                .serialized_size(compress)
+            + self
+                .trusted_advice_val_final_proof
+                .serialized_size(compress)
+            + self
+                .untrusted_advice_val_evaluation_proof
+                .serialized_size(compress)
+            + self
+                .untrusted_advice_val_final_proof
+                .serialized_size(compress)
             + self.untrusted_advice_commitment.serialized_size(compress)
             + self.trace_length.serialized_size(compress)
             + self.ram_K.serialized_size(compress)
             + self.bytecode_K.serialized_size(compress)
             + self.rw_config.serialized_size(compress)
             + self.one_hot_config.serialized_size(compress)
+            + self.dory_layout.serialized_size(compress)
     }
 }
 
-impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> Valid
-    for JoltProof<F, PCS, FS>
-{
+impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> Valid for JoltProof<F, PCS, FS> {
     fn check(&self) -> Result<(), SerializationError> {
         Ok(())
     }
@@ -312,6 +360,7 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalDeserialize
             bytecode_K: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             rw_config: ReadWriteConfig::deserialize_with_mode(&mut reader, compress, validate)?,
             one_hot_config: OneHotConfig::deserialize_with_mode(&mut reader, compress, validate)?,
+            dory_layout: DoryLayout::deserialize_with_mode(&mut reader, compress, validate)?,
         })
     }
 }

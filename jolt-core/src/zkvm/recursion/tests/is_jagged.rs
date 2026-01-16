@@ -6,7 +6,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryGlobals},
+            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
         },
         dense_mlpoly::DensePolynomial,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
@@ -28,7 +28,7 @@ fn test_dory_matrix_is_jagged() {
 
     // Initialize Dory globals
     DoryGlobals::reset();
-    DoryGlobals::initialize(1 << 2, 1 << 2);
+    DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 
     let num_vars = 4;
     let mut rng = thread_rng();

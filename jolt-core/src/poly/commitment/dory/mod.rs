@@ -18,7 +18,7 @@ mod tests;
 mod recursion_test;
 
 pub use commitment_scheme::DoryCommitmentScheme;
-pub use dory_globals::{DoryContext, DoryGlobals};
+pub use dory_globals::{DoryContext, DoryGlobals, DoryLayout};
 pub use jolt_dory_routines::{JoltG1Routines, JoltG2Routines};
 pub use recursion::{JoltWitness, JoltWitnessGenerator};
 pub use wrappers::{

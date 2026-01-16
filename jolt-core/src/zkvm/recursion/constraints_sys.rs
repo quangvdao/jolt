@@ -6,8 +6,8 @@ use crate::{
         commitment::{
             commitment_scheme::RecursionExt,
             dory::{
-                recursion::JoltGtMulWitness,
-                ArkDoryProof, ArkworksVerifierSetup, DoryCommitmentScheme,
+                recursion::JoltGtMulWitness, ArkDoryProof, ArkworksVerifierSetup,
+                DoryCommitmentScheme,
             },
         },
         dense_mlpoly::DensePolynomial,
@@ -633,7 +633,6 @@ impl DoryMatrixBuilder {
         });
     }
 
-
     /// Add constraint from a per-operation GT multiplication witness (from combine_commitments).
     /// This is the same as `add_gt_mul_witness` but accepts `GTMulOpWitness` type.
     pub fn add_gt_mul_op_witness(&mut self, witness: &GTMulOpWitness) {
@@ -650,10 +649,26 @@ impl DoryMatrixBuilder {
         let result_mle_4var = fq12_to_multilinear_evals(&witness.result);
         let quotient_mle_4var = witness.quotient_mle.clone();
 
-        assert_eq!(lhs_mle_4var.len(), 16, "GT mul witness should have 4-variable MLEs");
-        assert_eq!(rhs_mle_4var.len(), 16, "GT mul witness should have 4-variable MLEs");
-        assert_eq!(result_mle_4var.len(), 16, "GT mul witness should have 4-variable MLEs");
-        assert_eq!(quotient_mle_4var.len(), 16, "GT mul witness should have 4-variable MLEs");
+        assert_eq!(
+            lhs_mle_4var.len(),
+            16,
+            "GT mul witness should have 4-variable MLEs"
+        );
+        assert_eq!(
+            rhs_mle_4var.len(),
+            16,
+            "GT mul witness should have 4-variable MLEs"
+        );
+        assert_eq!(
+            result_mle_4var.len(),
+            16,
+            "GT mul witness should have 4-variable MLEs"
+        );
+        assert_eq!(
+            quotient_mle_4var.len(),
+            16,
+            "GT mul witness should have 4-variable MLEs"
+        );
 
         let (lhs_mle, rhs_mle, result_mle, quotient_mle) = if self.num_constraint_vars == 12 {
             (
@@ -670,7 +685,12 @@ impl DoryMatrixBuilder {
                 Self::pad_4var_to_8var_zero_padding(&quotient_mle_4var),
             )
         } else if self.num_constraint_vars == 4 {
-            (lhs_mle_4var, rhs_mle_4var, result_mle_4var, quotient_mle_4var)
+            (
+                lhs_mle_4var,
+                rhs_mle_4var,
+                result_mle_4var,
+                quotient_mle_4var,
+            )
         } else {
             panic!(
                 "Unsupported number of constraint variables: {}",
@@ -707,7 +727,10 @@ impl DoryMatrixBuilder {
 
     /// Add all constraints from a GTCombineWitness (homomorphic combine offloading).
     /// Returns the packed GT exp witnesses that were created.
-    pub fn add_combine_witness(&mut self, witness: &GTCombineWitness) -> Vec<super::stage1::packed_gt_exp::PackedGtExpWitness> {
+    pub fn add_combine_witness(
+        &mut self,
+        witness: &GTCombineWitness,
+    ) -> Vec<super::stage1::packed_gt_exp::PackedGtExpWitness> {
         use super::stage1::packed_gt_exp::PackedGtExpWitness;
         let mut packed_witnesses = Vec::new();
 
@@ -743,12 +766,8 @@ impl DoryMatrixBuilder {
                     exp_wit.quotient_mles.clone()
                 };
 
-                let packed = PackedGtExpWitness::from_steps(
-                    &rho_mles,
-                    &quotient_mles,
-                    &bits,
-                    &base_mle,
-                );
+                let packed =
+                    PackedGtExpWitness::from_steps(&rho_mles, &quotient_mles, &bits, &base_mle);
                 self.add_packed_gt_exp_witness(&packed);
                 packed_witnesses.push(packed);
                 continue;
@@ -782,12 +801,8 @@ impl DoryMatrixBuilder {
             };
 
             // Create packed witness
-            let packed = PackedGtExpWitness::from_steps(
-                &rho_mles,
-                &quotient_mles,
-                &exp_wit.bits,
-                &base_mle,
-            );
+            let packed =
+                PackedGtExpWitness::from_steps(&rho_mles, &quotient_mles, &exp_wit.bits, &base_mle);
 
             // Add to matrix
             self.add_packed_gt_exp_witness(&packed);
@@ -884,11 +899,7 @@ impl DoryMatrixBuilder {
 
                 // Copy actual rows
                 for row in rows {
-                    std::ptr::copy_nonoverlapping(
-                        row.as_ptr(),
-                        eval_ptr.add(offset),
-                        row_size
-                    );
+                    std::ptr::copy_nonoverlapping(row.as_ptr(), eval_ptr.add(offset), row_size);
                     offset += row_size;
                 }
 
@@ -1140,7 +1151,9 @@ impl ConstraintSystem {
         let row_size = 1 << num_constraint_vars;
 
         // Pre-allocate with exact capacity
-        let gt_mul_count = self.constraints.iter()
+        let gt_mul_count = self
+            .constraints
+            .iter()
             .filter(|c| matches!(c.constraint_type, ConstraintType::GtMul))
             .count();
         let mut constraints = Vec::with_capacity(gt_mul_count);
@@ -1177,7 +1190,9 @@ impl ConstraintSystem {
         let row_size = 1 << num_constraint_vars;
 
         // Pre-allocate with exact capacity
-        let g1_scalar_mul_count = self.constraints.iter()
+        let g1_scalar_mul_count = self
+            .constraints
+            .iter()
             .filter(|c| matches!(c.constraint_type, ConstraintType::G1ScalarMul { .. }))
             .count();
         let mut constraints = Vec::with_capacity(g1_scalar_mul_count);
@@ -1292,8 +1307,7 @@ impl ConstraintSystem {
                 let bit_eval = self.matrix.evaluate_row(bit_row, x);
 
                 let base_power = Fq::one() + (base_eval - Fq::one()) * bit_eval;
-                let constraint_eval =
-                    rho_curr - rho_prev.square() * base_power - quotient * g_eval;
+                let constraint_eval = rho_curr - rho_prev.square() * base_power - quotient * g_eval;
 
                 // Convert point to index
                 let mut index = 0usize;
@@ -1318,7 +1332,11 @@ impl ConstraintSystem {
                 // Also check raw data at the specific index
                 let packed = &self.packed_gt_exp_witnesses[idx];
                 println!("  --- Raw packed data at index {} ---", index);
-                println!("  rho_packed[{}] = {:?}", index, packed.rho_packed.get(index));
+                println!(
+                    "  rho_packed[{}] = {:?}",
+                    index,
+                    packed.rho_packed.get(index)
+                );
                 println!(
                     "  rho_next_packed[{}] = {:?}",
                     index,
@@ -1329,7 +1347,11 @@ impl ConstraintSystem {
                     index,
                     packed.quotient_packed.get(index)
                 );
-                println!("  bit_packed[{}] = {:?}", index, packed.bit_packed.get(index));
+                println!(
+                    "  bit_packed[{}] = {:?}",
+                    index,
+                    packed.bit_packed.get(index)
+                );
                 println!(
                     "  base_packed[{}] = {:?}",
                     index,
@@ -1339,10 +1361,7 @@ impl ConstraintSystem {
                 // Check if matrix data matches packed data
                 println!("  --- Matrix data check ---");
                 let storage_offset = self.matrix.storage_offset(base_row);
-                println!(
-                    "  base_row={}, storage_offset={}",
-                    base_row, storage_offset
-                );
+                println!("  base_row={}, storage_offset={}", base_row, storage_offset);
                 println!(
                     "  matrix.evaluations[{}] = {:?}",
                     storage_offset + index,
@@ -1351,7 +1370,9 @@ impl ConstraintSystem {
                 println!(
                     "  matrix row_evals[{}] = {:?}",
                     index,
-                    self.matrix.evaluations.get(storage_offset..storage_offset + 4096)
+                    self.matrix
+                        .evaluations
+                        .get(storage_offset..storage_offset + 4096)
                         .and_then(|s| s.get(index))
                 );
             }
@@ -1635,7 +1656,7 @@ mod tests {
     use crate::poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryGlobals},
+            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
         },
         dense_mlpoly::DensePolynomial,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
@@ -1650,7 +1671,7 @@ mod tests {
         use rand::thread_rng;
 
         DoryGlobals::reset();
-        DoryGlobals::initialize(1 << 2, 1 << 2);
+        DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
         let num_vars = 4;
         let mut rng = thread_rng();
 

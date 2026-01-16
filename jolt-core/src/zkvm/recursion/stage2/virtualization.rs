@@ -51,16 +51,16 @@ use crate::{
     poly::{
         dense_mlpoly::DensePolynomial,
         eq_poly::EqPolynomial,
-        multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation},
+        multilinear_polynomial::{
+            BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
+        },
         opening_proof::{
-            OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator, BIG_ENDIAN,
+            OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
+            VerifierOpeningAccumulator, BIG_ENDIAN,
         },
     },
     transcripts::Transcript,
-    zkvm::{
-        recursion::constraints_sys::ConstraintType,
-        witness::VirtualPolynomial,
-    },
+    zkvm::{recursion::constraints_sys::ConstraintType, witness::VirtualPolynomial},
 };
 use ark_bn254::Fq;
 use ark_ff::Zero;
@@ -90,7 +90,11 @@ pub fn virtual_claim_index(constraint_idx: usize, poly_idx: usize) -> usize {
 /// This is the transpose of how virtual claims are laid out, which is important
 /// for the mathematical properties of the virtualization protocol.
 #[inline]
-pub fn matrix_s_index(poly_idx: usize, constraint_idx: usize, num_constraints_padded: usize) -> usize {
+pub fn matrix_s_index(
+    poly_idx: usize,
+    constraint_idx: usize,
+    num_constraints_padded: usize,
+) -> usize {
     poly_idx * num_constraints_padded + constraint_idx
 }
 
@@ -145,9 +149,8 @@ impl DirectEvaluationProver {
     ) -> Self {
         // The matrix has layout [x_vars, s_vars] in little-endian
         // We need to bind the x variables to r_x
-        let mut matrix_poly = MultilinearPolynomial::LargeScalars(
-            DensePolynomial::new(matrix_evals)
-        );
+        let mut matrix_poly =
+            MultilinearPolynomial::LargeScalars(DensePolynomial::new(matrix_evals));
 
         // Bind x variables (first num_constraint_vars variables)
         for i in 0..params.num_constraint_vars {
@@ -223,11 +226,7 @@ pub struct DirectEvaluationVerifier {
 
 impl DirectEvaluationVerifier {
     /// Create a new verifier
-    pub fn new(
-        params: DirectEvaluationParams,
-        virtual_claims: Vec<Fq>,
-        r_x: Vec<Fq>,
-    ) -> Self {
+    pub fn new(params: DirectEvaluationParams, virtual_claims: Vec<Fq>, r_x: Vec<Fq>) -> Self {
         Self {
             params,
             virtual_claims,
@@ -296,7 +295,8 @@ impl DirectEvaluationVerifier {
         for constraint_idx in 0..self.params.num_constraints {
             for poly_idx in 0..NUM_POLY_TYPES {
                 let claim_idx = virtual_claim_index(constraint_idx, poly_idx);
-                let s_idx = matrix_s_index(poly_idx, constraint_idx, self.params.num_constraints_padded);
+                let s_idx =
+                    matrix_s_index(poly_idx, constraint_idx, self.params.num_constraints_padded);
 
                 if claim_idx < self.virtual_claims.len() && s_idx < eq_evals.len() {
                     result += eq_evals[s_idx] * self.virtual_claims[claim_idx];
@@ -446,4 +446,3 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
 
     claims
 }
-

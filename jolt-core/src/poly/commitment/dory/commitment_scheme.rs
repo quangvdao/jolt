@@ -110,27 +110,92 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
     }
 
     let exp_limbs: [u64; FR_LIMBS_U64] = coeff.0.into_bigint().0;
-    let base_limbs: [u64; GT_LIMBS_U64] = fq12_to_limbs_mont(&base.0);
 
-    // Square-and-multiply in guest code using smaller inlines (avoids the `u16` inline-length limit).
+    #[inline(always)]
+    fn exp_bit(exp: &[u64; FR_LIMBS_U64], bit_idx: usize) -> u64 {
+        let limb = exp[bit_idx / 64];
+        (limb >> (bit_idx % 64)) & 1
+    }
+
+    // Find the highest set bit (skip leading zeros). If exp == 0, return 1 in Fq12.
+    let msb: Option<usize> = (0..FR_LIMBS_U64).rev().find_map(|limb_idx| {
+        let limb = exp_limbs[limb_idx];
+        if limb == 0 {
+            None
+        } else {
+            Some(limb_idx * 64 + (63usize.saturating_sub(limb.leading_zeros() as usize)))
+        }
+    });
+
     // acc := 1 in Fq12 (Montgomery form)
     let one_limbs = fq_to_limbs_mont(&Fq::one());
-    let mut acc_limbs = [0u64; GT_LIMBS_U64];
-    acc_limbs[0..4].copy_from_slice(&one_limbs);
+    let mut one_gt_limbs = [0u64; GT_LIMBS_U64];
+    one_gt_limbs[0..4].copy_from_slice(&one_limbs);
+
+    let Some(msb) = msb else {
+        return ArkGT(fq12_from_limbs_mont(one_gt_limbs));
+    };
+
+    let base_limbs: [u64; GT_LIMBS_U64] = fq12_to_limbs_mont(&base.0);
+
+    // Sliding-window exponentiation (left-to-right) in guest code using GT_SQR/GT_MUL inlines.
+    // This reduces the number of GT multiplications relative to bit-by-bit square-and-multiply.
+    //
+    // Window size tradeoff:
+    // - larger windows reduce muls in the main loop, but increase precomputation muls
+    // - w=4 is a good first default for 256-bit exponents in a zkVM setting
+    const WINDOW: usize = 4;
+    const TABLE_SIZE: usize = 1 << (WINDOW - 1); // odd powers: 1,3,5,...,(2^w-1)
+
+    // Precompute odd powers: base^(2i+1) for i in [0, TABLE_SIZE).
+    let mut odd_pows = [[0u64; GT_LIMBS_U64]; TABLE_SIZE];
+    odd_pows[0] = base_limbs;
+
+    let mut base_sq = [0u64; GT_LIMBS_U64];
+    bn254_gt_sqr_into(&mut base_sq, &base_limbs); // base^2
+    for i in 1..TABLE_SIZE {
+        // base^(2i+1) = base^(2(i-1)+1) * base^2
+        let prev = odd_pows[i - 1];
+        bn254_gt_mul_into(&mut odd_pows[i], &prev, &base_sq);
+    }
+
+    #[inline(always)]
+    fn window_at(exp: &[u64; FR_LIMBS_U64], i: usize) -> (usize, u32) {
+        let mut l = core::cmp::min(WINDOW, i + 1);
+        while l > 1 && exp_bit(exp, i + 1 - l) == 0 {
+            l -= 1;
+        }
+        let mut u: u32 = 0;
+        for j in 0..l {
+            u = (u << 1) | (exp_bit(exp, i - j) as u32);
+        }
+        debug_assert!((u & 1) == 1, "window value must be odd");
+        (l, u)
+    }
+
+    // Initialize acc with the first (MSB) window, avoiding redundant squarings of 1.
+    let (l0, u0) = window_at(&exp_limbs, msb);
+    let mut acc_limbs = odd_pows[(u0 as usize) >> 1];
 
     let mut tmp = [0u64; GT_LIMBS_U64];
-    for limb_idx in (0..FR_LIMBS_U64).rev() {
-        let limb = exp_limbs[limb_idx];
-        for bit_idx in (0..64usize).rev() {
+    let mut i: isize = msb as isize - l0 as isize;
+    while i >= 0 {
+        if exp_bit(&exp_limbs, i as usize) == 0 {
             // acc := acc^2
             bn254_gt_sqr_into(&mut tmp, &acc_limbs);
             core::mem::swap(&mut acc_limbs, &mut tmp);
-
-            // If the bit is set, acc := acc * base
-            if ((limb >> bit_idx) & 1) == 1 {
-                bn254_gt_mul_into(&mut tmp, &acc_limbs, &base_limbs);
+            i -= 1;
+        } else {
+            let (l, u) = window_at(&exp_limbs, i as usize);
+            for _ in 0..l {
+                bn254_gt_sqr_into(&mut tmp, &acc_limbs);
                 core::mem::swap(&mut acc_limbs, &mut tmp);
             }
+            // u is odd, so index is (u - 1)/2 == u >> 1.
+            let idx = (u as usize) >> 1;
+            bn254_gt_mul_into(&mut tmp, &acc_limbs, &odd_pows[idx]);
+            core::mem::swap(&mut acc_limbs, &mut tmp);
+            i -= l as isize;
         }
     }
 
@@ -397,7 +462,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
                 #[cfg(not(feature = "host"))]
                 {
                     // Use the BN254_GT_EXP inline inside the zkVM guest.
-                    gt_exp_inline(&ark_coeff, *commitment)
+                    gt_exp_inline(&ark_coeff, commitment)
                 }
             })
             .collect();

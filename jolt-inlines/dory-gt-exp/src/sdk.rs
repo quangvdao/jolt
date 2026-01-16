@@ -96,6 +96,14 @@ pub unsafe fn bn254_gt_exp_inline(exp: *const u64, base: *const u64, out: *mut u
 /// - rs1 = lhs_ptr (48 x u64 limbs)
 /// - rs2 = rhs_ptr (48 x u64 limbs)
 /// - rd  = out_ptr (48 x u64 limbs)
+///
+/// # Safety
+/// - All pointers must be valid and 8-byte aligned.
+/// - `lhs` must be readable for 384 bytes.
+/// - `rhs` must be readable for 384 bytes.
+/// - `out` must be writable for 384 bytes.
+/// - The current host-side inline expansion (sequence builder) **rejects** `out == rhs` because it
+///   uses the `out[..384]` region as scratch while reading `rhs`.
 #[cfg(not(feature = "host"))]
 #[inline(always)]
 pub unsafe fn bn254_gt_mul_inline(lhs: *const u64, rhs: *const u64, out: *mut u64) {
@@ -118,6 +126,11 @@ pub unsafe fn bn254_gt_mul_inline(lhs: *const u64, rhs: *const u64, out: *mut u6
 /// - rs1 = in_ptr  (48 x u64 limbs)
 /// - rs2 = in_ptr  (duplicated; unused by the current builder)
 /// - rd  = out_ptr (48 x u64 limbs)
+///
+/// # Safety
+/// - All pointers must be valid and 8-byte aligned.
+/// - `input` must be readable for 384 bytes.
+/// - `out` must be writable for 384 bytes.
 #[cfg(not(feature = "host"))]
 #[inline(always)]
 pub unsafe fn bn254_gt_sqr_inline(input: *const u64, out: *mut u64) {

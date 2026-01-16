@@ -1029,8 +1029,6 @@ dependencies = [
 [[package]]
 name = "dory-pcs"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c39e3ecf57aa4adc063f292501076a16bd6f254c090c949cc9906af7edb43de4"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -1042,6 +1040,7 @@ dependencies = [
  "digest",
  "dirs",
  "dory-derive",
+ "jolt-inlines-dory-gt-exp",
  "once_cell",
  "rand_core 0.6.4",
  "rayon",

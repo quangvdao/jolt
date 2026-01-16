@@ -143,8 +143,9 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
     //
     // Window size tradeoff:
     // - larger windows reduce muls in the main loop, but increase precomputation muls
-    // - w=4 is a good first default for 256-bit exponents in a zkVM setting
-    const WINDOW: usize = 4;
+    // - because GT squaring is cyclotomic-specialized (cheap) while multiplication is expensive,
+    //   we typically want a moderately large window; w=5 is a good default for 256-bit exponents.
+    const WINDOW: usize = 5;
     const TABLE_SIZE: usize = 1 << (WINDOW - 1); // odd powers: 1,3,5,...,(2^w-1)
 
     // Precompute odd powers: base^(2i+1) for i in [0, TABLE_SIZE).
@@ -173,32 +174,62 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
         (l, u)
     }
 
+    // Double-buffer accumulator to avoid a 48-limb swap/copy after every GT op.
+    // `cur_is_0 == true` means `buf0` holds the current accumulator.
+    #[inline(always)]
+    fn sqr_toggle(
+        buf0: &mut [u64; GT_LIMBS_U64],
+        buf1: &mut [u64; GT_LIMBS_U64],
+        cur_is_0: &mut bool,
+    ) {
+        if *cur_is_0 {
+            bn254_gt_sqr_into(buf1, buf0);
+        } else {
+            bn254_gt_sqr_into(buf0, buf1);
+        }
+        *cur_is_0 = !*cur_is_0;
+    }
+
+    #[inline(always)]
+    fn mul_toggle(
+        buf0: &mut [u64; GT_LIMBS_U64],
+        buf1: &mut [u64; GT_LIMBS_U64],
+        rhs: &[u64; GT_LIMBS_U64],
+        cur_is_0: &mut bool,
+    ) {
+        if *cur_is_0 {
+            bn254_gt_mul_into(buf1, buf0, rhs);
+        } else {
+            bn254_gt_mul_into(buf0, buf1, rhs);
+        }
+        *cur_is_0 = !*cur_is_0;
+    }
+
     // Initialize acc with the first (MSB) window, avoiding redundant squarings of 1.
     let (l0, u0) = window_at(&exp_limbs, msb);
-    let mut acc_limbs = odd_pows[(u0 as usize) >> 1];
+    let mut buf0 = odd_pows[(u0 as usize) >> 1];
+    let mut buf1 = [0u64; GT_LIMBS_U64];
+    let mut cur_is_0 = true;
 
-    let mut tmp = [0u64; GT_LIMBS_U64];
     let mut i: isize = msb as isize - l0 as isize;
     while i >= 0 {
         if exp_bit(&exp_limbs, i as usize) == 0 {
             // acc := acc^2
-            bn254_gt_sqr_into(&mut tmp, &acc_limbs);
-            core::mem::swap(&mut acc_limbs, &mut tmp);
+            sqr_toggle(&mut buf0, &mut buf1, &mut cur_is_0);
             i -= 1;
         } else {
             let (l, u) = window_at(&exp_limbs, i as usize);
             for _ in 0..l {
-                bn254_gt_sqr_into(&mut tmp, &acc_limbs);
-                core::mem::swap(&mut acc_limbs, &mut tmp);
+                sqr_toggle(&mut buf0, &mut buf1, &mut cur_is_0);
             }
             // u is odd, so index is (u - 1)/2 == u >> 1.
             let idx = (u as usize) >> 1;
-            bn254_gt_mul_into(&mut tmp, &acc_limbs, &odd_pows[idx]);
-            core::mem::swap(&mut acc_limbs, &mut tmp);
+            mul_toggle(&mut buf0, &mut buf1, &odd_pows[idx], &mut cur_is_0);
             i -= l as isize;
         }
     }
 
+    let acc_limbs = if cur_is_0 { buf0 } else { buf1 };
     ArkGT(fq12_from_limbs_mont(acc_limbs))
 }
 

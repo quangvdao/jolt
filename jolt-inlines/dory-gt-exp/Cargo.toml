@@ -1,0 +1,28 @@
+[package]
+name = "jolt-inlines-dory-gt-exp"
+version = "0.1.0"
+edition = "2021"
+description = "BN254 Dory GT exponentiation inline (skeleton)"
+license = "MIT"
+homepage = "https://github.com/a16z/jolt/README.md"
+repository = "https://github.com/a16z/jolt"
+
+[features]
+default = []
+host = ["dep:ctor", "dep:tracer", "dep:tracing", "dep:ark-bn254", "dep:ark-ff"]
+
+[dependencies]
+ctor = { workspace = true, optional = true }
+tracer = { workspace = true, optional = true, features = ["std"] }
+tracing = { workspace = true, optional = true }
+
+# Host-only: used for reference execution in tests and future advice generation.
+# We enable `curve` (base + extension fields) and `scalar_field` (Fr) so tests can
+# compare limb layouts against arkworks types.
+ark-bn254 = { workspace = true, optional = true, features = ["std", "curve", "scalar_field"] }
+ark-ff = { workspace = true, optional = true, features = ["std"] }
+
+[dev-dependencies]
+tracer = { workspace = true, features = ["std", "test-utils"] }
+ark-std = { workspace = true, features = ["std"] }
+rand_chacha = { workspace = true, features = ["std"] }

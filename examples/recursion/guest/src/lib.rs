@@ -26,6 +26,8 @@ fn verify(bytes: &[u8]) -> u32 {
 
     let mut cursor = std::io::Cursor::new(data_bytes);
 
+    start_cycle_tracking("deserialization");
+
     start_cycle_tracking("deserialize preprocessing");
     let verifier_preprocessing: JoltVerifierPreprocessing<F, PCS> =
         JoltVerifierPreprocessing::<F, PCS>::deserialize_with_mode(&mut cursor, Compress::Yes, Validate::No).unwrap();
@@ -36,8 +38,11 @@ fn verify(bytes: &[u8]) -> u32 {
     let n: u32 = u32::deserialize_with_mode(&mut cursor, Compress::Yes, Validate::No).unwrap();
     end_cycle_tracking("deserialize count of proofs");
 
+    end_cycle_tracking("deserialization");
+
     let mut all_valid = true;
     for _ in 0..n {
+        start_cycle_tracking("deserialization");
         start_cycle_tracking("deserialize proof");
         let proof = RV64IMACProof::deserialize_with_mode(&mut cursor, Compress::Yes, Validate::No).unwrap();
         end_cycle_tracking("deserialize proof");
@@ -45,6 +50,7 @@ fn verify(bytes: &[u8]) -> u32 {
         start_cycle_tracking("deserialize device");
         let device = JoltDevice::deserialize_with_mode(&mut cursor, Compress::Yes, Validate::No).unwrap();
         end_cycle_tracking("deserialize device");
+        end_cycle_tracking("deserialization");
 
         start_cycle_tracking("verification");
         let verifier = RV64IMACVerifier::new(&verifier_preprocessing, proof, device, None, None);

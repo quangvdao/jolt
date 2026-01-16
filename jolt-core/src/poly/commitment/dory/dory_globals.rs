@@ -1,7 +1,9 @@
 //! Global state management for Dory parameters
 
 use crate::utils::math::Math;
-use dory::backends::arkworks::{init_cache, is_cached, ArkG1, ArkG2};
+use dory::backends::arkworks::{ArkG1, ArkG2};
+#[cfg(feature = "prover")]
+use dory::backends::arkworks::{init_cache, is_cached};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     OnceLock,
@@ -290,8 +292,15 @@ impl DoryGlobals {
     /// * `g1_vec` - Vector of G1 generators from the prover setup
     /// * `g2_vec` - Vector of G2 generators from the prover setup
     pub fn init_prepared_cache(g1_vec: &[ArkG1], g2_vec: &[ArkG2]) {
-        if !is_cached() {
-            init_cache(g1_vec, g2_vec);
+        #[cfg(feature = "prover")]
+        {
+            if !is_cached() {
+                init_cache(g1_vec, g2_vec);
+            }
+        }
+        #[cfg(not(feature = "prover"))]
+        {
+            let _ = (g1_vec, g2_vec);
         }
     }
 }

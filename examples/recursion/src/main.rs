@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info};
 
+// Ensure BN254_GT_EXP inline library is linked and auto-registered (via #[ctor::ctor]).
+use jolt_inlines_dory_gt_exp as _;
+
+use common::constants::RAM_START_ADDRESS;
+
 fn get_guest_src_dir() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let guest_src_dir = manifest_dir.join("guest").join("src");
@@ -467,7 +472,7 @@ fn run_recursion_proof(
     run_config: RunConfig,
     input_bytes: Vec<u8>,
     memory_config: MemoryConfig,
-    mut max_trace_length: usize,
+    max_trace_length: usize,
 ) {
     let target_dir = "/tmp/jolt-guest-targets";
 
@@ -480,32 +485,28 @@ fn run_recursion_proof(
     let mut recursion = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
     recursion.elf = program.elf;
 
-    if run_config == RunConfig::Trace || run_config == RunConfig::TraceToFile {
-        // shorten the max_trace_length for tracing only. Speeds up setup time for tracing purposes.
-        max_trace_length = 0;
-    }
-    let recursion_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length);
-    let recursion_verifier_preprocessing =
-        jolt_sdk::JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
-
-    // update program_size in memory_config now that we know it
-    recursion.memory_config.program_size = Some(
-        recursion_verifier_preprocessing
-            .shared
-            .memory_layout
-            .program_size,
-    );
-
-    let mut output_bytes = vec![
-        0;
-        recursion_verifier_preprocessing
-            .shared
-            .memory_layout
-            .max_output_size as usize
-    ];
     match run_config {
         RunConfig::Prove => {
+            let recursion_prover_preprocessing =
+                jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length);
+            let recursion_verifier_preprocessing =
+                jolt_sdk::JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
+
+            // update program_size in memory_config now that we know it
+            recursion.memory_config.program_size = Some(
+                recursion_verifier_preprocessing
+                    .shared
+                    .memory_layout
+                    .program_size,
+            );
+
+            let mut output_bytes = vec![
+                0;
+                recursion_verifier_preprocessing
+                    .shared
+                    .memory_layout
+                    .max_output_size as usize
+            ];
             let (proof, _io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
                 &recursion,
                 &input_bytes,
@@ -530,12 +531,18 @@ fn run_recursion_proof(
         }
         RunConfig::Trace => {
             info!("  Trace-only mode: Skipping proof generation and verification.");
+            // We still need program_size to lay out memory correctly, but we avoid guest preprocess
+            // because it fully expands inline sequences into bytecode (can be enormous for some inlines).
+            let (_, _, program_end, _) = tracer::decode(&elf_contents);
+            recursion.memory_config.program_size = Some(program_end - RAM_START_ADDRESS);
             let (_, _, _, io_device) = recursion.trace(&input_bytes, &[], &[]);
             let rv = postcard::from_bytes::<u32>(&io_device.outputs).unwrap_or(0);
             info!("  Recursion output (trace-only): {rv}");
         }
         RunConfig::TraceToFile => {
             info!("  Trace-only mode: Skipping proof generation and verification. Tracing to file: /tmp/{}.trace", guest.name());
+            let (_, _, program_end, _) = tracer::decode(&elf_contents);
+            recursion.memory_config.program_size = Some(program_end - RAM_START_ADDRESS);
             let (_, io_device) = recursion.trace_to_file(
                 &input_bytes,
                 &[],

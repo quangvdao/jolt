@@ -33,6 +33,8 @@ host = [
     "prover",
     "dep:jolt-inlines-sha2",
     "dep:jolt-inlines-keccak256",
+    "dep:jolt-inlines-dory-gt-exp",
+    "jolt-inlines-dory-gt-exp/host",
 ]
 prover = [
     "minimal",
@@ -45,7 +47,14 @@ prover = [
 ]
 # This is for building jolt-core without prover capabilities, e.g. for recursion
 # jolt-core needs std and rayon to compile, so these are the minimal set of features.
-minimal = ["ark-ec/std", "ark-ff/std", "ark-std/std", "ark-ff/asm", "rayon"]
+minimal = [
+    "ark-ec/std",
+    "ark-ff/std",
+    "ark-std/std",
+    "ark-ff/asm",
+    "rayon",
+    "dep:jolt-inlines-dory-gt-exp",
+]
 allocative = ["dep:inferno"]
 monitor = ["dep:sysinfo"]
 pprof = ["dep:pprof", "dep:prost"]
@@ -104,6 +113,7 @@ jolt-inlines-sha2 = { workspace = true, features = ["host"], optional = true }
 jolt-inlines-keccak256 = { workspace = true, features = [
     "host",
 ], optional = true }
+jolt-inlines-dory-gt-exp = { workspace = true, default-features = false, optional = true }
 sysinfo = { version = "0.37", optional = true }
 pprof = { version = "0.15", features = [
     "prost-codec",

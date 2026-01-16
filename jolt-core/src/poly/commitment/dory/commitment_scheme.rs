@@ -24,11 +24,110 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use std::borrow::Borrow;
 use tracing::trace_span;
+use core::hint::black_box;
+
+#[cfg(not(feature = "host"))]
+fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
+    use ark_bn254::{Fq, Fq12, Fq2, Fq6};
+    use ark_ff::{BigInt, PrimeField};
+    use core::marker::PhantomData;
+    use jolt_inlines_dory_gt_exp::{bn254_gt_exp, FR_LIMBS_U64, GT_LIMBS_U64};
+
+    #[inline(always)]
+    fn fq_to_limbs_mont(x: &Fq) -> [u64; 4] {
+        x.0 .0
+    }
+
+    #[inline(always)]
+    fn fq_from_limbs_mont(limbs: [u64; 4]) -> Fq {
+        ark_ff::Fp::<_, 4>(BigInt(limbs), PhantomData)
+    }
+
+    #[inline(always)]
+    fn fq2_to_limbs_mont(x: &Fq2) -> [u64; 8] {
+        let c0 = fq_to_limbs_mont(&x.c0);
+        let c1 = fq_to_limbs_mont(&x.c1);
+        [c0[0], c0[1], c0[2], c0[3], c1[0], c1[1], c1[2], c1[3]]
+    }
+
+    #[inline(always)]
+    fn fq2_from_limbs_mont(limbs: [u64; 8]) -> Fq2 {
+        Fq2 {
+            c0: fq_from_limbs_mont([limbs[0], limbs[1], limbs[2], limbs[3]]),
+            c1: fq_from_limbs_mont([limbs[4], limbs[5], limbs[6], limbs[7]]),
+        }
+    }
+
+    #[inline(always)]
+    fn fq6_to_limbs_mont(x: &Fq6) -> [u64; 24] {
+        let c0 = fq2_to_limbs_mont(&x.c0);
+        let c1 = fq2_to_limbs_mont(&x.c1);
+        let c2 = fq2_to_limbs_mont(&x.c2);
+        let mut out = [0u64; 24];
+        out[0..8].copy_from_slice(&c0);
+        out[8..16].copy_from_slice(&c1);
+        out[16..24].copy_from_slice(&c2);
+        out
+    }
+
+    #[inline(always)]
+    fn fq6_from_limbs_mont(limbs: [u64; 24]) -> Fq6 {
+        Fq6 {
+            c0: fq2_from_limbs_mont([
+                limbs[0], limbs[1], limbs[2], limbs[3], limbs[4], limbs[5], limbs[6], limbs[7],
+            ]),
+            c1: fq2_from_limbs_mont([
+                limbs[8], limbs[9], limbs[10], limbs[11], limbs[12], limbs[13], limbs[14], limbs[15],
+            ]),
+            c2: fq2_from_limbs_mont([
+                limbs[16], limbs[17], limbs[18], limbs[19], limbs[20], limbs[21], limbs[22], limbs[23],
+            ]),
+        }
+    }
+
+    #[inline(always)]
+    fn fq12_to_limbs_mont(x: &Fq12) -> [u64; 48] {
+        let c0 = fq6_to_limbs_mont(&x.c0);
+        let c1 = fq6_to_limbs_mont(&x.c1);
+        let mut out = [0u64; 48];
+        out[0..24].copy_from_slice(&c0);
+        out[24..48].copy_from_slice(&c1);
+        out
+    }
+
+    #[inline(always)]
+    fn fq12_from_limbs_mont(limbs: [u64; 48]) -> Fq12 {
+        Fq12 {
+            c0: fq6_from_limbs_mont(limbs[0..24].try_into().unwrap()),
+            c1: fq6_from_limbs_mont(limbs[24..48].try_into().unwrap()),
+        }
+    }
+
+    let exp_limbs: [u64; FR_LIMBS_U64] = coeff.0.into_bigint().0;
+    let base_limbs: [u64; GT_LIMBS_U64] = fq12_to_limbs_mont(&base.0);
+    let out_limbs = bn254_gt_exp(base_limbs, exp_limbs);
+    ArkGT(fq12_from_limbs_mont(out_limbs))
+}
 
 #[derive(Clone)]
 pub struct DoryCommitmentScheme;
+
+impl DoryCommitmentScheme {
+    /// Derived GT op counts for Dory opening verification.
+    ///
+    /// This is based on the algorithm in `dory-pcs`:
+    /// - Each reduce round performs 10 GT exponentiations and 11 GT multiplications.
+    /// - Final verification performs 5 GT exponentiations and 8 GT multiplications.
+    fn derived_opening_gt_op_counts(proof: &ArkDoryProof) -> (u64, u64) {
+        let rounds = proof.sigma as u64;
+        let exp_ops = 10 * rounds + 5;
+        let mul_ops = 11 * rounds + 8;
+        (mul_ops, exp_ops)
+    }
+}
 
 impl CommitmentScheme for DoryCommitmentScheme {
     type Field = ark_bn254::Fr;
@@ -46,7 +145,16 @@ impl CommitmentScheme for DoryCommitmentScheme {
         let hash_result = hasher.finalize();
         let seed: [u8; 32] = hash_result.into();
         let mut rng = ChaCha20Rng::from_seed(seed);
-        let setup = ArkworksProverSetup::new_from_urs(&mut rng, max_num_vars);
+        let setup = {
+            #[cfg(feature = "prover")]
+            {
+                ArkworksProverSetup::new_from_urs(&mut rng, max_num_vars)
+            }
+            #[cfg(not(feature = "prover"))]
+            {
+                ArkworksProverSetup::new(&mut rng, max_num_vars)
+            }
+        };
 
         // The prepared-point cache in dory-pcs is global and can only be initialized once.
         // In unit tests, multiple setups with different sizes are created, so initializing the
@@ -151,6 +259,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
         commitment: &Self::Commitment,
     ) -> Result<(), ProofVerifyError> {
         let _span = trace_span!("DoryCommitmentScheme::verify").entered();
+        const DORY_OPENING_VERIFY_SPAN: &str = "dory_opening_verify";
 
         // Dory uses the opposite endian-ness as Jolt
         let ark_point: Vec<ArkFr> = opening_point
@@ -165,6 +274,16 @@ impl CommitmentScheme for DoryCommitmentScheme {
 
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
+        let (opening_gt_mul_ops, opening_gt_exp_ops) =
+            DoryCommitmentScheme::derived_opening_gt_op_counts(proof);
+        jolt_platform::jolt_println!(
+            "dory_opening_gt_ops (derived): rounds={}, mul={}, exp={}",
+            proof.sigma,
+            opening_gt_mul_ops,
+            opening_gt_exp_ops
+        );
+
+        start_cycle_tracking(DORY_OPENING_VERIFY_SPAN);
         dory::verify::<ArkFr, BN254, JoltG1Routines, JoltG2Routines, _>(
             *commitment,
             ark_eval,
@@ -174,6 +293,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
             &mut dory_transcript,
         )
         .map_err(|_| ProofVerifyError::InternalError)?;
+        end_cycle_tracking(DORY_OPENING_VERIFY_SPAN);
 
         Ok(())
     }
@@ -181,6 +301,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
     fn protocol_name() -> &'static [u8] {
         b"Dory"
     }
+
 
     /// In Dory, the opening proof hint consists of the Pedersen commitments to the rows
     /// of the polynomial coefficient matrix. In the context of a batch opening proof, we
@@ -231,17 +352,44 @@ impl CommitmentScheme for DoryCommitmentScheme {
         coeffs: &[Self::Field],
     ) -> Self::Commitment {
         let _span = trace_span!("DoryCommitmentScheme::combine_commitments").entered();
+        const GT_EXP_SPAN: &str = "dory_gt_exp_ops";
+        const GT_MUL_SPAN: &str = "dory_gt_mul_ops";
+        let exp_ops = coeffs.len() as u64;
+        let mul_ops = coeffs.len().saturating_sub(1) as u64;
+        jolt_platform::jolt_println!(
+            "dory_gt_combine_counts: exp={}, mul={}",
+            exp_ops,
+            mul_ops
+        );
+        start_cycle_tracking(GT_EXP_SPAN);
 
         // Combine GT elements using parallel RLC
         let commitments_vec: Vec<&ArkGT> = commitments.iter().map(|c| c.borrow()).collect();
-        coeffs
+        let exp_terms: Vec<ArkGT> = coeffs
             .par_iter()
             .zip(commitments_vec.par_iter())
             .map(|(coeff, commitment)| {
                 let ark_coeff = jolt_to_ark(coeff);
-                ark_coeff * **commitment
+                #[cfg(feature = "host")]
+                {
+                    black_box(ark_coeff) * black_box(**commitment)
+                }
+                #[cfg(not(feature = "host"))]
+                {
+                    // Use the BN254_GT_EXP inline inside the zkVM guest.
+                    gt_exp_inline(&ark_coeff, *commitment)
+                }
             })
-            .reduce(ArkGT::identity, |a, b| a + b)
+            .collect();
+        end_cycle_tracking(GT_EXP_SPAN);
+
+        start_cycle_tracking(GT_MUL_SPAN);
+        let combined = exp_terms
+            .par_iter()
+            .cloned()
+            .reduce(ArkGT::identity, |a, b| black_box(a) + black_box(b));
+        end_cycle_tracking(GT_MUL_SPAN);
+        combined
     }
 }
 

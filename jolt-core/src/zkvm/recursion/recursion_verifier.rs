@@ -371,15 +371,8 @@ impl<F: JoltField> RecursionVerifier<F> {
         )
         .entered();
         // Create jagged sumcheck verifier with claimed evaluations for cheap f̂_jagged
-        let verifier = JaggedSumcheckVerifier::new(
-            (r_s_final.clone(), r_x_prev.clone()),
-            sparse_claim,
-            self.input.jagged_bijection.clone(),
-            self.input.jagged_mapping.clone(),
-            self.input.matrix_rows.clone(),
-            params,
-            claimed_evaluations,
-        );
+        let verifier =
+            JaggedSumcheckVerifier::new(r_s_final, sparse_claim, params, claimed_evaluations);
         drop(_create_verifier_span);
 
         let _batched_sumcheck_span =

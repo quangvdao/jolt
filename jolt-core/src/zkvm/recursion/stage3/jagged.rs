@@ -310,80 +310,78 @@ pub struct JaggedSumcheckVerifier<F: JoltField> {
     /// Parameters
     pub params: JaggedSumcheckParams,
 
-    /// Opening claim from Stage 2
-    pub sparse_opening_point_s: Vec<F>,
-    pub sparse_opening_point_x: Vec<F>,
+    /// Opening claim from Stage 2: M(r_s_final, r_x_prev) = v_sparse
     pub sparse_claim_value: F,
 
-    /// Bijection metadata
-    pub bijection: VarCountJaggedBijection,
+    /// The verifier-side value \( \hat f_{\text{jagged}}(r_s, r_x, r_{\text{dense}}) \).
+    ///
+    /// This is computed from the (already-aggregated) per-row values coming from Stage 3b:
+    /// `claimed_evaluations_by_row[y] = v_y`, and then evaluating the MLE at `r_s`.
+    pub f_jagged_at_r_dense: F,
+}
 
-    /// Mapping for decoding polynomial indices to matrix rows
-    pub mapping: ConstraintMapping,
+/// Evaluate a multilinear extension at a point, where:
+/// - the coefficient table is indexed by a little-endian (LSB-first) binary encoding, and
+/// - `r` is ordered low-to-high (LSB-first), matching `index_to_binary_vec` in this module.
+///
+/// This uses the standard in-place folding algorithm and consumes the evaluation table so we
+/// avoid allocating an extra EQ table of size `2^|r|`.
+#[inline]
+fn evaluate_mle_lsb_first_in_place<F: JoltField>(mut evals: Vec<F>, r: &[F]) -> F {
+    debug_assert!(!evals.is_empty(), "MLE table must be non-empty");
+    debug_assert_eq!(evals.len(), 1usize << r.len(), "MLE table length mismatch");
 
-    /// Precomputed matrix row indices for each polynomial index
-    pub matrix_rows: Vec<usize>,
+    let mut len = evals.len();
+    for r_i in r {
+        debug_assert_eq!(len & 1, 0, "MLE table length must stay even while folding");
+        let half = len / 2;
+        let one_minus = F::one() - *r_i;
 
-    /// Precomputed cumulative sizes for each matrix row
-    /// row_cumulative_sizes[i] = total size of all polynomials in rows 0..i
-    pub row_cumulative_sizes: Vec<usize>,
+        // Bind the next (low) variable by folding consecutive pairs:
+        // new[j] = old[2j] * (1 - r_i) + old[2j+1] * r_i
+        for j in 0..half {
+            let a = evals[2 * j];
+            let b = evals[2 * j + 1];
+            evals[j] = a * one_minus + b * *r_i;
+        }
+        len = half;
+    }
 
-    /// Claimed evaluations from Jagged Assist (Stage 3b)
-    /// Used for O(K) f̂_jagged computation instead of O(K × branching_program)
-    /// claimed_evaluations[y] = v_y = ĝ(r_x, r_dense, t_{y-1}, t_y)
-    pub claimed_evaluations: Vec<F>,
+    evals[0]
 }
 
 impl<F: JoltField> JaggedSumcheckVerifier<F> {
     pub fn new(
-        sparse_opening_point: (Vec<F>, Vec<F>),
+        r_s_final: Vec<F>,
         sparse_claim_value: F,
-        bijection: VarCountJaggedBijection,
-        mapping: ConstraintMapping,
-        matrix_rows: Vec<usize>,
         params: JaggedSumcheckParams,
-        claimed_evaluations: Vec<F>,
+        claimed_evaluations_by_row: Vec<F>,
     ) -> Self {
-        let _new_span = tracing::info_span!("JaggedSumcheckVerifier::new",
-            num_polys = bijection.num_polynomials(),
-            num_s_vars = params.num_s_vars
-        ).entered();
+        let _new_span = tracing::info_span!(
+            "JaggedSumcheckVerifier::new",
+            num_s_vars = params.num_s_vars,
+            num_rows = claimed_evaluations_by_row.len()
+        )
+        .entered();
 
-        let (r_s_final, r_x_prev) = sparse_opening_point;
+        debug_assert_eq!(r_s_final.len(), params.num_s_vars);
+        debug_assert_eq!(
+            claimed_evaluations_by_row.len(),
+            1usize << params.num_s_vars
+        );
 
-        let _precompute_span = tracing::info_span!("precompute_row_cumulative_sizes").entered();
-        // Build mapping from matrix row to cumulative size
-        // This is needed to implement the formula correctly
-        let num_rows = 1 << params.num_s_vars; // 2^num_s_vars
-        let mut row_cumulative_sizes = vec![0usize; num_rows + 1]; // +1 for easier indexing
-
-        // For each polynomial, add its size to its row's total
-        for poly_idx in 0..bijection.num_polynomials() {
-            let matrix_row = matrix_rows[poly_idx];
-            let poly_size = if poly_idx == 0 {
-                bijection.cumulative_size(0)
-            } else {
-                bijection.cumulative_size(poly_idx) - bijection.cumulative_size(poly_idx - 1)
-            };
-            row_cumulative_sizes[matrix_row + 1] += poly_size;
-        }
-
-        // Convert to cumulative sums
-        for i in 1..=num_rows {
-            row_cumulative_sizes[i] += row_cumulative_sizes[i - 1];
-        }
-        drop(_precompute_span);
+        // f̂_jagged = Σ_y eq(r_s, y) · v_y = v̂(r_s),
+        // where v_y comes from Stage 3b and is indexed by the same row numbering as `matrix_row`.
+        //
+        // IMPORTANT: Our row indices use little-endian (LSB-first) bit order (see `index_to_binary_vec`),
+        // so we evaluate the MLE assuming LSB-first indexing / binding.
+        let f_jagged_at_r_dense =
+            evaluate_mle_lsb_first_in_place(claimed_evaluations_by_row, &r_s_final);
 
         Self {
             params,
-            sparse_opening_point_s: r_s_final,
-            sparse_opening_point_x: r_x_prev,
             sparse_claim_value,
-            bijection,
-            mapping,
-            matrix_rows,
-            row_cumulative_sizes,
-            claimed_evaluations,
+            f_jagged_at_r_dense,
         }
     }
 
@@ -415,26 +413,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedSumch
         let (_, dense_claim) = accumulator
             .get_committed_polynomial_opening(self.params.polynomial, self.params.sumcheck_id);
 
-        // f̂_jagged = Σ_y eq(r_s, y) · v_y = v̂(r_s)
-        // This is just evaluating the MLE of claimed_evaluations at sparse_opening_point_s
-        // Note: EqPolynomial::evals uses big-endian bit ordering, but index_to_binary_vec
-        // uses little-endian, so we reverse the point to match.
-        let eq_evals = {
-            let _span = tracing::info_span!("jagged_eq_evals", num_vars = self.sparse_opening_point_s.len()).entered();
-            let r_s_reversed: Vec<F> = self.sparse_opening_point_s.iter().rev().cloned().collect();
-            EqPolynomial::<F>::evals(&r_s_reversed)
-        };
-
-        let f_jagged_at_r_dense: F = {
-            let _span = tracing::info_span!("jagged_inner_product", k = self.claimed_evaluations.len()).entered();
-            eq_evals
-                .iter()
-                .zip(self.claimed_evaluations.iter())
-                .map(|(eq, v)| *eq * *v)
-                .sum()
-        };
-
-        dense_claim * f_jagged_at_r_dense
+        dense_claim * self.f_jagged_at_r_dense
     }
 
     fn cache_openings(

@@ -346,6 +346,13 @@ fn copy_fq2(asm: &mut InstrAssembler, dst: Fq2Regs, src: Fq2Regs) {
 }
 
 #[inline(always)]
+fn copy_fq6(asm: &mut InstrAssembler, dst: Fq6Regs, src: Fq6Regs) {
+    copy_fq2(asm, dst.c0, src.c0);
+    copy_fq2(asm, dst.c1, src.c1);
+    copy_fq2(asm, dst.c2, src.c2);
+}
+
+#[inline(always)]
 fn load_fq2(asm: &mut InstrAssembler, dst: Fq2Regs, base: u8, offset_bytes: i64) {
     load_fq(asm, dst.c0, base, offset_bytes);
     load_fq(asm, dst.c1, base, offset_bytes + 32);
@@ -842,7 +849,7 @@ fn fq6_mul_karatsuba_mem(
     lhs_off: i64,
     rhs_ptr: u8,
     rhs_off: i64,
-    w: Fq2Work,
+    w: Fq2WorkTight,
     s: &FqScratch,
 ) {
     let slot = |i: i64| out_off + i * 64;
@@ -850,19 +857,19 @@ fn fq6_mul_karatsuba_mem(
     // --- ad ---
     load_fq2(asm, w.a, lhs_ptr, lhs_off + 0);
     load_fq2(asm, w.b, rhs_ptr, rhs_off + 0);
-    fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
     store_fq2(asm, out_ptr, slot(0), w.out);
 
     // --- be ---
     load_fq2(asm, w.a, lhs_ptr, lhs_off + 64);
     load_fq2(asm, w.b, rhs_ptr, rhs_off + 64);
-    fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
     store_fq2(asm, out_ptr, slot(1), w.out);
 
     // --- cf ---
     load_fq2(asm, w.a, lhs_ptr, lhs_off + 128);
     load_fq2(asm, w.b, rhs_ptr, rhs_off + 128);
-    fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
     store_fq2(asm, out_ptr, slot(2), w.out);
 
     // --- x = (e+f)*(b+c) - be - cf ---
@@ -872,7 +879,7 @@ fn fq6_mul_karatsuba_mem(
     load_fq2(asm, w.b, rhs_ptr, rhs_off + 64); // b
     load_fq2(asm, w.out, rhs_ptr, rhs_off + 128); // c
     fq2_add_mod(asm, w.b, w.b, w.out, s); // b = b+c
-    fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s); // out = (e+f)*(b+c)
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s); // out = (e+f)*(b+c)
     load_fq2(asm, w.a, out_ptr, slot(1)); // be
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
     load_fq2(asm, w.a, out_ptr, slot(2)); // cf
@@ -886,7 +893,7 @@ fn fq6_mul_karatsuba_mem(
     load_fq2(asm, w.b, rhs_ptr, rhs_off + 0); // a
     load_fq2(asm, w.out, rhs_ptr, rhs_off + 64); // b
     fq2_add_mod(asm, w.b, w.b, w.out, s); // b = a+b
-    fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
     load_fq2(asm, w.a, out_ptr, slot(0)); // ad
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
     load_fq2(asm, w.a, out_ptr, slot(1)); // be
@@ -900,7 +907,7 @@ fn fq6_mul_karatsuba_mem(
     load_fq2(asm, w.b, rhs_ptr, rhs_off + 0); // a
     load_fq2(asm, w.out, rhs_ptr, rhs_off + 128); // c
     fq2_add_mod(asm, w.b, w.b, w.out, s); // b = a+c
-    fq2_mul_karatsuba(asm, w.out, w.a, w.b, w.t0, w.t1, w.t2, s);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
     load_fq2(asm, w.a, out_ptr, slot(0)); // ad
     fq2_sub_mod(asm, w.out, w.out, w.a, s);
     load_fq2(asm, w.a, out_ptr, slot(1)); // be
@@ -911,14 +918,24 @@ fn fq6_mul_karatsuba_mem(
 
     // --- c0 = ad + ξ*x ---
     load_fq2(asm, w.a, out_ptr, slot(3)); // x
-    fq2_mul_by_xi_in_place(asm, w.a, w.t0, w.t1, s);
+                                          // fq2_mul_by_xi_in_place requires 2 temps. Fq2WorkTight does not have t0/t1.
+                                          // However, fq2_mul_by_xi_in_place signature is:
+                                          // fn fq2_mul_by_xi_in_place(..., fe, t0, t1, s)
+                                          // We can use w.b and w.out as temps if we don't need them?
+                                          // We are processing w.a (x). We need x.
+                                          // w.b is free. w.out is free (we just stored z).
+                                          // So we can use w.b and w.out as temps!
+                                          // But w.b and w.out are Fq2Regs (8 regs each). mul_by_xi needs FqRegs (4 regs).
+                                          // We can use w.b.c0 and w.b.c1? No, we need 4 regs for t0, 4 regs for t1.
+                                          // So use w.b.c0 and w.b.c1 as t0 and t1.
+    fq2_mul_by_xi_in_place(asm, w.a, w.b.c0, w.b.c1, s);
     load_fq2(asm, w.b, out_ptr, slot(0)); // ad
     fq2_add_mod(asm, w.a, w.a, w.b, s);
     store_fq2(asm, out_ptr, slot(0), w.a); // c0
 
     // --- c1 = y + ξ*cf ---
     load_fq2(asm, w.a, out_ptr, slot(2)); // cf
-    fq2_mul_by_xi_in_place(asm, w.a, w.t0, w.t1, s);
+    fq2_mul_by_xi_in_place(asm, w.a, w.b.c0, w.b.c1, s); // reuse w.b as temps
     load_fq2(asm, w.b, out_ptr, slot(4)); // y
     fq2_add_mod(asm, w.a, w.a, w.b, s);
     store_fq2(asm, out_ptr, slot(1), w.a); // c1 (slot1)
@@ -1373,6 +1390,119 @@ fn fq12_mul_regmem_to_mem(
     fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 0, w.out, w.a, s);
 }
 
+/// Multiply `lhs` (in memory) by `rhs` (in memory) and write the Fq12 product to memory.
+///
+/// Uses schoolbook multiplication at the Fq12 level (4 multiplications), but leverages
+/// the memory-based Karatsuba multiplication at the Fq6 level (`fq6_mul_karatsuba_mem`).
+/// This tradeoff (4x Karatsuba vs 3x Schoolbook) is generally favorable and reduces register pressure.
+///
+/// Output: `out_ptr[..384] = lhs * rhs`.
+/// `accum` is a set of 24 registers used for intermediate accumulation.
+/// `c1_saved` is a set of 24 registers used to preserve c1 while computing c0.
+/// `w` is the `Fq2WorkTight` bundle.
+fn fq12_mul_schoolbook_memmem_to_mem(
+    asm: &mut InstrAssembler,
+    out_ptr: u8,
+    lhs_ptr: u8,
+    lhs_off: i64,
+    rhs_ptr: u8,
+    rhs_off: i64,
+    accum: Fq6Regs,
+    c1_saved: Fq6Regs,
+    w: Fq2WorkTight,
+    s: &FqScratch,
+) {
+    // Formula: (a0 + a1*w)*(b0 + b1*w) = (a0b0 + a1b1*v) + (a0b1 + a1b0)*w.
+    // c1 = a0*b1 + a1*b0
+    // c0 = a0*b0 + v*a1b1
+
+    // 1. accum = a0 * b1
+    fq6_mul_karatsuba_mem(
+        asm,
+        out_ptr,
+        0,
+        lhs_ptr,
+        lhs_off + 0,
+        rhs_ptr,
+        rhs_off + 192,
+        w,
+        s,
+    );
+    load_fq6(asm, accum, out_ptr, 0);
+
+    // 2. tmp = a1 * b0 -> out_ptr
+    fq6_mul_karatsuba_mem(
+        asm,
+        out_ptr,
+        0,
+        lhs_ptr,
+        lhs_off + 192,
+        rhs_ptr,
+        rhs_off + 0,
+        w,
+        s,
+    );
+
+    // 3. accum += out_ptr (accum now holds c1)
+    load_fq2(asm, w.a, out_ptr, 0);
+    fq2_add_mod(asm, accum.c0, accum.c0, w.a, s);
+    load_fq2(asm, w.a, out_ptr, 64);
+    fq2_add_mod(asm, accum.c1, accum.c1, w.a, s);
+    load_fq2(asm, w.a, out_ptr, 128);
+    fq2_add_mod(asm, accum.c2, accum.c2, w.a, s);
+
+    // 4. Save c1 to registers (because next mul will trash memory)
+    copy_fq6(asm, c1_saved, accum);
+
+    // 5. accum = a0 * b0
+    fq6_mul_karatsuba_mem(
+        asm,
+        out_ptr,
+        0,
+        lhs_ptr,
+        lhs_off + 0,
+        rhs_ptr,
+        rhs_off + 0,
+        w,
+        s,
+    );
+    load_fq6(asm, accum, out_ptr, 0);
+
+    // 6. tmp = a1 * b1 -> out_ptr
+    fq6_mul_karatsuba_mem(
+        asm,
+        out_ptr,
+        0,
+        lhs_ptr,
+        lhs_off + 192,
+        rhs_ptr,
+        rhs_off + 192,
+        w,
+        s,
+    );
+
+    // 7. accum += v * out_ptr (accum now holds c0)
+    // v * (x0, x1, x2) = (x2*xi, x0, x1)
+
+    // accum.c0 += out_ptr.c2 * xi
+    load_fq2(asm, w.a, out_ptr, 128);
+    // Reuse w.b.c0 and w.b.c1 as temps for mul_by_xi
+    fq2_mul_by_xi_in_place(asm, w.a, w.b.c0, w.b.c1, s);
+    fq2_add_mod(asm, accum.c0, accum.c0, w.a, s);
+
+    // accum.c1 += out_ptr.c0
+    load_fq2(asm, w.a, out_ptr, 0);
+    fq2_add_mod(asm, accum.c1, accum.c1, w.a, s);
+
+    // accum.c2 += out_ptr.c1
+    load_fq2(asm, w.a, out_ptr, 64);
+    fq2_add_mod(asm, accum.c2, accum.c2, w.a, s);
+
+    // 8. Store c0 and c1
+    store_fq6(asm, out_ptr, 0, accum);
+    store_fq6(asm, out_ptr, 192, c1_saved);
+}
+
 // -----------------------------
 // BN254_GT_EXP inline entrypoint (still placeholder for now)
 // -----------------------------
@@ -1546,13 +1676,14 @@ pub fn bn254_gt_mul_sequence_builder(
     let fq_scratch = FqScratch::new(&fq_scratch_vr);
     fq_scratch.init_constants(&mut asm);
 
-    // Allocate tight Fq2 work regs (24 regs) for Fq6/Fq12 ops.
+    // Allocate Fq2 work regs (24 regs).
     let work_a_vr: [VirtualRegisterGuard; 8] =
         array::from_fn(|_| asm.allocator.allocate_for_inline());
     let work_b_vr: [VirtualRegisterGuard; 8] =
         array::from_fn(|_| asm.allocator.allocate_for_inline());
     let work_out_vr: [VirtualRegisterGuard; 8] =
         array::from_fn(|_| asm.allocator.allocate_for_inline());
+
     let work = Fq2WorkTight {
         a: Fq2Regs {
             c0: [*work_a_vr[0], *work_a_vr[1], *work_a_vr[2], *work_a_vr[3]],
@@ -1578,11 +1709,71 @@ pub fn bn254_gt_mul_sequence_builder(
         },
     };
 
-    // LHS in registers (48 limbs in ABI flatten order).
-    let lhs_vr: [VirtualRegisterGuard; 48] =
+    // Accumulator (24 regs).
+    let accum_vr: [VirtualRegisterGuard; 24] =
         array::from_fn(|_| asm.allocator.allocate_for_inline());
-    let lhs_flat: [u8; 48] = array::from_fn(|i| *lhs_vr[i]);
-    let lhs = fq12_regs_from_flat(&lhs_flat);
+    let accum = Fq6Regs {
+        c0: Fq2Regs {
+            c0: [*accum_vr[0], *accum_vr[1], *accum_vr[2], *accum_vr[3]],
+            c1: [*accum_vr[4], *accum_vr[5], *accum_vr[6], *accum_vr[7]],
+        },
+        c1: Fq2Regs {
+            c0: [*accum_vr[8], *accum_vr[9], *accum_vr[10], *accum_vr[11]],
+            c1: [*accum_vr[12], *accum_vr[13], *accum_vr[14], *accum_vr[15]],
+        },
+        c2: Fq2Regs {
+            c0: [*accum_vr[16], *accum_vr[17], *accum_vr[18], *accum_vr[19]],
+            c1: [*accum_vr[20], *accum_vr[21], *accum_vr[22], *accum_vr[23]],
+        },
+    };
+
+    // Saved registers for c1 (24 limbs).
+    let c1_saved_vr: [VirtualRegisterGuard; 24] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let c1_saved = Fq6Regs {
+        c0: Fq2Regs {
+            c0: [
+                *c1_saved_vr[0],
+                *c1_saved_vr[1],
+                *c1_saved_vr[2],
+                *c1_saved_vr[3],
+            ],
+            c1: [
+                *c1_saved_vr[4],
+                *c1_saved_vr[5],
+                *c1_saved_vr[6],
+                *c1_saved_vr[7],
+            ],
+        },
+        c1: Fq2Regs {
+            c0: [
+                *c1_saved_vr[8],
+                *c1_saved_vr[9],
+                *c1_saved_vr[10],
+                *c1_saved_vr[11],
+            ],
+            c1: [
+                *c1_saved_vr[12],
+                *c1_saved_vr[13],
+                *c1_saved_vr[14],
+                *c1_saved_vr[15],
+            ],
+        },
+        c2: Fq2Regs {
+            c0: [
+                *c1_saved_vr[16],
+                *c1_saved_vr[17],
+                *c1_saved_vr[18],
+                *c1_saved_vr[19],
+            ],
+            c1: [
+                *c1_saved_vr[20],
+                *c1_saved_vr[21],
+                *c1_saved_vr[22],
+                *c1_saved_vr[23],
+            ],
+        },
+    };
 
     let lhs_ptr = operands.rs1;
     let rhs_ptr = operands.rs2;
@@ -1596,16 +1787,23 @@ pub fn bn254_gt_mul_sequence_builder(
     li(&mut asm, fq_scratch.t3, 1);
     asm.emit_b::<VirtualAssertEQ>(fq_scratch.c2, fq_scratch.t3, 0);
 
-    // Load lhs into registers.
-    for i in 0..48 {
-        asm.emit_ld::<LD>(lhs_flat[i], lhs_ptr, (i as i64) * 8);
-    }
-
     // out := lhs * rhs
-    fq12_mul_regmem_to_mem(&mut asm, out_ptr, lhs, rhs_ptr, 0, work, &fq_scratch);
+    fq12_mul_schoolbook_memmem_to_mem(
+        &mut asm,
+        out_ptr,
+        lhs_ptr,
+        0,
+        rhs_ptr,
+        0,
+        accum,
+        c1_saved,
+        work,
+        &fq_scratch,
+    );
 
     // Cleanup: drop all guards before finalizing.
-    drop(lhs_vr);
+    drop(accum_vr);
+    drop(c1_saved_vr);
     drop(work_a_vr);
     drop(work_b_vr);
     drop(work_out_vr);
@@ -1695,13 +1893,68 @@ pub fn bn254_gt_sqr_sequence_builder(
     asm.finalize_inline()
 }
 
+/// Sequence builder for `BN254_GT_INV`.
+///
+/// Computes `out := in^{-1}` for BN254 GT elements.
+///
+/// # Correctness contract
+/// This implements **cyclotomic inverse / conjugation**: for `Fq12 = c0 + c1*w`, it returns
+/// `(c0, -c1)`. This is only correct when `in` is in the cyclotomic subgroup (which includes BN254 GT).
+///
+/// # ABI
+/// - `rs1` = `in_ptr`  (48 x u64 limbs, Montgomery form)
+/// - `rs3` = `out_ptr` (48 x u64 limbs, Montgomery form)
+///
+/// The instruction encoding duplicates `in_ptr` into `rs2`, but the builder ignores `rs2`.
+pub fn bn254_gt_inv_sequence_builder(
+    mut asm: InstrAssembler,
+    operands: FormatInline,
+) -> Vec<Instruction> {
+    // Allocate base-field scratch (14 regs) and initialize constants.
+    let fq_scratch_vr: [VirtualRegisterGuard; 14] =
+        array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let fq_scratch = FqScratch::new(&fq_scratch_vr);
+    fq_scratch.init_constants(&mut asm);
+
+    // Reusable Fq register bundle (4 regs).
+    let fe_vr: [VirtualRegisterGuard; 4] = array::from_fn(|_| asm.allocator.allocate_for_inline());
+    let fe: FqRegs = [*fe_vr[0], *fe_vr[1], *fe_vr[2], *fe_vr[3]];
+
+    let in_ptr = operands.rs1;
+    let out_ptr = operands.rs3;
+
+    // Fq12 layout: [c0 (24 u64) | c1 (24 u64)].
+    // Conjugation keeps c0 and negates c1.
+
+    // Copy c0 as raw u64 limbs (24 limbs = 192 bytes).
+    for limb_idx in 0..24i64 {
+        asm.emit_ld::<LD>(fq_scratch.t0, in_ptr, limb_idx * 8);
+        asm.emit_s::<SD>(out_ptr, fq_scratch.t0, limb_idx * 8);
+    }
+
+    // Negate c1 Fq limbs: 24 limbs = 6 x Fq (each Fq is 4 limbs / 32 bytes).
+    let c1_base_off: i64 = 192;
+    for fq_idx in 0..6i64 {
+        let off = c1_base_off + fq_idx * 32;
+        load_fq(&mut asm, fe, in_ptr, off);
+        fq_neg_mod(&mut asm, fe, fe, &fq_scratch);
+        store_fq(&mut asm, out_ptr, off, fe);
+    }
+
+    // Cleanup: drop all guards before finalizing.
+    drop(fe_vr);
+    drop(fq_scratch_vr);
+
+    asm.finalize_inline()
+}
+
 #[cfg(all(test, feature = "host"))]
 mod tests {
     use super::*;
 
     use ark_bn254::{Bn254, Fq, Fq12, Fq2, Fq6, Fq6Config, G1Projective, G2Projective};
     use ark_ec::pairing::Pairing;
-    use ark_ff::{AdditiveGroup, Field, Fp6Config, UniformRand};
+    use ark_ff::{AdditiveGroup, Field, Fp6Config, One, PrimeField, UniformRand};
     use ark_std::test_rng;
     use tracer::emulator::cpu::Xlen;
     use tracer::utils::inline_test_harness::{
@@ -2134,20 +2387,14 @@ mod tests {
         let scratch = FqScratch::new(&scratch_vr);
         scratch.init_constants(&mut asm);
 
-        // Work regs for Fq2 ops.
+        // Work regs for Fq2 ops (Tight).
         let a_vr: [VirtualRegisterGuard; 8] =
             array::from_fn(|_| asm.allocator.allocate_for_inline());
         let b_vr: [VirtualRegisterGuard; 8] =
             array::from_fn(|_| asm.allocator.allocate_for_inline());
         let out_vr: [VirtualRegisterGuard; 8] =
             array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t0_vr: [VirtualRegisterGuard; 4] =
-            array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t1_vr: [VirtualRegisterGuard; 4] =
-            array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let t2_vr: [VirtualRegisterGuard; 4] =
-            array::from_fn(|_| asm.allocator.allocate_for_inline());
-        let w = Fq2Work {
+        let w = Fq2WorkTight {
             a: Fq2Regs {
                 c0: [*a_vr[0], *a_vr[1], *a_vr[2], *a_vr[3]],
                 c1: [*a_vr[4], *a_vr[5], *a_vr[6], *a_vr[7]],
@@ -2160,9 +2407,6 @@ mod tests {
                 c0: [*out_vr[0], *out_vr[1], *out_vr[2], *out_vr[3]],
                 c1: [*out_vr[4], *out_vr[5], *out_vr[6], *out_vr[7]],
             },
-            t0: [*t0_vr[0], *t0_vr[1], *t0_vr[2], *t0_vr[3]],
-            t1: [*t1_vr[0], *t1_vr[1], *t1_vr[2], *t1_vr[3]],
-            t2: [*t2_vr[0], *t2_vr[1], *t2_vr[2], *t2_vr[3]],
         };
 
         fq6_mul_karatsuba_mem(
@@ -2172,9 +2416,6 @@ mod tests {
         drop(a_vr);
         drop(b_vr);
         drop(out_vr);
-        drop(t0_vr);
-        drop(t1_vr);
-        drop(t2_vr);
         drop(scratch_vr);
         let sequence = asm.finalize_inline();
 
@@ -2384,6 +2625,72 @@ mod tests {
         out
     }
 
+    fn run_gt_inv_inline(x: [u64; 48], layout: InlineMemoryLayout) -> [u64; 48] {
+        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+        harness.setup_registers();
+
+        // rs1 = in_ptr (48 limbs), rs2 = ignored (we duplicate input), rs3 = out_ptr (48 limbs)
+        harness.load_input64(&x);
+        harness.load_input2_64(&x);
+
+        let asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let sequence = bn254_gt_inv_sequence_builder(
+            asm,
+            FormatInline {
+                rs1: INLINE_RS1,
+                rs2: INLINE_RS2,
+                rs3: INLINE_RS3,
+            },
+        );
+
+        harness.execute_sequence(&sequence);
+        let out_vec = harness.read_output64(48);
+        let mut out = [0u64; 48];
+        out.copy_from_slice(&out_vec);
+        out
+    }
+
+    fn run_gt_mul_inline(a: [u64; 48], b: [u64; 48], layout: InlineMemoryLayout) -> [u64; 48] {
+        let mut harness = InlineTestHarness::new(layout, Xlen::Bit64);
+        harness.setup_registers();
+
+        // rs1 = lhs_ptr, rs2 = rhs_ptr, rs3 = out_ptr
+        harness.load_input64(&a);
+        harness.load_input2_64(&b);
+
+        let asm = InstrAssembler::new_inline(0, false, harness.xlen(), &harness.cpu.vr_allocator);
+        let sequence = bn254_gt_mul_sequence_builder(
+            asm,
+            FormatInline {
+                rs1: INLINE_RS1,
+                rs2: INLINE_RS2,
+                rs3: INLINE_RS3,
+            },
+        );
+
+        harness.execute_sequence(&sequence);
+        let out_vec = harness.read_output64(48);
+        let mut out = [0u64; 48];
+        out.copy_from_slice(&out_vec);
+        out
+    }
+
+    #[test]
+    fn gt_mul_matches_arkworks_mul() {
+        let mut rng = test_rng();
+        for _ in 0..4 {
+            let a = Fq12::rand(&mut rng);
+            let b = Fq12::rand(&mut rng);
+            let expected = fq12_to_limbs_mont(&(a * b));
+            let got = run_gt_mul_inline(
+                fq12_to_limbs_mont(&a),
+                fq12_to_limbs_mont(&b),
+                InlineMemoryLayout::two_inputs(384, 384, 384),
+            );
+            assert_eq!(got, expected, "GT mul mismatch vs arkworks Fq12::mul()");
+        }
+    }
+
     #[test]
     fn gt_sqr_pairing_output_matches_arkworks_square() {
         let mut rng = test_rng();
@@ -2399,6 +2706,172 @@ mod tests {
                 InlineMemoryLayout::two_inputs(384, 384, 384),
             );
             assert_eq!(got, expected, "GT sqr mismatch vs arkworks Fq12::square()");
+        }
+    }
+
+    #[test]
+    fn gt_inv_pairing_output_matches_arkworks_inverse() {
+        let mut rng = test_rng();
+        for _ in 0..4 {
+            // Pairing outputs are in BN254 GT ⊂ cyclotomic subgroup, so inverse is conjugation.
+            let g1 = G1Projective::rand(&mut rng);
+            let g2 = G2Projective::rand(&mut rng);
+            let gt: Fq12 = Bn254::pairing(g1, g2).0;
+
+            let expected = fq12_to_limbs_mont(&gt.inverse().expect("GT inverse"));
+            let got = run_gt_inv_inline(
+                fq12_to_limbs_mont(&gt),
+                InlineMemoryLayout::two_inputs(384, 384, 384),
+            );
+            assert_eq!(got, expected, "GT inv mismatch vs arkworks Fq12::inverse()");
+        }
+    }
+
+    fn fq12_conjugate(x: &Fq12) -> Fq12 {
+        let mut y = *x;
+        y.c1 = -y.c1;
+        y
+    }
+
+    fn wnaf_pow_gt(base: &Fq12, exp_limbs: [u64; 4]) -> Fq12 {
+        // Signed window exponentiation (wNAF) using cyclotomic inverse / conjugation.
+        //
+        // This matches the guest algorithm in `jolt-core` and is only correct for GT elements.
+        const WINDOW: usize = 5;
+        const TABLE_SIZE: usize = 1 << (WINDOW - 2); // odd powers: 1..(2^(w-1)-1)
+        const WINDOW_MASK: u64 = (1u64 << WINDOW) - 1;
+        const WINDOW_HALF: i64 = 1i64 << (WINDOW - 1);
+        const WINDOW_WIDTH: i64 = 1i64 << WINDOW;
+
+        if exp_limbs.iter().all(|&x| x == 0) {
+            return Fq12::one();
+        }
+
+        #[inline(always)]
+        fn scalar_is_zero(k: &[u64; 4]) -> bool {
+            k.iter().all(|&x| x == 0)
+        }
+
+        #[inline(always)]
+        fn scalar_shr1(k: &mut [u64; 4]) {
+            let mut carry = 0u64;
+            for limb in k.iter_mut().rev() {
+                let new_carry = *limb & 1;
+                *limb = (*limb >> 1) | (carry << 63);
+                carry = new_carry;
+            }
+        }
+
+        #[inline(always)]
+        fn scalar_add_small(k: &mut [u64; 4], add: u64) {
+            let (v0, mut carry) = k[0].overflowing_add(add);
+            k[0] = v0;
+            for limb in &mut k[1..] {
+                if !carry {
+                    break;
+                }
+                let (v, c) = limb.overflowing_add(1);
+                *limb = v;
+                carry = c;
+            }
+        }
+
+        #[inline(always)]
+        fn scalar_sub_small(k: &mut [u64; 4], sub: u64) {
+            let (v0, mut borrow) = k[0].overflowing_sub(sub);
+            k[0] = v0;
+            for limb in &mut k[1..] {
+                if !borrow {
+                    break;
+                }
+                let (v, b) = limb.overflowing_sub(1);
+                *limb = v;
+                borrow = b;
+            }
+        }
+
+        // Precompute odd powers base^(2i+1).
+        let base_sq = base.square();
+        let mut odd_pows: [Fq12; TABLE_SIZE] = array::from_fn(|_| Fq12::one());
+        odd_pows[0] = *base;
+        for i in 1..TABLE_SIZE {
+            odd_pows[i] = odd_pows[i - 1] * base_sq;
+        }
+
+        // Compute wNAF digits.
+        let mut k = exp_limbs;
+        let mut digits = [0i8; 256];
+        let mut digits_len = 0usize;
+        while !scalar_is_zero(&k) {
+            let mut di: i8 = 0;
+            if (k[0] & 1) == 1 {
+                let mut u = (k[0] & WINDOW_MASK) as i64;
+                if u > WINDOW_HALF {
+                    u -= WINDOW_WIDTH;
+                }
+                di = u as i8;
+                if di > 0 {
+                    scalar_sub_small(&mut k, di as u64);
+                } else {
+                    scalar_add_small(&mut k, (-di) as u64);
+                }
+            }
+            digits[digits_len] = di;
+            digits_len += 1;
+            scalar_shr1(&mut k);
+        }
+
+        // Find top non-zero digit.
+        let mut top = digits_len;
+        while top > 0 && digits[top - 1] == 0 {
+            top -= 1;
+        }
+        assert!(top > 0);
+
+        // Init acc at the top digit.
+        let d0 = digits[top - 1];
+        let abs0: usize = if d0 < 0 { (-d0) as usize } else { d0 as usize };
+        let idx0 = abs0 >> 1;
+        let mut acc = if d0 > 0 {
+            odd_pows[idx0]
+        } else {
+            fq12_conjugate(&odd_pows[idx0])
+        };
+
+        // Main loop.
+        for pos in (0..(top - 1)).rev() {
+            acc = acc.square();
+            let d = digits[pos];
+            if d != 0 {
+                let abs: usize = if d < 0 { (-d) as usize } else { d as usize };
+                let idx = abs >> 1;
+                let term = if d > 0 {
+                    odd_pows[idx]
+                } else {
+                    fq12_conjugate(&odd_pows[idx])
+                };
+                acc *= term;
+            }
+        }
+        acc
+    }
+
+    #[test]
+    fn gt_wnaf_signed_window_matches_arkworks_pow_on_pairing_outputs() {
+        use ark_bn254::Fr;
+
+        let mut rng = test_rng();
+        for _ in 0..2 {
+            let g1 = G1Projective::rand(&mut rng);
+            let g2 = G2Projective::rand(&mut rng);
+            let gt: Fq12 = Bn254::pairing(g1, g2).0;
+
+            let e = Fr::rand(&mut rng);
+            let exp_limbs: [u64; 4] = e.into_bigint().0;
+
+            let expected = gt.pow(exp_limbs);
+            let got = wnaf_pow_gt(&gt, exp_limbs);
+            assert_eq!(got, expected, "wNAF pow mismatch vs arkworks Fq12::pow()");
         }
     }
 

@@ -6,6 +6,7 @@ Reduce **zkVM virtual cycles** for Dory verification by introducing Jolt inlines
 
 - **GT multiplication** (group "add")
 - **GT exponentiation** (group "scalar mul")
+- **GT inverse** (cyclotomic inverse / conjugation, to enable signed-digit exp / wNAF)
 
 Primary target: Dory-heavy paths in the **recursive verifier** (guest runs verifier).
 
@@ -272,9 +273,10 @@ Deliver a markdown note with:
 
 | Inline | Opcode | funct7 | funct3 | Description |
 |--------|--------|--------|--------|-------------|
-| BN254_GT_MUL | 0x0B | 0x06 | 0x00 | GT group multiplication (a + b) |
-| BN254_GT_SQR | 0x0B | 0x06 | 0x01 | GT group squaring (a + a) |
 | BN254_GT_EXP | 0x0B | 0x06 | 0x02 | GT exponentiation (s * a) |
+| BN254_GT_MUL | 0x0B | 0x06 | 0x03 | GT group multiplication (a + b) |
+| BN254_GT_SQR | 0x0B | 0x06 | 0x04 | GT group squaring (a + a) |
+| BN254_GT_INV | 0x0B | 0x06 | 0x05 | GT group inverse (cyclotomic conjugation; GT-only) |
 
 ### GT exponentiation semantics (arkworks / Dory)
 
@@ -591,28 +593,33 @@ To be planned after Phase 0 measurement results.
 - `044d8d31` — vendor `dory-pcs` + route Dory verifier `ArkGT::{add,scale}` through `BN254_GT_MUL/GT_SQR` and windowed exp on guest.
 - `21e82e88` — `BN254_GT_MUL` uses **Fq12 Karatsuba** (`fq12_mul_regmem_to_mem`).
 - `31a071c3` — guest exp tuning: `WINDOW=5` + double-buffer accumulator (avoid 48-limb swaps).
+- `current` — `BN254_GT_MUL` uses **Fq6 Karatsuba** (`fq12_mul_schoolbook_memmem_to_mem`) + stream LHS from memory; GT exp switched to **wNAF** using `BN254_GT_INV` (cyclotomic conjugation).
 
-### Verification (after inlines)
+### Verification (after GT_INV + wNAF + Fq6 Karatsuba)
 
 | Item | RV64IMAC cycles | Virtual cycles | Notes |
 |------|-----------------|----------------|-------|
-| `verification (total)` | 188,421,232 | 1,036,716,772 | |
-| `dory_opening_verify` | 164,989,791 | 656,389,490 | `dory::verify` now uses GT inlines via vendored `dory-pcs` |
-| `dory_gt_exp_ops` | 591,480 | 347,438,261 | homomorphic combine only (`exp=41`) |
-| `dory_gt_mul_ops` | 45,545 | 2,607,103 | homomorphic combine only (`mul=40`); now routes GT add→`BN254_GT_MUL` |
+| `verification (total)` | 188,407,807 | 1,002,909,029 | |
+| `dory_opening_verify` | 164,989,791 | 645,317,858 | `dory::verify` now uses GT inlines via vendored `dory-pcs` |
+| `dory_gt_exp_ops` | 578,055 | 324,846,294 | homomorphic combine only (`exp=41`) |
+| `dory_gt_mul_ops` | 45,545 | 2,462,959 | homomorphic combine only (`mul=40`); now routes GT add→`BN254_GT_MUL` |
 | `dory_gt_combine_counts` | - | - | exp=41, mul=40 |
-| `dory_gt_exp_per_op` | 14,426 | 8,474,104 | per exp (591,480 / 41; 347,438,261 / 41) |
-| `dory_gt_mul_per_op` | 1,139 | 65,178 | per mul (45,545 / 40; 2,607,103 / 40) |
+| `dory_gt_exp_per_op` | 14,099 | 7,923,080 | per exp (578,055 / 41; 324,846,294 / 41) |
+| `dory_gt_mul_per_op` | 1,139 | 61,574 | per mul (45,545 / 40; 2,462,959 / 40) |
 | `dory_opening_gt_ops (derived)` | - | - | rounds=6, mul=74, exp=65 |
-| `dory_opening_gt_cycles_estimate` | 1,021,976 | 556,639,932 | derived ops * per-op (GT-only estimate; remainder is pairings/etc) |
+| `dory_opening_gt_cycles_estimate` | 1,000,721 | 519,556,676 | derived ops * per-op (GT-only estimate; remainder is pairings/etc) |
 | `verification_remainder` | 22,794,416 | 30,281,918 | verification minus opening + combine GT spans |
+
+**Change vs previous (unsigned window, same run):**
+- `dory_gt_exp_ops` virtual cycles: **339,740,285 → 324,846,294** (**-14,893,991**, -4.38%)
+- `verification (total)` virtual cycles: **1,017,803,020 → 1,002,909,029** (**-14,893,991**, -1.46%)
 
 ### Comparison vs previous baseline (this file L144–L155)
 
 | Item | Before RV64IMAC | After RV64IMAC | Δ RV64IMAC | Before virtual | After virtual | Δ virtual |
 |------|------------------|----------------|------------|----------------|---------------|----------|
-| `verification (total)` | 1,078,773,999 | 188,421,232 | **-890,352,767** (-82.5%) | 1,170,607,347 | 1,036,716,772 | **-133,890,575** (-11.4%) |
-| `dory_opening_verify` | 673,694,170 | 164,989,791 | **-508,704,379** (-75.5%) | 730,024,753 | 656,389,490 | **-73,635,263** (-10.1%) |
-| `dory_gt_exp_ops` | 380,771,004 | 591,480 | **-380,179,524** (-99.8%) | 408,942,199 | 347,438,261 | **-61,503,938** (-15.0%) |
-| `dory_gt_mul_ops` | 1,349,687 | 45,545 | **-1,304,142** (-96.6%) | 1,387,759 | 2,607,103 | **+1,219,344** (+87.9%) |
+| `verification (total)` | 1,078,773,999 | 188,407,807 | **-890,366,192** (-82.5%) | 1,170,607,347 | 1,002,909,029 | **-167,698,318** (-14.3%) |
+| `dory_opening_verify` | 673,694,170 | 164,989,791 | **-508,704,379** (-75.5%) | 730,024,753 | 645,317,858 | **-84,706,895** (-11.6%) |
+| `dory_gt_exp_ops` | 380,771,004 | 578,055 | **-380,192,949** (-99.8%) | 408,942,199 | 324,846,294 | **-84,095,905** (-20.6%) |
+| `dory_gt_mul_ops` | 1,349,687 | 45,545 | **-1,304,142** (-96.6%) | 1,387,759 | 2,462,959 | **+1,075,200** (+77.5%) |
 | `verification_remainder` | 22,959,138 | 22,794,416 | **-164,722** (-0.7%) | 30,252,636 | 30,281,918 | **+29,282** (+0.1%) |

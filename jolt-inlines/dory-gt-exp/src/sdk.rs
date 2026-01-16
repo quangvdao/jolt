@@ -59,6 +59,27 @@ pub fn bn254_gt_sqr_into(out: &mut [u64; GT_LIMBS_U64], x: &[u64; GT_LIMBS_U64])
     }
 }
 
+/// Safe wrapper: computes `out = x^{-1}` in BN254 GT.
+///
+/// This is implemented as **cyclotomic inverse / conjugation** (i.e., `c1 := -c1` in Fq12),
+/// and is only correct when `x` is in the cyclotomic subgroup (which includes BN254 GT).
+#[inline(always)]
+pub fn bn254_gt_inv(x: [u64; GT_LIMBS_U64]) -> [u64; GT_LIMBS_U64] {
+    let mut out = [0u64; GT_LIMBS_U64];
+    bn254_gt_inv_into(&mut out, &x);
+    out
+}
+
+/// Writes `out = x^{-1}` in BN254 GT without moving/copying the input array.
+///
+/// See `bn254_gt_inv()` for the cyclotomic-subgroup correctness contract.
+#[inline(always)]
+pub fn bn254_gt_inv_into(out: &mut [u64; GT_LIMBS_U64], x: &[u64; GT_LIMBS_U64]) {
+    unsafe {
+        bn254_gt_inv_inline(x.as_ptr(), out.as_mut_ptr());
+    }
+}
+
 /// Low-level interface to the BN254 GT exponentiation inline instruction.
 ///
 /// # Arguments
@@ -147,6 +168,36 @@ pub unsafe fn bn254_gt_sqr_inline(input: *const u64, out: *mut u64) {
     );
 }
 
+/// Low-level interface to the BN254 GT inversion inline instruction.
+///
+/// ABI:
+/// - rs1 = in_ptr  (48 x u64 limbs)
+/// - rs2 = in_ptr  (duplicated; unused by the current builder)
+/// - rd  = out_ptr (48 x u64 limbs)
+///
+/// # Safety
+/// - All pointers must be valid and 8-byte aligned.
+/// - `input` must be readable for 384 bytes.
+/// - `out` must be writable for 384 bytes.
+///
+/// # Correctness contract
+/// This inline implements **cyclotomic inverse / conjugation** and is only correct for BN254 GT elements.
+#[cfg(not(feature = "host"))]
+#[inline(always)]
+pub unsafe fn bn254_gt_inv_inline(input: *const u64, out: *mut u64) {
+    use crate::{BN254_GT_INV_FUNCT3, BN254_GT_INV_FUNCT7, INLINE_OPCODE};
+    core::arch::asm!(
+        ".insn r {opcode}, {funct3}, {funct7}, {rd}, {rs1}, {rs2}",
+        opcode = const INLINE_OPCODE,
+        funct3 = const BN254_GT_INV_FUNCT3,
+        funct7 = const BN254_GT_INV_FUNCT7,
+        rd = in(reg) out, // rd/rs3 - output address
+        rs1 = in(reg) input, // rs1 - input address
+        rs2 = in(reg) input, // rs2 - input address (duplicated)
+        options(nostack)
+    );
+}
+
 /// Host build placeholder: until we implement a full host executor, fail loudly if called.
 ///
 /// The inline is not expected to run on host; it expands via `sequence_builder` within the tracer.
@@ -180,4 +231,15 @@ pub unsafe fn bn254_gt_mul_inline(_lhs: *const u64, _rhs: *const u64, _out: *mut
 #[inline(always)]
 pub unsafe fn bn254_gt_sqr_inline(_input: *const u64, _out: *mut u64) {
     panic!("bn254_gt_sqr_inline(host) is a placeholder; use tracer execution");
+}
+
+/// Host build placeholder (see `bn254_gt_exp_inline`).
+///
+/// # Safety
+/// This function is `unsafe` to match the guest ABI, but on host builds it always panics and
+/// performs no memory accesses.
+#[cfg(feature = "host")]
+#[inline(always)]
+pub unsafe fn bn254_gt_inv_inline(_input: *const u64, _out: *mut u64) {
+    panic!("bn254_gt_inv_inline(host) is a placeholder; use tracer execution");
 }

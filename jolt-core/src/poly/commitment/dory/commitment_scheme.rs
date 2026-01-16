@@ -34,7 +34,7 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
     use ark_bn254::{Fq, Fq12, Fq2, Fq6};
     use ark_ff::{BigInt, One, PrimeField};
     use core::marker::PhantomData;
-    use jolt_inlines_dory_gt_exp::sdk::{bn254_gt_mul_into, bn254_gt_sqr_into};
+    use jolt_inlines_dory_gt_exp::sdk::{bn254_gt_inv_into, bn254_gt_mul_into, bn254_gt_sqr_into};
     use jolt_inlines_dory_gt_exp::{FR_LIMBS_U64, GT_LIMBS_U64};
 
     #[inline(always)]
@@ -111,42 +111,31 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
 
     let exp_limbs: [u64; FR_LIMBS_U64] = coeff.0.into_bigint().0;
 
-    #[inline(always)]
-    fn exp_bit(exp: &[u64; FR_LIMBS_U64], bit_idx: usize) -> u64 {
-        let limb = exp[bit_idx / 64];
-        (limb >> (bit_idx % 64)) & 1
-    }
-
-    // Find the highest set bit (skip leading zeros). If exp == 0, return 1 in Fq12.
-    let msb: Option<usize> = (0..FR_LIMBS_U64).rev().find_map(|limb_idx| {
-        let limb = exp_limbs[limb_idx];
-        if limb == 0 {
-            None
-        } else {
-            Some(limb_idx * 64 + (63usize.saturating_sub(limb.leading_zeros() as usize)))
-        }
-    });
-
     // acc := 1 in Fq12 (Montgomery form)
     let one_limbs = fq_to_limbs_mont(&Fq::one());
     let mut one_gt_limbs = [0u64; GT_LIMBS_U64];
     one_gt_limbs[0..4].copy_from_slice(&one_limbs);
 
-    let Some(msb) = msb else {
+    // If exp == 0, return identity.
+    if exp_limbs.iter().all(|&x| x == 0) {
         return ArkGT(fq12_from_limbs_mont(one_gt_limbs));
-    };
+    }
 
     let base_limbs: [u64; GT_LIMBS_U64] = fq12_to_limbs_mont(&base.0);
 
-    // Sliding-window exponentiation (left-to-right) in guest code using GT_SQR/GT_MUL inlines.
-    // This reduces the number of GT multiplications relative to bit-by-bit square-and-multiply.
+    // Signed window exponentiation (wNAF) in guest code using GT_SQR/GT_MUL inlines,
+    // and GT_INV (cyclotomic inverse / conjugation) for negative digits.
     //
-    // Window size tradeoff:
-    // - larger windows reduce muls in the main loop, but increase precomputation muls
-    // - because GT squaring is cyclotomic-specialized (cheap) while multiplication is expensive,
-    //   we typically want a moderately large window; w=5 is a good default for 256-bit exponents.
+    // Correctness contract: this assumes `base` is in BN254 GT ⊂ cyclotomic subgroup.
+    // We do **not** validate subgroup membership here; correctness relies on the protocol invariant
+    // that these values are GT elements (e.g. produced via pairing final exponentiation / Dory group ops).
+    //
+    // Tuned default: w=5 (cheap squaring, expensive mul).
     const WINDOW: usize = 5;
-    const TABLE_SIZE: usize = 1 << (WINDOW - 1); // odd powers: 1,3,5,...,(2^w-1)
+    const TABLE_SIZE: usize = 1 << (WINDOW - 2); // odd powers: 1,3,5,...,(2^(w-1)-1)
+    const WINDOW_MASK: u64 = (1u64 << WINDOW) - 1;
+    const WINDOW_HALF: i64 = 1i64 << (WINDOW - 1);
+    const WINDOW_WIDTH: i64 = 1i64 << WINDOW;
 
     // Precompute odd powers: base^(2i+1) for i in [0, TABLE_SIZE).
     let mut odd_pows = [[0u64; GT_LIMBS_U64]; TABLE_SIZE];
@@ -160,18 +149,77 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
         bn254_gt_mul_into(&mut odd_pows[i], &prev, &base_sq);
     }
 
+    // Compute wNAF digits for a 256-bit scalar in little-endian limb order.
+    // digits[i] is the signed digit for 2^i, in range [-(2^(w-1)-1), +(2^(w-1)-1)] and odd when non-zero.
     #[inline(always)]
-    fn window_at(exp: &[u64; FR_LIMBS_U64], i: usize) -> (usize, u32) {
-        let mut l = core::cmp::min(WINDOW, i + 1);
-        while l > 1 && exp_bit(exp, i + 1 - l) == 0 {
-            l -= 1;
+    fn scalar_is_zero(k: &[u64; FR_LIMBS_U64]) -> bool {
+        k.iter().all(|&x| x == 0)
+    }
+
+    #[inline(always)]
+    fn scalar_shr1(k: &mut [u64; FR_LIMBS_U64]) {
+        let mut carry = 0u64;
+        for limb in k.iter_mut().rev() {
+            let new_carry = *limb & 1;
+            *limb = (*limb >> 1) | (carry << 63);
+            carry = new_carry;
         }
-        let mut u: u32 = 0;
-        for j in 0..l {
-            u = (u << 1) | (exp_bit(exp, i - j) as u32);
+    }
+
+    #[inline(always)]
+    fn scalar_add_small(k: &mut [u64; FR_LIMBS_U64], add: u64) {
+        let (v0, mut carry) = k[0].overflowing_add(add);
+        k[0] = v0;
+        for limb in &mut k[1..] {
+            if !carry {
+                break;
+            }
+            let (v, c) = limb.overflowing_add(1);
+            *limb = v;
+            carry = c;
         }
-        debug_assert!((u & 1) == 1, "window value must be odd");
-        (l, u)
+    }
+
+    #[inline(always)]
+    fn scalar_sub_small(k: &mut [u64; FR_LIMBS_U64], sub: u64) {
+        let (v0, mut borrow) = k[0].overflowing_sub(sub);
+        k[0] = v0;
+        for limb in &mut k[1..] {
+            if !borrow {
+                break;
+            }
+            let (v, b) = limb.overflowing_sub(1);
+            *limb = v;
+            borrow = b;
+        }
+    }
+
+    let mut k = exp_limbs;
+    let mut digits = [0i8; 256];
+    let mut digits_len = 0usize;
+    while !scalar_is_zero(&k) {
+        let mut di: i8 = 0;
+        if (k[0] & 1) == 1 {
+            let mut u = (k[0] & WINDOW_MASK) as i64;
+            if u > WINDOW_HALF {
+                u -= WINDOW_WIDTH; // negative digit
+            }
+            debug_assert!(
+                u != 0 && (u & 1) == 1,
+                "wNAF digit must be odd and non-zero"
+            );
+            di = u as i8;
+            if di > 0 {
+                scalar_sub_small(&mut k, di as u64);
+            } else {
+                scalar_add_small(&mut k, (-di) as u64);
+            }
+        }
+
+        debug_assert!(digits_len < digits.len(), "wNAF digit buffer overflow");
+        digits[digits_len] = di;
+        digits_len += 1;
+        scalar_shr1(&mut k);
     }
 
     // Double-buffer accumulator to avoid a 48-limb swap/copy after every GT op.
@@ -205,27 +253,40 @@ fn gt_exp_inline(coeff: &ArkFr, base: &ArkGT) -> ArkGT {
         *cur_is_0 = !*cur_is_0;
     }
 
-    // Initialize acc with the first (MSB) window, avoiding redundant squarings of 1.
-    let (l0, u0) = window_at(&exp_limbs, msb);
-    let mut buf0 = odd_pows[(u0 as usize) >> 1];
+    // Initialize acc with the topmost non-zero wNAF digit, avoiding redundant squarings of 1.
+    let mut top = digits_len;
+    while top > 0 && digits[top - 1] == 0 {
+        top -= 1;
+    }
+    debug_assert!(top > 0, "non-zero exponent must have a non-zero wNAF digit");
+
+    let d0 = digits[top - 1];
+    let abs0: usize = if d0 < 0 { (-d0) as usize } else { d0 as usize };
+    let idx0 = abs0 >> 1;
+    let mut buf0 = [0u64; GT_LIMBS_U64];
+    if d0 > 0 {
+        buf0 = odd_pows[idx0];
+    } else {
+        bn254_gt_inv_into(&mut buf0, &odd_pows[idx0]);
+    }
     let mut buf1 = [0u64; GT_LIMBS_U64];
     let mut cur_is_0 = true;
 
-    let mut i: isize = msb as isize - l0 as isize;
-    while i >= 0 {
-        if exp_bit(&exp_limbs, i as usize) == 0 {
-            // acc := acc^2
-            sqr_toggle(&mut buf0, &mut buf1, &mut cur_is_0);
-            i -= 1;
-        } else {
-            let (l, u) = window_at(&exp_limbs, i as usize);
-            for _ in 0..l {
-                sqr_toggle(&mut buf0, &mut buf1, &mut cur_is_0);
+    let mut inv_tmp = [0u64; GT_LIMBS_U64];
+    for pos in (0..(top - 1)).rev() {
+        // acc := acc^2
+        sqr_toggle(&mut buf0, &mut buf1, &mut cur_is_0);
+
+        let d = digits[pos];
+        if d != 0 {
+            let abs: usize = if d < 0 { (-d) as usize } else { d as usize };
+            let idx = abs >> 1;
+            if d > 0 {
+                mul_toggle(&mut buf0, &mut buf1, &odd_pows[idx], &mut cur_is_0);
+            } else {
+                bn254_gt_inv_into(&mut inv_tmp, &odd_pows[idx]);
+                mul_toggle(&mut buf0, &mut buf1, &inv_tmp, &mut cur_is_0);
             }
-            // u is odd, so index is (u - 1)/2 == u >> 1.
-            let idx = (u as usize) >> 1;
-            mul_toggle(&mut buf0, &mut buf1, &odd_pows[idx], &mut cur_is_0);
-            i -= l as isize;
         }
     }
 

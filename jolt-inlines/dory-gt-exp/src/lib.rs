@@ -27,6 +27,13 @@ pub const BN254_GT_SQR_FUNCT3: u32 = 0x04;
 pub const BN254_GT_SQR_FUNCT7: u32 = BN254_FUNCT7;
 pub const BN254_GT_SQR_NAME: &str = "BN254_GT_SQR_INLINE";
 
+/// BN254_GT_INV: inversion in GT (cyclotomic inverse / conjugation).
+///
+/// Correctness contract: this is only correct for elements in the cyclotomic subgroup (i.e., BN254 GT).
+pub const BN254_GT_INV_FUNCT3: u32 = 0x05;
+pub const BN254_GT_INV_FUNCT7: u32 = BN254_FUNCT7;
+pub const BN254_GT_INV_NAME: &str = "BN254_GT_INV_INLINE";
+
 /// Limb sizes for the ABI contract.
 pub const GT_LIMBS_U64: usize = 48; // Fq12 = 12 * Fq; Fq = 4 u64 limbs => 48 u64 limbs
 pub const FR_LIMBS_U64: usize = 4; // Fr = 256-bit => 4 u64 limbs

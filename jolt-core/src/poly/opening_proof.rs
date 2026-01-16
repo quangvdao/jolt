@@ -6,11 +6,9 @@
 //! necessarily of the same size, each opened at a different point) into a single opening.
 
 use crate::{
-    poly::{
-        rlc_polynomial::{RLCPolynomial, RLCStreamingData, TraceSource},
-        rlc_utils::compute_rlc_coefficients,
-    },
-    zkvm::config::OneHotParams,
+    poly::rlc_polynomial::{RLCPolynomial, RLCStreamingData, TraceSource},
+    poly::rlc_utils::compute_rlc_coefficients,
+    zkvm::{claim_reductions::AdviceKind, config::OneHotParams},
 };
 use allocative::Allocative;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -21,7 +19,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::{
-    commitment::commitment_scheme::CommitmentScheme, multilinear_polynomial::MultilinearPolynomial,
+    commitment::commitment_scheme::CommitmentScheme, eq_poly::EqPolynomial,
+    multilinear_polynomial::MultilinearPolynomial,
 };
 use crate::utils::errors::ProofVerifyError;
 use crate::{
@@ -161,6 +160,8 @@ pub enum SumcheckId {
     RegistersValEvaluation,
     BytecodeReadRaf,
     Booleanity,
+    AdviceClaimReductionPhase1,
+    AdviceClaimReductionPhase2,
     IncClaimReduction,
     HammingWeightClaimReduction,
     BytecodeBooleanity,
@@ -236,6 +237,12 @@ pub trait OpeningAccumulator<F: JoltField> {
         polynomial: CommittedPolynomial,
         sumcheck: SumcheckId,
     ) -> (OpeningPoint<BIG_ENDIAN, F>, F);
+
+    fn get_advice_opening(
+        &self,
+        kind: AdviceKind,
+        sumcheck: SumcheckId,
+    ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)>;
 }
 
 /// State for Dory batch opening (Stage 8).
@@ -254,6 +261,7 @@ pub struct DoryOpeningState<F: JoltField> {
 impl<F: JoltField> DoryOpeningState<F> {
     /// Build streaming RLC polynomial from this state.
     /// Streams directly from trace - no witness regeneration needed.
+    /// Advice polynomials are passed separately (not streamed from trace).
     #[tracing::instrument(skip_all)]
     pub fn build_streaming_rlc<PCS: CommitmentScheme<Field = F>>(
         &self,
@@ -261,6 +269,7 @@ impl<F: JoltField> DoryOpeningState<F> {
         trace_source: TraceSource,
         rlc_streaming_data: Arc<RLCStreamingData>,
         mut opening_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
+        advice_polys: HashMap<CommittedPolynomial, MultilinearPolynomial<F>>,
     ) -> (MultilinearPolynomial<F>, PCS::OpeningProofHint) {
         // Accumulate gamma coefficients per polynomial using shared utility
         let rlc_map =
@@ -275,6 +284,7 @@ impl<F: JoltField> DoryOpeningState<F> {
             trace_source,
             poly_ids.clone(),
             &coeffs,
+            advice_polys,
         ));
 
         let hints: Vec<PCS::OpeningProofHint> = rlc_map
@@ -331,6 +341,19 @@ impl<F: JoltField> OpeningAccumulator<F> for ProverOpeningAccumulator<F> {
             .unwrap_or_else(|| panic!("opening for {sumcheck:?} {polynomial:?} not found"));
         (point.clone(), *claim)
     }
+
+    fn get_advice_opening(
+        &self,
+        kind: AdviceKind,
+        sumcheck_id: SumcheckId,
+    ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
+        let opening_id = match kind {
+            AdviceKind::Trusted => OpeningId::TrustedAdvice(sumcheck_id),
+            AdviceKind::Untrusted => OpeningId::UntrustedAdvice(sumcheck_id),
+        };
+        let (point, claim) = self.openings.get(&opening_id)?;
+        Some((point.clone(), *claim))
+    }
 }
 
 impl<F> ProverOpeningAccumulator<F>
@@ -355,21 +378,16 @@ where
         self.openings.get(&key).unwrap().1
     }
 
-    pub fn get_untrusted_advice_opening(
+    pub fn get_advice_opening(
         &self,
+        kind: AdviceKind,
         sumcheck_id: SumcheckId,
     ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
-        let (point, claim) = self
-            .openings
-            .get(&OpeningId::UntrustedAdvice(sumcheck_id))?;
-        Some((point.clone(), *claim))
-    }
-
-    pub fn get_trusted_advice_opening(
-        &self,
-        sumcheck_id: SumcheckId,
-    ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
-        let (point, claim) = self.openings.get(&OpeningId::TrustedAdvice(sumcheck_id))?;
+        let opening_id = match kind {
+            AdviceKind::Trusted => OpeningId::TrustedAdvice(sumcheck_id),
+            AdviceKind::Untrusted => OpeningId::UntrustedAdvice(sumcheck_id),
+        };
+        let (point, claim) = self.openings.get(&opening_id)?;
         Some((point.clone(), *claim))
     }
 
@@ -548,6 +566,19 @@ impl<F: JoltField> OpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
             .unwrap_or_else(|| panic!("No opening found for {sumcheck:?} {polynomial:?}"));
         (point.clone(), *claim)
     }
+
+    fn get_advice_opening(
+        &self,
+        kind: AdviceKind,
+        sumcheck_id: SumcheckId,
+    ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
+        let opening_id = match kind {
+            AdviceKind::Trusted => OpeningId::TrustedAdvice(sumcheck_id),
+            AdviceKind::Untrusted => OpeningId::UntrustedAdvice(sumcheck_id),
+        };
+        let (point, claim) = self.openings.get(&opening_id)?;
+        Some((point.clone(), *claim))
+    }
 }
 
 impl<F> VerifierOpeningAccumulator<F>
@@ -570,21 +601,16 @@ where
         self.prover_opening_accumulator = Some(prover_openings);
     }
 
-    pub fn get_untrusted_advice_opening(
+    pub fn get_advice_opening(
         &self,
+        kind: AdviceKind,
         sumcheck_id: SumcheckId,
     ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
-        let (point, claim) = self
-            .openings
-            .get(&OpeningId::UntrustedAdvice(sumcheck_id))?;
-        Some((point.clone(), *claim))
-    }
-
-    pub fn get_trusted_advice_opening(
-        &self,
-        sumcheck_id: SumcheckId,
-    ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)> {
-        let (point, claim) = self.openings.get(&OpeningId::TrustedAdvice(sumcheck_id))?;
+        let opening_id = match kind {
+            AdviceKind::Trusted => OpeningId::TrustedAdvice(sumcheck_id),
+            AdviceKind::Untrusted => OpeningId::UntrustedAdvice(sumcheck_id),
+        };
+        let (point, claim) = self.openings.get(&opening_id)?;
         Some((point.clone(), *claim))
     }
 
@@ -723,4 +749,50 @@ where
             &commitment,
         )
     }
+}
+
+/// Computes the Lagrange factor for embedding a smaller "advice" polynomial into the top-left
+/// block of the main Dory matrix.
+///
+/// Advice polynomials have fewer variables than main polynomials. To batch them together,
+/// we embed advice in the top-left corner of the larger matrix and multiply by a Lagrange
+/// selector that is 1 on that block and 0 elsewhere:
+///
+/// ```text
+/// Lagrange factor = ∏_{i=nu_a..nu_main} (1 - r_rows[i]) × ∏_{i=sigma_a..sigma_main} (1 - r_cols[i])
+/// ```
+///
+/// # Arguments
+/// - `opening_point_be`: The unified opening point in big-endian order
+/// - `advice_vars`: Number of variables in the advice polynomial
+///
+/// # Returns
+/// The Lagrange factor as a field element
+pub fn compute_advice_lagrange_factor<F: JoltField>(
+    opening_point_be: &[F::Challenge],
+    advice_vars: usize,
+) -> F {
+    // Convert to little-endian (Dory order)
+    let mut r_le: Vec<F::Challenge> = opening_point_be.to_vec();
+    r_le.reverse();
+
+    // Derive main matrix dimensions from the unified point length
+    let total_vars = r_le.len();
+    let (sigma_main, _nu_main) =
+        crate::poly::commitment::dory::DoryGlobals::balanced_sigma_nu(total_vars);
+    let (r_cols, r_rows) = r_le.split_at(sigma_main);
+
+    // Advice dimensions (balanced policy)
+    let (sigma_a, nu_a) =
+        crate::poly::commitment::dory::DoryGlobals::balanced_sigma_nu(advice_vars);
+
+    // Row factor: eq(r_rows[nu_a..], [0, 0, ...]) = ∏(1 - r_rows[i]) for i >= nu_a
+    // This selects the "zero" vertex in the row dimension beyond the advice region
+    let row_factor = EqPolynomial::<F>::zero_selector(&r_rows[nu_a..]);
+
+    // Column factor: eq(r_cols[sigma_a..], [0, 0, ...]) = ∏(1 - r_cols[i]) for i >= sigma_a
+    // This selects the "zero" vertex in the column dimension beyond the advice region
+    let col_factor = EqPolynomial::<F>::zero_selector(&r_cols[sigma_a..]);
+
+    row_factor * col_factor
 }

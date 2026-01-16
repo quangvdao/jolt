@@ -11,7 +11,7 @@
 //!    - `RamReadWriteChecking` (Stage 2): opened at `r_cycle_stage2`
 //!    - `RamValEvaluation` (Stage 4): opened at `r_cycle_stage4`
 //!    - `RamValFinalEvaluation` (Stage 4): opened at `r_cycle_stage4` (same as RamValEvaluation)
-//!
+//!    
 //!    Note: ValEvaluation and ValFinal share the same opening point because they're
 //!    in the same batched sumcheck and both normalize using the same sumcheck challenges.
 //!    So effectively RamInc has **2 distinct opening points**.
@@ -19,7 +19,7 @@
 //! 2. **RdInc**: Claims are emitted from:
 //!    - `RegistersReadWriteChecking` (Stage 4): opened at `s_cycle_stage4`
 //!    - `RegistersValEvaluation` (Stage 5): opened at `s_cycle_stage5`
-//!
+//!    
 //!    So RdInc has **2 distinct opening points**.
 //!
 //! ## Sumcheck Relation
@@ -27,7 +27,7 @@
 //! Let:
 //!   - v_1 = RamInc(r_cycle_stage2)     from RamReadWriteChecking
 //!   - v_2 = RamInc(r_cycle_stage4)     from RamValEvaluation (and RamValFinal)
-//!   - w_1 = RdInc(s_cycle_stage4)      from RegistersReadWriteChecking
+//!   - w_1 = RdInc(s_cycle_stage4)      from RegistersReadWriteChecking  
 //!   - w_2 = RdInc(s_cycle_stage5)      from RegistersValEvaluation
 //!
 //! Input claim:
@@ -71,10 +71,6 @@ use crate::utils::thread::unsafe_allocate_zero_vec;
 use crate::zkvm::witness::CommittedPolynomial;
 
 const DEGREE_BOUND: usize = 2;
-
-// ============================================================================
-// PARAMS
-// ============================================================================
 
 #[derive(Allocative, Clone)]
 pub struct IncClaimReductionSumcheckParams<F: JoltField> {
@@ -182,10 +178,6 @@ impl<F: JoltField> SumcheckInstanceParams<F> for IncClaimReductionSumcheckParams
     }
 }
 
-// ============================================================================
-// PROVER
-// ============================================================================
-
 #[derive(Allocative)]
 pub struct IncClaimReductionSumcheckProver<F: JoltField> {
     phase: IncClaimReductionPhase<F>,
@@ -285,10 +277,6 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         flamegraph.visit_root(self);
     }
 }
-
-// ============================================================================
-// PHASE 1: Prefix-Suffix Sumcheck
-// ============================================================================
 
 #[derive(Allocative)]
 struct IncClaimReductionPhase1State<F: JoltField> {
@@ -479,10 +467,6 @@ impl<F: JoltField> IncClaimReductionPhase1State<F> {
     }
 }
 
-// ============================================================================
-// PHASE 2: Standard Sumcheck
-// ============================================================================
-
 #[derive(Allocative)]
 struct IncClaimReductionPhase2State<F: JoltField> {
     ram_inc: MultilinearPolynomial<F>,
@@ -653,10 +637,6 @@ impl<F: JoltField> IncClaimReductionPhase2State<F> {
         self.eq_rd.bind_parallel(r_j, BindingOrder::LowToHigh);
     }
 }
-
-// ============================================================================
-// VERIFIER
-// ============================================================================
 
 pub struct IncClaimReductionSumcheckVerifier<F: JoltField> {
     params: IncClaimReductionSumcheckParams<F>,

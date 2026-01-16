@@ -49,7 +49,8 @@ use crate::{
         unipoly::UniPoly,
     },
     subprotocols::{
-        sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
+        sumcheck_prover::SumcheckInstanceProver,
+        sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
     utils::{expanding_table::ExpandingTable, math::Math, thread::unsafe_allocate_zero_vec},
@@ -59,10 +60,6 @@ use crate::{
 /// Degree bound of the sumcheck round polynomials.
 /// Degree 2: one from eq polynomial, one from ra (which is 0 or 1).
 const DEGREE_BOUND: usize = 2;
-
-// ============================================================================
-// Main Prover Enum
-// ============================================================================
 
 /// RAM RA reduction sumcheck prover.
 ///
@@ -109,16 +106,8 @@ impl<F: JoltField> RamRaClaimReductionSumcheckProver<F> {
 impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
     for RamRaClaimReductionSumcheckProver<F>
 {
-    fn degree(&self) -> usize {
-        DEGREE_BOUND
-    }
-
-    fn num_rounds(&self) -> usize {
-        self.params.num_rounds()
-    }
-
-    fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
-        self.params.input_claim()
+    fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
+        &self.params
     }
 
     #[tracing::instrument(skip_all, name = "RamRaClaimReductionSumcheckProver::compute_message")]
@@ -202,10 +191,6 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         flamegraph.visit_root(self);
     }
 }
-
-// ============================================================================
-// Phase Address State
-// ============================================================================
 
 /// State for address rounds (first log_K rounds).
 ///
@@ -509,10 +494,6 @@ impl<F: JoltField> PhaseAddressState<F> {
     }
 }
 
-// ============================================================================
-// Phase Cycle 1 State (Prefix-Suffix)
-// ============================================================================
-
 /// State for first half of cycle rounds using prefix-suffix optimization.
 ///
 /// Uses P/Q buffer structure where:
@@ -738,10 +719,6 @@ impl<F: JoltField> PhaseCycle1State<F> {
     }
 }
 
-// ============================================================================
-// Phase Cycle 2 State (Dense Suffix)
-// ============================================================================
-
 /// State for second half of cycle rounds using dense sumcheck.
 ///
 /// After prefix rounds, we have:
@@ -914,10 +891,6 @@ impl<F: JoltField> PhaseCycle2State<F> {
     }
 }
 
-// ============================================================================
-// Shared Parameters
-// ============================================================================
-
 /// Shared parameters between prover and verifier.
 #[derive(Clone, Allocative)]
 pub struct RaReductionParams<F: JoltField> {
@@ -1014,22 +987,36 @@ impl<F: JoltField> RaReductionParams<F> {
             log_T,
         }
     }
+}
+
+impl<F: JoltField> SumcheckInstanceParams<F> for RaReductionParams<F> {
+    fn degree(&self) -> usize {
+        DEGREE_BOUND
+    }
 
     fn num_rounds(&self) -> usize {
         self.log_K + self.log_T
     }
 
-    fn input_claim(&self) -> F {
+    fn input_claim(&self, _accumulator: &dyn OpeningAccumulator<F>) -> F {
         self.claim_raf
             + self.gamma * self.claim_val_final
             + self.gamma_squared * self.claim_rw
             + self.gamma_cubed * self.claim_val_eval
     }
-}
 
-// ============================================================================
-// Verifier
-// ============================================================================
+    fn normalize_opening_point(
+        &self,
+        sumcheck_challenges: &[F::Challenge],
+    ) -> OpeningPoint<BIG_ENDIAN, F> {
+        debug_assert_eq!(sumcheck_challenges.len(), self.num_rounds());
+        let (r_address, r_cycle) = sumcheck_challenges.split_at(self.log_K);
+        let r_address_be: Vec<_> = r_address.iter().rev().copied().collect();
+        let r_cycle_be: Vec<_> = r_cycle.iter().rev().copied().collect();
+
+        OpeningPoint::<BIG_ENDIAN, F>::new([r_address_be, r_cycle_be].concat())
+    }
+}
 
 /// RAM RA reduction sumcheck verifier.
 pub struct RamRaClaimReductionSumcheckVerifier<F: JoltField> {
@@ -1053,16 +1040,8 @@ impl<F: JoltField> RamRaClaimReductionSumcheckVerifier<F> {
 impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     for RamRaClaimReductionSumcheckVerifier<F>
 {
-    fn degree(&self) -> usize {
-        DEGREE_BOUND
-    }
-
-    fn num_rounds(&self) -> usize {
-        self.params.num_rounds()
-    }
-
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
-        self.params.input_claim()
+    fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
+        &self.params
     }
 
     fn expected_output_claim(

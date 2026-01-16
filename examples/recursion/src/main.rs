@@ -347,6 +347,7 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
             &[],
             &[],
             None,
+            None,
             &mut output_bytes,
             &guest_prover_preprocessing,
         );
@@ -618,6 +619,7 @@ fn run_recursion_proof(
                 &input_bytes,
                 &[],
                 &[],
+                None,
                 None,
                 &mut output_bytes,
                 &recursion_prover_preprocessing,

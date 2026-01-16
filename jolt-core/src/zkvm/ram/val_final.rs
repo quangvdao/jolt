@@ -21,6 +21,8 @@ use crate::{
     utils::math::Math,
     zkvm::{
         bytecode::BytecodePreprocessing,
+        claim_reductions::AdviceKind,
+        config::ReadWriteConfig,
         ram::remap_address,
         witness::{CommittedPolynomial, VirtualPolynomial},
     },
@@ -65,6 +67,7 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
         trace_len: usize,
         ram_K: usize,
         opening_accumulator: &VerifierOpeningAccumulator<F>,
+        rw_config: &ReadWriteConfig,
     ) -> Self {
         let r_address = opening_accumulator
             .get_virtual_polynomial_opening(
@@ -79,7 +82,6 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
         // When needs_single_advice_opening is true, advice is only opened at RamValEvaluation
         // (the two points are identical). Otherwise, we use RamValFinalEvaluation.
         let log_T = trace_len.log_2();
-        let rw_config = crate::zkvm::config::ReadWriteConfig::new(log_T, ram_K.log_2());
         let advice_sumcheck_id = if rw_config.needs_single_advice_opening(log_T) {
             SumcheckId::RamValEvaluation
         } else {
@@ -87,7 +89,7 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
         };
 
         let untrusted_advice_contribution = super::calculate_advice_memory_evaluation(
-            opening_accumulator.get_untrusted_advice_opening(advice_sumcheck_id),
+            opening_accumulator.get_advice_opening(AdviceKind::Untrusted, advice_sumcheck_id),
             (program_io.memory_layout.max_untrusted_advice_size as usize / 8)
                 .next_power_of_two()
                 .log_2(),
@@ -98,7 +100,7 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
         );
 
         let trusted_advice_contribution = super::calculate_advice_memory_evaluation(
-            opening_accumulator.get_trusted_advice_opening(advice_sumcheck_id),
+            opening_accumulator.get_advice_opening(AdviceKind::Trusted, advice_sumcheck_id),
             (program_io.memory_layout.max_trusted_advice_size as usize / 8)
                 .next_power_of_two()
                 .log_2(),
@@ -309,6 +311,7 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
         trace_len: usize,
         ram_K: usize,
         opening_accumulator: &VerifierOpeningAccumulator<F>,
+        rw_config: &ReadWriteConfig,
     ) -> Self {
         let params = ValFinalSumcheckParams::new_from_verifier(
             initial_ram_state,
@@ -316,6 +319,7 @@ impl<F: JoltField> ValFinalSumcheckVerifier<F> {
             trace_len,
             ram_K,
             opening_accumulator,
+            rw_config,
         );
         Self { params }
     }

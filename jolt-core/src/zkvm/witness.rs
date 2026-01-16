@@ -37,6 +37,12 @@ pub enum CommittedPolynomial {
     RamRa(usize),
     /// Dory dense matrix polynomial for recursion (after jagged transform)
     DoryDenseMatrix,
+    /// Trusted advice polynomial - committed before proving, verifier has commitment.
+    /// Length cannot exceed max_trace_length.
+    TrustedAdvice,
+    /// Untrusted advice polynomial - committed during proving, commitment in proof.
+    /// Length cannot exceed max_trace_length.
+    UntrustedAdvice,
 }
 
 /// Returns a list of symbols representing all committed polynomials.
@@ -125,6 +131,8 @@ impl CommittedPolynomial {
             }
             CommittedPolynomial::DoryDenseMatrix => {
                 panic!("DoryDenseMatrix is not generated from witness data")
+            CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
+                panic!("Advice polynomials should not use streaming witness generation")
             }
         }
     }
@@ -210,6 +218,8 @@ impl CommittedPolynomial {
             }
             CommittedPolynomial::DoryDenseMatrix => {
                 panic!("DoryDenseMatrix is not generated from witness data")
+            CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
+                panic!("Advice polynomials should not use generate_witness")
             }
         }
     }

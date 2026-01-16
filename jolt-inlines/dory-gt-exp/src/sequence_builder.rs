@@ -599,6 +599,20 @@ fn fq6_add_fq2_into_mem(
     store_fq2(asm, out_ptr, out_off, tmp);
 }
 
+#[inline(always)]
+fn fq6_sub_fq2_into_mem(
+    asm: &mut InstrAssembler,
+    out_ptr: u8,
+    out_off: i64,
+    subtrahend: Fq2Regs,
+    tmp: Fq2Regs,
+    s: &FqScratch,
+) {
+    load_fq2(asm, tmp, out_ptr, out_off);
+    fq2_sub_mod(asm, tmp, tmp, subtrahend, s);
+    store_fq2(asm, out_ptr, out_off, tmp);
+}
+
 /// Multiply `lhs` (in regs) by `rhs` (in memory) and write the Fq6 product to memory.
 ///
 /// Uses the schoolbook formula over `Fq2[v]/(v^3 - ξ)` and **does not** use any extra scratch memory
@@ -1228,32 +1242,135 @@ fn fq12_mul_regmem_to_mem(
     let c0_off = 0i64;
     let c1_off = 192i64;
 
-    // t0 = a0*b0 -> out.c0
-    fq6_mul_schoolbook_regmem_to_mem(asm, out_ptr, c0_off, lhs.c0, rhs_ptr, rhs_off + 0, w, s);
-    // t1 = a1*b1 -> out.c1 (temporary)
-    fq6_mul_schoolbook_regmem_to_mem(asm, out_ptr, c1_off, lhs.c1, rhs_ptr, rhs_off + 192, w, s);
+    // Fq12 Karatsuba (quadratic extension over Fq6):
+    //   t0 = a0*b0
+    //   t1 = a1*b1
+    //   t2 = (a0+a1)*(b0+b1)
+    //   c0 = t0 + v*t1
+    //   c1 = t2 - t0 - t1
+    //
+    // We avoid materializing all of t1 in memory by directly accumulating its contributions:
+    // - into c0 via the v-mapping v*(x0,x1,x2) = (x2*xi, x0, x1)
+    // - into c1 via subtraction
+    //
+    // Scratch strategy:
+    // - use out.c0 temporarily to store (b0+b1) while computing t2
+    // - store t2 in out.c1
+    // - overwrite out.c0 with t0
+    // - update out.c1 in-place to (t2 - t0 - t1) and out.c0 to (t0 + v*t1)
 
-    // out.c0 += v*t1, where v*(x0,x1,x2) = (x2*xi, x0, x1)
-    // c0.c0 += (t1.c2 * xi)
-    load_fq2(asm, w.a, out_ptr, c0_off + 0);
-    load_fq2(asm, w.b, out_ptr, c1_off + 128);
-    fq2_mul_by_xi_in_place(asm, w.b, w.out.c0, w.out.c1, s);
-    fq2_add_mod(asm, w.a, w.a, w.b, s);
-    store_fq2(asm, out_ptr, c0_off + 0, w.a);
-    // c0.c1 += t1.c0
-    load_fq2(asm, w.a, out_ptr, c0_off + 64);
-    load_fq2(asm, w.b, out_ptr, c1_off + 0);
-    fq2_add_mod(asm, w.a, w.a, w.b, s);
-    store_fq2(asm, out_ptr, c0_off + 64, w.a);
-    // c0.c2 += t1.c1
-    load_fq2(asm, w.a, out_ptr, c0_off + 128);
-    load_fq2(asm, w.b, out_ptr, c1_off + 64);
-    fq2_add_mod(asm, w.a, w.a, w.b, s);
-    store_fq2(asm, out_ptr, c0_off + 128, w.a);
+    let rhs_b0_off = rhs_off + 0;
+    let rhs_b1_off = rhs_off + 192;
 
-    // out.c1 = a0*b1 + a1*b0  (overwrite temporary t1)
-    fq6_mul_schoolbook_regmem_to_mem(asm, out_ptr, c1_off, lhs.c0, rhs_ptr, rhs_off + 192, w, s);
-    fq6_mul_schoolbook_regmem_add_to_mem(asm, out_ptr, c1_off, lhs.c1, rhs_ptr, rhs_off + 0, w, s);
+    // out.c0 := (b0 + b1)  (temporary scratch)
+    for fq2_i in 0..3i64 {
+        let off = fq2_i * 64;
+        load_fq2(asm, w.a, rhs_ptr, rhs_b0_off + off);
+        load_fq2(asm, w.b, rhs_ptr, rhs_b1_off + off);
+        fq2_add_mod(asm, w.out, w.a, w.b, s);
+        store_fq2(asm, out_ptr, c0_off + off, w.out);
+    }
+
+    // lhs.c0 := a0 + a1 (temporary, restored immediately after computing t2)
+    fq6_add_mod(asm, lhs.c0, lhs.c0, lhs.c1, s);
+
+    // t2 := (a0+a1)*(b0+b1) -> out.c1
+    fq6_mul_schoolbook_regmem_to_mem(asm, out_ptr, c1_off, lhs.c0, out_ptr, c0_off, w, s);
+
+    // Restore lhs.c0 := (a0+a1) - a1 = a0
+    fq6_sub_mod(asm, lhs.c0, lhs.c0, lhs.c1, s);
+
+    // t0 := a0*b0 -> out.c0 (overwrites b0+b1 scratch)
+    fq6_mul_schoolbook_regmem_to_mem(asm, out_ptr, c0_off, lhs.c0, rhs_ptr, rhs_b0_off, w, s);
+
+    // out.c1 := out.c1 - out.c0  (t2 - t0)
+    for fq2_i in 0..3i64 {
+        let off = fq2_i * 64;
+        load_fq2(asm, w.a, out_ptr, c1_off + off);
+        load_fq2(asm, w.b, out_ptr, c0_off + off);
+        fq2_sub_mod(asm, w.out, w.a, w.b, s);
+        store_fq2(asm, out_ptr, c1_off + off, w.out);
+    }
+
+    // Incorporate t1 := a1*b1 into:
+    // - c1 via subtraction: out.c1 -= t1
+    // - c0 via v-mapping:   out.c0 += v*t1
+    //
+    // We do this term-by-term (schoolbook) without ever storing full t1.
+    let b1_ptr = rhs_ptr;
+    let b1_off = rhs_b1_off;
+
+    // --- t1.c0 contributions (update c1.c0 and c0.c1) ---
+    // c0_term = a0*b0
+    copy_fq2(asm, w.a, lhs.c1.c0);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 0);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 0, w.out, w.a, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 64, w.out, w.a, s);
+
+    // c0_term += xi*(a1*b2)
+    copy_fq2(asm, w.a, lhs.c1.c1);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 128);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq2_mul_by_xi_in_place(asm, w.out, w.a.c0, w.a.c1, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 0, w.out, w.a, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 64, w.out, w.a, s);
+
+    // c0_term += xi*(a2*b1)
+    copy_fq2(asm, w.a, lhs.c1.c2);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 64);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq2_mul_by_xi_in_place(asm, w.out, w.a.c0, w.a.c1, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 0, w.out, w.a, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 64, w.out, w.a, s);
+
+    // --- t1.c1 contributions (update c1.c1 and c0.c2) ---
+    // c1_term = a0*b1
+    copy_fq2(asm, w.a, lhs.c1.c0);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 64);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 64, w.out, w.a, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 128, w.out, w.a, s);
+
+    // c1_term += a1*b0
+    copy_fq2(asm, w.a, lhs.c1.c1);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 0);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 64, w.out, w.a, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 128, w.out, w.a, s);
+
+    // c1_term += xi*(a2*b2)
+    copy_fq2(asm, w.a, lhs.c1.c2);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 128);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq2_mul_by_xi_in_place(asm, w.out, w.a.c0, w.a.c1, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 64, w.out, w.a, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 128, w.out, w.a, s);
+
+    // --- t1.c2 contributions (update c1.c2 and c0.c0 via xi) ---
+    // c2_term = a0*b2
+    copy_fq2(asm, w.a, lhs.c1.c0);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 128);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 128, w.out, w.a, s);
+    fq2_mul_by_xi_in_place(asm, w.out, w.a.c0, w.a.c1, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 0, w.out, w.a, s);
+
+    // c2_term += a1*b1
+    copy_fq2(asm, w.a, lhs.c1.c1);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 64);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 128, w.out, w.a, s);
+    fq2_mul_by_xi_in_place(asm, w.out, w.a.c0, w.a.c1, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 0, w.out, w.a, s);
+
+    // c2_term += a2*b0
+    copy_fq2(asm, w.a, lhs.c1.c2);
+    load_fq2(asm, w.b, b1_ptr, b1_off + 0);
+    fq2_mul_karatsuba_clobber(asm, w.out, w.a, w.b, s);
+    fq6_sub_fq2_into_mem(asm, out_ptr, c1_off + 128, w.out, w.a, s);
+    fq2_mul_by_xi_in_place(asm, w.out, w.a.c0, w.a.c1, s);
+    fq6_add_fq2_into_mem(asm, out_ptr, c0_off + 0, w.out, w.a, s);
 }
 
 // -----------------------------

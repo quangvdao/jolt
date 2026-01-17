@@ -1,11 +1,15 @@
 //! Global state management for Dory parameters
 
 use crate::utils::math::Math;
-use dory::backends::arkworks::{init_cache, is_cached, ArkG1, ArkG2};
+use dory::backends::arkworks::{ArkG1, ArkG2};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     OnceLock,
 };
+
+// The prepared point cache is a host/prover optimization. Keep it out of minimal/guest builds.
+#[cfg(feature = "prover")]
+use dory::backends::arkworks::{init_cache, is_cached};
 
 // Main polynomial globals
 static mut GLOBAL_T: OnceLock<usize> = OnceLock::new();
@@ -262,9 +266,14 @@ impl DoryGlobals {
     /// # Arguments
     /// * `g1_vec` - Vector of G1 generators from the prover setup
     /// * `g2_vec` - Vector of G2 generators from the prover setup
+    #[cfg(feature = "prover")]
     pub fn init_prepared_cache(g1_vec: &[ArkG1], g2_vec: &[ArkG2]) {
         if !is_cached() {
             init_cache(g1_vec, g2_vec);
         }
     }
+
+    /// No-op in minimal/guest builds (cache not compiled).
+    #[cfg(not(feature = "prover"))]
+    pub fn init_prepared_cache(_g1_vec: &[ArkG1], _g2_vec: &[ArkG2]) {}
 }

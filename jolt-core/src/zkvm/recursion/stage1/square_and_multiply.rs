@@ -12,8 +12,8 @@ use crate::{
         eq_poly::EqPolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
-            OpeningPoint, ProverOpeningAccumulator, SumcheckId,
-            VerifierOpeningAccumulator, BIG_ENDIAN,
+            OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
+            BIG_ENDIAN,
         },
         unipoly::UniPoly,
     },
@@ -21,8 +21,8 @@ use crate::{
         sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
     },
     transcripts::Transcript,
-    zkvm::{recursion::utils::virtual_polynomial_utils::*, witness::VirtualPolynomial},
     virtual_claims,
+    zkvm::{recursion::utils::virtual_polynomial_utils::*, witness::VirtualPolynomial},
 };
 use rayon::prelude::*;
 
@@ -77,7 +77,13 @@ fn append_constraint_virtual_openings<F: JoltField, T: Transcript>(
         VirtualPolynomial::RecursionRhoCurr(constraint_idx),
         VirtualPolynomial::RecursionQuotient(constraint_idx),
     ];
-    append_virtual_openings(accumulator, transcript, sumcheck_id, opening_point, &polynomials);
+    append_virtual_openings(
+        accumulator,
+        transcript,
+        sumcheck_id,
+        opening_point,
+        &polynomials,
+    );
 }
 
 /// Individual polynomial data for a single constraint

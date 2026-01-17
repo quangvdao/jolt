@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 guest = []
+grumpkin-msm-provable = ["jolt_sdk/grumpkin-msm-provable"]
 
 [dependencies]
 jolt_sdk = { package = "jolt-sdk", path = "../../../jolt-sdk", features = ["guest-verifier"] }

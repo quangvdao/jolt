@@ -582,6 +582,7 @@ where
     }
 
     /// Stage 8: PCS batch opening verification using a recursion hint (when supported by the PCS).
+    #[allow(dead_code)]
     #[tracing::instrument(skip_all, name = "verify_stage8_with_pcs_hint")]
     fn verify_stage8_with_pcs_hint(
         &mut self,
@@ -651,7 +652,8 @@ where
 
         // 2. Sample gamma and compute powers for RLC
         let gamma_powers: Vec<F> = {
-            let _span = tracing::info_span!("stage8_gamma_powers", num_claims = claims.len()).entered();
+            let _span =
+                tracing::info_span!("stage8_gamma_powers", num_claims = claims.len()).entered();
             self.transcript.append_scalars(&claims);
             self.transcript.challenge_scalar_powers(claims.len())
         };
@@ -740,18 +742,16 @@ where
         PCS: RecursionExt<F>,
         <PCS as RecursionExt<F>>::Hint: Clone,
     {
-        // 1. Verify Dory proof with hints
-        let hint = {
-            let _span = tracing::info_span!("stage8_clone_hint").entered();
-            self.proof.stage9_pcs_hint.clone().ok_or_else(|| {
-                anyhow::anyhow!("stage9_pcs_hint is required for recursion verification")
-            })?
-        };
-
-        {
-            let _span = tracing::info_span!("stage8_verify_dory_with_hint").entered();
-            self.verify_stage8_with_pcs_hint(&hint)?;
-        }
+        // 1. Verify Dory batch opening.
+        //
+        // NOTE: The stage-9 PCS hint is an optimization for recursion witness generation; it must
+        // NOT be required for sound verification. For now we always take the non-hint verification
+        // path to keep transcript evolution identical across environments (host + guest).
+        //
+        // If we re-enable hint-based Stage 8 verification, it must be proven transcript-equivalent
+        // to the non-hint path, since downstream recursion verification depends on transcript state.
+        let _span = tracing::info_span!("stage8_verify_dory_no_hint").entered();
+        self.verify_stage8()?;
 
         // 2. Extract data for RecursionVerifier
         let recursion_proof = &self.proof.recursion_proof;
@@ -763,16 +763,20 @@ where
         // Extract constraint counts from the opening claims in recursion_proof
         // We can infer the structure from the types of virtual polynomials
         let (_num_gt_exp, _num_gt_mul, _num_g1_scalar_mul) = {
-            let _span = tracing::info_span!("stage8_count_constraint_types", num_claims = recursion_proof.opening_claims.len()).entered();
+            let _span = tracing::info_span!(
+                "stage8_count_constraint_types",
+                num_claims = recursion_proof.opening_claims.len()
+            )
+            .entered();
             let mut num_gt_exp = 0;
             let mut num_gt_mul = 0;
             let mut num_g1_scalar_mul = 0;
 
-        // Count constraint types based on the virtual polynomial types in opening claims
-        for (key, _) in &recursion_proof.opening_claims {
-            match key {
-                OpeningId::Virtual(poly, _) => {
-                    match poly {
+            // Count constraint types based on the virtual polynomial types in opening claims
+            for (key, _) in &recursion_proof.opening_claims {
+                match key {
+                    OpeningId::Virtual(poly, _) => {
+                        match poly {
                         crate::zkvm::witness::VirtualPolynomial::RecursionBase(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionRhoPrev(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionRhoCurr(_)
@@ -826,10 +830,10 @@ where
                         }
                         _ => {} // Ignore other virtual polynomial types
                     }
+                    }
+                    _ => {} // Ignore non-virtual openings
                 }
-                _ => {} // Ignore non-virtual openings
             }
-        }
             (num_gt_exp, num_gt_mul, num_g1_scalar_mul)
         };
 
@@ -839,20 +843,11 @@ where
         let verifier_input = {
             let _span = tracing::info_span!("stage8_build_verifier_input").entered();
             let constraint_types = metadata.constraint_types.clone();
-            let num_constraints = constraint_types.len();
-            let num_constraints_padded = num_constraints.next_power_of_two();
-
-            // The dense polynomial is created by the jagged bijection which compresses
-            // the sparse matrix by removing redundant evaluations. We should use the
-            // actual dense_num_vars from the metadata rather than trying to recalculate it.
-
-            // Calculate the constraint system parameters for the verifier input
-            // These are based on the original constraint matrix structure
-            const NUM_POLY_TYPES: usize = 15; // PolyType::NUM_TYPES
-            let num_rows_unpadded = NUM_POLY_TYPES * num_constraints_padded;
-            let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
-            let num_constraint_vars = 8; // All constraints padded to 8 variables
-            let num_vars = num_s_vars + num_constraint_vars;
+            let num_constraints = metadata.num_constraints;
+            let num_constraints_padded = metadata.num_constraints_padded;
+            let num_s_vars = metadata.num_s_vars;
+            let num_constraint_vars = metadata.num_constraint_vars;
+            let num_vars = metadata.num_vars;
 
             let jagged_bijection = metadata.jagged_bijection.clone();
             let jagged_mapping = metadata.jagged_mapping.clone();
@@ -1171,7 +1166,8 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         type HyraxPCS = Hyrax<1, GrumpkinProjective>;
         let hyrax_prover_setup =
             <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
-        let hyrax_recursion_setup = <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
+        let hyrax_recursion_setup =
+            <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
 
         Self {
             generators,

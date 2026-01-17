@@ -1,8 +1,6 @@
 //! This file implements the Hyrax polynomial commitment scheme used in snark composition
 use super::commitment_scheme::CommitmentScheme;
 use crate::field::JoltField;
-use ark_bn254;
-use ark_grumpkin;
 use crate::msm::VariableBaseMSM;
 use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::poly::eq_poly::EqPolynomial;
@@ -14,6 +12,7 @@ use crate::utils::{compute_dotproduct, mul_0_1_optimized};
 use ark_ec::CurveGroup;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::vec::Vec;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use num_integer::Roots;
 use rand::SeedableRng;
 use rayon::prelude::*;
@@ -79,127 +78,11 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxComm
 
         let gens = &generators.generators[..R_size];
 
-        // Single-threaded Pippenger MSM closure for ZKVM environment
-        let pippenger_msm = |bases: &[G::Affine], scalars: &[G::ScalarField]| -> G {
-            use ark_ff::BigInteger;
-
-            if bases.is_empty() || scalars.is_empty() {
-                return G::zero();
-            }
-
-            let n = bases.len().min(scalars.len());
-
-            // For small MSMs, use naive method
-            if n < 32 {
-                let mut result = G::zero();
-                for i in 0..n {
-                    result += G::from(bases[i]) * scalars[i];
-                }
-                return result;
-            }
-
-            // Window size calculation (optimal for given input size)
-            let window_size = if n < 32 {
-                3
-            } else if n < 64 {
-                4
-            } else if n < 128 {
-                5
-            } else if n < 512 {
-                6
-            } else if n < 1024 {
-                7
-            } else if n < 4096 {
-                8
-            } else if n < 16384 {
-                9
-            } else {
-                10
-            };
-
-            let num_buckets = 1 << window_size;
-            // Determine scalar field bit size based on the actual field type
-            let scalar_bits = {
-                let scalar_ref: &dyn core::any::Any = &scalars[0];
-                if scalar_ref.is::<ark_grumpkin::Fr>() {
-                    255 // Grumpkin scalar field
-                } else if scalar_ref.is::<ark_bn254::Fr>() {
-                    254 // BN254 scalar field
-                } else {
-                    256 // Default fallback
-                }
-            };
-            let num_windows = (scalar_bits + window_size - 1) / window_size;
-
-            let mut result = G::zero();
-
-            // Process each window
-            for window in 0..num_windows {
-                // Initialize buckets
-                let mut buckets = vec![G::zero(); num_buckets];
-
-                // Add points to buckets based on their scalar bits in this window
-                for i in 0..n {
-                    // Transmute to access PrimeField methods
-                    let scalar_bigint = unsafe {
-                        use ark_ff::PrimeField;
-                        let scalar_ptr = &scalars[i] as *const G::ScalarField;
-                        // Cast through raw pointer to preserve the actual type
-                        let scalar_ref = &*(scalar_ptr as *const dyn core::any::Any);
-
-                        // Try Grumpkin first, then BN254
-                        if let Some(grumpkin_scalar) = scalar_ref.downcast_ref::<ark_grumpkin::Fr>() {
-                            grumpkin_scalar.into_bigint()
-                        } else if let Some(bn254_scalar) = scalar_ref.downcast_ref::<ark_bn254::Fr>() {
-                            bn254_scalar.into_bigint()
-                        } else {
-                            // Fallback: assume it implements PrimeField
-                            core::mem::transmute_copy::<G::ScalarField, ark_grumpkin::Fr>(&scalars[i]).into_bigint()
-                        }
-                    };
-
-                    // Extract the window_size bits for this window
-                    let window_start = window * window_size;
-                    let mut bucket_index = 0usize;
-
-                    for j in 0..window_size {
-                        let bit_index = window_start + j;
-                        if bit_index < scalar_bits {
-                            if scalar_bigint.get_bit(bit_index) {
-                                bucket_index |= 1 << j;
-                            }
-                        }
-                    }
-
-                    if bucket_index > 0 {
-                        buckets[bucket_index] += G::from(bases[i]);
-                    }
-                }
-
-                // Sum up the buckets using the Pippenger bucket method
-                let mut window_result = G::zero();
-                let mut running_sum = G::zero();
-
-                for i in (1..num_buckets).rev() {
-                    running_sum += buckets[i];
-                    window_result += running_sum;
-                }
-
-                // Shift result by window_size bits and add
-                for _ in 0..(window * window_size) {
-                    result.double_in_place();
-                }
-                result += window_result;
-            }
-
-            result
-        };
-
-        // In ZKVM guest environment, use serial Pippenger MSM to avoid rayon issues
+        // In ZKVM guest environment, use Arkworks' serial MSM to avoid rayon issues.
         let row_commitments = if cfg!(target_arch = "riscv64") || cfg!(target_arch = "riscv32") {
             poly.Z
                 .chunks(R_size)
-                .map(|row| pippenger_msm(gens, row))
+                .map(|row| VariableBaseMSM::msm_field_elements(gens, row).unwrap())
                 .collect()
         } else {
             poly.Z
@@ -255,6 +138,22 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
         opening: &G::ScalarField,         // evaluation \widetilde{Z}(r)
         commitment: &HyraxCommitment<RATIO, G>,
     ) -> Result<(), ProofVerifyError> {
+        struct CycleMarker(&'static str);
+        impl CycleMarker {
+            #[inline(always)]
+            fn start(label: &'static str) -> Self {
+                start_cycle_tracking(label);
+                Self(label)
+            }
+        }
+        impl Drop for CycleMarker {
+            fn drop(&mut self) {
+                end_cycle_tracking(self.0);
+            }
+        }
+
+        let _hyrax_verify_total = CycleMarker::start("hyrax_verify_total");
+
         // compute L and R
         let (L_size, R_size) = matrix_dimensions(opening_point.len(), RATIO);
 
@@ -265,141 +164,127 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
             "Hyrax verify matrix dimensions"
         );
 
-        let L: Vec<G::ScalarField> = EqPolynomial::evals(&opening_point[..L_size.log_2()]);
-        let R: Vec<G::ScalarField> = EqPolynomial::evals(&opening_point[L_size.log_2()..]);
+        let L: Vec<G::ScalarField> = {
+            let _m = CycleMarker::start("hyrax_verify_eq_L");
+            EqPolynomial::evals(&opening_point[..L_size.log_2()])
+        };
+        let R: Vec<G::ScalarField> = {
+            let _m = CycleMarker::start("hyrax_verify_eq_R");
+            EqPolynomial::evals(&opening_point[L_size.log_2()..])
+        };
         tracing::debug!("Computed EqPolynomial evals for L and R");
 
         // Verifier-derived commitment to u * a = \prod Com(u_j)^{a_j}
-        let normalized_commitments = G::normalize_batch(&commitment.row_commitments);
+        let normalized_commitments = {
+            let _m = CycleMarker::start("hyrax_verify_normalize_row_commitments");
+            G::normalize_batch(&commitment.row_commitments)
+        };
         tracing::debug!(
             num_bases = normalized_commitments.len(),
             "Normalized row commitments"
         );
 
-        // Single-threaded Pippenger MSM closure for ZKVM environment
-        let pippenger_msm = |bases: &[G::Affine], scalars: &[G::ScalarField]| -> G {
-            use ark_ff::BigInteger;
+        // Optional Grumpkin MSM(2048) acceleration (Grumpkin-only fast path).
+        // Enabled via `jolt-core/grumpkin-msm-provable`.
+        #[cfg(feature = "grumpkin-msm-provable")]
+        let try_grumpkin_msm2048_provable =
+            |bases: &[G::Affine], scalars: &[G::ScalarField]| -> Option<G> {
+                use core::{any::Any, mem::MaybeUninit};
 
-            if bases.is_empty() || scalars.is_empty() {
-                return G::zero();
-            }
-
-            let n = bases.len().min(scalars.len());
-
-            // For small MSMs, use naive method
-            if n < 32 {
-                let mut result = G::zero();
-                for i in 0..n {
-                    result += G::from(bases[i]) * scalars[i];
+                let n = bases.len().min(scalars.len());
+                if n != jolt_inlines_grumpkin_msm::MSM_N || n == 0 {
+                    return None;
                 }
-                return result;
-            }
 
-            // Window size calculation (optimal for given input size)
-            let window_size = if n < 32 {
-                3
-            } else if n < 64 {
-                4
-            } else if n < 128 {
-                5
-            } else if n < 512 {
-                6
-            } else if n < 1024 {
-                7
-            } else if n < 4096 {
-                8
-            } else if n < 16384 {
-                9
-            } else {
-                10
-            };
+                // Ensure we only apply this optimization for Grumpkin (recursion setting).
+                let base_any: &dyn Any = &bases[0];
+                let scalar_any: &dyn Any = &scalars[0];
+                if !base_any.is::<ark_grumpkin::Affine>() || !scalar_any.is::<ark_grumpkin::Fr>() {
+                    return None;
+                }
 
-            let num_buckets = 1 << window_size;
-            // Determine scalar field bit size based on the actual field type
-            let scalar_bits = {
-                let scalar_ref: &dyn core::any::Any = &scalars[0];
-                if scalar_ref.is::<ark_grumpkin::Fr>() {
-                    254 // Grumpkin scalar field
-                } else if scalar_ref.is::<ark_bn254::Fr>() {
-                    254 // BN254 scalar field
+                use ark_ec::AffineRepr;
+                use ark_ff::{BigInt, PrimeField, Zero};
+                use jolt_inlines_grumpkin_msm::types::{AffinePoint, FqLimbs, FrLimbs};
+
+                let mut bases_limbs: Vec<AffinePoint> = Vec::with_capacity(n);
+                let mut scalars_limbs: Vec<FrLimbs> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let b_any: &dyn Any = &bases[i];
+                    let b = b_any
+                        .downcast_ref::<ark_grumpkin::Affine>()
+                        .expect("type check above should guarantee grumpkin bases");
+                    bases_limbs.push(if b.is_zero() {
+                        AffinePoint::infinity()
+                    } else {
+                        AffinePoint {
+                            x: FqLimbs(b.x.into_bigint().0),
+                            y: FqLimbs(b.y.into_bigint().0),
+                            infinity: 0,
+                        }
+                    });
+
+                    let s_any: &dyn Any = &scalars[i];
+                    let s = s_any
+                        .downcast_ref::<ark_grumpkin::Fr>()
+                        .expect("type check above should guarantee grumpkin scalars");
+                    scalars_limbs.push(FrLimbs(s.into_bigint().0));
+                }
+
+                let out_jac =
+                    jolt_inlines_grumpkin_msm::grumpkin_msm_2048(&bases_limbs, &scalars_limbs);
+
+                // Convert stable limbs back into arkworks projective and then memcpy into `G`.
+                let out_proj = if out_jac.is_infinity() {
+                    ark_grumpkin::Projective::zero()
                 } else {
-                    254// Default fallback
+                    let x = <ark_grumpkin::Fq as PrimeField>::from_bigint(BigInt::new(out_jac.x.0))
+                        .expect("canonical fq limbs");
+                    let y = <ark_grumpkin::Fq as PrimeField>::from_bigint(BigInt::new(out_jac.y.0))
+                        .expect("canonical fq limbs");
+                    let z = <ark_grumpkin::Fq as PrimeField>::from_bigint(BigInt::new(out_jac.z.0))
+                        .expect("canonical fq limbs");
+                    ark_grumpkin::Projective { x, y, z }
+                };
+
+                if core::mem::size_of::<G>() != core::mem::size_of::<ark_grumpkin::Projective>() {
+                    return None;
+                }
+
+                let mut out = MaybeUninit::<G>::uninit();
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (&out_proj as *const ark_grumpkin::Projective) as *const u8,
+                        out.as_mut_ptr() as *mut u8,
+                        core::mem::size_of::<ark_grumpkin::Projective>(),
+                    );
+                    Some(out.assume_init())
                 }
             };
-            let num_windows = (scalar_bits + window_size - 1) / window_size;
-
-            let mut result = G::zero();
-
-            // Process each window
-            for window in 0..num_windows {
-                // Initialize buckets
-                let mut buckets = vec![G::zero(); num_buckets];
-
-                // Add points to buckets based on their scalar bits in this window
-                for i in 0..n {
-                    // Transmute to access PrimeField methods
-                    let scalar_bigint = unsafe {
-                        use ark_ff::PrimeField;
-                        let scalar_ptr = &scalars[i] as *const G::ScalarField;
-                        // Cast through raw pointer to preserve the actual type
-                        let scalar_ref = &*(scalar_ptr as *const dyn core::any::Any);
-
-                        // Try Grumpkin first, then BN254
-                        if let Some(grumpkin_scalar) = scalar_ref.downcast_ref::<ark_grumpkin::Fr>() {
-                            grumpkin_scalar.into_bigint()
-                        } else if let Some(bn254_scalar) = scalar_ref.downcast_ref::<ark_bn254::Fr>() {
-                            bn254_scalar.into_bigint()
-                        } else {
-                            // Fallback: assume it implements PrimeField
-                            core::mem::transmute_copy::<G::ScalarField, ark_grumpkin::Fr>(&scalars[i]).into_bigint()
-                        }
-                    };
-
-                    // Extract the window_size bits for this window
-                    let window_start = window * window_size;
-                    let mut bucket_index = 0usize;
-
-                    for j in 0..window_size {
-                        let bit_index = window_start + j;
-                        if bit_index < scalar_bits {
-                            if scalar_bigint.get_bit(bit_index) {
-                                bucket_index |= 1 << j;
-                            }
-                        }
-                    }
-
-                    if bucket_index > 0 {
-                        buckets[bucket_index] += G::from(bases[i]);
-                    }
-                }
-
-                // Sum up the buckets using the Pippenger bucket method
-                let mut window_result = G::zero();
-                let mut running_sum = G::zero();
-
-                for i in (1..num_buckets).rev() {
-                    running_sum += buckets[i];
-                    window_result += running_sum;
-                }
-
-                // Shift result by window_size bits and add
-                for _ in 0..(window * window_size) {
-                    result.double_in_place();
-                }
-                result += window_result;
-            }
-
-            result
-        };
 
         // In ZKVM guest environment, use serial Pippenger MSM to avoid rayon issues
-        let homomorphically_derived_commitment: G = if cfg!(target_arch = "riscv64") || cfg!(target_arch = "riscv32") {
+        let homomorphically_derived_commitment: G = if cfg!(target_arch = "riscv64")
+            || cfg!(target_arch = "riscv32")
+        {
+            let _m = CycleMarker::start("hyrax_verify_msm_rows");
             let poly = MultilinearPolynomial::from(L);
             let scalars = match &poly {
                 MultilinearPolynomial::LargeScalars(p) => p.evals_ref(),
                 _ => unreachable!("L should be LargeScalars"),
             };
-            pippenger_msm(&normalized_commitments, scalars)
+            #[cfg(feature = "grumpkin-msm-provable")]
+            {
+                try_grumpkin_msm2048_provable(&normalized_commitments, scalars).unwrap_or_else(
+                    || {
+                        VariableBaseMSM::msm_field_elements(&normalized_commitments, scalars)
+                            .unwrap()
+                    },
+                )
+            }
+            #[cfg(not(feature = "grumpkin-msm-provable"))]
+            {
+                VariableBaseMSM::msm_field_elements(&normalized_commitments, scalars).unwrap()
+            }
         } else {
             VariableBaseMSM::msm(&normalized_commitments, &MultilinearPolynomial::from(L)).unwrap()
         };
@@ -409,7 +294,18 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
         );
 
         let product_commitment = if cfg!(target_arch = "riscv64") || cfg!(target_arch = "riscv32") {
-            pippenger_msm(&pedersen_generators.generators[..R_size], &self.vector_matrix_product)
+            let _m = CycleMarker::start("hyrax_verify_msm_product");
+            let bases = &pedersen_generators.generators[..R_size];
+            let scalars = &self.vector_matrix_product;
+            #[cfg(feature = "grumpkin-msm-provable")]
+            {
+                try_grumpkin_msm2048_provable(bases, scalars)
+                    .unwrap_or_else(|| VariableBaseMSM::msm_field_elements(bases, scalars).unwrap())
+            }
+            #[cfg(not(feature = "grumpkin-msm-provable"))]
+            {
+                VariableBaseMSM::msm_field_elements(bases, scalars).unwrap()
+            }
         } else {
             VariableBaseMSM::msm_field_elements(
                 &pedersen_generators.generators[..R_size],
@@ -423,7 +319,10 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
             "MSM #2: product commitment"
         );
 
-        let dot_product = compute_dotproduct(&self.vector_matrix_product, &R);
+        let dot_product = {
+            let _m = CycleMarker::start("hyrax_verify_dot_product");
+            compute_dotproduct(&self.vector_matrix_product, &R)
+        };
         tracing::debug!("Computed dot product");
 
         if (homomorphically_derived_commitment == product_commitment) && (dot_product == *opening) {

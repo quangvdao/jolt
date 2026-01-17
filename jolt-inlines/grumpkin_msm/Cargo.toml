@@ -1,0 +1,16 @@
+[package]
+name = "jolt-inlines-grumpkin-msm"
+version = "0.1.0"
+edition = "2021"
+description = "Grumpkin MSM inline implementations for Jolt VM"
+license = "MIT"
+homepage = "https://github.com/a16z/jolt/README.md"
+repository = "https://github.com/a16z/jolt"
+
+[dependencies]
+
+[dev-dependencies]
+ark-ec = { workspace = true, features = ["std"] }
+ark-ff = { workspace = true, features = ["std"] }
+ark-grumpkin = { workspace = true, features = ["std"] }
+rand = { workspace = true, features = ["std"] }

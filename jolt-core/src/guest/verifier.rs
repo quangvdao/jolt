@@ -63,6 +63,8 @@ where
         trusted_advice_commitment,
         None,
     )?;
-    verifier.verify().unwrap();
+    verifier
+        .verify()
+        .map_err(|_e| ProofVerifyError::InternalError)?;
     Ok(())
 }

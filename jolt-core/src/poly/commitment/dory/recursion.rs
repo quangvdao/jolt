@@ -1,11 +1,15 @@
 //! Jolt implementation of Dory's recursion backend
 
 use ark_bn254::{Fq, Fq12, Fr, G1Affine};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
+};
 use dory::{
     backends::arkworks::{ArkG1, ArkG2, ArkGT, BN254},
     primitives::arithmetic::{Group, PairingCurve},
-    recursion::{HintMap, TraceContext, WitnessBackend, WitnessGenerator, WitnessResult},
+    recursion::{
+        HintMap, OpId, OpType, TraceContext, WitnessBackend, WitnessGenerator, WitnessResult,
+    },
     verify_recursive,
 };
 use jolt_optimizations::witness_gen::ExponentiationSteps;
@@ -27,6 +31,156 @@ use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpW
 /// Jolt witness backend implementation for dory recursion
 #[derive(Debug, Clone)]
 pub struct JoltWitness;
+
+/// Canonically-serializable, deterministic hint format for Dory recursion verification.
+///
+/// `dory::recursion::HintMap` is backed by a `HashMap` and (in the current dory fork) only
+/// implements Dory's custom serialization, which is not deterministic due to hash iteration
+/// order. Jolt needs a deterministic encoding because hints are embedded into proofs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DoryHintValue {
+    G1(ArkG1),
+    G2(ArkG2),
+    GT(ArkGT),
+}
+
+impl CanonicalSerialize for DoryHintValue {
+    fn serialize_with_mode<W: ark_serialize::Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        match self {
+            DoryHintValue::G1(g1) => {
+                0u8.serialize_with_mode(&mut writer, compress)?;
+                g1.serialize_with_mode(&mut writer, compress)?;
+            }
+            DoryHintValue::G2(g2) => {
+                1u8.serialize_with_mode(&mut writer, compress)?;
+                g2.serialize_with_mode(&mut writer, compress)?;
+            }
+            DoryHintValue::GT(gt) => {
+                2u8.serialize_with_mode(&mut writer, compress)?;
+                gt.serialize_with_mode(&mut writer, compress)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        1 + match self {
+            DoryHintValue::G1(g1) => g1.serialized_size(compress),
+            DoryHintValue::G2(g2) => g2.serialized_size(compress),
+            DoryHintValue::GT(gt) => gt.serialized_size(compress),
+        }
+    }
+}
+
+impl CanonicalDeserialize for DoryHintValue {
+    fn deserialize_with_mode<R: ark_serialize::Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: ark_serialize::Validate,
+    ) -> Result<Self, SerializationError> {
+        let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        match tag {
+            0 => Ok(DoryHintValue::G1(ArkG1::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?)),
+            1 => Ok(DoryHintValue::G2(ArkG2::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?)),
+            2 => Ok(DoryHintValue::GT(ArkGT::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?)),
+            _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
+
+impl Valid for DoryHintValue {
+    fn check(&self) -> Result<(), SerializationError> {
+        match self {
+            DoryHintValue::G1(g1) => g1.check(),
+            DoryHintValue::G2(g2) => g2.check(),
+            DoryHintValue::GT(gt) => gt.check(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct DoryHintEntry {
+    pub round: u16,
+    pub op_type: u8,
+    pub index: u16,
+    pub value: DoryHintValue,
+}
+
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct DoryHintMap {
+    pub num_rounds: u64,
+    pub entries: Vec<DoryHintEntry>, // sorted by (round, op_type, index)
+}
+
+impl DoryHintMap {
+    pub fn from_dory_hint_map(hints: HintMap<BN254>) -> Self {
+        let mut entries = Vec::with_capacity(hints.len());
+        for (id, result) in hints.iter() {
+            let value = if let Some(g1) = result.as_g1() {
+                DoryHintValue::G1(*g1)
+            } else if let Some(g2) = result.as_g2() {
+                DoryHintValue::G2(*g2)
+            } else if let Some(gt) = result.as_gt() {
+                DoryHintValue::GT(*gt)
+            } else {
+                continue;
+            };
+            entries.push(DoryHintEntry {
+                round: id.round,
+                op_type: id.op_type as u8,
+                index: id.index,
+                value,
+            });
+        }
+
+        entries.sort_by_key(|e| (e.round, e.op_type, e.index));
+
+        Self {
+            num_rounds: hints.num_rounds as u64,
+            entries,
+        }
+    }
+
+    pub fn to_dory_hint_map(&self) -> HintMap<BN254> {
+        let mut hints = HintMap::<BN254>::new(self.num_rounds as usize);
+        for e in &self.entries {
+            let op_type = match e.op_type {
+                0 => OpType::GtExp,
+                1 => OpType::G1ScalarMul,
+                2 => OpType::G2ScalarMul,
+                3 => OpType::GtMul,
+                4 => OpType::Pairing,
+                5 => OpType::MultiPairing,
+                6 => OpType::MsmG1,
+                7 => OpType::MsmG2,
+                _ => continue, // unknown op type; ignore
+            };
+            let id = OpId::new(e.round, op_type, e.index);
+            match e.value {
+                DoryHintValue::G1(g1) => hints.insert_g1(id, g1),
+                DoryHintValue::G2(g2) => hints.insert_g2(id, g2),
+                DoryHintValue::GT(gt) => hints.insert_gt(id, gt),
+            }
+        }
+        hints
+    }
+}
 
 /// GTExp witness following the ExponentiationSteps pattern
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -256,7 +410,7 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
 
 impl RecursionExt<Fr> for DoryCommitmentScheme {
     type Witness = dory::recursion::WitnessCollection<JoltWitness>;
-    type Hint = HintMap<BN254>;
+    type Hint = DoryHintMap;
     type CombineHint = ArkGT;
 
     fn witness_gen<ProofTranscript: crate::transcripts::Transcript>(
@@ -304,8 +458,8 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
             .finalize()
             .ok_or(ProofVerifyError::default())?;
 
-        // Convert witnesses to hints
-        let hints = witnesses.to_hints::<BN254>();
+        // Convert witnesses to deterministic, canonically-serializable hints.
+        let hints = DoryHintMap::from_dory_hint_map(witnesses.to_hints::<BN254>());
 
         // Return both witnesses and hints
         Ok((witnesses, hints))
@@ -333,7 +487,9 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
 
         // Create hint-based verification context
         let ctx = Rc::new(
-            TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_hints(hint.clone()),
+            TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_hints(
+                hint.to_dory_hint_map(),
+            ),
         );
 
         // Wrap transcript for dory compatibility

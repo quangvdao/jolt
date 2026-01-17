@@ -50,8 +50,8 @@ pub use stage1::{
     square_and_multiply::{SquareAndMultiplyProver, SquareAndMultiplyVerifier},
 };
 pub use stage2::virtualization::{
-    DirectEvaluationParams, DirectEvaluationProver, DirectEvaluationVerifier,
-    extract_virtual_claims_from_accumulator,
+    extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
+    DirectEvaluationVerifier,
 };
 pub use stage3::jagged::{JaggedSumcheckParams, JaggedSumcheckProver, JaggedSumcheckVerifier};
 pub use witness::{

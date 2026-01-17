@@ -1,4 +1,4 @@
-use jolt_sdk::serialize_and_print_size;
+use jolt_sdk::{serialize_and_print_size, Serializable, RV64IMACProof};
 use std::time::Instant;
 use tracing::info;
 
@@ -51,13 +51,11 @@ pub fn main() {
 
     // Test serialization/deserialization of the proof
     info!("Testing proof serialization/deserialization...");
-    let mut proof_bytes = Vec::new();
-    use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
-    proof.serialize_compressed(&mut proof_bytes).expect("Failed to serialize proof");
+    let proof_bytes = proof.serialize_to_bytes().expect("Failed to serialize proof");
     info!("Serialized proof to {} bytes", proof_bytes.len());
 
-    let deserialized_proof = type_of_proof::deserialize_compressed(&proof_bytes[..])
-        .expect("Failed to deserialize proof");
+    let deserialized_proof =
+        RV64IMACProof::deserialize_from_bytes(&proof_bytes).expect("Failed to deserialize proof");
     info!("Successfully deserialized proof");
 
     // Verify with deserialized proof

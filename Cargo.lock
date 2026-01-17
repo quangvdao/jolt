@@ -980,6 +980,7 @@ dependencies = [
 [[package]]
 name = "dory-derive"
 version = "0.1.0"
+source = "git+https://github.com/quangvdao/dory?branch=quang%2Ffeat%2Frecursion#7a0bfe663e23ad9723a2fc68eaf9879e1c22082c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -989,6 +990,7 @@ dependencies = [
 [[package]]
 name = "dory-pcs"
 version = "0.1.0"
+source = "git+https://github.com/quangvdao/dory?branch=quang%2Ffeat%2Frecursion#7a0bfe663e23ad9723a2fc68eaf9879e1c22082c"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -998,6 +1000,7 @@ dependencies = [
  "bincode",
  "blake2",
  "digest",
+ "dirs",
  "dory-derive",
  "once_cell",
  "rand_core 0.6.4",
@@ -1951,6 +1954,7 @@ dependencies = [
  "indicatif",
  "inferno 0.12.4",
  "itertools 0.10.5",
+ "jolt-inlines-grumpkin-msm",
  "jolt-inlines-keccak256",
  "jolt-inlines-sha2",
  "jolt-optimizations",
@@ -2018,6 +2022,16 @@ dependencies = [
  "hex-literal",
  "rand 0.8.5",
  "tracer",
+]
+
+[[package]]
+name = "jolt-inlines-grumpkin-msm"
+version = "0.1.0"
+dependencies = [
+ "ark-ec",
+ "ark-ff",
+ "ark-grumpkin",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -3212,8 +3226,6 @@ dependencies = [
 name = "recursion-guest"
 version = "0.1.0"
 dependencies = [
- "ark-ec",
- "ark-ff",
  "ark-serialize",
  "jolt-sdk",
  "postcard",

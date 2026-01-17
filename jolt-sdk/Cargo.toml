@@ -39,6 +39,8 @@ guest-verifier = [
     "dep:ark-bn254",
     "jolt-core/minimal",
 ]
+## Grumpkin MSM acceleration (recursion verifier / Hyrax hot path)
+grumpkin-msm-provable = ["jolt-core/grumpkin-msm-provable"]
 malloc-shim = ["jolt-platform/malloc-shim"]
 
 [dependencies]

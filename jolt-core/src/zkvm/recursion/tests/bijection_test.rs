@@ -793,7 +793,8 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
 
     // Only test GtMul constraints for zero padding (PackedGtExp uses full 12-var, no padding)
     for constraint_idx in 0..3.min(constraint_system.constraints.len()) {
-        if let ConstraintType::GtMul = &constraint_system.constraints[constraint_idx].constraint_type
+        if let ConstraintType::GtMul =
+            &constraint_system.constraints[constraint_idx].constraint_type
         {
             let matrix_row = constraint_system
                 .matrix

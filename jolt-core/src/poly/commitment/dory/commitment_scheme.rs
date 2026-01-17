@@ -46,7 +46,12 @@ impl CommitmentScheme for DoryCommitmentScheme {
         let hash_result = hasher.finalize();
         let seed: [u8; 32] = hash_result.into();
         let mut rng = ChaCha20Rng::from_seed(seed);
+        // `new_from_urs` is only available when Dory is built with `disk-persistence`.
+        // In minimal/guest builds we avoid that feature (it pulls in `dirs`), so fall back to `new`.
+        #[cfg(feature = "prover")]
         let setup = ArkworksProverSetup::new_from_urs(&mut rng, max_num_vars);
+        #[cfg(not(feature = "prover"))]
+        let setup = ArkworksProverSetup::new(&mut rng, max_num_vars);
 
         DoryGlobals::init_prepared_cache(&setup.g1_vec, &setup.g2_vec);
 

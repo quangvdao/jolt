@@ -39,8 +39,7 @@ use super::{
         packed_gt_exp::{PackedGtExpParams, PackedGtExpProver},
     },
     stage2::virtualization::{
-        DirectEvaluationParams, DirectEvaluationProver,
-        extract_virtual_claims_from_accumulator,
+        extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
     },
     stage3::{
         jagged::JaggedSumcheckProver,
@@ -101,7 +100,8 @@ impl RecursionProver<Fq> {
         );
 
         // Convert witness collection to DoryRecursionWitness
-        let recursion_witness = Self::witnesses_to_dory_recursion(&witness_collection, combine_witness.clone())?;
+        let recursion_witness =
+            Self::witnesses_to_dory_recursion(&witness_collection, combine_witness.clone())?;
 
         // Build constraint system from witness collection using DoryMatrixBuilder
         let build_cs_span = tracing::info_span!("build_constraint_system").entered();
@@ -698,7 +698,8 @@ impl<F: JoltField> RecursionProver<F> {
         }
 
         // Since we know F = Fq, we can work directly with Fq types
-        let accumulator_fq: &mut ProverOpeningAccumulator<Fq> = unsafe { std::mem::transmute(accumulator) };
+        let accumulator_fq: &mut ProverOpeningAccumulator<Fq> =
+            unsafe { std::mem::transmute(accumulator) };
 
         // Convert r_stage1 challenges to Fq field elements
         // SAFETY: We verified F = Fq above, so F::Challenge = Fq::Challenge
@@ -708,14 +709,14 @@ impl<F: JoltField> RecursionProver<F> {
         };
 
         // Extract virtual claims from Stage 1
-        let constraint_types: Vec<ConstraintType> = self.constraint_system.constraints
+        let constraint_types: Vec<ConstraintType> = self
+            .constraint_system
+            .constraints
             .iter()
             .map(|c| c.constraint_type.clone())
             .collect();
-        let virtual_claims = extract_virtual_claims_from_accumulator(
-            accumulator_fq,
-            &constraint_types,
-        );
+        let virtual_claims =
+            extract_virtual_claims_from_accumulator(accumulator_fq, &constraint_types);
 
         // Create parameters
         let params = DirectEvaluationParams::new(
@@ -739,11 +740,8 @@ impl<F: JoltField> RecursionProver<F> {
         // Stage 3 expects them in reverse order
         // SAFETY: We verified F = Fq above
         let r_stage2: Vec<<F as JoltField>::Challenge> = unsafe {
-            let r_s_challenges: Vec<<Fq as JoltField>::Challenge> = r_s
-                .into_iter()
-                .rev()
-                .map(|f| f.into())
-                .collect();
+            let r_s_challenges: Vec<<Fq as JoltField>::Challenge> =
+                r_s.into_iter().rev().map(|f| f.into()).collect();
             std::mem::transmute(r_s_challenges)
         };
 

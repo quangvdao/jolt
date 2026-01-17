@@ -192,11 +192,31 @@ impl Program {
             });
             envs.push((&cc_env_var, cc_value));
 
+            // Allow selectively enabling extra guest features for a single package build.
+            //
+            // This is useful for cycle profiling toggles (e.g. enabling provable Grumpkin MSM in
+            // the recursion verifier) without forcing every guest crate to define the feature.
+            let guest_features = {
+                let mut features = "guest".to_string();
+                let target_pkg = std::env::var("JOLT_GUEST_EXTRA_FEATURES_PKG").ok();
+                let extra = std::env::var("JOLT_GUEST_EXTRA_FEATURES").ok();
+                if target_pkg.as_deref() == Some(self.guest.as_str()) {
+                    if let Some(extra) = extra {
+                        let extra = extra.trim();
+                        if !extra.is_empty() {
+                            // Cargo accepts comma-separated feature lists.
+                            features = format!("{features},{extra}");
+                        }
+                    }
+                }
+                features
+            };
+
             let args = [
                 "build",
                 "--release",
                 "--features",
-                "guest",
+                &guest_features,
                 "-p",
                 &self.guest,
                 "--target-dir",

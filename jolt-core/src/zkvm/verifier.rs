@@ -69,8 +69,29 @@ use anyhow::Context;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
 use itertools::Itertools;
+use jolt_platform::cycle_tracking::{end_cycle_tracking, start_cycle_tracking};
 use tracer::instruction::Instruction;
 use tracer::JoltDevice;
+
+/// RAII cycle tracking guard - calls end_cycle_tracking on drop
+struct CycleSpan<'a> {
+    label: &'a str,
+}
+
+impl<'a> CycleSpan<'a> {
+    #[inline(always)]
+    fn new(label: &'a str) -> Self {
+        start_cycle_tracking(label);
+        Self { label }
+    }
+}
+
+impl Drop for CycleSpan<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.label);
+    }
+}
 
 pub struct JoltVerifier<
     'a,
@@ -179,37 +200,65 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     #[tracing::instrument(skip_all)]
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
+        let _cycle_verify = CycleSpan::new("jolt_verify_total");
 
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.proof.ram_K,
-            self.proof.trace_length,
-            &mut self.transcript,
-        );
+        {
+            let _cycle_preamble = CycleSpan::new("jolt_verify_preamble");
+            fiat_shamir_preamble(
+                &self.program_io,
+                self.proof.ram_K,
+                self.proof.trace_length,
+                &mut self.transcript,
+            );
 
-        // Append commitments to transcript
-        for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
-        }
-        // Append untrusted advice commitment to transcript
-        if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
-            self.transcript
-                .append_serializable(untrusted_advice_commitment);
-        }
-        // Append trusted advice commitment to transcript
-        if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
-            self.transcript
-                .append_serializable(trusted_advice_commitment);
+            // Append commitments to transcript
+            for commitment in &self.proof.commitments {
+                self.transcript.append_serializable(commitment);
+            }
+            // Append untrusted advice commitment to transcript
+            if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
+                self.transcript
+                    .append_serializable(untrusted_advice_commitment);
+            }
+            // Append trusted advice commitment to transcript
+            if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
+                self.transcript
+                    .append_serializable(trusted_advice_commitment);
+            }
         }
 
-        self.verify_stage1()?;
-        self.verify_stage2()?;
-        self.verify_stage3()?;
-        self.verify_stage4()?;
-        self.verify_stage5()?;
-        self.verify_stage6()?;
-        self.verify_stage7()?;
-        self.verify_stage8()?;
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage1");
+            self.verify_stage1()?;
+        }
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage2");
+            self.verify_stage2()?;
+        }
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage3");
+            self.verify_stage3()?;
+        }
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage4");
+            self.verify_stage4()?;
+        }
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage5");
+            self.verify_stage5()?;
+        }
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage6");
+            self.verify_stage6()?;
+        }
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage7");
+            self.verify_stage7()?;
+        }
+        {
+            let _cycle = CycleSpan::new("jolt_verify_stage8_dory");
+            self.verify_stage8()?;
+        }
 
         Ok(())
     }
@@ -541,6 +590,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
     /// Stage 8: Dory batch opening verification.
     fn verify_stage8(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle_stage8_init = CycleSpan::new("dory_init_context");
         // Initialize DoryGlobals with the layout from the proof
         // This ensures the verifier uses the same layout as the prover
         let _guard = DoryGlobals::initialize_context(
@@ -549,7 +599,9 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             DoryContext::Main,
             Some(self.proof.dory_layout),
         );
+        drop(_cycle_stage8_init);
 
+        let _cycle_collect_claims = CycleSpan::new("dory_collect_claims");
         // Get the unified opening point from HammingWeightClaimReduction
         // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
         let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
@@ -633,7 +685,9 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
         self.transcript.append_scalars(&claims);
         let gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
+        drop(_cycle_collect_claims);
 
+        let _cycle_build_commitments = CycleSpan::new("dory_build_commitments_map");
         // Build state for computing joint commitment/claim
         let state = DoryOpeningState {
             opening_point: opening_point.r.clone(),
@@ -669,9 +723,13 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                 commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
             }
         }
+        drop(_cycle_build_commitments);
 
         // Compute joint commitment: Σ γ_i · C_i
-        let joint_commitment = self.compute_joint_commitment(&mut commitments_map, &state);
+        let joint_commitment = {
+            let _cycle = CycleSpan::new("dory_compute_joint_commitment");
+            self.compute_joint_commitment(&mut commitments_map, &state)
+        };
 
         // Compute joint claim: Σ γ_i · claim_i
         let joint_claim: F = gamma_powers
@@ -681,15 +739,18 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             .sum();
 
         // Verify opening
-        PCS::verify(
-            &self.proof.joint_opening_proof,
-            &self.preprocessing.generators,
-            &mut self.transcript,
-            &opening_point.r,
-            &joint_claim,
-            &joint_commitment,
-        )
-        .context("Stage 8")
+        {
+            let _cycle = CycleSpan::new("dory_pcs_verify");
+            PCS::verify(
+                &self.proof.joint_opening_proof,
+                &self.preprocessing.generators,
+                &mut self.transcript,
+                &opening_point.r,
+                &joint_claim,
+                &joint_commitment,
+            )
+            .context("Stage 8")
+        }
     }
 
     /// Compute joint commitment for the batch opening.

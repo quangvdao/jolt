@@ -20,12 +20,33 @@ use dory::primitives::{
     arithmetic::{Group, PairingCurve},
     poly::Polynomial,
 };
+use jolt_platform::cycle_tracking::{end_cycle_tracking, start_cycle_tracking};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use rayon::prelude::*;
 use sha3::{Digest, Sha3_256};
 use std::borrow::Borrow;
 use tracing::trace_span;
+
+/// RAII cycle tracking guard - calls end_cycle_tracking on drop
+struct CycleSpan<'a> {
+    label: &'a str,
+}
+
+impl<'a> CycleSpan<'a> {
+    #[inline(always)]
+    fn new(label: &'a str) -> Self {
+        start_cycle_tracking(label);
+        Self { label }
+    }
+}
+
+impl Drop for CycleSpan<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.label);
+    }
+}
 
 #[derive(Clone)]
 pub struct DoryCommitmentScheme;
@@ -39,6 +60,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
     type BatchedProof = Vec<ArkDoryProof>;
     type OpeningProofHint = Vec<ArkG1>;
 
+    #[cfg(feature = "prover")]
     fn setup_prover(max_num_vars: usize) -> Self::ProverSetup {
         let _span = trace_span!("DoryCommitmentScheme::setup_prover").entered();
         let mut hasher = Sha3_256::new();
@@ -56,6 +78,11 @@ impl CommitmentScheme for DoryCommitmentScheme {
         DoryGlobals::init_prepared_cache(&setup.g1_vec, &setup.g2_vec);
 
         setup
+    }
+
+    #[cfg(not(feature = "prover"))]
+    fn setup_prover(_max_num_vars: usize) -> Self::ProverSetup {
+        unimplemented!("Prover setup not available without 'prover' feature")
     }
 
     fn setup_verifier(setup: &Self::ProverSetup) -> Self::VerifierSetup {
@@ -153,7 +180,9 @@ impl CommitmentScheme for DoryCommitmentScheme {
         commitment: &Self::Commitment,
     ) -> Result<(), ProofVerifyError> {
         let _span = trace_span!("DoryCommitmentScheme::verify").entered();
+        let _cycle_total = CycleSpan::new("dory_verify_eval_proof");
 
+        let _cycle_prep = CycleSpan::new("dory_verify_prep");
         let reordered_point = reorder_opening_point_for_layout::<ark_bn254::Fr>(opening_point);
 
         // Dory uses the opposite endian-ness as Jolt
@@ -166,9 +195,11 @@ impl CommitmentScheme for DoryCommitmentScheme {
             })
             .collect();
         let ark_eval: ArkFr = jolt_to_ark(opening);
+        drop(_cycle_prep);
 
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
+        let _cycle_verify = CycleSpan::new("dory_verify_inner");
         dory::verify::<ArkFr, BN254, JoltG1Routines, JoltG2Routines, _>(
             *commitment,
             ark_eval,
@@ -178,6 +209,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
             &mut dory_transcript,
         )
         .map_err(|_| ProofVerifyError::InternalError)?;
+        drop(_cycle_verify);
 
         Ok(())
     }

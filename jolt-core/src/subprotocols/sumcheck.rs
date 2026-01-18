@@ -12,7 +12,28 @@ use crate::utils::errors::ProofVerifyError;
 use crate::utils::profiling::print_current_memory_usage;
 
 use ark_serialize::*;
+use jolt_platform::cycle_tracking::{end_cycle_tracking, start_cycle_tracking};
 use std::marker::PhantomData;
+
+/// RAII cycle tracking guard - calls end_cycle_tracking on drop
+struct CycleSpan<'a> {
+    label: &'a str,
+}
+
+impl<'a> CycleSpan<'a> {
+    #[inline(always)]
+    fn new(label: &'a str) -> Self {
+        start_cycle_tracking(label);
+        Self { label }
+    }
+}
+
+impl Drop for CycleSpan<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.label);
+    }
+}
 
 /// Implements the standard technique for batching parallel sumchecks to reduce
 /// verifier cost and proof size.
@@ -173,6 +194,8 @@ impl BatchedSumcheck {
         opening_accumulator: &mut VerifierOpeningAccumulator<F>,
         transcript: &mut ProofTranscript,
     ) -> Result<Vec<F::Challenge>, ProofVerifyError> {
+        let _cycle_sumcheck = CycleSpan::new("batched_sumcheck_verify");
+
         let max_degree = sumcheck_instances
             .iter()
             .map(|sumcheck| sumcheck.degree())
@@ -201,34 +224,48 @@ impl BatchedSumcheck {
         //   = A * \sum_y \sum_x P(x) + B * \sum_{x, y} Q(x, y)
         //   = A * \sum_y claim_a + B * claim_b
         //   = A * 2^N * claim_a + B * claim_b
-        let claim: F = sumcheck_instances
-            .iter()
-            .zip(batching_coeffs.iter())
-            .map(|(sumcheck, coeff)| {
-                let num_rounds = sumcheck.num_rounds();
-                let input_claim = sumcheck.input_claim(opening_accumulator);
-                input_claim.mul_pow_2(max_num_rounds - num_rounds) * coeff
-            })
-            .sum();
+        let claim: F = {
+            let _cycle_claims = CycleSpan::new("sumcheck_input_claims");
+            sumcheck_instances
+                .iter()
+                .zip(batching_coeffs.iter())
+                .map(|(sumcheck, coeff)| {
+                    let num_rounds = sumcheck.num_rounds();
+                    let input_claim = sumcheck.input_claim(opening_accumulator);
+                    input_claim.mul_pow_2(max_num_rounds - num_rounds) * coeff
+                })
+                .sum()
+        };
 
-        let (output_claim, r_sumcheck) =
-            proof.verify(claim, max_num_rounds, max_degree, transcript)?;
+        let (output_claim, r_sumcheck) = {
+            let _cycle_rounds = CycleSpan::new("sumcheck_rounds_verify");
+            proof.verify(claim, max_num_rounds, max_degree, transcript)?
+        };
 
-        let expected_output_claim = sumcheck_instances
-            .iter()
-            .zip(batching_coeffs.iter())
-            .map(|(sumcheck, coeff)| {
-                let offset = sumcheck.round_offset(max_num_rounds);
-                let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
+        let expected_output_claim: F = {
+            let _cycle_expected = CycleSpan::new("sumcheck_expected_output_claims");
+            sumcheck_instances
+                .iter()
+                .zip(batching_coeffs.iter())
+                .map(|(sumcheck, coeff)| {
+                    let offset = sumcheck.round_offset(max_num_rounds);
+                    let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
 
-                // Cache polynomial opening claims, to be proven using either an
-                // opening proof or sumcheck (in the case of virtual polynomials).
-                sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
-                let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
+                    // Cache polynomial opening claims, to be proven using either an
+                    // opening proof or sumcheck (in the case of virtual polynomials).
+                    {
+                        let _cycle_cache = CycleSpan::new("sumcheck_cache_openings");
+                        sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
+                    }
+                    let claim = {
+                        let _cycle_claim = CycleSpan::new("sumcheck_compute_expected_claim");
+                        sumcheck.expected_output_claim(opening_accumulator, r_slice)
+                    };
 
-                claim * coeff
-            })
-            .sum();
+                    claim * coeff
+                })
+                .sum()
+        };
 
         if output_claim != expected_output_claim {
             return Err(ProofVerifyError::SumcheckVerificationError);

@@ -2,6 +2,7 @@
 
 use crate::utils::math::Math;
 use allocative::Allocative;
+#[cfg(feature = "prover")]
 use dory::backends::arkworks::{init_cache, is_cached, ArkG1, ArkG2};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -484,6 +485,7 @@ impl DoryGlobals {
     /// # Arguments
     /// * `g1_vec` - Vector of G1 generators from the prover setup
     /// * `g2_vec` - Vector of G2 generators from the prover setup
+    #[cfg(feature = "prover")]
     pub fn init_prepared_cache(g1_vec: &[ArkG1], g2_vec: &[ArkG2]) {
         if !is_cached() {
             init_cache(g1_vec, g2_vec);

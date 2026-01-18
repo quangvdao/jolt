@@ -2,8 +2,29 @@ use super::transcript::Transcript;
 use crate::field::JoltField;
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_serialize::CanonicalSerialize;
+use jolt_platform::cycle_tracking::{end_cycle_tracking, start_cycle_tracking};
 use sha3::{Digest, Keccak256};
 use std::borrow::Borrow;
+
+/// RAII cycle tracking guard - calls end_cycle_tracking on drop
+struct CycleSpan<'a> {
+    label: &'a str,
+}
+
+impl<'a> CycleSpan<'a> {
+    #[inline(always)]
+    fn new(label: &'a str) -> Self {
+        start_cycle_tracking(label);
+        Self { label }
+    }
+}
+
+impl Drop for CycleSpan<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.label);
+    }
+}
 
 /// Represents the current state of the protocol's Fiat-Shamir transcript.
 #[derive(Default, Clone)]
@@ -54,6 +75,7 @@ impl KeccakTranscript {
 
     // Loads exactly 32 bytes from the transcript by hashing the seed with the round constant
     fn challenge_bytes32(&mut self, out: &mut [u8]) {
+        let _cycle = CycleSpan::new("transcript_hash_challenge");
         assert_eq!(32, out.len());
         let rand: [u8; 32] = self.hasher().finalize().into();
         out.clone_from_slice(rand.as_slice());
@@ -106,6 +128,7 @@ impl Transcript for KeccakTranscript {
     }
 
     fn append_message(&mut self, msg: &'static [u8]) {
+        let _cycle = CycleSpan::new("transcript_hash_absorb");
         // We require all messages to fit into one evm word and then right pad them
         // right padding matches the format of the strings when cast to bytes 32 in solidity
         assert!(msg.len() < 33);
@@ -121,12 +144,14 @@ impl Transcript for KeccakTranscript {
     }
 
     fn append_bytes(&mut self, bytes: &[u8]) {
+        let _cycle = CycleSpan::new("transcript_hash_absorb");
         // Add the message and label
         let hasher = self.hasher().chain_update(bytes);
         self.update_state(hasher.finalize().into());
     }
 
     fn append_u64(&mut self, x: u64) {
+        let _cycle = CycleSpan::new("transcript_hash_absorb");
         // Allocate into a 32 byte region
         let mut packed = [0_u8; 24].to_vec();
         packed.append(&mut x.to_be_bytes().to_vec());
@@ -163,6 +188,7 @@ impl Transcript for KeccakTranscript {
     }
 
     fn append_point<G: CurveGroup>(&mut self, point: &G) {
+        let _cycle = CycleSpan::new("transcript_hash_absorb_point");
         // If we add the point at infinity then we hash over a region of zeros
         if point.is_zero() {
             self.append_bytes(&[0_u8; 64]);

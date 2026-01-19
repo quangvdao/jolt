@@ -48,9 +48,4 @@ pub fn main() {
         serialize_and_print_size("io_device", "/tmp/fib_io_device.bin", &io_device)
             .expect("Could not serialize io_device.");
     }
-
-    // Verify proof
-    let is_valid = verify_fib(50, output, io_device.panic, proof);
-    info!("output: {output}");
-    info!("valid: {is_valid}");
 }

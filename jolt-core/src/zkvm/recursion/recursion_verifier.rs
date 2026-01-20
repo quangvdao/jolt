@@ -22,7 +22,8 @@ use super::{
     constraints_sys::ConstraintType,
     recursion_prover::RecursionProof,
     stage1::{
-        g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulVerifier},
+        g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier},
+        g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier},
         gt_mul::{GtMulParams, GtMulVerifier},
         packed_gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
     },
@@ -59,6 +60,10 @@ pub struct RecursionVerifierInput {
     pub matrix_rows: Vec<usize>,
     /// Public inputs for packed GT exp (base Fq12 and scalar bits)
     pub packed_gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+    /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
+    pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
+    /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
+    pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 }
 
 /// Unified verifier for the recursion SNARK
@@ -170,11 +175,14 @@ impl<F: JoltField> RecursionVerifier<F> {
         let mut num_gt_exp = 0;
         let mut num_gt_mul = 0;
         let mut num_g1_scalar_mul = 0;
+        let mut num_g2_scalar_mul = 0;
 
         // Collect constraint information
         let mut gt_mul_indices = Vec::new();
         let mut g1_scalar_mul_base_points = Vec::new();
         let mut g1_scalar_mul_indices = Vec::new();
+        let mut g2_scalar_mul_base_points = Vec::new();
+        let mut g2_scalar_mul_indices = Vec::new();
 
         // Use enumeration index as global constraint index (matches prover's indexing)
         for (global_idx, constraint) in self.input.constraint_types.iter().enumerate() {
@@ -190,6 +198,11 @@ impl<F: JoltField> RecursionVerifier<F> {
                     g1_scalar_mul_base_points.push(*base_point);
                     g1_scalar_mul_indices.push(global_idx);
                     num_g1_scalar_mul += 1;
+                }
+                ConstraintType::G2ScalarMul { base_point } => {
+                    g2_scalar_mul_base_points.push(*base_point);
+                    g2_scalar_mul_indices.push(global_idx);
+                    num_g2_scalar_mul += 1;
                 }
             }
         }
@@ -216,10 +229,34 @@ impl<F: JoltField> RecursionVerifier<F> {
         // Add G1 scalar mul verifier if we have G1 scalar mul constraints
         if num_g1_scalar_mul > 0 {
             let params = G1ScalarMulParams::new(num_g1_scalar_mul);
+            debug_assert_eq!(
+                self.input.g1_scalar_mul_public_inputs.len(),
+                num_g1_scalar_mul,
+                "RecursionVerifierInput.g1_scalar_mul_public_inputs must match number of G1ScalarMul constraints"
+            );
             let verifier = G1ScalarMulVerifier::new(
                 params,
                 g1_scalar_mul_base_points,
                 g1_scalar_mul_indices,
+                self.input.g1_scalar_mul_public_inputs.clone(),
+                transcript,
+            );
+            verifiers.push(Box::new(verifier));
+        }
+
+        // Add G2 scalar mul verifier if we have G2 scalar mul constraints
+        if num_g2_scalar_mul > 0 {
+            let params = G2ScalarMulParams::new(num_g2_scalar_mul);
+            debug_assert_eq!(
+                self.input.g2_scalar_mul_public_inputs.len(),
+                num_g2_scalar_mul,
+                "RecursionVerifierInput.g2_scalar_mul_public_inputs must match number of G2ScalarMul constraints"
+            );
+            let verifier = G2ScalarMulVerifier::new(
+                params,
+                g2_scalar_mul_base_points,
+                g2_scalar_mul_indices,
+                self.input.g2_scalar_mul_public_inputs.clone(),
                 transcript,
             );
             verifiers.push(Box::new(verifier));

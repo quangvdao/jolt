@@ -960,9 +960,13 @@ where
                         | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYT(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXANext(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYANext(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulIndicator(
+                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulTIndicator(
                             _,
-                        ) => {
+                        )
+                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulAIndicator(
+                            _,
+                        )
+                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulBit(_) => {
                             // These are G1 scalar mul constraints
                             num_g1_scalar_mul = num_g1_scalar_mul.max(match poly {
                         crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXA(i)
@@ -971,7 +975,9 @@ where
                         | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYT(i)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXANext(i)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYANext(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulIndicator(i) => *i + 1,
+                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulTIndicator(i)
+                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulAIndicator(i)
+                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulBit(i) => *i + 1,
                         _ => 0,
                     });
                         }
@@ -997,12 +1003,15 @@ where
             // the sparse matrix by removing redundant evaluations. We should use the
             // actual dense_num_vars from the metadata rather than trying to recalculate it.
 
-            // Calculate the constraint system parameters for the verifier input
-            // These are based on the original constraint matrix structure
-            const NUM_POLY_TYPES: usize = 15; // PolyType::NUM_TYPES
-            let num_rows_unpadded = NUM_POLY_TYPES * num_constraints_padded;
+            // Calculate the constraint system parameters for the verifier input.
+            //
+            // IMPORTANT: These must match the recursion prover's matrix construction:
+            // - `num_constraint_vars = 11` (uniform matrix compatible with packed GT exp)
+            // - `num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded`
+            use crate::zkvm::recursion::constraints_sys::PolyType;
+            let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
             let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
-            let num_constraint_vars = 8; // All constraints padded to 8 variables
+            let num_constraint_vars = 11; // All constraints padded to 11 variables (zero padding)
             let num_vars = num_s_vars + num_constraint_vars;
 
             let jagged_bijection = metadata.jagged_bijection.clone();
@@ -1020,6 +1029,8 @@ where
                 jagged_mapping,
                 matrix_rows,
                 packed_gt_exp_public_inputs: metadata.packed_gt_exp_public_inputs.clone(),
+                g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
+                g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),
             }
         };
 

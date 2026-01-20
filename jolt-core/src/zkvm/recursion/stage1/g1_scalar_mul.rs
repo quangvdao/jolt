@@ -1,10 +1,26 @@
 //! G1 scalar multiplication sumcheck for proving G1 scalar multiplication constraints
-//! Proves: 0 = Σ_x eq(r_x, x) * Σ_i γ^i * (Σ_j δ^j * C_{i,j}(x))
-//! Where C_{i,j} are the 4 constraints (C1-C4) for each scalar multiplication instance
 //!
-//! This follows the same pattern as square_and_multiply.rs but with two-level batching:
-//! - Delta (δ) batches the 4 constraints within each scalar multiplication
+//! Proves: 0 = Σ_x eq(r_x, x) * Σ_i γ^i * (Σ_j δ^j * C_{i,j}(x))
+//! Where C_{i,j} are the scalar-mul constraints for each instance.
+//!
+//! See `g1_scalar_mul_spec.md` for the full specification and soundness proof.
+//!
+//! ## Constraints
+//! - C1: Doubling x-coordinate: 4y_A²(x_T + 2x_A) - 9x_A⁴ = 0
+//! - C2: Doubling y-coordinate: 3x_A²(x_T - x_A) + 2y_A(y_T + y_A) = 0
+//! - C3: Conditional addition x-coord (bit-dependent)
+//! - C4: Conditional addition y-coord (bit-dependent)
+//! - C6: If A = O then T = O (infinity preserved)
+//! - C7: If ind_T = 1 then (x_T, y_T) = (0,0)
+//!
+//! ## Batching
+//! - Delta (δ) batches constraints within each scalar multiplication
 //! - Gamma (γ) batches multiple scalar multiplication instances
+//!
+//! ## Public inputs
+//! The scalar bits are treated as **public inputs** (derived from the scalar),
+//! so we do NOT emit openings for the bit polynomial and we do NOT enforce a
+//! separate bit-booleanity constraint.
 
 use crate::{
     field::JoltField,
@@ -25,11 +41,56 @@ use crate::{
     virtual_claims,
     zkvm::{recursion::utils::virtual_polynomial_utils::*, witness::VirtualPolynomial},
 };
-use ark_bn254::Fq;
-use ark_ff::One;
+use ark_bn254::{Fq, Fr};
+use ark_ff::{BigInteger, One, PrimeField};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rayon::prelude::*;
 
+/// Public inputs for a single G1 scalar multiplication (the scalar).
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct G1ScalarMulPublicInputs {
+    pub scalar: Fr,
+}
+
+impl G1ScalarMulPublicInputs {
+    pub fn new(scalar: Fr) -> Self {
+        Self { scalar }
+    }
+
+    /// Scalar bits MSB-first, length 256 (matches witness generation).
+    pub fn bits_msb(&self) -> Vec<bool> {
+        let scalar_bits_le = self.scalar.into_bigint().to_bits_le();
+        (0..256).rev().map(|i| scalar_bits_le[i]).collect()
+    }
+
+    /// Evaluate the (padded) bit MLE at the sumcheck challenge point r* (11 vars).
+    ///
+    /// Padding convention matches `DoryMatrixBuilder::pad_8var_to_11var_zero_padding`:
+    /// only the first 256 entries are populated (bits), remaining 2048-256 are 0.
+    pub fn evaluate_bit_mle<F: JoltField>(&self, r_star: &[F]) -> F {
+        assert_eq!(r_star.len(), 11);
+        let bits = self.bits_msb();
+
+        // First 3 variables select the "prefix = 0" block (since bits live in indices 0..256).
+        let pad_factor = EqPolynomial::<F>::zero_selector(&r_star[..3]);
+
+        // Remaining 8 variables index the 256 step positions.
+        let eq_step = EqPolynomial::<F>::evals(&r_star[3..]);
+        debug_assert_eq!(eq_step.len(), 256);
+
+        let mut acc = F::zero();
+        for (i, eq) in eq_step.iter().enumerate() {
+            if bits[i] {
+                acc += *eq;
+            }
+        }
+
+        pad_factor * acc
+    }
+}
+
 /// Helper to append all virtual claims for a G1 scalar mul constraint
+#[allow(clippy::too_many_arguments)]
 fn append_g1_scalar_mul_virtual_claims<F: JoltField, T: Transcript>(
     accumulator: &mut ProverOpeningAccumulator<F>,
     transcript: &mut T,
@@ -43,6 +104,7 @@ fn append_g1_scalar_mul_virtual_claims<F: JoltField, T: Transcript>(
     x_a_next_claim: F,
     y_a_next_claim: F,
     t_is_infinity_claim: F,
+    a_is_infinity_claim: F,
 ) {
     let claims = virtual_claims![
         VirtualPolynomial::RecursionG1ScalarMulXA(constraint_idx) => x_a_claim,
@@ -51,17 +113,19 @@ fn append_g1_scalar_mul_virtual_claims<F: JoltField, T: Transcript>(
         VirtualPolynomial::RecursionG1ScalarMulYT(constraint_idx) => y_t_claim,
         VirtualPolynomial::RecursionG1ScalarMulXANext(constraint_idx) => x_a_next_claim,
         VirtualPolynomial::RecursionG1ScalarMulYANext(constraint_idx) => y_a_next_claim,
-        VirtualPolynomial::RecursionG1ScalarMulIndicator(constraint_idx) => t_is_infinity_claim,
+        VirtualPolynomial::RecursionG1ScalarMulTIndicator(constraint_idx) => t_is_infinity_claim,
+        VirtualPolynomial::RecursionG1ScalarMulAIndicator(constraint_idx) => a_is_infinity_claim,
     ];
     append_virtual_claims(accumulator, transcript, sumcheck_id, opening_point, &claims);
 }
 
 /// Helper to retrieve all virtual claims for a G1 scalar mul constraint
+/// Returns: (x_a, y_a, x_t, y_t, x_a_next, y_a_next, t_is_infinity, a_is_infinity)
 fn get_g1_scalar_mul_virtual_claims<F: JoltField>(
     accumulator: &VerifierOpeningAccumulator<F>,
     constraint_idx: usize,
     sumcheck_id: SumcheckId,
-) -> (F, F, F, F, F, F, F) {
+) -> (F, F, F, F, F, F, F, F) {
     let polynomials = vec![
         VirtualPolynomial::RecursionG1ScalarMulXA(constraint_idx),
         VirtualPolynomial::RecursionG1ScalarMulYA(constraint_idx),
@@ -69,11 +133,12 @@ fn get_g1_scalar_mul_virtual_claims<F: JoltField>(
         VirtualPolynomial::RecursionG1ScalarMulYT(constraint_idx),
         VirtualPolynomial::RecursionG1ScalarMulXANext(constraint_idx),
         VirtualPolynomial::RecursionG1ScalarMulYANext(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulIndicator(constraint_idx),
+        VirtualPolynomial::RecursionG1ScalarMulTIndicator(constraint_idx),
+        VirtualPolynomial::RecursionG1ScalarMulAIndicator(constraint_idx),
     ];
     let claims = get_virtual_claims(accumulator, sumcheck_id, &polynomials);
     (
-        claims[0], claims[1], claims[2], claims[3], claims[4], claims[5], claims[6],
+        claims[0], claims[1], claims[2], claims[3], claims[4], claims[5], claims[6], claims[7],
     )
 }
 
@@ -92,7 +157,8 @@ fn append_g1_scalar_mul_virtual_openings<F: JoltField, T: Transcript>(
         VirtualPolynomial::RecursionG1ScalarMulYT(constraint_idx),
         VirtualPolynomial::RecursionG1ScalarMulXANext(constraint_idx),
         VirtualPolynomial::RecursionG1ScalarMulYANext(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulIndicator(constraint_idx),
+        VirtualPolynomial::RecursionG1ScalarMulTIndicator(constraint_idx),
+        VirtualPolynomial::RecursionG1ScalarMulAIndicator(constraint_idx),
     ];
     append_virtual_openings(
         accumulator,
@@ -103,7 +169,17 @@ fn append_g1_scalar_mul_virtual_openings<F: JoltField, T: Transcript>(
     );
 }
 
-// Helper functions for computing constraints
+// =============================================================================
+// CONSTRAINT FUNCTIONS
+// See g1_scalar_mul_spec.md for derivations and soundness proof
+// =============================================================================
+
+/// C1: Doubling x-coordinate constraint
+/// Derived from tangent formula: λ = 3x_A² / 2y_A, x_T = λ² - 2x_A
+/// Eliminating denominators: 4y_A²(x_T + 2x_A) - 9x_A⁴ = 0
+///
+/// Note: When A = O (infinity), we have x_A = y_A = 0, so C1 = 0 trivially.
+/// The doubling of O is handled by C6 which ensures T = O when A = O.
 fn compute_c1(x_a: Fq, y_a: Fq, x_t: Fq) -> Fq {
     let four = Fq::from(4u64);
     let two = Fq::from(2u64);
@@ -116,6 +192,9 @@ fn compute_c1(x_a: Fq, y_a: Fq, x_t: Fq) -> Fq {
     four * y_a_sq * (x_t + two * x_a) - nine * x_a_fourth
 }
 
+/// C2: Doubling y-coordinate constraint
+/// Derived from: y_T = λ(x_A - x_T) - y_A
+/// Eliminating denominators: 3x_A²(x_T - x_A) + 2y_A(y_T + y_A) = 0
 fn compute_c2(x_a: Fq, y_a: Fq, x_t: Fq, y_t: Fq) -> Fq {
     let three = Fq::from(3u64);
     let two = Fq::from(2u64);
@@ -124,36 +203,91 @@ fn compute_c2(x_a: Fq, y_a: Fq, x_t: Fq, y_t: Fq) -> Fq {
     three * x_a_sq * (x_t - x_a) + two * y_a * (y_t + y_a)
 }
 
-/// C3: Unified constraint handling both finite and infinity cases
-/// - When T ≠ O (ind = 0): checks chord formula for addition
-/// - When T = O (ind = 1): checks x_a_next ∈ {0, x_p}
-fn compute_c3(ind: Fq, x_a_next: Fq, x_t: Fq, y_t: Fq, x_p: Fq, y_p: Fq) -> Fq {
-    // Infinity case: x_a_next must be 0 (stayed at O) or x_p (added P)
-    // Constraint: x_a_next * (x_a_next - x_p) = 0
-    let c3_infinity = x_a_next * (x_a_next - x_p);
+/// C3: Conditional addition x-coordinate constraint (BIT-DEPENDENT)
+///
+/// This is the CRITICAL constraint that binds the scalar bit to the operation:
+/// - If b = 0: A_{i+1} = T_i (skip addition) → x_A' = x_T
+/// - If b = 1: A_{i+1} = T_i + P (add base point) → chord formula
+///
+/// Additionally handles T = O case:
+/// - If b = 1 and T = O: A_{i+1} = P → x_A' = x_P
+///
+/// Combined formula:
+/// C3 = (1 - b) * (x_A' - x_T)
+///    + b * ind_T * (x_A' - x_P)
+///    + b * (1 - ind_T) * [(x_A' + x_T + x_P)(x_P - x_T)² - (y_P - y_T)²]
+#[allow(clippy::too_many_arguments)]
+fn compute_c3(bit: Fq, ind_t: Fq, x_a_next: Fq, x_t: Fq, y_t: Fq, x_p: Fq, y_p: Fq) -> Fq {
+    let one = Fq::one();
 
-    // Finite case: chord addition formula
+    // Case b = 0: skip addition, must have x_A' = x_T
+    let c3_skip = (one - bit) * (x_a_next - x_t);
+
+    // Case b = 1, T = O: adding to infinity gives P, must have x_A' = x_P
+    let c3_infinity = bit * ind_t * (x_a_next - x_p);
+
+    // Case b = 1, T ≠ O: chord addition formula
     let x_diff = x_p - x_t;
     let y_diff = y_p - y_t;
-    let x_a_diff = x_a_next - x_t;
-    let c3_finite = x_a_diff * ((x_a_next + x_t + x_p) * x_diff * x_diff - y_diff * y_diff);
+    let chord_x = (x_a_next + x_t + x_p) * x_diff * x_diff - y_diff * y_diff;
+    let c3_add = bit * (one - ind_t) * chord_x;
 
-    // Combined: ind * infinity_case + (1 - ind) * finite_case
-    ind * c3_infinity + (Fq::one() - ind) * c3_finite
+    c3_skip + c3_infinity + c3_add
 }
 
-/// C4: Unified constraint handling both finite and infinity cases
-fn compute_c4(ind: Fq, x_a_next: Fq, y_a_next: Fq, x_t: Fq, y_t: Fq, x_p: Fq, y_p: Fq) -> Fq {
-    // Infinity case: y_a_next must be 0 (stayed at O) or y_p (added P)
-    let c4_infinity = y_a_next * (y_a_next - y_p);
+/// C4: Conditional addition y-coordinate constraint (BIT-DEPENDENT)
+///
+/// Mirrors C3 for the y-coordinate:
+/// - If b = 0: y_A' = y_T
+/// - If b = 1 and T = O: y_A' = y_P
+/// - If b = 1 and T ≠ O: chord formula for y
+///
+/// Chord y formula (denominator-free):
+/// (y_A' + y_T)(x_P - x_T) - (y_P - y_T)(x_T - x_A') = 0
+#[allow(clippy::too_many_arguments)]
+fn compute_c4(
+    bit: Fq,
+    ind_t: Fq,
+    x_a_next: Fq,
+    y_a_next: Fq,
+    x_t: Fq,
+    y_t: Fq,
+    x_p: Fq,
+    y_p: Fq,
+) -> Fq {
+    let one = Fq::one();
 
-    // Finite case: chord addition formula
-    let y_a_diff = y_a_next - y_t;
-    let c4_finite =
-        y_a_diff * (x_t * (y_p + y_a_next) - x_p * (y_t + y_a_next) + x_a_next * (y_t - y_p));
+    // Case b = 0: skip addition, must have y_A' = y_T
+    let c4_skip = (one - bit) * (y_a_next - y_t);
 
-    // Combined
-    ind * c4_infinity + (Fq::one() - ind) * c4_finite
+    // Case b = 1, T = O: adding to infinity gives P, must have y_A' = y_P
+    let c4_infinity = bit * ind_t * (y_a_next - y_p);
+
+    // Case b = 1, T ≠ O: chord addition formula
+    let x_diff = x_p - x_t;
+    let y_diff = y_p - y_t;
+    let chord_y = (y_a_next + y_t) * x_diff - y_diff * (x_t - x_a_next);
+    let c4_add = bit * (one - ind_t) * chord_y;
+
+    c4_skip + c4_infinity + c4_add
+}
+
+/// C6: Doubling preserves infinity
+/// If A = O (ind_A = 1), then T = O (ind_T = 1)
+/// Constraint: ind_A * (1 - ind_T) = 0
+fn compute_c6(ind_a: Fq, ind_t: Fq) -> Fq {
+    ind_a * (Fq::one() - ind_t)
+}
+
+/// C7: Infinity indicator consistency for T
+/// If T has coordinates (0, 0), then ind_T = 1
+/// Constraint: (1 - ind_T) * (x_T² + y_T² == 0 implies false)
+/// Reformulated: (1 - ind_T) * f(x_T, y_T) where f forces (x_T, y_T) ≠ (0,0)
+/// For simplicity, we trust the honest witness sets this correctly.
+/// The constraint below catches the other direction: if ind_T = 1, coords must be (0,0)
+fn compute_c7(ind_t: Fq, x_t: Fq, y_t: Fq) -> Fq {
+    // If ind_T = 1, then x_T = 0 and y_T = 0
+    ind_t * (x_t * x_t + y_t * y_t)
 }
 
 /// Individual polynomial data for a single G1 scalar multiplication constraint
@@ -161,14 +295,15 @@ fn compute_c4(ind: Fq, x_a_next: Fq, y_a_next: Fq, x_t: Fq, y_t: Fq, x_p: Fq, y_
 /// produce values in the base field Fq
 #[derive(Clone)]
 pub struct G1ScalarMulConstraintPolynomials {
-    pub x_a: Vec<Fq>,            // x-coords of accumulator (all 256 steps)
-    pub y_a: Vec<Fq>,            // y-coords of accumulator (all 256 steps)
-    pub x_t: Vec<Fq>,            // x-coords of doubled point (all 256 steps)
-    pub y_t: Vec<Fq>,            // y-coords of doubled point (all 256 steps)
+    pub x_a: Vec<Fq>,            // x-coords of accumulator A_i (all 256 steps)
+    pub y_a: Vec<Fq>,            // y-coords of accumulator A_i (all 256 steps)
+    pub x_t: Vec<Fq>,            // x-coords of doubled point T_i (all 256 steps)
+    pub y_t: Vec<Fq>,            // y-coords of doubled point T_i (all 256 steps)
     pub x_a_next: Vec<Fq>,       // x-coords of A_{i+1} (shifted by 1)
     pub y_a_next: Vec<Fq>,       // y-coords of A_{i+1} (shifted by 1)
-    pub t_is_infinity: Vec<Fq>,  // Indicator polynomial (1 if T = O, 0 otherwise)
-    pub base_point: (Fq, Fq),    // Base point coordinates (must be Fq as G1 points)
+    pub t_is_infinity: Vec<Fq>,  // Indicator: 1 if T_i = O, 0 otherwise
+    pub a_is_infinity: Vec<Fq>,  // Indicator: 1 if A_i = O, 0 otherwise
+    pub base_point: (Fq, Fq),    // Base point P coordinates (public)
     pub constraint_index: usize, // Global constraint index
 }
 
@@ -216,7 +351,7 @@ pub struct G1ScalarMulProver<F: JoltField, T: Transcript> {
     /// Gamma coefficient for batching scalar multiplication instances
     pub gamma: F,
 
-    /// Delta coefficient for batching 4 constraints within each instance
+    /// Delta coefficient for batching 7 constraints within each instance
     pub delta: F,
 
     /// x_a polynomials as multilinear (one per instance, contains all steps)
@@ -237,8 +372,14 @@ pub struct G1ScalarMulProver<F: JoltField, T: Transcript> {
     /// y_a_next polynomials as multilinear (shifted A_{i+1} values)
     pub y_a_next_mlpoly: Vec<MultilinearPolynomial<F>>,
 
-    /// Infinity indicator polynomials (1 if T = O, 0 otherwise)
+    /// Infinity indicator for T (1 if T = O, 0 otherwise)
     pub t_is_infinity_mlpoly: Vec<MultilinearPolynomial<F>>,
+
+    /// Infinity indicator for A (1 if A = O, 0 otherwise)
+    pub a_is_infinity_mlpoly: Vec<MultilinearPolynomial<F>>,
+
+    /// Scalar bit polynomials derived from public inputs (not opened/claimed)
+    pub bit_public_mlpoly: Vec<MultilinearPolynomial<F>>,
 
     /// Individual claims for each constraint (not batched)
     pub x_a_claims: Vec<F>,
@@ -248,6 +389,7 @@ pub struct G1ScalarMulProver<F: JoltField, T: Transcript> {
     pub x_a_next_claims: Vec<F>,
     pub y_a_next_claims: Vec<F>,
     pub t_is_infinity_claims: Vec<F>,
+    pub a_is_infinity_claims: Vec<F>,
 
     /// Current round
     pub round: usize,
@@ -259,6 +401,7 @@ impl<F: JoltField, T: Transcript> G1ScalarMulProver<F, T> {
     pub fn new(
         params: G1ScalarMulParams,
         constraint_polys: Vec<G1ScalarMulConstraintPolynomials>,
+        public_inputs: Vec<G1ScalarMulPublicInputs>,
         transcript: &mut T,
     ) -> Self {
         let r_x: Vec<F::Challenge> = (0..params.num_constraint_vars)
@@ -284,8 +427,16 @@ impl<F: JoltField, T: Transcript> G1ScalarMulProver<F, T> {
         let mut x_a_next_mlpoly = Vec::new();
         let mut y_a_next_mlpoly = Vec::new();
         let mut t_is_infinity_mlpoly = Vec::new();
+        let mut a_is_infinity_mlpoly = Vec::new();
+        let mut bit_public_mlpoly = Vec::new();
 
-        for poly in constraint_polys {
+        assert_eq!(
+            constraint_polys.len(),
+            public_inputs.len(),
+            "G1ScalarMulProver: constraint_polys and public_inputs must have same length"
+        );
+
+        for (poly, pub_in) in constraint_polys.into_iter().zip(public_inputs.iter()) {
             base_points.push(poly.base_point);
             constraint_indices.push(poly.constraint_index);
             // SAFETY: We checked F = Fq above, so this transmute is safe
@@ -317,9 +468,23 @@ impl<F: JoltField, T: Transcript> G1ScalarMulProver<F, T> {
             t_is_infinity_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
                 t_is_infinity_f,
             )));
+            let a_is_infinity_f: Vec<F> = unsafe { std::mem::transmute(poly.a_is_infinity) };
+            a_is_infinity_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                a_is_infinity_f,
+            )));
+
+            // Build the (padded) bit polynomial from public scalar bits.
+            let bits = pub_in.bits_msb();
+            let mut bit_evals = vec![F::zero(); 1 << params.num_constraint_vars];
+            for i in 0..256 {
+                bit_evals[i] = if bits[i] { F::one() } else { F::zero() };
+            }
+            bit_public_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                bit_evals,
+            )));
         }
 
-        let prover = Self {
+        Self {
             params,
             base_points,
             constraint_indices,
@@ -334,6 +499,8 @@ impl<F: JoltField, T: Transcript> G1ScalarMulProver<F, T> {
             x_a_next_mlpoly,
             y_a_next_mlpoly,
             t_is_infinity_mlpoly,
+            a_is_infinity_mlpoly,
+            bit_public_mlpoly,
             x_a_claims: vec![],
             y_a_claims: vec![],
             x_t_claims: vec![],
@@ -341,17 +508,18 @@ impl<F: JoltField, T: Transcript> G1ScalarMulProver<F, T> {
             x_a_next_claims: vec![],
             y_a_next_claims: vec![],
             t_is_infinity_claims: vec![],
+            a_is_infinity_claims: vec![],
             round: 0,
             _marker: std::marker::PhantomData,
-        };
-
-        prover
+        }
     }
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulProver<F, T> {
     fn degree(&self) -> usize {
-        6 // Was 5, now 6 due to indicator multiplication in C3/C4
+        // Max per-variable degree comes from eq_x (degree 1) times the highest-degree constraint
+        // term (degree 5 from C3/C4 chord formulas), so total degree bound is 6.
+        6
     }
 
     fn num_rounds(&self) -> usize {
@@ -364,9 +532,17 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
 
     #[tracing::instrument(skip_all, name = "G1ScalarMul::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
-        const DEGREE: usize = 6; // INCREASED from 5 due to ind multiplication
+        const DEGREE: usize = 6;
+        const NUM_CONSTRAINT_TERMS: usize = 6; // C1,C2,C3,C4,C6,C7
         let num_x_remaining = self.eq_x.get_num_vars();
         let x_half = 1 << (num_x_remaining - 1);
+
+        // Precompute delta powers for batching within an instance.
+        let mut delta_pows = [F::zero(); NUM_CONSTRAINT_TERMS];
+        delta_pows[0] = F::one();
+        for j in 1..NUM_CONSTRAINT_TERMS {
+            delta_pows[j] = delta_pows[j - 1] * self.delta;
+        }
 
         let total_evals = (0..x_half)
             .into_par_iter()
@@ -380,65 +556,74 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
 
                 // For each G1 scalar multiplication instance
                 for i in 0..self.params.num_constraints {
-                    let x_a_evals_hint = self.x_a_mlpoly[i]
+                    let x_a_evals = self.x_a_mlpoly[i]
                         .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_a_evals_hint = self.y_a_mlpoly[i]
+                    let y_a_evals = self.y_a_mlpoly[i]
                         .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let x_t_evals_hint = self.x_t_mlpoly[i]
+                    let x_t_evals = self.x_t_mlpoly[i]
                         .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_t_evals_hint = self.y_t_mlpoly[i]
+                    let y_t_evals = self.y_t_mlpoly[i]
                         .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-
-                    // For A_{i+1}, use the pre-computed shifted MLEs
-                    let x_a_next_evals_hint = self.x_a_next_mlpoly[i]
+                    let x_a_next_evals = self.x_a_next_mlpoly[i]
                         .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_a_next_evals_hint = self.y_a_next_mlpoly[i]
+                    let y_a_next_evals = self.y_a_next_mlpoly[i]
                         .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-
-                    // NEW: get indicator evals
-                    let ind_evals = self.t_is_infinity_mlpoly[i]
+                    let ind_t_evals = self.t_is_infinity_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let ind_a_evals = self.a_is_infinity_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let bit_evals = self.bit_public_mlpoly[i]
                         .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
 
                     let (x_p, y_p) = self.base_points[i];
 
                     for t in 0..DEGREE {
-                        let ind = ind_evals[t];
-                        let x_a = x_a_evals_hint[t];
-                        let y_a = y_a_evals_hint[t];
-                        let x_t = x_t_evals_hint[t];
-                        let y_t = y_t_evals_hint[t];
-                        let x_a_next = x_a_next_evals_hint[t];
-                        let y_a_next = y_a_next_evals_hint[t];
-
                         // SAFETY: We checked F = Fq in new(), so these transmutes are safe
-                        let x_a_fq: Fq = unsafe { std::mem::transmute_copy(&x_a) };
-                        let y_a_fq: Fq = unsafe { std::mem::transmute_copy(&y_a) };
-                        let x_t_fq: Fq = unsafe { std::mem::transmute_copy(&x_t) };
-                        let y_t_fq: Fq = unsafe { std::mem::transmute_copy(&y_t) };
-                        let x_a_next_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_next) };
-                        let y_a_next_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_next) };
-                        let ind_fq: Fq = unsafe { std::mem::transmute_copy(&ind) };
+                        let x_a_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_evals[t]) };
+                        let y_a_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_evals[t]) };
+                        let x_t_fq: Fq = unsafe { std::mem::transmute_copy(&x_t_evals[t]) };
+                        let y_t_fq: Fq = unsafe { std::mem::transmute_copy(&y_t_evals[t]) };
+                        let x_a_next_fq: Fq =
+                            unsafe { std::mem::transmute_copy(&x_a_next_evals[t]) };
+                        let y_a_next_fq: Fq =
+                            unsafe { std::mem::transmute_copy(&y_a_next_evals[t]) };
+                        let ind_t_fq: Fq = unsafe { std::mem::transmute_copy(&ind_t_evals[t]) };
+                        let ind_a_fq: Fq = unsafe { std::mem::transmute_copy(&ind_a_evals[t]) };
+                        let bit_fq: Fq = unsafe { std::mem::transmute_copy(&bit_evals[t]) };
 
-                        // C1 and C2 unchanged
+                        // Compute constraints
                         let c1_fq = compute_c1(x_a_fq, y_a_fq, x_t_fq);
                         let c2_fq = compute_c2(x_a_fq, y_a_fq, x_t_fq, y_t_fq);
-
-                        // C3 and C4 now take indicator
-                        let c3_fq = compute_c3(ind_fq, x_a_next_fq, x_t_fq, y_t_fq, x_p, y_p);
-                        let c4_fq =
-                            compute_c4(ind_fq, x_a_next_fq, y_a_next_fq, x_t_fq, y_t_fq, x_p, y_p);
+                        let c3_fq =
+                            compute_c3(bit_fq, ind_t_fq, x_a_next_fq, x_t_fq, y_t_fq, x_p, y_p);
+                        let c4_fq = compute_c4(
+                            bit_fq,
+                            ind_t_fq,
+                            x_a_next_fq,
+                            y_a_next_fq,
+                            x_t_fq,
+                            y_t_fq,
+                            x_p,
+                            y_p,
+                        );
+                        let c6_fq = compute_c6(ind_a_fq, ind_t_fq);
+                        let c7_fq = compute_c7(ind_t_fq, x_t_fq, y_t_fq);
 
                         // Convert results back to F
                         let c1: F = unsafe { std::mem::transmute_copy(&c1_fq) };
                         let c2: F = unsafe { std::mem::transmute_copy(&c2_fq) };
                         let c3: F = unsafe { std::mem::transmute_copy(&c3_fq) };
                         let c4: F = unsafe { std::mem::transmute_copy(&c4_fq) };
+                        let c6: F = unsafe { std::mem::transmute_copy(&c6_fq) };
+                        let c7: F = unsafe { std::mem::transmute_copy(&c7_fq) };
 
-                        // Two-level batching:
-                        // 1. Use delta to batch the 4 constraints within each step
-                        let delta_sq = self.delta * self.delta;
-                        let delta_cube = delta_sq * self.delta;
-                        let constraint_val = c1 + self.delta * c2 + delta_sq * c3 + delta_cube * c4;
+                        // Batch constraints with powers of delta
+                        let constraint_val = delta_pows[0] * c1
+                            + delta_pows[1] * c2
+                            + delta_pows[2] * c3
+                            + delta_pows[3] * c4
+                            + delta_pows[4] * c6
+                            + delta_pows[5] * c7;
 
                         x_evals[t] += eq_x_evals[t] * gamma_power * constraint_val;
                     }
@@ -457,9 +642,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
                 },
             );
 
-        let uni_poly = UniPoly::from_evals_and_hint(previous_claim, &total_evals);
-
-        uni_poly
+        UniPoly::from_evals_and_hint(previous_claim, &total_evals)
     }
 
     #[tracing::instrument(skip_all, name = "G1ScalarMul::ingest_challenge")]
@@ -487,6 +670,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
         for poly in &mut self.t_is_infinity_mlpoly {
             poly.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
+        for poly in &mut self.a_is_infinity_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.bit_public_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
 
         self.round = round + 1;
 
@@ -498,6 +687,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
             self.x_a_next_claims.clear();
             self.y_a_next_claims.clear();
             self.t_is_infinity_claims.clear();
+            self.a_is_infinity_claims.clear();
 
             for i in 0..self.params.num_constraints {
                 self.x_a_claims.push(self.x_a_mlpoly[i].get_bound_coeff(0));
@@ -510,6 +700,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
                     .push(self.y_a_next_mlpoly[i].get_bound_coeff(0));
                 self.t_is_infinity_claims
                     .push(self.t_is_infinity_mlpoly[i].get_bound_coeff(0));
+                self.a_is_infinity_claims
+                    .push(self.a_is_infinity_mlpoly[i].get_bound_coeff(0));
             }
         }
     }
@@ -526,7 +718,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
             append_g1_scalar_mul_virtual_claims(
                 accumulator,
                 transcript,
-                i, // Use local index, not global constraint index
+                i,
                 self.params.sumcheck_id,
                 &opening_point,
                 self.x_a_claims[i],
@@ -536,6 +728,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
                 self.x_a_next_claims[i],
                 self.y_a_next_claims[i],
                 self.t_is_infinity_claims[i],
+                self.a_is_infinity_claims[i],
             );
         }
     }
@@ -550,6 +743,7 @@ pub struct G1ScalarMulVerifier<F: JoltField> {
     pub num_constraints: usize,
     pub base_points: Vec<(Fq, Fq)>, // Base points must be Fq as G1 points
     pub constraint_indices: Vec<usize>,
+    pub public_inputs: Vec<G1ScalarMulPublicInputs>,
 }
 
 impl<F: JoltField> G1ScalarMulVerifier<F> {
@@ -557,6 +751,7 @@ impl<F: JoltField> G1ScalarMulVerifier<F> {
         params: G1ScalarMulParams,
         base_points: Vec<(Fq, Fq)>,
         constraint_indices: Vec<usize>,
+        public_inputs: Vec<G1ScalarMulPublicInputs>,
         transcript: &mut T,
     ) -> Self {
         let r_x: Vec<F::Challenge> = (0..params.num_constraint_vars)
@@ -575,6 +770,7 @@ impl<F: JoltField> G1ScalarMulVerifier<F> {
             num_constraints,
             base_points,
             constraint_indices,
+            public_inputs,
         }
     }
 }
@@ -619,11 +815,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G1ScalarMul
                 x_a_next_claim,
                 y_a_next_claim,
                 t_is_infinity_claim,
-            ) = get_g1_scalar_mul_virtual_claims(
-                accumulator,
-                i, // Use local index, not global constraint index
-                self.params.sumcheck_id,
-            );
+                a_is_infinity_claim,
+            ) = get_g1_scalar_mul_virtual_claims(accumulator, i, self.params.sumcheck_id);
 
             let (x_p, y_p) = self.base_points[i];
 
@@ -634,54 +827,56 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G1ScalarMul
             }
 
             // SAFETY: We checked F = Fq above, so these transmutes are safe
-            let x_a_claim_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_claim) };
-            let y_a_claim_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_claim) };
-            let x_t_claim_fq: Fq = unsafe { std::mem::transmute_copy(&x_t_claim) };
-            let y_t_claim_fq: Fq = unsafe { std::mem::transmute_copy(&y_t_claim) };
-            let x_a_next_claim_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_next_claim) };
-            let y_a_next_claim_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_next_claim) };
-            let t_is_infinity_claim_fq: Fq =
-                unsafe { std::mem::transmute_copy(&t_is_infinity_claim) };
+            let x_a_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_claim) };
+            let y_a_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_claim) };
+            let x_t_fq: Fq = unsafe { std::mem::transmute_copy(&x_t_claim) };
+            let y_t_fq: Fq = unsafe { std::mem::transmute_copy(&y_t_claim) };
+            let x_a_next_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_next_claim) };
+            let y_a_next_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_next_claim) };
+            let ind_t_fq: Fq = unsafe { std::mem::transmute_copy(&t_is_infinity_claim) };
+            let ind_a_fq: Fq = unsafe { std::mem::transmute_copy(&a_is_infinity_claim) };
+            let bit_eval: F = self.public_inputs[i].evaluate_bit_mle(&r_star_f);
+            let bit_fq: Fq = unsafe { std::mem::transmute_copy(&bit_eval) };
 
-            // Compute all 4 constraints
-            let c1_fq = compute_c1(x_a_claim_fq, y_a_claim_fq, x_t_claim_fq);
-            let c2_fq = compute_c2(x_a_claim_fq, y_a_claim_fq, x_t_claim_fq, y_t_claim_fq);
-            let c3_fq = compute_c3(
-                t_is_infinity_claim_fq,
-                x_a_next_claim_fq,
-                x_t_claim_fq,
-                y_t_claim_fq,
-                x_p,
-                y_p,
-            );
+            // Compute constraints
+            let c1_fq = compute_c1(x_a_fq, y_a_fq, x_t_fq);
+            let c2_fq = compute_c2(x_a_fq, y_a_fq, x_t_fq, y_t_fq);
+            let c3_fq = compute_c3(bit_fq, ind_t_fq, x_a_next_fq, x_t_fq, y_t_fq, x_p, y_p);
             let c4_fq = compute_c4(
-                t_is_infinity_claim_fq,
-                x_a_next_claim_fq,
-                y_a_next_claim_fq,
-                x_t_claim_fq,
-                y_t_claim_fq,
+                bit_fq,
+                ind_t_fq,
+                x_a_next_fq,
+                y_a_next_fq,
+                x_t_fq,
+                y_t_fq,
                 x_p,
                 y_p,
             );
+            let c6_fq = compute_c6(ind_a_fq, ind_t_fq);
+            let c7_fq = compute_c7(ind_t_fq, x_t_fq, y_t_fq);
 
             // Convert results back to F
             let c1: F = unsafe { std::mem::transmute_copy(&c1_fq) };
             let c2: F = unsafe { std::mem::transmute_copy(&c2_fq) };
             let c3: F = unsafe { std::mem::transmute_copy(&c3_fq) };
             let c4: F = unsafe { std::mem::transmute_copy(&c4_fq) };
+            let c6: F = unsafe { std::mem::transmute_copy(&c6_fq) };
+            let c7: F = unsafe { std::mem::transmute_copy(&c7_fq) };
 
-            // Two-level batching
-            let delta_sq = self.delta * self.delta;
-            let delta_cube = delta_sq * self.delta;
-            let constraint_value = c1 + self.delta * c2 + delta_sq * c3 + delta_cube * c4;
+            // Batch constraints with powers of delta
+            let delta_2 = self.delta * self.delta;
+            let delta_3 = delta_2 * self.delta;
+            let delta_4 = delta_3 * self.delta;
+            let delta_5 = delta_4 * self.delta;
+
+            let constraint_value =
+                c1 + self.delta * c2 + delta_2 * c3 + delta_3 * c4 + delta_4 * c6 + delta_5 * c7;
 
             total += gamma_power * constraint_value;
             gamma_power *= self.gamma;
         }
 
-        let verifier_expected = eq_eval * total;
-
-        verifier_expected
+        eq_eval * total
     }
 
     fn cache_openings(

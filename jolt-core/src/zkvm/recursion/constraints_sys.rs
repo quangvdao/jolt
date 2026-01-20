@@ -16,11 +16,13 @@ use crate::{
     transcripts::Transcript,
     utils::errors::ProofVerifyError,
     zkvm::recursion::{
+        stage1::g1_scalar_mul::G1ScalarMulPublicInputs,
+        stage1::g2_scalar_mul::G2ScalarMulPublicInputs,
         stage1::packed_gt_exp::PackedGtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
 };
-use ark_bn254::{Fq, Fr};
+use ark_bn254::{Fq, Fq2, Fr};
 use ark_ff::{One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::backends::arkworks::ArkGT;
@@ -87,6 +89,8 @@ impl RecursionMetadataBuilder {
             matrix_rows,
             dense_num_vars,
             packed_gt_exp_public_inputs: self.constraint_system.packed_gt_exp_public_inputs.clone(),
+            g1_scalar_mul_public_inputs: self.constraint_system.g1_scalar_mul_public_inputs.clone(),
+            g2_scalar_mul_public_inputs: self.constraint_system.g2_scalar_mul_public_inputs.clone(),
         }
     }
 }
@@ -104,14 +108,16 @@ pub fn compute_constraint_formula(
     rho_curr - rho_prev.square() * base_power - quotient * g_val
 }
 
-/// Polynomial types stored in the matrix
-/// Note: Base and digit bits are NOT stored in the matrix - verifier computes them from public inputs
+/// Polynomial types stored in the recursion constraint matrix.
+///
+/// Notes:
+/// - Packed GT exp **commits only** `RhoPrev` and `Quotient`.
+/// - `rho_next` is verified separately via a **shift sumcheck**.
+/// - `base(x)` and the exponent digits/bits are **public inputs** (not committed matrix rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(usize)]
 pub enum PolyType {
     // Packed GT Exponentiation polynomials (11-var each, one constraint per GT exp)
-    // Note: base(x) and digit bits are public inputs, not committed polynomials
-    // Note: rho_next is no longer committed - verified via shift sumcheck
     RhoPrev = 0,  // rho(s,x) - packed intermediate results (11-var)
     Quotient = 1, // quotient(s,x) - packed quotients (11-var)
 
@@ -121,20 +127,39 @@ pub enum PolyType {
     MulResult = 4,
     MulQuotient = 5,
 
-    // G1 Scalar Multiplication polynomials
-    G1ScalarMulXA = 6,  // x-coord of accumulator A_i (contains A_0, A_1, ..., A_n)
-    G1ScalarMulYA = 7,  // y-coord of accumulator A_i (contains A_0, A_1, ..., A_n)
-    G1ScalarMulXT = 8,  // x-coord of doubled point T_i
-    G1ScalarMulYT = 9, // y-coord of doubled point T_i
-    G1ScalarMulXANext = 10, // x-coord of A_{i+1} (shifted by 1)
-    G1ScalarMulYANext = 11, // y-coord of A_{i+1} (shifted by 1)
-    G1ScalarMulIndicator = 12, // Indicator for T_i = O (point at infinity)
+    // G1 Scalar Multiplication polynomials (8-var padded to 11-var in the matrix)
+    G1ScalarMulXA = 6,
+    G1ScalarMulYA = 7,
+    G1ScalarMulXT = 8,
+    G1ScalarMulYT = 9,
+    G1ScalarMulXANext = 10,
+    G1ScalarMulYANext = 11,
+    G1ScalarMulTIndicator = 12,
+    G1ScalarMulAIndicator = 13,
+    G1ScalarMulBit = 14,
+
+    // G2 Scalar Multiplication polynomials (Fq2 coords split into c0/c1; 8-var padded to 11-var)
+    G2ScalarMulXAC0 = 15,
+    G2ScalarMulXAC1 = 16,
+    G2ScalarMulYAC0 = 17,
+    G2ScalarMulYAC1 = 18,
+    G2ScalarMulXTC0 = 19,
+    G2ScalarMulXTC1 = 20,
+    G2ScalarMulYTC0 = 21,
+    G2ScalarMulYTC1 = 22,
+    G2ScalarMulXANextC0 = 23,
+    G2ScalarMulXANextC1 = 24,
+    G2ScalarMulYANextC0 = 25,
+    G2ScalarMulYANextC1 = 26,
+    G2ScalarMulTIndicator = 27,
+    G2ScalarMulAIndicator = 28,
+    G2ScalarMulBit = 29,
 }
 
 impl PolyType {
-    pub const NUM_TYPES: usize = 13;
+    pub const NUM_TYPES: usize = 30;
 
-    pub fn all() -> [PolyType; 13] {
+    pub fn all() -> [PolyType; 30] {
         [
             PolyType::RhoPrev,
             PolyType::Quotient,
@@ -148,7 +173,24 @@ impl PolyType {
             PolyType::G1ScalarMulYT,
             PolyType::G1ScalarMulXANext,
             PolyType::G1ScalarMulYANext,
-            PolyType::G1ScalarMulIndicator,
+            PolyType::G1ScalarMulTIndicator,
+            PolyType::G1ScalarMulAIndicator,
+            PolyType::G1ScalarMulBit,
+            PolyType::G2ScalarMulXAC0,
+            PolyType::G2ScalarMulXAC1,
+            PolyType::G2ScalarMulYAC0,
+            PolyType::G2ScalarMulYAC1,
+            PolyType::G2ScalarMulXTC0,
+            PolyType::G2ScalarMulXTC1,
+            PolyType::G2ScalarMulYTC0,
+            PolyType::G2ScalarMulYTC1,
+            PolyType::G2ScalarMulXANextC0,
+            PolyType::G2ScalarMulXANextC1,
+            PolyType::G2ScalarMulYANextC0,
+            PolyType::G2ScalarMulYANextC1,
+            PolyType::G2ScalarMulTIndicator,
+            PolyType::G2ScalarMulAIndicator,
+            PolyType::G2ScalarMulBit,
         ]
     }
 
@@ -167,7 +209,24 @@ impl PolyType {
             9 => PolyType::G1ScalarMulYT,
             10 => PolyType::G1ScalarMulXANext,
             11 => PolyType::G1ScalarMulYANext,
-            12 => PolyType::G1ScalarMulIndicator,
+            12 => PolyType::G1ScalarMulTIndicator,
+            13 => PolyType::G1ScalarMulAIndicator,
+            14 => PolyType::G1ScalarMulBit,
+            15 => PolyType::G2ScalarMulXAC0,
+            16 => PolyType::G2ScalarMulXAC1,
+            17 => PolyType::G2ScalarMulYAC0,
+            18 => PolyType::G2ScalarMulYAC1,
+            19 => PolyType::G2ScalarMulXTC0,
+            20 => PolyType::G2ScalarMulXTC1,
+            21 => PolyType::G2ScalarMulYTC0,
+            22 => PolyType::G2ScalarMulYTC1,
+            23 => PolyType::G2ScalarMulXANextC0,
+            24 => PolyType::G2ScalarMulXANextC1,
+            25 => PolyType::G2ScalarMulYANextC0,
+            26 => PolyType::G2ScalarMulYANextC1,
+            27 => PolyType::G2ScalarMulTIndicator,
+            28 => PolyType::G2ScalarMulAIndicator,
+            29 => PolyType::G2ScalarMulBit,
             _ => panic!("Invalid row index"),
         }
     }
@@ -254,7 +313,7 @@ impl DoryMultilinearMatrix {
 /// Row index = poly_type * num_constraints_padded + constraint_index
 pub struct DoryMatrixBuilder {
     num_constraint_vars: usize,
-    /// Rows grouped by polynomial type (16 types total)
+    /// Rows grouped by polynomial type (`PolyType::NUM_TYPES` types total)
     rows_by_type: [Vec<Vec<Fq>>; PolyType::NUM_TYPES],
     /// Constraint types for each constraint
     constraint_types: Vec<ConstraintType>,
@@ -264,21 +323,7 @@ impl DoryMatrixBuilder {
     pub fn new(num_constraint_vars: usize) -> Self {
         Self {
             num_constraint_vars,
-            rows_by_type: [
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ],
+            rows_by_type: std::array::from_fn(|_| Vec::new()),
             constraint_types: Vec::new(),
         }
     }
@@ -286,6 +331,20 @@ impl DoryMatrixBuilder {
     /// Get the current number of constraints added to the builder
     pub fn constraint_count(&self) -> usize {
         self.constraint_types.len()
+    }
+
+    /// For a newly-added constraint, push a zero row for every polynomial type *except* `except`.
+    ///
+    /// This keeps the matrix layout consistent across heterogeneous constraints:
+    /// for each constraint index, every `PolyType` has exactly one row (possibly all zeros).
+    fn push_zero_rows_except(&mut self, row_size: usize, except: &[PolyType]) {
+        let zero_row = vec![Fq::zero(); row_size];
+        for poly_type in PolyType::all() {
+            if except.contains(&poly_type) {
+                continue;
+            }
+            self.rows_by_type[poly_type as usize].push(zero_row.clone());
+        }
     }
 
     /// Pad a 4-variable MLE to 8 variables by repeating the values.
@@ -406,19 +465,8 @@ impl DoryMatrixBuilder {
         self.rows_by_type[PolyType::RhoPrev as usize].push(witness.rho_packed.clone());
         self.rows_by_type[PolyType::Quotient as usize].push(witness.quotient_packed.clone());
 
-        // Add empty rows for GT mul and G1 types to maintain consistent indexing
-        let zero_row = vec![Fq::zero(); row_size];
-        self.rows_by_type[PolyType::MulLhs as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::MulRhs as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::MulResult as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::MulQuotient as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXA as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYA as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXT as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYT as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXANext as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYANext as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulIndicator as usize].push(zero_row);
+        // Add empty rows for all other polynomial types to maintain consistent indexing
+        self.push_zero_rows_except(row_size, &[PolyType::RhoPrev, PolyType::Quotient]);
 
         // Store ONE constraint entry for this packed GT exp
         self.constraint_types.push(ConstraintType::PackedGtExp);
@@ -500,17 +548,16 @@ impl DoryMatrixBuilder {
         self.rows_by_type[PolyType::MulResult as usize].push(result_mle);
         self.rows_by_type[PolyType::MulQuotient as usize].push(quotient_mle);
 
-        // Add empty rows for GT exp and G1 types to maintain consistent indexing
-        let zero_row = vec![Fq::zero(); 1 << self.num_constraint_vars];
-        self.rows_by_type[PolyType::RhoPrev as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::Quotient as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXA as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYA as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXT as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYT as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXANext as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYANext as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulIndicator as usize].push(zero_row);
+        // Add empty rows for all other polynomial types to maintain consistent indexing
+        self.push_zero_rows_except(
+            1 << self.num_constraint_vars,
+            &[
+                PolyType::MulLhs,
+                PolyType::MulRhs,
+                PolyType::MulResult,
+                PolyType::MulQuotient,
+            ],
+        );
 
         // Store constraint type
         self.constraint_types.push(ConstraintType::GtMul);
@@ -540,6 +587,16 @@ impl DoryMatrixBuilder {
             1,
             "Expected single MLE for y_a_next"
         );
+        assert_eq!(
+            witness.t_is_infinity_mles.len(),
+            1,
+            "Expected single MLE for t_is_infinity"
+        );
+        assert_eq!(
+            witness.a_is_infinity_mles.len(),
+            1,
+            "Expected single MLE for a_is_infinity"
+        );
 
         // Each MLE should have 256 evaluations for 8 variables
         assert_eq!(
@@ -552,24 +609,13 @@ impl DoryMatrixBuilder {
         assert_eq!(witness.y_t_mles[0].len(), 1 << 8);
         assert_eq!(witness.x_a_next_mles[0].len(), 1 << 8);
         assert_eq!(witness.y_a_next_mles[0].len(), 1 << 8);
-
-        // Compute infinity indicator from T coordinates
-        use ark_ff::Zero;
-        let t_is_infinity: Vec<Fq> = witness.x_t_mles[0]
-            .iter()
-            .zip(witness.y_t_mles[0].iter())
-            .map(|(x_t, y_t)| {
-                if x_t.is_zero() && y_t.is_zero() {
-                    Fq::from(1u64)
-                } else {
-                    Fq::zero()
-                }
-            })
-            .collect();
-        assert_eq!(t_is_infinity.len(), 1 << 8);
+        assert_eq!(witness.t_is_infinity_mles[0].len(), 1 << 8);
+        assert_eq!(witness.a_is_infinity_mles[0].len(), 1 << 8);
 
         // Pad 8-var MLEs to target constraint vars if needed
-        let (x_a, y_a, x_t, y_t, x_a_next, y_a_next, indicator) = if self.num_constraint_vars == 11
+        let (x_a, y_a, x_t, y_t, x_a_next, y_a_next, t_indicator, a_indicator) = if self
+            .num_constraint_vars
+            == 11
         {
             (
                 Self::pad_8var_to_11var_zero_padding(&witness.x_a_mles[0]),
@@ -578,7 +624,8 @@ impl DoryMatrixBuilder {
                 Self::pad_8var_to_11var_zero_padding(&witness.y_t_mles[0]),
                 Self::pad_8var_to_11var_zero_padding(&witness.x_a_next_mles[0]),
                 Self::pad_8var_to_11var_zero_padding(&witness.y_a_next_mles[0]),
-                Self::pad_8var_to_11var_zero_padding(&t_is_infinity),
+                Self::pad_8var_to_11var_zero_padding(&witness.t_is_infinity_mles[0]),
+                Self::pad_8var_to_11var_zero_padding(&witness.a_is_infinity_mles[0]),
             )
         } else if self.num_constraint_vars == 8 {
             (
@@ -588,7 +635,8 @@ impl DoryMatrixBuilder {
                 witness.y_t_mles[0].clone(),
                 witness.x_a_next_mles[0].clone(),
                 witness.y_a_next_mles[0].clone(),
-                t_is_infinity,
+                witness.t_is_infinity_mles[0].clone(),
+                witness.a_is_infinity_mles[0].clone(),
             )
         } else {
             panic!(
@@ -604,20 +652,195 @@ impl DoryMatrixBuilder {
         self.rows_by_type[PolyType::G1ScalarMulYT as usize].push(y_t);
         self.rows_by_type[PolyType::G1ScalarMulXANext as usize].push(x_a_next);
         self.rows_by_type[PolyType::G1ScalarMulYANext as usize].push(y_a_next);
-        self.rows_by_type[PolyType::G1ScalarMulIndicator as usize].push(indicator);
+        self.rows_by_type[PolyType::G1ScalarMulTIndicator as usize].push(t_indicator);
+        self.rows_by_type[PolyType::G1ScalarMulAIndicator as usize].push(a_indicator);
 
-        // Add empty rows for GT types to maintain consistent indexing
-        let zero_row = vec![Fq::zero(); 1 << self.num_constraint_vars];
-        self.rows_by_type[PolyType::RhoPrev as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::Quotient as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::MulLhs as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::MulRhs as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::MulResult as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::MulQuotient as usize].push(zero_row);
+        // Add empty rows for all other polynomial types to maintain consistent indexing
+        self.push_zero_rows_except(
+            1 << self.num_constraint_vars,
+            &[
+                PolyType::G1ScalarMulXA,
+                PolyType::G1ScalarMulYA,
+                PolyType::G1ScalarMulXT,
+                PolyType::G1ScalarMulYT,
+                PolyType::G1ScalarMulXANext,
+                PolyType::G1ScalarMulYANext,
+                PolyType::G1ScalarMulTIndicator,
+                PolyType::G1ScalarMulAIndicator,
+            ],
+        );
 
         // Store one constraint entry for this G1 scalar multiplication
         // The constraint evaluation will handle accessing different indices within the MLEs
         self.constraint_types.push(ConstraintType::G1ScalarMul {
+            base_point: (witness.point_base.x, witness.point_base.y),
+        });
+    }
+
+    /// Add constraints from a G2 scalar multiplication witness.
+    ///
+    /// G2 coordinates are in Fq2, so each coordinate is provided as two 8-var MLEs (c0/c1).
+    pub fn add_g2_scalar_mul_witness(
+        &mut self,
+        witness: &crate::poly::commitment::dory::recursion::JoltG2ScalarMulWitness,
+    ) {
+        // Expect a single 8-var MLE per coordinate component / indicator.
+        assert_eq!(
+            witness.x_a_c0_mles.len(),
+            1,
+            "Expected single MLE for x_a.c0"
+        );
+        assert_eq!(
+            witness.x_a_c1_mles.len(),
+            1,
+            "Expected single MLE for x_a.c1"
+        );
+        assert_eq!(
+            witness.y_a_c0_mles.len(),
+            1,
+            "Expected single MLE for y_a.c0"
+        );
+        assert_eq!(
+            witness.y_a_c1_mles.len(),
+            1,
+            "Expected single MLE for y_a.c1"
+        );
+        assert_eq!(
+            witness.x_t_c0_mles.len(),
+            1,
+            "Expected single MLE for x_t.c0"
+        );
+        assert_eq!(
+            witness.x_t_c1_mles.len(),
+            1,
+            "Expected single MLE for x_t.c1"
+        );
+        assert_eq!(
+            witness.y_t_c0_mles.len(),
+            1,
+            "Expected single MLE for y_t.c0"
+        );
+        assert_eq!(
+            witness.y_t_c1_mles.len(),
+            1,
+            "Expected single MLE for y_t.c1"
+        );
+        assert_eq!(
+            witness.x_a_next_c0_mles.len(),
+            1,
+            "Expected single MLE for x_a_next.c0"
+        );
+        assert_eq!(
+            witness.x_a_next_c1_mles.len(),
+            1,
+            "Expected single MLE for x_a_next.c1"
+        );
+        assert_eq!(
+            witness.y_a_next_c0_mles.len(),
+            1,
+            "Expected single MLE for y_a_next.c0"
+        );
+        assert_eq!(
+            witness.y_a_next_c1_mles.len(),
+            1,
+            "Expected single MLE for y_a_next.c1"
+        );
+        assert_eq!(
+            witness.t_is_infinity_mles.len(),
+            1,
+            "Expected single MLE for t_is_infinity"
+        );
+        assert_eq!(
+            witness.a_is_infinity_mles.len(),
+            1,
+            "Expected single MLE for a_is_infinity"
+        );
+
+        // Each MLE should have 256 evaluations for 8 variables
+        let expected_len = 1 << 8;
+        assert_eq!(witness.x_a_c0_mles[0].len(), expected_len);
+        assert_eq!(witness.x_a_c1_mles[0].len(), expected_len);
+        assert_eq!(witness.y_a_c0_mles[0].len(), expected_len);
+        assert_eq!(witness.y_a_c1_mles[0].len(), expected_len);
+        assert_eq!(witness.x_t_c0_mles[0].len(), expected_len);
+        assert_eq!(witness.x_t_c1_mles[0].len(), expected_len);
+        assert_eq!(witness.y_t_c0_mles[0].len(), expected_len);
+        assert_eq!(witness.y_t_c1_mles[0].len(), expected_len);
+        assert_eq!(witness.x_a_next_c0_mles[0].len(), expected_len);
+        assert_eq!(witness.x_a_next_c1_mles[0].len(), expected_len);
+        assert_eq!(witness.y_a_next_c0_mles[0].len(), expected_len);
+        assert_eq!(witness.y_a_next_c1_mles[0].len(), expected_len);
+        assert_eq!(witness.t_is_infinity_mles[0].len(), expected_len);
+        assert_eq!(witness.a_is_infinity_mles[0].len(), expected_len);
+
+        // Pad 8-var MLEs to target constraint vars if needed
+        let pad = |mle_8: &Vec<Fq>| -> Vec<Fq> {
+            if self.num_constraint_vars == 11 {
+                Self::pad_8var_to_11var_zero_padding(mle_8)
+            } else if self.num_constraint_vars == 8 {
+                mle_8.clone()
+            } else {
+                panic!(
+                    "G2 scalar multiplication requires 8 or 11 constraint variables, but builder has {}",
+                    self.num_constraint_vars
+                );
+            }
+        };
+
+        let x_a_c0 = pad(&witness.x_a_c0_mles[0]);
+        let x_a_c1 = pad(&witness.x_a_c1_mles[0]);
+        let y_a_c0 = pad(&witness.y_a_c0_mles[0]);
+        let y_a_c1 = pad(&witness.y_a_c1_mles[0]);
+        let x_t_c0 = pad(&witness.x_t_c0_mles[0]);
+        let x_t_c1 = pad(&witness.x_t_c1_mles[0]);
+        let y_t_c0 = pad(&witness.y_t_c0_mles[0]);
+        let y_t_c1 = pad(&witness.y_t_c1_mles[0]);
+        let x_a_next_c0 = pad(&witness.x_a_next_c0_mles[0]);
+        let x_a_next_c1 = pad(&witness.x_a_next_c1_mles[0]);
+        let y_a_next_c0 = pad(&witness.y_a_next_c0_mles[0]);
+        let y_a_next_c1 = pad(&witness.y_a_next_c1_mles[0]);
+        let t_indicator = pad(&witness.t_is_infinity_mles[0]);
+        let a_indicator = pad(&witness.a_is_infinity_mles[0]);
+
+        // Add the entire MLEs (one per variable type for this scalar multiplication)
+        self.rows_by_type[PolyType::G2ScalarMulXAC0 as usize].push(x_a_c0);
+        self.rows_by_type[PolyType::G2ScalarMulXAC1 as usize].push(x_a_c1);
+        self.rows_by_type[PolyType::G2ScalarMulYAC0 as usize].push(y_a_c0);
+        self.rows_by_type[PolyType::G2ScalarMulYAC1 as usize].push(y_a_c1);
+        self.rows_by_type[PolyType::G2ScalarMulXTC0 as usize].push(x_t_c0);
+        self.rows_by_type[PolyType::G2ScalarMulXTC1 as usize].push(x_t_c1);
+        self.rows_by_type[PolyType::G2ScalarMulYTC0 as usize].push(y_t_c0);
+        self.rows_by_type[PolyType::G2ScalarMulYTC1 as usize].push(y_t_c1);
+        self.rows_by_type[PolyType::G2ScalarMulXANextC0 as usize].push(x_a_next_c0);
+        self.rows_by_type[PolyType::G2ScalarMulXANextC1 as usize].push(x_a_next_c1);
+        self.rows_by_type[PolyType::G2ScalarMulYANextC0 as usize].push(y_a_next_c0);
+        self.rows_by_type[PolyType::G2ScalarMulYANextC1 as usize].push(y_a_next_c1);
+        self.rows_by_type[PolyType::G2ScalarMulTIndicator as usize].push(t_indicator);
+        self.rows_by_type[PolyType::G2ScalarMulAIndicator as usize].push(a_indicator);
+
+        // Add empty rows for all other polynomial types to maintain consistent indexing
+        self.push_zero_rows_except(
+            1 << self.num_constraint_vars,
+            &[
+                PolyType::G2ScalarMulXAC0,
+                PolyType::G2ScalarMulXAC1,
+                PolyType::G2ScalarMulYAC0,
+                PolyType::G2ScalarMulYAC1,
+                PolyType::G2ScalarMulXTC0,
+                PolyType::G2ScalarMulXTC1,
+                PolyType::G2ScalarMulYTC0,
+                PolyType::G2ScalarMulYTC1,
+                PolyType::G2ScalarMulXANextC0,
+                PolyType::G2ScalarMulXANextC1,
+                PolyType::G2ScalarMulYANextC0,
+                PolyType::G2ScalarMulYANextC1,
+                PolyType::G2ScalarMulTIndicator,
+                PolyType::G2ScalarMulAIndicator,
+            ],
+        );
+
+        // Store one constraint entry for this G2 scalar multiplication
+        self.constraint_types.push(ConstraintType::G2ScalarMul {
             base_point: (witness.point_base.x, witness.point_base.y),
         });
     }
@@ -697,16 +920,15 @@ impl DoryMatrixBuilder {
         self.rows_by_type[PolyType::MulResult as usize].push(result_mle);
         self.rows_by_type[PolyType::MulQuotient as usize].push(quotient_mle);
 
-        let zero_row = vec![Fq::zero(); 1 << self.num_constraint_vars];
-        self.rows_by_type[PolyType::RhoPrev as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::Quotient as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXA as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYA as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXT as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYT as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulXANext as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulYANext as usize].push(zero_row.clone());
-        self.rows_by_type[PolyType::G1ScalarMulIndicator as usize].push(zero_row);
+        self.push_zero_rows_except(
+            1 << self.num_constraint_vars,
+            &[
+                PolyType::MulLhs,
+                PolyType::MulRhs,
+                PolyType::MulResult,
+                PolyType::MulQuotient,
+            ],
+        );
 
         self.constraint_types.push(ConstraintType::GtMul);
     }
@@ -735,7 +957,8 @@ impl DoryMatrixBuilder {
                 );
                 let base_mle = fq12_to_multilinear_evals(&exp_wit.base);
                 let base2_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base));
-                let base3_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base * exp_wit.base));
+                let base3_mle =
+                    fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base * exp_wit.base));
 
                 let rho_mles = if exp_wit.rho_mles.is_empty() {
                     vec![fq12_to_multilinear_evals(&exp_wit.result)]
@@ -760,7 +983,8 @@ impl DoryMatrixBuilder {
             // Convert base Fq12 to 4-var MLE
             let base_mle = fq12_to_multilinear_evals(&exp_wit.base);
             let base2_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base));
-            let base3_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base * exp_wit.base));
+            let base3_mle =
+                fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base * exp_wit.base));
 
             // Validate and fix witness data if needed
             let num_steps = (exp_wit.bits.len() + 1) / 2;
@@ -936,6 +1160,10 @@ pub enum ConstraintType {
     G1ScalarMul {
         base_point: (Fq, Fq), // (x_p, y_p)
     },
+    /// G2 scalar multiplication constraint with base point (over Fq2)
+    G2ScalarMul {
+        base_point: (Fq2, Fq2), // (x_p, y_p) in Fq2
+    },
 }
 
 /// Constraint metadata for matrix-based evaluation.
@@ -966,6 +1194,12 @@ pub struct ConstraintSystem {
     /// Public inputs for packed GT exp (base Fq12 and scalar bits) - used by verifier
     /// and Stage 2 to compute digit/base evaluations directly
     pub packed_gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+
+    /// Public inputs for G1 scalar multiplication (the scalars, one per G1ScalarMul constraint)
+    pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
+
+    /// Public inputs for G2 scalar multiplication (the scalars, one per G2ScalarMul constraint)
+    pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 }
 
 impl ConstraintSystem {
@@ -991,42 +1225,107 @@ impl ConstraintSystem {
                     builder.rows_by_type[PolyType::RhoPrev as usize].push(zero_row.clone());
                     builder.rows_by_type[PolyType::Quotient as usize].push(zero_row.clone());
 
-                    // Add empty rows for other types (GT mul + G1)
-                    for poly_type in 2..PolyType::NUM_TYPES {
-                        builder.rows_by_type[poly_type].push(zero_row.clone());
-                    }
+                    // Add empty rows for all other polynomial types to maintain consistent indexing
+                    builder.push_zero_rows_except(
+                        1 << num_constraint_vars,
+                        &[PolyType::RhoPrev, PolyType::Quotient],
+                    );
 
                     builder.constraint_types.push(constraint_type.clone());
                 }
                 ConstraintType::GtMul => {
-                    // Add empty rows for packed GT exp types
-                    for poly_type in 0..2 {
-                        builder.rows_by_type[poly_type].push(zero_row.clone());
-                    }
-
                     // Add GT mul rows
                     builder.rows_by_type[PolyType::MulLhs as usize].push(zero_row.clone());
                     builder.rows_by_type[PolyType::MulRhs as usize].push(zero_row.clone());
                     builder.rows_by_type[PolyType::MulResult as usize].push(zero_row.clone());
                     builder.rows_by_type[PolyType::MulQuotient as usize].push(zero_row.clone());
 
-                    // Add empty rows for G1 types
-                    for poly_type in (PolyType::G1ScalarMulXA as usize)..PolyType::NUM_TYPES {
-                        builder.rows_by_type[poly_type].push(zero_row.clone());
-                    }
+                    // Add empty rows for all other polynomial types to maintain consistent indexing
+                    builder.push_zero_rows_except(
+                        1 << num_constraint_vars,
+                        &[
+                            PolyType::MulLhs,
+                            PolyType::MulRhs,
+                            PolyType::MulResult,
+                            PolyType::MulQuotient,
+                        ],
+                    );
 
                     builder.constraint_types.push(constraint_type.clone());
                 }
                 ConstraintType::G1ScalarMul { .. } => {
-                    // Add empty rows for GT types (packed GT exp + GT mul)
-                    for poly_type in 0..(PolyType::G1ScalarMulXA as usize) {
-                        builder.rows_by_type[poly_type].push(zero_row.clone());
-                    }
-
                     // Add G1 scalar mul rows
-                    for poly_type in (PolyType::G1ScalarMulXA as usize)..PolyType::NUM_TYPES {
-                        builder.rows_by_type[poly_type].push(zero_row.clone());
-                    }
+                    builder.rows_by_type[PolyType::G1ScalarMulXA as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G1ScalarMulYA as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G1ScalarMulXT as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G1ScalarMulYT as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G1ScalarMulXANext as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G1ScalarMulYANext as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G1ScalarMulTIndicator as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G1ScalarMulAIndicator as usize]
+                        .push(zero_row.clone());
+
+                    builder.push_zero_rows_except(
+                        1 << num_constraint_vars,
+                        &[
+                            PolyType::G1ScalarMulXA,
+                            PolyType::G1ScalarMulYA,
+                            PolyType::G1ScalarMulXT,
+                            PolyType::G1ScalarMulYT,
+                            PolyType::G1ScalarMulXANext,
+                            PolyType::G1ScalarMulYANext,
+                            PolyType::G1ScalarMulTIndicator,
+                            PolyType::G1ScalarMulAIndicator,
+                        ],
+                    );
+
+                    builder.constraint_types.push(constraint_type.clone());
+                }
+                ConstraintType::G2ScalarMul { .. } => {
+                    // Add G2 scalar mul rows (placeholders)
+                    builder.rows_by_type[PolyType::G2ScalarMulXAC0 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulXAC1 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulYAC0 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulYAC1 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulXTC0 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulXTC1 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulYTC0 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulYTC1 as usize].push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulXANextC0 as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulXANextC1 as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulYANextC0 as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulYANextC1 as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulTIndicator as usize]
+                        .push(zero_row.clone());
+                    builder.rows_by_type[PolyType::G2ScalarMulAIndicator as usize]
+                        .push(zero_row.clone());
+
+                    builder.push_zero_rows_except(
+                        1 << num_constraint_vars,
+                        &[
+                            PolyType::G2ScalarMulXAC0,
+                            PolyType::G2ScalarMulXAC1,
+                            PolyType::G2ScalarMulYAC0,
+                            PolyType::G2ScalarMulYAC1,
+                            PolyType::G2ScalarMulXTC0,
+                            PolyType::G2ScalarMulXTC1,
+                            PolyType::G2ScalarMulYTC0,
+                            PolyType::G2ScalarMulYTC1,
+                            PolyType::G2ScalarMulXANextC0,
+                            PolyType::G2ScalarMulXANextC1,
+                            PolyType::G2ScalarMulYANextC0,
+                            PolyType::G2ScalarMulYANextC1,
+                            PolyType::G2ScalarMulTIndicator,
+                            PolyType::G2ScalarMulAIndicator,
+                        ],
+                    );
 
                     builder.constraint_types.push(constraint_type.clone());
                 }
@@ -1041,6 +1340,8 @@ impl ConstraintSystem {
             constraints,
             packed_gt_exp_witnesses: Vec::new(), // No actual witnesses in from_witness (test helper)
             packed_gt_exp_public_inputs: Vec::new(), // No actual public inputs in from_witness (test helper)
+            g1_scalar_mul_public_inputs: Vec::new(),
+            g2_scalar_mul_public_inputs: Vec::new(),
         })
     }
 
@@ -1084,7 +1385,8 @@ impl ConstraintSystem {
         for (_op_id, witness) in witnesses.gt_exp.iter() {
             let base_mle = fq12_to_multilinear_evals(&witness.base);
             let base2_mle = fq12_to_multilinear_evals(&(witness.base * witness.base));
-            let base3_mle = fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
+            let base3_mle =
+                fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
             let packed = super::stage1::packed_gt_exp::PackedGtExpWitness::from_steps(
                 &witness.rho_mles,
                 &witness.quotient_mles,
@@ -1105,9 +1407,20 @@ impl ConstraintSystem {
             builder.add_gt_mul_witness(witness);
         }
 
+        // Collect scalar public inputs for scalar-mul constraints (bits are treated as public inputs)
+        let mut g1_scalar_mul_public_inputs = Vec::with_capacity(witnesses.g1_scalar_mul.len());
+        let mut g2_scalar_mul_public_inputs = Vec::with_capacity(witnesses.g2_scalar_mul.len());
+
         // Add G1 scalar multiplication witnesses
         for (_op_id, witness) in witnesses.g1_scalar_mul.iter() {
             builder.add_g1_scalar_mul_witness(witness);
+            g1_scalar_mul_public_inputs.push(G1ScalarMulPublicInputs::new(witness.scalar));
+        }
+
+        // Add G2 scalar multiplication witnesses
+        for (_op_id, witness) in witnesses.g2_scalar_mul.iter() {
+            builder.add_g2_scalar_mul_witness(witness);
+            g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(witness.scalar));
         }
 
         let (matrix, constraints) = builder.build();
@@ -1133,6 +1446,8 @@ impl ConstraintSystem {
                 constraints,
                 packed_gt_exp_witnesses,
                 packed_gt_exp_public_inputs,
+                g1_scalar_mul_public_inputs,
+                g2_scalar_mul_public_inputs,
             },
             hints,
         ))
@@ -1177,11 +1492,14 @@ impl ConstraintSystem {
     }
 
     /// Extract G1 scalar mul constraint data for g1_scalar_mul sumcheck
+    /// Returns: (idx, base_point, x_a, y_a, x_t, y_t, x_a_next, y_a_next, t_indicator, a_indicator)
+    #[allow(clippy::type_complexity)]
     pub fn extract_g1_scalar_mul_constraints(
         &self,
     ) -> Vec<(
         usize,
         (Fq, Fq),
+        Vec<Fq>,
         Vec<Fq>,
         Vec<Fq>,
         Vec<Fq>,
@@ -1210,8 +1528,10 @@ impl ConstraintSystem {
                 let y_t = self.extract_row_poly(PolyType::G1ScalarMulYT, idx, row_size);
                 let x_a_next = self.extract_row_poly(PolyType::G1ScalarMulXANext, idx, row_size);
                 let y_a_next = self.extract_row_poly(PolyType::G1ScalarMulYANext, idx, row_size);
-                let t_is_infinity =
-                    self.extract_row_poly(PolyType::G1ScalarMulIndicator, idx, row_size);
+                let t_indicator =
+                    self.extract_row_poly(PolyType::G1ScalarMulTIndicator, idx, row_size);
+                let a_indicator =
+                    self.extract_row_poly(PolyType::G1ScalarMulAIndicator, idx, row_size);
 
                 constraints.push((
                     constraint.constraint_index,
@@ -1222,7 +1542,92 @@ impl ConstraintSystem {
                     y_t,
                     x_a_next,
                     y_a_next,
-                    t_is_infinity,
+                    t_indicator,
+                    a_indicator,
+                ));
+            }
+        }
+
+        constraints
+    }
+
+    /// Extract G2 scalar mul constraint data for g2_scalar_mul sumcheck.
+    ///
+    /// Returns:
+    /// (idx, base_point, x_a_c0, x_a_c1, y_a_c0, y_a_c1, x_t_c0, x_t_c1, y_t_c0, y_t_c1,
+    ///  x_a_next_c0, x_a_next_c1, y_a_next_c0, y_a_next_c1, t_indicator, a_indicator)
+    #[allow(clippy::type_complexity)]
+    pub fn extract_g2_scalar_mul_constraints(
+        &self,
+    ) -> Vec<(
+        usize,
+        (Fq2, Fq2),
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+        Vec<Fq>,
+    )> {
+        let num_constraint_vars = self.matrix.num_constraint_vars;
+        let row_size = 1 << num_constraint_vars;
+
+        // Pre-allocate with exact capacity
+        let g2_scalar_mul_count = self
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::G2ScalarMul { .. }))
+            .count();
+        let mut constraints = Vec::with_capacity(g2_scalar_mul_count);
+
+        for (idx, constraint) in self.constraints.iter().enumerate() {
+            if let ConstraintType::G2ScalarMul { base_point } = constraint.constraint_type {
+                let x_a_c0 = self.extract_row_poly(PolyType::G2ScalarMulXAC0, idx, row_size);
+                let x_a_c1 = self.extract_row_poly(PolyType::G2ScalarMulXAC1, idx, row_size);
+                let y_a_c0 = self.extract_row_poly(PolyType::G2ScalarMulYAC0, idx, row_size);
+                let y_a_c1 = self.extract_row_poly(PolyType::G2ScalarMulYAC1, idx, row_size);
+                let x_t_c0 = self.extract_row_poly(PolyType::G2ScalarMulXTC0, idx, row_size);
+                let x_t_c1 = self.extract_row_poly(PolyType::G2ScalarMulXTC1, idx, row_size);
+                let y_t_c0 = self.extract_row_poly(PolyType::G2ScalarMulYTC0, idx, row_size);
+                let y_t_c1 = self.extract_row_poly(PolyType::G2ScalarMulYTC1, idx, row_size);
+                let x_a_next_c0 =
+                    self.extract_row_poly(PolyType::G2ScalarMulXANextC0, idx, row_size);
+                let x_a_next_c1 =
+                    self.extract_row_poly(PolyType::G2ScalarMulXANextC1, idx, row_size);
+                let y_a_next_c0 =
+                    self.extract_row_poly(PolyType::G2ScalarMulYANextC0, idx, row_size);
+                let y_a_next_c1 =
+                    self.extract_row_poly(PolyType::G2ScalarMulYANextC1, idx, row_size);
+                let t_indicator =
+                    self.extract_row_poly(PolyType::G2ScalarMulTIndicator, idx, row_size);
+                let a_indicator =
+                    self.extract_row_poly(PolyType::G2ScalarMulAIndicator, idx, row_size);
+
+                constraints.push((
+                    constraint.constraint_index,
+                    base_point,
+                    x_a_c0,
+                    x_a_c1,
+                    y_a_c0,
+                    y_a_c1,
+                    x_t_c0,
+                    x_t_c1,
+                    y_t_c0,
+                    y_t_c1,
+                    x_a_next_c0,
+                    x_a_next_c1,
+                    y_a_next_c0,
+                    y_a_next_c1,
+                    t_indicator,
+                    a_indicator,
                 ));
             }
         }
@@ -1233,9 +1638,7 @@ impl ConstraintSystem {
     /// Extract packed GT exp constraint data for packed_gt_exp sumcheck
     /// Returns: (constraint_index, rho, quotient) for each PackedGtExp constraint
     /// Note: digit bits, base, and rho_next are public inputs/virtual claims
-    pub fn extract_packed_gt_exp_constraints(
-        &self,
-    ) -> Vec<(usize, Vec<Fq>, Vec<Fq>)> {
+    pub fn extract_packed_gt_exp_constraints(&self) -> Vec<(usize, Vec<Fq>, Vec<Fq>)> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
@@ -1429,7 +1832,10 @@ impl ConstraintSystem {
             PolyType::G1ScalarMulYT => Fq::zero(),
             PolyType::G1ScalarMulXANext => Fq::zero(),
             PolyType::G1ScalarMulYANext => Fq::zero(),
-            PolyType::G1ScalarMulIndicator => Fq::zero(),
+            PolyType::G1ScalarMulTIndicator => Fq::zero(),
+            PolyType::G1ScalarMulAIndicator => Fq::zero(),
+            PolyType::G1ScalarMulBit => Fq::zero(),
+            _ => Fq::zero(),
         }
     }
 
@@ -1530,8 +1936,10 @@ impl ConstraintSystem {
                 let packed = &self.packed_gt_exp_witnesses[gt_exp_idx];
                 // Reverse for big-endian convention used by DensePolynomial::evaluate
                 let x_reversed: Vec<Fq> = x.iter().rev().copied().collect();
-                let rho_curr = DensePolynomial::new(packed.rho_next_packed.clone()).evaluate(&x_reversed);
-                let base_eval = DensePolynomial::new(packed.base_packed.clone()).evaluate(&x_reversed);
+                let rho_curr =
+                    DensePolynomial::new(packed.rho_next_packed.clone()).evaluate(&x_reversed);
+                let base_eval =
+                    DensePolynomial::new(packed.base_packed.clone()).evaluate(&x_reversed);
                 let base2_eval =
                     DensePolynomial::new(packed.base2_packed.clone()).evaluate(&x_reversed);
                 let base3_eval =
@@ -1581,8 +1989,8 @@ impl ConstraintSystem {
                 lhs_eval * rhs_eval - result_eval - quotient_eval * g_eval
             }
             ConstraintType::G1ScalarMul { base_point } => {
-                // G1 scalar multiplication constraint evaluation
-                // We evaluate all 4 constraints (C1-C4) at the given point x
+                // G1 scalar multiplication constraint evaluation (debug/testing helper).
+                // Matches the stage1 bit-dependent constraints, with bits treated as public inputs.
 
                 // Get the row indices for our MLEs
                 let x_a_row = self.matrix.row_index(PolyType::G1ScalarMulXA, idx);
@@ -1591,6 +1999,8 @@ impl ConstraintSystem {
                 let y_t_row = self.matrix.row_index(PolyType::G1ScalarMulYT, idx);
                 let x_a_next_row = self.matrix.row_index(PolyType::G1ScalarMulXANext, idx);
                 let y_a_next_row = self.matrix.row_index(PolyType::G1ScalarMulYANext, idx);
+                let ind_t_row = self.matrix.row_index(PolyType::G1ScalarMulTIndicator, idx);
+                let ind_a_row = self.matrix.row_index(PolyType::G1ScalarMulAIndicator, idx);
 
                 // Evaluate MLEs at point x
                 let x_a = self.matrix.evaluate_row(x_a_row, x);
@@ -1599,9 +2009,23 @@ impl ConstraintSystem {
                 let y_t = self.matrix.evaluate_row(y_t_row, x);
                 let x_a_next = self.matrix.evaluate_row(x_a_next_row, x);
                 let y_a_next = self.matrix.evaluate_row(y_a_next_row, x);
+                let ind_t = self.matrix.evaluate_row(ind_t_row, x);
+                let ind_a = self.matrix.evaluate_row(ind_a_row, x);
 
                 // Extract base point coordinates
                 let (x_p, y_p) = base_point;
+
+                // Evaluate bit MLE at x using verifier-known public input scalar.
+                // `x` is little-endian for the matrix, but public-bit evaluation expects big-endian.
+                let g1_scalar_mul_idx = self
+                    .constraints
+                    .iter()
+                    .take(idx)
+                    .filter(|c| matches!(c.constraint_type, ConstraintType::G1ScalarMul { .. }))
+                    .count();
+                let x_be: Vec<Fq> = x.iter().rev().copied().collect();
+                let bit = self.g1_scalar_mul_public_inputs[g1_scalar_mul_idx]
+                    .evaluate_bit_mle::<Fq>(&x_be);
 
                 // C1: Doubling x-coordinate constraint
                 // 4y_A^2(x_T + 2x_A) - 9x_A^4 = 0
@@ -1627,29 +2051,170 @@ impl ConstraintSystem {
                     three * x_a_sq * (x_t - x_a) + two * y_a * (y_t + y_a)
                 };
 
-                // C3: Conditional addition x-coordinate constraint
-                // Reformulated without explicit bit values:
-                // C3 = (x_A' - x_T) * [(x_A' + x_T + x_P)(x_P - x_T)^2 - (y_P - y_T)^2]
+                // C3/C4: bit-dependent conditional add with T=O special case (matches stage1).
                 let c3 = {
+                    let one = Fq::one();
+                    let c3_skip = (one - bit) * (x_a_next - x_t);
+                    let c3_infinity = bit * ind_t * (x_a_next - x_p);
                     let x_diff = x_p - x_t;
                     let y_diff = y_p - y_t;
-                    let x_a_diff = x_a_next - x_t;
-
-                    x_a_diff * ((x_a_next + x_t + x_p) * x_diff * x_diff - y_diff * y_diff)
+                    let chord_x = (x_a_next + x_t + x_p) * x_diff * x_diff - y_diff * y_diff;
+                    let c3_add = bit * (one - ind_t) * chord_x;
+                    c3_skip + c3_infinity + c3_add
                 };
 
-                // C4: Conditional addition y-coordinate constraint
-                // Reformulated without explicit bit values:
-                // C4 = (y_A' - y_T) * [x_T(y_P + y_A') - x_P(y_T + y_A') + x_A'(y_T - y_P)]
                 let c4 = {
-                    let y_a_diff = y_a_next - y_t;
-
-                    y_a_diff
-                        * (x_t * (y_p + y_a_next) - x_p * (y_t + y_a_next) + x_a_next * (y_t - y_p))
+                    let one = Fq::one();
+                    let c4_skip = (one - bit) * (y_a_next - y_t);
+                    let c4_infinity = bit * ind_t * (y_a_next - y_p);
+                    let x_diff = x_p - x_t;
+                    let y_diff = y_p - y_t;
+                    let chord_y = (y_a_next + y_t) * x_diff - y_diff * (x_t - x_a_next);
+                    let c4_add = bit * (one - ind_t) * chord_y;
+                    c4_skip + c4_infinity + c4_add
                 };
 
-                // Return sum of all constraints (should be 0 when valid)
-                c1 + c2 + c3 + c4
+                // C6/C7: indicator consistency (matches stage1).
+                let c6 = ind_a * (Fq::one() - ind_t);
+                let c7 = ind_t * (x_t * x_t + y_t * y_t);
+
+                // Return aggregate (should be 0 for honest witnesses).
+                c1 + c2 + c3 + c4 + c6 + c7
+            }
+            ConstraintType::G2ScalarMul { base_point } => {
+                // G2 scalar multiplication constraint evaluation (over Fq2, coords split into c0/c1).
+
+                // Row indices
+                let x_a_c0_row = self.matrix.row_index(PolyType::G2ScalarMulXAC0, idx);
+                let x_a_c1_row = self.matrix.row_index(PolyType::G2ScalarMulXAC1, idx);
+                let y_a_c0_row = self.matrix.row_index(PolyType::G2ScalarMulYAC0, idx);
+                let y_a_c1_row = self.matrix.row_index(PolyType::G2ScalarMulYAC1, idx);
+                let x_t_c0_row = self.matrix.row_index(PolyType::G2ScalarMulXTC0, idx);
+                let x_t_c1_row = self.matrix.row_index(PolyType::G2ScalarMulXTC1, idx);
+                let y_t_c0_row = self.matrix.row_index(PolyType::G2ScalarMulYTC0, idx);
+                let y_t_c1_row = self.matrix.row_index(PolyType::G2ScalarMulYTC1, idx);
+                let x_a_next_c0_row = self.matrix.row_index(PolyType::G2ScalarMulXANextC0, idx);
+                let x_a_next_c1_row = self.matrix.row_index(PolyType::G2ScalarMulXANextC1, idx);
+                let y_a_next_c0_row = self.matrix.row_index(PolyType::G2ScalarMulYANextC0, idx);
+                let y_a_next_c1_row = self.matrix.row_index(PolyType::G2ScalarMulYANextC1, idx);
+                let ind_t_row = self.matrix.row_index(PolyType::G2ScalarMulTIndicator, idx);
+                let ind_a_row = self.matrix.row_index(PolyType::G2ScalarMulAIndicator, idx);
+
+                // Evaluate at x
+                let x_a_c0 = self.matrix.evaluate_row(x_a_c0_row, x);
+                let x_a_c1 = self.matrix.evaluate_row(x_a_c1_row, x);
+                let y_a_c0 = self.matrix.evaluate_row(y_a_c0_row, x);
+                let y_a_c1 = self.matrix.evaluate_row(y_a_c1_row, x);
+                let x_t_c0 = self.matrix.evaluate_row(x_t_c0_row, x);
+                let x_t_c1 = self.matrix.evaluate_row(x_t_c1_row, x);
+                let y_t_c0 = self.matrix.evaluate_row(y_t_c0_row, x);
+                let y_t_c1 = self.matrix.evaluate_row(y_t_c1_row, x);
+                let x_a_next_c0 = self.matrix.evaluate_row(x_a_next_c0_row, x);
+                let x_a_next_c1 = self.matrix.evaluate_row(x_a_next_c1_row, x);
+                let y_a_next_c0 = self.matrix.evaluate_row(y_a_next_c0_row, x);
+                let y_a_next_c1 = self.matrix.evaluate_row(y_a_next_c1_row, x);
+                let ind_t = self.matrix.evaluate_row(ind_t_row, x);
+                let ind_a = self.matrix.evaluate_row(ind_a_row, x);
+
+                let x_a = Fq2::new(x_a_c0, x_a_c1);
+                let y_a = Fq2::new(y_a_c0, y_a_c1);
+                let x_t = Fq2::new(x_t_c0, x_t_c1);
+                let y_t = Fq2::new(y_t_c0, y_t_c1);
+                let x_a_next = Fq2::new(x_a_next_c0, x_a_next_c1);
+                let y_a_next = Fq2::new(y_a_next_c0, y_a_next_c1);
+
+                let (x_p, y_p) = base_point;
+
+                // Evaluate bit at x from public inputs (big-endian point expected).
+                let g2_scalar_mul_idx = self
+                    .constraints
+                    .iter()
+                    .take(idx)
+                    .filter(|c| matches!(c.constraint_type, ConstraintType::G2ScalarMul { .. }))
+                    .count();
+                let x_be: Vec<Fq> = x.iter().rev().copied().collect();
+                let bit = self.g2_scalar_mul_public_inputs[g2_scalar_mul_idx]
+                    .evaluate_bit_mle::<Fq>(&x_be);
+
+                let fq2_from_fq = |v: Fq| Fq2::new(v, Fq::zero());
+
+                // C1
+                let c1 = {
+                    let four = fq2_from_fq(Fq::from(4u64));
+                    let two = fq2_from_fq(Fq::from(2u64));
+                    let nine = fq2_from_fq(Fq::from(9u64));
+
+                    let y_a_sq = y_a * y_a;
+                    let x_a_sq = x_a * x_a;
+                    let x_a_fourth = x_a_sq * x_a_sq;
+
+                    four * y_a_sq * (x_t + two * x_a) - nine * x_a_fourth
+                };
+
+                // C2
+                let c2 = {
+                    let three = fq2_from_fq(Fq::from(3u64));
+                    let two = fq2_from_fq(Fq::from(2u64));
+
+                    let x_a_sq = x_a * x_a;
+                    three * x_a_sq * (x_t - x_a) + two * y_a * (y_t + y_a)
+                };
+
+                // C3 (bit/indicator dependent)
+                let c3 = {
+                    let one = Fq2::one();
+                    let bit2 = fq2_from_fq(bit);
+                    let ind_t2 = fq2_from_fq(ind_t);
+
+                    let c3_skip = (one - bit2) * (x_a_next - x_t);
+                    let c3_infty = bit2 * ind_t2 * (x_a_next - x_p);
+
+                    let x_diff = x_p - x_t;
+                    let y_diff = y_p - y_t;
+                    let chord_x = (x_a_next + x_t + x_p) * x_diff * x_diff - y_diff * y_diff;
+                    let c3_add = bit2 * (one - ind_t2) * chord_x;
+
+                    c3_skip + c3_infty + c3_add
+                };
+
+                // C4 (bit/indicator dependent)
+                let c4 = {
+                    let one = Fq2::one();
+                    let bit2 = fq2_from_fq(bit);
+                    let ind_t2 = fq2_from_fq(ind_t);
+
+                    let c4_skip = (one - bit2) * (y_a_next - y_t);
+                    let c4_infty = bit2 * ind_t2 * (y_a_next - y_p);
+
+                    let x_diff = x_p - x_t;
+                    let y_diff = y_p - y_t;
+                    let chord_y = (y_a_next + y_t) * x_diff - y_diff * (x_t - x_a_next);
+                    let c4_add = bit2 * (one - ind_t2) * chord_y;
+
+                    c4_skip + c4_infty + c4_add
+                };
+
+                // Base-field constraints
+                let c6 = ind_a * (Fq::one() - ind_t);
+                let c7_xt_c0 = ind_t * x_t.c0;
+                let c7_xt_c1 = ind_t * x_t.c1;
+                let c7_yt_c0 = ind_t * y_t.c0;
+                let c7_yt_c1 = ind_t * y_t.c1;
+
+                // Return a simple aggregate (should be 0 for honest witnesses).
+                c1.c0
+                    + c1.c1
+                    + c2.c0
+                    + c2.c1
+                    + c3.c0
+                    + c3.c1
+                    + c4.c0
+                    + c4.c1
+                    + c6
+                    + c7_xt_c0
+                    + c7_xt_c1
+                    + c7_yt_c0
+                    + c7_yt_c1
             }
         }
     }
@@ -1753,8 +2318,9 @@ mod tests {
         for constraint in &system.constraints {
             match &constraint.constraint_type {
                 ConstraintType::PackedGtExp => gt_exp_count += 1,
-                ConstraintType::GtMul { .. } => gt_mul_count += 1,
+                ConstraintType::GtMul => gt_mul_count += 1,
                 ConstraintType::G1ScalarMul { .. } => g1_scalar_mul_count += 1,
+                ConstraintType::G2ScalarMul { .. } => {}
             }
         }
 
@@ -1850,7 +2416,24 @@ impl CanonicalDeserialize for PolyType {
             9 => Ok(PolyType::G1ScalarMulYT),
             10 => Ok(PolyType::G1ScalarMulXANext),
             11 => Ok(PolyType::G1ScalarMulYANext),
-            12 => Ok(PolyType::G1ScalarMulIndicator),
+            12 => Ok(PolyType::G1ScalarMulTIndicator),
+            13 => Ok(PolyType::G1ScalarMulAIndicator),
+            14 => Ok(PolyType::G1ScalarMulBit),
+            15 => Ok(PolyType::G2ScalarMulXAC0),
+            16 => Ok(PolyType::G2ScalarMulXAC1),
+            17 => Ok(PolyType::G2ScalarMulYAC0),
+            18 => Ok(PolyType::G2ScalarMulYAC1),
+            19 => Ok(PolyType::G2ScalarMulXTC0),
+            20 => Ok(PolyType::G2ScalarMulXTC1),
+            21 => Ok(PolyType::G2ScalarMulYTC0),
+            22 => Ok(PolyType::G2ScalarMulYTC1),
+            23 => Ok(PolyType::G2ScalarMulXANextC0),
+            24 => Ok(PolyType::G2ScalarMulXANextC1),
+            25 => Ok(PolyType::G2ScalarMulYANextC0),
+            26 => Ok(PolyType::G2ScalarMulYANextC1),
+            27 => Ok(PolyType::G2ScalarMulTIndicator),
+            28 => Ok(PolyType::G2ScalarMulAIndicator),
+            29 => Ok(PolyType::G2ScalarMulBit),
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -1880,6 +2463,11 @@ impl CanonicalSerialize for ConstraintType {
                 base_point.0.serialize_with_mode(&mut writer, compress)?;
                 base_point.1.serialize_with_mode(&mut writer, compress)?;
             }
+            ConstraintType::G2ScalarMul { base_point } => {
+                3u8.serialize_with_mode(&mut writer, compress)?;
+                base_point.0.serialize_with_mode(&mut writer, compress)?;
+                base_point.1.serialize_with_mode(&mut writer, compress)?;
+            }
         }
         Ok(())
     }
@@ -1889,6 +2477,9 @@ impl CanonicalSerialize for ConstraintType {
             ConstraintType::PackedGtExp => 1,
             ConstraintType::GtMul => 1,
             ConstraintType::G1ScalarMul { base_point } => {
+                1 + base_point.0.serialized_size(compress) + base_point.1.serialized_size(compress)
+            }
+            ConstraintType::G2ScalarMul { base_point } => {
                 1 + base_point.0.serialized_size(compress) + base_point.1.serialized_size(compress)
             }
         }
@@ -1910,6 +2501,11 @@ impl CanonicalDeserialize for ConstraintType {
                 let y = Fq::deserialize_with_mode(&mut reader, compress, validate)?;
                 Ok(ConstraintType::G1ScalarMul { base_point: (x, y) })
             }
+            3 => {
+                let x = Fq2::deserialize_with_mode(&mut reader, compress, validate)?;
+                let y = Fq2::deserialize_with_mode(&mut reader, compress, validate)?;
+                Ok(ConstraintType::G2ScalarMul { base_point: (x, y) })
+            }
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -1919,6 +2515,10 @@ impl Valid for ConstraintType {
     fn check(&self) -> Result<(), SerializationError> {
         match self {
             ConstraintType::G1ScalarMul { base_point } => {
+                base_point.0.check()?;
+                base_point.1.check()?;
+            }
+            ConstraintType::G2ScalarMul { base_point } => {
                 base_point.0.check()?;
                 base_point.1.check()?;
             }

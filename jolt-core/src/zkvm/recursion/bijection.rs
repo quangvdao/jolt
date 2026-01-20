@@ -217,7 +217,24 @@ impl ConstraintSystemJaggedBuilder {
                     used_poly_types.insert(PolyType::G1ScalarMulYT);
                     used_poly_types.insert(PolyType::G1ScalarMulXANext);
                     used_poly_types.insert(PolyType::G1ScalarMulYANext);
-                    used_poly_types.insert(PolyType::G1ScalarMulIndicator);
+                    used_poly_types.insert(PolyType::G1ScalarMulTIndicator);
+                    used_poly_types.insert(PolyType::G1ScalarMulAIndicator);
+                }
+                ConstraintType::G2ScalarMul { .. } => {
+                    used_poly_types.insert(PolyType::G2ScalarMulXAC0);
+                    used_poly_types.insert(PolyType::G2ScalarMulXAC1);
+                    used_poly_types.insert(PolyType::G2ScalarMulYAC0);
+                    used_poly_types.insert(PolyType::G2ScalarMulYAC1);
+                    used_poly_types.insert(PolyType::G2ScalarMulXTC0);
+                    used_poly_types.insert(PolyType::G2ScalarMulXTC1);
+                    used_poly_types.insert(PolyType::G2ScalarMulYTC0);
+                    used_poly_types.insert(PolyType::G2ScalarMulYTC1);
+                    used_poly_types.insert(PolyType::G2ScalarMulXANextC0);
+                    used_poly_types.insert(PolyType::G2ScalarMulXANextC1);
+                    used_poly_types.insert(PolyType::G2ScalarMulYANextC0);
+                    used_poly_types.insert(PolyType::G2ScalarMulYANextC1);
+                    used_poly_types.insert(PolyType::G2ScalarMulTIndicator);
+                    used_poly_types.insert(PolyType::G2ScalarMulAIndicator);
                 }
             }
         }
@@ -258,7 +275,28 @@ impl ConstraintSystemJaggedBuilder {
                             | PolyType::G1ScalarMulYT
                             | PolyType::G1ScalarMulXANext
                             | PolyType::G1ScalarMulYANext
-                            | PolyType::G1ScalarMulIndicator => Some(8),
+                            | PolyType::G1ScalarMulTIndicator
+                            | PolyType::G1ScalarMulAIndicator => Some(8),
+                            _ => None,
+                        }
+                    }
+                    ConstraintType::G2ScalarMul { .. } => {
+                        // G2 scalar mul uses all G2ScalarMul* types (8-var padded to 12)
+                        match poly_type {
+                            PolyType::G2ScalarMulXAC0
+                            | PolyType::G2ScalarMulXAC1
+                            | PolyType::G2ScalarMulYAC0
+                            | PolyType::G2ScalarMulYAC1
+                            | PolyType::G2ScalarMulXTC0
+                            | PolyType::G2ScalarMulXTC1
+                            | PolyType::G2ScalarMulYTC0
+                            | PolyType::G2ScalarMulYTC1
+                            | PolyType::G2ScalarMulXANextC0
+                            | PolyType::G2ScalarMulXANextC1
+                            | PolyType::G2ScalarMulYANextC0
+                            | PolyType::G2ScalarMulYANextC1
+                            | PolyType::G2ScalarMulTIndicator
+                            | PolyType::G2ScalarMulAIndicator => Some(8),
                             _ => None,
                         }
                     }

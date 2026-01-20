@@ -10,6 +10,7 @@
 //! - `shift_rho`: Shift sumcheck for verifying rho_next claims (Stage 1b)
 
 pub mod g1_scalar_mul;
+pub mod g2_scalar_mul;
 pub mod gt_mul;
 pub mod packed_gt_exp;
 pub mod shift_rho;

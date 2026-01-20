@@ -146,9 +146,8 @@ impl PackedGtExpPublicInputs {
 
         // Convert r_x_star to Fq slice
         // SAFETY: F = Fq verified above, and slice references have same layout
-        let r_x_star_fq: &[Fq] = unsafe {
-            std::slice::from_raw_parts(r_x_star.as_ptr() as *const Fq, r_x_star.len())
-        };
+        let r_x_star_fq: &[Fq] =
+            unsafe { std::slice::from_raw_parts(r_x_star.as_ptr() as *const Fq, r_x_star.len()) };
         let result_fq = base_poly.evaluate(r_x_star_fq);
         unsafe { std::mem::transmute_copy(&result_fq) }
     }
@@ -220,12 +219,12 @@ impl PackedGtExpWitness {
     /// - Phase 1 (rounds 0-6): bind step variables s (low bits)
     /// - Phase 2 (rounds 7-10): bind element variables x (high bits)
     pub fn from_steps(
-        rho_mles: &[Vec<Fq>],        // rho_mles[step][x] for step in 0..=num_steps
-        quotient_mles: &[Vec<Fq>],   // quotient_mles[step][x] for step in 0..num_steps
-        bits: &[bool],               // bits (MSB first)
-        base_mle: &[Fq],             // base[x] - 16 values
-        base2_mle: &[Fq],            // base^2[x] - 16 values
-        base3_mle: &[Fq],            // base^3[x] - 16 values
+        rho_mles: &[Vec<Fq>],      // rho_mles[step][x] for step in 0..=num_steps
+        quotient_mles: &[Vec<Fq>], // quotient_mles[step][x] for step in 0..num_steps
+        bits: &[bool],             // bits (MSB first)
+        base_mle: &[Fq],           // base[x] - 16 values
+        base2_mle: &[Fq],          // base^2[x] - 16 values
+        base3_mle: &[Fq],          // base^3[x] - 16 values
     ) -> Self {
         let digits = digits_from_bits_msb(bits);
         let num_steps = digits.len();
@@ -366,46 +365,16 @@ impl PackedGtExpWitness {
                                 "PackedGtExpWitness debug: num_steps={}, first_fail s={}, x={}",
                                 num_steps, s, x
                             );
-                            eprintln!(
-                                "  digit_hi={}, digit_lo={}",
-                                digit_hi, digit_lo
-                            );
-                            eprintln!(
-                                "  rho={:?}",
-                                rho
-                            );
-                            eprintln!(
-                                "  rho_next={:?}",
-                                rho_next
-                            );
-                            eprintln!(
-                                "  quotient={:?}",
-                                quotient
-                            );
-                            eprintln!(
-                                "  base={:?}",
-                                base
-                            );
-                            eprintln!(
-                                "  base2={:?}",
-                                base2
-                            );
-                            eprintln!(
-                                "  base3={:?}",
-                                base3
-                            );
-                            eprintln!(
-                                "  g={:?}",
-                                g
-                            );
-                            eprintln!(
-                                "  base_power={:?}",
-                                base_power
-                            );
-                            eprintln!(
-                                "  rho4={:?}",
-                                rho4
-                            );
+                            eprintln!("  digit_hi={}, digit_lo={}", digit_hi, digit_lo);
+                            eprintln!("  rho={:?}", rho);
+                            eprintln!("  rho_next={:?}", rho_next);
+                            eprintln!("  quotient={:?}", quotient);
+                            eprintln!("  base={:?}", base);
+                            eprintln!("  base2={:?}", base2);
+                            eprintln!("  base3={:?}", base3);
+                            eprintln!("  g={:?}", g);
+                            eprintln!("  base_power={:?}", base_power);
+                            eprintln!("  rho4={:?}", rho4);
                         }
                         failed_constraints.push((s, x, constraint));
                     }
@@ -611,14 +580,30 @@ impl<F: JoltField> PackedGtExpProver<F> {
         let mut base3_polys = Vec::with_capacity(num_witnesses);
 
         for witness in witnesses {
-            rho_polys.push(MultilinearPolynomial::from(convert_vec(&witness.rho_packed)));
-            rho_next_polys.push(MultilinearPolynomial::from(convert_vec(&witness.rho_next_packed)));
-            quotient_polys.push(MultilinearPolynomial::from(convert_vec(&witness.quotient_packed)));
-            digit_lo_polys.push(MultilinearPolynomial::from(convert_vec(&witness.digit_lo_packed)));
-            digit_hi_polys.push(MultilinearPolynomial::from(convert_vec(&witness.digit_hi_packed)));
-            base_polys.push(MultilinearPolynomial::from(convert_vec(&witness.base_packed)));
-            base2_polys.push(MultilinearPolynomial::from(convert_vec(&witness.base2_packed)));
-            base3_polys.push(MultilinearPolynomial::from(convert_vec(&witness.base3_packed)));
+            rho_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.rho_packed,
+            )));
+            rho_next_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.rho_next_packed,
+            )));
+            quotient_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.quotient_packed,
+            )));
+            digit_lo_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.digit_lo_packed,
+            )));
+            digit_hi_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.digit_hi_packed,
+            )));
+            base_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.base_packed,
+            )));
+            base2_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.base2_packed,
+            )));
+            base3_polys.push(MultilinearPolynomial::from(convert_vec(
+                &witness.base3_packed,
+            )));
         }
 
         Self {
@@ -657,9 +642,7 @@ impl<F: JoltField> PackedGtExpProver<F> {
         let mut claims = Vec::with_capacity(self.num_witnesses);
 
         for w in 0..self.num_witnesses {
-            claims.push(ShiftClaim {
-                constraint_idx: w,
-            });
+            claims.push(ShiftClaim { constraint_idx: w });
         }
 
         claims

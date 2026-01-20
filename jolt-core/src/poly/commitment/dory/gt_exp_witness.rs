@@ -1,7 +1,7 @@
 //! GT exponentiation witness generation for packed base-4 recursion.
 
 use ark_bn254::{Fq, Fq12, Fr};
-use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
+use ark_ff::{Field, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use jolt_optimizations::{fq12_to_multilinear_evals, get_g_mle};
 
@@ -50,13 +50,7 @@ impl Base4ExponentiationSteps {
 
             let rho_next = rho4 * mul;
             let q_i = compute_step_quotient_base4(
-                rho_prev,
-                rho_next,
-                &base_mle,
-                &base2_mle,
-                &base3_mle,
-                digit_lo,
-                digit_hi,
+                rho_prev, rho_next, &base_mle, &base2_mle, &base3_mle, digit_lo, digit_hi,
             );
 
             quotient_mles.push(q_i);
@@ -94,7 +88,7 @@ fn digits_from_exponent_msb(exponent: Fr) -> Vec<u8> {
     while !n.is_zero() {
         let limb0 = n.as_ref()[0];
         digits_lsb.push((limb0 & 3) as u8);
-        n.divn(2);
+        n >>= 2;
     }
 
     digits_lsb.reverse();

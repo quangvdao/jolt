@@ -333,7 +333,7 @@ fn test_many_polynomials() {
     let num_polynomials = 8;
 
     let r_x: Vec<Fq> = (0..num_bits).map(|_| Fq::rand(&mut rng)).collect();
-    let r_dense: Vec<Fq> = (0..num_bits).map(|_| Fq::rand(&mut rng)).collect();
+    // Note: `r_dense` is sampled below (after constructing the bijection). Avoid shadowing.
 
     // Create sizes that sum to 16: [2, 2, 2, 2, 2, 2, 2, 2] = 16 total
     // Cumulative sizes will be: [2, 4, 6, 8, 10, 12, 14, 16]

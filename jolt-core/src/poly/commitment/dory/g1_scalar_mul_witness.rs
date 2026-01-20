@@ -1,5 +1,7 @@
 //! G1 scalar multiplication witness generation for Dory recursion
 //! Implements the double-and-add algorithm for elliptic curve scalar multiplication
+//!
+//! See `g1_scalar_mul_spec.md` for the full specification and soundness proof.
 
 use ark_bn254::{Fq, Fr, G1Affine, G1Projective};
 use ark_ec::AffineRepr;
@@ -42,6 +44,13 @@ pub struct ScalarMultiplicationSteps {
     /// Indicator: 1 if T_i = O (point at infinity), 0 otherwise
     pub t_is_infinity_mles: Vec<Vec<Fq>>,
 
+    /// Indicator: 1 if A_i = O (point at infinity), 0 otherwise
+    pub a_is_infinity_mles: Vec<Vec<Fq>>,
+
+    /// Scalar bits as field elements (1 or 0), MSB first
+    /// CRITICAL: This polynomial binds the conditional-add decision to the actual scalar
+    pub bit_mles: Vec<Vec<Fq>>,
+
     pub bits: Vec<bool>, // Scalar bits (MSB first, always 256 bits)
 }
 
@@ -66,6 +75,8 @@ impl ScalarMultiplicationSteps {
         let mut x_t_values = Vec::with_capacity(n); // T_0, T_1, ..., T_{n-1}
         let mut y_t_values = Vec::with_capacity(n);
         let mut t_is_infinity_values = Vec::with_capacity(n); // Indicator for T_i = O
+        let mut a_is_infinity_values = Vec::with_capacity(n); // Indicator for A_i = O
+        let mut bit_values = Vec::with_capacity(n); // Scalar bits as Fq
 
         // Initialize accumulator with point at infinity (identity)
         let mut accumulator = G1Projective::zero();
@@ -81,10 +92,22 @@ impl ScalarMultiplicationSteps {
         y_a_values.push(y_a_0);
 
         // Perform double-and-add algorithm and collect values
-        // For each bit b_i (i = 1 to 256), compute:
-        // T_i = [2]A_{i-1} and A_i = T_i + b_i * P
+        // For each bit b_i (i = 0 to 255), compute:
+        // T_i = [2]A_i and A_{i+1} = T_i + b_i * P
         for &bit in bits_msb.iter() {
-            // Double: T_{i+1} = [2]A_i
+            // Record if current accumulator is infinity BEFORE doubling
+            let a_affine: G1Affine = accumulator.into();
+            let a_is_inf = if a_affine.is_zero() {
+                Fq::one()
+            } else {
+                Fq::zero()
+            };
+            a_is_infinity_values.push(a_is_inf);
+
+            // Record bit value as field element
+            bit_values.push(if bit { Fq::one() } else { Fq::zero() });
+
+            // Double: T_i = [2]A_i
             let doubled = accumulator + accumulator;
             let t_affine: G1Affine = doubled.into();
             let (x_t, y_t) = if t_affine.is_zero() {
@@ -96,15 +119,14 @@ impl ScalarMultiplicationSteps {
             y_t_values.push(y_t);
 
             // Compute infinity indicator for T_i
-            let is_inf = if x_t.is_zero() && y_t.is_zero() {
+            let t_is_inf = if t_affine.is_zero() {
                 Fq::one()
             } else {
                 Fq::zero()
             };
-            t_is_infinity_values.push(is_inf);
+            t_is_infinity_values.push(t_is_inf);
 
             // Conditional add: A_{i+1} = T_i + b_i * P
-            // where b_i is bits_msb[i] (0-indexed array)
             accumulator = if bit {
                 doubled.add(&point.into_group())
             } else {
@@ -129,6 +151,8 @@ impl ScalarMultiplicationSteps {
         let x_t_mle = build_mle_from_steps(&x_t_values, num_vars);
         let y_t_mle = build_mle_from_steps(&y_t_values, num_vars);
         let t_is_infinity_mle = build_mle_from_steps(&t_is_infinity_values, num_vars);
+        let a_is_infinity_mle = build_mle_from_steps(&a_is_infinity_values, num_vars);
+        let bit_mle = build_mle_from_steps(&bit_values, num_vars);
 
         // Build shifted MLEs for A_{i+1} values
         // x_a_values contains [A_0, A_1, ..., A_256] (257 elements)
@@ -153,6 +177,8 @@ impl ScalarMultiplicationSteps {
             x_a_next_mles: vec![x_a_next_mle],
             y_a_next_mles: vec![y_a_next_mle],
             t_is_infinity_mles: vec![t_is_infinity_mle],
+            a_is_infinity_mles: vec![a_is_infinity_mle],
+            bit_mles: vec![bit_mle],
             bits: bits_msb,
         }
     }

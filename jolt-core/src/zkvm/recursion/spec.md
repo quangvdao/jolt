@@ -365,14 +365,16 @@ $$\text{ind} \cdot x_{A'} \cdot (x_{A'} - x_P) + (1 - \text{ind}) \cdot [\text{a
 $$0 = \sum_{x \in \{0,1\}^\ell} \text{eq}(r, x) \cdot \sum_{j=1}^{4} \delta^{j-1} \cdot C_j(x)$$
 
 - $\ell = \lceil \log_2 n \rceil$ rounds
-- Degree 6 (maximum constraint degree)
+- Degree 5 (maximum constraint degree from C3/C4)
 
 #### Output Claims
 
-- `RecursionG1ScalarMulXA(i)`, `RecursionG1ScalarMulYA(i)`
-- `RecursionG1ScalarMulXT(i)`, `RecursionG1ScalarMulYT(i)`
-- `RecursionG1ScalarMulXANext(i)`, `RecursionG1ScalarMulYANext(i)`
-- `RecursionG1ScalarMulIndicator(i)`
+- `RecursionG1ScalarMulXA(i)`, `RecursionG1ScalarMulYA(i)` - accumulator coordinates
+- `RecursionG1ScalarMulXT(i)`, `RecursionG1ScalarMulYT(i)` - doubled point coordinates
+- `RecursionG1ScalarMulXANext(i)`, `RecursionG1ScalarMulYANext(i)` - next accumulator
+- `RecursionG1ScalarMulTIndicator(i)` - 1 if T = O (infinity), 0 otherwise
+- `RecursionG1ScalarMulAIndicator(i)` - 1 if A = O (infinity), 0 otherwise
+- `RecursionG1ScalarMulBit(i)` - scalar bit b_i ∈ {0,1} (CRITICAL for soundness)
 
 ---
 

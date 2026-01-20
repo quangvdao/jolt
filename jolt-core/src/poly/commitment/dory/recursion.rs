@@ -1,6 +1,6 @@
 //! Jolt implementation of Dory's recursion backend
 
-use ark_bn254::{Fq, Fq12, Fr, G1Affine};
+use ark_bn254::{Fq, Fq12, Fr, G1Affine, G2Affine};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::{
     backends::arkworks::{ArkG1, ArkG2, ArkGT, BN254},
@@ -13,6 +13,7 @@ use std::{marker::PhantomData, rc::Rc};
 use super::{
     commitment_scheme::DoryCommitmentScheme,
     g1_scalar_mul_witness::ScalarMultiplicationSteps,
+    g2_scalar_mul_witness::G2ScalarMultiplicationSteps,
     gt_exp_witness::Base4ExponentiationSteps,
     gt_mul_witness::MultiplicationSteps,
     jolt_dory_routines::{JoltG1Routines, JoltG2Routines},
@@ -68,18 +69,57 @@ pub struct JoltG1ScalarMulWitness {
     pub point_base: G1Affine,
     pub scalar: Fr,
     pub result: G1Affine,
-    pub x_a_mles: Vec<Vec<Fq>>,      // x-coords of A_0, A_1, ..., A_n
-    pub y_a_mles: Vec<Vec<Fq>>,      // y-coords of A_0, A_1, ..., A_n
-    pub x_t_mles: Vec<Vec<Fq>>,      // x-coords of T_0, T_1, ..., T_{n-1}
-    pub y_t_mles: Vec<Vec<Fq>>,      // y-coords of T_0, T_1, ..., T_{n-1}
-    pub x_a_next_mles: Vec<Vec<Fq>>, // x-coords of A_{i+1} (shifted by 1)
-    pub y_a_next_mles: Vec<Vec<Fq>>, // y-coords of A_{i+1} (shifted by 1)
+    pub x_a_mles: Vec<Vec<Fq>>,           // x-coords of A_0, A_1, ..., A_n
+    pub y_a_mles: Vec<Vec<Fq>>,           // y-coords of A_0, A_1, ..., A_n
+    pub x_t_mles: Vec<Vec<Fq>>,           // x-coords of T_0, T_1, ..., T_{n-1}
+    pub y_t_mles: Vec<Vec<Fq>>,           // y-coords of T_0, T_1, ..., T_{n-1}
+    pub x_a_next_mles: Vec<Vec<Fq>>,      // x-coords of A_{i+1} (shifted by 1)
+    pub y_a_next_mles: Vec<Vec<Fq>>,      // y-coords of A_{i+1} (shifted by 1)
+    pub t_is_infinity_mles: Vec<Vec<Fq>>, // 1 if T_i = O, 0 otherwise
+    pub a_is_infinity_mles: Vec<Vec<Fq>>, // 1 if A_i = O, 0 otherwise
+    pub bit_mles: Vec<Vec<Fq>>,           // Scalar bit b_i (CRITICAL for soundness)
     pub bits: Vec<bool>,
     ark_result: ArkG1,
 }
 
 impl WitnessResult<ArkG1> for JoltG1ScalarMulWitness {
     fn result(&self) -> Option<&ArkG1> {
+        Some(&self.ark_result)
+    }
+}
+
+/// G2 scalar multiplication witness following the ScalarMultiplicationSteps pattern,
+/// with Fq2 coordinates split into (c0, c1) components in Fq.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct JoltG2ScalarMulWitness {
+    pub point_base: G2Affine,
+    pub scalar: Fr,
+    pub result: G2Affine,
+
+    pub x_a_c0_mles: Vec<Vec<Fq>>,
+    pub x_a_c1_mles: Vec<Vec<Fq>>,
+    pub y_a_c0_mles: Vec<Vec<Fq>>,
+    pub y_a_c1_mles: Vec<Vec<Fq>>,
+
+    pub x_t_c0_mles: Vec<Vec<Fq>>,
+    pub x_t_c1_mles: Vec<Vec<Fq>>,
+    pub y_t_c0_mles: Vec<Vec<Fq>>,
+    pub y_t_c1_mles: Vec<Vec<Fq>>,
+
+    pub x_a_next_c0_mles: Vec<Vec<Fq>>,
+    pub x_a_next_c1_mles: Vec<Vec<Fq>>,
+    pub y_a_next_c0_mles: Vec<Vec<Fq>>,
+    pub y_a_next_c1_mles: Vec<Vec<Fq>>,
+
+    pub t_is_infinity_mles: Vec<Vec<Fq>>,
+    pub a_is_infinity_mles: Vec<Vec<Fq>>,
+    pub bit_mles: Vec<Vec<Fq>>,
+    pub bits: Vec<bool>,
+    ark_result: ArkG2,
+}
+
+impl WitnessResult<ArkG2> for JoltG2ScalarMulWitness {
+    fn result(&self) -> Option<&ArkG2> {
         Some(&self.ark_result)
     }
 }
@@ -121,7 +161,7 @@ impl WitnessResult<ArkGT> for UnimplementedWitness<ArkGT> {
 impl WitnessBackend for JoltWitness {
     type GtExpWitness = JoltGtExpWitness;
     type G1ScalarMulWitness = JoltG1ScalarMulWitness;
-    type G2ScalarMulWitness = UnimplementedWitness<ArkG2>;
+    type G2ScalarMulWitness = JoltG2ScalarMulWitness;
     type GtMulWitness = JoltGtMulWitness;
     type PairingWitness = UnimplementedWitness<ArkGT>;
     type MultiPairingWitness = UnimplementedWitness<ArkGT>;
@@ -184,17 +224,52 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
             y_t_mles: scalar_mul_steps.y_t_mles,
             x_a_next_mles: scalar_mul_steps.x_a_next_mles,
             y_a_next_mles: scalar_mul_steps.y_a_next_mles,
+            t_is_infinity_mles: scalar_mul_steps.t_is_infinity_mles,
+            a_is_infinity_mles: scalar_mul_steps.a_is_infinity_mles,
+            bit_mles: scalar_mul_steps.bit_mles,
             bits: scalar_mul_steps.bits,
             ark_result: *result,
         }
     }
 
     fn generate_g2_scalar_mul(
-        _point: &<BN254 as PairingCurve>::G2,
-        _scalar: &<<BN254 as PairingCurve>::G1 as Group>::Scalar,
-        _result: &<BN254 as PairingCurve>::G2,
-    ) -> UnimplementedWitness<ArkG2> {
-        UnimplementedWitness::new("G2 scalar multiplication")
+        point: &<BN254 as PairingCurve>::G2,
+        scalar: &<<BN254 as PairingCurve>::G1 as Group>::Scalar,
+        result: &<BN254 as PairingCurve>::G2,
+    ) -> JoltG2ScalarMulWitness {
+        let point_affine: G2Affine = point.0.into();
+        let scalar_fr = ark_to_jolt(scalar);
+
+        let scalar_mul_steps = G2ScalarMultiplicationSteps::new(point_affine, scalar_fr);
+
+        let result_affine: G2Affine = result.0.into();
+        debug_assert_eq!(
+            scalar_mul_steps.result, result_affine,
+            "G2ScalarMultiplicationSteps result doesn't match expected result"
+        );
+
+        JoltG2ScalarMulWitness {
+            point_base: scalar_mul_steps.point_base,
+            scalar: scalar_mul_steps.scalar,
+            result: scalar_mul_steps.result,
+            x_a_c0_mles: scalar_mul_steps.x_a_c0_mles,
+            x_a_c1_mles: scalar_mul_steps.x_a_c1_mles,
+            y_a_c0_mles: scalar_mul_steps.y_a_c0_mles,
+            y_a_c1_mles: scalar_mul_steps.y_a_c1_mles,
+            x_t_c0_mles: scalar_mul_steps.x_t_c0_mles,
+            x_t_c1_mles: scalar_mul_steps.x_t_c1_mles,
+            y_t_c0_mles: scalar_mul_steps.y_t_c0_mles,
+            y_t_c1_mles: scalar_mul_steps.y_t_c1_mles,
+            x_a_next_c0_mles: scalar_mul_steps.x_a_next_c0_mles,
+            x_a_next_c1_mles: scalar_mul_steps.x_a_next_c1_mles,
+            y_a_next_c0_mles: scalar_mul_steps.y_a_next_c0_mles,
+            y_a_next_c1_mles: scalar_mul_steps.y_a_next_c1_mles,
+            t_is_infinity_mles: scalar_mul_steps.t_is_infinity_mles,
+            a_is_infinity_mles: scalar_mul_steps.a_is_infinity_mles,
+            bit_mles: scalar_mul_steps.bit_mles,
+            bits: scalar_mul_steps.bits,
+            ark_result: *result,
+        }
     }
 
     fn generate_gt_mul(
@@ -379,7 +454,7 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
             .zip(coeffs.iter())
             .map(|(comm, coeff)| {
                 let comm_fq12 = comm.borrow().0;
-                    let exp_steps = Base4ExponentiationSteps::new(comm_fq12, *coeff);
+                let exp_steps = Base4ExponentiationSteps::new(comm_fq12, *coeff);
 
                 GTExpOpWitness {
                     base: exp_steps.base,

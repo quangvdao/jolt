@@ -54,6 +54,7 @@ pub use recursion_prover::{RecursionProof, RecursionProver};
 pub use recursion_verifier::{RecursionVerifier, RecursionVerifierInput};
 pub use stage1::{
     g1_scalar_mul::{G1ScalarMulProver, G1ScalarMulVerifier},
+    g2_scalar_mul::{G2ScalarMulProver, G2ScalarMulVerifier},
     gt_mul::{GtMulProver, GtMulVerifier},
     square_and_multiply::{SquareAndMultiplyProver, SquareAndMultiplyVerifier},
 };

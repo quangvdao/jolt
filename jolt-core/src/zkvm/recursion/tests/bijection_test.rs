@@ -69,21 +69,21 @@ fn test_bijection_with_constraint_system() {
     let builder = ConstraintSystemJaggedBuilder::from_constraints(&cs.constraints);
     let (bijection, mapping) = builder.build();
 
-    // PackedGtExp has 2 poly types (RhoPrev, Quotient) - Base/Bit/RhoNext are public inputs: 3 × 2 = 6
+    // PackedGtExp has 2 poly types (RhoPrev, Quotient): 3 × 2 = 6
     // GtMul has 4 poly types: 2 × 4 = 8
-    // G1ScalarMul has 7 poly types: 1 × 7 = 7
-    // Total: 21 polynomials
-    assert_eq!(bijection.num_polynomials(), 21);
-    assert_eq!(mapping.num_polynomials(), 21);
+    // G1ScalarMul has 8 poly types (XA, YA, XT, YT, XANext, YANext, TIndicator, AIndicator): 1 × 8 = 8
+    // Total: 22 polynomials
+    assert_eq!(bijection.num_polynomials(), 22);
+    assert_eq!(mapping.num_polynomials(), 22);
 
     // Dense sizes:
     // - PackedGtExp polynomials are 11-var (2048 each): 6 × 2048 = 12288
     // - GtMul polynomials are 4-var (16 each): 8 × 16 = 128
-    // - G1ScalarMul polynomials are 8-var (256 each): 7 × 256 = 1792
-    // Total: 14208
+    // - G1ScalarMul polynomials are 8-var (256 each): 8 × 256 = 2048
+    // Total: 14464
     assert_eq!(
         <VarCountJaggedBijection as JaggedTransform<Fq>>::dense_size(&bijection),
-        6 * 2048 + 8 * 16 + 7 * 256
+        6 * 2048 + 8 * 16 + 8 * 256
     );
 
     let (c_idx, p_type) = mapping.decode(0);
@@ -276,10 +276,7 @@ fn test_constraint_mapping_consistency() {
             ConstraintType::PackedGtExp => {
                 // Base and Bit are public inputs, not committed polynomials
                 assert!(
-                    matches!(
-                        poly_type,
-                        PolyType::RhoPrev | PolyType::Quotient
-                    ),
+                    matches!(poly_type, PolyType::RhoPrev | PolyType::Quotient),
                     "Invalid poly type {:?} for GT exp constraint",
                     poly_type
                 );
@@ -307,9 +304,35 @@ fn test_constraint_mapping_consistency() {
                             | PolyType::G1ScalarMulYT
                             | PolyType::G1ScalarMulXANext
                             | PolyType::G1ScalarMulYANext
-                            | PolyType::G1ScalarMulIndicator
+                            | PolyType::G1ScalarMulTIndicator
+                            | PolyType::G1ScalarMulAIndicator
+                            | PolyType::G1ScalarMulBit
                     ),
                     "Invalid poly type {:?} for G1 scalar mul constraint",
+                    poly_type
+                );
+            }
+            ConstraintType::G2ScalarMul { .. } => {
+                assert!(
+                    matches!(
+                        poly_type,
+                        PolyType::G2ScalarMulXAC0
+                            | PolyType::G2ScalarMulXAC1
+                            | PolyType::G2ScalarMulYAC0
+                            | PolyType::G2ScalarMulYAC1
+                            | PolyType::G2ScalarMulXTC0
+                            | PolyType::G2ScalarMulXTC1
+                            | PolyType::G2ScalarMulYTC0
+                            | PolyType::G2ScalarMulYTC1
+                            | PolyType::G2ScalarMulXANextC0
+                            | PolyType::G2ScalarMulXANextC1
+                            | PolyType::G2ScalarMulYANextC0
+                            | PolyType::G2ScalarMulYANextC1
+                            | PolyType::G2ScalarMulTIndicator
+                            | PolyType::G2ScalarMulAIndicator
+                            | PolyType::G2ScalarMulBit
+                    ),
+                    "Invalid poly type {:?} for G2 scalar mul constraint",
                     poly_type
                 );
             }
@@ -390,6 +413,7 @@ fn test_jagged_bijection_with_real_dory_proof() {
             ConstraintType::PackedGtExp => gt_exp_count += 1,
             ConstraintType::GtMul => gt_mul_count += 1,
             ConstraintType::G1ScalarMul { .. } => _g1_scalar_mul_count += 1,
+            ConstraintType::G2ScalarMul { .. } => {}
         }
     }
 
@@ -728,10 +752,7 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
 
         let poly_types = match constraint_type {
             // Base and Bit are public inputs, not committed polynomials
-            ConstraintType::PackedGtExp => vec![
-                PolyType::RhoPrev,
-                PolyType::Quotient,
-            ],
+            ConstraintType::PackedGtExp => vec![PolyType::RhoPrev, PolyType::Quotient],
             ConstraintType::GtMul => vec![
                 PolyType::MulLhs,
                 PolyType::MulRhs,
@@ -740,6 +761,9 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
             ],
             ConstraintType::G1ScalarMul { .. } => {
                 vec![PolyType::G1ScalarMulXA, PolyType::G1ScalarMulYA]
+            }
+            ConstraintType::G2ScalarMul { .. } => {
+                vec![PolyType::G2ScalarMulXAC0, PolyType::G2ScalarMulXAC1]
             }
         };
 
@@ -754,6 +778,7 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
                 ConstraintType::PackedGtExp => 11,
                 ConstraintType::GtMul => 4,
                 ConstraintType::G1ScalarMul { .. } => 8,
+                ConstraintType::G2ScalarMul { .. } => 8,
             };
 
             let step = 1;

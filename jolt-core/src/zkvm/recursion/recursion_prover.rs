@@ -35,6 +35,7 @@ use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
     stage1::{
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulProver},
+        g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulProver},
         gt_mul::{GtMulParams, GtMulProver},
         packed_gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
     },
@@ -345,6 +346,8 @@ impl RecursionProver<Fq> {
         g_poly: DensePolynomial<Fq>,
     ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
         use super::constraints_sys::DoryMatrixBuilder;
+        use super::stage1::g1_scalar_mul::G1ScalarMulPublicInputs;
+        use super::stage1::g2_scalar_mul::G2ScalarMulPublicInputs;
         use super::stage1::packed_gt_exp::PackedGtExpWitness;
         use jolt_optimizations::fq12_to_multilinear_evals;
 
@@ -363,11 +366,16 @@ impl RecursionProver<Fq> {
         .entered();
         let mut packed_gt_exp_witnesses = Vec::with_capacity(witness_collection.gt_exp.len());
         let mut packed_gt_exp_public_inputs = Vec::with_capacity(witness_collection.gt_exp.len());
+        let mut g1_scalar_mul_public_inputs =
+            Vec::with_capacity(witness_collection.g1_scalar_mul.len());
+        let mut g2_scalar_mul_public_inputs =
+            Vec::with_capacity(witness_collection.g2_scalar_mul.len());
         for (_op_id, witness) in witness_collection.gt_exp.iter() {
             // Convert base ArkGT to 4-var MLE
             let base_mle = fq12_to_multilinear_evals(&witness.base);
             let base2_mle = fq12_to_multilinear_evals(&(witness.base * witness.base));
-            let base3_mle = fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
+            let base3_mle =
+                fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
 
             // Create packed witness
             let packed = PackedGtExpWitness::from_steps(
@@ -412,8 +420,21 @@ impl RecursionProver<Fq> {
         .entered();
         for (_op_id, witness) in witness_collection.g1_scalar_mul.iter() {
             builder.add_g1_scalar_mul_witness(witness);
+            g1_scalar_mul_public_inputs.push(G1ScalarMulPublicInputs::new(witness.scalar));
         }
         drop(g1_scalar_mul_span);
+
+        // Add G2 scalar mul witnesses
+        let g2_scalar_mul_span = tracing::info_span!(
+            "add_g2_scalar_mul_witnesses",
+            count = witness_collection.g2_scalar_mul.len()
+        )
+        .entered();
+        for (_op_id, witness) in witness_collection.g2_scalar_mul.iter() {
+            builder.add_g2_scalar_mul_witness(witness);
+            g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(witness.scalar));
+        }
+        drop(g2_scalar_mul_span);
 
         // Add combine_commitments witnesses (homomorphic combine offloading)
         if let Some(cw) = combine_witness {
@@ -458,6 +479,8 @@ impl RecursionProver<Fq> {
             g_poly,
             packed_gt_exp_witnesses,
             packed_gt_exp_public_inputs,
+            g1_scalar_mul_public_inputs,
+            g2_scalar_mul_public_inputs,
         })
     }
 }
@@ -647,6 +670,12 @@ impl<F: JoltField> RecursionProver<F> {
         if !g1_scalar_mul_constraints_tuples.is_empty() {
             use super::stage1::g1_scalar_mul::G1ScalarMulConstraintPolynomials;
 
+            debug_assert_eq!(
+                self.constraint_system.g1_scalar_mul_public_inputs.len(),
+                g1_scalar_mul_constraints_tuples.len(),
+                "ConstraintSystem.g1_scalar_mul_public_inputs must match extracted G1 scalar-mul constraints"
+            );
+
             // Convert tuples to structured type
             let g1_scalar_mul_constraints: Vec<G1ScalarMulConstraintPolynomials> =
                 g1_scalar_mul_constraints_tuples
@@ -662,6 +691,7 @@ impl<F: JoltField> RecursionProver<F> {
                             x_a_next,
                             y_a_next,
                             t_is_infinity,
+                            a_is_infinity,
                         )| {
                             G1ScalarMulConstraintPolynomials {
                                 x_a,
@@ -671,6 +701,7 @@ impl<F: JoltField> RecursionProver<F> {
                                 x_a_next,
                                 y_a_next,
                                 t_is_infinity,
+                                a_is_infinity,
                                 base_point,
                                 constraint_index: idx,
                             }
@@ -679,7 +710,78 @@ impl<F: JoltField> RecursionProver<F> {
                     .collect();
 
             let params = G1ScalarMulParams::new(g1_scalar_mul_constraints.len());
-            let prover = G1ScalarMulProver::new(params, g1_scalar_mul_constraints, transcript);
+            let prover = G1ScalarMulProver::new(
+                params,
+                g1_scalar_mul_constraints,
+                self.constraint_system.g1_scalar_mul_public_inputs.clone(),
+                transcript,
+            );
+            provers.push(Box::new(prover));
+        }
+
+        // Add G2 scalar mul prover if we have G2 scalar mul constraints
+        let g2_scalar_mul_constraints_tuples =
+            self.constraint_system.extract_g2_scalar_mul_constraints();
+        if !g2_scalar_mul_constraints_tuples.is_empty() {
+            use super::stage1::g2_scalar_mul::G2ScalarMulConstraintPolynomials;
+
+            debug_assert_eq!(
+                self.constraint_system.g2_scalar_mul_public_inputs.len(),
+                g2_scalar_mul_constraints_tuples.len(),
+                "ConstraintSystem.g2_scalar_mul_public_inputs must match extracted G2 scalar-mul constraints"
+            );
+
+            let g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials> =
+                g2_scalar_mul_constraints_tuples
+                    .into_iter()
+                    .map(
+                        |(
+                            idx,
+                            base_point,
+                            x_a_c0,
+                            x_a_c1,
+                            y_a_c0,
+                            y_a_c1,
+                            x_t_c0,
+                            x_t_c1,
+                            y_t_c0,
+                            y_t_c1,
+                            x_a_next_c0,
+                            x_a_next_c1,
+                            y_a_next_c0,
+                            y_a_next_c1,
+                            t_is_infinity,
+                            a_is_infinity,
+                        )| {
+                            G2ScalarMulConstraintPolynomials {
+                                x_a_c0,
+                                x_a_c1,
+                                y_a_c0,
+                                y_a_c1,
+                                x_t_c0,
+                                x_t_c1,
+                                y_t_c0,
+                                y_t_c1,
+                                x_a_next_c0,
+                                x_a_next_c1,
+                                y_a_next_c0,
+                                y_a_next_c1,
+                                t_is_infinity,
+                                a_is_infinity,
+                                base_point,
+                                constraint_index: idx,
+                            }
+                        },
+                    )
+                    .collect();
+
+            let params = G2ScalarMulParams::new(g2_scalar_mul_constraints.len());
+            let prover = G2ScalarMulProver::new(
+                params,
+                g2_scalar_mul_constraints,
+                self.constraint_system.g2_scalar_mul_public_inputs.clone(),
+                transcript,
+            );
             provers.push(Box::new(prover));
         }
 

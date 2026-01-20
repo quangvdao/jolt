@@ -296,12 +296,30 @@ pub enum VirtualPolynomial {
     RecursionG1ScalarMulYT(usize), // y_T values for G1 scalar mul constraint i
     RecursionG1ScalarMulXANext(usize), // x_A' values (shifted) for G1 scalar mul constraint i
     RecursionG1ScalarMulYANext(usize), // y_A' values (shifted) for G1 scalar mul constraint i
-    RecursionG1ScalarMulIndicator(usize), // Infinity indicator for G1 scalar mul constraint i
+    RecursionG1ScalarMulTIndicator(usize), // 1 if T_i = O (T is infinity), 0 otherwise
+    RecursionG1ScalarMulAIndicator(usize), // 1 if A_i = O (A is infinity), 0 otherwise
+    RecursionG1ScalarMulBit(usize), // Scalar bit b_i ∈ {0, 1} - CRITICAL for soundness
+    // G2 scalar multiplication virtual polynomials (Fq2 coords split into c0/c1) - indexed by constraint index
+    RecursionG2ScalarMulXAC0(usize), // x_A.c0 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulXAC1(usize), // x_A.c1 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulYAC0(usize), // y_A.c0 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulYAC1(usize), // y_A.c1 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulXTC0(usize), // x_T.c0 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulXTC1(usize), // x_T.c1 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulYTC0(usize), // y_T.c0 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulYTC1(usize), // y_T.c1 values for G2 scalar mul constraint i
+    RecursionG2ScalarMulXANextC0(usize), // x_A'.c0 values (shifted) for G2 scalar mul constraint i
+    RecursionG2ScalarMulXANextC1(usize), // x_A'.c1 values (shifted) for G2 scalar mul constraint i
+    RecursionG2ScalarMulYANextC0(usize), // y_A'.c0 values (shifted) for G2 scalar mul constraint i
+    RecursionG2ScalarMulYANextC1(usize), // y_A'.c1 values (shifted) for G2 scalar mul constraint i
+    RecursionG2ScalarMulTIndicator(usize), // 1 if T_i = O (T is infinity), 0 otherwise
+    RecursionG2ScalarMulAIndicator(usize), // 1 if A_i = O (A is infinity), 0 otherwise
+    RecursionG2ScalarMulBit(usize),  // Scalar bit b_i ∈ {0, 1} - CRITICAL for soundness
     // Dory sparse constraint matrix - virtualized in Stage 2, dense version committed in Stage 3
     DorySparseConstraintMatrix,
     // Packed GT exponentiation virtual polynomials (12-var packed) - indexed by witness/instance
     // Note: Bit and Base are public inputs computed by verifier, not committed polynomials
-    PackedGtExpRho(usize),      // ρ(s, x) - all intermediate results packed for witness i
-    PackedGtExpRhoNext(usize),  // ρ_next(s, x) = ρ(s+1, x) - shifted intermediates for witness i
+    PackedGtExpRho(usize), // ρ(s, x) - all intermediate results packed for witness i
+    PackedGtExpRhoNext(usize), // ρ_next(s, x) = ρ(s+1, x) - shifted intermediates for witness i
     PackedGtExpQuotient(usize), // Q(s, x) - all quotients packed for witness i
 }

@@ -1,187 +1,178 @@
-# G1 Scalar Multiplication Sumcheck Specification
+# G1 Scalar Multiplication Sumcheck Specification (BN254)
+
+This document specifies the **implemented** Stage-1 scalar-multiplication constraints in
+`jolt-core/src/zkvm/recursion/stage1/g1_scalar_mul.rs`.
+
+Important: the previous version of this file claimed “complete soundness” for a constraint set
+that **did not match the implementation** (and also contained incorrect constraints). This version
+is aligned to the code and is careful about what is (and is not) enforced.
 
 ## Overview
 
-This document specifies the constraints for proving G1 scalar multiplication `[k]P` via sumcheck. The goal is **complete soundness**: a malicious prover cannot satisfy the constraints unless the witness corresponds to the actual double-and-add trace of `[k]P`.
+We prove correctness of a double-and-add *transition relation* for 256 steps of a scalar
+multiplication in BN254 G1.
+
+- The scalar bits are treated as **public inputs** (derived from the scalar `Fr`), so we do **not**
+  commit to a bit polynomial and we do **not** include a bit-booleanity constraint.
+- Infinity is encoded as affine coordinates `(0,0)` plus an indicator bit.
+
+## Field / Curve
+
+- Base field: `Fq = ark_bn254::Fq` (prime field)
+- Scalar field: `Fr = ark_bn254::Fr`
+- Curve equation (BN254 G1): \(y^2 = x^3 + 3\) over `Fq`.
 
 ## Notation
 
-- `P = (x_P, y_P)` - base point (public, known to verifier)
-- `k` - scalar (256 bits), with bit decomposition `b_0, b_1, ..., b_{255}` (MSB-first)
-- `A_i` - accumulator at step i, where `A_0 = O` (point at infinity)
-- `T_i = [2]A_i` - doubled accumulator
-- `A_{i+1} = T_i + b_i · P` - next accumulator (conditional add)
-- `n = 256` - number of bits/steps
+- \(P = (x_P, y_P)\): base point (public per constraint instance)
+- \(k \in \mathrm{Fr}\): scalar (public per constraint instance)
+- Bits \(b_0,\dots,b_{255} \in \{0,1\}\): **MSB-first** bit decomposition of `k`
+- Accumulator \(A_i\) (start of step \(i\)), with \(A_0 = \mathcal{O}\)
+- Doubled point \(T_i = [2]A_i\)
+- Next accumulator \(A_{i+1} = T_i + b_i \cdot P\)
 
-## Double-and-Add Algorithm
+## Witness polynomials (conceptual 8-var MLEs)
 
-```
-A_0 = O (point at infinity)
-for i = 0 to n-1:
-    T_i = [2]A_i           (doubling)
-    A_{i+1} = T_i + b_i·P  (conditional addition)
-return A_n = [k]P
-```
+Conceptually we have multilinear extensions over \(\{0,1\}^8\) (256 steps):
 
-## Witness Polynomials (MLEs over {0,1}^8)
+| Polynomial | Meaning at step \(i\) |
+|---|---|
+| `x_A(i)`, `y_A(i)` | affine coords of \(A_i\) (or `(0,0)` if \(A_i=\mathcal{O}\)) |
+| `x_T(i)`, `y_T(i)` | affine coords of \(T_i=[2]A_i\) (or `(0,0)` if \(T_i=\mathcal{O}\)) |
+| `x_A_next(i)`, `y_A_next(i)` | affine coords of \(A_{i+1}\) (shifted “next” values) |
+| `ind_A(i)` | indicator for \(A_i=\mathcal{O}\) (intended: 1 if infinity else 0) |
+| `ind_T(i)` | indicator for \(T_i=\mathcal{O}\) (intended: 1 if infinity else 0) |
 
-| Polynomial | Description |
-|------------|-------------|
-| `x_A(i)`, `y_A(i)` | Coordinates of accumulator A_i at step i |
-| `x_T(i)`, `y_T(i)` | Coordinates of T_i = [2]A_i |
-| `x_A'(i)`, `y_A'(i)` | Coordinates of A_{i+1} (shifted) |
-| `b(i)` | Scalar bit b_i ∈ {0, 1} |
-| `ind_A(i)` | 1 if A_i = O, else 0 |
-| `ind_T(i)` | 1 if T_i = O, else 0 |
+Implementation detail: these 8-var tables are zero-padded to an 11-var table (`2048` entries) to
+fit the uniform Dory matrix layout (see `DoryMatrixBuilder::pad_8var_to_11var_zero_padding`).
 
-## Constraint Equations
+## Public bit polynomial
 
-### C1: Doubling x-coordinate (when A_i ≠ O)
+The bit values \(b_i\) are **not** committed: the verifier recomputes \(b(r^\*)\) directly from the
+public scalar (see `G1ScalarMulPublicInputs::evaluate_bit_mle` in `g1_scalar_mul.rs`).
 
-For doubling `T = [2]A` on short Weierstrass curve `y² = x³ + b`:
-- Tangent slope: `λ = 3x_A² / 2y_A`
-- New x: `x_T = λ² - 2x_A`
+## Constraint set (matches implementation)
 
-Eliminating denominators:
-```
-C1: 4y_A² · (x_T + 2x_A) - 9x_A⁴ = 0
-```
+All constraints are equations in `Fq` evaluated at every step index \(i\).
 
-### C2: Doubling y-coordinate (when A_i ≠ O)
+### C1: Doubling x-coordinate (affine, denominator-free)
 
-- New y: `y_T = λ(x_A - x_T) - y_A`
-
-Eliminating denominators:
-```
-C2: 3x_A² · (x_T - x_A) + 2y_A · (y_T + y_A) = 0
-```
-
-### C3: Conditional addition x-coordinate
-
-**Key insight**: We need bit-dependent branching:
-- If `b_i = 0`: `A_{i+1} = T_i` → enforce `(x_A', y_A') = (x_T, y_T)`
-- If `b_i = 1`: `A_{i+1} = T_i + P` → enforce chord addition formula
-
-For chord addition `R = T + P` with `T ≠ P` (guaranteed for random base):
-- Slope: `λ = (y_P - y_T) / (x_P - x_T)`
-- New x: `x_R = λ² - x_T - x_P`
-
-Eliminating denominators:
-```
-x_R · (x_P - x_T)² = (y_P - y_T)² - (x_T + x_P) · (x_P - x_T)²
-```
-
-Rearranging:
-```
-(x_R + x_T + x_P) · (x_P - x_T)² - (y_P - y_T)² = 0
-```
-
-**Combined constraint**:
-```
-C3: (1 - b) · (x_A' - x_T) + b · ind_T · x_A' · (x_A' - x_P)
-    + b · (1 - ind_T) · [(x_A' + x_T + x_P) · (x_P - x_T)² - (y_P - y_T)²] = 0
-```
-
-Breaking this down:
-- When `b = 0`: forces `x_A' = x_T`
-- When `b = 1` and `T = O` (ind_T = 1): forces `x_A' ∈ {0, x_P}` (i.e., O or P)
-- When `b = 1` and `T ≠ O` (ind_T = 0): forces chord addition formula
-
-### C4: Conditional addition y-coordinate
-
-For chord addition y-coordinate:
-```
-y_R = λ(x_T - x_R) - y_T = (y_P - y_T) · (x_T - x_R) / (x_P - x_T) - y_T
-```
-
-Eliminating denominators and rearranging:
-```
-y_R · (x_P - x_T) = (y_P - y_T) · (x_T - x_R) - y_T · (x_P - x_T)
-y_R · (x_P - x_T) + y_T · (x_P - x_T) = (y_P - y_T) · (x_T - x_R)
-(y_R + y_T) · (x_P - x_T) - (y_P - y_T) · (x_T - x_R) = 0
-```
-
-**Combined constraint**:
-```
-C4: (1 - b) · (y_A' - y_T) + b · ind_T · y_A' · (y_A' - y_P)
-    + b · (1 - ind_T) · [(y_A' + y_T) · (x_P - x_T) - (y_P - y_T) · (x_T - x_A')] = 0
-```
-
-### C5: Bit booleanity
+For \(T = [2]A\) on \(y^2=x^3+3\), using \(\lambda = \frac{3x_A^2}{2y_A}\) and \(x_T=\lambda^2-2x_A\),
+we eliminate denominators:
 
 ```
-C5: b · (1 - b) = 0
+C1: 4 y_A(i)^2 * (x_T(i) + 2 x_A(i)) - 9 x_A(i)^4 = 0
 ```
 
-This ensures `b ∈ {0, 1}`.
+### C2: Doubling y-coordinate (affine, denominator-free)
 
-### C6: Accumulator infinity indicator consistency
+Using \(y_T = \lambda(x_A-x_T)-y_A\), we eliminate denominators:
 
-When `A = O`, we use coordinates `(0, 0)`:
 ```
-C6: ind_A · (x_A² + y_A²) = 0
-```
-
-And conversely, if coordinates are `(0, 0)`, then `ind_A = 1`:
-```
-C7: (1 - ind_A) · (x_A · y_A) = 0  (only when x_A ≠ 0 and y_A ≠ 0)
+C2: 3 x_A(i)^2 * (x_T(i) - x_A(i)) + 2 y_A(i) * (y_T(i) + y_A(i)) = 0
 ```
 
-**Note**: For simplicity, we can assume the honest witness sets `ind_A = 1` iff `A = O`. The verifier checks initial and final conditions separately.
+### C3: Conditional addition x-coordinate (bit-dependent, with T = O case)
 
-### C8: Doubling infinity case
+Let \(R = A_{i+1}\), \(T=T_i\). The implemented constraint is:
 
-When `A = O`, doubling gives `T = O`:
 ```
-C8: ind_A · (1 - ind_T) = 0  (if A = O then T = O)
-C9: ind_A · (x_T² + y_T²) = 0  (if A = O then T has coords (0,0))
+C3: (1 - b(i)) * (x_A_next(i) - x_T(i))
+  + b(i) * ind_T(i) * (x_A_next(i) - x_P)
+  + b(i) * (1 - ind_T(i)) * [
+        (x_A_next(i) + x_T(i) + x_P) * (x_P - x_T(i))^2
+      - (y_P - y_T(i))^2
+    ] = 0
 ```
 
-## Boundary Conditions (Verified Outside Sumcheck)
+Intended behavior:
 
-1. **Initial**: `A_0 = O` (accumulator starts at identity)
-   - Check: `x_A(0) = 0`, `y_A(0) = 0`, `ind_A(0) = 1`
+- If `b(i)=0`: forces \(A_{i+1}=T_i\) (copy-through).
+- If `b(i)=1` and `ind_T(i)=1`: forces \(A_{i+1}=P\) (since \(\mathcal{O}+P=P\)).
+- If `b(i)=1` and `ind_T(i)=0`: enforces the standard chord-addition x relation for \(T_i+P\).
 
-2. **Final**: `A_n = [k]P` (result matches expected)
-   - Check: `x_A'(255) = x_result`, `y_A'(255) = y_result`
+### C4: Conditional addition y-coordinate (bit-dependent, with T = O case)
 
-3. **Bit decomposition**: The bits `b(i)` must equal the actual scalar
-   - This is verified by checking `Σ_i b(i) · 2^{255-i} = k`
-   - Can be done via separate constraint or public input check
+```
+C4: (1 - b(i)) * (y_A_next(i) - y_T(i))
+  + b(i) * ind_T(i) * (y_A_next(i) - y_P)
+  + b(i) * (1 - ind_T(i)) * [
+        (y_A_next(i) + y_T(i)) * (x_P - x_T(i))
+      - (y_P - y_T(i)) * (x_T(i) - x_A_next(i))
+    ] = 0
+```
 
-## Soundness Proof Sketch
+### C6: Doubling preserves infinity (A = O ⇒ T = O)
 
-**Theorem**: If a prover provides witness polynomials satisfying C1-C9 at all `i ∈ {0,...,255}`, then the witness represents the unique double-and-add trace for scalar `k = Σ_i b(i) · 2^{255-i}` starting from `A_0 = O`.
+```
+C6: ind_A(i) * (1 - ind_T(i)) = 0
+```
 
-**Proof**:
-1. C5 ensures each `b(i) ∈ {0, 1}` - these define a unique scalar k
-2. Initial condition ensures `A_0 = O`
-3. By induction on i:
-   - C1, C2 (with C8-C9 for infinity) uniquely determine `T_i = [2]A_i`
-   - C3, C4 (with C5) uniquely determine `A_{i+1}`:
-     - If `b_i = 0`: forced to `A_{i+1} = T_i`
-     - If `b_i = 1`: forced to `A_{i+1} = T_i + P`
-   - This is exactly the double-and-add algorithm
-4. Final condition ensures `A_n` equals the claimed result
+### C7: If ind_T = 1 then T has the infinity encoding (0,0)
 
-**Completeness**: The honest witness (from running double-and-add) satisfies all constraints.
+The implementation enforces:
 
-## Degree Analysis
+```
+C7: ind_T(i) * (x_T(i)^2 + y_T(i)^2) = 0
+```
 
-| Constraint | Degree | Notes |
-|------------|--------|-------|
-| C1 | 4 | `y_A² · x_T` and `x_A⁴` |
-| C2 | 3 | `x_A² · x_T` |
-| C3 | 5 | `b · (x_P - x_T)² · (x_A' + ...)` |
-| C4 | 4 | `b · (y_A' + y_T) · (x_P - x_T)` |
-| C5 | 2 | `b · (1 - b)` |
-| C6 | 3 | `ind · x²` |
+#### Why this implies x_T = y_T = 0 in BN254 Fq
 
-**Sumcheck degree**: 6 (after batching with eq polynomial)
+This implication is **not true over arbitrary fields**, but it **is true** over BN254’s base field
+because \(-1\) is a quadratic non-residue in `Fq` (equivalently, `Fq::MODULUS ≡ 3 (mod 4)`).
 
-## Implementation Notes
+Proof: if \(x^2+y^2=0\) and \(y\neq 0\), then \((x/y)^2 = -1\), contradiction. Thus \(y=0\), then
+\(x=0\).
 
-1. **Witness generation**: Run the actual double-and-add algorithm, recording all intermediate values
-2. **Bit polynomial**: Include `b(i)` as a committed polynomial
-3. **Public verification**: The scalar `k` must be publicly known or verified via the bit decomposition
-4. **Base point**: `P = (x_P, y_P)` is public and hardcoded into the verifier's constraint evaluation
+## What this constraint set does *not* enforce (soundness caveats)
+
+The constraints above are the ones currently implemented. As written, they **do not** justify the
+previous “complete soundness / unique trace” claim without extra assumptions or extra constraints.
+
+In particular, the implementation does **not** currently enforce:
+
+- **Indicator booleanity**: `ind_A(i), ind_T(i) ∈ {0,1}`.
+- **Curve membership**: when an indicator is 0, the corresponding affine coordinates satisfy
+  \(y^2=x^3+3\).
+- **Shift consistency across steps**: that `x_A_next(i) = x_A(i+1)` (and similarly for `y` and the
+  infinity indicator). Without this, you cannot inductively chain the per-step transition into a
+  single length-256 computation trace.
+- **Exceptional-case addition** when \(x_T(i)=x_P\) (i.e., \(T_i=\pm P\)). The chord constraints
+  are denominator-free but become non-binding when \(T_i=P\) (and they reject the \(T_i=-P\) case,
+  where the true sum is \(\mathcal{O}\)).
+
+If you want a spec that truly proves “[k]P” end-to-end against a malicious prover, you must add
+constraints (or additional sumchecks) to cover these gaps.
+
+## Hardening sketch for “complete soundness” (not currently implemented)
+
+One reasonable hardening plan (still low-degree) is:
+
+1. **Booleanity for indicators**:
+
+```
+ind_A(i) * (1 - ind_A(i)) = 0
+ind_T(i) * (1 - ind_T(i)) = 0
+```
+
+2. **On-curve when not infinity**:
+
+```
+(1 - ind_A(i)) * (y_A(i)^2 - x_A(i)^3 - 3) = 0
+(1 - ind_T(i)) * (y_T(i)^2 - x_T(i)^3 - 3) = 0
+```
+
+3. **Shift consistency** (needs an additional “shift” argument; see `EqPlusOnePolynomial` used in
+`stage1/shift_rho.rs` for the packed-GT case):
+
+- Prove `x_A_next(i) = x_A(i+1)` and `y_A_next(i) = y_A(i+1)` for all \(i\in[0,254]\).
+- Prove `ind_A(i+1) = ind_A_next(i)` if you carry a next-indicator.
+
+4. **Handle \(T_i=\pm P\)** either by:
+
+- adding an inverse witness for \((x_P-x_T(i))^{-1}\) when `b(i)=1` and `ind_T(i)=0`, or
+- switching to a complete addition law (projective complete formulas) so no inverses/side cases are
+  required.
+
+With these additions, an induction-based soundness proof (unique double-and-add trace and correct
+final result) becomes valid.

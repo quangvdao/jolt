@@ -196,7 +196,7 @@ impl BatchedSumcheck {
         {
             eprintln!("\n=== SUMCHECK VERIFY BATCHING ===");
             eprintln!("Number of instances: {}", sumcheck_instances.len());
-            eprintln!("Batching coefficients: {:?}", batching_coeffs);
+            eprintln!("Batching coefficients: {batching_coeffs:?}");
         }
 
         // To see why we may need to scale by a power of two, consider a batch of
@@ -251,8 +251,8 @@ impl BatchedSumcheck {
             #[cfg(debug_assertions)]
             {
                 eprintln!("\n=== SUMCHECK VERIFICATION FAILURE ===");
-                eprintln!("output_claim         = {:?}", output_claim);
-                eprintln!("expected_output_claim = {:?}", expected_output_claim);
+                eprintln!("output_claim         = {output_claim:?}");
+                eprintln!("expected_output_claim = {expected_output_claim:?}");
                 eprintln!("=====================================\n");
             }
             return Err(ProofVerifyError::SumcheckVerificationError);

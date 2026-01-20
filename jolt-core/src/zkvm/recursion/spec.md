@@ -331,16 +331,22 @@ Proves $Q = [k]P$ using double-and-add.
 
 #### Witness
 
-Execution trace with $n$ rows (padded to $N = 2^\ell$):
+Execution trace for a 256-bit scalar (so $n=256$ rows). We encode infinity as affine
+coordinates $(0,0)$ plus an indicator bit.
 
 | Column | Description |
 |--------|-------------|
-| $(x_A, y_A)$ | Accumulator at start of iteration |
-| $(x_T, y_T)$ | Doubled point: $T = [2]A$ |
-| $(x_{A'}, y_{A'})$ | Accumulator after conditional addition |
-| $\text{ind}$ | 1 if $T = \mathcal{O}$ (infinity), 0 otherwise |
+| $(x_A, y_A)$ | Accumulator at start of iteration: $A_i$ (or $(0,0)$ if $A_i=\mathcal{O}$) |
+| $(x_T, y_T)$ | Doubled point: $T_i = [2]A_i$ (or $(0,0)$ if $T_i=\mathcal{O}$) |
+| $(x_{A\_\text{next}}, y_{A\_\text{next}})$ | Next accumulator: $A_{i+1}$ (stored as a shifted “next” table) |
+| $\text{ind}_A$ | 1 if $A_i=\mathcal{O}$, else 0 |
+| $\text{ind}_T$ | 1 if $T_i=\mathcal{O}$, else 0 |
 
-Each row $i$: $A_{i+1} = T_i + b_i \cdot P$
+Each row $i$ implements:
+$$A_{i+1} = T_i + b_i \cdot P$$
+
+**Bit handling**: the scalar bits $b_i$ are treated as **public inputs** derived from $k$; the
+verifier recomputes $b(r^\*)$ from $k$ and does not require a committed/opened bit polynomial.
 
 #### Constraints
 
@@ -348,24 +354,57 @@ Each row $i$: $A_{i+1} = T_i + b_i \cdot P$
 
 **C2 (Doubling y)**: $3x_A^2(x_T - x_A) + 2y_A(y_T + y_A) = 0$
 
-**C3 (Addition x)**: Handles both finite and infinity cases via indicator:
-$$\text{ind} \cdot x_{A'} \cdot (x_{A'} - x_P) + (1 - \text{ind}) \cdot [\text{addition formula}] = 0$$
+**C3 (Conditional add x)**: bit-dependent conditional addition with a special case for $T=\mathcal{O}$:
 
-**C4 (Addition y)**: Similarly for y-coordinate.
+$$
+\begin{aligned}
+0
+=\;&(1-b)\cdot(x_{A\_\text{next}}-x_T) \\
+&+ b\cdot \text{ind}_T \cdot (x_{A\_\text{next}}-x_P) \\
+&+ b\cdot(1-\text{ind}_T)\cdot\Big[(x_{A\_\text{next}}+x_T+x_P)\cdot(x_P-x_T)^2-(y_P-y_T)^2\Big]
+\end{aligned}
+$$
+
+**C4 (Conditional add y)**:
+
+$$
+\begin{aligned}
+0
+=\;&(1-b)\cdot(y_{A\_\text{next}}-y_T) \\
+&+ b\cdot \text{ind}_T \cdot (y_{A\_\text{next}}-y_P) \\
+&+ b\cdot(1-\text{ind}_T)\cdot\Big[(y_{A\_\text{next}}+y_T)\cdot(x_P-x_T)-(y_P-y_T)\cdot(x_T-x_{A\_\text{next}})\Big]
+\end{aligned}
+$$
+
+**C5 (Doubling preserves infinity)**: if $A_i=\mathcal{O}$ then $T_i=\mathcal{O}$:
+
+$$\text{ind}_A \cdot (1-\text{ind}_T) = 0$$
+
+**C6 (Infinity encoding for $T$)**: if $\text{ind}_T=1$ then $(x_T,y_T)=(0,0)$ (field-independent):
+
+$$\text{ind}_T \cdot x_T = 0 \qquad\text{and}\qquad \text{ind}_T \cdot y_T = 0$$
 
 | Constraint | Degree |
 |------------|--------|
 | C1 | 4 |
 | C2 | 3 |
-| C3 | 6 |
-| C4 | 6 |
+| C3 | 5 |
+| C4 | 4 |
+| C5 | 2 |
+| C6 | 2 |
 
 #### Sum-Check
 
-$$0 = \sum_{x \in \{0,1\}^\ell} \text{eq}(r, x) \cdot \sum_{j=1}^{4} \delta^{j-1} \cdot C_j(x)$$
+The implementation uses 11 constraint variables (8 step variables, zero-padded to 11 for the
+uniform Dory matrix layout). For each scalar-mul instance, constraints are batched with $\delta$,
+and multiple instances are batched with $\gamma$:
 
-- $\ell = \lceil \log_2 n \rceil$ rounds
-- Degree 5 (maximum constraint degree from C3/C4)
+$$
+0 = \sum_{x \in \{0,1\}^{11}} \text{eq}(r_x, x)\cdot \sum_{i}\gamma^i\cdot\Big(\sum_{j}\delta^j\cdot C_{i,j}(x)\Big)
+$$
+
+- 11 rounds (one per constraint variable)
+- Degree 6 overall (max constraint degree 5, times $\text{eq}(r_x,x)$ which is multilinear)
 
 #### Output Claims
 
@@ -374,15 +413,103 @@ $$0 = \sum_{x \in \{0,1\}^\ell} \text{eq}(r, x) \cdot \sum_{j=1}^{4} \delta^{j-1
 - `RecursionG1ScalarMulXANext(i)`, `RecursionG1ScalarMulYANext(i)` - next accumulator
 - `RecursionG1ScalarMulTIndicator(i)` - 1 if T = O (infinity), 0 otherwise
 - `RecursionG1ScalarMulAIndicator(i)` - 1 if A = O (infinity), 0 otherwise
-- `RecursionG1ScalarMulBit(i)` - scalar bit b_i ∈ {0,1} (CRITICAL for soundness)
 
 ---
 
-### 2.5 [Future] G2 Scalar Multiplication
+### 2.5 G2 Scalar Multiplication
 
-Similar to G1, but over the twist curve $E'(\mathbb{F}_{q^2})$.
+Proves $R = [k]Q$ for $Q \in \mathbb{G}_2$ using the same 256-step MSB-first double-and-add trace
+as G1, but with coordinates in the quadratic extension field $\mathbb{F}_{q^2}$.
 
-*Pending implementation.*
+#### Field representation ($\mathbb{F}_{q^2}$)
+
+We use the standard BN254 quadratic extension:
+$$\mathbb{F}_{q^2} = \mathbb{F}_q[u]/(u^2 + 1)$$
+so each element is represented as $a = a_0 + a_1 \cdot u$ with $a_0,a_1 \in \mathbb{F}_q$ and
+$u^2 = -1$.
+
+Since the recursion SNARK arithmetic is over $\mathbb{F}_q$ (BN254 base field), we **split every**
+$\mathbb{F}_{q^2}$ coordinate into its $(c0,c1)$ components in $\mathbb{F}_q$ and enforce all
+constraints component-wise.
+
+#### Inputs / Outputs
+
+| Role | Symbol | Description |
+|------|--------|-------------|
+| Public Input | $Q \in \mathbb{G}_2$ | Base point $(x_Q, y_Q) \in \mathbb{F}_{q^2}^2$ |
+| Public Input | $k \in \mathbb{F}_r$ | Scalar (256-bit, MSB-first bits $b_0,\ldots,b_{255}$) |
+| Public Output | $R \in \mathbb{G}_2$ | Result $R = [k]Q$ |
+
+#### Witness
+
+As in G1, we maintain a 256-row trace with infinity encoded as $(0,0)$ plus an indicator bit.
+All $\mathbb{F}_{q^2}$ values are split into $(c0,c1)$ over $\mathbb{F}_q$.
+
+| Column | Description |
+|--------|-------------|
+| $(x_A, y_A)$ | Accumulator $A_i$ (Fq2; split into c0/c1 over Fq) |
+| $(x_T, y_T)$ | Doubled point $T_i = [2]A_i$ (Fq2; split into c0/c1 over Fq) |
+| $(x_{A\_\text{next}}, y_{A\_\text{next}})$ | Next accumulator $A_{i+1}$ (shifted “next” table) |
+| $\text{ind}_A$ | 1 if $A_i=\mathcal{O}$, else 0 (in $\mathbb{F}_q$) |
+| $\text{ind}_T$ | 1 if $T_i=\mathcal{O}$, else 0 (in $\mathbb{F}_q$) |
+
+Each row $i$ implements:
+$$A_{i+1} = T_i + b_i \cdot Q$$
+
+**Bit handling**: as in G1, bits are treated as **public inputs** derived from $k$; the verifier
+recomputes $b(r^\*)$ from $k$.
+
+#### Constraints (conceptual, in $\mathbb{F}_{q^2}$)
+
+The affine short-Weierstrass group laws (denominator-free) are identical in form to G1 and apply
+over $\mathbb{F}_{q^2}$:
+
+- **C1 (Doubling x)**: $4y_A^2(x_T + 2x_A) - 9x_A^4 = 0$
+- **C2 (Doubling y)**: $3x_A^2(x_T - x_A) + 2y_A(y_T + y_A) = 0$
+- **C3 (Conditional add x)**: same bit-dependent form as G1, but over $\mathbb{F}_{q^2}$
+- **C4 (Conditional add y)**: same bit-dependent form as G1, but over $\mathbb{F}_{q^2}$
+
+Infinity handling is enforced in $\mathbb{F}_q$:
+
+- **C5 (Doubling preserves infinity)**:
+  $$\text{ind}_A \cdot (1-\text{ind}_T) = 0$$
+- **C6 (Infinity encoding for $T$)**: if $\text{ind}_T=1$ then $(x_T,y_T)=(0,0)$ in $\mathbb{F}_{q^2}$.
+  Implemented as four base-field constraints:
+  $$\text{ind}_T \cdot x_{T,c0}=0,\;\text{ind}_T \cdot x_{T,c1}=0,\;\text{ind}_T \cdot y_{T,c0}=0,\;\text{ind}_T \cdot y_{T,c1}=0.$$
+
+#### Sum-Check (implemented batching layout)
+
+The sumcheck runs over 11 variables (8 step vars padded to 11 for the uniform Dory matrix layout).
+Because each $\mathbb{F}_{q^2}$ constraint contributes two $\mathbb{F}_q$ equations (c0 and c1),
+the implementation batches **13** $\mathbb{F}_q$ constraint terms per instance:
+
+- C1.c0, C1.c1
+- C2.c0, C2.c1
+- C3.c0, C3.c1
+- C4.c0, C4.c1
+- C5
+- C6.x\_c0, C6.x\_c1, C6.y\_c0, C6.y\_c1
+
+These are batched with $\delta$, and multiple instances are batched with $\gamma$:
+
+$$
+0 = \sum_{x \in \{0,1\}^{11}} \text{eq}(r_x, x)\cdot \sum_{i}\gamma^i\cdot\Big(\sum_{j}\delta^j\cdot C_{i,j}(x)\Big)
+$$
+
+- 11 rounds
+- Degree 6 overall (max term degree 5, times $\text{eq}(r_x,x)$)
+
+#### Output Claims
+
+All opened values are over $\mathbb{F}_q$ (components of $\mathbb{F}_{q^2}$):
+
+- `RecursionG2ScalarMulXAC0(i)`, `RecursionG2ScalarMulXAC1(i)`
+- `RecursionG2ScalarMulYAC0(i)`, `RecursionG2ScalarMulYAC1(i)`
+- `RecursionG2ScalarMulXTC0(i)`, `RecursionG2ScalarMulXTC1(i)`
+- `RecursionG2ScalarMulYTC0(i)`, `RecursionG2ScalarMulYTC1(i)`
+- `RecursionG2ScalarMulXANextC0(i)`, `RecursionG2ScalarMulXANextC1(i)`
+- `RecursionG2ScalarMulYANextC0(i)`, `RecursionG2ScalarMulYANextC1(i)`
+- `RecursionG2ScalarMulTIndicator(i)`, `RecursionG2ScalarMulAIndicator(i)`
 
 ---
 

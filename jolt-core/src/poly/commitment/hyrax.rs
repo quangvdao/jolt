@@ -119,7 +119,7 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxComm
 
             let num_buckets = 1 << window_size;
             // Determine scalar field bit size based on the actual field type
-            let scalar_bits = {
+            let scalar_bits: usize = {
                 let scalar_ref: &dyn core::any::Any = &scalars[0];
                 if scalar_ref.is::<ark_grumpkin::Fr>() {
                     255 // Grumpkin scalar field
@@ -129,7 +129,7 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxComm
                     256 // Default fallback
                 }
             };
-            let num_windows = (scalar_bits + window_size - 1) / window_size;
+            let num_windows = scalar_bits.div_ceil(window_size);
 
             let mut result = G::zero();
 
@@ -170,10 +170,8 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxComm
 
                     for j in 0..window_size {
                         let bit_index = window_start + j;
-                        if bit_index < scalar_bits {
-                            if scalar_bigint.get_bit(bit_index) {
-                                bucket_index |= 1 << j;
-                            }
+                        if bit_index < scalar_bits && scalar_bigint.get_bit(bit_index) {
+                            bucket_index |= 1 << j;
                         }
                     }
 
@@ -322,17 +320,9 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
 
             let num_buckets = 1 << window_size;
             // Determine scalar field bit size based on the actual field type
-            let scalar_bits = {
-                let scalar_ref: &dyn core::any::Any = &scalars[0];
-                if scalar_ref.is::<ark_grumpkin::Fr>() {
-                    254 // Grumpkin scalar field
-                } else if scalar_ref.is::<ark_bn254::Fr>() {
-                    254 // BN254 scalar field
-                } else {
-                    254 // Default fallback
-                }
-            };
-            let num_windows = (scalar_bits + window_size - 1) / window_size;
+            // All supported fields use 254 bits
+            let scalar_bits: usize = 254;
+            let num_windows = scalar_bits.div_ceil(window_size);
 
             let mut result = G::zero();
 
@@ -373,10 +363,8 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
 
                     for j in 0..window_size {
                         let bit_index = window_start + j;
-                        if bit_index < scalar_bits {
-                            if scalar_bigint.get_bit(bit_index) {
-                                bucket_index |= 1 << j;
-                            }
+                        if bit_index < scalar_bits && scalar_bigint.get_bit(bit_index) {
+                            bucket_index |= 1 << j;
                         }
                     }
 

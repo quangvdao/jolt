@@ -103,7 +103,7 @@ impl<F: JoltField> RecursionVerifier<F> {
 
         // Populate accumulator with opening claims from proof
         for (key, value) in &proof.opening_claims {
-            accumulator.openings.insert(key.clone(), value.clone());
+            accumulator.openings.insert(*key, value.clone());
         }
 
         // ============ STAGE 1: Verify Constraint Sumchecks ============
@@ -326,7 +326,7 @@ impl<F: JoltField> RecursionVerifier<F> {
 
         let r_s = verifier
             .verify(transcript, accumulator_fq, m_eval_fq)
-            .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+            .map_err(Box::<dyn std::error::Error>::from)?;
 
         // Convert r_s to challenges for Stage 3 compatibility
         // Stage 3 expects them in reverse order

@@ -102,12 +102,12 @@ impl RecursionProver<Fq> {
 
         // Convert witness collection to DoryRecursionWitness
         let recursion_witness =
-            Self::witnesses_to_dory_recursion(&witness_collection, combine_witness.clone())?;
+            Self::witnesses_to_dory_recursion(witness_collection, combine_witness.clone())?;
 
         // Build constraint system from witness collection using DoryMatrixBuilder
         let build_cs_span = tracing::info_span!("build_constraint_system").entered();
         let constraint_system = Self::build_constraint_system(
-            &witness_collection,
+            witness_collection,
             recursion_witness.combine_witness.as_ref(),
             recursion_witness.gt_exp_witness.g_poly.clone(),
         )?;
@@ -167,16 +167,16 @@ impl RecursionProver<Fq> {
         let gt_exp_span = tracing::info_span!("process_gt_exp_witnesses").entered();
 
         // Calculate total sizes for preallocation
-        let total_bits = witnesses.gt_exp.iter().map(|(_, w)| w.bits.len()).sum();
+        let total_bits = witnesses.gt_exp.values().map(|w| w.bits.len()).sum();
         let total_rho_elements: usize = witnesses
             .gt_exp
-            .iter()
-            .map(|(_, w)| w.rho_mles.iter().map(|mle| mle.len()).sum::<usize>())
+            .values()
+            .map(|w| w.rho_mles.iter().map(|mle| mle.len()).sum::<usize>())
             .sum();
         let total_quotient_elements: usize = witnesses
             .gt_exp
-            .iter()
-            .map(|(_, w)| w.quotient_mles.iter().map(|mle| mle.len()).sum::<usize>())
+            .values()
+            .map(|w| w.quotient_mles.iter().map(|mle| mle.len()).sum::<usize>())
             .sum();
 
         let mut bits = Vec::with_capacity(total_bits);
@@ -237,8 +237,8 @@ impl RecursionProver<Fq> {
 
         let total_mul_quotient_elements: usize = witnesses
             .gt_mul
-            .iter()
-            .map(|(_, w)| w.quotient_mle.len())
+            .values()
+            .map(|w| w.quotient_mle.len())
             .sum();
 
         let mut lhs_values = Vec::with_capacity(witnesses.gt_mul.len());
@@ -274,8 +274,8 @@ impl RecursionProver<Fq> {
         let num_g1_witnesses = witnesses.g1_scalar_mul.len();
         let total_bits: usize = witnesses
             .g1_scalar_mul
-            .iter()
-            .map(|(_, w)| w.bits.len())
+            .values()
+            .map(|w| w.bits.len())
             .sum();
 
         let mut base_points = Vec::with_capacity(num_g1_witnesses);
@@ -555,7 +555,7 @@ impl<F: JoltField> RecursionProver<F> {
         // Generate opening proof using PCS
         let opening_proof = accumulator
             .prove_single::<T, PCS>(polynomials_map, prover_setup, transcript)
-            .map_err(|e| format!("Failed to generate opening proof: {:?}", e))?;
+            .map_err(|e| format!("Failed to generate opening proof: {e:?}"))?;
 
         // Extract opening claims from accumulator
         let opening_claims = accumulator.openings.clone();
@@ -914,7 +914,12 @@ impl<F: JoltField> RecursionProver<F> {
         let dense_poly_f = DensePolynomial {
             num_vars: dense_poly_fq.num_vars,
             len: dense_poly_fq.len,
-            Z: unsafe { std::mem::transmute(dense_poly_fq.Z) },
+            Z: unsafe {
+                std::mem::transmute::<
+                    std::vec::Vec<ark_ff::Fp<ark_ff::MontBackend<ark_bn254::FqConfig, 4>, 4>>,
+                    std::vec::Vec<F>,
+                >(dense_poly_fq.Z)
+            },
         };
 
         // Convert r_stage2 (s challenges) and r_stage1 (x challenges) to F

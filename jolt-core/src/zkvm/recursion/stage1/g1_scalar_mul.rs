@@ -10,8 +10,8 @@
 //! - C2: Doubling y-coordinate: 3x_A²(x_T - x_A) + 2y_A(y_T + y_A) = 0
 //! - C3: Conditional addition x-coord (bit-dependent)
 //! - C4: Conditional addition y-coord (bit-dependent)
-//! - C6: If A = O then T = O (infinity preserved)
-//! - C7: If ind_T = 1 then (x_T, y_T) = (0,0)
+//! - C5: If A = O then T = O (infinity preserved)
+//! - C6: If ind_T = 1 then (x_T, y_T) = (0,0)
 //!
 //! ## Batching
 //! - Delta (δ) batches constraints within each scalar multiplication
@@ -272,22 +272,25 @@ fn compute_c4(
     c4_skip + c4_infinity + c4_add
 }
 
-/// C6: Doubling preserves infinity
+/// C5: Doubling preserves infinity
 /// If A = O (ind_A = 1), then T = O (ind_T = 1)
 /// Constraint: ind_A * (1 - ind_T) = 0
-fn compute_c6(ind_a: Fq, ind_t: Fq) -> Fq {
+fn compute_c5(ind_a: Fq, ind_t: Fq) -> Fq {
     ind_a * (Fq::one() - ind_t)
 }
 
-/// C7: Infinity indicator consistency for T
-/// If T has coordinates (0, 0), then ind_T = 1
-/// Constraint: (1 - ind_T) * (x_T² + y_T² == 0 implies false)
-/// Reformulated: (1 - ind_T) * f(x_T, y_T) where f forces (x_T, y_T) ≠ (0,0)
-/// For simplicity, we trust the honest witness sets this correctly.
-/// The constraint below catches the other direction: if ind_T = 1, coords must be (0,0)
-fn compute_c7(ind_t: Fq, x_t: Fq, y_t: Fq) -> Fq {
-    // If ind_T = 1, then x_T = 0 and y_T = 0
-    ind_t * (x_t * x_t + y_t * y_t)
+/// C6: Infinity encoding check for T (field-independent)
+///
+/// We encode infinity as affine coordinates (0,0) plus an indicator bit `ind_T`.
+/// The robust way to enforce `ind_T = 1 => (x_T, y_T) = (0,0)` over *any* field is:
+///   - ind_T * x_T = 0
+///   - ind_T * y_T = 0
+fn compute_c6_x(ind_t: Fq, x_t: Fq) -> Fq {
+    ind_t * x_t
+}
+
+fn compute_c6_y(ind_t: Fq, y_t: Fq) -> Fq {
+    ind_t * y_t
 }
 
 /// Individual polynomial data for a single G1 scalar multiplication constraint
@@ -533,7 +536,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
     #[tracing::instrument(skip_all, name = "G1ScalarMul::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         const DEGREE: usize = 6;
-        const NUM_CONSTRAINT_TERMS: usize = 6; // C1,C2,C3,C4,C6,C7
+        const NUM_CONSTRAINT_TERMS: usize = 7; // C1,C2,C3,C4,C5,C6_x,C6_y
         let num_x_remaining = self.eq_x.get_num_vars();
         let x_half = 1 << (num_x_remaining - 1);
 
@@ -606,24 +609,27 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1ScalarMulPr
                             x_p,
                             y_p,
                         );
-                        let c6_fq = compute_c6(ind_a_fq, ind_t_fq);
-                        let c7_fq = compute_c7(ind_t_fq, x_t_fq, y_t_fq);
+                        let c5_fq = compute_c5(ind_a_fq, ind_t_fq);
+                        let c6_x_fq = compute_c6_x(ind_t_fq, x_t_fq);
+                        let c6_y_fq = compute_c6_y(ind_t_fq, y_t_fq);
 
                         // Convert results back to F
                         let c1: F = unsafe { std::mem::transmute_copy(&c1_fq) };
                         let c2: F = unsafe { std::mem::transmute_copy(&c2_fq) };
                         let c3: F = unsafe { std::mem::transmute_copy(&c3_fq) };
                         let c4: F = unsafe { std::mem::transmute_copy(&c4_fq) };
-                        let c6: F = unsafe { std::mem::transmute_copy(&c6_fq) };
-                        let c7: F = unsafe { std::mem::transmute_copy(&c7_fq) };
+                        let c5: F = unsafe { std::mem::transmute_copy(&c5_fq) };
+                        let c6_x: F = unsafe { std::mem::transmute_copy(&c6_x_fq) };
+                        let c6_y: F = unsafe { std::mem::transmute_copy(&c6_y_fq) };
 
                         // Batch constraints with powers of delta
                         let constraint_val = delta_pows[0] * c1
                             + delta_pows[1] * c2
                             + delta_pows[2] * c3
                             + delta_pows[3] * c4
-                            + delta_pows[4] * c6
-                            + delta_pows[5] * c7;
+                            + delta_pows[4] * c5
+                            + delta_pows[5] * c6_x
+                            + delta_pows[6] * c6_y;
 
                         x_evals[t] += eq_x_evals[t] * gamma_power * constraint_val;
                     }
@@ -852,25 +858,33 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G1ScalarMul
                 x_p,
                 y_p,
             );
-            let c6_fq = compute_c6(ind_a_fq, ind_t_fq);
-            let c7_fq = compute_c7(ind_t_fq, x_t_fq, y_t_fq);
+            let c5_fq = compute_c5(ind_a_fq, ind_t_fq);
+            let c6_x_fq = compute_c6_x(ind_t_fq, x_t_fq);
+            let c6_y_fq = compute_c6_y(ind_t_fq, y_t_fq);
 
             // Convert results back to F
             let c1: F = unsafe { std::mem::transmute_copy(&c1_fq) };
             let c2: F = unsafe { std::mem::transmute_copy(&c2_fq) };
             let c3: F = unsafe { std::mem::transmute_copy(&c3_fq) };
             let c4: F = unsafe { std::mem::transmute_copy(&c4_fq) };
-            let c6: F = unsafe { std::mem::transmute_copy(&c6_fq) };
-            let c7: F = unsafe { std::mem::transmute_copy(&c7_fq) };
+            let c5: F = unsafe { std::mem::transmute_copy(&c5_fq) };
+            let c6_x: F = unsafe { std::mem::transmute_copy(&c6_x_fq) };
+            let c6_y: F = unsafe { std::mem::transmute_copy(&c6_y_fq) };
 
             // Batch constraints with powers of delta
             let delta_2 = self.delta * self.delta;
             let delta_3 = delta_2 * self.delta;
             let delta_4 = delta_3 * self.delta;
             let delta_5 = delta_4 * self.delta;
+            let delta_6 = delta_5 * self.delta;
 
-            let constraint_value =
-                c1 + self.delta * c2 + delta_2 * c3 + delta_3 * c4 + delta_4 * c6 + delta_5 * c7;
+            let constraint_value = c1
+                + self.delta * c2
+                + delta_2 * c3
+                + delta_3 * c4
+                + delta_4 * c5
+                + delta_5 * c6_x
+                + delta_6 * c6_y;
 
             total += gamma_power * constraint_value;
             gamma_power *= self.gamma;

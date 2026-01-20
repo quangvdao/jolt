@@ -12,9 +12,8 @@
 //! Constraints are the standard short-Weierstrass affine laws (denominator-free), applied in Fq2:
 //! - C1/C2: doubling formulas
 //! - C3/C4: conditional add formulas (bit-dependent), with a special case when T = O
-//! - C5: (omitted) bit booleanity (scalar bits are public inputs)
-//! - C6: if A = O then T = O (infinity preserved)
-//! - C7: if ind_T = 1 then (x_T, y_T) = (0,0) in Fq2 (implemented as 4 Fq constraints)
+//! - C5: if A = O then T = O (infinity preserved)
+//! - C6: if ind_T = 1 then (x_T, y_T) = (0,0) in Fq2 (implemented as 4 Fq constraints)
 
 use crate::{
     field::JoltField,
@@ -264,8 +263,8 @@ fn compute_c4(
     c4_skip + c4_infinity + c4_add
 }
 
-/// C6: Doubling preserves infinity (in Fq)
-fn compute_c6(ind_a: Fq, ind_t: Fq) -> Fq {
+/// C5: Doubling preserves infinity (in Fq)
+fn compute_c5(ind_a: Fq, ind_t: Fq) -> Fq {
     ind_a * (Fq::one() - ind_t)
 }
 
@@ -620,14 +619,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
                         let c3 = compute_c3(bit_fq, ind_t_fq, x_a_next, x_t, y_t, x_p, y_p);
                         let c4 =
                             compute_c4(bit_fq, ind_t_fq, x_a_next, y_a_next, x_t, y_t, x_p, y_p);
-                        let c6_fq = compute_c6(ind_a_fq, ind_t_fq);
+                        let c5_fq = compute_c5(ind_a_fq, ind_t_fq);
 
-                        // C7: if ind_T = 1 then x_T = 0 and y_T = 0 in Fq2
+                        // C6: if ind_T = 1 then x_T = 0 and y_T = 0 in Fq2
                         // Implemented as 4 base-field constraints on (c0, c1) components.
-                        let c7_xt_c0_fq = ind_t_fq * x_t.c0;
-                        let c7_xt_c1_fq = ind_t_fq * x_t.c1;
-                        let c7_yt_c0_fq = ind_t_fq * y_t.c0;
-                        let c7_yt_c1_fq = ind_t_fq * y_t.c1;
+                        let c6_xt_c0_fq = ind_t_fq * x_t.c0;
+                        let c6_xt_c1_fq = ind_t_fq * x_t.c1;
+                        let c6_yt_c0_fq = ind_t_fq * y_t.c0;
+                        let c6_yt_c1_fq = ind_t_fq * y_t.c1;
 
                         // Convert to F (Fq)
                         let c1_c0: F = unsafe { std::mem::transmute_copy(&c1.c0) };
@@ -638,11 +637,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
                         let c3_c1: F = unsafe { std::mem::transmute_copy(&c3.c1) };
                         let c4_c0: F = unsafe { std::mem::transmute_copy(&c4.c0) };
                         let c4_c1: F = unsafe { std::mem::transmute_copy(&c4.c1) };
-                        let c6: F = unsafe { std::mem::transmute_copy(&c6_fq) };
-                        let c7_xt_c0: F = unsafe { std::mem::transmute_copy(&c7_xt_c0_fq) };
-                        let c7_xt_c1: F = unsafe { std::mem::transmute_copy(&c7_xt_c1_fq) };
-                        let c7_yt_c0: F = unsafe { std::mem::transmute_copy(&c7_yt_c0_fq) };
-                        let c7_yt_c1: F = unsafe { std::mem::transmute_copy(&c7_yt_c1_fq) };
+                        let c5: F = unsafe { std::mem::transmute_copy(&c5_fq) };
+                        let c6_xt_c0: F = unsafe { std::mem::transmute_copy(&c6_xt_c0_fq) };
+                        let c6_xt_c1: F = unsafe { std::mem::transmute_copy(&c6_xt_c1_fq) };
+                        let c6_yt_c0: F = unsafe { std::mem::transmute_copy(&c6_yt_c0_fq) };
+                        let c6_yt_c1: F = unsafe { std::mem::transmute_copy(&c6_yt_c1_fq) };
 
                         let constraint_val = delta_pows[0] * c1_c0
                             + delta_pows[1] * c1_c1
@@ -652,11 +651,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
                             + delta_pows[5] * c3_c1
                             + delta_pows[6] * c4_c0
                             + delta_pows[7] * c4_c1
-                            + delta_pows[8] * c6
-                            + delta_pows[9] * c7_xt_c0
-                            + delta_pows[10] * c7_xt_c1
-                            + delta_pows[11] * c7_yt_c0
-                            + delta_pows[12] * c7_yt_c1;
+                            + delta_pows[8] * c5
+                            + delta_pows[9] * c6_xt_c0
+                            + delta_pows[10] * c6_xt_c1
+                            + delta_pows[11] * c6_yt_c0
+                            + delta_pows[12] * c6_yt_c1;
 
                         x_evals[t] += eq_x_evals[t] * gamma_power * constraint_val;
                     }
@@ -953,12 +952,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMul
             let c2 = compute_c2(x_a, y_a, x_t, y_t);
             let c3 = compute_c3(bit_fq, ind_t_fq, x_a_next, x_t, y_t, x_p, y_p);
             let c4 = compute_c4(bit_fq, ind_t_fq, x_a_next, y_a_next, x_t, y_t, x_p, y_p);
-            let c6_fq = compute_c6(ind_a_fq, ind_t_fq);
+            let c5_fq = compute_c5(ind_a_fq, ind_t_fq);
 
-            let c7_xt_c0_fq = ind_t_fq * x_t.c0;
-            let c7_xt_c1_fq = ind_t_fq * x_t.c1;
-            let c7_yt_c0_fq = ind_t_fq * y_t.c0;
-            let c7_yt_c1_fq = ind_t_fq * y_t.c1;
+            let c6_xt_c0_fq = ind_t_fq * x_t.c0;
+            let c6_xt_c1_fq = ind_t_fq * x_t.c1;
+            let c6_yt_c0_fq = ind_t_fq * y_t.c0;
+            let c6_yt_c1_fq = ind_t_fq * y_t.c1;
 
             let c1_c0: F = unsafe { std::mem::transmute_copy(&c1.c0) };
             let c1_c1: F = unsafe { std::mem::transmute_copy(&c1.c1) };
@@ -968,11 +967,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMul
             let c3_c1: F = unsafe { std::mem::transmute_copy(&c3.c1) };
             let c4_c0: F = unsafe { std::mem::transmute_copy(&c4.c0) };
             let c4_c1: F = unsafe { std::mem::transmute_copy(&c4.c1) };
-            let c6: F = unsafe { std::mem::transmute_copy(&c6_fq) };
-            let c7_xt_c0: F = unsafe { std::mem::transmute_copy(&c7_xt_c0_fq) };
-            let c7_xt_c1: F = unsafe { std::mem::transmute_copy(&c7_xt_c1_fq) };
-            let c7_yt_c0: F = unsafe { std::mem::transmute_copy(&c7_yt_c0_fq) };
-            let c7_yt_c1: F = unsafe { std::mem::transmute_copy(&c7_yt_c1_fq) };
+            let c5: F = unsafe { std::mem::transmute_copy(&c5_fq) };
+            let c6_xt_c0: F = unsafe { std::mem::transmute_copy(&c6_xt_c0_fq) };
+            let c6_xt_c1: F = unsafe { std::mem::transmute_copy(&c6_xt_c1_fq) };
+            let c6_yt_c0: F = unsafe { std::mem::transmute_copy(&c6_yt_c0_fq) };
+            let c6_yt_c1: F = unsafe { std::mem::transmute_copy(&c6_yt_c1_fq) };
 
             let constraint_value = delta_pows[0] * c1_c0
                 + delta_pows[1] * c1_c1
@@ -982,11 +981,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMul
                 + delta_pows[5] * c3_c1
                 + delta_pows[6] * c4_c0
                 + delta_pows[7] * c4_c1
-                + delta_pows[8] * c6
-                + delta_pows[9] * c7_xt_c0
-                + delta_pows[10] * c7_xt_c1
-                + delta_pows[11] * c7_yt_c0
-                + delta_pows[12] * c7_yt_c1;
+                + delta_pows[8] * c5
+                + delta_pows[9] * c6_xt_c0
+                + delta_pows[10] * c6_xt_c1
+                + delta_pows[11] * c6_yt_c0
+                + delta_pows[12] * c6_yt_c1;
 
             total += gamma_power * constraint_value;
             gamma_power *= self.gamma;
@@ -1126,12 +1125,12 @@ mod tests {
                 let c2 = compute_c2(x_a, y_a, x_t, y_t);
                 let c3 = compute_c3(bit_fq, ind_t_fq, x_a_next, x_t, y_t, x_p, y_p);
                 let c4 = compute_c4(bit_fq, ind_t_fq, x_a_next, y_a_next, x_t, y_t, x_p, y_p);
-                let c6_fq = compute_c6(ind_a_fq, ind_t_fq);
+                let c5_fq = compute_c5(ind_a_fq, ind_t_fq);
 
-                let c7_xt_c0_fq = ind_t_fq * x_t.c0;
-                let c7_xt_c1_fq = ind_t_fq * x_t.c1;
-                let c7_yt_c0_fq = ind_t_fq * y_t.c0;
-                let c7_yt_c1_fq = ind_t_fq * y_t.c1;
+                let c6_xt_c0_fq = ind_t_fq * x_t.c0;
+                let c6_xt_c1_fq = ind_t_fq * x_t.c1;
+                let c6_yt_c0_fq = ind_t_fq * y_t.c0;
+                let c6_yt_c1_fq = ind_t_fq * y_t.c1;
 
                 let constraint_val = delta_pows[0] * c1.c0
                     + delta_pows[1] * c1.c1
@@ -1141,11 +1140,11 @@ mod tests {
                     + delta_pows[5] * c3.c1
                     + delta_pows[6] * c4.c0
                     + delta_pows[7] * c4.c1
-                    + delta_pows[8] * c6_fq
-                    + delta_pows[9] * c7_xt_c0_fq
-                    + delta_pows[10] * c7_xt_c1_fq
-                    + delta_pows[11] * c7_yt_c0_fq
-                    + delta_pows[12] * c7_yt_c1_fq;
+                    + delta_pows[8] * c5_fq
+                    + delta_pows[9] * c6_xt_c0_fq
+                    + delta_pows[10] * c6_xt_c1_fq
+                    + delta_pows[11] * c6_yt_c0_fq
+                    + delta_pows[12] * c6_yt_c1_fq;
 
                 sum += eq * gamma_power * constraint_val;
             }

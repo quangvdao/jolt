@@ -987,7 +987,7 @@ impl DoryMatrixBuilder {
                 fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base * exp_wit.base));
 
             // Validate and fix witness data if needed
-            let num_steps = (exp_wit.bits.len() + 1) / 2;
+            let num_steps = exp_wit.bits.len().div_ceil(2);
             let (rho_mles, quotient_mles) = if exp_wit.quotient_mles.len() != num_steps {
                 // Fix mismatched sizes
                 let mut fixed_quotients = exp_wit.quotient_mles.clone();
@@ -1052,8 +1052,7 @@ impl DoryMatrixBuilder {
             let count = self.rows_by_type[poly_type as usize].len();
             if count != num_constraints {
                 eprintln!(
-                    "Row type {:?} has {} constraints, expected {}",
-                    poly_type, count, num_constraints
+                    "Row type {poly_type:?} has {count} constraints, expected {num_constraints}"
                 );
             }
         }
@@ -1062,8 +1061,7 @@ impl DoryMatrixBuilder {
             assert_eq!(
                 self.rows_by_type[poly_type as usize].len(),
                 num_constraints,
-                "Row type {:?} has wrong number of constraints",
-                poly_type
+                "Row type {poly_type:?} has wrong number of constraints"
             );
         }
         assert_eq!(
@@ -1738,19 +1736,19 @@ impl ConstraintSystem {
                 let s_index = index & 0x7F; // low 7 bits
                 let x_index = (index >> 7) & 0xF; // high 4 bits
 
-                println!("  s_index={}, x_index={}", s_index, x_index);
-                println!("  base_eval = {:?}", base_eval);
-                println!("  rho_prev = {:?}", rho_prev);
-                println!("  rho_curr = {:?}", rho_curr);
-                println!("  quotient = {:?}", quotient);
-                println!("  digit_lo_eval = {:?}", digit_lo_eval);
-                println!("  digit_hi_eval = {:?}", digit_hi_eval);
-                println!("  g_eval = {:?}", g_eval);
-                println!("  base_power = {:?}", base_power);
-                println!("  constraint = {:?}", constraint_eval);
+                println!("  s_index={s_index}, x_index={x_index}");
+                println!("  base_eval = {base_eval:?}");
+                println!("  rho_prev = {rho_prev:?}");
+                println!("  rho_curr = {rho_curr:?}");
+                println!("  quotient = {quotient:?}");
+                println!("  digit_lo_eval = {digit_lo_eval:?}");
+                println!("  digit_hi_eval = {digit_hi_eval:?}");
+                println!("  g_eval = {g_eval:?}");
+                println!("  base_power = {base_power:?}");
+                println!("  constraint = {constraint_eval:?}");
 
                 // Also check raw data at the specific index
-                println!("  --- Raw packed data at index {} ---", index);
+                println!("  --- Raw packed data at index {index} ---");
                 println!(
                     "  rho_packed[{}] = {:?}",
                     index,
@@ -2074,12 +2072,15 @@ impl ConstraintSystem {
                     c4_skip + c4_infinity + c4_add
                 };
 
-                // C6/C7: indicator consistency (matches stage1).
-                let c6 = ind_a * (Fq::one() - ind_t);
-                let c7 = ind_t * (x_t * x_t + y_t * y_t);
+                // C5/C6: indicator consistency (matches stage1).
+                // C5: ind_A * (1 - ind_T) = 0
+                let c5 = ind_a * (Fq::one() - ind_t);
+                // C6: ind_T => (x_T, y_T) = (0,0), implemented as two field-independent checks
+                let c6_x = ind_t * x_t;
+                let c6_y = ind_t * y_t;
 
                 // Return aggregate (should be 0 for honest witnesses).
-                c1 + c2 + c3 + c4 + c6 + c7
+                c1 + c2 + c3 + c4 + c5 + c6_x + c6_y
             }
             ConstraintType::G2ScalarMul { base_point } => {
                 // G2 scalar multiplication constraint evaluation (over Fq2, coords split into c0/c1).

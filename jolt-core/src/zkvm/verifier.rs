@@ -920,10 +920,9 @@ where
             let mut num_g1_scalar_mul = 0;
 
             // Count constraint types based on the virtual polynomial types in opening claims
-            for (key, _) in &recursion_proof.opening_claims {
-                match key {
-                    OpeningId::Virtual(poly, _) => {
-                        match poly {
+            for key in recursion_proof.opening_claims.keys() {
+                if let OpeningId::Virtual(poly, _) = key {
+                    match poly {
                         crate::zkvm::witness::VirtualPolynomial::RecursionBase(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionRhoPrev(_)
                         | crate::zkvm::witness::VirtualPolynomial::RecursionRhoCurr(_)
@@ -969,22 +968,20 @@ where
                         | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulBit(_) => {
                             // These are G1 scalar mul constraints
                             num_g1_scalar_mul = num_g1_scalar_mul.max(match poly {
-                        crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXA(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYA(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXT(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYT(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXANext(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYANext(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulTIndicator(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulAIndicator(i)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulBit(i) => *i + 1,
-                        _ => 0,
-                    });
+                                crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXA(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYA(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXT(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYT(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXANext(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYANext(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulTIndicator(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulAIndicator(i)
+                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulBit(i) => *i + 1,
+                                _ => 0,
+                            });
                         }
                         _ => {} // Ignore other virtual polynomial types
                     }
-                    }
-                    _ => {} // Ignore non-virtual openings
                 }
             }
             (num_gt_exp, num_gt_mul, num_g1_scalar_mul)
@@ -1066,9 +1063,9 @@ where
                     recursion_proof,
                     &mut self.transcript,
                     &recursion_proof.dense_commitment,
-                    &hyrax_verifier_setup,
+                    hyrax_verifier_setup,
                 )
-                .map_err(|e| anyhow::anyhow!("Recursion verification failed: {:?}", e))?
+                .map_err(|e| anyhow::anyhow!("Recursion verification failed: {e:?}"))?
         };
 
         if !verification_result {

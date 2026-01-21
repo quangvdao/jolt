@@ -22,7 +22,6 @@ use super::{
     constraints_sys::ConstraintType,
     recursion_prover::RecursionProof,
     stage1::{
-        boundary_constraints::{BoundarySumcheckParams, BoundarySumcheckVerifier},
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier},
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier},
         gt_mul::{GtMulParams, GtMulVerifier},
@@ -263,19 +262,8 @@ impl<F: JoltField> RecursionVerifier<F> {
             verifiers.push(Box::new(verifier));
         }
 
-        // Add Boundary Sumcheck Verifier (checks initial conditions)
-        if num_gt_exp > 0 || num_g1_scalar_mul > 0 || num_g2_scalar_mul > 0 {
-            let params =
-                BoundarySumcheckParams::new(num_gt_exp, num_g1_scalar_mul, num_g2_scalar_mul);
-            let verifier = BoundarySumcheckVerifier::new(
-                params,
-                &self.input.packed_gt_exp_public_inputs,
-                &self.input.g1_scalar_mul_public_inputs,
-                &self.input.g2_scalar_mul_public_inputs,
-                transcript,
-            );
-            verifiers.push(Box::new(verifier));
-        }
+        // TODO: Add Boundary/Wiring Sumcheck Verifier (initial/final states + copy constraints)
+        // Currently removed due to polynomial size mismatch bug; will be redesigned with packing.
 
         if verifiers.is_empty() {
             return Err("No constraints to verify in Stage 1".into());

@@ -16,12 +16,13 @@ The Jolt verifier compiled to RISC-V requires ~1.5 billion cycles. Our target is
 
 We decompose the verifier:
 
-$$\mathcal{V}_{\text{Jolt}} = \mathcal{V}_{\text{light}} \circ \mathcal{H}$$
+$$\mathcal{V}_{\text{Jolt}} = \mathcal{V}_{\text{light}} \circ \mathcal{V}_{\text{Dory}}$$
 
-where:
-- $\mathcal{H} = \{h_1, \ldots, h_m\}$ are **hints** for expensive operations
-- $\mathcal{V}_{\text{light}}$ assumes hints are correct
-- A **bespoke SNARK** proves hints are well-formed
+where $\mathcal{V}_{\text{Dory}}$ is the verification logic for the Dory polynomial commitment scheme. This logic is dominated by expensive group operations (scalar multiplication, exponentiation, pairing).
+
+Instead of the Jolt verifier executing these operations directly (which is expensive in the R1CS/AIR constraint model), we offload them to a **bespoke recursion SNARK**.
+
+The recursion SNARK proves that the execution trace of the Dory verifier is correct.
 
 The expensive operations (from Dory PCS verification):
 
@@ -33,13 +34,58 @@ The expensive operations (from Dory PCS verification):
 | GT Multiplication | $a \cdot b$ for $a, b \in \mathbb{G}_T$ |
 | Multi-Pairing | $\prod_i e(P_i, Q_i)$ |
 
-### 1.3 Protocol Flow
+### 1.3 Architecture: "No Hints" & Copy Constraints
+
+A naive approach would require the prover to provide "hints" for every intermediate group element generated during Dory verification, and the verifier to check each step individually. This would result in a massive proof size ("hint hell") and high verifier complexity.
+
+Instead, we adopt a **monolithic circuit** approach:
+
+1.  **Witness**: The prover commits to the *entire* execution trace of the Dory verifier, including all intermediate values (G1/G2/GT elements).
+2.  **Operation Constraints**: We verify that each individual operation (e.g., $C = A \cdot B$) is performed correctly using **Stage 1 Sumchecks**.
+3.  **Wiring (Copy) Constraints**: We verify that the operations are correctly connected (e.g., the output of operation $i$ is the input to operation $j$) using a **Wiring Sumcheck**.
+4.  **Boundary Constraints**: We verify that the trace begins with the public inputs (commitments, challenges) and ends with the final check values.
+
+This means the verifier **does not** need to receive or compute intermediate values. It only needs to know the **topology** of the Dory verification circuit (which is fixed and deterministic) and the **public inputs**.
+
+#### Example: GT Homomorphic Combination
+
+Suppose the proof contains GT elements $A, B, C$ and the verifier needs to check:
+$$D = m \cdot A + n \cdot B + p \cdot C$$
+(using additive notation for clarity, though GT is multiplicative).
+
+The witness trace includes all intermediate values: $m \cdot A$, $n \cdot B$, $p \cdot C$, $m \cdot A + n \cdot B$, and finally $D$.
+
+We do **not** expose these intermediate values to the verifier. Instead, we enforce the chain of computation via wiring constraints:
+
+1.  **GT Exp 1**: Public input $A$, scalar $m$. Output $O_1$ (witness).
+2.  **GT Exp 2**: Public input $B$, scalar $n$. Output $O_2$ (witness).
+3.  **GT Exp 3**: Public input $C$, scalar $p$. Output $O_3$ (witness).
+4.  **GT Mul 1**: Inputs $I_{4a}, I_{4b}$. Output $O_4$.
+    - Wiring: $I_{4a} = O_1$ (copy constraint)
+    - Wiring: $I_{4b} = O_2$ (copy constraint)
+5.  **GT Mul 2**: Inputs $I_{5a}, I_{5b}$. Output $O_5$.
+    - Wiring: $I_{5a} = O_4$ (copy constraint)
+    - Wiring: $I_{5b} = O_3$ (copy constraint)
+6.  **Final Check**: $O_5 = D$ (boundary constraint).
+
+The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumchecks prove that valid witnesses exist satisfying all operation and wiring constraints.
+
+### 1.4 Protocol Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Stage 1: Constraint Sum-Checks                                     │
 │  ─────────────────────────────                                      │
-│  GT Exp, GT Mul, G1 Scalar Mul → virtual polynomial claims at r_x   │
+│  Prove validity of each op in isolation (GT Exp, GT Mul, ScalarMul) │
+│  Output: Virtual claims for inputs/outputs of each op               │
+└──────────────────────────────────┬──────────────────────────────────┘
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Stage 1b/c/d: Consistency Checks                                   │
+│  ────────────────────────────────                                   │
+│  1b: Shift Sumcheck (internal consistency of packed ops)            │
+│  1c: Boundary Sumcheck (check initial/final states vs public input) │
+│  1d: Wiring Sumcheck (check data flow between ops)                  │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -61,7 +107,7 @@ The expensive operations (from Dory PCS verification):
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.4 Field Choice
+### 1.5 Field Choice
 
 All SNARK arithmetic is over $\mathbb{F}_q$ (BN254 base field), which equals the Grumpkin scalar field. This choice is dictated by:
 - GT witnesses produce $\mathbb{F}_q$ elements (from Fq12 representation)
@@ -95,9 +141,9 @@ Computes $b = a^k$ using square-and-multiply.
 
 | Role | Symbol | Description |
 |------|--------|-------------|
-| Public Input | $a \in \mathbb{G}_T$ | Base (as Fq12) |
+| Witness (Input) | $a \in \mathbb{G}_T$ | Base (as Fq12) |
 | Public Input | $k \in \mathbb{F}_r$ | Exponent |
-| Public Output | $b \in \mathbb{G}_T$ | Result $b = a^k$ |
+| Witness (Output) | $b \in \mathbb{G}_T$ | Result $b = a^k$ |
 
 #### Witness
 
@@ -201,7 +247,7 @@ Therefore, constraint satisfaction is preserved. □
 
 ---
 
-### 2.2.1 Shift Sumcheck Optimization
+### 2.2.1 Stage 1b: Shift Sumcheck Optimization
 
 The packed GT exponentiation can be further optimized by eliminating the `rho_next` polynomial commitment using a shift sumcheck protocol.
 
@@ -280,76 +326,6 @@ Stage 2 treats both virtual claims uniformly, regardless of their verification m
 
 **Security**: Maintains same soundness guarantees with error ≤ 12 × 2^{-254} ≈ 2^{-250}
 
-#### Implementation status (current repo)
-
-The repo already contains a `ShiftRho` (“shift sumcheck”) implementation, but it is **not wired into
-the prover/verifier**, so the packed GT exp transition is currently **underconstrained**:
-
-- Commit `8632981d` (“remove rho_next from committed data, but is under-constrained”) removed
-  `rho_next` from the committed recursion matrix rows (see `DoryMatrixBuilder::add_packed_gt_exp_witness`)
-  and introduced `jolt-core/src/zkvm/recursion/stage1/shift_rho.rs`.
-- `PackedGtExp` still produces a `PackedGtExpRhoNext(i)` *value* (via the witness table), and
-  `PackedGtExpVerifier` consumes that value in the transition constraint check, but **nothing currently
-  enforces**:
-
-  \[
-  \rho_{\text{next}}(r_s^\*, r_x^\*) = \rho(r_s^\* + 1, r_x^\*).
-  \]
-
-In other words, today the prover can pick `rho_next` values to satisfy the transition constraint at the
-random point without linking consecutive rows of `rho`.
-
-#### Implementation plan to remove the underconstraint
-
-**Goal**: before Stage 2, enforce the packed GT-exp shift relation at the Stage 1 challenge point for
-every packed GT exp witness:
-
-\[
-\rho_{\text{next}}(r_s^\*, r_x^\*) \stackrel{!}{=} \sum_{s \in \{0,1\}^{\ell_s}} \sum_{x \in \{0,1\}^{4}}
-\mathrm{EqPlusOne}(r_s^\*, s)\cdot \mathrm{eq}(r_x^\*, x)\cdot \rho(s,x).
-\]
-
-**Note**: the current code uses base-4 digits for the exponent, so \(\ell_s = 7\) (128 steps), not 8.
-
-1. **Add an explicit “Stage 1b” proof for the shift sumcheck**
-   - Extend `RecursionProof` with a new field (e.g. `stage1_shift_rho_proof`).
-   - In `RecursionProver::prove_with_pcs`, after Stage 1 completes and yields `r_stage1`,
-     instantiate `ShiftRhoProver` over all packed GT exp witnesses and generate `stage1_shift_rho_proof`.
-   - In `RecursionVerifier::verify_stage1`, after verifying Stage 1 and obtaining the same `r_stage1`,
-     verify `stage1_shift_rho_proof` using `ShiftRhoVerifier`.
-
-2. **Run `ShiftRho` with fresh Fiat–Shamir challenges (standard sumcheck soundness)**
-   - Do **not** reuse `r_stage1` as the `ShiftRho` round challenges. In Fiat–Shamir, each sumcheck’s
-     challenges must be derived *after* the prover commits to that sumcheck’s round polynomials.
-   - This means `ShiftRho` will have its own challenge point \(r_{\text{shift}}\) (11 variables). The
-     final oracle check for `ShiftRho` therefore needs \(\rho(r_{\text{shift}})\) (and/or a batched
-     linear combination of \(\rho_i(r_{\text{shift}})\) across witnesses).
-   - Concretely, update `ShiftRhoProver::cache_openings` to append the needed \(\rho(r_{\text{shift}})\)
-     claims into the accumulator under `SumcheckId::ShiftRho` (e.g. store
-     `VirtualPolynomial::PackedGtExpRho(i)` at \(r_{\text{shift}}\) keyed by `(…, SumcheckId::ShiftRho)`),
-     and update `ShiftRhoVerifier::expected_output_claim` to read those openings (instead of reading
-     `PackedGtExpRho(i)` from `SumcheckId::PackedGtExp`).
-
-3. **Prove the new \(\rho(r_{\text{shift}})\) openings against the committed dense polynomial**
-   - The \(\rho(r_{\text{shift}})\) values introduced in step (2) are new oracle evaluations; they must
-     be connected to the committed data (the dense polynomial) to avoid reintroducing an
-     underconstraint.
-   - A practical approach is to add a small “row-opening via jagged transform” reduction:
-     prove each needed claim `ρ_i(r_shift)` equals the corresponding matrix row’s MLE evaluation at
-     \(r_{\text{shift}}\), reduced to the same committed `DoryDenseMatrix` opening used in Stage 3.
-     If there are many packed GT exp witnesses, batch these row-opening checks with a random linear
-     combination to keep proof size small.
-
-4. **Enforce sequencing and prevent regressions**
-   - If any `ConstraintType::PackedGtExp` is present, require Stage 1b (`ShiftRho`) to be present and
-     successfully verified; otherwise fail fast (prover should not emit a proof, verifier should reject).
-
-5. **Add a negative test to demonstrate soundness**
-   - Create a test that tampers with `rho_next_packed` for a packed GT exp witness (keeping all other
-     witness data intact) and assert:
-     - `PackedGtExp` alone would not catch the tampering (this illustrates the underconstraint), and
-     - the new `ShiftRho` Stage 1b verification fails.
-
 ---
 
 ### 2.3 GT Multiplication
@@ -360,8 +336,8 @@ Proves $c = a \cdot b$ for $a, b, c \in \mathbb{G}_T$.
 
 | Role | Symbol | Description |
 |------|--------|-------------|
-| Public Input | $a, b \in \mathbb{G}_T$ | Operands |
-| Public Output | $c \in \mathbb{G}_T$ | Result $c = a \cdot b$ |
+| Witness (Input) | $a, b \in \mathbb{G}_T$ | Operands |
+| Witness (Output) | $c \in \mathbb{G}_T$ | Result $c = a \cdot b$ |
 
 #### Witness
 
@@ -395,9 +371,9 @@ Proves $Q = [k]P$ using double-and-add.
 
 | Role | Symbol | Description |
 |------|--------|-------------|
-| Public Input | $P \in \mathbb{G}_1$ | Base point $(x_P, y_P)$ |
+| Witness/Public | $P \in \mathbb{G}_1$ | Base point $(x_P, y_P)$ |
 | Public Input | $k \in \mathbb{F}_r$ | Scalar with bits $(b_0, \ldots, b_{n-1})$ |
-| Public Output | $Q \in \mathbb{G}_1$ | Result $Q = [k]P$ |
+| Witness (Output) | $Q \in \mathbb{G}_1$ | Result $Q = [k]P$ |
 
 #### Witness
 
@@ -506,9 +482,9 @@ constraints component-wise.
 
 | Role | Symbol | Description |
 |------|--------|-------------|
-| Public Input | $Q \in \mathbb{G}_2$ | Base point $(x_Q, y_Q) \in \mathbb{F}_{q^2}^2$ |
+| Witness/Public | $Q \in \mathbb{G}_2$ | Base point $(x_Q, y_Q) \in \mathbb{F}_{q^2}^2$ |
 | Public Input | $k \in \mathbb{F}_r$ | Scalar (256-bit, MSB-first bits $b_0,\ldots,b_{255}$) |
-| Public Output | $R \in \mathbb{G}_2$ | Result $R = [k]Q$ |
+| Witness (Output) | $R \in \mathbb{G}_2$ | Result $R = [k]Q$ |
 
 #### Witness
 
@@ -583,14 +559,144 @@ All opened values are over $\mathbb{F}_q$ (components of $\mathbb{F}_{q^2}$):
 
 ---
 
-### 2.6 [Future] Multi-Pairing
+### 2.6 Stage 1c: Boundary Sumcheck
 
-Computes $T = \prod_{i=1}^m e(P_i, Q_i)$ via:
-1. Miller loop accumulation
-2. Final exponentiation
-3. Line evaluation
+This stage enforces the initial and final states of the recursive operations.
 
-*Pending implementation.*
+#### Initial Conditions
+- **GT Exp**: $\rho(0, x) = 1$ (Identity)
+- **G1/G2 Scalar Mul**: $A(0) = \mathcal{O}$ (Infinity)
+
+#### Final Conditions
+- **GT Exp**: $\rho(N, x) = \text{result}(x)$
+- **G1/G2 Scalar Mul**: $A(N) = \text{result}$
+
+These are proven via a sumcheck over the step variable $s$, using `eq(0, s)` and `eq(N, s)` to isolate the boundary terms.
+
+---
+
+### 2.7 Stage 1d: Wiring (Copy) Constraints
+
+To avoid sending intermediate values ("hints") to the verifier, we enforce consistency between operations using copy constraints.
+
+#### The Recursion Circuit
+The Dory verification logic forms a DAG where nodes are operations (GT Exp, GT Mul, Scalar Mul) and edges represent data flow.
+
+#### Wiring Logic
+If the output of Operation $i$ is the input to Operation $j$, we must enforce:
+$$Output_i = Input_j$$
+
+In the matrix representation, this corresponds to equality between specific rows/indices:
+$$M(row_{out}, i) = M(row_{in}, j)$$
+
+This is proven via a **Wiring Sumcheck** that batches all such equality constraints:
+$$0 = \sum_{(i,j) \in Edges} r^k \cdot (Output_i - Input_j)$$
+
+where $r$ is a random challenge from the verifier.
+
+#### Critical implementation constraint (current codebase): Stage 1 instances do *not* share a common opening point
+
+In the current Rust implementation, each Stage 1 sumcheck instance (Packed GT Exp, GT Mul, G1 scalar mul, G2 scalar mul, boundary, etc.) samples its **own** random challenge point(s) from the Fiat–Shamir transcript (e.g. its own `r_x` / `r_s`), and caches virtual openings at that instance-specific point.
+
+Therefore, we generally **cannot** enforce wiring by “just comparing” the values already produced by different Stage 1 instances, because they are evaluations at **different points**.
+
+This is why wiring needs a dedicated reduction step: it must bring *all* values that participate in copy constraints to a **common random evaluation point** (or refactor Stage 1 so they share one).
+
+#### What must be wired: *ports* (inputs/outputs), not internal trace states
+
+For soundness and efficiency, wiring should only involve the *external interface* of each expensive operation:
+
+- **GT Exp**: input = base (often public), output = final GT element.
+- **GT Mul**: inputs = lhs/rhs GT elements, output = GT element.
+- **G1 scalar mul**: input = base point (often public), output = final point.
+- **G2 scalar mul**: input = base point (often public), output = final point.
+
+All intermediate states (e.g. internal $\rho_i$ values in exponentiation or per-step accumulators in scalar mul) are **internal correctness** and are already handled by the operation constraints (Stage 1a) plus internal consistency checks (Stage 1b/c). Wiring should connect only the *typed elements* that flow between operations.
+
+#### Reduction viewpoint: a tiny “port extraction” matrix \(A\)
+
+It is helpful to separate wiring into two conceptual layers:
+
+1. **Port extraction**: map the big witness polynomials (tables over \(\{0,1\}^{11}\) or \(\{0,1\}^{8}\)) to a short vector of *port values* (inputs/outputs of ops).
+2. **Copy check**: enforce that wired ports are equal.
+
+Let \(v \in \mathbb{F}_q^P\) be the vector of all port values of a given type (GT/G1/G2) evaluated at a shared random element-point. Then wiring is just a sparse linear constraint:
+
+\[
+\forall e=(u \to v)\in \text{Edges}, \quad v_u - v_v = 0.
+\]
+
+Batching these equalities is standard: sample random \(\alpha_e\) and check
+
+\[
+0 \stackrel{!}{=} \sum_{e\in \text{Edges}} \alpha_e \cdot (v_{\text{out}(e)} - v_{\text{in}(e)}).
+\]
+
+Markos’s “small copy matrix \(A\)” intuition: \(A\) is the (very small) linear map that extracts these port values from the underlying trace polynomials. Even if \(A\) is not “succinctly evaluable”, it is tiny (≈100–200 ports), so it is acceptable in practice.
+
+#### Two viable reductions (design options)
+
+##### Option A (structural refactor): force all Stage 1 instances to share a global \(r_x\)
+
+Refactor Stage 1 so every instance uses the same **global** random point \(r_x \in \mathbb{F}^{11}\) (and, where needed, \(r_s\) for step variables), sampled once and passed into each prover/verifier.
+
+- **Pros**:
+  - Wiring can often be implemented as pure verifier-side checks of equality of already-opened values.
+  - Fewer extra openings/proof elements.
+- **Cons**:
+  - Requires touching all Stage 1 instance constructors (they currently sample their own challenges internally).
+  - Must be very careful about variable order/endianness and about instances that naturally have different variable partitions (e.g. packed GT exp has \((s,x)\) phases).
+
+##### Option B (recommended): dedicated Stage 1d wiring stage with a shared evaluation point
+
+Introduce an explicit Stage 1d protocol that:
+
+1. Samples a shared random element-point (separately per type, or one shared 11-var point).
+2. Produces/requests the required **port evaluations** at that point.
+3. Checks the batched copy relation across all wiring edges of that type.
+
+This keeps Stage 1a implementations unchanged and cleanly isolates wiring logic.
+
+There are two sub-choices for how to obtain port evaluations:
+
+- **B1: open rows at “port points”** (most direct)
+  - For a port that is literally a matrix row polynomial \(P(x)\), open \(P(r)\).
+  - For a port that is a *slice* of a larger table (e.g. “final step” of scalar mul), open the underlying 11-var polynomial at a point where the step bits are fixed to that boundary (Boolean point) and the element bits are random.
+  - This may require additional openings, but the count is small (ports ≈ 100–200).
+
+- **B2: prove port extraction via a small sumcheck** (more algebraic)
+  - Treat port extraction as a linear functional of the witness table and prove it via sumcheck (similar in spirit to boundary and shift sumchecks).
+  - This can reduce the number of distinct openings by batching, at the cost of extra sumcheck rounds.
+
+#### Source of topology (important context): Dory’s traced op DAG
+
+To do wiring without trusting prover-supplied wiring metadata, the verifier must know the circuit topology deterministically.
+
+In the Dory recursion layer we can record this topology during verification:
+
+- Each traced value carries an `origin: Option<OpId>` (“which operation produced me?”).
+- Each traced operation records its input origins into an `OpGraph: OpId -> Vec<Option<OpId>>`.
+
+This graph is small and deterministic, and can be used to derive wiring edges:
+for each op, for each input dependency `Some(prev_op)`, add a wiring edge from `prev_op`’s **output port** to this op’s corresponding **input port**.
+
+#### Packed GT exponentiation nuance (why port extraction matters)
+
+Packed GT exponentiation represents the internal trace as a single table \(\rho(s,x)\) (and a shifted table \(\rho_{\text{next}}(s,x)\)).
+The **output GT element** is a *boundary slice* (e.g. \(\rho_{\text{next}}(s = \text{num\_steps}-1, x)\)).
+
+So, wiring GT-exp outputs requires a port extraction mechanism (Option B1 or B2 above).
+Additionally, if \(\rho_{\text{next}}\) is not committed, a separate internal-consistency proof (a “shift sumcheck”) is required so the prover cannot choose \(\rho_{\text{next}}\) arbitrarily.
+
+#### Recommended split in practice: three independent wiring checks (GT/G1/G2)
+
+Because the element representations differ (GT: 4-var domain, G1/G2: 8-var domain, G2 has split coordinates), it is cleanest to implement three independent wiring reductions:
+
+- **GT wiring**: edges among GT exp / GT mul outputs and GT mul inputs.
+- **G1 wiring**: edges among G1-producing ops and G1-consuming ops (if any).
+- **G2 wiring**: edges among G2-producing ops and G2-consuming ops (if any).
+
+Each can use its own random element point and its own batched equality check.
 
 ---
 
@@ -1090,7 +1196,9 @@ jolt-core/src/zkvm/recursion/
 ├── stage1/
 │   ├── square_and_multiply.rs   # GT exponentiation sumcheck
 │   ├── gt_mul.rs                # GT multiplication sumcheck
-│   └── g1_scalar_mul.rs         # G1 scalar mul sumcheck
+│   ├── g1_scalar_mul.rs         # G1 scalar mul sumcheck
+│   ├── boundary_constraints.rs  # Initial/Final state checks
+│   └── wiring.rs                # Wiring/Copy constraints (TODO)
 ├── stage2/
 │   └── virtualization.rs        # Direct evaluation protocol
 └── stage3/
@@ -1304,7 +1412,7 @@ impl RecursionVerifier {
             &proof.stage1_proof,
             &mut accumulator,
             transcript,
-        )?;
+        );
 
         // Stage 2: Verify virtualization
         let stage2_verifier = RecursionVirtualizationVerifier::new(...);

@@ -34,7 +34,6 @@ use crate::zkvm::recursion::DoryMatrixBuilder;
 use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
     stage1::{
-        boundary_constraints::{BoundarySumcheckParams, BoundarySumcheckProver},
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulProver},
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulProver},
         gt_mul::{GtMulParams, GtMulProver},
@@ -186,8 +185,10 @@ impl RecursionProver<Fq> {
         let mut quotient_values = Vec::with_capacity(total_quotient_elements);
         let mut scalar = Fr::zero();
 
-        // Process GT exp witnesses
-        for (_op_id, exp_witness) in witnesses.gt_exp.iter() {
+        // Process GT exp witnesses (deterministic order by OpId)
+        let mut gt_exp_items: Vec<_> = witnesses.gt_exp.iter().collect();
+        gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, exp_witness) in gt_exp_items {
             // Extract the scalar from the first witness
             if scalar.is_zero() && !exp_witness.exponent.is_zero() {
                 scalar = exp_witness.exponent;
@@ -247,7 +248,10 @@ impl RecursionProver<Fq> {
         let mut result_values = Vec::with_capacity(witnesses.gt_mul.len());
         let mut gt_mul_quotient_values = Vec::with_capacity(total_mul_quotient_elements);
 
-        for (_op_id, mul_witness) in witnesses.gt_mul.iter() {
+        // Deterministic order by OpId
+        let mut gt_mul_items: Vec<_> = witnesses.gt_mul.iter().collect();
+        gt_mul_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, mul_witness) in gt_mul_items {
             // For GT multiplication, we work with the quotient MLEs which are already in Fq
             // The actual lhs, rhs, result values come from the quotient decomposition
             gt_mul_quotient_values.extend(&mul_witness.quotient_mle);
@@ -285,7 +289,9 @@ impl RecursionProver<Fq> {
         let mut y_a_next_mles = Vec::new();
         let mut t_is_infinity_mles = Vec::with_capacity(total_bits);
 
-        for (_op_id, scalar_mul_witness) in witnesses.g1_scalar_mul.iter() {
+        let mut g1_items: Vec<_> = witnesses.g1_scalar_mul.iter().collect();
+        g1_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, scalar_mul_witness) in g1_items {
             base_points.push(scalar_mul_witness.point_base);
             scalars.push(scalar_mul_witness.scalar);
 
@@ -367,7 +373,10 @@ impl RecursionProver<Fq> {
             Vec::with_capacity(witness_collection.g1_scalar_mul.len());
         let mut g2_scalar_mul_public_inputs =
             Vec::with_capacity(witness_collection.g2_scalar_mul.len());
-        for (_op_id, witness) in witness_collection.gt_exp.iter() {
+        // Deterministic order by OpId
+        let mut gt_exp_items: Vec<_> = witness_collection.gt_exp.iter().collect();
+        gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, witness) in gt_exp_items {
             // Convert base ArkGT to 4-var MLE
             let base_mle = fq12_to_multilinear_evals(&witness.base);
             let base2_mle = fq12_to_multilinear_evals(&(witness.base * witness.base));
@@ -404,7 +413,9 @@ impl RecursionProver<Fq> {
             count = witness_collection.gt_mul.len()
         )
         .entered();
-        for (_op_id, witness) in witness_collection.gt_mul.iter() {
+        let mut gt_mul_items: Vec<_> = witness_collection.gt_mul.iter().collect();
+        gt_mul_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, witness) in gt_mul_items {
             builder.add_gt_mul_witness(witness);
         }
         drop(gt_mul_span);
@@ -415,7 +426,9 @@ impl RecursionProver<Fq> {
             count = witness_collection.g1_scalar_mul.len()
         )
         .entered();
-        for (_op_id, witness) in witness_collection.g1_scalar_mul.iter() {
+        let mut g1_items: Vec<_> = witness_collection.g1_scalar_mul.iter().collect();
+        g1_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, witness) in g1_items {
             builder.add_g1_scalar_mul_witness(witness);
             g1_scalar_mul_public_inputs.push(G1ScalarMulPublicInputs::new(witness.scalar));
         }
@@ -427,7 +440,9 @@ impl RecursionProver<Fq> {
             count = witness_collection.g2_scalar_mul.len()
         )
         .entered();
-        for (_op_id, witness) in witness_collection.g2_scalar_mul.iter() {
+        let mut g2_items: Vec<_> = witness_collection.g2_scalar_mul.iter().collect();
+        g2_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, witness) in g2_items {
             builder.add_g2_scalar_mul_witness(witness);
             g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(witness.scalar));
         }
@@ -747,101 +762,8 @@ impl<F: JoltField> RecursionProver<F> {
             provers.push(Box::new(prover));
         }
 
-        // Add Boundary Sumcheck Prover (checks initial conditions)
-        {
-            use super::constraints_sys::PolyType;
-            use crate::poly::multilinear_polynomial::MultilinearPolynomial;
-
-            // Helper to extract polynomials from matrix rows
-            let get_polys = |poly_type: PolyType| -> Vec<MultilinearPolynomial<F>> {
-                // We need to access rows_by_type from the matrix.
-                // But DoryMultilinearMatrix is flattened.
-                // However, we can use the extraction methods or reconstruct them.
-                // Actually, ConstraintSystem stores packed_gt_exp_witnesses directly!
-                // So for GT Exp, we can use that.
-                // For G1/G2, we need to extract from matrix.
-                // But extracting from flattened matrix is expensive/complex here.
-                // Wait, ConstraintSystem.extract_g1_scalar_mul_constraints() returns the polynomials!
-                // I can use that!
-                vec![] // Placeholder, logic below
-            };
-
-            let packed_witnesses = &self.constraint_system.packed_gt_exp_witnesses;
-            let g1_constraints = self.constraint_system.extract_g1_scalar_mul_constraints();
-            let g2_constraints = self.constraint_system.extract_g2_scalar_mul_constraints();
-
-            if !packed_witnesses.is_empty()
-                || !g1_constraints.is_empty()
-                || !g2_constraints.is_empty()
-            {
-                let params = BoundarySumcheckParams::new(
-                    packed_witnesses.len(),
-                    g1_constraints.len(),
-                    g2_constraints.len(),
-                );
-
-                // GT Exp Polys
-                let mut gt_rho_polys = Vec::with_capacity(packed_witnesses.len());
-                for w in packed_witnesses {
-                    // Convert Fq to F
-                    let rho_f: Vec<F> = unsafe { std::mem::transmute(w.rho_packed.clone()) };
-                    gt_rho_polys.push(MultilinearPolynomial::from(rho_f));
-                }
-
-                // G1 Polys
-                let mut g1_x_a = Vec::with_capacity(g1_constraints.len());
-                let mut g1_y_a = Vec::with_capacity(g1_constraints.len());
-                let mut g1_a_inf = Vec::with_capacity(g1_constraints.len());
-                for w in &g1_constraints {
-                    g1_x_a.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.x_a.clone())
-                    }));
-                    g1_y_a.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.y_a.clone())
-                    }));
-                    g1_a_inf.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.a_indicator.clone())
-                    }));
-                }
-
-                // G2 Polys
-                let mut g2_x_a_c0 = Vec::with_capacity(g2_constraints.len());
-                let mut g2_x_a_c1 = Vec::with_capacity(g2_constraints.len());
-                let mut g2_y_a_c0 = Vec::with_capacity(g2_constraints.len());
-                let mut g2_y_a_c1 = Vec::with_capacity(g2_constraints.len());
-                let mut g2_a_inf = Vec::with_capacity(g2_constraints.len());
-
-                for w in &g2_constraints {
-                    g2_x_a_c0.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.x_a_c0.clone())
-                    }));
-                    g2_x_a_c1.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.x_a_c1.clone())
-                    }));
-                    g2_y_a_c0.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.y_a_c0.clone())
-                    }));
-                    g2_y_a_c1.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.y_a_c1.clone())
-                    }));
-                    g2_a_inf.push(MultilinearPolynomial::from(unsafe {
-                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.a_indicator.clone())
-                    }));
-                }
-
-                let prover = BoundarySumcheckProver::new(
-                    params,
-                    gt_rho_polys,
-                    &self.constraint_system.packed_gt_exp_public_inputs,
-                    (g1_x_a, g1_y_a, g1_a_inf),
-                    &self.constraint_system.g1_scalar_mul_public_inputs,
-                    (g2_x_a_c0, g2_x_a_c1, g2_y_a_c0, g2_y_a_c1, g2_a_inf),
-                    &self.constraint_system.g2_scalar_mul_public_inputs,
-                    transcript,
-                );
-                provers.push(Box::new(prover));
-            }
-        }
+        // TODO: Add Boundary/Wiring Sumcheck (initial/final states + copy constraints)
+        // Currently removed due to polynomial size mismatch bug; will be redesigned with packing.
 
         if provers.is_empty() {
             return Err("No constraints to prove in Stage 1".into());

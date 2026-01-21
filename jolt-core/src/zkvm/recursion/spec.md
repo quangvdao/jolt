@@ -280,6 +280,76 @@ Stage 2 treats both virtual claims uniformly, regardless of their verification m
 
 **Security**: Maintains same soundness guarantees with error ≤ 12 × 2^{-254} ≈ 2^{-250}
 
+#### Implementation status (current repo)
+
+The repo already contains a `ShiftRho` (“shift sumcheck”) implementation, but it is **not wired into
+the prover/verifier**, so the packed GT exp transition is currently **underconstrained**:
+
+- Commit `8632981d` (“remove rho_next from committed data, but is under-constrained”) removed
+  `rho_next` from the committed recursion matrix rows (see `DoryMatrixBuilder::add_packed_gt_exp_witness`)
+  and introduced `jolt-core/src/zkvm/recursion/stage1/shift_rho.rs`.
+- `PackedGtExp` still produces a `PackedGtExpRhoNext(i)` *value* (via the witness table), and
+  `PackedGtExpVerifier` consumes that value in the transition constraint check, but **nothing currently
+  enforces**:
+
+  \[
+  \rho_{\text{next}}(r_s^\*, r_x^\*) = \rho(r_s^\* + 1, r_x^\*).
+  \]
+
+In other words, today the prover can pick `rho_next` values to satisfy the transition constraint at the
+random point without linking consecutive rows of `rho`.
+
+#### Implementation plan to remove the underconstraint
+
+**Goal**: before Stage 2, enforce the packed GT-exp shift relation at the Stage 1 challenge point for
+every packed GT exp witness:
+
+\[
+\rho_{\text{next}}(r_s^\*, r_x^\*) \stackrel{!}{=} \sum_{s \in \{0,1\}^{\ell_s}} \sum_{x \in \{0,1\}^{4}}
+\mathrm{EqPlusOne}(r_s^\*, s)\cdot \mathrm{eq}(r_x^\*, x)\cdot \rho(s,x).
+\]
+
+**Note**: the current code uses base-4 digits for the exponent, so \(\ell_s = 7\) (128 steps), not 8.
+
+1. **Add an explicit “Stage 1b” proof for the shift sumcheck**
+   - Extend `RecursionProof` with a new field (e.g. `stage1_shift_rho_proof`).
+   - In `RecursionProver::prove_with_pcs`, after Stage 1 completes and yields `r_stage1`,
+     instantiate `ShiftRhoProver` over all packed GT exp witnesses and generate `stage1_shift_rho_proof`.
+   - In `RecursionVerifier::verify_stage1`, after verifying Stage 1 and obtaining the same `r_stage1`,
+     verify `stage1_shift_rho_proof` using `ShiftRhoVerifier`.
+
+2. **Run `ShiftRho` with fresh Fiat–Shamir challenges (standard sumcheck soundness)**
+   - Do **not** reuse `r_stage1` as the `ShiftRho` round challenges. In Fiat–Shamir, each sumcheck’s
+     challenges must be derived *after* the prover commits to that sumcheck’s round polynomials.
+   - This means `ShiftRho` will have its own challenge point \(r_{\text{shift}}\) (11 variables). The
+     final oracle check for `ShiftRho` therefore needs \(\rho(r_{\text{shift}})\) (and/or a batched
+     linear combination of \(\rho_i(r_{\text{shift}})\) across witnesses).
+   - Concretely, update `ShiftRhoProver::cache_openings` to append the needed \(\rho(r_{\text{shift}})\)
+     claims into the accumulator under `SumcheckId::ShiftRho` (e.g. store
+     `VirtualPolynomial::PackedGtExpRho(i)` at \(r_{\text{shift}}\) keyed by `(…, SumcheckId::ShiftRho)`),
+     and update `ShiftRhoVerifier::expected_output_claim` to read those openings (instead of reading
+     `PackedGtExpRho(i)` from `SumcheckId::PackedGtExp`).
+
+3. **Prove the new \(\rho(r_{\text{shift}})\) openings against the committed dense polynomial**
+   - The \(\rho(r_{\text{shift}})\) values introduced in step (2) are new oracle evaluations; they must
+     be connected to the committed data (the dense polynomial) to avoid reintroducing an
+     underconstraint.
+   - A practical approach is to add a small “row-opening via jagged transform” reduction:
+     prove each needed claim `ρ_i(r_shift)` equals the corresponding matrix row’s MLE evaluation at
+     \(r_{\text{shift}}\), reduced to the same committed `DoryDenseMatrix` opening used in Stage 3.
+     If there are many packed GT exp witnesses, batch these row-opening checks with a random linear
+     combination to keep proof size small.
+
+4. **Enforce sequencing and prevent regressions**
+   - If any `ConstraintType::PackedGtExp` is present, require Stage 1b (`ShiftRho`) to be present and
+     successfully verified; otherwise fail fast (prover should not emit a proof, verifier should reject).
+
+5. **Add a negative test to demonstrate soundness**
+   - Create a test that tampers with `rho_next_packed` for a packed GT exp witness (keeping all other
+     witness data intact) and assert:
+     - `PackedGtExp` alone would not catch the tampering (this illustrates the underconstraint), and
+     - the new `ShiftRho` Stage 1b verification fails.
+
 ---
 
 ### 2.3 GT Multiplication

@@ -45,6 +45,51 @@ pub struct G2ScalarMulPublicInputs {
     pub scalar: Fr,
 }
 
+/// Witness polynomials for a G2 scalar multiplication constraint.
+///
+/// Represents the double-and-add trace with 256 steps (MSB-first) over Fq2.
+/// Since the recursion SNARK runs over Fq, each Fq2 element is split into
+/// its (c0, c1) components.
+///
+/// - `A_i`: accumulator point at step `i` (in G2)
+/// - `T_i = [2]A_i`: doubled point at step `i`
+/// - `A_{i+1} = T_i + b_i·P`: next accumulator
+#[derive(Clone, Debug)]
+pub struct G2ScalarMulWitness {
+    /// Index of this constraint in the constraint system
+    pub constraint_index: usize,
+    /// Base point P = (x, y) in G2 being multiplied (Fq2 coordinates)
+    pub base_point: (Fq2, Fq2),
+    /// Accumulator x-coordinate c0 component: x_A.c0(s)
+    pub x_a_c0: Vec<Fq>,
+    /// Accumulator x-coordinate c1 component: x_A.c1(s)
+    pub x_a_c1: Vec<Fq>,
+    /// Accumulator y-coordinate c0 component: y_A.c0(s)
+    pub y_a_c0: Vec<Fq>,
+    /// Accumulator y-coordinate c1 component: y_A.c1(s)
+    pub y_a_c1: Vec<Fq>,
+    /// Doubled point x-coordinate c0 component: x_T.c0(s)
+    pub x_t_c0: Vec<Fq>,
+    /// Doubled point x-coordinate c1 component: x_T.c1(s)
+    pub x_t_c1: Vec<Fq>,
+    /// Doubled point y-coordinate c0 component: y_T.c0(s)
+    pub y_t_c0: Vec<Fq>,
+    /// Doubled point y-coordinate c1 component: y_T.c1(s)
+    pub y_t_c1: Vec<Fq>,
+    /// Next accumulator x-coordinate c0 component: x_A_next.c0(s)
+    pub x_a_next_c0: Vec<Fq>,
+    /// Next accumulator x-coordinate c1 component: x_A_next.c1(s)
+    pub x_a_next_c1: Vec<Fq>,
+    /// Next accumulator y-coordinate c0 component: y_A_next.c0(s)
+    pub y_a_next_c0: Vec<Fq>,
+    /// Next accumulator y-coordinate c1 component: y_A_next.c1(s)
+    pub y_a_next_c1: Vec<Fq>,
+    /// Indicator for T being at infinity: 1 if T_s = O, else 0
+    pub t_indicator: Vec<Fq>,
+    /// Indicator for A being at infinity: 1 if A_s = O, else 0
+    pub a_indicator: Vec<Fq>,
+}
+
 impl G2ScalarMulPublicInputs {
     pub fn new(scalar: Fr) -> Self {
         Self { scalar }

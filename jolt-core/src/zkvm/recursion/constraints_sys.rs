@@ -16,8 +16,8 @@ use crate::{
     transcripts::Transcript,
     utils::errors::ProofVerifyError,
     zkvm::recursion::{
-        stage1::g1_scalar_mul::G1ScalarMulPublicInputs,
-        stage1::g2_scalar_mul::G2ScalarMulPublicInputs,
+        stage1::g1_scalar_mul::{G1ScalarMulPublicInputs, G1ScalarMulWitness},
+        stage1::g2_scalar_mul::{G2ScalarMulPublicInputs, G2ScalarMulWitness},
         stage1::packed_gt_exp::PackedGtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
@@ -1489,23 +1489,11 @@ impl ConstraintSystem {
         constraints
     }
 
-    /// Extract G1 scalar mul constraint data for g1_scalar_mul sumcheck
-    /// Returns: (idx, base_point, x_a, y_a, x_t, y_t, x_a_next, y_a_next, t_indicator, a_indicator)
-    #[allow(clippy::type_complexity)]
-    pub fn extract_g1_scalar_mul_constraints(
-        &self,
-    ) -> Vec<(
-        usize,
-        (Fq, Fq),
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-    )> {
+    /// Extract G1 scalar mul constraint data for g1_scalar_mul sumcheck.
+    ///
+    /// Returns a vector of [`G1ScalarMulWitness`] containing the witness polynomials
+    /// for each G1 scalar multiplication constraint.
+    pub fn extract_g1_scalar_mul_constraints(&self) -> Vec<G1ScalarMulWitness> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
@@ -1531,8 +1519,8 @@ impl ConstraintSystem {
                 let a_indicator =
                     self.extract_row_poly(PolyType::G1ScalarMulAIndicator, idx, row_size);
 
-                constraints.push((
-                    constraint.constraint_index,
+                constraints.push(G1ScalarMulWitness {
+                    constraint_index: constraint.constraint_index,
                     base_point,
                     x_a,
                     y_a,
@@ -1542,7 +1530,7 @@ impl ConstraintSystem {
                     y_a_next,
                     t_indicator,
                     a_indicator,
-                ));
+                });
             }
         }
 
@@ -1551,30 +1539,9 @@ impl ConstraintSystem {
 
     /// Extract G2 scalar mul constraint data for g2_scalar_mul sumcheck.
     ///
-    /// Returns:
-    /// (idx, base_point, x_a_c0, x_a_c1, y_a_c0, y_a_c1, x_t_c0, x_t_c1, y_t_c0, y_t_c1,
-    ///  x_a_next_c0, x_a_next_c1, y_a_next_c0, y_a_next_c1, t_indicator, a_indicator)
-    #[allow(clippy::type_complexity)]
-    pub fn extract_g2_scalar_mul_constraints(
-        &self,
-    ) -> Vec<(
-        usize,
-        (Fq2, Fq2),
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-        Vec<Fq>,
-    )> {
+    /// Returns a vector of [`G2ScalarMulWitness`] containing the witness polynomials
+    /// for each G2 scalar multiplication constraint.
+    pub fn extract_g2_scalar_mul_constraints(&self) -> Vec<G2ScalarMulWitness> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
@@ -1609,8 +1576,8 @@ impl ConstraintSystem {
                 let a_indicator =
                     self.extract_row_poly(PolyType::G2ScalarMulAIndicator, idx, row_size);
 
-                constraints.push((
-                    constraint.constraint_index,
+                constraints.push(G2ScalarMulWitness {
+                    constraint_index: constraint.constraint_index,
                     base_point,
                     x_a_c0,
                     x_a_c1,
@@ -1626,7 +1593,7 @@ impl ConstraintSystem {
                     y_a_next_c1,
                     t_indicator,
                     a_indicator,
-                ));
+                });
             }
         }
 

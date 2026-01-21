@@ -34,6 +34,7 @@ use crate::zkvm::recursion::DoryMatrixBuilder;
 use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
     stage1::{
+        boundary_constraints::{BoundarySumcheckParams, BoundarySumcheckProver},
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulProver},
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulProver},
         gt_mul::{GtMulParams, GtMulProver},
@@ -272,11 +273,7 @@ impl RecursionProver<Fq> {
         let g1_scalar_mul_span = tracing::info_span!("process_g1_scalar_mul_witnesses").entered();
 
         let num_g1_witnesses = witnesses.g1_scalar_mul.len();
-        let total_bits: usize = witnesses
-            .g1_scalar_mul
-            .values()
-            .map(|w| w.bits.len())
-            .sum();
+        let total_bits: usize = witnesses.g1_scalar_mul.values().map(|w| w.bits.len()).sum();
 
         let mut base_points = Vec::with_capacity(num_g1_witnesses);
         let mut scalars = Vec::with_capacity(num_g1_witnesses);
@@ -676,37 +673,22 @@ impl<F: JoltField> RecursionProver<F> {
                 "ConstraintSystem.g1_scalar_mul_public_inputs must match extracted G1 scalar-mul constraints"
             );
 
-            // Convert tuples to structured type
+            // Convert witness structs to constraint polynomials
             let g1_scalar_mul_constraints: Vec<G1ScalarMulConstraintPolynomials> =
                 g1_scalar_mul_constraints_tuples
                     .into_iter()
-                    .map(
-                        |(
-                            idx,
-                            base_point,
-                            x_a,
-                            y_a,
-                            x_t,
-                            y_t,
-                            x_a_next,
-                            y_a_next,
-                            t_is_infinity,
-                            a_is_infinity,
-                        )| {
-                            G1ScalarMulConstraintPolynomials {
-                                x_a,
-                                y_a,
-                                x_t,
-                                y_t,
-                                x_a_next,
-                                y_a_next,
-                                t_is_infinity,
-                                a_is_infinity,
-                                base_point,
-                                constraint_index: idx,
-                            }
-                        },
-                    )
+                    .map(|w| G1ScalarMulConstraintPolynomials {
+                        x_a: w.x_a,
+                        y_a: w.y_a,
+                        x_t: w.x_t,
+                        y_t: w.y_t,
+                        x_a_next: w.x_a_next,
+                        y_a_next: w.y_a_next,
+                        t_is_infinity: w.t_indicator,
+                        a_is_infinity: w.a_indicator,
+                        base_point: w.base_point,
+                        constraint_index: w.constraint_index,
+                    })
                     .collect();
 
             let params = G1ScalarMulParams::new(g1_scalar_mul_constraints.len());
@@ -731,48 +713,28 @@ impl<F: JoltField> RecursionProver<F> {
                 "ConstraintSystem.g2_scalar_mul_public_inputs must match extracted G2 scalar-mul constraints"
             );
 
+            // Convert witness structs to constraint polynomials
             let g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials> =
                 g2_scalar_mul_constraints_tuples
                     .into_iter()
-                    .map(
-                        |(
-                            idx,
-                            base_point,
-                            x_a_c0,
-                            x_a_c1,
-                            y_a_c0,
-                            y_a_c1,
-                            x_t_c0,
-                            x_t_c1,
-                            y_t_c0,
-                            y_t_c1,
-                            x_a_next_c0,
-                            x_a_next_c1,
-                            y_a_next_c0,
-                            y_a_next_c1,
-                            t_is_infinity,
-                            a_is_infinity,
-                        )| {
-                            G2ScalarMulConstraintPolynomials {
-                                x_a_c0,
-                                x_a_c1,
-                                y_a_c0,
-                                y_a_c1,
-                                x_t_c0,
-                                x_t_c1,
-                                y_t_c0,
-                                y_t_c1,
-                                x_a_next_c0,
-                                x_a_next_c1,
-                                y_a_next_c0,
-                                y_a_next_c1,
-                                t_is_infinity,
-                                a_is_infinity,
-                                base_point,
-                                constraint_index: idx,
-                            }
-                        },
-                    )
+                    .map(|w| G2ScalarMulConstraintPolynomials {
+                        x_a_c0: w.x_a_c0,
+                        x_a_c1: w.x_a_c1,
+                        y_a_c0: w.y_a_c0,
+                        y_a_c1: w.y_a_c1,
+                        x_t_c0: w.x_t_c0,
+                        x_t_c1: w.x_t_c1,
+                        y_t_c0: w.y_t_c0,
+                        y_t_c1: w.y_t_c1,
+                        x_a_next_c0: w.x_a_next_c0,
+                        x_a_next_c1: w.x_a_next_c1,
+                        y_a_next_c0: w.y_a_next_c0,
+                        y_a_next_c1: w.y_a_next_c1,
+                        t_is_infinity: w.t_indicator,
+                        a_is_infinity: w.a_indicator,
+                        base_point: w.base_point,
+                        constraint_index: w.constraint_index,
+                    })
                     .collect();
 
             let params = G2ScalarMulParams::new(g2_scalar_mul_constraints.len());
@@ -783,6 +745,102 @@ impl<F: JoltField> RecursionProver<F> {
                 transcript,
             );
             provers.push(Box::new(prover));
+        }
+
+        // Add Boundary Sumcheck Prover (checks initial conditions)
+        {
+            use super::constraints_sys::PolyType;
+            use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+
+            // Helper to extract polynomials from matrix rows
+            let get_polys = |poly_type: PolyType| -> Vec<MultilinearPolynomial<F>> {
+                // We need to access rows_by_type from the matrix.
+                // But DoryMultilinearMatrix is flattened.
+                // However, we can use the extraction methods or reconstruct them.
+                // Actually, ConstraintSystem stores packed_gt_exp_witnesses directly!
+                // So for GT Exp, we can use that.
+                // For G1/G2, we need to extract from matrix.
+                // But extracting from flattened matrix is expensive/complex here.
+                // Wait, ConstraintSystem.extract_g1_scalar_mul_constraints() returns the polynomials!
+                // I can use that!
+                vec![] // Placeholder, logic below
+            };
+
+            let packed_witnesses = &self.constraint_system.packed_gt_exp_witnesses;
+            let g1_constraints = self.constraint_system.extract_g1_scalar_mul_constraints();
+            let g2_constraints = self.constraint_system.extract_g2_scalar_mul_constraints();
+
+            if !packed_witnesses.is_empty()
+                || !g1_constraints.is_empty()
+                || !g2_constraints.is_empty()
+            {
+                let params = BoundarySumcheckParams::new(
+                    packed_witnesses.len(),
+                    g1_constraints.len(),
+                    g2_constraints.len(),
+                );
+
+                // GT Exp Polys
+                let mut gt_rho_polys = Vec::with_capacity(packed_witnesses.len());
+                for w in packed_witnesses {
+                    // Convert Fq to F
+                    let rho_f: Vec<F> = unsafe { std::mem::transmute(w.rho_packed.clone()) };
+                    gt_rho_polys.push(MultilinearPolynomial::from(rho_f));
+                }
+
+                // G1 Polys
+                let mut g1_x_a = Vec::with_capacity(g1_constraints.len());
+                let mut g1_y_a = Vec::with_capacity(g1_constraints.len());
+                let mut g1_a_inf = Vec::with_capacity(g1_constraints.len());
+                for w in &g1_constraints {
+                    g1_x_a.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.x_a.clone())
+                    }));
+                    g1_y_a.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.y_a.clone())
+                    }));
+                    g1_a_inf.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.a_indicator.clone())
+                    }));
+                }
+
+                // G2 Polys
+                let mut g2_x_a_c0 = Vec::with_capacity(g2_constraints.len());
+                let mut g2_x_a_c1 = Vec::with_capacity(g2_constraints.len());
+                let mut g2_y_a_c0 = Vec::with_capacity(g2_constraints.len());
+                let mut g2_y_a_c1 = Vec::with_capacity(g2_constraints.len());
+                let mut g2_a_inf = Vec::with_capacity(g2_constraints.len());
+
+                for w in &g2_constraints {
+                    g2_x_a_c0.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.x_a_c0.clone())
+                    }));
+                    g2_x_a_c1.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.x_a_c1.clone())
+                    }));
+                    g2_y_a_c0.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.y_a_c0.clone())
+                    }));
+                    g2_y_a_c1.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.y_a_c1.clone())
+                    }));
+                    g2_a_inf.push(MultilinearPolynomial::from(unsafe {
+                        std::mem::transmute::<Vec<Fq>, Vec<F>>(w.a_indicator.clone())
+                    }));
+                }
+
+                let prover = BoundarySumcheckProver::new(
+                    params,
+                    gt_rho_polys,
+                    &self.constraint_system.packed_gt_exp_public_inputs,
+                    (g1_x_a, g1_y_a, g1_a_inf),
+                    &self.constraint_system.g1_scalar_mul_public_inputs,
+                    (g2_x_a_c0, g2_x_a_c1, g2_y_a_c0, g2_y_a_c1, g2_a_inf),
+                    &self.constraint_system.g2_scalar_mul_public_inputs,
+                    transcript,
+                );
+                provers.push(Box::new(prover));
+            }
         }
 
         if provers.is_empty() {

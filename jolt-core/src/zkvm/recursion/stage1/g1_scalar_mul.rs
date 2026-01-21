@@ -52,6 +52,36 @@ pub struct G1ScalarMulPublicInputs {
     pub scalar: Fr,
 }
 
+/// Witness polynomials for a G1 scalar multiplication constraint.
+///
+/// Represents the double-and-add trace with 256 steps (MSB-first):
+/// - `A_i`: accumulator point at step `i`
+/// - `T_i = [2]A_i`: doubled point at step `i`
+/// - `A_{i+1} = T_i + b_i·P`: next accumulator
+#[derive(Clone, Debug)]
+pub struct G1ScalarMulWitness {
+    /// Index of this constraint in the constraint system
+    pub constraint_index: usize,
+    /// Base point P = (x, y) being multiplied
+    pub base_point: (Fq, Fq),
+    /// Accumulator x-coordinate: x_A(s) for each step s
+    pub x_a: Vec<Fq>,
+    /// Accumulator y-coordinate: y_A(s) for each step s
+    pub y_a: Vec<Fq>,
+    /// Doubled point x-coordinate: x_T(s) = x([2]A_s)
+    pub x_t: Vec<Fq>,
+    /// Doubled point y-coordinate: y_T(s) = y([2]A_s)
+    pub y_t: Vec<Fq>,
+    /// Next accumulator x-coordinate: x_A(s+1)
+    pub x_a_next: Vec<Fq>,
+    /// Next accumulator y-coordinate: y_A(s+1)
+    pub y_a_next: Vec<Fq>,
+    /// Indicator for T being at infinity: 1 if T_s = O, else 0
+    pub t_indicator: Vec<Fq>,
+    /// Indicator for A being at infinity: 1 if A_s = O, else 0
+    pub a_indicator: Vec<Fq>,
+}
+
 impl G1ScalarMulPublicInputs {
     pub fn new(scalar: Fr) -> Self {
         Self { scalar }

@@ -22,6 +22,7 @@ use super::{
     constraints_sys::ConstraintType,
     recursion_prover::RecursionProof,
     stage1::{
+        boundary_constraints::{BoundarySumcheckParams, BoundarySumcheckVerifier},
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier},
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier},
         gt_mul::{GtMulParams, GtMulVerifier},
@@ -257,6 +258,20 @@ impl<F: JoltField> RecursionVerifier<F> {
                 g2_scalar_mul_base_points,
                 g2_scalar_mul_indices,
                 self.input.g2_scalar_mul_public_inputs.clone(),
+                transcript,
+            );
+            verifiers.push(Box::new(verifier));
+        }
+
+        // Add Boundary Sumcheck Verifier (checks initial conditions)
+        if num_gt_exp > 0 || num_g1_scalar_mul > 0 || num_g2_scalar_mul > 0 {
+            let params =
+                BoundarySumcheckParams::new(num_gt_exp, num_g1_scalar_mul, num_g2_scalar_mul);
+            let verifier = BoundarySumcheckVerifier::new(
+                params,
+                &self.input.packed_gt_exp_public_inputs,
+                &self.input.g1_scalar_mul_public_inputs,
+                &self.input.g2_scalar_mul_public_inputs,
                 transcript,
             );
             verifiers.push(Box::new(verifier));

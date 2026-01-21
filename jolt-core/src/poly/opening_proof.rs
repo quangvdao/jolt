@@ -179,6 +179,8 @@ pub enum SumcheckId {
     OpeningReduction,
     /// G2 scalar multiplication constraints (recursion SNARK, Stage 1)
     G2ScalarMul,
+    /// Boundary constraints sumcheck (recursion SNARK, Stage 1)
+    BoundaryConstraints,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]

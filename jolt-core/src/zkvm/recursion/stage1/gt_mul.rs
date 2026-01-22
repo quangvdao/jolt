@@ -30,6 +30,7 @@ use rayon::prelude::*;
 use allocative::{allocative, Allocative};
 
 /// Helper to append all virtual claims for a GT mul constraint
+#[allow(clippy::too_many_arguments)]
 fn append_gt_mul_virtual_claims<F: JoltField, T: Transcript>(
     accumulator: &mut ProverOpeningAccumulator<F>,
     transcript: &mut T,

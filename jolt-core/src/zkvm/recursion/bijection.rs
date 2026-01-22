@@ -236,6 +236,44 @@ impl ConstraintSystemJaggedBuilder {
                     used_poly_types.insert(PolyType::G2ScalarMulTIndicator);
                     used_poly_types.insert(PolyType::G2ScalarMulAIndicator);
                 }
+                ConstraintType::G1Add => {
+                    used_poly_types.insert(PolyType::G1AddXP);
+                    used_poly_types.insert(PolyType::G1AddYP);
+                    used_poly_types.insert(PolyType::G1AddPIndicator);
+                    used_poly_types.insert(PolyType::G1AddXQ);
+                    used_poly_types.insert(PolyType::G1AddYQ);
+                    used_poly_types.insert(PolyType::G1AddQIndicator);
+                    used_poly_types.insert(PolyType::G1AddXR);
+                    used_poly_types.insert(PolyType::G1AddYR);
+                    used_poly_types.insert(PolyType::G1AddRIndicator);
+                    used_poly_types.insert(PolyType::G1AddLambda);
+                    used_poly_types.insert(PolyType::G1AddInvDeltaX);
+                    used_poly_types.insert(PolyType::G1AddIsDouble);
+                    used_poly_types.insert(PolyType::G1AddIsInverse);
+                }
+                ConstraintType::G2Add => {
+                    used_poly_types.insert(PolyType::G2AddXPC0);
+                    used_poly_types.insert(PolyType::G2AddXPC1);
+                    used_poly_types.insert(PolyType::G2AddYPC0);
+                    used_poly_types.insert(PolyType::G2AddYPC1);
+                    used_poly_types.insert(PolyType::G2AddPIndicator);
+                    used_poly_types.insert(PolyType::G2AddXQC0);
+                    used_poly_types.insert(PolyType::G2AddXQC1);
+                    used_poly_types.insert(PolyType::G2AddYQC0);
+                    used_poly_types.insert(PolyType::G2AddYQC1);
+                    used_poly_types.insert(PolyType::G2AddQIndicator);
+                    used_poly_types.insert(PolyType::G2AddXRC0);
+                    used_poly_types.insert(PolyType::G2AddXRC1);
+                    used_poly_types.insert(PolyType::G2AddYRC0);
+                    used_poly_types.insert(PolyType::G2AddYRC1);
+                    used_poly_types.insert(PolyType::G2AddRIndicator);
+                    used_poly_types.insert(PolyType::G2AddLambdaC0);
+                    used_poly_types.insert(PolyType::G2AddLambdaC1);
+                    used_poly_types.insert(PolyType::G2AddInvDeltaXC0);
+                    used_poly_types.insert(PolyType::G2AddInvDeltaXC1);
+                    used_poly_types.insert(PolyType::G2AddIsDouble);
+                    used_poly_types.insert(PolyType::G2AddIsInverse);
+                }
             }
         }
 
@@ -300,6 +338,46 @@ impl ConstraintSystemJaggedBuilder {
                             _ => None,
                         }
                     }
+                    ConstraintType::G1Add => match poly_type {
+                        PolyType::G1AddXP
+                        | PolyType::G1AddYP
+                        | PolyType::G1AddPIndicator
+                        | PolyType::G1AddXQ
+                        | PolyType::G1AddYQ
+                        | PolyType::G1AddQIndicator
+                        | PolyType::G1AddXR
+                        | PolyType::G1AddYR
+                        | PolyType::G1AddRIndicator
+                        | PolyType::G1AddLambda
+                        | PolyType::G1AddInvDeltaX
+                        | PolyType::G1AddIsDouble
+                        | PolyType::G1AddIsInverse => Some(11),
+                        _ => None,
+                    },
+                    ConstraintType::G2Add => match poly_type {
+                        PolyType::G2AddXPC0
+                        | PolyType::G2AddXPC1
+                        | PolyType::G2AddYPC0
+                        | PolyType::G2AddYPC1
+                        | PolyType::G2AddPIndicator
+                        | PolyType::G2AddXQC0
+                        | PolyType::G2AddXQC1
+                        | PolyType::G2AddYQC0
+                        | PolyType::G2AddYQC1
+                        | PolyType::G2AddQIndicator
+                        | PolyType::G2AddXRC0
+                        | PolyType::G2AddXRC1
+                        | PolyType::G2AddYRC0
+                        | PolyType::G2AddYRC1
+                        | PolyType::G2AddRIndicator
+                        | PolyType::G2AddLambdaC0
+                        | PolyType::G2AddLambdaC1
+                        | PolyType::G2AddInvDeltaXC0
+                        | PolyType::G2AddInvDeltaXC1
+                        | PolyType::G2AddIsDouble
+                        | PolyType::G2AddIsInverse => Some(11),
+                        _ => None,
+                    },
                 };
 
                 if let Some(num_vars) = num_vars {

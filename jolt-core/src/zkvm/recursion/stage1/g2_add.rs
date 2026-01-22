@@ -526,7 +526,11 @@ pub struct G2AddProver<F: JoltField, T: Transcript> {
 }
 
 impl<F: JoltField, T: Transcript> G2AddProver<F, T> {
-    pub fn new(params: G2AddParams, constraint_polys: Vec<G2AddConstraintPolynomials>, transcript: &mut T) -> Self {
+    pub fn new(
+        params: G2AddParams,
+        constraint_polys: Vec<G2AddConstraintPolynomials>,
+        transcript: &mut T,
+    ) -> Self {
         use std::any::TypeId;
         if TypeId::of::<F>() != TypeId::of::<Fq>() {
             panic!("G2 add requires F = Fq for recursion SNARK");
@@ -585,27 +589,69 @@ impl<F: JoltField, T: Transcript> G2AddProver<F, T> {
             let is_double_f: Vec<F> = unsafe { std::mem::transmute(poly.is_double) };
             let is_inverse_f: Vec<F> = unsafe { std::mem::transmute(poly.is_inverse) };
 
-            x_p_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_p_c0_f)));
-            x_p_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_p_c1_f)));
-            y_p_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_p_c0_f)));
-            y_p_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_p_c1_f)));
-            ind_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_p_f)));
-            x_q_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_q_c0_f)));
-            x_q_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_q_c1_f)));
-            y_q_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_q_c0_f)));
-            y_q_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_q_c1_f)));
-            ind_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_q_f)));
-            x_r_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_r_c0_f)));
-            x_r_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_r_c1_f)));
-            y_r_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_r_c0_f)));
-            y_r_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_r_c1_f)));
-            ind_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_r_f)));
-            lambda_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(lambda_c0_f)));
-            lambda_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(lambda_c1_f)));
-            inv_dx_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(inv_dx_c0_f)));
-            inv_dx_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(inv_dx_c1_f)));
-            is_double_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(is_double_f)));
-            is_inverse_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(is_inverse_f)));
+            x_p_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_p_c0_f,
+            )));
+            x_p_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_p_c1_f,
+            )));
+            y_p_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_p_c0_f,
+            )));
+            y_p_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_p_c1_f,
+            )));
+            ind_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                ind_p_f,
+            )));
+            x_q_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_q_c0_f,
+            )));
+            x_q_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_q_c1_f,
+            )));
+            y_q_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_q_c0_f,
+            )));
+            y_q_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_q_c1_f,
+            )));
+            ind_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                ind_q_f,
+            )));
+            x_r_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_r_c0_f,
+            )));
+            x_r_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_r_c1_f,
+            )));
+            y_r_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_r_c0_f,
+            )));
+            y_r_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_r_c1_f,
+            )));
+            ind_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                ind_r_f,
+            )));
+            lambda_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                lambda_c0_f,
+            )));
+            lambda_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                lambda_c1_f,
+            )));
+            inv_dx_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                inv_dx_c0_f,
+            )));
+            inv_dx_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                inv_dx_c1_f,
+            )));
+            is_double_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                is_double_f,
+            )));
+            is_inverse_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                is_inverse_f,
+            )));
         }
 
         Self {
@@ -683,45 +729,83 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2AddProver<F
         let total_evals = (0..x_half)
             .into_par_iter()
             .map(|x_idx| {
-                let eq_x_evals = self.eq_x.sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                let eq_x_evals = self
+                    .eq_x
+                    .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
 
                 let mut x_evals = [F::zero(); DEGREE];
                 let mut gamma_power = self.gamma;
 
                 for i in 0..self.params.num_constraints {
-                    let x_p0 = self.x_p_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let x_p1 = self.x_p_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_p0 = self.y_p_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_p1 = self.y_p_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let ind_p = self.ind_p_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let x_p0 = self.x_p_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let x_p1 = self.x_p_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let y_p0 = self.y_p_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let y_p1 = self.y_p_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let ind_p = self.ind_p_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
 
-                    let x_q0 = self.x_q_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let x_q1 = self.x_q_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_q0 = self.y_q_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_q1 = self.y_q_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let ind_q = self.ind_q_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let x_q0 = self.x_q_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let x_q1 = self.x_q_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let y_q0 = self.y_q_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let y_q1 = self.y_q_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let ind_q = self.ind_q_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
 
-                    let x_r0 = self.x_r_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let x_r1 = self.x_r_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_r0 = self.y_r_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let y_r1 = self.y_r_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let ind_r = self.ind_r_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let x_r0 = self.x_r_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let x_r1 = self.x_r_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let y_r0 = self.y_r_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let y_r1 = self.y_r_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let ind_r = self.ind_r_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
 
-                    let lambda0 = self.lambda_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let lambda1 = self.lambda_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let inv0 = self.inv_dx_c0_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let inv1 = self.inv_dx_c1_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let is_double = self.is_double_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let is_inverse = self.is_inverse_mlpoly[i].sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let lambda0 = self.lambda_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let lambda1 = self.lambda_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let inv0 = self.inv_dx_c0_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let inv1 = self.inv_dx_c1_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let is_double = self.is_double_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    let is_inverse = self.is_inverse_mlpoly[i]
+                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
 
                     for t in 0..DEGREE {
                         let constraint_val = eval_g2_add_constraint(
-                            x_p0[t], x_p1[t], y_p0[t], y_p1[t], ind_p[t],
-                            x_q0[t], x_q1[t], y_q0[t], y_q1[t], ind_q[t],
-                            x_r0[t], x_r1[t], y_r0[t], y_r1[t], ind_r[t],
-                            lambda0[t], lambda1[t],
-                            inv0[t], inv1[t],
-                            is_double[t], is_inverse[t],
+                            x_p0[t],
+                            x_p1[t],
+                            y_p0[t],
+                            y_p1[t],
+                            ind_p[t],
+                            x_q0[t],
+                            x_q1[t],
+                            y_q0[t],
+                            y_q1[t],
+                            ind_q[t],
+                            x_r0[t],
+                            x_r1[t],
+                            y_r0[t],
+                            y_r1[t],
+                            ind_r[t],
+                            lambda0[t],
+                            lambda1[t],
+                            inv0[t],
+                            inv1[t],
+                            is_double[t],
+                            is_inverse[t],
                             self.delta,
                         );
                         x_evals[t] += eq_x_evals[t] * gamma_power * constraint_val;
@@ -748,30 +832,72 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2AddProver<F
     fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize) {
         self.eq_x.bind_parallel(r_j, BindingOrder::LowToHigh);
 
-        for poly in &mut self.x_p_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.x_p_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.y_p_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.y_p_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.ind_p_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
+        for poly in &mut self.x_p_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.x_p_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.y_p_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.y_p_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.ind_p_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
 
-        for poly in &mut self.x_q_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.x_q_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.y_q_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.y_q_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.ind_q_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
+        for poly in &mut self.x_q_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.x_q_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.y_q_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.y_q_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.ind_q_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
 
-        for poly in &mut self.x_r_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.x_r_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.y_r_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.y_r_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.ind_r_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
+        for poly in &mut self.x_r_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.x_r_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.y_r_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.y_r_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.ind_r_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
 
-        for poly in &mut self.lambda_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.lambda_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.inv_dx_c0_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.inv_dx_c1_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.is_double_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
-        for poly in &mut self.is_inverse_mlpoly { poly.bind_parallel(r_j, BindingOrder::LowToHigh); }
+        for poly in &mut self.lambda_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.lambda_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.inv_dx_c0_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.inv_dx_c1_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.is_double_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
+        for poly in &mut self.is_inverse_mlpoly {
+            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        }
 
         self.round = round + 1;
         if self.round == self.params.num_constraint_vars {
@@ -798,27 +924,48 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2AddProver<F
             self.is_inverse_claims.clear();
 
             for i in 0..self.params.num_constraints {
-                self.x_p_c0_claims.push(self.x_p_c0_mlpoly[i].get_bound_coeff(0));
-                self.x_p_c1_claims.push(self.x_p_c1_mlpoly[i].get_bound_coeff(0));
-                self.y_p_c0_claims.push(self.y_p_c0_mlpoly[i].get_bound_coeff(0));
-                self.y_p_c1_claims.push(self.y_p_c1_mlpoly[i].get_bound_coeff(0));
-                self.ind_p_claims.push(self.ind_p_mlpoly[i].get_bound_coeff(0));
-                self.x_q_c0_claims.push(self.x_q_c0_mlpoly[i].get_bound_coeff(0));
-                self.x_q_c1_claims.push(self.x_q_c1_mlpoly[i].get_bound_coeff(0));
-                self.y_q_c0_claims.push(self.y_q_c0_mlpoly[i].get_bound_coeff(0));
-                self.y_q_c1_claims.push(self.y_q_c1_mlpoly[i].get_bound_coeff(0));
-                self.ind_q_claims.push(self.ind_q_mlpoly[i].get_bound_coeff(0));
-                self.x_r_c0_claims.push(self.x_r_c0_mlpoly[i].get_bound_coeff(0));
-                self.x_r_c1_claims.push(self.x_r_c1_mlpoly[i].get_bound_coeff(0));
-                self.y_r_c0_claims.push(self.y_r_c0_mlpoly[i].get_bound_coeff(0));
-                self.y_r_c1_claims.push(self.y_r_c1_mlpoly[i].get_bound_coeff(0));
-                self.ind_r_claims.push(self.ind_r_mlpoly[i].get_bound_coeff(0));
-                self.lambda_c0_claims.push(self.lambda_c0_mlpoly[i].get_bound_coeff(0));
-                self.lambda_c1_claims.push(self.lambda_c1_mlpoly[i].get_bound_coeff(0));
-                self.inv_dx_c0_claims.push(self.inv_dx_c0_mlpoly[i].get_bound_coeff(0));
-                self.inv_dx_c1_claims.push(self.inv_dx_c1_mlpoly[i].get_bound_coeff(0));
-                self.is_double_claims.push(self.is_double_mlpoly[i].get_bound_coeff(0));
-                self.is_inverse_claims.push(self.is_inverse_mlpoly[i].get_bound_coeff(0));
+                self.x_p_c0_claims
+                    .push(self.x_p_c0_mlpoly[i].get_bound_coeff(0));
+                self.x_p_c1_claims
+                    .push(self.x_p_c1_mlpoly[i].get_bound_coeff(0));
+                self.y_p_c0_claims
+                    .push(self.y_p_c0_mlpoly[i].get_bound_coeff(0));
+                self.y_p_c1_claims
+                    .push(self.y_p_c1_mlpoly[i].get_bound_coeff(0));
+                self.ind_p_claims
+                    .push(self.ind_p_mlpoly[i].get_bound_coeff(0));
+                self.x_q_c0_claims
+                    .push(self.x_q_c0_mlpoly[i].get_bound_coeff(0));
+                self.x_q_c1_claims
+                    .push(self.x_q_c1_mlpoly[i].get_bound_coeff(0));
+                self.y_q_c0_claims
+                    .push(self.y_q_c0_mlpoly[i].get_bound_coeff(0));
+                self.y_q_c1_claims
+                    .push(self.y_q_c1_mlpoly[i].get_bound_coeff(0));
+                self.ind_q_claims
+                    .push(self.ind_q_mlpoly[i].get_bound_coeff(0));
+                self.x_r_c0_claims
+                    .push(self.x_r_c0_mlpoly[i].get_bound_coeff(0));
+                self.x_r_c1_claims
+                    .push(self.x_r_c1_mlpoly[i].get_bound_coeff(0));
+                self.y_r_c0_claims
+                    .push(self.y_r_c0_mlpoly[i].get_bound_coeff(0));
+                self.y_r_c1_claims
+                    .push(self.y_r_c1_mlpoly[i].get_bound_coeff(0));
+                self.ind_r_claims
+                    .push(self.ind_r_mlpoly[i].get_bound_coeff(0));
+                self.lambda_c0_claims
+                    .push(self.lambda_c0_mlpoly[i].get_bound_coeff(0));
+                self.lambda_c1_claims
+                    .push(self.lambda_c1_mlpoly[i].get_bound_coeff(0));
+                self.inv_dx_c0_claims
+                    .push(self.inv_dx_c0_mlpoly[i].get_bound_coeff(0));
+                self.inv_dx_c1_claims
+                    .push(self.inv_dx_c1_mlpoly[i].get_bound_coeff(0));
+                self.is_double_claims
+                    .push(self.is_double_mlpoly[i].get_bound_coeff(0));
+                self.is_inverse_claims
+                    .push(self.is_inverse_mlpoly[i].get_bound_coeff(0));
             }
         }
     }
@@ -869,24 +1016,42 @@ pub struct G2AddVerifier<F: JoltField> {
     pub gamma: F,
     pub delta: F,
     pub num_constraints: usize,
+    pub constraint_indices: Vec<usize>,
 }
 
 impl<F: JoltField> G2AddVerifier<F> {
-    pub fn new<T: Transcript>(params: G2AddParams, transcript: &mut T) -> Self {
+    pub fn new<T: Transcript>(
+        params: G2AddParams,
+        constraint_indices: Vec<usize>,
+        transcript: &mut T,
+    ) -> Self {
         let r_x: Vec<F::Challenge> = (0..params.num_constraint_vars)
             .map(|_| transcript.challenge_scalar_optimized::<F>())
             .collect();
         let gamma = transcript.challenge_scalar_optimized::<F>();
         let delta = transcript.challenge_scalar_optimized::<F>();
         let num_constraints = params.num_constraints;
-        Self { params, r_x, gamma: gamma.into(), delta: delta.into(), num_constraints }
+        Self {
+            params,
+            r_x,
+            gamma: gamma.into(),
+            delta: delta.into(),
+            num_constraints,
+            constraint_indices,
+        }
     }
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2AddVerifier<F> {
-    fn degree(&self) -> usize { 6 }
-    fn num_rounds(&self) -> usize { self.params.num_constraint_vars }
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F { F::zero() }
+    fn degree(&self) -> usize {
+        6
+    }
+    fn num_rounds(&self) -> usize {
+        self.params.num_constraint_vars
+    }
+    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
+        F::zero()
+    }
 
     fn expected_output_claim(
         &self,
@@ -896,28 +1061,45 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2AddVerifi
         use crate::poly::eq_poly::EqPolynomial;
 
         let r_x_f: Vec<F> = self.r_x.iter().map(|c| (*c).into()).collect();
-        let r_star_f: Vec<F> = sumcheck_challenges.iter().rev().map(|c| (*c).into()).collect();
+        let r_star_f: Vec<F> = sumcheck_challenges
+            .iter()
+            .rev()
+            .map(|c| (*c).into())
+            .collect();
         let eq_eval = EqPolynomial::mle(&r_x_f, &r_star_f);
 
         let mut total = F::zero();
         let mut gamma_power = self.gamma;
 
         for i in 0..self.num_constraints {
+            let global_idx = self.constraint_indices[i];
             let (
-                x_p0, x_p1, y_p0, y_p1, ind_p,
-                x_q0, x_q1, y_q0, y_q1, ind_q,
-                x_r0, x_r1, y_r0, y_r1, ind_r,
-                lambda0, lambda1, inv0, inv1, is_double, is_inverse,
-            ) = get_g2_add_virtual_claims(accumulator, i, self.params.sumcheck_id);
+                x_p0,
+                x_p1,
+                y_p0,
+                y_p1,
+                ind_p,
+                x_q0,
+                x_q1,
+                y_q0,
+                y_q1,
+                ind_q,
+                x_r0,
+                x_r1,
+                y_r0,
+                y_r1,
+                ind_r,
+                lambda0,
+                lambda1,
+                inv0,
+                inv1,
+                is_double,
+                is_inverse,
+            ) = get_g2_add_virtual_claims(accumulator, global_idx, self.params.sumcheck_id);
 
             let constraint_val = eval_g2_add_constraint(
-                x_p0, x_p1, y_p0, y_p1, ind_p,
-                x_q0, x_q1, y_q0, y_q1, ind_q,
-                x_r0, x_r1, y_r0, y_r1, ind_r,
-                lambda0, lambda1,
-                inv0, inv1,
-                is_double, is_inverse,
-                self.delta,
+                x_p0, x_p1, y_p0, y_p1, ind_p, x_q0, x_q1, y_q0, y_q1, ind_q, x_r0, x_r1, y_r0,
+                y_r1, ind_r, lambda0, lambda1, inv0, inv1, is_double, is_inverse, self.delta,
             );
             total += gamma_power * constraint_val;
             gamma_power *= self.gamma;
@@ -937,11 +1119,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2AddVerifi
             append_g2_add_virtual_openings(
                 accumulator,
                 transcript,
-                i,
+                self.constraint_indices[i],
                 self.params.sumcheck_id,
                 &opening_point,
             );
         }
     }
 }
-

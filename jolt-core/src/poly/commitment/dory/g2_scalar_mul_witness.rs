@@ -319,19 +319,18 @@ mod tests {
             let c7_yt_c0 = ind_t * y_t.c0;
             let c7_yt_c1 = ind_t * y_t.c1;
 
-            assert!(c1.is_zero(), "C1 failed at step {}: {:?}", step, c1);
-            assert!(c2.is_zero(), "C2 failed at step {}: {:?}", step, c2);
-            assert!(c3.is_zero(), "C3 failed at step {}: {:?}", step, c3);
-            assert!(c4.is_zero(), "C4 failed at step {}: {:?}", step, c4);
-            assert!(c5.is_zero(), "C5 failed at step {}: {:?}", step, c5);
-            assert!(c6.is_zero(), "C6 failed at step {}: {:?}", step, c6);
+            assert!(c1.is_zero(), "C1 failed at step {step}: {c1:?}");
+            assert!(c2.is_zero(), "C2 failed at step {step}: {c2:?}");
+            assert!(c3.is_zero(), "C3 failed at step {step}: {c3:?}");
+            assert!(c4.is_zero(), "C4 failed at step {step}: {c4:?}");
+            assert!(c5.is_zero(), "C5 failed at step {step}: {c5:?}");
+            assert!(c6.is_zero(), "C6 failed at step {step}: {c6:?}");
             assert!(
                 c7_xt_c0.is_zero()
                     && c7_xt_c1.is_zero()
                     && c7_yt_c0.is_zero()
                     && c7_yt_c1.is_zero(),
-                "C7 failed at step {}",
-                step
+                "C7 failed at step {step}"
             );
         }
     }

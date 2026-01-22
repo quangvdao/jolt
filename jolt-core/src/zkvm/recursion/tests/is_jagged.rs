@@ -98,10 +98,7 @@ fn test_dory_matrix_is_jagged() {
             let val = constraint_system.matrix.evaluations[offset + i];
             assert!(
                 val.is_zero(),
-                "Row {} should have all zeros past height {}, but found non-zero at position {}",
-                row_idx,
-                height,
-                i
+                "Row {row_idx} should have all zeros past height {height}, but found non-zero at position {i}"
             );
         }
 
@@ -123,7 +120,6 @@ fn test_dory_matrix_is_jagged() {
 
     assert!(
         compression_ratio > 50.0,
-        "Compression ratio should be significant (>50%), but got {:.2}%",
-        compression_ratio
+        "Compression ratio should be significant (>50%), but got {compression_ratio:.2}%"
     );
 }

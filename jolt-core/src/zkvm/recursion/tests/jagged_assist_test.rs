@@ -79,8 +79,7 @@ fn test_claimed_evaluations_correctness() {
 
         assert_eq!(
             expected, actual,
-            "Claimed evaluation mismatch for polynomial {}",
-            k
+            "Claimed evaluation mismatch for polynomial {k}"
         );
     }
 }
@@ -190,8 +189,7 @@ fn test_sumcheck_round_sum_property() {
 
         assert_eq!(
             sum, current_claim,
-            "Round {}: h(0) + h(1) = {} != current_claim = {}",
-            round, sum, current_claim
+            "Round {round}: h(0) + h(1) = {sum} != current_claim = {current_claim}"
         );
 
         // Sample random challenge and update
@@ -249,7 +247,7 @@ fn test_prover_verifier_consistency() {
         // Verify round sum
         let h_0 = poly.evaluate(&Fq::zero());
         let h_1 = poly.evaluate(&Fq::one());
-        assert_eq!(h_0 + h_1, current_claim, "Round {} sum check failed", round);
+        assert_eq!(h_0 + h_1, current_claim, "Round {round} sum check failed");
 
         // Sample challenge (using deterministic rng for reproducibility)
         let challenge: Fq = Fq::rand(&mut rng);
@@ -264,8 +262,7 @@ fn test_prover_verifier_consistency() {
 
     assert_eq!(
         current_claim, expected_output,
-        "Final claim {} != expected output {}",
-        current_claim, expected_output
+        "Final claim {current_claim} != expected output {expected_output}"
     );
 }
 
@@ -310,7 +307,7 @@ fn test_single_polynomial() {
 
         let h_0 = poly.evaluate(&Fq::zero());
         let h_1 = poly.evaluate(&Fq::one());
-        assert_eq!(h_0 + h_1, current_claim, "Round {} sum check failed", round);
+        assert_eq!(h_0 + h_1, current_claim, "Round {round} sum check failed");
 
         let challenge: Fq = Fq::rand(&mut rng);
         challenges.push(challenge.into());
@@ -373,7 +370,7 @@ fn test_many_polynomials() {
 
         let h_0 = poly.evaluate(&Fq::zero());
         let h_1 = poly.evaluate(&Fq::one());
-        assert_eq!(h_0 + h_1, current_claim, "Round {} sum check failed", round);
+        assert_eq!(h_0 + h_1, current_claim, "Round {round} sum check failed");
 
         let challenge: Fq = Fq::rand(&mut rng);
         challenges.push(challenge.into());
@@ -384,8 +381,7 @@ fn test_many_polynomials() {
     let expected_output = verifier.expected_output_claim(&verifier_accumulator, &challenges);
     assert_eq!(
         current_claim, expected_output,
-        "Prover-verifier mismatch with {} polynomials",
-        num_polynomials
+        "Prover-verifier mismatch with {num_polynomials} polynomials"
     );
 }
 
@@ -457,9 +453,7 @@ fn test_interleaved_ordering() {
         assert_eq!(
             get_coordinate_info(base, num_bits),
             (CoordType::A, layer),
-            "Variable {} should be A at layer {}",
-            base,
-            layer
+            "Variable {base} should be A at layer {layer}"
         );
         assert_eq!(
             get_coordinate_info(base + 1, num_bits),

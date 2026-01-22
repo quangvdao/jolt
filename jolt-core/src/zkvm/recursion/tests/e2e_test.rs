@@ -18,7 +18,6 @@ use ark_bn254::{Fq, Fr};
 use ark_ff::UniformRand;
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_std::test_rng;
-use dory::backends::arkworks::ArkGT;
 use serial_test::serial;
 
 #[test]
@@ -67,7 +66,7 @@ fn test_recursion_snark_e2e_with_dory() {
 
     // Convert to ArkDoryProof
     let ark_proof = ArkDoryProof::from(opening_proof);
-    let ark_commitment = ArkGT::from(commitment);
+    let ark_commitment = commitment;
 
     // ============ CREATE RECURSION PROVER FROM DORY PROOF ============
     // Generate gamma and delta for batching

@@ -47,7 +47,7 @@ mod recursion_tests {
             "Results should match between witness and ExponentiationSteps"
         );
 
-        let expected_steps = (witness.bits.len() + 1) / 2;
+        let expected_steps = witness.bits.len().div_ceil(2);
         assert_eq!(
             witness.quotient_mles.len(),
             expected_steps,

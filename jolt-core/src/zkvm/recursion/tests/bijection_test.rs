@@ -145,8 +145,7 @@ fn test_dense_polynomial_extraction() {
 
         assert_eq!(
             actual_val, expected_val,
-            "Mismatch at dense_idx {}, poly_idx {}, eval_idx {}",
-            dense_idx, poly_idx, eval_idx
+            "Mismatch at dense_idx {dense_idx}, poly_idx {poly_idx}, eval_idx {eval_idx}"
         );
     }
 }
@@ -266,9 +265,7 @@ fn test_constraint_mapping_consistency() {
 
         assert!(
             constraint_idx < cs.constraints.len(),
-            "Invalid constraint index {} for poly {}",
-            constraint_idx,
-            poly_idx
+            "Invalid constraint index {constraint_idx} for poly {poly_idx}"
         );
 
         let constraint = &cs.constraints[constraint_idx];
@@ -277,8 +274,7 @@ fn test_constraint_mapping_consistency() {
                 // Base and Bit are public inputs, not committed polynomials
                 assert!(
                     matches!(poly_type, PolyType::RhoPrev | PolyType::Quotient),
-                    "Invalid poly type {:?} for GT exp constraint",
-                    poly_type
+                    "Invalid poly type {poly_type:?} for GT exp constraint"
                 );
             }
             ConstraintType::GtMul => {
@@ -290,8 +286,7 @@ fn test_constraint_mapping_consistency() {
                             | PolyType::MulResult
                             | PolyType::MulQuotient
                     ),
-                    "Invalid poly type {:?} for GT mul constraint",
-                    poly_type
+                    "Invalid poly type {poly_type:?} for GT mul constraint"
                 );
             }
             ConstraintType::G1ScalarMul { .. } => {
@@ -308,8 +303,7 @@ fn test_constraint_mapping_consistency() {
                             | PolyType::G1ScalarMulAIndicator
                             | PolyType::G1ScalarMulBit
                     ),
-                    "Invalid poly type {:?} for G1 scalar mul constraint",
-                    poly_type
+                    "Invalid poly type {poly_type:?} for G1 scalar mul constraint"
                 );
             }
             ConstraintType::G2ScalarMul { .. } => {
@@ -332,8 +326,57 @@ fn test_constraint_mapping_consistency() {
                             | PolyType::G2ScalarMulAIndicator
                             | PolyType::G2ScalarMulBit
                     ),
-                    "Invalid poly type {:?} for G2 scalar mul constraint",
-                    poly_type
+                    "Invalid poly type {poly_type:?} for G2 scalar mul constraint"
+                );
+            }
+            ConstraintType::G1Add => {
+                assert!(
+                    matches!(
+                        poly_type,
+                        PolyType::G1AddXP
+                            | PolyType::G1AddYP
+                            | PolyType::G1AddPIndicator
+                            | PolyType::G1AddXQ
+                            | PolyType::G1AddYQ
+                            | PolyType::G1AddQIndicator
+                            | PolyType::G1AddXR
+                            | PolyType::G1AddYR
+                            | PolyType::G1AddRIndicator
+                            | PolyType::G1AddLambda
+                            | PolyType::G1AddInvDeltaX
+                            | PolyType::G1AddIsDouble
+                            | PolyType::G1AddIsInverse
+                    ),
+                    "Invalid poly type {poly_type:?} for G1 add constraint"
+                );
+            }
+            ConstraintType::G2Add => {
+                assert!(
+                    matches!(
+                        poly_type,
+                        PolyType::G2AddXPC0
+                            | PolyType::G2AddXPC1
+                            | PolyType::G2AddYPC0
+                            | PolyType::G2AddYPC1
+                            | PolyType::G2AddPIndicator
+                            | PolyType::G2AddXQC0
+                            | PolyType::G2AddXQC1
+                            | PolyType::G2AddYQC0
+                            | PolyType::G2AddYQC1
+                            | PolyType::G2AddQIndicator
+                            | PolyType::G2AddXRC0
+                            | PolyType::G2AddXRC1
+                            | PolyType::G2AddYRC0
+                            | PolyType::G2AddYRC1
+                            | PolyType::G2AddRIndicator
+                            | PolyType::G2AddLambdaC0
+                            | PolyType::G2AddLambdaC1
+                            | PolyType::G2AddInvDeltaXC0
+                            | PolyType::G2AddInvDeltaXC1
+                            | PolyType::G2AddIsDouble
+                            | PolyType::G2AddIsInverse
+                    ),
+                    "Invalid poly type {poly_type:?} for G2 add constraint"
                 );
             }
         }
@@ -414,6 +457,7 @@ fn test_jagged_bijection_with_real_dory_proof() {
             ConstraintType::GtMul => gt_mul_count += 1,
             ConstraintType::G1ScalarMul { .. } => _g1_scalar_mul_count += 1,
             ConstraintType::G2ScalarMul { .. } => {}
+            ConstraintType::G1Add | ConstraintType::G2Add => {}
         }
     }
 
@@ -444,8 +488,7 @@ fn test_jagged_bijection_with_real_dory_proof() {
             <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&bijection, row);
         assert!(
             num_vars == 4 || num_vars == 8 || num_vars == 11,
-            "Expected 4, 8, or 11 variables, got {}",
-            num_vars
+            "Expected 4, 8, or 11 variables, got {num_vars}"
         );
     }
 
@@ -467,8 +510,7 @@ fn test_jagged_bijection_with_real_dory_proof() {
 
         assert_eq!(
             actual_val, expected_val,
-            "Value mismatch at dense index {}",
-            i
+            "Value mismatch at dense index {i}"
         );
     }
 }
@@ -609,8 +651,7 @@ fn test_sparse_dense_isomorphism_value_by_value() {
 
         assert_eq!(
             actual_val, expected_val,
-            "Value mismatch at dense[{}]: poly[{}] eval[{}] (constraint {} type {:?})",
-            dense_idx, poly_idx, eval_idx, constraint_idx, poly_type
+            "Value mismatch at dense[{dense_idx}]: poly[{poly_idx}] eval[{eval_idx}] (constraint {constraint_idx} type {poly_type:?})"
         );
     }
 
@@ -689,9 +730,8 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
 
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
 
-    use dory::backends::arkworks::ArkGT;
     let ark_proof = ArkDoryProof::from(opening_proof);
-    let ark_commitment = ArkGT::from(commitment);
+    let ark_commitment = commitment;
 
     let prover = RecursionProver::<Fq>::new_from_dory_proof(
         &ark_proof,
@@ -765,6 +805,8 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
             ConstraintType::G2ScalarMul { .. } => {
                 vec![PolyType::G2ScalarMulXAC0, PolyType::G2ScalarMulXAC1]
             }
+            ConstraintType::G1Add => vec![PolyType::G1AddXP, PolyType::G1AddYP],
+            ConstraintType::G2Add => vec![PolyType::G2AddXPC0, PolyType::G2AddXPC1],
         };
 
         for poly_type in poly_types {
@@ -779,6 +821,7 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
                 ConstraintType::GtMul => 4,
                 ConstraintType::G1ScalarMul { .. } => 8,
                 ConstraintType::G2ScalarMul { .. } => 8,
+                ConstraintType::G1Add | ConstraintType::G2Add => 11,
             };
 
             let step = 1;
@@ -804,8 +847,7 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
 
                 assert_eq!(
                     sparse_value, dense_value,
-                    "Reverse bijection failed: sparse[{}] → dense[{}]",
-                    sparse_pos, dense_idx
+                    "Reverse bijection failed: sparse[{sparse_pos}] → dense[{dense_idx}]"
                 );
 
                 _verified_sparse_to_dense += 1;
@@ -839,8 +881,7 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
             for i in 16..2048 {
                 assert!(
                     constraint_system.matrix.evaluations[storage_offset + i].is_zero(),
-                    "Position {} should be zero for 4-var polynomial with zero padding",
-                    i
+                    "Position {i} should be zero for 4-var polynomial with zero padding"
                 );
             }
         }

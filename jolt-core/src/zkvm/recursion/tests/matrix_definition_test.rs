@@ -59,10 +59,7 @@ fn test_matrix_mle_definition_direct() {
 
     // Test at random points
     println!("Testing matrix MLE definition at random points...");
-    println!(
-        "Matrix has {} s variables, {} total evaluations",
-        num_s_vars, mu_size
-    );
+    println!("Matrix has {num_s_vars} s variables, {mu_size} total evaluations");
 
     for test_idx in 0..5 {
         // Sample random r_s
@@ -80,13 +77,11 @@ fn test_matrix_mle_definition_direct() {
             .sum();
 
         println!(
-            "Test {}: Direct eval = {:?}, From eq computation = {:?}",
-            test_idx, m_direct, m_from_eq
+            "Test {test_idx}: Direct eval = {m_direct:?}, From eq computation = {m_from_eq:?}"
         );
         assert_eq!(
             m_direct, m_from_eq,
-            "M evaluation doesn't match expected MLE computation! Test index: {}",
-            test_idx
+            "M evaluation doesn't match expected MLE computation! Test index: {test_idx}"
         );
     }
 

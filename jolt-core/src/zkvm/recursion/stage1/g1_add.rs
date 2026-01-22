@@ -284,8 +284,7 @@ fn eval_g1_add_constraint<F: JoltField>(
     acc += delta_pow * (s_finite * (one - is_inverse) * (x_r - (lambda * lambda - x_p - x_q)));
     delta_pow *= delta;
     // (26) y_R formula for non-inverse
-    acc += delta_pow
-        * (s_finite * (one - is_inverse) * (y_r - (lambda * (x_p - x_r) - y_p)));
+    acc += delta_pow * (s_finite * (one - is_inverse) * (y_r - (lambda * (x_p - x_r) - y_p)));
 
     acc
 }
@@ -424,17 +423,39 @@ impl<F: JoltField, T: Transcript> G1AddProver<F, T> {
             let is_double_f: Vec<F> = unsafe { std::mem::transmute(poly.is_double) };
             let is_inverse_f: Vec<F> = unsafe { std::mem::transmute(poly.is_inverse) };
 
-            x_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_p_f)));
-            y_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_p_f)));
-            ind_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_p_f)));
-            x_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_q_f)));
-            y_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_q_f)));
-            ind_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_q_f)));
-            x_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_r_f)));
-            y_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_r_f)));
-            ind_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_r_f)));
-            lambda_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(lambda_f)));
-            inv_dx_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(inv_dx_f)));
+            x_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_p_f,
+            )));
+            y_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_p_f,
+            )));
+            ind_p_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                ind_p_f,
+            )));
+            x_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_q_f,
+            )));
+            y_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_q_f,
+            )));
+            ind_q_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                ind_q_f,
+            )));
+            x_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                x_r_f,
+            )));
+            y_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                y_r_f,
+            )));
+            ind_r_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                ind_r_f,
+            )));
+            lambda_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                lambda_f,
+            )));
+            inv_dx_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                inv_dx_f,
+            )));
             is_double_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
                 is_double_f,
             )));
@@ -639,17 +660,24 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G1AddProver<F
             for i in 0..self.params.num_constraints {
                 self.x_p_claims.push(self.x_p_mlpoly[i].get_bound_coeff(0));
                 self.y_p_claims.push(self.y_p_mlpoly[i].get_bound_coeff(0));
-                self.ind_p_claims.push(self.ind_p_mlpoly[i].get_bound_coeff(0));
+                self.ind_p_claims
+                    .push(self.ind_p_mlpoly[i].get_bound_coeff(0));
                 self.x_q_claims.push(self.x_q_mlpoly[i].get_bound_coeff(0));
                 self.y_q_claims.push(self.y_q_mlpoly[i].get_bound_coeff(0));
-                self.ind_q_claims.push(self.ind_q_mlpoly[i].get_bound_coeff(0));
+                self.ind_q_claims
+                    .push(self.ind_q_mlpoly[i].get_bound_coeff(0));
                 self.x_r_claims.push(self.x_r_mlpoly[i].get_bound_coeff(0));
                 self.y_r_claims.push(self.y_r_mlpoly[i].get_bound_coeff(0));
-                self.ind_r_claims.push(self.ind_r_mlpoly[i].get_bound_coeff(0));
-                self.lambda_claims.push(self.lambda_mlpoly[i].get_bound_coeff(0));
-                self.inv_dx_claims.push(self.inv_dx_mlpoly[i].get_bound_coeff(0));
-                self.is_double_claims.push(self.is_double_mlpoly[i].get_bound_coeff(0));
-                self.is_inverse_claims.push(self.is_inverse_mlpoly[i].get_bound_coeff(0));
+                self.ind_r_claims
+                    .push(self.ind_r_mlpoly[i].get_bound_coeff(0));
+                self.lambda_claims
+                    .push(self.lambda_mlpoly[i].get_bound_coeff(0));
+                self.inv_dx_claims
+                    .push(self.inv_dx_mlpoly[i].get_bound_coeff(0));
+                self.is_double_claims
+                    .push(self.is_double_mlpoly[i].get_bound_coeff(0));
+                self.is_inverse_claims
+                    .push(self.is_inverse_mlpoly[i].get_bound_coeff(0));
             }
         }
     }
@@ -693,10 +721,15 @@ pub struct G1AddVerifier<F: JoltField> {
     pub gamma: F,
     pub delta: F,
     pub num_constraints: usize,
+    pub constraint_indices: Vec<usize>,
 }
 
 impl<F: JoltField> G1AddVerifier<F> {
-    pub fn new<T: Transcript>(params: G1AddParams, transcript: &mut T) -> Self {
+    pub fn new<T: Transcript>(
+        params: G1AddParams,
+        constraint_indices: Vec<usize>,
+        transcript: &mut T,
+    ) -> Self {
         let r_x: Vec<F::Challenge> = (0..params.num_constraint_vars)
             .map(|_| transcript.challenge_scalar_optimized::<F>())
             .collect();
@@ -709,6 +742,7 @@ impl<F: JoltField> G1AddVerifier<F> {
             gamma: gamma.into(),
             delta: delta.into(),
             num_constraints,
+            constraint_indices,
         }
     }
 }
@@ -745,10 +779,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G1AddVerifi
         let mut gamma_power = self.gamma;
 
         for i in 0..self.num_constraints {
-            let (x_p, y_p, ind_p, x_q, y_q, ind_q, x_r, y_r, ind_r, lambda, inv_dx, is_double, is_inverse) =
-                get_g1_add_virtual_claims(accumulator, i, self.params.sumcheck_id);
-
-            let constraint_val = eval_g1_add_constraint(
+            let global_idx = self.constraint_indices[i];
+            let (
                 x_p,
                 y_p,
                 ind_p,
@@ -762,7 +794,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G1AddVerifi
                 inv_dx,
                 is_double,
                 is_inverse,
-                self.delta,
+            ) = get_g1_add_virtual_claims(accumulator, global_idx, self.params.sumcheck_id);
+
+            let constraint_val = eval_g1_add_constraint(
+                x_p, y_p, ind_p, x_q, y_q, ind_q, x_r, y_r, ind_r, lambda, inv_dx, is_double,
+                is_inverse, self.delta,
             );
 
             total += gamma_power * constraint_val;
@@ -783,11 +819,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G1AddVerifi
             append_g1_add_virtual_openings(
                 accumulator,
                 transcript,
-                i,
+                self.constraint_indices[i],
                 self.params.sumcheck_id,
                 &opening_point,
             );
         }
     }
 }
-

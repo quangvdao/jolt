@@ -213,10 +213,10 @@ fn test_jagged_relation_dory_witness() {
 
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
 
-    use crate::poly::commitment::dory::wrappers::{ArkDoryProof, ArkGT};
+    use crate::poly::commitment::dory::wrappers::ArkDoryProof;
 
     let ark_proof = ArkDoryProof::from(opening_proof);
-    let ark_commitment = ArkGT::from(commitment);
+    let ark_commitment = commitment;
 
     let prover = RecursionProver::<Fq>::new_from_dory_proof(
         &ark_proof,

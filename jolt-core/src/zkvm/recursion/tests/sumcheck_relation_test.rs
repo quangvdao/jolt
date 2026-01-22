@@ -76,10 +76,10 @@ fn test_sumcheck_relation_with_mapping() {
 
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
 
-    use crate::poly::commitment::dory::wrappers::{ArkDoryProof, ArkGT};
+    use crate::poly::commitment::dory::wrappers::ArkDoryProof;
 
     let ark_proof = ArkDoryProof::from(opening_proof);
-    let ark_commitment = ArkGT::from(commitment);
+    let ark_commitment = commitment;
 
     let prover = RecursionProver::<Fq>::new_from_dory_proof(
         &ark_proof,
@@ -120,7 +120,7 @@ fn test_sumcheck_relation_with_mapping() {
         }
     }
 
-    println!("Sparse eval p̂(zs, zx) = {:?}", sparse_eval);
+    println!("Sparse eval p̂(zs, zx) = {sparse_eval:?}");
 
     // Now let's verify the sumcheck relation holds
     // The relation is: p̂(zs, zx) = ∑_{i∈{0,1}^m} q(i) · f_t(zs, zx, i)
@@ -163,7 +163,7 @@ fn test_sumcheck_relation_with_mapping() {
         sumcheck_sum += q_i * f_t;
     }
 
-    println!("Sumcheck sum = {:?}", sumcheck_sum);
+    println!("Sumcheck sum = {sumcheck_sum:?}");
     println!("Match: {}", sparse_eval == sumcheck_sum);
 
     // They should be equal!
@@ -214,12 +214,9 @@ fn test_sumcheck_relation_with_mapping() {
 
     let sumcheck_final_claim = q_at_r * f_t_at_r;
     println!("\nAfter sumcheck:");
-    println!("q̂(r_dense) = {:?}", q_at_r);
-    println!("f̂_t(zs, zx, r_dense) = {:?}", f_t_at_r);
-    println!(
-        "Sumcheck final claim ĥ(r_dense) = {:?}",
-        sumcheck_final_claim
-    );
+    println!("q̂(r_dense) = {q_at_r:?}");
+    println!("f̂_t(zs, zx, r_dense) = {f_t_at_r:?}");
+    println!("Sumcheck final claim ĥ(r_dense) = {sumcheck_final_claim:?}");
 
     // The sumcheck verifier would check that this final claim is consistent
     // with the univariate polynomial evaluations from the last round.

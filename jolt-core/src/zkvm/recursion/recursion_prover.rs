@@ -121,6 +121,7 @@ impl RecursionProver<Fq> {
     }
 
     /// Create a new recursion prover by generating witnesses from a Dory proof
+    #[allow(clippy::too_many_arguments)]
     pub fn new_from_dory_proof<T: Transcript>(
         dory_proof: &ArkDoryProof,
         verifier_setup: &ArkworksVerifierSetup,
@@ -324,6 +325,11 @@ impl RecursionProver<Fq> {
             t_is_infinity_mles,
         };
 
+        // NOTE: Dory's `WitnessCollection` currently does not expose explicit `G1Add` / `G2Add`
+        // operation witnesses. Until that lands upstream, we leave the add witnesses empty here.
+        let g1_add_witness = Default::default();
+        let g2_add_witness = Default::default();
+
         if let Some(ref cw) = combine_witness {
             tracing::info!(
                 "[Homomorphic Combine] Merging combine_witness: {} exp ops, {} mul ops",
@@ -336,6 +342,8 @@ impl RecursionProver<Fq> {
             gt_exp_witness,
             gt_mul_witness,
             g1_scalar_mul_witness,
+            g1_add_witness,
+            g2_add_witness,
             combine_witness,
         })
     }
@@ -448,6 +456,9 @@ impl RecursionProver<Fq> {
         }
         drop(g2_scalar_mul_span);
 
+        // NOTE: Dory's `WitnessCollection` does not yet expose explicit `G1Add` / `G2Add` op witnesses,
+        // so we do not populate add rows in the recursion matrix here yet.
+
         // Add combine_commitments witnesses (homomorphic combine offloading)
         if let Some(cw) = combine_witness {
             let pre_count = builder.constraint_count();
@@ -493,6 +504,8 @@ impl RecursionProver<Fq> {
             packed_gt_exp_public_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
+            g1_add_witnesses: Vec::new(),
+            g2_add_witnesses: Vec::new(),
         })
     }
 }
@@ -589,6 +602,7 @@ impl<F: JoltField> RecursionProver<F> {
     }
 
     /// Run Stage 1: Constraint sumchecks
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all, name = "RecursionProver::prove_stage1")]
     pub(crate) fn prove_stage1<T: Transcript>(
         &self,
@@ -762,6 +776,74 @@ impl<F: JoltField> RecursionProver<F> {
             provers.push(Box::new(prover));
         }
 
+        // Add G1 add prover
+        let g1_add_constraints = self.constraint_system.extract_g1_add_constraints();
+        if !g1_add_constraints.is_empty() {
+            use super::stage1::g1_add::{G1AddConstraintPolynomials, G1AddParams, G1AddProver};
+
+            let constraints: Vec<G1AddConstraintPolynomials> = g1_add_constraints
+                .into_iter()
+                .map(|w| G1AddConstraintPolynomials {
+                    x_p: w.x_p,
+                    y_p: w.y_p,
+                    ind_p: w.ind_p,
+                    x_q: w.x_q,
+                    y_q: w.y_q,
+                    ind_q: w.ind_q,
+                    x_r: w.x_r,
+                    y_r: w.y_r,
+                    ind_r: w.ind_r,
+                    lambda: w.lambda,
+                    inv_delta_x: w.inv_delta_x,
+                    is_double: w.is_double,
+                    is_inverse: w.is_inverse,
+                    constraint_index: w.constraint_index,
+                })
+                .collect();
+
+            let params = G1AddParams::new(constraints.len());
+            let prover = G1AddProver::new(params, constraints, transcript);
+            provers.push(Box::new(prover));
+        }
+
+        // Add G2 add prover
+        let g2_add_constraints = self.constraint_system.extract_g2_add_constraints();
+        if !g2_add_constraints.is_empty() {
+            use super::stage1::g2_add::{G2AddConstraintPolynomials, G2AddParams, G2AddProver};
+
+            let constraints: Vec<G2AddConstraintPolynomials> = g2_add_constraints
+                .into_iter()
+                .map(|w| G2AddConstraintPolynomials {
+                    x_p_c0: w.x_p_c0,
+                    x_p_c1: w.x_p_c1,
+                    y_p_c0: w.y_p_c0,
+                    y_p_c1: w.y_p_c1,
+                    ind_p: w.ind_p,
+                    x_q_c0: w.x_q_c0,
+                    x_q_c1: w.x_q_c1,
+                    y_q_c0: w.y_q_c0,
+                    y_q_c1: w.y_q_c1,
+                    ind_q: w.ind_q,
+                    x_r_c0: w.x_r_c0,
+                    x_r_c1: w.x_r_c1,
+                    y_r_c0: w.y_r_c0,
+                    y_r_c1: w.y_r_c1,
+                    ind_r: w.ind_r,
+                    lambda_c0: w.lambda_c0,
+                    lambda_c1: w.lambda_c1,
+                    inv_delta_x_c0: w.inv_delta_x_c0,
+                    inv_delta_x_c1: w.inv_delta_x_c1,
+                    is_double: w.is_double,
+                    is_inverse: w.is_inverse,
+                    constraint_index: w.constraint_index,
+                })
+                .collect();
+
+            let params = G2AddParams::new(constraints.len());
+            let prover = G2AddProver::new(params, constraints, transcript);
+            provers.push(Box::new(prover));
+        }
+
         // TODO: Add Boundary/Wiring Sumcheck (initial/final states + copy constraints)
         // Currently removed due to polynomial size mismatch bug; will be redesigned with packing.
 
@@ -780,6 +862,7 @@ impl<F: JoltField> RecursionProver<F> {
     }
 
     /// Run Stage 2: Direct evaluation protocol
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all, name = "RecursionProver::prove_stage2")]
     pub(crate) fn prove_stage2<T: Transcript>(
         &self,
@@ -859,6 +942,7 @@ impl<F: JoltField> RecursionProver<F> {
     }
 
     /// Run Stage 3: Jagged Transform Sumcheck + Stage 3b: Jagged Assist
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all, name = "RecursionProver::prove_stage3")]
     pub(crate) fn prove_stage3<T: Transcript>(
         &self,

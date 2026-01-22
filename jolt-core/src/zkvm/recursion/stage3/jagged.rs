@@ -123,6 +123,7 @@ pub struct JaggedSumcheckProver<F: JoltField, T: Transcript> {
 }
 
 impl<F: JoltField, T: Transcript> JaggedSumcheckProver<F, T> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sparse_opening_point: (Vec<F>, Vec<F>),
         sparse_claim_value: F,

@@ -1407,6 +1407,7 @@ where
     /// Stage 8: Dory batch opening proof.
     /// Builds streaming RLC polynomial directly from trace (no witness regeneration needed).
     /// Stage 8: Dory batch opening proof with optional PCS recursion hint generation
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all)]
     fn prove_stage8(
         &mut self,
@@ -1783,6 +1784,7 @@ where
     }
 
     /// Stage 12: Run recursion sumchecks (3 stages) - verify the committed polynomial
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all)]
     fn prove_stage12(
         &mut self,

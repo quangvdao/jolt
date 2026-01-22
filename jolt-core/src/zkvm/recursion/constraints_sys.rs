@@ -154,12 +154,50 @@ pub enum PolyType {
     G2ScalarMulTIndicator = 27,
     G2ScalarMulAIndicator = 28,
     G2ScalarMulBit = 29,
+
+    // G1 Addition polynomials (11-var)
+    G1AddXP = 30,
+    G1AddYP = 31,
+    G1AddPIndicator = 32,
+    G1AddXQ = 33,
+    G1AddYQ = 34,
+    G1AddQIndicator = 35,
+    G1AddXR = 36,
+    G1AddYR = 37,
+    G1AddRIndicator = 38,
+    G1AddLambda = 39,
+    G1AddInvDeltaX = 40,
+    G1AddIsDouble = 41,
+    G1AddIsInverse = 42,
+
+    // G2 Addition polynomials (Fq2 coords split into c0/c1; 11-var)
+    G2AddXPC0 = 43,
+    G2AddXPC1 = 44,
+    G2AddYPC0 = 45,
+    G2AddYPC1 = 46,
+    G2AddPIndicator = 47,
+    G2AddXQC0 = 48,
+    G2AddXQC1 = 49,
+    G2AddYQC0 = 50,
+    G2AddYQC1 = 51,
+    G2AddQIndicator = 52,
+    G2AddXRC0 = 53,
+    G2AddXRC1 = 54,
+    G2AddYRC0 = 55,
+    G2AddYRC1 = 56,
+    G2AddRIndicator = 57,
+    G2AddLambdaC0 = 58,
+    G2AddLambdaC1 = 59,
+    G2AddInvDeltaXC0 = 60,
+    G2AddInvDeltaXC1 = 61,
+    G2AddIsDouble = 62,
+    G2AddIsInverse = 63,
 }
 
 impl PolyType {
-    pub const NUM_TYPES: usize = 30;
+    pub const NUM_TYPES: usize = 64;
 
-    pub fn all() -> [PolyType; 30] {
+    pub fn all() -> [PolyType; 64] {
         [
             PolyType::RhoPrev,
             PolyType::Quotient,
@@ -191,6 +229,40 @@ impl PolyType {
             PolyType::G2ScalarMulTIndicator,
             PolyType::G2ScalarMulAIndicator,
             PolyType::G2ScalarMulBit,
+            PolyType::G1AddXP,
+            PolyType::G1AddYP,
+            PolyType::G1AddPIndicator,
+            PolyType::G1AddXQ,
+            PolyType::G1AddYQ,
+            PolyType::G1AddQIndicator,
+            PolyType::G1AddXR,
+            PolyType::G1AddYR,
+            PolyType::G1AddRIndicator,
+            PolyType::G1AddLambda,
+            PolyType::G1AddInvDeltaX,
+            PolyType::G1AddIsDouble,
+            PolyType::G1AddIsInverse,
+            PolyType::G2AddXPC0,
+            PolyType::G2AddXPC1,
+            PolyType::G2AddYPC0,
+            PolyType::G2AddYPC1,
+            PolyType::G2AddPIndicator,
+            PolyType::G2AddXQC0,
+            PolyType::G2AddXQC1,
+            PolyType::G2AddYQC0,
+            PolyType::G2AddYQC1,
+            PolyType::G2AddQIndicator,
+            PolyType::G2AddXRC0,
+            PolyType::G2AddXRC1,
+            PolyType::G2AddYRC0,
+            PolyType::G2AddYRC1,
+            PolyType::G2AddRIndicator,
+            PolyType::G2AddLambdaC0,
+            PolyType::G2AddLambdaC1,
+            PolyType::G2AddInvDeltaXC0,
+            PolyType::G2AddInvDeltaXC1,
+            PolyType::G2AddIsDouble,
+            PolyType::G2AddIsInverse,
         ]
     }
 
@@ -845,6 +917,63 @@ impl DoryMatrixBuilder {
         });
     }
 
+    /// Add constraint from a G1 addition witness.
+    pub fn add_g1_add_witness(&mut self, _witness: &crate::zkvm::recursion::witness::G1AddWitness) {
+        // We expect vectors of MLEs, where each MLE corresponds to one addition instance.
+        // But wait, G1AddWitness in witness.rs stores vectors of MLEs (one MLE per variable type per instance).
+        // Actually, looking at witness.rs:
+        // pub struct G1AddWitness {
+        //     pub x_p_mles: Vec<Vec<Fq>>, ...
+        // }
+        // This structure aggregates ALL instances.
+        // But DoryMatrixBuilder adds ONE constraint at a time usually?
+        // No, `add_g1_scalar_mul_witness` takes a single `G1ScalarMulWitness` (from dory::recursion::witness) which represents ONE instance.
+        // BUT `witness.rs` defines `G1AddWitness` as aggregated.
+        // Let's look at `recursion_prover.rs` again.
+        // `witness_collection.g1_scalar_mul` is a map of `G1ScalarMulWitness` (single instance).
+        // So `DoryMatrixBuilder` should probably take a single instance witness.
+
+        // However, I defined `G1AddWitness` in `witness.rs` as aggregated because I thought it was for `DoryRecursionWitness`.
+        // If `DoryMatrixBuilder` is building the matrix row by row (or appending to rows), it iterates over instances.
+
+        // Let's look at `add_g1_scalar_mul_witness` implementation again.
+        // It takes `&dory::recursion::witness::G1ScalarMulWitness`.
+        // This is the Dory witness type, NOT the `jolt-core/src/zkvm/recursion/witness.rs` type.
+
+        // Ah, I need to define the witness type that `DoryMatrixBuilder` accepts.
+        // Usually `DoryMatrixBuilder` accepts types from `dory::recursion::witness`.
+        // But since G1Add is new and I implemented it in Jolt, I might not have updated Dory yet?
+        // The user said "M third-party/dory" in git status.
+        // If Dory has G1Add support, I should use Dory's witness type.
+        // If not, I might need to define a single-instance witness type in Jolt and use that.
+
+        // Let's assume for now I need to support adding a single instance.
+        // But `G1AddWitness` in `witness.rs` is aggregated.
+
+        // I should probably define `G1AddConstraintPolynomials` in `g1_add.rs` (already done) and use that?
+        // No, `DoryMatrixBuilder` builds the matrix from raw witness data.
+
+        // Let's look at `recursion_prover.rs` lines 424-435:
+        // for (_op_id, witness) in g1_items {
+        //     builder.add_g1_scalar_mul_witness(witness);
+        // }
+        // Here `witness` is `dory::recursion::witness::G1ScalarMulWitness`.
+
+        // So I need to know what `witness` type I will be passing to `add_g1_add_witness`.
+        // Since I haven't seen the Dory changes, I should probably define a struct in `witness.rs` that represents a SINGLE G1Add instance,
+        // or just pass the vectors directly.
+
+        // Let's redefine `G1AddWitness` in `witness.rs` to be a single instance if that makes sense, OR
+        // define a new struct `G1AddInstanceWitness` in `witness.rs` and use that in `DoryMatrixBuilder`.
+
+        // Actually, `G1AddWitness` in `g1_add.rs` (the sumcheck one) has `Vec<Fq>` for each poly.
+        // That is for a single instance (but over the hypercube).
+
+        // Let's assume `DoryMatrixBuilder` will receive a struct containing `Vec<Fq>` for each polynomial (the MLE evaluations).
+
+        // TODO: implement this once we settle the single-instance witness format feeding the matrix builder.
+    }
+
     /// Add constraint from a per-operation GT multiplication witness (from combine_commitments).
     /// This is the same as `add_gt_mul_witness` but accepts `GTMulOpWitness` type.
     pub fn add_gt_mul_op_witness(&mut self, witness: &GTMulOpWitness) {
@@ -1162,6 +1291,10 @@ pub enum ConstraintType {
     G2ScalarMul {
         base_point: (Fq2, Fq2), // (x_p, y_p) in Fq2
     },
+    /// G1 addition constraint
+    G1Add,
+    /// G2 addition constraint
+    G2Add,
 }
 
 /// Constraint metadata for matrix-based evaluation.
@@ -1198,6 +1331,12 @@ pub struct ConstraintSystem {
 
     /// Public inputs for G2 scalar multiplication (the scalars, one per G2ScalarMul constraint)
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
+
+    /// G1 addition witnesses for Stage 1 prover (one per `ConstraintType::G1Add`)
+    pub g1_add_witnesses: Vec<super::stage1::g1_add::G1AddWitness>,
+
+    /// G2 addition witnesses for Stage 1 prover (one per `ConstraintType::G2Add`)
+    pub g2_add_witnesses: Vec<super::stage1::g2_add::G2AddWitness>,
 }
 
 impl ConstraintSystem {
@@ -1327,6 +1466,12 @@ impl ConstraintSystem {
 
                     builder.constraint_types.push(constraint_type.clone());
                 }
+                ConstraintType::G1Add | ConstraintType::G2Add => {
+                    // Placeholder: add constraints are not yet wired into this constructor path.
+                    // Maintain consistent indexing by appending all-zero rows for every PolyType.
+                    builder.push_zero_rows_except(1 << num_constraint_vars, &[]);
+                    builder.constraint_types.push(constraint_type.clone());
+                }
             }
         }
 
@@ -1340,6 +1485,8 @@ impl ConstraintSystem {
             packed_gt_exp_public_inputs: Vec::new(), // No actual public inputs in from_witness (test helper)
             g1_scalar_mul_public_inputs: Vec::new(),
             g2_scalar_mul_public_inputs: Vec::new(),
+            g1_add_witnesses: Vec::new(),
+            g2_add_witnesses: Vec::new(),
         })
     }
 
@@ -1446,6 +1593,8 @@ impl ConstraintSystem {
                 packed_gt_exp_public_inputs,
                 g1_scalar_mul_public_inputs,
                 g2_scalar_mul_public_inputs,
+                g1_add_witnesses: Vec::new(),
+                g2_add_witnesses: Vec::new(),
             },
             hints,
         ))
@@ -1463,6 +1612,7 @@ impl ConstraintSystem {
     }
 
     /// Extract GT mul constraint data for gt_mul sumcheck
+    #[allow(clippy::type_complexity)]
     pub fn extract_gt_mul_constraints(&self) -> Vec<(usize, Vec<Fq>, Vec<Fq>, Vec<Fq>, Vec<Fq>)> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
@@ -1598,6 +1748,22 @@ impl ConstraintSystem {
         }
 
         constraints
+    }
+
+    /// Extract G1 add witnesses for the Stage 1 G1Add sumcheck.
+    ///
+    /// Note: this is currently populated only when the recursion constraint builder
+    /// wires in explicit `ConstraintType::G1Add` nodes.
+    pub fn extract_g1_add_constraints(&self) -> Vec<super::stage1::g1_add::G1AddWitness> {
+        self.g1_add_witnesses.clone()
+    }
+
+    /// Extract G2 add witnesses for the Stage 1 G2Add sumcheck.
+    ///
+    /// Note: this is currently populated only when the recursion constraint builder
+    /// wires in explicit `ConstraintType::G2Add` nodes.
+    pub fn extract_g2_add_constraints(&self) -> Vec<super::stage1::g2_add::G2AddWitness> {
+        self.g2_add_witnesses.clone()
     }
 
     /// Extract packed GT exp constraint data for packed_gt_exp sumcheck
@@ -2184,6 +2350,10 @@ impl ConstraintSystem {
                     + c7_yt_c0
                     + c7_yt_c1
             }
+            ConstraintType::G1Add | ConstraintType::G2Add => {
+                // Not yet integrated into the matrix-evaluation path.
+                Fq::zero()
+            }
         }
     }
 
@@ -2207,142 +2377,10 @@ impl ConstraintSystem {
 
                 assert!(
                     constraint_eval == Fq::zero(),
-                    "Constraint {} failed at x={:?}: got {}, expected 0",
-                    idx,
-                    x_binary,
-                    constraint_eval
+                    "Constraint {idx} failed at x={x_binary:?}: got {constraint_eval}, expected 0"
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::poly::{
-        commitment::{
-            commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
-        },
-        dense_mlpoly::DensePolynomial,
-        multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
-    };
-    use ark_bn254::Fr;
-    use serial_test::serial;
-
-    #[test]
-    #[serial]
-    fn test_dory_witness_constraint_evaluation() {
-        use ark_ff::UniformRand;
-        use rand::thread_rng;
-
-        DoryGlobals::reset();
-        DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
-        let num_vars = 4;
-        let mut rng = thread_rng();
-
-        let prover_setup = DoryCommitmentScheme::setup_prover(num_vars);
-        let verifier_setup = DoryCommitmentScheme::setup_verifier(&prover_setup);
-
-        let coefficients: Vec<Fr> = (0..(1 << num_vars)).map(|_| Fr::rand(&mut rng)).collect();
-        let poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(coefficients));
-        let (commitment, hint) = DoryCommitmentScheme::commit(&poly, &prover_setup);
-
-        let point: Vec<<Fr as JoltField>::Challenge> = (0..num_vars)
-            .map(|_| <Fr as JoltField>::Challenge::random(&mut rng))
-            .collect();
-
-        let mut prover_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-        let proof = DoryCommitmentScheme::prove(
-            &prover_setup,
-            &poly,
-            &point,
-            Some(hint),
-            &mut prover_transcript,
-        );
-
-        let evaluation = PolynomialEvaluation::evaluate(&poly, &point);
-        let mut extract_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-
-        let _start = std::time::Instant::now();
-
-        let (system, hints) = ConstraintSystem::new(
-            &proof,
-            &verifier_setup,
-            &mut extract_transcript,
-            &point,
-            &evaluation,
-            &commitment,
-        )
-        .expect("System creation should succeed");
-
-        let _elapsed = _start.elapsed();
-        // Count constraints by type
-        let mut gt_exp_count = 0;
-        let mut gt_mul_count = 0;
-        let mut g1_scalar_mul_count = 0;
-
-        for constraint in &system.constraints {
-            match &constraint.constraint_type {
-                ConstraintType::PackedGtExp => gt_exp_count += 1,
-                ConstraintType::GtMul => gt_mul_count += 1,
-                ConstraintType::G1ScalarMul { .. } => g1_scalar_mul_count += 1,
-                ConstraintType::G2ScalarMul { .. } => {}
-            }
-        }
-
-        let _ = (gt_exp_count, gt_mul_count, g1_scalar_mul_count);
-        // Instead of evaluating the full system, just evaluate constraints at random points
-        use rand::{rngs::StdRng, Rng, SeedableRng};
-
-        let mut rng = StdRng::seed_from_u64(42);
-        let num_x_vars = system.matrix.num_constraint_vars;
-
-        // For each constraint, test it at random x-variable points
-        for (idx, constraint) in system.constraints.iter().enumerate() {
-            // Test this constraint at 5 random points
-            for _trial in 0..5 {
-                let mut x_point = Vec::with_capacity(num_x_vars);
-                for _ in 0..num_x_vars {
-                    x_point.push(if rng.gen_bool(0.5) {
-                        Fq::one()
-                    } else {
-                        Fq::zero()
-                    });
-                }
-
-                let eval = system.evaluate_constraint(constraint, &x_point);
-                assert_eq!(
-                    eval,
-                    Fq::zero(),
-                    "Constraint {} should evaluate to 0 at boolean points",
-                    idx
-                );
-            }
-        }
-        let mut verify_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-        DoryCommitmentScheme::verify_with_hint(
-            &proof,
-            &verifier_setup,
-            &mut verify_transcript,
-            &point,
-            &evaluation,
-            &commitment,
-            &hints,
-        )
-        .expect("Verification with hint should succeed");
-
-        let mut verify_transcript_no_hint = crate::transcripts::Blake2bTranscript::new(b"test");
-        DoryCommitmentScheme::verify(
-            &proof,
-            &verifier_setup,
-            &mut verify_transcript_no_hint,
-            &point,
-            &evaluation,
-            &commitment,
-        )
-        .expect("Verification without hint should also succeed");
     }
 }
 
@@ -2436,6 +2474,12 @@ impl CanonicalSerialize for ConstraintType {
                 base_point.0.serialize_with_mode(&mut writer, compress)?;
                 base_point.1.serialize_with_mode(&mut writer, compress)?;
             }
+            ConstraintType::G1Add => {
+                4u8.serialize_with_mode(&mut writer, compress)?;
+            }
+            ConstraintType::G2Add => {
+                5u8.serialize_with_mode(&mut writer, compress)?;
+            }
         }
         Ok(())
     }
@@ -2450,6 +2494,8 @@ impl CanonicalSerialize for ConstraintType {
             ConstraintType::G2ScalarMul { base_point } => {
                 1 + base_point.0.serialized_size(compress) + base_point.1.serialized_size(compress)
             }
+            ConstraintType::G1Add => 1,
+            ConstraintType::G2Add => 1,
         }
     }
 }
@@ -2474,6 +2520,8 @@ impl CanonicalDeserialize for ConstraintType {
                 let y = Fq2::deserialize_with_mode(&mut reader, compress, validate)?;
                 Ok(ConstraintType::G2ScalarMul { base_point: (x, y) })
             }
+            4 => Ok(ConstraintType::G1Add),
+            5 => Ok(ConstraintType::G2Add),
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -2493,5 +2541,134 @@ impl Valid for ConstraintType {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::poly::{
+        commitment::{
+            commitment_scheme::CommitmentScheme,
+            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
+        },
+        dense_mlpoly::DensePolynomial,
+        multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
+    };
+    use ark_bn254::Fr;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn test_dory_witness_constraint_evaluation() {
+        use ark_ff::UniformRand;
+        use rand::thread_rng;
+
+        DoryGlobals::reset();
+        DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
+        let num_vars = 4;
+        let mut rng = thread_rng();
+
+        let prover_setup = DoryCommitmentScheme::setup_prover(num_vars);
+        let verifier_setup = DoryCommitmentScheme::setup_verifier(&prover_setup);
+
+        let coefficients: Vec<Fr> = (0..(1 << num_vars)).map(|_| Fr::rand(&mut rng)).collect();
+        let poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(coefficients));
+        let (commitment, hint) = DoryCommitmentScheme::commit(&poly, &prover_setup);
+
+        let point: Vec<<Fr as JoltField>::Challenge> = (0..num_vars)
+            .map(|_| <Fr as JoltField>::Challenge::random(&mut rng))
+            .collect();
+
+        let mut prover_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
+        let proof = DoryCommitmentScheme::prove(
+            &prover_setup,
+            &poly,
+            &point,
+            Some(hint),
+            &mut prover_transcript,
+        );
+
+        let evaluation = PolynomialEvaluation::evaluate(&poly, &point);
+        let mut extract_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
+
+        let _start = std::time::Instant::now();
+
+        let (system, hints) = ConstraintSystem::new(
+            &proof,
+            &verifier_setup,
+            &mut extract_transcript,
+            &point,
+            &evaluation,
+            &commitment,
+        )
+        .expect("System creation should succeed");
+
+        let _elapsed = _start.elapsed();
+        // Count constraints by type
+        let mut gt_exp_count = 0;
+        let mut gt_mul_count = 0;
+        let mut g1_scalar_mul_count = 0;
+
+        for constraint in &system.constraints {
+            match &constraint.constraint_type {
+                ConstraintType::PackedGtExp => gt_exp_count += 1,
+                ConstraintType::GtMul => gt_mul_count += 1,
+                ConstraintType::G1ScalarMul { .. } => g1_scalar_mul_count += 1,
+                ConstraintType::G2ScalarMul { .. } => {}
+                ConstraintType::G1Add | ConstraintType::G2Add => {}
+            }
+        }
+
+        let _ = (gt_exp_count, gt_mul_count, g1_scalar_mul_count);
+        // Instead of evaluating the full system, just evaluate constraints at random points
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let num_x_vars = system.matrix.num_constraint_vars;
+
+        // For each constraint, test it at random x-variable points
+        for (idx, constraint) in system.constraints.iter().enumerate() {
+            // Test this constraint at 5 random points
+            for _trial in 0..5 {
+                let mut x_point = Vec::with_capacity(num_x_vars);
+                for _ in 0..num_x_vars {
+                    x_point.push(if rng.gen_bool(0.5) {
+                        Fq::one()
+                    } else {
+                        Fq::zero()
+                    });
+                }
+
+                let eval = system.evaluate_constraint(constraint, &x_point);
+                assert_eq!(
+                    eval,
+                    Fq::zero(),
+                    "Constraint {idx} should evaluate to 0 at boolean points"
+                );
+            }
+        }
+        let mut verify_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
+        DoryCommitmentScheme::verify_with_hint(
+            &proof,
+            &verifier_setup,
+            &mut verify_transcript,
+            &point,
+            &evaluation,
+            &commitment,
+            &hints,
+        )
+        .expect("Verification with hint should succeed");
+
+        let mut verify_transcript_no_hint = crate::transcripts::Blake2bTranscript::new(b"test");
+        DoryCommitmentScheme::verify(
+            &proof,
+            &verifier_setup,
+            &mut verify_transcript_no_hint,
+            &point,
+            &evaluation,
+            &commitment,
+        )
+        .expect("Verification without hint should also succeed");
     }
 }

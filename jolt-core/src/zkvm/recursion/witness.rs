@@ -123,6 +123,94 @@ impl G1ScalarMulWitness {
     }
 }
 
+/// Witness data for G1 addition constraints (aggregated)
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+pub struct G1AddWitness {
+    pub x_p_mles: Vec<Vec<Fq>>,
+    pub y_p_mles: Vec<Vec<Fq>>,
+    pub ind_p_mles: Vec<Vec<Fq>>,
+    pub x_q_mles: Vec<Vec<Fq>>,
+    pub y_q_mles: Vec<Vec<Fq>>,
+    pub ind_q_mles: Vec<Vec<Fq>>,
+    pub x_r_mles: Vec<Vec<Fq>>,
+    pub y_r_mles: Vec<Vec<Fq>>,
+    pub ind_r_mles: Vec<Vec<Fq>>,
+    pub lambda_mles: Vec<Vec<Fq>>,
+    pub inv_dx_mles: Vec<Vec<Fq>>,
+    pub is_double_mles: Vec<Vec<Fq>>,
+    pub is_inverse_mles: Vec<Vec<Fq>>,
+}
+
+/// Witness data for a single G1 addition instance (used by DoryMatrixBuilder)
+#[derive(Clone, Debug)]
+pub struct G1AddInstanceWitness {
+    pub x_p: Vec<Fq>,
+    pub y_p: Vec<Fq>,
+    pub ind_p: Vec<Fq>,
+    pub x_q: Vec<Fq>,
+    pub y_q: Vec<Fq>,
+    pub ind_q: Vec<Fq>,
+    pub x_r: Vec<Fq>,
+    pub y_r: Vec<Fq>,
+    pub ind_r: Vec<Fq>,
+    pub lambda: Vec<Fq>,
+    pub inv_dx: Vec<Fq>,
+    pub is_double: Vec<Fq>,
+    pub is_inverse: Vec<Fq>,
+}
+
+/// Witness data for G2 addition constraints (aggregated)
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+pub struct G2AddWitness {
+    pub x_p_c0_mles: Vec<Vec<Fq>>,
+    pub x_p_c1_mles: Vec<Vec<Fq>>,
+    pub y_p_c0_mles: Vec<Vec<Fq>>,
+    pub y_p_c1_mles: Vec<Vec<Fq>>,
+    pub ind_p_mles: Vec<Vec<Fq>>,
+    pub x_q_c0_mles: Vec<Vec<Fq>>,
+    pub x_q_c1_mles: Vec<Vec<Fq>>,
+    pub y_q_c0_mles: Vec<Vec<Fq>>,
+    pub y_q_c1_mles: Vec<Vec<Fq>>,
+    pub ind_q_mles: Vec<Vec<Fq>>,
+    pub x_r_c0_mles: Vec<Vec<Fq>>,
+    pub x_r_c1_mles: Vec<Vec<Fq>>,
+    pub y_r_c0_mles: Vec<Vec<Fq>>,
+    pub y_r_c1_mles: Vec<Vec<Fq>>,
+    pub ind_r_mles: Vec<Vec<Fq>>,
+    pub lambda_c0_mles: Vec<Vec<Fq>>,
+    pub lambda_c1_mles: Vec<Vec<Fq>>,
+    pub inv_dx_c0_mles: Vec<Vec<Fq>>,
+    pub inv_dx_c1_mles: Vec<Vec<Fq>>,
+    pub is_double_mles: Vec<Vec<Fq>>,
+    pub is_inverse_mles: Vec<Vec<Fq>>,
+}
+
+/// Witness data for a single G2 addition instance (used by DoryMatrixBuilder)
+#[derive(Clone, Debug)]
+pub struct G2AddInstanceWitness {
+    pub x_p_c0: Vec<Fq>,
+    pub x_p_c1: Vec<Fq>,
+    pub y_p_c0: Vec<Fq>,
+    pub y_p_c1: Vec<Fq>,
+    pub ind_p: Vec<Fq>,
+    pub x_q_c0: Vec<Fq>,
+    pub x_q_c1: Vec<Fq>,
+    pub y_q_c0: Vec<Fq>,
+    pub y_q_c1: Vec<Fq>,
+    pub ind_q: Vec<Fq>,
+    pub x_r_c0: Vec<Fq>,
+    pub x_r_c1: Vec<Fq>,
+    pub y_r_c0: Vec<Fq>,
+    pub y_r_c1: Vec<Fq>,
+    pub ind_r: Vec<Fq>,
+    pub lambda_c0: Vec<Fq>,
+    pub lambda_c1: Vec<Fq>,
+    pub inv_dx_c0: Vec<Fq>,
+    pub inv_dx_c1: Vec<Fq>,
+    pub is_double: Vec<Fq>,
+    pub is_inverse: Vec<Fq>,
+}
+
 /// Witness for homomorphic combination of GT commitments.
 ///
 /// Captures the intermediate witnesses for computing:
@@ -147,6 +235,10 @@ pub struct DoryRecursionWitness {
     pub gt_mul_witness: GTMulWitness,
     /// G1 scalar multiplication witness
     pub g1_scalar_mul_witness: G1ScalarMulWitness,
+    /// G1 addition witness
+    pub g1_add_witness: G1AddWitness,
+    /// G2 addition witness
+    pub g2_add_witness: G2AddWitness,
     /// Witness for combine_commitments offloading
     pub combine_witness: Option<GTCombineWitness>,
 }

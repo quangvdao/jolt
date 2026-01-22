@@ -292,7 +292,7 @@ mod tests {
         // Verify constraints at each step
         for i in 0..witness.num_steps() {
             let result = witness.verify_constraint_at_step(i);
-            assert!(result, "Constraint verification failed at step {}", i);
+            assert!(result, "Constraint verification failed at step {i}");
         }
     }
 
@@ -423,17 +423,15 @@ mod tests {
                 // T_i should also be point at infinity
                 assert!(
                     x_t.is_zero() && y_t.is_zero(),
-                    "T_{} should be infinity when A_{} is",
-                    step,
-                    step
+                    "T_{step} should be infinity when A_{step} is"
                 );
                 // Constraints don't apply for point at infinity, skip
                 continue;
             }
 
             // Normal case: all constraints should be zero
-            assert!(c1.is_zero(), "C1 failed at step {}: {:?}", step, c1);
-            assert!(c2.is_zero(), "C2 failed at step {}: {:?}", step, c2);
+            assert!(c1.is_zero(), "C1 failed at step {step}: {c1:?}");
+            assert!(c2.is_zero(), "C2 failed at step {step}: {c2:?}");
 
             // C3 and C4 are satisfied either when:
             // 1. x_a_next = x_t (no addition case), OR
@@ -441,8 +439,8 @@ mod tests {
             let no_addition = x_a_next == x_t && y_a_next == y_t;
             if !no_addition {
                 // If we're adding the base point, constraints should still be zero
-                assert!(c3.is_zero(), "C3 failed at step {}: {:?}", step, c3);
-                assert!(c4.is_zero(), "C4 failed at step {}: {:?}", step, c4);
+                assert!(c3.is_zero(), "C3 failed at step {step}: {c3:?}");
+                assert!(c4.is_zero(), "C4 failed at step {step}: {c4:?}");
             }
         }
     }
@@ -579,33 +577,27 @@ mod tests {
             // Verify the evaluations match direct indexing
             assert_eq!(
                 x_a, witness.x_a_mles[0][cube_index],
-                "x_a MLE eval mismatch at {}",
-                cube_index
+                "x_a MLE eval mismatch at {cube_index}"
             );
             assert_eq!(
                 y_a, witness.y_a_mles[0][cube_index],
-                "y_a MLE eval mismatch at {}",
-                cube_index
+                "y_a MLE eval mismatch at {cube_index}"
             );
             assert_eq!(
                 x_t, witness.x_t_mles[0][cube_index],
-                "x_t MLE eval mismatch at {}",
-                cube_index
+                "x_t MLE eval mismatch at {cube_index}"
             );
             assert_eq!(
                 y_t, witness.y_t_mles[0][cube_index],
-                "y_t MLE eval mismatch at {}",
-                cube_index
+                "y_t MLE eval mismatch at {cube_index}"
             );
             assert_eq!(
                 x_a_next, witness.x_a_next_mles[0][cube_index],
-                "x_a_next MLE eval mismatch at {}",
-                cube_index
+                "x_a_next MLE eval mismatch at {cube_index}"
             );
             assert_eq!(
                 y_a_next, witness.y_a_next_mles[0][cube_index],
-                "y_a_next MLE eval mismatch at {}",
-                cube_index
+                "y_a_next MLE eval mismatch at {cube_index}"
             );
 
             // Get infinity indicator
@@ -627,33 +619,13 @@ mod tests {
             }
 
             // Verify constraints
-            assert!(
-                c1.is_zero(),
-                "C1 failed at cube_index {}: {:?}",
-                cube_index,
-                c1
-            );
-            assert!(
-                c2.is_zero(),
-                "C2 failed at cube_index {}: {:?}",
-                cube_index,
-                c2
-            );
+            assert!(c1.is_zero(), "C1 failed at cube_index {cube_index}: {c1:?}");
+            assert!(c2.is_zero(), "C2 failed at cube_index {cube_index}: {c2:?}");
 
             let no_addition = x_a_next == x_t && y_a_next == y_t;
             if !no_addition {
-                assert!(
-                    c3.is_zero(),
-                    "C3 failed at cube_index {}: {:?}",
-                    cube_index,
-                    c3
-                );
-                assert!(
-                    c4.is_zero(),
-                    "C4 failed at cube_index {}: {:?}",
-                    cube_index,
-                    c4
-                );
+                assert!(c3.is_zero(), "C3 failed at cube_index {cube_index}: {c3:?}");
+                assert!(c4.is_zero(), "C4 failed at cube_index {cube_index}: {c4:?}");
             }
         }
     }

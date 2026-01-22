@@ -22,7 +22,9 @@ use super::{
     constraints_sys::ConstraintType,
     recursion_prover::RecursionProof,
     stage1::{
+        g1_add::{G1AddParams, G1AddVerifier},
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier},
+        g2_add::{G2AddParams, G2AddVerifier},
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier},
         gt_mul::{GtMulParams, GtMulVerifier},
         packed_gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
@@ -176,6 +178,8 @@ impl<F: JoltField> RecursionVerifier<F> {
         let mut num_gt_mul = 0;
         let mut num_g1_scalar_mul = 0;
         let mut num_g2_scalar_mul = 0;
+        let mut num_g1_add = 0;
+        let mut num_g2_add = 0;
 
         // Collect constraint information
         let mut gt_mul_indices = Vec::new();
@@ -183,6 +187,8 @@ impl<F: JoltField> RecursionVerifier<F> {
         let mut g1_scalar_mul_indices = Vec::new();
         let mut g2_scalar_mul_base_points = Vec::new();
         let mut g2_scalar_mul_indices = Vec::new();
+        let mut g1_add_indices = Vec::new();
+        let mut g2_add_indices = Vec::new();
 
         // Use enumeration index as global constraint index (matches prover's indexing)
         for (global_idx, constraint) in self.input.constraint_types.iter().enumerate() {
@@ -203,6 +209,14 @@ impl<F: JoltField> RecursionVerifier<F> {
                     g2_scalar_mul_base_points.push(*base_point);
                     g2_scalar_mul_indices.push(global_idx);
                     num_g2_scalar_mul += 1;
+                }
+                ConstraintType::G1Add => {
+                    g1_add_indices.push(global_idx);
+                    num_g1_add += 1;
+                }
+                ConstraintType::G2Add => {
+                    g2_add_indices.push(global_idx);
+                    num_g2_add += 1;
                 }
             }
         }
@@ -259,6 +273,20 @@ impl<F: JoltField> RecursionVerifier<F> {
                 self.input.g2_scalar_mul_public_inputs.clone(),
                 transcript,
             );
+            verifiers.push(Box::new(verifier));
+        }
+
+        // Add G1 add verifier
+        if num_g1_add > 0 {
+            let params = G1AddParams::new(num_g1_add);
+            let verifier = G1AddVerifier::new(params, g1_add_indices, transcript);
+            verifiers.push(Box::new(verifier));
+        }
+
+        // Add G2 add verifier
+        if num_g2_add > 0 {
+            let params = G2AddParams::new(num_g2_add);
+            let verifier = G2AddVerifier::new(params, g2_add_indices, transcript);
             verifiers.push(Box::new(verifier));
         }
 

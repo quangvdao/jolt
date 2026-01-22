@@ -362,19 +362,18 @@ impl PackedGtExpWitness {
                     if !constraint.is_zero() {
                         if failed_constraints.is_empty() {
                             eprintln!(
-                                "PackedGtExpWitness debug: num_steps={}, first_fail s={}, x={}",
-                                num_steps, s, x
+                                "PackedGtExpWitness debug: num_steps={num_steps}, first_fail s={s}, x={x}"
                             );
-                            eprintln!("  digit_hi={}, digit_lo={}", digit_hi, digit_lo);
-                            eprintln!("  rho={:?}", rho);
-                            eprintln!("  rho_next={:?}", rho_next);
-                            eprintln!("  quotient={:?}", quotient);
-                            eprintln!("  base={:?}", base);
-                            eprintln!("  base2={:?}", base2);
-                            eprintln!("  base3={:?}", base3);
-                            eprintln!("  g={:?}", g);
-                            eprintln!("  base_power={:?}", base_power);
-                            eprintln!("  rho4={:?}", rho4);
+                            eprintln!("  digit_hi={digit_hi}, digit_lo={digit_lo}");
+                            eprintln!("  rho={rho:?}");
+                            eprintln!("  rho_next={rho_next:?}");
+                            eprintln!("  quotient={quotient:?}");
+                            eprintln!("  base={base:?}");
+                            eprintln!("  base2={base2:?}");
+                            eprintln!("  base3={base3:?}");
+                            eprintln!("  g={g:?}");
+                            eprintln!("  base_power={base_power:?}");
+                            eprintln!("  rho4={rho4:?}");
                         }
                         failed_constraints.push((s, x, constraint));
                     }
@@ -387,7 +386,7 @@ impl PackedGtExpWitness {
                     failed_constraints.len()
                 );
                 for (s, x, val) in failed_constraints.iter().take(5) {
-                    eprintln!("  step={}, x={}: constraint = {:?}", s, x, val);
+                    eprintln!("  step={s}, x={x}: constraint = {val:?}");
                 }
                 if failed_constraints.len() > 5 {
                     eprintln!("  ... and {} more", failed_constraints.len() - 5);
@@ -851,21 +850,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpPr
 
             let sum = s_0 + s_1;
             if sum != previous_claim {
-                eprintln!(
-                    "PackedGtExp round {}: s(0) + s(1) != previous_claim!",
-                    _round
-                );
+                eprintln!("PackedGtExp round {_round}: s(0) + s(1) != previous_claim!");
                 eprintln!("  rho_len = {}", self.rho_polys[0].len());
                 eprintln!("  eq_s_len = {}", self.eq_s.len());
-                eprintln!("  eq_x_len = {}", eq_x_len);
-                eprintln!("  half = {}", half);
-                eprintln!("  full_len = {}", full_len);
+                eprintln!("  eq_x_len = {eq_x_len}");
+                eprintln!("  half = {half}");
+                eprintln!("  full_len = {full_len}");
                 eprintln!("  evals[0] = {:?}", evals[0]);
-                eprintln!("  s(0) = {:?}", s_0);
-                eprintln!("  s(1) = {:?}", s_1);
-                eprintln!("  s(0) + s(1) = {:?}", sum);
-                eprintln!("  previous_claim = {:?}", previous_claim);
-                eprintln!("  in_step_phase = {}", in_step_phase);
+                eprintln!("  s(0) = {s_0:?}");
+                eprintln!("  s(1) = {s_1:?}");
+                eprintln!("  s(0) + s(1) = {sum:?}");
+                eprintln!("  previous_claim = {previous_claim:?}");
+                eprintln!("  in_step_phase = {in_step_phase}");
                 panic!("Sumcheck relation violated!");
             }
         }

@@ -521,6 +521,10 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
 
                 g2_scalar_mul_idx += 1;
             }
+            ConstraintType::G1Add | ConstraintType::G2Add => {
+                // Not yet integrated into Stage 2 claim extraction.
+                // (Handled here to keep the match exhaustive.)
+            }
         }
 
         claims.extend(constraint_claims);

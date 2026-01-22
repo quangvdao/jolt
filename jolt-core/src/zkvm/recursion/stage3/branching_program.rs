@@ -515,6 +515,7 @@ impl JaggedBranchingProgram {
     ///
     /// # Returns
     /// The MLE value ĝ(prefix, z_layer, suffix)
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_mle_via_forward_backward<F: JoltField>(
         &self,
         forward: &[F; 4],
@@ -931,8 +932,7 @@ mod tests {
             // This should equal the full MLE (since we're using the actual coordinates)
             assert_eq!(
                 mle_at_layer, expected,
-                "Forward-backward at layer {} mismatch",
-                layer
+                "Forward-backward at layer {layer} mismatch"
             );
 
             // Update forward for next iteration
@@ -979,8 +979,7 @@ mod tests {
                 // Sum should be 0 or 1 on boolean inputs
                 assert!(
                     sum == Fq::zero() || sum == Fq::one(),
-                    "Transition sum should be 0 or 1 on boolean inputs, got {:?}",
-                    sum
+                    "Transition sum should be 0 or 1 on boolean inputs, got {sum:?}"
                 );
             }
         }

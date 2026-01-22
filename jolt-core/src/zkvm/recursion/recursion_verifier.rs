@@ -26,8 +26,8 @@ use super::{
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier},
         g2_add::{G2AddParams, G2AddVerifier},
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier},
-        gt_mul::{GtMulParams, GtMulVerifier},
-        packed_gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
+        gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
+        gt_mul::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
     },
     stage2::virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationVerifier,
@@ -61,7 +61,7 @@ pub struct RecursionVerifierInput {
     /// Precomputed matrix row indices for each polynomial index
     pub matrix_rows: Vec<usize>,
     /// Public inputs for packed GT exp (base Fq12 and scalar bits)
-    pub packed_gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+    pub gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
     /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
@@ -227,7 +227,7 @@ impl<F: JoltField> RecursionVerifier<F> {
             let params = PackedGtExpParams::new();
             let verifier = PackedGtExpVerifier::new(
                 params,
-                self.input.packed_gt_exp_public_inputs.clone(),
+                self.input.gt_exp_public_inputs.clone(),
                 transcript,
             );
             verifiers.push(Box::new(verifier));
@@ -236,7 +236,8 @@ impl<F: JoltField> RecursionVerifier<F> {
         // Add GT mul verifier if we have GT mul constraints
         if num_gt_mul > 0 {
             let params = GtMulParams::new(num_gt_mul);
-            let verifier = GtMulVerifier::new(params, gt_mul_indices, transcript);
+            let spec = GtMulVerifierSpec::new(params);
+            let verifier = GtMulVerifier::from_spec(spec, transcript);
             verifiers.push(Box::new(verifier));
         }
 
@@ -337,7 +338,7 @@ impl<F: JoltField> RecursionVerifier<F> {
         let virtual_claims = extract_virtual_claims_from_accumulator(
             accumulator_fq,
             &self.input.constraint_types,
-            &self.input.packed_gt_exp_public_inputs,
+            &self.input.gt_exp_public_inputs,
         );
 
         // Create parameters

@@ -137,14 +137,14 @@ fn append_g1_scalar_mul_virtual_claims<F: JoltField, T: Transcript>(
     a_is_infinity_claim: F,
 ) {
     let claims = virtual_claims![
-        VirtualPolynomial::RecursionG1ScalarMulXA(constraint_idx) => x_a_claim,
-        VirtualPolynomial::RecursionG1ScalarMulYA(constraint_idx) => y_a_claim,
-        VirtualPolynomial::RecursionG1ScalarMulXT(constraint_idx) => x_t_claim,
-        VirtualPolynomial::RecursionG1ScalarMulYT(constraint_idx) => y_t_claim,
-        VirtualPolynomial::RecursionG1ScalarMulXANext(constraint_idx) => x_a_next_claim,
-        VirtualPolynomial::RecursionG1ScalarMulYANext(constraint_idx) => y_a_next_claim,
-        VirtualPolynomial::RecursionG1ScalarMulTIndicator(constraint_idx) => t_is_infinity_claim,
-        VirtualPolynomial::RecursionG1ScalarMulAIndicator(constraint_idx) => a_is_infinity_claim,
+        VirtualPolynomial::g1_scalar_mul_xa(constraint_idx) => x_a_claim,
+        VirtualPolynomial::g1_scalar_mul_ya(constraint_idx) => y_a_claim,
+        VirtualPolynomial::g1_scalar_mul_xt(constraint_idx) => x_t_claim,
+        VirtualPolynomial::g1_scalar_mul_yt(constraint_idx) => y_t_claim,
+        VirtualPolynomial::g1_scalar_mul_xa_next(constraint_idx) => x_a_next_claim,
+        VirtualPolynomial::g1_scalar_mul_ya_next(constraint_idx) => y_a_next_claim,
+        VirtualPolynomial::g1_scalar_mul_t_indicator(constraint_idx) => t_is_infinity_claim,
+        VirtualPolynomial::g1_scalar_mul_a_indicator(constraint_idx) => a_is_infinity_claim,
     ];
     append_virtual_claims(accumulator, transcript, sumcheck_id, opening_point, &claims);
 }
@@ -157,14 +157,14 @@ fn get_g1_scalar_mul_virtual_claims<F: JoltField>(
     sumcheck_id: SumcheckId,
 ) -> (F, F, F, F, F, F, F, F) {
     let polynomials = vec![
-        VirtualPolynomial::RecursionG1ScalarMulXA(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulYA(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulXT(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulYT(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulXANext(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulYANext(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulTIndicator(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulAIndicator(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_xa(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_ya(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_xt(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_yt(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_xa_next(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_ya_next(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_t_indicator(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_a_indicator(constraint_idx),
     ];
     let claims = get_virtual_claims(accumulator, sumcheck_id, &polynomials);
     (
@@ -181,14 +181,14 @@ fn append_g1_scalar_mul_virtual_openings<F: JoltField, T: Transcript>(
     opening_point: &OpeningPoint<BIG_ENDIAN, F>,
 ) {
     let polynomials = vec![
-        VirtualPolynomial::RecursionG1ScalarMulXA(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulYA(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulXT(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulYT(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulXANext(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulYANext(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulTIndicator(constraint_idx),
-        VirtualPolynomial::RecursionG1ScalarMulAIndicator(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_xa(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_ya(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_xt(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_yt(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_xa_next(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_ya_next(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_t_indicator(constraint_idx),
+        VirtualPolynomial::g1_scalar_mul_a_indicator(constraint_idx),
     ];
     append_virtual_openings(
         accumulator,

@@ -46,7 +46,7 @@ pub struct GTMulWitness {
 
 /// Per-operation witness for a single GT exponentiation (used by GTCombineWitness).
 ///
-/// Captures the intermediate values for one square-and-multiply exponentiation.
+/// Captures the intermediate values for one iterative GT exponentiation.
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct GTExpOpWitness {
     /// Base GT element

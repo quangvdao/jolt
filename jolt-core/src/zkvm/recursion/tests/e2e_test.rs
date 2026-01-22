@@ -122,7 +122,7 @@ fn test_recursion_snark_e2e_with_dory() {
         .collect();
 
     // Extract packed GT exp public inputs for verifier
-    let packed_gt_exp_public_inputs = prover.constraint_system.packed_gt_exp_public_inputs.clone();
+    let gt_exp_public_inputs = prover.constraint_system.gt_exp_public_inputs.clone();
     let g1_scalar_mul_public_inputs = prover.constraint_system.g1_scalar_mul_public_inputs.clone();
     let g2_scalar_mul_public_inputs = prover.constraint_system.g2_scalar_mul_public_inputs.clone();
 
@@ -160,7 +160,7 @@ fn test_recursion_snark_e2e_with_dory() {
         jagged_bijection,
         jagged_mapping,
         matrix_rows,
-        packed_gt_exp_public_inputs,
+        gt_exp_public_inputs,
         g1_scalar_mul_public_inputs,
         g2_scalar_mul_public_inputs,
     };

@@ -36,8 +36,8 @@ use super::{
     stage1::{
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulProver},
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulProver},
-        gt_mul::{GtMulParams, GtMulProver},
-        packed_gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
+        gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
+        gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
     },
     stage2::virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
@@ -359,7 +359,7 @@ impl RecursionProver<Fq> {
         use super::constraints_sys::DoryMatrixBuilder;
         use super::stage1::g1_scalar_mul::G1ScalarMulPublicInputs;
         use super::stage1::g2_scalar_mul::G2ScalarMulPublicInputs;
-        use super::stage1::packed_gt_exp::PackedGtExpWitness;
+        use super::stage1::gt_exp::PackedGtExpWitness;
         use jolt_optimizations::fq12_to_multilinear_evals;
 
         // Use DoryMatrixBuilder with 11 variables for uniform matrix structure (packed GT exp)
@@ -370,13 +370,13 @@ impl RecursionProver<Fq> {
             "[build_constraint_system] Processing {} direct GT exp witnesses",
             witness_collection.gt_exp.len()
         );
-        let packed_gt_exp_span = tracing::info_span!(
-            "build_packed_gt_exp_witnesses",
+        let gt_exp_span = tracing::info_span!(
+            "build_gt_exp_witnesses",
             count = witness_collection.gt_exp.len()
         )
         .entered();
-        let mut packed_gt_exp_witnesses = Vec::with_capacity(witness_collection.gt_exp.len());
-        let mut packed_gt_exp_public_inputs = Vec::with_capacity(witness_collection.gt_exp.len());
+        let mut gt_exp_witnesses = Vec::with_capacity(witness_collection.gt_exp.len());
+        let mut gt_exp_public_inputs = Vec::with_capacity(witness_collection.gt_exp.len());
         let mut g1_scalar_mul_public_inputs =
             Vec::with_capacity(witness_collection.g1_scalar_mul.len());
         let mut g2_scalar_mul_public_inputs =
@@ -402,18 +402,18 @@ impl RecursionProver<Fq> {
             );
 
             // Add to matrix (ONE constraint per packed GT exp)
-            builder.add_packed_gt_exp_witness(&packed);
+            builder.add_gt_exp_witness(&packed);
 
             // Keep for Stage 1 prover
-            packed_gt_exp_witnesses.push(packed);
+            gt_exp_witnesses.push(packed);
 
             // Store public inputs for verifier
-            packed_gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
+            gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
                 witness.base,
                 witness.bits.clone(),
             ));
         }
-        drop(packed_gt_exp_span);
+        drop(gt_exp_span);
 
         // Add GT mul witnesses
         let gt_mul_span = tracing::info_span!(
@@ -471,7 +471,7 @@ impl RecursionProver<Fq> {
 
             // Also collect public inputs for the combine witnesses
             for exp_wit in &cw.exp_witnesses {
-                packed_gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
+                gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
                     exp_wit.base,
                     exp_wit.bits.clone(),
                 ));
@@ -486,10 +486,10 @@ impl RecursionProver<Fq> {
             // Add the combined witnesses to our list
             tracing::info!(
                 "[Homomorphic Combine] Before extend: {} witnesses, adding {} more",
-                packed_gt_exp_witnesses.len(),
+                gt_exp_witnesses.len(),
                 combined_packed_witnesses.len()
             );
-            packed_gt_exp_witnesses.extend(combined_packed_witnesses);
+            gt_exp_witnesses.extend(combined_packed_witnesses);
         }
 
         let build_matrix_span = tracing::info_span!("build_matrix").entered();
@@ -500,8 +500,8 @@ impl RecursionProver<Fq> {
             constraints,
             matrix,
             g_poly,
-            packed_gt_exp_witnesses,
-            packed_gt_exp_public_inputs,
+            gt_exp_witnesses,
+            gt_exp_public_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
             g1_add_witnesses: Vec::new(),
@@ -633,7 +633,7 @@ impl<F: JoltField> RecursionProver<F> {
         let mut provers: Vec<Box<dyn SumcheckInstanceProver<F, T>>> = Vec::new();
 
         // Add packed GT exp prover (single prover handles all witnesses with gamma batching)
-        let packed_witnesses = &self.constraint_system.packed_gt_exp_witnesses;
+        let packed_witnesses = &self.constraint_system.gt_exp_witnesses;
         if !packed_witnesses.is_empty() {
             // Packed GT exp uses layout x * 128 + s (s in low bits), so g needs replication
             // Extract 4-var g from the zero-padded version and replicate across s
@@ -685,8 +685,8 @@ impl<F: JoltField> RecursionProver<F> {
                 >(gt_mul_constraints_fq)
             };
 
-            let prover =
-                GtMulProver::new(params, gt_mul_constraints_f, g_poly_f.clone(), transcript);
+            let spec = GtMulProverSpec::new(params, gt_mul_constraints_f, g_poly_f.clone());
+            let prover = GtMulProver::from_spec(spec, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -904,7 +904,7 @@ impl<F: JoltField> RecursionProver<F> {
         let virtual_claims = extract_virtual_claims_from_accumulator(
             accumulator_fq,
             &constraint_types,
-            &self.constraint_system.packed_gt_exp_public_inputs,
+            &self.constraint_system.gt_exp_public_inputs,
         );
 
         // Create parameters

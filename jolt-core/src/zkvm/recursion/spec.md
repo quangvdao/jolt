@@ -174,7 +174,7 @@ This transforms high-degree $\mathbb{F}_{q^{12}}$ operations into low-degree con
 
 ### 2.2 GT Exponentiation
 
-Computes $b = a^k$ using square-and-multiply.
+Computes $b = a^k$ using iterative exponentiation.
 
 #### Inputs / Outputs
 
@@ -269,6 +269,24 @@ After final challenges $(r_s^*, r_x^*)$:
 
 The verifier computes \(\text{digit\_lo}(r_s^*)\), \(\text{digit\_hi}(r_s^*)\), and \(\text{base}(r_x^*)\), \(\text{base}^2(r_x^*)\), \(\text{base}^3(r_x^*)\)
 directly from public inputs (scalar bits and base), so these are **not** emitted as openings/claims.
+
+#### Public Polynomial Optimization
+
+The `bit` (digit) and `base` polynomials are derived entirely from **public inputs** (the scalar exponent and base element), so the prover does not commit to them:
+
+| Polynomial | Source | Verifier Action |
+|------------|--------|-----------------|
+| `digit_lo(s)`, `digit_hi(s)` | Scalar $k$ bits | Evaluate 7-variable MLE at $r_s^*$ |
+| `base(x)`, `base²(x)`, `base³(x)` | Base $a \in \mathbb{G}_T$ | Evaluate 4-variable MLEs at $r_x^*$ |
+| `g(x)` | Irreducible polynomial (constant) | Evaluate 4-variable MLE at $r_x^*$ |
+
+This follows the same pattern as the irreducible polynomial `g(x)`, which is a known constant that the verifier evaluates directly. By recognizing these as public inputs:
+
+- **5 → 3 polynomials** committed per GT exponentiation
+- **40% reduction** in virtual claims for GT exp
+- **No security impact** — verifier computes identical values from public data
+
+The prover still uses these polynomials internally during sumcheck computation, but does not include them in the commitment.
 
 #### Mathematical Correctness
 
@@ -1601,11 +1619,14 @@ impl RecursionProver {
         witnesses: &WitnessCollection,
         transcript: &mut Transcript,
     ) -> RecursionProof {
-        // Stage 1: Run three sumchecks in parallel
+        // Stage 1: Run sumchecks in parallel
         let stage1_provers = vec![
-            SquareAndMultiplyProver::new(...),
+            GtExpProver::new(...),
             GtMulProver::new(...),
             G1ScalarMulProver::new(...),
+            G2ScalarMulProver::new(...),
+            G1AddProver::new(...),
+            G2AddProver::new(...),
         ];
         let (stage1_proof, stage1_claims) = BatchedSumcheck::prove(
             stage1_provers,
@@ -1648,9 +1669,12 @@ impl RecursionVerifier {
     ) -> Result<()> {
         // Stage 1: Verify batched sumcheck
         let stage1_verifiers = vec![
-            SquareAndMultiplyVerifier::new(...),
+            GtExpVerifier::new(...),
             GtMulVerifier::new(...),
             G1ScalarMulVerifier::new(...),
+            G2ScalarMulVerifier::new(...),
+            G1AddVerifier::new(...),
+            G2AddVerifier::new(...),
         ];
         let stage1_claims = BatchedSumcheck::verify(
             stage1_verifiers,
@@ -1686,16 +1710,16 @@ The `OpeningAccumulator` tracks virtual polynomial claims across stages:
 ```rust
 // Stage 1 appends virtual claims
 accumulator.append_virtual(
-    VirtualPolynomial::RecursionBase(constraint_idx),
-    SumcheckId::SquareAndMultiply,
+    VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho, instance: constraint_idx }),
+    SumcheckId::GtExp,
     opening_point,
     claimed_value,
 );
 
 // Stage 2 reads Stage 1 claims
 let (point, value) = accumulator.get_virtual_polynomial_opening(
-    VirtualPolynomial::RecursionBase(i),
-    SumcheckId::SquareAndMultiply,
+    VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho, instance: i }),
+    SumcheckId::GtExp,
 );
 
 // Stage 3 outputs committed polynomial claim

@@ -920,67 +920,20 @@ where
             let mut num_g1_scalar_mul = 0;
 
             // Count constraint types based on the virtual polynomial types in opening claims
+            use crate::zkvm::witness::{RecursionPoly, VirtualPolynomial};
             for key in recursion_proof.opening_claims.keys() {
-                if let OpeningId::Virtual(poly, _) = key {
-                    match poly {
-                        crate::zkvm::witness::VirtualPolynomial::RecursionBase(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionRhoPrev(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionRhoCurr(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionQuotient(_) => {
-                            // These are GT exp constraints
-                            num_gt_exp = num_gt_exp.max(match poly {
-                                crate::zkvm::witness::VirtualPolynomial::RecursionBase(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionRhoPrev(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionRhoCurr(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionQuotient(i) => {
-                                    *i + 1
-                                }
-                                _ => 0,
-                            });
+                if let OpeningId::Virtual(VirtualPolynomial::Recursion(rec_poly), _) = key {
+                    match rec_poly {
+                        RecursionPoly::GtExp { instance, .. } => {
+                            num_gt_exp = num_gt_exp.max(instance + 1);
                         }
-                        crate::zkvm::witness::VirtualPolynomial::RecursionMulLhs(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionMulRhs(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionMulResult(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionMulQuotient(_) => {
-                            // These are GT mul constraints
-                            num_gt_mul = num_gt_mul.max(match poly {
-                                crate::zkvm::witness::VirtualPolynomial::RecursionMulLhs(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionMulRhs(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionMulResult(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionMulQuotient(
-                                    i,
-                                ) => *i + 1,
-                                _ => 0,
-                            });
+                        RecursionPoly::GtMul { instance, .. } => {
+                            num_gt_mul = num_gt_mul.max(instance + 1);
                         }
-                        crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXA(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYA(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXT(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYT(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXANext(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYANext(_)
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulTIndicator(
-                            _,
-                        )
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulAIndicator(
-                            _,
-                        )
-                        | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulBit(_) => {
-                            // These are G1 scalar mul constraints
-                            num_g1_scalar_mul = num_g1_scalar_mul.max(match poly {
-                                crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXA(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYA(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXT(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYT(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulXANext(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulYANext(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulTIndicator(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulAIndicator(i)
-                                | crate::zkvm::witness::VirtualPolynomial::RecursionG1ScalarMulBit(i) => *i + 1,
-                                _ => 0,
-                            });
+                        RecursionPoly::G1ScalarMul { instance, .. } => {
+                            num_g1_scalar_mul = num_g1_scalar_mul.max(instance + 1);
                         }
-                        _ => {} // Ignore other virtual polynomial types
+                        _ => {} // G1Add, G2Add, G2ScalarMul - ignore for now
                     }
                 }
             }
@@ -1025,7 +978,7 @@ where
                 jagged_bijection,
                 jagged_mapping,
                 matrix_rows,
-                packed_gt_exp_public_inputs: metadata.packed_gt_exp_public_inputs.clone(),
+                gt_exp_public_inputs: metadata.gt_exp_public_inputs.clone(),
                 g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
                 g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),
             }

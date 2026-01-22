@@ -27,9 +27,12 @@ use crate::{
             recursion_prover::RecursionProof,
             stage1::g1_scalar_mul::G1ScalarMulPublicInputs,
             stage1::g2_scalar_mul::G2ScalarMulPublicInputs,
-            stage1::packed_gt_exp::PackedGtExpPublicInputs,
+            stage1::gt_exp::PackedGtExpPublicInputs,
         },
-        witness::{CommittedPolynomial, VirtualPolynomial},
+        witness::{
+            CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,
+            GtMulTerm, RecursionPoly, TermEnum, VirtualPolynomial,
+        },
     },
 };
 use ark_bn254::{Fq, Fq12};
@@ -44,7 +47,7 @@ pub struct RecursionConstraintMetadata {
     pub matrix_rows: Vec<usize>,
     pub dense_num_vars: usize,
     /// Public inputs for packed GT exp (base Fq12 and scalar bits for each GT exp)
-    pub packed_gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+    pub gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
     /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
@@ -663,285 +666,35 @@ impl CanonicalSerialize for VirtualPolynomial {
                 40u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*flag).unwrap()).serialize_with_mode(&mut writer, compress)
             }
-            Self::RecursionBase(i) => {
+            // Recursion polynomials - hierarchical serialization
+            // Format: tag 41, then op_type (u8), term_index (u8), instance (u32)
+            Self::Recursion(rec_poly) => {
                 41u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionRhoPrev(i) => {
-                42u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionRhoCurr(i) => {
-                43u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionQuotient(i) => {
-                44u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionMulLhs(i) => {
-                45u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionMulRhs(i) => {
-                46u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionMulResult(i) => {
-                47u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionMulQuotient(i) => {
-                48u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulXA(i) => {
-                49u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulYA(i) => {
-                50u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulXT(i) => {
-                51u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulYT(i) => {
-                52u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulXANext(i) => {
-                53u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulYANext(i) => {
-                54u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulTIndicator(i) => {
-                55u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulAIndicator(i) => {
-                62u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1ScalarMulBit(i) => {
-                63u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulXAC0(i) => {
-                64u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulXAC1(i) => {
-                65u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulYAC0(i) => {
-                66u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulYAC1(i) => {
-                67u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulXTC0(i) => {
-                68u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulXTC1(i) => {
-                69u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulYTC0(i) => {
-                70u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulYTC1(i) => {
-                71u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulXANextC0(i) => {
-                72u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulXANextC1(i) => {
-                73u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulYANextC0(i) => {
-                74u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulYANextC1(i) => {
-                75u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulTIndicator(i) => {
-                76u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulAIndicator(i) => {
-                77u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2ScalarMulBit(i) => {
-                78u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::DorySparseConstraintMatrix => 56u8.serialize_with_mode(&mut writer, compress),
-            Self::PackedGtExpRho(i) => {
-                57u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::PackedGtExpRhoNext(i) => {
-                58u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::PackedGtExpQuotient(i) => {
-                59u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            } // Note: PackedGtExpBit and PackedGtExpBase removed - they are public inputs
-            // G1 add
-            Self::RecursionG1AddXP(i) => {
-                79u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddYP(i) => {
-                80u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddPIndicator(i) => {
-                81u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddXQ(i) => {
-                82u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddYQ(i) => {
-                83u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddQIndicator(i) => {
-                84u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddXR(i) => {
-                85u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddYR(i) => {
-                86u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddRIndicator(i) => {
-                87u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddLambda(i) => {
-                88u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddInvDeltaX(i) => {
-                89u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddIsDouble(i) => {
-                90u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG1AddIsInverse(i) => {
-                91u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            // G2 add
-            Self::RecursionG2AddXPC0(i) => {
-                92u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddXPC1(i) => {
-                93u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddYPC0(i) => {
-                94u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddYPC1(i) => {
-                95u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddPIndicator(i) => {
-                96u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddXQC0(i) => {
-                97u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddXQC1(i) => {
-                98u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddYQC0(i) => {
-                99u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddYQC1(i) => {
-                100u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddQIndicator(i) => {
-                101u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddXRC0(i) => {
-                102u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddXRC1(i) => {
-                103u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddYRC0(i) => {
-                104u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddYRC1(i) => {
-                105u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddRIndicator(i) => {
-                106u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddLambdaC0(i) => {
-                107u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddLambdaC1(i) => {
-                108u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddInvDeltaXC0(i) => {
-                109u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddInvDeltaXC1(i) => {
-                110u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddIsDouble(i) => {
-                111u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
-            Self::RecursionG2AddIsInverse(i) => {
-                112u8.serialize_with_mode(&mut writer, compress)?;
-                (*i as u32).serialize_with_mode(&mut writer, compress)
-            }
+                let (op_type, term_index, instance) = match rec_poly {
+                    RecursionPoly::G1Add { term, instance } => {
+                        (0u8, term.to_index() as u8, *instance)
+                    }
+                    RecursionPoly::G1ScalarMul { term, instance } => {
+                        (1u8, term.to_index() as u8, *instance)
+                    }
+                    RecursionPoly::G2Add { term, instance } => {
+                        (2u8, term.to_index() as u8, *instance)
+                    }
+                    RecursionPoly::G2ScalarMul { term, instance } => {
+                        (3u8, term.to_index() as u8, *instance)
+                    }
+                    RecursionPoly::GtMul { term, instance } => {
+                        (4u8, term.to_index() as u8, *instance)
+                    }
+                    RecursionPoly::GtExp { term, instance } => {
+                        (5u8, term.to_index() as u8, *instance)
+                    }
+                };
+                op_type.serialize_with_mode(&mut writer, compress)?;
+                term_index.serialize_with_mode(&mut writer, compress)?;
+                (instance as u32).serialize_with_mode(&mut writer, compress)
+            }
+            Self::DorySparseConstraintMatrix => 42u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -985,79 +738,12 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::RamHammingWeight
             | Self::UnivariateSkip
             | Self::DorySparseConstraintMatrix => 1,
-            Self::PackedGtExpRho(_)
-            | Self::PackedGtExpRhoNext(_)
-            | Self::PackedGtExpQuotient(_) => 5,
             Self::InstructionRa(_)
             | Self::OpFlags(_)
             | Self::InstructionFlags(_)
             | Self::LookupTableFlag(_) => 2,
-            Self::RecursionBase(_)
-            | Self::RecursionRhoPrev(_)
-            | Self::RecursionRhoCurr(_)
-            | Self::RecursionQuotient(_)
-            | Self::RecursionMulLhs(_)
-            | Self::RecursionMulRhs(_)
-            | Self::RecursionMulResult(_)
-            | Self::RecursionMulQuotient(_)
-            | Self::RecursionG1ScalarMulXA(_)
-            | Self::RecursionG1ScalarMulYA(_)
-            | Self::RecursionG1ScalarMulXT(_)
-            | Self::RecursionG1ScalarMulYT(_)
-            | Self::RecursionG1ScalarMulXANext(_)
-            | Self::RecursionG1ScalarMulYANext(_)
-            | Self::RecursionG1ScalarMulTIndicator(_)
-            | Self::RecursionG1ScalarMulAIndicator(_)
-            | Self::RecursionG1ScalarMulBit(_)
-            | Self::RecursionG2ScalarMulXAC0(_)
-            | Self::RecursionG2ScalarMulXAC1(_)
-            | Self::RecursionG2ScalarMulYAC0(_)
-            | Self::RecursionG2ScalarMulYAC1(_)
-            | Self::RecursionG2ScalarMulXTC0(_)
-            | Self::RecursionG2ScalarMulXTC1(_)
-            | Self::RecursionG2ScalarMulYTC0(_)
-            | Self::RecursionG2ScalarMulYTC1(_)
-            | Self::RecursionG2ScalarMulXANextC0(_)
-            | Self::RecursionG2ScalarMulXANextC1(_)
-            | Self::RecursionG2ScalarMulYANextC0(_)
-            | Self::RecursionG2ScalarMulYANextC1(_)
-            | Self::RecursionG2ScalarMulTIndicator(_)
-            | Self::RecursionG2ScalarMulAIndicator(_)
-            | Self::RecursionG2ScalarMulBit(_)
-            | Self::RecursionG1AddXP(_)
-            | Self::RecursionG1AddYP(_)
-            | Self::RecursionG1AddPIndicator(_)
-            | Self::RecursionG1AddXQ(_)
-            | Self::RecursionG1AddYQ(_)
-            | Self::RecursionG1AddQIndicator(_)
-            | Self::RecursionG1AddXR(_)
-            | Self::RecursionG1AddYR(_)
-            | Self::RecursionG1AddRIndicator(_)
-            | Self::RecursionG1AddLambda(_)
-            | Self::RecursionG1AddInvDeltaX(_)
-            | Self::RecursionG1AddIsDouble(_)
-            | Self::RecursionG1AddIsInverse(_)
-            | Self::RecursionG2AddXPC0(_)
-            | Self::RecursionG2AddXPC1(_)
-            | Self::RecursionG2AddYPC0(_)
-            | Self::RecursionG2AddYPC1(_)
-            | Self::RecursionG2AddPIndicator(_)
-            | Self::RecursionG2AddXQC0(_)
-            | Self::RecursionG2AddXQC1(_)
-            | Self::RecursionG2AddYQC0(_)
-            | Self::RecursionG2AddYQC1(_)
-            | Self::RecursionG2AddQIndicator(_)
-            | Self::RecursionG2AddXRC0(_)
-            | Self::RecursionG2AddXRC1(_)
-            | Self::RecursionG2AddYRC0(_)
-            | Self::RecursionG2AddYRC1(_)
-            | Self::RecursionG2AddRIndicator(_)
-            | Self::RecursionG2AddLambdaC0(_)
-            | Self::RecursionG2AddLambdaC1(_)
-            | Self::RecursionG2AddInvDeltaXC0(_)
-            | Self::RecursionG2AddInvDeltaXC1(_)
-            | Self::RecursionG2AddIsDouble(_)
-            | Self::RecursionG2AddIsInverse(_) => 5, // 1 byte discriminator + 4 bytes u32
+            // Recursion: 1 byte tag + 1 byte op_type + 1 byte term_index + 4 bytes instance
+            Self::Recursion(_) => 7,
         }
     }
 }
@@ -1133,284 +819,48 @@ impl CanonicalDeserialize for VirtualPolynomial {
                     let flag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     Self::LookupTableFlag(flag as usize)
                 }
+                // Recursion polynomials - hierarchical deserialization
                 41 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionBase(i as usize)
-                }
-                42 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionRhoPrev(i as usize)
-                }
-                43 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionRhoCurr(i as usize)
-                }
-                44 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionQuotient(i as usize)
-                }
-                45 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionMulLhs(i as usize)
-                }
-                46 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionMulRhs(i as usize)
-                }
-                47 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionMulResult(i as usize)
-                }
-                48 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionMulQuotient(i as usize)
-                }
-                49 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulXA(i as usize)
-                }
-                50 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulYA(i as usize)
-                }
-                51 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulXT(i as usize)
-                }
-                52 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulYT(i as usize)
-                }
-                53 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulXANext(i as usize)
-                }
-                54 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulYANext(i as usize)
-                }
-                55 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulTIndicator(i as usize)
-                }
-                56 => Self::DorySparseConstraintMatrix,
-                57 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::PackedGtExpRho(i as usize)
-                }
-                58 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::PackedGtExpRhoNext(i as usize)
-                }
-                59 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::PackedGtExpQuotient(i as usize)
-                }
-                // Note: 60/61 (PackedGtExpBit/Base) removed - they are now public inputs
-                62 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulAIndicator(i as usize)
-                }
-                63 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1ScalarMulBit(i as usize)
-                }
-                64 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulXAC0(i as usize)
-                }
-                65 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulXAC1(i as usize)
-                }
-                66 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulYAC0(i as usize)
-                }
-                67 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulYAC1(i as usize)
-                }
-                68 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulXTC0(i as usize)
-                }
-                69 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulXTC1(i as usize)
-                }
-                70 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulYTC0(i as usize)
-                }
-                71 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulYTC1(i as usize)
-                }
-                72 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulXANextC0(i as usize)
-                }
-                73 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulXANextC1(i as usize)
-                }
-                74 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulYANextC0(i as usize)
-                }
-                75 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulYANextC1(i as usize)
-                }
-                76 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulTIndicator(i as usize)
-                }
-                77 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulAIndicator(i as usize)
-                }
-                78 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2ScalarMulBit(i as usize)
-                }
-                79 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddXP(i as usize)
-                }
-                80 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddYP(i as usize)
-                }
-                81 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddPIndicator(i as usize)
-                }
-                82 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddXQ(i as usize)
-                }
-                83 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddYQ(i as usize)
-                }
-                84 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddQIndicator(i as usize)
-                }
-                85 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddXR(i as usize)
-                }
-                86 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddYR(i as usize)
-                }
-                87 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddRIndicator(i as usize)
-                }
-                88 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddLambda(i as usize)
-                }
-                89 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddInvDeltaX(i as usize)
-                }
-                90 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddIsDouble(i as usize)
-                }
-                91 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG1AddIsInverse(i as usize)
-                }
-                92 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddXPC0(i as usize)
-                }
-                93 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddXPC1(i as usize)
-                }
-                94 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddYPC0(i as usize)
-                }
-                95 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddYPC1(i as usize)
-                }
-                96 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddPIndicator(i as usize)
-                }
-                97 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddXQC0(i as usize)
-                }
-                98 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddXQC1(i as usize)
-                }
-                99 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddYQC0(i as usize)
-                }
-                100 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddYQC1(i as usize)
-                }
-                101 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddQIndicator(i as usize)
-                }
-                102 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddXRC0(i as usize)
-                }
-                103 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddXRC1(i as usize)
-                }
-                104 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddYRC0(i as usize)
-                }
-                105 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddYRC1(i as usize)
-                }
-                106 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddRIndicator(i as usize)
-                }
-                107 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddLambdaC0(i as usize)
-                }
-                108 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddLambdaC1(i as usize)
-                }
-                109 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddInvDeltaXC0(i as usize)
-                }
-                110 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddInvDeltaXC1(i as usize)
-                }
-                111 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddIsDouble(i as usize)
-                }
-                112 => {
-                    let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
-                    Self::RecursionG2AddIsInverse(i as usize)
-                }
+                    let op_type = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+                    let term_index = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+                    let instance =
+                        u32::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                    let rec_poly = match op_type {
+                        0 => RecursionPoly::G1Add {
+                            term: G1AddTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        1 => RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        2 => RecursionPoly::G2Add {
+                            term: G2AddTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        3 => RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        4 => RecursionPoly::GtMul {
+                            term: GtMulTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        5 => RecursionPoly::GtExp {
+                            term: GtExpTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        _ => return Err(SerializationError::InvalidData),
+                    };
+                    Self::Recursion(rec_poly)
+                }
+                42 => Self::DorySparseConstraintMatrix,
                 _ => return Err(SerializationError::InvalidData),
             },
         )

@@ -63,7 +63,7 @@ use crate::{
     zkvm::{
         recursion::{
             constraints_sys::{ConstraintType, PolyType},
-            stage1::packed_gt_exp::PackedGtExpPublicInputs,
+            stage1::gt_exp::PackedGtExpPublicInputs,
         },
         witness::VirtualPolynomial,
     },
@@ -331,19 +331,19 @@ impl DirectEvaluationVerifier {
 /// # Arguments
 /// - `accumulator`: The Stage 1 opening accumulator
 /// - `constraint_types`: The types of constraints in order
-/// - `packed_gt_exp_public_inputs`: Public inputs for each packed GT exp (base, scalar_bits)
+/// - `gt_exp_public_inputs`: Public inputs for each packed GT exp (base, scalar_bits)
 ///
 /// # Returns
 /// A vector of virtual claims organized by constraint then polynomial type
 pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulator<F>>(
     accumulator: &A,
     constraint_types: &[ConstraintType],
-    _packed_gt_exp_public_inputs: &[PackedGtExpPublicInputs],
+    _gt_exp_public_inputs: &[PackedGtExpPublicInputs],
 ) -> Vec<F> {
     let mut claims = Vec::new();
 
     // Track separate indices for each constraint type
-    let mut packed_gt_exp_idx = 0;
+    let mut gt_exp_idx = 0;
     let mut gt_mul_idx = 0;
     let mut g1_scalar_mul_idx = 0;
     let mut g2_scalar_mul_idx = 0;
@@ -359,38 +359,38 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
             ConstraintType::PackedGtExp => {
                 // Packed GT Exp uses matrix polynomials: RhoPrev + Quotient.
                 // Base/digits/rho_next are public inputs or separately-verified, not in the matrix.
-                tracing::debug!("[extract_constraint_claims] Getting PackedGtExp({}) openings for constraint {}", packed_gt_exp_idx, idx);
+                tracing::debug!("[extract_constraint_claims] Getting PackedGtExp({}) openings for constraint {}", gt_exp_idx, idx);
 
                 // Get committed polynomial claims
                 let (_, rho_prev) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::PackedGtExpRho(packed_gt_exp_idx),
+                    VirtualPolynomial::gt_exp_rho(gt_exp_idx),
                     SumcheckId::PackedGtExp,
                 );
                 let (_, quotient) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::PackedGtExpQuotient(packed_gt_exp_idx),
+                    VirtualPolynomial::gt_exp_quotient(gt_exp_idx),
                     SumcheckId::PackedGtExp,
                 );
 
                 constraint_claims[PolyType::RhoPrev as usize] = rho_prev;
                 constraint_claims[PolyType::Quotient as usize] = quotient;
 
-                packed_gt_exp_idx += 1;
+                gt_exp_idx += 1;
             }
             ConstraintType::GtMul => {
                 let (_, lhs) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionMulLhs(gt_mul_idx),
+                    VirtualPolynomial::gt_mul_lhs(gt_mul_idx),
                     SumcheckId::GtMul,
                 );
                 let (_, rhs) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionMulRhs(gt_mul_idx),
+                    VirtualPolynomial::gt_mul_rhs(gt_mul_idx),
                     SumcheckId::GtMul,
                 );
                 let (_, result) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionMulResult(gt_mul_idx),
+                    VirtualPolynomial::gt_mul_result(gt_mul_idx),
                     SumcheckId::GtMul,
                 );
                 let (_, quotient) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionMulQuotient(gt_mul_idx),
+                    VirtualPolynomial::gt_mul_quotient(gt_mul_idx),
                     SumcheckId::GtMul,
                 );
 
@@ -403,35 +403,35 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
             }
             ConstraintType::G1ScalarMul { .. } => {
                 let (_, x_a) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulXA(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_xa(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
                 let (_, y_a) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulYA(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_ya(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
                 let (_, x_t) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulXT(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_xt(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
                 let (_, y_t) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulYT(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_yt(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
                 let (_, x_a_next) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulXANext(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_xa_next(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
                 let (_, y_a_next) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulYANext(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_ya_next(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
                 let (_, t_indicator) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulTIndicator(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_t_indicator(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
                 let (_, a_indicator) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG1ScalarMulAIndicator(g1_scalar_mul_idx),
+                    VirtualPolynomial::g1_scalar_mul_a_indicator(g1_scalar_mul_idx),
                     SumcheckId::G1ScalarMul,
                 );
 
@@ -448,59 +448,59 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
             }
             ConstraintType::G2ScalarMul { .. } => {
                 let (_, x_a_c0) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulXAC0(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_xa_c0(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, x_a_c1) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulXAC1(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_xa_c1(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, y_a_c0) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulYAC0(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_ya_c0(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, y_a_c1) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulYAC1(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_ya_c1(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, x_t_c0) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulXTC0(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_xt_c0(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, x_t_c1) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulXTC1(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_xt_c1(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, y_t_c0) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulYTC0(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_yt_c0(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, y_t_c1) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulYTC1(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_yt_c1(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, x_a_next_c0) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulXANextC0(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_xa_next_c0(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, x_a_next_c1) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulXANextC1(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_xa_next_c1(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, y_a_next_c0) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulYANextC0(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_ya_next_c0(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, y_a_next_c1) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulYANextC1(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_ya_next_c1(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, t_indicator) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulTIndicator(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_t_indicator(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
                 let (_, a_indicator) = accumulator.get_virtual_polynomial_opening(
-                    VirtualPolynomial::RecursionG2ScalarMulAIndicator(g2_scalar_mul_idx),
+                    VirtualPolynomial::g2_scalar_mul_a_indicator(g2_scalar_mul_idx),
                     SumcheckId::G2ScalarMul,
                 );
 

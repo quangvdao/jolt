@@ -18,7 +18,7 @@ use crate::{
     zkvm::recursion::{
         stage1::g1_scalar_mul::{G1ScalarMulPublicInputs, G1ScalarMulWitness},
         stage1::g2_scalar_mul::{G2ScalarMulPublicInputs, G2ScalarMulWitness},
-        stage1::packed_gt_exp::PackedGtExpPublicInputs,
+        stage1::gt_exp::PackedGtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
 };
@@ -88,7 +88,7 @@ impl RecursionMetadataBuilder {
             jagged_mapping,
             matrix_rows,
             dense_num_vars,
-            packed_gt_exp_public_inputs: self.constraint_system.packed_gt_exp_public_inputs.clone(),
+            gt_exp_public_inputs: self.constraint_system.gt_exp_public_inputs.clone(),
             g1_scalar_mul_public_inputs: self.constraint_system.g1_scalar_mul_public_inputs.clone(),
             g2_scalar_mul_public_inputs: self.constraint_system.g2_scalar_mul_public_inputs.clone(),
         }
@@ -512,10 +512,7 @@ impl DoryMatrixBuilder {
     /// - RhoNext: rho_next(s,x) - shifted intermediates (NOT COMMITTED - verified via shift sumcheck)
     /// - Quotient: quotient(s,x) - all quotients packed
     /// - Digit bits: digit_lo/hi(s) - scalar digits (7-var padded to 11-var, public input)
-    pub fn add_packed_gt_exp_witness(
-        &mut self,
-        witness: &super::stage1::packed_gt_exp::PackedGtExpWitness,
-    ) {
+    pub fn add_gt_exp_witness(&mut self, witness: &super::stage1::gt_exp::PackedGtExpWitness) {
         assert_eq!(
             self.num_constraint_vars, 11,
             "Packed GT exp requires 11 constraint variables"
@@ -1067,8 +1064,8 @@ impl DoryMatrixBuilder {
     pub fn add_combine_witness(
         &mut self,
         witness: &GTCombineWitness,
-    ) -> Vec<super::stage1::packed_gt_exp::PackedGtExpWitness> {
-        use super::stage1::packed_gt_exp::PackedGtExpWitness;
+    ) -> Vec<super::stage1::gt_exp::PackedGtExpWitness> {
+        use super::stage1::gt_exp::PackedGtExpWitness;
         let mut packed_witnesses = Vec::new();
 
         tracing::info!(
@@ -1104,7 +1101,7 @@ impl DoryMatrixBuilder {
                     &base2_mle,
                     &base3_mle,
                 );
-                self.add_packed_gt_exp_witness(&packed);
+                self.add_gt_exp_witness(&packed);
                 packed_witnesses.push(packed);
                 continue;
             }
@@ -1150,7 +1147,7 @@ impl DoryMatrixBuilder {
             );
 
             // Add to matrix
-            self.add_packed_gt_exp_witness(&packed);
+            self.add_gt_exp_witness(&packed);
             packed_witnesses.push(packed);
         }
 
@@ -1320,11 +1317,11 @@ pub struct ConstraintSystem {
     pub constraints: Vec<MatrixConstraint>,
 
     /// Packed GT exp witnesses for Stage 1 prover (base-4 steps packed into 11-var MLEs)
-    pub packed_gt_exp_witnesses: Vec<super::stage1::packed_gt_exp::PackedGtExpWitness>,
+    pub gt_exp_witnesses: Vec<super::stage1::gt_exp::PackedGtExpWitness>,
 
     /// Public inputs for packed GT exp (base Fq12 and scalar bits) - used by verifier
     /// and Stage 2 to compute digit/base evaluations directly
-    pub packed_gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+    pub gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
 
     /// Public inputs for G1 scalar multiplication (the scalars, one per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
@@ -1481,8 +1478,8 @@ impl ConstraintSystem {
             matrix,
             g_poly,
             constraints,
-            packed_gt_exp_witnesses: Vec::new(), // No actual witnesses in from_witness (test helper)
-            packed_gt_exp_public_inputs: Vec::new(), // No actual public inputs in from_witness (test helper)
+            gt_exp_witnesses: Vec::new(), // No actual witnesses in from_witness (test helper)
+            gt_exp_public_inputs: Vec::new(), // No actual public inputs in from_witness (test helper)
             g1_scalar_mul_public_inputs: Vec::new(),
             g2_scalar_mul_public_inputs: Vec::new(),
             g1_add_witnesses: Vec::new(),
@@ -1525,14 +1522,14 @@ impl ConstraintSystem {
         let mut builder = DoryMatrixBuilder::new(11);
 
         // Create packed GT exp witnesses and public inputs, add to matrix
-        let mut packed_gt_exp_witnesses = Vec::with_capacity(witnesses.gt_exp.len());
-        let mut packed_gt_exp_public_inputs = Vec::with_capacity(witnesses.gt_exp.len());
+        let mut gt_exp_witnesses = Vec::with_capacity(witnesses.gt_exp.len());
+        let mut gt_exp_public_inputs = Vec::with_capacity(witnesses.gt_exp.len());
         for (_op_id, witness) in witnesses.gt_exp.iter() {
             let base_mle = fq12_to_multilinear_evals(&witness.base);
             let base2_mle = fq12_to_multilinear_evals(&(witness.base * witness.base));
             let base3_mle =
                 fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
-            let packed = super::stage1::packed_gt_exp::PackedGtExpWitness::from_steps(
+            let packed = super::stage1::gt_exp::PackedGtExpWitness::from_steps(
                 &witness.rho_mles,
                 &witness.quotient_mles,
                 &witness.bits,
@@ -1540,9 +1537,9 @@ impl ConstraintSystem {
                 &base2_mle,
                 &base3_mle,
             );
-            builder.add_packed_gt_exp_witness(&packed);
-            packed_gt_exp_witnesses.push(packed);
-            packed_gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
+            builder.add_gt_exp_witness(&packed);
+            gt_exp_witnesses.push(packed);
+            gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
                 witness.base,
                 witness.bits.clone(),
             ));
@@ -1589,8 +1586,8 @@ impl ConstraintSystem {
                 matrix,
                 g_poly,
                 constraints,
-                packed_gt_exp_witnesses,
-                packed_gt_exp_public_inputs,
+                gt_exp_witnesses,
+                gt_exp_public_inputs,
                 g1_scalar_mul_public_inputs,
                 g2_scalar_mul_public_inputs,
                 g1_add_witnesses: Vec::new(),
@@ -1598,17 +1595,6 @@ impl ConstraintSystem {
             },
             hints,
         ))
-    }
-
-    /// Extract constraint polynomials for square-and-multiply sumcheck (Stage 1)
-    /// DEPRECATED: This is for the old per-step GT exp approach.
-    #[deprecated(note = "Use extract_packed_gt_exp_constraints for packed GT exp approach")]
-    pub fn extract_constraint_polynomials(
-        &self,
-    ) -> Vec<crate::zkvm::recursion::stage1::square_and_multiply::ConstraintPolynomials<Fq>> {
-        // Packed GT exp doesn't use per-step constraints
-        // This function is kept for backwards compatibility but returns empty
-        Vec::new()
     }
 
     /// Extract GT mul constraint data for gt_mul sumcheck
@@ -1766,20 +1752,20 @@ impl ConstraintSystem {
         self.g2_add_witnesses.clone()
     }
 
-    /// Extract packed GT exp constraint data for packed_gt_exp sumcheck
+    /// Extract packed GT exp constraint data for gt_exp sumcheck
     /// Returns: (constraint_index, rho, quotient) for each PackedGtExp constraint
     /// Note: digit bits, base, and rho_next are public inputs/virtual claims
-    pub fn extract_packed_gt_exp_constraints(&self) -> Vec<(usize, Vec<Fq>, Vec<Fq>)> {
+    pub fn extract_gt_exp_constraints(&self) -> Vec<(usize, Vec<Fq>, Vec<Fq>)> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
         // Pre-allocate with exact capacity
-        let packed_gt_exp_count = self
+        let gt_exp_count = self
             .constraints
             .iter()
             .filter(|c| matches!(c.constraint_type, ConstraintType::PackedGtExp))
             .count();
-        let mut constraints = Vec::with_capacity(packed_gt_exp_count);
+        let mut constraints = Vec::with_capacity(gt_exp_count);
 
         for (idx, constraint) in self.constraints.iter().enumerate() {
             if let ConstraintType::PackedGtExp = constraint.constraint_type {
@@ -1838,7 +1824,7 @@ impl ConstraintSystem {
                     .take(idx)
                     .filter(|c| matches!(c.constraint_type, ConstraintType::PackedGtExp))
                     .count();
-                let packed = &self.packed_gt_exp_witnesses[gt_exp_idx];
+                let packed = &self.gt_exp_witnesses[gt_exp_idx];
                 let rho_curr = DensePolynomial::new(packed.rho_next_packed.clone()).evaluate(x);
                 let base_eval = DensePolynomial::new(packed.base_packed.clone()).evaluate(x);
                 let base2_eval = DensePolynomial::new(packed.base2_packed.clone()).evaluate(x);
@@ -1973,7 +1959,7 @@ impl ConstraintSystem {
     /// Evaluate the constraint system for Stage 1 sumcheck
     ///
     /// Takes only x variables and evaluates F(x) = Σ_i γ^i * C_i(x)
-    /// This is used in the square-and-multiply sumcheck.
+    /// This is used in the GT exponentiation sumcheck.
     pub fn evaluate_constraints_batched(&self, x_vars: &[Fq], gamma: Fq) -> Fq {
         assert_eq!(x_vars.len(), self.matrix.num_constraint_vars);
 
@@ -2064,7 +2050,7 @@ impl ConstraintSystem {
                     .take(idx)
                     .filter(|c| matches!(c.constraint_type, ConstraintType::PackedGtExp))
                     .count();
-                let packed = &self.packed_gt_exp_witnesses[gt_exp_idx];
+                let packed = &self.gt_exp_witnesses[gt_exp_idx];
                 // Reverse for big-endian convention used by DensePolynomial::evaluate
                 let x_reversed: Vec<Fq> = x.iter().rev().copied().collect();
                 let rho_curr =

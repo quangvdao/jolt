@@ -935,9 +935,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpPr
         // rho_next is virtual (will be verified via shift sumcheck)
         for w in 0..self.num_witnesses {
             let claims = virtual_claims![
-                VirtualPolynomial::PackedGtExpRho(w) => self.rho_claims[w],
-                VirtualPolynomial::PackedGtExpRhoNext(w) => self.rho_next_claims[w],
-                VirtualPolynomial::PackedGtExpQuotient(w) => self.quotient_claims[w],
+                VirtualPolynomial::gt_exp_rho(w) => self.rho_claims[w],
+                VirtualPolynomial::gt_exp_rho_next(w) => self.rho_next_claims[w],
+                VirtualPolynomial::gt_exp_quotient(w) => self.quotient_claims[w],
             ];
             append_virtual_claims(
                 accumulator,
@@ -1076,9 +1076,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for PackedGtExp
         for w in 0..self.num_witnesses {
             // Get all polynomial claims from accumulator (including virtual rho_next)
             let polynomials = vec![
-                VirtualPolynomial::PackedGtExpRho(w),
-                VirtualPolynomial::PackedGtExpRhoNext(w),
-                VirtualPolynomial::PackedGtExpQuotient(w),
+                VirtualPolynomial::gt_exp_rho(w),
+                VirtualPolynomial::gt_exp_rho_next(w),
+                VirtualPolynomial::gt_exp_quotient(w),
             ];
             let claims = get_virtual_claims(accumulator, self.params.sumcheck_id, &polynomials);
             let rho_claim = claims[0];
@@ -1127,9 +1127,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for PackedGtExp
         // rho_next is virtual (will be verified via shift sumcheck)
         for w in 0..self.num_witnesses {
             let polynomials = vec![
-                VirtualPolynomial::PackedGtExpRho(w),
-                VirtualPolynomial::PackedGtExpRhoNext(w),
-                VirtualPolynomial::PackedGtExpQuotient(w),
+                VirtualPolynomial::gt_exp_rho(w),
+                VirtualPolynomial::gt_exp_rho_next(w),
+                VirtualPolynomial::gt_exp_quotient(w),
             ];
             append_virtual_openings(
                 accumulator,

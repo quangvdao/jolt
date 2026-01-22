@@ -109,7 +109,7 @@ impl<F: JoltField, T: Transcript> ShiftRhoProver<F, T> {
 
         for claim in &claims {
             let (point, value) = accumulator.get_virtual_polynomial_opening(
-                VirtualPolynomial::PackedGtExpRhoNext(claim.constraint_idx),
+                VirtualPolynomial::gt_exp_rho_next(claim.constraint_idx),
                 SumcheckId::PackedGtExp,
             );
 
@@ -296,7 +296,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
 
         for claim in &self.claims {
             let (_, value) = accumulator.get_virtual_polynomial_opening(
-                VirtualPolynomial::PackedGtExpRhoNext(claim.constraint_idx),
+                VirtualPolynomial::gt_exp_rho_next(claim.constraint_idx),
                 SumcheckId::PackedGtExp,
             );
 
@@ -318,14 +318,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
         for claim in &self.claims {
             // Get rho_next point and value from accumulator
             let (rho_next_point, _rho_next_value) = accumulator.get_virtual_polynomial_opening(
-                VirtualPolynomial::PackedGtExpRhoNext(claim.constraint_idx),
+                VirtualPolynomial::gt_exp_rho_next(claim.constraint_idx),
                 SumcheckId::PackedGtExp,
             );
 
             // Get rho evaluation at the challenge point
             // Note: This assumes rho was opened at the same challenge point
             let (_, rho_eval) = accumulator.get_virtual_polynomial_opening(
-                VirtualPolynomial::PackedGtExpRho(claim.constraint_idx),
+                VirtualPolynomial::gt_exp_rho(claim.constraint_idx),
                 SumcheckId::PackedGtExp,
             );
 

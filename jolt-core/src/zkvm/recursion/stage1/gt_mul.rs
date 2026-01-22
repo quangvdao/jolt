@@ -1,5 +1,5 @@
 //! GT multiplication sumcheck for proving GT multiplication constraints
-//! Proves: 0 = Σ_x eq(r_x, x) * Σ_i γ^i * C_i(x)
+//! Proves: 0 = Σ_x eq(eq_point, x) * Σ_i (instance_batch_coeff)^i * C_i(x)
 //! Where C_i(x) = a_i(x) × b_i(x) - c_i(x) - Q_i(x) × g(x)
 //!
 //! This is a separate sumcheck protocol for GT multiplication constraints.
@@ -8,87 +8,52 @@
 use crate::{
     field::JoltField,
     poly::{
-        dense_mlpoly::DensePolynomial,
-        eq_poly::EqPolynomial,
-        multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
-        opening_proof::{
-            OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
-            BIG_ENDIAN,
-        },
-        unipoly::UniPoly,
+        dense_mlpoly::DensePolynomial, multilinear_polynomial::MultilinearPolynomial,
+        opening_proof::SumcheckId,
     },
-    subprotocols::{
-        sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
-    },
-    transcripts::Transcript,
-    virtual_claims,
-    zkvm::{recursion::utils::virtual_polynomial_utils::*, witness::VirtualPolynomial},
 };
-use rayon::prelude::*;
 
-#[cfg(feature = "allocative")]
-use allocative::{allocative, Allocative};
+use crate::zkvm::witness::{GtMulTerm, RecursionPoly, VirtualPolynomial};
 
-/// Helper to append all virtual claims for a GT mul constraint
-#[allow(clippy::too_many_arguments)]
-fn append_gt_mul_virtual_claims<F: JoltField, T: Transcript>(
-    accumulator: &mut ProverOpeningAccumulator<F>,
-    transcript: &mut T,
-    constraint_idx: usize,
-    sumcheck_id: SumcheckId,
-    opening_point: &OpeningPoint<BIG_ENDIAN, F>,
-    lhs_claim: F,
-    rhs_claim: F,
-    result_claim: F,
-    quotient_claim: F,
-) {
-    let claims = virtual_claims![
-        VirtualPolynomial::RecursionMulLhs(constraint_idx) => lhs_claim,
-        VirtualPolynomial::RecursionMulRhs(constraint_idx) => rhs_claim,
-        VirtualPolynomial::RecursionMulResult(constraint_idx) => result_claim,
-        VirtualPolynomial::RecursionMulQuotient(constraint_idx) => quotient_claim,
-    ];
-    append_virtual_claims(accumulator, transcript, sumcheck_id, opening_point, &claims);
-}
+use super::constraint_list_sumcheck::{
+    ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec, ConstraintListVerifier,
+    ConstraintListVerifierSpec, OpeningSpec,
+};
 
-/// Helper to retrieve all virtual claims for a GT mul constraint
-fn get_gt_mul_virtual_claims<F: JoltField>(
-    accumulator: &VerifierOpeningAccumulator<F>,
-    constraint_idx: usize,
-    sumcheck_id: SumcheckId,
-) -> (F, F, F, F) {
-    let polynomials = vec![
-        VirtualPolynomial::RecursionMulLhs(constraint_idx),
-        VirtualPolynomial::RecursionMulRhs(constraint_idx),
-        VirtualPolynomial::RecursionMulResult(constraint_idx),
-        VirtualPolynomial::RecursionMulQuotient(constraint_idx),
-    ];
-    let claims = get_virtual_claims(accumulator, sumcheck_id, &polynomials);
-    (claims[0], claims[1], claims[2], claims[3])
-}
+// ============================================================================
+// Opening Specs
+// ============================================================================
 
-/// Helper to append virtual opening points for a GT mul constraint (verifier side)
-fn append_gt_mul_virtual_openings<F: JoltField, T: Transcript>(
-    accumulator: &mut VerifierOpeningAccumulator<F>,
-    transcript: &mut T,
-    constraint_idx: usize,
-    sumcheck_id: SumcheckId,
-    opening_point: &OpeningPoint<BIG_ENDIAN, F>,
-) {
-    let polynomials = vec![
-        VirtualPolynomial::RecursionMulLhs(constraint_idx),
-        VirtualPolynomial::RecursionMulRhs(constraint_idx),
-        VirtualPolynomial::RecursionMulResult(constraint_idx),
-        VirtualPolynomial::RecursionMulQuotient(constraint_idx),
-    ];
-    append_virtual_openings(
-        accumulator,
-        transcript,
-        sumcheck_id,
-        opening_point,
-        &polynomials,
-    );
-}
+const GT_MUL_OPENING_SPECS: [OpeningSpec; 4] = [
+    OpeningSpec::new(0, |i| {
+        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+            term: GtMulTerm::Lhs,
+            instance: i,
+        })
+    }),
+    OpeningSpec::new(1, |i| {
+        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+            term: GtMulTerm::Rhs,
+            instance: i,
+        })
+    }),
+    OpeningSpec::new(2, |i| {
+        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+            term: GtMulTerm::Result,
+            instance: i,
+        })
+    }),
+    OpeningSpec::new(3, |i| {
+        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+            term: GtMulTerm::Quotient,
+            instance: i,
+        })
+    }),
+];
+
+// ============================================================================
+// Parameters and Witness Types
+// ============================================================================
 
 /// Individual polynomial data for a single GT mul constraint
 #[derive(Clone)]
@@ -103,7 +68,7 @@ pub struct GtMulConstraintPolynomials<F: JoltField> {
 /// Parameters for GT mul sumcheck
 #[derive(Clone)]
 pub struct GtMulParams {
-    /// Number of constraint variables (x) - fixed at 4 for Fq12
+    /// Number of constraint variables (x) - fixed at 11 for uniform matrix
     pub num_constraint_vars: usize,
 
     /// Number of constraints
@@ -123,378 +88,208 @@ impl GtMulParams {
     }
 }
 
-/// Prover for GT mul sumcheck
-#[cfg_attr(feature = "allocative", derive(Allocative))]
-pub struct GtMulProver<F: JoltField, T: Transcript> {
-    /// Parameters
-    #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub params: GtMulParams,
+// ============================================================================
+// Prover Spec
+// ============================================================================
 
-    /// g(x) polynomial for constraint evaluation
-    #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub g_poly: MultilinearPolynomial<F>,
-
-    /// Equality polynomial for constraint variables x
-    #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub eq_x: MultilinearPolynomial<F>,
-
-    /// Random challenge for eq(r_x, x)
-    pub r_x: Vec<F::Challenge>,
-
-    /// Gamma coefficient for batching constraints
-    pub gamma: F,
-
-    /// Global constraint indices for each constraint
-    pub constraint_indices: Vec<usize>,
-
-    /// LHS polynomials as multilinear
-    #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub lhs_mlpoly: Vec<MultilinearPolynomial<F>>,
-
-    /// RHS polynomials as multilinear
-    #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub rhs_mlpoly: Vec<MultilinearPolynomial<F>>,
-
-    /// Result polynomials as multilinear
-    #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub result_mlpoly: Vec<MultilinearPolynomial<F>>,
-
-    /// Quotient polynomials as multilinear
-    #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub quotient_mlpoly: Vec<MultilinearPolynomial<F>>,
-
-    /// Current round in the protocol
-    pub round: usize,
-
-    /// Cached evaluation claims for each polynomial
-    pub lhs_claims: Vec<F>,
-    pub rhs_claims: Vec<F>,
-    pub result_claims: Vec<F>,
-    pub quotient_claims: Vec<F>,
-
-    pub _marker: std::marker::PhantomData<T>,
+/// Prover-side specification for GT mul constraints.
+#[derive(Clone)]
+pub struct GtMulProverSpec<F: JoltField> {
+    params: GtMulParams,
+    polys_by_kind: Vec<Vec<MultilinearPolynomial<F>>>,
+    shared_polys: Vec<MultilinearPolynomial<F>>,
 }
 
-impl<F: JoltField, T: Transcript> GtMulProver<F, T> {
+impl<F: JoltField> GtMulProverSpec<F> {
+    /// Create a new prover spec from constraint polynomials and the g polynomial.
     pub fn new(
         params: GtMulParams,
         constraint_polys: Vec<GtMulConstraintPolynomials<F>>,
         g_poly: DensePolynomial<F>,
-        transcript: &mut T,
     ) -> Self {
-        let r_x: Vec<F::Challenge> = (0..params.num_constraint_vars)
-            .map(|_| transcript.challenge_scalar_optimized::<F>())
-            .collect();
+        let num_instances = constraint_polys.len();
+        debug_assert_eq!(
+            num_instances, params.num_constraints,
+            "GtMulProverSpec: params.num_constraints must match constraint_polys length"
+        );
 
-        let gamma = transcript.challenge_scalar_optimized::<F>();
-
-        let eq_x = MultilinearPolynomial::from(EqPolynomial::<F>::evals(&r_x[..]));
-
-        let mut constraint_indices = Vec::new();
-        let mut lhs_mlpoly = Vec::new();
-        let mut rhs_mlpoly = Vec::new();
-        let mut result_mlpoly = Vec::new();
-        let mut quotient_mlpoly = Vec::new();
+        let mut lhs = Vec::with_capacity(num_instances);
+        let mut rhs = Vec::with_capacity(num_instances);
+        let mut result = Vec::with_capacity(num_instances);
+        let mut quotient = Vec::with_capacity(num_instances);
 
         for poly in constraint_polys {
-            constraint_indices.push(poly.constraint_index);
-            lhs_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+            lhs.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
                 poly.lhs,
             )));
-            rhs_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+            rhs.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
                 poly.rhs,
             )));
-            result_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+            result.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
                 poly.result,
             )));
-            quotient_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+            quotient.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
                 poly.quotient,
             )));
         }
 
-        let g_mlpoly = MultilinearPolynomial::LargeScalars(g_poly);
-
         Self {
             params,
-            g_poly: g_mlpoly,
-            eq_x,
-            r_x,
-            gamma: gamma.into(),
-            constraint_indices,
-            lhs_mlpoly,
-            rhs_mlpoly,
-            result_mlpoly,
-            quotient_mlpoly,
-            round: 0,
-            lhs_claims: vec![],
-            rhs_claims: vec![],
-            result_claims: vec![],
-            quotient_claims: vec![],
-            _marker: std::marker::PhantomData,
+            polys_by_kind: vec![lhs, rhs, result, quotient],
+            shared_polys: vec![MultilinearPolynomial::LargeScalars(g_poly)],
         }
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for GtMulProver<F, T> {
-    fn degree(&self) -> usize {
-        3 // Degree from constraint: lhs * rhs
+impl<F: JoltField> ConstraintListSpec for GtMulProverSpec<F> {
+    fn sumcheck_id(&self) -> SumcheckId {
+        self.params.sumcheck_id
     }
 
     fn num_rounds(&self) -> usize {
         self.params.num_constraint_vars
     }
 
-    fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
-        // For GT mul constraints, the sumcheck proves 0 = Σ_x eq(r_x, x) * Σ_i γ^i * C_i(x)
-        // So the initial claim is 0
-        F::zero()
+    fn num_instances(&self) -> usize {
+        self.params.num_constraints
     }
 
-    fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
-        const DEGREE: usize = 3; // Max degree for GT mul constraints
-        let num_x_remaining = self.eq_x.get_num_vars();
-        let x_half = 1 << (num_x_remaining - 1);
+    fn opening_specs(&self) -> &'static [OpeningSpec] {
+        &GT_MUL_OPENING_SPECS
+    }
+}
 
-        let total_evals = (0..x_half)
-            .into_par_iter()
-            .map(|x_idx| {
-                let eq_x_evals = self
-                    .eq_x
-                    .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                let g_evals = self
-                    .g_poly
-                    .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-
-                let mut x_evals = [F::zero(); DEGREE];
-                let mut gamma_power = self.gamma;
-
-                for i in 0..self.lhs_mlpoly.len() {
-                    let lhs_evals = self.lhs_mlpoly[i]
-                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let rhs_evals = self.rhs_mlpoly[i]
-                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let result_evals = self.result_mlpoly[i]
-                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-                    let quotient_evals = self.quotient_mlpoly[i]
-                        .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
-
-                    for t in 0..DEGREE {
-                        // Constraint: lhs * rhs - result - quotient * g
-                        let constraint_val = lhs_evals[t] * rhs_evals[t]
-                            - result_evals[t]
-                            - quotient_evals[t] * g_evals[t];
-
-                        x_evals[t] += eq_x_evals[t] * gamma_power * constraint_val;
-                    }
-
-                    gamma_power *= self.gamma;
-                }
-                x_evals
-            })
-            .reduce(
-                || [F::zero(); DEGREE],
-                |mut acc, evals| {
-                    for (a, e) in acc.iter_mut().zip(evals.iter()) {
-                        *a += *e;
-                    }
-                    acc
-                },
-            );
-
-        UniPoly::from_evals_and_hint(previous_claim, &total_evals)
+impl<F: JoltField> ConstraintListProverSpec<F, 3> for GtMulProverSpec<F> {
+    fn polys_by_kind(&self) -> &[Vec<MultilinearPolynomial<F>>] {
+        &self.polys_by_kind
     }
 
-    fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize) {
-        self.eq_x.bind_parallel(r_j, BindingOrder::LowToHigh);
-        self.g_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
-
-        for poly in &mut self.lhs_mlpoly {
-            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
-        }
-        for poly in &mut self.rhs_mlpoly {
-            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
-        }
-        for poly in &mut self.result_mlpoly {
-            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
-        }
-        for poly in &mut self.quotient_mlpoly {
-            poly.bind_parallel(r_j, BindingOrder::LowToHigh);
-        }
-
-        self.round = round + 1;
-
-        if self.round == self.params.num_constraint_vars {
-            self.lhs_claims.clear();
-            self.rhs_claims.clear();
-            self.result_claims.clear();
-            self.quotient_claims.clear();
-
-            for i in 0..self.lhs_mlpoly.len() {
-                self.lhs_claims.push(self.lhs_mlpoly[i].get_bound_coeff(0));
-                self.rhs_claims.push(self.rhs_mlpoly[i].get_bound_coeff(0));
-                self.result_claims
-                    .push(self.result_mlpoly[i].get_bound_coeff(0));
-                self.quotient_claims
-                    .push(self.quotient_mlpoly[i].get_bound_coeff(0));
-            }
-        }
+    fn polys_by_kind_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<F>>] {
+        &mut self.polys_by_kind
     }
 
-    fn cache_openings(
+    fn shared_polys(&self) -> &[MultilinearPolynomial<F>] {
+        &self.shared_polys
+    }
+
+    fn shared_polys_mut(&mut self) -> &mut [MultilinearPolynomial<F>] {
+        &mut self.shared_polys
+    }
+
+    fn eval_constraint(
         &self,
-        accumulator: &mut ProverOpeningAccumulator<F>,
-        transcript: &mut T,
-        sumcheck_challenges: &[F::Challenge],
-    ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, F>::new(sumcheck_challenges.to_vec());
-
-        for i in 0..self.lhs_mlpoly.len() {
-            append_gt_mul_virtual_claims(
-                accumulator,
-                transcript,
-                i, // Use local index, not global constraint index
-                self.params.sumcheck_id,
-                &opening_point,
-                self.lhs_claims[i],
-                self.rhs_claims[i],
-                self.result_claims[i],
-                self.quotient_claims[i],
-            );
-        }
-    }
-
-    #[cfg(feature = "allocative")]
-    fn update_flamegraph(&self, flamegraph: &mut allocative::FlameGraphBuilder) {
-        flamegraph.visit_root(self);
-    }
-}
-
-/// Verifier for GT mul sumcheck
-#[cfg_attr(feature = "allocative", derive(Allocative))]
-pub struct GtMulVerifier<F: JoltField> {
-    pub params: GtMulParams,
-    pub r_x: Vec<F::Challenge>,
-    pub gamma: F,
-    pub num_constraints: usize,
-    pub constraint_indices: Vec<usize>,
-}
-
-impl<F: JoltField> GtMulVerifier<F> {
-    pub fn new<T: Transcript>(
-        params: GtMulParams,
-        constraint_indices: Vec<usize>,
-        transcript: &mut T,
-    ) -> Self {
-        let r_x: Vec<F::Challenge> = (0..params.num_constraint_vars)
-            .map(|_| transcript.challenge_scalar_optimized::<F>())
-            .collect();
-
-        let gamma = transcript.challenge_scalar_optimized::<F>();
-        let num_constraints = params.num_constraints;
-
-        Self {
-            params,
-            r_x,
-            gamma: gamma.into(),
-            num_constraints,
-            constraint_indices,
-        }
-    }
-}
-
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for GtMulVerifier<F> {
-    fn degree(&self) -> usize {
-        3
-    }
-
-    fn num_rounds(&self) -> usize {
-        self.params.num_constraint_vars
-    }
-
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
-        F::zero()
-    }
-
-    fn expected_output_claim(
-        &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
-        sumcheck_challenges: &[F::Challenge],
+        _instance: usize,
+        eval_index: usize,
+        poly_evals: &[[F; 3]],
+        shared_evals: &[[F; 3]],
+        _term_batch_coeff: Option<F>,
     ) -> F {
-        use crate::poly::eq_poly::EqPolynomial;
+        let lhs = poly_evals[0][eval_index];
+        let rhs = poly_evals[1][eval_index];
+        let result = poly_evals[2][eval_index];
+        let quotient = poly_evals[3][eval_index];
+        let g = shared_evals[0][eval_index];
+        lhs * rhs - result - quotient * g
+    }
+}
 
-        let r_x_f: Vec<F> = self.r_x.iter().map(|c| (*c).into()).collect();
-        let r_star_f: Vec<F> = sumcheck_challenges
-            .iter()
-            .rev()
-            .map(|c| (*c).into())
-            .collect();
-        let eq_eval = EqPolynomial::mle(&r_x_f, &r_star_f);
-        let g_eval: F = {
-            use crate::poly::dense_mlpoly::DensePolynomial;
-            use crate::poly::multilinear_polynomial::MultilinearPolynomial;
-            use crate::zkvm::recursion::constraints_sys::DoryMatrixBuilder;
-            use ark_bn254::Fq;
-            use jolt_optimizations::get_g_mle;
-            use std::any::TypeId;
+// ============================================================================
+// Verifier Spec
+// ============================================================================
 
-            // Runtime check that F = Fq
-            if TypeId::of::<F>() != TypeId::of::<Fq>() {
-                panic!("g polynomial evaluation requires F = Fq for recursion SNARK");
-            }
+/// Verifier-side specification for GT mul constraints.
+#[derive(Clone)]
+pub struct GtMulVerifierSpec {
+    params: GtMulParams,
+}
 
-            // Get 4-var g polynomial and pad to match constraint vars
-            let g_mle_4var = get_g_mle();
-            let g_mle_padded = if r_star_f.len() == 11 {
-                DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var)
-            } else if r_star_f.len() == 8 {
-                DoryMatrixBuilder::pad_4var_to_8var_zero_padding(&g_mle_4var)
-            } else {
-                g_mle_4var
-            };
-            // SAFETY: We checked F = Fq above, so this transmute is safe
-            let g_poly_fq =
-                MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_padded));
-            let r_star_fq: &Vec<Fq> = unsafe { std::mem::transmute(&r_star_f) };
-            let g_eval_fq = g_poly_fq.evaluate_dot_product(r_star_fq);
-            unsafe { std::mem::transmute_copy(&g_eval_fq) }
+impl GtMulVerifierSpec {
+    pub fn new(params: GtMulParams) -> Self {
+        Self { params }
+    }
+}
+
+impl ConstraintListSpec for GtMulVerifierSpec {
+    fn sumcheck_id(&self) -> SumcheckId {
+        self.params.sumcheck_id
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.params.num_constraint_vars
+    }
+
+    fn num_instances(&self) -> usize {
+        self.params.num_constraints
+    }
+
+    fn opening_specs(&self) -> &'static [OpeningSpec] {
+        &GT_MUL_OPENING_SPECS
+    }
+}
+
+impl<F: JoltField> ConstraintListVerifierSpec<F, 3> for GtMulVerifierSpec {
+    fn compute_shared_scalars(&self, eval_point: &[F]) -> Vec<F> {
+        // Compute g(eval_point) once from the public g MLE.
+        // The g polynomial is the MLE of the irreducible polynomial p(X) for Fq12.
+        use crate::zkvm::recursion::constraints_sys::DoryMatrixBuilder;
+        use ark_bn254::Fq;
+        use jolt_optimizations::get_g_mle;
+        use std::any::TypeId;
+
+        // Runtime check that F = Fq (recursion SNARK is always over Fq)
+        if TypeId::of::<F>() != TypeId::of::<Fq>() {
+            panic!("g polynomial evaluation requires F = Fq for recursion SNARK");
+        }
+
+        let g_mle_4var = get_g_mle();
+        let g_mle_padded = if eval_point.len() == 11 {
+            DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var)
+        } else if eval_point.len() == 8 {
+            DoryMatrixBuilder::pad_4var_to_8var_zero_padding(&g_mle_4var)
+        } else {
+            g_mle_4var
         };
 
-        let mut total = F::zero();
-        let mut gamma_power = self.gamma;
+        // Evaluate g polynomial at eval_point
+        // SAFETY: F = Fq verified above, and slice references have same layout
+        let g_poly_fq =
+            MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_padded));
+        let eval_point_fq: &[Fq] = unsafe {
+            std::slice::from_raw_parts(eval_point.as_ptr() as *const Fq, eval_point.len())
+        };
+        let g_eval_fq = g_poly_fq.evaluate_dot_product(eval_point_fq);
+        let g_eval: F = unsafe { std::mem::transmute_copy(&g_eval_fq) };
 
-        for i in 0..self.num_constraints {
-            let (lhs_claim, rhs_claim, result_claim, quotient_claim) = get_gt_mul_virtual_claims(
-                accumulator,
-                i, // Use local index, not global constraint index
-                self.params.sumcheck_id,
-            );
-
-            // Compute the GT mul constraint: lhs * rhs - result - quotient * g(x)
-            let constraint_value = lhs_claim * rhs_claim - result_claim - quotient_claim * g_eval;
-
-            total += gamma_power * constraint_value;
-            gamma_power *= self.gamma;
-        }
-
-        eq_eval * total
+        vec![g_eval]
     }
 
-    fn cache_openings(
+    fn eval_constraint_at_point(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
-        transcript: &mut T,
-        sumcheck_challenges: &[F::Challenge],
-    ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, F>::new(sumcheck_challenges.to_vec());
+        _instance: usize,
+        opened_claims: &[F],
+        shared_scalars: &[F],
+        _term_batch_coeff: Option<F>,
+    ) -> F {
+        let lhs = opened_claims[0];
+        let rhs = opened_claims[1];
+        let result = opened_claims[2];
+        let quotient = opened_claims[3];
+        let g_eval = shared_scalars[0];
 
-        for i in 0..self.num_constraints {
-            append_gt_mul_virtual_openings(
-                accumulator,
-                transcript,
-                i, // Use local index, not global constraint index
-                self.params.sumcheck_id,
-                &opening_point,
-            );
-        }
+        lhs * rhs - result - quotient * g_eval
     }
 }
+
+// ============================================================================
+// Type Aliases (no wrapper structs needed!)
+// ============================================================================
+
+/// Prover for GT mul sumcheck.
+///
+/// This is a type alias - no manual trait delegation required.
+pub type GtMulProver<F> = ConstraintListProver<F, GtMulProverSpec<F>, 3>;
+
+/// Verifier for GT mul sumcheck.
+///
+/// This is a type alias - no manual trait delegation required.
+pub type GtMulVerifier<F> = ConstraintListVerifier<F, GtMulVerifierSpec, 3>;

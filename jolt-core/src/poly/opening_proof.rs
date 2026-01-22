@@ -173,12 +173,13 @@ pub enum SumcheckId {
     PackedGtExp,
     GtMul,
     G1ScalarMul,
+    G1Add,
     ShiftRho,
     RecursionVirtualization,
     RecursionJagged,
     OpeningReduction,
-    /// G2 scalar multiplication constraints (recursion SNARK, Stage 1)
     G2ScalarMul,
+    G2Add,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]

@@ -3,7 +3,7 @@
 //! Proves: 0 = Σ_x eq(r_x, x) * Σ_i γ^i * (Σ_j δ^j * C_{i,j}(x))
 //! Where C_{i,j} are the scalar-mul constraints for each instance.
 //!
-//! See `g1_scalar_mul_spec.md` for the full specification and soundness proof.
+//! See `spec.md` for the full specification and soundness proof.
 //!
 //! ## Constraints
 //! - C1: Doubling x-coordinate: 4y_A²(x_T + 2x_A) - 9x_A⁴ = 0

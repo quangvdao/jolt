@@ -315,6 +315,42 @@ pub enum VirtualPolynomial {
     RecursionG2ScalarMulTIndicator(usize), // 1 if T_i = O (T is infinity), 0 otherwise
     RecursionG2ScalarMulAIndicator(usize), // 1 if A_i = O (A is infinity), 0 otherwise
     RecursionG2ScalarMulBit(usize),  // Scalar bit b_i ∈ {0, 1} - CRITICAL for soundness
+    // G1 addition virtual polynomials - indexed by constraint index
+    RecursionG1AddXP(usize),
+    RecursionG1AddYP(usize),
+    RecursionG1AddPIndicator(usize),
+    RecursionG1AddXQ(usize),
+    RecursionG1AddYQ(usize),
+    RecursionG1AddQIndicator(usize),
+    RecursionG1AddXR(usize),
+    RecursionG1AddYR(usize),
+    RecursionG1AddRIndicator(usize),
+    RecursionG1AddLambda(usize),
+    RecursionG1AddInvDeltaX(usize),
+    RecursionG1AddIsDouble(usize),
+    RecursionG1AddIsInverse(usize),
+    // G2 addition virtual polynomials (Fq2 coords split into c0/c1) - indexed by constraint index
+    RecursionG2AddXPC0(usize),
+    RecursionG2AddXPC1(usize),
+    RecursionG2AddYPC0(usize),
+    RecursionG2AddYPC1(usize),
+    RecursionG2AddPIndicator(usize),
+    RecursionG2AddXQC0(usize),
+    RecursionG2AddXQC1(usize),
+    RecursionG2AddYQC0(usize),
+    RecursionG2AddYQC1(usize),
+    RecursionG2AddQIndicator(usize),
+    RecursionG2AddXRC0(usize),
+    RecursionG2AddXRC1(usize),
+    RecursionG2AddYRC0(usize),
+    RecursionG2AddYRC1(usize),
+    RecursionG2AddRIndicator(usize),
+    RecursionG2AddLambdaC0(usize),
+    RecursionG2AddLambdaC1(usize),
+    RecursionG2AddInvDeltaXC0(usize),
+    RecursionG2AddInvDeltaXC1(usize),
+    RecursionG2AddIsDouble(usize),
+    RecursionG2AddIsInverse(usize),
     // Dory sparse constraint matrix - virtualized in Stage 2, dense version committed in Stage 3
     DorySparseConstraintMatrix,
     // Packed GT exponentiation virtual polynomials (12-var packed) - indexed by witness/instance

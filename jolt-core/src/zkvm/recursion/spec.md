@@ -34,18 +34,35 @@ The expensive operations (from Dory PCS verification):
 | GT Multiplication | $a \cdot b$ for $a, b \in \mathbb{G}_T$ |
 | Multi-Pairing | $\prod_i e(P_i, Q_i)$ |
 
-### 1.3 Architecture: "No Hints" & Copy Constraints
+### 1.3 Architecture: Dory-Proof-Ground-Truth, AST-Driven Wiring, External Pairing Boundary
 
-A naive approach would require the prover to provide "hints" for every intermediate group element generated during Dory verification, and the verifier to check each step individually. This would result in a massive proof size ("hint hell") and high verifier complexity.
+We want the **Dory proof itself** (plus the public verifier setup and transcript-derived scalars) to be the ground truth.
+The recursion SNARK proves the correctness of *all non-pairing group computation* performed by Dory verification, and we leave
+the **final pairing check** to the outside verifier.
 
-Instead, we adopt a **monolithic circuit** approach:
+This removes the need for prover-provided intermediate “hints” of the form “here is some internal group element”, while still
+avoiding an in-circuit pairing implementation.
 
-1.  **Witness**: The prover commits to the *entire* execution trace of the Dory verifier, including all intermediate values (G1/G2/GT elements).
-2.  **Operation Constraints**: We verify that each individual operation (e.g., $C = A \cdot B$) is performed correctly using **Stage 1 Sumchecks**.
-3.  **Wiring (Copy) Constraints**: We verify that the operations are correctly connected (e.g., the output of operation $i$ is the input to operation $j$) using a **Wiring Sumcheck**.
-4.  **Boundary Constraints**: We verify that the trace begins with the public inputs (commitments, challenges) and ends with the final check values.
+Concretely:
 
-This means the verifier **does not** need to receive or compute intermediate values. It only needs to know the **topology** of the Dory verification circuit (which is fixed and deterministic) and the **public inputs**.
+1. **Witness**: The recursion prover commits to a witness encoding the complete non-pairing execution trace of Dory verification
+   (G1/G2/GT scalar-muls, adds, GT mul/exp, plus internal packed traces where applicable).
+2. **Operation constraints (Stage 1)**: For every traced operation instance, we prove “this op is computed correctly in isolation”
+   via a type-specific sumcheck (e.g., GT exp, GT mul, G1/G2 scalar mul, and (new) G1/G2 add).
+3. **Wiring / copy constraints (Stage 1d)**: We prove that the output of each operation is exactly the input consumed by downstream
+   operations, so the witness represents a single coherent computation DAG (not a bag of unrelated correct ops).
+4. **Boundary outputs for the outside verifier**: The recursion SNARK exposes the **three (G1,G2) pairing input pairs** used by Dory’s
+   final optimized check (a 3-way multi-pairing), and (optionally) the corresponding GT “rhs” value. The outside verifier then computes
+   the multi-pairing and checks equality itself.
+
+#### Why AST (and not prover-supplied wiring metadata)
+
+Dory already records the full verification computation as an AST/DAG where:
+- nodes are typed group operations producing `ValueId`s, and
+- edges are the `ValueId` dependencies (inputs) of each node.
+
+We use this AST as the **authoritative topology source** for wiring constraints: every operation’s input `ValueId`s are wired to the
+corresponding producer outputs. This prevents the prover from “choosing” an easier wiring graph.
 
 #### Example: GT Homomorphic Combination
 
@@ -76,7 +93,10 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Stage 1: Constraint Sum-Checks                                     │
 │  ─────────────────────────────                                      │
-│  Prove validity of each op in isolation (GT Exp, GT Mul, ScalarMul) │
+│  Prove validity of each op in isolation                              │
+│  - GT Exp, GT Mul                                                    │
+│  - G1/G2 ScalarMul                                                   │
+│  - (NEW) G1/G2 Add                                                   │
 │  Output: Virtual claims for inputs/outputs of each op               │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
@@ -85,7 +105,7 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │  ────────────────────────────────                                   │
 │  1b: Shift Sumcheck (internal consistency of packed ops)            │
 │  1c: Boundary Sumcheck (check initial/final states vs public input) │
-│  1d: Wiring Sumcheck (check data flow between ops)                  │
+│  1d: Wiring Sumcheck (AST-derived copy constraints)                 │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -106,6 +126,25 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │  Prove q(r_dense) = v_dense → final verification                    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+#### External step (outside this SNARK): final Dory multi-pairing check
+
+After the recursion SNARK verifies, the outside verifier performs Dory’s final optimized check:
+a **single 3-way multi-pairing** equality. The recursion SNARK provides the required three input pairs
+\((p1\_g1,p1\_g2),(p2\_g1,p2\_g2),(p3\_g1,p3\_g2)\) as public outputs, and the outside verifier computes the
+pairing product and compares it against the (public) GT rhs.
+
+Concretely (matching Dory’s `DoryVerifierState::verify_final`), the three pairs are:
+
+- \(p1 = (E1_{\text{final}} + d\cdot g1_0,\; E2_{\text{final}} + d^{-1}\cdot g2_0)\)
+- \(p2 = (h1,\; (-\gamma)\cdot(E2_{\text{acc}} + (d^{-1}\cdot s1_{\text{acc}})\cdot g2_0))\)
+- \(p3 = ((-\gamma^{-1})\cdot(E1_{\text{acc}} + (d\cdot s2_{\text{acc}})\cdot g1_0) + d^2\cdot E1_{\text{init}},\; h2)\)
+
+where:
+- \(E1_{\text{init}} = \text{vmv.e1}\) (from the Dory proof),
+- \(E1_{\text{acc}},E2_{\text{acc}}\) are the G1/G2 accumulators after all reduce-and-fold rounds,
+- \(E1_{\text{final}},E2_{\text{final}}\) are the final message elements from the Dory proof, and
+- \(d,\gamma,s1_{\text{acc}},s2_{\text{acc}}\) are derived by the outside verifier from the transcript / evaluation point.
 
 ### 1.5 Field Choice
 
@@ -180,70 +219,82 @@ After final challenge $r_x'$:
 
 #### Packed Witness Structure
 
-Instead of creating separate polynomials for each step, we pack all 254 steps into unified 12-variable MLEs:
+Instead of creating separate polynomials for each step, we pack the exponentiation trace into a single table over
+step variables and element variables. The implementation uses **base-4 digits** (two bits per step), which reduces
+the number of steps and keeps the constraint degree low.
 
 | Symbol | Description | Layout |
 |--------|-------------|--------|
-| $\rho(s, x)$ | Intermediate values | $\rho[x \cdot 256 + s] = \rho_s[x]$ |
-| $\rho_{\text{next}}(s, x)$ | Shifted intermediate values | $\rho_{\text{next}}[x \cdot 256 + s] = \rho_{s+1}[x]$ |
-| $Q(s, x)$ | Quotient polynomials | $Q[x \cdot 256 + s] = Q_s[x]$ |
-| $\text{bit}(s)$ | Binary representation of $k$ | Replicated across $x$ |
-| $\text{base}(x)$ | Base element | Replicated across $s$ |
+| $\rho(s, x)$ | Intermediate values | $\rho[x \cdot 128 + s] = \rho_s[x]$ |
+| $\rho_{\text{next}}(s, x)$ | Shifted intermediate values | $\rho_{\text{next}}[x \cdot 128 + s] = \rho_{s+1}[x]$ |
+| $Q(s, x)$ | Quotient polynomials | $Q[x \cdot 128 + s] = Q_s[x]$ |
+| $\text{digit\_lo}(s),\ \text{digit\_hi}(s)$ | Base-4 digit bits of $k$ | Replicated across $x$ |
+| $\text{base}(x),\text{base}^2(x),\text{base}^3(x)$ | Base powers | Replicated across $s$ |
 
 Where:
-- $s \in \{0,1\}^8$ indexes the step (0 to 255)
+- $s \in \{0,1\}^7$ indexes the step (0 to 127)
 - $x \in \{0,1\}^4$ indexes the field element (0 to 15)
-- Layout formula: `index = x * 256 + s` (s in low bits)
+- Layout formula: `index = x * 128 + s` (s in low bits)
 
 #### Unified Constraint
 
-$$C(s, x) = \rho_{\text{next}}(s, x) - \rho(s, x)^2 \cdot \text{base}(x)^{\text{bit}(s)} - Q(s, x) \cdot g(x) = 0$$
+Let \((u_s,v_s) = (\text{digit\_lo}(s),\text{digit\_hi}(s))\) encode a base-4 digit \(d_s \in \{0,1,2,3\}\).
+Define weights:
+\[
+w_0=(1-u)(1-v),\; w_1=u(1-v),\; w_2=(1-u)v,\; w_3=uv
+\]
+and the selected base power:
+\[
+\text{base\_power}(x,s)=w_0 + w_1\cdot \text{base}(x) + w_2\cdot \text{base}^2(x) + w_3\cdot \text{base}^3(x).
+\]
+
+The packed transition constraint is:
+
+$$C(s, x) = \rho_{\text{next}}(s, x) - \rho(s, x)^4 \cdot \text{base\_power}(x,s) - Q(s, x) \cdot g(x) = 0.$$
 
 #### Two-Phase Sum-Check
 
-$$0 = \sum_{s \in \{0,1\}^8} \sum_{x \in \{0,1\}^4} \text{eq}(r_s, s) \cdot \text{eq}(r_x, x) \cdot C(s, x)$$
+$$0 = \sum_{s \in \{0,1\}^7} \sum_{x \in \{0,1\}^4} \text{eq}(r_s, s) \cdot \text{eq}(r_x, x) \cdot C(s, x).$$
 
-- **Phase 1** (rounds 0-7): Bind step variables $s$
-- **Phase 2** (rounds 8-11): Bind element variables $x$
-- Total: 12 rounds, degree 4
+- **Phase 1** (rounds 0-6): Bind step variables $s$
+- **Phase 2** (rounds 7-10): Bind element variables $x$
+- Total: 11 rounds, degree 4
 
 #### Output Claims
 
 After final challenges $(r_s^*, r_x^*)$:
-- `PackedGtExpBase(i)`: $\text{base}(r_x^*)$
 - `PackedGtExpRho(i)`: $\rho(r_s^*, r_x^*)$
 - `PackedGtExpRhoNext(i)`: $\rho_{\text{next}}(r_s^*, r_x^*)$
 - `PackedGtExpQuotient(i)`: $Q(r_s^*, r_x^*)$
-- `PackedGtExpBit(i)`: $\text{bit}(r_s^*)$
+
+The verifier computes \(\text{digit\_lo}(r_s^*)\), \(\text{digit\_hi}(r_s^*)\), and \(\text{base}(r_x^*)\), \(\text{base}^2(r_x^*)\), \(\text{base}^3(r_x^*)\)
+directly from public inputs (scalar bits and base), so these are **not** emitted as openings/claims.
 
 #### Mathematical Correctness
 
 **Theorem**: The packed representation maintains constraint satisfaction equivalence.
 
-**Proof**: For each step $i \in [0, 254]$ and element $x \in [0, 15]$:
-- Original: $C_i(x) = \rho_{i+1}(x) - \rho_i(x)^2 \cdot a(x)^{b_i} - Q_i(x) \cdot g(x) = 0$
-- Packed: $C(i, x) = \rho_{\text{next}}(i, x) - \rho(i, x)^2 \cdot \text{base}(x)^{\text{bit}(i)} - Q(i, x) \cdot g(x) = 0$
+**Proof**: Let \((u_s,v_s)\) be the two bit selectors for the base-4 digit \(d_s \in \{0,1,2,3\}\).
+For each step \(s \in [0, \text{num\_steps}-1] \subseteq [0,127]\) and element index \(x \in [0,15]\):
 
-The packed constraint at $(i, x)$ equals the original constraint $C_i(x)$ by construction:
-- $\rho(i, x) = \rho_i(x)$ (by definition of packing)
-- $\rho_{\text{next}}(i, x) = \rho_{i+1}(x)$ (shifted index)
-- $\text{base}(x) = a(x)$ (replicated across steps)
-- $\text{bit}(i) = b_i$ (scalar bit at step $i$)
+- By construction of packing, \(\rho(s,x)=\rho_s(x)\), \(\rho_{\text{next}}(s,x)=\rho_{s+1}(x)\), and \(Q(s,x)=Q_s(x)\).
+- By construction of the weight selection, \(\text{base\_power}(x,s)=\text{base}(x)^{d_s}\).
 
-Therefore, constraint satisfaction is preserved. □
+Therefore the packed constraint \(C(s,x)=0\) is exactly the per-step base-4 transition constraint for the original trace,
+and constraint satisfaction is preserved. □
 
 **Security Analysis**:
 - Soundness error: Unchanged at $\text{deg}/|\mathbb{F}| = 4/p \approx 2^{-252}$
-- The two-phase sumcheck maintains the same security as 254 individual sumchecks
+- The two-phase sumcheck maintains the same security as checking all packed step constraints (up to 128 base-4 steps)
 - Batching with $\gamma$ preserves zero-knowledge properties
 
 #### Performance Benefits
 
 | Metric | Before | After | Improvement |
 |--------|--------|-------|-------------|
-| Polynomials per GT exp | 1,024 | 5 | 204.8× |
-| Virtual claims | 1,024 | 5 | 204.8× |
-| Proof size contribution | ~32KB | ~160B | 200× |
+| Polynomials per GT exp | 1,024 | 3 | 341.3× |
+| Virtual claims | 1,024 | 3 | 341.3× |
+| Proof size contribution | ~32KB | ~96B | ~333× |
 
 ---
 
@@ -264,7 +315,7 @@ Since `rho_next` is completely determined by `rho` through the shift relationshi
 
 Instead of committing to `rho_next`, we prove the shift relationship algebraically. After the constraint sumcheck completes at point `(r_s*, r_x*)`, we run an additional sumcheck to prove:
 
-$$v = \sum_{s \in \{0,1\}^8} \sum_{x \in \{0,1\}^4} \text{EqPlusOne}(r_s^*, s) \cdot \text{eq}(r_x^*, x) \cdot \rho(s,x)$$
+$$v = \sum_{s \in \{0,1\}^7} \sum_{x \in \{0,1\}^4} \text{EqPlusOne}(r_s^*, s) \cdot \text{eq}(r_x^*, x) \cdot \rho(s,x)$$
 
 Where:
 - `EqPlusOne(r_s*, s)` = 1 if `s = r_s* + 1`, 0 otherwise
@@ -280,11 +331,11 @@ Stage 1a: Packed GT Constraint Sumcheck
   ↓
 Stage 1b: Shift Sumcheck (NEW)
   - Proves that v = rho(r_s*+1, r_x*)
-  - 12 rounds, degree 2
-  - Outputs: verified rho_next claim
+  - 11 rounds, degree 2
+  - Outputs: verified rho_next claim (used by packed GT exp correctness, boundary, and wiring)
   ↓
 Stage 2: Direct Evaluation Protocol
-  - Uses all virtual claims (including verified rho_next)
+  - Uses the matrix claims from Stage 1 (e.g., rho and quotient for packed GT exp). The verified rho_next claim may be consumed by consistency checks, but does not need to appear as a matrix row.
   - No changes needed
 ```
 
@@ -320,11 +371,11 @@ Stage 2 treats both virtual claims uniformly, regardless of their verification m
 - Reduces memory requirements (no rho_next storage)
 
 **Trade-offs**:
-- Adds 12 sumcheck rounds
+- Adds 11 sumcheck rounds
 - Slightly more complex verifier (+24 field ops per round)
-- Additional proof elements (+12 field elements)
+- Additional proof elements (+11 field elements)
 
-**Security**: Maintains same soundness guarantees with error ≤ 12 × 2^{-254} ≈ 2^{-250}
+**Security**: Maintains the standard sumcheck soundness bound \(O(\text{rounds}/|\mathbb{F}|)\) (here, rounds = 11).
 
 ---
 
@@ -559,6 +610,257 @@ All opened values are over $\mathbb{F}_q$ (components of $\mathbb{F}_{q^2}$):
 
 ---
 
+### 2.5.1 G1/G2 Addition (NEW)
+
+Dory verification performs many explicit group additions in G1 and G2 (e.g., updates like
+\(e1 \leftarrow e1 + \alpha \cdot X\), \(e2 \leftarrow e2 + \beta^{-1}\cdot Y\)).
+In Dory’s AST these appear as `G1Add` / `G2Add` nodes, and they must be proven inside the recursion SNARK
+because they affect the final pairing inputs.
+
+We add two new Stage 1 sumchecks:
+
+- **G1Add sumcheck**: proves that for each add instance, the output point equals \(P+Q\) in \(\mathbb{G}_1\), with correct
+  handling of infinity, doubling, and inverse cases.
+- **G2Add sumcheck**: same, but for \(\mathbb{G}_2\) over \(\mathbb{F}_{q^2}\), implemented by splitting \(\mathbb{F}_{q^2}\)
+  coordinates into (c0,c1) components in \(\mathbb{F}_q\) and enforcing constraints component-wise.
+
+The constraint system below is the **authoritative** description of what is implemented in:
+
+- `jolt-core/src/zkvm/recursion/stage1/g1_add.rs`
+- `jolt-core/src/zkvm/recursion/stage1/g2_add.rs`
+
+#### Goal (per instance)
+
+Given witness polynomials for points \(P,Q,R\), prove:
+\[
+R = P + Q
+\]
+in the appropriate elliptic-curve group, including all exceptional cases.
+
+#### Point representation (infinity encoding)
+
+We encode points as affine coordinates plus an indicator bit:
+\[
+P=(x_P,y_P,\mathrm{ind}_P),\quad Q=(x_Q,y_Q,\mathrm{ind}_Q),\quad R=(x_R,y_R,\mathrm{ind}_R)
+\]
+where \(\mathrm{ind}=1\) indicates the point at infinity \(\mathcal{O}\).
+
+Infinity is encoded field-independently by enforcing:
+\[
+\mathrm{ind}=1 \Rightarrow x=0 \ \wedge\ y=0
+\]
+via constraints \(\mathrm{ind}\cdot x = 0\) and \(\mathrm{ind}\cdot y = 0\).
+
+We also enforce booleanity of all indicator / branch bits: \(b(1-b)=0\).
+
+#### Auxiliary witnesses (division-free)
+
+To avoid explicit inversion/division in-circuit, each addition instance includes auxiliary witnesses:
+
+- \(\lambda\): the slope used in affine add/double formulas
+- \(\mathrm{inv\_dx}\): inverse of \(\Delta x = x_Q - x_P\) in the generic-add branch (otherwise arbitrary)
+- \(b_d\): `is_double` (1 iff the instance is treated as doubling in the finite case)
+- \(b_i\): `is_inverse` (1 iff the instance is treated as the inverse case \(P=-Q\) in the finite case)
+
+Define:
+\[
+\Delta x = x_Q - x_P,\quad \Delta y = y_Q - y_P,\quad
+S_\text{finite} = (1-\mathrm{ind}_P)(1-\mathrm{ind}_Q).
+\]
+
+All of the above are witness polynomials over the recursion Stage-1 domain \(\{0,1\}^{11}\)
+(i.e., 11 variables / 2048 evaluations), matching the uniform Dory matrix layout.
+
+**Why 11 variables (even if an op is “smaller”)?** Many underlying objects are naturally lower-variate:
+- GT mul/field-element slices are naturally 4-var MLEs (size 16),
+- scalar-mul traces are naturally 8-var MLEs (size 256),
+- a single add instance’s ports are “morally” 0-var (just a single point).
+
+In the recursion implementation, we embed all of them into a **common 11-var column domain** so that:
+- Stage 1 can use a single shared opening point \(r_x^\*\) across all op types, and
+- Stage 2/3 can treat every port polynomial uniformly as a row of the recursion matrix.
+
+This embedding is done by **padding / gating** (typically zero-padding so the polynomial is supported only on a subcube),
+so the additional “padding variables” do not increase the *logical* information content—only the *ambient* domain.
+The jagged transform in Stage 3 later exploits this sparsity/jaggedness.
+
+#### Constraints (G1Add) over \(\mathbb{F}_q\)
+
+All constraints below are identities in \(\mathbb{F}_q\). The finite-case constraints are gated by \(S_\text{finite}\),
+and the “Q is infinity but P is not” case is gated by \(\mathrm{ind}_Q(1-\mathrm{ind}_P)\).
+
+1. **Indicator booleanity**:
+\[
+\mathrm{ind}_P(1-\mathrm{ind}_P)=0,\quad
+\mathrm{ind}_Q(1-\mathrm{ind}_Q)=0,\quad
+\mathrm{ind}_R(1-\mathrm{ind}_R)=0.
+\]
+
+2. **Infinity encoding** (if \(\mathrm{ind}=1\) then \((x,y)=(0,0)\)):
+\[
+\mathrm{ind}_P x_P=0,\ \mathrm{ind}_P y_P=0,\quad
+\mathrm{ind}_Q x_Q=0,\ \mathrm{ind}_Q y_Q=0,\quad
+\mathrm{ind}_R x_R=0,\ \mathrm{ind}_R y_R=0.
+\]
+
+3. **Identity handling**:
+
+- If \(P=\mathcal{O}\) then \(R=Q\):
+\[
+\mathrm{ind}_P(x_R-x_Q)=0,\quad
+\mathrm{ind}_P(y_R-y_Q)=0,\quad
+\mathrm{ind}_P(\mathrm{ind}_R-\mathrm{ind}_Q)=0.
+\]
+
+- If \(Q=\mathcal{O}\) and \(P\neq\mathcal{O}\) then \(R=P\):
+\[
+\mathrm{ind}_Q(1-\mathrm{ind}_P)(x_R-x_P)=0,\quad
+\mathrm{ind}_Q(1-\mathrm{ind}_P)(y_R-y_P)=0,\quad
+\mathrm{ind}_Q(1-\mathrm{ind}_P)(\mathrm{ind}_R-\mathrm{ind}_P)=0.
+\]
+
+4. **Branch-bit booleanity (finite case)**:
+\[
+S_\text{finite}\cdot b_d(1-b_d)=0,\quad
+S_\text{finite}\cdot b_i(1-b_i)=0.
+\]
+
+5. **Branch selection / inverse-as-witness**:
+
+Let \(b_\text{add} = 1-b_d-b_i\). We enforce:
+\[
+S_\text{finite}\cdot b_\text{add}\cdot (1-\mathrm{inv\_dx}\cdot\Delta x)=0.
+\]
+This has two effects:
+- if \(\Delta x\neq 0\) then \(\mathrm{inv\_dx}=\Delta x^{-1}\) is forced in the add-branch,
+- if \(\Delta x=0\) then \(b_\text{add}=0\), so we must be in a special case (doubling or inverse).
+
+6. **Doubling / inverse declarations (finite case)**:
+
+- If \(b_d=1\) then \(P=Q\):
+\[
+S_\text{finite}\cdot b_d\cdot\Delta x = 0,\quad
+S_\text{finite}\cdot b_d\cdot(y_Q-y_P)=0.
+\]
+
+- If \(b_i=1\) then \(P=-Q\):
+\[
+S_\text{finite}\cdot b_i\cdot\Delta x = 0,\quad
+S_\text{finite}\cdot b_i\cdot(y_Q+y_P)=0.
+\]
+
+7. **Slope equation (finite case)**:
+
+We enforce a single linearized slope constraint that covers both add and double branches:
+\[
+S_\text{finite}\cdot\Big(
+b_\text{add}\cdot(\Delta x\cdot\lambda - \Delta y)
+\ +\ b_d\cdot(2y_P\cdot\lambda - 3x_P^2)
+\Big)=0.
+\]
+If \(b_i=1\), then \(b_\text{add}=0\) and \(b_d=0\), so the slope constraint vanishes as intended.
+
+8. **Result encoding and affine formulas (finite case)**:
+
+- Inverse case: \(b_i=1 \Rightarrow R=\mathcal{O}\):
+\[
+S_\text{finite}\cdot b_i\cdot(1-\mathrm{ind}_R)=0.
+\]
+
+- Non-inverse case: \(b_i=0 \Rightarrow \mathrm{ind}_R=0\) and affine add/double formulas hold:
+\[
+S_\text{finite}\cdot (1-b_i)\cdot \mathrm{ind}_R = 0,
+\]
+\[
+S_\text{finite}\cdot (1-b_i)\cdot\Big(x_R - (\lambda^2 - x_P - x_Q)\Big)=0,
+\]
+\[
+S_\text{finite}\cdot (1-b_i)\cdot\Big(y_R - (\lambda(x_P-x_R)-y_P)\Big)=0.
+\]
+
+#### Batching / sumcheck statement (G1Add)
+
+Within an instance, we batch the above constraints with \(\delta\) into a single polynomial:
+\[
+C(P,Q,R,\lambda,\mathrm{inv\_dx},b_d,b_i) \;=\; \sum_{j} \delta^j \cdot C_j.
+\]
+Across instances, we batch with \(\gamma\). The sumcheck proves:
+\[
+0 = \sum_{x\in\{0,1\}^{11}} \mathrm{eq}(r_x,x)\cdot\sum_{i}\gamma^i\cdot C_i(x).
+\]
+
+- Rounds: 11
+- Degree bound: 6 (max constraint degree 5, times \(\mathrm{eq}(r_x,x)\) which is multilinear)
+
+*Note:* “Rounds: 11” refers to this **ambient** 11-var embedding. A given witness polynomial may be zero-padded / independent
+of some of those variables, but we still run the sumcheck over the full 11-var domain to match the matrix layout and shared
+opening point.
+
+#### Output claims (ports)
+
+At the final Stage-1 evaluation point \(r_x^\*\), Stage 1 emits virtual claims for the input/output ports and auxiliaries:
+
+- `RecursionG1AddXP(i)`, `RecursionG1AddYP(i)`, `RecursionG1AddPIndicator(i)`
+- `RecursionG1AddXQ(i)`, `RecursionG1AddYQ(i)`, `RecursionG1AddQIndicator(i)`
+- `RecursionG1AddXR(i)`, `RecursionG1AddYR(i)`, `RecursionG1AddRIndicator(i)`
+- `RecursionG1AddLambda(i)`, `RecursionG1AddInvDeltaX(i)`
+- `RecursionG1AddIsDouble(i)`, `RecursionG1AddIsInverse(i)`
+
+These are the values Stage 1d wiring uses to connect add nodes to the rest of the AST DAG.
+
+#### Constraints (G2Add) over \(\mathbb{F}_{q^2}\) implemented over \(\mathbb{F}_q\)
+
+Conceptually, the G2 add constraint system is **identical** to G1, but with:
+
+- \(x_\bullet,y_\bullet,\lambda,\mathrm{inv\_dx}\in\mathbb{F}_{q^2}\),
+- \(\mathrm{ind}_\bullet,b_d,b_i\in\mathbb{F}_q\).
+
+We use the BN254 quadratic extension:
+\[
+\mathbb{F}_{q^2} = \mathbb{F}_q[u]/(u^2+1),
+\quad a = a_0 + a_1 u,
+\]
+and enforce all \(\mathbb{F}_{q^2}\) equations component-wise over \(\mathbb{F}_q\).
+
+Concretely, the implementation in `stage1/g2_add.rs` enforces the following \(\mathbb{F}_q\) constraints
+(where each \(\mathbb{F}_{q^2}\) value is split into \((c0,c1)\)):
+
+1. **Indicator booleanity**: \(\mathrm{ind}_P(1-\mathrm{ind}_P)=0\), \(\mathrm{ind}_Q(1-\mathrm{ind}_Q)=0\), \(\mathrm{ind}_R(1-\mathrm{ind}_R)=0\).
+2. **Infinity encoding**: for each of the 12 base-field coordinates \(x_{P,c0},x_{P,c1},y_{P,c0},y_{P,c1},\ldots\) we enforce \(\mathrm{ind}\cdot \text{coord}=0\).
+3. **Identity handling**:
+   - If \(P=\mathcal{O}\), then \(R=Q\) component-wise and \(\mathrm{ind}_R=\mathrm{ind}_Q\).
+   - If \(Q=\mathcal{O}\) and \(P\neq\mathcal{O}\), then \(R=P\) component-wise and \(\mathrm{ind}_R=\mathrm{ind}_P\).
+4. **Branch-bit booleanity (finite case)**: \(S_\text{finite}\cdot b_d(1-b_d)=0\), \(S_\text{finite}\cdot b_i(1-b_i)=0\).
+5. **Branch selection / inverse-as-witness (finite case)**:
+   - Let \(\Delta x = x_Q-x_P \in \mathbb{F}_{q^2}\). In the add-branch \(b_\text{add}=1-b_d-b_i\), enforce:
+     \[
+     \mathrm{inv\_dx}\cdot\Delta x = 1 \in \mathbb{F}_{q^2}
+     \]
+     which becomes two \(\mathbb{F}_q\) constraints:
+     \[
+     (\mathrm{inv\_dx}\cdot\Delta x)_{c0} = 1,\quad (\mathrm{inv\_dx}\cdot\Delta x)_{c1} = 0.
+     \]
+6. **Doubling / inverse declarations**:
+   - If \(b_d=1\): enforce \(\Delta x=0\) and \(\Delta y=0\) component-wise.
+   - If \(b_i=1\): enforce \(\Delta x=0\) and \(y_Q+y_P=0\) component-wise.
+7. **Slope equation**:
+   - Add-branch: \(\Delta x\cdot\lambda = \Delta y\) in \(\mathbb{F}_{q^2}\) (2 component constraints).
+   - Double-branch: \(2y_P\cdot\lambda = 3x_P^2\) in \(\mathbb{F}_{q^2}\) (2 component constraints), where multiplications use
+     \((a_0+a_1u)(b_0+b_1u)=(a_0b_0-a_1b_1)+(a_0b_1+a_1b_0)u\).
+8. **Result encoding and affine formulas**:
+   - Inverse: \(b_i=1 \Rightarrow \mathrm{ind}_R=1\) (and infinity encoding forces all coords 0).
+   - Non-inverse: \(\mathrm{ind}_R=0\) and the affine formulas
+     \(x_R=\lambda^2-x_P-x_Q\), \(y_R=\lambda(x_P-x_R)-y_P\) hold component-wise.
+
+The sumcheck batching/round structure matches G1Add (11 rounds, degree bound 6), and Stage 1 emits the
+corresponding virtual port claims at \(r_x^\*\) for Stage 1d wiring:
+
+- `RecursionG2AddXPC0(i)`, `RecursionG2AddXPC1(i)`, `RecursionG2AddYPC0(i)`, `RecursionG2AddYPC1(i)`, `RecursionG2AddPIndicator(i)`
+- `RecursionG2AddXQC0(i)`, `RecursionG2AddXQC1(i)`, `RecursionG2AddYQC0(i)`, `RecursionG2AddYQC1(i)`, `RecursionG2AddQIndicator(i)`
+- `RecursionG2AddXRC0(i)`, `RecursionG2AddXRC1(i)`, `RecursionG2AddYRC0(i)`, `RecursionG2AddYRC1(i)`, `RecursionG2AddRIndicator(i)`
+- `RecursionG2AddLambdaC0(i)`, `RecursionG2AddLambdaC1(i)`, `RecursionG2AddInvDeltaXC0(i)`, `RecursionG2AddInvDeltaXC1(i)`
+- `RecursionG2AddIsDouble(i)`, `RecursionG2AddIsInverse(i)`
+
 ### 2.6 Stage 1c: Boundary Sumcheck
 
 This stage enforces the initial and final states of the recursive operations.
@@ -577,126 +879,65 @@ These are proven via a sumcheck over the step variable $s$, using `eq(0, s)` and
 
 ### 2.7 Stage 1d: Wiring (Copy) Constraints
 
-To avoid sending intermediate values ("hints") to the verifier, we enforce consistency between operations using copy constraints.
+This stage enforces that all Stage 1 operation instances form **one coherent computation DAG** (copy constraints),
+rather than a multiset of unrelated valid operations.
 
-#### The Recursion Circuit
-The Dory verification logic forms a DAG where nodes are operations (GT Exp, GT Mul, Scalar Mul) and edges represent data flow.
+#### Topology source: Dory’s `AstGraph`
 
-#### Wiring Logic
-If the output of Operation $i$ is the input to Operation $j$, we must enforce:
-$$Output_i = Input_j$$
+Dory can record the full verification computation as an AST/DAG (`AstGraph`) where each node:
+- produces a typed `ValueId` (G1/G2/GT),
+- records an `AstOp` (e.g. `G1Add`, `G2ScalarMul`, `GTMul`, `GTExp`), and
+- lists its input `ValueId`s (the data-flow edges).
 
-In the matrix representation, this corresponds to equality between specific rows/indices:
-$$M(row_{out}, i) = M(row_{in}, j)$$
+Wiring constraints are derived **only** from this graph structure: for every node input `ValueId`, we add a copy constraint
+from the producer’s output value to the consumer’s input port. This avoids trusting prover-supplied wiring metadata.
 
-This is proven via a **Wiring Sumcheck** that batches all such equality constraints:
-$$0 = \sum_{(i,j) \in Edges} r^k \cdot (Output_i - Input_j)$$
+#### What is being wired: typed values (ports)
 
-where $r$ is a random challenge from the verifier.
+We wire **typed values** (G1/G2/GT elements) between operation instances:
+- `GTExp` output → `GTMul` input
+- `GTMul` output → downstream `GTMul` input
+- `G1ScalarMul` output → `G1Add` input (this is common in Dory verifier updates like `e1 = e1 + alpha*X`)
+- `G2ScalarMul` output → `G2Add` input
+- `G1Add`/`G2Add` outputs → downstream inputs, etc.
 
-#### Critical implementation constraint (current codebase): Stage 1 instances do *not* share a common opening point
+This requires having sumchecks for the “primitive” ops that appear in Dory’s AST:
+- existing: GT exp/mul, G1/G2 scalar mul
+- **new**: G1 add, G2 add
 
-In the current Rust implementation, each Stage 1 sumcheck instance (Packed GT Exp, GT Mul, G1 scalar mul, G2 scalar mul, boundary, etc.) samples its **own** random challenge point(s) from the Fiat–Shamir transcript (e.g. its own `r_x` / `r_s`), and caches virtual openings at that instance-specific point.
+#### Port extraction for packed traces: “gated slices”
 
-Therefore, we generally **cannot** enforce wiring by “just comparing” the values already produced by different Stage 1 instances, because they are evaluations at **different points**.
+Some operations are encoded as larger tables (e.g., packed GT exp, scalar-mul traces).
+In those cases, a port (input/output value) is a **slice** of the table, extracted by multiplying by a selector polynomial:
 
-This is why wiring needs a dedicated reduction step: it must bring *all* values that participate in copy constraints to a **common random evaluation point** (or refactor Stage 1 so they share one).
+- Example (conceptual): output of a 256-step scalar-mul trace is the accumulator at the last step, extracted via
+  `Eq(step_last, step)` (“gated slice”).
 
-#### What must be wired: *ports* (inputs/outputs), not internal trace states
+This keeps witness size manageable and avoids creating a separate polynomial per step.
 
-For soundness and efficiency, wiring should only involve the *external interface* of each expensive operation:
+#### Wiring sumcheck (Stage 1d)
 
-- **GT Exp**: input = base (often public), output = final GT element.
-- **GT Mul**: inputs = lhs/rhs GT elements, output = GT element.
-- **G1 scalar mul**: input = base point (often public), output = final point.
-- **G2 scalar mul**: input = base point (often public), output = final point.
+For each type (G1/G2/GT), we run a dedicated wiring sumcheck that:
+1. samples a fresh random evaluation point \(r\) (Fiat–Shamir),
+2. evaluates the relevant port expressions at \(r\), and
+3. checks a single random linear combination of all copy constraints equals 0.
 
-All intermediate states (e.g. internal $\rho_i$ values in exponentiation or per-step accumulators in scalar mul) are **internal correctness** and are already handled by the operation constraints (Stage 1a) plus internal consistency checks (Stage 1b/c). Wiring should connect only the *typed elements* that flow between operations.
-
-#### Reduction viewpoint: a tiny “port extraction” matrix \(A\)
-
-It is helpful to separate wiring into two conceptual layers:
-
-1. **Port extraction**: map the big witness polynomials (tables over \(\{0,1\}^{11}\) or \(\{0,1\}^{8}\)) to a short vector of *port values* (inputs/outputs of ops).
-2. **Copy check**: enforce that wired ports are equal.
-
-Let \(v \in \mathbb{F}_q^P\) be the vector of all port values of a given type (GT/G1/G2) evaluated at a shared random element-point. Then wiring is just a sparse linear constraint:
-
+At a high level, for edges \(e\) we check:
 \[
-\forall e=(u \to v)\in \text{Edges}, \quad v_u - v_v = 0.
+0 \stackrel{!}{=} \sum_{e} \lambda_e \cdot (\text{PortOut}_{\text{src}(e)}(r) - \text{PortIn}_{\text{dst}(e)}(r)),
 \]
+where \(\lambda_e\) are transcript challenges to prevent cancellation.
 
-Batching these equalities is standard: sample random \(\alpha_e\) and check
+This design **does not rely** on Stage 1 instances sharing a common opening point; Stage 1d introduces its own shared point(s)
+for wiring.
 
-\[
-0 \stackrel{!}{=} \sum_{e\in \text{Edges}} \alpha_e \cdot (v_{\text{out}(e)} - v_{\text{in}(e)}).
-\]
+#### Connection to the external pairing boundary
 
-Markos’s “small copy matrix \(A\)” intuition: \(A\) is the (very small) linear map that extracts these port values from the underlying trace polynomials. Even if \(A\) is not “succinctly evaluable”, it is tiny (≈100–200 ports), so it is acceptable in practice.
-
-#### Two viable reductions (design options)
-
-##### Option A (structural refactor): force all Stage 1 instances to share a global \(r_x\)
-
-Refactor Stage 1 so every instance uses the same **global** random point \(r_x \in \mathbb{F}^{11}\) (and, where needed, \(r_s\) for step variables), sampled once and passed into each prover/verifier.
-
-- **Pros**:
-  - Wiring can often be implemented as pure verifier-side checks of equality of already-opened values.
-  - Fewer extra openings/proof elements.
-- **Cons**:
-  - Requires touching all Stage 1 instance constructors (they currently sample their own challenges internally).
-  - Must be very careful about variable order/endianness and about instances that naturally have different variable partitions (e.g. packed GT exp has \((s,x)\) phases).
-
-##### Option B (recommended): dedicated Stage 1d wiring stage with a shared evaluation point
-
-Introduce an explicit Stage 1d protocol that:
-
-1. Samples a shared random element-point (separately per type, or one shared 11-var point).
-2. Produces/requests the required **port evaluations** at that point.
-3. Checks the batched copy relation across all wiring edges of that type.
-
-This keeps Stage 1a implementations unchanged and cleanly isolates wiring logic.
-
-There are two sub-choices for how to obtain port evaluations:
-
-- **B1: open rows at “port points”** (most direct)
-  - For a port that is literally a matrix row polynomial \(P(x)\), open \(P(r)\).
-  - For a port that is a *slice* of a larger table (e.g. “final step” of scalar mul), open the underlying 11-var polynomial at a point where the step bits are fixed to that boundary (Boolean point) and the element bits are random.
-  - This may require additional openings, but the count is small (ports ≈ 100–200).
-
-- **B2: prove port extraction via a small sumcheck** (more algebraic)
-  - Treat port extraction as a linear functional of the witness table and prove it via sumcheck (similar in spirit to boundary and shift sumchecks).
-  - This can reduce the number of distinct openings by batching, at the cost of extra sumcheck rounds.
-
-#### Source of topology (important context): Dory’s traced op DAG
-
-To do wiring without trusting prover-supplied wiring metadata, the verifier must know the circuit topology deterministically.
-
-In the Dory recursion layer we can record this topology during verification:
-
-- Each traced value carries an `origin: Option<OpId>` (“which operation produced me?”).
-- Each traced operation records its input origins into an `OpGraph: OpId -> Vec<Option<OpId>>`.
-
-This graph is small and deterministic, and can be used to derive wiring edges:
-for each op, for each input dependency `Some(prev_op)`, add a wiring edge from `prev_op`’s **output port** to this op’s corresponding **input port**.
-
-#### Packed GT exponentiation nuance (why port extraction matters)
-
-Packed GT exponentiation represents the internal trace as a single table \(\rho(s,x)\) (and a shifted table \(\rho_{\text{next}}(s,x)\)).
-The **output GT element** is a *boundary slice* (e.g. \(\rho_{\text{next}}(s = \text{num\_steps}-1, x)\)).
-
-So, wiring GT-exp outputs requires a port extraction mechanism (Option B1 or B2 above).
-Additionally, if \(\rho_{\text{next}}\) is not committed, a separate internal-consistency proof (a “shift sumcheck”) is required so the prover cannot choose \(\rho_{\text{next}}\) arbitrarily.
-
-#### Recommended split in practice: three independent wiring checks (GT/G1/G2)
-
-Because the element representations differ (GT: 4-var domain, G1/G2: 8-var domain, G2 has split coordinates), it is cleanest to implement three independent wiring reductions:
-
-- **GT wiring**: edges among GT exp / GT mul outputs and GT mul inputs.
-- **G1 wiring**: edges among G1-producing ops and G1-consuming ops (if any).
-- **G2 wiring**: edges among G2-producing ops and G2-consuming ops (if any).
-
-Each can use its own random element point and its own batched equality check.
+The Dory verifier’s final optimized check is a **3-way multi-pairing** (see `third-party/dory/src/reduce_and_fold.rs::DoryVerifierState::verify_final`).
+We do not prove pairings inside this SNARK. Instead:
+- the recursion witness includes all non-pairing operations that produce the three pairing input pairs, and
+- the recursion SNARK exposes those three (G1,G2) pairs as public outputs,
+so the outside verifier can perform the final pairing check.
 
 ---
 
@@ -727,29 +968,16 @@ row = poly_type × num_constraints_padded + constraint_idx
 
 Polynomial types:
 
-| Type | Index | Source |
-|------|-------|--------|
-| RecursionBase | 0 | GT Exp (unpacked) |
-| RecursionRhoPrev | 1 | GT Exp (unpacked) |
-| RecursionRhoCurr | 2 | GT Exp (unpacked) |
-| RecursionQuotient | 3 | GT Exp (unpacked) |
-| RecursionMulLhs | 4 | GT Mul |
-| RecursionMulRhs | 5 | GT Mul |
-| RecursionMulResult | 6 | GT Mul |
-| RecursionMulQuotient | 7 | GT Mul |
-| RecursionG1ScalarMulXA | 8 | G1 Scalar Mul |
-| RecursionG1ScalarMulYA | 9 | G1 Scalar Mul |
-| RecursionG1ScalarMulXT | 10 | G1 Scalar Mul |
-| RecursionG1ScalarMulYT | 11 | G1 Scalar Mul |
-| RecursionG1ScalarMulXANext | 12 | G1 Scalar Mul |
-| RecursionG1ScalarMulYANext | 13 | G1 Scalar Mul |
-| RecursionG1ScalarMulIndicator | 14 | G1 Scalar Mul |
-| PackedGtExpBase | 15 | GT Exp (packed) |
-| PackedGtExpRho | 16 | GT Exp (packed) |
-| PackedGtExpRhoNext | 17 | GT Exp (packed) |
-| PackedGtExpQuotient | 18 | GT Exp (packed) |
+The sparse matrix rows correspond to the set of “virtual polynomials” emitted by Stage 1 for all supported op types.
+This includes:
 
-**Total**: 19 polynomial types (15 original + 4 packed)
+- GT ops: GT mul ports and (packed) GT exp committed polynomials (e.g., \(\rho\) and \(Q\))
+- G1 scalar mul ports (x/y for \(A,T,A'\) plus infinity indicators)
+- G2 scalar mul ports (same, with Fq2 split into c0/c1 components)
+- (NEW) G1 add / G2 add ports (for explicit add nodes in Dory’s AST)
+
+**Implementation note**: The exact enumeration and ordering is an implementation detail of the recursion constraint system
+(see `jolt-core/src/zkvm/recursion/constraints_sys.rs`), and should be treated as authoritative over any hard-coded table here.
 
 ### 3.3 Direct Evaluation Protocol
 
@@ -954,7 +1182,7 @@ This section provides analytical formulas for proof sizes, constraint counts, an
 | Stage | Protocol | Degree | Rounds | Elements/Round |
 |-------|----------|--------|--------|----------------|
 | 1 | GT Exponentiation (unpacked) | 4 | 4 | 5 |
-| 1 | GT Exponentiation (packed) | 4 | 12 | 5 |
+| 1 | GT Exponentiation (packed) | 4 | 11 | 5 |
 | 1 | GT Multiplication | 3 | 4 | 4 |
 | 1 | G1 Scalar Multiplication | 6 | $\ell$ | 7 |
 | 2 | Direct Evaluation | - | 0 | 1 |
@@ -968,29 +1196,28 @@ Where:
 
 ### 6.2 Constraint Counts
 
-**Per-operation constraints**:
+**Per-operation constraints** (high level):
 
-| Operation | Constraints | Poly Types | Total Polynomials |
-|-----------|-------------|------------|-------------------|
-| GT Exp (unpacked, $t$-bit) | $t$ | 4 | $4t$ |
-| GT Exp (packed, $t$-bit) | 1 | 5 | 5 |
-| GT Mul | 1 | 4 | 4 |
-| G1 Scalar Mul ($n$-bit) | 1 | 7 | 7 |
+- **GT Exp (unpacked, \(t\)-bit)**: \(t\) constraints, 4 polynomial types per bit (base, rho-prev, rho-curr, quotient).
+- **GT Exp (packed, base-4)**: 1 packed constraint covering up to 128 base-4 steps, with 3 packed witness tables
+  \((\rho,\rho_{\text{next}},Q)\) (plus additional public-input-derived tables if materialized).
+- **GT Mul**: 1 constraint, 4 polynomial types (lhs, rhs, result, quotient).
+- **G1 Scalar Mul (256-bit)**: 1 constraint over an 11-var domain (8 step bits padded to 11), with accumulator/double/next coordinates plus indicators.
+- **G2 Scalar Mul (256-bit)**: same shape as G1 but with Fq2 split into (c0,c1) components and additional constraints.
+- **G1Add / G2Add (new)**: 1 constraint per add node (with the exact polynomial interface defined by the add sumcheck implementation).
 
-**Typical Dory verification** (256-bit scalars):
-- GT exponentiations (unpacked): 256 constraints each
-- GT exponentiations (packed): 1 unified constraint covering all 256 steps
-- GT multiplications: 1 constraint each
-- G1 scalar multiplications: 1 constraint each (but 256 rows in trace)
+**Implementation note**: The exact set of “poly types” that become matrix rows is defined by the recursion constraint system
+(`jolt-core/src/zkvm/recursion/constraints_sys.rs`) and is the authoritative source of truth.
 
 ### 6.3 Matrix Dimensions
 
 **Row count**:
-$$\text{num\_rows} = 19 \times c_{\text{pad}}$$
+$$\text{num\_rows} = \text{NUM\_POLY\_TYPES} \times c_{\text{pad}}$$
 
 where $c_{\text{pad}} = 2^{\lceil \log_2 c \rceil}$ and $c$ = total constraints.
 
-**Note**: The count 19 includes both unpacked (15 types) and packed GT exp types (4 additional).
+**Note**: `NUM_POLY_TYPES` is an implementation constant defined by the recursion constraint system and grows as we add op types
+(e.g., G2 scalar mul, G1/G2 add) and/or change packing layouts.
 
 **Column count**:
 - $2^4 = 16$ for GT operations (4-variable MLEs)
@@ -1002,8 +1229,8 @@ where $c_{\text{pad}} = 2^{\lceil \log_2 c \rceil}$ and $c$ = total constraints.
 | Parameter | Formula | Value |
 |-----------|---------|-------|
 | $c_{\text{pad}}$ | $2^{\lceil \log_2 10 \rceil}$ | 16 |
-| num\_rows | $19 \times 16$ | 304 |
-| num\_s\_vars | $\lceil \log_2 304 \rceil$ | 9 |
+| num\_rows | $\text{NUM\_POLY\_TYPES} \times 16$ | (depends on implementation) |
+| num\_s\_vars | $\lceil \log_2(\text{num\_rows}) \rceil$ | (depends on implementation) |
 
 ### 6.4 Dense Size Computation
 
@@ -1054,46 +1281,22 @@ $$|P_4| = O(\sqrt{\text{dense\_size}}) \text{ group elements}$$
 **Total proof size** (field elements, excluding PCS):
 $$|P| = |P_1| + |P_2| + |P_3| + |P_{3b}| + \text{virtual claims}$$
 
-### 6.6 Concrete Example: Single 256-bit GT Exponentiation
+### 6.6 Concrete Example: Single 256-bit GT Exponentiation (Unpacked vs Packed)
 
-**Unpacked version**:
+This example isolates just the Stage 1 representation cost for a single 256-bit exponentiation.
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Constraints ($c$) | 256 | One per bit |
-| $c_{\text{pad}}$ | 256 | Already power of 2 |
-| Polynomials | 1,024 | $256 \times 4$ types |
-| num\_s\_vars ($s$) | 12 | $\lceil \log_2(19 \times 256) \rceil$ |
-| dense\_size | 16,384 | $1024 \times 16$ |
-| num\_dense\_vars ($d$) | 14 | $\lceil \log_2 16384 \rceil$ |
-| Virtual claims | 1,024 | $4 \times 256$ |
+**Unpacked**:
+- Constraints: \(t=256\) (one per bit)
+- Virtual claims: \(4t = 1024\) (base, rho-prev, rho-curr, quotient per bit)
+- Sumcheck rounds: 4 (over the 4 element variables)
 
-**Packed version**:
+**Packed (base-4)**:
+- Constraints: 1 (covers up to 128 base-4 steps)
+- Virtual claims: 3 (\(\rho,\rho_{\text{next}},Q\)) at \((r_s^*,r_x^*)\)
+- Sumcheck rounds: 11 (7 step vars + 4 element vars)
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Constraints ($c$) | 1 | Single unified constraint |
-| $c_{\text{pad}}$ | 1 | Already power of 2 |
-| Polynomials | 5 | PackedGtExp* types |
-| num\_s\_vars ($s$) | 5 | $\lceil \log_2(19 \times 1) \rceil$ |
-| dense\_size | 65,536 | $4 \times 16^4$ (12-var MLEs) |
-| num\_dense\_vars ($d$) | 16 | $\lceil \log_2 65536 \rceil$ |
-| Virtual claims | 5 | One per packed type |
-
-**Proof size comparison**:
-
-| Stage | Unpacked | Packed | Improvement |
-|-------|----------|--------|-------------|
-| Stage 1 | 20 | 60 | 3× larger |
-| Stage 2 | 1 | 1 | Same |
-| Stage 3 | $3 \times 14 = 42$ | $3 \times 16 = 48$ | Slightly larger |
-| Virtual claims | 1,024 | 5 | **204.8× smaller** |
-| **Total** | 1,087 | 114 | **9.5× smaller** |
-
-At 32 bytes per $\mathbb{F}_q$ element:
-- Unpacked: $1,087 \times 32 = 34.8$ KB
-- Packed: $114 \times 32 = 3.6$ KB
-(excluding PCS proof)
+**Note**: End-to-end Stage 2/3/4 costs depend on the full recursion constraint system (all op types in scope, padding rules, and
+`NUM_POLY_TYPES`), so they are intentionally not hard-coded in this single-op example.
 
 ### 6.7 Prover Complexity
 
@@ -1157,24 +1360,24 @@ The packed GT exponentiation optimization dramatically reduces system costs:
 | Approach | Polynomials | Memory (256-bit exp) | Formula |
 |----------|-------------|---------------------|---------|
 | Unpacked | $4t$ | ~32 MB | $4t \times 2^4 \times 32$ bytes |
-| Packed | 5 | ~10 MB | $5 \times 2^{12} \times 32$ bytes |
+| Packed | 3 | ~0.2 MB | $3 \times 2^{11} \times 32$ bytes |
 
 **Stage 2 Virtual Claims**:
 
 | Approach | Virtual Claims | Verifier Work |
 |----------|---------------|---------------|
 | Unpacked | 1,024 | $O(1024)$ field ops |
-| Packed | 5 | $O(5)$ field ops |
+| Packed | 3 | $O(3)$ field ops |
 
 **Impact on Later Stages**:
-- Stage 3 processes fewer polynomials (5 vs 1,024)
+- Stage 3 processes fewer polynomials (3 vs 1,024)
 - Stage 3b benefits from reduced $K$ in batch verification
 - Hyrax commitment is more efficient with fewer polynomials
 
 **Trade-offs**:
-- Packed approach uses 12-round sumcheck vs 4-round
+- Packed approach uses 11-round sumcheck vs 4-round
 - Slightly larger Stage 1 proof (60 vs 20 elements)
-- Prover computes over larger domain ($2^{12}$ vs $2^4$)
+- Prover computes over larger domain ($2^{11}$ vs $2^4$)
 - Net benefit: ~9.5× smaller total proof, ~200× fewer virtual claims
 
 ---
@@ -1194,11 +1397,15 @@ jolt-core/src/zkvm/recursion/
 ├── recursion_prover.rs       # RecursionProver orchestrating all stages
 ├── recursion_verifier.rs     # RecursionVerifier
 ├── stage1/
-│   ├── square_and_multiply.rs   # GT exponentiation sumcheck
+│   ├── packed_gt_exp.rs         # Packed GT exponentiation sumcheck (base-4 digits)
+│   ├── shift_rho.rs             # Shift consistency for packed GT exp (Stage 1b)
 │   ├── gt_mul.rs                # GT multiplication sumcheck
 │   ├── g1_scalar_mul.rs         # G1 scalar mul sumcheck
-│   ├── boundary_constraints.rs  # Initial/Final state checks
-│   └── wiring.rs                # Wiring/Copy constraints (TODO)
+│   ├── g2_scalar_mul.rs         # G2 scalar mul sumcheck
+│   ├── g1_add.rs                # (NEW) G1 addition sumcheck
+│   ├── g2_add.rs                # (NEW) G2 addition sumcheck
+│   ├── boundary_constraints.rs  # Initial/final state checks (Stage 1c)
+│   └── wiring.rs                # AST-derived wiring/copy constraints (Stage 1d)
 ├── stage2/
 │   └── virtualization.rs        # Direct evaluation protocol
 └── stage3/
@@ -1208,46 +1415,45 @@ jolt-core/src/zkvm/recursion/
 
 ### 7.2 The Offloading Pattern
 
-The recursion system uses a **hint-based offloading** pattern to reduce verification cost:
+The revised design treats the **Dory proof** as the ground truth and does **not** rely on a “HintMap” that supplies intermediate
+group elements to the verifier.
+
+The offloading boundary is:
+
+- **Inside the recursion SNARK**: all non-pairing group/GT computation implied by Dory verification (scalar mul, add, GT exp/mul, wiring).
+- **Outside the recursion SNARK**: transcript hashing / Fiat–Shamir challenge derivation, scalar-field arithmetic (inverses/products), and the
+  **final 3-way multi-pairing check**.
+
+At a high level:
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                        PROVER SIDE                                 │
-├────────────────────────────────────────────────────────────────────┤
-│                                                                    │
-│   Dory Proof ──→ witness_gen() ──┬──→ WitnessCollection (full)    │
-│                                  └──→ HintMap (compact)            │
-│                                                                    │
-│   WitnessCollection ──→ RecursionProver ──→ RecursionProof        │
-│                                                                    │
-└────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼  (send proof + hints)
-┌────────────────────────────────────────────────────────────────────┐
-│                       VERIFIER SIDE                                │
-├────────────────────────────────────────────────────────────────────┤
-│                                                                    │
-│   HintMap + RecursionProof ──→ verify_with_hint() ──→ Accept/Reject│
-│                                                                    │
-│   (Avoids expensive witness regeneration)                          │
-│                                                                    │
-└────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                                PROVER SIDE                                 │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  Dory proof + setup + transcript  ──→  run Dory verify in witness-gen mode │
+│                                       (with AST tracing enabled)           │
+│                                  ──→  (WitnessCollection, AstGraph)        │
+│                                                                            │
+│  (WitnessCollection, AstGraph) ──→  RecursionProver ──→ RecursionProof      │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                               VERIFIER SIDE                                │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  derive transcript challenges / scalars outside SNARK                       │
+│  RecursionVerifier verifies RecursionProof                                  │
+│    - obtains three pairing input pairs (p1,p2,p3) (and optionally rhs)      │
+│  outside verifier computes multi_pair(p1,p2,p3) and checks == rhs           │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The `RecursionExt` trait defines this interface:
-
-```rust
-pub trait RecursionExt<F: JoltField>: CommitmentScheme<Field = F> {
-    type Witness;  // Full witness data for proving
-    type Hint;     // Compact hints for verification
-
-    /// Generate witness and hints from a Dory proof
-    fn witness_gen(&self, proof: &ArkDoryProof, ...) -> (Self::Witness, Self::Hint);
-
-    /// Verify using hints instead of regenerating witnesses
-    fn verify_with_hint(&self, proof: &RecursionProof, hint: &Self::Hint, ...) -> Result<()>;
-}
-```
+**Implementation note**: Dory already supports collecting an AST during verification via
+`TraceContext::for_witness_gen_with_ast()` and extracting it via `finalize_with_ast()`.
 
 ### 7.3 Witness Types
 
@@ -1278,60 +1484,99 @@ struct GTMulWitness {
 **G1 Scalar Multiplication** (`G1ScalarMulWitness`):
 ```rust
 struct G1ScalarMulWitness {
-    base: G1Affine,                // Base point P
-    scalar: Fr,                    // Scalar k
-    result: G1Affine,              // Result [k]P
-    x_a_mle: Vec<Fq>,              // Accumulator x-coordinates
-    y_a_mle: Vec<Fq>,              // Accumulator y-coordinates
-    x_t_mle: Vec<Fq>,              // Doubled point x-coordinates
-    y_t_mle: Vec<Fq>,              // Doubled point y-coordinates
-    x_a_next_mle: Vec<Fq>,         // Next accumulator x-coordinates
-    y_a_next_mle: Vec<Fq>,         // Next accumulator y-coordinates
-    indicator_mle: Vec<Fq>,        // Infinity indicators
-    bits: Vec<bool>,               // Binary decomposition of k
+    constraint_index: usize,
+    base_point: (Fq, Fq),          // P = (x_P, y_P) (public/wired input)
+    // 11-var MLE eval vectors (size 2^11) for the 256-step trace (8 step bits, padded to 11 vars)
+    x_a: Vec<Fq>,                  // x_A(s)
+    y_a: Vec<Fq>,                  // y_A(s)
+    x_t: Vec<Fq>,                  // x_T(s) = x([2]A_s)
+    y_t: Vec<Fq>,                  // y_T(s) = y([2]A_s)
+    x_a_next: Vec<Fq>,             // x_A(s+1) (shifted)
+    y_a_next: Vec<Fq>,             // y_A(s+1) (shifted)
+    a_indicator: Vec<Fq>,          // ind_A(s)
+    t_indicator: Vec<Fq>,          // ind_T(s)
 }
 ```
+
+The scalar \(k\) is treated as a **public input** (the outside verifier derives its bits from the transcript), so the recursion
+SNARK does not require a committed bit polynomial.
+
+**G2 Scalar Multiplication** (`G2ScalarMulWitness`):
+
+```rust
+struct G2ScalarMulWitness {
+    constraint_index: usize,
+    base_point: (Fq2, Fq2),        // Q = (x_Q, y_Q) (public/wired input)
+    // Fq2 coordinates are split into c0/c1 components in Fq
+    x_a_c0: Vec<Fq>, x_a_c1: Vec<Fq>,
+    y_a_c0: Vec<Fq>, y_a_c1: Vec<Fq>,
+    x_t_c0: Vec<Fq>, x_t_c1: Vec<Fq>,
+    y_t_c0: Vec<Fq>, y_t_c1: Vec<Fq>,
+    x_a_next_c0: Vec<Fq>, x_a_next_c1: Vec<Fq>,
+    y_a_next_c0: Vec<Fq>, y_a_next_c1: Vec<Fq>,
+    a_indicator: Vec<Fq>,
+    t_indicator: Vec<Fq>,
+}
+```
+
+**G1 Addition** (`G1AddWitness`) and **G2 Addition** (`G2AddWitness`) (new):
+
+These witnesses provide the input points and output point for each explicit `G1Add`/`G2Add` node in Dory’s AST, including
+infinity encoding. A corresponding Stage 1 sumcheck enforces the affine group law (with correct infinity handling).
 
 **Packed GT Exponentiation** (Used when optimization enabled):
 
-The packed representation combines all 256 steps into unified 12-variable polynomials:
+The packed representation combines all steps into a single table over step bits and element bits.
+The implementation uses **base-4 digits** (two bits per step), so there are at most 128 steps and the packed tables
+use **11 variables** total (7 step vars + 4 element vars).
 
 ```rust
-struct PackedGTExpWitness {
-    base: Fq12,                    // Base element a
-    exponent: Fr,                  // Scalar k
-    result: Fq12,                  // Result a^k
+struct PackedGtExpWitness {
+    // 11-var packed tables (size 2^11 = 2048)
+    rho_packed: Vec<Fq>,       // ρ(s,x)
+    rho_next_packed: Vec<Fq>,  // ρ(s+1,x)
+    quotient_packed: Vec<Fq>,  // Q(s,x)
 
-    // Packed polynomials (12 variables each)
-    packed_base_mle: Vec<Fq>,      // base(x) replicated across steps
-    packed_rho_mle: Vec<Fq>,       // ρ(s,x) for all steps
-    packed_rho_next_mle: Vec<Fq>,  // ρ_next(s,x) shifted by 1
-    packed_quotient_mle: Vec<Fq>,  // Q(s,x) for all steps
-    packed_bit_mle: Vec<Fq>,       // bit(s) replicated across x
+    // Public-input-derived tables (replicated across the other dimension)
+    digit_lo_packed: Vec<Fq>,  // digit_lo(s)
+    digit_hi_packed: Vec<Fq>,  // digit_hi(s)
+    base_packed: Vec<Fq>,      // base(x)
+    base2_packed: Vec<Fq>,     // base^2(x)
+    base3_packed: Vec<Fq>,     // base^3(x)
 }
 ```
 
-Layout: For 12-variable MLEs with `s ∈ {0,1}^8` and `x ∈ {0,1}^4`:
-- Index formula: `index = x * 256 + s` (s in low bits)
-- `packed_rho_mle[x * 256 + s] = ρ_s[x]`
-- Each MLE has 2^12 = 4,096 evaluations
+Layout: For 11-variable MLEs with `s ∈ {0,1}^7` and `x ∈ {0,1}^4`:
+- Index formula: `index = x * 128 + s` (s in low bits)
+- `rho_packed[x * 128 + s] = ρ_s[x]`
+- Each packed table has 2^11 = 2,048 evaluations
 
 ### 7.4 Constraint System Construction
 
-The `DoryMatrixBuilder` constructs the constraint matrix from witnesses:
+The recursion constraint system is constructed from:
+
+- the extracted `WitnessCollection` (concrete witness traces), and
+- the extracted `AstGraph` (the authoritative operation DAG / topology).
+
+Conceptually, we traverse the AST nodes and:
+- allocate a constraint instance for each operation node we prove inside the SNARK (GT exp/mul, G1/G2 scalar mul, G1/G2 add),
+- attach the corresponding witness polynomials from `WitnessCollection` (for traced ops), and
+- attach any needed public inputs (setup/proof elements and transcript-derived scalars).
 
 ```rust
 let mut builder = DoryMatrixBuilder::new();
 
-// Add witnesses (each becomes one or more constraints)
-for witness in gt_exp_witnesses {
-    builder.add_gt_exp_witness(witness);  // t constraints per exponentiation
-}
-for witness in gt_mul_witnesses {
-    builder.add_gt_mul_witness(witness);  // 1 constraint per multiplication
-}
-for witness in g1_scalar_mul_witnesses {
-    builder.add_g1_scalar_mul_witness(witness);  // n constraints per scalar mul
+// Pseudocode: iterate AST nodes in topological order
+for node in ast.nodes {
+    match node.op {
+        AstOp::GTExp { .. } => builder.add_packed_gt_exp_witness(...),
+        AstOp::GTMul { .. } => builder.add_gt_mul_witness(...),
+        AstOp::G1ScalarMul { .. } => builder.add_g1_scalar_mul_witness(...),
+        AstOp::G2ScalarMul { .. } => builder.add_g2_scalar_mul_witness(...),
+        AstOp::G1Add { .. } => builder.add_g1_add_witness(...),
+        AstOp::G2Add { .. } => builder.add_g2_add_witness(...),
+        _ => { /* inputs, negations, pairings handled elsewhere */ }
+    }
 }
 
 let constraint_system: ConstraintSystem = builder.build();
@@ -1518,279 +1763,29 @@ let matrix_rows: Vec<usize> = (0..num_polynomials)
 
 ### 7.10 Polynomial Type Enumeration
 
-```rust
-#[repr(usize)]
-pub enum PolyType {
-    // GT Exponentiation (4-var MLEs)
-    Base = 0,
-    RhoPrev = 1,
-    RhoCurr = 2,
-    Quotient = 3,
+The recursion matrix row layout is an encoding detail of the constraint system and evolves as we add new op types (e.g., G1/G2 add)
+and refine packed protocols (e.g., packed GT exp). The authoritative definition is the `PolyType` enum in:
 
-    // GT Multiplication (4-var MLEs)
-    MulLhs = 4,
-    MulRhs = 5,
-    MulResult = 6,
-    MulQuotient = 7,
+- `jolt-core/src/zkvm/recursion/constraints_sys.rs`
 
-    // G1 Scalar Multiplication (8-var MLEs)
-    G1ScalarMulXA = 8,
-    G1ScalarMulYA = 9,
-    G1ScalarMulXT = 10,
-    G1ScalarMulYT = 11,
-    G1ScalarMulXANext = 12,
-    G1ScalarMulYANext = 13,
-    G1ScalarMulIndicator = 14,
+### 7.11 Dory Integration: Witness + AST Extraction (No HintMap)
 
-    // Packed GT Exponentiation (12-var MLEs)
-    PackedGtExpBase = 15,
-    PackedGtExpRho = 16,
-    PackedGtExpRhoNext = 17,
-    PackedGtExpQuotient = 18,
-}
+We run Dory verification once (prover-side) with a trace context that records:
 
-pub const NUM_POLY_TYPES: usize = 19;
-```
+- a **WitnessCollection**: per-op witness traces for Stage 1 sumchecks, and
+- an **AstGraph**: the full computation DAG used to derive wiring/copy constraints deterministically.
 
-### 7.11 Dory Integration: Witness Extraction and Hints
-
-The recursion system integrates with Dory through the `RecursionExt` trait, which enables automatic witness extraction during verification.
-
-#### The TraceContext Mechanism
-
-Dory's `verify_recursive` function accepts a `TraceContext` that captures witnesses during verification:
+Dory supports enabling AST tracing via `TraceContext::for_witness_gen_with_ast()` and extracting both artifacts via `finalize_with_ast()`.
 
 ```rust
-// TraceContext modes:
-TraceContext::for_witness_gen()  // Collect witnesses during verify
-TraceContext::for_hints(hint)    // Use precomputed hints instead
+let ctx = Rc::new(TraceContext::<W, E, Gen>::for_witness_gen_with_ast());
+verify_recursive(commitment, evaluation, point, proof, setup, transcript, ctx.clone())?;
+let (witnesses_opt, ast_opt) = Rc::try_unwrap(ctx).ok().unwrap().finalize_with_ast();
 ```
 
-When `verify_recursive` executes with a witness-gen context:
-1. Each GT exponentiation triggers `WitnessGenerator::generate_gt_exp()`
-2. Each GT multiplication triggers `WitnessGenerator::generate_gt_mul()`
-3. Each G1 scalar mul triggers `WitnessGenerator::generate_g1_scalar_mul()`
-4. Results accumulate in the shared `TraceContext`
-
-#### witness_gen Implementation
-
-```rust
-fn witness_gen(
-    proof: &ArkDoryProof,
-    setup: &ArkworksVerifierSetup,
-    transcript: &mut Transcript,
-    point: &[Challenge],
-    evaluation: &Fr,
-    commitment: &ArkGT,
-) -> Result<(WitnessCollection, HintMap), ProofVerifyError> {
-    // Create context that will collect witnesses
-    let ctx = Rc::new(
-        TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_witness_gen()
-    );
-
-    // Run verification - witnesses collected as side effect
-    verify_recursive(
-        commitment, evaluation, point, proof, setup,
-        transcript, ctx.clone(),
-    )?;
-
-    // Extract collected witnesses
-    let witnesses = Rc::try_unwrap(ctx)
-        .ok().expect("sole ownership")
-        .finalize()?;
-
-    // Convert to compact hints
-    let hints = witnesses.to_hints::<BN254>();
-
-    Ok((witnesses, hints))
-}
-```
-
-#### JoltWitnessGenerator
-
-The generator creates witness structures using optimized step computation:
-
-```rust
-impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
-    fn generate_gt_exp(base: &GT, scalar: &Fr, result: &GT) -> JoltGtExpWitness {
-        // ExponentiationSteps computes all intermediate ρ values and quotients
-        let steps = ExponentiationSteps::new(base.0, ark_to_jolt(scalar));
-        JoltGtExpWitness {
-            base: steps.base,
-            exponent: steps.exponent,
-            result: steps.result,
-            rho_mles: steps.rho_mles,          // All ρ_i as MLEs
-            quotient_mles: steps.quotient_mles, // All Q_i as MLEs
-            bits: steps.bits,
-        }
-    }
-
-    // Packed GT exponentiation witness generation
-    fn generate_packed_gt_exp(base: &GT, scalar: &Fr, result: &GT) -> PackedGtExpWitness {
-        let steps = ExponentiationSteps::new(base.0, ark_to_jolt(scalar));
-
-        // Pack 256 4-var MLEs into 5 12-var MLEs
-        let packed_base_mle = pack_replicated_base(&steps.base, 256, 16);
-        let packed_rho_mle = pack_sequential_mles(&steps.rho_mles);
-        let packed_rho_next_mle = pack_shifted_mles(&steps.rho_mles);
-        let packed_quotient_mle = pack_sequential_mles(&steps.quotient_mles);
-        let packed_bit_mle = pack_replicated_bits(&steps.bits, 16);
-
-        PackedGtExpWitness {
-            base: steps.base,
-            exponent: steps.exponent,
-            result: steps.result,
-            packed_base_mle,
-            packed_rho_mle,
-            packed_rho_next_mle,
-            packed_quotient_mle,
-            packed_bit_mle,
-        }
-    }
-
-    fn generate_gt_mul(lhs: &GT, rhs: &GT, result: &GT) -> JoltGtMulWitness {
-        let steps = MultiplicationSteps::new(lhs.0, rhs.0);
-        JoltGtMulWitness {
-            lhs: steps.lhs,
-            rhs: steps.rhs,
-            result: steps.result,
-            quotient_mle: steps.quotient_mle,
-        }
-    }
-
-    fn generate_g1_scalar_mul(point: &G1, scalar: &Fr, result: &G1) -> JoltG1ScalarMulWitness {
-        let steps = ScalarMultiplicationSteps::new(point.into(), ark_to_jolt(scalar));
-        JoltG1ScalarMulWitness {
-            point_base: steps.point_base,
-            scalar: steps.scalar,
-            result: steps.result,
-            x_a_mles: steps.x_a_mles,
-            y_a_mles: steps.y_a_mles,
-            x_t_mles: steps.x_t_mles,
-            y_t_mles: steps.y_t_mles,
-            x_a_next_mles: steps.x_a_next_mles,
-            y_a_next_mles: steps.y_a_next_mles,
-            bits: steps.bits,
-        }
-    }
-}
-```
-
-#### HintMap: Compact Verification Data
-
-The `HintMap` contains precomputed values that allow verification to skip expensive operations:
-
-```rust
-struct HintMap<C: PairingCurve> {
-    num_rounds: usize,
-    // Precomputed intermediate values for each operation type
-    gt_exp_hints: Vec<GtExpHint>,
-    gt_mul_hints: Vec<GtMulHint>,
-    g1_scalar_mul_hints: Vec<G1ScalarMulHint>,
-}
-```
-
-#### verify_with_hint: Fast Verification Path
-
-```rust
-fn verify_with_hint(
-    proof: &ArkDoryProof,
-    setup: &ArkworksVerifierSetup,
-    transcript: &mut Transcript,
-    point: &[Challenge],
-    evaluation: &Fr,
-    commitment: &ArkGT,
-    hint: &HintMap,  // Precomputed hints
-) -> Result<(), ProofVerifyError> {
-    // Context initialized with hints instead of empty
-    let ctx = Rc::new(
-        TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_hints(hint.clone())
-    );
-
-    // Same verify_recursive call, but:
-    // - Uses precomputed hints instead of regenerating witnesses
-    // - Skips ExponentiationSteps, MultiplicationSteps, ScalarMultiplicationSteps
-    verify_recursive(
-        commitment, evaluation, point, proof, setup,
-        transcript, ctx,
-    )?;
-
-    Ok(())
-}
-```
-
-#### Integration with RecursionProver
-
-The recursion prover uses `witness_gen` to bootstrap from a Dory proof:
-
-```rust
-impl RecursionProver {
-    pub fn new_from_dory_proof(
-        dory_proof: &ArkDoryProof,
-        verifier_setup: &ArkworksVerifierSetup,
-        transcript: &mut Transcript,
-        point: &[Challenge],
-        evaluation: &Fr,
-        commitment: &ArkGT,
-    ) -> Result<Self, Error> {
-        // Extract witnesses via TraceContext
-        let (witness_collection, _hints) = DoryCommitmentScheme::witness_gen(
-            dory_proof, verifier_setup, transcript,
-            point, evaluation, commitment,
-        )?;
-
-        // Convert to recursion witness format
-        let recursion_witness = Self::witnesses_to_dory_recursion(&witness_collection)?;
-
-        // Build constraint system from extracted witnesses
-        let constraint_system = Self::build_constraint_system(&witness_collection)?;
-
-        Ok(Self { constraint_system, ... })
-    }
-}
-```
-
-#### Complete Flow Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         DORY PROOF VERIFICATION                         │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┴───────────────┐
-                    ▼                               ▼
-        ┌─────────────────────┐         ┌─────────────────────┐
-        │    witness_gen()    │         │  verify_with_hint() │
-        │  (Prover/Setup)     │         │   (Lightweight V)   │
-        └─────────────────────┘         └─────────────────────┘
-                    │                               │
-                    ▼                               ▼
-        ┌─────────────────────┐         ┌─────────────────────┐
-        │   TraceContext::    │         │   TraceContext::    │
-        │   for_witness_gen() │         │   for_hints(hint)   │
-        └─────────────────────┘         └─────────────────────┘
-                    │                               │
-                    ▼                               ▼
-        ┌─────────────────────┐         ┌─────────────────────┐
-        │  verify_recursive() │         │  verify_recursive() │
-        │  + WitnessGenerator │         │  + Hint lookups     │
-        └─────────────────────┘         └─────────────────────┘
-                    │                               │
-         ┌──────────┴──────────┐                   │
-         ▼                     ▼                   │
-┌─────────────────┐  ┌─────────────────┐          │
-│WitnessCollection│  │    HintMap      │──────────┘
-│  (full data)    │  │   (compact)     │
-└─────────────────┘  └─────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      RECURSION SNARK (Stages 1-4)                       │
-│  Proves that witness_gen produced correct results for all operations    │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-The key insight is that `witness_gen` runs full verification once to extract witnesses, while `verify_with_hint` uses precomputed hints to achieve ~150× speedup by skipping expensive intermediate computations.
+**Verifier-side topology**: the recursion verifier must not trust a prover-supplied AST. The intended design is that the recursion verifier
+reconstructs the same AST skeleton deterministically from public inputs (Dory proof, setup, and transcript-derived scalars), without performing
+any expensive group operations.
 
 ### 7.12 GPU Considerations
 
@@ -1814,8 +1809,8 @@ The following remain on the CPU/Rust side:
 - **Transcript management**: Fiat-Shamir challenge generation
 - **Bijection logic**: `VarCountJaggedBijection` index computations
 - **Matrix row mapping**: Three-level decode (poly_idx → constraint_idx → matrix_row)
-- **Hint serialization**: `HintMap` construction and transmission
-- **Proof assembly**: Collecting stage outputs into `RecursionProof`
+- **AST extraction**: `AstGraph` extraction and (verifier-side) deterministic reconstruction for wiring
+- **Proof assembly**: Collecting stage outputs into `RecursionProof` (including the external pairing boundary outputs)
 
 #### Data Flow
 
@@ -1823,7 +1818,7 @@ The following remain on the CPU/Rust side:
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           RUST (CPU)                                    │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  witness_gen() ──→ WitnessCollection ──→ ConstraintSystem               │
+│  dory_verify_trace() ──→ (WitnessCollection, AstGraph) ──→ ConstraintSystem │
 │                                              │                          │
 │  Transcript ←─────────────────────────────── │ ←── challenges           │
 │       │                                      │                          │

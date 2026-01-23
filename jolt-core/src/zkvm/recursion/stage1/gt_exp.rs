@@ -38,7 +38,7 @@ use crate::{
     transcripts::Transcript,
     virtual_claims,
     zkvm::{
-        recursion::utils::virtual_polynomial_utils::*,
+        recursion::{constraint_config::CONFIG, utils::virtual_polynomial_utils::*},
         witness::VirtualPolynomial,
     },
 };
@@ -49,13 +49,13 @@ use ark_std::One;
 use rayon::prelude::*;
 
 /// Number of step variables (7 for 128 base-4 steps)
-pub const NUM_STEP_VARS: usize = 7;
+pub const NUM_STEP_VARS: usize = CONFIG.step_vars;
 
 /// Number of element variables (4 for Fq12 = 12 field elements, but we use 16 for power of 2)
-pub const NUM_ELEMENT_VARS: usize = 4;
+pub const NUM_ELEMENT_VARS: usize = CONFIG.element_vars;
 
 /// Total variables = step + element
-pub const NUM_TOTAL_VARS: usize = NUM_STEP_VARS + NUM_ELEMENT_VARS;
+pub const NUM_TOTAL_VARS: usize = CONFIG.packed_vars;
 
 /// Public inputs for a single packed GT exponentiation.
 ///

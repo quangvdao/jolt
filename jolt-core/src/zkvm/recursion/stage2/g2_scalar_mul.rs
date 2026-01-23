@@ -25,7 +25,7 @@ use crate::{
         opening_proof::SumcheckId,
     },
     zkvm::{
-        recursion::stage1::constraint_list_sumcheck::{
+        recursion::stage2::constraint_list_sumcheck::{
             ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec,
             ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
         },
@@ -602,19 +602,17 @@ pub type G2ScalarMulVerifier<F> = ConstraintListVerifier<F, G2ScalarMulVerifierS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcripts::{Blake2bTranscript, Transcript};
     use ark_bn254::G2Affine;
     use ark_ec::AffineRepr;
-    use ark_ff::UniformRand;
     use ark_std::test_rng;
 
     #[test]
     fn test_g2_scalar_mul_sumcheck_roundtrip_single_instance() {
         // Simple test: scalar = 2, base point = generator
-        let mut rng = test_rng();
+        let _rng = test_rng();
         let scalar = Fr::from(2u64);
         let generator = G2Affine::generator();
-        let base_point = (generator.x, generator.y);
+        let _base_point = (generator.x, generator.y);
 
         // Create witness for [2]G
         // A_0 = O, T_0 = [2]O = O, A_1 = T_0 + 1*G = G (since bit_0 = 1 for scalar=2 in binary 10)

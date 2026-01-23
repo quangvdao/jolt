@@ -1795,7 +1795,7 @@ where
         Vec<<Fq as JoltField>::Challenge>,
         Vec<<Fq as JoltField>::Challenge>,
         crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
-        crate::zkvm::recursion::stage3::jagged_assist::JaggedAssistProof<Fq, ProofTranscript>,
+        crate::zkvm::recursion::stage5::jagged_assist::JaggedAssistProof<Fq, ProofTranscript>,
         ProverOpeningAccumulator<Fq>,
     ) {
         tracing::info!("Stage 12: Running recursion sumchecks");

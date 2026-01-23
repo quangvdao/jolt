@@ -28,7 +28,7 @@ use crate::{
         opening_proof::SumcheckId,
     },
     zkvm::{
-        recursion::stage1::constraint_list_sumcheck::{
+        recursion::stage2::constraint_list_sumcheck::{
             ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec,
             ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
         },

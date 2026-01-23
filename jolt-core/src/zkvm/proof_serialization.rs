@@ -25,9 +25,9 @@ use crate::{
             bijection::{ConstraintMapping, VarCountJaggedBijection},
             constraints_sys::ConstraintType,
             recursion_prover::RecursionProof,
-            stage1::g1_scalar_mul::G1ScalarMulPublicInputs,
-            stage1::g2_scalar_mul::G2ScalarMulPublicInputs,
             stage1::gt_exp::PackedGtExpPublicInputs,
+            stage2::g1_scalar_mul::G1ScalarMulPublicInputs,
+            stage2::g2_scalar_mul::G2ScalarMulPublicInputs,
         },
         witness::{
             CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,

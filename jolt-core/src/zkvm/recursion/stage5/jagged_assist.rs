@@ -33,7 +33,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rayon::prelude::*;
 use std::marker::PhantomData;
 
-use super::branching_program::{
+use crate::zkvm::recursion::stage4::branching_program::{
     bit_to_field, get_coordinate_info, CoordType, JaggedBranchingProgram, Point,
 };
 use crate::zkvm::recursion::bijection::VarCountJaggedBijection;

@@ -20,6 +20,7 @@ use crate::subprotocols::{
     sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
 };
 use crate::transcripts::Transcript;
+use crate::zkvm::recursion::constraint_config::CONFIG;
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{virtual_claims, zkvm::recursion::utils::virtual_polynomial_utils::*};
 
@@ -35,7 +36,7 @@ pub struct PackedGtExpClaimReductionParams {
 impl PackedGtExpClaimReductionParams {
     pub fn new(num_claims: usize) -> Self {
         Self {
-            num_vars: 11,
+            num_vars: CONFIG.packed_vars,
             num_claims,
             sumcheck_id: SumcheckId::PackedGtExpClaimReduction,
         }

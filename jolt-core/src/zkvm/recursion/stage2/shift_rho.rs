@@ -19,7 +19,10 @@ use crate::{
     },
     transcripts::Transcript,
     virtual_claims,
-    zkvm::{recursion::utils::virtual_polynomial_utils::*, witness::VirtualPolynomial},
+    zkvm::{
+        recursion::{constraint_config::CONFIG, utils::virtual_polynomial_utils::*},
+        witness::VirtualPolynomial,
+    },
 };
 use rayon::prelude::*;
 
@@ -44,7 +47,7 @@ pub struct ShiftRhoParams {
 impl ShiftRhoParams {
     pub fn new(num_claims: usize) -> Self {
         Self {
-            num_vars: 11, // 7 step vars + 4 element vars
+            num_vars: CONFIG.packed_vars,
             num_claims,
             sumcheck_id: SumcheckId::ShiftRho,
         }

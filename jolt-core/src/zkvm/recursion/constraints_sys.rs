@@ -16,8 +16,8 @@ use crate::{
     transcripts::Transcript,
     utils::errors::ProofVerifyError,
     zkvm::recursion::{
-        stage1::g1_scalar_mul::{G1ScalarMulPublicInputs, G1ScalarMulWitness},
-        stage1::g2_scalar_mul::{G2ScalarMulPublicInputs, G2ScalarMulWitness},
+        stage2::g1_scalar_mul::{G1ScalarMulPublicInputs, G1ScalarMulWitness},
+        stage2::g2_scalar_mul::{G2ScalarMulPublicInputs, G2ScalarMulWitness},
         stage1::gt_exp::PackedGtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
@@ -1330,10 +1330,10 @@ pub struct ConstraintSystem {
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 
     /// G1 addition witnesses for Stage 1 prover (one per `ConstraintType::G1Add`)
-    pub g1_add_witnesses: Vec<super::stage1::g1_add::G1AddWitness<ark_bn254::Fq>>,
+    pub g1_add_witnesses: Vec<super::stage2::g1_add::G1AddWitness<ark_bn254::Fq>>,
 
     /// G2 addition witnesses for Stage 1 prover (one per `ConstraintType::G2Add`)
-    pub g2_add_witnesses: Vec<super::stage1::g2_add::G2AddWitness<ark_bn254::Fq>>,
+    pub g2_add_witnesses: Vec<super::stage2::g2_add::G2AddWitness<ark_bn254::Fq>>,
 }
 
 impl ConstraintSystem {
@@ -1740,7 +1740,7 @@ impl ConstraintSystem {
     ///
     /// Note: this is currently populated only when the recursion constraint builder
     /// wires in explicit `ConstraintType::G1Add` nodes.
-    pub fn extract_g1_add_constraints(&self) -> Vec<super::stage1::g1_add::G1AddWitness<ark_bn254::Fq>> {
+    pub fn extract_g1_add_constraints(&self) -> Vec<super::stage2::g1_add::G1AddWitness<ark_bn254::Fq>> {
         self.g1_add_witnesses.clone()
     }
 
@@ -1748,7 +1748,7 @@ impl ConstraintSystem {
     ///
     /// Note: this is currently populated only when the recursion constraint builder
     /// wires in explicit `ConstraintType::G2Add` nodes.
-    pub fn extract_g2_add_constraints(&self) -> Vec<super::stage1::g2_add::G2AddWitness<ark_bn254::Fq>> {
+    pub fn extract_g2_add_constraints(&self) -> Vec<super::stage2::g2_add::G2AddWitness<ark_bn254::Fq>> {
         self.g2_add_witnesses.clone()
     }
 

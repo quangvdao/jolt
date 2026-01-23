@@ -23,21 +23,19 @@ use super::{
     constraints_sys::ConstraintType,
     curve::Bn254Recursion,
     recursion_prover::RecursionProof,
-    stage1::{
+    stage1::gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
+    stage2::{
         g1_add::G1AddParams,
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs},
         g2_add::G2AddParams,
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs},
-        gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
         gt_mul::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
     },
-    stage2::virtualization::{
+    stage3::virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationVerifier,
     },
-    stage3::{
-        jagged::{JaggedSumcheckParams, JaggedSumcheckVerifier},
-        jagged_assist::JaggedAssistVerifier,
-    },
+    stage4::jagged::{JaggedSumcheckParams, JaggedSumcheckVerifier},
+    stage5::jagged_assist::JaggedAssistVerifier,
 };
 use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_verifier::SumcheckInstanceVerifier};
 
@@ -236,7 +234,7 @@ impl RecursionVerifier<Fq> {
 
         // Add G1 scalar mul verifier if we have G1 scalar mul constraints
         if num_g1_scalar_mul > 0 {
-            use super::stage1::g1_scalar_mul::{G1ScalarMulVerifier, G1ScalarMulVerifierSpec};
+            use super::stage2::g1_scalar_mul::{G1ScalarMulVerifier, G1ScalarMulVerifierSpec};
 
             let params = G1ScalarMulParams::new(num_g1_scalar_mul);
             debug_assert_eq!(
@@ -255,7 +253,7 @@ impl RecursionVerifier<Fq> {
 
         // Add G2 scalar mul verifier if we have G2 scalar mul constraints
         if num_g2_scalar_mul > 0 {
-            use super::stage1::g2_scalar_mul::{G2ScalarMulVerifier, G2ScalarMulVerifierSpec};
+            use super::stage2::g2_scalar_mul::{G2ScalarMulVerifier, G2ScalarMulVerifierSpec};
 
             let params = G2ScalarMulParams::new(num_g2_scalar_mul);
             debug_assert_eq!(
@@ -274,7 +272,7 @@ impl RecursionVerifier<Fq> {
 
         // Add G1 add verifier
         if num_g1_add > 0 {
-            use super::stage1::g1_add::{G1AddVerifier, G1AddVerifierSpec};
+            use super::stage2::g1_add::{G1AddVerifier, G1AddVerifierSpec};
             let params = G1AddParams::new(num_g1_add);
             let spec = G1AddVerifierSpec::new(params);
             let verifier = G1AddVerifier::from_spec(spec, g1_add_indices, transcript);
@@ -283,7 +281,7 @@ impl RecursionVerifier<Fq> {
 
         // Add G2 add verifier
         if num_g2_add > 0 {
-            use super::stage1::g2_add::{G2AddVerifier, G2AddVerifierSpec};
+            use super::stage2::g2_add::{G2AddVerifier, G2AddVerifierSpec};
             let params = G2AddParams::new(num_g2_add);
             let spec = G2AddVerifierSpec::new(params);
             let verifier = G2AddVerifier::from_spec(spec, g2_add_indices, transcript);
@@ -362,7 +360,7 @@ impl RecursionVerifier<Fq> {
     fn verify_stage3<T: Transcript>(
         &self,
         stage3_proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
-        stage3b_proof: &super::stage3::jagged_assist::JaggedAssistProof<Fq, T>,
+        stage3b_proof: &super::stage5::jagged_assist::JaggedAssistProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
         r_stage1: &[<Fq as crate::field::JoltField>::Challenge],

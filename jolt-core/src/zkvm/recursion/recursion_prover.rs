@@ -33,19 +33,17 @@ use crate::zkvm::recursion::DoryMatrixBuilder;
 
 use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
-    stage1::{
+    stage1::gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
+    stage2::{
         g1_scalar_mul::G1ScalarMulParams,
         g2_scalar_mul::G2ScalarMulParams,
-        gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
         gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
     },
-    stage2::virtualization::{
+    stage3::virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
     },
-    stage3::{
-        jagged::JaggedSumcheckProver,
-        jagged_assist::{JaggedAssistProof, JaggedAssistProver},
-    },
+    stage4::jagged::JaggedSumcheckProver,
+    stage5::jagged_assist::{JaggedAssistProof, JaggedAssistProver},
 };
 use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_prover::SumcheckInstanceProver};
 
@@ -357,8 +355,8 @@ impl RecursionProver<Fq> {
         g_poly: DensePolynomial<Fq>,
     ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
         use super::constraints_sys::DoryMatrixBuilder;
-        use super::stage1::g1_scalar_mul::G1ScalarMulPublicInputs;
-        use super::stage1::g2_scalar_mul::G2ScalarMulPublicInputs;
+        use super::stage2::g1_scalar_mul::G1ScalarMulPublicInputs;
+        use super::stage2::g2_scalar_mul::G2ScalarMulPublicInputs;
         use super::stage1::gt_exp::PackedGtExpWitness;
         use jolt_optimizations::fq12_to_multilinear_evals;
 
@@ -638,7 +636,7 @@ impl RecursionProver<Fq> {
         // Add GT mul prover if we have GT mul constraints
         let gt_mul_constraints_tuples = self.constraint_system.extract_gt_mul_constraints();
         if !gt_mul_constraints_tuples.is_empty() {
-            use super::stage1::gt_mul::GtMulConstraintPolynomials;
+            use super::stage2::gt_mul::GtMulConstraintPolynomials;
 
             // Use sequential indices (0, 1, 2...) to match Stage 2's expectation.
             // Stage 2's extract_virtual_claims_from_accumulator uses gt_mul_idx which
@@ -673,7 +671,7 @@ impl RecursionProver<Fq> {
         let g1_scalar_mul_constraints_tuples =
             self.constraint_system.extract_g1_scalar_mul_constraints();
         if !g1_scalar_mul_constraints_tuples.is_empty() {
-            use super::stage1::g1_scalar_mul::{
+            use super::stage2::g1_scalar_mul::{
                 G1ScalarMulConstraintPolynomials, G1ScalarMulProver, G1ScalarMulProverSpec,
             };
 
@@ -715,7 +713,7 @@ impl RecursionProver<Fq> {
         let g2_scalar_mul_constraints_tuples =
             self.constraint_system.extract_g2_scalar_mul_constraints();
         if !g2_scalar_mul_constraints_tuples.is_empty() {
-            use super::stage1::g2_scalar_mul::{
+            use super::stage2::g2_scalar_mul::{
                 G2ScalarMulConstraintPolynomials, G2ScalarMulProver, G2ScalarMulProverSpec,
             };
 
@@ -762,7 +760,7 @@ impl RecursionProver<Fq> {
         // Add G1 add prover
         let g1_add_constraints = self.constraint_system.extract_g1_add_constraints();
         if !g1_add_constraints.is_empty() {
-            use super::stage1::g1_add::{G1AddParams, G1AddProver, G1AddProverSpec};
+            use super::stage2::g1_add::{G1AddParams, G1AddProver, G1AddProverSpec};
 
             // G1AddWitness<Fq> = G1AddConstraintPolynomials<Fq> via type alias, no conversion needed
             let params = G1AddParams::new(g1_add_constraints.len());
@@ -774,7 +772,7 @@ impl RecursionProver<Fq> {
         // Add G2 add prover
         let g2_add_constraints = self.constraint_system.extract_g2_add_constraints();
         if !g2_add_constraints.is_empty() {
-            use super::stage1::g2_add::{G2AddParams, G2AddProver, G2AddProverSpec};
+            use super::stage2::g2_add::{G2AddParams, G2AddProver, G2AddProverSpec};
 
             // G2AddWitness<Fq> = G2AddConstraintPolynomials<Fq> via type alias, no conversion needed
             let params = G2AddParams::new(g2_add_constraints.len());

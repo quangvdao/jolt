@@ -46,4 +46,3 @@ impl WindowedScalar for u128 {
         (val & mask) as u16
     }
 }
-

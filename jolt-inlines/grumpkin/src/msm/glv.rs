@@ -101,4 +101,3 @@ where
         &expanded_points[..2 * n],
     )
 }
-

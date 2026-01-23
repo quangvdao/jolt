@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 jolt-sdk = { workspace = true, features = ["host"] }
+jolt-inlines-grumpkin = { workspace = true, features = ["host"] }
 tracing-subscriber.workspace = true
 tracing.workspace = true
 ark-serialize.workspace = true

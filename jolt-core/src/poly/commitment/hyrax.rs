@@ -19,6 +19,27 @@ use rand::SeedableRng;
 use rayon::prelude::*;
 use std::borrow::Borrow;
 use tracing::trace_span;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_HYRAX_OPENING_VERIFY: &str = "jolt_hyrax_opening_verify";
+const CYCLE_HYRAX_MSM1: &str = "jolt_hyrax_msm1";
+const CYCLE_HYRAX_MSM2: &str = "jolt_hyrax_msm2";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 /// Pedersen generators for commitment scheme
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
@@ -259,6 +280,7 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
         opening: &G::ScalarField,         // evaluation \widetilde{Z}(r)
         commitment: &HyraxCommitment<RATIO, G>,
     ) -> Result<(), ProofVerifyError> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_HYRAX_OPENING_VERIFY);
         // compute L and R
         let (L_size, R_size) = matrix_dimensions(opening_point.len(), RATIO);
 
@@ -322,11 +344,10 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
                 .collect();
             let scalars_1: Vec<GrumpkinFr> = L.iter().map(to_grumpkin_scalar).collect();
 
+            let _msm1_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM1);
             let homomorphically_derived_commitment: GrumpkinPoint =
-                msm_glv_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(
-                    &scalars_1,
-                    &bases_1,
-                );
+                msm_glv_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(&scalars_1, &bases_1);
+            drop(_msm1_cycle);
             tracing::debug!(
                 num_bases = bases_1.len(),
                 "MSM #1: homomorphically derived commitment (grumpkin GLV MSM)"
@@ -342,8 +363,10 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
                 .map(to_grumpkin_scalar)
                 .collect();
 
+            let _msm2_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM2);
             let product_commitment: GrumpkinPoint =
                 msm_glv_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(&scalars_2, &bases_2);
+            drop(_msm2_cycle);
             tracing::debug!(
                 num_bases = bases_2.len(),
                 vector_matrix_product_len = self.vector_matrix_product.len(),
@@ -352,19 +375,23 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
 
             homomorphically_derived_commitment == product_commitment
         } else {
+            let _msm1_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM1);
             let homomorphically_derived_commitment: G =
                 VariableBaseMSM::msm(&normalized_commitments, &MultilinearPolynomial::from(L))
                     .unwrap();
+            drop(_msm1_cycle);
             tracing::debug!(
                 num_bases = normalized_commitments.len(),
                 "MSM #1: homomorphically derived commitment"
             );
 
+            let _msm2_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM2);
             let product_commitment = VariableBaseMSM::msm_field_elements(
                 &pedersen_generators.generators[..R_size],
                 &self.vector_matrix_product,
             )
             .unwrap();
+            drop(_msm2_cycle);
             tracing::debug!(
                 num_bases = R_size,
                 vector_matrix_product_len = self.vector_matrix_product.len(),

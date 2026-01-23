@@ -3,10 +3,10 @@
 //! This module is a direct integration of the MSM code that previously lived in
 //! `examples/msm/guest`, made reusable for Hyrax verification.
 
-pub mod traits;
-pub mod scalar;
-pub mod pippenger;
 pub mod glv;
+pub mod pippenger;
+pub mod scalar;
+pub mod traits;
 
 pub use glv::*;
 pub use pippenger::*;
@@ -65,4 +65,3 @@ impl traits::GlvCapable for GrumpkinPoint {
         GrumpkinPoint::decompose_scalar(k)
     }
 }
-

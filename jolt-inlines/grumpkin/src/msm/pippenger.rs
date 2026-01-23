@@ -144,4 +144,3 @@ where
 
     result
 }
-

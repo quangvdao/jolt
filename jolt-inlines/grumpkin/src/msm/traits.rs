@@ -57,4 +57,3 @@ pub trait GlvCapable: MsmGroup {
     /// Returns [(sign1, |k1|), (sign2, |k2|)] where k ≡ k1 + k2·λ (mod n).
     fn decompose_scalar(k: &Self::FullScalar) -> [(bool, Self::HalfScalar); 2];
 }
-

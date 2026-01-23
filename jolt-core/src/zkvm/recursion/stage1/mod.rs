@@ -4,6 +4,7 @@
 //! All other constraint sumchecks are batched in Stage 2.
 
 pub mod gt_exp;
+#[cfg(feature = "experimental-pairing-recursion")]
 pub mod multi_miller_loop;
 
 pub use gt_exp::{PackedGtExpProver, PackedGtExpVerifier};

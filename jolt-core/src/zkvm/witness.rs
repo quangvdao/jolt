@@ -618,6 +618,8 @@ pub enum MultiMillerLoopTerm {
     LC0C1,
     LC1C0,
     LC1C1,
+    LC2C0,
+    LC2C1,
     XP,
     YP,
     XQC0,
@@ -632,7 +634,7 @@ pub enum MultiMillerLoopTerm {
     Selector1, // c0.c1
     Selector2, // c1.c0
     Selector3, // c1.c1
-    Selector4, // c2.c0 (implicit 1?)
+    Selector4, // c2.c0
     Selector5, // c2.c1
 }
 
@@ -670,7 +672,7 @@ impl TermEnum for FrobeniusTerm {
 }
 
 impl TermEnum for MultiMillerLoopTerm {
-    const COUNT: usize = 35;
+    const COUNT: usize = 37;
 
     fn from_index(i: usize) -> Option<Self> {
         match i {
@@ -693,22 +695,24 @@ impl TermEnum for MultiMillerLoopTerm {
             16 => Some(Self::LC0C1),
             17 => Some(Self::LC1C0),
             18 => Some(Self::LC1C1),
-            19 => Some(Self::XP),
-            20 => Some(Self::YP),
-            21 => Some(Self::XQC0),
-            22 => Some(Self::XQC1),
-            23 => Some(Self::YQC0),
-            24 => Some(Self::YQC1),
-            25 => Some(Self::IsDouble),
-            26 => Some(Self::IsAdd),
-            27 => Some(Self::LVal),
-            28 => Some(Self::G),
-            29 => Some(Self::Selector0),
-            30 => Some(Self::Selector1),
-            31 => Some(Self::Selector2),
-            32 => Some(Self::Selector3),
-            33 => Some(Self::Selector4),
-            34 => Some(Self::Selector5),
+            19 => Some(Self::LC2C0),
+            20 => Some(Self::LC2C1),
+            21 => Some(Self::XP),
+            22 => Some(Self::YP),
+            23 => Some(Self::XQC0),
+            24 => Some(Self::XQC1),
+            25 => Some(Self::YQC0),
+            26 => Some(Self::YQC1),
+            27 => Some(Self::IsDouble),
+            28 => Some(Self::IsAdd),
+            29 => Some(Self::LVal),
+            30 => Some(Self::G),
+            31 => Some(Self::Selector0),
+            32 => Some(Self::Selector1),
+            33 => Some(Self::Selector2),
+            34 => Some(Self::Selector3),
+            35 => Some(Self::Selector4),
+            36 => Some(Self::Selector5),
             _ => None,
         }
     }
@@ -738,6 +742,8 @@ impl TermEnum for MultiMillerLoopTerm {
             Self::LC0C1 => "l_c0_c1",
             Self::LC1C0 => "l_c1_c0",
             Self::LC1C1 => "l_c1_c1",
+            Self::LC2C0 => "l_c2_c0",
+            Self::LC2C1 => "l_c2_c1",
             Self::XP => "x_p",
             Self::YP => "y_p",
             Self::XQC0 => "x_q_c0",

@@ -86,11 +86,12 @@ use super::{
     gt_exp_witness::Base4ExponentiationSteps,
     gt_mul_witness::MultiplicationSteps,
     jolt_dory_routines::{JoltG1Routines, JoltG2Routines},
-    multi_miller_loop_witness::MultiMillerLoopSteps,
     wrappers::{
         ark_to_jolt, jolt_to_ark, ArkDoryProof, ArkFr, ArkworksVerifierSetup, JoltToDoryTranscript,
     },
 };
+#[cfg(feature = "experimental-pairing-recursion")]
+use super::multi_miller_loop_witness::MultiMillerLoopSteps;
 use crate::poly::commitment::commitment_scheme::RecursionExt;
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};
@@ -280,14 +281,20 @@ impl WitnessResult<ArkG2> for JoltG2AddWitness {
 }
 
 /// Multi-Miller loop witness for Dory recursion.
+#[cfg(feature = "experimental-pairing-recursion")]
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltMultiMillerLoopWitness {
     pub f_packed_mles: Vec<Vec<Fq>>,
+    pub f_next_packed_mles: Vec<Vec<Fq>>,
     pub quotient_packed_mles: Vec<Vec<Fq>>,
     pub t_x_c0_packed_mles: Vec<Vec<Fq>>,
     pub t_x_c1_packed_mles: Vec<Vec<Fq>>,
     pub t_y_c0_packed_mles: Vec<Vec<Fq>>,
     pub t_y_c1_packed_mles: Vec<Vec<Fq>>,
+    pub t_x_c0_next_packed_mles: Vec<Vec<Fq>>,
+    pub t_x_c1_next_packed_mles: Vec<Vec<Fq>>,
+    pub t_y_c0_next_packed_mles: Vec<Vec<Fq>>,
+    pub t_y_c1_next_packed_mles: Vec<Vec<Fq>>,
     pub lambda_c0_packed_mles: Vec<Vec<Fq>>,
     pub lambda_c1_packed_mles: Vec<Vec<Fq>>,
     pub inv_dx_c0_packed_mles: Vec<Vec<Fq>>,
@@ -296,10 +303,29 @@ pub struct JoltMultiMillerLoopWitness {
     pub l_c0_c1_packed_mles: Vec<Vec<Fq>>,
     pub l_c1_c0_packed_mles: Vec<Vec<Fq>>,
     pub l_c1_c1_packed_mles: Vec<Vec<Fq>>,
+    pub l_c2_c0_packed_mles: Vec<Vec<Fq>>,
+    pub l_c2_c1_packed_mles: Vec<Vec<Fq>>,
+    pub x_p_packed_mles: Vec<Vec<Fq>>,
+    pub y_p_packed_mles: Vec<Vec<Fq>>,
+    pub x_q_c0_packed_mles: Vec<Vec<Fq>>,
+    pub x_q_c1_packed_mles: Vec<Vec<Fq>>,
+    pub y_q_c0_packed_mles: Vec<Vec<Fq>>,
+    pub y_q_c1_packed_mles: Vec<Vec<Fq>>,
+    pub is_double_packed_mles: Vec<Vec<Fq>>,
+    pub is_add_packed_mles: Vec<Vec<Fq>>,
+    pub l_val_packed_mles: Vec<Vec<Fq>>,
+    pub g_packed_mles: Vec<Vec<Fq>>,
+    pub selector_0_packed_mles: Vec<Vec<Fq>>,
+    pub selector_1_packed_mles: Vec<Vec<Fq>>,
+    pub selector_2_packed_mles: Vec<Vec<Fq>>,
+    pub selector_3_packed_mles: Vec<Vec<Fq>>,
+    pub selector_4_packed_mles: Vec<Vec<Fq>>,
+    pub selector_5_packed_mles: Vec<Vec<Fq>>,
     pub num_steps: usize,
     ark_result: ArkGT,
 }
 
+#[cfg(feature = "experimental-pairing-recursion")]
 impl WitnessResult<ArkGT> for JoltMultiMillerLoopWitness {
     fn result(&self) -> Option<&ArkGT> {
         Some(&self.ark_result)
@@ -356,8 +382,15 @@ impl WitnessBackend for JoltWitness {
     type GtExpWitness = JoltGtExpWitness;
 
     // Pairing operations
+    #[cfg(feature = "experimental-pairing-recursion")]
     type PairingWitness = JoltMultiMillerLoopWitness;
+    #[cfg(not(feature = "experimental-pairing-recursion"))]
+    type PairingWitness = UnimplementedWitness<ArkGT>;
+
+    #[cfg(feature = "experimental-pairing-recursion")]
     type MultiPairingWitness = JoltMultiMillerLoopWitness;
+    #[cfg(not(feature = "experimental-pairing-recursion"))]
+    type MultiPairingWitness = UnimplementedWitness<ArkGT>;
 }
 
 pub struct JoltWitnessGenerator;
@@ -671,32 +704,60 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
         g1: &<BN254 as PairingCurve>::G1,
         g2: &<BN254 as PairingCurve>::G2,
         result: &<BN254 as PairingCurve>::GT,
-    ) -> JoltMultiMillerLoopWitness {
-        let g1_affine: G1Affine = g1.0.into();
-        let g2_affine: G2Affine = g2.0.into();
+    ) -> <JoltWitness as WitnessBackend>::PairingWitness {
+        #[cfg(feature = "experimental-pairing-recursion")]
+        {
+            let g1_affine: G1Affine = g1.0.into();
+            let g2_affine: G2Affine = g2.0.into();
 
-        let steps = MultiMillerLoopSteps::new(&[g1_affine], &[g2_affine]);
+            let steps = MultiMillerLoopSteps::new(&[g1_affine], &[g2_affine]);
 
-        // TODO: Verify result matches steps.result (after final exp)
-        // For now we just store the result
-
-        JoltMultiMillerLoopWitness {
-            f_packed_mles: steps.f_packed_mles,
-            quotient_packed_mles: steps.quotient_packed_mles,
-            t_x_c0_packed_mles: steps.t_x_c0_packed_mles,
-            t_x_c1_packed_mles: steps.t_x_c1_packed_mles,
-            t_y_c0_packed_mles: steps.t_y_c0_packed_mles,
-            t_y_c1_packed_mles: steps.t_y_c1_packed_mles,
-            lambda_c0_packed_mles: steps.lambda_c0_packed_mles,
-            lambda_c1_packed_mles: steps.lambda_c1_packed_mles,
-            inv_dx_c0_packed_mles: steps.inv_dx_c0_packed_mles,
-            inv_dx_c1_packed_mles: steps.inv_dx_c1_packed_mles,
-            l_c0_c0_packed_mles: steps.l_c0_c0_packed_mles,
-            l_c0_c1_packed_mles: steps.l_c0_c1_packed_mles,
-            l_c1_c0_packed_mles: steps.l_c1_c0_packed_mles,
-            l_c1_c1_packed_mles: steps.l_c1_c1_packed_mles,
-            num_steps: steps.num_steps,
-            ark_result: *result,
+            JoltMultiMillerLoopWitness {
+                f_packed_mles: steps.f_packed_mles,
+                f_next_packed_mles: steps.f_next_packed_mles,
+                quotient_packed_mles: steps.quotient_packed_mles,
+                t_x_c0_packed_mles: steps.t_x_c0_packed_mles,
+                t_x_c1_packed_mles: steps.t_x_c1_packed_mles,
+                t_y_c0_packed_mles: steps.t_y_c0_packed_mles,
+                t_y_c1_packed_mles: steps.t_y_c1_packed_mles,
+                t_x_c0_next_packed_mles: steps.t_x_c0_next_packed_mles,
+                t_x_c1_next_packed_mles: steps.t_x_c1_next_packed_mles,
+                t_y_c0_next_packed_mles: steps.t_y_c0_next_packed_mles,
+                t_y_c1_next_packed_mles: steps.t_y_c1_next_packed_mles,
+                lambda_c0_packed_mles: steps.lambda_c0_packed_mles,
+                lambda_c1_packed_mles: steps.lambda_c1_packed_mles,
+                inv_dx_c0_packed_mles: steps.inv_dx_c0_packed_mles,
+                inv_dx_c1_packed_mles: steps.inv_dx_c1_packed_mles,
+                l_c0_c0_packed_mles: steps.l_c0_c0_packed_mles,
+                l_c0_c1_packed_mles: steps.l_c0_c1_packed_mles,
+                l_c1_c0_packed_mles: steps.l_c1_c0_packed_mles,
+                l_c1_c1_packed_mles: steps.l_c1_c1_packed_mles,
+                l_c2_c0_packed_mles: steps.l_c2_c0_packed_mles,
+                l_c2_c1_packed_mles: steps.l_c2_c1_packed_mles,
+                x_p_packed_mles: steps.x_p_packed_mles,
+                y_p_packed_mles: steps.y_p_packed_mles,
+                x_q_c0_packed_mles: steps.x_q_c0_packed_mles,
+                x_q_c1_packed_mles: steps.x_q_c1_packed_mles,
+                y_q_c0_packed_mles: steps.y_q_c0_packed_mles,
+                y_q_c1_packed_mles: steps.y_q_c1_packed_mles,
+                is_double_packed_mles: steps.is_double_packed_mles,
+                is_add_packed_mles: steps.is_add_packed_mles,
+                l_val_packed_mles: steps.l_val_packed_mles,
+                g_packed_mles: steps.g_packed_mles,
+                selector_0_packed_mles: steps.selector_0_packed_mles,
+                selector_1_packed_mles: steps.selector_1_packed_mles,
+                selector_2_packed_mles: steps.selector_2_packed_mles,
+                selector_3_packed_mles: steps.selector_3_packed_mles,
+                selector_4_packed_mles: steps.selector_4_packed_mles,
+                selector_5_packed_mles: steps.selector_5_packed_mles,
+                num_steps: steps.num_steps,
+                ark_result: *result,
+            }
+        }
+        #[cfg(not(feature = "experimental-pairing-recursion"))]
+        {
+            let _ = (g1, g2, result);
+            UnimplementedWitness::new("Pairing (disabled: experimental-pairing-recursion)")
         }
     }
 
@@ -704,29 +765,60 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
         g1s: &[<BN254 as PairingCurve>::G1],
         g2s: &[<BN254 as PairingCurve>::G2],
         result: &<BN254 as PairingCurve>::GT,
-    ) -> JoltMultiMillerLoopWitness {
-        let g1_affines: Vec<G1Affine> = g1s.iter().map(|p| p.0.into()).collect();
-        let g2_affines: Vec<G2Affine> = g2s.iter().map(|p| p.0.into()).collect();
+    ) -> <JoltWitness as WitnessBackend>::MultiPairingWitness {
+        #[cfg(feature = "experimental-pairing-recursion")]
+        {
+            let g1_affines: Vec<G1Affine> = g1s.iter().map(|p| p.0.into()).collect();
+            let g2_affines: Vec<G2Affine> = g2s.iter().map(|p| p.0.into()).collect();
 
-        let steps = MultiMillerLoopSteps::new(&g1_affines, &g2_affines);
+            let steps = MultiMillerLoopSteps::new(&g1_affines, &g2_affines);
 
-        JoltMultiMillerLoopWitness {
-            f_packed_mles: steps.f_packed_mles,
-            quotient_packed_mles: steps.quotient_packed_mles,
-            t_x_c0_packed_mles: steps.t_x_c0_packed_mles,
-            t_x_c1_packed_mles: steps.t_x_c1_packed_mles,
-            t_y_c0_packed_mles: steps.t_y_c0_packed_mles,
-            t_y_c1_packed_mles: steps.t_y_c1_packed_mles,
-            lambda_c0_packed_mles: steps.lambda_c0_packed_mles,
-            lambda_c1_packed_mles: steps.lambda_c1_packed_mles,
-            inv_dx_c0_packed_mles: steps.inv_dx_c0_packed_mles,
-            inv_dx_c1_packed_mles: steps.inv_dx_c1_packed_mles,
-            l_c0_c0_packed_mles: steps.l_c0_c0_packed_mles,
-            l_c0_c1_packed_mles: steps.l_c0_c1_packed_mles,
-            l_c1_c0_packed_mles: steps.l_c1_c0_packed_mles,
-            l_c1_c1_packed_mles: steps.l_c1_c1_packed_mles,
-            num_steps: steps.num_steps,
-            ark_result: *result,
+            JoltMultiMillerLoopWitness {
+                f_packed_mles: steps.f_packed_mles,
+                f_next_packed_mles: steps.f_next_packed_mles,
+                quotient_packed_mles: steps.quotient_packed_mles,
+                t_x_c0_packed_mles: steps.t_x_c0_packed_mles,
+                t_x_c1_packed_mles: steps.t_x_c1_packed_mles,
+                t_y_c0_packed_mles: steps.t_y_c0_packed_mles,
+                t_y_c1_packed_mles: steps.t_y_c1_packed_mles,
+                t_x_c0_next_packed_mles: steps.t_x_c0_next_packed_mles,
+                t_x_c1_next_packed_mles: steps.t_x_c1_next_packed_mles,
+                t_y_c0_next_packed_mles: steps.t_y_c0_next_packed_mles,
+                t_y_c1_next_packed_mles: steps.t_y_c1_next_packed_mles,
+                lambda_c0_packed_mles: steps.lambda_c0_packed_mles,
+                lambda_c1_packed_mles: steps.lambda_c1_packed_mles,
+                inv_dx_c0_packed_mles: steps.inv_dx_c0_packed_mles,
+                inv_dx_c1_packed_mles: steps.inv_dx_c1_packed_mles,
+                l_c0_c0_packed_mles: steps.l_c0_c0_packed_mles,
+                l_c0_c1_packed_mles: steps.l_c0_c1_packed_mles,
+                l_c1_c0_packed_mles: steps.l_c1_c0_packed_mles,
+                l_c1_c1_packed_mles: steps.l_c1_c1_packed_mles,
+                l_c2_c0_packed_mles: steps.l_c2_c0_packed_mles,
+                l_c2_c1_packed_mles: steps.l_c2_c1_packed_mles,
+                x_p_packed_mles: steps.x_p_packed_mles,
+                y_p_packed_mles: steps.y_p_packed_mles,
+                x_q_c0_packed_mles: steps.x_q_c0_packed_mles,
+                x_q_c1_packed_mles: steps.x_q_c1_packed_mles,
+                y_q_c0_packed_mles: steps.y_q_c0_packed_mles,
+                y_q_c1_packed_mles: steps.y_q_c1_packed_mles,
+                is_double_packed_mles: steps.is_double_packed_mles,
+                is_add_packed_mles: steps.is_add_packed_mles,
+                l_val_packed_mles: steps.l_val_packed_mles,
+                g_packed_mles: steps.g_packed_mles,
+                selector_0_packed_mles: steps.selector_0_packed_mles,
+                selector_1_packed_mles: steps.selector_1_packed_mles,
+                selector_2_packed_mles: steps.selector_2_packed_mles,
+                selector_3_packed_mles: steps.selector_3_packed_mles,
+                selector_4_packed_mles: steps.selector_4_packed_mles,
+                selector_5_packed_mles: steps.selector_5_packed_mles,
+                num_steps: steps.num_steps,
+                ark_result: *result,
+            }
+        }
+        #[cfg(not(feature = "experimental-pairing-recursion"))]
+        {
+            let _ = (g1s, g2s, result);
+            UnimplementedWitness::new("Multi-pairing (disabled: experimental-pairing-recursion)")
         }
     }
 

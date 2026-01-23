@@ -212,6 +212,7 @@ pub struct G2AddInstanceWitness {
 }
 
 /// Witness data for multi-Miller loop constraints (aggregated)
+#[cfg(feature = "experimental-pairing-recursion")]
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct MultiMillerLoopWitness {
     /// Accumulator f(s, x) - packed 11-var MLE
@@ -247,6 +248,7 @@ pub struct MultiMillerLoopWitness {
 }
 
 /// Witness data for a single Multi-Miller loop instance (used by DoryMatrixBuilder)
+#[cfg(feature = "experimental-pairing-recursion")]
 #[derive(Clone, Debug)]
 pub struct MultiMillerLoopInstanceWitness {
     pub f_packed: Vec<Fq>,
@@ -294,7 +296,8 @@ pub struct DoryRecursionWitness {
     pub g1_add_witness: G1AddWitness,
     /// G2 addition witness
     pub g2_add_witness: G2AddWitness,
-    /// Multi-Miller loop witness
+    /// Multi-Miller loop witness (experimental; gated behind `experimental-pairing-recursion`)
+    #[cfg(feature = "experimental-pairing-recursion")]
     pub multi_miller_loop_witness: MultiMillerLoopWitness,
     /// Witness for combine_commitments offloading
     pub combine_witness: Option<GTCombineWitness>,

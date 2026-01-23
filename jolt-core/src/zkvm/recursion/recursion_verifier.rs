@@ -39,6 +39,29 @@ use super::{
 };
 use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_verifier::SumcheckInstanceVerifier};
 
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_RECURSION_STAGE1: &str = "jolt_recursion_stage1";
+const CYCLE_RECURSION_STAGE2: &str = "jolt_recursion_stage2";
+const CYCLE_RECURSION_STAGE3: &str = "jolt_recursion_stage3";
+const CYCLE_RECURSION_PCS_OPENING: &str = "jolt_recursion_pcs_opening";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
+
 /// Input required by the verifier
 #[derive(Clone, Debug)]
 pub struct RecursionVerifierInput {
@@ -103,6 +126,7 @@ impl RecursionVerifier<Fq> {
         }
 
         // ============ STAGE 1: Verify Constraint Sumchecks ============
+        let _cycle_stage1 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE1);
         let r_stage1 = tracing::info_span!("verify_recursion_stage1").in_scope(|| {
             tracing::info!("Verifying Stage 1: Constraint sumchecks");
             self.verify_stage1(
@@ -113,14 +137,18 @@ impl RecursionVerifier<Fq> {
                 proof.delta,
             )
         })?;
+        drop(_cycle_stage1);
 
         // ============ STAGE 2: Verify Virtualization Sumcheck ============
+        let _cycle_stage2 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE2);
         let r_stage2 = tracing::info_span!("verify_recursion_stage2").in_scope(|| {
             tracing::info!("Verifying Stage 2: Direct evaluation");
             self.verify_stage2(transcript, &mut accumulator, &r_stage1, proof.stage2_m_eval)
         })?;
+        drop(_cycle_stage2);
 
         // // ============ STAGE 3: Verify Jagged Transform Sumcheck + Stage 3b: Jagged Assist ============
+        let _cycle_stage3 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE3);
         let _r_stage3 = tracing::info_span!("verify_recursion_stage3").in_scope(|| {
             tracing::info!("Verifying Stage 3: Jagged transform sumcheck + Jagged Assist");
             self.verify_stage3(
@@ -132,8 +160,10 @@ impl RecursionVerifier<Fq> {
                 &r_stage2,
             )
         })?;
+        drop(_cycle_stage3);
 
         // ============ PCS OPENING VERIFICATION ============
+        let _cycle_pcs = CycleMarkerGuard::new(CYCLE_RECURSION_PCS_OPENING);
         tracing::info_span!("verify_recursion_pcs_opening").in_scope(|| {
             tracing::info!("Verifying PCS opening proof");
             // Verify opening proof using PCS
@@ -144,6 +174,7 @@ impl RecursionVerifier<Fq> {
                 transcript,
             )
         })?;
+        drop(_cycle_pcs);
 
         Ok(true)
     }

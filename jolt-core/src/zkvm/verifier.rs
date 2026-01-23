@@ -81,6 +81,34 @@ use itertools::Itertools;
 use tracer::instruction::Instruction;
 use tracer::JoltDevice;
 
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_STAGE1: &str = "jolt_verify_stage1";
+const CYCLE_VERIFY_STAGE2: &str = "jolt_verify_stage2";
+const CYCLE_VERIFY_STAGE3: &str = "jolt_verify_stage3";
+const CYCLE_VERIFY_STAGE4: &str = "jolt_verify_stage4";
+const CYCLE_VERIFY_STAGE5: &str = "jolt_verify_stage5";
+const CYCLE_VERIFY_STAGE6: &str = "jolt_verify_stage6";
+const CYCLE_VERIFY_STAGE7: &str = "jolt_verify_stage7";
+const CYCLE_VERIFY_STAGE8: &str = "jolt_verify_stage8";
+const CYCLE_VERIFY_STAGE8_DORY_PCS: &str = "jolt_verify_stage8_dory_pcs";
+const CYCLE_VERIFY_STAGE8_RECURSION: &str = "jolt_verify_stage8_recursion";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 pub struct JoltVerifier<'a, F: JoltField, PCS: RecursionExt<F>, ProofTranscript: Transcript> {
     pub trusted_advice_commitment: Option<PCS::Commitment>,
     pub program_io: JoltDevice,
@@ -225,6 +253,7 @@ where
     }
 
     fn verify_stage1(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE1);
         let uni_skip_params = verify_stage1_uni_skip(
             &self.proof.stage1_uni_skip_first_round_proof,
             &self.spartan_key,
@@ -252,6 +281,7 @@ where
     }
 
     fn verify_stage2(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE2);
         let uni_skip_params = verify_stage2_uni_skip(
             &self.proof.stage2_uni_skip_first_round_proof,
             &mut self.opening_accumulator,
@@ -302,6 +332,7 @@ where
     }
 
     fn verify_stage3(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE3);
         let spartan_shift = ShiftSumcheckVerifier::new(
             self.proof.trace_length.log_2(),
             &self.opening_accumulator,
@@ -331,6 +362,7 @@ where
     }
 
     fn verify_stage4(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE4);
         verifier_accumulate_advice::<F>(
             self.proof.ram_K,
             &self.program_io,
@@ -385,6 +417,7 @@ where
     }
 
     fn verify_stage5(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE5);
         let n_cycle_vars = self.proof.trace_length.log_2();
         let registers_val_evaluation =
             RegistersValEvaluationSumcheckVerifier::new(&self.opening_accumulator);
@@ -417,6 +450,7 @@ where
     }
 
     fn verify_stage6(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE6);
         let n_cycle_vars = self.proof.trace_length.log_2();
         let bytecode_read_raf = BytecodeReadRafSumcheckVerifier::gen(
             &self.preprocessing.shared.bytecode,
@@ -507,6 +541,7 @@ where
 
     /// Stage 7: HammingWeight claim reduction verification.
     fn verify_stage7(&mut self) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE7);
         // Create verifier for HammingWeightClaimReduction
         // (r_cycle and r_addr_bool are extracted from Booleanity opening internally)
         let hw_verifier = HammingWeightClaimReductionVerifier::new(
@@ -888,6 +923,7 @@ where
         PCS: RecursionExt<F>,
         <PCS as RecursionExt<F>>::Hint: Clone,
     {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8);
         // 1. Verify Dory proof with hints
         let hint = {
             let _span = tracing::info_span!("stage8_clone_hint").entered();
@@ -898,6 +934,7 @@ where
 
         {
             let _span = tracing::info_span!("stage8_verify_dory_with_hint").entered();
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DORY_PCS);
             self.verify_stage8_with_pcs_hint(&hint)?;
         }
 
@@ -1012,6 +1049,7 @@ where
 
         let verification_result = {
             let _span = tracing::info_span!("stage8_recursion_verifier_verify").entered();
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_RECURSION);
             recursion_verifier
                 .verify::<ProofTranscript, HyraxPCS>(
                     recursion_proof,

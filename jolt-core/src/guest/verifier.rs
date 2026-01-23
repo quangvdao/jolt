@@ -65,6 +65,10 @@ where
         trusted_advice_commitment,
         None,
     )?;
-    verifier.verify().unwrap();
+    if let Err(_e) = verifier.verify() {
+        #[cfg(debug_assertions)]
+        eprintln!("Jolt verifier failed: {_e:?}");
+        return Err(ProofVerifyError::InternalError);
+    }
     Ok(())
 }

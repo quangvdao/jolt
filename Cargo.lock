@@ -408,7 +408,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "regex",
@@ -990,7 +990,7 @@ dependencies = [
 [[package]]
 name = "dory-derive"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#4ea37b8ab67bff058d4b26d40c70081f20d86d84"
+source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#a01c1d6dfd221abaa5ad95dcc48d521d40baa5cf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1000,7 +1000,7 @@ dependencies = [
 [[package]]
 name = "dory-pcs"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#4ea37b8ab67bff058d4b26d40c70081f20d86d84"
+source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#a01c1d6dfd221abaa5ad95dcc48d521d40baa5cf"
 dependencies = [
  "ark-bn254",
  "ark-ec",

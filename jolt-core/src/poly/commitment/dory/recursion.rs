@@ -6,7 +6,9 @@ use dory::{
     backends::arkworks::{ArkG1, ArkG2, ArkGT, BN254},
     primitives::arithmetic::{Group, PairingCurve},
     primitives::serialization::{DoryDeserialize, DorySerialize},
-    recursion::{HintMap, TraceContext, WitnessBackend, WitnessGenerator, WitnessResult},
+    recursion::{
+        ast::AstGraph, HintMap, TraceContext, WitnessBackend, WitnessGenerator, WitnessResult,
+    },
     verify_recursive,
 };
 use std::{marker::PhantomData, rc::Rc};
@@ -851,4 +853,148 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
     fn combine_with_hint_fq12(hint: &Fq12) -> Self::Commitment {
         ArkGT(*hint)
     }
+}
+
+// ============================================================================
+// AST-enabled witness generation
+// ============================================================================
+
+/// Result of witness generation with AST tracing enabled.
+///
+/// Contains everything needed for AST-ordered constraint building and wiring.
+pub struct WitnessWithAst {
+    /// Collected witnesses from all operations
+    pub witnesses: dory::recursion::WitnessCollection<JoltWitness>,
+    /// AST graph capturing the computation DAG
+    pub ast: AstGraph<BN254>,
+    /// Hints for efficient verification
+    pub hints: JoltHintMap,
+}
+
+/// Generate witnesses with AST tracing enabled.
+///
+/// This is the entry point for recursion provers that need the AST for wiring constraints.
+/// The AST captures the full computation DAG, enabling:
+/// - Deterministic constraint ordering (by topological sort of AST nodes)
+/// - Wiring constraint derivation (from AST edges)
+/// - Boundary constraint identification (from AST roots and leaves)
+pub fn witness_gen_with_ast<ProofTranscript: crate::transcripts::Transcript>(
+    proof: &ArkDoryProof,
+    setup: &ArkworksVerifierSetup,
+    transcript: &mut ProofTranscript,
+    point: &[<Fr as crate::field::JoltField>::Challenge],
+    evaluation: &Fr,
+    commitment: &ArkGT,
+) -> Result<WitnessWithAst, ProofVerifyError> {
+    // Convert Jolt types to dory types
+    let reordered_point =
+        crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout::<Fr>(
+            point,
+        );
+    let ark_point: Vec<ArkFr> = reordered_point
+        .iter()
+        .rev() // Reverse for dory endianness
+        .map(|c| {
+            let f_val: Fr = (*c).into();
+            jolt_to_ark(&f_val)
+        })
+        .collect();
+    let ark_evaluation = jolt_to_ark(evaluation);
+
+    // Create witness generation context WITH AST tracing
+    let ctx = Rc::new(
+        TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_witness_gen_with_ast(),
+    );
+
+    // Wrap transcript for dory compatibility
+    let mut dory_transcript = JoltToDoryTranscript::new(transcript);
+
+    // Call verify_recursive to collect witnesses and build AST
+    verify_recursive::<_, BN254, JoltG1Routines, JoltG2Routines, _, _, _>(
+        *commitment,
+        ark_evaluation,
+        &ark_point,
+        proof,
+        setup.clone().into(),
+        &mut dory_transcript,
+        ctx.clone(),
+    )
+    .map_err(|_e| ProofVerifyError::default())?;
+
+    // Extract both witnesses and AST
+    let (witnesses_opt, ast_opt) = Rc::try_unwrap(ctx)
+        .ok()
+        .expect("Should have sole ownership")
+        .finalize_with_ast();
+
+    let witnesses = witnesses_opt.ok_or(ProofVerifyError::default())?;
+    let ast = ast_opt.ok_or(ProofVerifyError::default())?;
+
+    // Convert witnesses to hints
+    let hints = JoltHintMap(witnesses.to_hints::<BN254>());
+
+    Ok(WitnessWithAst {
+        witnesses,
+        ast,
+        hints,
+    })
+}
+
+/// Reconstruct AST from public inputs (verifier-side).
+///
+/// This re-runs verification with AST tracing but uses hints instead of
+/// computing the expensive operations. The resulting AST is deterministic
+/// and matches the prover's AST.
+pub fn reconstruct_ast<ProofTranscript: crate::transcripts::Transcript>(
+    proof: &ArkDoryProof,
+    setup: &ArkworksVerifierSetup,
+    transcript: &mut ProofTranscript,
+    point: &[<Fr as crate::field::JoltField>::Challenge],
+    evaluation: &Fr,
+    commitment: &ArkGT,
+    hints: &JoltHintMap,
+) -> Result<AstGraph<BN254>, ProofVerifyError> {
+    // Convert Jolt types to dory types
+    let reordered_point =
+        crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout::<Fr>(
+            point,
+        );
+    let ark_point: Vec<ArkFr> = reordered_point
+        .iter()
+        .rev()
+        .map(|c| {
+            let f_val: Fr = (*c).into();
+            jolt_to_ark(&f_val)
+        })
+        .collect();
+    let ark_evaluation = jolt_to_ark(evaluation);
+
+    // Create hint-based context WITH AST tracing
+    let ctx = Rc::new(
+        TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_hints(hints.0.clone())
+            .with_ast(),
+    );
+
+    // Wrap transcript for dory compatibility
+    let mut dory_transcript = JoltToDoryTranscript::new(transcript);
+
+    // Run verification with hints (fast) while building AST
+    verify_recursive::<_, BN254, JoltG1Routines, JoltG2Routines, _, _, _>(
+        *commitment,
+        ark_evaluation,
+        &ark_point,
+        proof,
+        setup.clone().into(),
+        &mut dory_transcript,
+        ctx.clone(),
+    )
+    .map_err(|_| ProofVerifyError::default())?;
+
+    // Extract only the AST (witnesses are None in hint mode)
+    let (_, ast_opt) = Rc::try_unwrap(ctx)
+        .ok()
+        .expect("Should have sole ownership")
+        .finalize_with_ast();
+
+    ast_opt.ok_or(ProofVerifyError::default())
 }

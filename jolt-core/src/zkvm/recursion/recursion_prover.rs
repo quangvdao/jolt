@@ -30,6 +30,8 @@ use dory::backends::arkworks::ArkGT;
 use std::collections::HashMap;
 
 use crate::zkvm::recursion::DoryMatrixBuilder;
+use dory::recursion::ast::AstGraph;
+use dory::backends::arkworks::BN254;
 
 use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
@@ -66,7 +68,6 @@ pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Fie
     pub dense_commitment: PCS::Commitment,
 }
 
-/// Type alias for readability
 /// Unified prover for the recursion SNARK
 #[derive(Clone)]
 pub struct RecursionProver<F: JoltField = Fq> {
@@ -76,6 +77,8 @@ pub struct RecursionProver<F: JoltField = Fq> {
     pub gamma: F,
     /// Delta value for batching within constraints
     pub delta: F,
+    /// AST graph for wiring constraints (optional, only present when using AST-enabled mode)
+    pub ast: Option<AstGraph<BN254>>,
 }
 
 impl RecursionProver<Fq> {
@@ -111,6 +114,7 @@ impl RecursionProver<Fq> {
             constraint_system,
             gamma,
             delta,
+            ast: None,
         })
     }
 
@@ -138,6 +142,56 @@ impl RecursionProver<Fq> {
 
         // Delegate to new_from_witnesses (no combine_witness from direct Dory proof)
         Self::new_from_witnesses(&witness_collection, None, gamma, delta)
+    }
+
+    /// Create a new recursion prover with AST tracing enabled.
+    ///
+    /// This captures the full computation DAG, enabling:
+    /// - Deterministic constraint ordering (by topological sort of AST nodes)
+    /// - Wiring constraint derivation (from AST edges)
+    /// - Boundary constraint identification (from AST roots and leaves)
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_from_dory_proof_with_ast<T: Transcript>(
+        dory_proof: &ArkDoryProof,
+        verifier_setup: &ArkworksVerifierSetup,
+        transcript: &mut T,
+        point: &[<Fr as JoltField>::Challenge],
+        evaluation: &Fr,
+        commitment: &ArkGT,
+        gamma: Fq,
+        delta: Fq,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        use crate::poly::commitment::dory::recursion::witness_gen_with_ast;
+
+        // Use AST-enabled witness generation
+        let witness_with_ast = witness_gen_with_ast(
+            dory_proof,
+            verifier_setup,
+            transcript,
+            point,
+            evaluation,
+            commitment,
+        )?;
+
+        // Convert witness collection to DoryRecursionWitness
+        let recursion_witness =
+            Self::witnesses_to_dory_recursion(&witness_with_ast.witnesses, None)?;
+
+        // Build constraint system from witness collection
+        let build_cs_span = tracing::info_span!("build_constraint_system_with_ast").entered();
+        let constraint_system = Self::build_constraint_system(
+            &witness_with_ast.witnesses,
+            recursion_witness.combine_witness.as_ref(),
+            recursion_witness.gt_exp_witness.g_poly.clone(),
+        )?;
+        drop(build_cs_span);
+
+        Ok(Self {
+            constraint_system,
+            gamma,
+            delta,
+            ast: Some(witness_with_ast.ast),
+        })
     }
 
     /// Convert Dory witness collection to DoryRecursionWitness
@@ -182,7 +236,7 @@ impl RecursionProver<Fq> {
 
         // Process GT exp witnesses (deterministic order by OpId)
         let mut gt_exp_items: Vec<_> = witnesses.gt_exp.iter().collect();
-        gt_exp_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
         for (_op_id, exp_witness) in gt_exp_items {
             // Extract the scalar from the first witness
             if scalar.is_zero() && !exp_witness.exponent.is_zero() {
@@ -245,7 +299,7 @@ impl RecursionProver<Fq> {
 
         // Deterministic order by OpId
         let mut gt_mul_items: Vec<_> = witnesses.gt_mul.iter().collect();
-        gt_mul_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        gt_mul_items.sort_by_key(|(op_id, _)| *op_id);
         for (_op_id, mul_witness) in gt_mul_items {
             // For GT multiplication, we work with the quotient MLEs which are already in Fq
             // The actual lhs, rhs, result values come from the quotient decomposition
@@ -285,7 +339,7 @@ impl RecursionProver<Fq> {
         let mut t_is_infinity_mles = Vec::with_capacity(total_bits);
 
         let mut g1_items: Vec<_> = witnesses.g1_scalar_mul.iter().collect();
-        g1_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        g1_items.sort_by_key(|(op_id, _)| *op_id);
         for (_op_id, scalar_mul_witness) in g1_items {
             base_points.push(scalar_mul_witness.point_base);
             scalars.push(scalar_mul_witness.scalar);
@@ -322,7 +376,7 @@ impl RecursionProver<Fq> {
         // Extract G1Add witnesses from dory collection
         let g1_add_witness = {
             let mut items: Vec<_> = witnesses.g1_add.iter().collect();
-            items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+            items.sort_by_key(|(op_id, _)| *op_id);
             super::witness::G1AddWitness {
                 x_p_mles: items.iter().map(|(_, w)| vec![w.x_p]).collect(),
                 y_p_mles: items.iter().map(|(_, w)| vec![w.y_p]).collect(),
@@ -343,7 +397,7 @@ impl RecursionProver<Fq> {
         // Extract G2Add witnesses from dory collection
         let g2_add_witness = {
             let mut items: Vec<_> = witnesses.g2_add.iter().collect();
-            items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+            items.sort_by_key(|(op_id, _)| *op_id);
             super::witness::G2AddWitness {
                 x_p_c0_mles: items.iter().map(|(_, w)| vec![w.x_p_c0]).collect(),
                 x_p_c1_mles: items.iter().map(|(_, w)| vec![w.x_p_c1]).collect(),
@@ -422,7 +476,7 @@ impl RecursionProver<Fq> {
             Vec::with_capacity(witness_collection.g2_scalar_mul.len());
         // Deterministic order by OpId
         let mut gt_exp_items: Vec<_> = witness_collection.gt_exp.iter().collect();
-        gt_exp_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
         for (_op_id, witness) in gt_exp_items {
             // Convert base ArkGT to 4-var MLE
             let base_mle = fq12_to_multilinear_evals(&witness.base);
@@ -461,7 +515,7 @@ impl RecursionProver<Fq> {
         )
         .entered();
         let mut gt_mul_items: Vec<_> = witness_collection.gt_mul.iter().collect();
-        gt_mul_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        gt_mul_items.sort_by_key(|(op_id, _)| *op_id);
         for (_op_id, witness) in gt_mul_items {
             builder.add_gt_mul_witness(witness);
         }
@@ -474,7 +528,7 @@ impl RecursionProver<Fq> {
         )
         .entered();
         let mut g1_items: Vec<_> = witness_collection.g1_scalar_mul.iter().collect();
-        g1_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        g1_items.sort_by_key(|(op_id, _)| *op_id);
         for (_op_id, witness) in g1_items {
             builder.add_g1_scalar_mul_witness(witness);
             g1_scalar_mul_public_inputs.push(G1ScalarMulPublicInputs::new(witness.scalar));
@@ -488,7 +542,7 @@ impl RecursionProver<Fq> {
         )
         .entered();
         let mut g2_items: Vec<_> = witness_collection.g2_scalar_mul.iter().collect();
-        g2_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        g2_items.sort_by_key(|(op_id, _)| *op_id);
         for (_op_id, witness) in g2_items {
             builder.add_g2_scalar_mul_witness(witness);
             g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(witness.scalar));
@@ -502,7 +556,7 @@ impl RecursionProver<Fq> {
         )
         .entered();
         let mut g1_add_items: Vec<_> = witness_collection.g1_add.iter().collect();
-        g1_add_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        g1_add_items.sort_by_key(|(op_id, _)| *op_id);
         let mut g1_add_witnesses = Vec::with_capacity(g1_add_items.len());
         for (_op_id, witness) in g1_add_items {
             // Convert JoltG1AddWitness (single values) to G1AddWitness<Fq> (constant MLEs)
@@ -535,7 +589,7 @@ impl RecursionProver<Fq> {
         )
         .entered();
         let mut g2_add_items: Vec<_> = witness_collection.g2_add.iter().collect();
-        g2_add_items.sort_by_key(|(op_id, _)| (op_id.round, op_id.op_type as u8, op_id.index));
+        g2_add_items.sort_by_key(|(op_id, _)| *op_id);
         let mut g2_add_witnesses = Vec::with_capacity(g2_add_items.len());
         for (_op_id, witness) in g2_add_items {
             // Convert JoltG2AddWitness (single values) to G2AddWitness<Fq> (constant MLEs)

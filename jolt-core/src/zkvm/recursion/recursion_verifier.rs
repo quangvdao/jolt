@@ -25,9 +25,9 @@ use super::{
     recursion_prover::RecursionProof,
     stage1::{
         g1_add::G1AddParams,
-        g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier},
+        g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs},
         g2_add::G2AddParams,
-        g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier},
+        g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs},
         gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
         gt_mul::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
     },
@@ -180,32 +180,34 @@ impl RecursionVerifier<Fq> {
         let mut g1_add_indices = Vec::new();
         let mut g2_add_indices = Vec::new();
 
-        // Use enumeration index as global constraint index (matches prover's indexing)
-        for (global_idx, constraint) in self.input.constraint_types.iter().enumerate() {
+        // Count constraints and collect base points per type.
+        // Use sequential indices (0, 1, 2...) within each type to match Stage 2's
+        // extract_virtual_claims_from_accumulator which uses separate counters per type.
+        for constraint in self.input.constraint_types.iter() {
             match constraint {
                 ConstraintType::PackedGtExp => {
                     num_gt_exp += 1;
                 }
                 ConstraintType::GtMul => {
-                    gt_mul_indices.push(global_idx);
+                    gt_mul_indices.push(num_gt_mul);
                     num_gt_mul += 1;
                 }
                 ConstraintType::G1ScalarMul { base_point } => {
                     g1_scalar_mul_base_points.push(*base_point);
-                    g1_scalar_mul_indices.push(global_idx);
+                    g1_scalar_mul_indices.push(num_g1_scalar_mul);
                     num_g1_scalar_mul += 1;
                 }
                 ConstraintType::G2ScalarMul { base_point } => {
                     g2_scalar_mul_base_points.push(*base_point);
-                    g2_scalar_mul_indices.push(global_idx);
+                    g2_scalar_mul_indices.push(num_g2_scalar_mul);
                     num_g2_scalar_mul += 1;
                 }
                 ConstraintType::G1Add => {
-                    g1_add_indices.push(global_idx);
+                    g1_add_indices.push(num_g1_add);
                     num_g1_add += 1;
                 }
                 ConstraintType::G2Add => {
-                    g2_add_indices.push(global_idx);
+                    g2_add_indices.push(num_g2_add);
                     num_g2_add += 1;
                 }
             }
@@ -234,37 +236,39 @@ impl RecursionVerifier<Fq> {
 
         // Add G1 scalar mul verifier if we have G1 scalar mul constraints
         if num_g1_scalar_mul > 0 {
+            use super::stage1::g1_scalar_mul::{G1ScalarMulVerifier, G1ScalarMulVerifierSpec};
+
             let params = G1ScalarMulParams::new(num_g1_scalar_mul);
             debug_assert_eq!(
                 self.input.g1_scalar_mul_public_inputs.len(),
                 num_g1_scalar_mul,
                 "RecursionVerifierInput.g1_scalar_mul_public_inputs must match number of G1ScalarMul constraints"
             );
-            let verifier = G1ScalarMulVerifier::new(
+            let spec = G1ScalarMulVerifierSpec::new(
                 params,
                 g1_scalar_mul_base_points,
-                g1_scalar_mul_indices,
                 self.input.g1_scalar_mul_public_inputs.clone(),
-                transcript,
             );
+            let verifier = G1ScalarMulVerifier::from_spec(spec, g1_scalar_mul_indices, transcript);
             verifiers.push(Box::new(verifier));
         }
 
         // Add G2 scalar mul verifier if we have G2 scalar mul constraints
         if num_g2_scalar_mul > 0 {
+            use super::stage1::g2_scalar_mul::{G2ScalarMulVerifier, G2ScalarMulVerifierSpec};
+
             let params = G2ScalarMulParams::new(num_g2_scalar_mul);
             debug_assert_eq!(
                 self.input.g2_scalar_mul_public_inputs.len(),
                 num_g2_scalar_mul,
                 "RecursionVerifierInput.g2_scalar_mul_public_inputs must match number of G2ScalarMul constraints"
             );
-            let verifier = G2ScalarMulVerifier::new(
+            let spec = G2ScalarMulVerifierSpec::new(
                 params,
                 g2_scalar_mul_base_points,
-                g2_scalar_mul_indices,
                 self.input.g2_scalar_mul_public_inputs.clone(),
-                transcript,
             );
+            let verifier = G2ScalarMulVerifier::from_spec(spec, g2_scalar_mul_indices, transcript);
             verifiers.push(Box::new(verifier));
         }
 

@@ -33,6 +33,7 @@
 //! - `recursion_verifier`: Unified verifier for the complete protocol
 
 pub mod bijection;
+pub mod constraint_config;
 pub mod constraints_sys;
 pub mod curve;
 pub mod recursion_prover;
@@ -48,6 +49,7 @@ mod tests;
 
 // Re-export main types
 pub use bijection::{ConstraintMapping, JaggedTransform, VarCountJaggedBijection};
+pub use constraint_config::{ConstraintSystemConfig, CONFIG};
 pub use constraints_sys::{
     ConstraintSystem, ConstraintType, DoryMatrixBuilder, PolyType, RecursionMetadataBuilder,
 };

@@ -38,7 +38,7 @@ use crate::{
     transcripts::Transcript,
     virtual_claims,
     zkvm::{
-        recursion::{stage1::shift_rho::ShiftClaim, utils::virtual_polynomial_utils::*},
+        recursion::utils::virtual_polynomial_utils::*,
         witness::VirtualPolynomial,
     },
 };
@@ -595,15 +595,9 @@ impl<F: JoltField> PackedGtExpProver<F> {
         self.round < self.params.num_step_vars
     }
 
-    /// Get shift claims for the shift sumcheck
-    pub fn get_shift_claims(&self) -> Vec<ShiftClaim> {
-        let mut claims = Vec::with_capacity(self.num_witnesses);
-
-        for w in 0..self.num_witnesses {
-            claims.push(ShiftClaim { constraint_idx: w });
-        }
-
-        claims
+    /// Get claim indices for the shift sumcheck
+    pub fn get_claim_indices(&self) -> Vec<usize> {
+        (0..self.num_witnesses).collect()
     }
 
     /// Get rho polynomials for shift sumcheck

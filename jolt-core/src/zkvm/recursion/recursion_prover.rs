@@ -34,8 +34,8 @@ use crate::zkvm::recursion::DoryMatrixBuilder;
 use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
     stage1::{
-        g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulProver},
-        g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulProver},
+        g1_scalar_mul::G1ScalarMulParams,
+        g2_scalar_mul::G2ScalarMulParams,
         gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
         gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
     },
@@ -640,9 +640,10 @@ impl RecursionProver<Fq> {
         if !gt_mul_constraints_tuples.is_empty() {
             use super::stage1::gt_mul::GtMulConstraintPolynomials;
 
-            // Extract constraint indices before consuming tuples
-            let constraint_indices: Vec<usize> =
-                gt_mul_constraints_tuples.iter().map(|(idx, ..)| *idx).collect();
+            // Use sequential indices (0, 1, 2...) to match Stage 2's expectation.
+            // Stage 2's extract_virtual_claims_from_accumulator uses gt_mul_idx which
+            // counts sequentially within each constraint type, not global constraint indices.
+            let constraint_indices: Vec<usize> = (0..gt_mul_constraints_tuples.len()).collect();
 
             // Convert tuples to structured type
             let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> =
@@ -672,7 +673,9 @@ impl RecursionProver<Fq> {
         let g1_scalar_mul_constraints_tuples =
             self.constraint_system.extract_g1_scalar_mul_constraints();
         if !g1_scalar_mul_constraints_tuples.is_empty() {
-            use super::stage1::g1_scalar_mul::G1ScalarMulConstraintPolynomials;
+            use super::stage1::g1_scalar_mul::{
+                G1ScalarMulConstraintPolynomials, G1ScalarMulProver, G1ScalarMulProverSpec,
+            };
 
             debug_assert_eq!(
                 self.constraint_system.g1_scalar_mul_public_inputs.len(),
@@ -699,12 +702,12 @@ impl RecursionProver<Fq> {
                     .collect();
 
             let params = G1ScalarMulParams::new(g1_scalar_mul_constraints.len());
-            let prover = G1ScalarMulProver::new(
+            let (spec, constraint_indices) = G1ScalarMulProverSpec::new(
                 params,
                 g1_scalar_mul_constraints,
-                self.constraint_system.g1_scalar_mul_public_inputs.clone(),
-                transcript,
+                &self.constraint_system.g1_scalar_mul_public_inputs,
             );
+            let prover = G1ScalarMulProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -712,7 +715,9 @@ impl RecursionProver<Fq> {
         let g2_scalar_mul_constraints_tuples =
             self.constraint_system.extract_g2_scalar_mul_constraints();
         if !g2_scalar_mul_constraints_tuples.is_empty() {
-            use super::stage1::g2_scalar_mul::G2ScalarMulConstraintPolynomials;
+            use super::stage1::g2_scalar_mul::{
+                G2ScalarMulConstraintPolynomials, G2ScalarMulProver, G2ScalarMulProverSpec,
+            };
 
             debug_assert_eq!(
                 self.constraint_system.g2_scalar_mul_public_inputs.len(),
@@ -721,7 +726,6 @@ impl RecursionProver<Fq> {
             );
 
             // Convert witness structs to constraint polynomials
-            // G2ScalarMulWitness has Vec<Fq> fields, G2ScalarMulConstraintPolynomials<Fq> matches
             let g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials<Fq>> =
                 g2_scalar_mul_constraints_tuples
                     .into_iter()
@@ -746,12 +750,12 @@ impl RecursionProver<Fq> {
                     .collect();
 
             let params = G2ScalarMulParams::new(g2_scalar_mul_constraints.len());
-            let prover = G2ScalarMulProver::new(
+            let (spec, constraint_indices) = G2ScalarMulProverSpec::new(
                 params,
                 g2_scalar_mul_constraints,
-                self.constraint_system.g2_scalar_mul_public_inputs.clone(),
-                transcript,
+                &self.constraint_system.g2_scalar_mul_public_inputs,
             );
+            let prover = G2ScalarMulProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
         }
 

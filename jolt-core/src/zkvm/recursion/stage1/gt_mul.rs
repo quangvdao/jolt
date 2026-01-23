@@ -167,6 +167,7 @@ impl<F: JoltField + Allocative> ConstraintListProverSpec<F, 3> for GtMulProverSp
         _instance: usize,
         eval_index: usize,
         poly_evals: &[[F; 3]],
+        _public_evals: &[[F; 3]],
         shared_evals: &[[F; 3]],
         _term_batch_coeff: Option<F>,
     ) -> F {
@@ -256,6 +257,7 @@ impl<C: RecursionCurve> ConstraintListVerifierSpec<C::Fq, 3> for GtMulVerifierSp
         _instance: usize,
         opened_claims: &[C::Fq],
         shared_scalars: &[C::Fq],
+        _eval_point: &[C::Fq],
         _term_batch_coeff: Option<C::Fq>,
     ) -> C::Fq {
         let lhs = opened_claims[0];

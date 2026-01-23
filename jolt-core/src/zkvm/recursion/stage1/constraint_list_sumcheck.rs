@@ -98,8 +98,19 @@ pub trait ConstraintListSpec: Send + Sync + Allocative {
 /// Prover-specific: owns polynomial data, evaluates constraint at univariate point t.
 pub trait ConstraintListProverSpec<F: JoltField, const DEGREE: usize>: ConstraintListSpec {
     /// Polynomials grouped by kind: `polys_by_kind[kind][instance]`.
+    /// These are committed polynomials that will be opened at the end of sumcheck.
     fn polys_by_kind(&self) -> &[Vec<MultilinearPolynomial<F>>];
     fn polys_by_kind_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<F>>];
+
+    /// Public polynomials: participate in sumcheck binding but are NOT opened.
+    /// The verifier computes their evaluations directly from public inputs.
+    /// Layout: `public_polys[kind][instance]`.
+    fn public_polys(&self) -> &[Vec<MultilinearPolynomial<F>>] {
+        &[]
+    }
+    fn public_polys_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<F>>] {
+        &mut []
+    }
 
     /// Shared polynomials (e.g. a global `g(x)`), bound each round.
     fn shared_polys(&self) -> &[MultilinearPolynomial<F>];
@@ -114,7 +125,9 @@ pub trait ConstraintListProverSpec<F: JoltField, const DEGREE: usize>: Constrain
     ///
     /// During each sumcheck round, we evaluate the constraint polynomial at multiple points
     /// to construct the univariate round polynomial. `eval_index` indexes into the evaluations:
-    /// - `poly_evals[kind][eval_index]` and `shared_evals[j][eval_index]`
+    /// - `poly_evals[kind][eval_index]`: committed polynomial evaluations
+    /// - `public_evals[kind][eval_index]`: public polynomial evaluations (not opened)
+    /// - `shared_evals[j][eval_index]`: shared polynomial evaluations
     /// - Points are `{0, 2, 3, ..., DEGREE}` (skipping 1, as produced by `sumcheck_evals_array`)
     ///
     /// `term_batch_coeff` is the random coefficient for batching multiple constraint terms
@@ -124,6 +137,7 @@ pub trait ConstraintListProverSpec<F: JoltField, const DEGREE: usize>: Constrain
         instance: usize,
         eval_index: usize,
         poly_evals: &[[F; DEGREE]],
+        public_evals: &[[F; DEGREE]],
         shared_evals: &[[F; DEGREE]],
         term_batch_coeff: Option<F>,
     ) -> F;
@@ -147,6 +161,9 @@ pub trait ConstraintListVerifierSpec<F: JoltField, const DEGREE: usize>:
     /// Evaluate the instance constraint at the final evaluation point (in little-endian order),
     /// using the opened claims (in `opening_specs()` order) and pre-computed shared scalars.
     ///
+    /// `eval_point` is provided so the verifier can compute public polynomial evaluations
+    /// directly from public inputs (e.g., scalar bit MLE evaluation).
+    ///
     /// `term_batch_coeff` is the random coefficient for batching multiple constraint terms
     /// within this instance (only present if `uses_term_batching()` returns true).
     fn eval_constraint_at_point(
@@ -154,6 +171,7 @@ pub trait ConstraintListVerifierSpec<F: JoltField, const DEGREE: usize>:
         instance: usize,
         opened_claims: &[F],
         shared_scalars: &[F],
+        eval_point: &[F],
         term_batch_coeff: Option<F>,
     ) -> F;
 }
@@ -239,9 +257,11 @@ where
         let x_half = 1 << (num_x_remaining - 1);
 
         let polys_by_kind = self.spec.polys_by_kind();
+        let public_polys = self.spec.public_polys();
         let shared_polys = self.spec.shared_polys();
         let num_instances = self.spec.num_instances();
         let num_kinds = polys_by_kind.len();
+        let num_public = public_polys.len();
         let num_shared = shared_polys.len();
 
         let instance_batch_coeff = self.instance_batch_coeff;
@@ -264,9 +284,17 @@ where
                 let mut batch_power = instance_batch_coeff;
 
                 for i in 0..num_instances {
+                    // Committed polynomial evaluations (will be opened)
                     let mut poly_evals = vec![[F::zero(); DEGREE]; num_kinds];
                     for (k, kind_polys) in polys_by_kind.iter().enumerate() {
                         poly_evals[k] = kind_polys[i]
+                            .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
+                    }
+
+                    // Public polynomial evaluations (not opened, verifier computes from public inputs)
+                    let mut public_evals = vec![[F::zero(); DEGREE]; num_public];
+                    for (k, kind_polys) in public_polys.iter().enumerate() {
+                        public_evals[k] = kind_polys[i]
                             .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
                     }
 
@@ -275,6 +303,7 @@ where
                             i,
                             eval_index,
                             &poly_evals,
+                            &public_evals,
                             &shared_evals,
                             term_batch_coeff,
                         );
@@ -307,6 +336,12 @@ where
             poly.bind_parallel(challenge, BindingOrder::LowToHigh);
         }
         for kind in self.spec.polys_by_kind_mut().iter_mut() {
+            for poly in kind.iter_mut() {
+                poly.bind_parallel(challenge, BindingOrder::LowToHigh);
+            }
+        }
+        // Bind public polynomials (participate in sumcheck but not opened)
+        for kind in self.spec.public_polys_mut().iter_mut() {
             for poly in kind.iter_mut() {
                 poly.bind_parallel(challenge, BindingOrder::LowToHigh);
             }
@@ -450,6 +485,7 @@ where
                 i,
                 &claims,
                 &shared_scalars,
+                &eval_point,
                 self.term_batch_coeff,
             );
             total += batch_power * constraint_value;
@@ -763,6 +799,7 @@ macro_rules! define_constraint {
                     _instance: usize,
                     eval_index: usize,
                     poly_evals: &[[F; [<$name:upper _DEGREE>]]],
+                    _public_evals: &[[F; [<$name:upper _DEGREE>]]],
                     _shared_evals: &[[F; [<$name:upper _DEGREE>]]],
                     term_batch_coeff: Option<F>,
                 ) -> F {
@@ -838,6 +875,7 @@ macro_rules! define_constraint {
                     _instance: usize,
                     opened_claims: &[F],
                     _shared_scalars: &[F],
+                    _eval_point: &[F],
                     term_batch_coeff: Option<F>,
                 ) -> F {
                     let vals = [<$name Values>]::from_claims(opened_claims);

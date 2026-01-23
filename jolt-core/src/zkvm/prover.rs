@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::poly::commitment::dory::DoryContext;
-use crate::poly::commitment::hyrax::Hyrax;
+use crate::poly::commitment::hyrax::{Hyrax, PedersenGenerators};
 use ark_bn254::{Fq, Fq12, Fr};
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -22,6 +22,7 @@ use itertools::Itertools;
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::proof_serialization::RecursionConstraintMetadata;
+use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::zkvm::Serializable;
 
@@ -1873,15 +1874,15 @@ where
         });
         let dense_num_vars = dense_poly.get_num_vars();
 
-        // Setup Hyrax
-        let hyrax_prover_setup = tracing::info_span!("hyrax_setup").in_scope(|| {
-            let setup = <HyraxPCS as CommitmentScheme>::setup_prover(dense_num_vars);
-            tracing::info!(
-                "Initialized Hyrax prover setup for {} variables",
-                dense_num_vars
-            );
-            setup
-        });
+        assert!(
+            dense_num_vars <= MAX_RECURSION_DENSE_NUM_VARS,
+            "dense_num_vars {} exceeds max {}",
+            dense_num_vars,
+            MAX_RECURSION_DENSE_NUM_VARS
+        );
+
+        // Use cached Hyrax setup from preprocessing (sized for MAX_RECURSION_DENSE_NUM_VARS).
+        let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
 
         // Convert to multilinear polynomial
         let dense_mlpoly = tracing::info_span!("convert_to_mlpoly").in_scope(|| {
@@ -1892,8 +1893,7 @@ where
 
         // Commit to dense polynomial
         let (dense_commitment, _) = tracing::info_span!("hyrax_commit").in_scope(|| {
-            let commitment =
-                <HyraxPCS as CommitmentScheme>::commit(&dense_mlpoly, &hyrax_prover_setup);
+            let commitment = <HyraxPCS as CommitmentScheme>::commit(&dense_mlpoly, hyrax_prover_setup);
             tracing::info!("Generated Hyrax commitment to dense polynomial");
             commitment
         });
@@ -1926,25 +1926,12 @@ where
             map
         });
 
-        // Setup Hyrax
-        let hyrax_prover_setup = tracing::info_span!("hyrax_setup_for_opening").in_scope(|| {
-            let dense_num_vars = polynomials_map[&CommittedPolynomial::DoryDenseMatrix]
-                .len()
-                .log_2();
-            let setup = <HyraxPCS as CommitmentScheme>::setup_prover(dense_num_vars);
-            tracing::info!(
-                "Set up Hyrax prover for opening proof with {} variables",
-                dense_num_vars
-            );
-            setup
-        });
-
         // Generate opening proof
         let opening_proof = tracing::info_span!("generate_hyrax_opening_proof").in_scope(|| {
             let proof = accumulator
                 .prove_single::<ProofTranscript, HyraxPCS>(
                     polynomials_map,
-                    &hyrax_prover_setup,
+                    &self.preprocessing.hyrax_recursion_setup,
                     &mut self.transcript,
                 )
                 .expect("Failed to generate Hyrax opening proof");
@@ -2001,6 +1988,7 @@ fn write_instance_flamegraph_svg(
 pub struct JoltProverPreprocessing<F: JoltField, PCS: CommitmentScheme<Field = F>> {
     pub generators: PCS::ProverSetup,
     pub shared: JoltSharedPreprocessing,
+    pub hyrax_recursion_setup: PedersenGenerators<GrumpkinProjective>,
 }
 
 impl<F, PCS> JoltProverPreprocessing<F, PCS>
@@ -2023,7 +2011,17 @@ where
             8
         };
         let generators = PCS::setup_prover(max_log_k_chunk + max_log_T);
-        JoltProverPreprocessing { generators, shared }
+        // Precompute Hyrax setup for recursion proving.
+        // We size it for a conservative max and slice as needed during commit/open.
+        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
+        let hyrax_recursion_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
+
+        JoltProverPreprocessing {
+            generators,
+            shared,
+            hyrax_recursion_setup,
+        }
     }
 
     pub fn save_to_target_dir(&self, target_dir: &str) -> std::io::Result<()> {

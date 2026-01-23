@@ -94,3 +94,10 @@ pub use stage5::jagged_assist::{
 pub use witness::{
     DoryRecursionWitness, G1ScalarMulWitness, GTExpWitness, GTMulWitness, WitnessData,
 };
+
+/// Max `dense_num_vars` for recursion Hyrax setup.
+///
+/// This bounds the size of the dense polynomial opened via Hyrax in the recursion proof.
+/// It is used to size cached Hyrax Pedersen generators in preprocessing (prover + verifier).
+/// Supports up to \(2^{22}\) constraints (see `zkvm/verifier.rs` recursion verification path).
+pub const MAX_RECURSION_DENSE_NUM_VARS: usize = 22;

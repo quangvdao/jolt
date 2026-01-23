@@ -22,6 +22,7 @@ use crate::zkvm::config::OneHotParams;
 use crate::zkvm::prover::JoltProverPreprocessing;
 use crate::zkvm::ram::val_final::ValFinalSumcheckVerifier;
 use crate::zkvm::ram::RAMPreprocessing;
+use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::zkvm::witness::all_committed_polynomials;
 use crate::zkvm::Serializable;
 use crate::zkvm::{
@@ -1240,9 +1241,6 @@ impl JoltSharedPreprocessing {
     }
 }
 
-/// Max dense_num_vars for recursion Hyrax setup. Supports up to 2^22 constraints.
-pub const MAX_RECURSION_DENSE_NUM_VARS: usize = 22;
-
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltVerifierPreprocessing<F, PCS>
 where
@@ -1313,17 +1311,10 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> From<&JoltProverPreprocessi
     fn from(prover_preprocessing: &JoltProverPreprocessing<F, PCS>) -> Self {
         let generators = PCS::setup_verifier(&prover_preprocessing.generators);
 
-        // Precompute Hyrax generators for recursion verification
-        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-        let hyrax_prover_setup =
-            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
-        let hyrax_recursion_setup =
-            <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
-
         Self {
             generators,
             shared: prover_preprocessing.shared.clone(),
-            hyrax_recursion_setup,
+            hyrax_recursion_setup: prover_preprocessing.hyrax_recursion_setup.clone(),
         }
     }
 }

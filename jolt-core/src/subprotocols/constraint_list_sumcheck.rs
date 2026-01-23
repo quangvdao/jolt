@@ -673,8 +673,8 @@ macro_rules! define_constraint {
             // Constants
             // ================================================================
 
-            const [<$name:upper _OPENING_SPECS>]: [$crate::zkvm::recursion::stage2::constraint_list_sumcheck::OpeningSpec; [<$name Values>]::<()>::COUNT] =
-                $crate::zkvm::recursion::stage2::constraint_list_sumcheck::sequential_opening_specs::<{ [<$name Values>]::<()>::COUNT }>();
+            const [<$name:upper _OPENING_SPECS>]: [$crate::subprotocols::constraint_list_sumcheck::OpeningSpec; [<$name Values>]::<()>::COUNT] =
+                $crate::subprotocols::constraint_list_sumcheck::sequential_opening_specs::<{ [<$name Values>]::<()>::COUNT }>();
 
             const [<$name:upper _DEGREE>]: usize = $degree;
 
@@ -699,12 +699,12 @@ macro_rules! define_constraint {
                 }
             }
 
-            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage2::constraint_list_sumcheck::ConstraintListSpec for [<$name ProverSpec>]<F> {
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::subprotocols::constraint_list_sumcheck::ConstraintListSpec for [<$name ProverSpec>]<F> {
                 fn sumcheck_id(&self) -> $crate::poly::opening_proof::SumcheckId { self.params.sumcheck_id }
                 fn num_rounds(&self) -> usize { self.params.num_constraint_vars }
                 fn num_instances(&self) -> usize { self.params.num_constraints }
                 fn uses_term_batching(&self) -> bool { $uses_term_batching }
-                fn opening_specs(&self) -> &'static [$crate::zkvm::recursion::stage2::constraint_list_sumcheck::OpeningSpec] { &[<$name:upper _OPENING_SPECS>] }
+                fn opening_specs(&self) -> &'static [$crate::subprotocols::constraint_list_sumcheck::OpeningSpec] { &[<$name:upper _OPENING_SPECS>] }
 
                 fn build_virtual_poly(&self, term_index: usize, instance: usize) -> $crate::zkvm::witness::VirtualPolynomial {
                     use $crate::zkvm::witness::TermEnum;
@@ -717,7 +717,7 @@ macro_rules! define_constraint {
                 }
             }
 
-            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage2::constraint_list_sumcheck::ConstraintListProverSpec<F, [<$name:upper _DEGREE>]> for [<$name ProverSpec>]<F> {
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::subprotocols::constraint_list_sumcheck::ConstraintListProverSpec<F, [<$name:upper _DEGREE>]> for [<$name ProverSpec>]<F> {
                 fn polys_by_kind(&self) -> &[Vec<$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>>] { &self.polys_by_kind }
                 fn polys_by_kind_mut(&mut self) -> &mut [Vec<$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>>] { &mut self.polys_by_kind }
                 fn shared_polys(&self) -> &[$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>] { &[] }
@@ -757,12 +757,12 @@ macro_rules! define_constraint {
                 }
             }
 
-            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage2::constraint_list_sumcheck::ConstraintListSpec for [<$name VerifierSpec>]<F> {
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::subprotocols::constraint_list_sumcheck::ConstraintListSpec for [<$name VerifierSpec>]<F> {
                 fn sumcheck_id(&self) -> $crate::poly::opening_proof::SumcheckId { self.params.sumcheck_id }
                 fn num_rounds(&self) -> usize { self.params.num_constraint_vars }
                 fn num_instances(&self) -> usize { self.params.num_constraints }
                 fn uses_term_batching(&self) -> bool { $uses_term_batching }
-                fn opening_specs(&self) -> &'static [$crate::zkvm::recursion::stage2::constraint_list_sumcheck::OpeningSpec] { &[<$name:upper _OPENING_SPECS>] }
+                fn opening_specs(&self) -> &'static [$crate::subprotocols::constraint_list_sumcheck::OpeningSpec] { &[<$name:upper _OPENING_SPECS>] }
 
                 fn build_virtual_poly(&self, term_index: usize, instance: usize) -> $crate::zkvm::witness::VirtualPolynomial {
                     use $crate::zkvm::witness::TermEnum;
@@ -775,7 +775,7 @@ macro_rules! define_constraint {
                 }
             }
 
-            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage2::constraint_list_sumcheck::ConstraintListVerifierSpec<F, [<$name:upper _DEGREE>]> for [<$name VerifierSpec>]<F> {
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::subprotocols::constraint_list_sumcheck::ConstraintListVerifierSpec<F, [<$name:upper _DEGREE>]> for [<$name VerifierSpec>]<F> {
                 fn compute_shared_scalars(&self, _eval_point: &[F]) -> Vec<F> { vec![] }
 
                 fn eval_constraint_at_point(
@@ -799,8 +799,8 @@ macro_rules! define_constraint {
             // Type Aliases
             // ================================================================
 
-            pub type [<$name Prover>]<F> = $crate::zkvm::recursion::stage2::constraint_list_sumcheck::ConstraintListProver<F, [<$name ProverSpec>]<F>, [<$name:upper _DEGREE>]>;
-            pub type [<$name Verifier>]<F> = $crate::zkvm::recursion::stage2::constraint_list_sumcheck::ConstraintListVerifier<F, [<$name VerifierSpec>]<F>, [<$name:upper _DEGREE>]>;
+            pub type [<$name Prover>]<F> = $crate::subprotocols::constraint_list_sumcheck::ConstraintListProver<F, [<$name ProverSpec>]<F>, [<$name:upper _DEGREE>]>;
+            pub type [<$name Verifier>]<F> = $crate::subprotocols::constraint_list_sumcheck::ConstraintListVerifier<F, [<$name VerifierSpec>]<F>, [<$name:upper _DEGREE>]>;
         }
     };
 }

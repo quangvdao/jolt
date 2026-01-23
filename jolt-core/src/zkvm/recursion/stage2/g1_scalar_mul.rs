@@ -18,13 +18,11 @@ use crate::{
         dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial,
         multilinear_polynomial::MultilinearPolynomial, opening_proof::SumcheckId,
     },
-    zkvm::{
-        recursion::stage2::constraint_list_sumcheck::{
-            sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec,
-            ConstraintListSpec, ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
-        },
-        witness::{G1ScalarMulTerm, RecursionPoly, TermEnum, VirtualPolynomial},
+    subprotocols::constraint_list_sumcheck::{
+        sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec,
+        ConstraintListSpec, ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
     },
+    zkvm::witness::{G1ScalarMulTerm, RecursionPoly, TermEnum, VirtualPolynomial},
 };
 use allocative::Allocative;
 use ark_bn254::{Fq, Fr};

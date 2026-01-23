@@ -16,7 +16,7 @@ use crate::{
 use crate::zkvm::witness::{GtMulTerm, RecursionPoly, TermEnum, VirtualPolynomial};
 use core::marker::PhantomData;
 
-use super::constraint_list_sumcheck::{
+use crate::subprotocols::constraint_list_sumcheck::{
     sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec,
     ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
 };

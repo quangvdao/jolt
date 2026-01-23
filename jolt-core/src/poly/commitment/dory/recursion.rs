@@ -124,6 +124,91 @@ impl WitnessResult<ArkG2> for JoltG2ScalarMulWitness {
     }
 }
 
+/// G1 addition witness for Dory recursion.
+///
+/// For a single point addition P + Q = R, we store:
+/// - The coordinates and infinity indicators for P, Q, R
+/// - Auxiliary values: lambda (slope), inv_delta_x, is_double, is_inverse
+///
+/// Since G1Add is a single operation (not a trace), the MLE is constant:
+/// all 2^11 entries have the same value.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct JoltG1AddWitness {
+    // Input P
+    pub x_p: Fq,
+    pub y_p: Fq,
+    pub ind_p: Fq, // 1 if P = O (infinity), 0 otherwise
+
+    // Input Q
+    pub x_q: Fq,
+    pub y_q: Fq,
+    pub ind_q: Fq,
+
+    // Output R = P + Q
+    pub x_r: Fq,
+    pub y_r: Fq,
+    pub ind_r: Fq,
+
+    // Auxiliary witness values
+    pub lambda: Fq,       // slope
+    pub inv_delta_x: Fq,  // 1/(x_q - x_p) in add case
+    pub is_double: Fq,    // 1 if P == Q
+    pub is_inverse: Fq,   // 1 if P == -Q (result is O)
+
+    // For WitnessResult trait
+    ark_result: ArkG1,
+}
+
+impl WitnessResult<ArkG1> for JoltG1AddWitness {
+    fn result(&self) -> Option<&ArkG1> {
+        Some(&self.ark_result)
+    }
+}
+
+/// G2 addition witness for Dory recursion.
+///
+/// Same as G1 but with Fq2 coordinates split into (c0, c1) components.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct JoltG2AddWitness {
+    // Input P (Fq2 coordinates)
+    pub x_p_c0: Fq,
+    pub x_p_c1: Fq,
+    pub y_p_c0: Fq,
+    pub y_p_c1: Fq,
+    pub ind_p: Fq,
+
+    // Input Q
+    pub x_q_c0: Fq,
+    pub x_q_c1: Fq,
+    pub y_q_c0: Fq,
+    pub y_q_c1: Fq,
+    pub ind_q: Fq,
+
+    // Output R = P + Q
+    pub x_r_c0: Fq,
+    pub x_r_c1: Fq,
+    pub y_r_c0: Fq,
+    pub y_r_c1: Fq,
+    pub ind_r: Fq,
+
+    // Auxiliary witness values (Fq2)
+    pub lambda_c0: Fq,
+    pub lambda_c1: Fq,
+    pub inv_delta_x_c0: Fq,
+    pub inv_delta_x_c1: Fq,
+    pub is_double: Fq,
+    pub is_inverse: Fq,
+
+    // For WitnessResult trait
+    ark_result: ArkG2,
+}
+
+impl WitnessResult<ArkG2> for JoltG2AddWitness {
+    fn result(&self) -> Option<&ArkG2> {
+        Some(&self.ark_result)
+    }
+}
+
 /// Witness type for unimplemented operations that panics when used
 #[derive(Clone, Debug)]
 pub struct UnimplementedWitness<T> {

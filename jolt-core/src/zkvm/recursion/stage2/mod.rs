@@ -7,7 +7,6 @@
 //! - G1/G2 addition
 //! - Generic constraint list sumcheck
 
-pub mod constraint_list_sumcheck;
 pub mod g1_add;
 pub mod g1_scalar_mul;
 pub mod g2_add;

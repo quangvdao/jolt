@@ -49,8 +49,10 @@ Concretely:
    (G1/G2/GT scalar-muls, adds, GT mul/exp, plus internal packed traces where applicable).
 2. **Operation constraints (Stage 1)**: For every traced operation instance, we prove “this op is computed correctly in isolation”
    via a type-specific sumcheck (e.g., GT exp, GT mul, G1/G2 scalar mul, and (new) G1/G2 add).
-3. **Wiring / copy constraints (Stage 1d)**: We prove that the output of each operation is exactly the input consumed by downstream
+3. **Wiring / copy constraints (Stage 2)**: We prove that the output of each operation is exactly the input consumed by downstream
    operations, so the witness represents a single coherent computation DAG (not a bag of unrelated correct ops).
+   
+   > **Implementation status**: Wiring is not yet implemented. See `recursion_prover.rs:958` for the TODO.
 4. **Boundary outputs for the outside verifier**: The recursion SNARK exposes the **three (G1,G2) pairing input pairs** used by Dory’s
    final optimized check (a 3-way multi-pairing), and (optionally) the corresponding GT “rhs” value. The outside verifier then computes
    the multi-pairing and checks equality itself.
@@ -94,34 +96,40 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │  Stage 1: Constraint Sum-Checks                                     │
 │  ─────────────────────────────                                      │
 │  Prove validity of each op in isolation                              │
-│  - GT Exp, GT Mul                                                    │
+│  - GT Exp (packed), GT Mul                                           │
 │  - G1/G2 ScalarMul                                                   │
-│  - (NEW) G1/G2 Add                                                   │
+│  - G1/G2 Add                                                         │
 │  Output: Virtual claims for inputs/outputs of each op               │
+│                                                                      │
+│  (Optional) Stage 1b: Shift Sumcheck                                 │
+│  - Internal consistency for packed GT exp (rho_next = rho shifted)   │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 1b/c/d: Consistency Checks                                   │
-│  ────────────────────────────────                                   │
-│  1b: Shift Sumcheck (internal consistency of packed ops)            │
-│  1c: Boundary Sumcheck (check initial/final states vs public input) │
-│  1d: Wiring Sumcheck (AST-derived copy constraints)                 │
-└──────────────────────────────────┬──────────────────────────────────┘
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 2: Virtualization Sum-Check                                  │
-│  ─────────────────────────────────                                  │
-│  Combine all claims into matrix M(s,x) → claim M(r_s, r_x)          │
-└──────────────────────────────────┬──────────────────────────────────┘
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 3: Jagged Transform Sum-Check                                │
+│  Stage 2: Wiring (NOT YET IMPLEMENTED)                              │
 │  ────────────────────────────────────                               │
-│  Sparse M → Dense q → claim q(r_dense)                              │
+│  Wiring Sumcheck: AST-derived copy constraints                       │
+│  Enforces DAG connectivity between operation instances               │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 4: Opening Proof (Hyrax over Grumpkin)                       │
+│  Stage 3: Direct Evaluation (Virtualization)                        │
+│  ───────────────────────────────────────────                        │
+│  Direct evaluation of matrix M(s,x) → claim M(r_s, r_x)              │
+│  (sumcheck-free)                                                     │
+└──────────────────────────────────┬──────────────────────────────────┘
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Stage 4: Jagged Transform Sum-Check                                │
+│  ───────────────────────────────────                                │
+│  Sparse M → Dense q → claim q(r_dense)                              │
+│                                                                      │
+│  Stage 4b: Jagged Assist                                             │
+│  - Batch verification of jagged indicator evaluations                │
+└──────────────────────────────────┬──────────────────────────────────┘
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Stage 5: Opening Proof (Hyrax over Grumpkin)                       │
 │  ────────────────────────────────────────────                       │
 │  Prove q(r_dense) = v_dense → final verification                    │
 └─────────────────────────────────────────────────────────────────────┘
@@ -258,7 +266,7 @@ $$0 = \sum_{s \in \{0,1\}^7} \sum_{x \in \{0,1\}^4} \text{eq}(r_s, s) \cdot \tex
 
 - **Phase 1** (rounds 0-6): Bind step variables $s$
 - **Phase 2** (rounds 7-10): Bind element variables $x$
-- Total: 11 rounds, degree 4
+- Total: 11 rounds, degree 7 (constraint degree 6 times multilinear eq)
 
 #### Output Claims
 
@@ -302,7 +310,7 @@ Therefore the packed constraint \(C(s,x)=0\) is exactly the per-step base-4 tran
 and constraint satisfaction is preserved. □
 
 **Security Analysis**:
-- Soundness error: Unchanged at $\text{deg}/|\mathbb{F}| = 4/p \approx 2^{-252}$
+- Soundness error: Unchanged at $\text{deg}/|\mathbb{F}| = 7/p \approx 2^{-252}$
 - The two-phase sumcheck maintains the same security as checking all packed step constraints (up to 128 base-4 steps)
 - Batching with $\gamma$ preserves zero-knowledge properties
 
@@ -349,12 +357,15 @@ Stage 1a: Packed GT Constraint Sumcheck
   ↓
 Stage 1b: Shift Sumcheck (NEW)
   - Proves that v = rho(r_s*+1, r_x*)
-  - 11 rounds, degree 2
-  - Outputs: verified rho_next claim (used by packed GT exp correctness, boundary, and wiring)
+  - 11 rounds, degree 3
+  - Outputs: verified rho_next claim (used by packed GT exp correctness and wiring)
   ↓
-Stage 2: Direct Evaluation Protocol
-  - Uses the matrix claims from Stage 1 (e.g., rho and quotient for packed GT exp). The verified rho_next claim may be consumed by consistency checks, but does not need to appear as a matrix row.
-  - No changes needed
+Stage 2: Wiring (copy constraints) [NOT YET IMPLEMENTED]
+  - May consume verified rho_next claim (and other endpoint extractions), depending on the wiring design.
+  ↓
+Stage 3: Direct Evaluation Protocol
+  - Uses the matrix claims from Stage 1 (e.g., rho and quotient for packed GT exp).
+  - No changes needed for the direct-evaluation math itself
 ```
 
 #### Accumulator Communication
@@ -379,7 +390,7 @@ accumulator.append_virtual(
 );
 ```
 
-Stage 2 treats both virtual claims uniformly, regardless of their verification method.
+Stage 3 (direct evaluation) treats both virtual claims uniformly, regardless of their verification method.
 
 #### Benefits and Trade-offs
 
@@ -644,8 +655,8 @@ We add two new Stage 1 sumchecks:
 
 The constraint system below is the **authoritative** description of what is implemented in:
 
-- `jolt-core/src/zkvm/recursion/stage1/g1_add.rs`
-- `jolt-core/src/zkvm/recursion/stage1/g2_add.rs`
+- `jolt-core/src/zkvm/recursion/stage2/g1_add.rs`
+- `jolt-core/src/zkvm/recursion/stage2/g2_add.rs`
 
 #### Goal (per instance)
 
@@ -824,7 +835,7 @@ At the final Stage-1 evaluation point \(r_x^\*\), Stage 1 emits virtual claims f
 - `RecursionG1AddLambda(i)`, `RecursionG1AddInvDeltaX(i)`
 - `RecursionG1AddIsDouble(i)`, `RecursionG1AddIsInverse(i)`
 
-These are the values Stage 1d wiring uses to connect add nodes to the rest of the AST DAG.
+These are the values Stage 2 wiring uses to connect add nodes to the rest of the AST DAG.
 
 #### Constraints (G2Add) over \(\mathbb{F}_{q^2}\) implemented over \(\mathbb{F}_q\)
 
@@ -840,7 +851,7 @@ We use the BN254 quadratic extension:
 \]
 and enforce all \(\mathbb{F}_{q^2}\) equations component-wise over \(\mathbb{F}_q\).
 
-Concretely, the implementation in `stage1/g2_add.rs` enforces the following \(\mathbb{F}_q\) constraints
+Concretely, the implementation in `stage2/g2_add.rs` enforces the following \(\mathbb{F}_q\) constraints
 (where each \(\mathbb{F}_{q^2}\) value is split into \((c0,c1)\)):
 
 1. **Indicator booleanity**: \(\mathrm{ind}_P(1-\mathrm{ind}_P)=0\), \(\mathrm{ind}_Q(1-\mathrm{ind}_Q)=0\), \(\mathrm{ind}_R(1-\mathrm{ind}_R)=0\).
@@ -871,7 +882,7 @@ Concretely, the implementation in `stage1/g2_add.rs` enforces the following \(\m
      \(x_R=\lambda^2-x_P-x_Q\), \(y_R=\lambda(x_P-x_R)-y_P\) hold component-wise.
 
 The sumcheck batching/round structure matches G1Add (11 rounds, degree bound 6), and Stage 1 emits the
-corresponding virtual port claims at \(r_x^\*\) for Stage 1d wiring:
+corresponding virtual port claims at \(r_x^\*\) for Stage 2 wiring:
 
 - `RecursionG2AddXPC0(i)`, `RecursionG2AddXPC1(i)`, `RecursionG2AddYPC0(i)`, `RecursionG2AddYPC1(i)`, `RecursionG2AddPIndicator(i)`
 - `RecursionG2AddXQC0(i)`, `RecursionG2AddXQC1(i)`, `RecursionG2AddYQC0(i)`, `RecursionG2AddYQC1(i)`, `RecursionG2AddQIndicator(i)`
@@ -879,25 +890,26 @@ corresponding virtual port claims at \(r_x^\*\) for Stage 1d wiring:
 - `RecursionG2AddLambdaC0(i)`, `RecursionG2AddLambdaC1(i)`, `RecursionG2AddInvDeltaXC0(i)`, `RecursionG2AddInvDeltaXC1(i)`
 - `RecursionG2AddIsDouble(i)`, `RecursionG2AddIsInverse(i)`
 
-### 2.6 Stage 1c: Boundary Sumcheck
+---
 
-This stage enforces the initial and final states of the recursive operations.
+#### Connection to the external pairing boundary
 
-#### Initial Conditions
-- **GT Exp**: $\rho(0, x) = 1$ (Identity)
-- **G1/G2 Scalar Mul**: $A(0) = \mathcal{O}$ (Infinity)
-
-#### Final Conditions
-- **GT Exp**: $\rho(N, x) = \text{result}(x)$
-- **G1/G2 Scalar Mul**: $A(N) = \text{result}$
-
-These are proven via a sumcheck over the step variable $s$, using `eq(0, s)` and `eq(N, s)` to isolate the boundary terms.
+The Dory verifier’s final optimized check is a **3-way multi-pairing** (see `third-party/dory/src/reduce_and_fold.rs::DoryVerifierState::verify_final`).
+We do not prove pairings inside this SNARK. Instead:
+- the recursion witness includes all non-pairing operations that produce the three pairing input pairs, and
+- the recursion SNARK exposes those three (G1,G2) pairs as public outputs,
+so the outside verifier can perform the final pairing check.
 
 ---
 
-### 2.7 Stage 1d: Wiring (Copy) Constraints
+## 3. Stage 2: Wiring (Copy Constraints)
 
-This stage enforces that all Stage 1 operation instances form **one coherent computation DAG** (copy constraints),
+> **Implementation status**: Wiring is **not yet implemented**. See `recursion_prover.rs:958` for the TODO.
+> The design is documented in `wiring_sumcheck_design.md`, `wiring_gt.md`, `wiring_g1.md`, and `wiring_g2.md`.
+
+After Stage 1, we have many virtual polynomial claims $(v_0, v_1, \ldots, v_{n-1})$ at point $r_x$.
+
+Stage 2 enforces that all Stage 1 operation instances form **one coherent computation DAG** (copy constraints),
 rather than a multiset of unrelated valid operations.
 
 #### Topology source: Dory’s `AstGraph`
@@ -910,60 +922,43 @@ Dory can record the full verification computation as an AST/DAG (`AstGraph`) whe
 Wiring constraints are derived **only** from this graph structure: for every node input `ValueId`, we add a copy constraint
 from the producer’s output value to the consumer’s input port. This avoids trusting prover-supplied wiring metadata.
 
-#### What is being wired: typed values (ports)
+### 3.2 What is being wired: typed values (ports)
 
 We wire **typed values** (G1/G2/GT elements) between operation instances:
 - `GTExp` output → `GTMul` input
 - `GTMul` output → downstream `GTMul` input
-- `G1ScalarMul` output → `G1Add` input (this is common in Dory verifier updates like `e1 = e1 + alpha*X`)
+- `G1ScalarMul` output → `G1Add` input
 - `G2ScalarMul` output → `G2Add` input
 - `G1Add`/`G2Add` outputs → downstream inputs, etc.
 
-This requires having sumchecks for the “primitive” ops that appear in Dory’s AST:
-- existing: GT exp/mul, G1/G2 scalar mul
-- **new**: G1 add, G2 add
+### 3.3 Port extraction for packed / step-indexed traces
 
-#### Port extraction for packed traces: “gated slices”
+Some operations are encoded as larger tables (e.g., packed GT exp, scalar-mul traces). In those cases, the *wired port*
+is an **endpoint** (e.g., the final accumulator), not the entire trace.
 
-Some operations are encoded as larger tables (e.g., packed GT exp, scalar-mul traces).
-In those cases, a port (input/output value) is a **slice** of the table, extracted by multiplying by a selector polynomial:
+We define endpoint ports using selector polynomials:
+- **Packed GT exp**: $\rho(s,x)$ is an 11-var MLE with 7 step vars and 4 element vars (layout `index = x * 128 + s`).
+  The output port is the last-step slice $\rho(s=\text{last}, x)$.
+- **G1/G2 scalar mul**: trace columns are 11-var MLEs with **zero padding** (3 pad vars + 8 step vars).
+  The output port is the last-step accumulator $A(\text{last})$ (including infinity indicator).
 
-- Example (conceptual): output of a 256-step scalar-mul trace is the accumulator at the last step, extracted via
-  `Eq(step_last, step)` (“gated slice”).
+These endpoint ports are proven/evaluated **at the same Stage 1 opening point $r_x$** via a selector/point-extraction sumcheck
+whose final check uses already-opened Stage 1 values at $r_x$ (so Stage 2 wiring does not introduce new PCS opening points).
 
-This keeps witness size manageable and avoids creating a separate polynomial per step.
+### 3.4 Wiring check
 
-#### Wiring sumcheck (Stage 1d)
-
-For each type (G1/G2/GT), we run a dedicated wiring sumcheck that:
-1. samples a fresh random evaluation point \(r\) (Fiat–Shamir),
-2. evaluates the relevant port expressions at \(r\), and
-3. checks a single random linear combination of all copy constraints equals 0.
-
+For each type (G1/G2/GT), we check a random linear combination of all copy constraints at the shared point $r_x$.
 At a high level, for edges \(e\) we check:
 \[
-0 \stackrel{!}{=} \sum_{e} \lambda_e \cdot (\text{PortOut}_{\text{src}(e)}(r) - \text{PortIn}_{\text{dst}(e)}(r)),
+0 \stackrel{!}{=} \sum_{e} \lambda_e \cdot (\text{PortOut}_{\text{src}(e)}(r_x) - \text{PortIn}_{\text{dst}(e)}(r_x)),
 \]
-where \(\lambda_e\) are transcript challenges to prevent cancellation.
-
-This design **does not rely** on Stage 1 instances sharing a common opening point; Stage 1d introduces its own shared point(s)
-for wiring.
-
-#### Connection to the external pairing boundary
-
-The Dory verifier’s final optimized check is a **3-way multi-pairing** (see `third-party/dory/src/reduce_and_fold.rs::DoryVerifierState::verify_final`).
-We do not prove pairings inside this SNARK. Instead:
-- the recursion witness includes all non-pairing operations that produce the three pairing input pairs, and
-- the recursion SNARK exposes those three (G1,G2) pairs as public outputs,
-so the outside verifier can perform the final pairing check.
+where \(\lambda_e\) are transcript challenges (Fiat–Shamir) to prevent cancellation.
 
 ---
 
-## 3. Stage 2: Direct Evaluation Protocol
+## 4. Stage 3: Direct Evaluation (Virtualization)
 
-After Stage 1, we have many virtual polynomial claims $(v_0, v_1, \ldots, v_{n-1})$ at point $r_x$. Stage 2 verifies these claims directly without sumcheck.
-
-### 3.1 Why Direct Evaluation
+### 4.1 Why Direct Evaluation
 
 The constraint matrix $M$ has a special structure:
 $$M(i, r_x) = v_i \text{ for all } i$$
@@ -973,7 +968,7 @@ $$M(r_s, r_x) = \sum_{i \in \{0,1\}^{\log n}} \text{eq}(r_s, i) \cdot M(i, r_x) 
 
 This allows direct computation without sumcheck rounds.
 
-### 3.2 Matrix Organization
+### 4.2 Matrix Organization
 
 Define matrix $M : \{0,1\}^s \times \{0,1\}^x \to \mathbb{F}_q$ where:
 - Row index $s$ selects polynomial type and constraint index
@@ -994,10 +989,12 @@ This includes:
 - G2 scalar mul ports (same, with Fq2 split into c0/c1 components)
 - (NEW) G1 add / G2 add ports (for explicit add nodes in Dory’s AST)
 
-**Implementation note**: The exact enumeration and ordering is an implementation detail of the recursion constraint system
-(see `jolt-core/src/zkvm/recursion/constraints_sys.rs`), and should be treated as authoritative over any hard-coded table here.
+**Implementation notes**:
+- The exact enumeration and ordering is defined by the `PolyType` enum in `jolt-core/src/zkvm/recursion/constraints_sys.rs`.
+- There are currently **64 polynomial types** (`NUM_TYPES = 64`).
+- **G1Add/G2Add status**: The `PolyType` enum entries are defined, but matrix evaluation is not yet integrated (see `constraints_sys.rs:2339-2342`).
 
-### 3.3 Direct Evaluation Protocol
+### 4.3 Direct Evaluation Protocol
 
 **Input**: Virtual claims $\{v_i\}$ from Stage 1 at point $r_x$
 
@@ -1040,11 +1037,11 @@ The verifier computes exactly this sum, so the protocol is perfectly sound. □
 
 ---
 
-## 4. Stage 3: Jagged Transform Sum-Check
+## 5. Stage 4: Jagged Transform Sum-Check
 
-The matrix $M$ is sparse: 4-variable polynomials (GT) are zero-padded to 8 variables. Stage 3 compresses to a dense representation.
+The matrix $M$ is sparse: 4-variable polynomials (GT) are zero-padded to 8 variables. Stage 4 compresses to a dense representation.
 
-### 4.1 Why Jaggedness
+### 5.1 Why Jaggedness
 
 | Operation | Native Variables | Native Size | Padded Size |
 |-----------|-----------------|-------------|-------------|
@@ -1053,7 +1050,7 @@ The matrix $M$ is sparse: 4-variable polynomials (GT) are zero-padded to 8 varia
 
 The jagged transform eliminates redundant zeros, reducing commitment size.
 
-### 4.2 Sparse-to-Dense Bijection
+### 5.2 Sparse-to-Dense Bijection
 
 **Sparse**: $M(s, x)$ with row $s$ and column $x \in \{0,1\}^8$
 
@@ -1064,7 +1061,7 @@ Bijection:
 - `col(i)` = evaluation index within that polynomial
 - Cumulative sizes track where each polynomial's entries begin
 
-### 4.3 Differences from Jagged PCS Paper
+### 5.3 Differences from Jagged PCS Paper
 
 | Paper | Our Implementation |
 |-------|-------------------|
@@ -1074,13 +1071,13 @@ Bijection:
 
 The three-level mapping handles multiple polynomial types per constraint.
 
-### 4.4 The Jagged Indicator Function
+### 5.4 The Jagged Indicator Function
 
 $$\hat{f}_{\text{jagged}}(r_s, r_x, r_{\text{dense}}) = \sum_{y \in \text{rows}} \text{eq}(r_s, y) \cdot \hat{g}(r_x, r_{\text{dense}}, t_{y-1}, t_y)$$
 
 where $g(a, b, c, d) = 1$ iff $b < d$ AND $b = a + c$.
 
-### 4.5 Branching Program Optimization
+### 5.5 Branching Program Optimization
 
 The function $\hat{g}$ can be computed in $O(n)$ time via a width-4 read-once branching program:
 - Tracks carry bit (addition check: $b = a + c$)
@@ -1089,7 +1086,7 @@ The function $\hat{g}$ can be computed in $O(n)$ time via a width-4 read-once br
 
 This avoids naive $O(2^{4n})$ computation.
 
-### 4.6 Sum-Check Protocol
+### 5.6 Sum-Check Protocol
 
 **Input**: $M(r_{s,\text{final}}, r_x) = v_{\text{sparse}}$ from Stage 2
 
@@ -1105,7 +1102,7 @@ $$v_{\text{sparse}} = \sum_{i \in \{0,1\}^{\ell_{\text{dense}}}} q(i) \cdot \hat
 
 **Output**: $(q, r_{\text{dense}}, v_{\text{dense}})$
 
-### 4.7 Stage 3b: Jagged Assist
+### 5.7 Stage 4b: Jagged Assist
 
 After Stage 3's sumcheck, the verifier must compute:
 $$\hat{f}_{\text{jagged}}(r_s, r_x, r_{\text{dense}}) = \sum_{y \in [K]} \text{eq}(r_s, y) \cdot \hat{g}(r_x, r_{\text{dense}}, t_{y-1}, t_y)$$
@@ -1156,24 +1153,24 @@ The protocol leverages Lemma 4.6 (forward-backward decomposition) for efficient 
 
 ---
 
-## 5. Stage 4: Opening Proof (Hyrax over Grumpkin)
+## 6. Stage 5: Opening Proof (Hyrax over Grumpkin)
 
-Stage 4 proves the dense polynomial claim using Hyrax.
+Stage 5 proves the dense polynomial claim using Hyrax.
 
-### 5.1 Why Hyrax
+### 6.1 Why Hyrax
 
 - **No pairing required**: Works over any curve with efficient MSM
 - **Grumpkin-native**: Scalar field = $\mathbb{F}_q$, matching our constraint field
 - **Square matrix efficiency**: Optimal for virtualized polynomials
 
-### 5.2 Commitment Structure
+### 6.2 Commitment Structure
 
 For polynomial $q$ with $2^n$ evaluations:
 1. Reshape as $2^{n_r} \times 2^{n_c}$ matrix
 2. Commit to each row via Pedersen over Grumpkin
 3. Commitment: $C = \{C_0, \ldots, C_{2^{n_r}-1}\}$
 
-### 5.3 Opening Protocol
+### 6.3 Opening Protocol
 
 **Input**: Commitment $C$, point $r_{\text{dense}}$, claimed value $v_{\text{dense}}$
 
@@ -1183,36 +1180,40 @@ For polynomial $q$ with $2^n$ evaluations:
 3. Column opening proves consistency
 4. Verifier checks against commitment
 
-### 5.4 Final Verification
+### 6.4 Final Verification
 
 The verifier accepts iff all checks pass:
-- Stage 1-3 sum-check verifications
+- Stage 1, 3, 4 sum-check verifications
+- Stage 2 wiring check (when implemented)
 - Hyrax opening verification
 
 ---
 
-## 6. Parameters & Cost Analysis
+## 7. Parameters & Cost Analysis
 
 This section provides analytical formulas for proof sizes, constraint counts, and computational costs.
 
-### 6.1 Sumcheck Degrees and Rounds
+### 7.1 Sumcheck Degrees and Rounds
 
 | Stage | Protocol | Degree | Rounds | Elements/Round |
 |-------|----------|--------|--------|----------------|
 | 1 | GT Exponentiation (unpacked) | 4 | 4 | 5 |
-| 1 | GT Exponentiation (packed) | 4 | 11 | 5 |
-| 1 | GT Multiplication | 3 | 4 | 4 |
-| 1 | G1 Scalar Multiplication | 6 | $\ell$ | 7 |
-| 2 | Direct Evaluation | - | 0 | 1 |
-| 3 | Jagged Transform | 2 | $d$ | 3 |
-| 3b | Jagged Assist | 2 | $2m$ | 3 |
+| 1 | GT Exponentiation (packed) | 7 | 11 | 8 |
+| 1 | GT Multiplication | 3 | 11 | 4 |
+| 1 | G1 Scalar Multiplication | 6 | 11 | 7 |
+| 2 | Wiring (NOT YET IMPL) | - | - | - |
+| 3 | Direct Evaluation | - | 0 | 1 |
+| 4 | Jagged Transform | 2 | $d$ | 3 |
+| 4b | Jagged Assist | 2 | $2m$ | 3 |
+
+**Note**: GT Multiplication uses 11 rounds (padded from 4 native variables to 11 for uniform matrix layout).
 
 Where:
 - $\ell = \lceil \log_2 n \rceil$ for $n$-bit scalar
 - $d = \lceil \log_2(\text{dense\_size}) \rceil$
 - $m = $ number of jagged indicator evaluations (typically $\log K$ where $K$ is polynomial count)
 
-### 6.2 Constraint Counts
+### 7.2 Constraint Counts
 
 **Per-operation constraints** (high level):
 
@@ -1227,7 +1228,7 @@ Where:
 **Implementation note**: The exact set of “poly types” that become matrix rows is defined by the recursion constraint system
 (`jolt-core/src/zkvm/recursion/constraints_sys.rs`) and is the authoritative source of truth.
 
-### 6.3 Matrix Dimensions
+### 7.3 Matrix Dimensions
 
 **Row count**:
 $$\text{num\_rows} = \text{NUM\_POLY\_TYPES} \times c_{\text{pad}}$$
@@ -1250,7 +1251,7 @@ where $c_{\text{pad}} = 2^{\lceil \log_2 c \rceil}$ and $c$ = total constraints.
 | num\_rows | $\text{NUM\_POLY\_TYPES} \times 16$ | (depends on implementation) |
 | num\_s\_vars | $\lceil \log_2(\text{num\_rows}) \rceil$ | (depends on implementation) |
 
-### 6.4 Dense Size Computation
+### 7.4 Dense Size Computation
 
 The jagged transform compresses the sparse matrix by removing zero-padding:
 
@@ -1271,7 +1272,7 @@ where:
 
 $\Rightarrow d = \lceil \log_2 2112 \rceil = 12$ rounds for Stage 3.
 
-### 6.5 Proof Size Formulas
+### 7.5 Proof Size Formulas
 
 **Stage 1** (sumcheck messages):
 $$|P_1| = \sum_{\text{type } t} (\text{degree}_t + 1) \times \text{rounds}_t$$
@@ -1289,7 +1290,7 @@ $$|P_2| = 1 \text{ element}$$
 **Stage 3** (jagged transform):
 $$|P_3| = 3d \text{ elements}$$
 
-**Stage 3b** (jagged assist):
+**Stage 4b** (jagged assist):
 $$|P_{3b}| = K + 3(2m) \text{ elements}$$
 where $K$ is the number of $\hat{g}$ evaluations sent
 
@@ -1299,7 +1300,7 @@ $$|P_4| = O(\sqrt{\text{dense\_size}}) \text{ group elements}$$
 **Total proof size** (field elements, excluding PCS):
 $$|P| = |P_1| + |P_2| + |P_3| + |P_{3b}| + \text{virtual claims}$$
 
-### 6.6 Concrete Example: Single 256-bit GT Exponentiation (Unpacked vs Packed)
+### 7.6 Concrete Example: Single 256-bit GT Exponentiation (Unpacked vs Packed)
 
 This example isolates just the Stage 1 representation cost for a single 256-bit exponentiation.
 
@@ -1316,7 +1317,7 @@ This example isolates just the Stage 1 representation cost for a single 256-bit 
 **Note**: End-to-end Stage 2/3/4 costs depend on the full recursion constraint system (all op types in scope, padding rules, and
 `NUM_POLY_TYPES`), so they are intentionally not hard-coded in this single-op example.
 
-### 6.7 Prover Complexity
+### 7.7 Prover Complexity
 
 | Stage | Operation | Complexity |
 |-------|-----------|------------|
@@ -1329,7 +1330,7 @@ This example isolates just the Stage 1 representation cost for a single 256-bit 
 
 **Parallelization**: Stage 1's three constraint types run in parallel.
 
-### 6.8 Verifier Complexity
+### 7.8 Verifier Complexity
 
 | Stage | Operation | Complexity |
 |-------|-----------|------------|
@@ -1340,7 +1341,7 @@ This example isolates just the Stage 1 representation cost for a single 256-bit 
 
 **Key efficiency**: Stage 3 verifier uses $O(n)$ branching program instead of naive $O(2^{4n})$ MLE evaluation.
 
-### 6.9 Comparison: Sparse vs Dense
+### 7.9 Comparison: Sparse vs Dense
 
 Without jagged transform (sparse):
 - Matrix size: $15 \cdot c_{\text{pad}} \times 256$
@@ -1352,24 +1353,24 @@ With jagged transform (dense):
 
 This compression directly reduces:
 - PCS commitment size
-- Stage 3 prover work
+- Stage 4 prover work
 - Hyrax opening proof size
 
-### 6.10 Scaling Summary
+### 7.10 Scaling Summary
 
 | Metric | Formula | 256-bit GT Exp |
 |--------|---------|----------------|
 | Constraints | $t$ (bit-length) | 256 |
-| Stage 1 rounds | 4 (fixed for GT) | 4 |
-| Stage 2 rounds | $\lceil \log_2(15c) \rceil$ | 12 |
-| Stage 3 rounds | $\lceil \log_2(4tc \cdot 16) \rceil$ | 14 |
+| Stage 1 rounds | 11 (packed GT) | 11 |
+| Stage 3 rounds | $\lceil \log_2(15c) \rceil$ | 12 |
+| Stage 4 rounds | $\lceil \log_2(4tc \cdot 16) \rceil$ | 14 |
 | Proof elements | $O(c + \log c)$ | ~1,100 |
-| Prover time | $O(c \cdot 2^4)$ | ~4,000 ops |
+| Prover time | $O(c \cdot 2^{11})$ | ~4,000 ops |
 | Verifier time | $O(c + \text{polys} \cdot \text{bits})$ | ~15,000 ops |
 
 The protocol achieves **logarithmic scaling** in proof size relative to constraint count, with linear prover work and near-linear verifier work.
 
-### 6.11 Unified Polynomial Cost Analysis
+### 7.11 Unified Polynomial Cost Analysis
 
 The packed GT exponentiation optimization dramatically reduces system costs:
 
@@ -1380,7 +1381,7 @@ The packed GT exponentiation optimization dramatically reduces system costs:
 | Unpacked | $4t$ | ~32 MB | $4t \times 2^4 \times 32$ bytes |
 | Packed | 3 | ~0.2 MB | $3 \times 2^{11} \times 32$ bytes |
 
-**Stage 2 Virtual Claims**:
+**Stage 3 Virtual Claims**:
 
 | Approach | Virtual Claims | Verifier Work |
 |----------|---------------|---------------|
@@ -1389,7 +1390,7 @@ The packed GT exponentiation optimization dramatically reduces system costs:
 
 **Impact on Later Stages**:
 - Stage 3 processes fewer polynomials (3 vs 1,024)
-- Stage 3b benefits from reduced $K$ in batch verification
+- Stage 4b benefits from reduced $K$ in batch verification
 - Hyrax commitment is more efficient with fewer polynomials
 
 **Trade-offs**:
@@ -1400,38 +1401,54 @@ The packed GT exponentiation optimization dramatically reduces system costs:
 
 ---
 
-## 7. Implementation
+## 8. Implementation
 
 This section describes the code architecture and data flow for the recursion implementation.
 
-### 7.1 Module Structure
+### 8.1 Module Structure
 
 ```
 jolt-core/src/zkvm/recursion/
 ├── mod.rs                    # Re-exports and module docs
 ├── witness.rs                # Witness types (GTExpWitness, GTMulWitness, G1ScalarMulWitness)
 ├── constraints_sys.rs        # DoryMatrixBuilder, DoryMultilinearMatrix, ConstraintSystem
+├── constraint_config.rs      # Central var-count configuration (step/element/padded sizes)
 ├── bijection.rs              # VarCountJaggedBijection, JaggedTransform trait
 ├── recursion_prover.rs       # RecursionProver orchestrating all stages
 ├── recursion_verifier.rs     # RecursionVerifier
-├── stage1/
-│   ├── packed_gt_exp.rs         # Packed GT exponentiation sumcheck (base-4 digits)
-│   ├── shift_rho.rs             # Shift consistency for packed GT exp (Stage 1b)
+├── stage1/                   # Stage 1: Constraint sumchecks (packed GT exp)
+│   ├── mod.rs
+│   └── gt_exp.rs                # Packed GT exponentiation sumcheck (base-4 digits)
+├── stage2/                   # Stage 1: Constraint sumchecks (other ops) + Stage 1b (shift)
+│   ├── mod.rs
 │   ├── gt_mul.rs                # GT multiplication sumcheck
 │   ├── g1_scalar_mul.rs         # G1 scalar mul sumcheck
 │   ├── g2_scalar_mul.rs         # G2 scalar mul sumcheck
-│   ├── g1_add.rs                # (NEW) G1 addition sumcheck
-│   ├── g2_add.rs                # (NEW) G2 addition sumcheck
-│   ├── boundary_constraints.rs  # Initial/final state checks (Stage 1c)
-│   └── wiring.rs                # AST-derived wiring/copy constraints (Stage 1d)
-├── stage2/
+│   ├── g1_add.rs                # G1 addition sumcheck
+│   ├── g2_add.rs                # G2 addition sumcheck
+│   ├── shift_rho.rs             # Stage 1b: Shift consistency for packed GT exp (optional)
+│   └── packed_gt_exp_reduction.rs # Packed GT exp claim reduction (optional)
+├── stage3/                   # Stage 3: Direct Evaluation (Virtualization)
+│   ├── mod.rs
 │   └── virtualization.rs        # Direct evaluation protocol
-└── stage3/
-    ├── jagged.rs                # Jagged transform sumcheck
-    └── branching_program.rs     # O(n) MLE evaluation for g function
+├── stage4/                   # Stage 4: Jagged Transform
+│   ├── mod.rs
+│   ├── jagged.rs                # Jagged transform sumcheck
+│   └── branching_program.rs     # O(n) MLE evaluation for g function
+└── stage5/                   # Stage 4b: Jagged Assist
+    ├── mod.rs
+    └── jagged_assist.rs         # Jagged assist batch verification
 ```
 
-### 7.2 The Offloading Pattern
+**Note on directory vs spec stage naming**: The directory names (`stage1/` through `stage5/`) are a historical artifact. The spec stages are:
+- Stage 1 = Constraint sumchecks (files in `stage1/` and `stage2/`)
+- Stage 2 = Wiring (NOT YET IMPLEMENTED)
+- Stage 3 = Direct Evaluation (files in `stage3/`)
+- Stage 4 = Jagged Transform (files in `stage4/`)
+- Stage 4b = Jagged Assist (files in `stage5/`)
+- Stage 5 = Hyrax Opening (in prover/verifier)
+
+### 8.2 The Offloading Pattern
 
 The revised design treats the **Dory proof** as the ground truth and does **not** rely on a “HintMap” that supplies intermediate
 group elements to the verifier.
@@ -1473,7 +1490,7 @@ At a high level:
 **Implementation note**: Dory already supports collecting an AST during verification via
 `TraceContext::for_witness_gen_with_ast()` and extracting it via `finalize_with_ast()`.
 
-### 7.3 Witness Types
+### 8.3 Witness Types
 
 Each expensive operation has a corresponding witness structure:
 
@@ -1569,7 +1586,7 @@ Layout: For 11-variable MLEs with `s ∈ {0,1}^7` and `x ∈ {0,1}^4`:
 - `rho_packed[x * 128 + s] = ρ_s[x]`
 - Each packed table has 2^11 = 2,048 evaluations
 
-### 7.4 Constraint System Construction
+### 8.4 Constraint System Construction
 
 The recursion constraint system is constructed from:
 
@@ -1610,7 +1627,7 @@ where:
   num_x_vars = 8  (max of 4-var GT and 8-var G1 polynomials)
 ```
 
-### 7.5 Prover Flow
+### 8.5 Prover Flow
 
 ```rust
 impl RecursionProver {
@@ -1658,7 +1675,7 @@ impl RecursionProver {
 }
 ```
 
-### 7.6 Verifier Flow
+### 8.6 Verifier Flow
 
 ```rust
 impl RecursionVerifier {
@@ -1703,7 +1720,7 @@ impl RecursionVerifier {
 }
 ```
 
-### 7.7 Opening Accumulator
+### 8.7 Opening Accumulator
 
 The `OpeningAccumulator` tracks virtual polynomial claims across stages:
 
@@ -1716,7 +1733,7 @@ accumulator.append_virtual(
     claimed_value,
 );
 
-// Stage 2 reads Stage 1 claims
+// Stage 3 reads Stage 1 claims
 let (point, value) = accumulator.get_virtual_polynomial_opening(
     VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho, instance: i }),
     SumcheckId::GtExp,
@@ -1730,7 +1747,7 @@ accumulator.append_committed(
 );
 ```
 
-### 7.8 Jagged Bijection
+### 8.8 Jagged Bijection
 
 The `VarCountJaggedBijection` maps between sparse and dense indices:
 
@@ -1759,7 +1776,7 @@ impl JaggedTransform for VarCountJaggedBijection {
 }
 ```
 
-### 7.9 Matrix Row Mapping
+### 8.9 Matrix Row Mapping
 
 The three-level mapping converts polynomial indices to matrix rows:
 
@@ -1785,14 +1802,14 @@ let matrix_rows: Vec<usize> = (0..num_polynomials)
     .collect();
 ```
 
-### 7.10 Polynomial Type Enumeration
+### 8.10 Polynomial Type Enumeration
 
 The recursion matrix row layout is an encoding detail of the constraint system and evolves as we add new op types (e.g., G1/G2 add)
 and refine packed protocols (e.g., packed GT exp). The authoritative definition is the `PolyType` enum in:
 
 - `jolt-core/src/zkvm/recursion/constraints_sys.rs`
 
-### 7.11 Dory Integration: Witness + AST Extraction (No HintMap)
+### 8.11 Dory Integration: Witness + AST Extraction (No HintMap)
 
 We run Dory verification once (prover-side) with a trace context that records:
 
@@ -1811,7 +1828,7 @@ let (witnesses_opt, ast_opt) = Rc::try_unwrap(ctx).ok().unwrap().finalize_with_a
 reconstructs the same AST skeleton deterministically from public inputs (Dory proof, setup, and transcript-derived scalars), without performing
 any expensive group operations.
 
-### 7.12 GPU Considerations
+### 8.12 GPU Considerations
 
 The recursion prover has a clear separation between orchestration logic (Rust) and compute-intensive kernels (GPU).
 

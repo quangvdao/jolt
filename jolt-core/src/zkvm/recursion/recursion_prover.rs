@@ -34,11 +34,7 @@ use crate::zkvm::recursion::DoryMatrixBuilder;
 use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
     stage1::gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
-    stage2::{
-        g1_scalar_mul::G1ScalarMulParams,
-        g2_scalar_mul::G2ScalarMulParams,
-        gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
-    },
+    stage2::gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
     stage3::virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
     },
@@ -672,7 +668,8 @@ impl RecursionProver<Fq> {
             self.constraint_system.extract_g1_scalar_mul_constraints();
         if !g1_scalar_mul_constraints_tuples.is_empty() {
             use super::stage2::g1_scalar_mul::{
-                G1ScalarMulConstraintPolynomials, G1ScalarMulProver, G1ScalarMulProverSpec,
+                G1ScalarMulConstraintPolynomials, G1ScalarMulParams, G1ScalarMulProver,
+                G1ScalarMulProverSpec,
             };
 
             debug_assert_eq!(
@@ -681,29 +678,33 @@ impl RecursionProver<Fq> {
                 "ConstraintSystem.g1_scalar_mul_public_inputs must match extracted G1 scalar-mul constraints"
             );
 
-            // Convert witness structs to constraint polynomials
-            let g1_scalar_mul_constraints: Vec<G1ScalarMulConstraintPolynomials> =
-                g1_scalar_mul_constraints_tuples
-                    .into_iter()
-                    .map(|w| G1ScalarMulConstraintPolynomials {
-                        x_a: w.x_a,
-                        y_a: w.y_a,
-                        x_t: w.x_t,
-                        y_t: w.y_t,
-                        x_a_next: w.x_a_next,
-                        y_a_next: w.y_a_next,
-                        t_is_infinity: w.t_indicator,
-                        a_is_infinity: w.a_indicator,
-                        base_point: w.base_point,
-                        constraint_index: w.constraint_index,
-                    })
-                    .collect();
+            // Convert witness structs to constraint polynomials and base_points
+            let mut g1_scalar_mul_constraints: Vec<G1ScalarMulConstraintPolynomials<Fq>> =
+                Vec::with_capacity(g1_scalar_mul_constraints_tuples.len());
+            let mut g1_scalar_mul_base_points: Vec<(Fq, Fq)> =
+                Vec::with_capacity(g1_scalar_mul_constraints_tuples.len());
+
+            for w in g1_scalar_mul_constraints_tuples {
+                g1_scalar_mul_constraints.push(G1ScalarMulConstraintPolynomials {
+                    x_a: w.x_a,
+                    y_a: w.y_a,
+                    x_t: w.x_t,
+                    y_t: w.y_t,
+                    x_a_next: w.x_a_next,
+                    y_a_next: w.y_a_next,
+                    t_indicator: w.t_indicator,
+                    a_indicator: w.a_indicator,
+                    constraint_index: w.constraint_index,
+                });
+                g1_scalar_mul_base_points.push(w.base_point);
+            }
 
             let params = G1ScalarMulParams::new(g1_scalar_mul_constraints.len());
             let (spec, constraint_indices) = G1ScalarMulProverSpec::new(
                 params,
                 g1_scalar_mul_constraints,
                 &self.constraint_system.g1_scalar_mul_public_inputs,
+                g1_scalar_mul_base_points,
             );
             let prover = G1ScalarMulProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
@@ -714,7 +715,8 @@ impl RecursionProver<Fq> {
             self.constraint_system.extract_g2_scalar_mul_constraints();
         if !g2_scalar_mul_constraints_tuples.is_empty() {
             use super::stage2::g2_scalar_mul::{
-                G2ScalarMulConstraintPolynomials, G2ScalarMulProver, G2ScalarMulProverSpec,
+                G2ScalarMulConstraintPolynomials, G2ScalarMulParams, G2ScalarMulProver,
+                G2ScalarMulProverSpec,
             };
 
             debug_assert_eq!(
@@ -723,35 +725,38 @@ impl RecursionProver<Fq> {
                 "ConstraintSystem.g2_scalar_mul_public_inputs must match extracted G2 scalar-mul constraints"
             );
 
-            // Convert witness structs to constraint polynomials
-            let g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials<Fq>> =
-                g2_scalar_mul_constraints_tuples
-                    .into_iter()
-                    .map(|w| G2ScalarMulConstraintPolynomials::<Fq> {
-                        x_a_c0: w.x_a_c0,
-                        x_a_c1: w.x_a_c1,
-                        y_a_c0: w.y_a_c0,
-                        y_a_c1: w.y_a_c1,
-                        x_t_c0: w.x_t_c0,
-                        x_t_c1: w.x_t_c1,
-                        y_t_c0: w.y_t_c0,
-                        y_t_c1: w.y_t_c1,
-                        x_a_next_c0: w.x_a_next_c0,
-                        x_a_next_c1: w.x_a_next_c1,
-                        y_a_next_c0: w.y_a_next_c0,
-                        y_a_next_c1: w.y_a_next_c1,
-                        t_is_infinity: w.t_indicator,
-                        a_is_infinity: w.a_indicator,
-                        base_point: w.base_point,
-                        constraint_index: w.constraint_index,
-                    })
-                    .collect();
+            // Convert witness structs to constraint polynomials and base_points
+            let mut g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials<Fq>> =
+                Vec::with_capacity(g2_scalar_mul_constraints_tuples.len());
+            let mut g2_scalar_mul_base_points = Vec::with_capacity(g2_scalar_mul_constraints_tuples.len());
+
+            for w in g2_scalar_mul_constraints_tuples {
+                g2_scalar_mul_constraints.push(G2ScalarMulConstraintPolynomials {
+                    x_a_c0: w.x_a_c0,
+                    x_a_c1: w.x_a_c1,
+                    y_a_c0: w.y_a_c0,
+                    y_a_c1: w.y_a_c1,
+                    x_t_c0: w.x_t_c0,
+                    x_t_c1: w.x_t_c1,
+                    y_t_c0: w.y_t_c0,
+                    y_t_c1: w.y_t_c1,
+                    x_a_next_c0: w.x_a_next_c0,
+                    x_a_next_c1: w.x_a_next_c1,
+                    y_a_next_c0: w.y_a_next_c0,
+                    y_a_next_c1: w.y_a_next_c1,
+                    t_indicator: w.t_indicator,
+                    a_indicator: w.a_indicator,
+                    constraint_index: w.constraint_index,
+                });
+                g2_scalar_mul_base_points.push(w.base_point);
+            }
 
             let params = G2ScalarMulParams::new(g2_scalar_mul_constraints.len());
             let (spec, constraint_indices) = G2ScalarMulProverSpec::new(
                 params,
                 g2_scalar_mul_constraints,
                 &self.constraint_system.g2_scalar_mul_public_inputs,
+                g2_scalar_mul_base_points,
             );
             let prover = G2ScalarMulProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));

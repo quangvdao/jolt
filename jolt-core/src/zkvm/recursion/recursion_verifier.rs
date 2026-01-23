@@ -26,9 +26,9 @@ use super::{
     stage1::gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
     stage2::{
         g1_add::G1AddParams,
-        g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs},
+        g1_scalar_mul::G1ScalarMulPublicInputs,
         g2_add::G2AddParams,
-        g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs},
+        g2_scalar_mul::G2ScalarMulPublicInputs,
         gt_mul::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
     },
     stage3::virtualization::{
@@ -234,7 +234,9 @@ impl RecursionVerifier<Fq> {
 
         // Add G1 scalar mul verifier if we have G1 scalar mul constraints
         if num_g1_scalar_mul > 0 {
-            use super::stage2::g1_scalar_mul::{G1ScalarMulVerifier, G1ScalarMulVerifierSpec};
+            use super::stage2::g1_scalar_mul::{
+                G1ScalarMulParams, G1ScalarMulVerifier, G1ScalarMulVerifierSpec,
+            };
 
             let params = G1ScalarMulParams::new(num_g1_scalar_mul);
             debug_assert_eq!(
@@ -244,8 +246,8 @@ impl RecursionVerifier<Fq> {
             );
             let spec = G1ScalarMulVerifierSpec::new(
                 params,
-                g1_scalar_mul_base_points,
                 self.input.g1_scalar_mul_public_inputs.clone(),
+                g1_scalar_mul_base_points,
             );
             let verifier = G1ScalarMulVerifier::from_spec(spec, g1_scalar_mul_indices, transcript);
             verifiers.push(Box::new(verifier));
@@ -253,7 +255,9 @@ impl RecursionVerifier<Fq> {
 
         // Add G2 scalar mul verifier if we have G2 scalar mul constraints
         if num_g2_scalar_mul > 0 {
-            use super::stage2::g2_scalar_mul::{G2ScalarMulVerifier, G2ScalarMulVerifierSpec};
+            use super::stage2::g2_scalar_mul::{
+                G2ScalarMulParams, G2ScalarMulVerifier, G2ScalarMulVerifierSpec,
+            };
 
             let params = G2ScalarMulParams::new(num_g2_scalar_mul);
             debug_assert_eq!(
@@ -263,8 +267,8 @@ impl RecursionVerifier<Fq> {
             );
             let spec = G2ScalarMulVerifierSpec::new(
                 params,
-                g2_scalar_mul_base_points,
                 self.input.g2_scalar_mul_public_inputs.clone(),
+                g2_scalar_mul_base_points,
             );
             let verifier = G2ScalarMulVerifier::from_spec(spec, g2_scalar_mul_indices, transcript);
             verifiers.push(Box::new(verifier));

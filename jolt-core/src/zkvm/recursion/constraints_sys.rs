@@ -16,8 +16,8 @@ use crate::{
     transcripts::Transcript,
     utils::errors::ProofVerifyError,
     zkvm::recursion::{
-        stage2::g1_scalar_mul::{G1ScalarMulPublicInputs, G1ScalarMulWitness},
-        stage2::g2_scalar_mul::{G2ScalarMulPublicInputs, G2ScalarMulWitness},
+        stage2::g1_scalar_mul::G1ScalarMulPublicInputs,
+        stage2::g2_scalar_mul::G2ScalarMulPublicInputs,
         stage1::gt_exp::PackedGtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
@@ -1629,7 +1629,7 @@ impl ConstraintSystem {
     ///
     /// Returns a vector of [`G1ScalarMulWitness`] containing the witness polynomials
     /// for each G1 scalar multiplication constraint.
-    pub fn extract_g1_scalar_mul_constraints(&self) -> Vec<G1ScalarMulWitness> {
+    pub fn extract_g1_scalar_mul_constraints(&self) -> Vec<G1ScalarMulWitness<Fq>> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
@@ -1677,7 +1677,7 @@ impl ConstraintSystem {
     ///
     /// Returns a vector of [`G2ScalarMulWitness`] containing the witness polynomials
     /// for each G2 scalar multiplication constraint.
-    pub fn extract_g2_scalar_mul_constraints(&self) -> Vec<G2ScalarMulWitness> {
+    pub fn extract_g2_scalar_mul_constraints(&self) -> Vec<G2ScalarMulWitness<Fq>> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
@@ -2657,4 +2657,48 @@ mod tests {
         )
         .expect("Verification without hint should also succeed");
     }
+}
+
+// =============================================================================
+// Witness Types for Constraint Extraction
+// =============================================================================
+//
+// These intermediate types are returned by the `extract_*_constraints` methods.
+// They bundle the constraint polynomials with per-instance data (like base_point)
+// needed by the prover.
+
+/// Witness data for a single G1 scalar multiplication constraint.
+#[derive(Clone, Debug)]
+pub struct G1ScalarMulWitness<F> {
+    pub constraint_index: usize,
+    pub base_point: (Fq, Fq),
+    pub x_a: Vec<F>,
+    pub y_a: Vec<F>,
+    pub x_t: Vec<F>,
+    pub y_t: Vec<F>,
+    pub x_a_next: Vec<F>,
+    pub y_a_next: Vec<F>,
+    pub t_indicator: Vec<F>,
+    pub a_indicator: Vec<F>,
+}
+
+/// Witness data for a single G2 scalar multiplication constraint.
+#[derive(Clone, Debug)]
+pub struct G2ScalarMulWitness<F> {
+    pub constraint_index: usize,
+    pub base_point: (Fq2, Fq2),
+    pub x_a_c0: Vec<F>,
+    pub x_a_c1: Vec<F>,
+    pub y_a_c0: Vec<F>,
+    pub y_a_c1: Vec<F>,
+    pub x_t_c0: Vec<F>,
+    pub x_t_c1: Vec<F>,
+    pub y_t_c0: Vec<F>,
+    pub y_t_c1: Vec<F>,
+    pub x_a_next_c0: Vec<F>,
+    pub x_a_next_c1: Vec<F>,
+    pub y_a_next_c0: Vec<F>,
+    pub y_a_next_c1: Vec<F>,
+    pub t_indicator: Vec<F>,
+    pub a_indicator: Vec<F>,
 }

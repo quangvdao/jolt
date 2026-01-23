@@ -1963,6 +1963,7 @@ dependencies = [
  "indicatif",
  "inferno 0.12.4",
  "itertools 0.10.5",
+ "jolt-inlines-grumpkin",
  "jolt-inlines-keccak256",
  "jolt-inlines-sha2",
  "jolt-optimizations",

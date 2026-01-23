@@ -7,6 +7,8 @@
 
 #![cfg_attr(not(feature = "host"), no_std)]
 
+extern crate alloc;
+
 pub const INLINE_OPCODE: u32 = 0x0B;
 pub const GRUMPKIN_FUNCT7: u32 = 0x06;
 
@@ -29,6 +31,9 @@ pub const GRUMPKIN_GLVR_ADV_NAME: &str = "GRUMPKIN_GLVR_ADV";
 
 pub mod sdk;
 pub use sdk::*;
+
+pub mod msm;
+pub use msm::*;
 
 #[cfg(feature = "host")]
 pub mod sequence_builder;

@@ -280,158 +280,104 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
             "Normalized row commitments"
         );
 
-        // Single-threaded Pippenger MSM closure for ZKVM environment
-        let pippenger_msm = |bases: &[G::Affine], scalars: &[G::ScalarField]| -> G {
-            use ark_ff::BigInteger;
+        // In ZKVM guest environment, use grumpkin MSM (GLV + Pippenger) so that
+        // group ops exercise the grumpkin inlines (division + GLV decomposition).
+        let msm_eq = if cfg!(target_arch = "riscv64") || cfg!(target_arch = "riscv32") {
+            use ark_ec::AffineRepr;
+            use core::any::TypeId;
+            use jolt_inlines_grumpkin::msm::{msm_glv_const, DEFAULT_GLV_WINDOW_BITS};
+            use jolt_inlines_grumpkin::{GrumpkinFq, GrumpkinFr, GrumpkinPoint};
 
-            if bases.is_empty() || scalars.is_empty() {
-                return G::zero();
-            }
+            debug_assert_eq!(
+                TypeId::of::<G>(),
+                TypeId::of::<ark_grumpkin::Projective>(),
+                "grumpkin MSM backend only supported for G = ark_grumpkin::Projective"
+            );
 
-            let n = bases.len().min(scalars.len());
-
-            // For small MSMs, use naive method
-            if n < 32 {
-                let mut result = G::zero();
-                for i in 0..n {
-                    result += G::from(bases[i]) * scalars[i];
+            let to_grumpkin_point = |p: &G::Affine| -> GrumpkinPoint {
+                // SAFETY: guarded by the TypeId check above in debug builds; this code path is only
+                // intended for the recursion verifier where Hyrax uses Grumpkin.
+                let p: &ark_grumpkin::Affine =
+                    unsafe { &*(p as *const G::Affine as *const ark_grumpkin::Affine) };
+                if p.is_zero() {
+                    GrumpkinPoint::infinity()
+                } else {
+                    GrumpkinPoint::new_unchecked(
+                        GrumpkinFq::new(p.x.clone()),
+                        GrumpkinFq::new(p.y.clone()),
+                    )
                 }
-                return result;
-            }
-
-            // Window size calculation (optimal for given input size)
-            let window_size = if n < 32 {
-                3
-            } else if n < 64 {
-                4
-            } else if n < 128 {
-                5
-            } else if n < 512 {
-                6
-            } else if n < 1024 {
-                7
-            } else if n < 4096 {
-                8
-            } else if n < 16384 {
-                9
-            } else {
-                10
             };
 
-            let num_buckets = 1 << window_size;
-            // Determine scalar field bit size based on the actual field type
-            // All supported fields use 254 bits
-            let scalar_bits: usize = 254;
-            let num_windows = scalar_bits.div_ceil(window_size);
-
-            let mut result = G::zero();
-
-            // Process each window
-            for window in 0..num_windows {
-                // Initialize buckets
-                let mut buckets = vec![G::zero(); num_buckets];
-
-                // Add points to buckets based on their scalar bits in this window
-                for i in 0..n {
-                    // Transmute to access PrimeField methods
-                    let scalar_bigint = unsafe {
-                        use ark_ff::PrimeField;
-                        let scalar_ptr = &scalars[i] as *const G::ScalarField;
-                        // Cast through raw pointer to preserve the actual type
-                        let scalar_ref = &*(scalar_ptr as *const dyn core::any::Any);
-
-                        // Try Grumpkin first, then BN254
-                        if let Some(grumpkin_scalar) = scalar_ref.downcast_ref::<ark_grumpkin::Fr>()
-                        {
-                            grumpkin_scalar.into_bigint()
-                        } else if let Some(bn254_scalar) =
-                            scalar_ref.downcast_ref::<ark_bn254::Fr>()
-                        {
-                            bn254_scalar.into_bigint()
-                        } else {
-                            // Fallback: assume it implements PrimeField
-                            core::mem::transmute_copy::<G::ScalarField, ark_grumpkin::Fr>(
-                                &scalars[i],
-                            )
-                            .into_bigint()
-                        }
-                    };
-
-                    // Extract the window_size bits for this window
-                    let window_start = window * window_size;
-                    let mut bucket_index = 0usize;
-
-                    for j in 0..window_size {
-                        let bit_index = window_start + j;
-                        if bit_index < scalar_bits && scalar_bigint.get_bit(bit_index) {
-                            bucket_index |= 1 << j;
-                        }
-                    }
-
-                    if bucket_index > 0 {
-                        buckets[bucket_index] += G::from(bases[i]);
-                    }
-                }
-
-                // Sum up the buckets using the Pippenger bucket method
-                let mut window_result = G::zero();
-                let mut running_sum = G::zero();
-
-                for i in (1..num_buckets).rev() {
-                    running_sum += buckets[i];
-                    window_result += running_sum;
-                }
-
-                // Shift result by window_size bits and add
-                for _ in 0..(window * window_size) {
-                    result.double_in_place();
-                }
-                result += window_result;
-            }
-
-            result
-        };
-
-        // In ZKVM guest environment, use serial Pippenger MSM to avoid rayon issues
-        let homomorphically_derived_commitment: G = if cfg!(target_arch = "riscv64")
-            || cfg!(target_arch = "riscv32")
-        {
-            let poly = MultilinearPolynomial::from(L);
-            let scalars = match &poly {
-                MultilinearPolynomial::LargeScalars(p) => p.evals_ref(),
-                _ => unreachable!("L should be LargeScalars"),
+            let to_grumpkin_scalar = |s: &G::ScalarField| -> GrumpkinFr {
+                // SAFETY: same as above.
+                let s: &ark_grumpkin::Fr =
+                    unsafe { &*(s as *const G::ScalarField as *const ark_grumpkin::Fr) };
+                GrumpkinFr::new(s.clone())
             };
-            pippenger_msm(&normalized_commitments, scalars)
+
+            let bases_1: Vec<GrumpkinPoint> = normalized_commitments
+                .iter()
+                .map(to_grumpkin_point)
+                .collect();
+            let scalars_1: Vec<GrumpkinFr> = L.iter().map(to_grumpkin_scalar).collect();
+
+            let homomorphically_derived_commitment: GrumpkinPoint =
+                msm_glv_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(
+                    &scalars_1,
+                    &bases_1,
+                );
+            tracing::debug!(
+                num_bases = bases_1.len(),
+                "MSM #1: homomorphically derived commitment (grumpkin GLV MSM)"
+            );
+
+            let bases_2: Vec<GrumpkinPoint> = pedersen_generators.generators[..R_size]
+                .iter()
+                .map(to_grumpkin_point)
+                .collect();
+            let scalars_2: Vec<GrumpkinFr> = self
+                .vector_matrix_product
+                .iter()
+                .map(to_grumpkin_scalar)
+                .collect();
+
+            let product_commitment: GrumpkinPoint =
+                msm_glv_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(&scalars_2, &bases_2);
+            tracing::debug!(
+                num_bases = bases_2.len(),
+                vector_matrix_product_len = self.vector_matrix_product.len(),
+                "MSM #2: product commitment (grumpkin GLV MSM)"
+            );
+
+            homomorphically_derived_commitment == product_commitment
         } else {
-            VariableBaseMSM::msm(&normalized_commitments, &MultilinearPolynomial::from(L)).unwrap()
-        };
-        tracing::debug!(
-            num_bases = normalized_commitments.len(),
-            "MSM #1: homomorphically derived commitment"
-        );
+            let homomorphically_derived_commitment: G =
+                VariableBaseMSM::msm(&normalized_commitments, &MultilinearPolynomial::from(L))
+                    .unwrap();
+            tracing::debug!(
+                num_bases = normalized_commitments.len(),
+                "MSM #1: homomorphically derived commitment"
+            );
 
-        let product_commitment = if cfg!(target_arch = "riscv64") || cfg!(target_arch = "riscv32") {
-            pippenger_msm(
+            let product_commitment = VariableBaseMSM::msm_field_elements(
                 &pedersen_generators.generators[..R_size],
                 &self.vector_matrix_product,
             )
-        } else {
-            VariableBaseMSM::msm_field_elements(
-                &pedersen_generators.generators[..R_size],
-                &self.vector_matrix_product,
-            )
-            .unwrap()
+            .unwrap();
+            tracing::debug!(
+                num_bases = R_size,
+                vector_matrix_product_len = self.vector_matrix_product.len(),
+                "MSM #2: product commitment"
+            );
+
+            homomorphically_derived_commitment == product_commitment
         };
-        tracing::debug!(
-            num_bases = R_size,
-            vector_matrix_product_len = self.vector_matrix_product.len(),
-            "MSM #2: product commitment"
-        );
 
         let dot_product = compute_dotproduct(&self.vector_matrix_product, &R);
         tracing::debug!("Computed dot product");
 
-        if (homomorphically_derived_commitment == product_commitment) && (dot_product == *opening) {
+        if msm_eq && (dot_product == *opening) {
             Ok(())
         } else {
             Err(ProofVerifyError::InternalError)

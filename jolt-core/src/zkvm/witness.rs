@@ -596,6 +596,168 @@ impl TermEnum for GtExpTerm {
     }
 }
 
+/// Multi-Miller loop: f_next = f^2 * l + Q*g
+#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]
+pub enum MultiMillerLoopTerm {
+    F,
+    FNext,
+    Quotient,
+    TXC0,
+    TXC1,
+    TYC0,
+    TYC1,
+    TXC0Next,
+    TXC1Next,
+    TYC0Next,
+    TYC1Next,
+    LambdaC0,
+    LambdaC1,
+    InvDeltaXC0,
+    InvDeltaXC1,
+    LC0C0,
+    LC0C1,
+    LC1C0,
+    LC1C1,
+    XP,
+    YP,
+    XQC0,
+    XQC1,
+    YQC0,
+    YQC1,
+    IsDouble,
+    IsAdd,
+    LVal,
+    G,
+    Selector0, // c0.c0
+    Selector1, // c0.c1
+    Selector2, // c1.c0
+    Selector3, // c1.c1
+    Selector4, // c2.c0 (implicit 1?)
+    Selector5, // c2.c1
+}
+
+/// Frobenius map: output = input^q
+#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]
+pub enum FrobeniusTerm {
+    Input,
+    Output,
+    FrobConst,
+}
+
+impl TermEnum for FrobeniusTerm {
+    const COUNT: usize = 3;
+
+    fn from_index(i: usize) -> Option<Self> {
+        match i {
+            0 => Some(Self::Input),
+            1 => Some(Self::Output),
+            2 => Some(Self::FrobConst),
+            _ => None,
+        }
+    }
+
+    fn to_index(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::FrobConst => "frob_const",
+        }
+    }
+}
+
+impl TermEnum for MultiMillerLoopTerm {
+    const COUNT: usize = 35;
+
+    fn from_index(i: usize) -> Option<Self> {
+        match i {
+            0 => Some(Self::F),
+            1 => Some(Self::FNext),
+            2 => Some(Self::Quotient),
+            3 => Some(Self::TXC0),
+            4 => Some(Self::TXC1),
+            5 => Some(Self::TYC0),
+            6 => Some(Self::TYC1),
+            7 => Some(Self::TXC0Next),
+            8 => Some(Self::TXC1Next),
+            9 => Some(Self::TYC0Next),
+            10 => Some(Self::TYC1Next),
+            11 => Some(Self::LambdaC0),
+            12 => Some(Self::LambdaC1),
+            13 => Some(Self::InvDeltaXC0),
+            14 => Some(Self::InvDeltaXC1),
+            15 => Some(Self::LC0C0),
+            16 => Some(Self::LC0C1),
+            17 => Some(Self::LC1C0),
+            18 => Some(Self::LC1C1),
+            19 => Some(Self::XP),
+            20 => Some(Self::YP),
+            21 => Some(Self::XQC0),
+            22 => Some(Self::XQC1),
+            23 => Some(Self::YQC0),
+            24 => Some(Self::YQC1),
+            25 => Some(Self::IsDouble),
+            26 => Some(Self::IsAdd),
+            27 => Some(Self::LVal),
+            28 => Some(Self::G),
+            29 => Some(Self::Selector0),
+            30 => Some(Self::Selector1),
+            31 => Some(Self::Selector2),
+            32 => Some(Self::Selector3),
+            33 => Some(Self::Selector4),
+            34 => Some(Self::Selector5),
+            _ => None,
+        }
+    }
+
+    fn to_index(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::F => "f",
+            Self::FNext => "f_next",
+            Self::Quotient => "quotient",
+            Self::TXC0 => "t_x_c0",
+            Self::TXC1 => "t_x_c1",
+            Self::TYC0 => "t_y_c0",
+            Self::TYC1 => "t_y_c1",
+            Self::TXC0Next => "t_x_c0_next",
+            Self::TXC1Next => "t_x_c1_next",
+            Self::TYC0Next => "t_y_c0_next",
+            Self::TYC1Next => "t_y_c1_next",
+            Self::LambdaC0 => "lambda_c0",
+            Self::LambdaC1 => "lambda_c1",
+            Self::InvDeltaXC0 => "inv_delta_x_c0",
+            Self::InvDeltaXC1 => "inv_delta_x_c1",
+            Self::LC0C0 => "l_c0_c0",
+            Self::LC0C1 => "l_c0_c1",
+            Self::LC1C0 => "l_c1_c0",
+            Self::LC1C1 => "l_c1_c1",
+            Self::XP => "x_p",
+            Self::YP => "y_p",
+            Self::XQC0 => "x_q_c0",
+            Self::XQC1 => "x_q_c1",
+            Self::YQC0 => "y_q_c0",
+            Self::YQC1 => "y_q_c1",
+            Self::IsDouble => "is_double",
+            Self::IsAdd => "is_add",
+            Self::LVal => "l_val",
+            Self::G => "g",
+            Self::Selector0 => "selector_0",
+            Self::Selector1 => "selector_1",
+            Self::Selector2 => "selector_2",
+            Self::Selector3 => "selector_3",
+            Self::Selector4 => "selector_4",
+            Self::Selector5 => "selector_5",
+        }
+    }
+}
+
 // =============================================================================
 // RecursionPoly - the main hierarchy enum
 // =============================================================================
@@ -631,6 +793,14 @@ pub enum RecursionPoly {
         term: GtExpTerm,
         instance: usize,
     },
+    MultiMillerLoop {
+        term: MultiMillerLoopTerm,
+        instance: usize,
+    },
+    Frobenius {
+        term: FrobeniusTerm,
+        instance: usize,
+    },
 }
 
 impl RecursionPoly {
@@ -642,6 +812,8 @@ impl RecursionPoly {
             Self::G2ScalarMul { instance, .. } => *instance,
             Self::GtMul { instance, .. } => *instance,
             Self::GtExp { instance, .. } => *instance,
+            Self::MultiMillerLoop { instance, .. } => *instance,
+            Self::Frobenius { instance, .. } => *instance,
         }
     }
 
@@ -653,6 +825,8 @@ impl RecursionPoly {
             Self::G2ScalarMul { term, .. } => term.to_index(),
             Self::GtMul { term, .. } => term.to_index(),
             Self::GtExp { term, .. } => term.to_index(),
+            Self::MultiMillerLoop { term, .. } => term.to_index(),
+            Self::Frobenius { term, .. } => term.to_index(),
         }
     }
 }
@@ -757,6 +931,239 @@ impl VirtualPolynomial {
     pub fn gt_exp_quotient(i: usize) -> Self {
         Self::Recursion(RecursionPoly::GtExp {
             term: GtExpTerm::Quotient,
+            instance: i,
+        })
+    }
+
+    // --- Multi-Miller loop ---
+    pub fn multi_miller_loop_f(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::F,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_f_next(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::FNext,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_quotient(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::Quotient,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_x_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TXC0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_x_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TXC1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_y_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TYC0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_y_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TYC1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_x_c0_next(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TXC0Next,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_x_c1_next(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TXC1Next,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_y_c0_next(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TYC0Next,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_t_y_c1_next(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::TYC1Next,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_lambda_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::LambdaC0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_lambda_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::LambdaC1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_inv_delta_x_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::InvDeltaXC0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_inv_delta_x_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::InvDeltaXC1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_l_c0_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::LC0C0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_l_c0_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::LC0C1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_l_c1_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::LC1C0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_l_c1_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::LC1C1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_x_p(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::XP,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_y_p(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::YP,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_x_q_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::XQC0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_x_q_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::XQC1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_y_q_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::YQC0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_y_q_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::YQC1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_is_double(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::IsDouble,
+            instance: i,
+        })
+    }
+
+    // --- Frobenius ---
+    pub fn frobenius_input(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::Frobenius {
+            term: FrobeniusTerm::Input,
+            instance: i,
+        })
+    }
+    pub fn frobenius_output(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::Frobenius {
+            term: FrobeniusTerm::Output,
+            instance: i,
+        })
+    }
+    pub fn frobenius_frob_const(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::Frobenius {
+            term: FrobeniusTerm::FrobConst,
+            instance: i,
+        })
+    }
+
+    pub fn multi_miller_loop_is_add(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::IsAdd,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_l_val(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::LVal,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_g(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::G,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_selector_0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::Selector0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_selector_1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::Selector1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_selector_2(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::Selector2,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_selector_3(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::Selector3,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_selector_4(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::Selector4,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_selector_5(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::Selector5,
             instance: i,
         })
     }

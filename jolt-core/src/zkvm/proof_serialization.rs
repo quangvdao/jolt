@@ -30,8 +30,9 @@ use crate::{
             stage2::g2_scalar_mul::G2ScalarMulPublicInputs,
         },
         witness::{
-            CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,
-            GtMulTerm, RecursionPoly, TermEnum, VirtualPolynomial,
+            CommittedPolynomial, FrobeniusTerm, G1AddTerm, G1ScalarMulTerm, G2AddTerm,
+            G2ScalarMulTerm, GtExpTerm, GtMulTerm, MultiMillerLoopTerm, RecursionPoly, TermEnum,
+            VirtualPolynomial,
         },
     },
 };
@@ -689,6 +690,12 @@ impl CanonicalSerialize for VirtualPolynomial {
                     RecursionPoly::GtExp { term, instance } => {
                         (5u8, term.to_index() as u8, *instance)
                     }
+                    RecursionPoly::MultiMillerLoop { term, instance } => {
+                        (6u8, term.to_index() as u8, *instance)
+                    }
+                    RecursionPoly::Frobenius { term, instance } => {
+                        (7u8, term.to_index() as u8, *instance)
+                    }
                 };
                 op_type.serialize_with_mode(&mut writer, compress)?;
                 term_index.serialize_with_mode(&mut writer, compress)?;
@@ -853,6 +860,16 @@ impl CanonicalDeserialize for VirtualPolynomial {
                         },
                         5 => RecursionPoly::GtExp {
                             term: GtExpTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        6 => RecursionPoly::MultiMillerLoop {
+                            term: MultiMillerLoopTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
+                            instance,
+                        },
+                        7 => RecursionPoly::Frobenius {
+                            term: FrobeniusTerm::from_index(term_index as usize)
                                 .ok_or(SerializationError::InvalidData)?,
                             instance,
                         },

@@ -211,6 +211,61 @@ pub struct G2AddInstanceWitness {
     pub is_inverse: Vec<Fq>,
 }
 
+/// Witness data for multi-Miller loop constraints (aggregated)
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+pub struct MultiMillerLoopWitness {
+    /// Accumulator f(s, x) - packed 11-var MLE
+    pub f_packed: Vec<Vec<Fq>>,
+    /// Quotient Q(s, x) - packed 11-var MLE
+    pub quotient_packed: Vec<Vec<Fq>>,
+    /// G2 state x-coordinate c0 (packed)
+    pub t_x_c0_packed: Vec<Vec<Fq>>,
+    /// G2 state x-coordinate c1 (packed)
+    pub t_x_c1_packed: Vec<Vec<Fq>>,
+    /// G2 state y-coordinate c0 (packed)
+    pub t_y_c0_packed: Vec<Vec<Fq>>,
+    /// G2 state y-coordinate c1 (packed)
+    pub t_y_c1_packed: Vec<Vec<Fq>>,
+    /// Slope lambda c0 (packed)
+    pub lambda_c0_packed: Vec<Vec<Fq>>,
+    /// Slope lambda c1 (packed)
+    pub lambda_c1_packed: Vec<Vec<Fq>>,
+    /// Inverse dx c0 (packed)
+    pub inv_dx_c0_packed: Vec<Vec<Fq>>,
+    /// Inverse dx c1 (packed)
+    pub inv_dx_c1_packed: Vec<Vec<Fq>>,
+    /// Line coeff c0 c0 (packed) - c0 of the first coefficient
+    pub l_c0_c0_packed: Vec<Vec<Fq>>,
+    /// Line coeff c0 c1 (packed)
+    pub l_c0_c1_packed: Vec<Vec<Fq>>,
+    /// Line coeff c1 c0 (packed)
+    pub l_c1_c0_packed: Vec<Vec<Fq>>,
+    /// Line coeff c1 c1 (packed)
+    pub l_c1_c1_packed: Vec<Vec<Fq>>,
+    /// Number of steps in the Miller loop
+    pub num_steps: usize,
+}
+
+/// Witness data for a single Multi-Miller loop instance (used by DoryMatrixBuilder)
+#[derive(Clone, Debug)]
+pub struct MultiMillerLoopInstanceWitness {
+    pub f_packed: Vec<Fq>,
+    pub quotient_packed: Vec<Fq>,
+    pub t_x_c0_packed: Vec<Fq>,
+    pub t_x_c1_packed: Vec<Fq>,
+    pub t_y_c0_packed: Vec<Fq>,
+    pub t_y_c1_packed: Vec<Fq>,
+    pub lambda_c0_packed: Vec<Fq>,
+    pub lambda_c1_packed: Vec<Fq>,
+    pub inv_dx_c0_packed: Vec<Fq>,
+    pub inv_dx_c1_packed: Vec<Fq>,
+    pub l_c0_c0_packed: Vec<Fq>,
+    pub l_c0_c1_packed: Vec<Fq>,
+    pub l_c1_c0_packed: Vec<Fq>,
+    pub l_c1_c1_packed: Vec<Fq>,
+    pub num_steps: usize,
+}
+
 /// Witness for homomorphic combination of GT commitments.
 ///
 /// Captures the intermediate witnesses for computing:
@@ -239,6 +294,8 @@ pub struct DoryRecursionWitness {
     pub g1_add_witness: G1AddWitness,
     /// G2 addition witness
     pub g2_add_witness: G2AddWitness,
+    /// Multi-Miller loop witness
+    pub multi_miller_loop_witness: MultiMillerLoopWitness,
     /// Witness for combine_commitments offloading
     pub combine_witness: Option<GTCombineWitness>,
 }

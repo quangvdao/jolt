@@ -4,5 +4,6 @@
 //! All other constraint sumchecks are batched in Stage 2.
 
 pub mod gt_exp;
+pub mod multi_miller_loop;
 
 pub use gt_exp::{PackedGtExpProver, PackedGtExpVerifier};

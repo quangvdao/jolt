@@ -181,6 +181,7 @@ pub enum SumcheckId {
     OpeningReduction,
     G2ScalarMul,
     G2Add,
+    MultiMillerLoop,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]

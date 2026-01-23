@@ -65,18 +65,16 @@ impl CanonicalDeserialize for JoltHintMap {
         use dory::primitives::serialization::{Compress as DoryCompress, Validate as DoryValidate};
 
         // Read length prefix using ark's deserialize
-        let len =
-            <u64 as CanonicalDeserialize>::deserialize_compressed(&mut reader)? as usize;
+        let len = <u64 as CanonicalDeserialize>::deserialize_compressed(&mut reader)? as usize;
         // Read data
         let mut bytes = vec![0u8; len];
-        reader.read_exact(&mut bytes).map_err(SerializationError::from)?;
+        reader
+            .read_exact(&mut bytes)
+            .map_err(SerializationError::from)?;
         // Deserialize using dory's format
-        let hint_map = HintMap::deserialize_with_mode(
-            &bytes[..],
-            DoryCompress::Yes,
-            DoryValidate::Yes,
-        )
-        .map_err(|_| SerializationError::InvalidData)?;
+        let hint_map =
+            HintMap::deserialize_with_mode(&bytes[..], DoryCompress::Yes, DoryValidate::Yes)
+                .map_err(|_| SerializationError::InvalidData)?;
         Ok(JoltHintMap(hint_map))
     }
 }
@@ -88,6 +86,7 @@ use super::{
     gt_exp_witness::Base4ExponentiationSteps,
     gt_mul_witness::MultiplicationSteps,
     jolt_dory_routines::{JoltG1Routines, JoltG2Routines},
+    multi_miller_loop_witness::MultiMillerLoopSteps,
     wrappers::{
         ark_to_jolt, jolt_to_ark, ArkDoryProof, ArkFr, ArkworksVerifierSetup, JoltToDoryTranscript,
     },
@@ -221,10 +220,10 @@ pub struct JoltG1AddWitness {
     pub ind_r: Fq,
 
     // Auxiliary witness values
-    pub lambda: Fq,       // slope
-    pub inv_delta_x: Fq,  // 1/(x_q - x_p) in add case
-    pub is_double: Fq,    // 1 if P == Q
-    pub is_inverse: Fq,   // 1 if P == -Q (result is O)
+    pub lambda: Fq,      // slope
+    pub inv_delta_x: Fq, // 1/(x_q - x_p) in add case
+    pub is_double: Fq,   // 1 if P == Q
+    pub is_inverse: Fq,  // 1 if P == -Q (result is O)
 
     // For WitnessResult trait
     ark_result: ArkG1,
@@ -280,6 +279,33 @@ impl WitnessResult<ArkG2> for JoltG2AddWitness {
     }
 }
 
+/// Multi-Miller loop witness for Dory recursion.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct JoltMultiMillerLoopWitness {
+    pub f_packed_mles: Vec<Vec<Fq>>,
+    pub quotient_packed_mles: Vec<Vec<Fq>>,
+    pub t_x_c0_packed_mles: Vec<Vec<Fq>>,
+    pub t_x_c1_packed_mles: Vec<Vec<Fq>>,
+    pub t_y_c0_packed_mles: Vec<Vec<Fq>>,
+    pub t_y_c1_packed_mles: Vec<Vec<Fq>>,
+    pub lambda_c0_packed_mles: Vec<Vec<Fq>>,
+    pub lambda_c1_packed_mles: Vec<Vec<Fq>>,
+    pub inv_dx_c0_packed_mles: Vec<Vec<Fq>>,
+    pub inv_dx_c1_packed_mles: Vec<Vec<Fq>>,
+    pub l_c0_c0_packed_mles: Vec<Vec<Fq>>,
+    pub l_c0_c1_packed_mles: Vec<Vec<Fq>>,
+    pub l_c1_c0_packed_mles: Vec<Vec<Fq>>,
+    pub l_c1_c1_packed_mles: Vec<Vec<Fq>>,
+    pub num_steps: usize,
+    ark_result: ArkGT,
+}
+
+impl WitnessResult<ArkGT> for JoltMultiMillerLoopWitness {
+    fn result(&self) -> Option<&ArkGT> {
+        Some(&self.ark_result)
+    }
+}
+
 /// Witness type for unimplemented operations that panics when used
 #[derive(Clone, Debug)]
 pub struct UnimplementedWitness<T> {
@@ -330,8 +356,8 @@ impl WitnessBackend for JoltWitness {
     type GtExpWitness = JoltGtExpWitness;
 
     // Pairing operations
-    type PairingWitness = UnimplementedWitness<ArkGT>;
-    type MultiPairingWitness = UnimplementedWitness<ArkGT>;
+    type PairingWitness = JoltMultiMillerLoopWitness;
+    type MultiPairingWitness = JoltMultiMillerLoopWitness;
 }
 
 pub struct JoltWitnessGenerator;
@@ -372,39 +398,38 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
         };
 
         // Compute auxiliary witness values
-        let (lambda, inv_delta_x, is_double, is_inverse) =
-            if ind_p == one || ind_q == one {
-                // At least one input is infinity - no slope needed
-                (zero, zero, zero, zero)
-            } else {
-                let dx = x_q - x_p;
-                let dy = y_q - y_p;
+        let (lambda, inv_delta_x, is_double, is_inverse) = if ind_p == one || ind_q == one {
+            // At least one input is infinity - no slope needed
+            (zero, zero, zero, zero)
+        } else {
+            let dx = x_q - x_p;
+            let dy = y_q - y_p;
 
-                if dx == zero {
-                    if dy == zero {
-                        // P == Q: doubling case
-                        // lambda = 3*x_p^2 / (2*y_p)
-                        let two = Fq::from(2u64);
-                        let three = Fq::from(3u64);
-                        let numerator = three * x_p * x_p;
-                        let denominator = two * y_p;
-                        let lam = if denominator == zero {
-                            zero // Edge case: y_p = 0 means P = -P, result is O
-                        } else {
-                            numerator * denominator.inverse().unwrap()
-                        };
-                        (lam, zero, one, zero)
+            if dx == zero {
+                if dy == zero {
+                    // P == Q: doubling case
+                    // lambda = 3*x_p^2 / (2*y_p)
+                    let two = Fq::from(2u64);
+                    let three = Fq::from(3u64);
+                    let numerator = three * x_p * x_p;
+                    let denominator = two * y_p;
+                    let lam = if denominator == zero {
+                        zero // Edge case: y_p = 0 means P = -P, result is O
                     } else {
-                        // P == -Q: inverse case, result is infinity
-                        (zero, zero, zero, one)
-                    }
+                        numerator * denominator.inverse().unwrap()
+                    };
+                    (lam, zero, one, zero)
                 } else {
-                    // General add case: lambda = dy/dx
-                    let inv_dx = dx.inverse().unwrap();
-                    let lam = dy * inv_dx;
-                    (lam, inv_dx, zero, zero)
+                    // P == -Q: inverse case, result is infinity
+                    (zero, zero, zero, one)
                 }
-            };
+            } else {
+                // General add case: lambda = dy/dx
+                let inv_dx = dx.inverse().unwrap();
+                let lam = dy * inv_dx;
+                (lam, inv_dx, zero, zero)
+            }
+        };
 
         JoltG1AddWitness {
             x_p,
@@ -461,37 +486,36 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
         };
 
         // Compute auxiliary witness values in Fq2
-        let (lambda, inv_delta_x, is_double, is_inverse) =
-            if ind_p == one || ind_q == one {
-                (fq2_zero, fq2_zero, zero, zero)
-            } else {
-                let dx = x_q - x_p;
-                let dy = y_q - y_p;
+        let (lambda, inv_delta_x, is_double, is_inverse) = if ind_p == one || ind_q == one {
+            (fq2_zero, fq2_zero, zero, zero)
+        } else {
+            let dx = x_q - x_p;
+            let dy = y_q - y_p;
 
-                if dx == fq2_zero {
-                    if dy == fq2_zero {
-                        // Doubling case
-                        let two = Fq2::from(2u64);
-                        let three = Fq2::from(3u64);
-                        let numerator = three * x_p * x_p;
-                        let denominator = two * y_p;
-                        let lam = if denominator == fq2_zero {
-                            fq2_zero
-                        } else {
-                            numerator * denominator.inverse().unwrap()
-                        };
-                        (lam, fq2_zero, one, zero)
+            if dx == fq2_zero {
+                if dy == fq2_zero {
+                    // Doubling case
+                    let two = Fq2::from(2u64);
+                    let three = Fq2::from(3u64);
+                    let numerator = three * x_p * x_p;
+                    let denominator = two * y_p;
+                    let lam = if denominator == fq2_zero {
+                        fq2_zero
                     } else {
-                        // Inverse case
-                        (fq2_zero, fq2_zero, zero, one)
-                    }
+                        numerator * denominator.inverse().unwrap()
+                    };
+                    (lam, fq2_zero, one, zero)
                 } else {
-                    // General add
-                    let inv_dx = dx.inverse().unwrap();
-                    let lam = dy * inv_dx;
-                    (lam, inv_dx, zero, zero)
+                    // Inverse case
+                    (fq2_zero, fq2_zero, zero, one)
                 }
-            };
+            } else {
+                // General add
+                let inv_dx = dx.inverse().unwrap();
+                let lam = dy * inv_dx;
+                (lam, inv_dx, zero, zero)
+            }
+        };
 
         JoltG2AddWitness {
             x_p_c0: x_p.c0,
@@ -644,19 +668,66 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
     }
 
     fn generate_pairing(
-        _g1: &<BN254 as PairingCurve>::G1,
-        _g2: &<BN254 as PairingCurve>::G2,
-        _result: &<BN254 as PairingCurve>::GT,
-    ) -> UnimplementedWitness<ArkGT> {
-        UnimplementedWitness::new("Pairing")
+        g1: &<BN254 as PairingCurve>::G1,
+        g2: &<BN254 as PairingCurve>::G2,
+        result: &<BN254 as PairingCurve>::GT,
+    ) -> JoltMultiMillerLoopWitness {
+        let g1_affine: G1Affine = g1.0.into();
+        let g2_affine: G2Affine = g2.0.into();
+
+        let steps = MultiMillerLoopSteps::new(&[g1_affine], &[g2_affine]);
+
+        // TODO: Verify result matches steps.result (after final exp)
+        // For now we just store the result
+
+        JoltMultiMillerLoopWitness {
+            f_packed_mles: steps.f_packed_mles,
+            quotient_packed_mles: steps.quotient_packed_mles,
+            t_x_c0_packed_mles: steps.t_x_c0_packed_mles,
+            t_x_c1_packed_mles: steps.t_x_c1_packed_mles,
+            t_y_c0_packed_mles: steps.t_y_c0_packed_mles,
+            t_y_c1_packed_mles: steps.t_y_c1_packed_mles,
+            lambda_c0_packed_mles: steps.lambda_c0_packed_mles,
+            lambda_c1_packed_mles: steps.lambda_c1_packed_mles,
+            inv_dx_c0_packed_mles: steps.inv_dx_c0_packed_mles,
+            inv_dx_c1_packed_mles: steps.inv_dx_c1_packed_mles,
+            l_c0_c0_packed_mles: steps.l_c0_c0_packed_mles,
+            l_c0_c1_packed_mles: steps.l_c0_c1_packed_mles,
+            l_c1_c0_packed_mles: steps.l_c1_c0_packed_mles,
+            l_c1_c1_packed_mles: steps.l_c1_c1_packed_mles,
+            num_steps: steps.num_steps,
+            ark_result: *result,
+        }
     }
 
     fn generate_multi_pairing(
-        _g1s: &[<BN254 as PairingCurve>::G1],
-        _g2s: &[<BN254 as PairingCurve>::G2],
-        _result: &<BN254 as PairingCurve>::GT,
-    ) -> UnimplementedWitness<ArkGT> {
-        UnimplementedWitness::new("Multi-pairing")
+        g1s: &[<BN254 as PairingCurve>::G1],
+        g2s: &[<BN254 as PairingCurve>::G2],
+        result: &<BN254 as PairingCurve>::GT,
+    ) -> JoltMultiMillerLoopWitness {
+        let g1_affines: Vec<G1Affine> = g1s.iter().map(|p| p.0.into()).collect();
+        let g2_affines: Vec<G2Affine> = g2s.iter().map(|p| p.0.into()).collect();
+
+        let steps = MultiMillerLoopSteps::new(&g1_affines, &g2_affines);
+
+        JoltMultiMillerLoopWitness {
+            f_packed_mles: steps.f_packed_mles,
+            quotient_packed_mles: steps.quotient_packed_mles,
+            t_x_c0_packed_mles: steps.t_x_c0_packed_mles,
+            t_x_c1_packed_mles: steps.t_x_c1_packed_mles,
+            t_y_c0_packed_mles: steps.t_y_c0_packed_mles,
+            t_y_c1_packed_mles: steps.t_y_c1_packed_mles,
+            lambda_c0_packed_mles: steps.lambda_c0_packed_mles,
+            lambda_c1_packed_mles: steps.lambda_c1_packed_mles,
+            inv_dx_c0_packed_mles: steps.inv_dx_c0_packed_mles,
+            inv_dx_c1_packed_mles: steps.inv_dx_c1_packed_mles,
+            l_c0_c0_packed_mles: steps.l_c0_c0_packed_mles,
+            l_c0_c1_packed_mles: steps.l_c0_c1_packed_mles,
+            l_c1_c0_packed_mles: steps.l_c1_c0_packed_mles,
+            l_c1_c1_packed_mles: steps.l_c1_c1_packed_mles,
+            num_steps: steps.num_steps,
+            ark_result: *result,
+        }
     }
 
     fn generate_msm_g1(

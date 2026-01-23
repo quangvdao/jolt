@@ -33,10 +33,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rayon::prelude::*;
 use std::marker::PhantomData;
 
+use crate::zkvm::recursion::bijection::VarCountJaggedBijection;
 use crate::zkvm::recursion::stage4::branching_program::{
     bit_to_field, get_coordinate_info, CoordType, JaggedBranchingProgram, Point,
 };
-use crate::zkvm::recursion::bijection::VarCountJaggedBijection;
 
 /// Compute eq(r, index) directly in O(m) time.
 ///

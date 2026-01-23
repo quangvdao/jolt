@@ -21,8 +21,8 @@ use crate::subprotocols::constraint_list_sumcheck::{
     ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
 };
 
-use allocative::Allocative;
 use crate::zkvm::recursion::curve::RecursionCurve;
+use allocative::Allocative;
 
 // ============================================================================
 // Opening Specs - 4 polynomial types (lhs, rhs, result, quotient)

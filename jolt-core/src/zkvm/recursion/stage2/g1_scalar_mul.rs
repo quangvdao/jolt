@@ -228,39 +228,74 @@ impl G1ScalarMulProverSpec {
         let num_instances = constraint_polys.len();
         let num_vars = params.num_constraint_vars;
 
-        let mut polys_by_kind: Vec<Vec<MultilinearPolynomial<Fq>>> =
-            (0..NUM_COMMITTED_KINDS).map(|_| Vec::with_capacity(num_instances)).collect();
+        let mut polys_by_kind: Vec<Vec<MultilinearPolynomial<Fq>>> = (0..NUM_COMMITTED_KINDS)
+            .map(|_| Vec::with_capacity(num_instances))
+            .collect();
         let mut public_polys = vec![Vec::with_capacity(num_instances)];
         let mut constraint_indices = Vec::with_capacity(num_instances);
 
         for (poly, pub_in) in constraint_polys.into_iter().zip(public_inputs.iter()) {
             constraint_indices.push(poly.constraint_index);
 
-            polys_by_kind[0].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_a)));
-            polys_by_kind[1].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_a)));
-            polys_by_kind[2].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_t)));
-            polys_by_kind[3].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_t)));
-            polys_by_kind[4].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_a_next)));
-            polys_by_kind[5].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_a_next)));
-            polys_by_kind[6].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.t_indicator)));
-            polys_by_kind[7].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.a_indicator)));
+            polys_by_kind[0].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_a,
+            )));
+            polys_by_kind[1].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_a,
+            )));
+            polys_by_kind[2].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_t,
+            )));
+            polys_by_kind[3].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_t,
+            )));
+            polys_by_kind[4].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_a_next,
+            )));
+            polys_by_kind[5].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_a_next,
+            )));
+            polys_by_kind[6].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.t_indicator,
+            )));
+            polys_by_kind[7].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.a_indicator,
+            )));
 
-            public_polys[0].push(MultilinearPolynomial::LargeScalars(
-                DensePolynomial::new(pub_in.build_bit_poly(num_vars))
-            ));
+            public_polys[0].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                pub_in.build_bit_poly(num_vars),
+            )));
         }
 
         let sequential_indices: Vec<usize> = (0..num_instances).collect();
-        (Self { params, polys_by_kind, public_polys, base_points }, sequential_indices)
+        (
+            Self {
+                params,
+                polys_by_kind,
+                public_polys,
+                base_points,
+            },
+            sequential_indices,
+        )
     }
 }
 
 impl ConstraintListSpec for G1ScalarMulProverSpec {
-    fn sumcheck_id(&self) -> SumcheckId { self.params.sumcheck_id }
-    fn num_rounds(&self) -> usize { self.params.num_constraint_vars }
-    fn num_instances(&self) -> usize { self.params.num_constraints }
-    fn uses_term_batching(&self) -> bool { true }
-    fn opening_specs(&self) -> &'static [OpeningSpec] { &OPENING_SPECS }
+    fn sumcheck_id(&self) -> SumcheckId {
+        self.params.sumcheck_id
+    }
+    fn num_rounds(&self) -> usize {
+        self.params.num_constraint_vars
+    }
+    fn num_instances(&self) -> usize {
+        self.params.num_constraints
+    }
+    fn uses_term_batching(&self) -> bool {
+        true
+    }
+    fn opening_specs(&self) -> &'static [OpeningSpec] {
+        &OPENING_SPECS
+    }
 
     fn build_virtual_poly(&self, term_index: usize, instance: usize) -> VirtualPolynomial {
         VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
@@ -271,12 +306,24 @@ impl ConstraintListSpec for G1ScalarMulProverSpec {
 }
 
 impl ConstraintListProverSpec<Fq, DEGREE> for G1ScalarMulProverSpec {
-    fn polys_by_kind(&self) -> &[Vec<MultilinearPolynomial<Fq>>] { &self.polys_by_kind }
-    fn polys_by_kind_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] { &mut self.polys_by_kind }
-    fn public_polys(&self) -> &[Vec<MultilinearPolynomial<Fq>>] { &self.public_polys }
-    fn public_polys_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] { &mut self.public_polys }
-    fn shared_polys(&self) -> &[MultilinearPolynomial<Fq>] { &[] }
-    fn shared_polys_mut(&mut self) -> &mut [MultilinearPolynomial<Fq>] { &mut [] }
+    fn polys_by_kind(&self) -> &[Vec<MultilinearPolynomial<Fq>>] {
+        &self.polys_by_kind
+    }
+    fn polys_by_kind_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] {
+        &mut self.polys_by_kind
+    }
+    fn public_polys(&self) -> &[Vec<MultilinearPolynomial<Fq>>] {
+        &self.public_polys
+    }
+    fn public_polys_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] {
+        &mut self.public_polys
+    }
+    fn shared_polys(&self) -> &[MultilinearPolynomial<Fq>] {
+        &[]
+    }
+    fn shared_polys_mut(&mut self) -> &mut [MultilinearPolynomial<Fq>] {
+        &mut []
+    }
 
     fn eval_constraint(
         &self,
@@ -314,16 +361,30 @@ impl G1ScalarMulVerifierSpec {
         public_inputs: Vec<G1ScalarMulPublicInputs>,
         base_points: Vec<(Fq, Fq)>,
     ) -> Self {
-        Self { params, public_inputs, base_points }
+        Self {
+            params,
+            public_inputs,
+            base_points,
+        }
     }
 }
 
 impl ConstraintListSpec for G1ScalarMulVerifierSpec {
-    fn sumcheck_id(&self) -> SumcheckId { self.params.sumcheck_id }
-    fn num_rounds(&self) -> usize { self.params.num_constraint_vars }
-    fn num_instances(&self) -> usize { self.params.num_constraints }
-    fn uses_term_batching(&self) -> bool { true }
-    fn opening_specs(&self) -> &'static [OpeningSpec] { &OPENING_SPECS }
+    fn sumcheck_id(&self) -> SumcheckId {
+        self.params.sumcheck_id
+    }
+    fn num_rounds(&self) -> usize {
+        self.params.num_constraint_vars
+    }
+    fn num_instances(&self) -> usize {
+        self.params.num_constraints
+    }
+    fn uses_term_batching(&self) -> bool {
+        true
+    }
+    fn opening_specs(&self) -> &'static [OpeningSpec] {
+        &OPENING_SPECS
+    }
 
     fn build_virtual_poly(&self, term_index: usize, instance: usize) -> VirtualPolynomial {
         VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
@@ -334,7 +395,9 @@ impl ConstraintListSpec for G1ScalarMulVerifierSpec {
 }
 
 impl ConstraintListVerifierSpec<Fq, DEGREE> for G1ScalarMulVerifierSpec {
-    fn compute_shared_scalars(&self, _eval_point: &[Fq]) -> Vec<Fq> { vec![] }
+    fn compute_shared_scalars(&self, _eval_point: &[Fq]) -> Vec<Fq> {
+        vec![]
+    }
 
     fn eval_constraint_at_point(
         &self,

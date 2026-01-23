@@ -6,10 +6,7 @@
 //! This protocol uses the generic ConstraintListSumcheck wrapper with term batching.
 
 use crate::{
-    define_constraint,
-    field::JoltField,
-    poly::opening_proof::SumcheckId,
-    zkvm::witness::G1AddTerm,
+    define_constraint, field::JoltField, poly::opening_proof::SumcheckId, zkvm::witness::G1AddTerm,
 };
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};

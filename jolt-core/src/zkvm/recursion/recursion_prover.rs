@@ -30,12 +30,13 @@ use dory::backends::arkworks::ArkGT;
 use std::collections::HashMap;
 
 use crate::zkvm::recursion::DoryMatrixBuilder;
-use dory::recursion::ast::AstGraph;
 use dory::backends::arkworks::BN254;
+use dory::recursion::ast::AstGraph;
 
 use super::{
     constraints_sys::{ConstraintSystem, ConstraintType},
     stage1::gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
+    stage1::multi_miller_loop::{MultiMillerLoopParams, MultiMillerLoopProver},
     stage2::gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
     stage3::virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
@@ -437,6 +438,7 @@ impl RecursionProver<Fq> {
             g1_scalar_mul_witness,
             g1_add_witness,
             g2_add_witness,
+            multi_miller_loop_witness: Default::default(),
             combine_witness,
         })
     }
@@ -450,9 +452,9 @@ impl RecursionProver<Fq> {
         g_poly: DensePolynomial<Fq>,
     ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
         use super::constraints_sys::DoryMatrixBuilder;
+        use super::stage1::gt_exp::PackedGtExpWitness;
         use super::stage2::g1_scalar_mul::G1ScalarMulPublicInputs;
         use super::stage2::g2_scalar_mul::G2ScalarMulPublicInputs;
-        use super::stage1::gt_exp::PackedGtExpWitness;
         use jolt_optimizations::fq12_to_multilinear_evals;
 
         // Use DoryMatrixBuilder with 11 variables for uniform matrix structure (packed GT exp)
@@ -772,7 +774,6 @@ impl RecursionProver<Fq> {
         ),
         Box<dyn std::error::Error>,
     > {
-
         // Convert g_poly for GT mul (uses zero padding layout: s * 16 + x)
         let g_poly_f = self.constraint_system.g_poly.clone();
 
@@ -897,7 +898,8 @@ impl RecursionProver<Fq> {
             // Convert witness structs to constraint polynomials and base_points
             let mut g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials<Fq>> =
                 Vec::with_capacity(g2_scalar_mul_constraints_tuples.len());
-            let mut g2_scalar_mul_base_points = Vec::with_capacity(g2_scalar_mul_constraints_tuples.len());
+            let mut g2_scalar_mul_base_points =
+                Vec::with_capacity(g2_scalar_mul_constraints_tuples.len());
 
             for w in g2_scalar_mul_constraints_tuples {
                 g2_scalar_mul_constraints.push(G2ScalarMulConstraintPolynomials {
@@ -954,6 +956,12 @@ impl RecursionProver<Fq> {
             let prover = G2AddProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
         }
+
+        // Add Multi-Miller loop prover
+        // Note: We need to extract multi-miller loop witnesses from the constraint system
+        // But I haven't added them to ConstraintSystem yet.
+        // I need to update ConstraintSystem first.
+        // For now, I'll skip adding the prover if no witnesses are present (which is true).
 
         // TODO: Add Boundary/Wiring Sumcheck (initial/final states + copy constraints)
         // Currently removed due to polynomial size mismatch bug; will be redesigned with packing.

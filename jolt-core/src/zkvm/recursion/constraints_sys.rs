@@ -16,9 +16,9 @@ use crate::{
     transcripts::Transcript,
     utils::errors::ProofVerifyError,
     zkvm::recursion::{
+        stage1::gt_exp::PackedGtExpPublicInputs,
         stage2::g1_scalar_mul::G1ScalarMulPublicInputs,
         stage2::g2_scalar_mul::G2ScalarMulPublicInputs,
-        stage1::gt_exp::PackedGtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
 };
@@ -1740,7 +1740,9 @@ impl ConstraintSystem {
     ///
     /// Note: this is currently populated only when the recursion constraint builder
     /// wires in explicit `ConstraintType::G1Add` nodes.
-    pub fn extract_g1_add_constraints(&self) -> Vec<super::stage2::g1_add::G1AddWitness<ark_bn254::Fq>> {
+    pub fn extract_g1_add_constraints(
+        &self,
+    ) -> Vec<super::stage2::g1_add::G1AddWitness<ark_bn254::Fq>> {
         self.g1_add_witnesses.clone()
     }
 
@@ -1748,7 +1750,9 @@ impl ConstraintSystem {
     ///
     /// Note: this is currently populated only when the recursion constraint builder
     /// wires in explicit `ConstraintType::G2Add` nodes.
-    pub fn extract_g2_add_constraints(&self) -> Vec<super::stage2::g2_add::G2AddWitness<ark_bn254::Fq>> {
+    pub fn extract_g2_add_constraints(
+        &self,
+    ) -> Vec<super::stage2::g2_add::G2AddWitness<ark_bn254::Fq>> {
         self.g2_add_witnesses.clone()
     }
 

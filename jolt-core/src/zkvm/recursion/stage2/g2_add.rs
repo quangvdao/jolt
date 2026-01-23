@@ -7,10 +7,7 @@
 //! This protocol uses the generic ConstraintListSumcheck wrapper with term batching.
 
 use crate::{
-    define_constraint,
-    field::JoltField,
-    poly::opening_proof::SumcheckId,
-    zkvm::witness::G2AddTerm,
+    define_constraint, field::JoltField, poly::opening_proof::SumcheckId, zkvm::witness::G2AddTerm,
 };
 
 define_constraint!(
@@ -133,9 +130,11 @@ impl<F: JoltField> G2AddValues<F> {
         // Branch selection: inv_dx * dx = 1 (c0) and 0 (c1) in the generic add case
         let inv_dx_times_dx_c0 = mul_c0(self.inv_delta_x_c0, self.inv_delta_x_c1, dx_c0, dx_c1);
         let inv_dx_times_dx_c1 = mul_c1(self.inv_delta_x_c0, self.inv_delta_x_c1, dx_c0, dx_c1);
-        acc += delta_pow * (s_finite * (one - self.is_double - self.is_inverse) * (one - inv_dx_times_dx_c0));
+        acc += delta_pow
+            * (s_finite * (one - self.is_double - self.is_inverse) * (one - inv_dx_times_dx_c0));
         delta_pow *= delta;
-        acc += delta_pow * (s_finite * (one - self.is_double - self.is_inverse) * inv_dx_times_dx_c1);
+        acc +=
+            delta_pow * (s_finite * (one - self.is_double - self.is_inverse) * inv_dx_times_dx_c1);
         delta_pow *= delta;
 
         // If doubling, enforce P == Q (dx = 0, dy = 0)
@@ -161,9 +160,11 @@ impl<F: JoltField> G2AddValues<F> {
         // Slope equation (add): lambda * dx = dy
         let lam_dx_c0 = mul_c0(self.lambda_c0, self.lambda_c1, dx_c0, dx_c1);
         let lam_dx_c1 = mul_c1(self.lambda_c0, self.lambda_c1, dx_c0, dx_c1);
-        acc += delta_pow * (s_finite * (one - self.is_double - self.is_inverse) * (lam_dx_c0 - dy_c0));
+        acc +=
+            delta_pow * (s_finite * (one - self.is_double - self.is_inverse) * (lam_dx_c0 - dy_c0));
         delta_pow *= delta;
-        acc += delta_pow * (s_finite * (one - self.is_double - self.is_inverse) * (lam_dx_c1 - dy_c1));
+        acc +=
+            delta_pow * (s_finite * (one - self.is_double - self.is_inverse) * (lam_dx_c1 - dy_c1));
         delta_pow *= delta;
 
         // Slope equation (double): 2*y_p*lambda = 3*x_p^2
@@ -186,19 +187,41 @@ impl<F: JoltField> G2AddValues<F> {
         // x_R formula for non-inverse: x_r = lambda^2 - x_p - x_q
         let lam_sq_c0 = sq_c0(self.lambda_c0, self.lambda_c1);
         let lam_sq_c1 = sq_c1(self.lambda_c0, self.lambda_c1);
-        acc += delta_pow * (s_finite * (one - self.is_inverse) * (self.x_r_c0 - (lam_sq_c0 - self.x_p_c0 - self.x_q_c0)));
+        acc += delta_pow
+            * (s_finite
+                * (one - self.is_inverse)
+                * (self.x_r_c0 - (lam_sq_c0 - self.x_p_c0 - self.x_q_c0)));
         delta_pow *= delta;
-        acc += delta_pow * (s_finite * (one - self.is_inverse) * (self.x_r_c1 - (lam_sq_c1 - self.x_p_c1 - self.x_q_c1)));
+        acc += delta_pow
+            * (s_finite
+                * (one - self.is_inverse)
+                * (self.x_r_c1 - (lam_sq_c1 - self.x_p_c1 - self.x_q_c1)));
         delta_pow *= delta;
 
         // y_R formula for non-inverse: y_r = lambda*(x_p - x_r) - y_p
         let xp_minus_xr_c0 = self.x_p_c0 - self.x_r_c0;
         let xp_minus_xr_c1 = self.x_p_c1 - self.x_r_c1;
-        let lam_times_diff_c0 = mul_c0(self.lambda_c0, self.lambda_c1, xp_minus_xr_c0, xp_minus_xr_c1);
-        let lam_times_diff_c1 = mul_c1(self.lambda_c0, self.lambda_c1, xp_minus_xr_c0, xp_minus_xr_c1);
-        acc += delta_pow * (s_finite * (one - self.is_inverse) * (self.y_r_c0 - (lam_times_diff_c0 - self.y_p_c0)));
+        let lam_times_diff_c0 = mul_c0(
+            self.lambda_c0,
+            self.lambda_c1,
+            xp_minus_xr_c0,
+            xp_minus_xr_c1,
+        );
+        let lam_times_diff_c1 = mul_c1(
+            self.lambda_c0,
+            self.lambda_c1,
+            xp_minus_xr_c0,
+            xp_minus_xr_c1,
+        );
+        acc += delta_pow
+            * (s_finite
+                * (one - self.is_inverse)
+                * (self.y_r_c0 - (lam_times_diff_c0 - self.y_p_c0)));
         delta_pow *= delta;
-        acc += delta_pow * (s_finite * (one - self.is_inverse) * (self.y_r_c1 - (lam_times_diff_c1 - self.y_p_c1)));
+        acc += delta_pow
+            * (s_finite
+                * (one - self.is_inverse)
+                * (self.y_r_c1 - (lam_times_diff_c1 - self.y_p_c1)));
 
         acc
     }

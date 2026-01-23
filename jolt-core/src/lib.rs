@@ -20,6 +20,6 @@ pub mod subprotocols;
 pub mod transcripts;
 pub mod utils;
 pub mod zkvm;
+pub use allocative;
 pub use ark_bn254;
 pub use paste;
-pub use allocative;

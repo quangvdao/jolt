@@ -59,7 +59,10 @@ impl OpeningSpec {
 /// Generate sequential opening specs where kind == term_index for all N terms.
 /// This is the common case when polynomial kinds are 1:1 with terms.
 pub const fn sequential_opening_specs<const N: usize>() -> [OpeningSpec; N] {
-    let mut specs = [OpeningSpec { kind: 0, term_index: 0 }; N];
+    let mut specs = [OpeningSpec {
+        kind: 0,
+        term_index: 0,
+    }; N];
     let mut i = 0;
     while i < N {
         specs[i] = OpeningSpec {
@@ -510,12 +513,7 @@ where
             let global_idx = self.constraint_indices[i];
             for spec in opening_specs {
                 let poly_id = self.spec.build_virtual_poly(spec.term_index, global_idx);
-                accumulator.append_virtual(
-                    transcript,
-                    poly_id,
-                    sumcheck_id,
-                    opening_point.clone(),
-                );
+                accumulator.append_virtual(transcript, poly_id, sumcheck_id, opening_point.clone());
             }
         }
     }
@@ -804,4 +802,3 @@ macro_rules! define_constraint {
         }
     };
 }
-

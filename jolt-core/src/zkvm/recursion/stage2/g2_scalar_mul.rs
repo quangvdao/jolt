@@ -124,12 +124,18 @@ impl G2ScalarMulParams {
 /// Single-point evaluation values for G2 scalar mul polynomials.
 #[derive(Clone, Copy, Debug)]
 struct G2ScalarMulValues {
-    x_a_c0: Fq, x_a_c1: Fq,
-    y_a_c0: Fq, y_a_c1: Fq,
-    x_t_c0: Fq, x_t_c1: Fq,
-    y_t_c0: Fq, y_t_c1: Fq,
-    x_a_next_c0: Fq, x_a_next_c1: Fq,
-    y_a_next_c0: Fq, y_a_next_c1: Fq,
+    x_a_c0: Fq,
+    x_a_c1: Fq,
+    y_a_c0: Fq,
+    y_a_c1: Fq,
+    x_t_c0: Fq,
+    x_t_c1: Fq,
+    y_t_c0: Fq,
+    y_t_c1: Fq,
+    x_a_next_c0: Fq,
+    x_a_next_c1: Fq,
+    y_a_next_c0: Fq,
+    y_a_next_c1: Fq,
     t_indicator: Fq,
     a_indicator: Fq,
 }
@@ -138,12 +144,18 @@ impl G2ScalarMulValues {
     #[inline]
     fn from_poly_evals<const D: usize>(poly_evals: &[[Fq; D]], idx: usize) -> Self {
         Self {
-            x_a_c0: poly_evals[0][idx], x_a_c1: poly_evals[1][idx],
-            y_a_c0: poly_evals[2][idx], y_a_c1: poly_evals[3][idx],
-            x_t_c0: poly_evals[4][idx], x_t_c1: poly_evals[5][idx],
-            y_t_c0: poly_evals[6][idx], y_t_c1: poly_evals[7][idx],
-            x_a_next_c0: poly_evals[8][idx], x_a_next_c1: poly_evals[9][idx],
-            y_a_next_c0: poly_evals[10][idx], y_a_next_c1: poly_evals[11][idx],
+            x_a_c0: poly_evals[0][idx],
+            x_a_c1: poly_evals[1][idx],
+            y_a_c0: poly_evals[2][idx],
+            y_a_c1: poly_evals[3][idx],
+            x_t_c0: poly_evals[4][idx],
+            x_t_c1: poly_evals[5][idx],
+            y_t_c0: poly_evals[6][idx],
+            y_t_c1: poly_evals[7][idx],
+            x_a_next_c0: poly_evals[8][idx],
+            x_a_next_c1: poly_evals[9][idx],
+            y_a_next_c0: poly_evals[10][idx],
+            y_a_next_c1: poly_evals[11][idx],
             t_indicator: poly_evals[12][idx],
             a_indicator: poly_evals[13][idx],
         }
@@ -152,12 +164,18 @@ impl G2ScalarMulValues {
     #[inline]
     fn from_claims(claims: &[Fq]) -> Self {
         Self {
-            x_a_c0: claims[0], x_a_c1: claims[1],
-            y_a_c0: claims[2], y_a_c1: claims[3],
-            x_t_c0: claims[4], x_t_c1: claims[5],
-            y_t_c0: claims[6], y_t_c1: claims[7],
-            x_a_next_c0: claims[8], x_a_next_c1: claims[9],
-            y_a_next_c0: claims[10], y_a_next_c1: claims[11],
+            x_a_c0: claims[0],
+            x_a_c1: claims[1],
+            y_a_c0: claims[2],
+            y_a_c1: claims[3],
+            x_t_c0: claims[4],
+            x_t_c1: claims[5],
+            y_t_c0: claims[6],
+            y_t_c1: claims[7],
+            x_a_next_c0: claims[8],
+            x_a_next_c1: claims[9],
+            y_a_next_c0: claims[10],
+            y_a_next_c1: claims[11],
             t_indicator: claims[12],
             a_indicator: claims[13],
         }
@@ -229,13 +247,19 @@ impl G2ScalarMulValues {
         let d11 = d10 * delta;
         let d12 = d11 * delta;
 
-        c1.c0 + delta * c1.c1
-            + d2 * c2.c0 + d3 * c2.c1
-            + d4 * c3.c0 + d5 * c3.c1
-            + d6 * c4.c0 + d7 * c4.c1
+        c1.c0
+            + delta * c1.c1
+            + d2 * c2.c0
+            + d3 * c2.c1
+            + d4 * c3.c0
+            + d5 * c3.c1
+            + d6 * c4.c0
+            + d7 * c4.c1
             + d8 * c5
-            + d9 * c6_xt_c0 + d10 * c6_xt_c1
-            + d11 * c6_yt_c0 + d12 * c6_yt_c1
+            + d9 * c6_xt_c0
+            + d10 * c6_xt_c1
+            + d11 * c6_yt_c0
+            + d12 * c6_yt_c1
     }
 }
 
@@ -262,45 +286,92 @@ impl G2ScalarMulProverSpec {
         let num_instances = constraint_polys.len();
         let num_vars = params.num_constraint_vars;
 
-        let mut polys_by_kind: Vec<Vec<MultilinearPolynomial<Fq>>> =
-            (0..NUM_COMMITTED_KINDS).map(|_| Vec::with_capacity(num_instances)).collect();
+        let mut polys_by_kind: Vec<Vec<MultilinearPolynomial<Fq>>> = (0..NUM_COMMITTED_KINDS)
+            .map(|_| Vec::with_capacity(num_instances))
+            .collect();
         let mut public_polys = vec![Vec::with_capacity(num_instances)];
         let mut constraint_indices = Vec::with_capacity(num_instances);
 
         for (poly, pub_in) in constraint_polys.into_iter().zip(public_inputs.iter()) {
             constraint_indices.push(poly.constraint_index);
 
-            polys_by_kind[0].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_a_c0)));
-            polys_by_kind[1].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_a_c1)));
-            polys_by_kind[2].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_a_c0)));
-            polys_by_kind[3].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_a_c1)));
-            polys_by_kind[4].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_t_c0)));
-            polys_by_kind[5].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_t_c1)));
-            polys_by_kind[6].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_t_c0)));
-            polys_by_kind[7].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_t_c1)));
-            polys_by_kind[8].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_a_next_c0)));
-            polys_by_kind[9].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.x_a_next_c1)));
-            polys_by_kind[10].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_a_next_c0)));
-            polys_by_kind[11].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.y_a_next_c1)));
-            polys_by_kind[12].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.t_indicator)));
-            polys_by_kind[13].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(poly.a_indicator)));
+            polys_by_kind[0].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_a_c0,
+            )));
+            polys_by_kind[1].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_a_c1,
+            )));
+            polys_by_kind[2].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_a_c0,
+            )));
+            polys_by_kind[3].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_a_c1,
+            )));
+            polys_by_kind[4].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_t_c0,
+            )));
+            polys_by_kind[5].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_t_c1,
+            )));
+            polys_by_kind[6].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_t_c0,
+            )));
+            polys_by_kind[7].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_t_c1,
+            )));
+            polys_by_kind[8].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_a_next_c0,
+            )));
+            polys_by_kind[9].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.x_a_next_c1,
+            )));
+            polys_by_kind[10].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_a_next_c0,
+            )));
+            polys_by_kind[11].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.y_a_next_c1,
+            )));
+            polys_by_kind[12].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.t_indicator,
+            )));
+            polys_by_kind[13].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                poly.a_indicator,
+            )));
 
-            public_polys[0].push(MultilinearPolynomial::LargeScalars(
-                DensePolynomial::new(pub_in.build_bit_poly(num_vars))
-            ));
+            public_polys[0].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                pub_in.build_bit_poly(num_vars),
+            )));
         }
 
         let sequential_indices: Vec<usize> = (0..num_instances).collect();
-        (Self { params, polys_by_kind, public_polys, base_points }, sequential_indices)
+        (
+            Self {
+                params,
+                polys_by_kind,
+                public_polys,
+                base_points,
+            },
+            sequential_indices,
+        )
     }
 }
 
 impl ConstraintListSpec for G2ScalarMulProverSpec {
-    fn sumcheck_id(&self) -> SumcheckId { self.params.sumcheck_id }
-    fn num_rounds(&self) -> usize { self.params.num_constraint_vars }
-    fn num_instances(&self) -> usize { self.params.num_constraints }
-    fn uses_term_batching(&self) -> bool { true }
-    fn opening_specs(&self) -> &'static [OpeningSpec] { &OPENING_SPECS }
+    fn sumcheck_id(&self) -> SumcheckId {
+        self.params.sumcheck_id
+    }
+    fn num_rounds(&self) -> usize {
+        self.params.num_constraint_vars
+    }
+    fn num_instances(&self) -> usize {
+        self.params.num_constraints
+    }
+    fn uses_term_batching(&self) -> bool {
+        true
+    }
+    fn opening_specs(&self) -> &'static [OpeningSpec] {
+        &OPENING_SPECS
+    }
 
     fn build_virtual_poly(&self, term_index: usize, instance: usize) -> VirtualPolynomial {
         VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
@@ -311,12 +382,24 @@ impl ConstraintListSpec for G2ScalarMulProverSpec {
 }
 
 impl ConstraintListProverSpec<Fq, DEGREE> for G2ScalarMulProverSpec {
-    fn polys_by_kind(&self) -> &[Vec<MultilinearPolynomial<Fq>>] { &self.polys_by_kind }
-    fn polys_by_kind_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] { &mut self.polys_by_kind }
-    fn public_polys(&self) -> &[Vec<MultilinearPolynomial<Fq>>] { &self.public_polys }
-    fn public_polys_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] { &mut self.public_polys }
-    fn shared_polys(&self) -> &[MultilinearPolynomial<Fq>] { &[] }
-    fn shared_polys_mut(&mut self) -> &mut [MultilinearPolynomial<Fq>] { &mut [] }
+    fn polys_by_kind(&self) -> &[Vec<MultilinearPolynomial<Fq>>] {
+        &self.polys_by_kind
+    }
+    fn polys_by_kind_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] {
+        &mut self.polys_by_kind
+    }
+    fn public_polys(&self) -> &[Vec<MultilinearPolynomial<Fq>>] {
+        &self.public_polys
+    }
+    fn public_polys_mut(&mut self) -> &mut [Vec<MultilinearPolynomial<Fq>>] {
+        &mut self.public_polys
+    }
+    fn shared_polys(&self) -> &[MultilinearPolynomial<Fq>] {
+        &[]
+    }
+    fn shared_polys_mut(&mut self) -> &mut [MultilinearPolynomial<Fq>] {
+        &mut []
+    }
 
     fn eval_constraint(
         &self,
@@ -354,16 +437,30 @@ impl G2ScalarMulVerifierSpec {
         public_inputs: Vec<G2ScalarMulPublicInputs>,
         base_points: Vec<(Fq2, Fq2)>,
     ) -> Self {
-        Self { params, public_inputs, base_points }
+        Self {
+            params,
+            public_inputs,
+            base_points,
+        }
     }
 }
 
 impl ConstraintListSpec for G2ScalarMulVerifierSpec {
-    fn sumcheck_id(&self) -> SumcheckId { self.params.sumcheck_id }
-    fn num_rounds(&self) -> usize { self.params.num_constraint_vars }
-    fn num_instances(&self) -> usize { self.params.num_constraints }
-    fn uses_term_batching(&self) -> bool { true }
-    fn opening_specs(&self) -> &'static [OpeningSpec] { &OPENING_SPECS }
+    fn sumcheck_id(&self) -> SumcheckId {
+        self.params.sumcheck_id
+    }
+    fn num_rounds(&self) -> usize {
+        self.params.num_constraint_vars
+    }
+    fn num_instances(&self) -> usize {
+        self.params.num_constraints
+    }
+    fn uses_term_batching(&self) -> bool {
+        true
+    }
+    fn opening_specs(&self) -> &'static [OpeningSpec] {
+        &OPENING_SPECS
+    }
 
     fn build_virtual_poly(&self, term_index: usize, instance: usize) -> VirtualPolynomial {
         VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
@@ -374,7 +471,9 @@ impl ConstraintListSpec for G2ScalarMulVerifierSpec {
 }
 
 impl ConstraintListVerifierSpec<Fq, DEGREE> for G2ScalarMulVerifierSpec {
-    fn compute_shared_scalars(&self, _eval_point: &[Fq]) -> Vec<Fq> { vec![] }
+    fn compute_shared_scalars(&self, _eval_point: &[Fq]) -> Vec<Fq> {
+        vec![]
+    }
 
     fn eval_constraint_at_point(
         &self,

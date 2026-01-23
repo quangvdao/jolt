@@ -1428,20 +1428,41 @@ where
             generate_recursion_hint
         );
 
-        let _guard = DoryGlobals::initialize_context(
-            self.one_hot_params.k_chunk,
-            self.padded_trace_len,
-            DoryContext::Main,
-            Some(DoryGlobals::get_layout()),
-        );
+        let _guard = tracing::info_span!("stage8_init_dory_context").in_scope(|| {
+            let start = Instant::now();
+            let guard = DoryGlobals::initialize_context(
+                self.one_hot_params.k_chunk,
+                self.padded_trace_len,
+                DoryContext::Main,
+                Some(DoryGlobals::get_layout()),
+            );
+            tracing::info!(
+                elapsed_ms = start.elapsed().as_millis(),
+                k_chunk = self.one_hot_params.k_chunk,
+                padded_trace_len = self.padded_trace_len,
+                "Initialized DoryGlobals for Stage 8"
+            );
+            guard
+        });
 
         // Get the unified opening point from HammingWeightClaimReduction
         // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
-        let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::InstructionRa(0),
-            SumcheckId::HammingWeightClaimReduction,
-        );
-        let log_k_chunk = self.one_hot_params.log_k_chunk;
+        let (opening_point, log_k_chunk) = tracing::info_span!("stage8_get_unified_opening_point")
+            .in_scope(|| {
+                let start = Instant::now();
+                let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::InstructionRa(0),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                let log_k_chunk = self.one_hot_params.log_k_chunk;
+                tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    log_k_chunk,
+                    opening_point_vars = opening_point.r.len(),
+                    "Fetched unified opening point for Stage 8"
+                );
+                (opening_point, log_k_chunk)
+            });
         let r_address_stage7 = &opening_point.r[..log_k_chunk];
 
         // 1. Collect all (polynomial, claim) pairs
@@ -1449,16 +1470,23 @@ where
 
         // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
         // These are at r_cycle_stage6 only (length log_T)
-        let (_ram_inc_point, ram_inc_claim) =
-            self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RamInc,
-                SumcheckId::IncClaimReduction,
-            );
-        let (_rd_inc_point, rd_inc_claim) =
-            self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RdInc,
-                SumcheckId::IncClaimReduction,
-            );
+        let ((_ram_inc_point, ram_inc_claim), (_rd_inc_point, rd_inc_claim)) =
+            tracing::info_span!("stage8_collect_dense_inc_claims").in_scope(|| {
+                let start = Instant::now();
+                let ram = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RamInc,
+                    SumcheckId::IncClaimReduction,
+                );
+                let rd = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RdInc,
+                    SumcheckId::IncClaimReduction,
+                );
+                tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "Collected dense Inc claims (RamInc/RdInc)"
+                );
+                (ram, rd)
+            });
 
         #[cfg(test)]
         {
@@ -1480,78 +1508,117 @@ where
         // Apply Lagrange factor for dense polys: ∏_{i<log_k_chunk} (1 - r_address[i])
         // Because dense polys have fewer variables, we need to account for this
         // Note: r_address is in big-endian, Lagrange factor uses ∏(1 - r_i)
-        let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+        let lagrange_factor: F =
+            tracing::info_span!("stage8_dense_lagrange_factor").in_scope(|| {
+                let start = Instant::now();
+                let lf: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+                tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    log_k_chunk,
+                    "Computed dense Lagrange factor for embedding"
+                );
+                lf
+            });
 
         polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
         polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
 
         // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
         // These are at (r_address_stage7, r_cycle_stage6)
-        for i in 0..self.one_hot_params.instruction_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::InstructionRa(i),
-                SumcheckId::HammingWeightClaimReduction,
+        tracing::info_span!("stage8_collect_sparse_ra_claims").in_scope(|| {
+            let start = Instant::now();
+            for i in 0..self.one_hot_params.instruction_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::InstructionRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.bytecode_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::BytecodeRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.ram_d {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RamRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
+            }
+            tracing::info!(
+                elapsed_ms = start.elapsed().as_millis(),
+                instruction_d = self.one_hot_params.instruction_d,
+                bytecode_d = self.one_hot_params.bytecode_d,
+                ram_d = self.one_hot_params.ram_d,
+                "Collected sparse RA claims"
             );
-            polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
-        }
-        for i in 0..self.one_hot_params.bytecode_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::BytecodeRa(i),
-                SumcheckId::HammingWeightClaimReduction,
-            );
-            polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
-        }
-        for i in 0..self.one_hot_params.ram_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RamRa(i),
-                SumcheckId::HammingWeightClaimReduction,
-            );
-            polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
-        }
+        });
 
         // Advice polynomials: TrustedAdvice and UntrustedAdvice (from AdviceClaimReduction in Stage 6)
         // These are committed with smaller dimensions, so we apply Lagrange factors to embed
         // them in the top-left block of the main Dory matrix.
-        if let Some((advice_point, advice_claim)) = self
-            .opening_accumulator
-            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
-        {
-            #[cfg(test)]
+        tracing::info_span!("stage8_collect_advice_claims").in_scope(|| {
+            let start = Instant::now();
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
             {
-                let advice_poly = self.advice.trusted_advice_polynomial.as_ref().unwrap();
-                let expected_eval = advice_poly.evaluate(&advice_point.r);
-                assert_eq!(expected_eval, advice_claim);
+                #[cfg(test)]
+                {
+                    let advice_poly = self.advice.trusted_advice_polynomial.as_ref().unwrap();
+                    let expected_eval = advice_poly.evaluate(&advice_point.r);
+                    assert_eq!(expected_eval, advice_claim);
+                }
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::TrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
             }
-            let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((
-                CommittedPolynomial::TrustedAdvice,
-                advice_claim * lagrange_factor,
-            ));
-        }
 
-        if let Some((advice_point, advice_claim)) = self
-            .opening_accumulator
-            .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
-        {
-            #[cfg(test)]
+            if let Some((advice_point, advice_claim)) = self
+                .opening_accumulator
+                .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
             {
-                let advice_poly = self.advice.untrusted_advice_polynomial.as_ref().unwrap();
-                let expected_eval = advice_poly.evaluate(&advice_point.r);
-                assert_eq!(expected_eval, advice_claim);
+                #[cfg(test)]
+                {
+                    let advice_poly = self.advice.untrusted_advice_polynomial.as_ref().unwrap();
+                    let expected_eval = advice_poly.evaluate(&advice_point.r);
+                    assert_eq!(expected_eval, advice_claim);
+                }
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::UntrustedAdvice,
+                    advice_claim * lagrange_factor,
+                ));
             }
-            let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((
-                CommittedPolynomial::UntrustedAdvice,
-                advice_claim * lagrange_factor,
-            ));
-        }
+
+            tracing::info!(
+                elapsed_ms = start.elapsed().as_millis(),
+                total_claims = polynomial_claims.len(),
+                "Collected advice claims (if present)"
+            );
+        });
 
         // 2. Sample gamma and compute powers for RLC
-        let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
-        self.transcript.append_scalars(&claims);
-        let gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
+        let (claims, gamma_powers) =
+            tracing::info_span!("stage8_sample_gamma_powers").in_scope(|| {
+                let start = Instant::now();
+                let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
+                self.transcript.append_scalars(&claims);
+                let gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
+                tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    num_claims = claims.len(),
+                    "Sampled gamma powers for Stage 8 RLC"
+                );
+                (claims, gamma_powers)
+            });
 
         // Build DoryOpeningState
         let state = DoryOpeningState {
@@ -1576,13 +1643,21 @@ where
 
         // Build streaming RLC polynomial directly (no witness poly regeneration!)
         // Use materialized trace (default, single pass) instead of lazy trace
-        let (joint_poly, hint) = state.build_streaming_rlc::<PCS>(
-            self.one_hot_params.clone(),
-            TraceSource::Materialized(Arc::clone(&self.trace)),
-            streaming_data,
-            opening_proof_hints,
-            advice_polys,
-        );
+        let (joint_poly, hint) = tracing::info_span!("stage8_build_streaming_rlc").in_scope(|| {
+            let start = Instant::now();
+            let out = state.build_streaming_rlc::<PCS>(
+                self.one_hot_params.clone(),
+                TraceSource::Materialized(Arc::clone(&self.trace)),
+                streaming_data,
+                opening_proof_hints,
+                advice_polys,
+            );
+            tracing::info!(
+                elapsed_ms = start.elapsed().as_millis(),
+                "Built streaming RLC polynomial for Stage 8"
+            );
+            out
+        });
 
         // Ensure Dory is in the Main context for proving the joint opening.
         // (Some helper paths may temporarily switch contexts for advice handling.)
@@ -1596,99 +1671,185 @@ where
         };
 
         // Dory opening proof at the unified point
-        let opening_proof = PCS::prove(
-            &self.preprocessing.generators,
-            &joint_poly,
-            &opening_point.r,
-            Some(hint),
-            &mut self.transcript,
-        );
+        let opening_proof = tracing::info_span!("stage8_pcs_prove").in_scope(|| {
+            let start = Instant::now();
+            let proof = PCS::prove(
+                &self.preprocessing.generators,
+                &joint_poly,
+                &opening_point.r,
+                Some(hint),
+                &mut self.transcript,
+            );
+            tracing::info!(
+                elapsed_ms = start.elapsed().as_millis(),
+                "Generated Stage 8 PCS opening proof"
+            );
+            proof
+        });
 
         // Generate recursion hint if requested
         let (stage8_hint, proof_data, stage8_combine_hint) = if generate_recursion_hint {
-            // Compute claim: Σ γ_i · claim_i using shared utility
-            let joint_claim = compute_joint_claim(&gamma_powers, &claims);
+            tracing::info_span!("stage8_generate_recursion_hint").in_scope(|| {
+                // Compute claim: Σ γ_i · claim_i using shared utility
+                let joint_claim = tracing::info_span!("stage8_joint_claim").in_scope(|| {
+                    let start = Instant::now();
+                    let jc = compute_joint_claim(&gamma_powers, &claims);
+                    tracing::info!(
+                        elapsed_ms = start.elapsed().as_millis(),
+                        num_claims = claims.len(),
+                        "Computed Stage 8 joint claim"
+                    );
+                    jc
+                });
 
-            // Compute joint commitment: Σ γ_i · C_i
-            let mut commitments_map = HashMap::new();
-            let all_polys = all_committed_polynomials(&self.one_hot_params);
-            debug_assert_eq!(
-                all_polys.len(),
-                self.commitments.len(),
-                "commitment vector length mismatch"
-            );
-            for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
-                commitments_map.insert(poly, commitment.clone());
-            }
+                // Compute joint commitment: Σ γ_i · C_i
+                let (coeffs, comms) = tracing::info_span!("stage8_collect_rlc_coeffs_and_comms")
+                    .in_scope(|| {
+                        let start = Instant::now();
 
-            // Include advice commitments if they were folded into the Stage 8 RLC.
-            if state
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
-            {
-                if let Some(ref commitment) = self.advice.trusted_advice_commitment {
-                    commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-                }
-            }
-            if state
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
-            {
-                if let Some(ref commitment) = self.untrusted_advice_commitment {
-                    commitments_map
-                        .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
-                }
-            }
+                        let mut commitments_map = HashMap::new();
+                        let all_polys = all_committed_polynomials(&self.one_hot_params);
+                        debug_assert_eq!(
+                            all_polys.len(),
+                            self.commitments.len(),
+                            "commitment vector length mismatch"
+                        );
+                        for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter())
+                        {
+                            commitments_map.insert(poly, commitment.clone());
+                        }
 
-            // Compute RLC coefficients using shared utility
-            let rlc_map = compute_rlc_coefficients(
-                &state.gamma_powers,
-                state.polynomial_claims.iter().cloned(),
-            );
-            let (coeffs, comms): (Vec<F>, Vec<PCS::Commitment>) = rlc_map
-                .into_iter()
-                .map(|(poly, coeff)| (coeff, commitments_map.remove(&poly).unwrap()))
-                .unzip();
+                        // Include advice commitments if they were folded into the Stage 8 RLC.
+                        if state
+                            .polynomial_claims
+                            .iter()
+                            .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+                        {
+                            if let Some(ref commitment) = self.advice.trusted_advice_commitment {
+                                commitments_map
+                                    .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                            }
+                        }
+                        if state
+                            .polynomial_claims
+                            .iter()
+                            .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+                        {
+                            if let Some(ref commitment) = self.untrusted_advice_commitment {
+                                commitments_map.insert(
+                                    CommittedPolynomial::UntrustedAdvice,
+                                    commitment.clone(),
+                                );
+                            }
+                        }
 
-            // Generate combine witness for homomorphic combining offload
-            let (combine_witness, combine_hint) = PCS::generate_combine_witness(&comms, &coeffs);
-            tracing::info!(
-                "[Homomorphic Combine] Generated witness: {} GT exp ops, {} GT mul ops",
-                combine_witness.exp_witnesses.len(),
-                combine_witness.mul_witnesses.len()
-            );
-            // combine_witness will be passed to Stage 9 via proof_data
-            let joint_commitment = PCS::combine_with_hint(&combine_hint);
+                        // Compute RLC coefficients using shared utility
+                        let rlc_map = compute_rlc_coefficients(
+                            &state.gamma_powers,
+                            state.polynomial_claims.iter().cloned(),
+                        );
+                        let (coeffs, comms): (Vec<F>, Vec<PCS::Commitment>) = rlc_map
+                            .into_iter()
+                            .map(|(poly, coeff)| (coeff, commitments_map.remove(&poly).unwrap()))
+                            .unzip();
 
-            // Generate a hint for verifying the opening proof (via the PCS's recursion extension).
-            let verifier_setup = PCS::setup_verifier(&self.preprocessing.generators);
-            let (witnesses, stage8_hint) = PCS::witness_gen(
-                &opening_proof,
-                &verifier_setup,
-                &mut witness_gen_transcript.clone().unwrap(),
-                &opening_point.r,
-                &joint_claim,
-                &joint_commitment,
-            )
-            .expect("PCS::witness_gen failed for Stage 8 opening proof");
+                        tracing::info!(
+                            elapsed_ms = start.elapsed().as_millis(),
+                            num_terms = coeffs.len(),
+                            "Collected RLC coeffs and commitments"
+                        );
+                        (coeffs, comms)
+                    });
 
-            // Create Stage8ProofData with all computed values
-            let proof_data = Stage8ProofData {
-                gamma_powers: gamma_powers.clone(),
-                joint_claim,
-                joint_commitment: joint_commitment.clone(),
-                witness_gen_transcript: witness_gen_transcript.unwrap(),
-                opening_state: state.clone(),
-                witnesses,
-                combine_witness: Some(combine_witness),
-            };
+                // Generate combine witness for homomorphic combining offload
+                let (combine_witness, combine_hint) =
+                    tracing::info_span!("stage8_generate_combine_witness").in_scope(|| {
+                        let start = Instant::now();
+                        let out = PCS::generate_combine_witness(&comms, &coeffs);
+                        tracing::info!(
+                            elapsed_ms = start.elapsed().as_millis(),
+                            exp_ops = out.0.exp_witnesses.len(),
+                            mul_ops = out.0.mul_witnesses.len(),
+                            "Generated combine witness for homomorphic combining"
+                        );
+                        out
+                    });
 
-            // Extract the Fq12 from combine_hint for serialization
-            let combine_hint_fq12 = PCS::combine_hint_to_fq12(&combine_hint);
+                // combine_witness will be passed to Stage 9 via proof_data
+                let joint_commitment =
+                    tracing::info_span!("stage8_combine_with_hint").in_scope(|| {
+                        let start = Instant::now();
+                        let jc = PCS::combine_with_hint(&combine_hint);
+                        tracing::info!(
+                            elapsed_ms = start.elapsed().as_millis(),
+                            "Computed joint commitment via combine hint"
+                        );
+                        jc
+                    });
 
-            (Some(stage8_hint), Some(proof_data), Some(combine_hint_fq12))
+                // Generate a hint for verifying the opening proof (via the PCS's recursion extension).
+                let verifier_setup = tracing::info_span!("stage8_setup_verifier").in_scope(|| {
+                    let start = Instant::now();
+                    let vs = PCS::setup_verifier(&self.preprocessing.generators);
+                    tracing::info!(
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "Derived PCS verifier setup for witness_gen"
+                    );
+                    vs
+                });
+
+                let (witnesses, stage8_hint) = tracing::info_span!("stage8_pcs_witness_gen")
+                    .in_scope(|| {
+                        let start = Instant::now();
+                        let out = PCS::witness_gen(
+                            &opening_proof,
+                            &verifier_setup,
+                            &mut witness_gen_transcript.clone().unwrap(),
+                            &opening_point.r,
+                            &joint_claim,
+                            &joint_commitment,
+                        )
+                        .expect("PCS::witness_gen failed for Stage 8 opening proof");
+                        tracing::info!(
+                            elapsed_ms = start.elapsed().as_millis(),
+                            "Generated recursion witness + hint for Stage 8 opening"
+                        );
+                        out
+                    });
+
+                // Create Stage8ProofData with all computed values
+                let proof_data = tracing::info_span!("stage8_pack_proof_data").in_scope(|| {
+                    let start = Instant::now();
+                    let pd = Stage8ProofData {
+                        gamma_powers: gamma_powers.clone(),
+                        joint_claim,
+                        joint_commitment: joint_commitment.clone(),
+                        witness_gen_transcript: witness_gen_transcript.unwrap(),
+                        opening_state: state.clone(),
+                        witnesses,
+                        combine_witness: Some(combine_witness),
+                    };
+                    tracing::info!(
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "Packed Stage8ProofData"
+                    );
+                    pd
+                });
+
+                // Extract the Fq12 from combine_hint for serialization
+                let combine_hint_fq12 = tracing::info_span!("stage8_combine_hint_to_fq12")
+                    .in_scope(|| {
+                        let start = Instant::now();
+                        let x = PCS::combine_hint_to_fq12(&combine_hint);
+                        tracing::info!(
+                            elapsed_ms = start.elapsed().as_millis(),
+                            "Converted combine hint to Fq12 for serialization"
+                        );
+                        x
+                    });
+
+                (Some(stage8_hint), Some(proof_data), Some(combine_hint_fq12))
+            })
         } else {
             (None, None, None)
         };
@@ -1893,7 +2054,8 @@ where
 
         // Commit to dense polynomial
         let (dense_commitment, _) = tracing::info_span!("hyrax_commit").in_scope(|| {
-            let commitment = <HyraxPCS as CommitmentScheme>::commit(&dense_mlpoly, hyrax_prover_setup);
+            let commitment =
+                <HyraxPCS as CommitmentScheme>::commit(&dense_mlpoly, hyrax_prover_setup);
             tracing::info!("Generated Hyrax commitment to dense polynomial");
             commitment
         });

@@ -31,40 +31,44 @@ use crate::{
     transcripts::Transcript,
     zkvm::witness::VirtualPolynomial,
 };
+use allocative::Allocative;
 use rayon::prelude::*;
 
 // ============================================================================
-// OpeningSpec: Declarative specification for virtual polynomial openings
+// OpeningSpec: Data-driven specification for virtual polynomial openings
 // ============================================================================
 
 /// Specifies one virtual opening to emit per instance.
 ///
 /// - `kind` indexes into the prover's `polys_by_kind()[kind][instance]`.
-/// - `make_poly` is a function that constructs the `VirtualPolynomial` from an instance index.
-#[derive(Clone, Copy)]
+/// - `term_index` identifies which term within the constraint (used by `build_virtual_poly`).
+///
+/// This is pure data - the actual VirtualPolynomial construction is delegated to the spec trait.
+#[derive(Clone, Copy, Debug, Allocative)]
 pub struct OpeningSpec {
     pub kind: usize,
-    pub make_poly: fn(usize) -> VirtualPolynomial,
-}
-
-impl std::fmt::Debug for OpeningSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OpeningSpec")
-            .field("kind", &self.kind)
-            .field("make_poly", &"<fn>")
-            .finish()
-    }
+    pub term_index: usize,
 }
 
 impl OpeningSpec {
-    pub const fn new(kind: usize, make_poly: fn(usize) -> VirtualPolynomial) -> Self {
-        Self { kind, make_poly }
+    pub const fn new(kind: usize, term_index: usize) -> Self {
+        Self { kind, term_index }
     }
+}
 
-    /// Construct the VirtualPolynomial for the given instance index.
-    pub fn with_index(&self, instance: usize) -> VirtualPolynomial {
-        (self.make_poly)(instance)
+/// Generate sequential opening specs where kind == term_index for all N terms.
+/// This is the common case when polynomial kinds are 1:1 with terms.
+pub const fn sequential_opening_specs<const N: usize>() -> [OpeningSpec; N] {
+    let mut specs = [OpeningSpec { kind: 0, term_index: 0 }; N];
+    let mut i = 0;
+    while i < N {
+        specs[i] = OpeningSpec {
+            kind: i,
+            term_index: i,
+        };
+        i += 1;
     }
+    specs
 }
 
 // ============================================================================
@@ -72,7 +76,7 @@ impl OpeningSpec {
 // ============================================================================
 
 /// Common metadata shared by prover and verifier specs.
-pub trait ConstraintListSpec: Send + Sync {
+pub trait ConstraintListSpec: Send + Sync + Allocative {
     fn sumcheck_id(&self) -> SumcheckId;
     fn num_rounds(&self) -> usize;
     fn num_instances(&self) -> usize;
@@ -85,6 +89,10 @@ pub trait ConstraintListSpec: Send + Sync {
 
     /// Virtual openings to emit (ordered). Order is consensus-critical.
     fn opening_specs(&self) -> &'static [OpeningSpec];
+
+    /// Build the VirtualPolynomial for the given term_index and instance.
+    /// This is called by the wrapper to construct polynomial identifiers for openings.
+    fn build_virtual_poly(&self, term_index: usize, instance: usize) -> VirtualPolynomial;
 }
 
 /// Prover-specific: owns polynomial data, evaluates constraint at univariate point t.
@@ -155,6 +163,7 @@ pub trait ConstraintListVerifierSpec<F: JoltField, const DEGREE: usize>:
 // ============================================================================
 
 /// Generic prover core for a "list of constraints" sumcheck.
+#[derive(Allocative)]
 pub struct ConstraintListProver<F: JoltField, Spec, const DEGREE: usize> {
     pub spec: Spec,
     pub eq_poly: MultilinearPolynomial<F>,
@@ -164,14 +173,27 @@ pub struct ConstraintListProver<F: JoltField, Spec, const DEGREE: usize> {
     pub instance_batch_coeff: F,
     /// Random coefficient for batching constraint terms within an instance (if used)
     pub term_batch_coeff: Option<F>,
+    /// Maps local instance index to global constraint index (for VirtualPolynomial identifiers)
+    pub constraint_indices: Vec<usize>,
 }
 
 impl<F: JoltField, Spec, const DEGREE: usize> ConstraintListProver<F, Spec, DEGREE>
 where
     Spec: ConstraintListProverSpec<F, DEGREE>,
 {
-    /// Create a prover from a spec. Op-specific files typically wrap this in a `new` method.
-    pub fn from_spec<T: Transcript>(spec: Spec, transcript: &mut T) -> Self {
+    /// Create a prover from a spec and constraint indices.
+    /// `constraint_indices` maps local instance i to global constraint index.
+    pub fn from_spec<T: Transcript>(
+        spec: Spec,
+        constraint_indices: Vec<usize>,
+        transcript: &mut T,
+    ) -> Self {
+        debug_assert_eq!(
+            spec.num_instances(),
+            constraint_indices.len(),
+            "constraint_indices length must match num_instances"
+        );
+
         let num_rounds = spec.num_rounds();
         let uses_term_batching = spec.uses_term_batching();
 
@@ -190,6 +212,7 @@ where
             eq_point,
             instance_batch_coeff,
             term_batch_coeff,
+            constraint_indices,
         }
     }
 }
@@ -303,11 +326,13 @@ where
 
         // Order is instance-major, then per-instance opening order.
         for i in 0..self.spec.num_instances() {
+            let global_idx = self.constraint_indices[i];
             for spec in opening_specs {
                 let claim = polys_by_kind[spec.kind][i].get_bound_coeff(0);
+                let poly_id = self.spec.build_virtual_poly(spec.term_index, global_idx);
                 accumulator.append_virtual(
                     transcript,
-                    spec.with_index(i),
+                    poly_id,
                     sumcheck_id,
                     opening_point.clone(),
                     claim,
@@ -322,6 +347,7 @@ where
 // ============================================================================
 
 /// Generic verifier core for a "list of constraints" sumcheck.
+#[derive(Allocative)]
 pub struct ConstraintListVerifier<F: JoltField, Spec, const DEGREE: usize> {
     pub spec: Spec,
     /// Random point sampled for the eq polynomial: eq(eq_point, x)
@@ -330,14 +356,27 @@ pub struct ConstraintListVerifier<F: JoltField, Spec, const DEGREE: usize> {
     pub instance_batch_coeff: F,
     /// Random coefficient for batching constraint terms within an instance (if used)
     pub term_batch_coeff: Option<F>,
+    /// Maps local instance index to global constraint index (for VirtualPolynomial identifiers)
+    pub constraint_indices: Vec<usize>,
 }
 
 impl<F: JoltField, Spec, const DEGREE: usize> ConstraintListVerifier<F, Spec, DEGREE>
 where
     Spec: ConstraintListVerifierSpec<F, DEGREE>,
 {
-    /// Create a verifier from a spec. Op-specific files typically wrap this in a `new` method.
-    pub fn from_spec<T: Transcript>(spec: Spec, transcript: &mut T) -> Self {
+    /// Create a verifier from a spec and constraint indices.
+    /// `constraint_indices` maps local instance i to global constraint index.
+    pub fn from_spec<T: Transcript>(
+        spec: Spec,
+        constraint_indices: Vec<usize>,
+        transcript: &mut T,
+    ) -> Self {
+        debug_assert_eq!(
+            spec.num_instances(),
+            constraint_indices.len(),
+            "constraint_indices length must match num_instances"
+        );
+
         let num_rounds = spec.num_rounds();
         let uses_term_batching = spec.uses_term_batching();
 
@@ -353,6 +392,7 @@ where
             eq_point,
             instance_batch_coeff,
             term_batch_coeff,
+            constraint_indices,
         }
     }
 }
@@ -398,10 +438,11 @@ where
         let mut batch_power = self.instance_batch_coeff;
 
         for i in 0..self.spec.num_instances() {
+            let global_idx = self.constraint_indices[i];
             let mut claims = Vec::with_capacity(opening_specs.len());
             for spec in opening_specs {
-                let (_, claim) =
-                    accumulator.get_virtual_polynomial_opening(spec.with_index(i), sumcheck_id);
+                let poly_id = self.spec.build_virtual_poly(spec.term_index, global_idx);
+                let (_, claim) = accumulator.get_virtual_polynomial_opening(poly_id, sumcheck_id);
                 claims.push(claim);
             }
 
@@ -430,10 +471,12 @@ where
 
         // Order is instance-major, then per-instance opening order.
         for i in 0..self.spec.num_instances() {
+            let global_idx = self.constraint_indices[i];
             for spec in opening_specs {
+                let poly_id = self.spec.build_virtual_poly(spec.term_index, global_idx);
                 accumulator.append_virtual(
                     transcript,
-                    spec.with_index(i),
+                    poly_id,
                     sumcheck_id,
                     opening_point.clone(),
                 );
@@ -441,3 +484,381 @@ where
         }
     }
 }
+
+// ============================================================================
+// Macro: Full constraint type definition
+// ============================================================================
+
+/// Macro to define a complete constraint type with all boilerplate auto-generated.
+///
+/// 1. `{Name}ConstraintPolynomials<F>` - generic over JoltField, holds `Vec<F>` for each field
+/// 2. `{Name}Values<F>` - single-point evaluations with `from_poly_evals`/`from_claims`
+/// 3. `{Name}Params` - sumcheck parameters
+/// 4. `{Name}ProverSpec<F>` - prover specification with all trait impls
+/// 5. `{Name}VerifierSpec<F>` - verifier specification with all trait impls
+/// 6. `{Name}Prover<F>` / `{Name}Verifier<F>` - type aliases
+/// 7. Opening specs (auto-generated sequential)
+/// 8. `build_virtual_poly` implementations
+///
+/// The ONLY custom code needed after invoking this macro is:
+/// ```ignore
+/// impl<F: JoltField> {Name}Values<F> {
+///     pub fn eval_constraint(&self, delta: F) -> F {
+///         // THE ACTUAL CONSTRAINT LOGIC
+///     }
+/// }
+/// ```
+///
+/// # Example
+/// ```ignore
+/// define_constraint!(
+///     name: G1Add,
+///     sumcheck_id: SumcheckId::G1Add,
+///     num_vars: 11,
+///     degree: 6,
+///     uses_term_batching: true,
+///     term_enum: G1AddTerm,
+///     recursion_poly_variant: G1Add,
+///     fields: [x_p, y_p, ind_p, x_q, y_q, ind_q, x_r, y_r, ind_r, lambda, inv_delta_x, is_double, is_inverse]
+/// );
+/// ```
+#[macro_export]
+macro_rules! define_constraint {
+    (
+        name: $name:ident,
+        sumcheck_id: $sumcheck_id:expr,
+        num_vars: $num_vars:expr,
+        degree: $degree:expr,
+        uses_term_batching: $uses_term_batching:expr,
+        term_enum: $term_enum:ty,
+        recursion_poly_variant: $recursion_variant:ident,
+        fields: [$($field:ident),* $(,)?]
+    ) => {
+        $crate::paste::paste! {
+            // ================================================================
+            // Constraint Polynomials (generic over F: JoltField)
+            // ================================================================
+
+            /// Polynomial data for one constraint instance.
+            /// Each field is a multilinear polynomial represented as evaluations over the boolean hypercube.
+            #[derive(Clone, Debug, $crate::allocative::Allocative)]
+            pub struct [<$name ConstraintPolynomials>]<F> {
+                $(pub $field: Vec<F>,)*
+                /// Global index of this constraint in the constraint system
+                pub constraint_index: usize,
+            }
+
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> [<$name ConstraintPolynomials>]<F> {
+                /// Unpack a vector of constraint polynomials into the `polys_by_kind` structure.
+                ///
+                /// Returns `(polys_by_kind, constraint_indices)` where:
+                /// - `polys_by_kind[kind][instance]` is the polynomial for that kind/instance
+                /// - `constraint_indices[i]` is the global constraint index for instance i
+                #[allow(unused_assignments)]
+                pub fn unpack_all(
+                    polys: Vec<Self>,
+                ) -> (
+                    Vec<Vec<$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>>>,
+                    Vec<usize>,
+                ) {
+                    let num_instances = polys.len();
+                    let num_fields = [<$name Values>]::<F>::COUNT;
+
+                    let mut polys_by_kind: Vec<Vec<$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>>> =
+                        (0..num_fields).map(|_| Vec::with_capacity(num_instances)).collect();
+                    let mut constraint_indices = Vec::with_capacity(num_instances);
+
+                    for poly in polys {
+                        constraint_indices.push(poly.constraint_index);
+
+                        let mut kind_idx = 0usize;
+                        $(
+                            polys_by_kind[kind_idx].push(
+                                $crate::poly::multilinear_polynomial::MultilinearPolynomial::LargeScalars(
+                                    $crate::poly::dense_mlpoly::DensePolynomial::new(poly.$field)
+                                )
+                            );
+                            kind_idx += 1;
+                        )*
+                    }
+
+                    (polys_by_kind, constraint_indices)
+                }
+            }
+
+            /// Type alias for backward compatibility.
+            pub type [<$name Witness>]<F> = [<$name ConstraintPolynomials>]<F>;
+
+            // ================================================================
+            // Values (single-point evaluations)
+            // ================================================================
+
+            /// Single-point evaluation values for constraint polynomials.
+            #[derive(Clone, Copy, Debug, $crate::allocative::Allocative)]
+            pub struct [<$name Values>]<F> {
+                $(pub $field: F,)*
+            }
+
+            impl<F: Copy> [<$name Values>]<F> {
+                /// Number of fields/terms in this constraint type.
+                pub const COUNT: usize = {
+                    #[allow(unused_mut)]
+                    let mut n = 0usize;
+                    $(
+                        let _ = stringify!($field);
+                        n += 1;
+                    )*
+                    n
+                };
+
+                /// Extract values from prover's per-round polynomial evaluations.
+                #[inline]
+                #[allow(unused_assignments)]
+                pub fn from_poly_evals<const DEGREE: usize>(
+                    poly_evals: &[[F; DEGREE]],
+                    eval_index: usize,
+                ) -> Self {
+                    let mut idx = 0usize;
+                    Self {
+                        $($field: {
+                            let v = poly_evals[idx][eval_index];
+                            idx += 1;
+                            v
+                        },)*
+                    }
+                }
+
+                /// Extract values from verifier's opened claims.
+                #[inline]
+                #[allow(unused_assignments)]
+                pub fn from_claims(claims: &[F]) -> Self {
+                    let mut idx = 0usize;
+                    Self {
+                        $($field: {
+                            let v = claims[idx];
+                            idx += 1;
+                            v
+                        },)*
+                    }
+                }
+            }
+
+            // ================================================================
+            // Parameters
+            // ================================================================
+
+            /// Parameters for this sumcheck.
+            #[derive(Clone, $crate::allocative::Allocative)]
+            pub struct [<$name Params>] {
+                /// Number of constraint variables
+                pub num_constraint_vars: usize,
+                /// Number of constraints
+                pub num_constraints: usize,
+                /// Sumcheck instance identifier
+                pub sumcheck_id: $crate::poly::opening_proof::SumcheckId,
+            }
+
+            impl [<$name Params>] {
+                pub fn new(num_constraints: usize) -> Self {
+                    Self {
+                        num_constraint_vars: $num_vars,
+                        num_constraints,
+                        sumcheck_id: $sumcheck_id,
+                    }
+                }
+            }
+
+            // ================================================================
+            // Opening Specs (auto-generated)
+            // ================================================================
+
+            const [<$name:upper _OPENING_SPECS>]: [$crate::zkvm::recursion::stage1::constraint_list_sumcheck::OpeningSpec; [<$name Values>]::<()>::COUNT] =
+                $crate::zkvm::recursion::stage1::constraint_list_sumcheck::sequential_opening_specs::<{ [<$name Values>]::<()>::COUNT }>();
+
+            const [<$name:upper _DEGREE>]: usize = $degree;
+
+            // ================================================================
+            // Prover Spec
+            // ================================================================
+
+            /// Prover-side specification.
+            #[derive(Clone, $crate::allocative::Allocative)]
+            pub struct [<$name ProverSpec>]<F: $crate::field::JoltField> {
+                params: [<$name Params>],
+                polys_by_kind: Vec<Vec<$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>>>,
+            }
+
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> [<$name ProverSpec>]<F> {
+                /// Create a new prover spec from constraint polynomials.
+                ///
+                /// Returns `(spec, constraint_indices)` for use with `ConstraintListProver::from_spec`.
+                pub fn new(
+                    params: [<$name Params>],
+                    constraint_polys: Vec<[<$name ConstraintPolynomials>]<F>>,
+                ) -> (Self, Vec<usize>) {
+                    debug_assert_eq!(
+                        constraint_polys.len(),
+                        params.num_constraints,
+                        concat!(stringify!($name), "ProverSpec: params.num_constraints must match constraint_polys length")
+                    );
+
+                    let (polys_by_kind, constraint_indices) =
+                        [<$name ConstraintPolynomials>]::unpack_all(constraint_polys);
+
+                    (Self { params, polys_by_kind }, constraint_indices)
+                }
+            }
+
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage1::constraint_list_sumcheck::ConstraintListSpec for [<$name ProverSpec>]<F> {
+                fn sumcheck_id(&self) -> $crate::poly::opening_proof::SumcheckId {
+                    self.params.sumcheck_id
+                }
+
+                fn num_rounds(&self) -> usize {
+                    self.params.num_constraint_vars
+                }
+
+                fn num_instances(&self) -> usize {
+                    self.params.num_constraints
+                }
+
+                fn uses_term_batching(&self) -> bool {
+                    $uses_term_batching
+                }
+
+                fn opening_specs(&self) -> &'static [$crate::zkvm::recursion::stage1::constraint_list_sumcheck::OpeningSpec] {
+                    &[<$name:upper _OPENING_SPECS>]
+                }
+
+                fn build_virtual_poly(&self, term_index: usize, instance: usize) -> $crate::zkvm::witness::VirtualPolynomial {
+                    use $crate::zkvm::witness::TermEnum;
+                    $crate::zkvm::witness::VirtualPolynomial::Recursion(
+                        $crate::zkvm::witness::RecursionPoly::$recursion_variant {
+                            term: <$term_enum>::from_index(term_index).expect(concat!("invalid ", stringify!($term_enum), " index")),
+                            instance,
+                        }
+                    )
+                }
+            }
+
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage1::constraint_list_sumcheck::ConstraintListProverSpec<F, [<$name:upper _DEGREE>]> for [<$name ProverSpec>]<F> {
+                fn polys_by_kind(&self) -> &[Vec<$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>>] {
+                    &self.polys_by_kind
+                }
+
+                fn polys_by_kind_mut(&mut self) -> &mut [Vec<$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>>] {
+                    &mut self.polys_by_kind
+                }
+
+                fn shared_polys(&self) -> &[$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>] {
+                    &[]
+                }
+
+                fn shared_polys_mut(&mut self) -> &mut [$crate::poly::multilinear_polynomial::MultilinearPolynomial<F>] {
+                    &mut []
+                }
+
+                fn eval_constraint(
+                    &self,
+                    _instance: usize,
+                    eval_index: usize,
+                    poly_evals: &[[F; [<$name:upper _DEGREE>]]],
+                    _shared_evals: &[[F; [<$name:upper _DEGREE>]]],
+                    term_batch_coeff: Option<F>,
+                ) -> F {
+                    let vals = [<$name Values>]::from_poly_evals(poly_evals, eval_index);
+                    if $uses_term_batching {
+                        vals.eval_constraint(term_batch_coeff.expect(concat!(stringify!($name), " requires term_batch_coeff")))
+                    } else {
+                        vals.eval_constraint_no_batching()
+                    }
+                }
+            }
+
+            // ================================================================
+            // Verifier Spec
+            // ================================================================
+
+            /// Verifier-side specification.
+            #[derive(Clone, $crate::allocative::Allocative)]
+            pub struct [<$name VerifierSpec>]<F: $crate::field::JoltField> {
+                params: [<$name Params>],
+                _marker: std::marker::PhantomData<F>,
+            }
+
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> [<$name VerifierSpec>]<F> {
+                /// Create a new verifier spec.
+                pub fn new(params: [<$name Params>]) -> Self {
+                    Self {
+                        params,
+                        _marker: std::marker::PhantomData,
+                    }
+                }
+            }
+
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage1::constraint_list_sumcheck::ConstraintListSpec for [<$name VerifierSpec>]<F> {
+                fn sumcheck_id(&self) -> $crate::poly::opening_proof::SumcheckId {
+                    self.params.sumcheck_id
+                }
+
+                fn num_rounds(&self) -> usize {
+                    self.params.num_constraint_vars
+                }
+
+                fn num_instances(&self) -> usize {
+                    self.params.num_constraints
+                }
+
+                fn uses_term_batching(&self) -> bool {
+                    $uses_term_batching
+                }
+
+                fn opening_specs(&self) -> &'static [$crate::zkvm::recursion::stage1::constraint_list_sumcheck::OpeningSpec] {
+                    &[<$name:upper _OPENING_SPECS>]
+                }
+
+                fn build_virtual_poly(&self, term_index: usize, instance: usize) -> $crate::zkvm::witness::VirtualPolynomial {
+                    use $crate::zkvm::witness::TermEnum;
+                    $crate::zkvm::witness::VirtualPolynomial::Recursion(
+                        $crate::zkvm::witness::RecursionPoly::$recursion_variant {
+                            term: <$term_enum>::from_index(term_index).expect(concat!("invalid ", stringify!($term_enum), " index")),
+                            instance,
+                        }
+                    )
+                }
+            }
+
+            impl<F: $crate::field::JoltField + $crate::allocative::Allocative> $crate::zkvm::recursion::stage1::constraint_list_sumcheck::ConstraintListVerifierSpec<F, [<$name:upper _DEGREE>]> for [<$name VerifierSpec>]<F> {
+                fn compute_shared_scalars(&self, _eval_point: &[F]) -> Vec<F> {
+                    vec![]
+                }
+
+                fn eval_constraint_at_point(
+                    &self,
+                    _instance: usize,
+                    opened_claims: &[F],
+                    _shared_scalars: &[F],
+                    term_batch_coeff: Option<F>,
+                ) -> F {
+                    let vals = [<$name Values>]::from_claims(opened_claims);
+                    if $uses_term_batching {
+                        vals.eval_constraint(term_batch_coeff.expect(concat!(stringify!($name), " requires term_batch_coeff")))
+                    } else {
+                        vals.eval_constraint_no_batching()
+                    }
+                }
+            }
+
+            // ================================================================
+            // Type Aliases
+            // ================================================================
+
+            /// Prover for this sumcheck.
+            pub type [<$name Prover>]<F> = $crate::zkvm::recursion::stage1::constraint_list_sumcheck::ConstraintListProver<F, [<$name ProverSpec>]<F>, [<$name:upper _DEGREE>]>;
+
+            /// Verifier for this sumcheck.
+            pub type [<$name Verifier>]<F> = $crate::zkvm::recursion::stage1::constraint_list_sumcheck::ConstraintListVerifier<F, [<$name VerifierSpec>]<F>, [<$name:upper _DEGREE>]>;
+        }
+    };
+}
+

@@ -439,7 +439,7 @@ impl DoryMatrixBuilder {
     }
 
     /// Pad a 4-variable MLE to 8 variables using zero padding for true jaggedness.
-    pub fn pad_4var_to_8var_zero_padding(mle_4var: &[Fq]) -> Vec<Fq> {
+    pub fn pad_4var_to_8var_zero_padding<Fq: JoltField>(mle_4var: &[Fq]) -> Vec<Fq> {
         assert_eq!(mle_4var.len(), 16, "Input must be a 4-variable MLE");
         let mut mle_8var = Vec::with_capacity(256);
 
@@ -456,7 +456,7 @@ impl DoryMatrixBuilder {
 
     /// Pad a 4-variable MLE to 11 variables using zero padding for true jaggedness.
     /// For GT mul: index = s * 16 + x (x in low bits).
-    pub fn pad_4var_to_11var_zero_padding(mle_4var: &[Fq]) -> Vec<Fq> {
+    pub fn pad_4var_to_11var_zero_padding<Fq: JoltField>(mle_4var: &[Fq]) -> Vec<Fq> {
         assert_eq!(mle_4var.len(), 16, "Input must be a 4-variable MLE");
         let mut mle_11var = Vec::with_capacity(2048);
 
@@ -473,7 +473,7 @@ impl DoryMatrixBuilder {
     /// Pad a 4-variable MLE to 11 variables for packed GT exp layout.
     /// Data layout: index = x * 128 + s (s in low 7 bits, x in high 4 bits).
     /// g(x) doesn't depend on s, so we replicate each g[x] across all 128 s values.
-    pub fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
+    pub fn pad_4var_to_11var_replicated<Fq: JoltField>(mle_4var: &[Fq]) -> Vec<Fq> {
         assert_eq!(mle_4var.len(), 16, "Input must be a 4-variable MLE");
         let mut mle_11var = vec![Fq::zero(); 2048];
 
@@ -512,7 +512,7 @@ impl DoryMatrixBuilder {
     /// - RhoNext: rho_next(s,x) - shifted intermediates (NOT COMMITTED - verified via shift sumcheck)
     /// - Quotient: quotient(s,x) - all quotients packed
     /// - Digit bits: digit_lo/hi(s) - scalar digits (7-var padded to 11-var, public input)
-    pub fn add_gt_exp_witness(&mut self, witness: &super::stage1::gt_exp::PackedGtExpWitness) {
+    pub fn add_gt_exp_witness(&mut self, witness: &super::stage1::gt_exp::PackedGtExpWitness<Fq>) {
         assert_eq!(
             self.num_constraint_vars, 11,
             "Packed GT exp requires 11 constraint variables"
@@ -1064,7 +1064,7 @@ impl DoryMatrixBuilder {
     pub fn add_combine_witness(
         &mut self,
         witness: &GTCombineWitness,
-    ) -> Vec<super::stage1::gt_exp::PackedGtExpWitness> {
+    ) -> Vec<super::stage1::gt_exp::PackedGtExpWitness<Fq>> {
         use super::stage1::gt_exp::PackedGtExpWitness;
         let mut packed_witnesses = Vec::new();
 
@@ -1317,7 +1317,7 @@ pub struct ConstraintSystem {
     pub constraints: Vec<MatrixConstraint>,
 
     /// Packed GT exp witnesses for Stage 1 prover (base-4 steps packed into 11-var MLEs)
-    pub gt_exp_witnesses: Vec<super::stage1::gt_exp::PackedGtExpWitness>,
+    pub gt_exp_witnesses: Vec<super::stage1::gt_exp::PackedGtExpWitness<Fq>>,
 
     /// Public inputs for packed GT exp (base Fq12 and scalar bits) - used by verifier
     /// and Stage 2 to compute digit/base evaluations directly
@@ -1330,10 +1330,10 @@ pub struct ConstraintSystem {
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 
     /// G1 addition witnesses for Stage 1 prover (one per `ConstraintType::G1Add`)
-    pub g1_add_witnesses: Vec<super::stage1::g1_add::G1AddWitness>,
+    pub g1_add_witnesses: Vec<super::stage1::g1_add::G1AddWitness<ark_bn254::Fq>>,
 
     /// G2 addition witnesses for Stage 1 prover (one per `ConstraintType::G2Add`)
-    pub g2_add_witnesses: Vec<super::stage1::g2_add::G2AddWitness>,
+    pub g2_add_witnesses: Vec<super::stage1::g2_add::G2AddWitness<ark_bn254::Fq>>,
 }
 
 impl ConstraintSystem {
@@ -1740,7 +1740,7 @@ impl ConstraintSystem {
     ///
     /// Note: this is currently populated only when the recursion constraint builder
     /// wires in explicit `ConstraintType::G1Add` nodes.
-    pub fn extract_g1_add_constraints(&self) -> Vec<super::stage1::g1_add::G1AddWitness> {
+    pub fn extract_g1_add_constraints(&self) -> Vec<super::stage1::g1_add::G1AddWitness<ark_bn254::Fq>> {
         self.g1_add_witnesses.clone()
     }
 
@@ -1748,7 +1748,7 @@ impl ConstraintSystem {
     ///
     /// Note: this is currently populated only when the recursion constraint builder
     /// wires in explicit `ConstraintType::G2Add` nodes.
-    pub fn extract_g2_add_constraints(&self) -> Vec<super::stage1::g2_add::G2AddWitness> {
+    pub fn extract_g2_add_constraints(&self) -> Vec<super::stage1::g2_add::G2AddWitness<ark_bn254::Fq>> {
         self.g2_add_witnesses.clone()
     }
 

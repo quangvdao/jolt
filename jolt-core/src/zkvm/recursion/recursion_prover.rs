@@ -510,33 +510,27 @@ impl RecursionProver<Fq> {
     }
 }
 
-impl<F: JoltField> RecursionProver<F> {
+impl RecursionProver<Fq> {
     /// Run the full two-stage recursion prover and generate PCS opening proof
-    pub fn prove<T: Transcript, PCS: CommitmentScheme<Field = F> + RecursionExt<F>>(
+    pub fn prove<T: Transcript, PCS: CommitmentScheme<Field = Fq> + RecursionExt<Fq>>(
         self,
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
-    ) -> Result<RecursionProof<F, T, PCS>, Box<dyn std::error::Error>> {
+    ) -> Result<RecursionProof<Fq, T, PCS>, Box<dyn std::error::Error>> {
         // Delegate to prove_with_pcs - the RecursionExt trait bound is not actually used
         self.prove_with_pcs(transcript, prover_setup)
     }
 
     /// Run the full two-stage recursion prover for any PCS (without requiring RecursionExt)
     #[tracing::instrument(skip_all, name = "RecursionProver::prove_with_pcs")]
-    pub fn prove_with_pcs<T: Transcript, PCS: CommitmentScheme<Field = F>>(
+    pub fn prove_with_pcs<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
         self,
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
-    ) -> Result<RecursionProof<F, T, PCS>, Box<dyn std::error::Error>> {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for recursion SNARK
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK requires F = Fq");
-        }
+    ) -> Result<RecursionProof<Fq, T, PCS>, Box<dyn std::error::Error>> {
         // Initialize opening accumulator
         let log_T = self.constraint_system.num_vars();
-        let mut accumulator = ProverOpeningAccumulator::<F>::new(log_T);
+        let mut accumulator = ProverOpeningAccumulator::<Fq>::new(log_T);
 
         // ============ STAGE 1: Constraint Sumchecks ============
         tracing::info_span!("recursion_stage1_sumchecks").in_scope(|| {
@@ -567,13 +561,13 @@ impl<F: JoltField> RecursionProver<F> {
         let (dense_poly, _bijection, _mapping) = self.constraint_system.build_dense_polynomial();
 
         // Convert dense polynomial evaluations to F
-        let dense_evaluations_f = unsafe { std::mem::transmute::<Vec<Fq>, Vec<F>>(dense_poly.Z) };
+        let dense_evaluations_f = dense_poly.Z;
         let dense_matrix_poly = MultilinearPolynomial::from(dense_evaluations_f.clone());
 
         // Commit to the dense polynomial
         let (dense_commitment, _) = PCS::commit(&dense_matrix_poly, prover_setup);
 
-        let mut polynomials_map: HashMap<CommittedPolynomial, MultilinearPolynomial<F>> =
+        let mut polynomials_map: HashMap<CommittedPolynomial, MultilinearPolynomial<Fq>> =
             HashMap::new();
         polynomials_map.insert(CommittedPolynomial::DoryDenseMatrix, dense_matrix_poly);
 
@@ -607,30 +601,20 @@ impl<F: JoltField> RecursionProver<F> {
     pub(crate) fn prove_stage1<T: Transcript>(
         &self,
         transcript: &mut T,
-        accumulator: &mut ProverOpeningAccumulator<F>,
+        accumulator: &mut ProverOpeningAccumulator<Fq>,
     ) -> Result<
         (
-            crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
-            Vec<<F as JoltField>::Challenge>,
+            crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+            Vec<<Fq as JoltField>::Challenge>,
         ),
         Box<dyn std::error::Error>,
     > {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for constraint system operations
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK constraint system requires F = Fq");
-        }
 
         // Convert g_poly for GT mul (uses zero padding layout: s * 16 + x)
-        let g_poly_f = unsafe {
-            std::mem::transmute::<DensePolynomial<Fq>, DensePolynomial<F>>(
-                self.constraint_system.g_poly.clone(),
-            )
-        };
+        let g_poly_f = self.constraint_system.g_poly.clone();
 
         // Create provers for each constraint type
-        let mut provers: Vec<Box<dyn SumcheckInstanceProver<F, T>>> = Vec::new();
+        let mut provers: Vec<Box<dyn SumcheckInstanceProver<Fq, T>>> = Vec::new();
 
         // Add packed GT exp prover (single prover handles all witnesses with gamma batching)
         let packed_witnesses = &self.constraint_system.gt_exp_witnesses;
@@ -639,11 +623,7 @@ impl<F: JoltField> RecursionProver<F> {
             // Extract 4-var g from the zero-padded version and replicate across s
             let g_4var: Vec<Fq> = self.constraint_system.g_poly.evals()[0..16].to_vec();
             let g_replicated = DoryMatrixBuilder::pad_4var_to_11var_replicated(&g_4var);
-            let g_poly_replicated_f = unsafe {
-                std::mem::transmute::<DensePolynomial<Fq>, DensePolynomial<F>>(
-                    DensePolynomial::new(g_replicated),
-                )
-            };
+            let g_poly_replicated_f = DensePolynomial::new(g_replicated);
 
             let params = PackedGtExpParams::new();
             tracing::info!(
@@ -659,6 +639,10 @@ impl<F: JoltField> RecursionProver<F> {
         let gt_mul_constraints_tuples = self.constraint_system.extract_gt_mul_constraints();
         if !gt_mul_constraints_tuples.is_empty() {
             use super::stage1::gt_mul::GtMulConstraintPolynomials;
+
+            // Extract constraint indices before consuming tuples
+            let constraint_indices: Vec<usize> =
+                gt_mul_constraints_tuples.iter().map(|(idx, ..)| *idx).collect();
 
             // Convert tuples to structured type
             let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> =
@@ -677,16 +661,10 @@ impl<F: JoltField> RecursionProver<F> {
 
             let params = GtMulParams::new(gt_mul_constraints_fq.len());
 
-            // Convert Fq constraints to F (safe because we checked F = Fq)
-            let gt_mul_constraints_f = unsafe {
-                std::mem::transmute::<
-                    Vec<GtMulConstraintPolynomials<Fq>>,
-                    Vec<GtMulConstraintPolynomials<F>>,
-                >(gt_mul_constraints_fq)
-            };
+            let gt_mul_constraints_f = gt_mul_constraints_fq;
 
             let spec = GtMulProverSpec::new(params, gt_mul_constraints_f, g_poly_f.clone());
-            let prover = GtMulProver::from_spec(spec, transcript);
+            let prover = GtMulProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -743,10 +721,11 @@ impl<F: JoltField> RecursionProver<F> {
             );
 
             // Convert witness structs to constraint polynomials
-            let g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials> =
+            // G2ScalarMulWitness has Vec<Fq> fields, G2ScalarMulConstraintPolynomials<Fq> matches
+            let g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials<Fq>> =
                 g2_scalar_mul_constraints_tuples
                     .into_iter()
-                    .map(|w| G2ScalarMulConstraintPolynomials {
+                    .map(|w| G2ScalarMulConstraintPolynomials::<Fq> {
                         x_a_c0: w.x_a_c0,
                         x_a_c1: w.x_a_c1,
                         y_a_c0: w.y_a_c0,
@@ -779,68 +758,24 @@ impl<F: JoltField> RecursionProver<F> {
         // Add G1 add prover
         let g1_add_constraints = self.constraint_system.extract_g1_add_constraints();
         if !g1_add_constraints.is_empty() {
-            use super::stage1::g1_add::{G1AddConstraintPolynomials, G1AddParams, G1AddProver};
+            use super::stage1::g1_add::{G1AddParams, G1AddProver, G1AddProverSpec};
 
-            let constraints: Vec<G1AddConstraintPolynomials> = g1_add_constraints
-                .into_iter()
-                .map(|w| G1AddConstraintPolynomials {
-                    x_p: w.x_p,
-                    y_p: w.y_p,
-                    ind_p: w.ind_p,
-                    x_q: w.x_q,
-                    y_q: w.y_q,
-                    ind_q: w.ind_q,
-                    x_r: w.x_r,
-                    y_r: w.y_r,
-                    ind_r: w.ind_r,
-                    lambda: w.lambda,
-                    inv_delta_x: w.inv_delta_x,
-                    is_double: w.is_double,
-                    is_inverse: w.is_inverse,
-                    constraint_index: w.constraint_index,
-                })
-                .collect();
-
-            let params = G1AddParams::new(constraints.len());
-            let prover = G1AddProver::new(params, constraints, transcript);
+            // G1AddWitness<Fq> = G1AddConstraintPolynomials<Fq> via type alias, no conversion needed
+            let params = G1AddParams::new(g1_add_constraints.len());
+            let (spec, constraint_indices) = G1AddProverSpec::new(params, g1_add_constraints);
+            let prover = G1AddProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
         }
 
         // Add G2 add prover
         let g2_add_constraints = self.constraint_system.extract_g2_add_constraints();
         if !g2_add_constraints.is_empty() {
-            use super::stage1::g2_add::{G2AddConstraintPolynomials, G2AddParams, G2AddProver};
+            use super::stage1::g2_add::{G2AddParams, G2AddProver, G2AddProverSpec};
 
-            let constraints: Vec<G2AddConstraintPolynomials> = g2_add_constraints
-                .into_iter()
-                .map(|w| G2AddConstraintPolynomials {
-                    x_p_c0: w.x_p_c0,
-                    x_p_c1: w.x_p_c1,
-                    y_p_c0: w.y_p_c0,
-                    y_p_c1: w.y_p_c1,
-                    ind_p: w.ind_p,
-                    x_q_c0: w.x_q_c0,
-                    x_q_c1: w.x_q_c1,
-                    y_q_c0: w.y_q_c0,
-                    y_q_c1: w.y_q_c1,
-                    ind_q: w.ind_q,
-                    x_r_c0: w.x_r_c0,
-                    x_r_c1: w.x_r_c1,
-                    y_r_c0: w.y_r_c0,
-                    y_r_c1: w.y_r_c1,
-                    ind_r: w.ind_r,
-                    lambda_c0: w.lambda_c0,
-                    lambda_c1: w.lambda_c1,
-                    inv_delta_x_c0: w.inv_delta_x_c0,
-                    inv_delta_x_c1: w.inv_delta_x_c1,
-                    is_double: w.is_double,
-                    is_inverse: w.is_inverse,
-                    constraint_index: w.constraint_index,
-                })
-                .collect();
-
-            let params = G2AddParams::new(constraints.len());
-            let prover = G2AddProver::new(params, constraints, transcript);
+            // G2AddWitness<Fq> = G2AddConstraintPolynomials<Fq> via type alias, no conversion needed
+            let params = G2AddParams::new(g2_add_constraints.len());
+            let (spec, constraint_indices) = G2AddProverSpec::new(params, g2_add_constraints);
+            let prover = G2AddProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -867,32 +802,21 @@ impl<F: JoltField> RecursionProver<F> {
     pub(crate) fn prove_stage2<T: Transcript>(
         &self,
         transcript: &mut T,
-        accumulator: &mut ProverOpeningAccumulator<F>,
-        r_stage1: &[<F as JoltField>::Challenge],
+        accumulator: &mut ProverOpeningAccumulator<Fq>,
+        r_stage1: &[<Fq as JoltField>::Challenge],
     ) -> Result<
         (
-            F, // Return m_eval instead of sumcheck proof
-            Vec<<F as JoltField>::Challenge>,
+            Fq, // Return m_eval instead of sumcheck proof
+            Vec<<Fq as JoltField>::Challenge>,
         ),
         Box<dyn std::error::Error>,
     > {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for constraint system operations
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK constraint system requires F = Fq");
-        }
-
         // Since we know F = Fq, we can work directly with Fq types
-        let accumulator_fq: &mut ProverOpeningAccumulator<Fq> =
-            unsafe { std::mem::transmute(accumulator) };
+        let accumulator_fq: &mut ProverOpeningAccumulator<Fq> = accumulator;
 
         // Convert r_stage1 challenges to Fq field elements
         // SAFETY: We verified F = Fq above, so F::Challenge = Fq::Challenge
-        let r_x: Vec<Fq> = unsafe {
-            let r_stage1_fq: &[<Fq as JoltField>::Challenge] = std::mem::transmute(r_stage1);
-            r_stage1_fq.iter().map(|c| (*c).into()).collect()
-        };
+        let r_x: Vec<Fq> = r_stage1.iter().map(|c| (*c).into()).collect();
 
         // Extract virtual claims from Stage 1
         let constraint_types: Vec<ConstraintType> = self
@@ -927,18 +851,10 @@ impl<F: JoltField> RecursionProver<F> {
 
         // Convert r_s to challenges for Stage 3 compatibility
         // Stage 3 expects them in reverse order
-        // SAFETY: We verified F = Fq above
-        let r_stage2: Vec<<F as JoltField>::Challenge> = unsafe {
-            let r_s_challenges: Vec<<Fq as JoltField>::Challenge> =
-                r_s.into_iter().rev().map(|f| f.into()).collect();
-            std::mem::transmute(r_s_challenges)
-        };
+        let r_stage2: Vec<<Fq as JoltField>::Challenge> =
+            r_s.into_iter().rev().map(|f| f.into()).collect();
 
-        // Convert m_eval from Fq to F
-        // SAFETY: We verified F = Fq above
-        let m_eval_f: F = unsafe { std::mem::transmute_copy(&m_eval) };
-
-        Ok((m_eval_f, r_stage2))
+        Ok((m_eval, r_stage2))
     }
 
     /// Run Stage 3: Jagged Transform Sumcheck + Stage 3b: Jagged Assist
@@ -947,24 +863,17 @@ impl<F: JoltField> RecursionProver<F> {
     pub(crate) fn prove_stage3<T: Transcript>(
         &self,
         transcript: &mut T,
-        accumulator: &mut ProverOpeningAccumulator<F>,
-        r_stage1: &[<F as JoltField>::Challenge],
-        r_stage2: &[<F as JoltField>::Challenge],
+        accumulator: &mut ProverOpeningAccumulator<Fq>,
+        r_stage1: &[<Fq as JoltField>::Challenge],
+        r_stage2: &[<Fq as JoltField>::Challenge],
     ) -> Result<
         (
-            crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
-            JaggedAssistProof<F, T>,
-            Vec<<F as JoltField>::Challenge>,
+            crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+            JaggedAssistProof<Fq, T>,
+            Vec<<Fq as JoltField>::Challenge>,
         ),
         Box<dyn std::error::Error>,
     > {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for constraint system operations
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK constraint system requires F = Fq");
-        }
-
         // Get the opening claim from Stage 2 using explicit key lookup (not .last() which depends on insertion order)
         let (_, sparse_claim_value) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::DorySparseConstraintMatrix,
@@ -975,20 +884,11 @@ impl<F: JoltField> RecursionProver<F> {
         let (dense_poly_fq, bijection, mapping) = self.constraint_system.build_dense_polynomial();
 
         // Convert dense polynomial from Fq to F (safe because F = Fq in recursion)
-        let dense_poly_f = DensePolynomial {
-            num_vars: dense_poly_fq.num_vars,
-            len: dense_poly_fq.len,
-            Z: unsafe {
-                std::mem::transmute::<
-                    std::vec::Vec<ark_ff::Fp<ark_ff::MontBackend<ark_bn254::FqConfig, 4>, 4>>,
-                    std::vec::Vec<F>,
-                >(dense_poly_fq.Z)
-            },
-        };
+        let dense_poly_f = dense_poly_fq;
 
         // Convert r_stage2 (s challenges) and r_stage1 (x challenges) to F
-        let r_s_final: Vec<F> = r_stage2.iter().map(|c| (*c).into()).collect();
-        let r_x_prev: Vec<F> = r_stage1.iter().map(|c| (*c).into()).collect();
+        let r_s_final: Vec<Fq> = r_stage2.iter().map(|c| (*c).into()).collect();
+        let r_x_prev: Vec<Fq> = r_stage1.iter().map(|c| (*c).into()).collect();
 
         // Precompute matrix row indices for all polynomial indices
         let num_polynomials = bijection.num_polynomials();
@@ -1025,7 +925,7 @@ impl<F: JoltField> RecursionProver<F> {
         });
 
         // Convert r_stage3 (dense challenges) to F
-        let r_dense: Vec<F> = r_stage3.iter().map(|c| (*c).into()).collect();
+        let r_dense: Vec<Fq> = r_stage3.iter().map(|c| (*c).into()).collect();
 
         // Compute num_bits for branching program
         let num_constraint_vars = self.constraint_system.matrix.num_constraint_vars;
@@ -1035,7 +935,7 @@ impl<F: JoltField> RecursionProver<F> {
 
         // Create Jagged Assist prover - iterates over K polynomials (not rows!)
         let mut assist_prover =
-            JaggedAssistProver::<F, T>::new(r_x_prev, r_dense, &bijection, num_bits, transcript);
+            JaggedAssistProver::<Fq, T>::new(r_x_prev, r_dense, &bijection, num_bits, transcript);
 
         // Run Jagged Assist sumcheck
         let (stage3b_sumcheck_proof, _r_assist) =

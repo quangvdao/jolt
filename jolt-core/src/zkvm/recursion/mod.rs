@@ -34,6 +34,7 @@
 
 pub mod bijection;
 pub mod constraints_sys;
+pub mod curve;
 pub mod recursion_prover;
 pub mod recursion_verifier;
 pub mod stage1;

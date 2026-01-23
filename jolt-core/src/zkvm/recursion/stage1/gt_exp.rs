@@ -45,7 +45,7 @@ use crate::{
 use ark_bn254::{Fq, Fq12};
 use ark_ff::Zero;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use jolt_optimizations::fq12_to_multilinear_evals;
+use ark_std::One;
 use rayon::prelude::*;
 
 /// Number of step variables (7 for 128 base-4 steps)
@@ -114,42 +114,31 @@ impl PackedGtExpPublicInputs {
     }
 
     /// Evaluate the base MLE at challenge point r_x* (4-variable MLE, 16 points).
-    pub fn evaluate_base_mle<F: JoltField>(&self, r_x_star: &[F]) -> F {
+    pub fn evaluate_base_mle(&self, r_x_star: &[Fq]) -> Fq {
         self.evaluate_fq12_mle(&self.base, r_x_star)
     }
 
     /// Evaluate base^2 MLE at challenge point r_x* (4-variable MLE, 16 points).
-    pub fn evaluate_base2_mle<F: JoltField>(&self, r_x_star: &[F]) -> F {
+    pub fn evaluate_base2_mle(&self, r_x_star: &[Fq]) -> Fq {
         let base2 = self.base * self.base;
         self.evaluate_fq12_mle(&base2, r_x_star)
     }
 
     /// Evaluate base^3 MLE at challenge point r_x* (4-variable MLE, 16 points).
-    pub fn evaluate_base3_mle<F: JoltField>(&self, r_x_star: &[F]) -> F {
+    pub fn evaluate_base3_mle(&self, r_x_star: &[Fq]) -> Fq {
         let base2 = self.base * self.base;
         let base3 = base2 * self.base;
         self.evaluate_fq12_mle(&base3, r_x_star)
     }
 
-    fn evaluate_fq12_mle<F: JoltField>(&self, fq12: &Fq12, r_x_star: &[F]) -> F {
-        use std::any::TypeId;
-
+    fn evaluate_fq12_mle(&self, fq12: &Fq12, r_x_star: &[Fq]) -> Fq {
         debug_assert_eq!(r_x_star.len(), NUM_ELEMENT_VARS);
 
-        // Runtime check that F = Fq for safe transmute
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("evaluate_base_mle requires F = Fq");
-        }
-
-        let base_mle_fq = fq12_to_multilinear_evals(fq12); // 16 Fq values
-        let base_poly = DensePolynomial::new(base_mle_fq);
-
-        // Convert r_x_star to Fq slice
-        // SAFETY: F = Fq verified above, and slice references have same layout
-        let r_x_star_fq: &[Fq] =
-            unsafe { std::slice::from_raw_parts(r_x_star.as_ptr() as *const Fq, r_x_star.len()) };
-        let result_fq = base_poly.evaluate(r_x_star_fq);
-        unsafe { std::mem::transmute_copy(&result_fq) }
+        // Expand GT element to base-field MLE evaluations, then evaluate at r_x*.
+        let base_mle =
+            <crate::zkvm::recursion::curve::Bn254Recursion as crate::zkvm::recursion::curve::RecursionCurve>::fq12_to_mle(fq12); // 16 Fq values
+        let base_poly = DensePolynomial::new(base_mle);
+        base_poly.evaluate(r_x_star)
     }
 }
 
@@ -174,44 +163,44 @@ pub struct PackedGtExpConstraintPolynomials<F: JoltField> {
 /// - Phase 1 (rounds 0-6): bind step variables s
 /// - Phase 2 (rounds 7-10): bind element variables x
 #[derive(Clone)]
-pub struct PackedGtExpWitness {
+pub struct PackedGtExpWitness<F: JoltField> {
     /// rho(s, x) - all intermediate results packed into 11-var MLE
     /// Layout: rho[x * 128 + s] = ρ_s[x]
-    pub rho_packed: Vec<Fq>,
+    pub rho_packed: Vec<F>,
 
     /// rho_next(s, x) = rho(s+1, x) - shifted intermediate results
     /// Layout: rho_next[x * 128 + s] = ρ_{s+1}[x]
-    pub rho_next_packed: Vec<Fq>,
+    pub rho_next_packed: Vec<F>,
 
     /// quotient(s, x) - all quotients packed into 11-var MLE
     /// Layout: quotient[x * 128 + s] = Q_s[x]
-    pub quotient_packed: Vec<Fq>,
+    pub quotient_packed: Vec<F>,
 
     /// digit_lo(s) - low digit bit replicated across x
     /// Layout: digit_lo[x * 128 + s] = u_s (same for all x)
-    pub digit_lo_packed: Vec<Fq>,
+    pub digit_lo_packed: Vec<F>,
 
     /// digit_hi(s) - high digit bit replicated across x
     /// Layout: digit_hi[x * 128 + s] = v_s (same for all x)
-    pub digit_hi_packed: Vec<Fq>,
+    pub digit_hi_packed: Vec<F>,
 
     /// base(x) - base element replicated across s
     /// Layout: base[x * 128 + s] = base[x] (same for all s)
-    pub base_packed: Vec<Fq>,
+    pub base_packed: Vec<F>,
 
     /// base2(x) - base^2 element replicated across s
     /// Layout: base2[x * 128 + s] = base2[x] (same for all s)
-    pub base2_packed: Vec<Fq>,
+    pub base2_packed: Vec<F>,
 
     /// base3(x) - base^3 element replicated across s
     /// Layout: base3[x * 128 + s] = base3[x] (same for all s)
-    pub base3_packed: Vec<Fq>,
+    pub base3_packed: Vec<F>,
 
     /// Number of actual steps (<= 127 for BN254 scalar)
     pub num_steps: usize,
 }
 
-impl PackedGtExpWitness {
+impl PackedGtExpWitness<Fq> {
     /// Create packed witness from individual step data
     ///
     /// Data layout: index = x * 128 + s (s in low 7 bits, x in high 4 bits)
@@ -530,17 +519,10 @@ impl<F: JoltField> PackedGtExpProver<F> {
     /// Create a new packed GT exp prover with multiple witnesses and gamma batching
     pub fn new<T: Transcript>(
         params: PackedGtExpParams,
-        witnesses: &[PackedGtExpWitness],
+        witnesses: &[PackedGtExpWitness<F>],
         g_poly: DensePolynomial<F>,
         transcript: &mut T,
     ) -> Self {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for safe transmute
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("PackedGtExpProver requires F = Fq");
-        }
-
         // Sample random challenges for element variables (4) - for eq_x polynomial
         let r_x: Vec<F::Challenge> = (0..params.num_element_vars)
             .map(|_| transcript.challenge_scalar_optimized::<F>())
@@ -561,13 +543,6 @@ impl<F: JoltField> PackedGtExpProver<F> {
         let eq_x = MultilinearPolynomial::from(EqPolynomial::<F>::evals(&r_x));
         let eq_s = MultilinearPolynomial::from(EqPolynomial::<F>::evals(&r_s));
 
-        // Convert witness to field F (safe because we checked F = Fq above)
-        let convert_vec = |v: &[Fq]| -> Vec<F> {
-            v.iter()
-                .map(|fq| unsafe { std::mem::transmute_copy(fq) })
-                .collect()
-        };
-
         let num_witnesses = witnesses.len();
         let mut rho_polys = Vec::with_capacity(num_witnesses);
         let mut rho_next_polys = Vec::with_capacity(num_witnesses);
@@ -579,30 +554,14 @@ impl<F: JoltField> PackedGtExpProver<F> {
         let mut base3_polys = Vec::with_capacity(num_witnesses);
 
         for witness in witnesses {
-            rho_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.rho_packed,
-            )));
-            rho_next_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.rho_next_packed,
-            )));
-            quotient_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.quotient_packed,
-            )));
-            digit_lo_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.digit_lo_packed,
-            )));
-            digit_hi_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.digit_hi_packed,
-            )));
-            base_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.base_packed,
-            )));
-            base2_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.base2_packed,
-            )));
-            base3_polys.push(MultilinearPolynomial::from(convert_vec(
-                &witness.base3_packed,
-            )));
+            rho_polys.push(MultilinearPolynomial::from(witness.rho_packed.clone()));
+            rho_next_polys.push(MultilinearPolynomial::from(witness.rho_next_packed.clone()));
+            quotient_polys.push(MultilinearPolynomial::from(witness.quotient_packed.clone()));
+            digit_lo_polys.push(MultilinearPolynomial::from(witness.digit_lo_packed.clone()));
+            digit_hi_polys.push(MultilinearPolynomial::from(witness.digit_hi_packed.clone()));
+            base_polys.push(MultilinearPolynomial::from(witness.base_packed.clone()));
+            base2_polys.push(MultilinearPolynomial::from(witness.base2_packed.clone()));
+            base3_polys.push(MultilinearPolynomial::from(witness.base3_packed.clone()));
         }
 
         Self {
@@ -961,19 +920,17 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpPr
 /// - Phase 1 (rounds 0-6): step variables s
 /// - Phase 2 (rounds 7-10): element variables x
 ///
-/// The verifier computes digit and base polynomial evaluations directly from
-/// public inputs, rather than receiving them as claims from the prover.
-pub struct PackedGtExpVerifier<F: JoltField> {
+pub struct PackedGtExpVerifier {
     pub params: PackedGtExpParams,
-    pub r_x: Vec<F::Challenge>,
-    pub r_s: Vec<F::Challenge>,
-    pub gamma: F,
+    pub r_x: Vec<<Fq as JoltField>::Challenge>,
+    pub r_s: Vec<<Fq as JoltField>::Challenge>,
+    pub gamma: Fq,
     pub num_witnesses: usize,
     /// Public inputs for each witness (base Fq12 and scalar bits)
     pub public_inputs: Vec<PackedGtExpPublicInputs>,
 }
 
-impl<F: JoltField> PackedGtExpVerifier<F> {
+impl PackedGtExpVerifier {
     pub fn new<T: Transcript>(
         params: PackedGtExpParams,
         public_inputs: Vec<PackedGtExpPublicInputs>,
@@ -982,18 +939,18 @@ impl<F: JoltField> PackedGtExpVerifier<F> {
         let num_witnesses = public_inputs.len();
         // Sample challenges for element variables (4) - must match prover sampling order
         // These form the eq_x polynomial for Phase 2 (rounds 7-10)
-        let r_x: Vec<F::Challenge> = (0..params.num_element_vars)
-            .map(|_| transcript.challenge_scalar_optimized::<F>())
+        let r_x: Vec<<Fq as JoltField>::Challenge> = (0..params.num_element_vars)
+            .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
 
         // Sample challenges for step variables (7) - must match prover sampling order
         // These form the eq_s polynomial for Phase 1 (rounds 0-6)
-        let r_s: Vec<F::Challenge> = (0..params.num_step_vars)
-            .map(|_| transcript.challenge_scalar_optimized::<F>())
+        let r_s: Vec<<Fq as JoltField>::Challenge> = (0..params.num_step_vars)
+            .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
 
         // Sample gamma for batching across witnesses (must match prover)
-        let gamma: F = transcript.challenge_scalar_optimized::<F>().into();
+        let gamma: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
 
         Self {
             params,
@@ -1006,7 +963,7 @@ impl<F: JoltField> PackedGtExpVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for PackedGtExpVerifier<F> {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for PackedGtExpVerifier {
     fn degree(&self) -> usize {
         7
     }
@@ -1015,37 +972,30 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for PackedGtExp
         self.params.num_constraint_vars
     }
 
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
-        F::zero()
+    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<Fq>) -> Fq {
+        Fq::zero()
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
-        sumcheck_challenges: &[F::Challenge],
-    ) -> F {
+        accumulator: &VerifierOpeningAccumulator<Fq>,
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
+    ) -> Fq {
         use crate::poly::dense_mlpoly::DensePolynomial;
-        use jolt_optimizations::get_g_mle;
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("PackedGtExp requires F = Fq");
-        }
 
         // Data layout: index = x * 128 + s (s in low 7 bits, x in high 4 bits)
         // With LowToHigh binding:
         // - Phase 1 (rounds 0-6): bind s variables → challenges[0..7]
         // - Phase 2 (rounds 7-10): bind x variables → challenges[7..11]
         // Each part is reversed to match the sampled challenge order (big-endian convention)
-        let r_s_star: Vec<F> = sumcheck_challenges
+        let r_s_star: Vec<Fq> = sumcheck_challenges
             .iter()
             .take(self.params.num_step_vars)
             .rev()
             .map(|c| (*c).into())
             .collect();
 
-        let r_x_star: Vec<F> = sumcheck_challenges
+        let r_x_star: Vec<Fq> = sumcheck_challenges
             .iter()
             .skip(self.params.num_step_vars)
             .rev()
@@ -1053,24 +1003,23 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for PackedGtExp
             .collect();
 
         // Compute eq evaluations for 2-phase
-        let r_x_f: Vec<F> = self.r_x.iter().map(|c| (*c).into()).collect();
-        let r_s_f: Vec<F> = self.r_s.iter().map(|c| (*c).into()).collect();
+        let r_x_f: Vec<Fq> = self.r_x.iter().map(|c| (*c).into()).collect();
+        let r_s_f: Vec<Fq> = self.r_s.iter().map(|c| (*c).into()).collect();
 
         let eq_x_eval = EqPolynomial::mle(&r_x_f, &r_x_star);
         let eq_s_eval = EqPolynomial::mle(&r_s_f, &r_s_star);
 
         // Compute g(r_x*) - g only depends on element variables (4-var)
-        let g_eval: F = {
-            let g_mle_4var = get_g_mle();
-            let g_poly_fq =
+        let g_eval: Fq = {
+            let g_mle_4var =
+                <crate::zkvm::recursion::curve::Bn254Recursion as crate::zkvm::recursion::curve::RecursionCurve>::g_mle();
+            let g_poly =
                 MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_4var));
-            let r_x_star_fq: &Vec<Fq> = unsafe { std::mem::transmute(&r_x_star) };
-            let g_eval_fq = g_poly_fq.evaluate_dot_product(r_x_star_fq);
-            unsafe { std::mem::transmute_copy(&g_eval_fq) }
+            g_poly.evaluate_dot_product::<Fq>(&r_x_star)
         };
 
         // Compute batched constraint value with gamma
-        let mut total_constraint = F::zero();
+        let mut total_constraint = Fq::zero();
         let mut gamma_power = self.gamma;
 
         for w in 0..self.num_witnesses {
@@ -1094,9 +1043,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for PackedGtExp
 
             let u = digit_lo;
             let v = digit_hi;
-            let w0 = (F::one() - u) * (F::one() - v);
-            let w1 = u * (F::one() - v);
-            let w2 = (F::one() - u) * v;
+            let w0 = (Fq::one() - u) * (Fq::one() - v);
+            let w1 = u * (Fq::one() - v);
+            let w2 = (Fq::one() - u) * v;
             let w3 = u * v;
             let base_power = w0 + w1 * base_claim + w2 * base2_claim + w3 * base3_claim;
 
@@ -1116,11 +1065,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for PackedGtExp
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
         transcript: &mut T,
-        sumcheck_challenges: &[F::Challenge],
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, F>::new(sumcheck_challenges.to_vec());
+        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
 
         // Cache openings for all polynomials including virtual rho_next
         // rho and quotient are committed polynomials

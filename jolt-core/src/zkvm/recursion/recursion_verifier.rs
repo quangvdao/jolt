@@ -16,15 +16,17 @@ use crate::{
     zkvm::witness::VirtualPolynomial,
 };
 use ark_bn254::Fq;
+use ark_std::Zero;
 
 use super::{
     bijection::{ConstraintMapping, VarCountJaggedBijection},
     constraints_sys::ConstraintType,
+    curve::Bn254Recursion,
     recursion_prover::RecursionProof,
     stage1::{
-        g1_add::{G1AddParams, G1AddVerifier},
+        g1_add::G1AddParams,
         g1_scalar_mul::{G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier},
-        g2_add::{G2AddParams, G2AddVerifier},
+        g2_add::G2AddParams,
         g2_scalar_mul::{G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier},
         gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
         gt_mul::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
@@ -76,7 +78,7 @@ pub struct RecursionVerifier<F: JoltField = Fq> {
     _phantom: std::marker::PhantomData<F>,
 }
 
-impl<F: JoltField> RecursionVerifier<F> {
+impl RecursionVerifier<Fq> {
     /// Create a new recursion verifier
     pub fn new(input: RecursionVerifierInput) -> Self {
         Self {
@@ -87,21 +89,15 @@ impl<F: JoltField> RecursionVerifier<F> {
 
     /// Verify the full two-stage recursion proof and PCS opening
     #[tracing::instrument(skip_all, name = "RecursionVerifier::verify")]
-    pub fn verify<T: Transcript, PCS: CommitmentScheme<Field = F>>(
+    pub fn verify<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
         &self,
-        proof: &RecursionProof<F, T, PCS>,
+        proof: &RecursionProof<Fq, T, PCS>,
         transcript: &mut T,
         matrix_commitment: &PCS::Commitment,
         verifier_setup: &PCS::VerifierSetup,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for recursion SNARK
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK requires F = Fq");
-        }
         // Initialize opening accumulator
-        let mut accumulator = VerifierOpeningAccumulator::<F>::new(self.input.num_vars);
+        let mut accumulator = VerifierOpeningAccumulator::<Fq>::new(self.input.num_vars);
 
         // Populate accumulator with opening claims from proof
         for (key, value) in &proof.opening_claims {
@@ -158,20 +154,14 @@ impl<F: JoltField> RecursionVerifier<F> {
     #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage1")]
     fn verify_stage1<T: Transcript>(
         &self,
-        proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
+        proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
         transcript: &mut T,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
-        _gamma: F,
-        _delta: F,
-    ) -> Result<Vec<<F as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for recursion SNARK
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK requires F = Fq");
-        }
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        _gamma: Fq,
+        _delta: Fq,
+    ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
         // Create verifiers for each constraint type
-        let mut verifiers: Vec<Box<dyn SumcheckInstanceVerifier<F, T>>> = Vec::new();
+        let mut verifiers: Vec<Box<dyn SumcheckInstanceVerifier<Fq, T>>> = Vec::new();
 
         // Count constraints by type
         let mut num_gt_exp = 0;
@@ -236,8 +226,9 @@ impl<F: JoltField> RecursionVerifier<F> {
         // Add GT mul verifier if we have GT mul constraints
         if num_gt_mul > 0 {
             let params = GtMulParams::new(num_gt_mul);
-            let spec = GtMulVerifierSpec::new(params);
-            let verifier = GtMulVerifier::from_spec(spec, transcript);
+            let spec = GtMulVerifierSpec::<Bn254Recursion>::new(params);
+            let verifier =
+                GtMulVerifier::<Bn254Recursion>::from_spec(spec, gt_mul_indices, transcript);
             verifiers.push(Box::new(verifier));
         }
 
@@ -279,15 +270,19 @@ impl<F: JoltField> RecursionVerifier<F> {
 
         // Add G1 add verifier
         if num_g1_add > 0 {
+            use super::stage1::g1_add::{G1AddVerifier, G1AddVerifierSpec};
             let params = G1AddParams::new(num_g1_add);
-            let verifier = G1AddVerifier::new(params, g1_add_indices, transcript);
+            let spec = G1AddVerifierSpec::new(params);
+            let verifier = G1AddVerifier::from_spec(spec, g1_add_indices, transcript);
             verifiers.push(Box::new(verifier));
         }
 
         // Add G2 add verifier
         if num_g2_add > 0 {
+            use super::stage1::g2_add::{G2AddVerifier, G2AddVerifierSpec};
             let params = G2AddParams::new(num_g2_add);
-            let verifier = G2AddVerifier::new(params, g2_add_indices, transcript);
+            let spec = G2AddVerifierSpec::new(params);
+            let verifier = G2AddVerifier::from_spec(spec, g2_add_indices, transcript);
             verifiers.push(Box::new(verifier));
         }
 
@@ -299,7 +294,7 @@ impl<F: JoltField> RecursionVerifier<F> {
         }
 
         // Run batched sumcheck verification for all verifiers
-        let verifier_refs: Vec<&dyn SumcheckInstanceVerifier<F, T>> =
+        let verifier_refs: Vec<&dyn SumcheckInstanceVerifier<Fq, T>> =
             verifiers.iter().map(|v| &**v).collect();
 
         let r_stage1 = BatchedSumcheck::verify(proof, verifier_refs, accumulator, transcript)?;
@@ -312,27 +307,16 @@ impl<F: JoltField> RecursionVerifier<F> {
     fn verify_stage2<T: Transcript>(
         &self,
         transcript: &mut T,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
-        r_stage1: &[<F as crate::field::JoltField>::Challenge],
-        stage2_m_eval: F,
-    ) -> Result<Vec<<F as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for recursion SNARK
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK requires F = Fq");
-        }
-
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        r_stage1: &[<Fq as crate::field::JoltField>::Challenge],
+        stage2_m_eval: Fq,
+    ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
         // Since we know F = Fq, we can work directly with Fq types
-        let accumulator_fq: &mut VerifierOpeningAccumulator<Fq> =
-            unsafe { std::mem::transmute(accumulator) };
+        let accumulator_fq: &mut VerifierOpeningAccumulator<Fq> = accumulator;
 
         // Convert r_stage1 challenges to Fq field elements
         // SAFETY: We verified F = Fq above, so F::Challenge = Fq::Challenge
-        let r_x: Vec<Fq> = unsafe {
-            let r_stage1_fq: &[<Fq as JoltField>::Challenge] = std::mem::transmute(r_stage1);
-            r_stage1_fq.iter().map(|c| (*c).into()).collect()
-        };
+        let r_x: Vec<Fq> = r_stage1.iter().map(|c| (*c).into()).collect();
 
         // Extract virtual claims from Stage 1
         let virtual_claims = extract_virtual_claims_from_accumulator(
@@ -354,7 +338,7 @@ impl<F: JoltField> RecursionVerifier<F> {
 
         // Convert stage2_m_eval from F to Fq
         // SAFETY: We verified F = Fq above
-        let m_eval_fq: Fq = unsafe { std::mem::transmute_copy(&stage2_m_eval) };
+        let m_eval_fq: Fq = stage2_m_eval;
 
         let r_s = verifier
             .verify(transcript, accumulator_fq, m_eval_fq)
@@ -363,11 +347,8 @@ impl<F: JoltField> RecursionVerifier<F> {
         // Convert r_s to challenges for Stage 3 compatibility
         // Stage 3 expects them in reverse order
         // SAFETY: We verified F = Fq above
-        let r_stage2: Vec<<F as JoltField>::Challenge> = unsafe {
-            let r_s_challenges: Vec<<Fq as JoltField>::Challenge> =
-                r_s.into_iter().rev().map(|f| f.into()).collect();
-            std::mem::transmute(r_s_challenges)
-        };
+        let r_stage2: Vec<<Fq as JoltField>::Challenge> =
+            r_s.into_iter().rev().map(|f| f.into()).collect();
 
         Ok(r_stage2)
     }
@@ -376,20 +357,13 @@ impl<F: JoltField> RecursionVerifier<F> {
     #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage3")]
     fn verify_stage3<T: Transcript>(
         &self,
-        stage3_proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
-        stage3b_proof: &super::stage3::jagged_assist::JaggedAssistProof<F, T>,
+        stage3_proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+        stage3b_proof: &super::stage3::jagged_assist::JaggedAssistProof<Fq, T>,
         transcript: &mut T,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
-        r_stage1: &[<F as crate::field::JoltField>::Challenge],
-        r_stage2: &[<F as crate::field::JoltField>::Challenge],
-    ) -> Result<Vec<<F as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
-        use std::any::TypeId;
-
-        // Runtime check that F = Fq for recursion SNARK
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("Recursion SNARK requires F = Fq");
-        }
-
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        r_stage1: &[<Fq as crate::field::JoltField>::Challenge],
+        r_stage2: &[<Fq as crate::field::JoltField>::Challenge],
+    ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
         let _get_claim_span = tracing::info_span!("stage3_get_sparse_claim").entered();
         // Get the Stage 2 opening claim (sparse matrix claim)
         let (_, sparse_claim) = accumulator.get_virtual_polynomial_opening(
@@ -400,12 +374,12 @@ impl<F: JoltField> RecursionVerifier<F> {
 
         let _convert_challenges_span = tracing::info_span!("stage3_convert_challenges").entered();
         // Convert challenges to field elements
-        let r_s_final: Vec<F> = r_stage2
+        let r_s_final: Vec<Fq> = r_stage2
             .iter()
             .take(self.input.num_s_vars)
             .map(|c| (*c).into())
             .collect();
-        let r_x_prev: Vec<F> = r_stage1.iter().map(|c| (*c).into()).collect();
+        let r_x_prev: Vec<Fq> = r_stage1.iter().map(|c| (*c).into()).collect();
         drop(_convert_challenges_span);
 
         let _dense_size_span = tracing::info_span!("stage3_compute_dense_size").entered();
@@ -432,7 +406,7 @@ impl<F: JoltField> RecursionVerifier<F> {
         )
         .entered();
         let num_rows = 1usize << self.input.num_s_vars;
-        let mut claimed_evaluations = vec![F::zero(); num_rows];
+        let mut claimed_evaluations = vec![Fq::zero(); num_rows];
 
         for (poly_idx, claimed_eval) in stage3b_proof.claimed_evaluations.iter().enumerate() {
             let matrix_row = self.input.matrix_rows[poly_idx];
@@ -463,13 +437,13 @@ impl<F: JoltField> RecursionVerifier<F> {
         let _stage3b_span = tracing::info_span!("stage3b_jagged_assist_verify").entered();
 
         // Convert r_stage3 (dense challenges) to F
-        let r_dense: Vec<F> = r_stage3.iter().map(|c| (*c).into()).collect();
+        let r_dense: Vec<Fq> = r_stage3.iter().map(|c| (*c).into()).collect();
 
         // Compute num_bits for branching program
         let num_bits = std::cmp::max(self.input.num_constraint_vars, num_dense_vars);
 
         // Create Jagged Assist verifier - iterates over K polynomials (not rows!)
-        let assist_verifier = JaggedAssistVerifier::<F, T>::new(
+        let assist_verifier = JaggedAssistVerifier::<Fq, T>::new(
             stage3b_proof.claimed_evaluations.clone(),
             r_x_prev,
             r_dense,

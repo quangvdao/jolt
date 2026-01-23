@@ -13,50 +13,29 @@ use crate::{
     },
 };
 
-use crate::zkvm::witness::{GtMulTerm, RecursionPoly, VirtualPolynomial};
+use crate::zkvm::witness::{GtMulTerm, RecursionPoly, TermEnum, VirtualPolynomial};
+use core::marker::PhantomData;
 
 use super::constraint_list_sumcheck::{
-    ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec, ConstraintListVerifier,
-    ConstraintListVerifierSpec, OpeningSpec,
+    sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec,
+    ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
 };
 
+use allocative::Allocative;
+use crate::zkvm::recursion::curve::RecursionCurve;
+
 // ============================================================================
-// Opening Specs
+// Opening Specs - 4 polynomial types (lhs, rhs, result, quotient)
 // ============================================================================
 
-const GT_MUL_OPENING_SPECS: [OpeningSpec; 4] = [
-    OpeningSpec::new(0, |i| {
-        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Lhs,
-            instance: i,
-        })
-    }),
-    OpeningSpec::new(1, |i| {
-        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Rhs,
-            instance: i,
-        })
-    }),
-    OpeningSpec::new(2, |i| {
-        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Result,
-            instance: i,
-        })
-    }),
-    OpeningSpec::new(3, |i| {
-        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Quotient,
-            instance: i,
-        })
-    }),
-];
+const GT_MUL_OPENING_SPECS: [OpeningSpec; 4] = sequential_opening_specs::<4>();
 
 // ============================================================================
 // Parameters and Witness Types
 // ============================================================================
 
 /// Individual polynomial data for a single GT mul constraint
-#[derive(Clone)]
+#[derive(Clone, Allocative)]
 pub struct GtMulConstraintPolynomials<F: JoltField> {
     pub lhs: Vec<F>,
     pub rhs: Vec<F>,
@@ -66,7 +45,7 @@ pub struct GtMulConstraintPolynomials<F: JoltField> {
 }
 
 /// Parameters for GT mul sumcheck
-#[derive(Clone)]
+#[derive(Clone, Allocative)]
 pub struct GtMulParams {
     /// Number of constraint variables (x) - fixed at 11 for uniform matrix
     pub num_constraint_vars: usize,
@@ -93,7 +72,7 @@ impl GtMulParams {
 // ============================================================================
 
 /// Prover-side specification for GT mul constraints.
-#[derive(Clone)]
+#[derive(Clone, Allocative)]
 pub struct GtMulProverSpec<F: JoltField> {
     params: GtMulParams,
     polys_by_kind: Vec<Vec<MultilinearPolynomial<F>>>,
@@ -141,7 +120,7 @@ impl<F: JoltField> GtMulProverSpec<F> {
     }
 }
 
-impl<F: JoltField> ConstraintListSpec for GtMulProverSpec<F> {
+impl<F: JoltField + Allocative> ConstraintListSpec for GtMulProverSpec<F> {
     fn sumcheck_id(&self) -> SumcheckId {
         self.params.sumcheck_id
     }
@@ -157,9 +136,16 @@ impl<F: JoltField> ConstraintListSpec for GtMulProverSpec<F> {
     fn opening_specs(&self) -> &'static [OpeningSpec] {
         &GT_MUL_OPENING_SPECS
     }
+
+    fn build_virtual_poly(&self, term_index: usize, instance: usize) -> VirtualPolynomial {
+        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+            term: GtMulTerm::from_index(term_index).expect("invalid GtMulTerm index"),
+            instance,
+        })
+    }
 }
 
-impl<F: JoltField> ConstraintListProverSpec<F, 3> for GtMulProverSpec<F> {
+impl<F: JoltField + Allocative> ConstraintListProverSpec<F, 3> for GtMulProverSpec<F> {
     fn polys_by_kind(&self) -> &[Vec<MultilinearPolynomial<F>>] {
         &self.polys_by_kind
     }
@@ -199,17 +185,25 @@ impl<F: JoltField> ConstraintListProverSpec<F, 3> for GtMulProverSpec<F> {
 
 /// Verifier-side specification for GT mul constraints.
 #[derive(Clone)]
-pub struct GtMulVerifierSpec {
+pub struct GtMulVerifierSpec<C: RecursionCurve> {
     params: GtMulParams,
+    _marker: PhantomData<fn() -> C>,
 }
 
-impl GtMulVerifierSpec {
+impl<C: RecursionCurve> Allocative for GtMulVerifierSpec<C> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
+}
+
+impl<C: RecursionCurve> GtMulVerifierSpec<C> {
     pub fn new(params: GtMulParams) -> Self {
-        Self { params }
+        Self {
+            params,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl ConstraintListSpec for GtMulVerifierSpec {
+impl<C: RecursionCurve> ConstraintListSpec for GtMulVerifierSpec<C> {
     fn sumcheck_id(&self) -> SumcheckId {
         self.params.sumcheck_id
     }
@@ -225,23 +219,22 @@ impl ConstraintListSpec for GtMulVerifierSpec {
     fn opening_specs(&self) -> &'static [OpeningSpec] {
         &GT_MUL_OPENING_SPECS
     }
+
+    fn build_virtual_poly(&self, term_index: usize, instance: usize) -> VirtualPolynomial {
+        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+            term: GtMulTerm::from_index(term_index).expect("invalid GtMulTerm index"),
+            instance,
+        })
+    }
 }
 
-impl<F: JoltField> ConstraintListVerifierSpec<F, 3> for GtMulVerifierSpec {
-    fn compute_shared_scalars(&self, eval_point: &[F]) -> Vec<F> {
+impl<C: RecursionCurve> ConstraintListVerifierSpec<C::Fq, 3> for GtMulVerifierSpec<C> {
+    fn compute_shared_scalars(&self, eval_point: &[C::Fq]) -> Vec<C::Fq> {
         // Compute g(eval_point) once from the public g MLE.
         // The g polynomial is the MLE of the irreducible polynomial p(X) for Fq12.
         use crate::zkvm::recursion::constraints_sys::DoryMatrixBuilder;
-        use ark_bn254::Fq;
-        use jolt_optimizations::get_g_mle;
-        use std::any::TypeId;
 
-        // Runtime check that F = Fq (recursion SNARK is always over Fq)
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("g polynomial evaluation requires F = Fq for recursion SNARK");
-        }
-
-        let g_mle_4var = get_g_mle();
+        let g_mle_4var = C::g_mle();
         let g_mle_padded = if eval_point.len() == 11 {
             DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var)
         } else if eval_point.len() == 8 {
@@ -251,14 +244,9 @@ impl<F: JoltField> ConstraintListVerifierSpec<F, 3> for GtMulVerifierSpec {
         };
 
         // Evaluate g polynomial at eval_point
-        // SAFETY: F = Fq verified above, and slice references have same layout
-        let g_poly_fq =
-            MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_padded));
-        let eval_point_fq: &[Fq] = unsafe {
-            std::slice::from_raw_parts(eval_point.as_ptr() as *const Fq, eval_point.len())
-        };
-        let g_eval_fq = g_poly_fq.evaluate_dot_product(eval_point_fq);
-        let g_eval: F = unsafe { std::mem::transmute_copy(&g_eval_fq) };
+        let g_poly =
+            MultilinearPolynomial::<C::Fq>::LargeScalars(DensePolynomial::new(g_mle_padded));
+        let g_eval = g_poly.evaluate_dot_product::<C::Fq>(eval_point);
 
         vec![g_eval]
     }
@@ -266,10 +254,10 @@ impl<F: JoltField> ConstraintListVerifierSpec<F, 3> for GtMulVerifierSpec {
     fn eval_constraint_at_point(
         &self,
         _instance: usize,
-        opened_claims: &[F],
-        shared_scalars: &[F],
-        _term_batch_coeff: Option<F>,
-    ) -> F {
+        opened_claims: &[C::Fq],
+        shared_scalars: &[C::Fq],
+        _term_batch_coeff: Option<C::Fq>,
+    ) -> C::Fq {
         let lhs = opened_claims[0];
         let rhs = opened_claims[1];
         let result = opened_claims[2];
@@ -292,4 +280,5 @@ pub type GtMulProver<F> = ConstraintListProver<F, GtMulProverSpec<F>, 3>;
 /// Verifier for GT mul sumcheck.
 ///
 /// This is a type alias - no manual trait delegation required.
-pub type GtMulVerifier<F> = ConstraintListVerifier<F, GtMulVerifierSpec, 3>;
+pub type GtMulVerifier<C> =
+    ConstraintListVerifier<<C as RecursionCurve>::Fq, GtMulVerifierSpec<C>, 3>;

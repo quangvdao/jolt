@@ -318,21 +318,22 @@ fn compute_c5(ind_a: Fq, ind_t: Fq) -> Fq {
 // =============================================================================
 
 #[derive(Clone)]
-pub struct G2ScalarMulConstraintPolynomials {
-    pub x_a_c0: Vec<Fq>,
-    pub x_a_c1: Vec<Fq>,
-    pub y_a_c0: Vec<Fq>,
-    pub y_a_c1: Vec<Fq>,
-    pub x_t_c0: Vec<Fq>,
-    pub x_t_c1: Vec<Fq>,
-    pub y_t_c0: Vec<Fq>,
-    pub y_t_c1: Vec<Fq>,
-    pub x_a_next_c0: Vec<Fq>,
-    pub x_a_next_c1: Vec<Fq>,
-    pub y_a_next_c0: Vec<Fq>,
-    pub y_a_next_c1: Vec<Fq>,
-    pub t_is_infinity: Vec<Fq>,
-    pub a_is_infinity: Vec<Fq>,
+pub struct G2ScalarMulConstraintPolynomials<F: JoltField> {
+    pub x_a_c0: Vec<F>,
+    pub x_a_c1: Vec<F>,
+    pub y_a_c0: Vec<F>,
+    pub y_a_c1: Vec<F>,
+    pub x_t_c0: Vec<F>,
+    pub x_t_c1: Vec<F>,
+    pub y_t_c0: Vec<F>,
+    pub y_t_c1: Vec<F>,
+    pub x_a_next_c0: Vec<F>,
+    pub x_a_next_c1: Vec<F>,
+    pub y_a_next_c0: Vec<F>,
+    pub y_a_next_c1: Vec<F>,
+    pub t_is_infinity: Vec<F>,
+    pub a_is_infinity: Vec<F>,
+    /// Base point (x, y) in Fq2 - curve-specific, used for constraint evaluation
     pub base_point: (Fq2, Fq2),
     pub constraint_index: usize,
 }
@@ -407,7 +408,7 @@ pub struct G2ScalarMulProver<F: JoltField, T: Transcript> {
 impl<F: JoltField, T: Transcript> G2ScalarMulProver<F, T> {
     pub fn new(
         params: G2ScalarMulParams,
-        constraint_polys: Vec<G2ScalarMulConstraintPolynomials>,
+        constraint_polys: Vec<G2ScalarMulConstraintPolynomials<F>>,
         public_inputs: Vec<G2ScalarMulPublicInputs>,
         transcript: &mut T,
     ) -> Self {
@@ -417,12 +418,6 @@ impl<F: JoltField, T: Transcript> G2ScalarMulProver<F, T> {
 
         let gamma = transcript.challenge_scalar_optimized::<F>();
         let delta = transcript.challenge_scalar_optimized::<F>();
-
-        // Runtime check that F = Fq (recursion SNARK base field)
-        use std::any::TypeId;
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("G2 scalar multiplication requires F = Fq for recursion SNARK");
-        }
 
         let eq_x = MultilinearPolynomial::from(EqPolynomial::<F>::evals(&r_x));
 
@@ -455,50 +450,48 @@ impl<F: JoltField, T: Transcript> G2ScalarMulProver<F, T> {
             base_points.push(poly.base_point);
             constraint_indices.push(poly.constraint_index);
 
-            // SAFETY: We checked F = Fq above, so these transmutes are safe
-            let to_f = |v: Vec<Fq>| -> Vec<F> { unsafe { std::mem::transmute(v) } };
-
+            // No transmutes needed - constraint_polys is already Vec<F>
             x_a_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.x_a_c0),
+                poly.x_a_c0,
             )));
             x_a_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.x_a_c1),
+                poly.x_a_c1,
             )));
             y_a_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.y_a_c0),
+                poly.y_a_c0,
             )));
             y_a_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.y_a_c1),
+                poly.y_a_c1,
             )));
             x_t_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.x_t_c0),
+                poly.x_t_c0,
             )));
             x_t_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.x_t_c1),
+                poly.x_t_c1,
             )));
             y_t_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.y_t_c0),
+                poly.y_t_c0,
             )));
             y_t_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.y_t_c1),
+                poly.y_t_c1,
             )));
             x_a_next_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.x_a_next_c0),
+                poly.x_a_next_c0,
             )));
             x_a_next_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.x_a_next_c1),
+                poly.x_a_next_c1,
             )));
             y_a_next_c0_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.y_a_next_c0),
+                poly.y_a_next_c0,
             )));
             y_a_next_c1_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.y_a_next_c1),
+                poly.y_a_next_c1,
             )));
             t_is_infinity_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.t_is_infinity),
+                poly.t_is_infinity,
             )));
             a_is_infinity_mlpoly.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                to_f(poly.a_is_infinity),
+                poly.a_is_infinity,
             )));
 
             // Build the (padded) bit polynomial from public scalar bits.
@@ -555,7 +548,10 @@ impl<F: JoltField, T: Transcript> G2ScalarMulProver<F, T> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulProver<F, T> {
+// This prover is only used in recursion where the sumcheck field is BN254 `Fq`.
+// Specializing the trait impl to `Fq` removes the need for runtime type checks or
+// memory-reinterpretation conversions when doing Fq2 arithmetic.
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for G2ScalarMulProver<Fq, T> {
     fn degree(&self) -> usize {
         // Max per-variable degree comes from eq_x (degree 1) times the highest-degree constraint
         // term (degree 5 from C3/C4 chord formulas), so total degree bound is 6.
@@ -566,12 +562,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
         self.params.num_constraint_vars
     }
 
-    fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
-        F::zero()
+    fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<Fq>) -> Fq {
+        Fq::zero()
     }
 
     #[tracing::instrument(skip_all, name = "G2ScalarMul::compute_message")]
-    fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
+    fn compute_message(&mut self, _round: usize, previous_claim: Fq) -> UniPoly<Fq> {
         const DEGREE: usize = 6;
         const NUM_CONSTRAINT_TERMS: usize = 13;
 
@@ -579,8 +575,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
         let x_half = 1 << (num_x_remaining - 1);
 
         // Precompute delta powers for batching the 13 constraint terms within an instance.
-        let mut delta_pows = [F::zero(); NUM_CONSTRAINT_TERMS];
-        delta_pows[0] = F::one();
+        let mut delta_pows = [Fq::zero(); NUM_CONSTRAINT_TERMS];
+        delta_pows[0] = Fq::one();
         for i in 1..NUM_CONSTRAINT_TERMS {
             delta_pows[i] = delta_pows[i - 1] * self.delta;
         }
@@ -592,7 +588,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
                     .eq_x
                     .sumcheck_evals_array::<DEGREE>(x_idx, BindingOrder::LowToHigh);
 
-                let mut x_evals = [F::zero(); DEGREE];
+                let mut x_evals = [Fq::zero(); DEGREE];
                 let mut gamma_power = self.gamma;
 
                 for i in 0..self.params.num_constraints {
@@ -630,26 +626,21 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
                     let (x_p, y_p) = self.base_points[i];
 
                     for t in 0..DEGREE {
-                        // SAFETY: We checked F = Fq in new(), so these transmutes are safe.
-                        let x_a_c0_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_c0_evals[t]) };
-                        let x_a_c1_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_c1_evals[t]) };
-                        let y_a_c0_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_c0_evals[t]) };
-                        let y_a_c1_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_c1_evals[t]) };
-                        let x_t_c0_fq: Fq = unsafe { std::mem::transmute_copy(&x_t_c0_evals[t]) };
-                        let x_t_c1_fq: Fq = unsafe { std::mem::transmute_copy(&x_t_c1_evals[t]) };
-                        let y_t_c0_fq: Fq = unsafe { std::mem::transmute_copy(&y_t_c0_evals[t]) };
-                        let y_t_c1_fq: Fq = unsafe { std::mem::transmute_copy(&y_t_c1_evals[t]) };
-                        let x_a_next_c0_fq: Fq =
-                            unsafe { std::mem::transmute_copy(&x_a_next_c0_evals[t]) };
-                        let x_a_next_c1_fq: Fq =
-                            unsafe { std::mem::transmute_copy(&x_a_next_c1_evals[t]) };
-                        let y_a_next_c0_fq: Fq =
-                            unsafe { std::mem::transmute_copy(&y_a_next_c0_evals[t]) };
-                        let y_a_next_c1_fq: Fq =
-                            unsafe { std::mem::transmute_copy(&y_a_next_c1_evals[t]) };
-                        let ind_t_fq: Fq = unsafe { std::mem::transmute_copy(&ind_t_evals[t]) };
-                        let ind_a_fq: Fq = unsafe { std::mem::transmute_copy(&ind_a_evals[t]) };
-                        let bit_fq: Fq = unsafe { std::mem::transmute_copy(&bit_evals[t]) };
+                        let x_a_c0_fq: Fq = x_a_c0_evals[t];
+                        let x_a_c1_fq: Fq = x_a_c1_evals[t];
+                        let y_a_c0_fq: Fq = y_a_c0_evals[t];
+                        let y_a_c1_fq: Fq = y_a_c1_evals[t];
+                        let x_t_c0_fq: Fq = x_t_c0_evals[t];
+                        let x_t_c1_fq: Fq = x_t_c1_evals[t];
+                        let y_t_c0_fq: Fq = y_t_c0_evals[t];
+                        let y_t_c1_fq: Fq = y_t_c1_evals[t];
+                        let x_a_next_c0_fq: Fq = x_a_next_c0_evals[t];
+                        let x_a_next_c1_fq: Fq = x_a_next_c1_evals[t];
+                        let y_a_next_c0_fq: Fq = y_a_next_c0_evals[t];
+                        let y_a_next_c1_fq: Fq = y_a_next_c1_evals[t];
+                        let ind_t_fq: Fq = ind_t_evals[t];
+                        let ind_a_fq: Fq = ind_a_evals[t];
+                        let bit_fq: Fq = bit_evals[t];
 
                         let x_a = Fq2::new(x_a_c0_fq, x_a_c1_fq);
                         let y_a = Fq2::new(y_a_c0_fq, y_a_c1_fq);
@@ -673,20 +664,19 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
                         let c6_yt_c0_fq = ind_t_fq * y_t.c0;
                         let c6_yt_c1_fq = ind_t_fq * y_t.c1;
 
-                        // Convert to F (Fq)
-                        let c1_c0: F = unsafe { std::mem::transmute_copy(&c1.c0) };
-                        let c1_c1: F = unsafe { std::mem::transmute_copy(&c1.c1) };
-                        let c2_c0: F = unsafe { std::mem::transmute_copy(&c2.c0) };
-                        let c2_c1: F = unsafe { std::mem::transmute_copy(&c2.c1) };
-                        let c3_c0: F = unsafe { std::mem::transmute_copy(&c3.c0) };
-                        let c3_c1: F = unsafe { std::mem::transmute_copy(&c3.c1) };
-                        let c4_c0: F = unsafe { std::mem::transmute_copy(&c4.c0) };
-                        let c4_c1: F = unsafe { std::mem::transmute_copy(&c4.c1) };
-                        let c5: F = unsafe { std::mem::transmute_copy(&c5_fq) };
-                        let c6_xt_c0: F = unsafe { std::mem::transmute_copy(&c6_xt_c0_fq) };
-                        let c6_xt_c1: F = unsafe { std::mem::transmute_copy(&c6_xt_c1_fq) };
-                        let c6_yt_c0: F = unsafe { std::mem::transmute_copy(&c6_yt_c0_fq) };
-                        let c6_yt_c1: F = unsafe { std::mem::transmute_copy(&c6_yt_c1_fq) };
+                        let c1_c0: Fq = c1.c0;
+                        let c1_c1: Fq = c1.c1;
+                        let c2_c0: Fq = c2.c0;
+                        let c2_c1: Fq = c2.c1;
+                        let c3_c0: Fq = c3.c0;
+                        let c3_c1: Fq = c3.c1;
+                        let c4_c0: Fq = c4.c0;
+                        let c4_c1: Fq = c4.c1;
+                        let c5: Fq = c5_fq;
+                        let c6_xt_c0: Fq = c6_xt_c0_fq;
+                        let c6_xt_c1: Fq = c6_xt_c1_fq;
+                        let c6_yt_c0: Fq = c6_yt_c0_fq;
+                        let c6_yt_c1: Fq = c6_yt_c1_fq;
 
                         let constraint_val = delta_pows[0] * c1_c0
                             + delta_pows[1] * c1_c1
@@ -711,7 +701,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
                 x_evals
             })
             .reduce(
-                || [F::zero(); DEGREE],
+                || [Fq::zero(); DEGREE],
                 |mut acc, evals| {
                     for (a, e) in acc.iter_mut().zip(evals.iter()) {
                         *a += *e;
@@ -724,7 +714,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
     }
 
     #[tracing::instrument(skip_all, name = "G2ScalarMul::ingest_challenge")]
-    fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize) {
+    fn ingest_challenge(&mut self, r_j: <Fq as JoltField>::Challenge, round: usize) {
         self.eq_x.bind_parallel(r_j, BindingOrder::LowToHigh);
 
         for poly in &mut self.x_a_c0_mlpoly {
@@ -826,11 +816,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for G2ScalarMulPr
 
     fn cache_openings(
         &self,
-        accumulator: &mut ProverOpeningAccumulator<F>,
+        accumulator: &mut ProverOpeningAccumulator<Fq>,
         transcript: &mut T,
-        sumcheck_challenges: &[F::Challenge],
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, F>::new(sumcheck_challenges.to_vec());
+        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
 
         for i in 0..self.params.num_constraints {
             append_g2_scalar_mul_virtual_claims(
@@ -903,7 +893,7 @@ impl<F: JoltField> G2ScalarMulVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMulVerifier<F> {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier<Fq> {
     fn degree(&self) -> usize {
         6
     }
@@ -912,38 +902,32 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMul
         self.params.num_constraint_vars
     }
 
-    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
-        F::zero()
+    fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<Fq>) -> Fq {
+        Fq::zero()
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
-        sumcheck_challenges: &[F::Challenge],
-    ) -> F {
+        accumulator: &VerifierOpeningAccumulator<Fq>,
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
+    ) -> Fq {
         use crate::poly::eq_poly::EqPolynomial;
-        use std::any::TypeId;
 
-        // Runtime check that F = Fq
-        if TypeId::of::<F>() != TypeId::of::<Fq>() {
-            panic!("G2 scalar multiplication requires F = Fq for recursion SNARK");
-        }
-
-        let r_x_f: Vec<F> = self.r_x.iter().map(|c| (*c).into()).collect();
-        let r_star_f: Vec<F> = sumcheck_challenges
+        let r_x_f: Vec<Fq> = self.r_x.iter().map(|c| (*c).into()).collect();
+        let r_star_f: Vec<Fq> = sumcheck_challenges
             .iter()
             .rev()
             .map(|c| (*c).into())
             .collect();
         let eq_eval = EqPolynomial::mle(&r_x_f, &r_star_f);
 
-        let mut total = F::zero();
+        let mut total = Fq::zero();
         let mut gamma_power = self.gamma;
 
         // Precompute delta powers for the 13 batched terms
         const NUM_CONSTRAINT_TERMS: usize = 13;
-        let mut delta_pows = [F::zero(); NUM_CONSTRAINT_TERMS];
-        delta_pows[0] = F::one();
+        let mut delta_pows = [Fq::zero(); NUM_CONSTRAINT_TERMS];
+        delta_pows[0] = Fq::one();
         for i in 1..NUM_CONSTRAINT_TERMS {
             delta_pows[i] = delta_pows[i - 1] * self.delta;
         }
@@ -966,23 +950,21 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMul
                 a_is_infinity_claim,
             ) = get_g2_scalar_mul_virtual_claims(accumulator, i, self.params.sumcheck_id);
 
-            // SAFETY: We checked F = Fq above, so these transmutes are safe.
-            let x_a_c0_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_c0_claim) };
-            let x_a_c1_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_c1_claim) };
-            let y_a_c0_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_c0_claim) };
-            let y_a_c1_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_c1_claim) };
-            let x_t_c0_fq: Fq = unsafe { std::mem::transmute_copy(&x_t_c0_claim) };
-            let x_t_c1_fq: Fq = unsafe { std::mem::transmute_copy(&x_t_c1_claim) };
-            let y_t_c0_fq: Fq = unsafe { std::mem::transmute_copy(&y_t_c0_claim) };
-            let y_t_c1_fq: Fq = unsafe { std::mem::transmute_copy(&y_t_c1_claim) };
-            let x_a_next_c0_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_next_c0_claim) };
-            let x_a_next_c1_fq: Fq = unsafe { std::mem::transmute_copy(&x_a_next_c1_claim) };
-            let y_a_next_c0_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_next_c0_claim) };
-            let y_a_next_c1_fq: Fq = unsafe { std::mem::transmute_copy(&y_a_next_c1_claim) };
-            let ind_t_fq: Fq = unsafe { std::mem::transmute_copy(&t_is_infinity_claim) };
-            let ind_a_fq: Fq = unsafe { std::mem::transmute_copy(&a_is_infinity_claim) };
-            let bit_eval: F = self.public_inputs[i].evaluate_bit_mle(&r_star_f);
-            let bit_fq: Fq = unsafe { std::mem::transmute_copy(&bit_eval) };
+            let x_a_c0_fq: Fq = x_a_c0_claim;
+            let x_a_c1_fq: Fq = x_a_c1_claim;
+            let y_a_c0_fq: Fq = y_a_c0_claim;
+            let y_a_c1_fq: Fq = y_a_c1_claim;
+            let x_t_c0_fq: Fq = x_t_c0_claim;
+            let x_t_c1_fq: Fq = x_t_c1_claim;
+            let y_t_c0_fq: Fq = y_t_c0_claim;
+            let y_t_c1_fq: Fq = y_t_c1_claim;
+            let x_a_next_c0_fq: Fq = x_a_next_c0_claim;
+            let x_a_next_c1_fq: Fq = x_a_next_c1_claim;
+            let y_a_next_c0_fq: Fq = y_a_next_c0_claim;
+            let y_a_next_c1_fq: Fq = y_a_next_c1_claim;
+            let ind_t_fq: Fq = t_is_infinity_claim;
+            let ind_a_fq: Fq = a_is_infinity_claim;
+            let bit_fq: Fq = self.public_inputs[i].evaluate_bit_mle(&r_star_f);
 
             let x_a = Fq2::new(x_a_c0_fq, x_a_c1_fq);
             let y_a = Fq2::new(y_a_c0_fq, y_a_c1_fq);
@@ -1004,19 +986,19 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMul
             let c6_yt_c0_fq = ind_t_fq * y_t.c0;
             let c6_yt_c1_fq = ind_t_fq * y_t.c1;
 
-            let c1_c0: F = unsafe { std::mem::transmute_copy(&c1.c0) };
-            let c1_c1: F = unsafe { std::mem::transmute_copy(&c1.c1) };
-            let c2_c0: F = unsafe { std::mem::transmute_copy(&c2.c0) };
-            let c2_c1: F = unsafe { std::mem::transmute_copy(&c2.c1) };
-            let c3_c0: F = unsafe { std::mem::transmute_copy(&c3.c0) };
-            let c3_c1: F = unsafe { std::mem::transmute_copy(&c3.c1) };
-            let c4_c0: F = unsafe { std::mem::transmute_copy(&c4.c0) };
-            let c4_c1: F = unsafe { std::mem::transmute_copy(&c4.c1) };
-            let c5: F = unsafe { std::mem::transmute_copy(&c5_fq) };
-            let c6_xt_c0: F = unsafe { std::mem::transmute_copy(&c6_xt_c0_fq) };
-            let c6_xt_c1: F = unsafe { std::mem::transmute_copy(&c6_xt_c1_fq) };
-            let c6_yt_c0: F = unsafe { std::mem::transmute_copy(&c6_yt_c0_fq) };
-            let c6_yt_c1: F = unsafe { std::mem::transmute_copy(&c6_yt_c1_fq) };
+            let c1_c0: Fq = c1.c0;
+            let c1_c1: Fq = c1.c1;
+            let c2_c0: Fq = c2.c0;
+            let c2_c1: Fq = c2.c1;
+            let c3_c0: Fq = c3.c0;
+            let c3_c1: Fq = c3.c1;
+            let c4_c0: Fq = c4.c0;
+            let c4_c1: Fq = c4.c1;
+            let c5: Fq = c5_fq;
+            let c6_xt_c0: Fq = c6_xt_c0_fq;
+            let c6_xt_c1: Fq = c6_xt_c1_fq;
+            let c6_yt_c0: Fq = c6_yt_c0_fq;
+            let c6_yt_c1: Fq = c6_yt_c1_fq;
 
             let constraint_value = delta_pows[0] * c1_c0
                 + delta_pows[1] * c1_c1
@@ -1041,11 +1023,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for G2ScalarMul
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
         transcript: &mut T,
-        sumcheck_challenges: &[F::Challenge],
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, F>::new(sumcheck_challenges.to_vec());
+        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
         for i in 0..self.num_constraints {
             append_g2_scalar_mul_virtual_openings(
                 accumulator,

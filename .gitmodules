@@ -5,7 +5,3 @@
 	path = third-party/riscv-arch-test
 	url = https://github.com/riscv-non-isa/riscv-arch-test.git
 	shallow = true
-[submodule "third-party/dory"]
-	path = third-party/dory
-	url = https://github.com/LayerZero-Research/dory.git
-	branch = lz-recursion

@@ -1,14 +1,83 @@
 //! Jolt implementation of Dory's recursion backend
 
 use ark_bn254::{Fq, Fq12, Fr, G1Affine, G2Affine};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Write};
 use dory::{
     backends::arkworks::{ArkG1, ArkG2, ArkGT, BN254},
     primitives::arithmetic::{Group, PairingCurve},
+    primitives::serialization::{DoryDeserialize, DorySerialize},
     recursion::{HintMap, TraceContext, WitnessBackend, WitnessGenerator, WitnessResult},
     verify_recursive,
 };
 use std::{marker::PhantomData, rc::Rc};
+
+/// Wrapper for `HintMap` that implements ark's serialization traits.
+///
+/// This bridges dory's `DorySerialize`/`DoryDeserialize` to ark's
+/// `CanonicalSerialize`/`CanonicalDeserialize` for proof transport.
+#[derive(Clone)]
+pub struct JoltHintMap(pub HintMap<BN254>);
+
+impl CanonicalSerialize for JoltHintMap {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        mut writer: W,
+        _compress: ark_serialize::Compress,
+    ) -> Result<(), SerializationError> {
+        use dory::primitives::serialization::Compress as DoryCompress;
+
+        // First serialize to a buffer to get the length
+        let mut buffer = Vec::new();
+        self.0
+            .serialize_with_mode(&mut buffer, DoryCompress::Yes)
+            .map_err(|_| SerializationError::InvalidData)?;
+
+        // Write length prefix + data
+        let len = buffer.len() as u64;
+        <u64 as CanonicalSerialize>::serialize_compressed(&len, &mut writer)?;
+        writer
+            .write_all(&buffer)
+            .map_err(SerializationError::from)?;
+        Ok(())
+    }
+
+    fn serialized_size(&self, _compress: ark_serialize::Compress) -> usize {
+        use dory::primitives::serialization::Compress as DoryCompress;
+        // Size = 8 bytes for length + serialized data
+        8 + self.0.serialized_size(DoryCompress::Yes)
+    }
+}
+
+impl ark_serialize::Valid for JoltHintMap {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for JoltHintMap {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        _compress: ark_serialize::Compress,
+        _validate: ark_serialize::Validate,
+    ) -> Result<Self, SerializationError> {
+        use dory::primitives::serialization::{Compress as DoryCompress, Validate as DoryValidate};
+
+        // Read length prefix using ark's deserialize
+        let len =
+            <u64 as CanonicalDeserialize>::deserialize_compressed(&mut reader)? as usize;
+        // Read data
+        let mut bytes = vec![0u8; len];
+        reader.read_exact(&mut bytes).map_err(SerializationError::from)?;
+        // Deserialize using dory's format
+        let hint_map = HintMap::deserialize_with_mode(
+            &bytes[..],
+            DoryCompress::Yes,
+            DoryValidate::Yes,
+        )
+        .map_err(|_| SerializationError::InvalidData)?;
+        Ok(JoltHintMap(hint_map))
+    }
+}
 
 use super::{
     commitment_scheme::DoryCommitmentScheme,
@@ -244,19 +313,210 @@ impl WitnessResult<ArkGT> for UnimplementedWitness<ArkGT> {
 }
 
 impl WitnessBackend for JoltWitness {
-    type GtExpWitness = JoltGtExpWitness;
+    // G1 operations
+    type G1AddWitness = JoltG1AddWitness;
     type G1ScalarMulWitness = JoltG1ScalarMulWitness;
+    type MsmG1Witness = UnimplementedWitness<ArkG1>;
+
+    // G2 operations
+    type G2AddWitness = JoltG2AddWitness;
     type G2ScalarMulWitness = JoltG2ScalarMulWitness;
+    type MsmG2Witness = UnimplementedWitness<ArkG2>;
+
+    // GT operations
     type GtMulWitness = JoltGtMulWitness;
+    type GtExpWitness = JoltGtExpWitness;
+
+    // Pairing operations
     type PairingWitness = UnimplementedWitness<ArkGT>;
     type MultiPairingWitness = UnimplementedWitness<ArkGT>;
-    type MsmG1Witness = UnimplementedWitness<ArkG1>;
-    type MsmG2Witness = UnimplementedWitness<ArkG2>;
 }
 
 pub struct JoltWitnessGenerator;
 
 impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
+    fn generate_g1_add(
+        a: &<BN254 as PairingCurve>::G1,
+        b: &<BN254 as PairingCurve>::G1,
+        result: &<BN254 as PairingCurve>::G1,
+    ) -> JoltG1AddWitness {
+        use ark_ec::AffineRepr;
+        use ark_ff::Field;
+
+        let p: G1Affine = a.0.into();
+        let q: G1Affine = b.0.into();
+        let r: G1Affine = result.0.into();
+
+        let zero = Fq::from(0u64);
+        let one = Fq::from(1u64);
+
+        // Extract coordinates (0 for infinity points)
+        let (x_p, y_p, ind_p) = if p.is_zero() {
+            (zero, zero, one)
+        } else {
+            (p.x, p.y, zero)
+        };
+
+        let (x_q, y_q, ind_q) = if q.is_zero() {
+            (zero, zero, one)
+        } else {
+            (q.x, q.y, zero)
+        };
+
+        let (x_r, y_r, ind_r) = if r.is_zero() {
+            (zero, zero, one)
+        } else {
+            (r.x, r.y, zero)
+        };
+
+        // Compute auxiliary witness values
+        let (lambda, inv_delta_x, is_double, is_inverse) =
+            if ind_p == one || ind_q == one {
+                // At least one input is infinity - no slope needed
+                (zero, zero, zero, zero)
+            } else {
+                let dx = x_q - x_p;
+                let dy = y_q - y_p;
+
+                if dx == zero {
+                    if dy == zero {
+                        // P == Q: doubling case
+                        // lambda = 3*x_p^2 / (2*y_p)
+                        let two = Fq::from(2u64);
+                        let three = Fq::from(3u64);
+                        let numerator = three * x_p * x_p;
+                        let denominator = two * y_p;
+                        let lam = if denominator == zero {
+                            zero // Edge case: y_p = 0 means P = -P, result is O
+                        } else {
+                            numerator * denominator.inverse().unwrap()
+                        };
+                        (lam, zero, one, zero)
+                    } else {
+                        // P == -Q: inverse case, result is infinity
+                        (zero, zero, zero, one)
+                    }
+                } else {
+                    // General add case: lambda = dy/dx
+                    let inv_dx = dx.inverse().unwrap();
+                    let lam = dy * inv_dx;
+                    (lam, inv_dx, zero, zero)
+                }
+            };
+
+        JoltG1AddWitness {
+            x_p,
+            y_p,
+            ind_p,
+            x_q,
+            y_q,
+            ind_q,
+            x_r,
+            y_r,
+            ind_r,
+            lambda,
+            inv_delta_x,
+            is_double,
+            is_inverse,
+            ark_result: *result,
+        }
+    }
+
+    fn generate_g2_add(
+        a: &<BN254 as PairingCurve>::G2,
+        b: &<BN254 as PairingCurve>::G2,
+        result: &<BN254 as PairingCurve>::G2,
+    ) -> JoltG2AddWitness {
+        use ark_bn254::Fq2;
+        use ark_ec::AffineRepr;
+        use ark_ff::Field;
+
+        let p: G2Affine = a.0.into();
+        let q: G2Affine = b.0.into();
+        let r: G2Affine = result.0.into();
+
+        let zero = Fq::from(0u64);
+        let one = Fq::from(1u64);
+        let fq2_zero = Fq2::from(0u64);
+
+        // Extract Fq2 coordinates split into (c0, c1)
+        let (x_p, y_p, ind_p) = if p.is_zero() {
+            (fq2_zero, fq2_zero, one)
+        } else {
+            (p.x, p.y, zero)
+        };
+
+        let (x_q, y_q, ind_q) = if q.is_zero() {
+            (fq2_zero, fq2_zero, one)
+        } else {
+            (q.x, q.y, zero)
+        };
+
+        let (x_r, y_r, ind_r) = if r.is_zero() {
+            (fq2_zero, fq2_zero, one)
+        } else {
+            (r.x, r.y, zero)
+        };
+
+        // Compute auxiliary witness values in Fq2
+        let (lambda, inv_delta_x, is_double, is_inverse) =
+            if ind_p == one || ind_q == one {
+                (fq2_zero, fq2_zero, zero, zero)
+            } else {
+                let dx = x_q - x_p;
+                let dy = y_q - y_p;
+
+                if dx == fq2_zero {
+                    if dy == fq2_zero {
+                        // Doubling case
+                        let two = Fq2::from(2u64);
+                        let three = Fq2::from(3u64);
+                        let numerator = three * x_p * x_p;
+                        let denominator = two * y_p;
+                        let lam = if denominator == fq2_zero {
+                            fq2_zero
+                        } else {
+                            numerator * denominator.inverse().unwrap()
+                        };
+                        (lam, fq2_zero, one, zero)
+                    } else {
+                        // Inverse case
+                        (fq2_zero, fq2_zero, zero, one)
+                    }
+                } else {
+                    // General add
+                    let inv_dx = dx.inverse().unwrap();
+                    let lam = dy * inv_dx;
+                    (lam, inv_dx, zero, zero)
+                }
+            };
+
+        JoltG2AddWitness {
+            x_p_c0: x_p.c0,
+            x_p_c1: x_p.c1,
+            y_p_c0: y_p.c0,
+            y_p_c1: y_p.c1,
+            ind_p,
+            x_q_c0: x_q.c0,
+            x_q_c1: x_q.c1,
+            y_q_c0: y_q.c0,
+            y_q_c1: y_q.c1,
+            ind_q,
+            x_r_c0: x_r.c0,
+            x_r_c1: x_r.c1,
+            y_r_c0: y_r.c0,
+            y_r_c1: y_r.c1,
+            ind_r,
+            lambda_c0: lambda.c0,
+            lambda_c1: lambda.c1,
+            inv_delta_x_c0: inv_delta_x.c0,
+            inv_delta_x_c1: inv_delta_x.c1,
+            is_double,
+            is_inverse,
+            ark_result: *result,
+        }
+    }
+
     fn generate_gt_exp(
         base: &<BN254 as PairingCurve>::GT,
         scalar: &<<BN254 as PairingCurve>::G1 as Group>::Scalar,
@@ -416,7 +676,7 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
 
 impl RecursionExt<Fr> for DoryCommitmentScheme {
     type Witness = dory::recursion::WitnessCollection<JoltWitness>;
-    type Hint = HintMap<BN254>;
+    type Hint = JoltHintMap;
     type CombineHint = ArkGT;
 
     fn witness_gen<ProofTranscript: crate::transcripts::Transcript>(
@@ -468,8 +728,8 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
             .finalize()
             .ok_or(ProofVerifyError::default())?;
 
-        // Convert witnesses to hints
-        let hints = witnesses.to_hints::<BN254>();
+        // Convert witnesses to hints and wrap in JoltHintMap
+        let hints = JoltHintMap(witnesses.to_hints::<BN254>());
 
         // Return both witnesses and hints
         Ok((witnesses, hints))
@@ -499,9 +759,9 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
             .collect();
         let ark_evaluation = jolt_to_ark(evaluation);
 
-        // Create hint-based verification context
+        // Create hint-based verification context (unwrap JoltHintMap)
         let ctx = Rc::new(
-            TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_hints(hint.clone()),
+            TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_hints(hint.0.clone()),
         );
 
         // Wrap transcript for dory compatibility

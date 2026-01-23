@@ -169,7 +169,7 @@ mod recursion_tests {
         // Now we have both witnesses (for proving) and hints (for verification)
         println!(
             "Successfully generated hints for {} rounds",
-            hints.num_rounds
+            hints.0.num_rounds
         );
         println!("Collected {} GT exp witnesses", witnesses.gt_exp.len());
 
@@ -256,7 +256,7 @@ mod recursion_tests {
         .expect("Witness generation should succeed");
 
         // Both witnesses and hints successfully generated
-        assert!(hints.num_rounds > 0, "Should have generated hints");
+        assert!(hints.0.num_rounds > 0, "Should have generated hints");
         assert!(
             !witnesses.gt_exp.is_empty(),
             "Should have collected witnesses"

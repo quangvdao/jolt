@@ -417,12 +417,124 @@ impl ConstraintSystem {
         VarCountJaggedBijection,
         ConstraintMapping,
     ) {
+        // Env-gated logging for precise virtual-poly size tracking.
+        //
+        // - JOLT_RECURSION_LOG_POLY_SIZES=0/false (default): off
+        // - JOLT_RECURSION_LOG_POLY_SIZES=1/true: summary only
+        // - JOLT_RECURSION_LOG_POLY_SIZES=2/full: full per-virtual-poly table
+        let poly_size_log_level: u8 = std::env::var("JOLT_RECURSION_LOG_POLY_SIZES")
+            .ok()
+            .and_then(|v| {
+                let v = v.trim().to_lowercase();
+                match v.as_str() {
+                    "" | "0" | "false" | "off" => Some(0),
+                    "1" | "true" | "on" => Some(1),
+                    "2" | "full" => Some(2),
+                    _ => v.parse::<u8>().ok(),
+                }
+            })
+            .unwrap_or(0);
+
         let builder = ConstraintSystemJaggedBuilder::from_constraints(&self.constraints);
         let (bijection, mapping) = builder.build();
 
         // Pre-allocate for exact dense size
         let dense_size = <VarCountJaggedBijection as JaggedTransform<Fq>>::dense_size(&bijection);
         let mut dense_evals = Vec::with_capacity(dense_size);
+
+        if poly_size_log_level >= 1 {
+            let num_polynomials = bijection.num_polynomials();
+            let padded_size = dense_size.next_power_of_two();
+            let row_size = 1usize << self.matrix.num_constraint_vars;
+
+            // Summaries over the jagged packing.
+            let mut count_by_num_vars: std::collections::BTreeMap<usize, usize> =
+                std::collections::BTreeMap::new();
+            // Use string keys so we don't require `PolyType: Ord`.
+            let mut count_by_poly_type: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            let mut count_by_constraint_type: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+
+            for poly_idx in 0..num_polynomials {
+                let (constraint_idx, poly_type) = mapping.decode(poly_idx);
+                let num_vars =
+                    <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&bijection, poly_idx);
+
+                *count_by_num_vars.entry(num_vars).or_insert(0) += 1;
+                *count_by_poly_type
+                    .entry(format!("{poly_type:?}"))
+                    .or_insert(0) += 1;
+
+                let cty = self
+                    .constraints
+                    .get(constraint_idx)
+                    .map(|c| format!("{:?}", c.constraint_type))
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                *count_by_constraint_type.entry(cty).or_insert(0) += 1;
+            }
+
+            tracing::info!(
+                "[recursion::jagged] virtual-poly packing: num_constraints={}, num_polynomials={}, dense_native_size={}, dense_padded_size={}, dense_padding={}, row_size={}",
+                self.constraints.len(),
+                num_polynomials,
+                dense_size,
+                padded_size,
+                padded_size - dense_size,
+                row_size,
+            );
+            tracing::info!(
+                "[recursion::jagged] virtual-poly packing: counts_by_num_vars={:?}",
+                count_by_num_vars
+            );
+            tracing::info!(
+                "[recursion::jagged] virtual-poly packing: counts_by_poly_type={:?}",
+                count_by_poly_type
+            );
+            tracing::info!(
+                "[recursion::jagged] virtual-poly packing: counts_by_constraint_type={:?}",
+                count_by_constraint_type
+            );
+
+            if poly_size_log_level >= 2 {
+                tracing::info!(
+                    "[recursion::jagged] virtual-poly table: poly_idx, constraint_idx, constraint_type, poly_type, num_vars, native_size, dense_start, dense_end, matrix_row, matrix_row_offset"
+                );
+
+                for poly_idx in 0..num_polynomials {
+                    let (constraint_idx, poly_type) = mapping.decode(poly_idx);
+                    let num_vars =
+                        <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&bijection, poly_idx);
+
+                    let dense_start = bijection.cumulative_size_before(poly_idx);
+                    let dense_end = bijection.cumulative_size(poly_idx);
+                    let native_size = dense_end - dense_start;
+
+                    let matrix_row = self.matrix.row_index(poly_type, constraint_idx);
+                    let matrix_row_offset = self.matrix.storage_offset(matrix_row);
+
+                    let constraint_type = self
+                        .constraints
+                        .get(constraint_idx)
+                        .map(|c| format!("{:?}", c.constraint_type))
+                        .unwrap_or_else(|| "<unknown>".to_string());
+
+                    tracing::info!(
+                        "[recursion::jagged] poly_idx={} constraint_idx={} constraint_type={} poly_type={:?} num_vars={} native_size={} dense_range=[{}, {}) matrix_row={} matrix_row_offset={}",
+                        poly_idx,
+                        constraint_idx,
+                        constraint_type,
+                        poly_type,
+                        num_vars,
+                        native_size,
+                        dense_start,
+                        dense_end,
+                        matrix_row,
+                        matrix_row_offset,
+                    );
+                }
+            }
+        }
 
         // Extract only native (non-padded) evaluations
         for dense_idx in 0..dense_size {

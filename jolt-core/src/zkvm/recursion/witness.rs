@@ -289,6 +289,82 @@ pub struct GTCombineWitness {
     pub mul_layers: Vec<Vec<GTMulOpWitness>>,
 }
 
+impl GTCombineWitness {
+    /// Validate the deterministic balanced-tree wiring.
+    ///
+    /// This checks:
+    /// - Each `mul_layers[level][j]` multiplies the expected children from the previous level
+    ///   (adjacent pairing, left-to-right; odd tail carried forward).
+    /// - Each mul witness's `result` matches `lhs * rhs`.
+    ///
+    /// This is intended as a cheap structural invariant check to support future
+    /// explicit wiring/equality constraints.
+    pub fn validate_tree_wiring(&self) -> Result<(), String> {
+        if self.exp_witnesses.is_empty() {
+            return Err("GTCombineWitness.exp_witnesses is empty".to_owned());
+        }
+
+        let mut prev: Vec<Fq12> = self.exp_witnesses.iter().map(|w| w.result).collect();
+
+        for (level, layer_wits) in self.mul_layers.iter().enumerate() {
+            let expected_pairs = prev.len() / 2;
+            if layer_wits.len() != expected_pairs {
+                return Err(format!(
+                    "GTCombineWitness.mul_layers[{level}] wrong length: got {}, expected {} (prev_len={})",
+                    layer_wits.len(),
+                    expected_pairs,
+                    prev.len()
+                ));
+            }
+
+            let mut next = Vec::with_capacity((prev.len() + 1) / 2);
+            for j in 0..expected_pairs {
+                let expected_lhs = prev[2 * j];
+                let expected_rhs = prev[2 * j + 1];
+                let wit = &layer_wits[j];
+
+                if wit.lhs != expected_lhs {
+                    return Err(format!(
+                        "mul_layers[{level}][{j}].lhs mismatch: got {:?}, expected {:?}",
+                        wit.lhs, expected_lhs
+                    ));
+                }
+                if wit.rhs != expected_rhs {
+                    return Err(format!(
+                        "mul_layers[{level}][{j}].rhs mismatch: got {:?}, expected {:?}",
+                        wit.rhs, expected_rhs
+                    ));
+                }
+
+                let expected_result = expected_lhs * expected_rhs;
+                if wit.result != expected_result {
+                    return Err(format!(
+                        "mul_layers[{level}][{j}].result mismatch: got {:?}, expected {:?}",
+                        wit.result, expected_result
+                    ));
+                }
+
+                next.push(wit.result);
+            }
+
+            // Carry forward odd tail, if any.
+            if prev.len() % 2 == 1 {
+                next.push(*prev.last().unwrap());
+            }
+            prev = next;
+        }
+
+        // After applying all layers, we should have reduced to a single accumulator.
+        if prev.len() != 1 {
+            return Err(format!(
+                "GTCombineWitness did not reduce to a single value: final_len={}",
+                prev.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Combined witness data for all recursion constraints
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DoryRecursionWitness {

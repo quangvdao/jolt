@@ -758,19 +758,20 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
 
         // Step 2: Balanced binary-tree fold (associative group op) to expose parallelism.
         //
-        // We record one `GTMulOpWitness` for each internal node. The witness order is
-        // deterministic: level-order, left-to-right within each level.
-        let mut mul_witnesses = Vec::with_capacity(exp_witnesses.len().saturating_sub(1));
+        // We record one `GTMulOpWitness` for each internal node, grouped by level.
+        // The tree shape is deterministic given `exp_witnesses.len()`.
+        let mut mul_layers: Vec<Vec<GTMulOpWitness>> = Vec::new();
         let mut layer: Vec<Fq12> = exp_witnesses.iter().map(|w| w.result).collect();
 
         while layer.len() > 1 {
             #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
             {
                 let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+                let mut this_level_wits = Vec::with_capacity(layer.len() / 2);
                 for chunk in layer.chunks(2) {
                     if let [a, b] = chunk {
                         let mul_steps = MultiplicationSteps::new(*a, *b);
-                        mul_witnesses.push(GTMulOpWitness {
+                        this_level_wits.push(GTMulOpWitness {
                             lhs: mul_steps.lhs,
                             rhs: mul_steps.rhs,
                             result: mul_steps.result,
@@ -782,12 +783,16 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
                         next.push(chunk[0]);
                     }
                 }
+                mul_layers.push(this_level_wits);
                 layer = next;
             }
 
             #[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32")))]
             {
                 use rayon::prelude::*;
+
+                // IMPORTANT: `par_chunks(2)` is an IndexedParallelIterator, so collecting into a Vec
+                // preserves left-to-right order deterministically.
                 let pairs: Vec<(Fq12, Option<GTMulOpWitness>)> = layer
                     .par_chunks(2)
                     .map(|chunk| {
@@ -803,18 +808,21 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
                                 }),
                             )
                         } else {
+                            // Odd tail element: carry forward.
                             (chunk[0], None)
                         }
                     })
                     .collect();
 
                 let mut next = Vec::with_capacity(pairs.len());
+                let mut this_level_wits = Vec::with_capacity(layer.len() / 2);
                 for (res, wit) in pairs {
                     next.push(res);
                     if let Some(w) = wit {
-                        mul_witnesses.push(w);
+                        this_level_wits.push(w);
                     }
                 }
+                mul_layers.push(this_level_wits);
                 layer = next;
             }
         }
@@ -823,8 +831,12 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
 
         let witness = GTCombineWitness {
             exp_witnesses,
-            mul_witnesses,
+            mul_layers,
         };
+        debug_assert!(
+            witness.validate_tree_wiring().is_ok(),
+            "GTCombineWitness tree wiring invalid"
+        );
 
         // The hint is the final accumulated result
         let hint = ArkGT(accumulator);

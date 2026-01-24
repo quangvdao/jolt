@@ -451,7 +451,7 @@ impl RecursionProver<Fq> {
             tracing::info!(
                 "[Homomorphic Combine] Merging combine_witness: {} exp ops, {} mul ops",
                 cw.exp_witnesses.len(),
-                cw.mul_witnesses.len()
+                cw.mul_layers.iter().map(|l| l.len()).sum::<usize>()
             );
         }
 
@@ -655,7 +655,7 @@ impl RecursionProver<Fq> {
             tracing::info!(
                 "[Homomorphic Combine] Adding {} GT exp + {} GT mul constraints (pre-count: {})",
                 cw.exp_witnesses.len(),
-                cw.mul_witnesses.len(),
+                cw.mul_layers.iter().map(|l| l.len()).sum::<usize>(),
                 pre_count
             );
 

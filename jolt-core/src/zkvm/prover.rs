@@ -2218,7 +2218,7 @@ where
                         tracing::info!(
                             elapsed_ms = start.elapsed().as_millis(),
                             exp_ops = out.0.exp_witnesses.len(),
-                            mul_ops = out.0.mul_witnesses.len(),
+                            mul_ops = out.0.mul_layers.iter().map(|l| l.len()).sum::<usize>(),
                             "Generated combine witness for homomorphic combining"
                         );
                         out

@@ -1616,11 +1616,19 @@ impl DoryMatrixBuilder {
         // Add GT mul witnesses
         tracing::info!(
             "[add_combine_witness] Processing {} GT mul witnesses",
-            witness.mul_witnesses.len()
+            witness.mul_layers.iter().map(|l| l.len()).sum::<usize>()
         );
-        for (idx, mul_wit) in witness.mul_witnesses.iter().enumerate() {
-            tracing::debug!("[add_combine_witness] Adding GT mul witness {}", idx);
-            self.add_gt_mul_op_witness(mul_wit);
+        let mut idx = 0usize;
+        for (level, layer) in witness.mul_layers.iter().enumerate() {
+            for mul_wit in layer {
+                tracing::debug!(
+                    "[add_combine_witness] Adding GT mul witness {} (level={})",
+                    idx,
+                    level
+                );
+                self.add_gt_mul_op_witness(mul_wit);
+                idx += 1;
+            }
         }
 
         tracing::info!(

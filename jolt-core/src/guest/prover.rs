@@ -60,7 +60,13 @@ pub fn preprocess_committed(
 #[cfg(feature = "prover")]
 pub fn prove<
     F: JoltField,
-    PCS: StreamingCommitmentScheme<Field = F> + RecursionExt<F>,
+    PCS: StreamingCommitmentScheme<Field = F>
+        + RecursionExt<
+            F,
+            Witness = dory::recursion::WitnessCollection<
+                crate::poly::commitment::dory::recursion::JoltWitness,
+            >,
+        >,
     FS: Transcript,
 >(
     guest: &Program,

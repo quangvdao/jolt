@@ -106,7 +106,73 @@ pub struct RecursionProver<F: JoltField = Fq> {
     pub ast: Option<AstGraph<BN254>>,
 }
 
+/// Minimal Stage 8 output required to run Stage 9 (PCS recursion witness generation) and
+/// construct the recursion constraint system.
+///
+/// CRITICAL transcript invariant:
+/// - `witness_gen_transcript` must be forked from the main transcript **after** all Stage 8
+///   claims have been appended and gamma has been sampled, but **before** `PCS::prove` mutates
+///   the main transcript. This fork is what `PCS::witness_gen` must use (it mutates transcripts).
+pub struct Stage8RecursionInput<
+    F: JoltField,
+    PCS: RecursionExt<F>,
+    ProofTranscript: Transcript,
+> {
+    /// Forked transcript state right after gamma sampling (before `PCS::prove`).
+    pub witness_gen_transcript: ProofTranscript,
+    /// Unified opening point (big-endian challenges).
+    pub opening_point: Vec<<F as JoltField>::Challenge>,
+    /// Joint claim: Σ γ_i · claim_i.
+    pub joint_claim: F,
+    /// Joint commitment: Σ γ_i · C_i.
+    pub joint_commitment: PCS::Commitment,
+    /// Witness for homomorphic combine offloading (embedded as recursion constraints).
+    pub combine_witness: Option<crate::zkvm::recursion::witness::GTCombineWitness>,
+    /// Verifier setup used by `PCS::witness_gen`.
+    pub verifier_setup: PCS::VerifierSetup,
+}
+
 impl RecursionProver<Fq> {
+    /// Create a new recursion prover from Stage 8 opening data by running Stage 9 witness
+    /// generation internally.
+    ///
+    /// Returns the constructed `RecursionProver` and the PCS hint (`stage9_pcs_hint`) that must be
+    /// serialized in the top-level proof for verifier-side Stage 8 verification.
+    #[allow(clippy::type_complexity)]
+    pub fn new_from_stage8_opening<F, PCS, ProofTranscript>(
+        opening_proof: &PCS::Proof,
+        mut input: Stage8RecursionInput<F, PCS, ProofTranscript>,
+        gamma: Fq,
+        delta: Fq,
+    ) -> Result<(Self, PCS::Hint), Box<dyn std::error::Error>>
+    where
+        F: JoltField,
+        PCS: RecursionExt<
+            F,
+            Witness = dory::recursion::WitnessCollection<
+                crate::poly::commitment::dory::recursion::JoltWitness,
+            >,
+        >,
+        ProofTranscript: Transcript,
+    {
+        // Stage 9: Use the PCS recursion extension to generate witnesses + hint for verifying the
+        // Stage 8 opening proof.
+        let (witness_collection, stage9_pcs_hint) = PCS::witness_gen(
+            opening_proof,
+            &input.verifier_setup,
+            &mut input.witness_gen_transcript,
+            &input.opening_point,
+            &input.joint_claim,
+            &input.joint_commitment,
+        )?;
+
+        // Build constraint system from generated witnesses (and optional combine witness).
+        let prover =
+            Self::new_from_witnesses(&witness_collection, input.combine_witness, gamma, delta)?;
+
+        Ok((prover, stage9_pcs_hint))
+    }
+
     /// Create a new recursion prover from pre-generated witnesses
     pub fn new_from_witnesses(
         witness_collection: &dory::recursion::WitnessCollection<

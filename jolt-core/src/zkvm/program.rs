@@ -587,6 +587,15 @@ impl<PCS: CommitmentScheme> CanonicalDeserialize for VerifierProgram<PCS> {
             0 => {
                 let p =
                     ProgramPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
+                // NOTE: We use Arc::new() here which uses atomic operations (LRD/SCD).
+                // This is fine on the host, but will panic if executed inside a Jolt guest
+                // because Jolt doesn't support atomic instructions.
+                //
+                // For recursion (guest-side verification), use Committed mode (tag 1)
+                // which doesn't use Arc.
+                //
+                // If you need Full mode in a guest, consider using Box instead of Arc,
+                // or implement a custom wrapper that doesn't use atomics.
                 Ok(VerifierProgram::Full(Arc::new(p)))
             }
             1 => {

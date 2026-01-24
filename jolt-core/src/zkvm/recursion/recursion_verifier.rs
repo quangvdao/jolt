@@ -137,6 +137,11 @@ impl RecursionVerifier<Fq> {
             accumulator.openings.insert(*key, value.clone());
         }
 
+        // NOTE: The caller is responsible for appending the commitment to the transcript
+        // BEFORE calling this method. The prover commits BEFORE running sumchecks,
+        // so the verifier must also append the commitment before verification.
+        // See: JoltVerifier::verify_stage8_with_recursion() and e2e_test.rs
+
         // ============ STAGE 1: Packed GT Exp ============
         let _cycle_stage1 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE1);
         let _r_stage1_packed = tracing::info_span!("verify_recursion_stage1").in_scope(|| {

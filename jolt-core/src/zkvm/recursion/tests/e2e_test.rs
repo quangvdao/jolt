@@ -170,15 +170,14 @@ fn test_recursion_snark_e2e_with_dory() {
 
     let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(dense_num_vars);
 
-    // Commit to the dense polynomial using Hyrax (after jagged transform)
-    let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z);
-    let (dense_commitment, _) =
-        <HyraxPCS as CommitmentScheme>::commit(&dense_mlpoly, &hyrax_prover_setup);
-
-    // Run the unified prover
-    let recursion_proof = prover
-        .prove_with_pcs::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
+    // Run the unified prover - now uses prove_full which commits internally
+    // The dense polynomial commitment is returned in the proof
+    let (recursion_proof, _metadata) = prover
+        .prove_full::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
         .expect("Failed to generate recursion proof");
+
+    // Use the commitment from the proof (created inside prove_full)
+    let dense_commitment = recursion_proof.dense_commitment.clone();
 
     // ============ VERIFY THE RECURSION PROOF ============
 
@@ -206,6 +205,9 @@ fn test_recursion_snark_e2e_with_dory() {
 
     // Setup Hyrax verifier
     let hyrax_verifier_setup = <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
+
+    // Append commitment to transcript BEFORE calling verify (matches prover's order)
+    verifier_transcript.append_serializable(&dense_commitment);
 
     // Verify the proof
     let verification_result = verifier

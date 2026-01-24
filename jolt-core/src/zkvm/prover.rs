@@ -36,7 +36,7 @@ use crate::{
         },
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{
-            compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator, Openings,
+            compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator,
             ProverOpeningAccumulator, SumcheckId,
         },
         rlc_polynomial::{RLCStreamingData, TraceSource},
@@ -124,10 +124,7 @@ use crate::{
             raf_evaluation::RafEvaluationSumcheckProver as RamRafEvaluationSumcheckProver,
             read_write_checking::RamReadWriteCheckingProver,
         },
-        recursion::{
-            constraints_sys::RecursionMetadataBuilder,
-            recursion_prover::{RecursionProof, RecursionProver},
-        },
+        recursion::recursion_prover::{RecursionProof, RecursionProver},
         registers::{
             read_write_checking::RegistersReadWriteCheckingProver,
             val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
@@ -705,40 +702,16 @@ where
         let stage8_proof_data =
             stage8_proof_data.expect("Stage 8 proof data required for recursion");
 
-        // Stage 9: Recursion witness generation
-        let recursion_prover = self
-            .prove_stage9(stage8_proof_data)
-            .expect("Failed to generate recursion witness");
-
-        // Stage 10: Build constraint system and extract metadata
-        let recursion_constraint_metadata = self.prove_stage10(&recursion_prover);
-
-        // Stage 11: Build dense polynomial and commit (must happen BEFORE sumchecks for soundness)
-        let (_dense_poly, dense_commitment, dense_mlpoly) = self.prove_stage11(&recursion_prover);
-
-        // Stage 12: Run recursion subprotocols (Stages 1–5) - verify the committed polynomial
-        let (stage1_proof, stage2_proof, stage3_m_eval, stage4_proof, stage5_proof, accumulator) =
-            self.prove_stage12(&recursion_prover);
-
-        // Stage 13: Generate Hyrax opening proof
-        let (hyrax_proof, opening_claims) = self.prove_stage13(dense_mlpoly, accumulator);
-
-        let gamma = recursion_prover.gamma;
-        let delta = recursion_prover.delta;
-
-        // Assemble recursion proof
-        let recursion_proof = RecursionProof {
-            stage1_proof,
-            stage2_proof,
-            stage3_m_eval,
-            stage4_proof,
-            stage5_proof,
-            opening_proof: hyrax_proof,
-            gamma,
-            delta,
-            opening_claims,
-            dense_commitment,
-        };
+        // Stages 9-13: Consolidated recursion proof generation
+        // This handles:
+        // - Stage 9: Create RecursionProver from witnesses + sample gamma/delta
+        // - Stage 10: Extract constraint metadata
+        // - Stage 11: Build dense polynomial + commit (BEFORE sumchecks for soundness)
+        // - Stage 12: Run recursion sumchecks (stages 1-5 of RecursionProver)
+        // - Stage 13: Generate Hyrax opening proof
+        let (recursion_proof, recursion_constraint_metadata) = self
+            .prove_stage_recursive(stage8_proof_data)
+            .expect("Failed to generate recursion proof");
 
         #[cfg(test)]
         assert!(
@@ -2334,19 +2307,35 @@ where
         (opening_proof, stage8_hint, proof_data, stage8_combine_hint)
     }
 
-    /// Stage 9: Generate recursion witness and create RecursionProver
-    #[tracing::instrument(skip_all)]
-    fn prove_stage9(
+    /// Consolidated recursion proof generation (Stages 9-13).
+    ///
+    /// This method consolidates the following stages:
+    /// - Stage 9: Create RecursionProver from witnesses + sample gamma/delta
+    /// - Stage 10: Extract constraint metadata
+    /// - Stage 11: Build dense polynomial + commit (BEFORE sumchecks for soundness)
+    /// - Stage 12: Run recursion sumchecks (stages 1-5 of RecursionProver)
+    /// - Stage 13: Generate Hyrax opening proof
+    ///
+    /// Returns the recursion proof and constraint metadata for the verifier.
+    #[tracing::instrument(skip_all, name = "prove_stage_recursive")]
+    fn prove_stage_recursive(
         &mut self,
-        proof_data: Stage8ProofData<F, PCS, ProofTranscript>,
-    ) -> Result<RecursionProver<Fq>, Box<dyn std::error::Error>>
+        stage8_proof_data: Stage8ProofData<F, PCS, ProofTranscript>,
+    ) -> Result<
+        (
+            RecursionProof<Fq, ProofTranscript, Hyrax<1, GrumpkinProjective>>,
+            RecursionConstraintMetadata,
+        ),
+        Box<dyn std::error::Error>,
+    >
     where
         PCS: RecursionExt<F>,
         <PCS as RecursionExt<F>>::Hint: Send + Sync + 'static,
     {
-        tracing::info!("Stage 9: Recursion witness generation");
+        tracing::info!("Starting consolidated recursion proof (Stages 9-13)");
 
-        // Sample challenges from the main transcript
+        // ============ STAGE 9: Create RecursionProver ============
+        // Sample gamma/delta challenges from the main transcript
         let (gamma, delta) = tracing::info_span!("sample_recursion_challenges").in_scope(|| {
             let g: Fq = self.transcript.challenge_scalar();
             let d: Fq = self.transcript.challenge_scalar();
@@ -2372,10 +2361,10 @@ where
         }
 
         // Convert PCS witnesses to Dory witness collection type
-        // These unsafe transmutes are necessary because we're working with generic types
         let witness_collection = tracing::info_span!("convert_witness_collection").in_scope(|| {
+            // These unsafe transmutes are necessary because we're working with generic types
             let collection = unsafe {
-                &*(&proof_data.witnesses as *const <PCS as RecursionExt<F>>::Witness
+                &*(&stage8_proof_data.witnesses as *const <PCS as RecursionExt<F>>::Witness
                     as *const dory::recursion::WitnessCollection<
                         crate::poly::commitment::dory::recursion::JoltWitness,
                     >)
@@ -2388,7 +2377,7 @@ where
         let recursion_prover = tracing::info_span!("create_recursion_prover").in_scope(|| {
             let prover = RecursionProver::<Fq>::new_from_witnesses(
                 witness_collection,
-                proof_data.combine_witness.clone(),
+                stage8_proof_data.combine_witness.clone(),
                 gamma,
                 delta,
             )?;
@@ -2396,210 +2385,27 @@ where
             Ok::<_, Box<dyn std::error::Error>>(prover)
         })?;
 
-        Ok(recursion_prover)
-    }
-
-    /// Stage 10: Build constraint system metadata for verifier
-    #[tracing::instrument(skip_all)]
-    fn prove_stage10(
-        &mut self,
-        recursion_prover: &RecursionProver<Fq>,
-    ) -> RecursionConstraintMetadata {
-        tracing::info!("Stage 10: Building constraint system metadata");
-
-        // Use the RecursionMetadataBuilder to extract metadata
-        tracing::info_span!("extract_constraint_metadata").in_scope(|| {
-            let metadata = RecursionMetadataBuilder::from_constraint_system(
-                recursion_prover.constraint_system.clone(),
-            )
-            .build();
-            tracing::info!(
-                "Extracted metadata for {} constraints, {} polynomial types",
-                metadata.constraint_types.len(),
-                metadata.matrix_rows.len()
-            );
-            metadata
-        })
-    }
-
-    /// Stage 12: Run recursion subprotocols (Stages 1–5) - verify the committed polynomial
-    #[allow(clippy::type_complexity)]
-    #[tracing::instrument(skip_all)]
-    fn prove_stage12(
-        &mut self,
-        recursion_prover: &RecursionProver<Fq>,
-    ) -> (
-        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
-        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
-        Fq, // stage3_m_eval
-        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
-        crate::zkvm::recursion::stage5::jagged_assist::JaggedAssistProof<Fq, ProofTranscript>,
-        ProverOpeningAccumulator<Fq>,
-    ) {
-        tracing::info!("Stage 12: Running recursion sumchecks");
-
-        // Initialize opening accumulator
-        let log_T = recursion_prover.constraint_system.num_vars();
-        let mut accumulator = tracing::info_span!("init_opening_accumulator").in_scope(|| {
-            let acc = ProverOpeningAccumulator::<Fq>::new(log_T);
-            tracing::info!("Initialized opening accumulator with {} variables", log_T);
-            acc
-        });
-
-        // Stage 1: Packed GT exp sumcheck
-        let (stage1_proof, _r_stage1_packed) =
-            tracing::info_span!("recursion_stage12_1_packed_gt_exp").in_scope(|| {
-                tracing::info!("Running Stage 12.1: Packed GT exp sumcheck");
-                recursion_prover
-                    .prove_stage1(&mut self.transcript, &mut accumulator)
-                    .expect("Failed to run Stage 1 (PackedGtExp)")
-            });
-
-        // Stage 2: Batched constraint sumchecks (shift + claim reduction + remaining constraints)
-        let (stage2_proof, r_x) = tracing::info_span!("recursion_stage12_2_constraint_sumchecks")
-            .in_scope(|| {
-                tracing::info!("Running Stage 12.2: Batched constraint sumchecks");
-                recursion_prover
-                    .prove_stage2(&mut self.transcript, &mut accumulator)
-                    .expect("Failed to run Stage 2 (constraint sumchecks)")
-            });
-
-        // Stage 3: Virtualization direct evaluation
-        let (stage3_m_eval, r_s) = tracing::info_span!("recursion_stage12_3_virtualization")
-            .in_scope(|| {
-                tracing::info!("Running Stage 12.3: Virtualization direct evaluation");
-                recursion_prover
-                    .prove_stage3(&mut self.transcript, &mut accumulator, &r_x)
-                    .expect("Failed to run Stage 3 (virtualization)")
-            });
-
-        // Stage 4: Jagged transform sumcheck
-        let (stage4_proof, r_dense) =
-            tracing::info_span!("recursion_stage12_4_jagged").in_scope(|| {
-                tracing::info!("Running Stage 12.4: Jagged transform sumcheck");
-                recursion_prover
-                    .prove_stage4(&mut self.transcript, &mut accumulator, &r_s, &r_x)
-                    .expect("Failed to run Stage 4 (jagged)")
-            });
-
-        // Stage 5: Jagged assist
-        let stage5_proof =
-            tracing::info_span!("recursion_stage12_5_jagged_assist").in_scope(|| {
-                tracing::info!("Running Stage 12.5: Jagged assist");
-                recursion_prover
-                    .prove_stage5(&mut self.transcript, &mut accumulator, &r_dense, &r_x)
-                    .expect("Failed to run Stage 5 (jagged assist)")
-            });
-
-        (
-            stage1_proof,
-            stage2_proof,
-            stage3_m_eval,
-            stage4_proof,
-            stage5_proof,
-            accumulator,
-        )
-    }
-
-    /// Stage 11: Build and commit to dense polynomial (must happen BEFORE sumchecks for soundness)
-    #[tracing::instrument(skip_all)]
-    fn prove_stage11(
-        &mut self,
-        recursion_prover: &RecursionProver<Fq>,
-    ) -> (
-        crate::poly::dense_mlpoly::DensePolynomial<Fq>,
-        <Hyrax<1, GrumpkinProjective> as CommitmentScheme>::Commitment,
-        MultilinearPolynomial<Fq>,
-    ) {
-        tracing::info!("Stage 11: Building and committing to dense polynomial");
-
+        // ============ STAGES 10-13: Delegate to RecursionProver::prove_full ============
+        // This method handles:
+        // - Stage 10: Build constraint metadata
+        // - Stage 11: Build dense polynomial + commit (BEFORE sumchecks)
+        // - Stage 12: Run all recursion sumchecks (stages 1-5)
+        // - Stage 13: Generate Hyrax opening proof
         type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-
-        // Build dense polynomial
-        let (dense_poly, _, _) = tracing::info_span!("build_dense_polynomial").in_scope(|| {
-            let poly = recursion_prover.constraint_system.build_dense_polynomial();
-            tracing::info!(
-                "Built dense polynomial with {} variables",
-                poly.0.get_num_vars()
-            );
-            poly
-        });
-        let dense_num_vars = dense_poly.get_num_vars();
-
-        assert!(
-            dense_num_vars <= MAX_RECURSION_DENSE_NUM_VARS,
-            "dense_num_vars {} exceeds max {}",
-            dense_num_vars,
-            MAX_RECURSION_DENSE_NUM_VARS
-        );
-
-        // Use cached Hyrax setup from preprocessing (sized for MAX_RECURSION_DENSE_NUM_VARS).
         let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
 
-        // Convert to multilinear polynomial
-        let dense_mlpoly = tracing::info_span!("convert_to_mlpoly").in_scope(|| {
-            let mlpoly = MultilinearPolynomial::from(dense_poly.Z.clone());
-            tracing::info!("Converted dense polynomial to multilinear format");
-            mlpoly
-        });
+        let (recursion_proof, metadata) = tracing::info_span!("recursion_prover_prove_full")
+            .in_scope(|| {
+                recursion_prover
+                    .prove_full::<ProofTranscript, HyraxPCS>(
+                        &mut self.transcript,
+                        hyrax_prover_setup,
+                    )
+                    .expect("Failed to run RecursionProver::prove_full")
+            });
 
-        // Commit to dense polynomial
-        let (dense_commitment, _) = tracing::info_span!("hyrax_commit").in_scope(|| {
-            let commitment =
-                <HyraxPCS as CommitmentScheme>::commit(&dense_mlpoly, hyrax_prover_setup);
-            tracing::info!("Generated Hyrax commitment to dense polynomial");
-            commitment
-        });
-
-        // Add commitment to transcript for Fiat-Shamir soundness
-        self.transcript.append_serializable(&dense_commitment);
-
-        (dense_poly, dense_commitment, dense_mlpoly)
-    }
-
-    /// Stage 13: Generate Hyrax opening proof
-    #[tracing::instrument(skip_all)]
-    fn prove_stage13(
-        &mut self,
-        dense_mlpoly: MultilinearPolynomial<Fq>,
-        mut accumulator: ProverOpeningAccumulator<Fq>,
-    ) -> (
-        <Hyrax<1, GrumpkinProjective> as CommitmentScheme>::Proof,
-        Openings<Fq>,
-    ) {
-        tracing::info!("Stage 13: Generating Hyrax opening proof");
-
-        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-
-        // Create polynomial map for opening proof
-        let polynomials_map = tracing::info_span!("create_polynomial_map").in_scope(|| {
-            let mut map: HashMap<CommittedPolynomial, MultilinearPolynomial<Fq>> = HashMap::new();
-            map.insert(CommittedPolynomial::DoryDenseMatrix, dense_mlpoly);
-            tracing::info!("Created polynomial map for opening proof");
-            map
-        });
-
-        // Generate opening proof
-        let opening_proof = tracing::info_span!("generate_hyrax_opening_proof").in_scope(|| {
-            let proof = accumulator
-                .prove_single::<ProofTranscript, HyraxPCS>(
-                    polynomials_map,
-                    &self.preprocessing.hyrax_recursion_setup,
-                    &mut self.transcript,
-                )
-                .expect("Failed to generate Hyrax opening proof");
-            tracing::info!("Generated Hyrax opening proof");
-            proof
-        });
-
-        // Extract opening claims
-        let opening_claims = tracing::info_span!("extract_opening_claims").in_scope(|| {
-            let claims = accumulator.openings;
-            tracing::info!("Extracted {} opening claims", claims.len());
-            claims
-        });
-
-        (opening_proof, opening_claims)
+        tracing::info!("Completed consolidated recursion proof");
+        Ok((recursion_proof, metadata))
     }
 }
 

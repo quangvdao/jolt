@@ -22,6 +22,7 @@ use crate::{
     },
     transcripts::Transcript,
     zkvm::{
+        proof_serialization::RecursionConstraintMetadata,
         recursion::witness::{DoryRecursionWitness, G1ScalarMulWitness},
         witness::{CommittedPolynomial, VirtualPolynomial},
     },
@@ -675,87 +676,207 @@ impl RecursionProver<Fq> {
 }
 
 impl RecursionProver<Fq> {
-    /// Run the full recursion prover and generate PCS opening proof
+    /// Run the full recursion prover and generate PCS opening proof.
+    ///
+    /// This is a convenience wrapper around [`prove_full`] that discards the
+    /// constraint metadata. For most use cases, prefer [`prove_full`] which
+    /// returns both the proof and the metadata needed by the verifier.
     pub fn prove<T: Transcript, PCS: CommitmentScheme<Field = Fq> + RecursionExt<Fq>>(
-        self,
+        &self,
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
     ) -> Result<RecursionProof<Fq, T, PCS>, Box<dyn std::error::Error>> {
-        // Delegate to prove_with_pcs - the RecursionExt trait bound is not actually used
-        self.prove_with_pcs(transcript, prover_setup)
+        // Delegate to prove_full and discard the metadata
+        let (proof, _metadata) = self.prove_full(transcript, prover_setup)?;
+        Ok(proof)
     }
 
-    /// Run the full recursion prover for any PCS (without requiring RecursionExt)
+    /// Run the full recursion prover for any PCS (without requiring RecursionExt).
+    ///
+    /// # Deprecated
+    /// This method is deprecated in favor of [`prove_full`], which correctly commits
+    /// to the dense polynomial BEFORE running sumchecks (required for soundness).
+    /// This method delegates to `prove_full` and discards the constraint metadata.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use prove_full() instead, which commits before sumchecks (required for soundness)"
+    )]
     #[tracing::instrument(skip_all, name = "RecursionProver::prove_with_pcs")]
     pub fn prove_with_pcs<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
-        self,
+        &self,
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
     ) -> Result<RecursionProof<Fq, T, PCS>, Box<dyn std::error::Error>> {
+        // Delegate to prove_full and discard the metadata
+        let (proof, _metadata) = self.prove_full(transcript, prover_setup)?;
+        Ok(proof)
+    }
+
+    /// Build constraint metadata for the verifier.
+    ///
+    /// This extracts all metadata the verifier needs from the constraint system,
+    /// including constraint types, jagged bijection info, and public inputs.
+    #[tracing::instrument(skip_all, name = "RecursionProver::build_constraint_metadata")]
+    pub fn build_constraint_metadata(&self) -> RecursionConstraintMetadata {
+        // Extract constraint types
+        let constraint_types: Vec<_> = self
+            .constraint_system
+            .constraints
+            .iter()
+            .map(|c| c.constraint_type.clone())
+            .collect();
+
+        // Build dense polynomial and get bijection info
+        let (dense_poly, jagged_bijection, jagged_mapping) =
+            self.constraint_system.build_dense_polynomial();
+        let dense_num_vars = dense_poly.get_num_vars();
+
+        // Compute matrix rows for the verifier
+        let num_polynomials = jagged_bijection.num_polynomials();
+        let mut matrix_rows = Vec::with_capacity(num_polynomials);
+
+        for poly_idx in 0..num_polynomials {
+            let (constraint_idx, poly_type) = jagged_mapping.decode(poly_idx);
+            let matrix_row = self
+                .constraint_system
+                .matrix
+                .row_index(poly_type, constraint_idx);
+            matrix_rows.push(matrix_row);
+        }
+
+        RecursionConstraintMetadata {
+            constraint_types,
+            jagged_bijection,
+            jagged_mapping,
+            matrix_rows,
+            dense_num_vars,
+            gt_exp_public_inputs: self.constraint_system.gt_exp_public_inputs.clone(),
+            g1_scalar_mul_public_inputs: self.constraint_system.g1_scalar_mul_public_inputs.clone(),
+            g2_scalar_mul_public_inputs: self.constraint_system.g2_scalar_mul_public_inputs.clone(),
+        }
+    }
+
+    /// Run the full recursion prover with correct commitment ordering for soundness.
+    ///
+    /// This method:
+    /// 1. Builds constraint metadata for the verifier
+    /// 2. Builds and commits to the dense polynomial BEFORE running sumchecks (for soundness)
+    /// 3. Runs all sumcheck stages (1-5)
+    /// 4. Generates the PCS opening proof
+    ///
+    /// Returns both the proof and the constraint metadata needed by the verifier.
+    #[tracing::instrument(skip_all, name = "RecursionProver::prove_full")]
+    pub fn prove_full<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
+        &self,
+        transcript: &mut T,
+        prover_setup: &PCS::ProverSetup,
+    ) -> Result<(RecursionProof<Fq, T, PCS>, RecursionConstraintMetadata), Box<dyn std::error::Error>>
+    {
+        // ============ BUILD METADATA ============
+        // Extract constraint metadata for the verifier
+        let metadata = tracing::info_span!("build_constraint_metadata").in_scope(|| {
+            tracing::info!("Building constraint metadata for verifier");
+            self.build_constraint_metadata()
+        });
+
+        // ============ STAGE 11 (from JoltProver): BUILD + COMMIT DENSE POLYNOMIAL ============
+        // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
+        // This prevents the prover from adaptively choosing the polynomial.
+        let (_dense_poly, dense_commitment, dense_mlpoly) =
+            tracing::info_span!("build_and_commit_dense_polynomial").in_scope(|| {
+                tracing::info!("Building and committing to dense polynomial");
+
+                // Build dense polynomial from constraint system
+                let (dense_poly, _bijection, _mapping) =
+                    self.constraint_system.build_dense_polynomial();
+
+                // Convert to multilinear polynomial
+                let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z.clone());
+
+                // Commit to dense polynomial BEFORE sumchecks
+                let (dense_commitment, _) = PCS::commit(&dense_mlpoly, prover_setup);
+
+                tracing::info!(
+                    "Committed to dense polynomial with {} variables",
+                    dense_poly.get_num_vars()
+                );
+
+                (dense_poly, dense_commitment, dense_mlpoly)
+            });
+
+        // Add commitment to transcript for Fiat-Shamir soundness
+        transcript.append_serializable(&dense_commitment);
+
+        // ============ STAGE 12 (from JoltProver): RUN ALL SUMCHECKS ============
         // Initialize opening accumulator
         let log_T = self.constraint_system.num_vars();
-        let mut accumulator = ProverOpeningAccumulator::<Fq>::new(log_T);
-
-        // ============ STAGE 1: Packed GT Exp ============
-        tracing::info_span!("recursion_stage1_packed_gt_exp").in_scope(|| {
-            tracing::info!("Starting Stage 1: Packed GT exp sumcheck");
+        let mut accumulator = tracing::info_span!("init_opening_accumulator").in_scope(|| {
+            let acc = ProverOpeningAccumulator::<Fq>::new(log_T);
+            tracing::info!("Initialized opening accumulator with {} variables", log_T);
+            acc
         });
-        let (stage1_proof, _r_stage1_packed) = self.prove_stage1(transcript, &mut accumulator)?;
 
-        // ============ STAGE 2: Batched Constraint Sumchecks ============
-        tracing::info_span!("recursion_stage2_constraint_sumchecks").in_scope(|| {
-            tracing::info!("Starting Stage 2: Batched constraint sumchecks");
-        });
-        // r_x is the shared constraint-binding point used by Stage 3.
-        let (stage2_proof, r_x) = self.prove_stage2(transcript, &mut accumulator)?;
+        // Stage 1: Packed GT exp sumcheck
+        let (stage1_proof, _r_stage1_packed) =
+            tracing::info_span!("recursion_prove_full_stage1").in_scope(|| {
+                tracing::info!("Running Stage 1: Packed GT exp sumcheck");
+                self.prove_stage1(transcript, &mut accumulator)
+                    .expect("Failed to run Stage 1 (PackedGtExp)")
+            });
 
-        // ============ STAGE 3: Virtualization (direct evaluation) ============
-        tracing::info_span!("recursion_stage3_virtualization").in_scope(|| {
-            tracing::info!("Starting Stage 3: Virtualization direct evaluation");
-        });
-        let (stage3_m_eval, r_s) = self.prove_stage3(transcript, &mut accumulator, &r_x)?;
+        // Stage 2: Batched constraint sumchecks
+        let (stage2_proof, r_x) =
+            tracing::info_span!("recursion_prove_full_stage2").in_scope(|| {
+                tracing::info!("Running Stage 2: Batched constraint sumchecks");
+                self.prove_stage2(transcript, &mut accumulator)
+                    .expect("Failed to run Stage 2 (constraint sumchecks)")
+            });
 
-        // ============ STAGE 4: Jagged Transform Sumcheck ============
-        tracing::info_span!("recursion_stage4_jagged").in_scope(|| {
-            tracing::info!("Starting Stage 4: Jagged transform sumcheck");
-        });
+        // Stage 3: Virtualization direct evaluation
+        let (stage3_m_eval, r_s) =
+            tracing::info_span!("recursion_prove_full_stage3").in_scope(|| {
+                tracing::info!("Running Stage 3: Virtualization direct evaluation");
+                self.prove_stage3(transcript, &mut accumulator, &r_x)
+                    .expect("Failed to run Stage 3 (virtualization)")
+            });
+
+        // Stage 4: Jagged transform sumcheck
         let (stage4_proof, r_dense) =
-            self.prove_stage4(transcript, &mut accumulator, &r_s, &r_x)?;
+            tracing::info_span!("recursion_prove_full_stage4").in_scope(|| {
+                tracing::info!("Running Stage 4: Jagged transform sumcheck");
+                self.prove_stage4(transcript, &mut accumulator, &r_s, &r_x)
+                    .expect("Failed to run Stage 4 (jagged)")
+            });
 
-        // ============ STAGE 5: Jagged Assist ============
-        tracing::info_span!("recursion_stage5_jagged_assist").in_scope(|| {
-            tracing::info!("Starting Stage 5: Jagged assist");
+        // Stage 5: Jagged assist
+        let stage5_proof = tracing::info_span!("recursion_prove_full_stage5").in_scope(|| {
+            tracing::info!("Running Stage 5: Jagged assist");
+            self.prove_stage5(transcript, &mut accumulator, &r_dense, &r_x)
+                .expect("Failed to run Stage 5 (jagged assist)")
         });
-        let stage5_proof = self.prove_stage5(transcript, &mut accumulator, &r_dense, &r_x)?;
 
-        // ============ PCS OPENING PROOF ============
-        tracing::info_span!("recursion_pcs_opening_proof").in_scope(|| {
-            tracing::info!("Starting PCS opening proof generation");
-        });
+        // ============ STAGE 13 (from JoltProver): GENERATE PCS OPENING PROOF ============
+        let (opening_proof, opening_claims) =
+            tracing::info_span!("recursion_prove_full_pcs_opening").in_scope(|| {
+                tracing::info!("Generating PCS opening proof");
 
-        // Now we commit to the dense polynomial instead of the full matrix
-        let (dense_poly, _bijection, _mapping) = self.constraint_system.build_dense_polynomial();
+                // Create polynomial map for opening proof
+                let mut polynomials_map: HashMap<CommittedPolynomial, MultilinearPolynomial<Fq>> =
+                    HashMap::new();
+                polynomials_map.insert(CommittedPolynomial::DoryDenseMatrix, dense_mlpoly);
 
-        // Convert dense polynomial evaluations to F
-        let dense_evaluations_f = dense_poly.Z;
-        let dense_matrix_poly = MultilinearPolynomial::from(dense_evaluations_f.clone());
+                // Generate opening proof using PCS
+                let opening_proof = accumulator
+                    .prove_single::<T, PCS>(polynomials_map, prover_setup, transcript)
+                    .expect("Failed to generate PCS opening proof");
 
-        // Commit to the dense polynomial
-        let (dense_commitment, _) = PCS::commit(&dense_matrix_poly, prover_setup);
+                let opening_claims = accumulator.openings.clone();
+                tracing::info!("Generated opening proof with {} claims", opening_claims.len());
 
-        let mut polynomials_map: HashMap<CommittedPolynomial, MultilinearPolynomial<Fq>> =
-            HashMap::new();
-        polynomials_map.insert(CommittedPolynomial::DoryDenseMatrix, dense_matrix_poly);
+                (opening_proof, opening_claims)
+            });
 
-        // Generate opening proof using PCS
-        let opening_proof = accumulator
-            .prove_single::<T, PCS>(polynomials_map, prover_setup, transcript)
-            .map_err(|e| format!("Failed to generate opening proof: {e:?}"))?;
-
-        // Extract opening claims from accumulator
-        let opening_claims = accumulator.openings.clone();
-
-        // Create final proof
+        // ============ ASSEMBLE PROOF ============
         let proof = RecursionProof {
             stage1_proof,
             stage2_proof,
@@ -769,7 +890,7 @@ impl RecursionProver<Fq> {
             dense_commitment,
         };
 
-        Ok(proof)
+        Ok((proof, metadata))
     }
 
     /// Run Stage 1: Packed GT exp sumcheck

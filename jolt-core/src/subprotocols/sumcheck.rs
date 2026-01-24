@@ -192,12 +192,6 @@ impl BatchedSumcheck {
 
         let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
 
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("\n=== SUMCHECK VERIFY BATCHING ===");
-            eprintln!("Number of instances: {}", sumcheck_instances.len());
-            eprintln!("Batching coefficients: {batching_coeffs:?}");
-        }
 
         // To see why we may need to scale by a power of two, consider a batch of
         // two sumchecks:
@@ -232,17 +226,6 @@ impl BatchedSumcheck {
                 // opening proof or sumcheck (in the case of virtual polynomials).
                 sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
                 let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
-
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!(
-                        "  claim = {:?}, coeff = {:?}, claim * coeff = {:?}",
-                        claim,
-                        coeff,
-                        claim * coeff
-                    );
-                }
-
                 claim * coeff
             })
             .sum();

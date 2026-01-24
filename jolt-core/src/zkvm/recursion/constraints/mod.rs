@@ -5,15 +5,15 @@
 //! - Constraint system: Matrix building and constraint batching
 //! - Constraint list sumcheck: Generic sumcheck over a list of constraints
 
-pub mod constraint_config;
-pub mod constraint_list_sumcheck;
-pub mod constraints_sys;
+pub mod config;
+pub mod sumcheck;
+pub mod system;
 
-pub use constraint_config::{ConstraintSystemConfig, CONFIG};
-pub use constraint_list_sumcheck::{
+pub use config::{ConstraintSystemConfig, CONFIG};
+pub use sumcheck::{
     sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec,
     ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
 };
-pub use constraints_sys::{
+pub use system::{
     ConstraintSystem, ConstraintType, DoryMatrixBuilder, PolyType, RecursionMetadataBuilder,
 };

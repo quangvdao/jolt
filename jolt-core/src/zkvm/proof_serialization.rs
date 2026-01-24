@@ -21,12 +21,12 @@ use crate::{
         config::{OneHotConfig, ProgramMode, ReadWriteConfig},
         instruction::{CircuitFlags, InstructionFlags},
         recursion::{
-            constraints::constraints_sys::ConstraintType,
+            constraints::system::ConstraintType,
             g1::scalar_multiplication::G1ScalarMulPublicInputs,
             g2::scalar_multiplication::G2ScalarMulPublicInputs,
             gt::exponentiation::PackedGtExpPublicInputs,
             jagged::bijection::{ConstraintMapping, VarCountJaggedBijection},
-            recursion_prover::RecursionProof,
+            prover::RecursionProof,
         },
         witness::{
             CommittedPolynomial, FrobeniusTerm, G1AddTerm, G1ScalarMulTerm, G2AddTerm,

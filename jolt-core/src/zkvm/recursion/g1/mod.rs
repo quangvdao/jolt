@@ -7,11 +7,11 @@
 
 pub mod addition;
 pub mod scalar_multiplication;
-pub mod shift_scalar_multiplication;
+pub mod shift;
 
 pub use addition::{G1AddProver, G1AddVerifier};
 pub use scalar_multiplication::{G1ScalarMulProver, G1ScalarMulPublicInputs, G1ScalarMulVerifier};
-pub use shift_scalar_multiplication::{
+pub use shift::{
     g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG1ScalarMulVerifier,
     ShiftG2ScalarMulProver, ShiftG2ScalarMulVerifier, ShiftScalarMulParams,
 };

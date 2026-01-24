@@ -12,7 +12,7 @@ use crate::{
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     },
     zkvm::recursion::{
-        constraints::constraints_sys::ConstraintSystem,
+        constraints::system::ConstraintSystem,
         jagged::bijection::{JaggedTransform, VarCountJaggedBijection},
     },
 };

@@ -26,7 +26,11 @@ fn ln_without_floats(a: usize) -> usize {
 }
 
 #[inline(always)]
-fn extract_window_from_bigint_limbs(limbs: &[u64], window_start: usize, window_size: usize) -> usize {
+fn extract_window_from_bigint_limbs(
+    limbs: &[u64],
+    window_start: usize,
+    window_size: usize,
+) -> usize {
     if window_size == 0 {
         return 0;
     }
@@ -188,8 +192,7 @@ where
                 }
 
                 let limbs = bigint.as_ref();
-                let window_val =
-                    extract_window_from_bigint_limbs(limbs, w_start, window_size);
+                let window_val = extract_window_from_bigint_limbs(limbs, w_start, window_size);
 
                 if window_val != 0 {
                     // (Recall: `buckets` doesn't have a zero bucket.)
@@ -208,10 +211,7 @@ where
         }
 
         // Combine window sums from high to low (excluding lowest), shifting by `window_size` each step.
-        let lowest = window_sums
-            .first()
-            .cloned()
-            .unwrap_or_else(Self::zero);
+        let lowest = window_sums.first().cloned().unwrap_or_else(Self::zero);
 
         let mut total = Self::zero();
         for sum_i in window_sums.iter().skip(1).rev() {

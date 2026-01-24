@@ -264,7 +264,7 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::poly::commitment::dory::multi_miller_loop_witness::MultiMillerLoopSteps;
+    use crate::poly::commitment::dory::witness::multi_miller_loop::MultiMillerLoopSteps;
     use ark_bn254::{Fq, G1Affine, G2Affine};
     use ark_ec::AffineRepr;
     use ark_ff::Zero;

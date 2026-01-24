@@ -9,7 +9,7 @@
 pub mod claim_reduction;
 pub mod exponentiation;
 pub mod multiplication;
-pub mod shift_rho;
+pub mod shift;
 
 pub use claim_reduction::{
     PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver,
@@ -17,4 +17,4 @@ pub use claim_reduction::{
 };
 pub use exponentiation::{PackedGtExpProver, PackedGtExpPublicInputs, PackedGtExpVerifier};
 pub use multiplication::{GtMulProver, GtMulVerifier};
-pub use shift_rho::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier};
+pub use shift::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier};

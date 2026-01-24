@@ -22,12 +22,12 @@ use ark_bn254::Fq;
 use ark_std::Zero;
 
 use super::{
-    constraints::constraints_sys::ConstraintType,
+    constraints::system::ConstraintType,
     curve::Bn254Recursion,
     g1::{
         addition::G1AddParams,
         scalar_multiplication::G1ScalarMulPublicInputs,
-        shift_scalar_multiplication::{
+        shift::{
             g1_shift_params, g2_shift_params, ShiftG1ScalarMulVerifier, ShiftG2ScalarMulVerifier,
         },
     },
@@ -36,14 +36,14 @@ use super::{
         claim_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionVerifier},
         exponentiation::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
         multiplication::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
-        shift_rho::{ShiftRhoParams, ShiftRhoVerifier},
+        shift::{ShiftRhoParams, ShiftRhoVerifier},
     },
     jagged::{
+        assist::JaggedAssistVerifier,
         bijection::{ConstraintMapping, VarCountJaggedBijection},
-        jagged_assist::JaggedAssistVerifier,
         sumcheck::{JaggedSumcheckParams, JaggedSumcheckVerifier},
     },
-    recursion_prover::RecursionProof,
+    prover::RecursionProof,
     virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationVerifier,
     },
@@ -502,7 +502,7 @@ impl RecursionVerifier<Fq> {
     fn verify_stage4<T: Transcript>(
         &self,
         stage4_proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
-        stage5_proof: &super::jagged::jagged_assist::JaggedAssistProof<Fq, T>,
+        stage5_proof: &super::jagged::assist::JaggedAssistProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
         r_s: &[<Fq as crate::field::JoltField>::Challenge],
@@ -554,7 +554,7 @@ impl RecursionVerifier<Fq> {
     #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage5")]
     fn verify_stage5<T: Transcript>(
         &self,
-        stage5_proof: &super::jagged::jagged_assist::JaggedAssistProof<Fq, T>,
+        stage5_proof: &super::jagged::assist::JaggedAssistProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
         r_dense: &[<Fq as crate::field::JoltField>::Challenge],

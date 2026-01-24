@@ -11,7 +11,7 @@ use crate::field::JoltField;
 use ark_bn254::Fq;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-use crate::zkvm::recursion::constraints::constraints_sys::{
+use crate::zkvm::recursion::constraints::system::{
     ConstraintSystem, ConstraintType, MatrixConstraint, PolyType,
 };
 

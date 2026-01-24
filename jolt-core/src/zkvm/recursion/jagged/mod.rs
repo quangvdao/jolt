@@ -8,17 +8,17 @@
 //! - Jagged: Jagged transform sumcheck (sparse to dense reduction)
 //! - Jagged assist: Batch MLE verification optimization (Theorem 1.5)
 
+pub mod assist;
 pub mod bijection;
 pub mod branching_program;
-pub mod jagged_assist;
 pub mod sumcheck;
 
+pub use assist::{
+    JaggedAssistEvalPoint, JaggedAssistParams, JaggedAssistProof, JaggedAssistProver,
+    JaggedAssistVerifier,
+};
 pub use bijection::{ConstraintMapping, JaggedTransform, VarCountJaggedBijection};
 pub use branching_program::{
     bit_to_field, get_coordinate_info, CoordType, JaggedBranchingProgram, Point,
 };
 pub use sumcheck::{JaggedSumcheckParams, JaggedSumcheckProver, JaggedSumcheckVerifier};
-pub use jagged_assist::{
-    JaggedAssistEvalPoint, JaggedAssistParams, JaggedAssistProof, JaggedAssistProver,
-    JaggedAssistVerifier,
-};

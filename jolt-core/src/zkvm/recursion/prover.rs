@@ -40,18 +40,16 @@ use dory::recursion::ast::AstGraph;
 #[cfg(feature = "experimental-pairing-recursion")]
 use super::pairing::multi_miller_loop::{MultiMillerLoopParams, MultiMillerLoopProver};
 use super::{
-    constraints::constraints_sys::{ConstraintSystem, ConstraintType},
-    g1::shift_scalar_multiplication::{
-        g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver,
-    },
+    constraints::system::{ConstraintSystem, ConstraintType},
+    g1::shift::{g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver},
     gt::{
         claim_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver},
         exponentiation::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
         multiplication::{GtMulParams, GtMulProver, GtMulProverSpec},
-        shift_rho::{ShiftRhoParams, ShiftRhoProver},
+        shift::{ShiftRhoParams, ShiftRhoProver},
     },
     jagged::{
-        jagged_assist::{JaggedAssistProof, JaggedAssistProver},
+        assist::{JaggedAssistProof, JaggedAssistProver},
         sumcheck::JaggedSumcheckProver,
     },
     virtualization::{
@@ -93,13 +91,8 @@ pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Fie
 /// Result type for recursion proof generation.
 ///
 /// Contains the proof and constraint metadata needed by the verifier.
-pub type RecursionProofResult<T, PCS> = Result<
-    (
-        RecursionProof<Fq, T, PCS>,
-        RecursionConstraintMetadata,
-    ),
-    Box<dyn std::error::Error>,
->;
+pub type RecursionProofResult<T, PCS> =
+    Result<(RecursionProof<Fq, T, PCS>, RecursionConstraintMetadata), Box<dyn std::error::Error>>;
 
 /// Unified prover for the recursion SNARK
 #[derive(Clone)]
@@ -295,7 +288,7 @@ impl RecursionProver<Fq> {
         // Get the proper g(x) polynomial from jolt_optimizations
         // This is the irreducible polynomial defining the Fq12 extension field
         let g_poly_span = tracing::info_span!("process_g_polynomial").entered();
-        use super::constraints::constraints_sys::DoryMatrixBuilder;
+        use super::constraints::system::DoryMatrixBuilder;
         use jolt_optimizations::get_g_mle;
 
         let g_mle_4var = get_g_mle();
@@ -484,7 +477,7 @@ impl RecursionProver<Fq> {
         combine_witness: Option<&crate::zkvm::recursion::witness::GTCombineWitness>,
         g_poly: DensePolynomial<Fq>,
     ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
-        use super::constraints::constraints_sys::DoryMatrixBuilder;
+        use super::constraints::system::DoryMatrixBuilder;
         use super::g1::scalar_multiplication::G1ScalarMulPublicInputs;
         use super::g2::scalar_multiplication::G2ScalarMulPublicInputs;
         use super::gt::exponentiation::PackedGtExpWitness;
@@ -781,8 +774,7 @@ impl RecursionProver<Fq> {
         &self,
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
-    ) -> RecursionProofResult<T, PCS>
-    {
+    ) -> RecursionProofResult<T, PCS> {
         // ============ BUILD METADATA ============
         // Extract constraint metadata for the verifier
         let metadata = tracing::info_span!("build_constraint_metadata").in_scope(|| {
@@ -805,10 +797,7 @@ impl RecursionProver<Fq> {
                 let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z.clone());
 
                 // Commit to dense polynomial BEFORE sumchecks
-                tracing::info!(
-                    "Hyrax commitment terms: {}",
-                    dense_mlpoly.len()
-                );
+                tracing::info!("Hyrax commitment terms: {}", dense_mlpoly.len());
                 let (dense_commitment, _) = PCS::commit(&dense_mlpoly, prover_setup);
 
                 tracing::info!(

@@ -1,5 +1,5 @@
 use crate::poly::dense_mlpoly::DensePolynomial;
-use crate::zkvm::recursion::constraints::constraints_sys::{
+use crate::zkvm::recursion::constraints::system::{
     ConstraintSystem, ConstraintType, MatrixConstraint, PolyType,
 };
 use crate::zkvm::recursion::jagged::bijection::*;

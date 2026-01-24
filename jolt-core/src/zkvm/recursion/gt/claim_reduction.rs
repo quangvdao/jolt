@@ -20,11 +20,11 @@ use crate::subprotocols::{
     sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
 };
 use crate::transcripts::Transcript;
-use crate::zkvm::recursion::constraints::constraint_config::CONFIG;
+use crate::zkvm::recursion::constraints::config::CONFIG;
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{virtual_claims, zkvm::recursion::utils::virtual_polynomial_utils::*};
 
-use super::shift_rho::{eq_lsb_evals, eq_lsb_mle};
+use super::shift::{eq_lsb_evals, eq_lsb_mle};
 
 #[derive(Allocative, Clone)]
 pub struct PackedGtExpClaimReductionParams {

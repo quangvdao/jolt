@@ -62,7 +62,7 @@ use crate::{
     transcripts::Transcript,
     zkvm::{
         recursion::{
-            constraints::constraints_sys::{ConstraintType, PolyType},
+            constraints::system::{ConstraintType, PolyType},
             gt::exponentiation::PackedGtExpPublicInputs,
         },
         witness::VirtualPolynomial,

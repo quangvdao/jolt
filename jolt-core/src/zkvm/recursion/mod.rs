@@ -38,8 +38,8 @@
 //! - `jagged/`: Jagged transform and assist protocols
 //! - `virtualization`: Direct evaluation protocol
 //! - `utils/`: Shared utilities and helpers
-//! - `recursion_prover`: Unified prover orchestrating all stages
-//! - `recursion_verifier`: Unified verifier for the complete protocol
+//! - `prover`: Unified prover orchestrating all stages
+//! - `verifier`: Unified verifier for the complete protocol
 
 pub mod constraints;
 pub mod curve;
@@ -48,9 +48,9 @@ pub mod g2;
 pub mod gt;
 pub mod jagged;
 pub mod pairing;
-pub mod recursion_prover;
-pub mod recursion_verifier;
+pub mod prover;
 pub mod utils;
+pub mod verifier;
 pub mod virtualization;
 pub mod witness;
 
@@ -67,8 +67,8 @@ pub use constraints::{
 pub use jagged::{ConstraintMapping, JaggedTransform, VarCountJaggedBijection};
 
 // Re-export prover/verifier
-pub use recursion_prover::{RecursionProof, RecursionProofResult, RecursionProver};
-pub use recursion_verifier::{RecursionVerifier, RecursionVerifierInput};
+pub use prover::{RecursionProof, RecursionProofResult, RecursionProver};
+pub use verifier::{RecursionVerifier, RecursionVerifierInput};
 
 // G1 exports
 pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier};

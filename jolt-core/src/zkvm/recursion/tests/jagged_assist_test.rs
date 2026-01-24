@@ -11,9 +11,9 @@ use crate::{
     },
     transcripts::{Blake2bTranscript, Transcript},
     zkvm::recursion::{
+        jagged::assist::{JaggedAssistProver, JaggedAssistVerifier},
         jagged::bijection::{JaggedPolynomial, VarCountJaggedBijection},
         jagged::branching_program::{JaggedBranchingProgram, Point},
-        jagged::jagged_assist::{JaggedAssistProver, JaggedAssistVerifier},
     },
 };
 use ark_bn254::Fq;

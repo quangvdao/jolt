@@ -217,7 +217,7 @@ impl OpeningId {
     pub fn committed(poly: CommittedPolynomial, sumcheck: SumcheckId) -> Self {
         OpeningId::Polynomial(PolynomialId::Committed(poly), sumcheck)
     }
-    
+
     pub fn virtual_poly(poly: VirtualPolynomial, sumcheck: SumcheckId) -> Self {
         OpeningId::Polynomial(PolynomialId::Virtual(poly), sumcheck)
     }
@@ -531,9 +531,7 @@ where
         let committed_openings: Vec<_> = self
             .openings
             .iter()
-            .filter(|(id, _)| {
-                matches!(id, OpeningId::Polynomial(PolynomialId::Committed(_), _))
-            })
+            .filter(|(id, _)| matches!(id, OpeningId::Polynomial(PolynomialId::Committed(_), _)))
             .collect();
 
         // Check exactly one committed opening
@@ -749,9 +747,7 @@ where
         let committed_openings: Vec<_> = self
             .openings
             .iter()
-            .filter(|(id, _)| {
-                matches!(id, OpeningId::Polynomial(PolynomialId::Committed(_), _))
-            })
+            .filter(|(id, _)| matches!(id, OpeningId::Polynomial(PolynomialId::Committed(_), _)))
             .collect();
 
         // Check exactly one committed opening

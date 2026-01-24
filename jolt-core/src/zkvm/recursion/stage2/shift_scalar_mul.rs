@@ -210,26 +210,26 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftScalarMu
         let evals = (0..half)
             .into_par_iter()
             .map(|i| {
-                let eq_evals =
-                    self.eq_step_poly
-                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let eqm1_evals =
-                    self.eq_minus_one_step_poly
-                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let not_last_evals =
-                    self.not_last_poly
-                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let eq_evals = self
+                    .eq_step_poly
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let eqm1_evals = self
+                    .eq_minus_one_step_poly
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let not_last_evals = self
+                    .not_last_poly
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
 
                 let mut term_evals = [F::zero(); DEGREE];
                 let mut gamma_power = F::one();
 
                 for pair in &self.pairs {
-                    let a_evals =
-                        pair.a_poly
-                            .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                    let an_evals =
-                        pair.a_next_poly
-                            .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                    let a_evals = pair
+                        .a_poly
+                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                    let an_evals = pair
+                        .a_next_poly
+                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
 
                     for t in 0..DEGREE {
                         term_evals[t] += gamma_power
@@ -259,10 +259,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftScalarMu
             pair.a_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
             pair.a_next_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
-        self.eq_step_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.eq_step_poly
+            .bind_parallel(r_j, BindingOrder::LowToHigh);
         self.eq_minus_one_step_poly
             .bind_parallel(r_j, BindingOrder::LowToHigh);
-        self.not_last_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.not_last_poly
+            .bind_parallel(r_j, BindingOrder::LowToHigh);
         self.round = round + 1;
     }
 
@@ -371,7 +373,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftScalar
     ) {
         let opening_point = OpeningPoint::<{ BIG_ENDIAN }, F>::new(sumcheck_challenges.to_vec());
         for (a_id, a_next_id) in &self.pairs {
-            accumulator.append_virtual(transcript, *a_id, self.params.sumcheck_id, opening_point.clone());
+            accumulator.append_virtual(
+                transcript,
+                *a_id,
+                self.params.sumcheck_id,
+                opening_point.clone(),
+            );
             accumulator.append_virtual(
                 transcript,
                 *a_next_id,
@@ -395,4 +402,3 @@ pub fn g1_shift_params(num_pairs: usize) -> ShiftScalarMulParams {
 pub fn g2_shift_params(num_pairs: usize) -> ShiftScalarMulParams {
     ShiftScalarMulParams::new(SumcheckId::ShiftG2ScalarMul, num_pairs)
 }
-

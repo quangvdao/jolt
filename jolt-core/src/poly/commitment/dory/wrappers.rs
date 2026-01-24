@@ -450,4 +450,3 @@ impl<'a, T: Transcript> DoryTranscript for JoltToDoryTranscript<'a, T> {
         panic!("Reset not supported for JoltToDoryTranscript")
     }
 }
-

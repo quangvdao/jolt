@@ -33,7 +33,9 @@ use super::{
         g2_add::G2AddParams,
         g2_scalar_mul::G2ScalarMulPublicInputs,
         gt_mul::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
-        packed_gt_exp_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionVerifier},
+        packed_gt_exp_reduction::{
+            PackedGtExpClaimReductionParams, PackedGtExpClaimReductionVerifier,
+        },
         shift_rho::{ShiftRhoParams, ShiftRhoVerifier},
         shift_scalar_mul::{
             g1_shift_params, g2_shift_params, ShiftG1ScalarMulVerifier, ShiftG2ScalarMulVerifier,
@@ -183,7 +185,13 @@ impl RecursionVerifier<Fq> {
         let _cycle_stage5 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE5);
         tracing::info_span!("verify_recursion_stage5").in_scope(|| {
             tracing::info!("Verifying Stage 5: Jagged assist");
-            self.verify_stage5(&proof.stage5_proof, transcript, &mut accumulator, &r_dense, &r_x)
+            self.verify_stage5(
+                &proof.stage5_proof,
+                transcript,
+                &mut accumulator,
+                &r_dense,
+                &r_x,
+            )
         })?;
         drop(_cycle_stage5);
 
@@ -243,8 +251,7 @@ impl RecursionVerifier<Fq> {
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G1_SCALAR_MUL", true);
         let enable_shift_g2_scalar_mul =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
-        let enable_claim_reduction =
-            env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
+        let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
 
         let mut verifiers: Vec<Box<dyn SumcheckInstanceVerifier<Fq, T>>> = Vec::new();
 
@@ -524,8 +531,12 @@ impl RecursionVerifier<Fq> {
             }
         }
 
-        let verifier =
-            JaggedSumcheckVerifier::new(r_s_final, sparse_claim, params, claimed_evaluations_by_row);
+        let verifier = JaggedSumcheckVerifier::new(
+            r_s_final,
+            sparse_claim,
+            params,
+            claimed_evaluations_by_row,
+        );
 
         let r_dense =
             BatchedSumcheck::verify(stage4_proof, vec![&verifier], accumulator, transcript)?;

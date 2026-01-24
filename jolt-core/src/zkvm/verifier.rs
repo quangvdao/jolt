@@ -100,7 +100,8 @@ const CYCLE_VERIFY_STAGE2: &str = "jolt_verify_stage2";
 const CYCLE_VERIFY_STAGE3: &str = "jolt_verify_stage3";
 const CYCLE_VERIFY_STAGE4: &str = "jolt_verify_stage4";
 const CYCLE_VERIFY_STAGE5: &str = "jolt_verify_stage5";
-const CYCLE_VERIFY_STAGE6: &str = "jolt_verify_stage6";
+const CYCLE_VERIFY_STAGE6A: &str = "jolt_verify_stage6a";
+const CYCLE_VERIFY_STAGE6B: &str = "jolt_verify_stage6b";
 const CYCLE_VERIFY_STAGE7: &str = "jolt_verify_stage7";
 const CYCLE_VERIFY_STAGE8: &str = "jolt_verify_stage8";
 const CYCLE_VERIFY_STAGE8_DORY_PCS: &str = "jolt_verify_stage8_dory_pcs";
@@ -519,6 +520,7 @@ where
         ),
         anyhow::Error,
     > {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE6A);
         let n_cycle_vars = self.proof.trace_length.log_2();
         let program_preprocessing = match self.proof.program_mode {
             ProgramMode::Committed => {
@@ -562,6 +564,7 @@ where
         bytecode_read_raf_params: BytecodeReadRafSumcheckParams<F>,
         booleanity_params: BooleanitySumcheckParams<F>,
     ) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE6B);
         // Initialize Stage 6b cycle verifiers from scratch (Option B).
         let booleanity = BooleanityCycleSumcheckVerifier::new(booleanity_params);
         let ram_hamming_booleanity =

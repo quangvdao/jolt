@@ -43,9 +43,13 @@ use super::{
     stage1::gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
     stage2::{
         gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
-        packed_gt_exp_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver},
+        packed_gt_exp_reduction::{
+            PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver,
+        },
         shift_rho::{ShiftRhoParams, ShiftRhoProver},
-        shift_scalar_mul::{g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver},
+        shift_scalar_mul::{
+            g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver,
+        },
     },
     stage3::virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
@@ -838,8 +842,7 @@ impl RecursionProver<Fq> {
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G1_SCALAR_MUL", true);
         let enable_shift_g2_scalar_mul =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
-        let enable_claim_reduction =
-            env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
+        let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
 
         let mut provers: Vec<Box<dyn SumcheckInstanceProver<Fq, T>>> = Vec::new();
 
@@ -904,16 +907,19 @@ impl RecursionProver<Fq> {
         if !gt_mul_constraints_tuples.is_empty() {
             use super::stage2::gt_mul::GtMulConstraintPolynomials;
             let constraint_indices: Vec<usize> = (0..gt_mul_constraints_tuples.len()).collect();
-            let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> = gt_mul_constraints_tuples
-                .into_iter()
-                .map(|(idx, lhs, rhs, result, quotient)| GtMulConstraintPolynomials {
-                    lhs,
-                    rhs,
-                    result,
-                    quotient,
-                    constraint_index: idx,
-                })
-                .collect();
+            let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> =
+                gt_mul_constraints_tuples
+                    .into_iter()
+                    .map(
+                        |(idx, lhs, rhs, result, quotient)| GtMulConstraintPolynomials {
+                            lhs,
+                            rhs,
+                            result,
+                            quotient,
+                            constraint_index: idx,
+                        },
+                    )
+                    .collect();
 
             let params = GtMulParams::new(gt_mul_constraints_fq.len());
             let spec = GtMulProverSpec::new(params, gt_mul_constraints_fq, g_poly_f.clone());
@@ -1113,7 +1119,7 @@ impl RecursionProver<Fq> {
         r_x: &[<Fq as JoltField>::Challenge],
     ) -> Result<
         (
-            Fq, // M(r_s, r_x)
+            Fq,                                // M(r_s, r_x)
             Vec<<Fq as JoltField>::Challenge>, // r_s in Stage 4-expected order
         ),
         Box<dyn std::error::Error>,
@@ -1232,8 +1238,9 @@ impl RecursionProver<Fq> {
         let num_dense_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
         let num_bits = std::cmp::max(num_constraint_vars, num_dense_vars);
 
-        let mut assist_prover =
-            JaggedAssistProver::<Fq, T>::new(r_x_prev, r_dense_fq, &bijection, num_bits, transcript);
+        let mut assist_prover = JaggedAssistProver::<Fq, T>::new(
+            r_x_prev, r_dense_fq, &bijection, num_bits, transcript,
+        );
 
         let (sumcheck_proof, _r_assist) =
             BatchedSumcheck::prove(vec![&mut assist_prover], accumulator, transcript);

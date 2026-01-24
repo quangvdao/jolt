@@ -46,7 +46,7 @@ use super::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionProver},
         exponentiation::{GtExpParams, GtExpProver, GtExpPublicInputs},
         multiplication::{GtMulParams, GtMulProver, GtMulProverSpec},
-        shift::{ShiftRhoParams, ShiftRhoProver},
+        shift::{GtShiftParams, GtShiftProver},
     },
     jagged::{
         assist::{JaggedAssistProof, JaggedAssistProver},
@@ -943,7 +943,7 @@ impl RecursionProver<Fq> {
     /// Run Stage 2: Batched constraint sumchecks.
     ///
     /// This stage includes:
-    /// - packed-GT-exp internal consistency (`ShiftRho`)
+    /// - packed-GT-exp internal consistency (`GtShift`)
     /// - packed-GT-exp claim reduction to a shared `r_x`
     /// - all remaining constraint families (GT mul, G1/G2 scalar mul, G1/G2 add, ...)
     #[allow(clippy::type_complexity)]
@@ -986,8 +986,8 @@ impl RecursionProver<Fq> {
                     .iter()
                     .map(|w| w.rho_packed.clone())
                     .collect();
-                let shift_params = ShiftRhoParams::new(num_gt_exp);
-                let shift_prover = ShiftRhoProver::<Fq, T>::new(
+                let shift_params = GtShiftParams::new(num_gt_exp);
+                let shift_prover = GtShiftProver::<Fq, T>::new(
                     shift_params,
                     rho_polys,
                     claim_indices.clone(),

@@ -63,14 +63,14 @@ use rayon::prelude::*;
 
 /// A claim to verify in the shift sumcheck
 #[derive(Clone, Debug)]
-pub struct ShiftClaim {
+pub struct GtShiftClaim {
     /// Index of the constraint this claim belongs to
     pub constraint_idx: usize,
 }
 
 /// Parameters for shift rho sumcheck
 #[derive(Clone)]
-pub struct ShiftRhoParams {
+pub struct GtShiftParams {
     /// Number of variables (11 = 7 step + 4 element)
     pub num_vars: usize,
     /// Number of claims to verify
@@ -79,22 +79,22 @@ pub struct ShiftRhoParams {
     pub sumcheck_id: SumcheckId,
 }
 
-impl ShiftRhoParams {
+impl GtShiftParams {
     pub fn new(num_claims: usize) -> Self {
         Self {
             num_vars: CONFIG.packed_vars,
             num_claims,
-            sumcheck_id: SumcheckId::ShiftRho,
+            sumcheck_id: SumcheckId::GtShift,
         }
     }
 }
 
 /// Prover for shift rho sumcheck
 #[cfg_attr(feature = "allocative", derive(Allocative))]
-pub struct ShiftRhoProver<F: JoltField, T: Transcript> {
+pub struct GtShiftProver<F: JoltField, T: Transcript> {
     /// Parameters
     #[cfg_attr(feature = "allocative", allocative(skip))]
-    pub params: ShiftRhoParams,
+    pub params: GtShiftParams,
 
     /// Rho polynomials (11-var, one per claim)
     #[cfg_attr(feature = "allocative", allocative(skip))]
@@ -120,9 +120,9 @@ pub struct ShiftRhoProver<F: JoltField, T: Transcript> {
     pub _marker: std::marker::PhantomData<T>,
 }
 
-impl<F: JoltField, T: Transcript> ShiftRhoProver<F, T> {
+impl<F: JoltField, T: Transcript> GtShiftProver<F, T> {
     pub fn new(
-        params: ShiftRhoParams,
+        params: GtShiftParams,
         rho_polys: Vec<Vec<F>>,
         claim_indices: Vec<usize>,
         accumulator: &ProverOpeningAccumulator<F>,
@@ -169,7 +169,7 @@ impl<F: JoltField, T: Transcript> ShiftRhoProver<F, T> {
         for entry in &entries[1..] {
             debug_assert_eq!(
                 entry.point.r, point.r,
-                "ShiftRho claims must share the same opening point"
+                "GtShift claims must share the same opening point"
             );
         }
 
@@ -294,7 +294,7 @@ pub(crate) fn eq_plus_one_lsb_evals<F: JoltField>(r: &[F::Challenge]) -> Vec<F> 
     evals
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftRhoProver<F, T> {
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for GtShiftProver<F, T> {
     fn degree(&self) -> usize {
         3 // EqPlusOne * Eq * rho (each degree 1)
     }
@@ -316,7 +316,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftRhoProve
         sum
     }
 
-    #[tracing::instrument(skip_all, name = "ShiftRho::compute_message")]
+    #[tracing::instrument(skip_all, name = "GtShift::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         const DEGREE: usize = 3;
 
@@ -441,7 +441,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftRhoProve
             append_virtual_claims(
                 accumulator,
                 transcript,
-                SumcheckId::ShiftRho,
+                SumcheckId::GtShift,
                 &opening_point,
                 &claims,
             );
@@ -455,15 +455,15 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftRhoProve
 }
 
 /// Verifier for shift rho sumcheck
-pub struct ShiftRhoVerifier<F: JoltField> {
-    pub params: ShiftRhoParams,
+pub struct GtShiftVerifier<F: JoltField> {
+    pub params: GtShiftParams,
     pub claim_indices: Vec<usize>,
     pub gamma: F,
 }
 
-impl<F: JoltField> ShiftRhoVerifier<F> {
+impl<F: JoltField> GtShiftVerifier<F> {
     pub fn new<T: Transcript>(
-        params: ShiftRhoParams,
+        params: GtShiftParams,
         claim_indices: Vec<usize>,
         transcript: &mut T,
     ) -> Self {
@@ -480,7 +480,7 @@ impl<F: JoltField> ShiftRhoVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVerifier<F> {
+impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for GtShiftVerifier<F> {
     fn degree(&self) -> usize {
         3
     }
@@ -539,7 +539,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
             // Get rho evaluation at the shift sumcheck challenge point
             let (_, rho_eval) = accumulator.get_virtual_polynomial_opening(
                 VirtualPolynomial::gt_exp_rho(*claim),
-                SumcheckId::ShiftRho, // ShiftRho sumcheck ID!
+                SumcheckId::GtShift, // GtShift sumcheck ID!
             );
 
             rho_sum += gamma_power * rho_eval;
@@ -562,7 +562,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
             append_virtual_openings(
                 accumulator,
                 transcript,
-                SumcheckId::ShiftRho,
+                SumcheckId::GtShift,
                 &opening_point,
                 &polynomials,
             );

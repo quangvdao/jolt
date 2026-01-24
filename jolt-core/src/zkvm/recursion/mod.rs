@@ -82,7 +82,7 @@ pub use gt::{
     GtExpClaimReductionParams, GtExpClaimReductionProver,
     GtExpClaimReductionVerifier, GtExpProver, GtExpVerifier,
 };
-pub use gt::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier};
+pub use gt::{GtShiftClaim, GtShiftParams, GtShiftProver, GtShiftVerifier};
 
 // Virtualization exports
 pub use virtualization::{

@@ -17,4 +17,4 @@ pub use claim_reduction::{
 };
 pub use exponentiation::{GtExpProver, GtExpPublicInputs, GtExpVerifier};
 pub use multiplication::{GtMulProver, GtMulVerifier};
-pub use shift::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier};
+pub use shift::{GtShiftClaim, GtShiftParams, GtShiftProver, GtShiftVerifier};

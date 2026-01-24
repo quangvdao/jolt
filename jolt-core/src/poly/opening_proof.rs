@@ -179,7 +179,7 @@ pub enum SumcheckId {
     GtMul,
     G1ScalarMul,
     G1Add,
-    ShiftRho,
+    GtShift,
     GtExpClaimReduction,
     RecursionVirtualization,
     RecursionJagged,

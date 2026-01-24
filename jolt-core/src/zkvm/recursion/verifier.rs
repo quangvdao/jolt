@@ -36,7 +36,7 @@ use super::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionVerifier},
         exponentiation::{GtExpParams, GtExpPublicInputs, GtExpVerifier},
         multiplication::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
-        shift::{ShiftRhoParams, ShiftRhoVerifier},
+        shift::{GtShiftParams, GtShiftVerifier},
     },
     jagged::{
         assist::JaggedAssistVerifier,
@@ -311,8 +311,8 @@ impl RecursionVerifier<Fq> {
         if num_gt_exp > 0 {
             let claim_indices: Vec<usize> = (0..num_gt_exp).collect();
             if enable_shift_rho {
-                let shift_verifier = ShiftRhoVerifier::<Fq>::new(
-                    ShiftRhoParams::new(num_gt_exp),
+                let shift_verifier = GtShiftVerifier::<Fq>::new(
+                    GtShiftParams::new(num_gt_exp),
                     claim_indices.clone(),
                     transcript,
                 );

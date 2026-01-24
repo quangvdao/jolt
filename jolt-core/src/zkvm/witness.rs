@@ -7,7 +7,6 @@ use rayon::prelude::*;
 use tracer::instruction::Cycle;
 
 use crate::poly::commitment::commitment_scheme::StreamingCommitmentScheme;
-use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::config::OneHotParams;
 use crate::zkvm::instruction::InstructionFlags;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
@@ -31,6 +30,9 @@ pub enum CommittedPolynomial {
     InstructionRa(usize),
     /// One-hot ra polynomial for the bytecode instance of Shout
     BytecodeRa(usize),
+    /// Packed bytecode commitment chunk polynomial (lane chunk i).
+    /// This is used by BytecodeClaimReduction; commitment + batching integration is staged separately.
+    BytecodeChunk(usize),
     /// One-hot ra/wa polynomial for the RAM instance of Twist
     /// Note that for RAM, ra and wa are the same polynomial because
     /// there is at most one load or store per cycle.
@@ -43,6 +45,12 @@ pub enum CommittedPolynomial {
     /// Untrusted advice polynomial - committed during proving, commitment in proof.
     /// Length cannot exceed max_trace_length.
     UntrustedAdvice,
+    /// Program image words polynomial (initial RAM image), committed in preprocessing for
+    /// `ProgramMode::Committed` and opened via `ProgramImageClaimReduction`.
+    ///
+    /// This polynomial is NOT streamed from the execution trace (it is provided as an "extra"
+    /// polynomial to the Stage 8 streaming RLC builder, similar to advice polynomials).
+    ProgramImageInit,
 }
 
 /// Returns a list of symbols representing all committed polynomials.
@@ -66,6 +74,7 @@ impl CommittedPolynomial {
         &self,
         setup: &PCS::ProverSetup,
         preprocessing: &JoltSharedPreprocessing,
+        program: &crate::zkvm::program::ProgramPreprocessing,
         row_cycles: &[tracer::instruction::Cycle],
         one_hot_params: &OneHotParams,
     ) -> <PCS as StreamingCommitmentScheme>::ChunkState
@@ -110,11 +119,14 @@ impl CommittedPolynomial {
                 let row: Vec<Option<usize>> = row_cycles
                     .iter()
                     .map(|cycle| {
-                        let pc = preprocessing.bytecode.get_pc(cycle);
+                        let pc = program.get_pc(cycle);
                         Some(one_hot_params.bytecode_pc_chunk(pc, *idx) as usize)
                     })
                     .collect();
                 PCS::process_chunk_onehot(setup, one_hot_params.k_chunk, &row)
+            }
+            CommittedPolynomial::BytecodeChunk(_) => {
+                panic!("Bytecode chunk polynomials are not stream-committed yet")
             }
             CommittedPolynomial::RamRa(idx) => {
                 let row: Vec<Option<usize>> = row_cycles
@@ -132,7 +144,9 @@ impl CommittedPolynomial {
             CommittedPolynomial::DoryDenseMatrix => {
                 panic!("DoryDenseMatrix is not generated from witness data")
             }
-            CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
+            CommittedPolynomial::TrustedAdvice
+            | CommittedPolynomial::UntrustedAdvice
+            | CommittedPolynomial::ProgramImageInit => {
                 panic!("Advice polynomials should not use streaming witness generation")
             }
         }
@@ -141,7 +155,7 @@ impl CommittedPolynomial {
     #[tracing::instrument(skip_all, name = "CommittedPolynomial::generate_witness")]
     pub fn generate_witness<F>(
         &self,
-        bytecode_preprocessing: &BytecodePreprocessing,
+        program: &crate::zkvm::program::ProgramPreprocessing,
         memory_layout: &MemoryLayout,
         trace: &[Cycle],
         one_hot_params: Option<&OneHotParams>,
@@ -155,7 +169,7 @@ impl CommittedPolynomial {
                 let addresses: Vec<_> = trace
                     .par_iter()
                     .map(|cycle| {
-                        let pc = bytecode_preprocessing.get_pc(cycle);
+                        let pc = program.get_pc(cycle);
                         Some(one_hot_params.bytecode_pc_chunk(pc, *i))
                     })
                     .collect();
@@ -163,6 +177,9 @@ impl CommittedPolynomial {
                     addresses,
                     one_hot_params.k_chunk,
                 ))
+            }
+            CommittedPolynomial::BytecodeChunk(_) => {
+                panic!("Bytecode chunk polynomials are not supported by generate_witness yet")
             }
             CommittedPolynomial::RamRa(i) => {
                 let one_hot_params = one_hot_params.unwrap();
@@ -220,7 +237,9 @@ impl CommittedPolynomial {
             CommittedPolynomial::DoryDenseMatrix => {
                 panic!("DoryDenseMatrix is not generated from witness data")
             }
-            CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
+            CommittedPolynomial::TrustedAdvice
+            | CommittedPolynomial::UntrustedAdvice
+            | CommittedPolynomial::ProgramImageInit => {
                 panic!("Advice polynomials should not use generate_witness")
             }
         }
@@ -884,6 +903,16 @@ pub enum VirtualPolynomial {
     OpFlags(CircuitFlags),
     InstructionFlags(InstructionFlags),
     LookupTableFlag(usize),
+    // Program-image commitment variants
+    BytecodeValStage(usize),
+    BytecodeReadRafAddrClaim,
+    BooleanityAddrClaim,
+    BytecodeClaimReductionIntermediate,
+    /// Staged scalar program-image contribution at `r_address_rw` (Stage 4).
+    ProgramImageInitContributionRw,
+    /// Staged scalar program-image contribution at `r_address_raf` (Stage 4), when the two
+    /// address points differ.
+    ProgramImageInitContributionRaf,
     // Recursion protocol virtual polynomials - hierarchical structure
     Recursion(RecursionPoly),
     // Dory sparse constraint matrix - virtualized in Stage 2, dense version committed in Stage 3

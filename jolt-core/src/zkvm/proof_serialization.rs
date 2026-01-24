@@ -9,7 +9,6 @@ use ark_serialize::{
 use num::FromPrimitive;
 use strum::EnumCount;
 
-use crate::subprotocols::univariate_skip::UniSkipFirstRoundProof;
 use crate::{
     field::JoltField,
     poly::{
@@ -19,7 +18,7 @@ use crate::{
     subprotocols::sumcheck::SumcheckInstanceProof,
     transcripts::Transcript,
     zkvm::{
-        config::{OneHotConfig, ReadWriteConfig},
+        config::{OneHotConfig, ProgramMode, ReadWriteConfig},
         instruction::{CircuitFlags, InstructionFlags},
         recursion::{
             bijection::{ConstraintMapping, VarCountJaggedBijection},
@@ -38,6 +37,9 @@ use crate::{
 };
 use ark_bn254::{Fq, Fq12};
 use ark_grumpkin::Projective as GrumpkinProjective;
+use crate::{
+    poly::opening_proof::PolynomialId, subprotocols::univariate_skip::UniSkipFirstRoundProof,
+};
 
 /// Constraint metadata for the recursion verifier
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -77,9 +79,10 @@ pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
 
     // ============ Stage 5: Registers & Bytecode ============
     pub stage5_sumcheck_proof: SumcheckInstanceProof<F, FS>,
-
-    // ============ Stage 6: Hamming Weight & Ra Claims ============
-    pub stage6_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    // ============ Stage 6a: Bytecode Claim Reduction ============
+    pub stage6a_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    // ============ Stage 6b: Hamming Weight & Ra Claims ============
+    pub stage6b_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
     // ============ Stage 7: Inc Claims & Virtualization ============
     pub stage7_sumcheck_proof: SumcheckInstanceProof<F, FS>,
@@ -120,6 +123,7 @@ pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
     pub trace_length: usize,
     pub ram_K: usize,
     pub bytecode_K: usize,
+    pub program_mode: ProgramMode,
     pub rw_config: ReadWriteConfig,
     pub one_hot_config: OneHotConfig,
     pub dory_layout: DoryLayout,
@@ -185,7 +189,9 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             .serialize_with_mode(&mut writer, compress)?;
         self.stage5_sumcheck_proof
             .serialize_with_mode(&mut writer, compress)?;
-        self.stage6_sumcheck_proof
+        self.stage6a_sumcheck_proof
+            .serialize_with_mode(&mut writer, compress)?;
+        self.stage6b_sumcheck_proof
             .serialize_with_mode(&mut writer, compress)?;
         self.stage7_sumcheck_proof
             .serialize_with_mode(&mut writer, compress)?;
@@ -213,6 +219,8 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             .serialize_with_mode(&mut writer, compress)?;
         self.ram_K.serialize_with_mode(&mut writer, compress)?;
         self.bytecode_K.serialize_with_mode(&mut writer, compress)?;
+        self.program_mode
+            .serialize_with_mode(&mut writer, compress)?;
         self.rw_config.serialize_with_mode(&mut writer, compress)?;
         self.one_hot_config
             .serialize_with_mode(&mut writer, compress)?;
@@ -235,7 +243,8 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             + self.stage3_sumcheck_proof.serialized_size(compress)
             + self.stage4_sumcheck_proof.serialized_size(compress)
             + self.stage5_sumcheck_proof.serialized_size(compress)
-            + self.stage6_sumcheck_proof.serialized_size(compress)
+            + self.stage6a_sumcheck_proof.serialized_size(compress)
+            + self.stage6b_sumcheck_proof.serialized_size(compress)
             + self.stage7_sumcheck_proof.serialized_size(compress)
             + self.stage8_opening_proof.serialized_size(compress)
             + self.stage8_combine_hint.serialized_size(compress)
@@ -258,6 +267,7 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             + self.trace_length.serialized_size(compress)
             + self.ram_K.serialized_size(compress)
             + self.bytecode_K.serialized_size(compress)
+            + self.program_mode.serialized_size(compress)
             + self.rw_config.serialized_size(compress)
             + self.one_hot_config.serialized_size(compress)
             + self.dory_layout.serialized_size(compress)
@@ -316,7 +326,12 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalDeserialize
                 compress,
                 validate,
             )?,
-            stage6_sumcheck_proof: SumcheckInstanceProof::deserialize_with_mode(
+            stage6a_sumcheck_proof: SumcheckInstanceProof::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
+            stage6b_sumcheck_proof: SumcheckInstanceProof::deserialize_with_mode(
                 &mut reader,
                 compress,
                 validate,
@@ -371,6 +386,7 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalDeserialize
             trace_length: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             ram_K: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             bytecode_K: usize::deserialize_with_mode(&mut reader, compress, validate)?,
+            program_mode: ProgramMode::deserialize_with_mode(&mut reader, compress, validate)?,
             rw_config: ReadWriteConfig::deserialize_with_mode(&mut reader, compress, validate)?,
             one_hot_config: OneHotConfig::deserialize_with_mode(&mut reader, compress, validate)?,
             dory_layout: DoryLayout::deserialize_with_mode(&mut reader, compress, validate)?,
@@ -455,12 +471,12 @@ impl CanonicalSerialize for OpeningId {
                 let fused = OPENING_ID_TRUSTED_ADVICE_BASE + (*sumcheck_id as u8);
                 fused.serialize_with_mode(&mut writer, compress)
             }
-            OpeningId::Committed(committed_polynomial, sumcheck_id) => {
+            OpeningId::Polynomial(PolynomialId::Committed(committed_polynomial), sumcheck_id) => {
                 let fused = OPENING_ID_COMMITTED_BASE + (*sumcheck_id as u8);
                 fused.serialize_with_mode(&mut writer, compress)?;
                 committed_polynomial.serialize_with_mode(&mut writer, compress)
             }
-            OpeningId::Virtual(virtual_polynomial, sumcheck_id) => {
+            OpeningId::Polynomial(PolynomialId::Virtual(virtual_polynomial), sumcheck_id) => {
                 let fused = OPENING_ID_VIRTUAL_BASE + (*sumcheck_id as u8);
                 fused.serialize_with_mode(&mut writer, compress)?;
                 virtual_polynomial.serialize_with_mode(&mut writer, compress)
@@ -471,11 +487,11 @@ impl CanonicalSerialize for OpeningId {
     fn serialized_size(&self, compress: Compress) -> usize {
         match self {
             OpeningId::UntrustedAdvice(_) | OpeningId::TrustedAdvice(_) => 1,
-            OpeningId::Committed(committed_polynomial, _) => {
+            OpeningId::Polynomial(PolynomialId::Committed(committed_polynomial), _) => {
                 // 1 byte fused (variant + sumcheck_id) + poly index
                 1 + committed_polynomial.serialized_size(compress)
             }
-            OpeningId::Virtual(virtual_polynomial, _) => {
+            OpeningId::Polynomial(PolynomialId::Virtual(virtual_polynomial), _) => {
                 // 1 byte fused (variant + sumcheck_id) + poly index
                 1 + virtual_polynomial.serialized_size(compress)
             }
@@ -513,8 +529,8 @@ impl CanonicalDeserialize for OpeningId {
                 let sumcheck_id = fused - OPENING_ID_COMMITTED_BASE;
                 let polynomial =
                     CommittedPolynomial::deserialize_with_mode(&mut reader, compress, validate)?;
-                Ok(OpeningId::Committed(
-                    polynomial,
+                Ok(OpeningId::Polynomial(
+                    PolynomialId::Committed(polynomial),
                     SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
                 ))
             }
@@ -522,8 +538,8 @@ impl CanonicalDeserialize for OpeningId {
                 let sumcheck_id = fused - OPENING_ID_VIRTUAL_BASE;
                 let polynomial =
                     VirtualPolynomial::deserialize_with_mode(&mut reader, compress, validate)?;
-                Ok(OpeningId::Virtual(
-                    polynomial,
+                Ok(OpeningId::Polynomial(
+                    PolynomialId::Virtual(polynomial),
                     SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
                 ))
             }
@@ -548,13 +564,18 @@ impl CanonicalSerialize for CommittedPolynomial {
                 3u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*i).unwrap()).serialize_with_mode(writer, compress)
             }
+            Self::BytecodeChunk(i) => {
+                7u8.serialize_with_mode(&mut writer, compress)?;
+                (u8::try_from(*i).unwrap()).serialize_with_mode(writer, compress)
+            }
             Self::RamRa(i) => {
                 4u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*i).unwrap()).serialize_with_mode(writer, compress)
             }
             Self::TrustedAdvice => 5u8.serialize_with_mode(writer, compress),
             Self::UntrustedAdvice => 6u8.serialize_with_mode(writer, compress),
-            Self::DoryDenseMatrix => 7u8.serialize_with_mode(writer, compress),
+            Self::DoryDenseMatrix => 9u8.serialize_with_mode(writer, compress),
+            Self::ProgramImageInit => 8u8.serialize_with_mode(writer, compress),
         }
     }
 
@@ -564,8 +585,12 @@ impl CanonicalSerialize for CommittedPolynomial {
             | Self::RamInc
             | Self::TrustedAdvice
             | Self::UntrustedAdvice
-            | Self::DoryDenseMatrix => 1,
-            Self::InstructionRa(_) | Self::BytecodeRa(_) | Self::RamRa(_) => 2,
+            | Self::DoryDenseMatrix
+            | Self::ProgramImageInit => 1,
+            Self::InstructionRa(_)
+            | Self::BytecodeRa(_)
+            | Self::BytecodeChunk(_)
+            | Self::RamRa(_) => 2,
         }
     }
 }
@@ -600,7 +625,12 @@ impl CanonicalDeserialize for CommittedPolynomial {
                 }
                 5 => Self::TrustedAdvice,
                 6 => Self::UntrustedAdvice,
-                7 => Self::DoryDenseMatrix,
+                7 => {
+                    let i = u8::deserialize_with_mode(reader, compress, validate)?;
+                    Self::BytecodeChunk(i as usize)
+                }
+                8 => Self::ProgramImageInit,
+                9 => Self::DoryDenseMatrix,
                 _ => return Err(SerializationError::InvalidData),
             },
         )
@@ -667,10 +697,24 @@ impl CanonicalSerialize for VirtualPolynomial {
                 40u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*flag).unwrap()).serialize_with_mode(&mut writer, compress)
             }
-            // Recursion polynomials - hierarchical serialization
-            // Format: tag 41, then op_type (u8), term_index (u8), instance (u32)
-            Self::Recursion(rec_poly) => {
+            // Program-image commitment variants
+            Self::BytecodeValStage(stage) => {
                 41u8.serialize_with_mode(&mut writer, compress)?;
+                (u8::try_from(*stage).unwrap()).serialize_with_mode(&mut writer, compress)
+            }
+            Self::BytecodeReadRafAddrClaim => 42u8.serialize_with_mode(&mut writer, compress),
+            Self::BooleanityAddrClaim => 43u8.serialize_with_mode(&mut writer, compress),
+            Self::BytecodeClaimReductionIntermediate => {
+                44u8.serialize_with_mode(&mut writer, compress)
+            }
+            Self::ProgramImageInitContributionRw => 45u8.serialize_with_mode(&mut writer, compress),
+            Self::ProgramImageInitContributionRaf => {
+                46u8.serialize_with_mode(&mut writer, compress)
+            }
+            // Recursion polynomials - hierarchical serialization
+            // Format: tag 47, then op_type (u8), term_index (u8), instance (u32)
+            Self::Recursion(rec_poly) => {
+                47u8.serialize_with_mode(&mut writer, compress)?;
                 let (op_type, term_index, instance) = match rec_poly {
                     RecursionPoly::G1Add { term, instance } => {
                         (0u8, term.to_index() as u8, *instance)
@@ -701,7 +745,7 @@ impl CanonicalSerialize for VirtualPolynomial {
                 term_index.serialize_with_mode(&mut writer, compress)?;
                 (instance as u32).serialize_with_mode(&mut writer, compress)
             }
-            Self::DorySparseConstraintMatrix => 42u8.serialize_with_mode(&mut writer, compress),
+            Self::DorySparseConstraintMatrix => 48u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -744,11 +788,17 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::RamValFinal
             | Self::RamHammingWeight
             | Self::UnivariateSkip
-            | Self::DorySparseConstraintMatrix => 1,
+            | Self::DorySparseConstraintMatrix
+            | Self::BytecodeReadRafAddrClaim
+            | Self::BooleanityAddrClaim
+            | Self::BytecodeClaimReductionIntermediate
+            | Self::ProgramImageInitContributionRw
+            | Self::ProgramImageInitContributionRaf => 1,
             Self::InstructionRa(_)
             | Self::OpFlags(_)
             | Self::InstructionFlags(_)
-            | Self::LookupTableFlag(_) => 2,
+            | Self::LookupTableFlag(_)
+            | Self::BytecodeValStage(_) => 2,
             // Recursion: 1 byte tag + 1 byte op_type + 1 byte term_index + 4 bytes instance
             Self::Recursion(_) => 7,
         }
@@ -826,8 +876,18 @@ impl CanonicalDeserialize for VirtualPolynomial {
                     let flag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     Self::LookupTableFlag(flag as usize)
                 }
-                // Recursion polynomials - hierarchical deserialization
+                // Program-image commitment variants
                 41 => {
+                    let stage = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+                    Self::BytecodeValStage(stage as usize)
+                }
+                42 => Self::BytecodeReadRafAddrClaim,
+                43 => Self::BooleanityAddrClaim,
+                44 => Self::BytecodeClaimReductionIntermediate,
+                45 => Self::ProgramImageInitContributionRw,
+                46 => Self::ProgramImageInitContributionRaf,
+                // Recursion polynomials - hierarchical deserialization
+                47 => {
                     let op_type = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     let term_index = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     let instance =
@@ -877,7 +937,7 @@ impl CanonicalDeserialize for VirtualPolynomial {
                     };
                     Self::Recursion(rec_poly)
                 }
-                42 => Self::DorySparseConstraintMatrix,
+                48 => Self::DorySparseConstraintMatrix,
                 _ => return Err(SerializationError::InvalidData),
             },
         )

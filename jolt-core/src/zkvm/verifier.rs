@@ -12,25 +12,34 @@ use crate::poly::commitment::{
     dory::{DoryContext, DoryGlobals},
     hyrax::{Hyrax, PedersenGenerators},
 };
-use crate::poly::opening_proof::OpeningId;
+use crate::poly::opening_proof::{OpeningId, PolynomialId};
 use crate::subprotocols::sumcheck::BatchedSumcheck;
-use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::zkvm::bytecode::chunks::total_lanes;
 use crate::zkvm::claim_reductions::advice::ReductionPhase;
 use crate::zkvm::claim_reductions::RegistersClaimReductionSumcheckVerifier;
 use crate::zkvm::config::OneHotParams;
+use crate::zkvm::config::ProgramMode;
+use crate::zkvm::program::{
+    ProgramMetadata, ProgramPreprocessing, TrustedProgramCommitments, VerifierProgram,
+};
 #[cfg(feature = "prover")]
 use crate::zkvm::prover::JoltProverPreprocessing;
 use crate::zkvm::ram::val_final::ValFinalSumcheckVerifier;
-use crate::zkvm::ram::RAMPreprocessing;
+use crate::zkvm::ram::verifier_accumulate_program_image;
 use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::zkvm::witness::all_committed_polynomials;
 use crate::zkvm::Serializable;
 use crate::zkvm::{
-    bytecode::read_raf_checking::BytecodeReadRafSumcheckVerifier,
+    bytecode::read_raf_checking::{
+        BytecodeReadRafAddressSumcheckVerifier, BytecodeReadRafCycleSumcheckVerifier,
+        BytecodeReadRafSumcheckParams,
+    },
     claim_reductions::{
-        AdviceClaimReductionVerifier, AdviceKind, HammingWeightClaimReductionVerifier,
-        IncClaimReductionSumcheckVerifier, InstructionLookupsClaimReductionSumcheckVerifier,
-        RamRaClaimReductionSumcheckVerifier,
+        AdviceClaimReductionVerifier, AdviceKind, BytecodeClaimReductionParams,
+        BytecodeClaimReductionVerifier, BytecodeReductionPhase,
+        HammingWeightClaimReductionVerifier, IncClaimReductionSumcheckVerifier,
+        InstructionLookupsClaimReductionSumcheckVerifier, ProgramImageClaimReductionParams,
+        ProgramImageClaimReductionVerifier, RamRaClaimReductionSumcheckVerifier,
     },
     fiat_shamir_preamble,
     instruction_lookups::{
@@ -40,7 +49,7 @@ use crate::zkvm::{
     proof_serialization::JoltProof,
     r1cs::key::UniformSpartanKey,
     ram::{
-        self, hamming_booleanity::HammingBooleanitySumcheckVerifier,
+        hamming_booleanity::HammingBooleanitySumcheckVerifier,
         output_check::OutputSumcheckVerifier, ra_virtual::RamRaVirtualSumcheckVerifier,
         raf_evaluation::RafEvaluationSumcheckVerifier as RamRafEvaluationSumcheckVerifier,
         read_write_checking::RamReadWriteCheckingVerifier,
@@ -67,7 +76,10 @@ use crate::{
     },
     pprof_scope,
     subprotocols::{
-        booleanity::{BooleanitySumcheckParams, BooleanitySumcheckVerifier},
+        booleanity::{
+            BooleanityAddressSumcheckVerifier, BooleanityCycleSumcheckVerifier,
+            BooleanitySumcheckParams,
+        },
         sumcheck_verifier::SumcheckInstanceVerifier,
     },
     transcripts::Transcript,
@@ -78,7 +90,6 @@ use anyhow::Context;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
 use itertools::Itertools;
-use tracer::instruction::Instruction;
 use tracer::JoltDevice;
 
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
@@ -122,6 +133,9 @@ pub struct JoltVerifier<'a, F: JoltField, PCS: RecursionExt<F>, ProofTranscript:
     /// The advice claim reduction sumcheck effectively spans two stages (6 and 7).
     /// Cache the verifier state here between stages.
     advice_reduction_verifier_untrusted: Option<AdviceClaimReductionVerifier<F>>,
+    /// The bytecode claim reduction sumcheck effectively spans two stages (6b and 7).
+    /// Cache the verifier state here between stages.
+    bytecode_reduction_verifier: Option<BytecodeClaimReductionVerifier<F>>,
     pub spartan_key: UniformSpartanKey<F>,
     pub one_hot_params: OneHotParams,
 }
@@ -200,6 +214,31 @@ where
         let one_hot_params =
             OneHotParams::from_config(&proof.one_hot_config, proof.bytecode_K, proof.ram_K);
 
+        if proof.program_mode == ProgramMode::Committed {
+            let committed = preprocessing.program.as_committed()?;
+            if committed.log_k_chunk != proof.one_hot_config.log_k_chunk {
+                return Err(ProofVerifyError::InvalidBytecodeConfig(format!(
+                    "bytecode log_k_chunk mismatch: commitments={}, proof={}",
+                    committed.log_k_chunk, proof.one_hot_config.log_k_chunk
+                )));
+            }
+            if committed.bytecode_len != preprocessing.shared.bytecode_size() {
+                return Err(ProofVerifyError::InvalidBytecodeConfig(format!(
+                    "bytecode length mismatch: commitments={}, shared={}",
+                    committed.bytecode_len,
+                    preprocessing.shared.bytecode_size()
+                )));
+            }
+            let k_chunk = 1usize << (committed.log_k_chunk as usize);
+            let expected_chunks = total_lanes().div_ceil(k_chunk);
+            if committed.bytecode_commitments.len() != expected_chunks {
+                return Err(ProofVerifyError::InvalidBytecodeConfig(format!(
+                    "expected {expected_chunks} bytecode commitments, got {}",
+                    committed.bytecode_commitments.len()
+                )));
+            }
+        }
+
         Ok(Self {
             trusted_advice_commitment,
             program_io,
@@ -209,6 +248,7 @@ where
             opening_accumulator,
             advice_reduction_verifier_trusted: None,
             advice_reduction_verifier_untrusted: None,
+            bytecode_reduction_verifier: None,
             spartan_key,
             one_hot_params,
         })
@@ -239,13 +279,22 @@ where
             self.transcript
                 .append_serializable(trusted_advice_commitment);
         }
+        if self.proof.program_mode == ProgramMode::Committed {
+            let trusted = self.preprocessing.program.as_committed()?;
+            for commitment in &trusted.bytecode_commitments {
+                self.transcript.append_serializable(commitment);
+            }
+            self.transcript
+                .append_serializable(&trusted.program_image_commitment);
+        }
 
         self.verify_stage1()?;
         self.verify_stage2()?;
         self.verify_stage3()?;
         self.verify_stage4()?;
         self.verify_stage5()?;
-        self.verify_stage6()?;
+        let (bytecode_read_raf_params, booleanity_params) = self.verify_stage6a()?;
+        self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
         self.verify_stage7()?;
         self.verify_stage8_with_recursion()?;
 
@@ -374,29 +423,41 @@ where
                 .rw_config
                 .needs_single_advice_opening(self.proof.trace_length.log_2()),
         );
+        if self.proof.program_mode == ProgramMode::Committed {
+            verifier_accumulate_program_image::<F>(
+                self.proof.ram_K,
+                &self.program_io,
+                &mut self.opening_accumulator,
+                &mut self.transcript,
+                self.proof
+                    .rw_config
+                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
+            );
+        }
         let registers_read_write_checking = RegistersReadWriteCheckingVerifier::new(
             self.proof.trace_length,
             &self.opening_accumulator,
             &mut self.transcript,
             &self.proof.rw_config,
         );
-        let initial_ram_state = ram::gen_ram_initial_memory_state::<F>(
-            self.proof.ram_K,
-            &self.preprocessing.shared.ram,
-            &self.program_io,
-        );
+        // In Full mode, get the program image words from the preprocessing
+        let program_image_words = self.preprocessing.program.program_image_words();
         let ram_val_evaluation = RamValEvaluationSumcheckVerifier::new(
-            &initial_ram_state,
+            &self.preprocessing.shared.program_meta,
+            program_image_words,
             &self.program_io,
             self.proof.trace_length,
             self.proof.ram_K,
+            self.proof.program_mode,
             &self.opening_accumulator,
         );
         let ram_val_final = ValFinalSumcheckVerifier::new(
-            &initial_ram_state,
+            &self.preprocessing.shared.program_meta,
+            program_image_words,
             &self.program_io,
             self.proof.trace_length,
             self.proof.ram_K,
+            self.proof.program_mode,
             &self.opening_accumulator,
             &self.proof.rw_config,
         );
@@ -449,27 +510,62 @@ where
         Ok(())
     }
 
-    fn verify_stage6(&mut self) -> Result<(), anyhow::Error> {
-        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE6);
+    fn verify_stage6a(
+        &mut self,
+    ) -> Result<
+        (
+            BytecodeReadRafSumcheckParams<F>,
+            BooleanitySumcheckParams<F>,
+        ),
+        anyhow::Error,
+    > {
         let n_cycle_vars = self.proof.trace_length.log_2();
-        let bytecode_read_raf = BytecodeReadRafSumcheckVerifier::gen(
-            &self.preprocessing.shared.bytecode,
+        let program_preprocessing = match self.proof.program_mode {
+            ProgramMode::Committed => {
+                // Ensure we have committed program commitments for committed mode.
+                let _ = self.preprocessing.program.as_committed()?;
+                None
+            }
+            ProgramMode::Full => self.preprocessing.program.full().map(|p| p.as_ref()),
+        };
+        let bytecode_read_raf = BytecodeReadRafAddressSumcheckVerifier::new(
+            program_preprocessing,
             n_cycle_vars,
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
-        );
-
-        let ram_hamming_booleanity =
-            HammingBooleanitySumcheckVerifier::new(&self.opening_accumulator);
+            self.proof.program_mode,
+        )?;
         let booleanity_params = BooleanitySumcheckParams::new(
             n_cycle_vars,
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
+        let booleanity = BooleanityAddressSumcheckVerifier::new(booleanity_params);
 
-        let booleanity = BooleanitySumcheckVerifier::new(booleanity_params);
+        let instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> =
+            vec![&bytecode_read_raf, &booleanity];
+
+        let _r_stage6a = BatchedSumcheck::verify(
+            &self.proof.stage6a_sumcheck_proof,
+            instances,
+            &mut self.opening_accumulator,
+            &mut self.transcript,
+        )
+        .context("Stage 6a")?;
+        Ok((bytecode_read_raf.into_params(), booleanity.into_params()))
+    }
+
+    fn verify_stage6b(
+        &mut self,
+        bytecode_read_raf_params: BytecodeReadRafSumcheckParams<F>,
+        booleanity_params: BooleanitySumcheckParams<F>,
+    ) -> Result<(), anyhow::Error> {
+        // Initialize Stage 6b cycle verifiers from scratch (Option B).
+        let booleanity = BooleanityCycleSumcheckVerifier::new(booleanity_params);
+        let ram_hamming_booleanity =
+            HammingBooleanitySumcheckVerifier::new(&self.opening_accumulator);
         let ram_ra_virtual = RamRaVirtualSumcheckVerifier::new(
             self.proof.trace_length,
             &self.one_hot_params,
@@ -487,7 +583,26 @@ where
             &mut self.transcript,
         );
 
-        // Advice claim reduction (Phase 1 in Stage 6): trusted and untrusted are separate instances.
+        // Bytecode claim reduction (Phase 1 in Stage 6b): consumes Val_s(r_bc) from Stage 6a and
+        // caches an intermediate claim for Stage 7.
+        //
+        // IMPORTANT: This must be sampled *after* other Stage 6b params (e.g. lookup/inc gammas),
+        // to match the prover's transcript order.
+        if self.proof.program_mode == ProgramMode::Committed {
+            let bytecode_reduction_params = BytecodeClaimReductionParams::new(
+                &bytecode_read_raf_params,
+                &self.opening_accumulator,
+                &mut self.transcript,
+            );
+            self.bytecode_reduction_verifier = Some(BytecodeClaimReductionVerifier::new(
+                bytecode_reduction_params,
+            ));
+        } else {
+            // Legacy mode: do not run the bytecode claim reduction.
+            self.bytecode_reduction_verifier = None;
+        }
+
+        // Advice claim reduction (Phase 1 in Stage 6b): trusted and untrusted are separate instances.
         if self.trusted_advice_commitment.is_some() {
             self.advice_reduction_verifier_trusted = Some(AdviceClaimReductionVerifier::new(
                 AdviceKind::Trusted,
@@ -513,6 +628,40 @@ where
             ));
         }
 
+        // Program-image claim reduction (Stage 6b): binds staged Stage 4 scalar program-image claims
+        // to the trusted commitment, caching an opening of ProgramImageInit.
+        let program_image_reduction = if self.proof.program_mode == ProgramMode::Committed {
+            let trusted = self
+                .preprocessing
+                .program
+                .as_committed()
+                .expect("program commitments missing in committed mode");
+            let padded_len_words = trusted.program_image_num_words;
+            let log_t = self.proof.trace_length.log_2();
+            let m = padded_len_words.log_2();
+            if m > log_t {
+                return Err(ProofVerifyError::InvalidBytecodeConfig(format!(
+                    "program-image claim reduction requires m=log2(padded_len_words) <= log_T (got m={m}, log_T={log_t})"
+                ))
+                .into());
+            }
+            let params = ProgramImageClaimReductionParams::new(
+                &self.program_io,
+                self.preprocessing.shared.min_bytecode_address(),
+                padded_len_words,
+                self.proof.ram_K,
+                self.proof.trace_length,
+                &self.proof.rw_config,
+                &self.opening_accumulator,
+                &mut self.transcript,
+            );
+            Some(ProgramImageClaimReductionVerifier { params })
+        } else {
+            None
+        };
+
+        let bytecode_read_raf = BytecodeReadRafCycleSumcheckVerifier::new(bytecode_read_raf_params);
+
         let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> = vec![
             &bytecode_read_raf,
             &ram_hamming_booleanity,
@@ -521,20 +670,26 @@ where
             &lookups_ra_virtual,
             &inc_reduction,
         ];
+        if let Some(ref bytecode) = self.bytecode_reduction_verifier {
+            instances.push(bytecode);
+        }
         if let Some(ref advice) = self.advice_reduction_verifier_trusted {
             instances.push(advice);
         }
         if let Some(ref advice) = self.advice_reduction_verifier_untrusted {
             instances.push(advice);
         }
+        if let Some(ref prog) = program_image_reduction {
+            instances.push(prog);
+        }
 
-        let _r_stage6 = BatchedSumcheck::verify(
-            &self.proof.stage6_sumcheck_proof,
+        let _r_stage6b = BatchedSumcheck::verify(
+            &self.proof.stage6b_sumcheck_proof,
             instances,
             &mut self.opening_accumulator,
             &mut self.transcript,
         )
-        .context("Stage 6")?;
+        .context("Stage 6b")?;
 
         Ok(())
     }
@@ -552,6 +707,12 @@ where
 
         let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> =
             vec![&hw_verifier];
+
+        if let Some(bytecode_reduction_verifier) = self.bytecode_reduction_verifier.as_mut() {
+            bytecode_reduction_verifier.params.borrow_mut().phase =
+                BytecodeReductionPhase::LaneVariables;
+            instances.push(bytecode_reduction_verifier);
+        }
         if let Some(advice_reduction_verifier_trusted) =
             self.advice_reduction_verifier_trusted.as_mut()
         {
@@ -587,14 +748,25 @@ where
     /// Stage 8: Dory batch opening verification.
     #[allow(dead_code)]
     fn verify_stage8(&mut self) -> Result<(), anyhow::Error> {
-        // Initialize DoryGlobals with the layout from the proof
-        // This ensures the verifier uses the same layout as the prover
-        let _guard = DoryGlobals::initialize_context(
-            1 << self.one_hot_params.log_k_chunk,
-            self.proof.trace_length.next_power_of_two(),
-            DoryContext::Main,
-            Some(self.proof.dory_layout),
-        );
+        // Initialize DoryGlobals with the layout from the proof.
+        // In committed mode, we must also match the Main-context sigma used to derive trusted
+        // bytecode commitments, otherwise Stage 8 batching will be inconsistent.
+        let _guard = if self.proof.program_mode == ProgramMode::Committed {
+            let committed = self.preprocessing.program.as_committed()?;
+            DoryGlobals::initialize_main_context_with_num_columns(
+                1 << self.one_hot_params.log_k_chunk,
+                self.proof.trace_length.next_power_of_two(),
+                committed.bytecode_num_columns,
+                Some(self.proof.dory_layout),
+            )
+        } else {
+            DoryGlobals::initialize_context(
+                1 << self.one_hot_params.log_k_chunk,
+                self.proof.trace_length.next_power_of_two(),
+                DoryContext::Main,
+                Some(self.proof.dory_layout),
+            )
+        };
 
         // Get the unified opening point from HammingWeightClaimReduction
         // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
@@ -675,6 +847,67 @@ where
             ));
         }
 
+        // Bytecode chunk polynomials: committed in Bytecode context and embedded into the
+        // main opening point by fixing the extra cycle variables to 0.
+        if self.proof.program_mode == ProgramMode::Committed {
+            let (bytecode_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::BytecodeChunk(0),
+                SumcheckId::BytecodeClaimReduction,
+            );
+            let log_t = opening_point.r.len() - log_k_chunk;
+            let log_k = bytecode_point.r.len() - log_k_chunk;
+            if log_k > log_t {
+                return Err(ProofVerifyError::InvalidBytecodeConfig(format!(
+                    "bytecode folding requires log_T >= log_K (got log_T={log_t}, log_K={log_k})"
+                ))
+                .into());
+            }
+            #[cfg(test)]
+            {
+                if log_k == log_t {
+                    assert_eq!(
+                        bytecode_point.r, opening_point.r,
+                        "BytecodeChunk opening point must equal unified opening point when log_K == log_T"
+                    );
+                } else {
+                    let (r_lane_main, r_cycle_main) = opening_point.split_at(log_k_chunk);
+                    let (r_lane_bc, r_cycle_bc) = bytecode_point.split_at(log_k_chunk);
+                    debug_assert_eq!(r_lane_main.r, r_lane_bc.r);
+                    debug_assert_eq!(&r_cycle_main.r[(log_t - log_k)..], r_cycle_bc.r.as_slice());
+                }
+            }
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &bytecode_point.r);
+
+            let num_chunks = total_lanes().div_ceil(self.one_hot_params.k_chunk);
+            for i in 0..num_chunks {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::BytecodeChunk(i),
+                    SumcheckId::BytecodeClaimReduction,
+                );
+                polynomial_claims.push((
+                    CommittedPolynomial::BytecodeChunk(i),
+                    claim * lagrange_factor,
+                ));
+            }
+        }
+
+        // Program-image polynomial: opened by ProgramImageClaimReduction in Stage 6b.
+        // Embed into the top-left block of the main matrix (same trick as advice).
+        if self.proof.program_mode == ProgramMode::Committed {
+            let (prog_point, prog_claim) =
+                self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::ProgramImageInit,
+                    SumcheckId::ProgramImageClaimReduction,
+                );
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &prog_point.r);
+            polynomial_claims.push((
+                CommittedPolynomial::ProgramImageInit,
+                prog_claim * lagrange_factor,
+            ));
+        }
+
         // 2. Sample gamma and compute powers for RLC
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
         self.transcript.append_scalars(&claims);
@@ -716,6 +949,27 @@ where
             }
         }
 
+        if self.proof.program_mode == ProgramMode::Committed {
+            let committed = self.preprocessing.program.as_committed()?;
+            for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
+                commitments_map
+                    .entry(CommittedPolynomial::BytecodeChunk(idx))
+                    .or_insert_with(|| commitment.clone());
+            }
+
+            // Add trusted program-image commitment if it's part of the batch.
+            if state
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
+            {
+                commitments_map.insert(
+                    CommittedPolynomial::ProgramImageInit,
+                    committed.program_image_commitment.clone(),
+                );
+            }
+        }
+
         // Compute joint commitment: Σ γ_i · C_i
         let joint_commitment = self.compute_joint_commitment(&mut commitments_map, &state);
 
@@ -726,7 +980,7 @@ where
             .map(|(gamma, claim)| *gamma * claim)
             .sum();
 
-        // Verify opening
+        // Verify joint opening
         PCS::verify(
             &self.proof.stage8_opening_proof,
             &self.preprocessing.generators,
@@ -735,7 +989,9 @@ where
             &joint_claim,
             &joint_commitment,
         )
-        .context("Stage 8")
+        .context("Stage 8 (joint)")?;
+
+        Ok(())
     }
 
     /// Stage 8: PCS batch opening verification using a recursion hint (when supported by the PCS).
@@ -960,7 +1216,11 @@ where
             // Count constraint types based on the virtual polynomial types in opening claims
             use crate::zkvm::witness::{RecursionPoly, VirtualPolynomial};
             for key in recursion_proof.opening_claims.keys() {
-                if let OpeningId::Virtual(VirtualPolynomial::Recursion(rec_poly), _) = key {
+                if let OpeningId::Polynomial(
+                    PolynomialId::Virtual(VirtualPolynomial::Recursion(rec_poly)),
+                    _,
+                ) = key
+                {
                     match rec_poly {
                         RecursionPoly::GtExp { instance, .. } => {
                             num_gt_exp = num_gt_exp.max(instance + 1);
@@ -1197,89 +1457,59 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+/// Shared preprocessing between prover and verifier.
+///
+/// Contains O(1) metadata about the program. Does NOT contain the full program data.
+/// - Full program data is in `JoltProverPreprocessing.program`.
+/// - Verifier program (Full or Committed) is in `JoltVerifierPreprocessing.program`.
+#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltSharedPreprocessing {
-    pub bytecode: Arc<BytecodePreprocessing>,
-    pub ram: RAMPreprocessing,
+    /// Program metadata (bytecode size, program image info).
+    pub program_meta: ProgramMetadata,
     pub memory_layout: MemoryLayout,
     pub max_padded_trace_length: usize,
 }
 
-impl CanonicalSerialize for JoltSharedPreprocessing {
-    fn serialize_with_mode<W: std::io::Write>(
-        &self,
-        mut writer: W,
-        compress: ark_serialize::Compress,
-    ) -> Result<(), ark_serialize::SerializationError> {
-        // Serialize the inner BytecodePreprocessing (not the Arc wrapper)
-        self.bytecode
-            .as_ref()
-            .serialize_with_mode(&mut writer, compress)?;
-        self.ram.serialize_with_mode(&mut writer, compress)?;
-        self.memory_layout
-            .serialize_with_mode(&mut writer, compress)?;
-        self.max_padded_trace_length
-            .serialize_with_mode(&mut writer, compress)?;
-        Ok(())
-    }
-
-    fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
-        self.bytecode.serialized_size(compress)
-            + self.ram.serialized_size(compress)
-            + self.memory_layout.serialized_size(compress)
-            + self.max_padded_trace_length.serialized_size(compress)
-    }
-}
-
-impl CanonicalDeserialize for JoltSharedPreprocessing {
-    fn deserialize_with_mode<R: std::io::Read>(
-        mut reader: R,
-        compress: ark_serialize::Compress,
-        validate: ark_serialize::Validate,
-    ) -> Result<Self, ark_serialize::SerializationError> {
-        let bytecode =
-            BytecodePreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
-        let ram = RAMPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
-        let memory_layout = MemoryLayout::deserialize_with_mode(&mut reader, compress, validate)?;
-        let max_padded_trace_length =
-            usize::deserialize_with_mode(&mut reader, compress, validate)?;
-        Ok(Self {
-            bytecode: Arc::new(bytecode),
-            ram,
-            memory_layout,
-            max_padded_trace_length,
-        })
-    }
-}
-
-impl ark_serialize::Valid for JoltSharedPreprocessing {
-    fn check(&self) -> Result<(), ark_serialize::SerializationError> {
-        self.bytecode.check()?;
-        self.ram.check()?;
-        self.memory_layout.check()
-    }
-}
-
 impl JoltSharedPreprocessing {
+    /// Create shared preprocessing from program metadata.
+    ///
+    /// # Arguments
+    /// - `program_meta`: Program metadata (from `ProgramPreprocessing::meta()`)
+    /// - `memory_layout`: Memory layout configuration
+    /// - `max_padded_trace_length`: Maximum trace length for generator sizing
     #[tracing::instrument(skip_all, name = "JoltSharedPreprocessing::new")]
     pub fn new(
-        bytecode: Vec<Instruction>,
+        program_meta: ProgramMetadata,
         memory_layout: MemoryLayout,
-        memory_init: Vec<(u64, u8)>,
         max_padded_trace_length: usize,
     ) -> JoltSharedPreprocessing {
-        let bytecode = Arc::new(BytecodePreprocessing::preprocess(bytecode));
-        let ram = RAMPreprocessing::preprocess(memory_init);
         Self {
-            bytecode,
-            ram,
+            program_meta,
             memory_layout,
             max_padded_trace_length,
         }
     }
+
+    /// Bytecode size (power-of-2 padded).
+    /// Legacy accessor - use `program_meta.bytecode_len` directly.
+    pub fn bytecode_size(&self) -> usize {
+        self.program_meta.bytecode_len
+    }
+
+    /// Minimum bytecode address.
+    /// Legacy accessor - use `program_meta.min_bytecode_address` directly.
+    pub fn min_bytecode_address(&self) -> u64 {
+        self.program_meta.min_bytecode_address
+    }
+
+    /// Program image length (unpadded words).
+    /// Legacy accessor - use `program_meta.program_image_len_words` directly.
+    pub fn program_image_len_words(&self) -> usize {
+        self.program_meta.program_image_len_words
+    }
 }
 
-#[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Debug, Clone)]
 pub struct JoltVerifierPreprocessing<F, PCS>
 where
     F: JoltField,
@@ -1289,6 +1519,76 @@ where
     pub shared: JoltSharedPreprocessing,
     /// Cached Hyrax setup for recursion verification (avoids 40ms regeneration per verify)
     pub hyrax_recursion_setup: PedersenGenerators<GrumpkinProjective>,
+    /// Program information for verification.
+    ///
+    /// In Full mode: contains full program preprocessing (bytecode + program image).
+    /// In Committed mode: contains only commitments (succinct).
+    pub program: VerifierProgram<PCS>,
+}
+
+impl<F, PCS> CanonicalSerialize for JoltVerifierPreprocessing<F, PCS>
+where
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+{
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        mut writer: W,
+        compress: ark_serialize::Compress,
+    ) -> Result<(), ark_serialize::SerializationError> {
+        self.generators.serialize_with_mode(&mut writer, compress)?;
+        self.shared.serialize_with_mode(&mut writer, compress)?;
+        self.hyrax_recursion_setup
+            .serialize_with_mode(&mut writer, compress)?;
+        self.program.serialize_with_mode(&mut writer, compress)?;
+        Ok(())
+    }
+
+    fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
+        self.generators.serialized_size(compress)
+            + self.shared.serialized_size(compress)
+            + self.hyrax_recursion_setup.serialized_size(compress)
+            + self.program.serialized_size(compress)
+    }
+}
+
+impl<F, PCS> ark_serialize::Valid for JoltVerifierPreprocessing<F, PCS>
+where
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+{
+    fn check(&self) -> Result<(), ark_serialize::SerializationError> {
+        self.generators.check()?;
+        self.shared.check()?;
+        self.hyrax_recursion_setup.check()?;
+        self.program.check()
+    }
+}
+
+impl<F, PCS> CanonicalDeserialize for JoltVerifierPreprocessing<F, PCS>
+where
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+{
+    fn deserialize_with_mode<R: std::io::Read>(
+        mut reader: R,
+        compress: ark_serialize::Compress,
+        validate: ark_serialize::Validate,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        let generators =
+            PCS::VerifierSetup::deserialize_with_mode(&mut reader, compress, validate)?;
+        let shared =
+            JoltSharedPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
+        let hyrax_recursion_setup =
+            PedersenGenerators::deserialize_with_mode(&mut reader, compress, validate)?;
+        let program = VerifierProgram::deserialize_with_mode(&mut reader, compress, validate)?;
+        Ok(Self {
+            generators,
+            shared,
+            hyrax_recursion_setup,
+            program,
+        })
+    }
 }
 
 impl<F, PCS> Serializable for JoltVerifierPreprocessing<F, PCS>
@@ -1322,10 +1622,12 @@ where
 }
 
 impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F, PCS> {
-    #[tracing::instrument(skip_all, name = "JoltVerifierPreprocessing::new")]
-    pub fn new(
+    /// Create verifier preprocessing in Full mode (verifier has full program).
+    #[tracing::instrument(skip_all, name = "JoltVerifierPreprocessing::new_full")]
+    pub fn new_full(
         shared: JoltSharedPreprocessing,
         generators: PCS::VerifierSetup,
+        program: Arc<ProgramPreprocessing>,
     ) -> JoltVerifierPreprocessing<F, PCS> {
         // Precompute Hyrax generators for recursion verification
         type HyraxPCS = Hyrax<1, GrumpkinProjective>;
@@ -1338,6 +1640,31 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
             generators,
             shared: shared.clone(),
             hyrax_recursion_setup,
+            program: VerifierProgram::Full(program),
+        }
+    }
+
+    /// Create verifier preprocessing in Committed mode with trusted commitments.
+    ///
+    /// This is the "fast path" for online verification. The `TrustedProgramCommitments`
+    /// type guarantees (at the type level) that these commitments were derived from
+    /// actual program via `TrustedProgramCommitments::derive()`.
+    ///
+    /// # Trust Model
+    /// The caller must ensure the commitments were honestly derived (e.g., loaded from
+    /// a trusted file or received from trusted preprocessing).
+    #[tracing::instrument(skip_all, name = "JoltVerifierPreprocessing::new_committed")]
+    pub fn new_committed(
+        shared: JoltSharedPreprocessing,
+        generators: PCS::VerifierSetup,
+        hyrax_recursion_setup: PedersenGenerators<GrumpkinProjective>,
+        program_commitments: TrustedProgramCommitments<PCS>,
+    ) -> JoltVerifierPreprocessing<F, PCS> {
+        Self {
+            generators,
+            shared,
+            hyrax_recursion_setup,
+            program: VerifierProgram::Committed(program_commitments),
         }
     }
 }
@@ -1348,11 +1675,18 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> From<&JoltProverPreprocessi
 {
     fn from(prover_preprocessing: &JoltProverPreprocessing<F, PCS>) -> Self {
         let generators = PCS::setup_verifier(&prover_preprocessing.generators);
-
+        let shared = prover_preprocessing.shared.clone();
+        let hyrax_recursion_setup = prover_preprocessing.hyrax_recursion_setup.clone();
+        // Choose VerifierProgram variant based on whether prover has program commitments
+        let program = match &prover_preprocessing.program_commitments {
+            Some(commitments) => VerifierProgram::Committed(commitments.clone()),
+            None => VerifierProgram::Full(Arc::clone(&prover_preprocessing.program)),
+        };
         Self {
             generators,
-            shared: prover_preprocessing.shared.clone(),
-            hyrax_recursion_setup: prover_preprocessing.hyrax_recursion_setup.clone(),
+            shared,
+            hyrax_recursion_setup,
+            program,
         }
     }
 }

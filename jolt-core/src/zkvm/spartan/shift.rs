@@ -13,15 +13,19 @@ use crate::poly::multilinear_polynomial::{
     BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
 };
 use crate::poly::opening_proof::{
-    OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
+    OpeningAccumulator, OpeningPoint, PolynomialId, ProverOpeningAccumulator, SumcheckId,
     VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
 };
 use crate::poly::unipoly::UniPoly;
+use crate::subprotocols::sumcheck_claim::{
+    CachedPointRef, ChallengePart, Claim, ClaimExpr, InputOutputClaims, SumcheckFrontend,
+    VerifierEvaluablePolynomial,
+};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier};
 use crate::transcripts::Transcript;
-use crate::zkvm::bytecode::BytecodePreprocessing;
 use crate::zkvm::instruction::{CircuitFlags, InstructionFlags};
+use crate::zkvm::program::ProgramPreprocessing;
 use crate::zkvm::r1cs::inputs::ShiftSumcheckCycleState;
 use crate::zkvm::witness::VirtualPolynomial;
 use rayon::prelude::*;
@@ -146,10 +150,9 @@ impl<F: JoltField> ShiftSumcheckProver<F> {
     pub fn initialize(
         params: ShiftSumcheckParams<F>,
         trace: Arc<Vec<Cycle>>,
-        bytecode_preprocessing: &BytecodePreprocessing,
+        program: &crate::zkvm::program::ProgramPreprocessing,
     ) -> Self {
-        let phase =
-            ShiftSumcheckPhase::Phase1(Phase1State::gen(trace, bytecode_preprocessing, &params));
+        let phase = ShiftSumcheckPhase::Phase1(Phase1State::gen(trace, program, &params));
         Self { phase, params }
     }
 }
@@ -180,7 +183,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftSumcheck
                     sumcheck_challenges.push(r_j);
                     self.phase = ShiftSumcheckPhase::Phase2(Phase2State::gen(
                         &state.trace,
-                        &state.bytecode_preprocessing,
+                        &state.program,
                         &sumcheck_challenges,
                         &self.params,
                     ));
@@ -269,6 +272,19 @@ impl<F: JoltField> ShiftSumcheckVerifier<F> {
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftSumcheckVerifier<F> {
+    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
+        let result = self.params.input_claim(accumulator);
+
+        #[cfg(test)]
+        {
+            let reference_result =
+                Self::input_output_claims().input_claim(&self.params.gamma_powers, accumulator);
+            assert_eq!(result, reference_result);
+        }
+
+        result
+    }
+
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
         &self.params
     }
@@ -278,6 +294,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftSumche
         accumulator: &VerifierOpeningAccumulator<F>,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
+        let r = normalize_opening_point::<F>(sumcheck_challenges);
+
         // Get the shift evaluations from the accumulator
         let (_, unexpanded_pc_claim) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::UnexpandedPC,
@@ -298,13 +316,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftSumche
             SumcheckId::SpartanShift,
         );
 
-        let r = normalize_opening_point::<F>(sumcheck_challenges);
         let eq_plus_one_r_outer_at_shift =
             EqPlusOnePolynomial::<F>::new(self.params.r_outer.r.to_vec()).evaluate(&r.r);
         let eq_plus_one_r_product_at_shift =
             EqPlusOnePolynomial::<F>::new(self.params.r_product.r.to_vec()).evaluate(&r.r);
 
-        [
+        let result = [
             unexpanded_pc_claim,
             pc_claim,
             is_virtual_claim,
@@ -317,7 +334,20 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftSumche
             * eq_plus_one_r_outer_at_shift
             + self.params.gamma_powers[4]
                 * (F::one() - is_noop_claim)
-                * eq_plus_one_r_product_at_shift
+                * eq_plus_one_r_product_at_shift;
+
+        #[cfg(test)]
+        {
+            let reference_result = Self::input_output_claims().expected_output_claim(
+                &r,
+                &self.params.gamma_powers,
+                accumulator,
+            );
+
+            assert_eq!(result, reference_result);
+        }
+
+        result
     }
 
     fn cache_openings(
@@ -360,6 +390,73 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftSumche
     }
 }
 
+impl<F: JoltField> SumcheckFrontend<F> for ShiftSumcheckVerifier<F> {
+    fn input_output_claims() -> InputOutputClaims<F> {
+        let next_unexpanded_pc: ClaimExpr<F> = VirtualPolynomial::NextUnexpandedPC.into();
+        let next_pc: ClaimExpr<F> = VirtualPolynomial::NextPC.into();
+        let next_is_virtual: ClaimExpr<F> = VirtualPolynomial::NextIsVirtual.into();
+        let next_is_first_in_sequence: ClaimExpr<F> =
+            VirtualPolynomial::NextIsFirstInSequence.into();
+        let next_is_noop: ClaimExpr<F> = VirtualPolynomial::NextIsNoop.into();
+
+        let unexpanded_pc: ClaimExpr<F> = VirtualPolynomial::UnexpandedPC.into();
+        let pc: ClaimExpr<F> = VirtualPolynomial::PC.into();
+        let is_virtual: ClaimExpr<F> =
+            VirtualPolynomial::OpFlags(CircuitFlags::VirtualInstruction).into();
+        let is_first_in_sequence: ClaimExpr<F> =
+            VirtualPolynomial::OpFlags(CircuitFlags::IsFirstInSequence).into();
+        let is_noop: ClaimExpr<F> =
+            VirtualPolynomial::InstructionFlags(InstructionFlags::IsNoop).into();
+
+        let outer_sumcheck_r = VerifierEvaluablePolynomial::EqPlusOne(CachedPointRef {
+            opening: PolynomialId::Virtual(VirtualPolynomial::NextPC),
+            sumcheck: SumcheckId::SpartanOuter,
+            part: ChallengePart::Cycle,
+        });
+        let product_sumcheck_r = VerifierEvaluablePolynomial::EqPlusOne(CachedPointRef {
+            opening: PolynomialId::Virtual(VirtualPolynomial::NextIsNoop),
+            sumcheck: SumcheckId::SpartanProductVirtualization,
+            part: ChallengePart::Cycle,
+        });
+
+        InputOutputClaims {
+            claims: vec![
+                Claim {
+                    input_sumcheck_id: SumcheckId::SpartanOuter,
+                    input_claim_expr: next_unexpanded_pc,
+                    batching_poly: outer_sumcheck_r,
+                    expected_output_claim_expr: unexpanded_pc,
+                },
+                Claim {
+                    input_sumcheck_id: SumcheckId::SpartanOuter,
+                    input_claim_expr: next_pc,
+                    batching_poly: outer_sumcheck_r,
+                    expected_output_claim_expr: pc,
+                },
+                Claim {
+                    input_sumcheck_id: SumcheckId::SpartanOuter,
+                    input_claim_expr: next_is_virtual,
+                    batching_poly: outer_sumcheck_r,
+                    expected_output_claim_expr: is_virtual,
+                },
+                Claim {
+                    input_sumcheck_id: SumcheckId::SpartanOuter,
+                    input_claim_expr: next_is_first_in_sequence,
+                    batching_poly: outer_sumcheck_r,
+                    expected_output_claim_expr: is_first_in_sequence,
+                },
+                Claim {
+                    input_sumcheck_id: SumcheckId::SpartanProductVirtualization,
+                    input_claim_expr: ClaimExpr::Constant(F::one()) - next_is_noop,
+                    batching_poly: product_sumcheck_r,
+                    expected_output_claim_expr: ClaimExpr::Constant(F::one()) - is_noop,
+                },
+            ],
+            output_sumcheck_id: SumcheckId::SpartanShift,
+        }
+    }
+}
+
 /// State for 1st half of the rounds.
 ///
 /// Performs prefix-suffix sumcheck. See <https://eprint.iacr.org/2025/611.pdf> (Appendix A).
@@ -371,14 +468,14 @@ struct Phase1State<F: JoltField> {
     #[allocative(skip)]
     trace: Arc<Vec<Cycle>>,
     #[allocative(skip)]
-    bytecode_preprocessing: BytecodePreprocessing,
+    program: ProgramPreprocessing,
     sumcheck_challenges: Vec<F::Challenge>,
 }
 
 impl<F: JoltField> Phase1State<F> {
     fn gen(
         trace: Arc<Vec<Cycle>>,
-        bytecode_preprocessing: &BytecodePreprocessing,
+        program: &crate::zkvm::program::ProgramPreprocessing,
         params: &ShiftSumcheckParams<F>,
     ) -> Self {
         let EqPlusOnePrefixSuffixPoly {
@@ -443,7 +540,7 @@ impl<F: JoltField> Phase1State<F> {
                                 is_virtual,
                                 is_first_in_sequence,
                                 is_noop,
-                            } = ShiftSumcheckCycleState::new(&trace[x], bytecode_preprocessing);
+                            } = ShiftSumcheckCycleState::new(&trace[x], program);
 
                             let mut v =
                                 F::from_u64(unexpanded_pc) + params.gamma_powers[1].mul_u64(pc);
@@ -493,7 +590,7 @@ impl<F: JoltField> Phase1State<F> {
         Self {
             prefix_suffix_pairs,
             trace,
-            bytecode_preprocessing: bytecode_preprocessing.clone(),
+            program: program.clone(),
             sumcheck_challenges: Vec::new(),
         }
     }
@@ -550,7 +647,7 @@ struct Phase2State<F: JoltField> {
 impl<F: JoltField> Phase2State<F> {
     fn gen(
         trace: &[Cycle],
-        bytecode_preprocessing: &BytecodePreprocessing,
+        program: &crate::zkvm::program::ProgramPreprocessing,
         sumcheck_challenges: &[F::Challenge],
         params: &ShiftSumcheckParams<F>,
     ) -> Self {
@@ -624,7 +721,7 @@ impl<F: JoltField> Phase2State<F> {
                             is_virtual,
                             is_first_in_sequence,
                             is_noop,
-                        } = ShiftSumcheckCycleState::new(cycle, bytecode_preprocessing);
+                        } = ShiftSumcheckCycleState::new(cycle, program);
                         let eq_eval = eq_evals[i];
                         unexpanded_pc_eval_unreduced += eq_eval.mul_u64_unreduced(unexpanded_pc);
                         pc_eval_unreduced += eq_eval.mul_u64_unreduced(pc);

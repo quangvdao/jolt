@@ -4,7 +4,27 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 mod e2e_profiling;
 use e2e_profiling::{benchmarks, master_benchmark, BenchType};
 
+use jolt_core::poly::commitment::dory::{DoryGlobals, DoryLayout};
 use std::any::Any;
+
+/// CLI-friendly layout enum that maps to DoryLayout
+#[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
+pub enum LayoutArg {
+    /// Cycle-major layout (default): index = address * T + cycle
+    #[default]
+    CycleMajor,
+    /// Address-major layout: index = cycle * K + address
+    AddressMajor,
+}
+
+impl From<LayoutArg> for DoryLayout {
+    fn from(arg: LayoutArg) -> Self {
+        match arg {
+            LayoutArg::CycleMajor => DoryLayout::CycleMajor,
+            LayoutArg::AddressMajor => DoryLayout::AddressMajor,
+        }
+    }
+}
 
 use chrono::Local;
 use tracing_chrome::ChromeLayerBuilder;
@@ -36,6 +56,10 @@ struct ProfileArgs {
     /// Use committed program mode
     #[clap(long, default_value = "false")]
     committed: bool,
+
+    /// Dory matrix layout (cycle-major or address-major)
+    #[clap(long, value_enum, default_value = "cycle-major")]
+    layout: LayoutArg,
 }
 
 #[derive(Args, Debug)]
@@ -139,9 +163,18 @@ fn setup_tracing(formats: Option<Vec<Format>>, trace_name: &str) -> Vec<Box<dyn 
 fn trace(args: ProfileArgs) {
     let bench_name = normalize_bench_name(&args.name.to_string());
     let mode_suffix = if args.committed { "_committed" } else { "" };
+    let layout_suffix = match args.layout {
+        LayoutArg::CycleMajor => "",
+        LayoutArg::AddressMajor => "_addr_major",
+    };
     let timestamp = Local::now().format("%Y%m%d-%H%M");
-    let trace_name = format!("{bench_name}{mode_suffix}_{timestamp}");
+    let trace_name = format!("{bench_name}{mode_suffix}{layout_suffix}_{timestamp}");
     let _guards = setup_tracing(args.format, &trace_name);
+
+    // Set the Dory layout before running benchmarks
+    let layout: DoryLayout = args.layout.into();
+    DoryGlobals::set_layout(layout);
+    tracing::info!("Using Dory layout: {:?}", layout);
 
     for (span, bench) in benchmarks(args.name, args.committed).into_iter() {
         span.in_scope(|| {
@@ -162,8 +195,17 @@ fn run_benchmark(args: BenchmarkArgs) {
     };
 
     let bench_name = normalize_bench_name(&args.profile_args.name.to_string());
-    let trace_name = format!("{bench_name}_{scale}");
+    let layout_suffix = match args.profile_args.layout {
+        LayoutArg::CycleMajor => "",
+        LayoutArg::AddressMajor => "_addr_major",
+    };
+    let trace_name = format!("{bench_name}{layout_suffix}_{scale}");
     let _guards = setup_tracing(args.profile_args.format, &trace_name);
+
+    // Set the Dory layout before running benchmarks
+    let layout: DoryLayout = args.profile_args.layout.into();
+    DoryGlobals::set_layout(layout);
+    tracing::info!("Using Dory layout: {:?}", layout);
 
     // Call master_benchmark with parameters
     for (span, bench) in

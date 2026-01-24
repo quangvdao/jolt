@@ -80,14 +80,14 @@ impl CanonicalDeserialize for JoltHintMap {
 }
 
 #[cfg(feature = "experimental-pairing-recursion")]
-use super::multi_miller_loop_witness::MultiMillerLoopSteps;
+use super::witness::multi_miller_loop::MultiMillerLoopSteps;
 use super::{
     commitment_scheme::DoryCommitmentScheme,
-    g1_scalar_mul_witness::ScalarMultiplicationSteps,
-    g2_scalar_mul_witness::G2ScalarMultiplicationSteps,
-    gt_exp_witness::Base4ExponentiationSteps,
-    gt_mul_witness::MultiplicationSteps,
     jolt_dory_routines::{JoltG1Routines, JoltG2Routines},
+    witness::{
+        g1_scalar_mul::ScalarMultiplicationSteps, g2_scalar_mul::G2ScalarMultiplicationSteps,
+        gt_exp::Base4ExponentiationSteps, gt_mul::MultiplicationSteps,
+    },
     wrappers::{
         ark_to_jolt, jolt_to_ark, ArkDoryProof, ArkFr, ArkworksVerifierSetup, JoltToDoryTranscript,
     },

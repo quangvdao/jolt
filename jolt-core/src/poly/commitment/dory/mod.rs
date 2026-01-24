@@ -5,14 +5,9 @@
 
 mod commitment_scheme;
 mod dory_globals;
-pub mod g1_scalar_mul_witness;
-pub mod g2_scalar_mul_witness;
-pub mod gt_exp_witness;
-pub mod gt_mul_witness;
 mod jolt_dory_routines;
-#[cfg(feature = "experimental-pairing-recursion")]
-pub mod multi_miller_loop_witness;
 pub mod recursion;
+pub mod witness;
 pub mod wrappers;
 
 #[cfg(test)]

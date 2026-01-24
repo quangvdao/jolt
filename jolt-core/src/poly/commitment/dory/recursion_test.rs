@@ -2,7 +2,7 @@
 mod recursion_tests {
     use super::super::recursion::{JoltWitness, JoltWitnessGenerator};
     use super::super::{DoryCommitmentScheme, DoryContext, DoryGlobals, BN254};
-    use crate::poly::commitment::dory::gt_exp_witness::Base4ExponentiationSteps;
+    use crate::poly::commitment::dory::witness::gt_exp::Base4ExponentiationSteps;
     use crate::{
         field::JoltField,
         poly::{

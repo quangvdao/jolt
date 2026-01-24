@@ -31,6 +31,9 @@ enum Commands {
         /// Working directory for output files
         #[arg(long, value_name = "DIRECTORY", default_value = "output")]
         workdir: PathBuf,
+        /// Use committed program mode (verifier only gets commitments, not full program)
+        #[arg(long, default_value_t = false)]
+        committed: bool,
     },
     /// Verify proofs and optionally embed them
     Verify {
@@ -43,6 +46,9 @@ enum Commands {
         /// Embed proof data to specified directory
         #[arg(long, value_name = "DIRECTORY", num_args = 0..=1)]
         embed: Option<Option<PathBuf>>,
+        /// Use committed program mode (verifier only gets commitments, not full program)
+        #[arg(long, default_value_t = false)]
+        committed: bool,
     },
     /// Trace the execution of guest programs without attempting to prove them
     Trace {
@@ -58,6 +64,9 @@ enum Commands {
         /// Trace to disk instead of memory (redues memory usage)
         #[arg(short = 'd', long = "disk", default_value_t = false)]
         trace_to_file: bool,
+        /// Use committed program mode (verifier only gets commitments, not full program)
+        #[arg(long, default_value_t = false)]
+        committed: bool,
     },
     /// Debug proof deserialization
     Debug {
@@ -276,8 +285,14 @@ fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     (n, remaining_data.len() as u32)
 }
 
-fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) -> Vec<u8> {
+fn collect_guest_proofs(
+    guest: GuestProgram,
+    target_dir: &str,
+    use_embed: bool,
+    use_committed: bool,
+) -> Vec<u8> {
     info!("Starting collect_guest_proofs for {}", guest.name());
+    info!("Using committed program mode: {use_committed}");
     let max_trace_length = guest.get_max_trace_length(use_embed);
 
     // This should match the example being run, it can cause layout issues if the guest's macro and our assumption here differ
@@ -299,9 +314,12 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
     let mut guest_prog = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
     guest_prog.elf = program.elf;
 
-    info!("Preprocessing guest prover...");
-    let guest_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&guest_prog, max_trace_length);
+    info!("Preprocessing guest prover (committed={use_committed})...");
+    let guest_prover_preprocessing = if use_committed {
+        jolt_sdk::guest::prover::preprocess_committed(&guest_prog, max_trace_length)
+    } else {
+        jolt_sdk::guest::prover::preprocess(&guest_prog, max_trace_length)
+    };
     info!("Preprocessing guest verifier...");
     let guest_verifier_preprocessing =
         jolt_sdk::JoltVerifierPreprocessing::from(&guest_prover_preprocessing);
@@ -593,13 +611,14 @@ fn load_proof_data(guest: GuestProgram, workdir: &Path) -> Vec<u8> {
     proof_data
 }
 
-fn generate_proofs(guest: GuestProgram, workdir: &Path) {
+fn generate_proofs(guest: GuestProgram, workdir: &Path, use_committed: bool) {
     info!("Generating proofs for {} guest program...", guest.name());
+    info!("Using committed program mode: {use_committed}");
 
     let target_dir = "/tmp/jolt-guest-targets";
 
     // Collect guest proofs
-    let all_groups_data = collect_guest_proofs(guest, target_dir, false);
+    let all_groups_data = collect_guest_proofs(guest, target_dir, false, use_committed);
 
     // Save proof data
     save_proof_data(guest, &all_groups_data, workdir);
@@ -613,8 +632,11 @@ fn run_recursion_proof(
     input_bytes: Vec<u8>,
     memory_config: MemoryConfig,
     mut max_trace_length: usize,
+    use_committed: bool,
 ) {
     let target_dir = "/tmp/jolt-guest-targets";
+
+    info!("Using committed program mode: {use_committed}");
 
     let mut program = jolt_sdk::host::Program::new("recursion-guest");
     program.set_func("verify");
@@ -629,8 +651,11 @@ fn run_recursion_proof(
         // shorten the max_trace_length for tracing only. Speeds up setup time for tracing purposes.
         max_trace_length = 0;
     }
-    let recursion_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length);
+    let recursion_prover_preprocessing = if use_committed {
+        jolt_sdk::guest::prover::preprocess_committed(&recursion, max_trace_length)
+    } else {
+        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length)
+    };
     let recursion_verifier_preprocessing =
         jolt_sdk::JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
 
@@ -699,9 +724,11 @@ fn verify_proofs(
     workdir: &Path,
     output_dir: &Path,
     run_config: RunConfig,
+    use_committed: bool,
 ) {
     info!("Verifying proofs for {} guest program...", guest.name());
     info!("Using embed mode: {use_embed}");
+    info!("Using committed program mode: {use_committed}");
 
     generate_provable_macro(guest, use_embed, output_dir);
 
@@ -725,6 +752,7 @@ fn verify_proofs(
             input_bytes,
             memory_config,
             guest.get_max_trace_length(use_embed),
+            use_committed,
         );
     } else {
         info!("Running {} recursion with input data...", guest.name());
@@ -754,6 +782,7 @@ fn verify_proofs(
             input_bytes,
             memory_config,
             guest.get_max_trace_length(use_embed),
+            use_committed,
         );
     }
 }
@@ -764,7 +793,11 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Generate { example, workdir }) => {
+        Some(Commands::Generate {
+            example,
+            workdir,
+            committed,
+        }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
                 None => {
@@ -772,12 +805,13 @@ fn main() {
                     return;
                 }
             };
-            generate_proofs(guest, workdir);
+            generate_proofs(guest, workdir, *committed);
         }
         Some(Commands::Verify {
             example,
             workdir,
             embed,
+            committed,
         }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
@@ -797,6 +831,7 @@ fn main() {
                 workdir,
                 &output_dir,
                 RunConfig::Prove,
+                *committed,
             );
         }
         Some(Commands::Trace {
@@ -804,6 +839,7 @@ fn main() {
             workdir,
             embed,
             trace_to_file,
+            committed,
         }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
@@ -822,7 +858,14 @@ fn main() {
             } else {
                 RunConfig::Trace
             };
-            verify_proofs(guest, embed.is_some(), workdir, &output_dir, run_config);
+            verify_proofs(
+                guest,
+                embed.is_some(),
+                workdir,
+                &output_dir,
+                run_config,
+                *committed,
+            );
         }
         Some(Commands::Debug { example, workdir }) => {
             let guest = match GuestProgram::from_str(example) {
@@ -837,16 +880,16 @@ fn main() {
         }
         None => {
             info!("No subcommand specified. Available commands:");
-            info!("  generate --example <fibonacci|muldiv> [--workdir <DIR>]");
-            info!("  verify --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>]");
+            info!("  generate --example <fibonacci|muldiv> [--workdir <DIR>] [--committed]");
+            info!("  verify --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed]");
             info!("");
             info!("Examples:");
             info!("  cargo run --release -- generate --example fibonacci");
-            info!("  cargo run --release -- generate --example fibonacci --workdir ./output");
+            info!("  cargo run --release -- generate --example fibonacci --workdir ./output --committed");
             info!("  cargo run --release -- verify --example fibonacci");
-            info!("  cargo run --release -- verify --example fibonacci --workdir ./output --embed");
-            info!("  cargo run --release -- trace --example fibonacci --embed");
-            info!("  cargo run --release -- trace --example fibonacci --embed --disk");
+            info!("  cargo run --release -- verify --example fibonacci --workdir ./output --embed --committed");
+            info!("  cargo run --release -- trace --example fibonacci --embed --committed");
+            info!("  cargo run --release -- trace --example fibonacci --embed --disk --committed");
         }
     }
 }

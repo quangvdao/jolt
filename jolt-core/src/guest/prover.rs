@@ -31,6 +31,31 @@ pub fn preprocess(
     JoltProverPreprocessing::new(shared, program)
 }
 
+/// Preprocess a guest program in Committed mode.
+///
+/// In Committed mode, the verifier only receives commitments to the program
+/// (bytecode + program image) rather than the full program data.
+#[allow(clippy::type_complexity)]
+#[cfg(feature = "prover")]
+pub fn preprocess_committed(
+    guest: &Program,
+    max_trace_length: usize,
+) -> JoltProverPreprocessing<ark_bn254::Fr, DoryCommitmentScheme> {
+    use crate::zkvm::program::ProgramPreprocessing;
+    use crate::zkvm::verifier::JoltSharedPreprocessing;
+    use std::sync::Arc;
+
+    let (instructions, memory_init, program_size) = guest.decode();
+
+    let mut memory_config = guest.memory_config;
+    memory_config.program_size = Some(program_size);
+    let memory_layout = MemoryLayout::new(&memory_config);
+
+    let program = Arc::new(ProgramPreprocessing::preprocess(instructions, memory_init));
+    let shared = JoltSharedPreprocessing::new(program.meta(), memory_layout, max_trace_length);
+    JoltProverPreprocessing::new_committed(shared, program)
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "prover")]
 pub fn prove<
@@ -54,9 +79,17 @@ pub fn prove<
 where
     <PCS as RecursionExt<F>>::Hint: Send + Sync + 'static,
 {
+    use crate::zkvm::config::ProgramMode;
     use crate::zkvm::prover::JoltCpuProver;
 
-    let prover = JoltCpuProver::gen_from_elf(
+    // Detect program mode from preprocessing: if program_commitments is Some, use Committed mode
+    let program_mode = if preprocessing.is_committed_mode() {
+        ProgramMode::Committed
+    } else {
+        ProgramMode::Full
+    };
+
+    let prover = JoltCpuProver::gen_from_elf_with_program_mode(
         preprocessing,
         &guest.elf_contents,
         inputs_bytes,
@@ -64,6 +97,7 @@ where
         trusted_advice_bytes,
         trusted_advice_commitment,
         trusted_advice_hint,
+        program_mode,
     );
     let io_device = prover.program_io.clone();
     let (proof, debug_info) = prover.prove();

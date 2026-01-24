@@ -1095,10 +1095,10 @@ where
                         CommittedPolynomial::BytecodeChunk(0),
                         SumcheckId::BytecodeClaimReduction,
                     );
-                let log_t = opening_point.r.len() - log_k_chunk;
-                let log_k = bytecode_point.r.len() - log_k_chunk;
                 #[cfg(test)]
                 {
+                    let log_t = opening_point.r.len() - log_k_chunk;
+                    let log_k = bytecode_point.r.len() - log_k_chunk;
                     if log_k == log_t {
                         assert_eq!(
                             bytecode_point.r, opening_point.r,

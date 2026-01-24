@@ -1,5 +1,11 @@
+//! Traits for MSM algorithms.
+//!
+//! These traits abstract over curve-specific implementations, allowing the
+//! same MSM algorithms to work with any elliptic curve.
+
 /// Minimal group operations required by MSM algorithms.
-/// Implementors: curve point types (e.g., GrumpkinPoint).
+///
+/// Implementors: curve point types (e.g., GrumpkinPoint, Secp256k1Point).
 pub trait MsmGroup: Clone + Sized {
     /// The additive identity (point at infinity).
     fn identity() -> Self;
@@ -29,7 +35,9 @@ pub trait MsmGroup: Clone + Sized {
 }
 
 /// Interface for extracting windows of bits from scalars.
-/// Abstracts away limb layout and bit-width differences.
+///
+/// Abstracts away limb layout and bit-width differences, allowing the same
+/// Pippenger implementation to work with different scalar representations.
 pub trait WindowedScalar: Clone {
     /// Total number of bits in this scalar representation.
     fn bit_len(&self) -> usize;
@@ -40,13 +48,18 @@ pub trait WindowedScalar: Clone {
 }
 
 /// Marker trait for curves with efficient GLV endomorphism.
-/// Enables the GLV-accelerated MSM path.
+///
+/// Curves with a GLV endomorphism can decompose a 256-bit scalar into two
+/// ~128-bit half-scalars, effectively halving the number of point doublings
+/// needed in MSM at the cost of doubling the number of points.
+///
+/// For curves without GLV, use the standard [`msm_pippenger`](crate::msm_pippenger) instead.
 pub trait GlvCapable: MsmGroup {
     /// Half-scalar type after decomposition (e.g., u128).
     /// Must implement Default for buffer initialization.
     type HalfScalar: WindowedScalar + Default;
 
-    /// Full scalar type before decomposition (e.g., GrumpkinFr).
+    /// Full scalar type before decomposition (e.g., curve's Fr type).
     /// Must be Clone to allow iteration over scalar slices.
     type FullScalar: Clone;
 

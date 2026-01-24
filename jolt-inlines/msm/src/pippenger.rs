@@ -1,6 +1,8 @@
+//! Pippenger's bucket method for multi-scalar multiplication.
+
 use alloc::vec::Vec;
 
-use crate::msm::traits::{MsmGroup, WindowedScalar};
+use crate::traits::{MsmGroup, WindowedScalar};
 
 #[inline(always)]
 fn double_n<G: MsmGroup>(mut acc: G, n: usize) -> G {
@@ -79,6 +81,9 @@ where
 }
 
 /// Pippenger MSM: Σ(scalar_i · point_i) with compile-time window sizing.
+///
+/// Using a const generic for window size allows the compiler to optimize
+/// the bucket array size and loop unrolling.
 #[inline(always)]
 pub fn msm_pippenger_const<G, S, const WINDOW_BITS: usize>(scalars: &[S], points: &[G]) -> G
 where
@@ -128,11 +133,7 @@ where
         }
 
         if started {
-            let mut shift = 0;
-            while shift < WINDOW_BITS {
-                result = result.double();
-                shift += 1;
-            }
+            result = double_n(result, WINDOW_BITS);
         } else if !window_sum.is_identity() {
             started = true;
         }

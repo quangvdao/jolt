@@ -1,18 +1,15 @@
-//! Grumpkin MSM utilities (GLV + Pippenger + Fixed-base) for use in the zkVM guest.
+//! Grumpkin MSM utilities for use in the zkVM guest.
 //!
-//! This module is a direct integration of the MSM code that previously lived in
-//! `examples/msm/guest`, made reusable for Hyrax verification and recursion.
+//! This module provides Grumpkin-specific MSM functionality by:
+//! 1. Re-exporting generic MSM algorithms from `jolt-inlines-msm`
+//! 2. Implementing the MSM traits for `GrumpkinPoint`
+//! 3. Providing Grumpkin-specific constants and type aliases
 
-pub mod fixed_base;
-pub mod glv;
-pub mod pippenger;
-pub mod scalar;
-pub mod traits;
-
-pub use fixed_base::*;
-pub use glv::*;
-pub use pippenger::*;
-pub use traits::*;
+// Re-export all generic MSM functionality from jolt-inlines-msm
+pub use jolt_inlines_msm::{
+    msm_fixed_base, msm_glv, msm_glv_const, msm_glv_with_scratch_const, msm_pippenger,
+    msm_pippenger_const, FixedBaseTable, GlvCapable, MsmGroup, WindowedScalar,
+};
 
 use crate::{GrumpkinFr, GrumpkinPoint};
 
@@ -59,9 +56,14 @@ pub const FIXED_BASE_WINDOWS: usize = SCALAR_BITS.div_ceil(FIXED_BASE_WINDOW);
 pub const DEFAULT_GLV_WINDOW_BITS: usize = GLV_WINDOW;
 
 /// Type alias for a fixed-base table for Grumpkin generator multiplication.
-pub type GrumpkinFixedBaseTable = FixedBaseTable<GrumpkinPoint, FIXED_BASE_WINDOWS, FIXED_BASE_BUCKETS>;
+pub type GrumpkinFixedBaseTable =
+    FixedBaseTable<GrumpkinPoint, FIXED_BASE_WINDOWS, FIXED_BASE_BUCKETS>;
 
-impl traits::MsmGroup for GrumpkinPoint {
+// ============================================================
+// Trait Implementations for GrumpkinPoint
+// ============================================================
+
+impl MsmGroup for GrumpkinPoint {
     #[inline(always)]
     fn identity() -> Self {
         GrumpkinPoint::infinity()
@@ -93,7 +95,7 @@ impl traits::MsmGroup for GrumpkinPoint {
     }
 }
 
-impl traits::GlvCapable for GrumpkinPoint {
+impl GlvCapable for GrumpkinPoint {
     type HalfScalar = u128;
     type FullScalar = GrumpkinFr;
 

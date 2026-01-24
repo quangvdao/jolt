@@ -1,0 +1,14 @@
+[package]
+name = "jolt-inlines-msm"
+version = "0.1.0"
+edition = "2021"
+description = "Generic MSM (multi-scalar multiplication) algorithms for Jolt VM guest code"
+license = "MIT"
+homepage = "https://github.com/a16z/jolt/README.md"
+repository = "https://github.com/a16z/jolt"
+
+[features]
+default = []
+
+[dependencies]
+# No dependencies - this is a pure no_std library with only alloc

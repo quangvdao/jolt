@@ -1,7 +1,14 @@
+//! GLV-accelerated multi-scalar multiplication.
+//!
+//! For curves with an efficient endomorphism φ where φ(P) = [λ]P,
+//! we can decompose each scalar k ≡ k1 + k2·λ (mod n) where k1, k2
+//! are ~half the bit-width of k. This halves the number of doublings
+//! at the cost of doubling the number of points.
+
 use alloc::vec::Vec;
 
-use crate::msm::pippenger::{msm_pippenger, msm_pippenger_const};
-use crate::msm::traits::GlvCapable;
+use crate::pippenger::{msm_pippenger, msm_pippenger_const};
+use crate::traits::GlvCapable;
 
 /// Expand (scalar, point) pairs into GLV-decomposed form.
 /// For each (k, P), produces (k1, P') and (k2, φ(P')) where k ≡ k1 + k2·λ.
@@ -73,6 +80,9 @@ where
 }
 
 /// GLV-accelerated MSM using caller-provided scratch buffers (no heap allocation).
+///
+/// Use this variant when you want to avoid heap allocations, for example
+/// in constrained environments or when reusing buffers across multiple MSMs.
 #[inline(always)]
 pub fn msm_glv_with_scratch_const<G, const WINDOW_BITS: usize>(
     scalars: &[G::FullScalar],

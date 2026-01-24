@@ -2045,6 +2045,7 @@ dependencies = [
  "ark-serialize",
  "ctor 0.2.9",
  "hex-literal",
+ "jolt-inlines-msm",
  "num-bigint",
  "num-integer",
  "serde",
@@ -2062,6 +2063,10 @@ dependencies = [
  "tracer",
  "tracing",
 ]
+
+[[package]]
+name = "jolt-inlines-msm"
+version = "0.1.0"
 
 [[package]]
 name = "jolt-inlines-secp256k1"

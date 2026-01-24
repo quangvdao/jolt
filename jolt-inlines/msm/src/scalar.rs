@@ -1,6 +1,10 @@
-use crate::msm::traits::WindowedScalar;
+//! WindowedScalar implementations for common scalar types.
 
-// 256-bit scalar as 4 limbs.
+use crate::traits::WindowedScalar;
+
+/// 256-bit scalar as 4 limbs (little-endian).
+///
+/// Common representation for BN254 and Grumpkin scalar fields.
 impl WindowedScalar for [u64; 4] {
     #[inline(always)]
     fn bit_len(&self) -> usize {
@@ -28,7 +32,9 @@ impl WindowedScalar for [u64; 4] {
     }
 }
 
-// 128-bit scalar (for GLV half-scalars).
+/// 128-bit scalar (for GLV half-scalars).
+///
+/// After GLV decomposition, each 256-bit scalar becomes two ~128-bit half-scalars.
 impl WindowedScalar for u128 {
     #[inline(always)]
     fn bit_len(&self) -> usize {

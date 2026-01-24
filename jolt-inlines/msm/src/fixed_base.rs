@@ -1,11 +1,18 @@
+//! Fixed-base scalar multiplication with precomputed tables.
+//!
+//! When performing many scalar multiplications with the same base point
+//! (e.g., the generator), precomputing a table of multiples can significantly
+//! speed up the computation.
+
 use alloc::boxed::Box;
 
-use crate::msm::traits::{MsmGroup, WindowedScalar};
+use crate::traits::{MsmGroup, WindowedScalar};
 
 /// Fixed-base precomputed table for a single base point.
-/// table[window][digit] = digit · 2^(window·width) · base.
 ///
-/// Type parameters:
+/// The table stores `table[window][digit] = digit · 2^(window·width) · base`.
+///
+/// # Type Parameters
 /// - `G`: The group/point type
 /// - `WINDOWS`: Number of windows (= ceil(scalar_bits / window_bits))
 /// - `BUCKETS`: Number of buckets per window (= 2^window_bits)
@@ -18,6 +25,7 @@ impl<G: MsmGroup, const WINDOWS: usize, const BUCKETS: usize> FixedBaseTable<G, 
     pub const WINDOW_BITS: usize = BUCKETS.trailing_zeros() as usize;
 
     /// Precompute table for a given base point.
+    ///
     /// Window size is derived from BUCKETS const generic.
     #[inline(always)]
     pub fn new(base: &G) -> Self {
@@ -69,6 +77,9 @@ impl<G: MsmGroup, const WINDOWS: usize, const BUCKETS: usize> FixedBaseTable<G, 
 }
 
 /// Fixed-base MSM: Σ(scalar_i · base) using precomputed table.
+///
+/// This is efficient when all scalars multiply the same base point,
+/// such as when computing commitments to a polynomial using the generator.
 #[inline(always)]
 pub fn msm_fixed_base<G, S, const WINDOWS: usize, const BUCKETS: usize>(
     scalars: &[S],

@@ -27,6 +27,7 @@ use ark_ff::{One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::backends::arkworks::ArkGT;
 use jolt_optimizations::{fq12_to_multilinear_evals, get_g_mle};
+use rayon::prelude::*;
 
 /// Convert index to binary representation as field elements (little-endian)
 pub fn index_to_binary<F: JoltField>(index: usize, num_vars: usize) -> Vec<F> {
@@ -1699,24 +1700,37 @@ impl DoryMatrixBuilder {
         // Pre-allocate the exact size and initialize to zero
         let mut evaluations = vec![Fq::zero(); capacity];
 
-        // Use unsafe for faster copying without bounds checks
-        unsafe {
-            let eval_ptr = evaluations.as_mut_ptr();
-            let mut offset = 0;
+        // Pre-compute offsets for each PolyType to enable parallel copy
+        // Each PolyType writes to a contiguous block of size num_constraints_padded * row_size
+        let block_size = num_constraints_padded * row_size;
 
-            for &poly_type in PolyType::all() {
-                let rows = &self.rows_by_type[poly_type as usize];
+        // Extract rows_by_type to avoid capturing self in the closure
+        let rows_by_type = &self.rows_by_type;
 
-                // Copy actual rows
-                for row in rows {
-                    std::ptr::copy_nonoverlapping(row.as_ptr(), eval_ptr.add(offset), row_size);
-                    offset += row_size;
+        // Create a wrapper to safely share the evaluations pointer across threads
+        // Safety: Each thread writes to a disjoint region based on type_idx
+        #[derive(Clone, Copy)]
+        struct SendPtr(*mut Fq);
+        unsafe impl Send for SendPtr {}
+        unsafe impl Sync for SendPtr {}
+
+        let send_ptr = SendPtr(evaluations.as_mut_ptr());
+
+        (0..PolyType::NUM_TYPES).into_par_iter().for_each(move |type_idx| {
+            let rows = &rows_by_type[type_idx];
+            let base_offset = type_idx * block_size;
+            let ptr = send_ptr; // Copy the SendPtr (implements Copy)
+
+            // Copy rows for this PolyType
+            for (row_idx, row) in rows.iter().enumerate() {
+                let offset = base_offset + row_idx * row_size;
+                // Safety: Each (type_idx, row_idx) writes to a unique, non-overlapping region
+                unsafe {
+                    std::ptr::copy_nonoverlapping(row.as_ptr(), ptr.0.add(offset), row_size);
                 }
-
-                // Skip zero padding (already initialized to zero)
-                offset += (num_constraints_padded - rows.len()) * row_size;
             }
-        }
+            // Zero padding is already initialized, no need to write zeros
+        });
 
         let matrix = DoryMultilinearMatrix {
             num_s_vars,

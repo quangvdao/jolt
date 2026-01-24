@@ -31,6 +31,7 @@ use ark_bn254::{Fq, Fr};
 use ark_ff::{One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::backends::arkworks::ArkGT;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 use crate::zkvm::recursion::DoryMatrixBuilder;
@@ -121,16 +122,22 @@ impl RecursionProver<Fq> {
             witness_collection.gt_mul.len()
         );
 
-        // Convert witness collection to DoryRecursionWitness
-        let recursion_witness =
-            Self::witnesses_to_dory_recursion(witness_collection, combine_witness.clone())?;
+        // Compute g_poly directly (was previously computed in witnesses_to_dory_recursion)
+        // g(x) is the irreducible polynomial defining the Fq12 extension field
+        let g_poly = {
+            use super::constraints::system::DoryMatrixBuilder;
+            use jolt_optimizations::get_g_mle;
+            let g_mle_4var = get_g_mle();
+            let g_poly_values = DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var);
+            DensePolynomial::new(g_poly_values)
+        };
 
         // Build constraint system from witness collection using DoryMatrixBuilder
         let build_cs_span = tracing::info_span!("build_constraint_system").entered();
         let constraint_system = Self::build_constraint_system(
             witness_collection,
-            recursion_witness.combine_witness.as_ref(),
-            recursion_witness.gt_exp_witness.g_poly.clone(),
+            combine_witness.as_ref(),
+            g_poly,
         )?;
         drop(build_cs_span);
 
@@ -197,16 +204,21 @@ impl RecursionProver<Fq> {
             commitment,
         )?;
 
-        // Convert witness collection to DoryRecursionWitness
-        let recursion_witness =
-            Self::witnesses_to_dory_recursion(&witness_with_ast.witnesses, None)?;
+        // Compute g_poly directly (same as new_from_witnesses)
+        let g_poly = {
+            use super::constraints::system::DoryMatrixBuilder;
+            use jolt_optimizations::get_g_mle;
+            let g_mle_4var = get_g_mle();
+            let g_poly_values = DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var);
+            DensePolynomial::new(g_poly_values)
+        };
 
         // Build constraint system from witness collection
         let build_cs_span = tracing::info_span!("build_constraint_system_with_ast").entered();
         let constraint_system = Self::build_constraint_system(
             &witness_with_ast.witnesses,
-            recursion_witness.combine_witness.as_ref(),
-            recursion_witness.gt_exp_witness.g_poly.clone(),
+            None, // No combine_witness for AST path
+            g_poly,
         )?;
         drop(build_cs_span);
 
@@ -219,6 +231,10 @@ impl RecursionProver<Fq> {
     }
 
     /// Convert Dory witness collection to DoryRecursionWitness
+    ///
+    /// NOTE: This function is no longer called directly - g_poly is now computed inline
+    /// in `new_from_witnesses`. Keeping for reference/testing purposes.
+    #[allow(dead_code)]
     fn witnesses_to_dory_recursion(
         witnesses: &dory::recursion::WitnessCollection<
             crate::poly::commitment::dory::recursion::JoltWitness,
@@ -510,40 +526,47 @@ impl RecursionProver<Fq> {
             count = witness_collection.gt_exp.len()
         )
         .entered();
-        let mut gt_exp_witnesses = Vec::with_capacity(witness_collection.gt_exp.len());
-        let mut gt_exp_public_inputs = Vec::with_capacity(witness_collection.gt_exp.len());
         let mut g1_scalar_mul_public_inputs =
             Vec::with_capacity(witness_collection.g1_scalar_mul.len());
         let mut g2_scalar_mul_public_inputs =
             Vec::with_capacity(witness_collection.g2_scalar_mul.len());
-        // Deterministic order by OpId
+
+        // Sort once, then parallelize expensive witness preparation
         let mut gt_exp_items: Vec<_> = witness_collection.gt_exp.iter().collect();
         gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
-        for (_op_id, witness) in gt_exp_items {
-            // Convert base ArkGT to 4-var MLE
-            let base_mle = fq12_to_multilinear_evals(&witness.base);
-            let base2_mle = fq12_to_multilinear_evals(&(witness.base * witness.base));
-            let base3_mle =
-                fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
 
-            // Create packed witness
-            let packed = GtExpWitness::from_steps(
-                &witness.rho_mles,
-                &witness.quotient_mles,
-                &witness.bits,
-                &base_mle,
-                &base2_mle,
-                &base3_mle,
-            );
+        // Parallel computation of packed witnesses (expensive work)
+        let prepared_gt_exp: Vec<_> = gt_exp_items
+            .par_iter()
+            .map(|(_op_id, witness)| {
+                // Convert base ArkGT to 4-var MLE (expensive)
+                let base_mle = fq12_to_multilinear_evals(&witness.base);
+                let base2 = witness.base * witness.base;
+                let base2_mle = fq12_to_multilinear_evals(&base2);
+                let base3_mle = fq12_to_multilinear_evals(&(base2 * witness.base));
 
-            // Add to matrix (ONE constraint per packed GT exp)
+                // Create packed witness (expensive)
+                let packed = GtExpWitness::from_steps(
+                    &witness.rho_mles,
+                    &witness.quotient_mles,
+                    &witness.bits,
+                    &base_mle,
+                    &base2_mle,
+                    &base3_mle,
+                );
+
+                let public_input = GtExpPublicInputs::new(witness.base, witness.bits.clone());
+                (packed, public_input)
+            })
+            .collect();
+
+        // Sequential addition to builder (requires mutable state)
+        let mut gt_exp_witnesses = Vec::with_capacity(prepared_gt_exp.len());
+        let mut gt_exp_public_inputs = Vec::with_capacity(prepared_gt_exp.len());
+        for (packed, public_input) in prepared_gt_exp {
             builder.add_gt_exp_witness(&packed);
-
-            // Keep for Stage 1 prover
             gt_exp_witnesses.push(packed);
-
-            // Store public inputs for verifier
-            gt_exp_public_inputs.push(GtExpPublicInputs::new(witness.base, witness.bits.clone()));
+            gt_exp_public_inputs.push(public_input);
         }
         drop(gt_exp_span);
 

@@ -1087,6 +1087,57 @@ where
                 ));
             }
 
+            // Bytecode chunk polynomials: committed in Bytecode context and embedded into the
+            // main opening point by fixing the extra cycle variables to 0.
+            if self.proof.program_mode == ProgramMode::Committed {
+                let (bytecode_point, _) =
+                    self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::BytecodeChunk(0),
+                        SumcheckId::BytecodeClaimReduction,
+                    );
+                let log_t = opening_point.r.len() - log_k_chunk;
+                let log_k = bytecode_point.r.len() - log_k_chunk;
+                #[cfg(test)]
+                {
+                    if log_k == log_t {
+                        assert_eq!(
+                            bytecode_point.r, opening_point.r,
+                            "BytecodeChunk opening point must equal unified opening point when log_K == log_T"
+                        );
+                    }
+                }
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &bytecode_point.r);
+
+                let num_chunks = total_lanes().div_ceil(self.one_hot_params.k_chunk);
+                for i in 0..num_chunks {
+                    let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::BytecodeChunk(i),
+                        SumcheckId::BytecodeClaimReduction,
+                    );
+                    polynomial_claims.push((
+                        CommittedPolynomial::BytecodeChunk(i),
+                        claim * lagrange_factor,
+                    ));
+                }
+            }
+
+            // Program-image polynomial: opened by ProgramImageClaimReduction in Stage 6b.
+            // Embed into the top-left block of the main matrix (same trick as advice).
+            if self.proof.program_mode == ProgramMode::Committed {
+                let (prog_point, prog_claim) =
+                    self.opening_accumulator.get_committed_polynomial_opening(
+                        CommittedPolynomial::ProgramImageInit,
+                        SumcheckId::ProgramImageClaimReduction,
+                    );
+                let lagrange_factor =
+                    compute_advice_lagrange_factor::<F>(&opening_point.r, &prog_point.r);
+                polynomial_claims.push((
+                    CommittedPolynomial::ProgramImageInit,
+                    prog_claim * lagrange_factor,
+                ));
+            }
+
             let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
             (opening_point, polynomial_claims, claims)
         };
@@ -1122,6 +1173,52 @@ where
                 {
                     commitments_map.insert(polynomial, commitment.clone());
                 }
+
+                // Add advice commitments if they're part of the batch
+                if let Some(ref commitment) = self.trusted_advice_commitment {
+                    if state
+                        .polynomial_claims
+                        .iter()
+                        .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+                    {
+                        commitments_map
+                            .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                    }
+                }
+                if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
+                    if state
+                        .polynomial_claims
+                        .iter()
+                        .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+                    {
+                        commitments_map
+                            .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                    }
+                }
+
+                // Add program commitments in committed mode
+                if self.proof.program_mode == ProgramMode::Committed {
+                    if let Ok(committed) = self.preprocessing.program.as_committed() {
+                        for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
+                            commitments_map
+                                .entry(CommittedPolynomial::BytecodeChunk(idx))
+                                .or_insert_with(|| commitment.clone());
+                        }
+
+                        // Add trusted program-image commitment if it's part of the batch
+                        if state
+                            .polynomial_claims
+                            .iter()
+                            .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
+                        {
+                            commitments_map.insert(
+                                CommittedPolynomial::ProgramImageInit,
+                                committed.program_image_commitment.clone(),
+                            );
+                        }
+                    }
+                }
+
                 self.compute_joint_commitment(&mut commitments_map, &state)
             }
         };

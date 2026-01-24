@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use ark_bn254::{Fq, Fr};
-use ark_ff::{UniformRand, Zero};
+use ark_ff::{One, UniformRand, Zero};
 use ark_std::test_rng;
 use serial_test::serial;
 
@@ -152,9 +152,20 @@ fn test_sumcheck_relation_with_mapping() {
 
         // Compute f_t(zs, zx, i) = eq(matrix_row, zs) · eq(eval_idx, zx)
         let row_binary = index_to_binary::<Fq>(matrix_row, num_s_vars);
-        let col_binary = index_to_binary::<Fq>(eval_idx, num_x_vars);
         let eq_row = EqPolynomial::mle(&row_binary, &zs);
-        let eq_col = EqPolynomial::mle(&col_binary, &zx);
+        let poly_num_vars =
+            <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&jagged_bijection, poly_idx);
+
+        // For "native_size == 1" rows (0-var polys), the sparse matrix row is constant over the
+        // entire x-hypercube. In the sparse evaluation we get a factor:
+        //   Σ_x eq(zx, x) = 1
+        // so the correct column weight here is 1 (not eq(zx, 0)).
+        let eq_col = if poly_num_vars == 0 {
+            Fq::one()
+        } else {
+            let col_binary = index_to_binary::<Fq>(eval_idx, num_x_vars);
+            EqPolynomial::mle(&col_binary, &zx)
+        };
         let f_t = eq_row * eq_col;
 
         // Get q(i)
@@ -193,6 +204,8 @@ fn test_sumcheck_relation_with_mapping() {
     for poly_idx in 0..jagged_bijection.num_polynomials() {
         let t_prev = jagged_bijection.cumulative_size_before(poly_idx);
         let t_curr = jagged_bijection.cumulative_size(poly_idx);
+        let poly_num_vars =
+            <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&jagged_bijection, poly_idx);
 
         let matrix_row = matrix_rows[poly_idx];
         let row_binary = index_to_binary::<Fq>(matrix_row, num_s_vars);
@@ -202,8 +215,12 @@ fn test_sumcheck_relation_with_mapping() {
         for x_idx in 0..(t_curr - t_prev) {
             let dense_idx = t_prev + x_idx;
 
-            let x_binary = index_to_binary::<Fq>(x_idx, num_x_vars);
-            let eq_zx_x = EqPolynomial::mle(&x_binary, &zx);
+            let eq_zx_x = if poly_num_vars == 0 {
+                Fq::one()
+            } else {
+                let x_binary = index_to_binary::<Fq>(x_idx, num_x_vars);
+                EqPolynomial::mle(&x_binary, &zx)
+            };
 
             let dense_binary = index_to_binary::<Fq>(dense_idx, num_dense_vars);
             let eq_r_dense = EqPolynomial::mle(&dense_binary, &r_dense);

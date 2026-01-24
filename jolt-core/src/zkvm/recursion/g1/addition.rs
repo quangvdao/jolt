@@ -14,7 +14,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 define_constraint!(
     name: G1Add,
     sumcheck_id: SumcheckId::G1Add,
-    num_vars: 11,
+    // These witness polynomials are constant over the recursion constraint hypercube (see
+    // `ConstraintSystemBuilder::add_g1_add_witness`), so the Stage 2 sumcheck does not need
+    // to range over any x-variables.
+    num_vars: 0,
     degree: 6,
     uses_term_batching: true,
     term_enum: G1AddTerm,

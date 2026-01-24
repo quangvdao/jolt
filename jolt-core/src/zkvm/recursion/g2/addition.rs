@@ -15,7 +15,10 @@ use super::{fq2_mul_c0, fq2_mul_c1, fq2_sq_c0, fq2_sq_c1};
 define_constraint!(
     name: G2Add,
     sumcheck_id: SumcheckId::G2Add,
-    num_vars: 11,
+    // These witness polynomials are constant over the recursion constraint hypercube (see
+    // `ConstraintSystemBuilder::add_g2_add_witness`), so the Stage 2 sumcheck does not need
+    // to range over any x-variables.
+    num_vars: 0,
     degree: 6,
     uses_term_batching: true,
     term_enum: G2AddTerm,

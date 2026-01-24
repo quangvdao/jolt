@@ -914,61 +914,163 @@ impl DoryMatrixBuilder {
         });
     }
 
-    /// Add constraint from a G1 addition witness.
-    pub fn add_g1_add_witness(&mut self, _witness: &crate::zkvm::recursion::witness::G1AddWitness) {
-        // We expect vectors of MLEs, where each MLE corresponds to one addition instance.
-        // But wait, G1AddWitness in witness.rs stores vectors of MLEs (one MLE per variable type per instance).
-        // Actually, looking at witness.rs:
-        // pub struct G1AddWitness {
-        //     pub x_p_mles: Vec<Vec<Fq>>, ...
-        // }
-        // This structure aggregates ALL instances.
-        // But DoryMatrixBuilder adds ONE constraint at a time usually?
-        // No, `add_g1_scalar_mul_witness` takes a single `G1ScalarMulWitness` (from dory::recursion::witness) which represents ONE instance.
-        // BUT `witness.rs` defines `G1AddWitness` as aggregated.
-        // Let's look at `recursion_prover.rs` again.
-        // `witness_collection.g1_scalar_mul` is a map of `G1ScalarMulWitness` (single instance).
-        // So `DoryMatrixBuilder` should probably take a single instance witness.
+    /// Add constraint from a single G1 addition witness (P + Q = R).
+    ///
+    /// The recursion matrix uses 11 constraint variables for a uniform layout, so each witness
+    /// polynomial is an 11-var MLE (length 2^11). For G1Add, each polynomial is constant over
+    /// the hypercube (the same value repeated).
+    pub fn add_g1_add_witness(
+        &mut self,
+        witness: &crate::poly::commitment::dory::recursion::JoltG1AddWitness,
+    ) {
+        assert_eq!(
+            self.num_constraint_vars, 11,
+            "G1Add expects 11 constraint vars (constant 11-var MLEs)"
+        );
+        let row_size = 1 << self.num_constraint_vars;
+        let const_row = |v: Fq| vec![v; row_size];
 
-        // However, I defined `G1AddWitness` in `witness.rs` as aggregated because I thought it was for `DoryRecursionWitness`.
-        // If `DoryMatrixBuilder` is building the matrix row by row (or appending to rows), it iterates over instances.
+        let x_p = const_row(witness.x_p);
+        let y_p = const_row(witness.y_p);
+        let ind_p = const_row(witness.ind_p);
+        let x_q = const_row(witness.x_q);
+        let y_q = const_row(witness.y_q);
+        let ind_q = const_row(witness.ind_q);
+        let x_r = const_row(witness.x_r);
+        let y_r = const_row(witness.y_r);
+        let ind_r = const_row(witness.ind_r);
+        let lambda = const_row(witness.lambda);
+        let inv_delta_x = const_row(witness.inv_delta_x);
+        let is_double = const_row(witness.is_double);
+        let is_inverse = const_row(witness.is_inverse);
 
-        // Let's look at `add_g1_scalar_mul_witness` implementation again.
-        // It takes `&dory::recursion::witness::G1ScalarMulWitness`.
-        // This is the Dory witness type, NOT the `jolt-core/src/zkvm/recursion/witness.rs` type.
+        self.rows_by_type[PolyType::G1AddXP as usize].push(x_p);
+        self.rows_by_type[PolyType::G1AddYP as usize].push(y_p);
+        self.rows_by_type[PolyType::G1AddPIndicator as usize].push(ind_p);
+        self.rows_by_type[PolyType::G1AddXQ as usize].push(x_q);
+        self.rows_by_type[PolyType::G1AddYQ as usize].push(y_q);
+        self.rows_by_type[PolyType::G1AddQIndicator as usize].push(ind_q);
+        self.rows_by_type[PolyType::G1AddXR as usize].push(x_r);
+        self.rows_by_type[PolyType::G1AddYR as usize].push(y_r);
+        self.rows_by_type[PolyType::G1AddRIndicator as usize].push(ind_r);
+        self.rows_by_type[PolyType::G1AddLambda as usize].push(lambda);
+        self.rows_by_type[PolyType::G1AddInvDeltaX as usize].push(inv_delta_x);
+        self.rows_by_type[PolyType::G1AddIsDouble as usize].push(is_double);
+        self.rows_by_type[PolyType::G1AddIsInverse as usize].push(is_inverse);
 
-        // Ah, I need to define the witness type that `DoryMatrixBuilder` accepts.
-        // Usually `DoryMatrixBuilder` accepts types from `dory::recursion::witness`.
-        // But since G1Add is new and I implemented it in Jolt, I might not have updated Dory yet?
-        // The user said "M third-party/dory" in git status.
-        // If Dory has G1Add support, I should use Dory's witness type.
-        // If not, I might need to define a single-instance witness type in Jolt and use that.
+        self.push_zero_rows_except(
+            row_size,
+            &[
+                PolyType::G1AddXP,
+                PolyType::G1AddYP,
+                PolyType::G1AddPIndicator,
+                PolyType::G1AddXQ,
+                PolyType::G1AddYQ,
+                PolyType::G1AddQIndicator,
+                PolyType::G1AddXR,
+                PolyType::G1AddYR,
+                PolyType::G1AddRIndicator,
+                PolyType::G1AddLambda,
+                PolyType::G1AddInvDeltaX,
+                PolyType::G1AddIsDouble,
+                PolyType::G1AddIsInverse,
+            ],
+        );
 
-        // Let's assume for now I need to support adding a single instance.
-        // But `G1AddWitness` in `witness.rs` is aggregated.
+        self.constraint_types.push(ConstraintType::G1Add);
+    }
 
-        // I should probably define `G1AddConstraintPolynomials` in `g1_add.rs` (already done) and use that?
-        // No, `DoryMatrixBuilder` builds the matrix from raw witness data.
+    /// Add constraint from a single G2 addition witness (P + Q = R), with Fq2 coordinates split
+    /// into (c0, c1) components in Fq.
+    pub fn add_g2_add_witness(
+        &mut self,
+        witness: &crate::poly::commitment::dory::recursion::JoltG2AddWitness,
+    ) {
+        assert_eq!(
+            self.num_constraint_vars, 11,
+            "G2Add expects 11 constraint vars (constant 11-var MLEs)"
+        );
+        let row_size = 1 << self.num_constraint_vars;
+        let const_row = |v: Fq| vec![v; row_size];
 
-        // Let's look at `recursion_prover.rs` lines 424-435:
-        // for (_op_id, witness) in g1_items {
-        //     builder.add_g1_scalar_mul_witness(witness);
-        // }
-        // Here `witness` is `dory::recursion::witness::G1ScalarMulWitness`.
+        let x_p_c0 = const_row(witness.x_p_c0);
+        let x_p_c1 = const_row(witness.x_p_c1);
+        let y_p_c0 = const_row(witness.y_p_c0);
+        let y_p_c1 = const_row(witness.y_p_c1);
+        let ind_p = const_row(witness.ind_p);
 
-        // So I need to know what `witness` type I will be passing to `add_g1_add_witness`.
-        // Since I haven't seen the Dory changes, I should probably define a struct in `witness.rs` that represents a SINGLE G1Add instance,
-        // or just pass the vectors directly.
+        let x_q_c0 = const_row(witness.x_q_c0);
+        let x_q_c1 = const_row(witness.x_q_c1);
+        let y_q_c0 = const_row(witness.y_q_c0);
+        let y_q_c1 = const_row(witness.y_q_c1);
+        let ind_q = const_row(witness.ind_q);
 
-        // Let's redefine `G1AddWitness` in `witness.rs` to be a single instance if that makes sense, OR
-        // define a new struct `G1AddInstanceWitness` in `witness.rs` and use that in `DoryMatrixBuilder`.
+        let x_r_c0 = const_row(witness.x_r_c0);
+        let x_r_c1 = const_row(witness.x_r_c1);
+        let y_r_c0 = const_row(witness.y_r_c0);
+        let y_r_c1 = const_row(witness.y_r_c1);
+        let ind_r = const_row(witness.ind_r);
 
-        // Actually, `G1AddWitness` in `g1_add.rs` (the sumcheck one) has `Vec<Fq>` for each poly.
-        // That is for a single instance (but over the hypercube).
+        let lambda_c0 = const_row(witness.lambda_c0);
+        let lambda_c1 = const_row(witness.lambda_c1);
+        let inv_delta_x_c0 = const_row(witness.inv_delta_x_c0);
+        let inv_delta_x_c1 = const_row(witness.inv_delta_x_c1);
+        let is_double = const_row(witness.is_double);
+        let is_inverse = const_row(witness.is_inverse);
 
-        // Let's assume `DoryMatrixBuilder` will receive a struct containing `Vec<Fq>` for each polynomial (the MLE evaluations).
+        self.rows_by_type[PolyType::G2AddXPC0 as usize].push(x_p_c0);
+        self.rows_by_type[PolyType::G2AddXPC1 as usize].push(x_p_c1);
+        self.rows_by_type[PolyType::G2AddYPC0 as usize].push(y_p_c0);
+        self.rows_by_type[PolyType::G2AddYPC1 as usize].push(y_p_c1);
+        self.rows_by_type[PolyType::G2AddPIndicator as usize].push(ind_p);
 
-        // TODO: implement this once we settle the single-instance witness format feeding the matrix builder.
+        self.rows_by_type[PolyType::G2AddXQC0 as usize].push(x_q_c0);
+        self.rows_by_type[PolyType::G2AddXQC1 as usize].push(x_q_c1);
+        self.rows_by_type[PolyType::G2AddYQC0 as usize].push(y_q_c0);
+        self.rows_by_type[PolyType::G2AddYQC1 as usize].push(y_q_c1);
+        self.rows_by_type[PolyType::G2AddQIndicator as usize].push(ind_q);
+
+        self.rows_by_type[PolyType::G2AddXRC0 as usize].push(x_r_c0);
+        self.rows_by_type[PolyType::G2AddXRC1 as usize].push(x_r_c1);
+        self.rows_by_type[PolyType::G2AddYRC0 as usize].push(y_r_c0);
+        self.rows_by_type[PolyType::G2AddYRC1 as usize].push(y_r_c1);
+        self.rows_by_type[PolyType::G2AddRIndicator as usize].push(ind_r);
+
+        self.rows_by_type[PolyType::G2AddLambdaC0 as usize].push(lambda_c0);
+        self.rows_by_type[PolyType::G2AddLambdaC1 as usize].push(lambda_c1);
+        self.rows_by_type[PolyType::G2AddInvDeltaXC0 as usize].push(inv_delta_x_c0);
+        self.rows_by_type[PolyType::G2AddInvDeltaXC1 as usize].push(inv_delta_x_c1);
+        self.rows_by_type[PolyType::G2AddIsDouble as usize].push(is_double);
+        self.rows_by_type[PolyType::G2AddIsInverse as usize].push(is_inverse);
+
+        self.push_zero_rows_except(
+            row_size,
+            &[
+                PolyType::G2AddXPC0,
+                PolyType::G2AddXPC1,
+                PolyType::G2AddYPC0,
+                PolyType::G2AddYPC1,
+                PolyType::G2AddPIndicator,
+                PolyType::G2AddXQC0,
+                PolyType::G2AddXQC1,
+                PolyType::G2AddYQC0,
+                PolyType::G2AddYQC1,
+                PolyType::G2AddQIndicator,
+                PolyType::G2AddXRC0,
+                PolyType::G2AddXRC1,
+                PolyType::G2AddYRC0,
+                PolyType::G2AddYRC1,
+                PolyType::G2AddRIndicator,
+                PolyType::G2AddLambdaC0,
+                PolyType::G2AddLambdaC1,
+                PolyType::G2AddInvDeltaXC0,
+                PolyType::G2AddInvDeltaXC1,
+                PolyType::G2AddIsDouble,
+                PolyType::G2AddIsInverse,
+            ],
+        );
+
+        self.constraint_types.push(ConstraintType::G2Add);
     }
 
     /// Add constraint from a per-operation GT multiplication witness (from combine_commitments).
@@ -1565,6 +1667,16 @@ impl ConstraintSystem {
             g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(witness.scalar));
         }
 
+        // Add G1 add witnesses
+        for (_op_id, witness) in witnesses.g1_add.iter() {
+            builder.add_g1_add_witness(witness);
+        }
+
+        // Add G2 add witnesses
+        for (_op_id, witness) in witnesses.g2_add.iter() {
+            builder.add_g2_add_witness(witness);
+        }
+
         let (matrix, constraints) = builder.build();
 
         // Get the 4-variable g(x) polynomial
@@ -1640,6 +1752,7 @@ impl ConstraintSystem {
             .filter(|c| matches!(c.constraint_type, ConstraintType::G1ScalarMul { .. }))
             .count();
         let mut constraints = Vec::with_capacity(g1_scalar_mul_count);
+        let mut local_idx = 0usize;
 
         for (idx, constraint) in self.constraints.iter().enumerate() {
             if let ConstraintType::G1ScalarMul { base_point } = constraint.constraint_type {
@@ -1656,7 +1769,8 @@ impl ConstraintSystem {
                     self.extract_row_poly(PolyType::G1ScalarMulAIndicator, idx, row_size);
 
                 constraints.push(G1ScalarMulWitness {
-                    constraint_index: constraint.constraint_index,
+                    // Instance index is sequential within the G1ScalarMul family.
+                    constraint_index: local_idx,
                     base_point,
                     x_a,
                     y_a,
@@ -1667,6 +1781,7 @@ impl ConstraintSystem {
                     t_indicator,
                     a_indicator,
                 });
+                local_idx += 1;
             }
         }
 
@@ -1688,6 +1803,7 @@ impl ConstraintSystem {
             .filter(|c| matches!(c.constraint_type, ConstraintType::G2ScalarMul { .. }))
             .count();
         let mut constraints = Vec::with_capacity(g2_scalar_mul_count);
+        let mut local_idx = 0usize;
 
         for (idx, constraint) in self.constraints.iter().enumerate() {
             if let ConstraintType::G2ScalarMul { base_point } = constraint.constraint_type {
@@ -1713,7 +1829,8 @@ impl ConstraintSystem {
                     self.extract_row_poly(PolyType::G2ScalarMulAIndicator, idx, row_size);
 
                 constraints.push(G2ScalarMulWitness {
-                    constraint_index: constraint.constraint_index,
+                    // Instance index is sequential within the G2ScalarMul family.
+                    constraint_index: local_idx,
                     base_point,
                     x_a_c0,
                     x_a_c1,
@@ -1730,6 +1847,7 @@ impl ConstraintSystem {
                     t_indicator,
                     a_indicator,
                 });
+                local_idx += 1;
             }
         }
 
@@ -1737,23 +1855,136 @@ impl ConstraintSystem {
     }
 
     /// Extract G1 add witnesses for the Stage 1 G1Add sumcheck.
-    ///
-    /// Note: this is currently populated only when the recursion constraint builder
-    /// wires in explicit `ConstraintType::G1Add` nodes.
     pub fn extract_g1_add_constraints(
         &self,
     ) -> Vec<super::stage2::g1_add::G1AddWitness<ark_bn254::Fq>> {
-        self.g1_add_witnesses.clone()
+        let num_constraint_vars = self.matrix.num_constraint_vars;
+        let row_size = 1 << num_constraint_vars;
+
+        let g1_add_count = self
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::G1Add))
+            .count();
+
+        let mut constraints = Vec::with_capacity(g1_add_count);
+        let mut local_idx = 0usize;
+
+        for (idx, constraint) in self.constraints.iter().enumerate() {
+            if matches!(constraint.constraint_type, ConstraintType::G1Add) {
+                let x_p = self.extract_row_poly(PolyType::G1AddXP, idx, row_size);
+                let y_p = self.extract_row_poly(PolyType::G1AddYP, idx, row_size);
+                let ind_p = self.extract_row_poly(PolyType::G1AddPIndicator, idx, row_size);
+                let x_q = self.extract_row_poly(PolyType::G1AddXQ, idx, row_size);
+                let y_q = self.extract_row_poly(PolyType::G1AddYQ, idx, row_size);
+                let ind_q = self.extract_row_poly(PolyType::G1AddQIndicator, idx, row_size);
+                let x_r = self.extract_row_poly(PolyType::G1AddXR, idx, row_size);
+                let y_r = self.extract_row_poly(PolyType::G1AddYR, idx, row_size);
+                let ind_r = self.extract_row_poly(PolyType::G1AddRIndicator, idx, row_size);
+                let lambda = self.extract_row_poly(PolyType::G1AddLambda, idx, row_size);
+                let inv_delta_x = self.extract_row_poly(PolyType::G1AddInvDeltaX, idx, row_size);
+                let is_double = self.extract_row_poly(PolyType::G1AddIsDouble, idx, row_size);
+                let is_inverse = self.extract_row_poly(PolyType::G1AddIsInverse, idx, row_size);
+
+                constraints.push(super::stage2::g1_add::G1AddWitness {
+                    x_p,
+                    y_p,
+                    ind_p,
+                    x_q,
+                    y_q,
+                    ind_q,
+                    x_r,
+                    y_r,
+                    ind_r,
+                    lambda,
+                    inv_delta_x,
+                    is_double,
+                    is_inverse,
+                    // Instance index is sequential within the G1Add family.
+                    constraint_index: local_idx,
+                });
+                local_idx += 1;
+            }
+        }
+
+        constraints
     }
 
     /// Extract G2 add witnesses for the Stage 1 G2Add sumcheck.
-    ///
-    /// Note: this is currently populated only when the recursion constraint builder
-    /// wires in explicit `ConstraintType::G2Add` nodes.
     pub fn extract_g2_add_constraints(
         &self,
     ) -> Vec<super::stage2::g2_add::G2AddWitness<ark_bn254::Fq>> {
-        self.g2_add_witnesses.clone()
+        let num_constraint_vars = self.matrix.num_constraint_vars;
+        let row_size = 1 << num_constraint_vars;
+
+        let g2_add_count = self
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::G2Add))
+            .count();
+
+        let mut constraints = Vec::with_capacity(g2_add_count);
+        let mut local_idx = 0usize;
+
+        for (idx, constraint) in self.constraints.iter().enumerate() {
+            if matches!(constraint.constraint_type, ConstraintType::G2Add) {
+                let x_p_c0 = self.extract_row_poly(PolyType::G2AddXPC0, idx, row_size);
+                let x_p_c1 = self.extract_row_poly(PolyType::G2AddXPC1, idx, row_size);
+                let y_p_c0 = self.extract_row_poly(PolyType::G2AddYPC0, idx, row_size);
+                let y_p_c1 = self.extract_row_poly(PolyType::G2AddYPC1, idx, row_size);
+                let ind_p = self.extract_row_poly(PolyType::G2AddPIndicator, idx, row_size);
+
+                let x_q_c0 = self.extract_row_poly(PolyType::G2AddXQC0, idx, row_size);
+                let x_q_c1 = self.extract_row_poly(PolyType::G2AddXQC1, idx, row_size);
+                let y_q_c0 = self.extract_row_poly(PolyType::G2AddYQC0, idx, row_size);
+                let y_q_c1 = self.extract_row_poly(PolyType::G2AddYQC1, idx, row_size);
+                let ind_q = self.extract_row_poly(PolyType::G2AddQIndicator, idx, row_size);
+
+                let x_r_c0 = self.extract_row_poly(PolyType::G2AddXRC0, idx, row_size);
+                let x_r_c1 = self.extract_row_poly(PolyType::G2AddXRC1, idx, row_size);
+                let y_r_c0 = self.extract_row_poly(PolyType::G2AddYRC0, idx, row_size);
+                let y_r_c1 = self.extract_row_poly(PolyType::G2AddYRC1, idx, row_size);
+                let ind_r = self.extract_row_poly(PolyType::G2AddRIndicator, idx, row_size);
+
+                let lambda_c0 = self.extract_row_poly(PolyType::G2AddLambdaC0, idx, row_size);
+                let lambda_c1 = self.extract_row_poly(PolyType::G2AddLambdaC1, idx, row_size);
+                let inv_delta_x_c0 =
+                    self.extract_row_poly(PolyType::G2AddInvDeltaXC0, idx, row_size);
+                let inv_delta_x_c1 =
+                    self.extract_row_poly(PolyType::G2AddInvDeltaXC1, idx, row_size);
+                let is_double = self.extract_row_poly(PolyType::G2AddIsDouble, idx, row_size);
+                let is_inverse = self.extract_row_poly(PolyType::G2AddIsInverse, idx, row_size);
+
+                constraints.push(super::stage2::g2_add::G2AddWitness {
+                    x_p_c0,
+                    x_p_c1,
+                    y_p_c0,
+                    y_p_c1,
+                    ind_p,
+                    x_q_c0,
+                    x_q_c1,
+                    y_q_c0,
+                    y_q_c1,
+                    ind_q,
+                    x_r_c0,
+                    x_r_c1,
+                    y_r_c0,
+                    y_r_c1,
+                    ind_r,
+                    lambda_c0,
+                    lambda_c1,
+                    inv_delta_x_c0,
+                    inv_delta_x_c1,
+                    is_double,
+                    is_inverse,
+                    // Instance index is sequential within the G2Add family.
+                    constraint_index: local_idx,
+                });
+                local_idx += 1;
+            }
+        }
+
+        constraints
     }
 
     /// Extract packed GT exp constraint data for gt_exp sumcheck
@@ -2340,9 +2571,93 @@ impl ConstraintSystem {
                     + c7_yt_c0
                     + c7_yt_c1
             }
-            ConstraintType::G1Add | ConstraintType::G2Add => {
-                // Not yet integrated into the matrix-evaluation path.
-                Fq::zero()
+            ConstraintType::G1Add => {
+                use super::stage2::g1_add::G1AddValues;
+                let delta = Fq::from(7u64);
+
+                let x_p_row = self.matrix.row_index(PolyType::G1AddXP, idx);
+                let y_p_row = self.matrix.row_index(PolyType::G1AddYP, idx);
+                let ind_p_row = self.matrix.row_index(PolyType::G1AddPIndicator, idx);
+                let x_q_row = self.matrix.row_index(PolyType::G1AddXQ, idx);
+                let y_q_row = self.matrix.row_index(PolyType::G1AddYQ, idx);
+                let ind_q_row = self.matrix.row_index(PolyType::G1AddQIndicator, idx);
+                let x_r_row = self.matrix.row_index(PolyType::G1AddXR, idx);
+                let y_r_row = self.matrix.row_index(PolyType::G1AddYR, idx);
+                let ind_r_row = self.matrix.row_index(PolyType::G1AddRIndicator, idx);
+                let lambda_row = self.matrix.row_index(PolyType::G1AddLambda, idx);
+                let inv_dx_row = self.matrix.row_index(PolyType::G1AddInvDeltaX, idx);
+                let is_double_row = self.matrix.row_index(PolyType::G1AddIsDouble, idx);
+                let is_inverse_row = self.matrix.row_index(PolyType::G1AddIsInverse, idx);
+
+                let values = G1AddValues::<Fq> {
+                    x_p: self.matrix.evaluate_row(x_p_row, x),
+                    y_p: self.matrix.evaluate_row(y_p_row, x),
+                    ind_p: self.matrix.evaluate_row(ind_p_row, x),
+                    x_q: self.matrix.evaluate_row(x_q_row, x),
+                    y_q: self.matrix.evaluate_row(y_q_row, x),
+                    ind_q: self.matrix.evaluate_row(ind_q_row, x),
+                    x_r: self.matrix.evaluate_row(x_r_row, x),
+                    y_r: self.matrix.evaluate_row(y_r_row, x),
+                    ind_r: self.matrix.evaluate_row(ind_r_row, x),
+                    lambda: self.matrix.evaluate_row(lambda_row, x),
+                    inv_delta_x: self.matrix.evaluate_row(inv_dx_row, x),
+                    is_double: self.matrix.evaluate_row(is_double_row, x),
+                    is_inverse: self.matrix.evaluate_row(is_inverse_row, x),
+                };
+
+                values.eval_constraint(delta)
+            }
+            ConstraintType::G2Add => {
+                use super::stage2::g2_add::G2AddValues;
+                let delta = Fq::from(7u64);
+
+                let x_p_c0_row = self.matrix.row_index(PolyType::G2AddXPC0, idx);
+                let x_p_c1_row = self.matrix.row_index(PolyType::G2AddXPC1, idx);
+                let y_p_c0_row = self.matrix.row_index(PolyType::G2AddYPC0, idx);
+                let y_p_c1_row = self.matrix.row_index(PolyType::G2AddYPC1, idx);
+                let ind_p_row = self.matrix.row_index(PolyType::G2AddPIndicator, idx);
+                let x_q_c0_row = self.matrix.row_index(PolyType::G2AddXQC0, idx);
+                let x_q_c1_row = self.matrix.row_index(PolyType::G2AddXQC1, idx);
+                let y_q_c0_row = self.matrix.row_index(PolyType::G2AddYQC0, idx);
+                let y_q_c1_row = self.matrix.row_index(PolyType::G2AddYQC1, idx);
+                let ind_q_row = self.matrix.row_index(PolyType::G2AddQIndicator, idx);
+                let x_r_c0_row = self.matrix.row_index(PolyType::G2AddXRC0, idx);
+                let x_r_c1_row = self.matrix.row_index(PolyType::G2AddXRC1, idx);
+                let y_r_c0_row = self.matrix.row_index(PolyType::G2AddYRC0, idx);
+                let y_r_c1_row = self.matrix.row_index(PolyType::G2AddYRC1, idx);
+                let ind_r_row = self.matrix.row_index(PolyType::G2AddRIndicator, idx);
+                let lambda_c0_row = self.matrix.row_index(PolyType::G2AddLambdaC0, idx);
+                let lambda_c1_row = self.matrix.row_index(PolyType::G2AddLambdaC1, idx);
+                let inv_dx_c0_row = self.matrix.row_index(PolyType::G2AddInvDeltaXC0, idx);
+                let inv_dx_c1_row = self.matrix.row_index(PolyType::G2AddInvDeltaXC1, idx);
+                let is_double_row = self.matrix.row_index(PolyType::G2AddIsDouble, idx);
+                let is_inverse_row = self.matrix.row_index(PolyType::G2AddIsInverse, idx);
+
+                let values = G2AddValues::<Fq> {
+                    x_p_c0: self.matrix.evaluate_row(x_p_c0_row, x),
+                    x_p_c1: self.matrix.evaluate_row(x_p_c1_row, x),
+                    y_p_c0: self.matrix.evaluate_row(y_p_c0_row, x),
+                    y_p_c1: self.matrix.evaluate_row(y_p_c1_row, x),
+                    ind_p: self.matrix.evaluate_row(ind_p_row, x),
+                    x_q_c0: self.matrix.evaluate_row(x_q_c0_row, x),
+                    x_q_c1: self.matrix.evaluate_row(x_q_c1_row, x),
+                    y_q_c0: self.matrix.evaluate_row(y_q_c0_row, x),
+                    y_q_c1: self.matrix.evaluate_row(y_q_c1_row, x),
+                    ind_q: self.matrix.evaluate_row(ind_q_row, x),
+                    x_r_c0: self.matrix.evaluate_row(x_r_c0_row, x),
+                    x_r_c1: self.matrix.evaluate_row(x_r_c1_row, x),
+                    y_r_c0: self.matrix.evaluate_row(y_r_c0_row, x),
+                    y_r_c1: self.matrix.evaluate_row(y_r_c1_row, x),
+                    ind_r: self.matrix.evaluate_row(ind_r_row, x),
+                    lambda_c0: self.matrix.evaluate_row(lambda_c0_row, x),
+                    lambda_c1: self.matrix.evaluate_row(lambda_c1_row, x),
+                    inv_delta_x_c0: self.matrix.evaluate_row(inv_dx_c0_row, x),
+                    inv_delta_x_c1: self.matrix.evaluate_row(inv_dx_c1_row, x),
+                    is_double: self.matrix.evaluate_row(is_double_row, x),
+                    is_inverse: self.matrix.evaluate_row(is_inverse_row, x),
+                };
+
+                values.eval_constraint(delta)
             }
         }
     }
@@ -2430,6 +2745,40 @@ impl CanonicalDeserialize for PolyType {
             27 => Ok(PolyType::G2ScalarMulTIndicator),
             28 => Ok(PolyType::G2ScalarMulAIndicator),
             29 => Ok(PolyType::G2ScalarMulBit),
+            30 => Ok(PolyType::G1AddXP),
+            31 => Ok(PolyType::G1AddYP),
+            32 => Ok(PolyType::G1AddPIndicator),
+            33 => Ok(PolyType::G1AddXQ),
+            34 => Ok(PolyType::G1AddYQ),
+            35 => Ok(PolyType::G1AddQIndicator),
+            36 => Ok(PolyType::G1AddXR),
+            37 => Ok(PolyType::G1AddYR),
+            38 => Ok(PolyType::G1AddRIndicator),
+            39 => Ok(PolyType::G1AddLambda),
+            40 => Ok(PolyType::G1AddInvDeltaX),
+            41 => Ok(PolyType::G1AddIsDouble),
+            42 => Ok(PolyType::G1AddIsInverse),
+            43 => Ok(PolyType::G2AddXPC0),
+            44 => Ok(PolyType::G2AddXPC1),
+            45 => Ok(PolyType::G2AddYPC0),
+            46 => Ok(PolyType::G2AddYPC1),
+            47 => Ok(PolyType::G2AddPIndicator),
+            48 => Ok(PolyType::G2AddXQC0),
+            49 => Ok(PolyType::G2AddXQC1),
+            50 => Ok(PolyType::G2AddYQC0),
+            51 => Ok(PolyType::G2AddYQC1),
+            52 => Ok(PolyType::G2AddQIndicator),
+            53 => Ok(PolyType::G2AddXRC0),
+            54 => Ok(PolyType::G2AddXRC1),
+            55 => Ok(PolyType::G2AddYRC0),
+            56 => Ok(PolyType::G2AddYRC1),
+            57 => Ok(PolyType::G2AddRIndicator),
+            58 => Ok(PolyType::G2AddLambdaC0),
+            59 => Ok(PolyType::G2AddLambdaC1),
+            60 => Ok(PolyType::G2AddInvDeltaXC0),
+            61 => Ok(PolyType::G2AddInvDeltaXC1),
+            62 => Ok(PolyType::G2AddIsDouble),
+            63 => Ok(PolyType::G2AddIsInverse),
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -2599,6 +2948,8 @@ mod tests {
         let mut gt_exp_count = 0;
         let mut gt_mul_count = 0;
         let mut g1_scalar_mul_count = 0;
+        let mut g1_add_count = 0;
+        let mut g2_add_count = 0;
 
         for constraint in &system.constraints {
             match &constraint.constraint_type {
@@ -2606,11 +2957,27 @@ mod tests {
                 ConstraintType::GtMul => gt_mul_count += 1,
                 ConstraintType::G1ScalarMul { .. } => g1_scalar_mul_count += 1,
                 ConstraintType::G2ScalarMul { .. } => {}
-                ConstraintType::G1Add | ConstraintType::G2Add => {}
+                ConstraintType::G1Add => g1_add_count += 1,
+                ConstraintType::G2Add => g2_add_count += 1,
             }
         }
 
-        let _ = (gt_exp_count, gt_mul_count, g1_scalar_mul_count);
+        assert!(
+            g1_add_count > 0,
+            "Expected at least one G1Add constraint from Dory witness_gen"
+        );
+        assert!(
+            g2_add_count > 0,
+            "Expected at least one G2Add constraint from Dory witness_gen"
+        );
+
+        let _ = (
+            gt_exp_count,
+            gt_mul_count,
+            g1_scalar_mul_count,
+            g1_add_count,
+            g2_add_count,
+        );
         // Instead of evaluating the full system, just evaluate constraints at random points
         use rand::{rngs::StdRng, Rng, SeedableRng};
 

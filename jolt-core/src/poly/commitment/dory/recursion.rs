@@ -79,6 +79,8 @@ impl CanonicalDeserialize for JoltHintMap {
     }
 }
 
+#[cfg(feature = "experimental-pairing-recursion")]
+use super::multi_miller_loop_witness::MultiMillerLoopSteps;
 use super::{
     commitment_scheme::DoryCommitmentScheme,
     g1_scalar_mul_witness::ScalarMultiplicationSteps,
@@ -90,8 +92,6 @@ use super::{
         ark_to_jolt, jolt_to_ark, ArkDoryProof, ArkFr, ArkworksVerifierSetup, JoltToDoryTranscript,
     },
 };
-#[cfg(feature = "experimental-pairing-recursion")]
-use super::multi_miller_loop_witness::MultiMillerLoopSteps;
 use crate::poly::commitment::commitment_scheme::RecursionExt;
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};

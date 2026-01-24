@@ -342,11 +342,14 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
 ) -> Vec<F> {
     let mut claims = Vec::new();
 
-    // Track separate indices for each constraint type
-    let mut gt_exp_idx = 0;
-    let mut gt_mul_idx = 0;
-    let mut g1_scalar_mul_idx = 0;
-    let mut g2_scalar_mul_idx = 0;
+    // Track separate indices for each constraint type. These indices correspond to the
+    // `instance` field in `VirtualPolynomial::Recursion(...)` for that constraint family.
+    let mut gt_exp_idx = 0usize;
+    let mut gt_mul_idx = 0usize;
+    let mut g1_scalar_mul_idx = 0usize;
+    let mut g2_scalar_mul_idx = 0usize;
+    let mut g1_add_idx = 0usize;
+    let mut g2_add_idx = 0usize;
 
     // Process each constraint
     for (idx, constraint_type) in constraint_types.iter().enumerate() {
@@ -359,7 +362,11 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
             ConstraintType::PackedGtExp => {
                 // Packed GT Exp uses matrix polynomials: RhoPrev + Quotient.
                 // Base/digits/rho_next are public inputs or separately-verified, not in the matrix.
-                tracing::debug!("[extract_constraint_claims] Getting PackedGtExp({}) openings for constraint {}", gt_exp_idx, idx);
+                tracing::debug!(
+                    "[extract_constraint_claims] Getting PackedGtExp({}) openings for constraint {}",
+                    gt_exp_idx,
+                    idx,
+                );
 
                 // Get committed polynomial claims
                 let (_, rho_prev) = accumulator.get_virtual_polynomial_opening(
@@ -373,7 +380,6 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
 
                 constraint_claims[PolyType::RhoPrev as usize] = rho_prev;
                 constraint_claims[PolyType::Quotient as usize] = quotient;
-
                 gt_exp_idx += 1;
             }
             ConstraintType::GtMul => {
@@ -398,7 +404,6 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 constraint_claims[PolyType::MulRhs as usize] = rhs;
                 constraint_claims[PolyType::MulResult as usize] = result;
                 constraint_claims[PolyType::MulQuotient as usize] = quotient;
-
                 gt_mul_idx += 1;
             }
             ConstraintType::G1ScalarMul { .. } => {
@@ -443,7 +448,6 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 constraint_claims[PolyType::G1ScalarMulYANext as usize] = y_a_next;
                 constraint_claims[PolyType::G1ScalarMulTIndicator as usize] = t_indicator;
                 constraint_claims[PolyType::G1ScalarMulAIndicator as usize] = a_indicator;
-
                 g1_scalar_mul_idx += 1;
             }
             ConstraintType::G2ScalarMul { .. } => {
@@ -518,12 +522,188 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 constraint_claims[PolyType::G2ScalarMulYANextC1 as usize] = y_a_next_c1;
                 constraint_claims[PolyType::G2ScalarMulTIndicator as usize] = t_indicator;
                 constraint_claims[PolyType::G2ScalarMulAIndicator as usize] = a_indicator;
-
                 g2_scalar_mul_idx += 1;
             }
-            ConstraintType::G1Add | ConstraintType::G2Add => {
-                // Not yet integrated into Stage 2 claim extraction.
-                // (Handled here to keep the match exhaustive.)
+            ConstraintType::G1Add => {
+                let (_, x_p) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_xp(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, y_p) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_yp(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, ind_p) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_p_indicator(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, x_q) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_xq(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, y_q) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_yq(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, ind_q) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_q_indicator(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, x_r) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_xr(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, y_r) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_yr(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, ind_r) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_r_indicator(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, lambda) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_lambda(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, inv_delta_x) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_inv_delta_x(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, is_double) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_is_double(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+                let (_, is_inverse) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_is_inverse(g1_add_idx),
+                    SumcheckId::G1Add,
+                );
+
+                constraint_claims[PolyType::G1AddXP as usize] = x_p;
+                constraint_claims[PolyType::G1AddYP as usize] = y_p;
+                constraint_claims[PolyType::G1AddPIndicator as usize] = ind_p;
+                constraint_claims[PolyType::G1AddXQ as usize] = x_q;
+                constraint_claims[PolyType::G1AddYQ as usize] = y_q;
+                constraint_claims[PolyType::G1AddQIndicator as usize] = ind_q;
+                constraint_claims[PolyType::G1AddXR as usize] = x_r;
+                constraint_claims[PolyType::G1AddYR as usize] = y_r;
+                constraint_claims[PolyType::G1AddRIndicator as usize] = ind_r;
+                constraint_claims[PolyType::G1AddLambda as usize] = lambda;
+                constraint_claims[PolyType::G1AddInvDeltaX as usize] = inv_delta_x;
+                constraint_claims[PolyType::G1AddIsDouble as usize] = is_double;
+                constraint_claims[PolyType::G1AddIsInverse as usize] = is_inverse;
+                g1_add_idx += 1;
+            }
+            ConstraintType::G2Add => {
+                let (_, x_p_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xp_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, x_p_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xp_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, y_p_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yp_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, y_p_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yp_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, ind_p) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_p_indicator(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, x_q_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xq_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, x_q_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xq_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, y_q_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yq_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, y_q_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yq_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, ind_q) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_q_indicator(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, x_r_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xr_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, x_r_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xr_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, y_r_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yr_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, y_r_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yr_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, ind_r) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_r_indicator(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, lambda_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_lambda_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, lambda_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_lambda_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, inv_delta_x_c0) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_inv_delta_x_c0(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, inv_delta_x_c1) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_inv_delta_x_c1(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, is_double) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_is_double(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+                let (_, is_inverse) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_is_inverse(g2_add_idx),
+                    SumcheckId::G2Add,
+                );
+
+                constraint_claims[PolyType::G2AddXPC0 as usize] = x_p_c0;
+                constraint_claims[PolyType::G2AddXPC1 as usize] = x_p_c1;
+                constraint_claims[PolyType::G2AddYPC0 as usize] = y_p_c0;
+                constraint_claims[PolyType::G2AddYPC1 as usize] = y_p_c1;
+                constraint_claims[PolyType::G2AddPIndicator as usize] = ind_p;
+
+                constraint_claims[PolyType::G2AddXQC0 as usize] = x_q_c0;
+                constraint_claims[PolyType::G2AddXQC1 as usize] = x_q_c1;
+                constraint_claims[PolyType::G2AddYQC0 as usize] = y_q_c0;
+                constraint_claims[PolyType::G2AddYQC1 as usize] = y_q_c1;
+                constraint_claims[PolyType::G2AddQIndicator as usize] = ind_q;
+
+                constraint_claims[PolyType::G2AddXRC0 as usize] = x_r_c0;
+                constraint_claims[PolyType::G2AddXRC1 as usize] = x_r_c1;
+                constraint_claims[PolyType::G2AddYRC0 as usize] = y_r_c0;
+                constraint_claims[PolyType::G2AddYRC1 as usize] = y_r_c1;
+                constraint_claims[PolyType::G2AddRIndicator as usize] = ind_r;
+
+                constraint_claims[PolyType::G2AddLambdaC0 as usize] = lambda_c0;
+                constraint_claims[PolyType::G2AddLambdaC1 as usize] = lambda_c1;
+                constraint_claims[PolyType::G2AddInvDeltaXC0 as usize] = inv_delta_x_c0;
+                constraint_claims[PolyType::G2AddInvDeltaXC1 as usize] = inv_delta_x_c1;
+                constraint_claims[PolyType::G2AddIsDouble as usize] = is_double;
+                constraint_claims[PolyType::G2AddIsInverse as usize] = is_inverse;
+                g2_add_idx += 1;
             }
         }
 

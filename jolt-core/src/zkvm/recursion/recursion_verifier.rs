@@ -200,7 +200,10 @@ impl RecursionVerifier<Fq> {
         let mut num_g1_add = 0;
         let mut num_g2_add = 0;
 
-        // Collect constraint information
+        // Collect constraint information.
+        //
+        // Indices are sequential *within each constraint type* (0, 1, 2, ...), matching
+        // `extract_virtual_claims_from_accumulator` which uses per-type counters.
         let mut gt_mul_indices = Vec::new();
         let mut g1_scalar_mul_base_points = Vec::new();
         let mut g1_scalar_mul_indices = Vec::new();
@@ -209,9 +212,6 @@ impl RecursionVerifier<Fq> {
         let mut g1_add_indices = Vec::new();
         let mut g2_add_indices = Vec::new();
 
-        // Count constraints and collect base points per type.
-        // Use sequential indices (0, 1, 2...) within each type to match Stage 2's
-        // extract_virtual_claims_from_accumulator which uses separate counters per type.
         for constraint in self.input.constraint_types.iter() {
             match constraint {
                 ConstraintType::PackedGtExp => {

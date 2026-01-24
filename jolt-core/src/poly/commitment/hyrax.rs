@@ -14,12 +14,12 @@ use ark_ec::CurveGroup;
 use ark_grumpkin;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::vec::Vec;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use num_integer::Roots;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use std::borrow::Borrow;
 use tracing::trace_span;
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_HYRAX_OPENING_VERIFY: &str = "jolt_hyrax_opening_verify";

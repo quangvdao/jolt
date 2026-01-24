@@ -121,6 +121,23 @@ fn test_recursion_snark_e2e_with_dory() {
         .map(|c| c.constraint_type.clone())
         .collect();
 
+    let num_g1_add = constraint_types
+        .iter()
+        .filter(|t| matches!(t, ConstraintType::G1Add))
+        .count();
+    let num_g2_add = constraint_types
+        .iter()
+        .filter(|t| matches!(t, ConstraintType::G2Add))
+        .count();
+    assert!(
+        num_g1_add > 0,
+        "Expected at least one G1Add constraint in recursion constraint system"
+    );
+    assert!(
+        num_g2_add > 0,
+        "Expected at least one G2Add constraint in recursion constraint system"
+    );
+
     // Extract packed GT exp public inputs for verifier
     let gt_exp_public_inputs = prover.constraint_system.gt_exp_public_inputs.clone();
     let g1_scalar_mul_public_inputs = prover.constraint_system.g1_scalar_mul_public_inputs.clone();

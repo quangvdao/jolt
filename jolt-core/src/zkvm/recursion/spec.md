@@ -48,7 +48,7 @@ Concretely:
 1. **Witness**: The recursion prover commits to a witness encoding the complete non-pairing execution trace of Dory verification
    (G1/G2/GT scalar-muls, adds, GT mul/exp, plus internal packed traces where applicable).
 2. **Operation constraints (Stage 1)**: For every traced operation instance, we prove “this op is computed correctly in isolation”
-   via a type-specific sumcheck (e.g., GT exp, GT mul, G1/G2 scalar mul, and (new) G1/G2 add).
+   via a type-specific sumcheck (e.g., GT exp, GT mul, G1/G2 scalar mul, and G1/G2 add).
 3. **Wiring / copy constraints (Stage 2)**: We prove that the output of each operation is exactly the input consumed by downstream
    operations, so the witness represents a single coherent computation DAG (not a bag of unrelated correct ops).
    
@@ -992,7 +992,7 @@ This includes:
 **Implementation notes**:
 - The exact enumeration and ordering is defined by the `PolyType` enum in `jolt-core/src/zkvm/recursion/constraints_sys.rs`.
 - There are currently **64 polynomial types** (`NUM_TYPES = 64`).
-- **G1Add/G2Add status**: The `PolyType` enum entries are defined, but matrix evaluation is not yet integrated (see `constraints_sys.rs:2339-2342`).
+- **G1Add/G2Add status**: Wired end-to-end: Dory witness generation → matrix rows (`DoryMatrixBuilder::{add_g1_add_witness, add_g2_add_witness}`) → Stage 1 sumchecks → Stage 2 virtualization claim extraction.
 
 ### 4.3 Direct Evaluation Protocol
 

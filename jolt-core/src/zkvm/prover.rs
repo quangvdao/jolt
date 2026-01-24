@@ -19,8 +19,7 @@ use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use itertools::Itertools;
 
-use crate::zkvm::proof_serialization::RecursionConstraintMetadata;
-use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
+use crate::zkvm::recursion::{RecursionProofResult, MAX_RECURSION_DENSE_NUM_VARS};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::profiling::print_current_memory_usage;
@@ -124,7 +123,7 @@ use crate::{
             raf_evaluation::RafEvaluationSumcheckProver as RamRafEvaluationSumcheckProver,
             read_write_checking::RamReadWriteCheckingProver,
         },
-        recursion::recursion_prover::{RecursionProof, RecursionProver},
+        recursion::recursion_prover::RecursionProver,
         registers::{
             read_write_checking::RegistersReadWriteCheckingProver,
             val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
@@ -2321,13 +2320,7 @@ where
     fn prove_stage_recursive(
         &mut self,
         stage8_proof_data: Stage8ProofData<F, PCS, ProofTranscript>,
-    ) -> Result<
-        (
-            RecursionProof<Fq, ProofTranscript, Hyrax<1, GrumpkinProjective>>,
-            RecursionConstraintMetadata,
-        ),
-        Box<dyn std::error::Error>,
-    >
+    ) -> RecursionProofResult<ProofTranscript, Hyrax<1, GrumpkinProjective>>
     where
         PCS: RecursionExt<F>,
         <PCS as RecursionExt<F>>::Hint: Send + Sync + 'static,

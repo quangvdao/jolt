@@ -325,8 +325,8 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
                     GrumpkinPoint::infinity()
                 } else {
                     GrumpkinPoint::new_unchecked(
-                        GrumpkinFq::new(p.x.clone()),
-                        GrumpkinFq::new(p.y.clone()),
+                        GrumpkinFq::new(p.x),
+                        GrumpkinFq::new(p.y),
                     )
                 }
             };
@@ -335,7 +335,7 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
                 // SAFETY: same as above.
                 let s: &ark_grumpkin::Fr =
                     unsafe { &*(s as *const G::ScalarField as *const ark_grumpkin::Fr) };
-                GrumpkinFr::new(s.clone())
+                GrumpkinFr::new(*s)
             };
 
             let bases_1: Vec<GrumpkinPoint> = normalized_commitments

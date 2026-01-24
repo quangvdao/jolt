@@ -101,6 +101,10 @@ To generate a trace, run e.g.
 
 Where `--name` can be `sha2`, `sha3`, `sha2-chain`, `fibonacci`, or `btreemap`. The corresponding guest programs can be found in the [`examples`](./examples/) directory. The benchmark inputs are provided in [`bench.rs`](./jolt-core/src/benches/bench.rs).
 
+To run in committed program mode, add the `--committed` flag:
+
+```cargo run --release -p jolt-core profile --name sha3 --committed --format chrome```
+
 The above command will output a JSON file in the workspace rootwith a name `trace-<timestamp>.json`, which can be viewed in [Perfetto](https://ui.perfetto.dev/).
 
 To easily see CPU and memory usage in the trace, you can use `--features monitor` which will log these metrics as tracing events:

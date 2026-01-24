@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use ark_serialize::CanonicalSerialize;
 use jolt_core::host;
+use jolt_core::zkvm::config::ProgramMode;
 use jolt_core::zkvm::prover::JoltProverPreprocessing;
 use jolt_core::zkvm::verifier::{JoltSharedPreprocessing, JoltVerifierPreprocessing};
 use jolt_core::zkvm::{RV64IMACProver, RV64IMACVerifier};
@@ -35,38 +36,38 @@ pub enum BenchType {
     Sha3Chain,
 }
 
-pub fn benchmarks(bench_type: BenchType) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+pub fn benchmarks(bench_type: BenchType, committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     match bench_type {
-        BenchType::BTreeMap => btreemap(),
-        BenchType::Sha2 => sha2(),
-        BenchType::Sha3 => sha3(),
-        BenchType::Sha2Chain => sha2_chain(),
-        BenchType::Sha3Chain => sha3_chain(),
-        BenchType::Fibonacci => fibonacci(),
+        BenchType::BTreeMap => btreemap(committed),
+        BenchType::Sha2 => sha2(committed),
+        BenchType::Sha3 => sha3(committed),
+        BenchType::Sha2Chain => sha2_chain(committed),
+        BenchType::Sha3Chain => sha3_chain(committed),
+        BenchType::Fibonacci => fibonacci(committed),
     }
 }
 
-fn fibonacci() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    prove_example("fibonacci-guest", postcard::to_stdvec(&400000u32).unwrap())
+fn fibonacci(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+    prove_example("fibonacci-guest", postcard::to_stdvec(&400000u32).unwrap(), committed)
 }
 
-fn sha2() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha2(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
-    prove_example("sha2-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap())
+    prove_example("sha2-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap(), committed)
 }
 
-fn sha3() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha3(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_keccak256 as _;
-    prove_example("sha3-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap())
+    prove_example("sha3-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap(), committed)
 }
 
-fn btreemap() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    prove_example("btreemap-guest", postcard::to_stdvec(&50u32).unwrap())
+fn btreemap(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+    prove_example("btreemap-guest", postcard::to_stdvec(&50u32).unwrap(), committed)
 }
 
-fn sha2_chain() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha2_chain(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
     let mut inputs = vec![];
@@ -76,16 +77,16 @@ fn sha2_chain() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
         CYCLES_PER_SHA256,
     );
     inputs.append(&mut postcard::to_stdvec(&iters).unwrap());
-    prove_example("sha2-chain-guest", inputs)
+    prove_example("sha2-chain-guest", inputs, committed)
 }
 
-fn sha3_chain() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha3_chain(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     extern crate jolt_inlines_keccak256;
     let mut inputs = vec![];
     inputs.append(&mut postcard::to_stdvec(&[5u8; 32]).unwrap());
     inputs.append(&mut postcard::to_stdvec(&20u32).unwrap());
-    prove_example("sha3-chain-guest", inputs)
+    prove_example("sha3-chain-guest", inputs, committed)
 }
 
 pub fn master_benchmark(
@@ -200,6 +201,7 @@ pub fn master_benchmark(
 fn prove_example(
     example_name: &str,
     serialized_input: Vec<u8>,
+    committed: bool,
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     let mut tasks = Vec::new();
     let mut program = host::Program::new(example_name);
@@ -219,12 +221,19 @@ fn prove_example(
             program_io.memory_layout.clone(),
             padded_trace_len,
         );
-        let preprocessing =
-            JoltProverPreprocessing::new(shared_preprocessing.clone(), Arc::clone(&program_data));
+        
+        // Choose preprocessing mode based on committed flag
+        let preprocessing = if committed {
+            tracing::info!("Using COMMITTED mode");
+            JoltProverPreprocessing::new_committed(shared_preprocessing.clone(), Arc::clone(&program_data))
+        } else {
+            JoltProverPreprocessing::new(shared_preprocessing.clone(), Arc::clone(&program_data))
+        };
 
         let elf_contents_opt = program.get_elf_contents();
         let elf_contents = elf_contents_opt.as_deref().expect("elf contents is None");
-        let prover = RV64IMACProver::gen_from_elf(
+        let program_mode = if committed { ProgramMode::Committed } else { ProgramMode::Full };
+        let prover = RV64IMACProver::gen_from_elf_with_program_mode(
             &preprocessing,
             elf_contents,
             &serialized_input,
@@ -232,23 +241,23 @@ fn prove_example(
             &[],
             None,
             None,
+            program_mode,
         );
         let program_io = prover.program_io.clone();
         let (jolt_proof, _) = prover.prove();
 
-        let verifier_preprocessing = JoltVerifierPreprocessing::new_full(
-            shared_preprocessing,
-            preprocessing.generators.to_verifier_setup(),
-            Arc::clone(&preprocessing.program),
-        );
+        // Verifier preprocessing is derived from prover preprocessing
+        // This automatically uses committed mode if preprocessing was committed
+        let verifier_preprocessing = JoltVerifierPreprocessing::from(&preprocessing);
         let verifier =
             RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
                 .expect("Failed to create verifier");
         verifier.verify().unwrap();
     };
 
+    let span_name = if committed { "Example_E2E_Committed" } else { "Example_E2E" };
     tasks.push((
-        tracing::info_span!("Example_E2E"),
+        tracing::info_span!("{}", span_name),
         Box::new(task) as Box<dyn FnOnce()>,
     ));
 

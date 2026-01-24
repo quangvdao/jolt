@@ -32,6 +32,10 @@ struct ProfileArgs {
     /// Type of benchmark to run
     #[clap(long, value_enum)]
     name: BenchType,
+
+    /// Use committed program mode
+    #[clap(long, default_value = "false")]
+    committed: bool,
 }
 
 #[derive(Args, Debug)]
@@ -134,11 +138,12 @@ fn setup_tracing(formats: Option<Vec<Format>>, trace_name: &str) -> Vec<Box<dyn 
 
 fn trace(args: ProfileArgs) {
     let bench_name = normalize_bench_name(&args.name.to_string());
+    let mode_suffix = if args.committed { "_committed" } else { "" };
     let timestamp = Local::now().format("%Y%m%d-%H%M");
-    let trace_name = format!("{bench_name}_{timestamp}");
+    let trace_name = format!("{bench_name}{mode_suffix}_{timestamp}");
     let _guards = setup_tracing(args.format, &trace_name);
 
-    for (span, bench) in benchmarks(args.name).into_iter() {
+    for (span, bench) in benchmarks(args.name, args.committed).into_iter() {
         span.in_scope(|| {
             bench();
             tracing::info!("Bench Complete");

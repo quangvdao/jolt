@@ -105,7 +105,11 @@ To run in committed program mode, add the `--committed` flag:
 
 ```cargo run --release -p jolt-core profile --name sha3 --committed --format chrome```
 
-The above command will output a JSON file in the workspace rootwith a name `trace-<timestamp>.json`, which can be viewed in [Perfetto](https://ui.perfetto.dev/).
+To specify the Dory matrix layout, use the `--layout` flag (options: `cycle-major` (default), `address-major`):
+
+```cargo run --release -p jolt-core profile --name sha3 --committed --layout address-major --format chrome```
+
+The above commands will output a JSON file in the workspace root with a name `trace-<timestamp>.json`, which can be viewed in [Perfetto](https://ui.perfetto.dev/).
 
 To easily see CPU and memory usage in the trace, you can use `--features monitor` which will log these metrics as tracing events:
 

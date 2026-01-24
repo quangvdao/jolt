@@ -14,6 +14,7 @@ pub mod g2_scalar_mul;
 pub mod gt_mul;
 pub mod packed_gt_exp_reduction;
 pub mod shift_rho;
+pub mod shift_scalar_mul;
 
 pub use g1_scalar_mul::{G1ScalarMulProver, G1ScalarMulVerifier};
 pub use g2_scalar_mul::{G2ScalarMulProver, G2ScalarMulVerifier};
@@ -23,3 +24,7 @@ pub use packed_gt_exp_reduction::{
     PackedGtExpClaimReductionVerifier,
 };
 pub use shift_rho::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier};
+pub use shift_scalar_mul::{
+    g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG1ScalarMulVerifier,
+    ShiftG2ScalarMulProver, ShiftG2ScalarMulVerifier, ShiftScalarMulParams,
+};

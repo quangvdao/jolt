@@ -520,14 +520,13 @@ where
         // Stage 11: Build dense polynomial and commit (must happen BEFORE sumchecks for soundness)
         let (_dense_poly, dense_commitment, dense_mlpoly) = self.prove_stage11(&recursion_prover);
 
-        // Stage 12: Run recursion sumchecks (stages 1-3 + 3b) - verify the committed polynomial
+        // Stage 12: Run recursion subprotocols (Stages 1–5) - verify the committed polynomial
         let (
             stage1_proof,
-            stage2_m_eval,
-            _r_stage1,
-            _r_stage2,
-            stage3_proof,
-            stage3b_proof,
+            stage2_proof,
+            stage3_m_eval,
+            stage4_proof,
+            stage5_proof,
             accumulator,
         ) = self.prove_stage12(&recursion_prover);
 
@@ -540,9 +539,10 @@ where
         // Assemble recursion proof
         let recursion_proof = RecursionProof {
             stage1_proof,
-            stage2_m_eval,
-            stage3_proof,
-            stage3b_proof,
+            stage2_proof,
+            stage3_m_eval,
+            stage4_proof,
+            stage5_proof,
             opening_proof: hyrax_proof,
             gamma,
             delta,
@@ -1945,7 +1945,7 @@ where
         })
     }
 
-    /// Stage 12: Run recursion sumchecks (3 stages) - verify the committed polynomial
+    /// Stage 12: Run recursion subprotocols (Stages 1–5) - verify the committed polynomial
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all)]
     fn prove_stage12(
@@ -1953,9 +1953,8 @@ where
         recursion_prover: &RecursionProver<Fq>,
     ) -> (
         crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
-        Fq, // stage2_m_eval
-        Vec<<Fq as JoltField>::Challenge>,
-        Vec<<Fq as JoltField>::Challenge>,
+        crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
+        Fq, // stage3_m_eval
         crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, ProofTranscript>,
         crate::zkvm::recursion::stage5::jagged_assist::JaggedAssistProof<Fq, ProofTranscript>,
         ProverOpeningAccumulator<Fq>,
@@ -1970,42 +1969,57 @@ where
             acc
         });
 
-        // Stage 1: Constraint sumchecks
-        let (stage1_proof, r_stage1) = tracing::info_span!("recursion_stage11_1_constraints")
-            .in_scope(|| {
-                tracing::info!(
-                    "Running Stage 11.1: Constraint sumchecks (GT exp, GT mul, G1 scalar mul)"
-                );
+        // Stage 1: Packed GT exp sumcheck
+        let (stage1_proof, _r_stage1_packed) =
+            tracing::info_span!("recursion_stage12_1_packed_gt_exp").in_scope(|| {
+                tracing::info!("Running Stage 12.1: Packed GT exp sumcheck");
                 recursion_prover
                     .prove_stage1(&mut self.transcript, &mut accumulator)
-                    .expect("Failed to run stage 1 sumchecks")
+                    .expect("Failed to run Stage 1 (PackedGtExp)")
             });
 
-        // Stage 2: Virtualization direct evaluation
-        let (stage2_m_eval, r_stage2) = tracing::info_span!("recursion_stage11_2_virtualization")
-            .in_scope(|| {
-                tracing::info!("Running Stage 11.2: Virtualization direct evaluation");
+        // Stage 2: Batched constraint sumchecks (shift + claim reduction + remaining constraints)
+        let (stage2_proof, r_x) =
+            tracing::info_span!("recursion_stage12_2_constraint_sumchecks").in_scope(|| {
+                tracing::info!("Running Stage 12.2: Batched constraint sumchecks");
                 recursion_prover
-                    .prove_stage2(&mut self.transcript, &mut accumulator, &r_stage1)
-                    .expect("Failed to run stage 2 evaluation")
+                    .prove_stage2(&mut self.transcript, &mut accumulator)
+                    .expect("Failed to run Stage 2 (constraint sumchecks)")
             });
 
-        // Stage 3: Jagged transform sumcheck + Stage 3b: Jagged Assist
-        let (stage3_proof, stage3b_proof, _r_stage3) =
-            tracing::info_span!("recursion_stage11_3_jagged").in_scope(|| {
-                tracing::info!("Running Stage 11.3: Jagged transform sumcheck + Jagged Assist");
+        // Stage 3: Virtualization direct evaluation
+        let (stage3_m_eval, r_s) =
+            tracing::info_span!("recursion_stage12_3_virtualization").in_scope(|| {
+                tracing::info!("Running Stage 12.3: Virtualization direct evaluation");
                 recursion_prover
-                    .prove_stage3(&mut self.transcript, &mut accumulator, &r_stage1, &r_stage2)
-                    .expect("Failed to run stage 3 sumcheck")
+                    .prove_stage3(&mut self.transcript, &mut accumulator, &r_x)
+                    .expect("Failed to run Stage 3 (virtualization)")
+            });
+
+        // Stage 4: Jagged transform sumcheck
+        let (stage4_proof, r_dense) =
+            tracing::info_span!("recursion_stage12_4_jagged").in_scope(|| {
+                tracing::info!("Running Stage 12.4: Jagged transform sumcheck");
+                recursion_prover
+                    .prove_stage4(&mut self.transcript, &mut accumulator, &r_s, &r_x)
+                    .expect("Failed to run Stage 4 (jagged)")
+            });
+
+        // Stage 5: Jagged assist
+        let stage5_proof =
+            tracing::info_span!("recursion_stage12_5_jagged_assist").in_scope(|| {
+                tracing::info!("Running Stage 12.5: Jagged assist");
+                recursion_prover
+                    .prove_stage5(&mut self.transcript, &mut accumulator, &r_dense, &r_x)
+                    .expect("Failed to run Stage 5 (jagged assist)")
             });
 
         (
             stage1_proof,
-            stage2_m_eval,
-            r_stage1,
-            r_stage2,
-            stage3_proof,
-            stage3b_proof,
+            stage2_proof,
+            stage3_m_eval,
+            stage4_proof,
+            stage5_proof,
             accumulator,
         )
     }

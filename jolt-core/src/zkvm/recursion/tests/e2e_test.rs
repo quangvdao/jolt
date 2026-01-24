@@ -129,14 +129,30 @@ fn test_recursion_snark_e2e_with_dory() {
         .iter()
         .filter(|t| matches!(t, ConstraintType::G2Add))
         .count();
-    assert!(
-        num_g1_add > 0,
-        "Expected at least one G1Add constraint in recursion constraint system"
-    );
-    assert!(
-        num_g2_add > 0,
-        "Expected at least one G2Add constraint in recursion constraint system"
-    );
+
+    // Allow selectively disabling constraint families when debugging recursion composition.
+    // By default, we expect these constraint families to be present.
+    let env_flag_default = |name: &str, default: bool| -> bool {
+        std::env::var(name)
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(default)
+    };
+    let enable_g1_add = env_flag_default("JOLT_RECURSION_ENABLE_G1_ADD", true);
+    let enable_g2_add = env_flag_default("JOLT_RECURSION_ENABLE_G2_ADD", true);
+
+    if enable_g1_add {
+        assert!(
+            num_g1_add > 0,
+            "Expected at least one G1Add constraint in recursion constraint system"
+        );
+    }
+    if enable_g2_add {
+        assert!(
+            num_g2_add > 0,
+            "Expected at least one G2Add constraint in recursion constraint system"
+        );
+    }
 
     // Extract packed GT exp public inputs for verifier
     let gt_exp_public_inputs = prover.constraint_system.gt_exp_public_inputs.clone();

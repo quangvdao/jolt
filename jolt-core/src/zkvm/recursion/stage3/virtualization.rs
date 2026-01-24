@@ -1,13 +1,13 @@
-//! Stage 2: Direct Evaluation Protocol for Recursion SNARK
+//! Stage 3: Direct Evaluation Protocol for Recursion SNARK
 //!
-//! This module implements the optimized Stage 2 protocol that directly evaluates
+//! This module implements the optimized Stage 3 protocol that directly evaluates
 //! M(r_s, r_x) without running a sumcheck. The key insight is that M is the
-//! multilinear extension of the virtual claims v_i from Stage 1.
+//! multilinear extension of the virtual claims v_i from Stage 2.
 //!
 //! ## Mathematical Foundation
 //!
 //! The matrix M is defined such that M(i, r_x) = v_i for all i, where v_i are
-//! the virtual claims from Stage 1. The direct evaluation protocol uses the fact
+//! the virtual claims from Stage 2. The direct evaluation protocol uses the fact
 //! that for the MLE of M:
 //!
 //! M(r_s, r_x) = Σ_i eq(r_s, i) · M(i, r_x) = Σ_i eq(r_s, i) · v_i
@@ -15,7 +15,7 @@
 //! ## Data Layout
 //!
 //! ### Virtual Claims Layout
-//! Virtual claims from Stage 1 are organized by constraint then polynomial type:
+//! Virtual claims from Stage 2 are organized by constraint then polynomial type:
 //! [c0_p0, c0_p1, ..., c0_p14, c1_p0, c1_p1, ..., c1_p14, ...]
 //!
 //! ### Matrix S Layout
@@ -27,13 +27,13 @@
 //! ## Protocol Flow
 //!
 //! 1. **Sampling**: Sample r_s directly from the Fiat-Shamir transcript
-//! 2. **Prover Evaluation**: Prover evaluates M(r_s, r_x) where r_x comes from Stage 1
+//! 2. **Prover Evaluation**: Prover evaluates M(r_s, r_x) where r_x comes from Stage 2
 //! 3. **Verifier Computation**: Verifier computes Σ_i eq(r_s, i) · v_i independently
 //! 4. **Verification**: Check that prover's evaluation matches verifier's computation
 
 use thiserror::Error;
 
-/// Errors that can occur in Stage 2 direct evaluation protocol
+/// Errors that can occur in Stage 3 direct evaluation protocol
 #[derive(Debug, Error)]
 pub enum Stage2Error {
     #[error("Direct evaluation mismatch: expected {expected}, got {actual}")]
@@ -137,11 +137,11 @@ impl DirectEvaluationParams {
 pub struct DirectEvaluationProver {
     /// Protocol parameters
     pub params: DirectEvaluationParams,
-    /// The constraint matrix M bound to r_x from Stage 1
+    /// The constraint matrix M bound to r_x from Stage 2
     pub matrix_bound: MultilinearPolynomial<Fq>,
-    /// Virtual claims from Stage 1
+    /// Virtual claims from Stage 2
     pub virtual_claims: Vec<Fq>,
-    /// The r_x point from Stage 1
+    /// The r_x point from Stage 2
     pub r_x: Vec<Fq>,
 }
 
@@ -224,9 +224,9 @@ impl DirectEvaluationProver {
 pub struct DirectEvaluationVerifier {
     /// Protocol parameters
     pub params: DirectEvaluationParams,
-    /// Virtual claims from Stage 1
+    /// Virtual claims from Stage 2
     pub virtual_claims: Vec<Fq>,
-    /// The r_x point from Stage 1
+    /// The r_x point from Stage 2
     pub r_x: Vec<Fq>,
 }
 
@@ -316,8 +316,8 @@ impl DirectEvaluationVerifier {
 
 /// Extract virtual claims from any accumulator (Prover or Verifier) in the correct order
 ///
-/// This function extracts the virtual polynomial claims from Stage 1 accumulators
-/// and organizes them in the standard layout expected by Stage 2:
+/// This function extracts the virtual polynomial claims from Stage 2 accumulators
+/// and organizes them in the standard layout expected by Stage 3:
 /// [constraint_0_poly_0, constraint_0_poly_1, ..., constraint_0_poly_12,
 ///  constraint_1_poly_0, constraint_1_poly_1, ..., constraint_1_poly_12, ...]
 ///
@@ -329,7 +329,7 @@ impl DirectEvaluationVerifier {
 /// - `A`: The accumulator type (ProverOpeningAccumulator or VerifierOpeningAccumulator)
 ///
 /// # Arguments
-/// - `accumulator`: The Stage 1 opening accumulator
+/// - `accumulator`: The Stage 2 opening accumulator
 /// - `constraint_types`: The types of constraints in order
 /// - `gt_exp_public_inputs`: Public inputs for each packed GT exp (base, scalar_bits)
 ///
@@ -368,14 +368,14 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                     idx,
                 );
 
-                // Get committed polynomial claims
+                // Packed GT exp claims are *claim-reduced* in Stage 2 to the shared r_x.
                 let (_, rho_prev) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::gt_exp_rho(gt_exp_idx),
-                    SumcheckId::PackedGtExp,
+                    SumcheckId::PackedGtExpClaimReduction,
                 );
                 let (_, quotient) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::gt_exp_quotient(gt_exp_idx),
-                    SumcheckId::PackedGtExp,
+                    SumcheckId::PackedGtExpClaimReduction,
                 );
 
                 constraint_claims[PolyType::RhoPrev as usize] = rho_prev;

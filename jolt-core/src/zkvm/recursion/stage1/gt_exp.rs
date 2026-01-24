@@ -215,7 +215,7 @@ impl PackedGtExpWitness<Fq> {
         base2_mle: &[Fq],          // base^2[x] - 16 values
         base3_mle: &[Fq],          // base^3[x] - 16 values
     ) -> Self {
-        let digits = digits_from_bits_msb(bits);
+        let mut digits = digits_from_bits_msb(bits);
         let num_steps = digits.len();
         assert_eq!(rho_mles.len(), num_steps + 1, "Need num_steps + 1 rho MLEs");
         assert_eq!(
@@ -230,13 +230,35 @@ impl PackedGtExpWitness<Fq> {
         let step_size = 1 << NUM_STEP_VARS; // 128
         let elem_size = 1 << NUM_ELEMENT_VARS; // 16
         let total_size = 1 << NUM_TOTAL_VARS; // 2048
+        let num_steps_padded = (num_steps + 1).min(step_size);
+
+        // If we have room, pad one extra "dummy" quotient row so that:
+        // - rho_next is a pure shift of rho (terminal row shifts to zero), and
+        // - the packed GT exp constraint is still satisfied on the Boolean hypercube.
+        let mut quotient_mles_padded = quotient_mles.to_vec();
+        if num_steps_padded > num_steps {
+            use jolt_optimizations::get_g_mle;
+
+            let g_mle = get_g_mle();
+            let rho_prev = &rho_mles[num_steps];
+
+            let mut dummy_q = vec![Fq::zero(); elem_size];
+            for j in 0..elem_size {
+                let rho4 = rho_prev[j].square().square();
+                if !g_mle[j].is_zero() {
+                    dummy_q[j] = -rho4 / g_mle[j];
+                }
+            }
+
+            quotient_mles_padded.push(dummy_q);
+            digits.push((false, false));
+        }
 
         // Pack rho: rho_packed[x * 128 + s] = rho_mles[s][x]
         // s in low 7 bits, x in high 4 bits
-        // NOTE: Only populate for s < num_steps (not s = num_steps) to ensure
-        // the constraint at s = num_steps is zero (since rho_next[num_steps] = 0)
         let mut rho_packed = vec![Fq::zero(); total_size];
-        for s in 0..num_steps.min(step_size) {
+        // NOTE: Populate through num_steps_padded so rho_next is a pure shift of rho.
+        for s in 0..num_steps_padded.min(step_size) {
             for x in 0..elem_size {
                 if s < rho_mles.len() && x < rho_mles[s].len() {
                     rho_packed[x * step_size + s] = rho_mles[s][x];
@@ -246,7 +268,7 @@ impl PackedGtExpWitness<Fq> {
 
         // Pack rho_next: rho_next_packed[x * 128 + s] = rho_mles[s+1][x]
         let mut rho_next_packed = vec![Fq::zero(); total_size];
-        for s in 0..num_steps.min(step_size) {
+        for s in 0..num_steps_padded.min(step_size) {
             for x in 0..elem_size {
                 if s + 1 < rho_mles.len() && x < rho_mles[s + 1].len() {
                     rho_next_packed[x * step_size + s] = rho_mles[s + 1][x];
@@ -256,10 +278,10 @@ impl PackedGtExpWitness<Fq> {
 
         // Pack quotient: quotient_packed[x * 128 + s] = quotient_mles[s][x]
         let mut quotient_packed = vec![Fq::zero(); total_size];
-        for s in 0..num_steps.min(step_size) {
+        for s in 0..num_steps_padded.min(step_size) {
             for x in 0..elem_size {
-                if s < quotient_mles.len() && x < quotient_mles[s].len() {
-                    quotient_packed[x * step_size + s] = quotient_mles[s][x];
+                if s < quotient_mles_padded.len() && x < quotient_mles_padded[s].len() {
+                    quotient_packed[x * step_size + s] = quotient_mles_padded[s][x];
                 }
             }
         }
@@ -267,7 +289,7 @@ impl PackedGtExpWitness<Fq> {
         // Pack digit_lo and digit_hi: replicated across x
         let mut digit_lo_packed = vec![Fq::zero(); total_size];
         let mut digit_hi_packed = vec![Fq::zero(); total_size];
-        for s in 0..num_steps.min(step_size) {
+        for s in 0..num_steps_padded.min(step_size) {
             let (digit_hi, digit_lo) = digits[s];
             let lo_val = if digit_lo { Fq::from(1u64) } else { Fq::zero() };
             let hi_val = if digit_hi { Fq::from(1u64) } else { Fq::zero() };
@@ -311,7 +333,7 @@ impl PackedGtExpWitness<Fq> {
             base_packed,
             base2_packed,
             base3_packed,
-            num_steps,
+            num_steps: num_steps_padded,
         };
 
         // Debug: verify all constraints are zero over the Boolean hypercube

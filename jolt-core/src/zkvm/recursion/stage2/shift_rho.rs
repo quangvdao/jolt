@@ -1,8 +1,42 @@
-//! Shift sumcheck for verifying rho_next claims in packed GT exponentiation
-//! Proves: Σ_i γ^i * v_i = Σ_{s,x} EqPlusOne(r_s*_i, s) × Eq(r_x*_i, x) × rho_i(s,x)
+//! Shift sumcheck for verifying `rho_next` claims in packed GT exponentiation.
 //!
-//! This sumcheck runs in Stage 1b to verify
-//! that claimed rho_next values equal rho at shifted positions.
+//! ## What objects this relates
+//! For each packed GT exponentiation constraint instance \(i\), there is a committed packed
+//! polynomial \(\rho_i(s,x)\) over:
+//! - step index \(s \in \{0,1\}^7\) (128 steps), and
+//! - element index \(x \in \{0,1\}^4\) (16 limb/element positions),
+//! giving an 11-var MLE overall.
+//!
+//! In the packed GT exp constraint system, `rho_next` is a **virtual** polynomial: it is not
+//! committed/opened directly by the PCS. Instead, Stage 1 (`PackedGtExp`) produces *claimed*
+//! evaluations of `rho_next` at a random point, and this sumcheck verifies those claims are
+//! consistent with the committed \(\rho_i\) after a one-step shift in \(s\).
+//!
+//! ## The precise relation being proved
+//! Let \(r_i = (r^s_i, r^x_i) \in \mathbb{F}^{7} \times \mathbb{F}^{4}\) be the (shared) opening
+//! point used by the `PackedGtExp` sumcheck for instance \(i\). Let:
+//! - \(v_i := \rho^{next}_i(r_i)\) be the claimed `rho_next` evaluation pulled from the opening
+//!   accumulator via `VirtualPolynomial::gt_exp_rho_next(i)` under `SumcheckId::PackedGtExp`.
+//! - \(\gamma \in \mathbb{F}\) be the batching coefficient sampled by this sumcheck.
+//!
+//! This sumcheck proves the following batched identity:
+//!
+//! \[
+//!   \sum_{i=0}^{m-1} \gamma^i \, v_i
+//!   \;=\;
+//!   \sum_{s \in \{0,1\}^7} \sum_{x \in \{0,1\}^4}
+//!     EqPlusOne(r^s_i, s)\cdot Eq(r^x_i, x)\cdot \left(\sum_{i=0}^{m-1}\gamma^i \rho_i(s,x)\right)
+//! \]
+//!
+//! where `EqPlusOne(r^s_i, s)` is the multilinear selector corresponding to shifting the step
+//! index by one (with the out-of-range boundary contributing 0). Concretely, this enforces that
+//! each claimed `rho_next` evaluation equals the committed `rho` evaluated at the shifted step
+//! index (at the same element coordinates), at the shared random point \(r_i\).
+//!
+//! ## Boundary behavior
+//! As with any shift, one boundary slice is intentionally excluded via the `EqPlusOne` selector
+//! (the “out of range” step has weight 0). Any required boundary initialization/finalization
+//! conditions are enforced by other constraints in the packed GT exp gadget, not here.
 
 use crate::{
     field::JoltField,

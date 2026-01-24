@@ -182,6 +182,10 @@ pub enum SumcheckId {
     G2ScalarMul,
     G2Add,
     MultiMillerLoop,
+    /// Shift-check for the G1 scalar-mul accumulator trace: links `A` and `A_next`.
+    ShiftG1ScalarMul,
+    /// Shift-check for the G2 scalar-mul accumulator trace: links `A` and `A_next`.
+    ShiftG2ScalarMul,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]

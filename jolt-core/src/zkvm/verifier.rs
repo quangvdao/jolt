@@ -877,20 +877,20 @@ where
                 .sum()
         };
 
-        // Verify opening using the hint-based PCS verifier
-        {
-            let _span = tracing::info_span!("stage8_pcs_verify_with_hint").entered();
-            PCS::verify_with_hint(
-                &self.proof.stage8_opening_proof,
-                &self.preprocessing.generators,
-                &mut self.transcript,
-                &opening_point.r,
-                &joint_claim,
-                &joint_commitment,
-                stage8_hint,
-            )
-            .context("Stage 8 (hint)")
-        }
+        // Verify opening using the hint-based PCS verifier.
+        //
+        // Important: This must remain transcript-compatible with the prover's `PCS::prove`
+        // for end-to-end recursion correctness (gamma/delta are sampled from the same transcript).
+        PCS::verify_with_hint(
+            &self.proof.stage8_opening_proof,
+            &self.preprocessing.generators,
+            &mut self.transcript,
+            &opening_point.r,
+            &joint_claim,
+            &joint_commitment,
+            stage8_hint,
+        )
+        .context("Stage 8 (hint)")
     }
 
     /// Compute joint commitment for the batch opening.

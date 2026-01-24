@@ -1,11 +1,30 @@
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
-use clap::{Parser, Subcommand};
-use jolt_sdk::{JoltDevice, MemoryConfig, RV64IMACProof, Serializable};
+use clap::{Parser, Subcommand, ValueEnum};
+use jolt_sdk::{DoryGlobals, DoryLayout, JoltDevice, MemoryConfig, RV64IMACProof, Serializable};
 use std::cmp::PartialEq;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info};
+
+/// CLI-friendly layout enum that maps to DoryLayout
+#[derive(Clone, Copy, Debug, Default, ValueEnum, PartialEq, Eq)]
+pub enum LayoutArg {
+    /// Cycle-major layout (default): index = address * T + cycle
+    #[default]
+    CycleMajor,
+    /// Address-major layout: index = cycle * K + address
+    AddressMajor,
+}
+
+impl From<LayoutArg> for DoryLayout {
+    fn from(arg: LayoutArg) -> Self {
+        match arg {
+            LayoutArg::CycleMajor => DoryLayout::CycleMajor,
+            LayoutArg::AddressMajor => DoryLayout::AddressMajor,
+        }
+    }
+}
 
 fn get_guest_src_dir() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -34,6 +53,9 @@ enum Commands {
         /// Use committed program mode (verifier only gets commitments, not full program)
         #[arg(long, default_value_t = false)]
         committed: bool,
+        /// Dory matrix layout (cycle-major or address-major)
+        #[arg(long, value_enum, default_value_t = LayoutArg::CycleMajor)]
+        layout: LayoutArg,
     },
     /// Verify proofs and optionally embed them
     Verify {
@@ -49,6 +71,9 @@ enum Commands {
         /// Use committed program mode (verifier only gets commitments, not full program)
         #[arg(long, default_value_t = false)]
         committed: bool,
+        /// Dory matrix layout (cycle-major or address-major)
+        #[arg(long, value_enum, default_value_t = LayoutArg::CycleMajor)]
+        layout: LayoutArg,
     },
     /// Trace the execution of guest programs without attempting to prove them
     Trace {
@@ -67,6 +92,9 @@ enum Commands {
         /// Use committed program mode (verifier only gets commitments, not full program)
         #[arg(long, default_value_t = false)]
         committed: bool,
+        /// Dory matrix layout (cycle-major or address-major)
+        #[arg(long, value_enum, default_value_t = LayoutArg::CycleMajor)]
+        layout: LayoutArg,
     },
     /// Debug proof deserialization
     Debug {
@@ -611,9 +639,13 @@ fn load_proof_data(guest: GuestProgram, workdir: &Path) -> Vec<u8> {
     proof_data
 }
 
-fn generate_proofs(guest: GuestProgram, workdir: &Path, use_committed: bool) {
+fn generate_proofs(guest: GuestProgram, workdir: &Path, use_committed: bool, layout: DoryLayout) {
     info!("Generating proofs for {} guest program...", guest.name());
     info!("Using committed program mode: {use_committed}");
+    info!("Using Dory layout: {layout:?}");
+
+    // Set the Dory layout before any preprocessing
+    DoryGlobals::set_layout(layout);
 
     let target_dir = "/tmp/jolt-guest-targets";
 
@@ -633,8 +665,12 @@ fn run_recursion_proof(
     memory_config: MemoryConfig,
     mut max_trace_length: usize,
     _use_committed: bool, // Note: committed mode only applies to inner proof, not recursion guest
+    layout: DoryLayout,
 ) {
     let target_dir = "/tmp/jolt-guest-targets";
+
+    // Set the Dory layout before any preprocessing
+    DoryGlobals::set_layout(layout);
 
     // Note: We always use Full mode for the recursion guest itself.
     // The --committed flag controls whether the inner proof (fibonacci/muldiv) uses committed mode.
@@ -724,10 +760,12 @@ fn verify_proofs(
     output_dir: &Path,
     run_config: RunConfig,
     use_committed: bool,
+    layout: DoryLayout,
 ) {
     info!("Verifying proofs for {} guest program...", guest.name());
     info!("Using embed mode: {use_embed}");
     info!("Using committed program mode: {use_committed}");
+    info!("Using Dory layout: {layout:?}");
 
     generate_provable_macro(guest, use_embed, output_dir);
 
@@ -752,6 +790,7 @@ fn verify_proofs(
             memory_config,
             guest.get_max_trace_length(use_embed),
             use_committed,
+            layout,
         );
     } else {
         info!("Running {} recursion with input data...", guest.name());
@@ -782,6 +821,7 @@ fn verify_proofs(
             memory_config,
             guest.get_max_trace_length(use_embed),
             use_committed,
+            layout,
         );
     }
 }
@@ -796,6 +836,7 @@ fn main() {
             example,
             workdir,
             committed,
+            layout,
         }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
@@ -804,13 +845,14 @@ fn main() {
                     return;
                 }
             };
-            generate_proofs(guest, workdir, *committed);
+            generate_proofs(guest, workdir, *committed, (*layout).into());
         }
         Some(Commands::Verify {
             example,
             workdir,
             embed,
             committed,
+            layout,
         }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
@@ -831,6 +873,7 @@ fn main() {
                 &output_dir,
                 RunConfig::Prove,
                 *committed,
+                (*layout).into(),
             );
         }
         Some(Commands::Trace {
@@ -839,6 +882,7 @@ fn main() {
             embed,
             trace_to_file,
             committed,
+            layout,
         }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
@@ -864,6 +908,7 @@ fn main() {
                 &output_dir,
                 run_config,
                 *committed,
+                (*layout).into(),
             );
         }
         Some(Commands::Debug { example, workdir }) => {
@@ -879,16 +924,18 @@ fn main() {
         }
         None => {
             info!("No subcommand specified. Available commands:");
-            info!("  generate --example <fibonacci|muldiv> [--workdir <DIR>] [--committed]");
-            info!("  verify --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed]");
+            info!("  generate --example <fibonacci|muldiv> [--workdir <DIR>] [--committed] [--layout <cycle-major|address-major>]");
+            info!("  verify --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed] [--layout <cycle-major|address-major>]");
+            info!("  trace --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed] [--layout <cycle-major|address-major>]");
             info!("");
             info!("Examples:");
             info!("  cargo run --release -- generate --example fibonacci");
             info!("  cargo run --release -- generate --example fibonacci --workdir ./output --committed");
+            info!("  cargo run --release -- generate --example fibonacci --layout address-major");
             info!("  cargo run --release -- verify --example fibonacci");
             info!("  cargo run --release -- verify --example fibonacci --workdir ./output --embed --committed");
             info!("  cargo run --release -- trace --example fibonacci --embed --committed");
-            info!("  cargo run --release -- trace --example fibonacci --embed --disk --committed");
+            info!("  cargo run --release -- trace --example fibonacci --embed --layout address-major");
         }
     }
 }

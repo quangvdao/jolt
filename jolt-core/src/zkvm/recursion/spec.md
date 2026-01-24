@@ -685,6 +685,83 @@ and prove a random linear check that enforces the one-step shift over all indice
 padding rule, this consistency check is well-defined without introducing additional “pad selectors”. For wiring/boundary extraction
 to other (non-padded) ports, one must include the appropriate pad selector (see Section 3.3).
 
+---
+
+### 2.7 Multi-Miller loop (BN254 pairing Miller loop) [EXPERIMENTAL]
+
+> **Implementation status**: the constraint polynomial exists (`jolt-core/src/zkvm/recursion/pairing/multi_miller_loop.rs`) and a
+> standalone witness generator exists (`jolt-core/src/poly/commitment/dory/witness/multi_miller_loop.rs`), but end-to-end integration
+> into the recursion constraint matrix and Stage 2 batching is still in progress.
+
+This gadget is intended to prove correctness of the **Miller-loop** part of a BN254 pairing computation:
+\[
+f_{\text{out}} \;=\; \prod_{s=0}^{S-1} \Big(f_s^{[2]} \cdot \ell_s(P)\Big)^{\mathbf{1}_{\text{double}}(s)}
+\cdot \Big(f_s \cdot \ell_s(P)\Big)^{\mathbf{1}_{\text{add}}(s)}
+\]
+where each step \(s\) is either a tangent (doubling) step or a chord (addition) step, and \(\ell_s(P)\) is the line function evaluated
+at the G1 input point \(P\). (Final exponentiation and/or the final multi-pairing equality can still remain outside the SNARK boundary.)
+
+#### Packed trace layout (11-variable domain)
+
+We use the same packed layout as the packed GT exponentiation:
+- step variables \(s \in \{0,1\}^7\) (up to 128 steps),
+- element variables \(x \in \{0,1\}^4\) (16 base-field evaluations representing an \(F_{q^{12}}\) element via an MLE),
+- packed index: `idx = x * 128 + s` (step in the low bits).
+
+Each operation instance corresponds to one Miller-loop trace (typically one \((P,Q)\) pair), represented as 11-var MLE columns.
+
+#### Per-step constraints (local semantics)
+
+At each packed point \((s,x)\), the constraint polynomial enforces:
+
+1. **Branch bits** (`is_double`, `is_add`) are boolean and mutually exclusive.
+2. **G2 affine update** (over \(F_{q^2}\), split into base-field components):
+   - doubling slope: \(2y\lambda = 3x^2\),
+   - addition slope: \(\lambda(x_Q-x_T) = y_Q-y_T\), plus an `inv_dx` witness enforcing \((x_Q-x_T)^{-1}\) in the add branch,
+   - affine formulas: \(x'=\lambda^2-x_T-x_{\text{op}}\), \(y'=\lambda(x_T-x')-y_T\).
+3. **Line coefficients** \((c0,c1,c2)\in F_{q^2}\) for the tangent/chord line, using the BN254 `TwistType::D` conventions.
+4. **Line evaluation embedding**: the line is embedded as a sparse-034 \(F_{q^{12}}\) element and evaluated via 6 selector polynomials.
+5. **Accumulator update in \(F_{q^{12}}\)** via ring-switching:
+   \[
+   a(x)\cdot b(x) - c(x) - Q(x)\cdot g(x) = 0
+   \]
+   where \(a\) is either \(f^2\) (double) or \(f\) (add), \(b\) is the embedded line value, \(c\) is \(f_{\text{next}}\), and
+   \(g\) is the fixed tower reduction polynomial MLE.
+
+These per-step constraints are **sound and complete** for the *local* step semantics, assuming all “public” polynomials described below
+are fixed correctly (see caveats).
+
+#### Missing global consistency constraints (required for end-to-end soundness)
+
+Local step correctness alone does **not** imply the trace is a single coherent Miller-loop computation. We must additionally enforce:
+
+1. **Shift (step-to-step chaining)**: for each relevant column \(A\),
+   \[
+   \forall s<127,\forall x:\quad A_{\text{next}}(s,x) = A(s+1,x)
+   \]
+   This prevents a prover from choosing unrelated per-step states. We implement this as a dedicated shift sumcheck:
+   - `SumcheckId::ShiftMultiMillerLoop` (implemented in `jolt-core/src/zkvm/recursion/pairing/shift.rs`),
+   - applied at least to `f`/`f_next` and the four G2 state components `t_*`/`t_*_next`.
+
+2. **Boundary conditions**:
+   - initial state \(f(0)=1\) and \(T(0)=Q\),
+   - correct step schedule (derived from `Bn254Config::ATE_LOOP_COUNT` plus the two final Frobenius additions),
+   - extraction of the final output slice \(f(\text{last},x)\) as the claimed Miller-loop output.
+
+3. **Public constants vs witness values**:
+   - `g(x)` is a fixed, verifier-known polynomial (`get_g_mle()`), and must not be prover-chosen,
+   - the sparse-034 selector polynomials are fixed constants (basis vectors under `fq12_to_multilinear_evals`) and must not be prover-chosen.
+   As with packed GT exponentiation, the intended design is that the verifier computes these values directly from public definitions; if they are
+   carried as witness columns for convenience, we must add explicit constraints that they match their public definitions.
+
+#### Integration plan (next steps)
+
+To wire MultiMillerLoop into the recursion protocol (Stage 2 batched constraints), we will:
+- add the missing **shift sumcheck** instance(s) (`ShiftMultiMillerLoop`),
+- decide which columns are **public inputs** (schedule bits, `g`, selectors, Frobenius-derived points) and avoid committing to them,
+- add **boundary constraints** for initialization/finalization and for extracting the final Miller-loop output port,
+- then include the MultiMillerLoop constraint family in the same Stage 2 batched sumcheck as the other op families.
+
 ### 2.5.1 G1/G2 Addition (NEW)
 
 Dory verification performs many explicit group additions in G1 and G2 (e.g., updates like
@@ -1984,6 +2061,71 @@ trait HyraxGpuKernel {
 | Hyrax | $O(\sqrt{N})$ bases + scalars | MSM working set |
 
 The jagged transform (Stage 3) reduces GPU memory pressure by ~60× compared to operating on the sparse matrix directly.
+
+---
+
+## 9. Benchmarking & Cycle Measurement
+
+This section describes how to measure cycle counts for the recursion verifier running inside the RISC-V guest.
+
+### 9.1 Measuring Cycle Counts
+
+To measure cycle counts without generating a full proof (which is slow), use the `trace` command with the `--committed` flag for committed program mode:
+
+```bash
+# Trace fibonacci recursion (committed program mode)
+cargo run --release -p recursion -- trace --example fibonacci --embed --committed
+
+# Trace muldiv recursion (committed program mode)
+cargo run --release -p recursion -- trace --example muldiv --embed --committed
+
+# With disk-based tracing (reduces memory usage for large traces)
+cargo run --release -p recursion -- trace --example fibonacci --embed --committed --disk
+```
+
+### 9.2 Understanding the Output
+
+The tracer outputs cycle counts for each instrumented section:
+
+| Stage | Description |
+|-------|-------------|
+| `deserialize proof` | Deserializing the Jolt proof from bytes |
+| `deserialize device` | Deserializing the I/O device |
+| `jolt_verify_stage1` - `stage7` | Jolt verifier stages (non-PCS) |
+| `jolt_verify_stage8_dory_pcs` | Dory PCS verification (native) |
+| `jolt_recursion_stage1` - `stage5` | Recursion SNARK stages |
+| `jolt_hyrax_msm1`, `jolt_hyrax_msm2` | Hyrax multi-scalar multiplications |
+| `jolt_hyrax_opening_verify` | Hyrax opening verification |
+| `jolt_verify_stage8_recursion` | Total recursion verification |
+| `verification` | Total verification (excluding deserialization) |
+
+Each line shows both:
+- **RV64IMAC cycles**: Raw RISC-V instruction cycles
+- **Virtual cycles**: Cycles including memory operations and other costs
+
+### 9.3 Full Proof Generation & Verification
+
+To generate proofs first, then verify them:
+
+```bash
+# Step 1: Generate proofs (committed program mode)
+cargo run --release -p recursion -- generate --example fibonacci --committed
+
+# Step 2: Verify proofs (with embedding for recursion)
+cargo run --release -p recursion -- verify --example fibonacci --embed --committed
+```
+
+### 9.4 Comparing Program Modes
+
+The `--committed` flag enables "committed program mode" where the verifier only receives commitments to the program (bytecode + program image) rather than the full program data. This is the mode used in production recursion.
+
+```bash
+# Without --committed: Full program mode (verifier gets full bytecode)
+cargo run --release -p recursion -- trace --example fibonacci --embed
+
+# With --committed: Committed program mode (verifier gets commitments only)
+cargo run --release -p recursion -- trace --example fibonacci --embed --committed
+```
 
 ---
 

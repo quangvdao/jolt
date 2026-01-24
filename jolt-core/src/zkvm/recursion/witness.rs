@@ -273,14 +273,20 @@ pub struct MultiMillerLoopInstanceWitness {
 /// Captures the intermediate witnesses for computing:
 /// `result = sum_i(coeff_i * commitment_i)`
 ///
-/// Uses a linear fold: first compute all scaled commitments via GT exponentiation,
-/// then accumulate via sequential GT multiplications.
+/// Uses a balanced fold: first compute all scaled commitments via GT exponentiation,
+/// then accumulate via a deterministic balanced binary-tree of GT multiplications.
+///
+/// The tree shape is **fully deterministic** given `exp_witnesses.len()`:
+/// - Level 0 inputs are `exp_witnesses[i].result` for i=0..n-1
+/// - Each level pairs adjacent elements left-to-right; if the level has an odd
+///   number of nodes, the final node is carried forward unchanged.
+/// - `mul_layers[level][j]` multiplies the pair (2j, 2j+1) from the previous level.
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct GTCombineWitness {
     /// Exponentiation witnesses: `scaled[i] = coeff[i] * commitment[i]`
     pub exp_witnesses: Vec<GTExpOpWitness>,
-    /// Multiplication witnesses for linear fold: `acc[i] = acc[i-1] * scaled[i]`
-    pub mul_witnesses: Vec<GTMulOpWitness>,
+    /// Multiplication witnesses, grouped by fold level (left-to-right per level).
+    pub mul_layers: Vec<Vec<GTMulOpWitness>>,
 }
 
 /// Combined witness data for all recursion constraints

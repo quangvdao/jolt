@@ -12,8 +12,7 @@ pub mod multiplication;
 pub mod shift;
 
 pub use claim_reduction::{
-    GtExpClaimReductionParams, GtExpClaimReductionProver,
-    GtExpClaimReductionVerifier,
+    GtExpClaimReductionParams, GtExpClaimReductionProver, GtExpClaimReductionVerifier,
 };
 pub use exponentiation::{GtExpProver, GtExpPublicInputs, GtExpVerifier};
 pub use multiplication::{GtMulProver, GtMulVerifier};

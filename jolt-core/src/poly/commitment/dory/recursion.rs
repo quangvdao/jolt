@@ -85,9 +85,9 @@ use super::{
     commitment_scheme::DoryCommitmentScheme,
     jolt_dory_routines::{JoltG1Routines, JoltG2Routines},
     witness::{
-        g1_add::G1AdditionSteps, g1_scalar_mul::ScalarMultiplicationSteps,
-        g2_add::G2AdditionSteps, g2_scalar_mul::G2ScalarMultiplicationSteps,
-        gt_exp::Base4ExponentiationSteps, gt_mul::MultiplicationSteps,
+        g1_add::G1AdditionSteps, g1_scalar_mul::ScalarMultiplicationSteps, g2_add::G2AdditionSteps,
+        g2_scalar_mul::G2ScalarMultiplicationSteps, gt_exp::Base4ExponentiationSteps,
+        gt_mul::MultiplicationSteps,
     },
     wrappers::{
         ark_to_jolt, jolt_to_ark, ArkDoryProof, ArkFr, ArkworksVerifierSetup, JoltToDoryTranscript,
@@ -710,41 +710,116 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
             "commitments and coeffs must have same length"
         );
 
-        // Step 1: Generate exponentiation witnesses for each coeff * commitment
-        let exp_witnesses: Vec<GTExpOpWitness> = commitments
-            .iter()
-            .zip(coeffs.iter())
-            .map(|(comm, coeff)| {
-                let comm_fq12 = comm.borrow().0;
-                let exp_steps = Base4ExponentiationSteps::new(comm_fq12, *coeff);
+        // Step 1: Generate exponentiation witnesses for each coeff * commitment.
+        //
+        // Note: `commitments` is generic and may not be `Sync`, so first copy out the small
+        // `Fq12` values to enable parallel iteration on host without changing trait bounds.
+        let comms_fq12: Vec<Fq12> = commitments.iter().map(|c| c.borrow().0).collect();
 
-                GTExpOpWitness {
-                    base: exp_steps.base,
-                    exponent: exp_steps.exponent,
-                    result: exp_steps.result,
-                    rho_mles: exp_steps.rho_mles,
-                    quotient_mles: exp_steps.quotient_mles,
-                    bits: exp_steps.bits,
-                }
-            })
-            .collect();
+        let exp_witnesses: Vec<GTExpOpWitness> = {
+            #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
+            {
+                comms_fq12
+                    .iter()
+                    .zip(coeffs.iter())
+                    .map(|(comm_fq12, coeff)| {
+                        let exp_steps = Base4ExponentiationSteps::new(*comm_fq12, *coeff);
+                        GTExpOpWitness {
+                            base: exp_steps.base,
+                            exponent: exp_steps.exponent,
+                            result: exp_steps.result,
+                            rho_mles: exp_steps.rho_mles,
+                            quotient_mles: exp_steps.quotient_mles,
+                            bits: exp_steps.bits,
+                        }
+                    })
+                    .collect()
+            }
+            #[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32")))]
+            {
+                use rayon::prelude::*;
+                comms_fq12
+                    .par_iter()
+                    .zip(coeffs.par_iter())
+                    .map(|(comm_fq12, coeff)| {
+                        let exp_steps = Base4ExponentiationSteps::new(*comm_fq12, *coeff);
+                        GTExpOpWitness {
+                            base: exp_steps.base,
+                            exponent: exp_steps.exponent,
+                            result: exp_steps.result,
+                            rho_mles: exp_steps.rho_mles,
+                            quotient_mles: exp_steps.quotient_mles,
+                            bits: exp_steps.bits,
+                        }
+                    })
+                    .collect()
+            }
+        };
 
-        // Step 2: Linear fold with multiplication witnesses
+        // Step 2: Balanced binary-tree fold (associative group op) to expose parallelism.
+        //
+        // We record one `GTMulOpWitness` for each internal node. The witness order is
+        // deterministic: level-order, left-to-right within each level.
         let mut mul_witnesses = Vec::with_capacity(exp_witnesses.len().saturating_sub(1));
-        let mut accumulator = exp_witnesses[0].result;
+        let mut layer: Vec<Fq12> = exp_witnesses.iter().map(|w| w.result).collect();
 
-        for exp_wit in &exp_witnesses[1..] {
-            let mul_steps = MultiplicationSteps::new(accumulator, exp_wit.result);
+        while layer.len() > 1 {
+            #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
+            {
+                let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+                for chunk in layer.chunks(2) {
+                    if let [a, b] = chunk {
+                        let mul_steps = MultiplicationSteps::new(*a, *b);
+                        mul_witnesses.push(GTMulOpWitness {
+                            lhs: mul_steps.lhs,
+                            rhs: mul_steps.rhs,
+                            result: mul_steps.result,
+                            quotient_mle: mul_steps.quotient_mle,
+                        });
+                        next.push(mul_steps.result);
+                    } else {
+                        // Odd tail element: carry forward.
+                        next.push(chunk[0]);
+                    }
+                }
+                layer = next;
+            }
 
-            mul_witnesses.push(GTMulOpWitness {
-                lhs: mul_steps.lhs,
-                rhs: mul_steps.rhs,
-                result: mul_steps.result,
-                quotient_mle: mul_steps.quotient_mle,
-            });
+            #[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32")))]
+            {
+                use rayon::prelude::*;
+                let pairs: Vec<(Fq12, Option<GTMulOpWitness>)> = layer
+                    .par_chunks(2)
+                    .map(|chunk| {
+                        if let [a, b] = chunk {
+                            let mul_steps = MultiplicationSteps::new(*a, *b);
+                            (
+                                mul_steps.result,
+                                Some(GTMulOpWitness {
+                                    lhs: mul_steps.lhs,
+                                    rhs: mul_steps.rhs,
+                                    result: mul_steps.result,
+                                    quotient_mle: mul_steps.quotient_mle,
+                                }),
+                            )
+                        } else {
+                            (chunk[0], None)
+                        }
+                    })
+                    .collect();
 
-            accumulator = mul_steps.result;
+                let mut next = Vec::with_capacity(pairs.len());
+                for (res, wit) in pairs {
+                    next.push(res);
+                    if let Some(w) = wit {
+                        mul_witnesses.push(w);
+                    }
+                }
+                layer = next;
+            }
         }
+
+        let accumulator = layer[0];
 
         let witness = GTCombineWitness {
             exp_witnesses,

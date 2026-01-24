@@ -671,10 +671,8 @@ impl RecursionVerifier<Fq> {
                 let got = stage5_proof.claimed_evaluations[poly_idx];
                 if got != expected {
                     return Err(format!(
-                        "Stage5 constant-poly claimed_eval mismatch at poly_idx={}: got {}, expected {} (t_prev={}, num_bits={})",
-                        poly_idx, got, expected, t_prev, num_bits
-                    )
-                    .into());
+                        "Stage5 constant-poly claimed_eval mismatch at poly_idx={poly_idx}: got {got}, expected {expected} (t_prev={t_prev}, num_bits={num_bits})"
+                    ).into());
                 }
             }
         }

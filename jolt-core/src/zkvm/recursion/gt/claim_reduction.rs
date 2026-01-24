@@ -123,9 +123,7 @@ impl<F: JoltField, T: Transcript> GtExpClaimReductionProver<F, T> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
-    for GtExpClaimReductionProver<F, T>
-{
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for GtExpClaimReductionProver<F, T> {
     fn degree(&self) -> usize {
         2 // eq * poly
     }

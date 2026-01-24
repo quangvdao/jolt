@@ -4,10 +4,11 @@
 //! Concretely, for each MultiMillerLoop instance, we enforce that:
 //! - `f_next(s,x) = f(s+1,x)` for all `s != last` and all `x`,
 //! - `T_next(s) = T(s+1)` component-wise for all `s != last`,
+//!
 //! where the packed layout is `idx = x * 128 + s` with:
 //! - step vars `s ∈ {0,1}^7` (low bits),
 //! - element vars `x ∈ {0,1}^4` (high bits),
-//! giving an 11-var MLE overall.
+//!   giving an 11-var MLE overall.
 //!
 //! We prove a randomized identity using Eq/EqPlusOne over the **step** variables and Eq over the
 //! **element** variables, analogous to `ShiftG{1,2}ScalarMul` and `GtShift`.

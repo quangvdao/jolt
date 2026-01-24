@@ -120,10 +120,8 @@ impl<F: JoltField> G2AddValues<F> {
         delta_pow *= delta;
 
         // Branch selection: inv_dx * dx = 1 (c0) and 0 (c1) in the generic add case
-        let inv_dx_times_dx_c0 =
-            fq2_mul_c0(self.inv_delta_x_c0, self.inv_delta_x_c1, dx_c0, dx_c1);
-        let inv_dx_times_dx_c1 =
-            fq2_mul_c1(self.inv_delta_x_c0, self.inv_delta_x_c1, dx_c0, dx_c1);
+        let inv_dx_times_dx_c0 = fq2_mul_c0(self.inv_delta_x_c0, self.inv_delta_x_c1, dx_c0, dx_c1);
+        let inv_dx_times_dx_c1 = fq2_mul_c1(self.inv_delta_x_c0, self.inv_delta_x_c1, dx_c0, dx_c1);
         acc += delta_pow
             * (s_finite * (one - self.is_double - self.is_inverse) * (one - inv_dx_times_dx_c0));
         delta_pow *= delta;
@@ -198,10 +196,18 @@ impl<F: JoltField> G2AddValues<F> {
         // y_R formula for non-inverse: y_r = lambda*(x_p - x_r) - y_p
         let xp_minus_xr_c0 = self.x_p_c0 - self.x_r_c0;
         let xp_minus_xr_c1 = self.x_p_c1 - self.x_r_c1;
-        let lam_times_diff_c0 =
-            fq2_mul_c0(self.lambda_c0, self.lambda_c1, xp_minus_xr_c0, xp_minus_xr_c1);
-        let lam_times_diff_c1 =
-            fq2_mul_c1(self.lambda_c0, self.lambda_c1, xp_minus_xr_c0, xp_minus_xr_c1);
+        let lam_times_diff_c0 = fq2_mul_c0(
+            self.lambda_c0,
+            self.lambda_c1,
+            xp_minus_xr_c0,
+            xp_minus_xr_c1,
+        );
+        let lam_times_diff_c1 = fq2_mul_c1(
+            self.lambda_c0,
+            self.lambda_c1,
+            xp_minus_xr_c0,
+            xp_minus_xr_c1,
+        );
         acc += delta_pow
             * (s_finite
                 * (one - self.is_inverse)

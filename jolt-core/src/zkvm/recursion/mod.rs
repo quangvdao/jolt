@@ -77,11 +77,11 @@ pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier};
 pub use g2::{G2ScalarMulProver, G2ScalarMulVerifier};
 
 // GT exports
-pub use gt::{GtMulProver, GtMulVerifier};
 pub use gt::{
-    GtExpClaimReductionParams, GtExpClaimReductionProver,
-    GtExpClaimReductionVerifier, GtExpProver, GtExpVerifier,
+    GtExpClaimReductionParams, GtExpClaimReductionProver, GtExpClaimReductionVerifier, GtExpProver,
+    GtExpVerifier,
 };
+pub use gt::{GtMulProver, GtMulVerifier};
 pub use gt::{GtShiftClaim, GtShiftParams, GtShiftProver, GtShiftVerifier};
 
 // Virtualization exports

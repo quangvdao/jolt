@@ -935,7 +935,9 @@ fn main() {
             info!("  cargo run --release -- verify --example fibonacci");
             info!("  cargo run --release -- verify --example fibonacci --workdir ./output --embed --committed");
             info!("  cargo run --release -- trace --example fibonacci --embed --committed");
-            info!("  cargo run --release -- trace --example fibonacci --embed --layout address-major");
+            info!(
+                "  cargo run --release -- trace --example fibonacci --embed --layout address-major"
+            );
         }
     }
 }

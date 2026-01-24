@@ -494,7 +494,7 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
     // shift-checked against the corresponding `*` columns (i.e. `*_next(s) = *(s+1)`), matching
     // the packed GT exp pattern. This requires room for `num_steps + 1`.
     assert!(
-        num_steps + 1 <= STEP_SIZE,
+        num_steps < STEP_SIZE,
         "miller-loop trace too long for 7 step vars with terminal row: num_steps+1={} > {STEP_SIZE}",
         num_steps + 1
     );

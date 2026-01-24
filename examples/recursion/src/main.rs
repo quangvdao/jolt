@@ -632,11 +632,12 @@ fn run_recursion_proof(
     input_bytes: Vec<u8>,
     memory_config: MemoryConfig,
     mut max_trace_length: usize,
-    use_committed: bool,
+    _use_committed: bool, // Note: committed mode only applies to inner proof, not recursion guest
 ) {
     let target_dir = "/tmp/jolt-guest-targets";
 
-    info!("Using committed program mode: {use_committed}");
+    // Note: We always use Full mode for the recursion guest itself.
+    // The --committed flag controls whether the inner proof (fibonacci/muldiv) uses committed mode.
 
     let mut program = jolt_sdk::host::Program::new("recursion-guest");
     program.set_func("verify");
@@ -651,11 +652,9 @@ fn run_recursion_proof(
         // shorten the max_trace_length for tracing only. Speeds up setup time for tracing purposes.
         max_trace_length = 0;
     }
-    let recursion_prover_preprocessing = if use_committed {
-        jolt_sdk::guest::prover::preprocess_committed(&recursion, max_trace_length)
-    } else {
-        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length)
-    };
+    // Always use Full mode for the recursion guest (outer proof)
+    let recursion_prover_preprocessing =
+        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length);
     let recursion_verifier_preprocessing =
         jolt_sdk::JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
 

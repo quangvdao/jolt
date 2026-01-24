@@ -151,6 +151,38 @@ fn test_dense_polynomial_extraction() {
 }
 
 #[test]
+fn test_dense_polynomial_split_api_matches_monolithic() {
+    let cs = create_mixed_constraint_system();
+
+    let (dense_poly, bijection, mapping) = cs.build_dense_polynomial();
+    let (bijection2, mapping2) = cs.build_jagged_layout();
+    let dense_evals2 = cs.extract_dense_evals(&bijection2, &mapping2);
+
+    assert_eq!(bijection.num_polynomials(), bijection2.num_polynomials());
+    assert_eq!(mapping.num_polynomials(), mapping2.num_polynomials());
+
+    let dense_size_1 = <VarCountJaggedBijection as JaggedTransform<Fq>>::dense_size(&bijection);
+    let dense_size_2 = <VarCountJaggedBijection as JaggedTransform<Fq>>::dense_size(&bijection2);
+    assert_eq!(dense_size_1, dense_size_2);
+
+    for dense_idx in 0..dense_size_1.min(128) {
+        let row1 = <VarCountJaggedBijection as JaggedTransform<Fq>>::row(&bijection, dense_idx);
+        let col1 = <VarCountJaggedBijection as JaggedTransform<Fq>>::col(&bijection, dense_idx);
+        let row2 = <VarCountJaggedBijection as JaggedTransform<Fq>>::row(&bijection2, dense_idx);
+        let col2 = <VarCountJaggedBijection as JaggedTransform<Fq>>::col(&bijection2, dense_idx);
+        assert_eq!((row1, col1), (row2, col2));
+    }
+
+    for poly_idx in 0..mapping.num_polynomials().min(64) {
+        assert_eq!(mapping.decode(poly_idx), mapping2.decode(poly_idx));
+    }
+    assert_eq!(
+        dense_poly.Z, dense_evals2,
+        "dense eval vector mismatch between APIs"
+    );
+}
+
+#[test]
 fn test_bijection_boundary_cases() {
     let empty_bijection = VarCountJaggedBijection::new(vec![]);
     assert_eq!(

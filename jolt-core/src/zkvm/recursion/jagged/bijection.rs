@@ -497,15 +497,23 @@ impl ConstraintSystemJaggedBuilder {
 
 /// Extension methods for ConstraintSystem to build dense polynomial
 impl ConstraintSystem {
-    /// Build dense polynomial using generic jagged transform
-    /// Returns the dense polynomial, the bijection, and the mapping used to create it
-    pub fn build_dense_polynomial(
+    /// Build the jagged layout (bijection + mapping) from the constraint list.
+    ///
+    /// This is the “layout” part of jagged compression: it does **not** read the sparse matrix.
+    /// Call [`extract_dense_evals`] to actually extract dense evaluations from `self.matrix`.
+    pub fn build_jagged_layout(&self) -> (VarCountJaggedBijection, ConstraintMapping) {
+        let builder = ConstraintSystemJaggedBuilder::from_constraints(&self.constraints);
+        builder.build()
+    }
+
+    /// Extract the dense evaluation vector from the sparse matrix using an already-built layout.
+    ///
+    /// Returns a vector padded to a power of two (ready for `DensePolynomial::new`).
+    pub fn extract_dense_evals(
         &self,
-    ) -> (
-        crate::poly::dense_mlpoly::DensePolynomial<Fq>,
-        VarCountJaggedBijection,
-        ConstraintMapping,
-    ) {
+        bijection: &VarCountJaggedBijection,
+        mapping: &ConstraintMapping,
+    ) -> Vec<Fq> {
         // Env-gated logging for precise virtual-poly size tracking.
         //
         // - JOLT_RECURSION_LOG_POLY_SIZES=0/false (default): off
@@ -524,11 +532,8 @@ impl ConstraintSystem {
             })
             .unwrap_or(0);
 
-        let builder = ConstraintSystemJaggedBuilder::from_constraints(&self.constraints);
-        let (bijection, mapping) = builder.build();
-
         // Pre-allocate for exact dense size
-        let dense_size = <VarCountJaggedBijection as JaggedTransform<Fq>>::dense_size(&bijection);
+        let dense_size = <VarCountJaggedBijection as JaggedTransform<Fq>>::dense_size(bijection);
         let mut dense_evals = Vec::with_capacity(dense_size);
 
         if poly_size_log_level >= 1 {
@@ -547,9 +552,10 @@ impl ConstraintSystem {
 
             for poly_idx in 0..num_polynomials {
                 let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-                let num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
-                    &bijection, poly_idx,
-                );
+                let num_vars =
+                    <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+                        bijection, poly_idx,
+                    );
 
                 *count_by_num_vars.entry(num_vars).or_insert(0) += 1;
                 *count_by_poly_type
@@ -593,9 +599,10 @@ impl ConstraintSystem {
 
                 for poly_idx in 0..num_polynomials {
                     let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-                    let num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
-                        &bijection, poly_idx,
-                    );
+                    let num_vars =
+                        <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+                            bijection, poly_idx,
+                        );
 
                     let dense_start = bijection.cumulative_size_before(poly_idx);
                     let dense_end = bijection.cumulative_size(poly_idx);
@@ -630,15 +637,15 @@ impl ConstraintSystem {
         // Extract only native (non-padded) evaluations
         for dense_idx in 0..dense_size {
             let poly_idx =
-                <VarCountJaggedBijection as JaggedTransform<Fq>>::row(&bijection, dense_idx);
+                <VarCountJaggedBijection as JaggedTransform<Fq>>::row(bijection, dense_idx);
             let eval_idx =
-                <VarCountJaggedBijection as JaggedTransform<Fq>>::col(&bijection, dense_idx);
+                <VarCountJaggedBijection as JaggedTransform<Fq>>::col(bijection, dense_idx);
 
             let (constraint_idx, poly_type) = mapping.decode(poly_idx);
 
             // Get the number of variables for this polynomial
             let _num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
-                &bijection, poly_idx,
+                bijection, poly_idx,
             );
 
             // Get the row in the matrix
@@ -657,10 +664,22 @@ impl ConstraintSystem {
         let padded_size = dense_evals.len().next_power_of_two();
         dense_evals.resize(padded_size, Fq::zero());
 
-        (
-            crate::poly::dense_mlpoly::DensePolynomial::new(dense_evals),
-            bijection,
-            mapping,
-        )
+        dense_evals
+    }
+
+    /// Build dense polynomial using generic jagged transform.
+    ///
+    /// This is a convenience wrapper that builds the layout and extracts dense evals in one call.
+    /// Returns the dense polynomial, the bijection, and the mapping used to create it.
+    pub fn build_dense_polynomial(
+        &self,
+    ) -> (
+        crate::poly::dense_mlpoly::DensePolynomial<Fq>,
+        VarCountJaggedBijection,
+        ConstraintMapping,
+    ) {
+        let (bijection, mapping) = self.build_jagged_layout();
+        let dense_evals = self.extract_dense_evals(&bijection, &mapping);
+        (crate::poly::dense_mlpoly::DensePolynomial::new(dense_evals), bijection, mapping)
     }
 }

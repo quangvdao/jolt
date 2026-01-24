@@ -191,6 +191,8 @@ pub enum SumcheckId {
     ShiftG1ScalarMul,
     /// Shift-check for the G2 scalar-mul accumulator trace: links `A` and `A_next`.
     ShiftG2ScalarMul,
+    /// Shift-check for MultiMillerLoop packed traces: links `*_next(s,x)` to `*(s+1,x)` on step vars.
+    ShiftMultiMillerLoop,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]

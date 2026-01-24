@@ -276,11 +276,51 @@ impl ConstraintSystemJaggedBuilder {
                     used_poly_types.insert(PolyType::G2AddIsDouble);
                     used_poly_types.insert(PolyType::G2AddIsInverse);
                 }
+                #[cfg(feature = "experimental-pairing-recursion")]
+                ConstraintType::MultiMillerLoop => {
+                    used_poly_types.insert(PolyType::MultiMillerLoopF);
+                    used_poly_types.insert(PolyType::MultiMillerLoopFNext);
+                    used_poly_types.insert(PolyType::MultiMillerLoopQuotient);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTXC0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTXC1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTYC0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTYC1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTXC0Next);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTXC1Next);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTYC0Next);
+                    used_poly_types.insert(PolyType::MultiMillerLoopTYC1Next);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLambdaC0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLambdaC1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopInvDeltaXC0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopInvDeltaXC1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLC0C0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLC0C1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLC1C0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLC1C1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLC2C0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLC2C1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopXP);
+                    used_poly_types.insert(PolyType::MultiMillerLoopYP);
+                    used_poly_types.insert(PolyType::MultiMillerLoopXQC0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopXQC1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopYQC0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopYQC1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopIsDouble);
+                    used_poly_types.insert(PolyType::MultiMillerLoopIsAdd);
+                    used_poly_types.insert(PolyType::MultiMillerLoopLVal);
+                    used_poly_types.insert(PolyType::MultiMillerLoopG);
+                    used_poly_types.insert(PolyType::MultiMillerLoopSelector0);
+                    used_poly_types.insert(PolyType::MultiMillerLoopSelector1);
+                    used_poly_types.insert(PolyType::MultiMillerLoopSelector2);
+                    used_poly_types.insert(PolyType::MultiMillerLoopSelector3);
+                    used_poly_types.insert(PolyType::MultiMillerLoopSelector4);
+                    used_poly_types.insert(PolyType::MultiMillerLoopSelector5);
+                }
             }
         }
 
         // Iterate through polynomial types in order (matching matrix layout)
-        for poly_type in PolyType::all() {
+        for &poly_type in PolyType::all() {
             if !used_poly_types.contains(&poly_type) {
                 continue;
             }
@@ -388,6 +428,47 @@ impl ConstraintSystemJaggedBuilder {
                         }
                         _ => None,
                     },
+                    #[cfg(feature = "experimental-pairing-recursion")]
+                    ConstraintType::MultiMillerLoop => match poly_type {
+                        PolyType::MultiMillerLoopF
+                        | PolyType::MultiMillerLoopFNext
+                        | PolyType::MultiMillerLoopQuotient
+                        | PolyType::MultiMillerLoopTXC0
+                        | PolyType::MultiMillerLoopTXC1
+                        | PolyType::MultiMillerLoopTYC0
+                        | PolyType::MultiMillerLoopTYC1
+                        | PolyType::MultiMillerLoopTXC0Next
+                        | PolyType::MultiMillerLoopTXC1Next
+                        | PolyType::MultiMillerLoopTYC0Next
+                        | PolyType::MultiMillerLoopTYC1Next
+                        | PolyType::MultiMillerLoopLambdaC0
+                        | PolyType::MultiMillerLoopLambdaC1
+                        | PolyType::MultiMillerLoopInvDeltaXC0
+                        | PolyType::MultiMillerLoopInvDeltaXC1
+                        | PolyType::MultiMillerLoopLC0C0
+                        | PolyType::MultiMillerLoopLC0C1
+                        | PolyType::MultiMillerLoopLC1C0
+                        | PolyType::MultiMillerLoopLC1C1
+                        | PolyType::MultiMillerLoopLC2C0
+                        | PolyType::MultiMillerLoopLC2C1
+                        | PolyType::MultiMillerLoopXP
+                        | PolyType::MultiMillerLoopYP
+                        | PolyType::MultiMillerLoopXQC0
+                        | PolyType::MultiMillerLoopXQC1
+                        | PolyType::MultiMillerLoopYQC0
+                        | PolyType::MultiMillerLoopYQC1
+                        | PolyType::MultiMillerLoopIsDouble
+                        | PolyType::MultiMillerLoopIsAdd
+                        | PolyType::MultiMillerLoopLVal
+                        | PolyType::MultiMillerLoopG
+                        | PolyType::MultiMillerLoopSelector0
+                        | PolyType::MultiMillerLoopSelector1
+                        | PolyType::MultiMillerLoopSelector2
+                        | PolyType::MultiMillerLoopSelector3
+                        | PolyType::MultiMillerLoopSelector4
+                        | PolyType::MultiMillerLoopSelector5 => Some(11),
+                        _ => None,
+                    },
                 };
 
                 if let Some(num_vars) = num_vars {
@@ -466,8 +547,9 @@ impl ConstraintSystem {
 
             for poly_idx in 0..num_polynomials {
                 let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-                let num_vars =
-                    <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&bijection, poly_idx);
+                let num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+                    &bijection, poly_idx,
+                );
 
                 *count_by_num_vars.entry(num_vars).or_insert(0) += 1;
                 *count_by_poly_type
@@ -511,8 +593,9 @@ impl ConstraintSystem {
 
                 for poly_idx in 0..num_polynomials {
                     let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-                    let num_vars =
-                        <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&bijection, poly_idx);
+                    let num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+                        &bijection, poly_idx,
+                    );
 
                     let dense_start = bijection.cumulative_size_before(poly_idx);
                     let dense_end = bijection.cumulative_size(poly_idx);

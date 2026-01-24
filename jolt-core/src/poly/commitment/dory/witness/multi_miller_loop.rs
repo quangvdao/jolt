@@ -228,7 +228,7 @@ impl MultiMillerLoopSteps {
         debug_assert_eq!(sel4_4.len(), ELEM_SIZE);
         debug_assert_eq!(sel5_4.len(), ELEM_SIZE);
 
-        let mut sel_pack = |sel_4: &[Fq]| -> Vec<Fq> {
+        let sel_pack = |sel_4: &[Fq]| -> Vec<Fq> {
             let mut packed = vec![Fq::zero(); PACKED_SIZE];
             for x in 0..ELEM_SIZE {
                 for s in 0..STEP_SIZE {
@@ -490,9 +490,13 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
     op_is_double.push(false);
 
     let num_steps = op_is_double.len();
+    // We keep one extra "terminal state" row in the packed trace so that `*_next` columns can be
+    // shift-checked against the corresponding `*` columns (i.e. `*_next(s) = *(s+1)`), matching
+    // the packed GT exp pattern. This requires room for `num_steps + 1`.
     assert!(
-        num_steps <= STEP_SIZE,
-        "miller-loop trace too long for 7 step vars: {num_steps} > {STEP_SIZE}"
+        num_steps + 1 <= STEP_SIZE,
+        "miller-loop trace too long for 7 step vars with terminal row: num_steps+1={} > {STEP_SIZE}",
+        num_steps + 1
     );
 
     for (is_dbl, op_q_opt) in op_is_double.into_iter().zip(op_points.into_iter()) {
@@ -670,51 +674,80 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
         }
     }
 
+    // Append a terminal state row so that:
+    // - `f(s,x)` includes the final accumulator value `f_S` at s=num_steps, and
+    // - `T(s)` includes the final G2 state at s=num_steps,
+    // enabling shift sumchecks like `f_next(s,x) = f(s+1,x)` and `T_next(s) = T(s+1)`.
+    //
+    // This terminal row is treated as inactive by setting `is_double=is_add=0`; the per-step
+    // MultiMillerLoop constraints are gated by `is_active` and therefore do not constrain it.
+    let terminal_f_mle = fq12_to_multilinear_evals(&f);
+    f_step_mles.push(terminal_f_mle);
+    f_next_step_mles.push(vec![Fq::zero(); ELEM_SIZE]);
+    quotient_step_mles.push(vec![Fq::zero(); ELEM_SIZE]);
+    l_val_step_mles.push(vec![Fq::zero(); ELEM_SIZE]);
+
+    t_x.push(t.x);
+    t_y.push(t.y);
+    t_x_next.push(Fq2::zero());
+    t_y_next.push(Fq2::zero());
+
+    lambda.push(Fq2::zero());
+    inv_dx.push(Fq2::zero());
+    l0.push(Fq2::zero());
+    l1.push(Fq2::zero());
+    l2.push(Fq2::zero());
+    x_q_steps.push(Fq2::zero());
+    y_q_steps.push(Fq2::zero());
+    is_double_steps.push(zero);
+    is_add_steps.push(zero);
+
     // Pack step × element tables.
-    let f_packed = pack_step_and_elem(&f_step_mles, num_steps);
-    let f_next_packed = pack_step_and_elem(&f_next_step_mles, num_steps);
-    let quotient_packed = pack_step_and_elem(&quotient_step_mles, num_steps);
-    let l_val_packed = pack_step_and_elem(&l_val_step_mles, num_steps);
+    let num_packed_steps = num_steps + 1; // include terminal row
+    let f_packed = pack_step_and_elem(&f_step_mles, num_packed_steps);
+    let f_next_packed = pack_step_and_elem(&f_next_step_mles, num_packed_steps);
+    let quotient_packed = pack_step_and_elem(&quotient_step_mles, num_packed_steps);
+    let l_val_packed = pack_step_and_elem(&l_val_step_mles, num_packed_steps);
 
     // Pack step-only columns (replicated across x).
-    let t_x_c0_packed = pack_step_only_fq2_c0(&t_x, num_steps);
-    let t_x_c1_packed = pack_step_only_fq2_c1(&t_x, num_steps);
-    let t_y_c0_packed = pack_step_only_fq2_c0(&t_y, num_steps);
-    let t_y_c1_packed = pack_step_only_fq2_c1(&t_y, num_steps);
+    let t_x_c0_packed = pack_step_only_fq2_c0(&t_x, num_packed_steps);
+    let t_x_c1_packed = pack_step_only_fq2_c1(&t_x, num_packed_steps);
+    let t_y_c0_packed = pack_step_only_fq2_c0(&t_y, num_packed_steps);
+    let t_y_c1_packed = pack_step_only_fq2_c1(&t_y, num_packed_steps);
 
-    let t_x_c0_next_packed = pack_step_only_fq2_c0(&t_x_next, num_steps);
-    let t_x_c1_next_packed = pack_step_only_fq2_c1(&t_x_next, num_steps);
-    let t_y_c0_next_packed = pack_step_only_fq2_c0(&t_y_next, num_steps);
-    let t_y_c1_next_packed = pack_step_only_fq2_c1(&t_y_next, num_steps);
+    let t_x_c0_next_packed = pack_step_only_fq2_c0(&t_x_next, num_packed_steps);
+    let t_x_c1_next_packed = pack_step_only_fq2_c1(&t_x_next, num_packed_steps);
+    let t_y_c0_next_packed = pack_step_only_fq2_c0(&t_y_next, num_packed_steps);
+    let t_y_c1_next_packed = pack_step_only_fq2_c1(&t_y_next, num_packed_steps);
 
-    let lambda_c0_packed = pack_step_only_fq2_c0(&lambda, num_steps);
-    let lambda_c1_packed = pack_step_only_fq2_c1(&lambda, num_steps);
-    let inv_dx_c0_packed = pack_step_only_fq2_c0(&inv_dx, num_steps);
-    let inv_dx_c1_packed = pack_step_only_fq2_c1(&inv_dx, num_steps);
+    let lambda_c0_packed = pack_step_only_fq2_c0(&lambda, num_packed_steps);
+    let lambda_c1_packed = pack_step_only_fq2_c1(&lambda, num_packed_steps);
+    let inv_dx_c0_packed = pack_step_only_fq2_c0(&inv_dx, num_packed_steps);
+    let inv_dx_c1_packed = pack_step_only_fq2_c1(&inv_dx, num_packed_steps);
 
-    let l0_c0_packed = pack_step_only_fq2_c0(&l0, num_steps);
-    let l0_c1_packed = pack_step_only_fq2_c1(&l0, num_steps);
-    let l1_c0_packed = pack_step_only_fq2_c0(&l1, num_steps);
-    let l1_c1_packed = pack_step_only_fq2_c1(&l1, num_steps);
-    let l2_c0_packed = pack_step_only_fq2_c0(&l2, num_steps);
-    let l2_c1_packed = pack_step_only_fq2_c1(&l2, num_steps);
+    let l0_c0_packed = pack_step_only_fq2_c0(&l0, num_packed_steps);
+    let l0_c1_packed = pack_step_only_fq2_c1(&l0, num_packed_steps);
+    let l1_c0_packed = pack_step_only_fq2_c0(&l1, num_packed_steps);
+    let l1_c1_packed = pack_step_only_fq2_c1(&l1, num_packed_steps);
+    let l2_c0_packed = pack_step_only_fq2_c0(&l2, num_packed_steps);
+    let l2_c1_packed = pack_step_only_fq2_c1(&l2, num_packed_steps);
 
-    let x_p_vals = vec![p.x; num_steps];
-    let y_p_vals = vec![p.y; num_steps];
-    let x_p_packed = pack_step_only(&x_p_vals, num_steps);
-    let y_p_packed = pack_step_only(&y_p_vals, num_steps);
+    let x_p_vals = vec![p.x; num_packed_steps];
+    let y_p_vals = vec![p.y; num_packed_steps];
+    let x_p_packed = pack_step_only(&x_p_vals, num_packed_steps);
+    let y_p_packed = pack_step_only(&y_p_vals, num_packed_steps);
 
     let x_q_c0: Vec<Fq> = x_q_steps.iter().map(|v| v.c0).collect();
     let x_q_c1: Vec<Fq> = x_q_steps.iter().map(|v| v.c1).collect();
     let y_q_c0: Vec<Fq> = y_q_steps.iter().map(|v| v.c0).collect();
     let y_q_c1: Vec<Fq> = y_q_steps.iter().map(|v| v.c1).collect();
-    let x_q_c0_packed = pack_step_only(&x_q_c0, num_steps);
-    let x_q_c1_packed = pack_step_only(&x_q_c1, num_steps);
-    let y_q_c0_packed = pack_step_only(&y_q_c0, num_steps);
-    let y_q_c1_packed = pack_step_only(&y_q_c1, num_steps);
+    let x_q_c0_packed = pack_step_only(&x_q_c0, num_packed_steps);
+    let x_q_c1_packed = pack_step_only(&x_q_c1, num_packed_steps);
+    let y_q_c0_packed = pack_step_only(&y_q_c0, num_packed_steps);
+    let y_q_c1_packed = pack_step_only(&y_q_c1, num_packed_steps);
 
-    let is_double_packed = pack_step_only(&is_double_steps, num_steps);
-    let is_add_packed = pack_step_only(&is_add_steps, num_steps);
+    let is_double_packed = pack_step_only(&is_double_steps, num_packed_steps);
+    let is_add_packed = pack_step_only(&is_add_steps, num_packed_steps);
 
     SinglePairTrace {
         num_steps,

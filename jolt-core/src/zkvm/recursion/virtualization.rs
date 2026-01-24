@@ -46,6 +46,8 @@ pub enum Stage2Error {
     InvalidParameters(String),
 }
 
+#[cfg(feature = "experimental-pairing-recursion")]
+use crate::zkvm::witness::{MultiMillerLoopTerm, RecursionPoly};
 use crate::{
     field::JoltField,
     poly::{
@@ -350,6 +352,8 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
     let mut g2_scalar_mul_idx = 0usize;
     let mut g1_add_idx = 0usize;
     let mut g2_add_idx = 0usize;
+    #[cfg(feature = "experimental-pairing-recursion")]
+    let mut multi_miller_loop_idx = 0usize;
 
     // Process each constraint
     for (idx, constraint_type) in constraint_types.iter().enumerate() {
@@ -704,6 +708,204 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 constraint_claims[PolyType::G2AddIsDouble as usize] = is_double;
                 constraint_claims[PolyType::G2AddIsInverse as usize] = is_inverse;
                 g2_add_idx += 1;
+            }
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => {
+                let vp = |term: MultiMillerLoopTerm| -> VirtualPolynomial {
+                    VirtualPolynomial::Recursion(RecursionPoly::MultiMillerLoop {
+                        term,
+                        instance: multi_miller_loop_idx,
+                    })
+                };
+
+                let (_, f) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::F),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, f_next) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::FNext),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, quotient) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::Quotient),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_x_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TXC0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_x_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TXC1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_y_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TYC0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_y_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TYC1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_x_c0_next) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TXC0Next),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_x_c1_next) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TXC1Next),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_y_c0_next) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TYC0Next),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, t_y_c1_next) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::TYC1Next),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, lambda_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LambdaC0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, lambda_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LambdaC1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, inv_dx_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::InvDeltaXC0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, inv_dx_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::InvDeltaXC1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, l_c0_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LC0C0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, l_c0_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LC0C1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, l_c1_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LC1C0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, l_c1_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LC1C1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, l_c2_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LC2C0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, l_c2_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LC2C1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, x_p) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::XP),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, y_p) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::YP),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, x_q_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::XQC0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, x_q_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::XQC1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, y_q_c0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::YQC0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, y_q_c1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::YQC1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, is_double) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::IsDouble),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, is_add) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::IsAdd),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, l_val) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::LVal),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, g) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::G),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, selector_0) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::Selector0),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, selector_1) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::Selector1),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, selector_2) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::Selector2),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, selector_3) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::Selector3),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, selector_4) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::Selector4),
+                    SumcheckId::MultiMillerLoop,
+                );
+                let (_, selector_5) = accumulator.get_virtual_polynomial_opening(
+                    vp(MultiMillerLoopTerm::Selector5),
+                    SumcheckId::MultiMillerLoop,
+                );
+
+                constraint_claims[PolyType::MultiMillerLoopF as usize] = f;
+                constraint_claims[PolyType::MultiMillerLoopFNext as usize] = f_next;
+                constraint_claims[PolyType::MultiMillerLoopQuotient as usize] = quotient;
+                constraint_claims[PolyType::MultiMillerLoopTXC0 as usize] = t_x_c0;
+                constraint_claims[PolyType::MultiMillerLoopTXC1 as usize] = t_x_c1;
+                constraint_claims[PolyType::MultiMillerLoopTYC0 as usize] = t_y_c0;
+                constraint_claims[PolyType::MultiMillerLoopTYC1 as usize] = t_y_c1;
+                constraint_claims[PolyType::MultiMillerLoopTXC0Next as usize] = t_x_c0_next;
+                constraint_claims[PolyType::MultiMillerLoopTXC1Next as usize] = t_x_c1_next;
+                constraint_claims[PolyType::MultiMillerLoopTYC0Next as usize] = t_y_c0_next;
+                constraint_claims[PolyType::MultiMillerLoopTYC1Next as usize] = t_y_c1_next;
+                constraint_claims[PolyType::MultiMillerLoopLambdaC0 as usize] = lambda_c0;
+                constraint_claims[PolyType::MultiMillerLoopLambdaC1 as usize] = lambda_c1;
+                constraint_claims[PolyType::MultiMillerLoopInvDeltaXC0 as usize] = inv_dx_c0;
+                constraint_claims[PolyType::MultiMillerLoopInvDeltaXC1 as usize] = inv_dx_c1;
+                constraint_claims[PolyType::MultiMillerLoopLC0C0 as usize] = l_c0_c0;
+                constraint_claims[PolyType::MultiMillerLoopLC0C1 as usize] = l_c0_c1;
+                constraint_claims[PolyType::MultiMillerLoopLC1C0 as usize] = l_c1_c0;
+                constraint_claims[PolyType::MultiMillerLoopLC1C1 as usize] = l_c1_c1;
+                constraint_claims[PolyType::MultiMillerLoopLC2C0 as usize] = l_c2_c0;
+                constraint_claims[PolyType::MultiMillerLoopLC2C1 as usize] = l_c2_c1;
+                constraint_claims[PolyType::MultiMillerLoopXP as usize] = x_p;
+                constraint_claims[PolyType::MultiMillerLoopYP as usize] = y_p;
+                constraint_claims[PolyType::MultiMillerLoopXQC0 as usize] = x_q_c0;
+                constraint_claims[PolyType::MultiMillerLoopXQC1 as usize] = x_q_c1;
+                constraint_claims[PolyType::MultiMillerLoopYQC0 as usize] = y_q_c0;
+                constraint_claims[PolyType::MultiMillerLoopYQC1 as usize] = y_q_c1;
+                constraint_claims[PolyType::MultiMillerLoopIsDouble as usize] = is_double;
+                constraint_claims[PolyType::MultiMillerLoopIsAdd as usize] = is_add;
+                constraint_claims[PolyType::MultiMillerLoopLVal as usize] = l_val;
+                constraint_claims[PolyType::MultiMillerLoopG as usize] = g;
+                constraint_claims[PolyType::MultiMillerLoopSelector0 as usize] = selector_0;
+                constraint_claims[PolyType::MultiMillerLoopSelector1 as usize] = selector_1;
+                constraint_claims[PolyType::MultiMillerLoopSelector2 as usize] = selector_2;
+                constraint_claims[PolyType::MultiMillerLoopSelector3 as usize] = selector_3;
+                constraint_claims[PolyType::MultiMillerLoopSelector4 as usize] = selector_4;
+                constraint_claims[PolyType::MultiMillerLoopSelector5 as usize] = selector_5;
+
+                multi_miller_loop_idx += 1;
             }
         }
 

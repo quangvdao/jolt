@@ -379,6 +379,52 @@ fn test_constraint_mapping_consistency() {
                     "Invalid poly type {poly_type:?} for G2 add constraint"
                 );
             }
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => {
+                assert!(
+                    matches!(
+                        poly_type,
+                        PolyType::MultiMillerLoopF
+                            | PolyType::MultiMillerLoopFNext
+                            | PolyType::MultiMillerLoopQuotient
+                            | PolyType::MultiMillerLoopTXC0
+                            | PolyType::MultiMillerLoopTXC1
+                            | PolyType::MultiMillerLoopTYC0
+                            | PolyType::MultiMillerLoopTYC1
+                            | PolyType::MultiMillerLoopTXC0Next
+                            | PolyType::MultiMillerLoopTXC1Next
+                            | PolyType::MultiMillerLoopTYC0Next
+                            | PolyType::MultiMillerLoopTYC1Next
+                            | PolyType::MultiMillerLoopLambdaC0
+                            | PolyType::MultiMillerLoopLambdaC1
+                            | PolyType::MultiMillerLoopInvDeltaXC0
+                            | PolyType::MultiMillerLoopInvDeltaXC1
+                            | PolyType::MultiMillerLoopLC0C0
+                            | PolyType::MultiMillerLoopLC0C1
+                            | PolyType::MultiMillerLoopLC1C0
+                            | PolyType::MultiMillerLoopLC1C1
+                            | PolyType::MultiMillerLoopLC2C0
+                            | PolyType::MultiMillerLoopLC2C1
+                            | PolyType::MultiMillerLoopXP
+                            | PolyType::MultiMillerLoopYP
+                            | PolyType::MultiMillerLoopXQC0
+                            | PolyType::MultiMillerLoopXQC1
+                            | PolyType::MultiMillerLoopYQC0
+                            | PolyType::MultiMillerLoopYQC1
+                            | PolyType::MultiMillerLoopIsDouble
+                            | PolyType::MultiMillerLoopIsAdd
+                            | PolyType::MultiMillerLoopLVal
+                            | PolyType::MultiMillerLoopG
+                            | PolyType::MultiMillerLoopSelector0
+                            | PolyType::MultiMillerLoopSelector1
+                            | PolyType::MultiMillerLoopSelector2
+                            | PolyType::MultiMillerLoopSelector3
+                            | PolyType::MultiMillerLoopSelector4
+                            | PolyType::MultiMillerLoopSelector5
+                    ),
+                    "Invalid poly type {poly_type:?} for MultiMillerLoop constraint"
+                );
+            }
         }
     }
 }
@@ -458,6 +504,8 @@ fn test_jagged_bijection_with_real_dory_proof() {
             ConstraintType::G1ScalarMul { .. } => _g1_scalar_mul_count += 1,
             ConstraintType::G2ScalarMul { .. } => {}
             ConstraintType::G1Add | ConstraintType::G2Add => {}
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => {}
         }
     }
 
@@ -807,6 +855,10 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
             }
             ConstraintType::G1Add => vec![PolyType::G1AddXP, PolyType::G1AddYP],
             ConstraintType::G2Add => vec![PolyType::G2AddXPC0, PolyType::G2AddXPC1],
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => {
+                vec![PolyType::MultiMillerLoopF, PolyType::MultiMillerLoopFNext]
+            }
         };
 
         for poly_type in poly_types {
@@ -822,6 +874,8 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
                 ConstraintType::G1ScalarMul { .. } => 8,
                 ConstraintType::G2ScalarMul { .. } => 8,
                 ConstraintType::G1Add | ConstraintType::G2Add => 11,
+                #[cfg(feature = "experimental-pairing-recursion")]
+                ConstraintType::MultiMillerLoop => 11,
             };
 
             let step = 1;

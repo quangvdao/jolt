@@ -8,3 +8,11 @@ pub mod multi_miller_loop;
 
 #[cfg(feature = "experimental-pairing-recursion")]
 pub use multi_miller_loop::{MultiMillerLoopProver, MultiMillerLoopVerifier};
+
+#[cfg(feature = "experimental-pairing-recursion")]
+pub mod shift;
+
+#[cfg(feature = "experimental-pairing-recursion")]
+pub use shift::{
+    ShiftMultiMillerLoopParams, ShiftMultiMillerLoopProver, ShiftMultiMillerLoopVerifier,
+};

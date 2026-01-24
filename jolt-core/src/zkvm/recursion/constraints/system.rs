@@ -192,12 +192,103 @@ pub enum PolyType {
     G2AddInvDeltaXC1 = 61,
     G2AddIsDouble = 62,
     G2AddIsInverse = 63,
+
+    // ---------------------------------------------------------------------
+    // Pairing recursion (experimental): Multi-Miller loop packed traces
+    // ---------------------------------------------------------------------
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopF = 64,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopFNext = 65,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopQuotient = 66,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTXC0 = 67,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTXC1 = 68,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTYC0 = 69,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTYC1 = 70,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTXC0Next = 71,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTXC1Next = 72,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTYC0Next = 73,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopTYC1Next = 74,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLambdaC0 = 75,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLambdaC1 = 76,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopInvDeltaXC0 = 77,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopInvDeltaXC1 = 78,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLC0C0 = 79,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLC0C1 = 80,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLC1C0 = 81,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLC1C1 = 82,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLC2C0 = 83,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLC2C1 = 84,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopXP = 85,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopYP = 86,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopXQC0 = 87,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopXQC1 = 88,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopYQC0 = 89,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopYQC1 = 90,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopIsDouble = 91,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopIsAdd = 92,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopLVal = 93,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopG = 94,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopSelector0 = 95,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopSelector1 = 96,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopSelector2 = 97,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopSelector3 = 98,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopSelector4 = 99,
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopSelector5 = 100,
 }
 
-impl PolyType {
-    pub const NUM_TYPES: usize = 64;
+#[cfg(not(feature = "experimental-pairing-recursion"))]
+const ALL_POLY_TYPES: [PolyType; 64] = PolyType::all_base_64();
+#[cfg(feature = "experimental-pairing-recursion")]
+const ALL_POLY_TYPES: [PolyType; 101] = PolyType::all_with_pairing_101();
 
-    pub fn all() -> [PolyType; 64] {
+impl PolyType {
+    #[cfg(not(feature = "experimental-pairing-recursion"))]
+    pub const NUM_TYPES: usize = 64;
+    #[cfg(feature = "experimental-pairing-recursion")]
+    pub const NUM_TYPES: usize = 101;
+
+    pub fn all() -> &'static [PolyType] {
+        &ALL_POLY_TYPES
+    }
+
+    #[cfg(not(feature = "experimental-pairing-recursion"))]
+    const fn all_base_64() -> [PolyType; 64] {
         [
             PolyType::RhoPrev,
             PolyType::Quotient,
@@ -263,6 +354,115 @@ impl PolyType {
             PolyType::G2AddInvDeltaXC1,
             PolyType::G2AddIsDouble,
             PolyType::G2AddIsInverse,
+        ]
+    }
+
+    #[cfg(feature = "experimental-pairing-recursion")]
+    const fn all_with_pairing_101() -> [PolyType; 101] {
+        [
+            // Base 64
+            PolyType::RhoPrev,
+            PolyType::Quotient,
+            PolyType::MulLhs,
+            PolyType::MulRhs,
+            PolyType::MulResult,
+            PolyType::MulQuotient,
+            PolyType::G1ScalarMulXA,
+            PolyType::G1ScalarMulYA,
+            PolyType::G1ScalarMulXT,
+            PolyType::G1ScalarMulYT,
+            PolyType::G1ScalarMulXANext,
+            PolyType::G1ScalarMulYANext,
+            PolyType::G1ScalarMulTIndicator,
+            PolyType::G1ScalarMulAIndicator,
+            PolyType::G1ScalarMulBit,
+            PolyType::G2ScalarMulXAC0,
+            PolyType::G2ScalarMulXAC1,
+            PolyType::G2ScalarMulYAC0,
+            PolyType::G2ScalarMulYAC1,
+            PolyType::G2ScalarMulXTC0,
+            PolyType::G2ScalarMulXTC1,
+            PolyType::G2ScalarMulYTC0,
+            PolyType::G2ScalarMulYTC1,
+            PolyType::G2ScalarMulXANextC0,
+            PolyType::G2ScalarMulXANextC1,
+            PolyType::G2ScalarMulYANextC0,
+            PolyType::G2ScalarMulYANextC1,
+            PolyType::G2ScalarMulTIndicator,
+            PolyType::G2ScalarMulAIndicator,
+            PolyType::G2ScalarMulBit,
+            PolyType::G1AddXP,
+            PolyType::G1AddYP,
+            PolyType::G1AddPIndicator,
+            PolyType::G1AddXQ,
+            PolyType::G1AddYQ,
+            PolyType::G1AddQIndicator,
+            PolyType::G1AddXR,
+            PolyType::G1AddYR,
+            PolyType::G1AddRIndicator,
+            PolyType::G1AddLambda,
+            PolyType::G1AddInvDeltaX,
+            PolyType::G1AddIsDouble,
+            PolyType::G1AddIsInverse,
+            PolyType::G2AddXPC0,
+            PolyType::G2AddXPC1,
+            PolyType::G2AddYPC0,
+            PolyType::G2AddYPC1,
+            PolyType::G2AddPIndicator,
+            PolyType::G2AddXQC0,
+            PolyType::G2AddXQC1,
+            PolyType::G2AddYQC0,
+            PolyType::G2AddYQC1,
+            PolyType::G2AddQIndicator,
+            PolyType::G2AddXRC0,
+            PolyType::G2AddXRC1,
+            PolyType::G2AddYRC0,
+            PolyType::G2AddYRC1,
+            PolyType::G2AddRIndicator,
+            PolyType::G2AddLambdaC0,
+            PolyType::G2AddLambdaC1,
+            PolyType::G2AddInvDeltaXC0,
+            PolyType::G2AddInvDeltaXC1,
+            PolyType::G2AddIsDouble,
+            PolyType::G2AddIsInverse,
+            // Pairing extension (37)
+            PolyType::MultiMillerLoopF,
+            PolyType::MultiMillerLoopFNext,
+            PolyType::MultiMillerLoopQuotient,
+            PolyType::MultiMillerLoopTXC0,
+            PolyType::MultiMillerLoopTXC1,
+            PolyType::MultiMillerLoopTYC0,
+            PolyType::MultiMillerLoopTYC1,
+            PolyType::MultiMillerLoopTXC0Next,
+            PolyType::MultiMillerLoopTXC1Next,
+            PolyType::MultiMillerLoopTYC0Next,
+            PolyType::MultiMillerLoopTYC1Next,
+            PolyType::MultiMillerLoopLambdaC0,
+            PolyType::MultiMillerLoopLambdaC1,
+            PolyType::MultiMillerLoopInvDeltaXC0,
+            PolyType::MultiMillerLoopInvDeltaXC1,
+            PolyType::MultiMillerLoopLC0C0,
+            PolyType::MultiMillerLoopLC0C1,
+            PolyType::MultiMillerLoopLC1C0,
+            PolyType::MultiMillerLoopLC1C1,
+            PolyType::MultiMillerLoopLC2C0,
+            PolyType::MultiMillerLoopLC2C1,
+            PolyType::MultiMillerLoopXP,
+            PolyType::MultiMillerLoopYP,
+            PolyType::MultiMillerLoopXQC0,
+            PolyType::MultiMillerLoopXQC1,
+            PolyType::MultiMillerLoopYQC0,
+            PolyType::MultiMillerLoopYQC1,
+            PolyType::MultiMillerLoopIsDouble,
+            PolyType::MultiMillerLoopIsAdd,
+            PolyType::MultiMillerLoopLVal,
+            PolyType::MultiMillerLoopG,
+            PolyType::MultiMillerLoopSelector0,
+            PolyType::MultiMillerLoopSelector1,
+            PolyType::MultiMillerLoopSelector2,
+            PolyType::MultiMillerLoopSelector3,
+            PolyType::MultiMillerLoopSelector4,
+            PolyType::MultiMillerLoopSelector5,
         ]
     }
 
@@ -411,7 +611,7 @@ impl DoryMatrixBuilder {
     /// for each constraint index, every `PolyType` has exactly one row (possibly all zeros).
     fn push_zero_rows_except(&mut self, row_size: usize, except: &[PolyType]) {
         let zero_row = vec![Fq::zero(); row_size];
-        for poly_type in PolyType::all() {
+        for &poly_type in PolyType::all() {
             if except.contains(&poly_type) {
                 continue;
             }
@@ -1076,6 +1276,163 @@ impl DoryMatrixBuilder {
         self.constraint_types.push(ConstraintType::G2Add);
     }
 
+    /// Add constraints from a Multi-Miller loop witness.
+    ///
+    /// One `ConstraintType::MultiMillerLoop` is added **per traced pair** in the witness.
+    /// Each packed trace is an 11-var MLE (length \(2^{11}\)).
+    #[cfg(feature = "experimental-pairing-recursion")]
+    pub fn add_multi_miller_loop_witness(
+        &mut self,
+        witness: &crate::poly::commitment::dory::recursion::JoltMultiMillerLoopWitness,
+    ) {
+        assert_eq!(
+            self.num_constraint_vars, 11,
+            "MultiMillerLoop expects 11 constraint vars (11-var packed trace MLEs)"
+        );
+        let row_size = 1 << self.num_constraint_vars;
+
+        let num_pairs = witness.f_packed_mles.len();
+        debug_assert_eq!(witness.f_next_packed_mles.len(), num_pairs);
+        debug_assert_eq!(witness.quotient_packed_mles.len(), num_pairs);
+
+        for pair_idx in 0..num_pairs {
+            // Basic shape sanity (catch accidental padding bugs early).
+            debug_assert_eq!(witness.f_packed_mles[pair_idx].len(), row_size);
+            debug_assert_eq!(witness.f_next_packed_mles[pair_idx].len(), row_size);
+            debug_assert_eq!(witness.t_x_c0_packed_mles[pair_idx].len(), row_size);
+            debug_assert_eq!(witness.t_x_c0_next_packed_mles[pair_idx].len(), row_size);
+
+            self.rows_by_type[PolyType::MultiMillerLoopF as usize]
+                .push(witness.f_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopFNext as usize]
+                .push(witness.f_next_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopQuotient as usize]
+                .push(witness.quotient_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopTXC0 as usize]
+                .push(witness.t_x_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopTXC1 as usize]
+                .push(witness.t_x_c1_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopTYC0 as usize]
+                .push(witness.t_y_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopTYC1 as usize]
+                .push(witness.t_y_c1_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopTXC0Next as usize]
+                .push(witness.t_x_c0_next_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopTXC1Next as usize]
+                .push(witness.t_x_c1_next_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopTYC0Next as usize]
+                .push(witness.t_y_c0_next_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopTYC1Next as usize]
+                .push(witness.t_y_c1_next_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopLambdaC0 as usize]
+                .push(witness.lambda_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopLambdaC1 as usize]
+                .push(witness.lambda_c1_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopInvDeltaXC0 as usize]
+                .push(witness.inv_dx_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopInvDeltaXC1 as usize]
+                .push(witness.inv_dx_c1_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopLC0C0 as usize]
+                .push(witness.l_c0_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopLC0C1 as usize]
+                .push(witness.l_c0_c1_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopLC1C0 as usize]
+                .push(witness.l_c1_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopLC1C1 as usize]
+                .push(witness.l_c1_c1_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopLC2C0 as usize]
+                .push(witness.l_c2_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopLC2C1 as usize]
+                .push(witness.l_c2_c1_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopXP as usize]
+                .push(witness.x_p_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopYP as usize]
+                .push(witness.y_p_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopXQC0 as usize]
+                .push(witness.x_q_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopXQC1 as usize]
+                .push(witness.x_q_c1_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopYQC0 as usize]
+                .push(witness.y_q_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopYQC1 as usize]
+                .push(witness.y_q_c1_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopIsDouble as usize]
+                .push(witness.is_double_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopIsAdd as usize]
+                .push(witness.is_add_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopLVal as usize]
+                .push(witness.l_val_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopG as usize]
+                .push(witness.g_packed_mles[pair_idx].clone());
+
+            self.rows_by_type[PolyType::MultiMillerLoopSelector0 as usize]
+                .push(witness.selector_0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopSelector1 as usize]
+                .push(witness.selector_1_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopSelector2 as usize]
+                .push(witness.selector_2_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopSelector3 as usize]
+                .push(witness.selector_3_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopSelector4 as usize]
+                .push(witness.selector_4_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopSelector5 as usize]
+                .push(witness.selector_5_packed_mles[pair_idx].clone());
+
+            self.push_zero_rows_except(
+                row_size,
+                &[
+                    PolyType::MultiMillerLoopF,
+                    PolyType::MultiMillerLoopFNext,
+                    PolyType::MultiMillerLoopQuotient,
+                    PolyType::MultiMillerLoopTXC0,
+                    PolyType::MultiMillerLoopTXC1,
+                    PolyType::MultiMillerLoopTYC0,
+                    PolyType::MultiMillerLoopTYC1,
+                    PolyType::MultiMillerLoopTXC0Next,
+                    PolyType::MultiMillerLoopTXC1Next,
+                    PolyType::MultiMillerLoopTYC0Next,
+                    PolyType::MultiMillerLoopTYC1Next,
+                    PolyType::MultiMillerLoopLambdaC0,
+                    PolyType::MultiMillerLoopLambdaC1,
+                    PolyType::MultiMillerLoopInvDeltaXC0,
+                    PolyType::MultiMillerLoopInvDeltaXC1,
+                    PolyType::MultiMillerLoopLC0C0,
+                    PolyType::MultiMillerLoopLC0C1,
+                    PolyType::MultiMillerLoopLC1C0,
+                    PolyType::MultiMillerLoopLC1C1,
+                    PolyType::MultiMillerLoopLC2C0,
+                    PolyType::MultiMillerLoopLC2C1,
+                    PolyType::MultiMillerLoopXP,
+                    PolyType::MultiMillerLoopYP,
+                    PolyType::MultiMillerLoopXQC0,
+                    PolyType::MultiMillerLoopXQC1,
+                    PolyType::MultiMillerLoopYQC0,
+                    PolyType::MultiMillerLoopYQC1,
+                    PolyType::MultiMillerLoopIsDouble,
+                    PolyType::MultiMillerLoopIsAdd,
+                    PolyType::MultiMillerLoopLVal,
+                    PolyType::MultiMillerLoopG,
+                    PolyType::MultiMillerLoopSelector0,
+                    PolyType::MultiMillerLoopSelector1,
+                    PolyType::MultiMillerLoopSelector2,
+                    PolyType::MultiMillerLoopSelector3,
+                    PolyType::MultiMillerLoopSelector4,
+                    PolyType::MultiMillerLoopSelector5,
+                ],
+            );
+
+            self.constraint_types.push(ConstraintType::MultiMillerLoop);
+        }
+    }
+
     /// Add constraint from a per-operation GT multiplication witness (from combine_commitments).
     /// This is the same as `add_gt_mul_witness` but accepts `GTMulOpWitness` type.
     pub fn add_gt_mul_op_witness(&mut self, witness: &GTMulOpWitness) {
@@ -1279,7 +1636,7 @@ impl DoryMatrixBuilder {
         assert!(num_constraints > 0, "No constraints added");
 
         // Debug: print constraint counts for each type
-        for poly_type in PolyType::all() {
+        for &poly_type in PolyType::all() {
             let count = self.rows_by_type[poly_type as usize].len();
             if count != num_constraints {
                 eprintln!(
@@ -1288,7 +1645,7 @@ impl DoryMatrixBuilder {
             }
         }
 
-        for poly_type in PolyType::all() {
+        for &poly_type in PolyType::all() {
             assert_eq!(
                 self.rows_by_type[poly_type as usize].len(),
                 num_constraints,
@@ -1339,7 +1696,7 @@ impl DoryMatrixBuilder {
             let eval_ptr = evaluations.as_mut_ptr();
             let mut offset = 0;
 
-            for poly_type in PolyType::all() {
+            for &poly_type in PolyType::all() {
                 let rows = &self.rows_by_type[poly_type as usize];
 
                 // Copy actual rows
@@ -1397,6 +1754,9 @@ pub enum ConstraintType {
     G1Add,
     /// G2 addition constraint
     G2Add,
+    /// Multi-Miller loop constraint (BN254 pairing Miller loop), one per traced pair.
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoop,
 }
 
 /// Constraint metadata for matrix-based evaluation.
@@ -1574,6 +1934,13 @@ impl ConstraintSystem {
                     builder.push_zero_rows_except(1 << num_constraint_vars, &[]);
                     builder.constraint_types.push(constraint_type.clone());
                 }
+                #[cfg(feature = "experimental-pairing-recursion")]
+                ConstraintType::MultiMillerLoop => {
+                    // Placeholder: pairing constraints are not yet wired into this constructor path.
+                    // Maintain consistent indexing by appending all-zero rows for every PolyType.
+                    builder.push_zero_rows_except(1 << num_constraint_vars, &[]);
+                    builder.constraint_types.push(constraint_type.clone());
+                }
             }
         }
 
@@ -1644,10 +2011,7 @@ impl ConstraintSystem {
             );
             builder.add_gt_exp_witness(&packed);
             gt_exp_witnesses.push(packed);
-            gt_exp_public_inputs.push(GtExpPublicInputs::new(
-                witness.base,
-                witness.bits.clone(),
-            ));
+            gt_exp_public_inputs.push(GtExpPublicInputs::new(witness.base, witness.bits.clone()));
         }
 
         for (_op_id, witness) in witnesses.gt_mul.iter() {
@@ -1990,6 +2354,139 @@ impl ConstraintSystem {
         constraints
     }
 
+    /// Extract Multi-Miller loop witnesses for the Stage 2 `MultiMillerLoop` sumcheck.
+    #[cfg(feature = "experimental-pairing-recursion")]
+    pub fn extract_multi_miller_loop_constraints(
+        &self,
+    ) -> Vec<
+        crate::zkvm::recursion::pairing::multi_miller_loop::MultiMillerLoopWitness<ark_bn254::Fq>,
+    > {
+        let num_constraint_vars = self.matrix.num_constraint_vars;
+        let row_size = 1 << num_constraint_vars;
+
+        let mml_count = self
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.constraint_type, ConstraintType::MultiMillerLoop))
+            .count();
+        let mut constraints = Vec::with_capacity(mml_count);
+        let mut local_idx = 0usize;
+
+        for (idx, constraint) in self.constraints.iter().enumerate() {
+            if matches!(constraint.constraint_type, ConstraintType::MultiMillerLoop) {
+                let f = self.extract_row_poly(PolyType::MultiMillerLoopF, idx, row_size);
+                let f_next = self.extract_row_poly(PolyType::MultiMillerLoopFNext, idx, row_size);
+                let quotient =
+                    self.extract_row_poly(PolyType::MultiMillerLoopQuotient, idx, row_size);
+
+                let t_x_c0 = self.extract_row_poly(PolyType::MultiMillerLoopTXC0, idx, row_size);
+                let t_x_c1 = self.extract_row_poly(PolyType::MultiMillerLoopTXC1, idx, row_size);
+                let t_y_c0 = self.extract_row_poly(PolyType::MultiMillerLoopTYC0, idx, row_size);
+                let t_y_c1 = self.extract_row_poly(PolyType::MultiMillerLoopTYC1, idx, row_size);
+
+                let t_x_c0_next =
+                    self.extract_row_poly(PolyType::MultiMillerLoopTXC0Next, idx, row_size);
+                let t_x_c1_next =
+                    self.extract_row_poly(PolyType::MultiMillerLoopTXC1Next, idx, row_size);
+                let t_y_c0_next =
+                    self.extract_row_poly(PolyType::MultiMillerLoopTYC0Next, idx, row_size);
+                let t_y_c1_next =
+                    self.extract_row_poly(PolyType::MultiMillerLoopTYC1Next, idx, row_size);
+
+                let lambda_c0 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopLambdaC0, idx, row_size);
+                let lambda_c1 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopLambdaC1, idx, row_size);
+                let inv_delta_x_c0 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopInvDeltaXC0, idx, row_size);
+                let inv_delta_x_c1 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopInvDeltaXC1, idx, row_size);
+
+                let l_c0_c0 = self.extract_row_poly(PolyType::MultiMillerLoopLC0C0, idx, row_size);
+                let l_c0_c1 = self.extract_row_poly(PolyType::MultiMillerLoopLC0C1, idx, row_size);
+                let l_c1_c0 = self.extract_row_poly(PolyType::MultiMillerLoopLC1C0, idx, row_size);
+                let l_c1_c1 = self.extract_row_poly(PolyType::MultiMillerLoopLC1C1, idx, row_size);
+                let l_c2_c0 = self.extract_row_poly(PolyType::MultiMillerLoopLC2C0, idx, row_size);
+                let l_c2_c1 = self.extract_row_poly(PolyType::MultiMillerLoopLC2C1, idx, row_size);
+
+                let x_p = self.extract_row_poly(PolyType::MultiMillerLoopXP, idx, row_size);
+                let y_p = self.extract_row_poly(PolyType::MultiMillerLoopYP, idx, row_size);
+
+                let x_q_c0 = self.extract_row_poly(PolyType::MultiMillerLoopXQC0, idx, row_size);
+                let x_q_c1 = self.extract_row_poly(PolyType::MultiMillerLoopXQC1, idx, row_size);
+                let y_q_c0 = self.extract_row_poly(PolyType::MultiMillerLoopYQC0, idx, row_size);
+                let y_q_c1 = self.extract_row_poly(PolyType::MultiMillerLoopYQC1, idx, row_size);
+
+                let is_double =
+                    self.extract_row_poly(PolyType::MultiMillerLoopIsDouble, idx, row_size);
+                let is_add = self.extract_row_poly(PolyType::MultiMillerLoopIsAdd, idx, row_size);
+
+                let l_val = self.extract_row_poly(PolyType::MultiMillerLoopLVal, idx, row_size);
+                let g = self.extract_row_poly(PolyType::MultiMillerLoopG, idx, row_size);
+
+                let selector_0 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopSelector0, idx, row_size);
+                let selector_1 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopSelector1, idx, row_size);
+                let selector_2 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopSelector2, idx, row_size);
+                let selector_3 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopSelector3, idx, row_size);
+                let selector_4 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopSelector4, idx, row_size);
+                let selector_5 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopSelector5, idx, row_size);
+
+                constraints.push(
+                    crate::zkvm::recursion::pairing::multi_miller_loop::MultiMillerLoopWitness {
+                        f,
+                        f_next,
+                        quotient,
+                        t_x_c0,
+                        t_x_c1,
+                        t_y_c0,
+                        t_y_c1,
+                        t_x_c0_next,
+                        t_x_c1_next,
+                        t_y_c0_next,
+                        t_y_c1_next,
+                        lambda_c0,
+                        lambda_c1,
+                        inv_delta_x_c0,
+                        inv_delta_x_c1,
+                        l_c0_c0,
+                        l_c0_c1,
+                        l_c1_c0,
+                        l_c1_c1,
+                        l_c2_c0,
+                        l_c2_c1,
+                        x_p,
+                        y_p,
+                        x_q_c0,
+                        x_q_c1,
+                        y_q_c0,
+                        y_q_c1,
+                        is_double,
+                        is_add,
+                        l_val,
+                        g,
+                        selector_0,
+                        selector_1,
+                        selector_2,
+                        selector_3,
+                        selector_4,
+                        selector_5,
+                        // Instance index is sequential within the MultiMillerLoop family.
+                        constraint_index: local_idx,
+                    },
+                );
+                local_idx += 1;
+            }
+        }
+
+        constraints
+    }
+
     /// Extract packed GT exp constraint data for gt_exp sumcheck
     /// Returns: (constraint_index, rho, quotient) for each GtExp constraint
     /// Note: digit bits, base, and rho_next are public inputs/virtual claims
@@ -2240,7 +2737,7 @@ impl ConstraintSystem {
             let constraint_padded_idx = constraint.constraint_index;
 
             // Check all 4 row indices that correspond to this constraint
-            for poly_type in PolyType::all() {
+            for &poly_type in PolyType::all() {
                 let row_idx = (poly_type as usize) * num_constraints_padded + constraint_padded_idx;
                 let row_binary = index_to_binary::<Fq>(row_idx, num_s_vars);
                 let eq_eval = EqPolynomial::mle(&row_binary, s_vars);
@@ -2662,6 +3159,130 @@ impl ConstraintSystem {
 
                 values.eval_constraint(delta)
             }
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => {
+                use crate::zkvm::recursion::pairing::multi_miller_loop::MultiMillerLoopValues;
+                let delta = Fq::from(7u64);
+
+                let f_row = self.matrix.row_index(PolyType::MultiMillerLoopF, idx);
+                let f_next_row = self.matrix.row_index(PolyType::MultiMillerLoopFNext, idx);
+                let quotient_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopQuotient, idx);
+
+                let t_x_c0_row = self.matrix.row_index(PolyType::MultiMillerLoopTXC0, idx);
+                let t_x_c1_row = self.matrix.row_index(PolyType::MultiMillerLoopTXC1, idx);
+                let t_y_c0_row = self.matrix.row_index(PolyType::MultiMillerLoopTYC0, idx);
+                let t_y_c1_row = self.matrix.row_index(PolyType::MultiMillerLoopTYC1, idx);
+
+                let t_x_c0_next_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopTXC0Next, idx);
+                let t_x_c1_next_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopTXC1Next, idx);
+                let t_y_c0_next_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopTYC0Next, idx);
+                let t_y_c1_next_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopTYC1Next, idx);
+
+                let lambda_c0_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopLambdaC0, idx);
+                let lambda_c1_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopLambdaC1, idx);
+                let inv_dx_c0_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopInvDeltaXC0, idx);
+                let inv_dx_c1_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopInvDeltaXC1, idx);
+
+                let l_c0_c0_row = self.matrix.row_index(PolyType::MultiMillerLoopLC0C0, idx);
+                let l_c0_c1_row = self.matrix.row_index(PolyType::MultiMillerLoopLC0C1, idx);
+                let l_c1_c0_row = self.matrix.row_index(PolyType::MultiMillerLoopLC1C0, idx);
+                let l_c1_c1_row = self.matrix.row_index(PolyType::MultiMillerLoopLC1C1, idx);
+                let l_c2_c0_row = self.matrix.row_index(PolyType::MultiMillerLoopLC2C0, idx);
+                let l_c2_c1_row = self.matrix.row_index(PolyType::MultiMillerLoopLC2C1, idx);
+
+                let x_p_row = self.matrix.row_index(PolyType::MultiMillerLoopXP, idx);
+                let y_p_row = self.matrix.row_index(PolyType::MultiMillerLoopYP, idx);
+                let x_q_c0_row = self.matrix.row_index(PolyType::MultiMillerLoopXQC0, idx);
+                let x_q_c1_row = self.matrix.row_index(PolyType::MultiMillerLoopXQC1, idx);
+                let y_q_c0_row = self.matrix.row_index(PolyType::MultiMillerLoopYQC0, idx);
+                let y_q_c1_row = self.matrix.row_index(PolyType::MultiMillerLoopYQC1, idx);
+
+                let is_double_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopIsDouble, idx);
+                let is_add_row = self.matrix.row_index(PolyType::MultiMillerLoopIsAdd, idx);
+                let l_val_row = self.matrix.row_index(PolyType::MultiMillerLoopLVal, idx);
+                let g_row = self.matrix.row_index(PolyType::MultiMillerLoopG, idx);
+
+                let selector_0_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopSelector0, idx);
+                let selector_1_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopSelector1, idx);
+                let selector_2_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopSelector2, idx);
+                let selector_3_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopSelector3, idx);
+                let selector_4_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopSelector4, idx);
+                let selector_5_row = self
+                    .matrix
+                    .row_index(PolyType::MultiMillerLoopSelector5, idx);
+
+                let values = MultiMillerLoopValues::<Fq> {
+                    f: self.matrix.evaluate_row(f_row, x),
+                    f_next: self.matrix.evaluate_row(f_next_row, x),
+                    quotient: self.matrix.evaluate_row(quotient_row, x),
+                    t_x_c0: self.matrix.evaluate_row(t_x_c0_row, x),
+                    t_x_c1: self.matrix.evaluate_row(t_x_c1_row, x),
+                    t_y_c0: self.matrix.evaluate_row(t_y_c0_row, x),
+                    t_y_c1: self.matrix.evaluate_row(t_y_c1_row, x),
+                    t_x_c0_next: self.matrix.evaluate_row(t_x_c0_next_row, x),
+                    t_x_c1_next: self.matrix.evaluate_row(t_x_c1_next_row, x),
+                    t_y_c0_next: self.matrix.evaluate_row(t_y_c0_next_row, x),
+                    t_y_c1_next: self.matrix.evaluate_row(t_y_c1_next_row, x),
+                    lambda_c0: self.matrix.evaluate_row(lambda_c0_row, x),
+                    lambda_c1: self.matrix.evaluate_row(lambda_c1_row, x),
+                    inv_delta_x_c0: self.matrix.evaluate_row(inv_dx_c0_row, x),
+                    inv_delta_x_c1: self.matrix.evaluate_row(inv_dx_c1_row, x),
+                    l_c0_c0: self.matrix.evaluate_row(l_c0_c0_row, x),
+                    l_c0_c1: self.matrix.evaluate_row(l_c0_c1_row, x),
+                    l_c1_c0: self.matrix.evaluate_row(l_c1_c0_row, x),
+                    l_c1_c1: self.matrix.evaluate_row(l_c1_c1_row, x),
+                    l_c2_c0: self.matrix.evaluate_row(l_c2_c0_row, x),
+                    l_c2_c1: self.matrix.evaluate_row(l_c2_c1_row, x),
+                    x_p: self.matrix.evaluate_row(x_p_row, x),
+                    y_p: self.matrix.evaluate_row(y_p_row, x),
+                    x_q_c0: self.matrix.evaluate_row(x_q_c0_row, x),
+                    x_q_c1: self.matrix.evaluate_row(x_q_c1_row, x),
+                    y_q_c0: self.matrix.evaluate_row(y_q_c0_row, x),
+                    y_q_c1: self.matrix.evaluate_row(y_q_c1_row, x),
+                    is_double: self.matrix.evaluate_row(is_double_row, x),
+                    is_add: self.matrix.evaluate_row(is_add_row, x),
+                    l_val: self.matrix.evaluate_row(l_val_row, x),
+                    g: self.matrix.evaluate_row(g_row, x),
+                    selector_0: self.matrix.evaluate_row(selector_0_row, x),
+                    selector_1: self.matrix.evaluate_row(selector_1_row, x),
+                    selector_2: self.matrix.evaluate_row(selector_2_row, x),
+                    selector_3: self.matrix.evaluate_row(selector_3_row, x),
+                    selector_4: self.matrix.evaluate_row(selector_4_row, x),
+                    selector_5: self.matrix.evaluate_row(selector_5_row, x),
+                };
+
+                values.eval_constraint(delta)
+            }
         }
     }
 
@@ -2782,6 +3403,80 @@ impl CanonicalDeserialize for PolyType {
             61 => Ok(PolyType::G2AddInvDeltaXC1),
             62 => Ok(PolyType::G2AddIsDouble),
             63 => Ok(PolyType::G2AddIsInverse),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            64 => Ok(PolyType::MultiMillerLoopF),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            65 => Ok(PolyType::MultiMillerLoopFNext),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            66 => Ok(PolyType::MultiMillerLoopQuotient),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            67 => Ok(PolyType::MultiMillerLoopTXC0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            68 => Ok(PolyType::MultiMillerLoopTXC1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            69 => Ok(PolyType::MultiMillerLoopTYC0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            70 => Ok(PolyType::MultiMillerLoopTYC1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            71 => Ok(PolyType::MultiMillerLoopTXC0Next),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            72 => Ok(PolyType::MultiMillerLoopTXC1Next),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            73 => Ok(PolyType::MultiMillerLoopTYC0Next),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            74 => Ok(PolyType::MultiMillerLoopTYC1Next),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            75 => Ok(PolyType::MultiMillerLoopLambdaC0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            76 => Ok(PolyType::MultiMillerLoopLambdaC1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            77 => Ok(PolyType::MultiMillerLoopInvDeltaXC0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            78 => Ok(PolyType::MultiMillerLoopInvDeltaXC1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            79 => Ok(PolyType::MultiMillerLoopLC0C0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            80 => Ok(PolyType::MultiMillerLoopLC0C1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            81 => Ok(PolyType::MultiMillerLoopLC1C0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            82 => Ok(PolyType::MultiMillerLoopLC1C1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            83 => Ok(PolyType::MultiMillerLoopLC2C0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            84 => Ok(PolyType::MultiMillerLoopLC2C1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            85 => Ok(PolyType::MultiMillerLoopXP),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            86 => Ok(PolyType::MultiMillerLoopYP),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            87 => Ok(PolyType::MultiMillerLoopXQC0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            88 => Ok(PolyType::MultiMillerLoopXQC1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            89 => Ok(PolyType::MultiMillerLoopYQC0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            90 => Ok(PolyType::MultiMillerLoopYQC1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            91 => Ok(PolyType::MultiMillerLoopIsDouble),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            92 => Ok(PolyType::MultiMillerLoopIsAdd),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            93 => Ok(PolyType::MultiMillerLoopLVal),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            94 => Ok(PolyType::MultiMillerLoopG),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            95 => Ok(PolyType::MultiMillerLoopSelector0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            96 => Ok(PolyType::MultiMillerLoopSelector1),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            97 => Ok(PolyType::MultiMillerLoopSelector2),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            98 => Ok(PolyType::MultiMillerLoopSelector3),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            99 => Ok(PolyType::MultiMillerLoopSelector4),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            100 => Ok(PolyType::MultiMillerLoopSelector5),
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -2822,6 +3517,10 @@ impl CanonicalSerialize for ConstraintType {
             ConstraintType::G2Add => {
                 5u8.serialize_with_mode(&mut writer, compress)?;
             }
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => {
+                6u8.serialize_with_mode(&mut writer, compress)?;
+            }
         }
         Ok(())
     }
@@ -2838,6 +3537,8 @@ impl CanonicalSerialize for ConstraintType {
             }
             ConstraintType::G1Add => 1,
             ConstraintType::G2Add => 1,
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => 1,
         }
     }
 }
@@ -2864,6 +3565,8 @@ impl CanonicalDeserialize for ConstraintType {
             }
             4 => Ok(ConstraintType::G1Add),
             5 => Ok(ConstraintType::G2Add),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            6 => Ok(ConstraintType::MultiMillerLoop),
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -2962,6 +3665,8 @@ mod tests {
                 ConstraintType::G2ScalarMul { .. } => {}
                 ConstraintType::G1Add => g1_add_count += 1,
                 ConstraintType::G2Add => g2_add_count += 1,
+                #[cfg(feature = "experimental-pairing-recursion")]
+                ConstraintType::MultiMillerLoop => {}
             }
         }
 

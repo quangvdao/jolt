@@ -37,8 +37,6 @@ use crate::zkvm::recursion::DoryMatrixBuilder;
 use dory::backends::arkworks::BN254;
 use dory::recursion::ast::AstGraph;
 
-#[cfg(feature = "experimental-pairing-recursion")]
-use super::pairing::multi_miller_loop::{MultiMillerLoopParams, MultiMillerLoopProver};
 use super::{
     constraints::system::{ConstraintSystem, ConstraintType},
     g1::shift::{g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver},
@@ -496,6 +494,8 @@ impl RecursionProver<Fq> {
         let enable_g2_scalar_mul = env_flag_default("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL", true);
         let enable_g1_add = env_flag_default("JOLT_RECURSION_ENABLE_G1_ADD", true);
         let enable_g2_add = env_flag_default("JOLT_RECURSION_ENABLE_G2_ADD", true);
+        #[cfg(feature = "experimental-pairing-recursion")]
+        let enable_pairing = env_flag_default("JOLT_RECURSION_ENABLE_PAIRING", true);
 
         // Use DoryMatrixBuilder with 11 variables for uniform matrix structure (packed GT exp)
         let mut builder = DoryMatrixBuilder::new(11);
@@ -543,10 +543,7 @@ impl RecursionProver<Fq> {
             gt_exp_witnesses.push(packed);
 
             // Store public inputs for verifier
-            gt_exp_public_inputs.push(GtExpPublicInputs::new(
-                witness.base,
-                witness.bits.clone(),
-            ));
+            gt_exp_public_inputs.push(GtExpPublicInputs::new(witness.base, witness.bits.clone()));
         }
         drop(gt_exp_span);
 
@@ -627,6 +624,31 @@ impl RecursionProver<Fq> {
             drop(g2_add_span);
         }
 
+        // Add pairing (Multi-Miller loop) witnesses (experimental; into the matrix)
+        #[cfg(feature = "experimental-pairing-recursion")]
+        if enable_pairing {
+            let pairing_span = tracing::info_span!(
+                "add_pairing_witnesses",
+                count = witness_collection.pairing.len(),
+                multi_count = witness_collection.multi_pairing.len()
+            )
+            .entered();
+
+            let mut pairing_items: Vec<_> = witness_collection.pairing.iter().collect();
+            pairing_items.sort_by_key(|(op_id, _)| *op_id);
+            for (_op_id, witness) in pairing_items {
+                builder.add_multi_miller_loop_witness(witness);
+            }
+
+            let mut multi_pairing_items: Vec<_> = witness_collection.multi_pairing.iter().collect();
+            multi_pairing_items.sort_by_key(|(op_id, _)| *op_id);
+            for (_op_id, witness) in multi_pairing_items {
+                builder.add_multi_miller_loop_witness(witness);
+            }
+
+            drop(pairing_span);
+        }
+
         // Add combine_commitments witnesses (homomorphic combine offloading)
         if let Some(cw) = combine_witness {
             let pre_count = builder.constraint_count();
@@ -639,10 +661,8 @@ impl RecursionProver<Fq> {
 
             // Also collect public inputs for the combine witnesses
             for exp_wit in &cw.exp_witnesses {
-                gt_exp_public_inputs.push(GtExpPublicInputs::new(
-                    exp_wit.base,
-                    exp_wit.bits.clone(),
-                ));
+                gt_exp_public_inputs
+                    .push(GtExpPublicInputs::new(exp_wit.base, exp_wit.bits.clone()));
             }
 
             let combined_packed_witnesses = builder.add_combine_witness(cw);
@@ -971,6 +991,9 @@ impl RecursionProver<Fq> {
         let enable_shift_g2_scalar_mul =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
+        #[cfg(feature = "experimental-pairing-recursion")]
+        let enable_shift_multi_miller_loop =
+            env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_MULTI_MILLER_LOOP", true);
 
         let mut provers: Vec<Box<dyn SumcheckInstanceProver<Fq, T>>> = Vec::new();
 
@@ -1220,6 +1243,71 @@ impl RecursionProver<Fq> {
             let (spec, constraint_indices) = G2AddProverSpec::new(params, g2_add_constraints);
             let prover = G2AddProver::from_spec(spec, constraint_indices, transcript);
             provers.push(Box::new(prover));
+        }
+
+        // Multi-Miller loop (pairing Miller loop) + shift chaining (experimental)
+        #[cfg(feature = "experimental-pairing-recursion")]
+        {
+            let mml_constraints = self
+                .constraint_system
+                .extract_multi_miller_loop_constraints();
+            if !mml_constraints.is_empty() {
+                use super::pairing::{
+                    multi_miller_loop::{
+                        MultiMillerLoopParams, MultiMillerLoopProver, MultiMillerLoopProverSpec,
+                    },
+                    shift::{ShiftMultiMillerLoopParams, ShiftMultiMillerLoopProver},
+                };
+
+                if enable_shift_multi_miller_loop {
+                    let mut pairs: Vec<(VirtualPolynomial, Vec<Fq>, VirtualPolynomial, Vec<Fq>)> =
+                        Vec::with_capacity(mml_constraints.len() * 5);
+                    for w in &mml_constraints {
+                        let i = w.constraint_index;
+                        pairs.push((
+                            VirtualPolynomial::multi_miller_loop_f(i),
+                            w.f.clone(),
+                            VirtualPolynomial::multi_miller_loop_f_next(i),
+                            w.f_next.clone(),
+                        ));
+                        pairs.push((
+                            VirtualPolynomial::multi_miller_loop_t_x_c0(i),
+                            w.t_x_c0.clone(),
+                            VirtualPolynomial::multi_miller_loop_t_x_c0_next(i),
+                            w.t_x_c0_next.clone(),
+                        ));
+                        pairs.push((
+                            VirtualPolynomial::multi_miller_loop_t_x_c1(i),
+                            w.t_x_c1.clone(),
+                            VirtualPolynomial::multi_miller_loop_t_x_c1_next(i),
+                            w.t_x_c1_next.clone(),
+                        ));
+                        pairs.push((
+                            VirtualPolynomial::multi_miller_loop_t_y_c0(i),
+                            w.t_y_c0.clone(),
+                            VirtualPolynomial::multi_miller_loop_t_y_c0_next(i),
+                            w.t_y_c0_next.clone(),
+                        ));
+                        pairs.push((
+                            VirtualPolynomial::multi_miller_loop_t_y_c1(i),
+                            w.t_y_c1.clone(),
+                            VirtualPolynomial::multi_miller_loop_t_y_c1_next(i),
+                            w.t_y_c1_next.clone(),
+                        ));
+                    }
+
+                    let shift_params = ShiftMultiMillerLoopParams::new(pairs.len());
+                    let shift_prover =
+                        ShiftMultiMillerLoopProver::<Fq, T>::new(shift_params, pairs, transcript);
+                    provers.push(Box::new(shift_prover));
+                }
+
+                let params = MultiMillerLoopParams::new(mml_constraints.len());
+                let (spec, constraint_indices) =
+                    MultiMillerLoopProverSpec::new(params, mml_constraints);
+                let prover = MultiMillerLoopProver::from_spec(spec, constraint_indices, transcript);
+                provers.push(Box::new(prover));
+            }
         }
 
         // TODO: Add wiring/boundary constraints sumcheck (AST-driven).

@@ -57,7 +57,6 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         // Fq2 helper functions (inline)
         // mul: (a0,a1) * (b0,b1) = (a0*b0 - a1*b1, a0*b1 + a1*b0)
         let mul_c0 = |a0: F, a1: F, b0: F, b1: F| a0 * b0 - a1 * b1;
-        let mul_c1 = |a0: F, a1: F, b0: F, b1: F| a0 * b1 + a1 * b0;
         // sq: (a0,a1)^2 = (a0^2 - a1^2, 2*a0*a1)
         let sq_c0 = |a0: F, a1: F| a0 * a0 - a1 * a1;
         let sq_c1 = |a0: F, a1: F| two * a0 * a1;
@@ -98,7 +97,7 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         // Slope constraints
         // Double case: 2 * y * lambda = 3 * x^2
         let two_y_lam0 = two * mul_c0(ty0, ty1, self.lambda_c0, self.lambda_c1);
-        let two_y_lam1 = two * mul_c1(ty0, ty1, self.lambda_c0, self.lambda_c1);
+        let two_y_lam1 = two * (ty0 * self.lambda_c1 + ty1 * self.lambda_c0);
         let three_x_sq0 = three * sq_c0(tx0, tx1);
         let three_x_sq1 = three * sq_c1(tx0, tx1);
 
@@ -114,7 +113,7 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let dy1 = self.y_q_c1 - ty1;
 
         let lam_dx0 = mul_c0(self.lambda_c0, self.lambda_c1, dx0, dx1);
-        let lam_dx1 = mul_c1(self.lambda_c0, self.lambda_c1, dx0, dx1);
+        let lam_dx1 = self.lambda_c0 * dx1 + self.lambda_c1 * dx0;
 
         acc += delta_pow * (self.is_add * (lam_dx0 - dy0));
         delta_pow *= delta;
@@ -123,7 +122,7 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
 
         // Inverse constraint for add case: inv_dx * dx = 1
         let inv_dx_dx0 = mul_c0(self.inv_delta_x_c0, self.inv_delta_x_c1, dx0, dx1);
-        let inv_dx_dx1 = mul_c1(self.inv_delta_x_c0, self.inv_delta_x_c1, dx0, dx1);
+        let inv_dx_dx1 = self.inv_delta_x_c0 * dx1 + self.inv_delta_x_c1 * dx0;
 
         acc += delta_pow * (self.is_add * (inv_dx_dx0 - one));
         delta_pow *= delta;
@@ -144,7 +143,7 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let dx_next0 = tx0 - tx_next0;
         let dx_next1 = tx1 - tx_next1;
         let lam_dx_next0 = mul_c0(self.lambda_c0, self.lambda_c1, dx_next0, dx_next1);
-        let lam_dx_next1 = mul_c1(self.lambda_c0, self.lambda_c1, dx_next0, dx_next1);
+        let lam_dx_next1 = self.lambda_c0 * dx_next1 + self.lambda_c1 * dx_next0;
 
         acc += delta_pow * (is_active * (ty_next0 - (lam_dx_next0 - ty0)));
         delta_pow *= delta;
@@ -179,7 +178,7 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let y_sq0 = sq_c0(ty0, ty1);
         let y_sq1 = sq_c1(ty0, ty1);
         let x_cub0 = mul_c0(x_sq0, x_sq1, tx0, tx1);
-        let x_cub1 = mul_c1(x_sq0, x_sq1, tx0, tx1);
+        let x_cub1 = x_sq0 * tx1 + x_sq1 * tx0;
         let dbl_c2_0 = two * y_sq0 - three * x_cub0;
         let dbl_c2_1 = two * y_sq1 - three * x_cub1;
 
@@ -189,9 +188,9 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let add_c1_0 = self.y_q_c0 - ty0;
         let add_c1_1 = self.y_q_c1 - ty1;
         let xq_yt_0 = mul_c0(self.x_q_c0, self.x_q_c1, ty0, ty1);
-        let xq_yt_1 = mul_c1(self.x_q_c0, self.x_q_c1, ty0, ty1);
+        let xq_yt_1 = self.x_q_c0 * ty1 + self.x_q_c1 * ty0;
         let xt_yq_0 = mul_c0(tx0, tx1, self.y_q_c0, self.y_q_c1);
-        let xt_yq_1 = mul_c1(tx0, tx1, self.y_q_c0, self.y_q_c1);
+        let xt_yq_1 = tx0 * self.y_q_c1 + tx1 * self.y_q_c0;
         let add_c2_0 = xq_yt_0 - xt_yq_0;
         let add_c2_1 = xq_yt_1 - xt_yq_1;
 

@@ -1,82 +1,20 @@
-use crate::fixed_base::FixedBaseTable as GenericFixedBaseTable;
-use crate::traits::{GlvCapable, MsmGroup};
+//! Grumpkin curve-specific benchmark helpers.
+//!
+//! The core MSM functionality (traits, algorithms, constants) is now in
+//! `jolt-inlines-grumpkin::msm`. This module only contains benchmark-specific
+//! helpers for generating test data.
+
+use jolt_inlines_grumpkin::msm::GrumpkinFixedBaseTable;
 use jolt_inlines_grumpkin::{GrumpkinFr, GrumpkinPoint, UnwrapOrSpoilProof};
 
-// ============================================================
-// Curve Parameters
-// ============================================================
+// Re-export constants and types from jolt-inlines for convenience.
+pub use jolt_inlines_grumpkin::msm::{
+    BASELINE_BUCKETS, BASELINE_WINDOW, BASELINE_WINDOWS, FIXED_BASE_BUCKETS, FIXED_BASE_WINDOW,
+    FIXED_BASE_WINDOWS, GLV_BUCKETS, GLV_SCALAR_BITS, GLV_WINDOW, GLV_WINDOWS, SCALAR_BITS,
+};
 
-pub const SCALAR_BITS: usize = 256;
-pub const GLV_SCALAR_BITS: usize = 128;
-
-// Pippenger parameters for baseline (256-bit scalars).
-pub const BASELINE_WINDOW: usize = 12;
-pub const BASELINE_BUCKETS: usize = 1 << BASELINE_WINDOW;
-pub const BASELINE_WINDOWS: usize = SCALAR_BITS.div_ceil(BASELINE_WINDOW);
-
-// Pippenger parameters for GLV (128-bit scalars).
-pub const GLV_WINDOW: usize = 8;
-pub const GLV_BUCKETS: usize = 1 << GLV_WINDOW;
-pub const GLV_WINDOWS: usize = GLV_SCALAR_BITS.div_ceil(GLV_WINDOW);
-
-// Fixed-base (generator) windowed multiplication parameters (256-bit scalars).
-pub const FIXED_BASE_WINDOW: usize = 14;
-pub const FIXED_BASE_BUCKETS: usize = 1 << FIXED_BASE_WINDOW;
-pub const FIXED_BASE_WINDOWS: usize = SCALAR_BITS.div_ceil(FIXED_BASE_WINDOW);
-
-pub type FixedBaseTable =
-    GenericFixedBaseTable<GrumpkinPoint, FIXED_BASE_WINDOWS, FIXED_BASE_BUCKETS>;
-
-// ============================================================
-// Trait Implementations
-// ============================================================
-
-impl MsmGroup for GrumpkinPoint {
-    #[inline(always)]
-    fn identity() -> Self {
-        GrumpkinPoint::infinity()
-    }
-
-    #[inline(always)]
-    fn is_identity(&self) -> bool {
-        self.is_infinity()
-    }
-
-    #[inline(always)]
-    fn add(&self, other: &Self) -> Self {
-        GrumpkinPoint::add(self, other)
-    }
-
-    #[inline(always)]
-    fn neg(&self) -> Self {
-        GrumpkinPoint::neg(self)
-    }
-
-    #[inline(always)]
-    fn double(&self) -> Self {
-        GrumpkinPoint::double(self)
-    }
-
-    #[inline(always)]
-    fn double_and_add(&self, other: &Self) -> Self {
-        GrumpkinPoint::double_and_add(self, other)
-    }
-}
-
-impl GlvCapable for GrumpkinPoint {
-    type HalfScalar = u128;
-    type FullScalar = GrumpkinFr;
-
-    #[inline(always)]
-    fn endomorphism(&self) -> Self {
-        GrumpkinPoint::endomorphism(self)
-    }
-
-    #[inline(always)]
-    fn decompose_scalar(k: &GrumpkinFr) -> [(bool, u128); 2] {
-        GrumpkinPoint::decompose_scalar(k)
-    }
-}
+/// Type alias for convenience - re-export from jolt-inlines.
+pub type FixedBaseTable = GrumpkinFixedBaseTable;
 
 // ============================================================
 // Benchmark Helpers

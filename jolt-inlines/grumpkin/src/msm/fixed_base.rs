@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 
-use crate::traits::{MsmGroup, WindowedScalar};
+use crate::msm::traits::{MsmGroup, WindowedScalar};
 
 /// Fixed-base precomputed table for a single base point.
 /// table[window][digit] = digit · 2^(window·width) · base.

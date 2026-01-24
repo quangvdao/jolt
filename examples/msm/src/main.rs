@@ -34,12 +34,9 @@ pub fn main() {
     if run_proof {
         info!("Running full prove/verify cycle...");
 
-        let shared_preprocessing = guest::preprocess_shared_msm_bench(&mut program);
-        let prover_preprocessing = guest::preprocess_prover_msm_bench(shared_preprocessing.clone());
-        let verifier_preprocessing = guest::preprocess_verifier_msm_bench(
-            shared_preprocessing,
-            prover_preprocessing.generators.to_verifier_setup(),
-        );
+        let prover_preprocessing = guest::preprocess_msm_bench(&mut program);
+        let verifier_preprocessing =
+            guest::verifier_preprocessing_from_prover_msm_bench(&prover_preprocessing);
 
         let prove = guest::build_prover_msm_bench(program, prover_preprocessing);
         let verify = guest::build_verifier_msm_bench(verifier_preprocessing);

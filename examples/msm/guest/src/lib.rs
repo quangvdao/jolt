@@ -3,29 +3,25 @@
 extern crate alloc;
 
 pub mod curves;
-pub mod fixed_base;
-pub mod glv;
-pub mod pippenger;
-pub mod scalar;
-pub mod traits;
 
 use core::hint::black_box;
 
 use jolt::{end_cycle_tracking, start_cycle_tracking};
+use jolt_inlines_grumpkin::msm::{
+    msm_fixed_base, msm_glv_with_scratch_const, msm_pippenger_const, GrumpkinFixedBaseTable,
+    BASELINE_WINDOW, GLV_WINDOW,
+};
 use jolt_inlines_grumpkin::{GrumpkinFr, GrumpkinPoint};
 
-use crate::curves::grumpkin::{
-    generate_points_fixed_base, generate_scalars, scalar_to_fr, FixedBaseTable, BASELINE_WINDOW,
-    GLV_WINDOW,
-};
-use crate::fixed_base::msm_fixed_base;
-use crate::glv::msm_glv_with_scratch_const;
-use crate::pippenger::msm_pippenger_const;
+use crate::curves::grumpkin::{generate_points_fixed_base, generate_scalars, scalar_to_fr};
 
-// Re-export for convenience.
-pub use crate::glv::msm_glv;
-pub use crate::pippenger::msm_pippenger;
-pub use crate::traits::*;
+// Re-export MSM functions from jolt-inlines for convenience.
+pub use jolt_inlines_grumpkin::msm::{
+    msm_glv, msm_glv_const, msm_pippenger, GlvCapable, WindowedScalar,
+};
+
+/// Type alias for convenience.
+pub type FixedBaseTable = GrumpkinFixedBaseTable;
 
 /// MSM size - adjust this constant to change benchmark size.
 /// Recommended values: 16 (quick test), 256, 1024, 2048.

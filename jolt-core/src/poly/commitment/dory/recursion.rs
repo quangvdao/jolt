@@ -85,7 +85,8 @@ use super::{
     commitment_scheme::DoryCommitmentScheme,
     jolt_dory_routines::{JoltG1Routines, JoltG2Routines},
     witness::{
-        g1_scalar_mul::ScalarMultiplicationSteps, g2_scalar_mul::G2ScalarMultiplicationSteps,
+        g1_add::G1AdditionSteps, g1_scalar_mul::ScalarMultiplicationSteps,
+        g2_add::G2AdditionSteps, g2_scalar_mul::G2ScalarMultiplicationSteps,
         gt_exp::Base4ExponentiationSteps, gt_mul::MultiplicationSteps,
     },
     wrappers::{
@@ -195,91 +196,6 @@ impl WitnessResult<ArkG2> for JoltG2ScalarMulWitness {
     }
 }
 
-/// G1 addition witness for Dory recursion.
-///
-/// For a single point addition P + Q = R, we store:
-/// - The coordinates and infinity indicators for P, Q, R
-/// - Auxiliary values: lambda (slope), inv_delta_x, is_double, is_inverse
-///
-/// Since G1Add is a single operation (not a trace), the MLE is constant:
-/// all 2^11 entries have the same value.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct JoltG1AddWitness {
-    // Input P
-    pub x_p: Fq,
-    pub y_p: Fq,
-    pub ind_p: Fq, // 1 if P = O (infinity), 0 otherwise
-
-    // Input Q
-    pub x_q: Fq,
-    pub y_q: Fq,
-    pub ind_q: Fq,
-
-    // Output R = P + Q
-    pub x_r: Fq,
-    pub y_r: Fq,
-    pub ind_r: Fq,
-
-    // Auxiliary witness values
-    pub lambda: Fq,      // slope
-    pub inv_delta_x: Fq, // 1/(x_q - x_p) in add case
-    pub is_double: Fq,   // 1 if P == Q
-    pub is_inverse: Fq,  // 1 if P == -Q (result is O)
-
-    // For WitnessResult trait
-    ark_result: ArkG1,
-}
-
-impl WitnessResult<ArkG1> for JoltG1AddWitness {
-    fn result(&self) -> Option<&ArkG1> {
-        Some(&self.ark_result)
-    }
-}
-
-/// G2 addition witness for Dory recursion.
-///
-/// Same as G1 but with Fq2 coordinates split into (c0, c1) components.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct JoltG2AddWitness {
-    // Input P (Fq2 coordinates)
-    pub x_p_c0: Fq,
-    pub x_p_c1: Fq,
-    pub y_p_c0: Fq,
-    pub y_p_c1: Fq,
-    pub ind_p: Fq,
-
-    // Input Q
-    pub x_q_c0: Fq,
-    pub x_q_c1: Fq,
-    pub y_q_c0: Fq,
-    pub y_q_c1: Fq,
-    pub ind_q: Fq,
-
-    // Output R = P + Q
-    pub x_r_c0: Fq,
-    pub x_r_c1: Fq,
-    pub y_r_c0: Fq,
-    pub y_r_c1: Fq,
-    pub ind_r: Fq,
-
-    // Auxiliary witness values (Fq2)
-    pub lambda_c0: Fq,
-    pub lambda_c1: Fq,
-    pub inv_delta_x_c0: Fq,
-    pub inv_delta_x_c1: Fq,
-    pub is_double: Fq,
-    pub is_inverse: Fq,
-
-    // For WitnessResult trait
-    ark_result: ArkG2,
-}
-
-impl WitnessResult<ArkG2> for JoltG2AddWitness {
-    fn result(&self) -> Option<&ArkG2> {
-        Some(&self.ark_result)
-    }
-}
-
 /// Multi-Miller loop witness for Dory recursion.
 #[cfg(feature = "experimental-pairing-recursion")]
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -368,12 +284,12 @@ impl WitnessResult<ArkGT> for UnimplementedWitness<ArkGT> {
 
 impl WitnessBackend for JoltWitness {
     // G1 operations
-    type G1AddWitness = JoltG1AddWitness;
+    type G1AddWitness = G1AdditionSteps;
     type G1ScalarMulWitness = JoltG1ScalarMulWitness;
     type MsmG1Witness = UnimplementedWitness<ArkG1>;
 
     // G2 operations
-    type G2AddWitness = JoltG2AddWitness;
+    type G2AddWitness = G2AdditionSteps;
     type G2ScalarMulWitness = JoltG2ScalarMulWitness;
     type MsmG2Witness = UnimplementedWitness<ArkG2>;
 
@@ -400,180 +316,16 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
         a: &<BN254 as PairingCurve>::G1,
         b: &<BN254 as PairingCurve>::G1,
         result: &<BN254 as PairingCurve>::G1,
-    ) -> JoltG1AddWitness {
-        use ark_ec::AffineRepr;
-        use ark_ff::Field;
-
-        let p: G1Affine = a.0.into();
-        let q: G1Affine = b.0.into();
-        let r: G1Affine = result.0.into();
-
-        let zero = Fq::from(0u64);
-        let one = Fq::from(1u64);
-
-        // Extract coordinates (0 for infinity points)
-        let (x_p, y_p, ind_p) = if p.is_zero() {
-            (zero, zero, one)
-        } else {
-            (p.x, p.y, zero)
-        };
-
-        let (x_q, y_q, ind_q) = if q.is_zero() {
-            (zero, zero, one)
-        } else {
-            (q.x, q.y, zero)
-        };
-
-        let (x_r, y_r, ind_r) = if r.is_zero() {
-            (zero, zero, one)
-        } else {
-            (r.x, r.y, zero)
-        };
-
-        // Compute auxiliary witness values
-        let (lambda, inv_delta_x, is_double, is_inverse) = if ind_p == one || ind_q == one {
-            // At least one input is infinity - no slope needed
-            (zero, zero, zero, zero)
-        } else {
-            let dx = x_q - x_p;
-            let dy = y_q - y_p;
-
-            if dx == zero {
-                if dy == zero {
-                    // P == Q: doubling case
-                    // lambda = 3*x_p^2 / (2*y_p)
-                    let two = Fq::from(2u64);
-                    let three = Fq::from(3u64);
-                    let numerator = three * x_p * x_p;
-                    let denominator = two * y_p;
-                    let lam = if denominator == zero {
-                        zero // Edge case: y_p = 0 means P = -P, result is O
-                    } else {
-                        numerator * denominator.inverse().unwrap()
-                    };
-                    (lam, zero, one, zero)
-                } else {
-                    // P == -Q: inverse case, result is infinity
-                    (zero, zero, zero, one)
-                }
-            } else {
-                // General add case: lambda = dy/dx
-                let inv_dx = dx.inverse().unwrap();
-                let lam = dy * inv_dx;
-                (lam, inv_dx, zero, zero)
-            }
-        };
-
-        JoltG1AddWitness {
-            x_p,
-            y_p,
-            ind_p,
-            x_q,
-            y_q,
-            ind_q,
-            x_r,
-            y_r,
-            ind_r,
-            lambda,
-            inv_delta_x,
-            is_double,
-            is_inverse,
-            ark_result: *result,
-        }
+    ) -> G1AdditionSteps {
+        G1AdditionSteps::new(a, b, result)
     }
 
     fn generate_g2_add(
         a: &<BN254 as PairingCurve>::G2,
         b: &<BN254 as PairingCurve>::G2,
         result: &<BN254 as PairingCurve>::G2,
-    ) -> JoltG2AddWitness {
-        use ark_bn254::Fq2;
-        use ark_ec::AffineRepr;
-        use ark_ff::Field;
-
-        let p: G2Affine = a.0.into();
-        let q: G2Affine = b.0.into();
-        let r: G2Affine = result.0.into();
-
-        let zero = Fq::from(0u64);
-        let one = Fq::from(1u64);
-        let fq2_zero = Fq2::from(0u64);
-
-        // Extract Fq2 coordinates split into (c0, c1)
-        let (x_p, y_p, ind_p) = if p.is_zero() {
-            (fq2_zero, fq2_zero, one)
-        } else {
-            (p.x, p.y, zero)
-        };
-
-        let (x_q, y_q, ind_q) = if q.is_zero() {
-            (fq2_zero, fq2_zero, one)
-        } else {
-            (q.x, q.y, zero)
-        };
-
-        let (x_r, y_r, ind_r) = if r.is_zero() {
-            (fq2_zero, fq2_zero, one)
-        } else {
-            (r.x, r.y, zero)
-        };
-
-        // Compute auxiliary witness values in Fq2
-        let (lambda, inv_delta_x, is_double, is_inverse) = if ind_p == one || ind_q == one {
-            (fq2_zero, fq2_zero, zero, zero)
-        } else {
-            let dx = x_q - x_p;
-            let dy = y_q - y_p;
-
-            if dx == fq2_zero {
-                if dy == fq2_zero {
-                    // Doubling case
-                    let two = Fq2::from(2u64);
-                    let three = Fq2::from(3u64);
-                    let numerator = three * x_p * x_p;
-                    let denominator = two * y_p;
-                    let lam = if denominator == fq2_zero {
-                        fq2_zero
-                    } else {
-                        numerator * denominator.inverse().unwrap()
-                    };
-                    (lam, fq2_zero, one, zero)
-                } else {
-                    // Inverse case
-                    (fq2_zero, fq2_zero, zero, one)
-                }
-            } else {
-                // General add
-                let inv_dx = dx.inverse().unwrap();
-                let lam = dy * inv_dx;
-                (lam, inv_dx, zero, zero)
-            }
-        };
-
-        JoltG2AddWitness {
-            x_p_c0: x_p.c0,
-            x_p_c1: x_p.c1,
-            y_p_c0: y_p.c0,
-            y_p_c1: y_p.c1,
-            ind_p,
-            x_q_c0: x_q.c0,
-            x_q_c1: x_q.c1,
-            y_q_c0: y_q.c0,
-            y_q_c1: y_q.c1,
-            ind_q,
-            x_r_c0: x_r.c0,
-            x_r_c1: x_r.c1,
-            y_r_c0: y_r.c0,
-            y_r_c1: y_r.c1,
-            ind_r,
-            lambda_c0: lambda.c0,
-            lambda_c1: lambda.c1,
-            inv_delta_x_c0: inv_delta_x.c0,
-            inv_delta_x_c1: inv_delta_x.c1,
-            is_double,
-            is_inverse,
-            ark_result: *result,
-        }
+    ) -> G2AdditionSteps {
+        G2AdditionSteps::new(a, b, result)
     }
 
     fn generate_gt_exp(

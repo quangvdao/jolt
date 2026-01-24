@@ -924,7 +924,7 @@ impl DoryMatrixBuilder {
     /// the hypercube (the same value repeated).
     pub fn add_g1_add_witness(
         &mut self,
-        witness: &crate::poly::commitment::dory::recursion::JoltG1AddWitness,
+        witness: &crate::poly::commitment::dory::witness::g1_add::G1AdditionSteps,
     ) {
         assert_eq!(
             self.num_constraint_vars, 11,
@@ -987,7 +987,7 @@ impl DoryMatrixBuilder {
     /// into (c0, c1) components in Fq.
     pub fn add_g2_add_witness(
         &mut self,
-        witness: &crate::poly::commitment::dory::recursion::JoltG2AddWitness,
+        witness: &crate::poly::commitment::dory::witness::g2_add::G2AdditionSteps,
     ) {
         assert_eq!(
             self.num_constraint_vars, 11,

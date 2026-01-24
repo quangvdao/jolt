@@ -192,7 +192,6 @@ impl BatchedSumcheck {
 
         let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
 
-
         // To see why we may need to scale by a power of two, consider a batch of
         // two sumchecks:
         //   claim_a = \sum_x P(x)             where x \in {0, 1}^M

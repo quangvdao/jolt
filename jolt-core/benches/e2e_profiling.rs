@@ -36,7 +36,10 @@ pub enum BenchType {
     Sha3Chain,
 }
 
-pub fn benchmarks(bench_type: BenchType, committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+pub fn benchmarks(
+    bench_type: BenchType,
+    committed: bool,
+) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     match bench_type {
         BenchType::BTreeMap => btreemap(committed),
         BenchType::Sha2 => sha2(committed),
@@ -48,23 +51,39 @@ pub fn benchmarks(bench_type: BenchType, committed: bool) -> Vec<(tracing::Span,
 }
 
 fn fibonacci(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    prove_example("fibonacci-guest", postcard::to_stdvec(&400000u32).unwrap(), committed)
+    prove_example(
+        "fibonacci-guest",
+        postcard::to_stdvec(&400000u32).unwrap(),
+        committed,
+    )
 }
 
 fn sha2(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
-    prove_example("sha2-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap(), committed)
+    prove_example(
+        "sha2-guest",
+        postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
+        committed,
+    )
 }
 
 fn sha3(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_keccak256 as _;
-    prove_example("sha3-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap(), committed)
+    prove_example(
+        "sha3-guest",
+        postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
+        committed,
+    )
 }
 
 fn btreemap(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    prove_example("btreemap-guest", postcard::to_stdvec(&50u32).unwrap(), committed)
+    prove_example(
+        "btreemap-guest",
+        postcard::to_stdvec(&50u32).unwrap(),
+        committed,
+    )
 }
 
 fn sha2_chain(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
@@ -221,18 +240,25 @@ fn prove_example(
             program_io.memory_layout.clone(),
             padded_trace_len,
         );
-        
+
         // Choose preprocessing mode based on committed flag
         let preprocessing = if committed {
             tracing::info!("Using COMMITTED mode");
-            JoltProverPreprocessing::new_committed(shared_preprocessing.clone(), Arc::clone(&program_data))
+            JoltProverPreprocessing::new_committed(
+                shared_preprocessing.clone(),
+                Arc::clone(&program_data),
+            )
         } else {
             JoltProverPreprocessing::new(shared_preprocessing.clone(), Arc::clone(&program_data))
         };
 
         let elf_contents_opt = program.get_elf_contents();
         let elf_contents = elf_contents_opt.as_deref().expect("elf contents is None");
-        let program_mode = if committed { ProgramMode::Committed } else { ProgramMode::Full };
+        let program_mode = if committed {
+            ProgramMode::Committed
+        } else {
+            ProgramMode::Full
+        };
         let prover = RV64IMACProver::gen_from_elf_with_program_mode(
             &preprocessing,
             elf_contents,
@@ -255,7 +281,11 @@ fn prove_example(
         verifier.verify().unwrap();
     };
 
-    let span_name = if committed { "Example_E2E_Committed" } else { "Example_E2E" };
+    let span_name = if committed {
+        "Example_E2E_Committed"
+    } else {
+        "Example_E2E"
+    };
     tasks.push((
         tracing::info_span!("{}", span_name),
         Box::new(task) as Box<dyn FnOnce()>,

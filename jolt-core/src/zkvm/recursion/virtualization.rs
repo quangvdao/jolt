@@ -63,7 +63,7 @@ use crate::{
     zkvm::{
         recursion::{
             constraints::system::{ConstraintType, PolyType},
-            gt::exponentiation::PackedGtExpPublicInputs,
+            gt::exponentiation::GtExpPublicInputs,
         },
         witness::VirtualPolynomial,
     },
@@ -321,7 +321,7 @@ impl DirectEvaluationVerifier {
 /// [constraint_0_poly_0, constraint_0_poly_1, ..., constraint_0_poly_12,
 ///  constraint_1_poly_0, constraint_1_poly_1, ..., constraint_1_poly_12, ...]
 ///
-/// For PackedGtExp constraints, base and bit evaluations are computed directly from
+/// For GtExp constraints, base and bit evaluations are computed directly from
 /// public inputs rather than being extracted from the accumulator.
 ///
 /// # Type Parameters
@@ -338,7 +338,7 @@ impl DirectEvaluationVerifier {
 pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulator<F>>(
     accumulator: &A,
     constraint_types: &[ConstraintType],
-    _gt_exp_public_inputs: &[PackedGtExpPublicInputs],
+    _gt_exp_public_inputs: &[GtExpPublicInputs],
 ) -> Vec<F> {
     let mut claims = Vec::new();
 
@@ -359,11 +359,11 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
         let mut constraint_claims = vec![F::zero(); NUM_POLY_TYPES];
 
         match constraint_type {
-            ConstraintType::PackedGtExp => {
+            ConstraintType::GtExp => {
                 // Packed GT Exp uses matrix polynomials: RhoPrev + Quotient.
                 // Base/digits/rho_next are public inputs or separately-verified, not in the matrix.
                 tracing::debug!(
-                    "[extract_constraint_claims] Getting PackedGtExp({}) openings for constraint {}",
+                    "[extract_constraint_claims] Getting GtExp({}) openings for constraint {}",
                     gt_exp_idx,
                     idx,
                 );
@@ -371,11 +371,11 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 // Packed GT exp claims are *claim-reduced* in Stage 2 to the shared r_x.
                 let (_, rho_prev) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::gt_exp_rho(gt_exp_idx),
-                    SumcheckId::PackedGtExpClaimReduction,
+                    SumcheckId::GtExpClaimReduction,
                 );
                 let (_, quotient) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::gt_exp_quotient(gt_exp_idx),
-                    SumcheckId::PackedGtExpClaimReduction,
+                    SumcheckId::GtExpClaimReduction,
                 );
 
                 constraint_claims[PolyType::RhoPrev as usize] = rho_prev;

@@ -9,15 +9,15 @@
 //! giving an 11-var MLE overall.
 //!
 //! In the packed GT exp constraint system, `rho_next` is a **virtual** polynomial: it is not
-//! committed/opened directly by the PCS. Instead, Stage 1 (`PackedGtExp`) produces *claimed*
+//! committed/opened directly by the PCS. Instead, Stage 1 (`GtExp`) produces *claimed*
 //! evaluations of `rho_next` at a random point, and this sumcheck verifies those claims are
 //! consistent with the committed \(\rho_i\) after a one-step shift in \(s\).
 //!
 //! ## The precise relation being proved
 //! Let \(r_i = (r^s_i, r^x_i) \in \mathbb{F}^{7} \times \mathbb{F}^{4}\) be the (shared) opening
-//! point used by the `PackedGtExp` sumcheck for instance \(i\). Let:
+//! point used by the `GtExp` sumcheck for instance \(i\). Let:
 //! - \(v_i := \rho^{next}_i(r_i)\) be the claimed `rho_next` evaluation pulled from the opening
-//!   accumulator via `VirtualPolynomial::gt_exp_rho_next(i)` under `SumcheckId::PackedGtExp`.
+//!   accumulator via `VirtualPolynomial::gt_exp_rho_next(i)` under `SumcheckId::GtExp`.
 //! - \(\gamma \in \mathbb{F}\) be the batching coefficient sampled by this sumcheck.
 //!
 //! This sumcheck proves the following batched identity:
@@ -147,7 +147,7 @@ impl<F: JoltField, T: Transcript> ShiftRhoProver<F, T> {
             .map(|(claim, rho_poly)| {
                 let (point, claimed_value) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::gt_exp_rho_next(claim),
-                    SumcheckId::PackedGtExp,
+                    SumcheckId::GtExp,
                 );
                 ShiftEntry {
                     constraint_idx: claim,
@@ -160,7 +160,7 @@ impl<F: JoltField, T: Transcript> ShiftRhoProver<F, T> {
 
         entries.sort_by_key(|entry| entry.constraint_idx);
 
-        // All claims should share the same evaluation point from PackedGtExp sumcheck.
+        // All claims should share the same evaluation point from GtExp sumcheck.
         let point = entries
             .first()
             .expect("shift rho requires at least one claim")
@@ -497,7 +497,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
         for claim in &self.claim_indices {
             let (_, value) = accumulator.get_virtual_polynomial_opening(
                 VirtualPolynomial::gt_exp_rho_next(*claim),
-                SumcheckId::PackedGtExp,
+                SumcheckId::GtExp,
             );
 
             sum += gamma_power * value;
@@ -515,7 +515,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
         // Get the shared point from the first claim (all claims share the same point)
         let (rho_next_point, _) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho_next(self.claim_indices[0]),
-            SumcheckId::PackedGtExp,
+            SumcheckId::GtExp,
         );
 
         // Eq eval tables expect MSB-first ordering; sumcheck challenges are LSB-first.

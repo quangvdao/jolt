@@ -18,7 +18,7 @@ use crate::{
     zkvm::recursion::{
         g1::scalar_multiplication::G1ScalarMulPublicInputs,
         g2::scalar_multiplication::G2ScalarMulPublicInputs,
-        gt::exponentiation::PackedGtExpPublicInputs,
+        gt::exponentiation::GtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
 };
@@ -514,7 +514,7 @@ impl DoryMatrixBuilder {
     /// - Digit bits: digit_lo/hi(s) - scalar digits (7-var padded to 11-var, public input)
     pub fn add_gt_exp_witness(
         &mut self,
-        witness: &crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness<Fq>,
+        witness: &crate::zkvm::recursion::gt::exponentiation::GtExpWitness<Fq>,
     ) {
         assert_eq!(
             self.num_constraint_vars, 11,
@@ -541,7 +541,7 @@ impl DoryMatrixBuilder {
         self.push_zero_rows_except(row_size, &[PolyType::RhoPrev, PolyType::Quotient]);
 
         // Store ONE constraint entry for this packed GT exp
-        self.constraint_types.push(ConstraintType::PackedGtExp);
+        self.constraint_types.push(ConstraintType::GtExp);
     }
 
     /// Add constraint from a GT multiplication witness.
@@ -1169,8 +1169,8 @@ impl DoryMatrixBuilder {
     pub fn add_combine_witness(
         &mut self,
         witness: &GTCombineWitness,
-    ) -> Vec<crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness<Fq>> {
-        use crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness;
+    ) -> Vec<crate::zkvm::recursion::gt::exponentiation::GtExpWitness<Fq>> {
+        use crate::zkvm::recursion::gt::exponentiation::GtExpWitness;
         let mut packed_witnesses = Vec::new();
 
         tracing::info!(
@@ -1198,7 +1198,7 @@ impl DoryMatrixBuilder {
                 };
                 let quotient_mles = exp_wit.quotient_mles.clone();
 
-                let packed = PackedGtExpWitness::from_steps(
+                let packed = GtExpWitness::from_steps(
                     &rho_mles,
                     &quotient_mles,
                     &exp_wit.bits,
@@ -1242,7 +1242,7 @@ impl DoryMatrixBuilder {
             };
 
             // Create packed witness
-            let packed = PackedGtExpWitness::from_steps(
+            let packed = GtExpWitness::from_steps(
                 &rho_mles,
                 &quotient_mles,
                 &exp_wit.bits,
@@ -1382,7 +1382,7 @@ impl DoryMatrixBuilder {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConstraintType {
     /// Packed GT exponentiation constraint (one per GT exp, covers all 254 steps)
-    PackedGtExp,
+    GtExp,
     /// GT multiplication constraint
     GtMul,
     /// G1 scalar multiplication constraint with base point
@@ -1422,11 +1422,11 @@ pub struct ConstraintSystem {
     pub constraints: Vec<MatrixConstraint>,
 
     /// Packed GT exp witnesses for Stage 1 prover (base-4 steps packed into 11-var MLEs)
-    pub gt_exp_witnesses: Vec<crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness<Fq>>,
+    pub gt_exp_witnesses: Vec<crate::zkvm::recursion::gt::exponentiation::GtExpWitness<Fq>>,
 
     /// Public inputs for packed GT exp (base Fq12 and scalar bits) - used by verifier
     /// and Stage 2 to compute digit/base evaluations directly
-    pub gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+    pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
 
     /// Public inputs for G1 scalar multiplication (the scalars, one per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
@@ -1459,7 +1459,7 @@ impl ConstraintSystem {
 
         for constraint_type in &constraint_types {
             match constraint_type {
-                ConstraintType::PackedGtExp => {
+                ConstraintType::GtExp => {
                     // Add packed GT exp rows (2 committed polynomials - base/digits/rho_next are not committed)
                     builder.rows_by_type[PolyType::RhoPrev as usize].push(zero_row.clone());
                     builder.rows_by_type[PolyType::Quotient as usize].push(zero_row.clone());
@@ -1634,7 +1634,7 @@ impl ConstraintSystem {
             let base2_mle = fq12_to_multilinear_evals(&(witness.base * witness.base));
             let base3_mle =
                 fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
-            let packed = crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness::from_steps(
+            let packed = crate::zkvm::recursion::gt::exponentiation::GtExpWitness::from_steps(
                 &witness.rho_mles,
                 &witness.quotient_mles,
                 &witness.bits,
@@ -1644,7 +1644,7 @@ impl ConstraintSystem {
             );
             builder.add_gt_exp_witness(&packed);
             gt_exp_witnesses.push(packed);
-            gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
+            gt_exp_public_inputs.push(GtExpPublicInputs::new(
                 witness.base,
                 witness.bits.clone(),
             ));
@@ -1991,7 +1991,7 @@ impl ConstraintSystem {
     }
 
     /// Extract packed GT exp constraint data for gt_exp sumcheck
-    /// Returns: (constraint_index, rho, quotient) for each PackedGtExp constraint
+    /// Returns: (constraint_index, rho, quotient) for each GtExp constraint
     /// Note: digit bits, base, and rho_next are public inputs/virtual claims
     pub fn extract_gt_exp_constraints(&self) -> Vec<(usize, Vec<Fq>, Vec<Fq>)> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
@@ -2001,12 +2001,12 @@ impl ConstraintSystem {
         let gt_exp_count = self
             .constraints
             .iter()
-            .filter(|c| matches!(c.constraint_type, ConstraintType::PackedGtExp))
+            .filter(|c| matches!(c.constraint_type, ConstraintType::GtExp))
             .count();
         let mut constraints = Vec::with_capacity(gt_exp_count);
 
         for (idx, constraint) in self.constraints.iter().enumerate() {
-            if let ConstraintType::PackedGtExp = constraint.constraint_type {
+            if let ConstraintType::GtExp = constraint.constraint_type {
                 // Extract the 2 committed MLEs for this packed GT exp
                 // Note: RhoPrev = rho in the packed convention
                 // Base, digit bits, and rho_next are not committed
@@ -2038,7 +2038,7 @@ impl ConstraintSystem {
     pub fn debug_constraint_eval(&self, constraint: &MatrixConstraint, x: &[Fq]) {
         let idx = constraint.constraint_index;
         match constraint.constraint_type {
-            ConstraintType::PackedGtExp => {
+            ConstraintType::GtExp => {
                 let g_eval = if x.len() == 11 {
                     let x_elem_reversed: Vec<Fq> = x[7..11].iter().rev().copied().collect();
                     let g_4var = get_g_mle();
@@ -2055,12 +2055,12 @@ impl ConstraintSystem {
                 let quotient = self.matrix.evaluate_row(quotient_row, x);
 
                 // Get rho_next, base_eval and digit bits from packed witness
-                // Need to find GT exp witness index (count PackedGtExp constraints before this one)
+                // Need to find GT exp witness index (count GtExp constraints before this one)
                 let gt_exp_idx = self
                     .constraints
                     .iter()
                     .take(idx)
-                    .filter(|c| matches!(c.constraint_type, ConstraintType::PackedGtExp))
+                    .filter(|c| matches!(c.constraint_type, ConstraintType::GtExp))
                     .count();
                 let packed = &self.gt_exp_witnesses[gt_exp_idx];
                 let rho_curr = DensePolynomial::new(packed.rho_next_packed.clone()).evaluate(x);
@@ -2148,7 +2148,7 @@ impl ConstraintSystem {
                 );
             }
             _ => {
-                println!("  Non-PackedGtExp constraint, skipping debug");
+                println!("  Non-GtExp constraint, skipping debug");
             }
         }
     }
@@ -2258,7 +2258,7 @@ impl ConstraintSystem {
         let idx = constraint.constraint_index;
 
         match constraint.constraint_type {
-            ConstraintType::PackedGtExp => {
+            ConstraintType::GtExp => {
                 // For packed GT exp, g(x) only depends on element variables (high 4 bits)
                 // Data layout: index = x_elem * 128 + s (s in low 7 bits, x_elem in high 4 bits)
                 // So for an 11-var point, element vars are x[7..11]
@@ -2281,12 +2281,12 @@ impl ConstraintSystem {
 
                 // Compute rho_next on the fly from packed witness
                 // During constraint evaluation, we use the precomputed rho_next_packed
-                // Need to find GT exp witness index (count PackedGtExp constraints before this one)
+                // Need to find GT exp witness index (count GtExp constraints before this one)
                 let gt_exp_idx = self
                     .constraints
                     .iter()
                     .take(idx)
-                    .filter(|c| matches!(c.constraint_type, ConstraintType::PackedGtExp))
+                    .filter(|c| matches!(c.constraint_type, ConstraintType::GtExp))
                     .count();
                 let packed = &self.gt_exp_witnesses[gt_exp_idx];
                 // Reverse for big-endian convention used by DensePolynomial::evaluate
@@ -2800,7 +2800,7 @@ impl CanonicalSerialize for ConstraintType {
         compress: Compress,
     ) -> Result<(), SerializationError> {
         match self {
-            ConstraintType::PackedGtExp => {
+            ConstraintType::GtExp => {
                 0u8.serialize_with_mode(&mut writer, compress)?;
             }
             ConstraintType::GtMul => {
@@ -2828,7 +2828,7 @@ impl CanonicalSerialize for ConstraintType {
 
     fn serialized_size(&self, compress: Compress) -> usize {
         match self {
-            ConstraintType::PackedGtExp => 1,
+            ConstraintType::GtExp => 1,
             ConstraintType::GtMul => 1,
             ConstraintType::G1ScalarMul { base_point } => {
                 1 + base_point.0.serialized_size(compress) + base_point.1.serialized_size(compress)
@@ -2850,7 +2850,7 @@ impl CanonicalDeserialize for ConstraintType {
     ) -> Result<Self, SerializationError> {
         let variant = u8::deserialize_with_mode(&mut reader, compress, validate)?;
         match variant {
-            0 => Ok(ConstraintType::PackedGtExp),
+            0 => Ok(ConstraintType::GtExp),
             1 => Ok(ConstraintType::GtMul),
             2 => {
                 let x = Fq::deserialize_with_mode(&mut reader, compress, validate)?;
@@ -2956,7 +2956,7 @@ mod tests {
 
         for constraint in &system.constraints {
             match &constraint.constraint_type {
-                ConstraintType::PackedGtExp => gt_exp_count += 1,
+                ConstraintType::GtExp => gt_exp_count += 1,
                 ConstraintType::GtMul => gt_mul_count += 1,
                 ConstraintType::G1ScalarMul { .. } => g1_scalar_mul_count += 1,
                 ConstraintType::G2ScalarMul { .. } => {}

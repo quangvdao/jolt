@@ -201,7 +201,7 @@ impl ConstraintSystemJaggedBuilder {
         let mut used_poly_types = std::collections::HashSet::new();
         for constraint in constraints.iter() {
             match &constraint.constraint_type {
-                ConstraintType::PackedGtExp => {
+                ConstraintType::GtExp => {
                     // Base, Bit, and RhoNext are not committed polynomials
                     used_poly_types.insert(PolyType::RhoPrev);
                     used_poly_types.insert(PolyType::Quotient);
@@ -288,7 +288,7 @@ impl ConstraintSystemJaggedBuilder {
             // For each constraint, check if it uses this polynomial type
             for (idx, constraint) in constraints.iter().enumerate() {
                 let num_vars = match &constraint.constraint_type {
-                    ConstraintType::PackedGtExp => {
+                    ConstraintType::GtExp => {
                         // Packed GT exp uses RhoPrev and Quotient (all 11-var)
                         // Base, Bit, and RhoNext are not committed polynomials
                         match poly_type {

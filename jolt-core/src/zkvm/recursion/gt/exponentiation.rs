@@ -62,14 +62,14 @@ pub const NUM_TOTAL_VARS: usize = CONFIG.packed_vars;
 /// These are known to both prover and verifier, so the verifier can compute
 /// the digit and base polynomial evaluations directly without receiving claims.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct PackedGtExpPublicInputs {
+pub struct GtExpPublicInputs {
     /// Base GT element (Fq12) for this exponentiation
     pub base: Fq12,
     /// Scalar bits (MSB-first, no leading zeros)
     pub scalar_bits: Vec<bool>,
 }
 
-impl PackedGtExpPublicInputs {
+impl GtExpPublicInputs {
     /// Create new public inputs for a GT exponentiation
     pub fn new(base: Fq12, scalar_bits: Vec<bool>) -> Self {
         Self { base, scalar_bits }
@@ -145,7 +145,7 @@ impl PackedGtExpPublicInputs {
 /// Constraint polynomials for a single packed GT exponentiation
 /// Used when extracting from the Dory matrix for the prover
 #[derive(Clone)]
-pub struct PackedGtExpConstraintPolynomials<F: JoltField> {
+pub struct GtExpConstraintPolynomials<F: JoltField> {
     pub rho: Vec<F>,
     pub quotient: Vec<F>,
     pub digit_lo: Vec<F>,
@@ -163,7 +163,7 @@ pub struct PackedGtExpConstraintPolynomials<F: JoltField> {
 /// - Phase 1 (rounds 0-6): bind step variables s
 /// - Phase 2 (rounds 7-10): bind element variables x
 #[derive(Clone)]
-pub struct PackedGtExpWitness<F: JoltField> {
+pub struct GtExpWitness<F: JoltField> {
     /// rho(s, x) - all intermediate results packed into 11-var MLE
     /// Layout: rho[x * 128 + s] = ρ_s[x]
     pub rho_packed: Vec<F>,
@@ -200,7 +200,7 @@ pub struct PackedGtExpWitness<F: JoltField> {
     pub num_steps: usize,
 }
 
-impl PackedGtExpWitness<Fq> {
+impl GtExpWitness<Fq> {
     /// Create packed witness from individual step data
     ///
     /// Data layout: index = x * 128 + s (s in low 7 bits, x in high 4 bits)
@@ -373,7 +373,7 @@ impl PackedGtExpWitness<Fq> {
                     if !constraint.is_zero() {
                         if failed_constraints.is_empty() {
                             eprintln!(
-                                "PackedGtExpWitness debug: num_steps={num_steps}, first_fail s={s}, x={x}"
+                                "GtExpWitness debug: num_steps={num_steps}, first_fail s={s}, x={x}"
                             );
                             eprintln!("  digit_hi={digit_hi}, digit_lo={digit_lo}");
                             eprintln!("  rho={rho:?}");
@@ -393,7 +393,7 @@ impl PackedGtExpWitness<Fq> {
 
             if !failed_constraints.is_empty() {
                 eprintln!(
-                    "PackedGtExpWitness: {} constraints are non-zero!",
+                    "GtExpWitness: {} constraints are non-zero!",
                     failed_constraints.len()
                 );
                 for (s, x, val) in failed_constraints.iter().take(5) {
@@ -403,7 +403,7 @@ impl PackedGtExpWitness<Fq> {
                     eprintln!("  ... and {} more", failed_constraints.len() - 5);
                 }
                 panic!(
-                    "PackedGtExpWitness: {} constraints are non-zero!",
+                    "GtExpWitness: {} constraints are non-zero!",
                     failed_constraints.len()
                 );
             }
@@ -435,7 +435,7 @@ fn digits_from_bits_msb(bits_msb: &[bool]) -> Vec<(bool, bool)> {
 
 /// Parameters for packed GT exp sumcheck
 #[derive(Clone)]
-pub struct PackedGtExpParams {
+pub struct GtExpParams {
     /// Total number of constraint variables (11 = 7 step + 4 element)
     pub num_constraint_vars: usize,
 
@@ -449,18 +449,18 @@ pub struct PackedGtExpParams {
     pub sumcheck_id: SumcheckId,
 }
 
-impl PackedGtExpParams {
+impl GtExpParams {
     pub fn new() -> Self {
         Self {
             num_constraint_vars: NUM_TOTAL_VARS,
             num_step_vars: NUM_STEP_VARS,
             num_element_vars: NUM_ELEMENT_VARS,
-            sumcheck_id: SumcheckId::PackedGtExp,
+            sumcheck_id: SumcheckId::GtExp,
         }
     }
 }
 
-impl Default for PackedGtExpParams {
+impl Default for GtExpParams {
     fn default() -> Self {
         Self::new()
     }
@@ -476,9 +476,9 @@ impl Default for PackedGtExpParams {
 /// but are NOT committed as virtual claims. The verifier computes these evaluations
 /// directly from public inputs (base Fq12 and scalar bits).
 #[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
-pub struct PackedGtExpProver<F: JoltField> {
+pub struct GtExpProver<F: JoltField> {
     /// Parameters
-    pub params: PackedGtExpParams,
+    pub params: GtExpParams,
 
     /// Number of witnesses (GT exp instances)
     pub num_witnesses: usize,
@@ -537,11 +537,11 @@ pub struct PackedGtExpProver<F: JoltField> {
     pub quotient_claims: Vec<F>,
 }
 
-impl<F: JoltField> PackedGtExpProver<F> {
+impl<F: JoltField> GtExpProver<F> {
     /// Create a new packed GT exp prover with multiple witnesses and gamma batching
     pub fn new<T: Transcript>(
-        params: PackedGtExpParams,
-        witnesses: &[PackedGtExpWitness<F>],
+        params: GtExpParams,
+        witnesses: &[GtExpWitness<F>],
         g_poly: DensePolynomial<F>,
         transcript: &mut T,
     ) -> Self {
@@ -634,7 +634,7 @@ impl<F: JoltField> PackedGtExpProver<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpProver<F> {
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for GtExpProver<F> {
     fn degree(&self) -> usize {
         // Degree from constraint: rho^4 × digit selector (degree 6)
         7
@@ -648,7 +648,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpPr
         F::zero() // The constraint should sum to zero
     }
 
-    #[tracing::instrument(skip_all, name = "PackedGtExp::compute_message")]
+    #[tracing::instrument(skip_all, name = "GtExp::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         const DEGREE: usize = 7;
 
@@ -825,7 +825,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpPr
 
             let sum = s_0 + s_1;
             if sum != previous_claim {
-                eprintln!("PackedGtExp round {_round}: s(0) + s(1) != previous_claim!");
+                eprintln!("GtExp round {_round}: s(0) + s(1) != previous_claim!");
                 eprintln!("  rho_len = {}", self.rho_polys[0].len());
                 eprintln!("  eq_s_len = {}", self.eq_s.len());
                 eprintln!("  eq_x_len = {eq_x_len}");
@@ -844,7 +844,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpPr
         UniPoly::from_evals_and_hint(previous_claim, &evals)
     }
 
-    #[tracing::instrument(skip_all, name = "PackedGtExp::ingest_challenge")]
+    #[tracing::instrument(skip_all, name = "GtExp::ingest_challenge")]
     fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize) {
         // Bind committed witness polynomials
         self.g_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
@@ -936,20 +936,20 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for PackedGtExpPr
 /// - Phase 1 (rounds 0-6): step variables s
 /// - Phase 2 (rounds 7-10): element variables x
 ///
-pub struct PackedGtExpVerifier {
-    pub params: PackedGtExpParams,
+pub struct GtExpVerifier {
+    pub params: GtExpParams,
     pub r_x: Vec<<Fq as JoltField>::Challenge>,
     pub r_s: Vec<<Fq as JoltField>::Challenge>,
     pub gamma: Fq,
     pub num_witnesses: usize,
     /// Public inputs for each witness (base Fq12 and scalar bits)
-    pub public_inputs: Vec<PackedGtExpPublicInputs>,
+    pub public_inputs: Vec<GtExpPublicInputs>,
 }
 
-impl PackedGtExpVerifier {
+impl GtExpVerifier {
     pub fn new<T: Transcript>(
-        params: PackedGtExpParams,
-        public_inputs: Vec<PackedGtExpPublicInputs>,
+        params: GtExpParams,
+        public_inputs: Vec<GtExpPublicInputs>,
         transcript: &mut T,
     ) -> Self {
         let num_witnesses = public_inputs.len();
@@ -979,7 +979,7 @@ impl PackedGtExpVerifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for PackedGtExpVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
     fn degree(&self) -> usize {
         7
     }

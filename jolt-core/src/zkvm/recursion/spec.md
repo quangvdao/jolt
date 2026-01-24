@@ -49,7 +49,7 @@ Concretely:
    (G1/G2/GT scalar-muls, adds, GT mul/exp, plus internal packed traces where applicable).
 2. **Operation constraints (Stage 1 + Stage 2)**: For every traced operation instance, we prove “this op is computed correctly in isolation”
    via type-specific sumchecks.
-   - Stage 1 proves the packed GT exponentiation constraints (`PackedGtExp`).
+   - Stage 1 proves the packed GT exponentiation constraints (`GtExp`).
    - Stage 2 proves all remaining constraint families (GT mul, G1/G2 scalar mul, G1/G2 add, ...), batched into one sumcheck proof.
 3. **Internal trace consistency (Stage 2)**: Some witnesses contain “shifted” columns (e.g. `rho_next`, `A_next`) that are redundant.
    Instead of committing to these columns, we verify their claimed openings via dedicated shift sumchecks:
@@ -287,9 +287,9 @@ $$0 = \sum_{s \in \{0,1\}^7} \sum_{x \in \{0,1\}^4} \text{eq}(r_s, s) \cdot \tex
 #### Output Claims
 
 After final challenges $(r_s^*, r_x^*)$:
-- `PackedGtExpRho(i)`: $\rho(r_s^*, r_x^*)$
-- `PackedGtExpRhoNext(i)`: $\rho_{\text{next}}(r_s^*, r_x^*)$
-- `PackedGtExpQuotient(i)`: $Q(r_s^*, r_x^*)$
+- `GtExpRho(i)`: $\rho(r_s^*, r_x^*)$
+- `GtExpRhoNext(i)`: $\rho_{\text{next}}(r_s^*, r_x^*)$
+- `GtExpQuotient(i)`: $Q(r_s^*, r_x^*)$
 
 The verifier computes \(\text{digit\_lo}(r_s^*)\), \(\text{digit\_hi}(r_s^*)\), and \(\text{base}(r_x^*)\), \(\text{base}^2(r_x^*)\), \(\text{base}^3(r_x^*)\)
 directly from public inputs (scalar bits and base), so these are **not** emitted as openings/claims.
@@ -355,9 +355,9 @@ Since `rho_next` is completely determined by `rho` through the shift relationshi
 
 #### The Solution: Shift Sumcheck
 
-Instead of committing to `rho_next`, the prover treats `rho_next(r_s^*, r_x^*)` as a **virtual claim** (produced by the `PackedGtExp` sumcheck), and then proves that this claim is consistent with the committed `rho` table via a shift sumcheck (`SumcheckId::ShiftRho`).
+Instead of committing to `rho_next`, the prover treats `rho_next(r_s^*, r_x^*)` as a **virtual claim** (produced by the `GtExp` sumcheck), and then proves that this claim is consistent with the committed `rho` table via a shift sumcheck (`SumcheckId::ShiftRho`).
 
-Let \(r^*=(r_s^*, r_x^*)\) be the opening point used by `PackedGtExp`. Let \(v\) denote the claimed value:
+Let \(r^*=(r_s^*, r_x^*)\) be the opening point used by `GtExp`. Let \(v\) denote the claimed value:
 \[
 v := \rho_{\text{next}}(r_s^*, r_x^*).
 \]
@@ -377,7 +377,7 @@ Where:
 #### Modified Protocol Flow
 
 ```
-Stage 1: Packed GT Constraint Sumcheck (`PackedGtExp`)
+Stage 1: Packed GT Constraint Sumcheck (`GtExp`)
   - Commits only to rho and quotient (NOT rho_next)
   - Outputs: virtual claims for rho, quotient
   - Outputs: unverified claim v = rho_next(r_s*, r_x*)
@@ -395,7 +395,7 @@ Stage 3: Direct Evaluation Protocol
 #### Accumulator communication (as implemented)
 
 In the implementation:
-- `PackedGtExp` caches the virtual claim `VirtualPolynomial::gt_exp_rho_next(i)` at the `PackedGtExp` opening point.
+- `GtExp` caches the virtual claim `VirtualPolynomial::gt_exp_rho_next(i)` at the `GtExp` opening point.
 - `ShiftRho` caches the corresponding shifted `rho` opening `VirtualPolynomial::gt_exp_rho(i)` at the *ShiftRho* opening point.
 
 The verifier checks consistency by combining these cached openings with the appropriate Eq/EqPlusOne selector evaluations (see `jolt-core/src/zkvm/recursion/stage2/shift_rho.rs`).
@@ -1633,7 +1633,7 @@ The implementation uses **base-4 digits** (two bits per step), so there are at m
 use **11 variables** total (7 step vars + 4 element vars).
 
 ```rust
-struct PackedGtExpWitness {
+struct GtExpWitness {
     // 11-var packed tables (size 2^11 = 2048)
     rho_packed: Vec<Fq>,       // ρ(s,x)
     rho_next_packed: Vec<Fq>,  // ρ(s+1,x)

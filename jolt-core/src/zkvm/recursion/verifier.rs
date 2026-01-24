@@ -33,8 +33,8 @@ use super::{
     },
     g2::{addition::G2AddParams, scalar_multiplication::G2ScalarMulPublicInputs},
     gt::{
-        claim_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionVerifier},
-        exponentiation::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
+        claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionVerifier},
+        exponentiation::{GtExpParams, GtExpPublicInputs, GtExpVerifier},
         multiplication::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
         shift::{ShiftRhoParams, ShiftRhoVerifier},
     },
@@ -97,7 +97,7 @@ pub struct RecursionVerifierInput {
     /// Precomputed matrix row indices for each polynomial index
     pub matrix_rows: Vec<usize>,
     /// Public inputs for packed GT exp (base Fq12 and scalar bits)
-    pub gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+    pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
     /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
@@ -227,12 +227,12 @@ impl RecursionVerifier<Fq> {
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
     ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
         if self.input.gt_exp_public_inputs.is_empty() {
-            return Err("No PackedGtExp constraints to verify in Stage 1".into());
+            return Err("No GtExp constraints to verify in Stage 1".into());
         }
 
-        let params = PackedGtExpParams::new();
+        let params = GtExpParams::new();
         let verifier =
-            PackedGtExpVerifier::new(params, self.input.gt_exp_public_inputs.clone(), transcript);
+            GtExpVerifier::new(params, self.input.gt_exp_public_inputs.clone(), transcript);
 
         let r_stage1 = BatchedSumcheck::verify(proof, vec![&verifier], accumulator, transcript)?;
         Ok(r_stage1)
@@ -279,7 +279,7 @@ impl RecursionVerifier<Fq> {
 
         for constraint in self.input.constraint_types.iter() {
             match constraint {
-                ConstraintType::PackedGtExp => {
+                ConstraintType::GtExp => {
                     num_gt_exp += 1;
                 }
                 ConstraintType::GtMul => {
@@ -320,8 +320,8 @@ impl RecursionVerifier<Fq> {
             }
 
             if enable_claim_reduction {
-                let reduction_verifier = PackedGtExpClaimReductionVerifier::<Fq>::new(
-                    PackedGtExpClaimReductionParams::new(2 * num_gt_exp),
+                let reduction_verifier = GtExpClaimReductionVerifier::<Fq>::new(
+                    GtExpClaimReductionParams::new(2 * num_gt_exp),
                     claim_indices,
                     transcript,
                 );

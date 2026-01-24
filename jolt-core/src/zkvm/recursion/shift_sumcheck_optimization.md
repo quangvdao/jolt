@@ -31,9 +31,9 @@ The recursion SNARK has four stages:
 4. **Stage 4**: Opening proof (Hyrax over Grumpkin)
 
 Currently, the packed GT constraint sum-check in Stage 1 produces these virtual claims:
-- `PackedGtExpRho(i)`: ρ(r_s*, r_x*)
-- `PackedGtExpRhoNext(i)`: ρ_next(r_s*, r_x*)
-- `PackedGtExpQuotient(i)`: Q(r_s*, r_x*)
+- `GtExpRho(i)`: ρ(r_s*, r_x*)
+- `GtExpRhoNext(i)`: ρ_next(r_s*, r_x*)
+- `GtExpQuotient(i)`: Q(r_s*, r_x*)
 
 ## Proposed Optimization: Shift Sum-Check
 
@@ -69,17 +69,17 @@ Therefore, the sum equals exactly `rho(r_s*+1, r_x*)`, which is `rho_next(r_s*, 
 ### Current Flow (Stage 1)
 1. Packed GT constraint sum-check runs (12 rounds)
 2. After binding all variables to `(r_s*, r_x*)`:
-   - Cache opening: `PackedGtExpRho(i)` → ρ(r_s*, r_x*)
-   - Cache opening: `PackedGtExpRhoNext(i)` → ρ_next(r_s*, r_x*)
-   - Cache opening: `PackedGtExpQuotient(i)` → Q(r_s*, r_x*)
+   - Cache opening: `GtExpRho(i)` → ρ(r_s*, r_x*)
+   - Cache opening: `GtExpRhoNext(i)` → ρ_next(r_s*, r_x*)
+   - Cache opening: `GtExpQuotient(i)` → Q(r_s*, r_x*)
 3. These claims feed into Stage 2's direct evaluation
 
 ### Optimized Flow (Stage 1 + Shift Sum-Check)
 1. **Stage 1a**: Packed GT constraint sum-check runs (12 rounds)
    - Prover commits only to `rho` and `quotient` (not `rho_next`)
    - After binding all variables to `(r_s*, r_x*)`:
-     - Cache opening: `PackedGtExpRho(i)` → ρ(r_s*, r_x*)
-     - Cache opening: `PackedGtExpQuotient(i)` → Q(r_s*, r_x*)
+     - Cache opening: `GtExpRho(i)` → ρ(r_s*, r_x*)
+     - Cache opening: `GtExpQuotient(i)` → Q(r_s*, r_x*)
      - Prover claims: v = ρ_next(r_s*, r_x*)
 
 2. **Stage 1b**: Shift sum-check (12 rounds)
@@ -88,7 +88,7 @@ Therefore, the sum equals exactly `rho(r_s*+1, r_x*)`, which is `rho_next(r_s*, 
      v = Σ_{s,x} EqPlusOne(r_s*, s) × Eq(r_x*, x) × rho(s,x)
      ```
    - After verification, cache the verified claim:
-     - `PackedGtExpRhoNext(i)` → v (now verified)
+     - `GtExpRhoNext(i)` → v (now verified)
 
 3. **Stage 2**: Proceeds normally with all virtual claims
    - Direct evaluation combines all claims (including verified `rho_next`)
@@ -214,20 +214,20 @@ The recursion SNARK uses an `OpeningAccumulator` to track polynomial claims acro
 ```rust
 // Stage 1a: Packed GT constraint sumcheck
 accumulator.append_virtual(
-    VirtualPolynomial::PackedGtExpRho(i),
-    SumcheckId::PackedGtExp,
+    VirtualPolynomial::GtExpRho(i),
+    SumcheckId::GtExp,
     (r_s_star, r_x_star),
     rho_claim,
 );
 accumulator.append_virtual(
-    VirtualPolynomial::PackedGtExpRhoNext(i),  // Committed polynomial
-    SumcheckId::PackedGtExp,
+    VirtualPolynomial::GtExpRhoNext(i),  // Committed polynomial
+    SumcheckId::GtExp,
     (r_s_star, r_x_star),
     rho_next_claim,
 );
 accumulator.append_virtual(
-    VirtualPolynomial::PackedGtExpQuotient(i),
-    SumcheckId::PackedGtExp,
+    VirtualPolynomial::GtExpQuotient(i),
+    SumcheckId::GtExp,
     (r_s_star, r_x_star),
     quotient_claim,
 );
@@ -238,14 +238,14 @@ accumulator.append_virtual(
 ```rust
 // Stage 1a: Packed GT constraint sumcheck
 accumulator.append_virtual(
-    VirtualPolynomial::PackedGtExpRho(i),
-    SumcheckId::PackedGtExp,
+    VirtualPolynomial::GtExpRho(i),
+    SumcheckId::GtExp,
     (r_s_star, r_x_star),
     rho_claim,
 );
 accumulator.append_virtual(
-    VirtualPolynomial::PackedGtExpQuotient(i),
-    SumcheckId::PackedGtExp,
+    VirtualPolynomial::GtExpQuotient(i),
+    SumcheckId::GtExp,
     (r_s_star, r_x_star),
     quotient_claim,
 );
@@ -254,7 +254,7 @@ accumulator.append_virtual(
 let rho_next_claimed = prover.evaluate_rho_at_shifted_point(r_s_star, r_x_star);
 pending_shift_claims.push(ShiftClaim {
     constraint_idx: i,
-    source_poly: VirtualPolynomial::PackedGtExpRho(i),
+    source_poly: VirtualPolynomial::GtExpRho(i),
     shift_type: ShiftType::StepPlusOne,
     point: (r_s_star, r_x_star),
     claimed_value: rho_next_claimed,
@@ -265,7 +265,7 @@ shift_sumcheck_prover.prove(pending_shift_claims, accumulator, transcript);
 
 // After verification, add to accumulator as virtual polynomial
 accumulator.append_virtual(
-    VirtualPolynomial::PackedGtExpRhoNext(i),
+    VirtualPolynomial::GtExpRhoNext(i),
     SumcheckId::ShiftSumcheck,  // Different sumcheck ID!
     (r_s_star, r_x_star),
     rho_next_claimed,  // Now verified
@@ -284,15 +284,15 @@ This leverages the existing virtual polynomial infrastructure:
 ```rust
 enum VirtualPolynomial {
     // Original virtual polynomials from constraint sumchecks
-    PackedGtExpRho(usize),
-    PackedGtExpQuotient(usize),
+    GtExpRho(usize),
+    GtExpQuotient(usize),
 
     // Virtual polynomial verified through shift sumcheck
-    PackedGtExpRhoNext(usize),  // Same variant, different verification path!
+    GtExpRhoNext(usize),  // Same variant, different verification path!
 }
 
 enum SumcheckId {
-    PackedGtExp,      // For constraint sumcheck
+    GtExp,      // For constraint sumcheck
     ShiftSumcheck,    // For shift verification
 }
 ```
@@ -304,7 +304,7 @@ Stage 2's direct evaluation protocol treats all virtual claims uniformly:
 ```rust
 // Stage 2 doesn't care about the verification method
 let (point, value) = accumulator.get_virtual_polynomial_opening(
-    VirtualPolynomial::PackedGtExpRhoNext(i),
+    VirtualPolynomial::GtExpRhoNext(i),
     SumcheckId::ShiftSumcheck,  // Just uses different sumcheck ID
 );
 
@@ -457,8 +457,8 @@ This means we can change a polynomial from committed to virtual without affectin
 
 With the optimization, the matrix row count changes:
 
-**Before**: PackedGtExpRho, PackedGtExpRhoNext, PackedGtExpQuotient (3 rows per GT exp)
-**After**: PackedGtExpRho, PackedGtExpQuotient (2 rows per GT exp) + virtual rho_next
+**Before**: GtExpRho, GtExpRhoNext, GtExpQuotient (3 rows per GT exp)
+**After**: GtExpRho, GtExpQuotient (2 rows per GT exp) + virtual rho_next
 
 The virtual rho_next claims still participate in Stage 2's matrix computation, but don't require commitment storage or opening proofs.
 
@@ -501,7 +501,7 @@ For applications with many GT exponentiations:
    - More efficient than individual shift sumchecks
 
 4. **Matrix Row Indexing**:
-   - Completely remove `PackedGtExpRhoNext` from polynomial type enum
+   - Completely remove `GtExpRhoNext` from polynomial type enum
    - Renumber subsequent types (no backwards compatibility needed)
    - This is strictly better - no need to maintain old indexing
 

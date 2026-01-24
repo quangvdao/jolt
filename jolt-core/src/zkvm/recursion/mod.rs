@@ -79,8 +79,8 @@ pub use g2::{G2ScalarMulProver, G2ScalarMulVerifier};
 // GT exports
 pub use gt::{GtMulProver, GtMulVerifier};
 pub use gt::{
-    PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver,
-    PackedGtExpClaimReductionVerifier, PackedGtExpProver, PackedGtExpVerifier,
+    GtExpClaimReductionParams, GtExpClaimReductionProver,
+    GtExpClaimReductionVerifier, GtExpProver, GtExpVerifier,
 };
 pub use gt::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier};
 

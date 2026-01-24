@@ -24,7 +24,7 @@ use crate::{
             constraints::system::ConstraintType,
             g1::scalar_multiplication::G1ScalarMulPublicInputs,
             g2::scalar_multiplication::G2ScalarMulPublicInputs,
-            gt::exponentiation::PackedGtExpPublicInputs,
+            gt::exponentiation::GtExpPublicInputs,
             jagged::bijection::{ConstraintMapping, VarCountJaggedBijection},
             prover::RecursionProof,
         },
@@ -50,7 +50,7 @@ pub struct RecursionConstraintMetadata {
     pub matrix_rows: Vec<usize>,
     pub dense_num_vars: usize,
     /// Public inputs for packed GT exp (base Fq12 and scalar bits for each GT exp)
-    pub gt_exp_public_inputs: Vec<PackedGtExpPublicInputs>,
+    pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
     /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)

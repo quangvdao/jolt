@@ -43,8 +43,8 @@ use super::{
     constraints::system::{ConstraintSystem, ConstraintType},
     g1::shift::{g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver},
     gt::{
-        claim_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver},
-        exponentiation::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
+        claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionProver},
+        exponentiation::{GtExpParams, GtExpProver, GtExpPublicInputs},
         multiplication::{GtMulParams, GtMulProver, GtMulProverSpec},
         shift::{ShiftRhoParams, ShiftRhoProver},
     },
@@ -480,7 +480,7 @@ impl RecursionProver<Fq> {
         use super::constraints::system::DoryMatrixBuilder;
         use super::g1::scalar_multiplication::G1ScalarMulPublicInputs;
         use super::g2::scalar_multiplication::G2ScalarMulPublicInputs;
-        use super::gt::exponentiation::PackedGtExpWitness;
+        use super::gt::exponentiation::GtExpWitness;
         use jolt_optimizations::fq12_to_multilinear_evals;
 
         // Constraint-family toggles (useful to isolate failures).
@@ -527,7 +527,7 @@ impl RecursionProver<Fq> {
                 fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
 
             // Create packed witness
-            let packed = PackedGtExpWitness::from_steps(
+            let packed = GtExpWitness::from_steps(
                 &witness.rho_mles,
                 &witness.quotient_mles,
                 &witness.bits,
@@ -543,7 +543,7 @@ impl RecursionProver<Fq> {
             gt_exp_witnesses.push(packed);
 
             // Store public inputs for verifier
-            gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
+            gt_exp_public_inputs.push(GtExpPublicInputs::new(
                 witness.base,
                 witness.bits.clone(),
             ));
@@ -639,7 +639,7 @@ impl RecursionProver<Fq> {
 
             // Also collect public inputs for the combine witnesses
             for exp_wit in &cw.exp_witnesses {
-                gt_exp_public_inputs.push(PackedGtExpPublicInputs::new(
+                gt_exp_public_inputs.push(GtExpPublicInputs::new(
                     exp_wit.base,
                     exp_wit.bits.clone(),
                 ));
@@ -825,7 +825,7 @@ impl RecursionProver<Fq> {
             .in_scope(|| {
                 tracing::info!("Running Stage 1: Packed GT exp sumcheck");
                 self.prove_stage1(transcript, &mut accumulator)
-                    .expect("Failed to run Stage 1 (PackedGtExp)")
+                    .expect("Failed to run Stage 1 (GtExp)")
             });
 
         // Stage 2: Batched constraint sumchecks
@@ -916,7 +916,7 @@ impl RecursionProver<Fq> {
     > {
         let packed_witnesses = &self.constraint_system.gt_exp_witnesses;
         if packed_witnesses.is_empty() {
-            return Err("No PackedGtExp constraints to prove in Stage 1".into());
+            return Err("No GtExp constraints to prove in Stage 1".into());
         }
 
         // Packed GT exp uses layout x * 128 + s (s in low bits), so g needs replication
@@ -925,13 +925,13 @@ impl RecursionProver<Fq> {
         let g_replicated = DoryMatrixBuilder::pad_4var_to_11var_replicated(&g_4var);
         let g_poly_replicated_f = DensePolynomial::new(g_replicated);
 
-        let params = PackedGtExpParams::new();
+        let params = GtExpParams::new();
         tracing::info!(
-            "[Stage 1] Creating PackedGtExpProver with {} witnesses",
+            "[Stage 1] Creating GtExpProver with {} witnesses",
             packed_witnesses.len()
         );
         let mut packed_gt_exp_prover =
-            PackedGtExpProver::new(params, packed_witnesses, g_poly_replicated_f, transcript);
+            GtExpProver::new(params, packed_witnesses, g_poly_replicated_f, transcript);
 
         // Run the (single-instance) sumcheck.
         let (proof, r_stage1) =
@@ -1010,8 +1010,8 @@ impl RecursionProver<Fq> {
                     .iter()
                     .map(|w| MultilinearPolynomial::from(w.quotient_packed.clone()))
                     .collect();
-                let reduction_params = PackedGtExpClaimReductionParams::new(2 * num_gt_exp);
-                let reduction_prover = PackedGtExpClaimReductionProver::<Fq, T>::new(
+                let reduction_params = GtExpClaimReductionParams::new(2 * num_gt_exp);
+                let reduction_prover = GtExpClaimReductionProver::<Fq, T>::new(
                     reduction_params,
                     &claim_indices,
                     rho_polys,
@@ -1255,7 +1255,7 @@ impl RecursionProver<Fq> {
         let accumulator_fq: &mut ProverOpeningAccumulator<Fq> = accumulator;
         let r_x_fq: Vec<Fq> = r_x.iter().map(|c| (*c).into()).collect();
 
-        // Extract virtual claims from Stage 2 (note PackedGtExp claims come from claim reduction).
+        // Extract virtual claims from Stage 2 (note GtExp claims come from claim reduction).
         let constraint_types: Vec<ConstraintType> = self
             .constraint_system
             .constraints

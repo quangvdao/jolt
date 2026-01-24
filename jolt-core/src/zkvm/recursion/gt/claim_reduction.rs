@@ -1,6 +1,6 @@
-//! Stage 1b: PackedGtExp claim reduction sumcheck.
+//! Stage 1b: GtExp claim reduction sumcheck.
 //!
-//! Reduces PackedGtExp rho/quotient claims from the Stage 1 point r1 to a single
+//! Reduces GtExp rho/quotient claims from the Stage 1 point r1 to a single
 //! opening point r2 using an eq-weighted sumcheck.
 
 use allocative::Allocative;
@@ -27,23 +27,23 @@ use crate::{virtual_claims, zkvm::recursion::utils::virtual_polynomial_utils::*}
 use super::shift::{eq_lsb_evals, eq_lsb_mle};
 
 #[derive(Allocative, Clone)]
-pub struct PackedGtExpClaimReductionParams {
+pub struct GtExpClaimReductionParams {
     pub num_vars: usize,
     pub num_claims: usize,
     pub sumcheck_id: SumcheckId,
 }
 
-impl PackedGtExpClaimReductionParams {
+impl GtExpClaimReductionParams {
     pub fn new(num_claims: usize) -> Self {
         Self {
             num_vars: CONFIG.packed_vars,
             num_claims,
-            sumcheck_id: SumcheckId::PackedGtExpClaimReduction,
+            sumcheck_id: SumcheckId::GtExpClaimReduction,
         }
     }
 }
 
-impl<F: JoltField> SumcheckInstanceParams<F> for PackedGtExpClaimReductionParams {
+impl<F: JoltField> SumcheckInstanceParams<F> for GtExpClaimReductionParams {
     fn input_claim(&self, _accumulator: &dyn OpeningAccumulator<F>) -> F {
         F::zero()
     }
@@ -62,8 +62,8 @@ impl<F: JoltField> SumcheckInstanceParams<F> for PackedGtExpClaimReductionParams
 }
 
 #[derive(Allocative)]
-pub struct PackedGtExpClaimReductionProver<F: JoltField, T: Transcript> {
-    pub params: PackedGtExpClaimReductionParams,
+pub struct GtExpClaimReductionProver<F: JoltField, T: Transcript> {
+    pub params: GtExpClaimReductionParams,
     pub gamma: F,
     pub round: usize,
     pub eq_poly: MultilinearPolynomial<F>,
@@ -72,9 +72,9 @@ pub struct PackedGtExpClaimReductionProver<F: JoltField, T: Transcript> {
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<F: JoltField, T: Transcript> PackedGtExpClaimReductionProver<F, T> {
+impl<F: JoltField, T: Transcript> GtExpClaimReductionProver<F, T> {
     pub fn new(
-        params: PackedGtExpClaimReductionParams,
+        params: GtExpClaimReductionParams,
         claim_indices: &[usize],
         rho_polys: Vec<MultilinearPolynomial<F>>,
         quotient_polys: Vec<MultilinearPolynomial<F>>,
@@ -85,7 +85,7 @@ impl<F: JoltField, T: Transcript> PackedGtExpClaimReductionProver<F, T> {
 
         let (rho_point, _) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho(claim_indices[0]),
-            SumcheckId::PackedGtExp,
+            SumcheckId::GtExp,
         );
         let r1 = rho_point.r;
         let eq_evals = eq_lsb_evals::<F>(&r1);
@@ -95,14 +95,14 @@ impl<F: JoltField, T: Transcript> PackedGtExpClaimReductionProver<F, T> {
         for idx in claim_indices {
             let (_, rho_claim) = accumulator.get_virtual_polynomial_opening(
                 VirtualPolynomial::gt_exp_rho(*idx),
-                SumcheckId::PackedGtExp,
+                SumcheckId::GtExp,
             );
             claimed_values.push(rho_claim);
         }
         for idx in claim_indices {
             let (_, quotient_claim) = accumulator.get_virtual_polynomial_opening(
                 VirtualPolynomial::gt_exp_quotient(*idx),
-                SumcheckId::PackedGtExp,
+                SumcheckId::GtExp,
             );
             claimed_values.push(quotient_claim);
         }
@@ -124,7 +124,7 @@ impl<F: JoltField, T: Transcript> PackedGtExpClaimReductionProver<F, T> {
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
-    for PackedGtExpClaimReductionProver<F, T>
+    for GtExpClaimReductionProver<F, T>
 {
     fn degree(&self) -> usize {
         2 // eq * poly
@@ -144,7 +144,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         sum
     }
 
-    #[tracing::instrument(skip_all, name = "PackedGtExpClaimReduction::compute_message")]
+    #[tracing::instrument(skip_all, name = "GtExpClaimReduction::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         const DEGREE: usize = 2;
         let half = if !self.polys.is_empty() {
@@ -230,15 +230,15 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
 }
 
 #[derive(Allocative)]
-pub struct PackedGtExpClaimReductionVerifier<F: JoltField> {
-    pub params: PackedGtExpClaimReductionParams,
+pub struct GtExpClaimReductionVerifier<F: JoltField> {
+    pub params: GtExpClaimReductionParams,
     pub claim_indices: Vec<usize>,
     pub gamma: F,
 }
 
-impl<F: JoltField> PackedGtExpClaimReductionVerifier<F> {
+impl<F: JoltField> GtExpClaimReductionVerifier<F> {
     pub fn new<T: Transcript>(
-        params: PackedGtExpClaimReductionParams,
+        params: GtExpClaimReductionParams,
         claim_indices: Vec<usize>,
         transcript: &mut T,
     ) -> Self {
@@ -252,7 +252,7 @@ impl<F: JoltField> PackedGtExpClaimReductionVerifier<F> {
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
-    for PackedGtExpClaimReductionVerifier<F>
+    for GtExpClaimReductionVerifier<F>
 {
     fn degree(&self) -> usize {
         2
@@ -268,7 +268,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         for idx in &self.claim_indices {
             let (_, rho_claim) = accumulator.get_virtual_polynomial_opening(
                 VirtualPolynomial::gt_exp_rho(*idx),
-                SumcheckId::PackedGtExp,
+                SumcheckId::GtExp,
             );
             sum += gamma_power * rho_claim;
             gamma_power *= self.gamma;
@@ -276,7 +276,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         for idx in &self.claim_indices {
             let (_, quotient_claim) = accumulator.get_virtual_polynomial_opening(
                 VirtualPolynomial::gt_exp_quotient(*idx),
-                SumcheckId::PackedGtExp,
+                SumcheckId::GtExp,
             );
             sum += gamma_power * quotient_claim;
             gamma_power *= self.gamma;
@@ -291,7 +291,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
     ) -> F {
         let (rho_point, _) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho(self.claim_indices[0]),
-            SumcheckId::PackedGtExp,
+            SumcheckId::GtExp,
         );
         let r1 = rho_point.r;
         let eq_val = eq_lsb_mle::<F>(&r1, sumcheck_challenges);

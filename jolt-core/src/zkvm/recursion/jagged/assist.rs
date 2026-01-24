@@ -107,6 +107,12 @@ pub struct JaggedAssistProver<F: JoltField, T: Transcript> {
     pub claimed_evaluations: Vec<F>,
     /// Powers of batching randomness: r^0, r^1, ..., r^{K-1}
     pub r_powers: Vec<F>,
+    /// Whether this polynomial is "constant-in-x" (native_size == 1 in the jagged bijection).
+    ///
+    /// These polynomials' Stage-4 indicator contribution is independent of `r_x`, so we:
+    /// - set `claimed_evaluations[k] = eq(r_dense, t_prev)` directly, and
+    /// - exclude them from the Jagged Assist sumcheck (they are checked directly by the verifier).
+    is_constant: Vec<bool>,
     /// Current sumcheck round (0 to 4*num_bits - 1)
     pub round: usize,
     /// Number of sumcheck variables (4 * num_bits for a, b, c, d)
@@ -155,6 +161,8 @@ impl<F: JoltField, T: Transcript> JaggedAssistProver<F, T> {
         // Parallelized over all K polynomials
         let za = Point::from_slice(&r_x);
         let zb = Point::from_slice(&r_dense);
+        let mut r_dense_padded = r_dense.clone();
+        r_dense_padded.resize(num_bits, F::zero());
 
         // Build evaluation points (lightweight, serial)
         let evaluation_points: Vec<JaggedAssistEvalPoint<F>> = (0..num_polynomials)
@@ -170,22 +178,36 @@ impl<F: JoltField, T: Transcript> JaggedAssistProver<F, T> {
             })
             .collect();
 
+        let is_constant: Vec<bool> = evaluation_points
+            .iter()
+            .map(|p| (p.t_curr - p.t_prev) == 1)
+            .collect();
+
         // Parallel computation of claimed evaluations and backward states
         let (claimed_evaluations, backward_states): (Vec<F>, Vec<Vec<[F; 4]>>) = evaluation_points
             .par_iter()
-            .map(|eval_point| {
-                let zc = Point::from_usize(eval_point.t_prev, num_bits);
-                let zd = Point::from_usize(eval_point.t_curr, num_bits);
+            .zip(is_constant.par_iter())
+            .map(|(eval_point, is_const)| {
+                if *is_const {
+                    // For native_size == 1 polynomials, the Stage-4 indicator is a delta at `t_prev`
+                    // (scaled later by eq(r_s, row)). The corresponding verifier-side value is:
+                    //   v_k = eq(r_dense, t_prev)
+                    // independent of r_x.
+                    (eq_at_index(&r_dense_padded, eval_point.t_prev), Vec::new())
+                } else {
+                    let zc = Point::from_usize(eval_point.t_prev, num_bits);
+                    let zd = Point::from_usize(eval_point.t_curr, num_bits);
 
-                let v_k = branching_program.eval_multilinear(&za, &zb, &zc, &zd);
-                let backward = branching_program.precompute_backward(
-                    &r_x,
-                    &r_dense,
-                    eval_point.t_prev,
-                    eval_point.t_curr,
-                );
+                    let v_k = branching_program.eval_multilinear(&za, &zb, &zc, &zd);
+                    let backward = branching_program.precompute_backward(
+                        &r_x,
+                        &r_dense,
+                        eval_point.t_prev,
+                        eval_point.t_curr,
+                    );
 
-                (v_k, backward)
+                    (v_k, backward)
+                }
             })
             .unzip();
 
@@ -227,6 +249,7 @@ impl<F: JoltField, T: Transcript> JaggedAssistProver<F, T> {
             params,
             claimed_evaluations,
             r_powers,
+            is_constant,
             round: 0,
             num_sumcheck_vars,
             eq_cache,
@@ -243,7 +266,9 @@ impl<F: JoltField, T: Transcript> JaggedAssistProver<F, T> {
         self.r_powers
             .iter()
             .zip(&self.claimed_evaluations)
-            .map(|(r_k, v_k)| *r_k * *v_k)
+            .enumerate()
+            .filter(|(k, _)| !self.is_constant[*k])
+            .map(|(_k, (r_k, v_k))| *r_k * *v_k)
             .sum()
     }
 
@@ -363,6 +388,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for JaggedAssistP
             (0..num_polynomials)
                 .into_par_iter()
                 .map(|k| {
+                    if self.is_constant[k] {
+                        // Constant-in-x polynomials are excluded from the assist sumcheck.
+                        return F::zero();
+                    }
                     let eval_point = &self.params.evaluation_points[k];
 
                     // Get the x_k coordinate value for eq computation
@@ -421,6 +450,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for JaggedAssistP
             .par_iter_mut()
             .enumerate()
             .for_each(|(k, eq_val)| {
+                if self.is_constant[k] {
+                    return;
+                }
                 let x_k_coord = match coord_type {
                     CoordType::A => self.params.evaluation_points[k]
                         .r_x
@@ -454,9 +486,15 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for JaggedAssistP
             let zc = self.current_layer_challenges[2];
             let zd = self.current_layer_challenges[3];
 
-            self.forward_states.par_iter_mut().for_each(|fwd| {
-                *fwd = self.branching_program.update_forward(fwd, za, zb, zc, zd);
-            });
+            self.forward_states
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(k, fwd)| {
+                    if self.is_constant[k] {
+                        return;
+                    }
+                    *fwd = self.branching_program.update_forward(fwd, za, zb, zc, zd);
+                });
 
             // Clear for next layer
             self.current_layer_challenges.clear();
@@ -483,6 +521,8 @@ pub struct JaggedAssistVerifier<F: JoltField, T: Transcript> {
     pub params: JaggedAssistParams<F>,
     /// Powers of batching randomness
     pub r_powers: Vec<F>,
+    /// Whether this polynomial is "constant-in-x" (native_size == 1 in the jagged bijection).
+    is_constant: Vec<bool>,
     /// Number of sumcheck variables
     pub num_sumcheck_vars: usize,
     /// Phantom
@@ -514,6 +554,10 @@ impl<F: JoltField, T: Transcript> JaggedAssistVerifier<F, T> {
                 t_curr,
             });
         }
+        let is_constant: Vec<bool> = evaluation_points
+            .iter()
+            .map(|p| (p.t_curr - p.t_prev) == 1)
+            .collect();
 
         // Append claimed evaluations to transcript (must match prover)
         for v in &claimed_evaluations {
@@ -544,6 +588,7 @@ impl<F: JoltField, T: Transcript> JaggedAssistVerifier<F, T> {
             claimed_evaluations,
             params,
             r_powers,
+            is_constant,
             num_sumcheck_vars,
             _marker: PhantomData,
         }
@@ -581,7 +626,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedAssis
         self.r_powers
             .iter()
             .zip(&self.claimed_evaluations)
-            .map(|(r_k, v_k)| *r_k * *v_k)
+            .enumerate()
+            .filter(|(k, _)| !self.is_constant[*k])
+            .map(|(_k, (r_k, v_k))| *r_k * *v_k)
             .sum()
     }
 
@@ -664,7 +711,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for JaggedAssis
             self.r_powers
                 .iter()
                 .zip(&self.params.evaluation_points)
-                .map(|(r_k, eval_point)| {
+                .enumerate()
+                .filter(|(k, _)| !self.is_constant[*k])
+                .map(|(_k, (r_k, eval_point))| {
                     let eq_c = eq_at_index(&rho_c, eval_point.t_prev);
                     let eq_d = eq_at_index(&rho_d, eval_point.t_curr);
                     *r_k * eq_c * eq_d

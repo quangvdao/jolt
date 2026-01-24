@@ -173,8 +173,17 @@ impl<F: JoltField, T: Transcript> JaggedSumcheckProver<F, T> {
             let t_curr = bijection.cumulative_size(poly_idx);
             let native_size = t_curr - t_prev;
             let eq_s = eq_s_cache[poly_idx];
-            for col in 0..native_size {
-                jagged_indicator_evals[t_prev + col] = eq_s * eq_x_cache[col];
+            if native_size == 1 {
+                // 0-var "constant-in-x" polynomials (e.g., G1Add/G2Add) are stored as a single
+                // dense entry representing a constant sparse row. Their sparse evaluation at
+                // r_x is:
+                //   Σ_x eq(r_x, x) * c = c
+                // so the correct weight is 1 (not eq(r_x, 0)).
+                jagged_indicator_evals[t_prev] = eq_s;
+            } else {
+                for col in 0..native_size {
+                    jagged_indicator_evals[t_prev + col] = eq_s * eq_x_cache[col];
+                }
             }
         }
 

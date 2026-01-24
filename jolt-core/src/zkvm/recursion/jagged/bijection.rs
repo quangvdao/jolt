@@ -353,7 +353,11 @@ impl ConstraintSystemJaggedBuilder {
                         | PolyType::G1AddLambda
                         | PolyType::G1AddInvDeltaX
                         | PolyType::G1AddIsDouble
-                        | PolyType::G1AddIsInverse => Some(11),
+                        | PolyType::G1AddIsInverse => {
+                            // G1Add witnesses are constant over the constraint hypercube
+                            // (single operation, not a trace), so these are 0-var polys.
+                            Some(0)
+                        }
                         _ => None,
                     },
                     ConstraintType::G2Add => match poly_type {
@@ -377,7 +381,11 @@ impl ConstraintSystemJaggedBuilder {
                         | PolyType::G2AddInvDeltaXC0
                         | PolyType::G2AddInvDeltaXC1
                         | PolyType::G2AddIsDouble
-                        | PolyType::G2AddIsInverse => Some(11),
+                        | PolyType::G2AddIsInverse => {
+                            // G2Add witnesses are constant over the constraint hypercube
+                            // (single operation, not a trace), so these are 0-var polys.
+                            Some(0)
+                        }
                         _ => None,
                     },
                 };

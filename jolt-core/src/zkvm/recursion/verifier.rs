@@ -567,6 +567,56 @@ impl RecursionVerifier<Fq> {
         let num_dense_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
         let num_bits = std::cmp::max(self.input.num_constraint_vars, num_dense_vars);
 
+        // Sanity-check "constant-in-x" polynomials (native_size == 1) directly.
+        //
+        // These polynomials are excluded from the Jagged Assist sumcheck (for efficiency),
+        // so we must ensure their claimed evaluations are correct here.
+        //
+        // For such a polynomial with dense index `t_prev`, the correct verifier-side value is:
+        //   v_k = eq(r_dense, t_prev)
+        // (independent of r_x).
+        fn eq_at_index_lsb_first(r: &[Fq], index: usize) -> Fq {
+            let one = Fq::from(1u64);
+            r.iter()
+                .enumerate()
+                .map(|(i, r_i)| {
+                    if (index >> i) & 1 == 1 {
+                        *r_i
+                    } else {
+                        one - *r_i
+                    }
+                })
+                .product()
+        }
+
+        let mut r_dense_padded = r_dense_fq.clone();
+        r_dense_padded.resize(num_bits, Fq::zero());
+
+        let num_polynomials = self.input.jagged_bijection.num_polynomials();
+        if stage5_proof.claimed_evaluations.len() != num_polynomials {
+            return Err(format!(
+                "Stage5 claimed_evaluations length mismatch: got {}, expected {}",
+                stage5_proof.claimed_evaluations.len(),
+                num_polynomials
+            )
+            .into());
+        }
+        for poly_idx in 0..num_polynomials {
+            let t_prev = self.input.jagged_bijection.cumulative_size_before(poly_idx);
+            let t_curr = self.input.jagged_bijection.cumulative_size(poly_idx);
+            if t_curr - t_prev == 1 {
+                let expected = eq_at_index_lsb_first(&r_dense_padded, t_prev);
+                let got = stage5_proof.claimed_evaluations[poly_idx];
+                if got != expected {
+                    return Err(format!(
+                        "Stage5 constant-poly claimed_eval mismatch at poly_idx={}: got {}, expected {} (t_prev={}, num_bits={})",
+                        poly_idx, got, expected, t_prev, num_bits
+                    )
+                    .into());
+                }
+            }
+        }
+
         let assist_verifier = JaggedAssistVerifier::<Fq, T>::new(
             stage5_proof.claimed_evaluations.clone(),
             r_x_prev,

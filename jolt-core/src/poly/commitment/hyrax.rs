@@ -86,7 +86,10 @@ pub struct HyraxCommitment<const RATIO: usize, G: CurveGroup> {
     pub row_commitments: Vec<G>,
 }
 
-impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxCommitment<RATIO, G> {
+impl<const RATIO: usize, G: CurveGroup> HyraxCommitment<RATIO, G>
+where
+    G::ScalarField: JoltField,
+{
     #[tracing::instrument(skip_all, name = "HyraxCommitment::commit")]
     pub fn commit(
         poly: &DensePolynomial<G::ScalarField>,
@@ -220,7 +223,8 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxComm
             result
         };
 
-        // In ZKVM guest environment, use serial Pippenger MSM to avoid rayon issues
+        // In ZKVM guest environment, use serial Pippenger MSM to avoid rayon issues.
+        // On host, parallelize over rows but use sequential MSM per row to avoid oversubscription.
         let row_commitments = if cfg!(target_arch = "riscv64") || cfg!(target_arch = "riscv32") {
             poly.Z
                 .chunks(R_size)
@@ -228,8 +232,12 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxComm
                 .collect()
         } else {
             poly.Z
-                .chunks(R_size)
-                .map(|row| G::msm_unchecked(gens, row))
+                .par_chunks(R_size)
+                .map(|row| {
+                    // Use truly sequential MSM to avoid nested rayon parallelism
+                    VariableBaseMSM::msm_sequential(gens, row)
+                        .expect("row length should match generator length")
+                })
                 .collect()
         };
 
@@ -324,10 +332,7 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
                 if p.is_zero() {
                     GrumpkinPoint::infinity()
                 } else {
-                    GrumpkinPoint::new_unchecked(
-                        GrumpkinFq::new(p.x),
-                        GrumpkinFq::new(p.y),
-                    )
+                    GrumpkinPoint::new_unchecked(GrumpkinFq::new(p.x), GrumpkinFq::new(p.y))
                 }
             };
 
@@ -583,10 +588,11 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>>
 #[derive(Clone)]
 pub struct Hyrax<const RATIO: usize, G: CurveGroup>(std::marker::PhantomData<G>);
 
-impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> CommitmentScheme
-    for Hyrax<RATIO, G>
+impl<const RATIO: usize, G: CurveGroup> CommitmentScheme for Hyrax<RATIO, G>
+where
+    G::ScalarField: JoltField,
 {
-    type Field = F;
+    type Field = G::ScalarField;
     type ProverSetup = PedersenGenerators<G>;
     type VerifierSetup = PedersenGenerators<G>;
     type Commitment = HyraxCommitment<RATIO, G>;
@@ -682,7 +688,7 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> Commitmen
             _ => panic!("Hyrax only supports dense and RLC polynomials"),
         };
 
-        let opening_point_field: Vec<F> = opening_point
+        let opening_point_field: Vec<G::ScalarField> = opening_point
             .iter()
             // .rev() // Hyrax uses opposite endian-ness
             .map(|challenge| (*challenge).into())
@@ -699,7 +705,7 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> Commitmen
         opening: &Self::Field,
         commitment: &Self::Commitment,
     ) -> Result<(), ProofVerifyError> {
-        let opening_point_field: Vec<F> = opening_point
+        let opening_point_field: Vec<G::ScalarField> = opening_point
             .iter()
             .map(|challenge| (*challenge).into())
             .collect();

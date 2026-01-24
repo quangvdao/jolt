@@ -1356,7 +1356,7 @@ where
             // IMPORTANT: These must match the recursion prover's matrix construction:
             // - `num_constraint_vars = 11` (uniform matrix compatible with packed GT exp)
             // - `num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded`
-            use crate::zkvm::recursion::constraints_sys::PolyType;
+            use crate::zkvm::recursion::constraints::constraints_sys::PolyType;
             let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
             let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
             let num_constraint_vars = 11; // All constraints padded to 11 variables (zero padding)

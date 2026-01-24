@@ -5,6 +5,7 @@
 //! polynomial \(\rho_i(s,x)\) over:
 //! - step index \(s \in \{0,1\}^7\) (128 steps), and
 //! - element index \(x \in \{0,1\}^4\) (16 limb/element positions),
+//!
 //! giving an 11-var MLE overall.
 //!
 //! In the packed GT exp constraint system, `rho_next` is a **virtual** polynomial: it is not
@@ -54,7 +55,7 @@ use crate::{
     transcripts::Transcript,
     virtual_claims,
     zkvm::{
-        recursion::{constraint_config::CONFIG, utils::virtual_polynomial_utils::*},
+        recursion::{constraints::constraint_config::CONFIG, utils::virtual_polynomial_utils::*},
         witness::VirtualPolynomial,
     },
 };
@@ -142,7 +143,7 @@ impl<F: JoltField, T: Transcript> ShiftRhoProver<F, T> {
 
         let mut entries: Vec<ShiftEntry<F>> = claim_indices
             .into_iter()
-            .zip(rho_polys.into_iter())
+            .zip(rho_polys)
             .map(|(claim, rho_poly)| {
                 let (point, claimed_value) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::gt_exp_rho_next(claim),
@@ -545,9 +546,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftRhoVer
             gamma_power *= self.gamma;
         }
 
-        let sum = eq_product * rho_sum;
-
-        sum
+        eq_product * rho_sum
     }
 
     fn cache_openings(

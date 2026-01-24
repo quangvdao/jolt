@@ -13,7 +13,7 @@ use crate::{
     },
     transcripts::{Blake2bTranscript, Transcript},
     zkvm::recursion::{
-        bijection::{JaggedTransform, VarCountJaggedBijection},
+        jagged::bijection::{JaggedTransform, VarCountJaggedBijection},
         RecursionProver,
     },
 };

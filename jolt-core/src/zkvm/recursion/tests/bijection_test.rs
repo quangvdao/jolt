@@ -1,8 +1,8 @@
 use crate::poly::dense_mlpoly::DensePolynomial;
-use crate::zkvm::recursion::bijection::*;
-use crate::zkvm::recursion::constraints_sys::{
+use crate::zkvm::recursion::constraints::constraints_sys::{
     ConstraintSystem, ConstraintType, MatrixConstraint, PolyType,
 };
+use crate::zkvm::recursion::jagged::bijection::*;
 use crate::{
     field::JoltField,
     poly::{

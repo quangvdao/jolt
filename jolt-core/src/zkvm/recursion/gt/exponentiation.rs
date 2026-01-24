@@ -38,7 +38,7 @@ use crate::{
     transcripts::Transcript,
     virtual_claims,
     zkvm::{
-        recursion::{constraint_config::CONFIG, utils::virtual_polynomial_utils::*},
+        recursion::{constraints::constraint_config::CONFIG, utils::virtual_polynomial_utils::*},
         witness::VirtualPolynomial,
     },
 };

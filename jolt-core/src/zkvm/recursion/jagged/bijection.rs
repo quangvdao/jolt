@@ -11,7 +11,9 @@ use crate::field::JoltField;
 use ark_bn254::Fq;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-use super::constraints_sys::{ConstraintSystem, ConstraintType, MatrixConstraint, PolyType};
+use crate::zkvm::recursion::constraints::constraints_sys::{
+    ConstraintSystem, ConstraintType, MatrixConstraint, PolyType,
+};
 
 /// Core trait for jagged transforms with variable-count based heights
 pub trait JaggedTransform<F: JoltField> {

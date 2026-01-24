@@ -46,7 +46,7 @@ use crate::{
 };
 use rayon::prelude::*;
 
-use crate::zkvm::recursion::bijection::{ConstraintMapping, VarCountJaggedBijection};
+use super::bijection::{ConstraintMapping, VarCountJaggedBijection};
 
 /// Parameters for Stage 3 jagged sumcheck
 #[derive(Clone)]

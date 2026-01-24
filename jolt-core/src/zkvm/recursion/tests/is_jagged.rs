@@ -12,8 +12,8 @@ use crate::{
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     },
     zkvm::recursion::{
-        bijection::{JaggedTransform, VarCountJaggedBijection},
-        constraints_sys::ConstraintSystem,
+        constraints::constraints_sys::ConstraintSystem,
+        jagged::bijection::{JaggedTransform, VarCountJaggedBijection},
     },
 };
 use ark_bn254::{Fq, Fr};

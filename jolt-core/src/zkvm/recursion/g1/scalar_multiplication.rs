@@ -18,7 +18,7 @@ use crate::{
         dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial,
         multilinear_polynomial::MultilinearPolynomial, opening_proof::SumcheckId,
     },
-    subprotocols::constraint_list_sumcheck::{
+    zkvm::recursion::constraints::constraint_list_sumcheck::{
         sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec,
         ConstraintListSpec, ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
     },

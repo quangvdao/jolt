@@ -7,7 +7,7 @@ use crate::{
         eq_poly::EqPolynomial,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     },
-    zkvm::recursion::stage3::virtualization::{matrix_s_index, virtual_claim_index},
+    zkvm::recursion::virtualization::{matrix_s_index, virtual_claim_index},
 };
 use ark_bn254::Fq;
 use ark_ff::{UniformRand, Zero};
@@ -24,7 +24,7 @@ fn test_matrix_mle_definition_direct() {
     // Create a small test case with 1 constraint
     let num_constraints = 1;
     let num_constraints_padded = 1; // Already a power of 2
-    let num_poly_types = crate::zkvm::recursion::constraints_sys::PolyType::NUM_TYPES;
+    let num_poly_types = crate::zkvm::recursion::constraints::constraints_sys::PolyType::NUM_TYPES;
 
     // Calculate num_s_vars: log2(num_poly_types * num_constraints_padded)
     let total_rows = num_poly_types * num_constraints_padded;
@@ -97,7 +97,7 @@ fn test_matrix_mle_with_multiple_constraints() {
     // Test with 2 constraints (padded to 2)
     let num_constraints = 2;
     let num_constraints_padded = 2;
-    let num_poly_types = crate::zkvm::recursion::constraints_sys::PolyType::NUM_TYPES;
+    let num_poly_types = crate::zkvm::recursion::constraints::constraints_sys::PolyType::NUM_TYPES;
 
     // Calculate num_s_vars: log2(30 * 2) = log2(60) -> ceil = 6
     let total_rows = num_poly_types * num_constraints_padded;

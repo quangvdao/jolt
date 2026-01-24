@@ -38,25 +38,25 @@ use dory::backends::arkworks::BN254;
 use dory::recursion::ast::AstGraph;
 
 #[cfg(feature = "experimental-pairing-recursion")]
-use super::stage1::multi_miller_loop::{MultiMillerLoopParams, MultiMillerLoopProver};
+use super::pairing::multi_miller_loop::{MultiMillerLoopParams, MultiMillerLoopProver};
 use super::{
-    constraints_sys::{ConstraintSystem, ConstraintType},
-    stage1::gt_exp::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
-    stage2::{
-        gt_mul::{GtMulParams, GtMulProver, GtMulProverSpec},
-        packed_gt_exp_reduction::{
-            PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver,
-        },
-        shift_rho::{ShiftRhoParams, ShiftRhoProver},
-        shift_scalar_mul::{
-            g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver,
-        },
+    constraints::constraints_sys::{ConstraintSystem, ConstraintType},
+    g1::shift_scalar_multiplication::{
+        g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver,
     },
-    stage3::virtualization::{
+    gt::{
+        claim_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver},
+        exponentiation::{PackedGtExpParams, PackedGtExpProver, PackedGtExpPublicInputs},
+        multiplication::{GtMulParams, GtMulProver, GtMulProverSpec},
+        shift_rho::{ShiftRhoParams, ShiftRhoProver},
+    },
+    jagged::{
+        jagged_assist::{JaggedAssistProof, JaggedAssistProver},
+        sumcheck::JaggedSumcheckProver,
+    },
+    virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
     },
-    stage4::jagged::JaggedSumcheckProver,
-    stage5::jagged_assist::{JaggedAssistProof, JaggedAssistProver},
 };
 use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_prover::SumcheckInstanceProver};
 
@@ -89,6 +89,17 @@ pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Fie
     /// Dense polynomial commitment after jagged transform
     pub dense_commitment: PCS::Commitment,
 }
+
+/// Result type for recursion proof generation.
+///
+/// Contains the proof and constraint metadata needed by the verifier.
+pub type RecursionProofResult<T, PCS> = Result<
+    (
+        RecursionProof<Fq, T, PCS>,
+        RecursionConstraintMetadata,
+    ),
+    Box<dyn std::error::Error>,
+>;
 
 /// Unified prover for the recursion SNARK
 #[derive(Clone)]
@@ -284,7 +295,7 @@ impl RecursionProver<Fq> {
         // Get the proper g(x) polynomial from jolt_optimizations
         // This is the irreducible polynomial defining the Fq12 extension field
         let g_poly_span = tracing::info_span!("process_g_polynomial").entered();
-        use super::constraints_sys::DoryMatrixBuilder;
+        use super::constraints::constraints_sys::DoryMatrixBuilder;
         use jolt_optimizations::get_g_mle;
 
         let g_mle_4var = get_g_mle();
@@ -473,10 +484,10 @@ impl RecursionProver<Fq> {
         combine_witness: Option<&crate::zkvm::recursion::witness::GTCombineWitness>,
         g_poly: DensePolynomial<Fq>,
     ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
-        use super::constraints_sys::DoryMatrixBuilder;
-        use super::stage1::gt_exp::PackedGtExpWitness;
-        use super::stage2::g1_scalar_mul::G1ScalarMulPublicInputs;
-        use super::stage2::g2_scalar_mul::G2ScalarMulPublicInputs;
+        use super::constraints::constraints_sys::DoryMatrixBuilder;
+        use super::g1::scalar_multiplication::G1ScalarMulPublicInputs;
+        use super::g2::scalar_multiplication::G2ScalarMulPublicInputs;
+        use super::gt::exponentiation::PackedGtExpWitness;
         use jolt_optimizations::fq12_to_multilinear_evals;
 
         // Constraint-family toggles (useful to isolate failures).
@@ -770,7 +781,7 @@ impl RecursionProver<Fq> {
         &self,
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
-    ) -> Result<(RecursionProof<Fq, T, PCS>, RecursionConstraintMetadata), Box<dyn std::error::Error>>
+    ) -> RecursionProofResult<T, PCS>
     {
         // ============ BUILD METADATA ============
         // Extract constraint metadata for the verifier
@@ -794,6 +805,10 @@ impl RecursionProver<Fq> {
                 let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z.clone());
 
                 // Commit to dense polynomial BEFORE sumchecks
+                tracing::info!(
+                    "Hyrax commitment terms: {}",
+                    dense_mlpoly.len()
+                );
                 let (dense_commitment, _) = PCS::commit(&dense_mlpoly, prover_setup);
 
                 tracing::info!(
@@ -817,8 +832,8 @@ impl RecursionProver<Fq> {
         });
 
         // Stage 1: Packed GT exp sumcheck
-        let (stage1_proof, _r_stage1_packed) =
-            tracing::info_span!("recursion_prove_full_stage1").in_scope(|| {
+        let (stage1_proof, _r_stage1_packed) = tracing::info_span!("recursion_prove_full_stage1")
+            .in_scope(|| {
                 tracing::info!("Running Stage 1: Packed GT exp sumcheck");
                 self.prove_stage1(transcript, &mut accumulator)
                     .expect("Failed to run Stage 1 (PackedGtExp)")
@@ -871,7 +886,10 @@ impl RecursionProver<Fq> {
                     .expect("Failed to generate PCS opening proof");
 
                 let opening_claims = accumulator.openings.clone();
-                tracing::info!("Generated opening proof with {} claims", opening_claims.len());
+                tracing::info!(
+                    "Generated opening proof with {} claims",
+                    opening_claims.len()
+                );
 
                 (opening_proof, opening_claims)
             });
@@ -1026,7 +1044,7 @@ impl RecursionProver<Fq> {
         // GT mul
         let gt_mul_constraints_tuples = self.constraint_system.extract_gt_mul_constraints();
         if !gt_mul_constraints_tuples.is_empty() {
-            use super::stage2::gt_mul::GtMulConstraintPolynomials;
+            use super::gt::multiplication::GtMulConstraintPolynomials;
             let constraint_indices: Vec<usize> = (0..gt_mul_constraints_tuples.len()).collect();
             let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> =
                 gt_mul_constraints_tuples
@@ -1052,7 +1070,7 @@ impl RecursionProver<Fq> {
         let g1_scalar_mul_constraints_tuples =
             self.constraint_system.extract_g1_scalar_mul_constraints();
         if !g1_scalar_mul_constraints_tuples.is_empty() {
-            use super::stage2::g1_scalar_mul::{
+            use super::g1::scalar_multiplication::{
                 G1ScalarMulConstraintPolynomials, G1ScalarMulParams, G1ScalarMulProver,
                 G1ScalarMulProverSpec,
             };
@@ -1119,7 +1137,7 @@ impl RecursionProver<Fq> {
         let g2_scalar_mul_constraints_tuples =
             self.constraint_system.extract_g2_scalar_mul_constraints();
         if !g2_scalar_mul_constraints_tuples.is_empty() {
-            use super::stage2::g2_scalar_mul::{
+            use super::g2::scalar_multiplication::{
                 G2ScalarMulConstraintPolynomials, G2ScalarMulParams, G2ScalarMulProver,
                 G2ScalarMulProverSpec,
             };
@@ -1198,7 +1216,7 @@ impl RecursionProver<Fq> {
         // G1 add
         let g1_add_constraints = self.constraint_system.extract_g1_add_constraints();
         if !g1_add_constraints.is_empty() {
-            use super::stage2::g1_add::{G1AddParams, G1AddProver, G1AddProverSpec};
+            use super::g1::addition::{G1AddParams, G1AddProver, G1AddProverSpec};
             let params = G1AddParams::new(g1_add_constraints.len());
             let (spec, constraint_indices) = G1AddProverSpec::new(params, g1_add_constraints);
             let prover = G1AddProver::from_spec(spec, constraint_indices, transcript);
@@ -1208,7 +1226,7 @@ impl RecursionProver<Fq> {
         // G2 add
         let g2_add_constraints = self.constraint_system.extract_g2_add_constraints();
         if !g2_add_constraints.is_empty() {
-            use super::stage2::g2_add::{G2AddParams, G2AddProver, G2AddProverSpec};
+            use super::g2::addition::{G2AddParams, G2AddProver, G2AddProverSpec};
             let params = G2AddParams::new(g2_add_constraints.len());
             let (spec, constraint_indices) = G2AddProverSpec::new(params, g2_add_constraints);
             let prover = G2AddProver::from_spec(spec, constraint_indices, transcript);
@@ -1355,7 +1373,7 @@ impl RecursionProver<Fq> {
         let r_dense_fq: Vec<Fq> = r_dense.iter().map(|c| (*c).into()).collect();
 
         let num_constraint_vars = self.constraint_system.matrix.num_constraint_vars;
-        let dense_size = <super::bijection::VarCountJaggedBijection as super::bijection::JaggedTransform<Fq>>::dense_size(&bijection);
+        let dense_size = <super::jagged::bijection::VarCountJaggedBijection as super::jagged::bijection::JaggedTransform<Fq>>::dense_size(&bijection);
         let num_dense_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
         let num_bits = std::cmp::max(num_constraint_vars, num_dense_vars);
 

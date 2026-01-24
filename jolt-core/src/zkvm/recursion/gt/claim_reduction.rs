@@ -20,7 +20,7 @@ use crate::subprotocols::{
     sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
 };
 use crate::transcripts::Transcript;
-use crate::zkvm::recursion::constraint_config::CONFIG;
+use crate::zkvm::recursion::constraints::constraint_config::CONFIG;
 use crate::zkvm::witness::VirtualPolynomial;
 use crate::{virtual_claims, zkvm::recursion::utils::virtual_polynomial_utils::*};
 

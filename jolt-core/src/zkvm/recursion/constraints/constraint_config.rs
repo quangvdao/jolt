@@ -42,8 +42,7 @@ impl ConstraintSystemConfig {
             8 => Ok(()),  // G1 vars
             11 => Ok(()), // Packed vars
             _ => Err(format!(
-                "Invalid number of constraint variables: {}. Expected 4, 8, or 11.",
-                num_vars
+                "Invalid number of constraint variables: {num_vars}. Expected 4, 8, or 11."
             )),
         }
     }

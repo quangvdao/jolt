@@ -5,91 +5,97 @@
 //!
 //! ## Protocol Overview
 //!
-//! The recursion SNARK consists of five stages plus PCS opening:
+//! The recursion SNARK consists of multiple sumcheck stages plus PCS opening:
 //!
-//! ### Stage 1: Packed GT Exp Sumcheck
-//! Proves constraints for pairing group exponentiation in a packed base-4 form.
+//! ### G1 Operations
+//! Proves constraints for G1 addition and scalar multiplication.
 //!
-//! ### Stage 2: Batched Constraint Sumchecks
-//! Shift + reduction + GT mul + G1/G2 scalar mul + G1/G2 add, sharing challenges.
+//! ### G2 Operations
+//! Proves constraints for G2 addition and scalar multiplication.
 //!
-//! ### Stage 3: Direct Evaluation
+//! ### GT Operations
+//! Proves constraints for GT exponentiation and multiplication.
+//!
+//! ### Pairing Operations
+//! Proves Multi-Miller loop constraints.
+//!
+//! ### Virtualization (Direct Evaluation)
 //! Verifies virtual polynomial claims using direct evaluation over the matrix.
 //!
-//! ### Stage 4: Jagged Transform
+//! ### Jagged Transform
 //! Uses sumcheck to open the sparse constraint matrix at a random point.
 //!
-//! ### Stage 5: Jagged Assist (Optimization)
+//! ### Jagged Assist (Optimization)
 //! Batch verification protocol that reduces verifier cost for evaluating multiple
 //! polynomial openings from O(K × bits) to O(bits) operations.
 //!
 //! ## Module Structure
-//! - `constraints_sys`: Constraint system management and matrix building
-//! - `constraint_config`: Central configuration for constraint variable counts
-//! - `stage1/`: Stage 1 - Packed GT exponentiation sumcheck
-//! - `stage2/`: Stage 2 - Batched constraint sumchecks
-//! - `stage3/`: Stage 3 - Direct evaluation (virtualization)
-//! - `stage4/`: Stage 4 - Jagged transform sumcheck
-//! - `stage5/`: Stage 5 - Jagged assist sumcheck
+//! - `constraints/`: Constraint system management and configuration
+//! - `g1/`: G1 curve operations (addition, scalar multiplication)
+//! - `g2/`: G2 curve operations (addition, scalar multiplication)
+//! - `gt/`: GT group operations (exponentiation, multiplication, claim reduction)
+//! - `pairing/`: Pairing operations (multi-miller loop)
+//! - `jagged/`: Jagged transform and assist protocols
+//! - `virtualization`: Direct evaluation protocol
 //! - `utils/`: Shared utilities and helpers
 //! - `recursion_prover`: Unified prover orchestrating all stages
 //! - `recursion_verifier`: Unified verifier for the complete protocol
 
-pub mod bijection;
-pub mod constraint_config;
-pub mod constraints_sys;
+pub mod constraints;
 pub mod curve;
+pub mod g1;
+pub mod g2;
+pub mod gt;
+pub mod jagged;
+pub mod pairing;
 pub mod recursion_prover;
 pub mod recursion_verifier;
-pub mod stage1;
-pub mod stage2;
-pub mod stage3;
-pub mod stage4;
-pub mod stage5;
 pub mod utils;
+pub mod virtualization;
 pub mod witness;
 
 #[cfg(test)]
 mod tests;
 
-// Re-export main types
-pub use bijection::{ConstraintMapping, JaggedTransform, VarCountJaggedBijection};
-pub use constraint_config::{ConstraintSystemConfig, CONFIG};
-pub use constraints_sys::{
-    ConstraintSystem, ConstraintType, DoryMatrixBuilder, PolyType, RecursionMetadataBuilder,
+// Re-export constraint types
+pub use constraints::{
+    ConstraintSystem, ConstraintSystemConfig, ConstraintType, DoryMatrixBuilder, PolyType,
+    RecursionMetadataBuilder, CONFIG,
 };
-pub use recursion_prover::{RecursionProof, RecursionProver};
+
+// Re-export jagged types
+pub use jagged::{ConstraintMapping, JaggedTransform, VarCountJaggedBijection};
+
+// Re-export prover/verifier
+pub use recursion_prover::{RecursionProof, RecursionProofResult, RecursionProver};
 pub use recursion_verifier::{RecursionVerifier, RecursionVerifierInput};
 
-// Stage 1 exports
-pub use stage1::gt_exp::{PackedGtExpProver, PackedGtExpVerifier};
+// G1 exports
+pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier};
 
-// Stage 2 exports
-pub use stage2::{
-    g1_scalar_mul::{G1ScalarMulProver, G1ScalarMulVerifier},
-    g2_scalar_mul::{G2ScalarMulProver, G2ScalarMulVerifier},
-    gt_mul::{GtMulProver, GtMulVerifier},
-    packed_gt_exp_reduction::{
-        PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver,
-        PackedGtExpClaimReductionVerifier,
-    },
-    shift_rho::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier},
+// G2 exports
+pub use g2::{G2ScalarMulProver, G2ScalarMulVerifier};
+
+// GT exports
+pub use gt::{GtMulProver, GtMulVerifier};
+pub use gt::{
+    PackedGtExpClaimReductionParams, PackedGtExpClaimReductionProver,
+    PackedGtExpClaimReductionVerifier, PackedGtExpProver, PackedGtExpVerifier,
 };
+pub use gt::{ShiftClaim, ShiftRhoParams, ShiftRhoProver, ShiftRhoVerifier};
 
-// Stage 3 exports
-pub use stage3::virtualization::{
+// Virtualization exports
+pub use virtualization::{
     extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
     DirectEvaluationVerifier,
 };
 
-// Stage 4 exports
-pub use stage4::jagged::{JaggedSumcheckParams, JaggedSumcheckProver, JaggedSumcheckVerifier};
-
-// Stage 5 exports
-pub use stage5::jagged_assist::{
+// Jagged exports
+pub use jagged::{
     JaggedAssistEvalPoint, JaggedAssistParams, JaggedAssistProof, JaggedAssistProver,
     JaggedAssistVerifier,
 };
+pub use jagged::{JaggedSumcheckParams, JaggedSumcheckProver, JaggedSumcheckVerifier};
 
 pub use witness::{
     DoryRecursionWitness, G1ScalarMulWitness, GTExpWitness, GTMulWitness, WitnessData,

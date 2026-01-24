@@ -16,7 +16,7 @@ use crate::{
 use crate::zkvm::witness::{GtMulTerm, RecursionPoly, TermEnum, VirtualPolynomial};
 use core::marker::PhantomData;
 
-use crate::subprotocols::constraint_list_sumcheck::{
+use crate::zkvm::recursion::constraints::constraint_list_sumcheck::{
     sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec, ConstraintListSpec,
     ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
 };
@@ -233,7 +233,7 @@ impl<C: RecursionCurve> ConstraintListVerifierSpec<C::Fq, 3> for GtMulVerifierSp
     fn compute_shared_scalars(&self, eval_point: &[C::Fq]) -> Vec<C::Fq> {
         // Compute g(eval_point) once from the public g MLE.
         // The g polynomial is the MLE of the irreducible polynomial p(X) for Fq12.
-        use crate::zkvm::recursion::constraints_sys::DoryMatrixBuilder;
+        use crate::zkvm::recursion::constraints::constraints_sys::DoryMatrixBuilder;
 
         let g_mle_4var = C::g_mle();
         let g_mle_padded = if eval_point.len() == 11 {

@@ -16,9 +16,9 @@ use crate::{
     transcripts::Transcript,
     utils::errors::ProofVerifyError,
     zkvm::recursion::{
-        stage1::gt_exp::PackedGtExpPublicInputs,
-        stage2::g1_scalar_mul::G1ScalarMulPublicInputs,
-        stage2::g2_scalar_mul::G2ScalarMulPublicInputs,
+        g1::scalar_multiplication::G1ScalarMulPublicInputs,
+        g2::scalar_multiplication::G2ScalarMulPublicInputs,
+        gt::exponentiation::PackedGtExpPublicInputs,
         witness::{GTCombineWitness, GTMulOpWitness},
     },
 };
@@ -512,7 +512,10 @@ impl DoryMatrixBuilder {
     /// - RhoNext: rho_next(s,x) - shifted intermediates (NOT COMMITTED - verified via shift sumcheck)
     /// - Quotient: quotient(s,x) - all quotients packed
     /// - Digit bits: digit_lo/hi(s) - scalar digits (7-var padded to 11-var, public input)
-    pub fn add_gt_exp_witness(&mut self, witness: &super::stage1::gt_exp::PackedGtExpWitness<Fq>) {
+    pub fn add_gt_exp_witness(
+        &mut self,
+        witness: &crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness<Fq>,
+    ) {
         assert_eq!(
             self.num_constraint_vars, 11,
             "Packed GT exp requires 11 constraint variables"
@@ -1166,8 +1169,8 @@ impl DoryMatrixBuilder {
     pub fn add_combine_witness(
         &mut self,
         witness: &GTCombineWitness,
-    ) -> Vec<super::stage1::gt_exp::PackedGtExpWitness<Fq>> {
-        use super::stage1::gt_exp::PackedGtExpWitness;
+    ) -> Vec<crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness<Fq>> {
+        use crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness;
         let mut packed_witnesses = Vec::new();
 
         tracing::info!(
@@ -1419,7 +1422,7 @@ pub struct ConstraintSystem {
     pub constraints: Vec<MatrixConstraint>,
 
     /// Packed GT exp witnesses for Stage 1 prover (base-4 steps packed into 11-var MLEs)
-    pub gt_exp_witnesses: Vec<super::stage1::gt_exp::PackedGtExpWitness<Fq>>,
+    pub gt_exp_witnesses: Vec<crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness<Fq>>,
 
     /// Public inputs for packed GT exp (base Fq12 and scalar bits) - used by verifier
     /// and Stage 2 to compute digit/base evaluations directly
@@ -1432,10 +1435,10 @@ pub struct ConstraintSystem {
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 
     /// G1 addition witnesses for Stage 1 prover (one per `ConstraintType::G1Add`)
-    pub g1_add_witnesses: Vec<super::stage2::g1_add::G1AddWitness<ark_bn254::Fq>>,
+    pub g1_add_witnesses: Vec<crate::zkvm::recursion::g1::addition::G1AddWitness<ark_bn254::Fq>>,
 
     /// G2 addition witnesses for Stage 1 prover (one per `ConstraintType::G2Add`)
-    pub g2_add_witnesses: Vec<super::stage2::g2_add::G2AddWitness<ark_bn254::Fq>>,
+    pub g2_add_witnesses: Vec<crate::zkvm::recursion::g2::addition::G2AddWitness<ark_bn254::Fq>>,
 }
 
 impl ConstraintSystem {
@@ -1631,7 +1634,7 @@ impl ConstraintSystem {
             let base2_mle = fq12_to_multilinear_evals(&(witness.base * witness.base));
             let base3_mle =
                 fq12_to_multilinear_evals(&(witness.base * witness.base * witness.base));
-            let packed = super::stage1::gt_exp::PackedGtExpWitness::from_steps(
+            let packed = crate::zkvm::recursion::gt::exponentiation::PackedGtExpWitness::from_steps(
                 &witness.rho_mles,
                 &witness.quotient_mles,
                 &witness.bits,
@@ -1857,7 +1860,7 @@ impl ConstraintSystem {
     /// Extract G1 add witnesses for the Stage 1 G1Add sumcheck.
     pub fn extract_g1_add_constraints(
         &self,
-    ) -> Vec<super::stage2::g1_add::G1AddWitness<ark_bn254::Fq>> {
+    ) -> Vec<crate::zkvm::recursion::g1::addition::G1AddWitness<ark_bn254::Fq>> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
@@ -1886,7 +1889,7 @@ impl ConstraintSystem {
                 let is_double = self.extract_row_poly(PolyType::G1AddIsDouble, idx, row_size);
                 let is_inverse = self.extract_row_poly(PolyType::G1AddIsInverse, idx, row_size);
 
-                constraints.push(super::stage2::g1_add::G1AddWitness {
+                constraints.push(crate::zkvm::recursion::g1::addition::G1AddWitness {
                     x_p,
                     y_p,
                     ind_p,
@@ -1913,7 +1916,7 @@ impl ConstraintSystem {
     /// Extract G2 add witnesses for the Stage 1 G2Add sumcheck.
     pub fn extract_g2_add_constraints(
         &self,
-    ) -> Vec<super::stage2::g2_add::G2AddWitness<ark_bn254::Fq>> {
+    ) -> Vec<crate::zkvm::recursion::g2::addition::G2AddWitness<ark_bn254::Fq>> {
         let num_constraint_vars = self.matrix.num_constraint_vars;
         let row_size = 1 << num_constraint_vars;
 
@@ -1955,7 +1958,7 @@ impl ConstraintSystem {
                 let is_double = self.extract_row_poly(PolyType::G2AddIsDouble, idx, row_size);
                 let is_inverse = self.extract_row_poly(PolyType::G2AddIsInverse, idx, row_size);
 
-                constraints.push(super::stage2::g2_add::G2AddWitness {
+                constraints.push(crate::zkvm::recursion::g2::addition::G2AddWitness {
                     x_p_c0,
                     x_p_c1,
                     y_p_c0,
@@ -2572,7 +2575,7 @@ impl ConstraintSystem {
                     + c7_yt_c1
             }
             ConstraintType::G1Add => {
-                use super::stage2::g1_add::G1AddValues;
+                use crate::zkvm::recursion::g1::addition::G1AddValues;
                 let delta = Fq::from(7u64);
 
                 let x_p_row = self.matrix.row_index(PolyType::G1AddXP, idx);
@@ -2608,7 +2611,7 @@ impl ConstraintSystem {
                 values.eval_constraint(delta)
             }
             ConstraintType::G2Add => {
-                use super::stage2::g2_add::G2AddValues;
+                use crate::zkvm::recursion::g2::addition::G2AddValues;
                 let delta = Fq::from(7u64);
 
                 let x_p_c0_row = self.matrix.row_index(PolyType::G2AddXPC0, idx);

@@ -22,30 +22,31 @@ use ark_bn254::Fq;
 use ark_std::Zero;
 
 use super::{
-    bijection::{ConstraintMapping, VarCountJaggedBijection},
-    constraints_sys::ConstraintType,
+    constraints::constraints_sys::ConstraintType,
     curve::Bn254Recursion,
-    recursion_prover::RecursionProof,
-    stage1::gt_exp::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
-    stage2::{
-        g1_add::G1AddParams,
-        g1_scalar_mul::G1ScalarMulPublicInputs,
-        g2_add::G2AddParams,
-        g2_scalar_mul::G2ScalarMulPublicInputs,
-        gt_mul::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
-        packed_gt_exp_reduction::{
-            PackedGtExpClaimReductionParams, PackedGtExpClaimReductionVerifier,
-        },
-        shift_rho::{ShiftRhoParams, ShiftRhoVerifier},
-        shift_scalar_mul::{
+    g1::{
+        addition::G1AddParams,
+        scalar_multiplication::G1ScalarMulPublicInputs,
+        shift_scalar_multiplication::{
             g1_shift_params, g2_shift_params, ShiftG1ScalarMulVerifier, ShiftG2ScalarMulVerifier,
         },
     },
-    stage3::virtualization::{
+    g2::{addition::G2AddParams, scalar_multiplication::G2ScalarMulPublicInputs},
+    gt::{
+        claim_reduction::{PackedGtExpClaimReductionParams, PackedGtExpClaimReductionVerifier},
+        exponentiation::{PackedGtExpParams, PackedGtExpPublicInputs, PackedGtExpVerifier},
+        multiplication::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
+        shift_rho::{ShiftRhoParams, ShiftRhoVerifier},
+    },
+    jagged::{
+        bijection::{ConstraintMapping, VarCountJaggedBijection},
+        jagged_assist::JaggedAssistVerifier,
+        sumcheck::{JaggedSumcheckParams, JaggedSumcheckVerifier},
+    },
+    recursion_prover::RecursionProof,
+    virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationVerifier,
     },
-    stage4::jagged::{JaggedSumcheckParams, JaggedSumcheckVerifier},
-    stage5::jagged_assist::JaggedAssistVerifier,
 };
 use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_verifier::SumcheckInstanceVerifier};
 
@@ -360,7 +361,7 @@ impl RecursionVerifier<Fq> {
 
         // G1 scalar mul
         if num_g1_scalar_mul > 0 {
-            use super::stage2::g1_scalar_mul::{
+            use super::g1::scalar_multiplication::{
                 G1ScalarMulParams, G1ScalarMulVerifier, G1ScalarMulVerifierSpec,
             };
 
@@ -410,7 +411,7 @@ impl RecursionVerifier<Fq> {
 
         // G2 scalar mul
         if num_g2_scalar_mul > 0 {
-            use super::stage2::g2_scalar_mul::{
+            use super::g2::scalar_multiplication::{
                 G2ScalarMulParams, G2ScalarMulVerifier, G2ScalarMulVerifierSpec,
             };
 
@@ -431,7 +432,7 @@ impl RecursionVerifier<Fq> {
 
         // G1 add
         if num_g1_add > 0 {
-            use super::stage2::g1_add::{G1AddVerifier, G1AddVerifierSpec};
+            use super::g1::addition::{G1AddVerifier, G1AddVerifierSpec};
             let params = G1AddParams::new(num_g1_add);
             let spec = G1AddVerifierSpec::new(params);
             let verifier = G1AddVerifier::from_spec(spec, g1_add_indices, transcript);
@@ -440,7 +441,7 @@ impl RecursionVerifier<Fq> {
 
         // G2 add
         if num_g2_add > 0 {
-            use super::stage2::g2_add::{G2AddVerifier, G2AddVerifierSpec};
+            use super::g2::addition::{G2AddVerifier, G2AddVerifierSpec};
             let params = G2AddParams::new(num_g2_add);
             let spec = G2AddVerifierSpec::new(params);
             let verifier = G2AddVerifier::from_spec(spec, g2_add_indices, transcript);
@@ -501,7 +502,7 @@ impl RecursionVerifier<Fq> {
     fn verify_stage4<T: Transcript>(
         &self,
         stage4_proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
-        stage5_proof: &super::stage5::jagged_assist::JaggedAssistProof<Fq, T>,
+        stage5_proof: &super::jagged::jagged_assist::JaggedAssistProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
         r_s: &[<Fq as crate::field::JoltField>::Challenge],
@@ -517,7 +518,7 @@ impl RecursionVerifier<Fq> {
             .map(|c| (*c).into())
             .collect();
 
-        let dense_size = <VarCountJaggedBijection as crate::zkvm::recursion::bijection::JaggedTransform<Fq>>::dense_size(&self.input.jagged_bijection);
+        let dense_size = <VarCountJaggedBijection as crate::zkvm::recursion::jagged::bijection::JaggedTransform<Fq>>::dense_size(&self.input.jagged_bijection);
         let num_dense_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
 
         let params = JaggedSumcheckParams::new(
@@ -553,7 +554,7 @@ impl RecursionVerifier<Fq> {
     #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage5")]
     fn verify_stage5<T: Transcript>(
         &self,
-        stage5_proof: &super::stage5::jagged_assist::JaggedAssistProof<Fq, T>,
+        stage5_proof: &super::jagged::jagged_assist::JaggedAssistProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
         r_dense: &[<Fq as crate::field::JoltField>::Challenge],
@@ -562,7 +563,7 @@ impl RecursionVerifier<Fq> {
         let r_dense_fq: Vec<Fq> = r_dense.iter().map(|c| (*c).into()).collect();
         let r_x_prev: Vec<Fq> = r_x.iter().map(|c| (*c).into()).collect();
 
-        let dense_size = <VarCountJaggedBijection as crate::zkvm::recursion::bijection::JaggedTransform<Fq>>::dense_size(&self.input.jagged_bijection);
+        let dense_size = <VarCountJaggedBijection as crate::zkvm::recursion::jagged::bijection::JaggedTransform<Fq>>::dense_size(&self.input.jagged_bijection);
         let num_dense_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
         let num_bits = std::cmp::max(self.input.num_constraint_vars, num_dense_vars);
 

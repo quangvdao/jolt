@@ -9,7 +9,6 @@ use crate::transcripts::{AppendToTranscript, Transcript};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::math::Math;
 use crate::utils::{compute_dotproduct, mul_0_1_optimized};
-use ark_bn254;
 use ark_ec::CurveGroup;
 use ark_grumpkin;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -103,143 +102,17 @@ where
 
         let gens = &generators.generators[..R_size];
 
-        // Single-threaded Pippenger MSM closure for ZKVM environment
-        let pippenger_msm = |bases: &[G::Affine], scalars: &[G::ScalarField]| -> G {
-            use ark_ff::BigInteger;
-
-            if bases.is_empty() || scalars.is_empty() {
-                return G::zero();
-            }
-
-            let n = bases.len().min(scalars.len());
-
-            // For small MSMs, use naive method
-            if n < 32 {
-                let mut result = G::zero();
-                for i in 0..n {
-                    result += G::from(bases[i]) * scalars[i];
-                }
-                return result;
-            }
-
-            // Window size calculation (optimal for given input size)
-            let window_size = if n < 32 {
-                3
-            } else if n < 64 {
-                4
-            } else if n < 128 {
-                5
-            } else if n < 512 {
-                6
-            } else if n < 1024 {
-                7
-            } else if n < 4096 {
-                8
-            } else if n < 16384 {
-                9
-            } else {
-                10
-            };
-
-            let num_buckets = 1 << window_size;
-            // Determine scalar field bit size based on the actual field type
-            let scalar_bits: usize = {
-                let scalar_ref: &dyn core::any::Any = &scalars[0];
-                if scalar_ref.is::<ark_grumpkin::Fr>() {
-                    255 // Grumpkin scalar field
-                } else if scalar_ref.is::<ark_bn254::Fr>() {
-                    254 // BN254 scalar field
-                } else {
-                    256 // Default fallback
-                }
-            };
-            let num_windows = scalar_bits.div_ceil(window_size);
-
-            let mut result = G::zero();
-
-            // Process each window
-            for window in 0..num_windows {
-                // Initialize buckets
-                let mut buckets = vec![G::zero(); num_buckets];
-
-                // Add points to buckets based on their scalar bits in this window
-                for i in 0..n {
-                    // Transmute to access PrimeField methods
-                    let scalar_bigint = unsafe {
-                        use ark_ff::PrimeField;
-                        let scalar_ptr = &scalars[i] as *const G::ScalarField;
-                        // Cast through raw pointer to preserve the actual type
-                        let scalar_ref = &*(scalar_ptr as *const dyn core::any::Any);
-
-                        // Try Grumpkin first, then BN254
-                        if let Some(grumpkin_scalar) = scalar_ref.downcast_ref::<ark_grumpkin::Fr>()
-                        {
-                            grumpkin_scalar.into_bigint()
-                        } else if let Some(bn254_scalar) =
-                            scalar_ref.downcast_ref::<ark_bn254::Fr>()
-                        {
-                            bn254_scalar.into_bigint()
-                        } else {
-                            // Fallback: assume it implements PrimeField
-                            core::mem::transmute_copy::<G::ScalarField, ark_grumpkin::Fr>(
-                                &scalars[i],
-                            )
-                            .into_bigint()
-                        }
-                    };
-
-                    // Extract the window_size bits for this window
-                    let window_start = window * window_size;
-                    let mut bucket_index = 0usize;
-
-                    for j in 0..window_size {
-                        let bit_index = window_start + j;
-                        if bit_index < scalar_bits && scalar_bigint.get_bit(bit_index) {
-                            bucket_index |= 1 << j;
-                        }
-                    }
-
-                    if bucket_index > 0 {
-                        buckets[bucket_index] += G::from(bases[i]);
-                    }
-                }
-
-                // Sum up the buckets using the Pippenger bucket method
-                let mut window_result = G::zero();
-                let mut running_sum = G::zero();
-
-                for i in (1..num_buckets).rev() {
-                    running_sum += buckets[i];
-                    window_result += running_sum;
-                }
-
-                // Shift result by window_size bits and add
-                for _ in 0..(window * window_size) {
-                    result.double_in_place();
-                }
-                result += window_result;
-            }
-
-            result
-        };
-
-        // In ZKVM guest environment, use serial Pippenger MSM to avoid rayon issues.
-        // On host, parallelize over rows but use sequential MSM per row to avoid oversubscription.
-        let row_commitments = if cfg!(target_arch = "riscv64") || cfg!(target_arch = "riscv32") {
-            poly.Z
-                .chunks(R_size)
-                .map(|row| pippenger_msm(gens, row))
-                .collect()
-        } else {
-            poly.Z
-                .par_chunks(R_size)
-                .map(|row| {
-                    // Use truly sequential MSM to avoid nested rayon parallelism
-                    VariableBaseMSM::msm_sequential(gens, row)
-                        .expect("row length should match generator length")
-                })
-                .collect()
-        };
+        // This commitment method is used on the prover side (host). Keep it simple and
+        // parallelize over rows while running a sequential MSM per row to avoid nested
+        // rayon oversubscription in upstream callsites.
+        let row_commitments = poly
+            .Z
+            .par_chunks(R_size)
+            .map(|row| {
+                VariableBaseMSM::msm_sequential(gens, row)
+                    .expect("row length should match generator length")
+            })
+            .collect();
 
         Self { row_commitments }
     }

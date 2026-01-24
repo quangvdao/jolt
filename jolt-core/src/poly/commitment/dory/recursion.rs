@@ -5,12 +5,18 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Read, Serializatio
 use dory::{
     backends::arkworks::{ArkG1, ArkG2, ArkGT, BN254},
     primitives::arithmetic::{Group, PairingCurve},
+    primitives::backend::VerifierBackend,
+    primitives::transcript::Transcript as DoryTranscript,
     primitives::serialization::{DoryDeserialize, DorySerialize},
     recursion::{
-        ast::AstGraph, HintMap, TraceContext, WitnessBackend, WitnessGenerator, WitnessResult,
+        ast::{AstBuilder, AstGraph, AstOp, ScalarValue, ValueId, ValueType},
+        precompute_challenges, ChallengeSet, DoryInputProviderWithCommitment, EvalResult, HintMap,
+        InputProvider, OpId, OpType, OperationEvaluator, RoundChallenges, TaskExecutor, TraceContext,
+        WitnessBackend, WitnessGenerator, WitnessResult,
     },
-    verify_recursive,
 };
+use dory::evaluation_proof::verify_with_backend;
+use dory::verify_recursive;
 use std::{marker::PhantomData, rc::Rc};
 
 /// Wrapper for `HintMap` that implements ark's serialization traits.
@@ -100,6 +106,365 @@ use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpW
 /// Jolt witness backend implementation for dory recursion
 #[derive(Debug, Clone)]
 pub struct JoltWitness;
+
+/// Transcript that **replays** a precomputed `ChallengeSet` without hashing.
+///
+/// This enables building the verification AST (and running backend-generic verification logic)
+/// without doing Fiat–Shamir transcript work a second time.
+struct ChallengeReplayTranscript {
+    challenges: ChallengeSet<ArkFr>,
+    round_idx: usize,
+    expect_alpha: bool,
+    in_final: bool,
+}
+
+impl ChallengeReplayTranscript {
+    fn new(challenges: ChallengeSet<ArkFr>) -> Self {
+        Self {
+            challenges,
+            round_idx: 0,
+            expect_alpha: false,
+            in_final: false,
+        }
+    }
+}
+
+impl DoryTranscript for ChallengeReplayTranscript {
+    type Curve = BN254;
+
+    fn append_bytes(&mut self, _label: &[u8], _bytes: &[u8]) {}
+
+    fn append_field(&mut self, _label: &[u8], _x: &ArkFr) {}
+
+    fn append_group<G: Group>(&mut self, _label: &[u8], _g: &G) {}
+
+    fn append_serde<S: DorySerialize>(&mut self, _label: &[u8], _s: &S) {}
+
+    fn challenge_scalar(&mut self, label: &[u8]) -> ArkFr {
+        match label {
+            b"beta" => {
+                assert!(
+                    !self.in_final,
+                    "challenge_scalar(beta) requested during final phase"
+                );
+                assert!(
+                    !self.expect_alpha,
+                    "challenge_scalar(beta) requested when alpha was expected"
+                );
+                let RoundChallenges { beta, alpha: _ } =
+                    self.challenges.rounds[self.round_idx].clone();
+                self.expect_alpha = true;
+                beta
+            }
+            b"alpha" => {
+                assert!(
+                    !self.in_final,
+                    "challenge_scalar(alpha) requested during final phase"
+                );
+                assert!(
+                    self.expect_alpha,
+                    "challenge_scalar(alpha) requested when beta was expected"
+                );
+                let RoundChallenges { beta: _, alpha } =
+                    self.challenges.rounds[self.round_idx].clone();
+                self.expect_alpha = false;
+                self.round_idx += 1;
+                alpha
+            }
+            b"gamma" => {
+                assert!(
+                    self.round_idx == self.challenges.rounds.len(),
+                    "challenge_scalar(gamma) requested before consuming all round challenges"
+                );
+                self.in_final = true;
+                self.challenges.gamma
+            }
+            b"d" => {
+                assert!(self.in_final, "challenge_scalar(d) requested before gamma");
+                self.challenges.d
+            }
+            _ => panic!("Unexpected transcript challenge label: {:?}", label),
+        }
+    }
+
+    fn reset(&mut self, _domain_label: &[u8]) {
+        self.round_idx = 0;
+        self.expect_alpha = false;
+        self.in_final = false;
+    }
+}
+
+/// Deterministic OpId assignment matching Dory's tracing OpId builder.
+#[derive(Default)]
+struct LocalOpIdBuilder {
+    current_round: u16,
+    counters: std::collections::HashMap<OpType, u16>,
+}
+
+impl LocalOpIdBuilder {
+    fn next(&mut self, op_type: OpType) -> OpId {
+        let index = self.counters.entry(op_type).or_insert(0);
+        let id = OpId::new(self.current_round, op_type, *index);
+        *index += 1;
+        id
+    }
+
+    fn advance_round(&mut self) {
+        self.current_round += 1;
+        self.counters.clear();
+    }
+
+    fn enter_final(&mut self) {
+        self.current_round = u16::MAX;
+        self.counters.clear();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AstG1(ValueId);
+#[derive(Clone, Copy)]
+struct AstG2(ValueId);
+#[derive(Clone, Copy)]
+struct AstGT(ValueId);
+
+/// Backend that builds the verification AST (and OpId->ValueId mapping) without doing group ops.
+struct AstOnlyBackend {
+    opids: LocalOpIdBuilder,
+    ast: AstBuilder<BN254>,
+}
+
+impl AstOnlyBackend {
+    fn new() -> Self {
+        Self {
+            opids: LocalOpIdBuilder::default(),
+            ast: AstBuilder::new(),
+        }
+    }
+
+    fn finalize(self) -> AstGraph<BN254> {
+        self.ast.finalize()
+    }
+}
+
+impl VerifierBackend for AstOnlyBackend {
+    type Curve = BN254;
+    type Scalar = ArkFr;
+    type G1 = AstG1;
+    type G2 = AstG2;
+    type GT = AstGT;
+
+    fn wrap_g1_setup(&mut self, value: <BN254 as PairingCurve>::G1, name: &'static str, index: Option<usize>) -> Self::G1 {
+        AstG1(self.ast.intern_g1_setup(value, name, index))
+    }
+    fn wrap_g2_setup(&mut self, value: <BN254 as PairingCurve>::G2, name: &'static str, index: Option<usize>) -> Self::G2 {
+        AstG2(self.ast.intern_g2_setup(value, name, index))
+    }
+    fn wrap_gt_setup(&mut self, value: <BN254 as PairingCurve>::GT, name: &'static str, index: Option<usize>) -> Self::GT {
+        AstGT(self.ast.intern_gt_setup(value, name, index))
+    }
+
+    fn wrap_g1_proof(&mut self, value: <BN254 as PairingCurve>::G1, name: &'static str) -> Self::G1 {
+        AstG1(self.ast.intern_g1_proof(value, name))
+    }
+    fn wrap_g2_proof(&mut self, value: <BN254 as PairingCurve>::G2, name: &'static str) -> Self::G2 {
+        AstG2(self.ast.intern_g2_proof(value, name))
+    }
+    fn wrap_gt_proof(&mut self, value: <BN254 as PairingCurve>::GT, name: &'static str) -> Self::GT {
+        AstGT(self.ast.intern_gt_proof(value, name))
+    }
+
+    fn wrap_g1_proof_round(&mut self, value: <BN254 as PairingCurve>::G1, round: usize, is_first_msg: bool, name: &'static str) -> Self::G1 {
+        let msg = if is_first_msg { dory::recursion::ast::RoundMsg::First } else { dory::recursion::ast::RoundMsg::Second };
+        AstG1(self.ast.intern_g1_proof_round(value, round, msg, name))
+    }
+    fn wrap_g2_proof_round(&mut self, value: <BN254 as PairingCurve>::G2, round: usize, is_first_msg: bool, name: &'static str) -> Self::G2 {
+        let msg = if is_first_msg { dory::recursion::ast::RoundMsg::First } else { dory::recursion::ast::RoundMsg::Second };
+        AstG2(self.ast.intern_g2_proof_round(value, round, msg, name))
+    }
+    fn wrap_gt_proof_round(&mut self, value: <BN254 as PairingCurve>::GT, round: usize, is_first_msg: bool, name: &'static str) -> Self::GT {
+        let msg = if is_first_msg { dory::recursion::ast::RoundMsg::First } else { dory::recursion::ast::RoundMsg::Second };
+        AstGT(self.ast.intern_gt_proof_round(value, round, msg, name))
+    }
+
+    fn g1_scale(&mut self, g: &Self::G1, s: &Self::Scalar) -> Self::G1 {
+        let op_id = self.opids.next(OpType::G1ScalarMul);
+        let out = self.ast.push_with_opid(
+            ValueType::G1,
+            AstOp::G1ScalarMul {
+                op_id: Some(op_id),
+                point: g.0,
+                scalar: ScalarValue::new(*s),
+            },
+            op_id,
+        );
+        AstG1(out)
+    }
+
+    fn g1_add(&mut self, a: &Self::G1, b: &Self::G1) -> Self::G1 {
+        let op_id = self.opids.next(OpType::G1Add);
+        let out = self.ast.push_with_opid(
+            ValueType::G1,
+            AstOp::G1Add {
+                op_id: Some(op_id),
+                a: a.0,
+                b: b.0,
+            },
+            op_id,
+        );
+        AstG1(out)
+    }
+
+    fn g2_scale(&mut self, g: &Self::G2, s: &Self::Scalar) -> Self::G2 {
+        let op_id = self.opids.next(OpType::G2ScalarMul);
+        let out = self.ast.push_with_opid(
+            ValueType::G2,
+            AstOp::G2ScalarMul {
+                op_id: Some(op_id),
+                point: g.0,
+                scalar: ScalarValue::new(*s),
+            },
+            op_id,
+        );
+        AstG2(out)
+    }
+
+    fn g2_add(&mut self, a: &Self::G2, b: &Self::G2) -> Self::G2 {
+        let op_id = self.opids.next(OpType::G2Add);
+        let out = self.ast.push_with_opid(
+            ValueType::G2,
+            AstOp::G2Add {
+                op_id: Some(op_id),
+                a: a.0,
+                b: b.0,
+            },
+            op_id,
+        );
+        AstG2(out)
+    }
+
+    fn gt_scale(&mut self, g: &Self::GT, s: &Self::Scalar) -> Self::GT {
+        let op_id = self.opids.next(OpType::GtExp);
+        let out = self.ast.push_with_opid(
+            ValueType::GT,
+            AstOp::GTExp {
+                op_id: Some(op_id),
+                base: g.0,
+                scalar: ScalarValue::new(*s),
+            },
+            op_id,
+        );
+        AstGT(out)
+    }
+
+    fn gt_mul(&mut self, a: &Self::GT, b: &Self::GT) -> Self::GT {
+        let op_id = self.opids.next(OpType::GtMul);
+        let out = self.ast.push_with_opid(
+            ValueType::GT,
+            AstOp::GTMul {
+                op_id: Some(op_id),
+                lhs: a.0,
+                rhs: b.0,
+            },
+            op_id,
+        );
+        AstGT(out)
+    }
+
+    fn multi_pair(&mut self, g1s: &[Self::G1], g2s: &[Self::G2]) -> Self::GT {
+        let op_id = self.opids.next(OpType::MultiPairing);
+        let out = self.ast.push_with_opid(
+            ValueType::GT,
+            AstOp::MultiPairing {
+                op_id: Some(op_id),
+                g1s: g1s.iter().map(|v| v.0).collect(),
+                g2s: g2s.iter().map(|v| v.0).collect(),
+            },
+            op_id,
+        );
+        AstGT(out)
+    }
+
+    fn gt_eq(&mut self, lhs: &Self::GT, rhs: &Self::GT) -> Result<(), dory::error::DoryError> {
+        self.ast.push_eq(lhs.0, rhs.0, "gt equality");
+        Ok(())
+    }
+
+    fn advance_round(&mut self) {
+        self.opids.advance_round();
+    }
+
+    fn enter_final(&mut self) {
+        self.opids.enter_final();
+    }
+}
+
+/// Parallel evaluator for AST node values (host).
+struct ArkworksOpEvaluator;
+
+impl OperationEvaluator<BN254> for ArkworksOpEvaluator {
+    fn g1_add(&self, a: &<BN254 as PairingCurve>::G1, b: &<BN254 as PairingCurve>::G1) -> <BN254 as PairingCurve>::G1 {
+        a.add(b)
+    }
+    fn g1_scalar_mul(
+        &self,
+        point: &<BN254 as PairingCurve>::G1,
+        scalar: &<<BN254 as PairingCurve>::G1 as Group>::Scalar,
+    ) -> <BN254 as PairingCurve>::G1 {
+        point.scale(scalar)
+    }
+    fn g1_msm(
+        &self,
+        points: &[<BN254 as PairingCurve>::G1],
+        scalars: &[<<BN254 as PairingCurve>::G1 as Group>::Scalar],
+    ) -> <BN254 as PairingCurve>::G1 {
+        // Not used by current verification AST; keep a simple implementation.
+        let mut acc = <BN254 as PairingCurve>::G1::identity();
+        for (p, s) in points.iter().zip(scalars.iter()) {
+            acc = acc.add(&p.scale(s));
+        }
+        acc
+    }
+
+    fn g2_add(&self, a: &<BN254 as PairingCurve>::G2, b: &<BN254 as PairingCurve>::G2) -> <BN254 as PairingCurve>::G2 {
+        a.add(b)
+    }
+    fn g2_scalar_mul(
+        &self,
+        point: &<BN254 as PairingCurve>::G2,
+        scalar: &<<BN254 as PairingCurve>::G1 as Group>::Scalar,
+    ) -> <BN254 as PairingCurve>::G2 {
+        point.scale(scalar)
+    }
+    fn g2_msm(
+        &self,
+        points: &[<BN254 as PairingCurve>::G2],
+        scalars: &[<<BN254 as PairingCurve>::G1 as Group>::Scalar],
+    ) -> <BN254 as PairingCurve>::G2 {
+        // Not used by current verification AST; keep a simple implementation.
+        let mut acc = <BN254 as PairingCurve>::G2::identity();
+        for (p, s) in points.iter().zip(scalars.iter()) {
+            acc = acc.add(&p.scale(s));
+        }
+        acc
+    }
+
+    fn gt_mul(&self, lhs: &<BN254 as PairingCurve>::GT, rhs: &<BN254 as PairingCurve>::GT) -> <BN254 as PairingCurve>::GT {
+        lhs.add(rhs)
+    }
+    fn gt_exp(
+        &self,
+        base: &<BN254 as PairingCurve>::GT,
+        scalar: &<<BN254 as PairingCurve>::G1 as Group>::Scalar,
+    ) -> <BN254 as PairingCurve>::GT {
+        base.scale(scalar)
+    }
+    fn pairing(&self, g1: &<BN254 as PairingCurve>::G1, g2: &<BN254 as PairingCurve>::G2) -> <BN254 as PairingCurve>::GT {
+        BN254::pair(g1, g2)
+    }
+    fn multi_pairing(&self, g1s: &[<BN254 as PairingCurve>::G1], g2s: &[<BN254 as PairingCurve>::G2]) -> <BN254 as PairingCurve>::GT {
+        BN254::multi_pair(g1s, g2s)
+    }
+}
 
 /// GTExp witness following the ExponentiationSteps pattern
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -591,6 +956,441 @@ impl WitnessGenerator<JoltWitness, BN254> for JoltWitnessGenerator {
     }
 }
 
+/// Expand full Dory recursion witnesses from the deferred (AST + outputs-only hints) capture.
+///
+/// This is the "Phase 2" of Dory's two-phase witness generation: expensive, per-op witness
+/// payloads are generated in parallel given the already-determined operation DAG and outputs.
+fn expand_witnesses_from_deferred(
+    ast: &AstGraph<BN254>,
+    hints: &HintMap<BN254>,
+    setup: &dory::setup::VerifierSetup<BN254>,
+    proof: &ArkDoryProof,
+    commitment: ArkGT,
+) -> Result<dory::recursion::WitnessCollection<JoltWitness>, ProofVerifyError> {
+    use std::collections::HashMap;
+
+    debug_assert!(
+        ast.validate().is_ok(),
+        "invalid Dory recursion AST produced during deferred witness capture"
+    );
+
+    let input_provider = DoryInputProviderWithCommitment::new(setup, proof, commitment);
+
+    // Populate a ValueId -> value table.
+    //
+    // In deferred mode, we *expect* every traced op to have an OpId and a corresponding
+    // output hint. However, to be robust to upstream AST changes (e.g. new un-traced nodes),
+    // we fall back to computing missing node values from their dependencies.
+    let mut values: Vec<Option<EvalResult<BN254>>> = vec![None; ast.nodes.len()];
+    for node in &ast.nodes {
+        let out_idx = node.out.0 as usize;
+        let hinted = node.op.op_id().and_then(|op_id| match node.out_ty {
+            ValueType::G1 => hints.get_g1(op_id).copied().map(EvalResult::G1),
+            ValueType::G2 => hints.get_g2(op_id).copied().map(EvalResult::G2),
+            ValueType::GT => hints.get_gt(op_id).copied().map(EvalResult::GT),
+        });
+
+        let value = match (&node.op, hinted) {
+            // Fast path: use the recorded output hint.
+            (_, Some(v)) => Some(v),
+
+            // Inputs come from setup/proof/commitment.
+            (AstOp::Input { .. }, _) => InputProvider::get_input(&input_provider, node),
+
+            // Fallback path: compute from dependencies.
+            (AstOp::G1Add { a, b, .. }, _) => {
+                let a = match values[a.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G1(v) => *v,
+                    _ => unreachable!("G1Add input must be G1"),
+                };
+                let b = match values[b.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G1(v) => *v,
+                    _ => unreachable!("G1Add input must be G1"),
+                };
+                Some(EvalResult::G1(a.add(&b)))
+            }
+            (AstOp::G1ScalarMul { point, scalar, .. }, _) => {
+                let p = match values[point.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G1(v) => *v,
+                    _ => unreachable!("G1ScalarMul input must be G1"),
+                };
+                Some(EvalResult::G1(p.scale(&scalar.value)))
+            }
+            (AstOp::G2Add { a, b, .. }, _) => {
+                let a = match values[a.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G2(v) => *v,
+                    _ => unreachable!("G2Add input must be G2"),
+                };
+                let b = match values[b.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G2(v) => *v,
+                    _ => unreachable!("G2Add input must be G2"),
+                };
+                Some(EvalResult::G2(a.add(&b)))
+            }
+            (AstOp::G2ScalarMul { point, scalar, .. }, _) => {
+                let p = match values[point.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G2(v) => *v,
+                    _ => unreachable!("G2ScalarMul input must be G2"),
+                };
+                Some(EvalResult::G2(p.scale(&scalar.value)))
+            }
+            (AstOp::GTMul { lhs, rhs, .. }, _) => {
+                let a = match values[lhs.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::GT(v) => *v,
+                    _ => unreachable!("GTMul input must be GT"),
+                };
+                let b = match values[rhs.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::GT(v) => *v,
+                    _ => unreachable!("GTMul input must be GT"),
+                };
+                Some(EvalResult::GT(a.add(&b)))
+            }
+            (AstOp::GTExp { base, scalar, .. }, _) => {
+                let b = match values[base.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::GT(v) => *v,
+                    _ => unreachable!("GTExp input must be GT"),
+                };
+                Some(EvalResult::GT(b.scale(&scalar.value)))
+            }
+            (AstOp::Pairing { g1, g2, .. }, _) => {
+                let p = match values[g1.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G1(v) => *v,
+                    _ => unreachable!("Pairing G1 input must be G1"),
+                };
+                let q = match values[g2.0 as usize].as_ref().expect("AST topo order") {
+                    EvalResult::G2(v) => *v,
+                    _ => unreachable!("Pairing G2 input must be G2"),
+                };
+                Some(EvalResult::GT(BN254::pair(&p, &q)))
+            }
+            (AstOp::MultiPairing { g1s, g2s, .. }, _) => {
+                let ps: Vec<<BN254 as PairingCurve>::G1> = g1s
+                    .iter()
+                    .map(|id| match values[id.0 as usize].as_ref().expect("AST topo order") {
+                        EvalResult::G1(v) => *v,
+                        _ => unreachable!("MultiPairing G1 input must be G1"),
+                    })
+                    .collect();
+                let qs: Vec<<BN254 as PairingCurve>::G2> = g2s
+                    .iter()
+                    .map(|id| match values[id.0 as usize].as_ref().expect("AST topo order") {
+                        EvalResult::G2(v) => *v,
+                        _ => unreachable!("MultiPairing G2 input must be G2"),
+                    })
+                    .collect();
+                Some(EvalResult::GT(BN254::multi_pair(&ps, &qs)))
+            }
+            (AstOp::MsmG1 { points, scalars, .. }, _) => {
+                let mut acc = <BN254 as PairingCurve>::G1::identity();
+                for (p, s) in points.iter().zip(scalars.iter()) {
+                    let base = match values[p.0 as usize].as_ref().expect("AST topo order") {
+                        EvalResult::G1(v) => *v,
+                        _ => unreachable!("MsmG1 input must be G1"),
+                    };
+                    acc = acc.add(&base.scale(&s.value));
+                }
+                Some(EvalResult::G1(acc))
+            }
+            (AstOp::MsmG2 { points, scalars, .. }, _) => {
+                let mut acc = <BN254 as PairingCurve>::G2::identity();
+                for (p, s) in points.iter().zip(scalars.iter()) {
+                    let base = match values[p.0 as usize].as_ref().expect("AST topo order") {
+                        EvalResult::G2(v) => *v,
+                        _ => unreachable!("MsmG2 input must be G2"),
+                    };
+                    acc = acc.add(&base.scale(&s.value));
+                }
+                Some(EvalResult::G2(acc))
+            }
+        };
+
+        values[out_idx] = value;
+    }
+
+    if values.iter().any(|v| v.is_none()) {
+        tracing::error!(
+            ast_nodes = ast.nodes.len(),
+            hints = hints.len(),
+            "Missing values while expanding deferred witnesses"
+        );
+        return Err(ProofVerifyError::default());
+    }
+    let values: Vec<EvalResult<BN254>> = values.into_iter().map(|v| v.unwrap()).collect();
+
+    let get_g1 = |id: ValueId| -> &<BN254 as PairingCurve>::G1 {
+        match &values[id.0 as usize] {
+            EvalResult::G1(v) => v,
+            _ => unreachable!("type mismatch for ValueId {id} (expected G1)"),
+        }
+    };
+    let get_g2 = |id: ValueId| -> &<BN254 as PairingCurve>::G2 {
+        match &values[id.0 as usize] {
+            EvalResult::G2(v) => v,
+            _ => unreachable!("type mismatch for ValueId {id} (expected G2)"),
+        }
+    };
+    let get_gt = |id: ValueId| -> &<BN254 as PairingCurve>::GT {
+        match &values[id.0 as usize] {
+            EvalResult::GT(v) => v,
+            _ => unreachable!("type mismatch for ValueId {id} (expected GT)"),
+        }
+    };
+
+    use rayon::prelude::*;
+
+    let g1_add: HashMap<OpId, <JoltWitness as WitnessBackend>::G1AddWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::G1Add {
+                op_id: Some(op_id),
+                a,
+                b,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::G1(v) => v,
+                    _ => unreachable!("G1Add output must be G1"),
+                };
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_g1_add(get_g1(*a), get_g1(*b), result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let g1_scalar_mul: HashMap<OpId, <JoltWitness as WitnessBackend>::G1ScalarMulWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::G1ScalarMul {
+                op_id: Some(op_id),
+                point,
+                scalar,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::G1(v) => v,
+                    _ => unreachable!("G1ScalarMul output must be G1"),
+                };
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_g1_scalar_mul(
+                        get_g1(*point),
+                        &scalar.value,
+                        result,
+                    ),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let msm_g1: HashMap<OpId, <JoltWitness as WitnessBackend>::MsmG1Witness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::MsmG1 {
+                op_id: Some(op_id),
+                points,
+                scalars,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::G1(v) => v,
+                    _ => unreachable!("MsmG1 output must be G1"),
+                };
+                let bases: Vec<<BN254 as PairingCurve>::G1> =
+                    points.iter().map(|p| *get_g1(*p)).collect();
+                let scalars: Vec<<<BN254 as PairingCurve>::G1 as Group>::Scalar> =
+                    scalars.iter().map(|s| s.value).collect();
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_msm_g1(&bases, &scalars, result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let g2_add: HashMap<OpId, <JoltWitness as WitnessBackend>::G2AddWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::G2Add {
+                op_id: Some(op_id),
+                a,
+                b,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::G2(v) => v,
+                    _ => unreachable!("G2Add output must be G2"),
+                };
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_g2_add(get_g2(*a), get_g2(*b), result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let g2_scalar_mul: HashMap<OpId, <JoltWitness as WitnessBackend>::G2ScalarMulWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::G2ScalarMul {
+                op_id: Some(op_id),
+                point,
+                scalar,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::G2(v) => v,
+                    _ => unreachable!("G2ScalarMul output must be G2"),
+                };
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_g2_scalar_mul(
+                        get_g2(*point),
+                        &scalar.value,
+                        result,
+                    ),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let msm_g2: HashMap<OpId, <JoltWitness as WitnessBackend>::MsmG2Witness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::MsmG2 {
+                op_id: Some(op_id),
+                points,
+                scalars,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::G2(v) => v,
+                    _ => unreachable!("MsmG2 output must be G2"),
+                };
+                let bases: Vec<<BN254 as PairingCurve>::G2> =
+                    points.iter().map(|p| *get_g2(*p)).collect();
+                let scalars: Vec<<<BN254 as PairingCurve>::G1 as Group>::Scalar> =
+                    scalars.iter().map(|s| s.value).collect();
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_msm_g2(&bases, &scalars, result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let gt_mul: HashMap<OpId, <JoltWitness as WitnessBackend>::GtMulWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::GTMul {
+                op_id: Some(op_id),
+                lhs,
+                rhs,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::GT(v) => v,
+                    _ => unreachable!("GTMul output must be GT"),
+                };
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_gt_mul(get_gt(*lhs), get_gt(*rhs), result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let gt_exp: HashMap<OpId, <JoltWitness as WitnessBackend>::GtExpWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::GTExp {
+                op_id: Some(op_id),
+                base,
+                scalar,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::GT(v) => v,
+                    _ => unreachable!("GTExp output must be GT"),
+                };
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_gt_exp(get_gt(*base), &scalar.value, result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let pairing: HashMap<OpId, <JoltWitness as WitnessBackend>::PairingWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::Pairing {
+                op_id: Some(op_id),
+                g1,
+                g2,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::GT(v) => v,
+                    _ => unreachable!("Pairing output must be GT"),
+                };
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_pairing(get_g1(*g1), get_g2(*g2), result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let multi_pairing: HashMap<OpId, <JoltWitness as WitnessBackend>::MultiPairingWitness> = ast
+        .nodes
+        .par_iter()
+        .filter_map(|node| match &node.op {
+            AstOp::MultiPairing {
+                op_id: Some(op_id),
+                g1s,
+                g2s,
+            } => {
+                let result = match &values[node.out.0 as usize] {
+                    EvalResult::GT(v) => v,
+                    _ => unreachable!("MultiPairing output must be GT"),
+                };
+                let g1s: Vec<<BN254 as PairingCurve>::G1> = g1s.iter().map(|id| *get_g1(*id)).collect();
+                let g2s: Vec<<BN254 as PairingCurve>::G2> = g2s.iter().map(|id| *get_g2(*id)).collect();
+                Some((
+                    *op_id,
+                    JoltWitnessGenerator::generate_multi_pairing(&g1s, &g2s, result),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut witnesses = dory::recursion::WitnessCollection::<JoltWitness>::new();
+    witnesses.num_rounds = hints.num_rounds;
+    witnesses.g1_add = g1_add;
+    witnesses.g1_scalar_mul = g1_scalar_mul;
+    witnesses.msm_g1 = msm_g1;
+    witnesses.g2_add = g2_add;
+    witnesses.g2_scalar_mul = g2_scalar_mul;
+    witnesses.msm_g2 = msm_g2;
+    witnesses.gt_mul = gt_mul;
+    witnesses.gt_exp = gt_exp;
+    witnesses.pairing = pairing;
+    witnesses.multi_pairing = multi_pairing;
+    Ok(witnesses)
+}
+
 impl RecursionExt<Fr> for DoryCommitmentScheme {
     type Witness = dory::recursion::WitnessCollection<JoltWitness>;
     type Hint = JoltHintMap;
@@ -619,37 +1419,53 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
             .collect();
         let ark_evaluation = jolt_to_ark(evaluation);
 
-        // Create witness generation context
-        let ctx =
-            Rc::new(TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_witness_gen());
+        let dory_setup: dory::setup::VerifierSetup<BN254> = setup.clone().into();
 
-        // Wrap transcript for dory compatibility
+        // Phase 0: derive Fiat–Shamir challenges on the real transcript (hashing).
+        // This mutates `transcript` to the exact same final state as a normal verification run.
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
+        let challenges =
+            precompute_challenges::<ArkFr, BN254, _>(proof, &mut dory_transcript)
+                .map_err(|_| ProofVerifyError::default())?;
 
-        // Call verify_recursive to collect witnesses
-        verify_recursive::<_, BN254, JoltG1Routines, JoltG2Routines, _, _, _>(
+        // Phase 1: build verification AST with challenge replay (no transcript hashing, no group ops).
+        let mut backend = AstOnlyBackend::new();
+        let mut replay_transcript = ChallengeReplayTranscript::new(challenges);
+        verify_with_backend::<ArkFr, BN254, _, _>(
             *commitment,
             ark_evaluation,
             &ark_point,
             proof,
-            setup.clone().into(),
-            &mut dory_transcript,
-            ctx.clone(),
+            dory_setup.clone(),
+            &mut replay_transcript,
+            &mut backend,
         )
-        .map_err(|_e| ProofVerifyError::default())?;
+        .map_err(|_| ProofVerifyError::default())?;
 
-        // Extract witness collection
-        let witnesses = Rc::try_unwrap(ctx)
-            .ok()
-            .expect("Should have sole ownership")
-            .finalize()
-            .ok_or(ProofVerifyError::default())?;
+        let ast = backend.finalize();
+        debug_assert!(ast.validate().is_ok(), "Dory verification AST invalid");
 
-        // Convert witnesses to hints and wrap in JoltHintMap
-        let hints = JoltHintMap(witnesses.to_hints::<BN254>());
+        // Phase 2: evaluate AST in parallel to recover all op outputs (hints).
+        let input_provider = DoryInputProviderWithCommitment::new(&dory_setup, proof, *commitment);
+        let ops = ArkworksOpEvaluator;
+        let results = TaskExecutor::new(&ast, &input_provider, &ops).execute();
 
-        // Return both witnesses and hints
-        Ok((witnesses, hints))
+        let mut hints = HintMap::new(proof.sigma);
+        for (op_id, value_id) in ast.opid_to_value.iter() {
+            let v = results
+                .get(value_id)
+                .unwrap_or_else(|| panic!("Missing AST eval result for {}", value_id));
+            match v {
+                EvalResult::G1(g1) => hints.insert_g1(*op_id, *g1),
+                EvalResult::G2(g2) => hints.insert_g2(*op_id, *g2),
+                EvalResult::GT(gt) => hints.insert_gt(*op_id, *gt),
+            }
+        }
+
+        // Phase 3: expand detailed witnesses in parallel from (AST + outputs-only hints).
+        let witnesses = expand_witnesses_from_deferred(&ast, &hints, &dory_setup, proof, *commitment)?;
+
+        Ok((witnesses, JoltHintMap(hints)))
     }
 
     fn verify_with_hint<ProofTranscript: crate::transcripts::Transcript>(
@@ -903,43 +1719,54 @@ pub fn witness_gen_with_ast<ProofTranscript: crate::transcripts::Transcript>(
         .collect();
     let ark_evaluation = jolt_to_ark(evaluation);
 
-    // Create witness generation context WITH AST tracing
-    let ctx = Rc::new(
-        TraceContext::<JoltWitness, BN254, JoltWitnessGenerator>::for_witness_gen_with_ast(),
-    );
+    let dory_setup: dory::setup::VerifierSetup<BN254> = setup.clone().into();
 
-    // Wrap transcript for dory compatibility
+    // Phase 0: derive Fiat–Shamir challenges on the real transcript (hashing).
+    // This mutates `transcript` to the exact same final state as a normal verification run.
     let mut dory_transcript = JoltToDoryTranscript::new(transcript);
+    let challenges =
+        precompute_challenges::<ArkFr, BN254, _>(proof, &mut dory_transcript)
+            .map_err(|_| ProofVerifyError::default())?;
 
-    // Call verify_recursive to collect witnesses and build AST
-    verify_recursive::<_, BN254, JoltG1Routines, JoltG2Routines, _, _, _>(
+    // Phase 1: build verification AST with challenge replay (no transcript hashing, no group ops).
+    let mut backend = AstOnlyBackend::new();
+    let mut replay_transcript = ChallengeReplayTranscript::new(challenges);
+    verify_with_backend::<ArkFr, BN254, _, _>(
         *commitment,
         ark_evaluation,
         &ark_point,
         proof,
-        setup.clone().into(),
-        &mut dory_transcript,
-        ctx.clone(),
+        dory_setup.clone(),
+        &mut replay_transcript,
+        &mut backend,
     )
-    .map_err(|_e| ProofVerifyError::default())?;
+    .map_err(|_| ProofVerifyError::default())?;
 
-    // Extract both witnesses and AST
-    let (witnesses_opt, ast_opt) = Rc::try_unwrap(ctx)
-        .ok()
-        .expect("Should have sole ownership")
-        .finalize_with_ast();
+    let ast = backend.finalize();
+    debug_assert!(ast.validate().is_ok(), "Dory verification AST invalid");
 
-    let witnesses = witnesses_opt.ok_or(ProofVerifyError::default())?;
-    let ast = ast_opt.ok_or(ProofVerifyError::default())?;
+    // Phase 2: evaluate AST in parallel to recover all op outputs (hints).
+    let input_provider = DoryInputProviderWithCommitment::new(&dory_setup, proof, *commitment);
+    let ops = ArkworksOpEvaluator;
+    let results = TaskExecutor::new(&ast, &input_provider, &ops).execute();
 
-    // Convert witnesses to hints
-    let hints = JoltHintMap(witnesses.to_hints::<BN254>());
+    let mut hints = HintMap::new(proof.sigma);
+    for (op_id, value_id) in ast.opid_to_value.iter() {
+        let v = results
+            .get(value_id)
+            .unwrap_or_else(|| panic!("Missing AST eval result for {}", value_id));
+        match v {
+            EvalResult::G1(g1) => hints.insert_g1(*op_id, *g1),
+            EvalResult::G2(g2) => hints.insert_g2(*op_id, *g2),
+            EvalResult::GT(gt) => hints.insert_gt(*op_id, *gt),
+        }
+    }
 
-    Ok(WitnessWithAst {
-        witnesses,
-        ast,
-        hints,
-    })
+    // Phase 3: expand detailed witnesses in parallel from (AST + outputs-only hints).
+    let witnesses = expand_witnesses_from_deferred(&ast, &hints, &dory_setup, proof, *commitment)?;
+    let hints = JoltHintMap(hints);
+
+    Ok(WitnessWithAst { witnesses, ast, hints })
 }
 
 /// Reconstruct AST from public inputs (verifier-side).

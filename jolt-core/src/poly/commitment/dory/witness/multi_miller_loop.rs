@@ -95,6 +95,10 @@ pub struct MultiMillerLoopSteps {
     pub lambda_c1_packed_mles: Vec<Vec<Fq>>,
     pub inv_dx_c0_packed_mles: Vec<Vec<Fq>>,
     pub inv_dx_c1_packed_mles: Vec<Vec<Fq>>,
+    /// Witnessed inverse of 2*y_T for doubling rows (arbitrary/zero on non-double rows),
+    /// replicated across x.
+    pub inv_two_y_c0_packed_mles: Vec<Vec<Fq>>,
+    pub inv_two_y_c1_packed_mles: Vec<Vec<Fq>>,
 
     /// G1 input (replicated across s,x).
     pub x_p_packed_mles: Vec<Vec<Fq>>,
@@ -145,6 +149,8 @@ impl MultiMillerLoopSteps {
         let mut lambda_c1_packed_mles = Vec::with_capacity(num_pairs);
         let mut inv_dx_c0_packed_mles = Vec::with_capacity(num_pairs);
         let mut inv_dx_c1_packed_mles = Vec::with_capacity(num_pairs);
+        let mut inv_two_y_c0_packed_mles = Vec::with_capacity(num_pairs);
+        let mut inv_two_y_c1_packed_mles = Vec::with_capacity(num_pairs);
         let mut x_p_packed_mles = Vec::with_capacity(num_pairs);
         let mut y_p_packed_mles = Vec::with_capacity(num_pairs);
 
@@ -191,6 +197,8 @@ impl MultiMillerLoopSteps {
             lambda_c1_packed_mles.push(trace.lambda_c1_packed);
             inv_dx_c0_packed_mles.push(trace.inv_dx_c0_packed);
             inv_dx_c1_packed_mles.push(trace.inv_dx_c1_packed);
+            inv_two_y_c0_packed_mles.push(trace.inv_two_y_c0_packed);
+            inv_two_y_c1_packed_mles.push(trace.inv_two_y_c1_packed);
 
             x_p_packed_mles.push(trace.x_p_packed);
             y_p_packed_mles.push(trace.y_p_packed);
@@ -228,6 +236,8 @@ impl MultiMillerLoopSteps {
             lambda_c1_packed_mles,
             inv_dx_c0_packed_mles,
             inv_dx_c1_packed_mles,
+            inv_two_y_c0_packed_mles,
+            inv_two_y_c1_packed_mles,
 
             x_p_packed_mles,
             y_p_packed_mles,
@@ -265,6 +275,8 @@ struct SinglePairTrace {
     lambda_c1_packed: Vec<Fq>,
     inv_dx_c0_packed: Vec<Fq>,
     inv_dx_c1_packed: Vec<Fq>,
+    inv_two_y_c0_packed: Vec<Fq>,
+    inv_two_y_c1_packed: Vec<Fq>,
 
     x_p_packed: Vec<Fq>,
     y_p_packed: Vec<Fq>,
@@ -320,6 +332,7 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
 
     let mut lambda: Vec<Fq2> = Vec::new();
     let mut inv_dx: Vec<Fq2> = Vec::new();
+    let mut inv_two_y: Vec<Fq2> = Vec::new();
 
     let mut x_q_steps: Vec<Fq2> = Vec::new();
     let mut y_q_steps: Vec<Fq2> = Vec::new();
@@ -395,6 +408,7 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
             let lam = num * den_inv;
             lambda.push(lam);
             inv_dx.push(Fq2::zero());
+            inv_two_y.push(den_inv);
 
             // T_next = 2T in affine.
             let x3 = lam.square() - t.x - t.x;
@@ -483,6 +497,7 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
             let lam = dy * inv;
             lambda.push(lam);
             inv_dx.push(inv);
+            inv_two_y.push(Fq2::zero());
 
             // T_next = T + Q in affine.
             let x3 = lam.square() - t.x - op_q.x;
@@ -562,6 +577,7 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
 
     lambda.push(Fq2::zero());
     inv_dx.push(Fq2::zero());
+    inv_two_y.push(Fq2::zero());
     x_q_steps.push(Fq2::zero());
     y_q_steps.push(Fq2::zero());
     is_double_steps.push(zero);
@@ -589,6 +605,8 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
     let lambda_c1_packed = pack_step_only_fq2_c1(&lambda, num_packed_steps);
     let inv_dx_c0_packed = pack_step_only_fq2_c0(&inv_dx, num_packed_steps);
     let inv_dx_c1_packed = pack_step_only_fq2_c1(&inv_dx, num_packed_steps);
+    let inv_two_y_c0_packed = pack_step_only_fq2_c0(&inv_two_y, num_packed_steps);
+    let inv_two_y_c1_packed = pack_step_only_fq2_c1(&inv_two_y, num_packed_steps);
 
     let x_p_vals = vec![p.x; num_packed_steps];
     let y_p_vals = vec![p.y; num_packed_steps];
@@ -628,6 +646,8 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
         lambda_c1_packed,
         inv_dx_c0_packed,
         inv_dx_c1_packed,
+        inv_two_y_c0_packed,
+        inv_two_y_c1_packed,
 
         x_p_packed,
         y_p_packed,

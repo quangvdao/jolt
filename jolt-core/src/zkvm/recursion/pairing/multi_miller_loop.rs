@@ -37,9 +37,33 @@ const ELEM_VARS: usize = 4;
 const STEP_SIZE: usize = 1 << STEP_VARS; // 128
 const ELEM_SIZE: usize = 1 << ELEM_VARS; // 16
 
-const NUM_COMMITTED_KINDS: usize = 24; // Must match MultiMillerLoopTerm::COUNT
+const NUM_COMMITTED_KINDS: usize = 26; // Must match MultiMillerLoopTerm::COUNT
 const DEGREE: usize = 6;
 const OPENING_SPECS: [OpeningSpec; NUM_COMMITTED_KINDS] = sequential_opening_specs();
+
+// =============================================================================
+// Fq2 helpers (u^2 = -1)
+// =============================================================================
+
+#[inline(always)]
+fn fq2_mul_c0<F: JoltField>(a0: F, a1: F, b0: F, b1: F) -> F {
+    a0 * b0 - a1 * b1
+}
+
+#[inline(always)]
+fn fq2_mul_c1<F: JoltField>(a0: F, a1: F, b0: F, b1: F) -> F {
+    a0 * b1 + a1 * b0
+}
+
+#[inline(always)]
+fn fq2_sq_c0<F: JoltField>(a0: F, a1: F) -> F {
+    a0 * a0 - a1 * a1
+}
+
+#[inline(always)]
+fn fq2_sq_c1<F: JoltField>(two: F, a0: F, a1: F) -> F {
+    two * a0 * a1
+}
 
 // =============================================================================
 // Witness / Params
@@ -65,6 +89,8 @@ pub struct MultiMillerLoopWitness<F> {
     pub lambda_c1: Vec<F>,
     pub inv_delta_x_c0: Vec<F>,
     pub inv_delta_x_c1: Vec<F>,
+    pub inv_two_y_c0: Vec<F>,
+    pub inv_two_y_c1: Vec<F>,
 
     pub x_p: Vec<F>,
     pub y_p: Vec<F>,
@@ -243,6 +269,8 @@ pub struct MultiMillerLoopValues<F: JoltField> {
     pub lambda_c1: F,
     pub inv_delta_x_c0: F,
     pub inv_delta_x_c1: F,
+    pub inv_two_y_c0: F,
+    pub inv_two_y_c1: F,
     pub x_p: F,
     pub y_p: F,
     pub x_q_c0: F,
@@ -268,12 +296,7 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let two = F::from_u64(2);
         let three = F::from_u64(3);
 
-        // Fq2 helper functions (inline)
-        // mul: (a0,a1) * (b0,b1) = (a0*b0 - a1*b1, a0*b1 + a1*b0)
-        let mul_c0 = |a0: F, a1: F, b0: F, b1: F| a0 * b0 - a1 * b1;
-        // sq: (a0,a1)^2 = (a0^2 - a1^2, 2*a0*a1)
-        let sq_c0 = |a0: F, a1: F| a0 * a0 - a1 * a1;
-        let sq_c1 = |a0: F, a1: F| two * a0 * a1;
+        // Fq2 helpers: see `fq2_mul_c*` / `fq2_sq_c*` above.
 
         let mut acc = F::zero();
         let mut delta_pow = F::one();
@@ -308,12 +331,25 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let _op_y0 = self.is_double * ty0 + self.is_add * self.y_q_c0;
         let _op_y1 = self.is_double * ty1 + self.is_add * self.y_q_c1;
 
+        // Doubling denominator invertibility: inv_two_y * (2y) = 1 in Fq2.
+        // This prevents degenerate "doubling" rows with y=0 (where lambda would be underconstrained).
+        let two_y0 = two * ty0;
+        let two_y1 = two * ty1;
+        // NOTE: write these out explicitly (rather than calling `mul_c*`) to match
+        // arkworks `Fp2` multiplication exactly.
+        let inv_two_y_times_two_y0 = self.inv_two_y_c0 * two_y0 - self.inv_two_y_c1 * two_y1;
+        let inv_two_y_times_two_y1 = self.inv_two_y_c0 * two_y1 + self.inv_two_y_c1 * two_y0;
+        acc += delta_pow * (self.is_double * (inv_two_y_times_two_y0 - one));
+        delta_pow *= delta;
+        acc += delta_pow * (self.is_double * inv_two_y_times_two_y1);
+        delta_pow *= delta;
+
         // Slope constraints
         // Double case: 2 * y * lambda = 3 * x^2
-        let two_y_lam0 = two * mul_c0(ty0, ty1, self.lambda_c0, self.lambda_c1);
-        let two_y_lam1 = two * (ty0 * self.lambda_c1 + ty1 * self.lambda_c0);
-        let three_x_sq0 = three * sq_c0(tx0, tx1);
-        let three_x_sq1 = three * sq_c1(tx0, tx1);
+        let two_y_lam0 = two * fq2_mul_c0(ty0, ty1, self.lambda_c0, self.lambda_c1);
+        let two_y_lam1 = two * fq2_mul_c1(ty0, ty1, self.lambda_c0, self.lambda_c1);
+        let three_x_sq0 = three * fq2_sq_c0(tx0, tx1);
+        let three_x_sq1 = three * fq2_sq_c1(two, tx0, tx1);
 
         acc += delta_pow * (self.is_double * (two_y_lam0 - three_x_sq0));
         delta_pow *= delta;
@@ -326,8 +362,8 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let dy0 = self.y_q_c0 - ty0;
         let dy1 = self.y_q_c1 - ty1;
 
-        let lam_dx0 = mul_c0(self.lambda_c0, self.lambda_c1, dx0, dx1);
-        let lam_dx1 = self.lambda_c0 * dx1 + self.lambda_c1 * dx0;
+        let lam_dx0 = fq2_mul_c0(self.lambda_c0, self.lambda_c1, dx0, dx1);
+        let lam_dx1 = fq2_mul_c1(self.lambda_c0, self.lambda_c1, dx0, dx1);
 
         acc += delta_pow * (self.is_add * (lam_dx0 - dy0));
         delta_pow *= delta;
@@ -335,8 +371,8 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         delta_pow *= delta;
 
         // Inverse constraint for add case: inv_dx * dx = 1
-        let inv_dx_dx0 = mul_c0(self.inv_delta_x_c0, self.inv_delta_x_c1, dx0, dx1);
-        let inv_dx_dx1 = self.inv_delta_x_c0 * dx1 + self.inv_delta_x_c1 * dx0;
+        let inv_dx_dx0 = fq2_mul_c0(self.inv_delta_x_c0, self.inv_delta_x_c1, dx0, dx1);
+        let inv_dx_dx1 = fq2_mul_c1(self.inv_delta_x_c0, self.inv_delta_x_c1, dx0, dx1);
 
         acc += delta_pow * (self.is_add * (inv_dx_dx0 - one));
         delta_pow *= delta;
@@ -345,8 +381,8 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
 
         // Point update constraints
         // x_next = lambda^2 - x - x_op
-        let lam_sq0 = sq_c0(self.lambda_c0, self.lambda_c1);
-        let lam_sq1 = sq_c1(self.lambda_c0, self.lambda_c1);
+        let lam_sq0 = fq2_sq_c0(self.lambda_c0, self.lambda_c1);
+        let lam_sq1 = fq2_sq_c1(two, self.lambda_c0, self.lambda_c1);
 
         acc += delta_pow * (is_active * (tx_next0 - (lam_sq0 - tx0 - op_x0)));
         delta_pow *= delta;
@@ -356,8 +392,8 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         // y_next = lambda * (x - x_next) - y
         let dx_next0 = tx0 - tx_next0;
         let dx_next1 = tx1 - tx_next1;
-        let lam_dx_next0 = mul_c0(self.lambda_c0, self.lambda_c1, dx_next0, dx_next1);
-        let lam_dx_next1 = self.lambda_c0 * dx_next1 + self.lambda_c1 * dx_next0;
+        let lam_dx_next0 = fq2_mul_c0(self.lambda_c0, self.lambda_c1, dx_next0, dx_next1);
+        let lam_dx_next1 = fq2_mul_c1(self.lambda_c0, self.lambda_c1, dx_next0, dx_next1);
 
         acc += delta_pow * (is_active * (ty_next0 - (lam_dx_next0 - ty0)));
         delta_pow *= delta;
@@ -385,14 +421,14 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         // --- Double coefficients ---
         let dbl_c0_0 = -(two * ty0);
         let dbl_c0_1 = -(two * ty1);
-        let x_sq0 = sq_c0(tx0, tx1);
-        let x_sq1 = sq_c1(tx0, tx1);
+        let x_sq0 = fq2_sq_c0(tx0, tx1);
+        let x_sq1 = fq2_sq_c1(two, tx0, tx1);
         let dbl_c1_0 = three * x_sq0;
         let dbl_c1_1 = three * x_sq1;
-        let y_sq0 = sq_c0(ty0, ty1);
-        let y_sq1 = sq_c1(ty0, ty1);
-        let x_cub0 = mul_c0(x_sq0, x_sq1, tx0, tx1);
-        let x_cub1 = x_sq0 * tx1 + x_sq1 * tx0;
+        let y_sq0 = fq2_sq_c0(ty0, ty1);
+        let y_sq1 = fq2_sq_c1(two, ty0, ty1);
+        let x_cub0 = fq2_mul_c0(x_sq0, x_sq1, tx0, tx1);
+        let x_cub1 = fq2_mul_c1(x_sq0, x_sq1, tx0, tx1);
         let dbl_c2_0 = two * y_sq0 - three * x_cub0;
         let dbl_c2_1 = two * y_sq1 - three * x_cub1;
 
@@ -401,10 +437,10 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         let add_c0_1 = tx1 - self.x_q_c1;
         let add_c1_0 = self.y_q_c0 - ty0;
         let add_c1_1 = self.y_q_c1 - ty1;
-        let xq_yt_0 = mul_c0(self.x_q_c0, self.x_q_c1, ty0, ty1);
-        let xq_yt_1 = self.x_q_c0 * ty1 + self.x_q_c1 * ty0;
-        let xt_yq_0 = mul_c0(tx0, tx1, self.y_q_c0, self.y_q_c1);
-        let xt_yq_1 = tx0 * self.y_q_c1 + tx1 * self.y_q_c0;
+        let xq_yt_0 = fq2_mul_c0(self.x_q_c0, self.x_q_c1, ty0, ty1);
+        let xq_yt_1 = fq2_mul_c1(self.x_q_c0, self.x_q_c1, ty0, ty1);
+        let xt_yq_0 = fq2_mul_c0(tx0, tx1, self.y_q_c0, self.y_q_c1);
+        let xt_yq_1 = fq2_mul_c1(tx0, tx1, self.y_q_c0, self.y_q_c1);
         let add_c2_0 = xq_yt_0 - xt_yq_0;
         let add_c2_1 = xq_yt_1 - xt_yq_1;
 
@@ -504,6 +540,8 @@ impl MultiMillerLoopProverSpec<Fq> {
             push(&mut polys_by_kind, &mut k, poly.lambda_c1);
             push(&mut polys_by_kind, &mut k, poly.inv_delta_x_c0);
             push(&mut polys_by_kind, &mut k, poly.inv_delta_x_c1);
+            push(&mut polys_by_kind, &mut k, poly.inv_two_y_c0);
+            push(&mut polys_by_kind, &mut k, poly.inv_two_y_c1);
             push(&mut polys_by_kind, &mut k, poly.x_p);
             push(&mut polys_by_kind, &mut k, poly.y_p);
             push(&mut polys_by_kind, &mut k, poly.x_q_c0);
@@ -598,15 +636,17 @@ impl ConstraintListProverSpec<Fq, DEGREE> for MultiMillerLoopProverSpec<Fq> {
             lambda_c1: poly_evals[12][eval_index],
             inv_delta_x_c0: poly_evals[13][eval_index],
             inv_delta_x_c1: poly_evals[14][eval_index],
-            x_p: poly_evals[15][eval_index],
-            y_p: poly_evals[16][eval_index],
-            x_q_c0: poly_evals[17][eval_index],
-            x_q_c1: poly_evals[18][eval_index],
-            y_q_c0: poly_evals[19][eval_index],
-            y_q_c1: poly_evals[20][eval_index],
-            is_double: poly_evals[21][eval_index],
-            is_add: poly_evals[22][eval_index],
-            l_val: poly_evals[23][eval_index],
+            inv_two_y_c0: poly_evals[15][eval_index],
+            inv_two_y_c1: poly_evals[16][eval_index],
+            x_p: poly_evals[17][eval_index],
+            y_p: poly_evals[18][eval_index],
+            x_q_c0: poly_evals[19][eval_index],
+            x_q_c1: poly_evals[20][eval_index],
+            y_q_c0: poly_evals[21][eval_index],
+            y_q_c1: poly_evals[22][eval_index],
+            is_double: poly_evals[23][eval_index],
+            is_add: poly_evals[24][eval_index],
+            l_val: poly_evals[25][eval_index],
         };
 
         let shared = SharedScalars::<Fq> {
@@ -696,15 +736,17 @@ impl ConstraintListVerifierSpec<Fq, DEGREE> for MultiMillerLoopVerifierSpec<Fq> 
             lambda_c1: opened_claims[12],
             inv_delta_x_c0: opened_claims[13],
             inv_delta_x_c1: opened_claims[14],
-            x_p: opened_claims[15],
-            y_p: opened_claims[16],
-            x_q_c0: opened_claims[17],
-            x_q_c1: opened_claims[18],
-            y_q_c0: opened_claims[19],
-            y_q_c1: opened_claims[20],
-            is_double: opened_claims[21],
-            is_add: opened_claims[22],
-            l_val: opened_claims[23],
+            inv_two_y_c0: opened_claims[15],
+            inv_two_y_c1: opened_claims[16],
+            x_p: opened_claims[17],
+            y_p: opened_claims[18],
+            x_q_c0: opened_claims[19],
+            x_q_c1: opened_claims[20],
+            y_q_c0: opened_claims[21],
+            y_q_c1: opened_claims[22],
+            is_double: opened_claims[23],
+            is_add: opened_claims[24],
+            l_val: opened_claims[25],
         };
 
         let shared = SharedScalars::<Fq> {
@@ -755,6 +797,8 @@ mod tests {
         let lambda_c1 = &steps.lambda_c1_packed_mles[pair];
         let inv_dx_c0 = &steps.inv_dx_c0_packed_mles[pair];
         let inv_dx_c1 = &steps.inv_dx_c1_packed_mles[pair];
+        let inv_two_y_c0 = &steps.inv_two_y_c0_packed_mles[pair];
+        let inv_two_y_c1 = &steps.inv_two_y_c1_packed_mles[pair];
         let x_p = &steps.x_p_packed_mles[pair];
         let y_p = &steps.y_p_packed_mles[pair];
         let x_q_c0 = &steps.x_q_c0_packed_mles[pair];
@@ -804,6 +848,8 @@ mod tests {
                     lambda_c1: lambda_c1[idx],
                     inv_delta_x_c0: inv_dx_c0[idx],
                     inv_delta_x_c1: inv_dx_c1[idx],
+                    inv_two_y_c0: inv_two_y_c0[idx],
+                    inv_two_y_c1: inv_two_y_c1[idx],
                     x_p: x_p[idx],
                     y_p: y_p[idx],
                     x_q_c0: x_q_c0[idx],

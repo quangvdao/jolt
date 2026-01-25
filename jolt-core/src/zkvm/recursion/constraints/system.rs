@@ -245,18 +245,24 @@ pub enum PolyType {
     MultiMillerLoopIsAdd = 86,
     #[cfg(feature = "experimental-pairing-recursion")]
     MultiMillerLoopLVal = 87,
+    /// Witnessed inverse of 2*y_T for doubling rows in the Multi-Miller loop trace (Fq2.c0).
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopInvTwoYC0 = 88,
+    /// Witnessed inverse of 2*y_T for doubling rows in the Multi-Miller loop trace (Fq2.c1).
+    #[cfg(feature = "experimental-pairing-recursion")]
+    MultiMillerLoopInvTwoYC1 = 89,
 }
 
 #[cfg(not(feature = "experimental-pairing-recursion"))]
 const ALL_POLY_TYPES: [PolyType; 64] = PolyType::all_base_64();
 #[cfg(feature = "experimental-pairing-recursion")]
-const ALL_POLY_TYPES: [PolyType; 88] = PolyType::all_with_pairing_88();
+const ALL_POLY_TYPES: [PolyType; 90] = PolyType::all_with_pairing_90();
 
 impl PolyType {
     #[cfg(not(feature = "experimental-pairing-recursion"))]
     pub const NUM_TYPES: usize = 64;
     #[cfg(feature = "experimental-pairing-recursion")]
-    pub const NUM_TYPES: usize = 88;
+    pub const NUM_TYPES: usize = 90;
 
     pub fn all() -> &'static [PolyType] {
         &ALL_POLY_TYPES
@@ -333,7 +339,7 @@ impl PolyType {
     }
 
     #[cfg(feature = "experimental-pairing-recursion")]
-    const fn all_with_pairing_88() -> [PolyType; 88] {
+    const fn all_with_pairing_90() -> [PolyType; 90] {
         [
             // Base 64
             PolyType::RhoPrev,
@@ -425,6 +431,8 @@ impl PolyType {
             PolyType::MultiMillerLoopIsDouble,
             PolyType::MultiMillerLoopIsAdd,
             PolyType::MultiMillerLoopLVal,
+            PolyType::MultiMillerLoopInvTwoYC0,
+            PolyType::MultiMillerLoopInvTwoYC1,
         ]
     }
 
@@ -1183,6 +1191,8 @@ impl DoryMatrixBuilder {
             debug_assert_eq!(witness.f_next_packed_mles[pair_idx].len(), row_size);
             debug_assert_eq!(witness.t_x_c0_packed_mles[pair_idx].len(), row_size);
             debug_assert_eq!(witness.t_x_c0_next_packed_mles[pair_idx].len(), row_size);
+            debug_assert_eq!(witness.inv_two_y_c0_packed_mles[pair_idx].len(), row_size);
+            debug_assert_eq!(witness.inv_two_y_c1_packed_mles[pair_idx].len(), row_size);
 
             self.rows_by_type[PolyType::MultiMillerLoopF as usize]
                 .push(witness.f_packed_mles[pair_idx].clone());
@@ -1217,6 +1227,10 @@ impl DoryMatrixBuilder {
                 .push(witness.inv_dx_c0_packed_mles[pair_idx].clone());
             self.rows_by_type[PolyType::MultiMillerLoopInvDeltaXC1 as usize]
                 .push(witness.inv_dx_c1_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopInvTwoYC0 as usize]
+                .push(witness.inv_two_y_c0_packed_mles[pair_idx].clone());
+            self.rows_by_type[PolyType::MultiMillerLoopInvTwoYC1 as usize]
+                .push(witness.inv_two_y_c1_packed_mles[pair_idx].clone());
 
             self.rows_by_type[PolyType::MultiMillerLoopXP as usize]
                 .push(witness.x_p_packed_mles[pair_idx].clone());
@@ -1755,7 +1769,7 @@ const G2_ADD_SPECS: [(PolyType, usize); 21] = [
 ];
 
 #[cfg(feature = "experimental-pairing-recursion")]
-const MULTI_MILLER_LOOP_POLYS: [PolyType; 24] = [
+const MULTI_MILLER_LOOP_POLYS: [PolyType; 26] = [
     PolyType::MultiMillerLoopF,
     PolyType::MultiMillerLoopFNext,
     PolyType::MultiMillerLoopQuotient,
@@ -1780,9 +1794,11 @@ const MULTI_MILLER_LOOP_POLYS: [PolyType; 24] = [
     PolyType::MultiMillerLoopIsDouble,
     PolyType::MultiMillerLoopIsAdd,
     PolyType::MultiMillerLoopLVal,
+    PolyType::MultiMillerLoopInvTwoYC0,
+    PolyType::MultiMillerLoopInvTwoYC1,
 ];
 #[cfg(feature = "experimental-pairing-recursion")]
-const MULTI_MILLER_LOOP_SPECS: [(PolyType, usize); 24] = [
+const MULTI_MILLER_LOOP_SPECS: [(PolyType, usize); 26] = [
     (PolyType::MultiMillerLoopF, 11),
     (PolyType::MultiMillerLoopFNext, 11),
     (PolyType::MultiMillerLoopQuotient, 11),
@@ -1807,6 +1823,8 @@ const MULTI_MILLER_LOOP_SPECS: [(PolyType, usize); 24] = [
     (PolyType::MultiMillerLoopIsDouble, 11),
     (PolyType::MultiMillerLoopIsAdd, 11),
     (PolyType::MultiMillerLoopLVal, 11),
+    (PolyType::MultiMillerLoopInvTwoYC0, 11),
+    (PolyType::MultiMillerLoopInvTwoYC1, 11),
 ];
 
 impl ConstraintType {
@@ -2471,6 +2489,10 @@ impl ConstraintSystem {
                     self.extract_row_poly(PolyType::MultiMillerLoopInvDeltaXC0, idx, row_size);
                 let inv_delta_x_c1 =
                     self.extract_row_poly(PolyType::MultiMillerLoopInvDeltaXC1, idx, row_size);
+                let inv_two_y_c0 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopInvTwoYC0, idx, row_size);
+                let inv_two_y_c1 =
+                    self.extract_row_poly(PolyType::MultiMillerLoopInvTwoYC1, idx, row_size);
 
                 let x_p = self.extract_row_poly(PolyType::MultiMillerLoopXP, idx, row_size);
                 let y_p = self.extract_row_poly(PolyType::MultiMillerLoopYP, idx, row_size);
@@ -2503,6 +2525,8 @@ impl ConstraintSystem {
                         lambda_c1,
                         inv_delta_x_c0,
                         inv_delta_x_c1,
+                        inv_two_y_c0,
+                        inv_two_y_c1,
                         x_p,
                         y_p,
                         x_q_c0,
@@ -3370,6 +3394,10 @@ impl CanonicalDeserialize for PolyType {
             86 => Ok(PolyType::MultiMillerLoopIsAdd),
             #[cfg(feature = "experimental-pairing-recursion")]
             87 => Ok(PolyType::MultiMillerLoopLVal),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            88 => Ok(PolyType::MultiMillerLoopInvTwoYC0),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            89 => Ok(PolyType::MultiMillerLoopInvTwoYC1),
             _ => Err(SerializationError::InvalidData),
         }
     }

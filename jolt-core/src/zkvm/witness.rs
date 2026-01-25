@@ -633,6 +633,8 @@ pub enum MultiMillerLoopTerm {
     LambdaC1,
     InvDeltaXC0,
     InvDeltaXC1,
+    InvTwoYC0,
+    InvTwoYC1,
     XP,
     YP,
     XQC0,
@@ -678,7 +680,7 @@ impl TermEnum for FrobeniusTerm {
 }
 
 impl TermEnum for MultiMillerLoopTerm {
-    const COUNT: usize = 24;
+    const COUNT: usize = 26;
 
     fn from_index(i: usize) -> Option<Self> {
         match i {
@@ -697,15 +699,17 @@ impl TermEnum for MultiMillerLoopTerm {
             12 => Some(Self::LambdaC1),
             13 => Some(Self::InvDeltaXC0),
             14 => Some(Self::InvDeltaXC1),
-            15 => Some(Self::XP),
-            16 => Some(Self::YP),
-            17 => Some(Self::XQC0),
-            18 => Some(Self::XQC1),
-            19 => Some(Self::YQC0),
-            20 => Some(Self::YQC1),
-            21 => Some(Self::IsDouble),
-            22 => Some(Self::IsAdd),
-            23 => Some(Self::LVal),
+            15 => Some(Self::InvTwoYC0),
+            16 => Some(Self::InvTwoYC1),
+            17 => Some(Self::XP),
+            18 => Some(Self::YP),
+            19 => Some(Self::XQC0),
+            20 => Some(Self::XQC1),
+            21 => Some(Self::YQC0),
+            22 => Some(Self::YQC1),
+            23 => Some(Self::IsDouble),
+            24 => Some(Self::IsAdd),
+            25 => Some(Self::LVal),
             _ => None,
         }
     }
@@ -731,6 +735,8 @@ impl TermEnum for MultiMillerLoopTerm {
             Self::LambdaC1 => "lambda_c1",
             Self::InvDeltaXC0 => "inv_delta_x_c0",
             Self::InvDeltaXC1 => "inv_delta_x_c1",
+            Self::InvTwoYC0 => "inv_two_y_c0",
+            Self::InvTwoYC1 => "inv_two_y_c1",
             Self::XP => "x_p",
             Self::YP => "y_p",
             Self::XQC0 => "x_q_c0",
@@ -1029,6 +1035,18 @@ impl VirtualPolynomial {
     pub fn multi_miller_loop_inv_delta_x_c1(i: usize) -> Self {
         Self::Recursion(RecursionPoly::MultiMillerLoop {
             term: MultiMillerLoopTerm::InvDeltaXC1,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_inv_two_y_c0(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::InvTwoYC0,
+            instance: i,
+        })
+    }
+    pub fn multi_miller_loop_inv_two_y_c1(i: usize) -> Self {
+        Self::Recursion(RecursionPoly::MultiMillerLoop {
+            term: MultiMillerLoopTerm::InvTwoYC1,
             instance: i,
         })
     }

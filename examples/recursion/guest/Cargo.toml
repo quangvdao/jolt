@@ -5,6 +5,11 @@ edition = "2021"
 
 [features]
 guest = []
+# Enable pre-deserialized input mode
+# When enabled, verify() function accepts pre-deserialized data structures instead of serialized bytes
+native-input = []
+# Enable proof-bundle input mode (length-delimited container with device+proof bytes).
+proof-bundle = []
 
 [dependencies]
 jolt_sdk = { package = "jolt-sdk", path = "../../../jolt-sdk", features = ["guest-verifier"] }

@@ -7,7 +7,16 @@ edition = "2021"
 name = "recursion"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enable pre-deserialized input mode for guest verify() function
+# When enabled, guest receives pre-deserialized data structures instead of serialized bytes
+native-input = ["dep:recursion-guest", "recursion-guest/native-input"]
+# Enable proof-bundle input mode for the recursion guest.
+proof-bundle = ["dep:recursion-guest", "recursion-guest/proof-bundle"]
+
 [dependencies]
+recursion-guest = { path = "guest", package = "recursion-guest", optional = true }
 jolt-sdk = { workspace = true, features = ["host"] }
 jolt-inlines-grumpkin = { workspace = true, features = ["host"] }
 tracing-subscriber.workspace = true

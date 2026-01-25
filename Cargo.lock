@@ -3279,6 +3279,7 @@ dependencies = [
  "jolt-inlines-grumpkin",
  "jolt-sdk",
  "postcard",
+ "recursion-guest",
  "tracing",
  "tracing-subscriber",
 ]

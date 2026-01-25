@@ -4,6 +4,7 @@ use crate::{
     zkvm::proof_serialization::JoltProof,
 };
 use ark_serialize::CanonicalSerialize;
+use crate::zkvm::recursion_proof_bundle;
 
 /// Proof bundle magic header.
 ///
@@ -14,7 +15,7 @@ pub const PROOF_BUNDLE_MAGIC: &[u8; 8] = b"JOLTBDL\0";
 pub const PROOF_BUNDLE_VERSION: u32 = 2;
 
 /// Proof record format version (inside the proof bundle).
-pub const PROOF_RECORD_VERSION: u32 = 1;
+pub const PROOF_RECORD_VERSION: u32 = 3;
 
 /// A streaming view over a proof bundle byte slice.
 ///
@@ -121,6 +122,11 @@ fn write_u32_le(mut out: impl ark_std::io::Write, v: u32) -> Result<(), ark_std:
 }
 
 #[inline]
+fn write_u8(mut out: impl ark_std::io::Write, v: u8) -> Result<(), ark_std::io::Error> {
+    out.write_all(&[v])
+}
+
+#[inline]
 fn write_u64_le(mut out: impl ark_std::io::Write, v: u64) -> Result<(), ark_std::io::Error> {
     out.write_all(&v.to_le_bytes())
 }
@@ -151,7 +157,7 @@ pub fn write_proof_record<F, PCS, FS>(
 ) -> Result<(), ark_std::io::Error>
 where
     F: JoltField,
-    PCS: RecursionExt<F>,
+    PCS: RecursionExt<F, Hint = crate::poly::commitment::dory::recursion::JoltHintMap>,
     FS: Transcript,
 {
     // Record version
@@ -178,6 +184,9 @@ where
         .dory_layout
         .serialize_compressed(&mut out)
         .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
+
+    // Recursion mode tag (strict extension): 0 = base proof, 1 = includes recursion payload.
+    write_u8(&mut out, u8::from(proof.recursion.is_some()))?;
 
     // Opening claims (key -> claim), length-delimited as u32.
     write_u32_le(&mut out, proof.opening_claims.0.len() as u32)?;
@@ -227,24 +236,23 @@ where
         .stage8_opening_proof
         .serialize_compressed(&mut out)
         .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
-    proof
-        .stage8_combine_hint
-        .serialize_compressed(&mut out)
-        .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
-    proof
-        .stage9_pcs_hint
-        .serialize_compressed(&mut out)
-        .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
 
-    // Stage 10+: recursion payload.
-    proof
-        .stage10_recursion_metadata
-        .serialize_compressed(&mut out)
-        .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
-    proof
-        .recursion_proof
-        .serialize_compressed(&mut out)
-        .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
+    // Optional Stage 9–13 recursion payload (record format; eliminates point decompression).
+    if let Some(payload) = proof.recursion.as_ref() {
+        // Stage 8 combine hint (optional).
+        payload
+            .stage8_combine_hint
+            .serialize_compressed(&mut out)
+            .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
+
+        // RecursionProofBundle starts here: version + hint map + metadata + recursion proof.
+        recursion_proof_bundle::write_recursion_proof_bundle(
+            &mut out,
+            &payload.stage9_pcs_hint,
+            &payload.stage10_recursion_metadata,
+            &payload.recursion_proof,
+        )?;
+    }
 
     Ok(())
 }

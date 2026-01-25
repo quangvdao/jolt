@@ -100,6 +100,28 @@ impl<'a> SliceReader<'a> {
         Ok(ark_bn254::G1Affine::new_unchecked(x, y))
     }
 
+    /// Reads a BN254 G2 affine point encoded as:
+    /// - u8 is_infinity (0/1)
+    /// - x (Fq2, canonical compressed)
+    /// - y (Fq2, canonical compressed)
+    ///
+    /// This avoids curve-point decompression (the host should store points uncompressed).
+    #[inline]
+    pub fn read_bn254_g2_affine_uncompressed_unchecked(
+        &mut self,
+    ) -> Result<ark_bn254::G2Affine, DecodeError> {
+        let is_inf = self.read_u8()?;
+        if is_inf == 1 {
+            return Ok(ark_bn254::G2Affine::identity());
+        }
+        if is_inf != 0 {
+            return Err(DecodeError::Invalid("invalid infinity flag"));
+        }
+        let x: ark_bn254::Fq2 = self.read_canonical(Compress::Yes, Validate::No)?;
+        let y: ark_bn254::Fq2 = self.read_canonical(Compress::Yes, Validate::No)?;
+        Ok(ark_bn254::G2Affine::new_unchecked(x, y))
+    }
+
     /// Reads a Grumpkin affine point encoded as:
     /// - u8 is_infinity (0/1)
     /// - x (Fq, canonical compressed)

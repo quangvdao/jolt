@@ -34,6 +34,7 @@ pub mod r1cs;
 pub mod ram;
 pub mod recursion;
 pub mod registers;
+pub mod recursion_proof_bundle;
 pub mod serialized_bundle;
 pub mod spartan;
 pub mod streaming_decode;

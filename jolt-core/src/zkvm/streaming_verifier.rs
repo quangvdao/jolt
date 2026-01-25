@@ -28,7 +28,6 @@ use crate::{
     poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt},
     poly::commitment::dory::DoryLayout,
     poly::opening_proof::{OpeningId, OpeningPoint, VerifierOpeningAccumulator},
-    subprotocols::sumcheck::BatchedSumcheck,
     transcripts::Transcript,
     utils::{errors::ProofVerifyError, math::Math},
     zkvm::{
@@ -41,7 +40,7 @@ use crate::{
 };
 
 use crate::zkvm::serialized_bundle::PROOF_RECORD_VERSION;
-use crate::zkvm::streaming_decode::{DecodeError, SliceReader};
+use crate::zkvm::streaming_decode::SliceReader;
 use anyhow::Context;
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
@@ -58,6 +57,17 @@ const CYCLE_VERIFY_STAGE7: &str = "jolt_verify_stage7";
 const CYCLE_VERIFY_STAGE8: &str = "jolt_verify_stage8";
 const CYCLE_VERIFY_STAGE8_DORY_PCS: &str = "jolt_verify_stage8_dory_pcs";
 const CYCLE_VERIFY_STAGE8_RECURSION: &str = "jolt_verify_stage8_recursion";
+
+// Extra Stage 8 submarkers to attribute "stage8 other" costs.
+const CYCLE_VERIFY_STAGE8_DECODE_OPENING_PROOF: &str = "jolt_verify_stage8_decode_opening_proof";
+const CYCLE_VERIFY_STAGE8_DECODE_COMBINE_HINT: &str = "jolt_verify_stage8_decode_combine_hint";
+const CYCLE_VERIFY_STAGE8_DECODE_PCS_HINT: &str = "jolt_verify_stage8_decode_pcs_hint";
+const CYCLE_VERIFY_STAGE8_DECODE_RECURSION_METADATA: &str =
+    "jolt_verify_stage8_decode_recursion_metadata";
+const CYCLE_VERIFY_STAGE8_DECODE_RECURSION_PROOF: &str = "jolt_verify_stage8_decode_recursion_proof";
+const CYCLE_VERIFY_STAGE8_BUILD_RECURSION_INPUT: &str = "jolt_verify_stage8_build_recursion_input";
+const CYCLE_VERIFY_STAGE8_CREATE_RECURSION_VERIFIER: &str =
+    "jolt_verify_stage8_create_recursion_verifier";
 
 struct CycleMarkerGuard(&'static str);
 impl CycleMarkerGuard {
@@ -114,12 +124,16 @@ pub struct StreamingJoltVerifier<
     // Commitments required by Stage 8
     commitments: Vec<PCS::Commitment>,
     untrusted_advice_commitment: Option<PCS::Commitment>,
+
+    /// Whether this proof-record contains the optional recursion payload.
+    has_recursion: bool,
 }
 
 impl<'a, F, PCS, T> StreamingJoltVerifier<'a, F, PCS, T>
 where
     F: JoltField,
-    PCS: CommitmentScheme<Field = F> + RecursionExt<F>,
+    PCS: CommitmentScheme<Field = F>
+        + RecursionExt<F, Hint = crate::poly::commitment::dory::recursion::JoltHintMap>,
     T: Transcript,
     <PCS as RecursionExt<F>>::Hint: Send + Sync + Clone + 'static,
 {
@@ -133,7 +147,7 @@ where
         let version = r
             .read_u32_le()
             .map_err(|_| ProofVerifyError::InternalError)?;
-        if version != PROOF_RECORD_VERSION {
+        if version != 2 && version != PROOF_RECORD_VERSION {
             return Err(ProofVerifyError::InternalError);
         }
 
@@ -159,6 +173,19 @@ where
         let dory_layout: DoryLayout = r
             .read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
             .map_err(|_| ProofVerifyError::InternalError)?;
+
+        // v2: legacy (always-recursive) record format
+        // v3: tagged record format (base vs recursion)
+        let has_recursion = if version == 2 {
+            true
+        } else {
+            let b = r.read_u8().map_err(|_| ProofVerifyError::InternalError)?;
+            match b {
+                0 => false,
+                1 => true,
+                _ => return Err(ProofVerifyError::InternalError),
+            }
+        };
 
         // Memory layout checks (mirrors `JoltVerifier::new`).
         if program_io.memory_layout != preprocessing.shared.memory_layout {
@@ -239,6 +266,7 @@ where
                 one_hot_params,
                 commitments,
                 untrusted_advice_commitment,
+                has_recursion,
             },
             r,
         ))
@@ -744,6 +772,128 @@ where
         PCS::combine_commitments(&commitments, &coeffs)
     }
 
+    fn compute_stage8_opening_point_and_claims(
+        &self,
+    ) -> (
+        OpeningPoint<{ crate::poly::opening_proof::BIG_ENDIAN }, F>,
+        Vec<(CommittedPolynomial, F)>,
+        Vec<F>,
+    ) {
+        use crate::poly::opening_proof::{
+            compute_advice_lagrange_factor, OpeningAccumulator, SumcheckId,
+        };
+
+        let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
+            CommittedPolynomial::InstructionRa(0),
+            SumcheckId::HammingWeightClaimReduction,
+        );
+        let log_k_chunk = self.one_hot_params.log_k_chunk;
+        let r_address_stage7 = &opening_point.r[..log_k_chunk];
+
+        let mut polynomial_claims = Vec::new();
+
+        // Dense polynomials (IncClaimReduction)
+        let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            CommittedPolynomial::RamInc,
+            SumcheckId::IncClaimReduction,
+        );
+        let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            CommittedPolynomial::RdInc,
+            SumcheckId::IncClaimReduction,
+        );
+
+        let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+        polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
+        polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
+
+        // Sparse polynomials: all RA polys (HammingWeightClaimReduction)
+        for i in 0..self.one_hot_params.instruction_d {
+            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::InstructionRa(i),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
+        }
+        for i in 0..self.one_hot_params.bytecode_d {
+            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::BytecodeRa(i),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
+        }
+        for i in 0..self.one_hot_params.ram_d {
+            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamRa(i),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
+        }
+
+        // Advice polynomials (if present)
+        if let Some((advice_point, advice_claim)) = self.opening_accumulator.get_advice_opening(
+            crate::zkvm::claim_reductions::AdviceKind::Trusted,
+            SumcheckId::AdviceClaimReduction,
+        ) {
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+            polynomial_claims.push((
+                CommittedPolynomial::TrustedAdvice,
+                advice_claim * lagrange_factor,
+            ));
+        }
+        if let Some((advice_point, advice_claim)) = self.opening_accumulator.get_advice_opening(
+            crate::zkvm::claim_reductions::AdviceKind::Untrusted,
+            SumcheckId::AdviceClaimReduction,
+        ) {
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+            polynomial_claims.push((
+                CommittedPolynomial::UntrustedAdvice,
+                advice_claim * lagrange_factor,
+            ));
+        }
+
+        // Bytecode chunk polynomials (Committed mode)
+        if self.program_mode == ProgramMode::Committed {
+            let (bytecode_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::BytecodeChunk(0),
+                SumcheckId::BytecodeClaimReduction,
+            );
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &bytecode_point.r);
+
+            let num_chunks = crate::zkvm::bytecode::chunks::total_lanes()
+                .div_ceil(self.one_hot_params.k_chunk);
+            for i in 0..num_chunks {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::BytecodeChunk(i),
+                    SumcheckId::BytecodeClaimReduction,
+                );
+                polynomial_claims.push((
+                    CommittedPolynomial::BytecodeChunk(i),
+                    claim * lagrange_factor,
+                ));
+            }
+        }
+
+        // Program-image polynomial (Committed mode)
+        if self.program_mode == ProgramMode::Committed {
+            let (prog_point, prog_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::ProgramImageInit,
+                SumcheckId::ProgramImageClaimReduction,
+            );
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &prog_point.r);
+            polynomial_claims.push((
+                CommittedPolynomial::ProgramImageInit,
+                prog_claim * lagrange_factor,
+            ));
+        }
+
+        let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
+        (opening_point, polynomial_claims, claims)
+    }
+
     fn verify_stage8_with_pcs_hint_inner(
         &mut self,
         stage8_opening_proof: &PCS::Proof,
@@ -956,11 +1106,99 @@ where
         Ok(())
     }
 
-    fn verify_stage8_with_recursion_from_reader(
+    fn verify_stage8_native_inner(
         &mut self,
-        r: &mut SliceReader<'_>,
+        stage8_opening_proof: &PCS::Proof,
     ) -> Result<(), anyhow::Error> {
+        use crate::poly::opening_proof::DoryOpeningState;
+        use crate::zkvm::witness::all_committed_polynomials;
+        use itertools::Itertools;
+
+        let (opening_point, polynomial_claims, claims) = self.compute_stage8_opening_point_and_claims();
+
+        let gamma_powers: Vec<F> = {
+            self.transcript.append_scalars(&claims);
+            self.transcript.challenge_scalar_powers(claims.len())
+        };
+
+        let state = DoryOpeningState {
+            opening_point: opening_point.r.clone(),
+            gamma_powers: gamma_powers.clone(),
+            polynomial_claims,
+        };
+
+        let mut commitments_map = std::collections::HashMap::new();
+        for (polynomial, commitment) in all_committed_polynomials(&self.one_hot_params)
+            .into_iter()
+            .zip_eq(&self.commitments)
+        {
+            commitments_map.insert(polynomial, commitment.clone());
+        }
+
+        if let Some(ref commitment) = self.trusted_advice_commitment {
+            if state
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+            {
+                commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+            }
+        }
+        if let Some(ref commitment) = self.untrusted_advice_commitment {
+            if state
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+            {
+                commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+            }
+        }
+
+        if self.program_mode == ProgramMode::Committed {
+            if let Ok(committed) = self.preprocessing.program.as_committed() {
+                for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
+                    commitments_map
+                        .entry(CommittedPolynomial::BytecodeChunk(idx))
+                        .or_insert_with(|| commitment.clone());
+                }
+
+                if state
+                    .polynomial_claims
+                    .iter()
+                    .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
+                {
+                    commitments_map.insert(
+                        CommittedPolynomial::ProgramImageInit,
+                        committed.program_image_commitment.clone(),
+                    );
+                }
+            }
+        }
+
+        let joint_commitment = self.compute_joint_commitment(&mut commitments_map, &state);
+
+        let joint_claim: F = gamma_powers
+            .iter()
+            .zip(claims.iter())
+            .map(|(gamma, claim)| *gamma * *claim)
+            .sum();
+
+        PCS::verify(
+            stage8_opening_proof,
+            &self.preprocessing.generators,
+            &mut self.transcript,
+            &opening_point.r,
+            &joint_claim,
+            &joint_commitment,
+        )
+        .map_err(|_| anyhow::anyhow!("Stage 8"))?;
+
+        Ok(())
+    }
+
+    fn verify_stage8_from_reader(&mut self, r: &mut SliceReader<'_>) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8);
+
         // Initialize Dory globals so the Dory PCS verifier can reorder points correctly.
         let _dory_guard = if self.program_mode == ProgramMode::Committed {
             let committed = self.preprocessing.program.as_committed()?;
@@ -982,40 +1220,91 @@ where
         let stage8_opening_proof: PCS::Proof = r
             .read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
             .map_err(|e| anyhow::anyhow!("decode stage8_opening_proof: {e:?}"))?;
-        let stage8_combine_hint: Option<ark_bn254::Fq12> = r
-            .read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
-            .map_err(|e| anyhow::anyhow!("decode stage8_combine_hint: {e:?}"))?;
-        let stage8_hint: Option<<PCS as RecursionExt<F>>::Hint> = r
-            .read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
-            .map_err(|e| anyhow::anyhow!("decode stage9_pcs_hint: {e:?}"))?;
-        let stage8_hint = stage8_hint.clone().ok_or_else(|| {
-            anyhow::anyhow!("stage9_pcs_hint is required for recursion verification")
-        })?;
 
-        {
-            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DORY_PCS);
-            self.verify_stage8_with_pcs_hint_inner(
-                &stage8_opening_proof,
-                &stage8_combine_hint,
-                &stage8_hint,
-            )?;
-        }
+        self.verify_stage8_native_inner(&stage8_opening_proof)?;
+        Ok(())
+    }
 
-        // Decode recursion payload and verify recursion proof.
-        let metadata: crate::zkvm::proof_serialization::RecursionConstraintMetadata = r
-            .read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
-            .map_err(|e| anyhow::anyhow!("decode stage10_recursion_metadata: {e:?}"))?;
+    fn verify_stage8_with_recursion_from_reader(
+        &mut self,
+        r: &mut SliceReader<'_>,
+    ) -> Result<(), anyhow::Error> {
+        let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8);
+
+        // Initialize Dory globals so the Dory PCS verifier can reorder points correctly.
+        let _dory_guard = if self.program_mode == ProgramMode::Committed {
+            let committed = self.preprocessing.program.as_committed()?;
+            crate::poly::commitment::dory::DoryGlobals::initialize_main_context_with_num_columns(
+                1 << self.one_hot_params.log_k_chunk,
+                self.trace_length.next_power_of_two(),
+                committed.bytecode_num_columns,
+                Some(self.dory_layout),
+            )
+        } else {
+            crate::poly::commitment::dory::DoryGlobals::initialize_context(
+                1 << self.one_hot_params.log_k_chunk,
+                self.trace_length.next_power_of_two(),
+                crate::poly::commitment::dory::DoryContext::Main,
+                Some(self.dory_layout),
+            )
+        };
+
+        // 1) Decode Stage 8 opening proof.
+        let stage8_opening_proof: PCS::Proof = {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DECODE_OPENING_PROOF);
+            r.read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
+                .map_err(|e| anyhow::anyhow!("decode stage8_opening_proof: {e:?}"))?
+        };
+        let _stage8_combine_hint: Option<ark_bn254::Fq12> = {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DECODE_COMBINE_HINT);
+            r.read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
+                .map_err(|e| anyhow::anyhow!("decode stage8_combine_hint: {e:?}"))?
+        };
+        // RecursionProofBundle starts here: version + hint map + (later) metadata + recursion proof.
+        let _stage9_hint: <PCS as RecursionExt<F>>::Hint = {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DECODE_PCS_HINT);
+            let v = r
+                .read_u32_le()
+                .map_err(|e| anyhow::anyhow!("decode RecursionProofBundle version: {e:?}"))?;
+            if v != crate::zkvm::recursion_proof_bundle::RECURSION_PROOF_BUNDLE_VERSION {
+                return Err(anyhow::anyhow!("unsupported RecursionProofBundle version: {v}"));
+            }
+            crate::zkvm::recursion_proof_bundle::read_hint_map_record(r)
+                .map_err(|e| anyhow::anyhow!("decode stage9_pcs_hint record: {e:?}"))?
+        };
+
+        // 2) Decode recursion payload.
+        let metadata: crate::zkvm::proof_serialization::RecursionConstraintMetadata = {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DECODE_RECURSION_METADATA);
+            crate::zkvm::recursion_proof_bundle::read_recursion_constraint_metadata_record(r)
+                .map_err(|e| anyhow::anyhow!("decode stage10_recursion_metadata record: {e:?}"))?
+        };
 
         type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, ark_grumpkin::Projective>;
         let recursion_proof: crate::zkvm::recursion::prover::RecursionProof<
             ark_bn254::Fq,
             T,
             HyraxPCS,
-        > = r
-            .read_canonical(ark_serialize::Compress::Yes, ark_serialize::Validate::No)
-            .map_err(|e| anyhow::anyhow!("decode recursion_proof: {e:?}"))?;
+        > = {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DECODE_RECURSION_PROOF);
+            crate::zkvm::recursion_proof_bundle::read_recursion_proof_record::<T>(r)
+                .map_err(|e| anyhow::anyhow!("decode recursion_proof record: {e:?}"))?
+        };
 
+        // 3) Stage 8 Fiat–Shamir replay (no PCS checks): advance transcript to match
+        // the prover's post-Stage8 state expected by the recursion SNARK verifier.
+        {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DORY_PCS);
+            let (_opening_point, _poly_claims, claims) = self.compute_stage8_opening_point_and_claims();
+            self.transcript.append_scalars(&claims);
+            let _gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
+            PCS::replay_opening_proof_transcript(&stage8_opening_proof, &mut self.transcript)
+                .map_err(|e| anyhow::anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
+        }
+
+        // 4) Build recursion verifier input (alloc-heavy: clones large vectors).
         let verifier_input = {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_BUILD_RECURSION_INPUT);
             let constraint_types = metadata.constraint_types.clone();
             let num_constraints = constraint_types.len();
             let num_constraints_padded = num_constraints.next_power_of_two();
@@ -1040,13 +1329,12 @@ where
             }
         };
 
-        let recursion_verifier =
+        let recursion_verifier = {
+            let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_CREATE_RECURSION_VERIFIER);
             crate::zkvm::recursion::verifier::RecursionVerifier::<ark_bn254::Fq>::new(
                 verifier_input,
-            );
-
-        let _gamma: ark_bn254::Fq = self.transcript.challenge_scalar();
-        let _delta: ark_bn254::Fq = self.transcript.challenge_scalar();
+            )
+        };
 
         if metadata.dense_num_vars > crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS {
             return Err(anyhow::anyhow!(
@@ -1055,9 +1343,6 @@ where
                 crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS
             ));
         }
-
-        self.transcript
-            .append_serializable(&recursion_proof.dense_commitment);
 
         let ok = {
             let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_RECURSION);
@@ -1094,8 +1379,6 @@ fn verify_batched_sumcheck_streaming<F: JoltField, ProofTranscript: Transcript>(
     opening_accumulator: &mut VerifierOpeningAccumulator<F>,
     transcript: &mut ProofTranscript,
 ) -> Result<Vec<F::Challenge>, ProofVerifyError> {
-    use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
-
     let max_degree = sumcheck_instances
         .iter()
         .map(|sumcheck| sumcheck.degree())
@@ -1216,7 +1499,8 @@ pub fn verify_from_proof_bytes<F, PCS, ProofTranscript>(
 ) -> Result<(), anyhow::Error>
 where
     F: JoltField,
-    PCS: CommitmentScheme<Field = F> + RecursionExt<F>,
+    PCS: CommitmentScheme<Field = F>
+        + RecursionExt<F, Hint = crate::poly::commitment::dory::recursion::JoltHintMap>,
     ProofTranscript: Transcript,
     <PCS as RecursionExt<F>>::Hint: Send + Sync + Clone + 'static,
 {
@@ -1256,7 +1540,11 @@ where
     let (bytecode_read_raf_params, booleanity_params) = v.verify_stage6a_from_reader(&mut r)?;
     v.verify_stage6b_from_reader(&mut r, bytecode_read_raf_params, booleanity_params)?;
     v.verify_stage7_from_reader(&mut r)?;
-    v.verify_stage8_with_recursion_from_reader(&mut r)?;
+    if v.has_recursion {
+        v.verify_stage8_with_recursion_from_reader(&mut r)?;
+    } else {
+        v.verify_stage8_from_reader(&mut r)?;
+    }
 
     if r.remaining() != 0 {
         return Err(anyhow::anyhow!(

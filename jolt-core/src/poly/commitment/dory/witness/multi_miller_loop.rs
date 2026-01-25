@@ -96,14 +96,6 @@ pub struct MultiMillerLoopSteps {
     pub inv_dx_c0_packed_mles: Vec<Vec<Fq>>,
     pub inv_dx_c1_packed_mles: Vec<Vec<Fq>>,
 
-    /// Line coefficients (c0, c1, c2) ∈ Fq2 (one per step), as in the BN line function.
-    pub l_c0_c0_packed_mles: Vec<Vec<Fq>>,
-    pub l_c0_c1_packed_mles: Vec<Vec<Fq>>,
-    pub l_c1_c0_packed_mles: Vec<Vec<Fq>>,
-    pub l_c1_c1_packed_mles: Vec<Vec<Fq>>,
-    pub l_c2_c0_packed_mles: Vec<Vec<Fq>>,
-    pub l_c2_c1_packed_mles: Vec<Vec<Fq>>,
-
     /// G1 input (replicated across s,x).
     pub x_p_packed_mles: Vec<Vec<Fq>>,
     pub y_p_packed_mles: Vec<Vec<Fq>>,
@@ -120,17 +112,6 @@ pub struct MultiMillerLoopSteps {
 
     /// Line evaluation as an Fq12 element, expanded to 16 MLE evals per step and packed.
     pub l_val_packed_mles: Vec<Vec<Fq>>,
-
-    /// g(x) for ring-switching, replicated across step dimension (one per pair).
-    pub g_packed_mles: Vec<Vec<Fq>>,
-
-    /// Selector polynomials for mapping sparse-034 Fq12 coefficients to MLE evals, replicated across step.
-    pub selector_0_packed_mles: Vec<Vec<Fq>>,
-    pub selector_1_packed_mles: Vec<Vec<Fq>>,
-    pub selector_2_packed_mles: Vec<Vec<Fq>>,
-    pub selector_3_packed_mles: Vec<Vec<Fq>>,
-    pub selector_4_packed_mles: Vec<Vec<Fq>>,
-    pub selector_5_packed_mles: Vec<Vec<Fq>>,
 
     /// Number of active steps in the trace (<= 128).
     pub num_steps: usize,
@@ -164,14 +145,6 @@ impl MultiMillerLoopSteps {
         let mut lambda_c1_packed_mles = Vec::with_capacity(num_pairs);
         let mut inv_dx_c0_packed_mles = Vec::with_capacity(num_pairs);
         let mut inv_dx_c1_packed_mles = Vec::with_capacity(num_pairs);
-
-        let mut l_c0_c0_packed_mles = Vec::with_capacity(num_pairs);
-        let mut l_c0_c1_packed_mles = Vec::with_capacity(num_pairs);
-        let mut l_c1_c0_packed_mles = Vec::with_capacity(num_pairs);
-        let mut l_c1_c1_packed_mles = Vec::with_capacity(num_pairs);
-        let mut l_c2_c0_packed_mles = Vec::with_capacity(num_pairs);
-        let mut l_c2_c1_packed_mles = Vec::with_capacity(num_pairs);
-
         let mut x_p_packed_mles = Vec::with_capacity(num_pairs);
         let mut y_p_packed_mles = Vec::with_capacity(num_pairs);
 
@@ -185,64 +158,8 @@ impl MultiMillerLoopSteps {
 
         let mut l_val_packed_mles = Vec::with_capacity(num_pairs);
 
-        let mut g_packed_mles = Vec::with_capacity(num_pairs);
-        let mut selector_0_packed_mles = Vec::with_capacity(num_pairs);
-        let mut selector_1_packed_mles = Vec::with_capacity(num_pairs);
-        let mut selector_2_packed_mles = Vec::with_capacity(num_pairs);
-        let mut selector_3_packed_mles = Vec::with_capacity(num_pairs);
-        let mut selector_4_packed_mles = Vec::with_capacity(num_pairs);
-        let mut selector_5_packed_mles = Vec::with_capacity(num_pairs);
-
         // All traces share the same step schedule for BN254, so num_steps is identical for all pairs.
         let mut num_steps_out: usize = 0;
-
-        // Shared polynomials for ring-switching and sparse embedding.
-        let g_mle = get_g_mle();
-        debug_assert_eq!(g_mle.len(), ELEM_SIZE);
-        let mut g_packed = vec![Fq::zero(); PACKED_SIZE];
-        for x in 0..ELEM_SIZE {
-            for s in 0..STEP_SIZE {
-                g_packed[x * STEP_SIZE + s] = g_mle[x];
-            }
-        }
-
-        // Selector basis: coefficients at sparse-034 slots (0,3,4) in Fq2, split into (c0,c1).
-        let basis0_c0 = fq12_sparse_034(Fq2::new(Fq::one(), Fq::zero()), Fq2::zero(), Fq2::zero());
-        let basis0_c1 = fq12_sparse_034(Fq2::new(Fq::zero(), Fq::one()), Fq2::zero(), Fq2::zero());
-        let basis3_c0 = fq12_sparse_034(Fq2::zero(), Fq2::new(Fq::one(), Fq::zero()), Fq2::zero());
-        let basis3_c1 = fq12_sparse_034(Fq2::zero(), Fq2::new(Fq::zero(), Fq::one()), Fq2::zero());
-        let basis4_c0 = fq12_sparse_034(Fq2::zero(), Fq2::zero(), Fq2::new(Fq::one(), Fq::zero()));
-        let basis4_c1 = fq12_sparse_034(Fq2::zero(), Fq2::zero(), Fq2::new(Fq::zero(), Fq::one()));
-
-        let sel0_4 = fq12_to_multilinear_evals(&basis0_c0);
-        let sel1_4 = fq12_to_multilinear_evals(&basis0_c1);
-        let sel2_4 = fq12_to_multilinear_evals(&basis3_c0);
-        let sel3_4 = fq12_to_multilinear_evals(&basis3_c1);
-        let sel4_4 = fq12_to_multilinear_evals(&basis4_c0);
-        let sel5_4 = fq12_to_multilinear_evals(&basis4_c1);
-
-        debug_assert_eq!(sel0_4.len(), ELEM_SIZE);
-        debug_assert_eq!(sel1_4.len(), ELEM_SIZE);
-        debug_assert_eq!(sel2_4.len(), ELEM_SIZE);
-        debug_assert_eq!(sel3_4.len(), ELEM_SIZE);
-        debug_assert_eq!(sel4_4.len(), ELEM_SIZE);
-        debug_assert_eq!(sel5_4.len(), ELEM_SIZE);
-
-        let sel_pack = |sel_4: &[Fq]| -> Vec<Fq> {
-            let mut packed = vec![Fq::zero(); PACKED_SIZE];
-            for x in 0..ELEM_SIZE {
-                for s in 0..STEP_SIZE {
-                    packed[x * STEP_SIZE + s] = sel_4[x];
-                }
-            }
-            packed
-        };
-        let sel0_packed = sel_pack(&sel0_4);
-        let sel1_packed = sel_pack(&sel1_4);
-        let sel2_packed = sel_pack(&sel2_4);
-        let sel3_packed = sel_pack(&sel3_4);
-        let sel4_packed = sel_pack(&sel4_4);
-        let sel5_packed = sel_pack(&sel5_4);
 
         for (pair_idx, (&p, &q)) in g1s.iter().zip(g2s.iter()).enumerate() {
             let trace = trace_single_pair(p, q);
@@ -275,13 +192,6 @@ impl MultiMillerLoopSteps {
             inv_dx_c0_packed_mles.push(trace.inv_dx_c0_packed);
             inv_dx_c1_packed_mles.push(trace.inv_dx_c1_packed);
 
-            l_c0_c0_packed_mles.push(trace.l0_c0_packed);
-            l_c0_c1_packed_mles.push(trace.l0_c1_packed);
-            l_c1_c0_packed_mles.push(trace.l1_c0_packed);
-            l_c1_c1_packed_mles.push(trace.l1_c1_packed);
-            l_c2_c0_packed_mles.push(trace.l2_c0_packed);
-            l_c2_c1_packed_mles.push(trace.l2_c1_packed);
-
             x_p_packed_mles.push(trace.x_p_packed);
             y_p_packed_mles.push(trace.y_p_packed);
 
@@ -294,15 +204,6 @@ impl MultiMillerLoopSteps {
             is_add_packed_mles.push(trace.is_add_packed);
 
             l_val_packed_mles.push(trace.l_val_packed);
-
-            // Replicate shared polynomials per pair (for the current Stage1 interface).
-            g_packed_mles.push(g_packed.clone());
-            selector_0_packed_mles.push(sel0_packed.clone());
-            selector_1_packed_mles.push(sel1_packed.clone());
-            selector_2_packed_mles.push(sel2_packed.clone());
-            selector_3_packed_mles.push(sel3_packed.clone());
-            selector_4_packed_mles.push(sel4_packed.clone());
-            selector_5_packed_mles.push(sel5_packed.clone());
         }
 
         Self {
@@ -328,13 +229,6 @@ impl MultiMillerLoopSteps {
             inv_dx_c0_packed_mles,
             inv_dx_c1_packed_mles,
 
-            l_c0_c0_packed_mles,
-            l_c0_c1_packed_mles,
-            l_c1_c0_packed_mles,
-            l_c1_c1_packed_mles,
-            l_c2_c0_packed_mles,
-            l_c2_c1_packed_mles,
-
             x_p_packed_mles,
             y_p_packed_mles,
             x_q_c0_packed_mles,
@@ -344,13 +238,6 @@ impl MultiMillerLoopSteps {
             is_double_packed_mles,
             is_add_packed_mles,
             l_val_packed_mles,
-            g_packed_mles,
-            selector_0_packed_mles,
-            selector_1_packed_mles,
-            selector_2_packed_mles,
-            selector_3_packed_mles,
-            selector_4_packed_mles,
-            selector_5_packed_mles,
 
             num_steps: num_steps_out,
         }
@@ -378,13 +265,6 @@ struct SinglePairTrace {
     lambda_c1_packed: Vec<Fq>,
     inv_dx_c0_packed: Vec<Fq>,
     inv_dx_c1_packed: Vec<Fq>,
-
-    l0_c0_packed: Vec<Fq>,
-    l0_c1_packed: Vec<Fq>,
-    l1_c0_packed: Vec<Fq>,
-    l1_c1_packed: Vec<Fq>,
-    l2_c0_packed: Vec<Fq>,
-    l2_c1_packed: Vec<Fq>,
 
     x_p_packed: Vec<Fq>,
     y_p_packed: Vec<Fq>,
@@ -440,10 +320,6 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
 
     let mut lambda: Vec<Fq2> = Vec::new();
     let mut inv_dx: Vec<Fq2> = Vec::new();
-
-    let mut l0: Vec<Fq2> = Vec::new();
-    let mut l1: Vec<Fq2> = Vec::new();
-    let mut l2: Vec<Fq2> = Vec::new();
 
     let mut x_q_steps: Vec<Fq2> = Vec::new();
     let mut y_q_steps: Vec<Fq2> = Vec::new();
@@ -548,10 +424,6 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
 
             let c2 = c2_left - c2_right;
 
-            l0.push(c0);
-            l1.push(c1);
-            l2.push(c2);
-
             // For double rows, operand Q is unused; fill with 0.
             x_q_steps.push(Fq2::zero());
             y_q_steps.push(Fq2::zero());
@@ -629,10 +501,6 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
             let c1 = op_q.y - t.y;
             let c2 = op_q.x * t.y - t.x * op_q.y;
 
-            l0.push(c0);
-            l1.push(c1);
-            l2.push(c2);
-
             // Build line element as sparse 034 and update f.
             let mut c0_scaled = c0;
             c0_scaled.mul_assign_by_fp(&p.y);
@@ -694,9 +562,6 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
 
     lambda.push(Fq2::zero());
     inv_dx.push(Fq2::zero());
-    l0.push(Fq2::zero());
-    l1.push(Fq2::zero());
-    l2.push(Fq2::zero());
     x_q_steps.push(Fq2::zero());
     y_q_steps.push(Fq2::zero());
     is_double_steps.push(zero);
@@ -724,13 +589,6 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
     let lambda_c1_packed = pack_step_only_fq2_c1(&lambda, num_packed_steps);
     let inv_dx_c0_packed = pack_step_only_fq2_c0(&inv_dx, num_packed_steps);
     let inv_dx_c1_packed = pack_step_only_fq2_c1(&inv_dx, num_packed_steps);
-
-    let l0_c0_packed = pack_step_only_fq2_c0(&l0, num_packed_steps);
-    let l0_c1_packed = pack_step_only_fq2_c1(&l0, num_packed_steps);
-    let l1_c0_packed = pack_step_only_fq2_c0(&l1, num_packed_steps);
-    let l1_c1_packed = pack_step_only_fq2_c1(&l1, num_packed_steps);
-    let l2_c0_packed = pack_step_only_fq2_c0(&l2, num_packed_steps);
-    let l2_c1_packed = pack_step_only_fq2_c1(&l2, num_packed_steps);
 
     let x_p_vals = vec![p.x; num_packed_steps];
     let y_p_vals = vec![p.y; num_packed_steps];
@@ -770,13 +628,6 @@ fn trace_single_pair(p: G1Affine, q: G2Affine) -> SinglePairTrace {
         lambda_c1_packed,
         inv_dx_c0_packed,
         inv_dx_c1_packed,
-
-        l0_c0_packed,
-        l0_c1_packed,
-        l1_c0_packed,
-        l1_c1_packed,
-        l2_c0_packed,
-        l2_c1_packed,
 
         x_p_packed,
         y_p_packed,

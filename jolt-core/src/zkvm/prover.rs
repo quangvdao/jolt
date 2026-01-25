@@ -39,7 +39,7 @@ use crate::{
             ProverOpeningAccumulator, SumcheckId,
         },
         rlc_polynomial::{RLCStreamingData, TraceSource},
-        rlc_utils::{compute_joint_claim, compute_rlc_coefficients},
+        rlc_utils::compute_joint_claim,
     },
     pprof_scope,
     subprotocols::{
@@ -123,7 +123,7 @@ use crate::{
             raf_evaluation::RafEvaluationSumcheckProver as RamRafEvaluationSumcheckProver,
             read_write_checking::RamReadWriteCheckingProver,
         },
-        recursion::prover::{RecursionProof, RecursionProver, Stage8RecursionInput},
+        recursion::prover::{DoryOpeningSnapshot, RecursionProof, RecursionProver},
         registers::{
             read_write_checking::RegistersReadWriteCheckingProver,
             val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
@@ -680,11 +680,12 @@ where
         let stage6b_sumcheck_proof = self.prove_stage6b();
         let stage7_sumcheck_proof = self.prove_stage7();
 
-        // Stage 8: Dory batch opening proof (plus minimal input for recursion witness generation).
-        let (joint_opening_proof, stage8_recursion_input, stage8_combine_hint) =
-            self.prove_stage8(opening_proof_hints, true);
-        let stage8_recursion_input =
-            stage8_recursion_input.expect("Stage 8 recursion input required for recursion");
+        // Stage 8: Dory batch opening proof (plus a recursion-agnostic snapshot).
+        let (joint_opening_proof, stage8_snapshot) = self.prove_stage8(opening_proof_hints);
+
+        // Derive verifier setup once for recursion witness generation.
+        // (Intended to be cached for session-level reuse.)
+        let verifier_setup = PCS::setup_verifier(&self.preprocessing.generators);
 
         // Stages 9-13: Consolidated recursion proof generation
         // This handles:
@@ -693,8 +694,9 @@ where
         // - Stage 11: Build dense polynomial + commit (BEFORE sumchecks for soundness)
         // - Stage 12: Run recursion sumchecks (stages 1-5 of RecursionProver)
         // - Stage 13: Generate Hyrax opening proof
-        let (recursion_proof, recursion_constraint_metadata, stage9_pcs_hint) = self
-            .prove_stage_recursive(&joint_opening_proof, stage8_recursion_input)
+        let (recursion_proof, recursion_constraint_metadata, stage8_combine_hint, stage9_pcs_hint) =
+            self
+                .prove_stage_recursive(&joint_opening_proof, stage8_snapshot, &verifier_setup)
             .expect("Failed to generate recursion proof");
 
         #[cfg(test)]
@@ -1717,26 +1719,18 @@ where
     }
 
     /// Stage 8: Dory batch opening proof.
+    ///
     /// Builds streaming RLC polynomial directly from trace (no witness regeneration needed).
-    /// Stage 8: Dory batch opening proof with optional PCS recursion hint generation
+    ///
+    /// Output is recursion-agnostic: it returns the opening proof plus a snapshot of the
+    /// transcript/claims state right before `PCS::prove`, which can be consumed by recursion logic.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all)]
     fn prove_stage8(
         &mut self,
         opening_proof_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
-        generate_recursion_hint: bool,
-    ) -> (
-        PCS::Proof,
-        Option<Stage8RecursionInput<F, PCS, ProofTranscript>>,
-        Option<Fq12>, // combine_hint for homomorphic combining offload
-    )
-    where
-        PCS: RecursionExt<F>,
-    {
-        tracing::info!(
-            "Stage 8 proving (Dory batch opening) - recursion hint: {}",
-            generate_recursion_hint
-        );
+    ) -> (PCS::Proof, DoryOpeningSnapshot<F, ProofTranscript>) {
+        tracing::info!("Stage 8 proving (Dory batch opening)");
 
         let _guard = tracing::info_span!("stage8_init_dory_context").in_scope(|| {
             let start = Instant::now();
@@ -2078,12 +2072,11 @@ where
         // (Some helper paths may temporarily switch contexts for advice handling.)
         let _ctx_main = DoryGlobals::with_context(DoryContext::Main);
 
-        // Fork the transcript state if we need to generate recursion hint
-        let witness_gen_transcript = if generate_recursion_hint {
-            Some(self.transcript.clone())
-        } else {
-            None
-        };
+        // Fork transcript state right after gamma sampling (before `PCS::prove`).
+        //
+        // This is recursion-agnostic: if recursion is enabled, the recursion prover consumes this
+        // snapshot for `PCS::witness_gen` replay. If recursion is disabled, the snapshot is unused.
+        let pre_opening_proof_transcript = self.transcript.clone();
 
         // Dory opening proof at the unified point
         let opening_proof = tracing::info_span!("stage8_pcs_prove").in_scope(|| {
@@ -2102,173 +2095,25 @@ where
             proof
         });
 
-        // Generate recursion input if requested
-        let (recursion_input, stage8_combine_hint) = if generate_recursion_hint {
-            tracing::info_span!("stage8_generate_recursion_hint").in_scope(|| {
-                // Compute claim: Σ γ_i · claim_i using shared utility
-                let joint_claim = tracing::info_span!("stage8_joint_claim").in_scope(|| {
-                    let start = Instant::now();
-                    let jc = compute_joint_claim(&gamma_powers, &claims);
-                    tracing::info!(
-                        elapsed_ms = start.elapsed().as_millis(),
-                        num_claims = claims.len(),
-                        "Computed Stage 8 joint claim"
-                    );
-                    jc
-                });
+        // Compute the joint claim Σ γ_i · claim_i (needed by recursion witness generation).
+        let joint_claim = compute_joint_claim(&gamma_powers, &claims);
 
-                // Compute joint commitment: Σ γ_i · C_i
-                let (coeffs, comms) = tracing::info_span!("stage8_collect_rlc_coeffs_and_comms")
-                    .in_scope(|| {
-                        let start = Instant::now();
+        // Move polynomial claims out of the opening state for the Stage 8 snapshot.
+        let DoryOpeningState {
+            polynomial_claims,
+            gamma_powers: _,
+            opening_point: _,
+        } = state;
 
-                        let mut commitments_map = HashMap::new();
-                        let all_polys = all_committed_polynomials(&self.one_hot_params);
-                        debug_assert_eq!(
-                            all_polys.len(),
-                            self.commitments.len(),
-                            "commitment vector length mismatch"
-                        );
-                        for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter())
-                        {
-                            commitments_map.insert(poly, commitment.clone());
-                        }
-
-                        // Include advice commitments if they were folded into the Stage 8 RLC.
-                        if state
-                            .polynomial_claims
-                            .iter()
-                            .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
-                        {
-                            if let Some(ref commitment) = self.advice.trusted_advice_commitment {
-                                commitments_map
-                                    .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-                            }
-                        }
-                        if state
-                            .polynomial_claims
-                            .iter()
-                            .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
-                        {
-                            if let Some(ref commitment) = self.untrusted_advice_commitment {
-                                commitments_map.insert(
-                                    CommittedPolynomial::UntrustedAdvice,
-                                    commitment.clone(),
-                                );
-                            }
-                        }
-
-                        // Include program commitments in committed mode (BytecodeChunk and ProgramImageInit)
-                        if let Some(ref program_commitments) =
-                            self.preprocessing.program_commitments
-                        {
-                            for (idx, commitment) in
-                                program_commitments.bytecode_commitments.iter().enumerate()
-                            {
-                                commitments_map.insert(
-                                    CommittedPolynomial::BytecodeChunk(idx),
-                                    commitment.clone(),
-                                );
-                            }
-                            commitments_map.insert(
-                                CommittedPolynomial::ProgramImageInit,
-                                program_commitments.program_image_commitment.clone(),
-                            );
-                        }
-
-                        // Compute RLC coefficients using shared utility
-                        let rlc_map = compute_rlc_coefficients(
-                            &state.gamma_powers,
-                            state.polynomial_claims.iter().cloned(),
-                        );
-                        let (coeffs, comms): (Vec<F>, Vec<PCS::Commitment>) = rlc_map
-                            .into_iter()
-                            .map(|(poly, coeff)| (coeff, commitments_map.remove(&poly).unwrap()))
-                            .unzip();
-
-                        tracing::info!(
-                            elapsed_ms = start.elapsed().as_millis(),
-                            num_terms = coeffs.len(),
-                            "Collected RLC coeffs and commitments"
-                        );
-                        (coeffs, comms)
-                    });
-
-                // Generate combine witness for homomorphic combining offload
-                let (combine_witness, combine_hint) =
-                    tracing::info_span!("stage8_generate_combine_witness").in_scope(|| {
-                        let start = Instant::now();
-                        let out = PCS::generate_combine_witness(&comms, &coeffs);
-                        tracing::info!(
-                            elapsed_ms = start.elapsed().as_millis(),
-                            exp_ops = out.0.exp_witnesses.len(),
-                            mul_ops = out.0.mul_layers.iter().map(|l| l.len()).sum::<usize>(),
-                            "Generated combine witness for homomorphic combining"
-                        );
-                        out
-                    });
-
-                // combine_witness will be passed to Stage 9 via proof_data
-                let joint_commitment =
-                    tracing::info_span!("stage8_combine_with_hint").in_scope(|| {
-                        let start = Instant::now();
-                        let jc = PCS::combine_with_hint(&combine_hint);
-                        tracing::info!(
-                            elapsed_ms = start.elapsed().as_millis(),
-                            "Computed joint commitment via combine hint"
-                        );
-                        jc
-                    });
-
-                // Generate a hint for verifying the opening proof (via the PCS's recursion extension).
-                let verifier_setup = tracing::info_span!("stage8_setup_verifier").in_scope(|| {
-                    let start = Instant::now();
-                    let vs = PCS::setup_verifier(&self.preprocessing.generators);
-                    tracing::info!(
-                        elapsed_ms = start.elapsed().as_millis(),
-                        "Derived PCS verifier setup for witness_gen"
-                    );
-                    vs
-                });
-
-                // Package the minimal Stage 8 output needed for Stage 9 witness generation.
-                let recursion_input = tracing::info_span!("stage8_pack_recursion_input").in_scope(|| {
-                    let start = Instant::now();
-                    let input = Stage8RecursionInput {
-                        witness_gen_transcript: witness_gen_transcript
-                            .expect("witness_gen_transcript must exist when recursion hint generation is enabled"),
-                        opening_point: opening_point.r.clone(),
-                        joint_claim,
-                        joint_commitment: joint_commitment.clone(),
-                        combine_witness: Some(combine_witness),
-                        verifier_setup,
-                    };
-                    tracing::info!(
-                        elapsed_ms = start.elapsed().as_millis(),
-                        "Packed Stage8RecursionInput"
-                    );
-                    input
-                });
-
-                // Extract the Fq12 from combine_hint for serialization
-                let combine_hint_fq12 = tracing::info_span!("stage8_combine_hint_to_fq12")
-                    .in_scope(|| {
-                        let start = Instant::now();
-                        let x = PCS::combine_hint_to_fq12(&combine_hint);
-                        tracing::info!(
-                            elapsed_ms = start.elapsed().as_millis(),
-                            "Converted combine hint to Fq12 for serialization"
-                        );
-                        x
-                    });
-
-                (Some(recursion_input), Some(combine_hint_fq12))
-            })
-        } else {
-            (None, None)
+        let snapshot = DoryOpeningSnapshot {
+            pre_opening_proof_transcript,
+            opening_point: opening_point.r.clone(),
+            polynomial_claims,
+            gamma_powers,
+            joint_claim,
         };
 
-        (opening_proof, recursion_input, stage8_combine_hint)
+        (opening_proof, snapshot)
     }
 
     /// Consolidated recursion proof generation (Stages 9-13).
@@ -2285,11 +2130,13 @@ where
     fn prove_stage_recursive(
         &mut self,
         stage8_opening_proof: &PCS::Proof,
-        stage8_recursion_input: Stage8RecursionInput<F, PCS, ProofTranscript>,
+        stage8_snapshot: DoryOpeningSnapshot<F, ProofTranscript>,
+        verifier_setup: &PCS::VerifierSetup,
     ) -> Result<
         (
             RecursionProof<Fq, ProofTranscript, Hyrax<1, GrumpkinProjective>>,
             crate::zkvm::proof_serialization::RecursionConstraintMetadata,
+            Option<Fq12>, // combine_hint for homomorphic combining offload
             <PCS as RecursionExt<F>>::Hint,
         ),
         Box<dyn std::error::Error>,
@@ -2322,17 +2169,67 @@ where
             )));
         }
 
-        // Create RecursionProver by running Stage 9 witness generation internally.
-        let (recursion_prover, stage9_pcs_hint) =
+        // Build the minimal commitment map needed for recursion-only Stage 8 offloading.
+        let mut commitments_map = HashMap::new();
+        {
+            let all_polys = all_committed_polynomials(&self.one_hot_params);
+            debug_assert_eq!(
+                all_polys.len(),
+                self.commitments.len(),
+                "commitment vector length mismatch"
+            );
+            for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
+                commitments_map.insert(poly, commitment.clone());
+            }
+
+            // Include advice commitments if they were folded into the Stage 8 RLC.
+            if stage8_snapshot
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+            {
+                if let Some(ref commitment) = self.advice.trusted_advice_commitment {
+                    commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                }
+            }
+            if stage8_snapshot
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+            {
+                if let Some(ref commitment) = self.untrusted_advice_commitment {
+                    commitments_map
+                        .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                }
+            }
+
+            // Include program commitments in committed mode (BytecodeChunk and ProgramImageInit).
+            if let Some(ref program_commitments) = self.preprocessing.program_commitments {
+                for (idx, commitment) in program_commitments.bytecode_commitments.iter().enumerate()
+                {
+                    commitments_map.insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
+                }
+                commitments_map.insert(
+                    CommittedPolynomial::ProgramImageInit,
+                    program_commitments.program_image_commitment.clone(),
+                );
+            }
+        }
+
+        // Create RecursionProver by performing all recursion-only Stage 8 work and Stage 9 witness generation.
+        let (recursion_prover, stage8_combine_hint, stage9_pcs_hint) =
             tracing::info_span!("create_recursion_prover_from_stage8").in_scope(|| {
-                let (prover, hint) = RecursionProver::<Fq>::new_from_stage8_opening(
+                let (prover, combine_hint_fq12, hint) =
+                    RecursionProver::<Fq>::new_from_stage8_snapshot::<F, PCS, ProofTranscript>(
                     stage8_opening_proof,
-                    stage8_recursion_input,
+                    stage8_snapshot,
+                    verifier_setup,
+                    &commitments_map,
                     gamma,
                     delta,
                 )?;
                 tracing::info!("Created RecursionProver from Stage 8 opening data");
-                Ok::<_, Box<dyn std::error::Error>>((prover, hint))
+                Ok::<_, Box<dyn std::error::Error>>((prover, Some(combine_hint_fq12), hint))
             })?;
 
         // ============ STAGES 10-13: Delegate to RecursionProver::prove_full ============
@@ -2355,7 +2252,7 @@ where
             });
 
         tracing::info!("Completed consolidated recursion proof");
-        Ok((recursion_proof, metadata, stage9_pcs_hint))
+        Ok((recursion_proof, metadata, stage8_combine_hint, stage9_pcs_hint))
     }
 }
 

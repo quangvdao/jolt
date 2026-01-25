@@ -153,11 +153,24 @@ impl RecursionVerifier<Fq> {
 
         // ============ STAGE 2: Batched Constraint Sumchecks ============
         let _cycle_stage2 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE2);
-        let r_x = tracing::info_span!("verify_recursion_stage2").in_scope(|| {
+        let r_stage2 = tracing::info_span!("verify_recursion_stage2").in_scope(|| {
             tracing::info!("Verifying Stage 2: Batched constraint sumchecks");
             self.verify_stage2(&proof.stage2_proof, transcript, &mut accumulator)
         })?;
         drop(_cycle_stage2);
+
+        // Stage 2 challenges layout: [r_c || r_x].
+        let k = self.input.num_constraints_padded.trailing_zeros() as usize;
+        if r_stage2.len() < k + self.input.num_constraint_vars {
+            return Err(format!(
+                "Stage 2 returned {} challenges, expected at least {} (k + num_constraint_vars)",
+                r_stage2.len(),
+                k + self.input.num_constraint_vars
+            )
+            .into());
+        }
+        let r_c = &r_stage2[..k];
+        let r_x = &r_stage2[r_stage2.len() - self.input.num_constraint_vars..];
 
         // Debug hook: allow stopping after Stage 2 to isolate failures.
         #[cfg(test)]
@@ -169,7 +182,7 @@ impl RecursionVerifier<Fq> {
         let _cycle_stage3 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE3);
         let r_s = tracing::info_span!("verify_recursion_stage3").in_scope(|| {
             tracing::info!("Verifying Stage 3: Virtualization direct evaluation");
-            self.verify_stage3(transcript, &mut accumulator, &r_x, proof.stage3_m_eval)
+            self.verify_stage3(transcript, &mut accumulator, r_c, r_x, proof.stage3_m_eval)
         })?;
         drop(_cycle_stage3);
 
@@ -444,6 +457,18 @@ impl RecursionVerifier<Fq> {
 
         // G1 add
         if num_g1_add > 0 {
+            // Add fused G1Add verifier (over global constraint index + x vars) to match the
+            // prover's Stage 2 fused instance and to introduce a global r_c prefix.
+            use super::g1::fused_addition::{FusedG1AddParams, FusedG1AddVerifier};
+            let fused_params = FusedG1AddParams::new(
+                self.input.num_constraints,
+                self.input.num_constraints_padded,
+                self.input.num_constraint_vars,
+            );
+            let fused_verifier =
+                FusedG1AddVerifier::new(fused_params, &self.input.constraint_types, transcript);
+            verifiers.push(Box::new(fused_verifier));
+
             use super::g1::addition::{G1AddVerifier, G1AddVerifierSpec};
             let params = G1AddParams::new(num_g1_add);
             let spec = G1AddVerifierSpec::new(params);
@@ -518,8 +543,8 @@ impl RecursionVerifier<Fq> {
 
         let verifier_refs: Vec<&dyn SumcheckInstanceVerifier<Fq, T>> =
             verifiers.iter().map(|v| &**v).collect();
-        let r_x = BatchedSumcheck::verify(proof, verifier_refs, accumulator, transcript)?;
-        Ok(r_x)
+        let r_stage2 = BatchedSumcheck::verify(proof, verifier_refs, accumulator, transcript)?;
+        Ok(r_stage2)
     }
 
     /// Verify Stage 3: Direct evaluation protocol (virtualization).
@@ -528,10 +553,12 @@ impl RecursionVerifier<Fq> {
         &self,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        r_c: &[<Fq as crate::field::JoltField>::Challenge],
         r_x: &[<Fq as crate::field::JoltField>::Challenge],
         stage3_m_eval: Fq,
     ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
         let accumulator_fq: &mut VerifierOpeningAccumulator<Fq> = accumulator;
+        let r_c_fq: Vec<Fq> = r_c.iter().map(|c| (*c).into()).collect();
         let r_x_fq: Vec<Fq> = r_x.iter().map(|c| (*c).into()).collect();
 
         let virtual_claims = extract_virtual_claims_from_accumulator(
@@ -550,7 +577,7 @@ impl RecursionVerifier<Fq> {
         let verifier = DirectEvaluationVerifier::new(params, virtual_claims, r_x_fq);
         let m_eval_fq: Fq = stage3_m_eval;
         let r_s = verifier
-            .verify(transcript, accumulator_fq, m_eval_fq)
+            .verify_with_r_c(&r_c_fq, transcript, accumulator_fq, m_eval_fq)
             .map_err(Box::<dyn std::error::Error>::from)?;
 
         let r_s_challenges: Vec<<Fq as JoltField>::Challenge> =

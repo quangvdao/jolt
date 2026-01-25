@@ -633,12 +633,6 @@ pub enum MultiMillerLoopTerm {
     LambdaC1,
     InvDeltaXC0,
     InvDeltaXC1,
-    LC0C0,
-    LC0C1,
-    LC1C0,
-    LC1C1,
-    LC2C0,
-    LC2C1,
     XP,
     YP,
     XQC0,
@@ -648,13 +642,6 @@ pub enum MultiMillerLoopTerm {
     IsDouble,
     IsAdd,
     LVal,
-    G,
-    Selector0, // c0.c0
-    Selector1, // c0.c1
-    Selector2, // c1.c0
-    Selector3, // c1.c1
-    Selector4, // c2.c0
-    Selector5, // c2.c1
 }
 
 /// Frobenius map: output = input^q
@@ -691,7 +678,7 @@ impl TermEnum for FrobeniusTerm {
 }
 
 impl TermEnum for MultiMillerLoopTerm {
-    const COUNT: usize = 37;
+    const COUNT: usize = 24;
 
     fn from_index(i: usize) -> Option<Self> {
         match i {
@@ -710,28 +697,15 @@ impl TermEnum for MultiMillerLoopTerm {
             12 => Some(Self::LambdaC1),
             13 => Some(Self::InvDeltaXC0),
             14 => Some(Self::InvDeltaXC1),
-            15 => Some(Self::LC0C0),
-            16 => Some(Self::LC0C1),
-            17 => Some(Self::LC1C0),
-            18 => Some(Self::LC1C1),
-            19 => Some(Self::LC2C0),
-            20 => Some(Self::LC2C1),
-            21 => Some(Self::XP),
-            22 => Some(Self::YP),
-            23 => Some(Self::XQC0),
-            24 => Some(Self::XQC1),
-            25 => Some(Self::YQC0),
-            26 => Some(Self::YQC1),
-            27 => Some(Self::IsDouble),
-            28 => Some(Self::IsAdd),
-            29 => Some(Self::LVal),
-            30 => Some(Self::G),
-            31 => Some(Self::Selector0),
-            32 => Some(Self::Selector1),
-            33 => Some(Self::Selector2),
-            34 => Some(Self::Selector3),
-            35 => Some(Self::Selector4),
-            36 => Some(Self::Selector5),
+            15 => Some(Self::XP),
+            16 => Some(Self::YP),
+            17 => Some(Self::XQC0),
+            18 => Some(Self::XQC1),
+            19 => Some(Self::YQC0),
+            20 => Some(Self::YQC1),
+            21 => Some(Self::IsDouble),
+            22 => Some(Self::IsAdd),
+            23 => Some(Self::LVal),
             _ => None,
         }
     }
@@ -757,12 +731,6 @@ impl TermEnum for MultiMillerLoopTerm {
             Self::LambdaC1 => "lambda_c1",
             Self::InvDeltaXC0 => "inv_delta_x_c0",
             Self::InvDeltaXC1 => "inv_delta_x_c1",
-            Self::LC0C0 => "l_c0_c0",
-            Self::LC0C1 => "l_c0_c1",
-            Self::LC1C0 => "l_c1_c0",
-            Self::LC1C1 => "l_c1_c1",
-            Self::LC2C0 => "l_c2_c0",
-            Self::LC2C1 => "l_c2_c1",
             Self::XP => "x_p",
             Self::YP => "y_p",
             Self::XQC0 => "x_q_c0",
@@ -772,13 +740,6 @@ impl TermEnum for MultiMillerLoopTerm {
             Self::IsDouble => "is_double",
             Self::IsAdd => "is_add",
             Self::LVal => "l_val",
-            Self::G => "g",
-            Self::Selector0 => "selector_0",
-            Self::Selector1 => "selector_1",
-            Self::Selector2 => "selector_2",
-            Self::Selector3 => "selector_3",
-            Self::Selector4 => "selector_4",
-            Self::Selector5 => "selector_5",
         }
     }
 }
@@ -795,6 +756,14 @@ pub enum RecursionPoly {
     G1Add {
         term: G1AddTerm,
         instance: usize,
+    },
+    /// Fused G1 addition term polynomial across all constraints.
+    ///
+    /// This is a transitional variant used by the recursion fused-virtual-polynomials port:
+    /// Stage 2 may append a *single* opening per term at the fused point (r_c, r_x),
+    /// rather than per-instance openings.
+    G1AddFused {
+        term: G1AddTerm,
     },
     G1ScalarMul {
         term: G1ScalarMulTerm,
@@ -832,6 +801,7 @@ impl RecursionPoly {
     pub fn instance(&self) -> usize {
         match self {
             Self::G1Add { instance, .. } => *instance,
+            Self::G1AddFused { .. } => 0,
             Self::G1ScalarMul { instance, .. } => *instance,
             Self::G2Add { instance, .. } => *instance,
             Self::G2ScalarMul { instance, .. } => *instance,
@@ -845,6 +815,7 @@ impl RecursionPoly {
     pub fn term_index(&self) -> usize {
         match self {
             Self::G1Add { term, .. } => term.to_index(),
+            Self::G1AddFused { term } => term.to_index(),
             Self::G1ScalarMul { term, .. } => term.to_index(),
             Self::G2Add { term, .. } => term.to_index(),
             Self::G2ScalarMul { term, .. } => term.to_index(),
@@ -1061,30 +1032,6 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
-    pub fn multi_miller_loop_l_c0_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::LC0C0,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_l_c0_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::LC0C1,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_l_c1_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::LC1C0,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_l_c1_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::LC1C1,
-            instance: i,
-        })
-    }
     pub fn multi_miller_loop_x_p(i: usize) -> Self {
         Self::Recursion(RecursionPoly::MultiMillerLoop {
             term: MultiMillerLoopTerm::XP,
@@ -1160,50 +1107,11 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
-    pub fn multi_miller_loop_g(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::G,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_selector_0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::Selector0,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_selector_1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::Selector1,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_selector_2(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::Selector2,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_selector_3(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::Selector3,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_selector_4(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::Selector4,
-            instance: i,
-        })
-    }
-    pub fn multi_miller_loop_selector_5(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::MultiMillerLoop {
-            term: MultiMillerLoopTerm::Selector5,
-            instance: i,
-        })
-    }
 
     // --- G1 addition ---
+    pub fn g1_add_fused(term: G1AddTerm) -> Self {
+        Self::Recursion(RecursionPoly::G1AddFused { term })
+    }
     pub fn g1_add_xp(i: usize) -> Self {
         Self::Recursion(RecursionPoly::G1Add {
             term: G1AddTerm::XP,

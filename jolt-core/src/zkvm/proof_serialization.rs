@@ -719,6 +719,7 @@ impl CanonicalSerialize for VirtualPolynomial {
                     RecursionPoly::G1Add { term, instance } => {
                         (0u8, term.to_index() as u8, *instance)
                     }
+                    RecursionPoly::G1AddFused { term } => (8u8, term.to_index() as u8, 0usize),
                     RecursionPoly::G1ScalarMul { term, instance } => {
                         (1u8, term.to_index() as u8, *instance)
                     }
@@ -897,6 +898,10 @@ impl CanonicalDeserialize for VirtualPolynomial {
                             term: G1AddTerm::from_index(term_index as usize)
                                 .ok_or(SerializationError::InvalidData)?,
                             instance,
+                        },
+                        8 => RecursionPoly::G1AddFused {
+                            term: G1AddTerm::from_index(term_index as usize)
+                                .ok_or(SerializationError::InvalidData)?,
                         },
                         1 => RecursionPoly::G1ScalarMul {
                             term: G1ScalarMulTerm::from_index(term_index as usize)

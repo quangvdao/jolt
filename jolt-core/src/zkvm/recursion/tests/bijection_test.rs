@@ -1,6 +1,6 @@
 use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::zkvm::recursion::constraints::system::{
-    ConstraintSystem, ConstraintType, MatrixConstraint, PolyType,
+    ConstraintSystem, ConstraintType, MatrixConstraint, PolyType, PolyTypeSet,
 };
 use crate::zkvm::recursion::jagged::bijection::*;
 use crate::{
@@ -180,6 +180,21 @@ fn test_dense_polynomial_split_api_matches_monolithic() {
         dense_poly.Z, dense_evals2,
         "dense eval vector mismatch between APIs"
     );
+}
+
+#[test]
+fn test_polytypeset_matches_jagged_builder_entries() {
+    let cs = create_mixed_constraint_system();
+
+    let constraint_types: Vec<ConstraintType> = cs
+        .constraints
+        .iter()
+        .map(|c| c.constraint_type.clone())
+        .collect();
+    let polytypeset = PolyTypeSet::from_constraint_types(&constraint_types);
+
+    let builder = ConstraintSystemJaggedBuilder::from_constraints(&cs.constraints);
+    assert_eq!(builder.polynomials.as_slice(), polytypeset.entries());
 }
 
 #[test]
@@ -431,12 +446,6 @@ fn test_constraint_mapping_consistency() {
                             | PolyType::MultiMillerLoopLambdaC1
                             | PolyType::MultiMillerLoopInvDeltaXC0
                             | PolyType::MultiMillerLoopInvDeltaXC1
-                            | PolyType::MultiMillerLoopLC0C0
-                            | PolyType::MultiMillerLoopLC0C1
-                            | PolyType::MultiMillerLoopLC1C0
-                            | PolyType::MultiMillerLoopLC1C1
-                            | PolyType::MultiMillerLoopLC2C0
-                            | PolyType::MultiMillerLoopLC2C1
                             | PolyType::MultiMillerLoopXP
                             | PolyType::MultiMillerLoopYP
                             | PolyType::MultiMillerLoopXQC0
@@ -446,13 +455,6 @@ fn test_constraint_mapping_consistency() {
                             | PolyType::MultiMillerLoopIsDouble
                             | PolyType::MultiMillerLoopIsAdd
                             | PolyType::MultiMillerLoopLVal
-                            | PolyType::MultiMillerLoopG
-                            | PolyType::MultiMillerLoopSelector0
-                            | PolyType::MultiMillerLoopSelector1
-                            | PolyType::MultiMillerLoopSelector2
-                            | PolyType::MultiMillerLoopSelector3
-                            | PolyType::MultiMillerLoopSelector4
-                            | PolyType::MultiMillerLoopSelector5
                     ),
                     "Invalid poly type {poly_type:?} for MultiMillerLoop constraint"
                 );

@@ -53,9 +53,7 @@ use crate::{
     poly::{
         dense_mlpoly::DensePolynomial,
         eq_poly::EqPolynomial,
-        multilinear_polynomial::{
-            BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
-        },
+        multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
         opening_proof::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN,
@@ -139,8 +137,10 @@ impl DirectEvaluationParams {
 pub struct DirectEvaluationProver {
     /// Protocol parameters
     pub params: DirectEvaluationParams,
-    /// The constraint matrix M bound to r_x from Stage 2
-    pub matrix_bound: MultilinearPolynomial<Fq>,
+    /// The row-evaluation vector \(i \mapsto M(i, r_x)\) materialized as an MLE over `s`.
+    ///
+    /// Row index layout matches [`matrix_s_index`]: poly-type major then constraint index.
+    pub row_values_mle: MultilinearPolynomial<Fq>,
     /// Virtual claims from Stage 2
     pub virtual_claims: Vec<Fq>,
     /// The r_x point from Stage 2
@@ -151,29 +151,35 @@ impl DirectEvaluationProver {
     /// Create a new prover
     pub fn new(
         params: DirectEvaluationParams,
-        matrix_evals: Vec<Fq>,
         virtual_claims: Vec<Fq>,
         r_x: Vec<Fq>,
     ) -> Self {
-        // The matrix has layout [x_vars, s_vars] in little-endian
-        // We need to bind the x variables to r_x
-        let mut matrix_poly =
-            MultilinearPolynomial::LargeScalars(DensePolynomial::new(matrix_evals));
+        // Build the row-evaluation table `M(i, r_x)` from Stage 2 virtual claims:
+        //
+        // For each row i (poly_idx, constraint_idx), Stage 2 provides v_i = M(i, r_x).
+        // We place v_i at `row = matrix_s_index(poly_idx, constraint_idx, num_constraints_padded)`.
+        let rows = params.num_constraints_padded * NUM_POLY_TYPES;
+        debug_assert_eq!(
+            1usize << params.num_s_vars,
+            rows,
+            "Expected 2^num_s_vars rows (got rows={rows}, num_s_vars={})",
+            params.num_s_vars
+        );
 
-        // Bind x variables (first num_constraint_vars variables)
-        for i in 0..params.num_constraint_vars {
-            matrix_poly.bind_parallel(r_x[i].into(), BindingOrder::LowToHigh);
+        let mut row_values = vec![Fq::zero(); rows];
+        for constraint_idx in 0..params.num_constraints {
+            for poly_idx in 0..NUM_POLY_TYPES {
+                let claim_idx = virtual_claim_index(constraint_idx, poly_idx);
+                let row_idx = matrix_s_index(poly_idx, constraint_idx, params.num_constraints_padded);
+                row_values[row_idx] = virtual_claims[claim_idx];
+            }
         }
 
-        assert_eq!(
-            matrix_poly.get_num_vars(),
-            params.num_s_vars,
-            "After binding x vars, should only have s vars left"
-        );
+        let row_values_mle = MultilinearPolynomial::LargeScalars(DensePolynomial::new(row_values));
 
         Self {
             params,
-            matrix_bound: matrix_poly,
+            row_values_mle,
             virtual_claims,
             r_x,
         }
@@ -190,8 +196,8 @@ impl DirectEvaluationProver {
             .map(|_| transcript.challenge_scalar::<Fq>())
             .collect();
 
-        // Evaluate M(r_s, r_x)
-        let m_eval = PolynomialEvaluation::evaluate(&self.matrix_bound, &r_s);
+        // Evaluate M(r_s, r_x) = Σ_i eq(r_s, i) · v_i via MLE evaluation of row values.
+        let m_eval = PolynomialEvaluation::evaluate(&self.row_values_mle, &r_s);
 
         // Note: m_eval is passed in the proof structure, but we still append
         // to transcript to maintain Fiat-Shamir soundness
@@ -201,6 +207,54 @@ impl DirectEvaluationProver {
         // Note: We reverse r_s and r_x because OpeningPoint expects big-endian ordering
         // while our polynomials use little-endian variable ordering internally.
         // The matrix has variables ordered as [x_vars, s_vars] in little-endian.
+        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(
+            r_s.iter()
+                .rev()
+                .chain(self.r_x.iter().rev())
+                .cloned()
+                .map(|f| f.into())
+                .collect(),
+        );
+
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::DorySparseConstraintMatrix,
+            SumcheckId::RecursionVirtualization,
+            opening_point,
+            m_eval,
+        );
+
+        (r_s, m_eval)
+    }
+
+    /// Run the prover protocol, using a fixed prefix `r_c` and sampling only the remaining
+    /// `r_t` coordinates in Stage 3.
+    ///
+    /// This is used by the fused-virtual-polynomials rollout: Stage 2 fixes `r_c`, Stage 3
+    /// samples only the remaining `s`-coordinates.
+    pub fn prove_with_r_c<T: Transcript>(
+        &self,
+        r_c: &[Fq],
+        transcript: &mut T,
+        accumulator: &mut ProverOpeningAccumulator<Fq>,
+    ) -> (Vec<Fq>, Fq) {
+        assert!(
+            r_c.len() <= self.params.num_s_vars,
+            "r_c length must be <= num_s_vars"
+        );
+        let num_remaining = self.params.num_s_vars - r_c.len();
+        let r_t: Vec<Fq> = (0..num_remaining)
+            .map(|_| transcript.challenge_scalar::<Fq>())
+            .collect();
+
+        let mut r_s: Vec<Fq> = Vec::with_capacity(self.params.num_s_vars);
+        r_s.extend_from_slice(r_c);
+        r_s.extend_from_slice(&r_t);
+
+        // Evaluate M(r_s, r_x) = Σ_i eq(r_s, i) · v_i via MLE evaluation of row values.
+        let m_eval = PolynomialEvaluation::evaluate(&self.row_values_mle, &r_s);
+        transcript.append_scalar(&m_eval);
+
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(
             r_s.iter()
                 .rev()
@@ -273,6 +327,58 @@ impl DirectEvaluationVerifier {
         // Note: We reverse r_s and r_x because OpeningPoint expects big-endian ordering
         // while our polynomials use little-endian variable ordering internally.
         // The matrix has variables ordered as [x_vars, s_vars] in little-endian.
+        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(
+            r_s.iter()
+                .rev()
+                .chain(self.r_x.iter().rev())
+                .cloned()
+                .map(|f| f.into())
+                .collect(),
+        );
+
+        accumulator.append_virtual(
+            transcript,
+            VirtualPolynomial::DorySparseConstraintMatrix,
+            SumcheckId::RecursionVirtualization,
+            opening_point,
+        );
+
+        Ok(r_s)
+    }
+
+    /// Run the verifier protocol, using a fixed prefix `r_c` and sampling only the remaining
+    /// `r_t` coordinates in Stage 3.
+    pub fn verify_with_r_c<T: Transcript>(
+        &self,
+        r_c: &[Fq],
+        transcript: &mut T,
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        m_eval_claimed: Fq,
+    ) -> Result<Vec<Fq>, Stage2Error> {
+        assert!(
+            r_c.len() <= self.params.num_s_vars,
+            "r_c length must be <= num_s_vars"
+        );
+        let num_remaining = self.params.num_s_vars - r_c.len();
+        let r_t: Vec<Fq> = (0..num_remaining)
+            .map(|_| transcript.challenge_scalar::<Fq>())
+            .collect();
+        let mut r_s: Vec<Fq> = Vec::with_capacity(self.params.num_s_vars);
+        r_s.extend_from_slice(r_c);
+        r_s.extend_from_slice(&r_t);
+
+        let eq_evals = EqPolynomial::<Fq>::evals(&r_s);
+        let m_eval_expected = self.compute_expected_evaluation(&eq_evals);
+
+        if m_eval_claimed != m_eval_expected {
+            return Err(Stage2Error::EvaluationMismatch {
+                expected: format!("{m_eval_expected:?}"),
+                actual: format!("{m_eval_claimed:?}"),
+            });
+        }
+
+        transcript.append_scalar(&m_eval_claimed);
+
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(
             r_s.iter()
                 .rev()
@@ -778,30 +884,6 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                     vp(MultiMillerLoopTerm::InvDeltaXC1),
                     SumcheckId::MultiMillerLoop,
                 );
-                let (_, l_c0_c0) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::LC0C0),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, l_c0_c1) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::LC0C1),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, l_c1_c0) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::LC1C0),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, l_c1_c1) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::LC1C1),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, l_c2_c0) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::LC2C0),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, l_c2_c1) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::LC2C1),
-                    SumcheckId::MultiMillerLoop,
-                );
                 let (_, x_p) = accumulator.get_virtual_polynomial_opening(
                     vp(MultiMillerLoopTerm::XP),
                     SumcheckId::MultiMillerLoop,
@@ -838,34 +920,6 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                     vp(MultiMillerLoopTerm::LVal),
                     SumcheckId::MultiMillerLoop,
                 );
-                let (_, g) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::G),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, selector_0) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::Selector0),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, selector_1) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::Selector1),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, selector_2) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::Selector2),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, selector_3) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::Selector3),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, selector_4) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::Selector4),
-                    SumcheckId::MultiMillerLoop,
-                );
-                let (_, selector_5) = accumulator.get_virtual_polynomial_opening(
-                    vp(MultiMillerLoopTerm::Selector5),
-                    SumcheckId::MultiMillerLoop,
-                );
 
                 constraint_claims[PolyType::MultiMillerLoopF as usize] = f;
                 constraint_claims[PolyType::MultiMillerLoopFNext as usize] = f_next;
@@ -882,12 +936,6 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 constraint_claims[PolyType::MultiMillerLoopLambdaC1 as usize] = lambda_c1;
                 constraint_claims[PolyType::MultiMillerLoopInvDeltaXC0 as usize] = inv_dx_c0;
                 constraint_claims[PolyType::MultiMillerLoopInvDeltaXC1 as usize] = inv_dx_c1;
-                constraint_claims[PolyType::MultiMillerLoopLC0C0 as usize] = l_c0_c0;
-                constraint_claims[PolyType::MultiMillerLoopLC0C1 as usize] = l_c0_c1;
-                constraint_claims[PolyType::MultiMillerLoopLC1C0 as usize] = l_c1_c0;
-                constraint_claims[PolyType::MultiMillerLoopLC1C1 as usize] = l_c1_c1;
-                constraint_claims[PolyType::MultiMillerLoopLC2C0 as usize] = l_c2_c0;
-                constraint_claims[PolyType::MultiMillerLoopLC2C1 as usize] = l_c2_c1;
                 constraint_claims[PolyType::MultiMillerLoopXP as usize] = x_p;
                 constraint_claims[PolyType::MultiMillerLoopYP as usize] = y_p;
                 constraint_claims[PolyType::MultiMillerLoopXQC0 as usize] = x_q_c0;
@@ -897,13 +945,6 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 constraint_claims[PolyType::MultiMillerLoopIsDouble as usize] = is_double;
                 constraint_claims[PolyType::MultiMillerLoopIsAdd as usize] = is_add;
                 constraint_claims[PolyType::MultiMillerLoopLVal as usize] = l_val;
-                constraint_claims[PolyType::MultiMillerLoopG as usize] = g;
-                constraint_claims[PolyType::MultiMillerLoopSelector0 as usize] = selector_0;
-                constraint_claims[PolyType::MultiMillerLoopSelector1 as usize] = selector_1;
-                constraint_claims[PolyType::MultiMillerLoopSelector2 as usize] = selector_2;
-                constraint_claims[PolyType::MultiMillerLoopSelector3 as usize] = selector_3;
-                constraint_claims[PolyType::MultiMillerLoopSelector4 as usize] = selector_4;
-                constraint_claims[PolyType::MultiMillerLoopSelector5 as usize] = selector_5;
 
                 multi_miller_loop_idx += 1;
             }

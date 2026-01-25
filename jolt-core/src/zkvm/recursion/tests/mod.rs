@@ -13,4 +13,6 @@ mod jagged_test;
 #[cfg(test)]
 mod matrix_definition_test;
 #[cfg(test)]
+mod pipeline_invariants_test;
+#[cfg(test)]
 mod sumcheck_relation_test;

@@ -6,6 +6,7 @@
 //! - Shift scalar multiplication: Shift sumchecks for scalar multiplication traces
 
 pub mod addition;
+pub mod fused_addition;
 pub mod scalar_multiplication;
 pub mod shift;
 

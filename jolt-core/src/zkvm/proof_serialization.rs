@@ -57,6 +57,27 @@ pub struct RecursionConstraintMetadata {
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 }
 
+/// Optional recursion payload (strict extension of the base proof).
+///
+/// When present, the verifier can skip native Stage 8 PCS verification and instead
+/// do Stage 8 Fiat–Shamir replay + recursion SNARK verification.
+#[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
+pub struct RecursionPayload<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
+    /// Hint for combine_commitments offloading (the combined GT element), used by some
+    /// non-recursive fast paths and by legacy verifiers.
+    pub stage8_combine_hint: Option<Fq12>,
+    /// PCS hint produced during recursion witness generation (used by some streaming
+    /// and legacy verification paths).
+    pub stage9_pcs_hint: <PCS as RecursionExt<F>>::Hint,
+    /// Constraint metadata extracted from recursion prover.
+    pub stage10_recursion_metadata: RecursionConstraintMetadata,
+    /// Combined proof containing:
+    /// - Stage 11: Recursion sumchecks (constraint, virtualization, jagged)
+    /// - Stage 12: Dense polynomial commitment
+    /// - Stage 13: Hyrax opening proof
+    pub recursion_proof: RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>,
+}
+
 /// Jolt proof structure organized by verification stages
 pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
     // ============ Shared Data ============
@@ -90,23 +111,10 @@ pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
     // ============ Stage 8: Dory Batch Opening ============
     /// Dory polynomial commitment opening proof
     pub stage8_opening_proof: PCS::Proof,
-    /// Hint for combine_commitments offloading (the combined GT element)
-    pub stage8_combine_hint: Option<Fq12>,
 
-    // ============ Stage 9: Recursion Witness Generation ============
-    /// PCS hint for recursion witness generation
-    pub stage9_pcs_hint: Option<<PCS as RecursionExt<F>>::Hint>,
-
-    // ============ Stage 10: Constraint System Metadata ============
-    /// Constraint metadata extracted from recursion prover
-    pub stage10_recursion_metadata: RecursionConstraintMetadata,
-
-    // ============ Stages 11-13: Recursion SNARK ============
-    /// Combined proof containing:
-    /// - Stage 11: Recursion sumchecks (constraint, virtualization, jagged)
-    /// - Stage 12: Dense polynomial commitment
-    /// - Stage 13: Hyrax opening proof
-    pub recursion_proof: RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>,
+    // ============ Optional Recursion Payload ============
+    /// Recursion payload (strict extension).
+    pub recursion: Option<RecursionPayload<F, PCS, FS>>,
 
     // ============ Advice Proofs ============
     /// Trusted advice opening proof at point from RamValEvaluation
@@ -197,13 +205,7 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             .serialize_with_mode(&mut writer, compress)?;
         self.stage8_opening_proof
             .serialize_with_mode(&mut writer, compress)?;
-        self.stage8_combine_hint
-            .serialize_with_mode(&mut writer, compress)?;
-        self.stage9_pcs_hint
-            .serialize_with_mode(&mut writer, compress)?;
-        self.stage10_recursion_metadata
-            .serialize_with_mode(&mut writer, compress)?;
-        self.recursion_proof
+        self.recursion
             .serialize_with_mode(&mut writer, compress)?;
         self.trusted_advice_val_evaluation_proof
             .serialize_with_mode(&mut writer, compress)?;
@@ -247,10 +249,7 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             + self.stage6b_sumcheck_proof.serialized_size(compress)
             + self.stage7_sumcheck_proof.serialized_size(compress)
             + self.stage8_opening_proof.serialized_size(compress)
-            + self.stage8_combine_hint.serialized_size(compress)
-            + self.stage9_pcs_hint.serialized_size(compress)
-            + self.stage10_recursion_metadata.serialized_size(compress)
-            + self.recursion_proof.serialized_size(compress)
+            + self.recursion.serialized_size(compress)
             + self
                 .trusted_advice_val_evaluation_proof
                 .serialized_size(compress)
@@ -346,18 +345,7 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalDeserialize
                 compress,
                 validate,
             )?,
-            stage8_combine_hint: Option::deserialize_with_mode(&mut reader, compress, validate)?,
-            stage9_pcs_hint: Option::deserialize_with_mode(&mut reader, compress, validate)?,
-            stage10_recursion_metadata: RecursionConstraintMetadata::deserialize_with_mode(
-                &mut reader,
-                compress,
-                validate,
-            )?,
-            recursion_proof: RecursionProof::deserialize_with_mode(
-                &mut reader,
-                compress,
-                validate,
-            )?,
+            recursion: Option::deserialize_with_mode(&mut reader, compress, validate)?,
             trusted_advice_val_evaluation_proof: Option::deserialize_with_mode(
                 &mut reader,
                 compress,

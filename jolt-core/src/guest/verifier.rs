@@ -41,6 +41,7 @@ pub fn verify<
     inputs_bytes: &[u8],
     trusted_advice_commitment: Option<<PCS as CommitmentScheme>::Commitment>,
     outputs_bytes: &[u8],
+    recursion: bool,
     proof: JoltProof<F, PCS, FS>,
     preprocessing: &JoltVerifierPreprocessing<F, PCS>,
 ) -> Result<(), ProofVerifyError>
@@ -70,7 +71,7 @@ where
         trusted_advice_commitment,
         None,
     )?;
-    if let Err(_e) = verifier.verify() {
+    if let Err(_e) = verifier.verify(recursion) {
         #[cfg(debug_assertions)]
         eprintln!("Jolt verifier failed: {_e:?}");
         return Err(ProofVerifyError::InternalError);

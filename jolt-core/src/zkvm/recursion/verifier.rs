@@ -130,6 +130,25 @@ impl RecursionVerifier<Fq> {
         matrix_commitment: &PCS::Commitment,
         verifier_setup: &PCS::VerifierSetup,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Synchronize Fiat–Shamir transcript state with the prover.
+        //
+        // In the end-to-end pipeline, these are sampled from the main transcript *after* Stage 8
+        // (Dory batch opening) and *before* any recursion sumchecks/Hyrax operations.
+        let gamma: Fq = transcript.challenge_scalar();
+        let delta: Fq = transcript.challenge_scalar();
+        if gamma != proof.gamma || delta != proof.delta {
+            return Err(format!(
+                "Recursion FS mismatch: transcript sampled (gamma, delta)=({gamma}, {delta}) but proof has (gamma, delta)=({}, {})",
+                proof.gamma, proof.delta
+            )
+            .into());
+        }
+
+        // Bind the Hyrax dense commitment into the transcript.
+        //
+        // Prover order: commit dense polynomial (Hyrax) → append commitment → run recursion sumchecks.
+        transcript.append_serializable(matrix_commitment);
+
         // Initialize opening accumulator
         let mut accumulator = VerifierOpeningAccumulator::<Fq>::new(self.input.num_vars);
 
@@ -137,11 +156,6 @@ impl RecursionVerifier<Fq> {
         for (key, value) in &proof.opening_claims {
             accumulator.openings.insert(*key, value.clone());
         }
-
-        // NOTE: The caller is responsible for appending the commitment to the transcript
-        // BEFORE calling this method. The prover commits BEFORE running sumchecks,
-        // so the verifier must also append the commitment before verification.
-        // See: JoltVerifier::verify_stage8_with_recursion() and e2e_test.rs
 
         // ============ STAGE 1: Packed GT Exp ============
         let _cycle_stage1 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE1);

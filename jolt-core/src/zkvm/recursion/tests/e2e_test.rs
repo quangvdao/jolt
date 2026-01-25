@@ -71,9 +71,13 @@ fn test_recursion_snark_e2e_with_dory() {
     let ark_commitment = commitment;
 
     // ============ CREATE RECURSION PROVER FROM DORY PROOF ============
-    // Generate gamma and delta for batching
-    let gamma = Fq::rand(&mut rng);
-    let delta = Fq::rand(&mut rng);
+    // Create transcript for proving recursion and sample (gamma, delta) from it.
+    //
+    // This mirrors the end-to-end pipeline where recursion batching challenges are derived
+    // from Fiat–Shamir transcript state (not RNG).
+    let mut prover_transcript = Blake2bTranscript::new(b"recursion_snark");
+    let gamma: Fq = prover_transcript.challenge_scalar();
+    let delta: Fq = prover_transcript.challenge_scalar();
 
     // Create prover using Dory witness generation
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
@@ -146,9 +150,6 @@ fn test_recursion_snark_e2e_with_dory() {
 
     // (Verifier input will be constructed from prover-produced metadata later.)
 
-    // Create transcript for proving
-    let mut prover_transcript = Blake2bTranscript::new(b"recursion_snark");
-
     // Setup Hyrax PCS (which works with Fq)
     const RATIO: usize = 1;
     type HyraxPCS = Hyrax<RATIO, GrumpkinProjective>;
@@ -218,9 +219,6 @@ fn test_recursion_snark_e2e_with_dory() {
 
     // Setup Hyrax verifier
     let hyrax_verifier_setup = <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
-
-    // Append commitment to transcript BEFORE calling verify (matches prover's order)
-    verifier_transcript.append_serializable(&dense_commitment);
 
     // Verify the proof
     let verification_result = verifier

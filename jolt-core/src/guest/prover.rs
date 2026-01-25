@@ -73,6 +73,7 @@ pub fn prove<
     inputs_bytes: &[u8],
     untrusted_advice_bytes: &[u8],
     trusted_advice_bytes: &[u8],
+    recursion: bool,
     trusted_advice_commitment: Option<<PCS as CommitmentScheme>::Commitment>,
     trusted_advice_hint: Option<<PCS as CommitmentScheme>::OpeningProofHint>,
     output_bytes: &mut [u8],
@@ -106,7 +107,7 @@ where
         program_mode,
     );
     let io_device = prover.program_io.clone();
-    let (proof, debug_info) = prover.prove();
+    let (proof, debug_info) = prover.prove(recursion);
     output_bytes[..io_device.outputs.len()].copy_from_slice(&io_device.outputs);
     (proof, io_device, debug_info)
 }

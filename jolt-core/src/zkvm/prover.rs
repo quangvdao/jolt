@@ -114,7 +114,7 @@ use crate::{
             ra_virtual::InstructionRaSumcheckProver as LookupsRaSumcheckProver,
             read_raf_checking::InstructionReadRafSumcheckProver,
         },
-        proof_serialization::{Claims, JoltProof},
+        proof_serialization::{Claims, JoltProof, RecursionPayload},
         r1cs::key::UniformSpartanKey,
         ram::{
             gen_ram_memory_states, hamming_booleanity::HammingBooleanitySumcheckProver,
@@ -565,6 +565,7 @@ where
     #[tracing::instrument(skip_all)]
     pub fn prove(
         mut self,
+        recursion: bool,
     ) -> (
         JoltProof<F, PCS, ProofTranscript>,
         Option<ProverDebugInfo<F, ProofTranscript, PCS>>,
@@ -683,64 +684,71 @@ where
         // Stage 8: Dory batch opening proof (plus a recursion-agnostic snapshot).
         let (joint_opening_proof, stage8_snapshot) = self.prove_stage8(opening_proof_hints);
 
-        // Derive verifier setup once for recursion witness generation.
-        // (Intended to be cached for session-level reuse.)
-        let verifier_setup = PCS::setup_verifier(&self.preprocessing.generators);
+        let recursion_payload: Option<RecursionPayload<F, PCS, ProofTranscript>> = if recursion {
+            // Derive verifier setup once for recursion witness generation.
+            // (Intended to be cached for session-level reuse.)
+            let verifier_setup = PCS::setup_verifier(&self.preprocessing.generators);
 
-        // Recursion proving entrypoint (Stages 9-13 live inside `RecursionProver::prove`).
-        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-        let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
+            // Recursion proving entrypoint (Stages 9-13 live inside `RecursionProver::prove`).
+            type HyraxPCS = Hyrax<1, GrumpkinProjective>;
+            let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
 
-        // Build the minimal commitment map needed for recursion-only Stage 8 offloading.
-        let mut commitments_map = HashMap::new();
-        {
-            let needs_trusted_advice = stage8_snapshot
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice);
-            let needs_untrusted_advice = stage8_snapshot
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice);
+            // Build the minimal commitment map needed for recursion-only Stage 8 offloading.
+            let mut commitments_map = HashMap::new();
+            {
+                let needs_trusted_advice = stage8_snapshot
+                    .polynomial_claims
+                    .iter()
+                    .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice);
+                let needs_untrusted_advice = stage8_snapshot
+                    .polynomial_claims
+                    .iter()
+                    .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice);
 
-            let all_polys = all_committed_polynomials(&self.one_hot_params);
-            debug_assert_eq!(
-                all_polys.len(),
-                self.commitments.len(),
-                "commitment vector length mismatch"
-            );
-            for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
-                commitments_map.insert(poly, commitment.clone());
-            }
-
-            if needs_trusted_advice {
-                if let Some(ref commitment) = self.advice.trusted_advice_commitment {
-                    commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-                }
-            }
-            if needs_untrusted_advice {
-                if let Some(ref commitment) = self.untrusted_advice_commitment {
-                    commitments_map
-                        .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
-                }
-            }
-
-            // Include program commitments in committed mode (BytecodeChunk and ProgramImageInit).
-            if let Some(ref program_commitments) = self.preprocessing.program_commitments {
-                for (idx, commitment) in program_commitments.bytecode_commitments.iter().enumerate()
-                {
-                    commitments_map
-                        .insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
-                }
-                commitments_map.insert(
-                    CommittedPolynomial::ProgramImageInit,
-                    program_commitments.program_image_commitment.clone(),
+                let all_polys = all_committed_polynomials(&self.one_hot_params);
+                debug_assert_eq!(
+                    all_polys.len(),
+                    self.commitments.len(),
+                    "commitment vector length mismatch"
                 );
-            }
-        }
+                for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
+                    commitments_map.insert(poly, commitment.clone());
+                }
 
-        let (recursion_proof, recursion_constraint_metadata, stage8_combine_hint, stage9_pcs_hint) =
-            RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript, HyraxPCS>(
+                if needs_trusted_advice {
+                    if let Some(ref commitment) = self.advice.trusted_advice_commitment {
+                        commitments_map
+                            .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                    }
+                }
+                if needs_untrusted_advice {
+                    if let Some(ref commitment) = self.untrusted_advice_commitment {
+                        commitments_map
+                            .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                    }
+                }
+
+                // Include program commitments in committed mode (BytecodeChunk and ProgramImageInit).
+                if let Some(ref program_commitments) = self.preprocessing.program_commitments {
+                    for (idx, commitment) in
+                        program_commitments.bytecode_commitments.iter().enumerate()
+                    {
+                        commitments_map
+                            .insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
+                    }
+                    commitments_map.insert(
+                        CommittedPolynomial::ProgramImageInit,
+                        program_commitments.program_image_commitment.clone(),
+                    );
+                }
+            }
+
+            let (
+                recursion_proof,
+                recursion_constraint_metadata,
+                stage8_combine_hint,
+                stage9_pcs_hint,
+            ) = RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript, HyraxPCS>(
                 &mut self.transcript,
                 hyrax_prover_setup,
                 &joint_opening_proof,
@@ -749,6 +757,16 @@ where
                 &commitments_map,
             )
             .expect("Failed to generate recursion proof");
+
+            Some(RecursionPayload {
+                stage8_combine_hint,
+                stage9_pcs_hint,
+                stage10_recursion_metadata: recursion_constraint_metadata,
+                recursion_proof,
+            })
+        } else {
+            None
+        };
 
         #[cfg(test)]
         assert!(
@@ -784,10 +802,7 @@ where
             stage6b_sumcheck_proof,
             stage7_sumcheck_proof,
             stage8_opening_proof: joint_opening_proof,
-            stage8_combine_hint,
-            stage9_pcs_hint: Some(stage9_pcs_hint),
-            stage10_recursion_metadata: recursion_constraint_metadata,
-            recursion_proof,
+            recursion: recursion_payload,
             trusted_advice_val_evaluation_proof: None,
             trusted_advice_val_final_proof: None,
             untrusted_advice_val_evaluation_proof: None,

@@ -25,9 +25,7 @@ use rayon::prelude::*;
 use crate::field::JoltField;
 use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
 use crate::poly::eq_poly::EqPolynomial;
-use crate::poly::multilinear_polynomial::{
-    BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
-};
+use crate::poly::multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding};
 use crate::poly::opening_proof::{
     OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
     VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
@@ -333,10 +331,12 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for BytecodeClaim
         0
     }
 
+    #[tracing::instrument(skip_all, name = "BytecodeClaimReductionProver::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         self.compute_message_impl(previous_claim)
     }
 
+    #[tracing::instrument(skip_all, name = "BytecodeClaimReductionProver::ingest_challenge")]
     fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         if self.params.phase == BytecodeReductionPhase::CycleVariables {
             self.params.cycle_var_challenges.push(r_j);
@@ -454,15 +454,18 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
                 let eq_eval = EqPolynomial::<F>::mle(&r_cycle.r, &params.r_bc.r);
 
                 // Evaluate each chunk's lane-weight polynomial at r_lane and combine with chunk openings.
+                let eq_lane = EqPolynomial::<F>::evals(&r_lane.r);
                 let mut sum = F::zero();
                 for chunk_idx in 0..params.num_chunks {
                     let (_, chunk_opening) = accumulator.get_committed_polynomial_opening(
                         CommittedPolynomial::BytecodeChunk(chunk_idx),
                         SumcheckId::BytecodeClaimReduction,
                     );
-                    let w_poly =
-                        MultilinearPolynomial::from(params.chunk_lane_weights[chunk_idx].clone());
-                    let w_eval = w_poly.evaluate(&r_lane.r);
+                    let w_eval: F = params.chunk_lane_weights[chunk_idx]
+                        .iter()
+                        .zip(eq_lane.iter())
+                        .map(|(w, e)| *w * *e)
+                        .sum();
                     sum += chunk_opening * w_eval;
                 }
 

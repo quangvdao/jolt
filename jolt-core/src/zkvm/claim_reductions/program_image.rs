@@ -7,6 +7,8 @@
 use allocative::Allocative;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rayon::prelude::*;
+
 use crate::field::JoltField;
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding};
@@ -160,6 +162,7 @@ fn build_eq_slice_table<F: JoltField>(
 }
 
 impl<F: JoltField> ProgramImageClaimReductionProver<F> {
+    #[tracing::instrument(skip_all, name = "ProgramImageClaimReductionProver::initialize")]
     pub fn initialize(
         params: ProgramImageClaimReductionParams<F>,
         program_image_words_padded: Vec<u64>,
@@ -212,20 +215,30 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         0
     }
 
+    #[tracing::instrument(skip_all, name = "ProgramImageClaimReductionProver::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         let half = self.program_word.len() / 2;
-        let mut evals = [F::zero(); DEGREE_BOUND];
-        for j in 0..half {
-            let pw = self
-                .program_word
-                .sumcheck_evals_array::<DEGREE_BOUND>(j, BindingOrder::LowToHigh);
-            let eq = self
-                .eq_slice
-                .sumcheck_evals_array::<DEGREE_BOUND>(j, BindingOrder::LowToHigh);
-            for i in 0..DEGREE_BOUND {
-                evals[i] += pw[i] * eq[i];
-            }
-        }
+        let program_word = &self.program_word;
+        let eq_slice = &self.eq_slice;
+        let mut evals: [F; DEGREE_BOUND] = (0..half)
+            .into_par_iter()
+            .map(|j| {
+                let pw =
+                    program_word.sumcheck_evals_array::<DEGREE_BOUND>(j, BindingOrder::LowToHigh);
+                let eq = eq_slice.sumcheck_evals_array::<DEGREE_BOUND>(j, BindingOrder::LowToHigh);
+                let mut out = [F::zero(); DEGREE_BOUND];
+                for i in 0..DEGREE_BOUND {
+                    out[i] = pw[i] * eq[i];
+                }
+                out
+            })
+            .reduce(
+                || [F::zero(); DEGREE_BOUND],
+                |mut acc, arr| {
+                    acc.iter_mut().zip(arr.iter()).for_each(|(a, b)| *a += *b);
+                    acc
+                },
+            );
         // If this instance has trailing dummy rounds, `previous_claim` is scaled by 2^{dummy_rounds}
         // in the batched sumcheck. Scale the per-round univariate evaluations accordingly so the
         // sumcheck consistency checks pass (mirrors BytecodeClaimReduction).
@@ -239,6 +252,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         UniPoly::from_evals_and_hint(previous_claim, &evals)
     }
 
+    #[tracing::instrument(skip_all, name = "ProgramImageClaimReductionProver::ingest_challenge")]
     fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         self.program_word
             .bind_parallel(r_j, BindingOrder::LowToHigh);

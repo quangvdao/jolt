@@ -10,6 +10,7 @@ guest = []
 native-input = []
 # Enable proof-bundle input mode (length-delimited container with device+proof bytes).
 proof-bundle = []
+cycle-tracking = ["jolt_sdk/cycle-tracking"]
 
 [dependencies]
 jolt_sdk = { package = "jolt-sdk", path = "../../../jolt-sdk", features = ["guest-verifier"] }

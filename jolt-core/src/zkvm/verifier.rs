@@ -13,6 +13,7 @@ use crate::poly::commitment::{
     hyrax::{Hyrax, PedersenGenerators},
 };
 use crate::poly::opening_proof::{OpeningId, PolynomialId};
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::subprotocols::sumcheck::BatchedSumcheck;
 use crate::zkvm::bytecode::chunks::total_lanes;
 use crate::zkvm::claim_reductions::advice::ReductionPhase;
@@ -1627,7 +1628,6 @@ pub struct JoltSharedPreprocessing {
     pub memory_layout: MemoryLayout,
     pub max_padded_trace_length: usize,
 }
-
 impl JoltSharedPreprocessing {
     /// Create shared preprocessing from program metadata.
     ///
@@ -1745,6 +1745,33 @@ where
             shared,
             hyrax_recursion_setup,
             program,
+        })
+    }
+}
+
+impl<F, PCS> crate::zkvm::guest_serde::GuestSerialize for JoltVerifierPreprocessing<F, PCS>
+where
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+    PCS::VerifierSetup: crate::zkvm::guest_serde::GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.generators.guest_serialize(w)?;
+        self.shared.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl<F, PCS> crate::zkvm::guest_serde::GuestDeserialize for JoltVerifierPreprocessing<F, PCS>
+where
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+    PCS::VerifierSetup: crate::zkvm::guest_serde::GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            generators: PCS::VerifierSetup::guest_deserialize(r)?,
+            shared: JoltSharedPreprocessing::guest_deserialize(r)?,
         })
     }
 }

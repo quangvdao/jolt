@@ -15,7 +15,6 @@ pub const TOOLCHAIN_VERSION: &str = "1.89.0";
 pub struct Program {
     guest: String,
     func: Option<String>,
-    guest_features: String,
     memory_size: u64,
     stack_size: u64,
     max_input_size: u64,
@@ -23,6 +22,7 @@ pub struct Program {
     max_trusted_advice_size: u64,
     max_output_size: u64,
     std: bool,
+    guest_features: Vec<String>,
     pub elf: Option<PathBuf>,
 }
 

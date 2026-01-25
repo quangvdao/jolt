@@ -27,7 +27,6 @@ impl Program {
         Self {
             guest: guest.to_string(),
             func: None,
-            guest_features: "guest".to_string(),
             memory_size: DEFAULT_MEMORY_SIZE,
             stack_size: DEFAULT_STACK_SIZE,
             max_input_size: DEFAULT_MAX_INPUT_SIZE,
@@ -35,8 +34,16 @@ impl Program {
             max_trusted_advice_size: DEFAULT_MAX_TRUSTED_ADVICE_SIZE,
             max_output_size: DEFAULT_MAX_OUTPUT_SIZE,
             std: false,
+            guest_features: Vec::new(),
             elf: None,
         }
+    }
+
+    /// Add an extra cargo feature to enable when building the guest crate.
+    ///
+    /// The base guest build always includes the `guest` feature.
+    pub fn add_guest_feature(&mut self, feature: &str) {
+        self.guest_features.push(feature.to_string());
     }
 
     pub fn set_std(&mut self, std: bool) {
@@ -51,7 +58,15 @@ impl Program {
     ///
     /// Default is `"guest"`.
     pub fn set_guest_features(&mut self, features: &str) {
-        self.guest_features = features.to_string();
+        // Backwards-compatible API: accept a comma-separated feature string.
+        // We always include the base `guest` feature implicitly.
+        self.guest_features = features
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|s| *s != "guest")
+            .map(str::to_string)
+            .collect();
     }
 
     pub fn set_memory_config(&mut self, memory_config: MemoryConfig) {
@@ -200,11 +215,20 @@ impl Program {
             });
             envs.push((&cc_env_var, cc_value));
 
+            let mut features = String::from("guest");
+            if !self.guest_features.is_empty() {
+                let mut extras = self.guest_features.clone();
+                extras.sort();
+                extras.dedup();
+                features.push(',');
+                features.push_str(&extras.join(","));
+            }
+
             let args = [
                 "build",
                 "--release",
                 "--features",
-                &self.guest_features,
+                &features,
                 "-p",
                 &self.guest,
                 "--target-dir",

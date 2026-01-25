@@ -149,11 +149,7 @@ pub struct DirectEvaluationProver {
 
 impl DirectEvaluationProver {
     /// Create a new prover
-    pub fn new(
-        params: DirectEvaluationParams,
-        virtual_claims: Vec<Fq>,
-        r_x: Vec<Fq>,
-    ) -> Self {
+    pub fn new(params: DirectEvaluationParams, virtual_claims: Vec<Fq>, r_x: Vec<Fq>) -> Self {
         // Build the row-evaluation table `M(i, r_x)` from Stage 2 virtual claims:
         //
         // For each row i (poly_idx, constraint_idx), Stage 2 provides v_i = M(i, r_x).
@@ -170,7 +166,8 @@ impl DirectEvaluationProver {
         for constraint_idx in 0..params.num_constraints {
             for poly_idx in 0..NUM_POLY_TYPES {
                 let claim_idx = virtual_claim_index(constraint_idx, poly_idx);
-                let row_idx = matrix_s_index(poly_idx, constraint_idx, params.num_constraints_padded);
+                let row_idx =
+                    matrix_s_index(poly_idx, constraint_idx, params.num_constraints_padded);
                 row_values[row_idx] = virtual_claims[claim_idx];
             }
         }

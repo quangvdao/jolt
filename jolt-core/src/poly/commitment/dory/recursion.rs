@@ -2,21 +2,21 @@
 
 use ark_bn254::{Fq, Fq12, Fr, G1Affine, G2Affine};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Write};
+use dory::evaluation_proof::verify_with_backend;
+use dory::verify_recursive;
 use dory::{
     backends::arkworks::{ArkG1, ArkG2, ArkGT, BN254},
     primitives::arithmetic::{Group, PairingCurve},
     primitives::backend::VerifierBackend,
-    primitives::transcript::Transcript as DoryTranscript,
     primitives::serialization::{DoryDeserialize, DorySerialize},
+    primitives::transcript::Transcript as DoryTranscript,
     recursion::{
         ast::{AstBuilder, AstGraph, AstOp, ScalarValue, ValueId, ValueType},
         precompute_challenges, ChallengeSet, DoryInputProviderWithCommitment, EvalResult, HintMap,
-        InputProvider, OpId, OpType, OperationEvaluator, RoundChallenges, TaskExecutor, TraceContext,
-        WitnessBackend, WitnessGenerator, WitnessResult,
+        InputProvider, OpId, OpType, OperationEvaluator, RoundChallenges, TaskExecutor,
+        TraceContext, WitnessBackend, WitnessGenerator, WitnessResult,
     },
 };
-use dory::evaluation_proof::verify_with_backend;
-use dory::verify_recursive;
 use std::{marker::PhantomData, rc::Rc};
 
 /// Wrapper for `HintMap` that implements ark's serialization traits.
@@ -253,36 +253,93 @@ impl VerifierBackend for AstOnlyBackend {
     type G2 = AstG2;
     type GT = AstGT;
 
-    fn wrap_g1_setup(&mut self, value: <BN254 as PairingCurve>::G1, name: &'static str, index: Option<usize>) -> Self::G1 {
+    fn wrap_g1_setup(
+        &mut self,
+        value: <BN254 as PairingCurve>::G1,
+        name: &'static str,
+        index: Option<usize>,
+    ) -> Self::G1 {
         AstG1(self.ast.intern_g1_setup(value, name, index))
     }
-    fn wrap_g2_setup(&mut self, value: <BN254 as PairingCurve>::G2, name: &'static str, index: Option<usize>) -> Self::G2 {
+    fn wrap_g2_setup(
+        &mut self,
+        value: <BN254 as PairingCurve>::G2,
+        name: &'static str,
+        index: Option<usize>,
+    ) -> Self::G2 {
         AstG2(self.ast.intern_g2_setup(value, name, index))
     }
-    fn wrap_gt_setup(&mut self, value: <BN254 as PairingCurve>::GT, name: &'static str, index: Option<usize>) -> Self::GT {
+    fn wrap_gt_setup(
+        &mut self,
+        value: <BN254 as PairingCurve>::GT,
+        name: &'static str,
+        index: Option<usize>,
+    ) -> Self::GT {
         AstGT(self.ast.intern_gt_setup(value, name, index))
     }
 
-    fn wrap_g1_proof(&mut self, value: <BN254 as PairingCurve>::G1, name: &'static str) -> Self::G1 {
+    fn wrap_g1_proof(
+        &mut self,
+        value: <BN254 as PairingCurve>::G1,
+        name: &'static str,
+    ) -> Self::G1 {
         AstG1(self.ast.intern_g1_proof(value, name))
     }
-    fn wrap_g2_proof(&mut self, value: <BN254 as PairingCurve>::G2, name: &'static str) -> Self::G2 {
+    fn wrap_g2_proof(
+        &mut self,
+        value: <BN254 as PairingCurve>::G2,
+        name: &'static str,
+    ) -> Self::G2 {
         AstG2(self.ast.intern_g2_proof(value, name))
     }
-    fn wrap_gt_proof(&mut self, value: <BN254 as PairingCurve>::GT, name: &'static str) -> Self::GT {
+    fn wrap_gt_proof(
+        &mut self,
+        value: <BN254 as PairingCurve>::GT,
+        name: &'static str,
+    ) -> Self::GT {
         AstGT(self.ast.intern_gt_proof(value, name))
     }
 
-    fn wrap_g1_proof_round(&mut self, value: <BN254 as PairingCurve>::G1, round: usize, is_first_msg: bool, name: &'static str) -> Self::G1 {
-        let msg = if is_first_msg { dory::recursion::ast::RoundMsg::First } else { dory::recursion::ast::RoundMsg::Second };
+    fn wrap_g1_proof_round(
+        &mut self,
+        value: <BN254 as PairingCurve>::G1,
+        round: usize,
+        is_first_msg: bool,
+        name: &'static str,
+    ) -> Self::G1 {
+        let msg = if is_first_msg {
+            dory::recursion::ast::RoundMsg::First
+        } else {
+            dory::recursion::ast::RoundMsg::Second
+        };
         AstG1(self.ast.intern_g1_proof_round(value, round, msg, name))
     }
-    fn wrap_g2_proof_round(&mut self, value: <BN254 as PairingCurve>::G2, round: usize, is_first_msg: bool, name: &'static str) -> Self::G2 {
-        let msg = if is_first_msg { dory::recursion::ast::RoundMsg::First } else { dory::recursion::ast::RoundMsg::Second };
+    fn wrap_g2_proof_round(
+        &mut self,
+        value: <BN254 as PairingCurve>::G2,
+        round: usize,
+        is_first_msg: bool,
+        name: &'static str,
+    ) -> Self::G2 {
+        let msg = if is_first_msg {
+            dory::recursion::ast::RoundMsg::First
+        } else {
+            dory::recursion::ast::RoundMsg::Second
+        };
         AstG2(self.ast.intern_g2_proof_round(value, round, msg, name))
     }
-    fn wrap_gt_proof_round(&mut self, value: <BN254 as PairingCurve>::GT, round: usize, is_first_msg: bool, name: &'static str) -> Self::GT {
-        let msg = if is_first_msg { dory::recursion::ast::RoundMsg::First } else { dory::recursion::ast::RoundMsg::Second };
+    fn wrap_gt_proof_round(
+        &mut self,
+        value: <BN254 as PairingCurve>::GT,
+        round: usize,
+        is_first_msg: bool,
+        name: &'static str,
+    ) -> Self::GT {
+        let msg = if is_first_msg {
+            dory::recursion::ast::RoundMsg::First
+        } else {
+            dory::recursion::ast::RoundMsg::Second
+        };
         AstGT(self.ast.intern_gt_proof_round(value, round, msg, name))
     }
 
@@ -402,7 +459,11 @@ impl VerifierBackend for AstOnlyBackend {
 struct ArkworksOpEvaluator;
 
 impl OperationEvaluator<BN254> for ArkworksOpEvaluator {
-    fn g1_add(&self, a: &<BN254 as PairingCurve>::G1, b: &<BN254 as PairingCurve>::G1) -> <BN254 as PairingCurve>::G1 {
+    fn g1_add(
+        &self,
+        a: &<BN254 as PairingCurve>::G1,
+        b: &<BN254 as PairingCurve>::G1,
+    ) -> <BN254 as PairingCurve>::G1 {
         a.add(b)
     }
     fn g1_scalar_mul(
@@ -425,7 +486,11 @@ impl OperationEvaluator<BN254> for ArkworksOpEvaluator {
         acc
     }
 
-    fn g2_add(&self, a: &<BN254 as PairingCurve>::G2, b: &<BN254 as PairingCurve>::G2) -> <BN254 as PairingCurve>::G2 {
+    fn g2_add(
+        &self,
+        a: &<BN254 as PairingCurve>::G2,
+        b: &<BN254 as PairingCurve>::G2,
+    ) -> <BN254 as PairingCurve>::G2 {
         a.add(b)
     }
     fn g2_scalar_mul(
@@ -448,7 +513,11 @@ impl OperationEvaluator<BN254> for ArkworksOpEvaluator {
         acc
     }
 
-    fn gt_mul(&self, lhs: &<BN254 as PairingCurve>::GT, rhs: &<BN254 as PairingCurve>::GT) -> <BN254 as PairingCurve>::GT {
+    fn gt_mul(
+        &self,
+        lhs: &<BN254 as PairingCurve>::GT,
+        rhs: &<BN254 as PairingCurve>::GT,
+    ) -> <BN254 as PairingCurve>::GT {
         lhs.add(rhs)
     }
     fn gt_exp(
@@ -458,10 +527,18 @@ impl OperationEvaluator<BN254> for ArkworksOpEvaluator {
     ) -> <BN254 as PairingCurve>::GT {
         base.scale(scalar)
     }
-    fn pairing(&self, g1: &<BN254 as PairingCurve>::G1, g2: &<BN254 as PairingCurve>::G2) -> <BN254 as PairingCurve>::GT {
+    fn pairing(
+        &self,
+        g1: &<BN254 as PairingCurve>::G1,
+        g2: &<BN254 as PairingCurve>::G2,
+    ) -> <BN254 as PairingCurve>::GT {
         BN254::pair(g1, g2)
     }
-    fn multi_pairing(&self, g1s: &[<BN254 as PairingCurve>::G1], g2s: &[<BN254 as PairingCurve>::G2]) -> <BN254 as PairingCurve>::GT {
+    fn multi_pairing(
+        &self,
+        g1s: &[<BN254 as PairingCurve>::G1],
+        g2s: &[<BN254 as PairingCurve>::G2],
+    ) -> <BN254 as PairingCurve>::GT {
         BN254::multi_pair(g1s, g2s)
     }
 }
@@ -1033,21 +1110,30 @@ fn expand_witnesses_from_deferred(
             (AstOp::MultiPairing { g1s, g2s, .. }, _) => {
                 let ps: Vec<<BN254 as PairingCurve>::G1> = g1s
                     .iter()
-                    .map(|id| match values[id.0 as usize].as_ref().expect("AST topo order") {
-                        EvalResult::G1(v) => *v,
-                        _ => unreachable!("MultiPairing G1 input must be G1"),
-                    })
+                    .map(
+                        |id| match values[id.0 as usize].as_ref().expect("AST topo order") {
+                            EvalResult::G1(v) => *v,
+                            _ => unreachable!("MultiPairing G1 input must be G1"),
+                        },
+                    )
                     .collect();
                 let qs: Vec<<BN254 as PairingCurve>::G2> = g2s
                     .iter()
-                    .map(|id| match values[id.0 as usize].as_ref().expect("AST topo order") {
-                        EvalResult::G2(v) => *v,
-                        _ => unreachable!("MultiPairing G2 input must be G2"),
-                    })
+                    .map(
+                        |id| match values[id.0 as usize].as_ref().expect("AST topo order") {
+                            EvalResult::G2(v) => *v,
+                            _ => unreachable!("MultiPairing G2 input must be G2"),
+                        },
+                    )
                     .collect();
                 Some(EvalResult::GT(BN254::multi_pair(&ps, &qs)))
             }
-            (AstOp::MsmG1 { points, scalars, .. }, _) => {
+            (
+                AstOp::MsmG1 {
+                    points, scalars, ..
+                },
+                _,
+            ) => {
                 let mut acc = <BN254 as PairingCurve>::G1::identity();
                 for (p, s) in points.iter().zip(scalars.iter()) {
                     let base = match values[p.0 as usize].as_ref().expect("AST topo order") {
@@ -1058,7 +1144,12 @@ fn expand_witnesses_from_deferred(
                 }
                 Some(EvalResult::G1(acc))
             }
-            (AstOp::MsmG2 { points, scalars, .. }, _) => {
+            (
+                AstOp::MsmG2 {
+                    points, scalars, ..
+                },
+                _,
+            ) => {
                 let mut acc = <BN254 as PairingCurve>::G2::identity();
                 for (p, s) in points.iter().zip(scalars.iter()) {
                     let base = match values[p.0 as usize].as_ref().expect("AST topo order") {
@@ -1332,8 +1423,10 @@ fn expand_witnesses_from_deferred(
                     EvalResult::GT(v) => v,
                     _ => unreachable!("MultiPairing output must be GT"),
                 };
-                let g1s: Vec<<BN254 as PairingCurve>::G1> = g1s.iter().map(|id| *get_g1(*id)).collect();
-                let g2s: Vec<<BN254 as PairingCurve>::G2> = g2s.iter().map(|id| *get_g2(*id)).collect();
+                let g1s: Vec<<BN254 as PairingCurve>::G1> =
+                    g1s.iter().map(|id| *get_g1(*id)).collect();
+                let g2s: Vec<<BN254 as PairingCurve>::G2> =
+                    g2s.iter().map(|id| *get_g2(*id)).collect();
                 Some((
                     *op_id,
                     JoltWitnessGenerator::generate_multi_pairing(&g1s, &g2s, result),
@@ -1391,9 +1484,8 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         // Phase 0: derive Fiat–Shamir challenges on the real transcript (hashing).
         // This mutates `transcript` to the exact same final state as a normal verification run.
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-        let challenges =
-            precompute_challenges::<ArkFr, BN254, _>(proof, &mut dory_transcript)
-                .map_err(|_| ProofVerifyError::default())?;
+        let challenges = precompute_challenges::<ArkFr, BN254, _>(proof, &mut dory_transcript)
+            .map_err(|_| ProofVerifyError::default())?;
 
         // Phase 1: build verification AST with challenge replay (no transcript hashing, no group ops).
         let mut backend = AstOnlyBackend::new();
@@ -1430,7 +1522,8 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         }
 
         // Phase 3: expand detailed witnesses in parallel from (AST + outputs-only hints).
-        let witnesses = expand_witnesses_from_deferred(&ast, &hints, &dory_setup, proof, *commitment)?;
+        let witnesses =
+            expand_witnesses_from_deferred(&ast, &hints, &dory_setup, proof, *commitment)?;
 
         Ok((witnesses, JoltHintMap(hints)))
     }
@@ -1691,9 +1784,8 @@ pub fn witness_gen_with_ast<ProofTranscript: crate::transcripts::Transcript>(
     // Phase 0: derive Fiat–Shamir challenges on the real transcript (hashing).
     // This mutates `transcript` to the exact same final state as a normal verification run.
     let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-    let challenges =
-        precompute_challenges::<ArkFr, BN254, _>(proof, &mut dory_transcript)
-            .map_err(|_| ProofVerifyError::default())?;
+    let challenges = precompute_challenges::<ArkFr, BN254, _>(proof, &mut dory_transcript)
+        .map_err(|_| ProofVerifyError::default())?;
 
     // Phase 1: build verification AST with challenge replay (no transcript hashing, no group ops).
     let mut backend = AstOnlyBackend::new();
@@ -1733,7 +1825,11 @@ pub fn witness_gen_with_ast<ProofTranscript: crate::transcripts::Transcript>(
     let witnesses = expand_witnesses_from_deferred(&ast, &hints, &dory_setup, proof, *commitment)?;
     let hints = JoltHintMap(hints);
 
-    Ok(WitnessWithAst { witnesses, ast, hints })
+    Ok(WitnessWithAst {
+        witnesses,
+        ast,
+        hints,
+    })
 }
 
 /// Reconstruct AST from public inputs (verifier-side).

@@ -153,8 +153,10 @@ fn test_sumcheck_relation_with_mapping() {
         // Compute f_t(zs, zx, i) = eq(matrix_row, zs) · eq(eval_idx, zx)
         let row_binary = index_to_binary::<Fq>(matrix_row, num_s_vars);
         let eq_row = EqPolynomial::mle(&row_binary, &zs);
-        let poly_num_vars =
-            <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&jagged_bijection, poly_idx);
+        let poly_num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+            &jagged_bijection,
+            poly_idx,
+        );
 
         // For "native_size == 1" rows (0-var polys), the sparse matrix row is constant over the
         // entire x-hypercube. In the sparse evaluation we get a factor:
@@ -204,8 +206,10 @@ fn test_sumcheck_relation_with_mapping() {
     for poly_idx in 0..jagged_bijection.num_polynomials() {
         let t_prev = jagged_bijection.cumulative_size_before(poly_idx);
         let t_curr = jagged_bijection.cumulative_size(poly_idx);
-        let poly_num_vars =
-            <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&jagged_bijection, poly_idx);
+        let poly_num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+            &jagged_bijection,
+            poly_idx,
+        );
 
         let matrix_row = matrix_rows[poly_idx];
         let row_binary = index_to_binary::<Fq>(matrix_row, num_s_vars);

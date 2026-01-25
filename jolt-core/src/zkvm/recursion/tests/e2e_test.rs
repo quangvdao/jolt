@@ -156,9 +156,9 @@ fn test_recursion_snark_e2e_with_dory() {
     let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(dense_num_vars);
 
     // Run the prover phases explicitly (commit → sumchecks → opening).
-    let poly_commit =
-        prover.poly_commit::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
-            .expect("poly_commit failed");
+    let poly_commit = prover
+        .poly_commit::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
+        .expect("poly_commit failed");
     let sumchecks = prover
         .prove_sumchecks::<Blake2bTranscript>(
             &mut prover_transcript,
@@ -167,16 +167,14 @@ fn test_recursion_snark_e2e_with_dory() {
             poly_commit.dense_poly_for_jagged,
         )
         .expect("prove_sumchecks failed");
-    let (opening_proof, opening_claims) = RecursionProver::<Fq>::poly_opening::<
-        Blake2bTranscript,
-        HyraxPCS,
-    >(
-        &mut prover_transcript,
-        &hyrax_prover_setup,
-        sumchecks.accumulator,
-        poly_commit.dense_mlpoly,
-    )
-    .expect("poly_opening failed");
+    let (opening_proof, opening_claims) =
+        RecursionProver::<Fq>::poly_opening::<Blake2bTranscript, HyraxPCS>(
+            &mut prover_transcript,
+            &hyrax_prover_setup,
+            sumchecks.accumulator,
+            poly_commit.dense_mlpoly,
+        )
+        .expect("poly_opening failed");
 
     let dense_commitment = poly_commit.dense_commitment.clone();
     let recursion_constraint_metadata = poly_commit.metadata.clone();

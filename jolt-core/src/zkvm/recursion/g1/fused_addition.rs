@@ -18,9 +18,7 @@ use crate::{
     poly::{
         dense_mlpoly::DensePolynomial,
         eq_poly::EqPolynomial,
-        multilinear_polynomial::{
-            BindingOrder, MultilinearPolynomial, PolynomialBinding,
-        },
+        multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN,
@@ -32,6 +30,7 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
+    zkvm::witness::TermEnum,
     zkvm::{
         recursion::{
             constraints::system::{ConstraintType, PolyType},
@@ -39,7 +38,6 @@ use crate::{
         },
         witness::{G1AddTerm, VirtualPolynomial},
     },
-    zkvm::witness::TermEnum,
 };
 
 use allocative::Allocative;
@@ -55,11 +53,7 @@ const DEGREE_BOUND: usize = 6;
 /// Input layout: `in[c * row_size + x]` (x varies fastest within a constraint row)
 /// Output layout: `out[x * num_constraints_padded + c]` (c varies fastest within an x-slice)
 #[inline]
-fn transpose_xc_to_cx(
-    input: &[Fq],
-    num_constraints_padded: usize,
-    row_size: usize,
-) -> Vec<Fq> {
+fn transpose_xc_to_cx(input: &[Fq], num_constraints_padded: usize, row_size: usize) -> Vec<Fq> {
     debug_assert_eq!(input.len(), num_constraints_padded * row_size);
     let mut out = vec![Fq::zero(); input.len()];
     for c in 0..num_constraints_padded {
@@ -98,7 +92,11 @@ pub struct FusedG1AddParams {
 }
 
 impl FusedG1AddParams {
-    pub fn new(num_constraints: usize, num_constraints_padded: usize, num_constraint_vars: usize) -> Self {
+    pub fn new(
+        num_constraints: usize,
+        num_constraints_padded: usize,
+        num_constraint_vars: usize,
+    ) -> Self {
         debug_assert!(num_constraints_padded.is_power_of_two());
         let num_constraint_index_vars = num_constraints_padded.trailing_zeros() as usize;
         Self {
@@ -129,7 +127,10 @@ impl SumcheckInstanceParams<Fq> for FusedG1AddParams {
         Fq::zero()
     }
 
-    fn normalize_opening_point(&self, challenges: &[<Fq as JoltField>::Challenge]) -> OpeningPoint<BIG_ENDIAN, Fq> {
+    fn normalize_opening_point(
+        &self,
+        challenges: &[<Fq as JoltField>::Challenge],
+    ) -> OpeningPoint<BIG_ENDIAN, Fq> {
         // Follow the default recursion convention: treat the raw sumcheck challenges as the opening point.
         OpeningPoint::<BIG_ENDIAN, Fq>::new(challenges.to_vec())
     }
@@ -170,7 +171,8 @@ impl FusedG1AddProver {
         // Build indicator table in [x_low, c_high] layout, then transpose to [c_low, x_high].
         let mut ind_xc = vec![Fq::zero(); params.num_constraints_padded * row_size];
         for c in 0..params.num_constraints_padded {
-            let is_g1add = c < constraint_types.len() && matches!(constraint_types[c], ConstraintType::G1Add);
+            let is_g1add =
+                c < constraint_types.len() && matches!(constraint_types[c], ConstraintType::G1Add);
             if is_g1add {
                 let off = c * row_size;
                 for x in 0..row_size {
@@ -191,7 +193,9 @@ impl FusedG1AddProver {
             let end = start + block_size;
             let block_xc = &matrix_evals[start..end];
             let block_cx = transpose_xc_to_cx(block_xc, params.num_constraints_padded, row_size);
-            term_polys.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(block_cx)));
+            term_polys.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+                block_cx,
+            )));
         }
 
         Self {
@@ -211,7 +215,10 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1AddProver {
 
     fn compute_message(&mut self, _round: usize, previous_claim: Fq) -> UniPoly<Fq> {
         let num_remaining = self.eq_poly.get_num_vars();
-        debug_assert!(num_remaining > 0, "fused g1add should have at least one round");
+        debug_assert!(
+            num_remaining > 0,
+            "fused g1add should have at least one round"
+        );
         let half = 1usize << (num_remaining - 1);
 
         let term_batch_coeff = self.term_batch_coeff;
@@ -229,7 +236,8 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1AddProver {
                 // Collect per-term eval arrays once per idx.
                 let mut poly_evals = vec![[Fq::zero(); DEGREE_BOUND]; self.term_polys.len()];
                 for (t, poly) in self.term_polys.iter().enumerate() {
-                    poly_evals[t] = poly.sumcheck_evals_array::<DEGREE_BOUND>(idx, BindingOrder::LowToHigh);
+                    poly_evals[t] =
+                        poly.sumcheck_evals_array::<DEGREE_BOUND>(idx, BindingOrder::LowToHigh);
                 }
 
                 let mut out = [Fq::zero(); DEGREE_BOUND];
@@ -255,7 +263,8 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1AddProver {
 
     fn ingest_challenge(&mut self, r_j: <Fq as JoltField>::Challenge, _round: usize) {
         self.eq_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
-        self.indicator_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.indicator_poly
+            .bind_parallel(r_j, BindingOrder::LowToHigh);
         for poly in self.term_polys.iter_mut() {
             poly.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
@@ -356,8 +365,10 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1AddVerifier {
         let mut claims = Vec::with_capacity(G1AddTerm::COUNT);
         for term_idx in 0..G1AddTerm::COUNT {
             let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");
-            let (_, claim) =
-                accumulator.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_fused(term), SumcheckId::G1Add);
+            let (_, claim) = accumulator.get_virtual_polynomial_opening(
+                VirtualPolynomial::g1_add_fused(term),
+                SumcheckId::G1Add,
+            );
             claims.push(claim);
         }
 
@@ -385,4 +396,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1AddVerifier {
         }
     }
 }
-

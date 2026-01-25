@@ -291,8 +291,10 @@ fn test_jagged_relation_dory_witness() {
 
             // Get eq evaluations using the correct indices
             let eq_s = eq_row_evals[matrix_row];
-            let num_vars =
-                <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(&jagged_bijection, poly_idx);
+            let num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+                &jagged_bijection,
+                poly_idx,
+            );
             let eq_x = if num_vars == 0 {
                 // 0-var "constant-in-x" polynomials represent constant sparse rows:
                 //   Σ_x eq(zc, x) * c = c

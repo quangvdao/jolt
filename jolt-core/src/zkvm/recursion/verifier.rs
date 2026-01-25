@@ -173,12 +173,17 @@ impl RecursionVerifier<Fq> {
             )
             .into());
         }
-        let (r_c, r_x): (&[<Fq as crate::field::JoltField>::Challenge], &[<Fq as crate::field::JoltField>::Challenge]) =
-            if r_stage2.len() == num_constraint_vars {
-                (&[], &r_stage2)
-            } else {
-                (&r_stage2[..k], &r_stage2[r_stage2.len() - num_constraint_vars..])
-            };
+        let (r_c, r_x): (
+            &[<Fq as crate::field::JoltField>::Challenge],
+            &[<Fq as crate::field::JoltField>::Challenge],
+        ) = if r_stage2.len() == num_constraint_vars {
+            (&[], &r_stage2)
+        } else {
+            (
+                &r_stage2[..k],
+                &r_stage2[r_stage2.len() - num_constraint_vars..],
+            )
+        };
 
         // Debug hook: allow stopping after Stage 2 to isolate failures.
         #[cfg(test)]

@@ -729,7 +729,8 @@ where
             if let Some(ref program_commitments) = self.preprocessing.program_commitments {
                 for (idx, commitment) in program_commitments.bytecode_commitments.iter().enumerate()
                 {
-                    commitments_map.insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
+                    commitments_map
+                        .insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
                 }
                 commitments_map.insert(
                     CommittedPolynomial::ProgramImageInit,
@@ -2165,7 +2166,6 @@ where
 
         (opening_proof, snapshot)
     }
-
 }
 
 pub struct JoltAdvice<F: JoltField, PCS: CommitmentScheme<Field = F>> {

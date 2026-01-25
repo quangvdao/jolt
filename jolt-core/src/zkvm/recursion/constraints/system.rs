@@ -1542,21 +1542,23 @@ impl DoryMatrixBuilder {
 
         let send_ptr = SendPtr(evaluations.as_mut_ptr());
 
-        (0..PolyType::NUM_TYPES).into_par_iter().for_each(move |type_idx| {
-            let rows = &rows_by_type[type_idx];
-            let base_offset = type_idx * block_size;
-            let ptr = send_ptr; // Copy the SendPtr (implements Copy)
+        (0..PolyType::NUM_TYPES)
+            .into_par_iter()
+            .for_each(move |type_idx| {
+                let rows = &rows_by_type[type_idx];
+                let base_offset = type_idx * block_size;
+                let ptr = send_ptr; // Copy the SendPtr (implements Copy)
 
-            // Copy rows for this PolyType
-            for (row_idx, row) in rows.iter().enumerate() {
-                let offset = base_offset + row_idx * row_size;
-                // Safety: Each (type_idx, row_idx) writes to a unique, non-overlapping region
-                unsafe {
-                    std::ptr::copy_nonoverlapping(row.as_ptr(), ptr.0.add(offset), row_size);
+                // Copy rows for this PolyType
+                for (row_idx, row) in rows.iter().enumerate() {
+                    let offset = base_offset + row_idx * row_size;
+                    // Safety: Each (type_idx, row_idx) writes to a unique, non-overlapping region
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(row.as_ptr(), ptr.0.add(offset), row_size);
+                    }
                 }
-            }
-            // Zero padding is already initialized, no need to write zeros
-        });
+                // Zero padding is already initialized, no need to write zeros
+            });
 
         let matrix = DoryMultilinearMatrix {
             num_s_vars,
@@ -1874,7 +1876,8 @@ impl PolyTypeSet {
         }
 
         // Sort to match matrix layout order (PolyType-major, then constraint index).
-        entries.sort_by_key(|(constraint_idx, poly_type, _)| (*poly_type as usize, *constraint_idx));
+        entries
+            .sort_by_key(|(constraint_idx, poly_type, _)| (*poly_type as usize, *constraint_idx));
 
         Self { entries }
     }

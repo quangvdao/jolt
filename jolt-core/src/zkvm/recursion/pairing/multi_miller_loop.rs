@@ -11,8 +11,7 @@
 use crate::{
     field::JoltField,
     poly::{
-        dense_mlpoly::DensePolynomial,
-        multilinear_polynomial::MultilinearPolynomial,
+        dense_mlpoly::DensePolynomial, multilinear_polynomial::MultilinearPolynomial,
         opening_proof::SumcheckId,
     },
     zkvm::recursion::constraints::sumcheck::{
@@ -190,7 +189,9 @@ fn build_shared_polys_11() -> Vec<MultilinearPolynomial<Fq>> {
     let mut out = Vec::with_capacity(7);
     for evals_4 in [g_4, sel0_4, sel1_4, sel2_4, sel3_4, sel4_4, sel5_4] {
         let evals_11 = expand_elem_4_to_11(&evals_4);
-        out.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(evals_11)));
+        out.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+            evals_11,
+        )));
     }
     out
 }
@@ -511,19 +512,19 @@ impl MultiMillerLoopProverSpec<Fq> {
         debug_assert_eq!(constraint_polys.len(), params.num_constraints);
 
         let num_instances = constraint_polys.len();
-        let mut polys_by_kind: Vec<Vec<MultilinearPolynomial<Fq>>> =
-            (0..NUM_COMMITTED_KINDS).map(|_| Vec::with_capacity(num_instances)).collect();
+        let mut polys_by_kind: Vec<Vec<MultilinearPolynomial<Fq>>> = (0..NUM_COMMITTED_KINDS)
+            .map(|_| Vec::with_capacity(num_instances))
+            .collect();
         let mut constraint_indices = Vec::with_capacity(num_instances);
 
         for poly in constraint_polys {
             constraint_indices.push(poly.constraint_index);
             let mut k = 0usize;
-            let push = |dst: &mut Vec<Vec<MultilinearPolynomial<Fq>>>,
-                        k: &mut usize,
-                        v: Vec<Fq>| {
-                dst[*k].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(v)));
-                *k += 1;
-            };
+            let push =
+                |dst: &mut Vec<Vec<MultilinearPolynomial<Fq>>>, k: &mut usize, v: Vec<Fq>| {
+                    dst[*k].push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(v)));
+                    *k += 1;
+                };
 
             push(&mut polys_by_kind, &mut k, poly.f);
             push(&mut polys_by_kind, &mut k, poly.f_next);

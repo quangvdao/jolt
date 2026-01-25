@@ -38,7 +38,8 @@ fn test_stage8_transcript_fork_matches_prover_after_witness_gen() {
     // Setup + commit.
     let prover_setup = <DoryCommitmentScheme as CommitmentScheme>::setup_prover(num_vars);
     let verifier_setup = <DoryCommitmentScheme as CommitmentScheme>::setup_verifier(&prover_setup);
-    let (commitment, hint) = <DoryCommitmentScheme as CommitmentScheme>::commit(&poly, &prover_setup);
+    let (commitment, hint) =
+        <DoryCommitmentScheme as CommitmentScheme>::commit(&poly, &prover_setup);
 
     // Opening point + evaluation.
     let mut point_transcript: Blake2bTranscript = Transcript::new(b"pt");
@@ -82,4 +83,3 @@ fn test_stage8_transcript_fork_matches_prover_after_witness_gen() {
         "witness_gen transcript state must match prover transcript after prove"
     );
 }
-

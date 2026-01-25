@@ -195,8 +195,10 @@ impl ConstraintSystemJaggedBuilder {
     /// Create builder from constraint system constraints
     /// This matches the matrix layout where rows are organized by polynomial type first
     pub fn from_constraints(constraints: &[MatrixConstraint]) -> Self {
-        let constraint_types: Vec<ConstraintType> =
-            constraints.iter().map(|c| c.constraint_type.clone()).collect();
+        let constraint_types: Vec<ConstraintType> = constraints
+            .iter()
+            .map(|c| c.constraint_type.clone())
+            .collect();
         let poly_type_set = PolyTypeSet::from_constraint_types(&constraint_types);
         Self {
             polynomials: poly_type_set.into_entries(),
@@ -275,10 +277,9 @@ impl ConstraintSystem {
 
             for poly_idx in 0..num_polynomials {
                 let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-                let num_vars =
-                    <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
-                        bijection, poly_idx,
-                    );
+                let num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+                    bijection, poly_idx,
+                );
 
                 *count_by_num_vars.entry(num_vars).or_insert(0) += 1;
                 *count_by_poly_type
@@ -322,10 +323,9 @@ impl ConstraintSystem {
 
                 for poly_idx in 0..num_polynomials {
                     let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-                    let num_vars =
-                        <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
-                            bijection, poly_idx,
-                        );
+                    let num_vars = <VarCountJaggedBijection as JaggedTransform<Fq>>::poly_num_vars(
+                        bijection, poly_idx,
+                    );
 
                     let dense_start = bijection.cumulative_size_before(poly_idx);
                     let dense_end = bijection.cumulative_size(poly_idx);
@@ -403,6 +403,10 @@ impl ConstraintSystem {
     ) {
         let (bijection, mapping) = self.build_jagged_layout();
         let dense_evals = self.extract_dense_evals(&bijection, &mapping);
-        (crate::poly::dense_mlpoly::DensePolynomial::new(dense_evals), bijection, mapping)
+        (
+            crate::poly::dense_mlpoly::DensePolynomial::new(dense_evals),
+            bijection,
+            mapping,
+        )
     }
 }

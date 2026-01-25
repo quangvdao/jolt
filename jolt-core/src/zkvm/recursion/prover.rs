@@ -38,6 +38,7 @@ use crate::zkvm::recursion::DoryMatrixBuilder;
 use dory::backends::arkworks::BN254;
 use dory::recursion::ast::AstGraph;
 
+use super::jagged::bijection::{ConstraintMapping, VarCountJaggedBijection};
 use super::{
     constraints::system::{ConstraintSystem, ConstraintType},
     g1::shift::{g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver},
@@ -57,7 +58,6 @@ use super::{
 };
 use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_prover::SumcheckInstanceProver};
 use crate::zkvm::recursion::jagged::bijection::JaggedTransform;
-use super::jagged::bijection::{ConstraintMapping, VarCountJaggedBijection};
 
 #[derive(Clone)]
 pub(crate) struct JaggedBundle {
@@ -268,7 +268,8 @@ impl RecursionProver<Fq> {
         )?;
 
         // Build constraint system from generated witnesses and include combine witness constraints.
-        let prover = Self::new_from_witnesses(&witness_collection, Some(combine_witness), gamma, delta)?;
+        let prover =
+            Self::new_from_witnesses(&witness_collection, Some(combine_witness), gamma, delta)?;
 
         Ok((prover, stage8_combine_hint_fq12, stage9_pcs_hint))
     }
@@ -312,20 +313,18 @@ impl RecursionProver<Fq> {
         HyraxPCS: CommitmentScheme<Field = Fq>,
     {
         // Phase 1: witness generation
-        let (mut prover, stage8_combine_hint_fq12, stage9_pcs_hint) = Self::witness_generation::<
-            F,
-            DoryPCS,
-            ProofTranscript,
-        >(
-            transcript,
-            stage8_opening_proof,
-            stage8_snapshot,
-            verifier_setup,
-            commitments,
-        )?;
+        let (mut prover, stage8_combine_hint_fq12, stage9_pcs_hint) =
+            Self::witness_generation::<F, DoryPCS, ProofTranscript>(
+                transcript,
+                stage8_opening_proof,
+                stage8_snapshot,
+                verifier_setup,
+                commitments,
+            )?;
 
         // Phase 2: polynomial commitment (Hyrax)
-        let poly_commit = prover.poly_commit::<ProofTranscript, HyraxPCS>(transcript, hyrax_prover_setup)?;
+        let poly_commit =
+            prover.poly_commit::<ProofTranscript, HyraxPCS>(transcript, hyrax_prover_setup)?;
 
         // Phase 3: sumchecks
         let sumchecks = prover.prove_sumchecks::<ProofTranscript>(
@@ -391,11 +390,8 @@ impl RecursionProver<Fq> {
 
         // Build constraint system from witness collection using DoryMatrixBuilder
         let build_cs_span = tracing::info_span!("build_constraint_system").entered();
-        let constraint_system = Self::build_constraint_system(
-            witness_collection,
-            combine_witness.as_ref(),
-            g_poly,
-        )?;
+        let constraint_system =
+            Self::build_constraint_system(witness_collection, combine_witness.as_ref(), g_poly)?;
         drop(build_cs_span);
 
         Ok(Self {
@@ -998,10 +994,9 @@ impl RecursionProver<Fq> {
         let (jagged_bijection, jagged_mapping) = self.constraint_system.build_jagged_layout();
 
         // dense_num_vars is defined by the padded dense length (power-of-two).
-        let dense_size =
-            <super::jagged::bijection::VarCountJaggedBijection as JaggedTransform<Fq>>::dense_size(
-                &jagged_bijection,
-            );
+        let dense_size = <super::jagged::bijection::VarCountJaggedBijection as JaggedTransform<
+            Fq,
+        >>::dense_size(&jagged_bijection);
         let dense_num_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
 
         // Compute matrix rows for the verifier
@@ -1128,8 +1123,8 @@ impl RecursionProver<Fq> {
         });
 
         // Stage 1: Packed GT exp sumcheck
-        let (stage1_proof, _r_stage1_packed) =
-            tracing::info_span!("recursion_prove_stage1").in_scope(|| {
+        let (stage1_proof, _r_stage1_packed) = tracing::info_span!("recursion_prove_stage1")
+            .in_scope(|| {
                 tracing::info!("Running Stage 1: Packed GT exp sumcheck");
                 self.prove_stage1(transcript, &mut accumulator)
                     .expect("Failed to run Stage 1 (GtExp)")
@@ -1157,26 +1152,27 @@ impl RecursionProver<Fq> {
             )
             .into());
         }
-        let (r_c, r_x): (&[<Fq as JoltField>::Challenge], &[<Fq as JoltField>::Challenge]) =
-            if r_stage2.len() == num_constraint_vars {
-                (&[], &r_stage2)
-            } else {
-                (
-                    &r_stage2[..k],
-                    &r_stage2[r_stage2.len() - num_constraint_vars..],
-                )
-            };
+        let (r_c, r_x): (
+            &[<Fq as JoltField>::Challenge],
+            &[<Fq as JoltField>::Challenge],
+        ) = if r_stage2.len() == num_constraint_vars {
+            (&[], &r_stage2)
+        } else {
+            (
+                &r_stage2[..k],
+                &r_stage2[r_stage2.len() - num_constraint_vars..],
+            )
+        };
 
         // Stage 3: Virtualization direct evaluation
-        let (stage3_m_eval, r_s) =
-            tracing::info_span!("recursion_prove_stage3").in_scope(|| {
-                tracing::info!("Running Stage 3: Virtualization direct evaluation");
-                // Stage 3 no longer needs the sparse matrix buffer; drop it after Stage 2.
-                let _dropped_matrix_evals =
-                    std::mem::take(&mut self.constraint_system.matrix.evaluations);
-                self.prove_stage3(transcript, &mut accumulator, r_c, r_x)
-                    .expect("Failed to run Stage 3 (virtualization)")
-            });
+        let (stage3_m_eval, r_s) = tracing::info_span!("recursion_prove_stage3").in_scope(|| {
+            tracing::info!("Running Stage 3: Virtualization direct evaluation");
+            // Stage 3 no longer needs the sparse matrix buffer; drop it after Stage 2.
+            let _dropped_matrix_evals =
+                std::mem::take(&mut self.constraint_system.matrix.evaluations);
+            self.prove_stage3(transcript, &mut accumulator, r_c, r_x)
+                .expect("Failed to run Stage 3 (virtualization)")
+        });
 
         // Stage 4: Jagged transform sumcheck
         let dense_native_size = jagged_bundle.dense_native_size;
@@ -1240,7 +1236,10 @@ impl RecursionProver<Fq> {
             .expect("Failed to generate PCS opening proof");
 
         let opening_claims = accumulator.openings.clone();
-        tracing::info!("Generated opening proof with {} claims", opening_claims.len());
+        tracing::info!(
+            "Generated opening proof with {} claims",
+            opening_claims.len()
+        );
 
         Ok((opening_proof, opening_claims))
     }
@@ -1766,9 +1765,8 @@ impl RecursionProver<Fq> {
         let num_dense_vars = dense_native_size.next_power_of_two().trailing_zeros() as usize;
         let num_bits = std::cmp::max(num_constraint_vars, num_dense_vars);
 
-        let mut assist_prover = JaggedAssistProver::<Fq, T>::new(
-            r_x_prev, r_dense_fq, bijection, num_bits, transcript,
-        );
+        let mut assist_prover =
+            JaggedAssistProver::<Fq, T>::new(r_x_prev, r_dense_fq, bijection, num_bits, transcript);
 
         let (sumcheck_proof, _r_assist) =
             BatchedSumcheck::prove(vec![&mut assist_prover], accumulator, transcript);

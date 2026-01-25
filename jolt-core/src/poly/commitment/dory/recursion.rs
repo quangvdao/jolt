@@ -1456,6 +1456,18 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
     type Hint = JoltHintMap;
     type CombineHint = ArkGT;
 
+    fn replay_opening_proof_transcript<ProofTranscript: crate::transcripts::Transcript>(
+        proof: &ArkDoryProof,
+        transcript: &mut ProofTranscript,
+    ) -> Result<(), ProofVerifyError> {
+        // Phase 0 only: derive Fiat–Shamir challenges on the real transcript (hashing).
+        // This mutates `transcript` to the exact same final state as a normal verification run.
+        let mut dory_transcript = JoltToDoryTranscript::new(transcript);
+        precompute_challenges::<ArkFr, BN254, _>(proof, &mut dory_transcript)
+            .map_err(|_| ProofVerifyError::default())?;
+        Ok(())
+    }
+
     fn witness_gen<ProofTranscript: crate::transcripts::Transcript>(
         proof: &ArkDoryProof,
         setup: &ArkworksVerifierSetup,

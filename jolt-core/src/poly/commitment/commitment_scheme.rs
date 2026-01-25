@@ -187,6 +187,16 @@ pub trait RecursionExt<F: JoltField>: CommitmentScheme<Field = F> {
         hint: &Self::Hint,
     ) -> Result<(), ProofVerifyError>;
 
+    /// Replay the Fiat–Shamir transcript interactions for an opening proof,
+    /// without performing any group checks.
+    ///
+    /// This is used by "recursion mode" verification to advance the transcript to
+    /// the exact post-Stage8 state expected by the recursion SNARK verifier.
+    fn replay_opening_proof_transcript<ProofTranscript: Transcript>(
+        proof: &Self::Proof,
+        transcript: &mut ProofTranscript,
+    ) -> Result<(), ProofVerifyError>;
+
     /// Generate witness for combine_commitments offloading.
     ///
     /// Computes `result = sum_i(coeff_i * commitment_i)` while capturing

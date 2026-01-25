@@ -92,7 +92,7 @@ pub struct RAMPreprocessing {
     pub program_image_len_words: usize,
 }
 
-impl crate::zkvm::guest_serde::GuestSerialize for RAMPreprocessing {
+impl GuestSerialize for RAMPreprocessing {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.min_bytecode_address.guest_serialize(w)?;
         self.bytecode_words.guest_serialize(w)?;
@@ -100,7 +100,7 @@ impl crate::zkvm::guest_serde::GuestSerialize for RAMPreprocessing {
     }
 }
 
-impl crate::zkvm::guest_serde::GuestDeserialize for RAMPreprocessing {
+impl GuestDeserialize for RAMPreprocessing {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             min_bytecode_address: u64::guest_deserialize(r)?,

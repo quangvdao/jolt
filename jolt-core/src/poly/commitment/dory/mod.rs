@@ -283,52 +283,48 @@ pub fn deserialize_arkworks_verifier_setup_marked<R: std::io::Read>(
 // Guest (decompressed) encoding helpers
 // -------------------------------------------------------------------------------------------------
 
-impl crate::zkvm::guest_serde::GuestSerialize for ArkGT {
+impl GuestSerialize for ArkGT {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        crate::zkvm::guest_serde::GuestSerialize::guest_serialize(&self.0, w)
+        self.0.guest_serialize(w)
     }
 }
-impl crate::zkvm::guest_serde::GuestDeserialize for ArkGT {
+impl GuestDeserialize for ArkGT {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(ArkGT(
-            crate::zkvm::guest_serde::GuestDeserialize::guest_deserialize(r)?,
-        ))
+        Ok(ArkGT(GuestDeserialize::guest_deserialize(r)?))
     }
 }
 
-impl crate::zkvm::guest_serde::GuestSerialize for ArkG1 {
+impl GuestSerialize for ArkG1 {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         use ark_ec::CurveGroup;
         let aff = self.0.into_affine();
-        crate::zkvm::guest_serde::GuestSerialize::guest_serialize(&aff, w)
+        aff.guest_serialize(w)
     }
 }
-impl crate::zkvm::guest_serde::GuestDeserialize for ArkG1 {
+impl GuestDeserialize for ArkG1 {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         use ark_ec::AffineRepr;
-        let aff: ark_bn254::g1::G1Affine =
-            crate::zkvm::guest_serde::GuestDeserialize::guest_deserialize(r)?;
+        let aff: ark_bn254::g1::G1Affine = GuestDeserialize::guest_deserialize(r)?;
         Ok(ArkG1(aff.into_group()))
     }
 }
 
-impl crate::zkvm::guest_serde::GuestSerialize for ArkG2 {
+impl GuestSerialize for ArkG2 {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         use ark_ec::CurveGroup;
         let aff = self.0.into_affine();
-        crate::zkvm::guest_serde::GuestSerialize::guest_serialize(&aff, w)
+        aff.guest_serialize(w)
     }
 }
-impl crate::zkvm::guest_serde::GuestDeserialize for ArkG2 {
+impl GuestDeserialize for ArkG2 {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         use ark_ec::AffineRepr;
-        let aff: ark_bn254::g2::G2Affine =
-            crate::zkvm::guest_serde::GuestDeserialize::guest_deserialize(r)?;
+        let aff: ark_bn254::g2::G2Affine = GuestDeserialize::guest_deserialize(r)?;
         Ok(ArkG2(aff.into_group()))
     }
 }
 
-impl crate::zkvm::guest_serde::GuestSerialize for ArkworksVerifierSetup {
+impl GuestSerialize for ArkworksVerifierSetup {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         let s = &self.0;
         s.delta_1l.guest_serialize(w)?;
@@ -345,7 +341,7 @@ impl crate::zkvm::guest_serde::GuestSerialize for ArkworksVerifierSetup {
         Ok(())
     }
 }
-impl crate::zkvm::guest_serde::GuestDeserialize for ArkworksVerifierSetup {
+impl GuestDeserialize for ArkworksVerifierSetup {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         use dory::setup::VerifierSetup;
         Ok(ArkworksVerifierSetup(VerifierSetup::<BN254> {
@@ -364,7 +360,7 @@ impl crate::zkvm::guest_serde::GuestDeserialize for ArkworksVerifierSetup {
     }
 }
 
-impl crate::zkvm::guest_serde::GuestSerialize for ArkDoryProof {
+impl GuestSerialize for ArkDoryProof {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.vmv_message.guest_serialize(w)?;
         self.first_messages.guest_serialize(w)?;
@@ -375,7 +371,7 @@ impl crate::zkvm::guest_serde::GuestSerialize for ArkDoryProof {
         Ok(())
     }
 }
-impl crate::zkvm::guest_serde::GuestDeserialize for ArkDoryProof {
+impl GuestDeserialize for ArkDoryProof {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(ArkDoryProof {
             vmv_message: dory::messages::VMVMessage::<ArkG1, ArkGT>::guest_deserialize(r)?,
@@ -396,10 +392,10 @@ impl crate::zkvm::guest_serde::GuestDeserialize for ArkDoryProof {
     }
 }
 
-impl<G1, GT> crate::zkvm::guest_serde::GuestSerialize for dory::messages::VMVMessage<G1, GT>
+impl<G1, GT> GuestSerialize for dory::messages::VMVMessage<G1, GT>
 where
-    G1: crate::zkvm::guest_serde::GuestSerialize,
-    GT: crate::zkvm::guest_serde::GuestSerialize,
+    G1: GuestSerialize,
+    GT: GuestSerialize,
 {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.c.guest_serialize(w)?;
@@ -408,10 +404,10 @@ where
         Ok(())
     }
 }
-impl<G1, GT> crate::zkvm::guest_serde::GuestDeserialize for dory::messages::VMVMessage<G1, GT>
+impl<G1, GT> GuestDeserialize for dory::messages::VMVMessage<G1, GT>
 where
-    G1: crate::zkvm::guest_serde::GuestDeserialize,
-    GT: crate::zkvm::guest_serde::GuestDeserialize,
+    G1: GuestDeserialize,
+    GT: GuestDeserialize,
 {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(dory::messages::VMVMessage {
@@ -422,12 +418,11 @@ where
     }
 }
 
-impl<G1, G2, GT> crate::zkvm::guest_serde::GuestSerialize
-    for dory::messages::FirstReduceMessage<G1, G2, GT>
+impl<G1, G2, GT> GuestSerialize for dory::messages::FirstReduceMessage<G1, G2, GT>
 where
-    G1: crate::zkvm::guest_serde::GuestSerialize,
-    G2: crate::zkvm::guest_serde::GuestSerialize,
-    GT: crate::zkvm::guest_serde::GuestSerialize,
+    G1: GuestSerialize,
+    G2: GuestSerialize,
+    GT: GuestSerialize,
 {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.d1_left.guest_serialize(w)?;
@@ -439,12 +434,11 @@ where
         Ok(())
     }
 }
-impl<G1, G2, GT> crate::zkvm::guest_serde::GuestDeserialize
-    for dory::messages::FirstReduceMessage<G1, G2, GT>
+impl<G1, G2, GT> GuestDeserialize for dory::messages::FirstReduceMessage<G1, G2, GT>
 where
-    G1: crate::zkvm::guest_serde::GuestDeserialize,
-    G2: crate::zkvm::guest_serde::GuestDeserialize,
-    GT: crate::zkvm::guest_serde::GuestDeserialize,
+    G1: GuestDeserialize,
+    G2: GuestDeserialize,
+    GT: GuestDeserialize,
 {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(dory::messages::FirstReduceMessage {
@@ -458,12 +452,11 @@ where
     }
 }
 
-impl<G1, G2, GT> crate::zkvm::guest_serde::GuestSerialize
-    for dory::messages::SecondReduceMessage<G1, G2, GT>
+impl<G1, G2, GT> GuestSerialize for dory::messages::SecondReduceMessage<G1, G2, GT>
 where
-    G1: crate::zkvm::guest_serde::GuestSerialize,
-    G2: crate::zkvm::guest_serde::GuestSerialize,
-    GT: crate::zkvm::guest_serde::GuestSerialize,
+    G1: GuestSerialize,
+    G2: GuestSerialize,
+    GT: GuestSerialize,
 {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.c_plus.guest_serialize(w)?;
@@ -475,12 +468,11 @@ where
         Ok(())
     }
 }
-impl<G1, G2, GT> crate::zkvm::guest_serde::GuestDeserialize
-    for dory::messages::SecondReduceMessage<G1, G2, GT>
+impl<G1, G2, GT> GuestDeserialize for dory::messages::SecondReduceMessage<G1, G2, GT>
 where
-    G1: crate::zkvm::guest_serde::GuestDeserialize,
-    G2: crate::zkvm::guest_serde::GuestDeserialize,
-    GT: crate::zkvm::guest_serde::GuestDeserialize,
+    G1: GuestDeserialize,
+    G2: GuestDeserialize,
+    GT: GuestDeserialize,
 {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(dory::messages::SecondReduceMessage {
@@ -494,11 +486,10 @@ where
     }
 }
 
-impl<G1, G2> crate::zkvm::guest_serde::GuestSerialize
-    for dory::messages::ScalarProductMessage<G1, G2>
+impl<G1, G2> GuestSerialize for dory::messages::ScalarProductMessage<G1, G2>
 where
-    G1: crate::zkvm::guest_serde::GuestSerialize,
-    G2: crate::zkvm::guest_serde::GuestSerialize,
+    G1: GuestSerialize,
+    G2: GuestSerialize,
 {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.e1.guest_serialize(w)?;
@@ -506,11 +497,10 @@ where
         Ok(())
     }
 }
-impl<G1, G2> crate::zkvm::guest_serde::GuestDeserialize
-    for dory::messages::ScalarProductMessage<G1, G2>
+impl<G1, G2> GuestDeserialize for dory::messages::ScalarProductMessage<G1, G2>
 where
-    G1: crate::zkvm::guest_serde::GuestDeserialize,
-    G2: crate::zkvm::guest_serde::GuestDeserialize,
+    G1: GuestDeserialize,
+    G2: GuestDeserialize,
 {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(dory::messages::ScalarProductMessage {

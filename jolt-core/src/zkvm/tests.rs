@@ -47,6 +47,8 @@ pub struct E2ETestConfig {
     pub untrusted_advice: Vec<u8>,
     /// Expected output bytes (None = don't verify output)
     pub expected_output: Option<Vec<u8>>,
+    /// Whether to enable recursion proving/verifying (default: false).
+    pub recursion: bool,
 }
 
 impl Default for E2ETestConfig {
@@ -60,6 +62,7 @@ impl Default for E2ETestConfig {
             trusted_advice: vec![],
             untrusted_advice: vec![],
             expected_output: None,
+            recursion: false,
         }
     }
 }
@@ -208,6 +211,13 @@ impl E2ETestConfig {
         self.expected_output = None;
         self
     }
+
+    /// Enable recursion proving/verifying for this test.
+    #[allow(dead_code)] // Used by recursion-mode tests
+    pub fn with_recursion(mut self) -> Self {
+        self.recursion = true;
+        self
+    }
 }
 
 /// Run an end-to-end test with the given configuration.
@@ -289,8 +299,13 @@ pub fn run_e2e_test(config: E2ETestConfig) {
         program_mode,
     );
     let io_device = prover.program_io.clone();
-    let (jolt_proof, debug_info) = prover.prove();
+    let (jolt_proof, debug_info) = prover.prove(config.recursion);
     assert_eq!(jolt_proof.program_mode, program_mode);
+    assert_eq!(
+        jolt_proof.recursion.is_some(),
+        config.recursion,
+        "proof recursion payload presence mismatch"
+    );
 
     // Create verifier preprocessing from prover (respects mode)
     let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
@@ -311,7 +326,9 @@ pub fn run_e2e_test(config: E2ETestConfig) {
         debug_info,
     )
     .expect("Failed to create verifier");
-    verifier.verify().expect("Verification failed");
+    verifier
+        .verify(config.recursion)
+        .expect("Verification failed");
 
     // Check expected output if specified
     if let Some(expected) = config.expected_output {
@@ -361,6 +378,12 @@ fn fib_e2e() {
 #[serial]
 fn fib_e2e_small_trace() {
     run_e2e_test(E2ETestConfig::fibonacci(5).with_small_trace());
+}
+
+#[test]
+#[serial]
+fn fib_e2e_small_trace_recursion() {
+    run_e2e_test(E2ETestConfig::fibonacci(5).with_small_trace().with_recursion());
 }
 
 #[test]
@@ -743,7 +766,7 @@ fn max_advice_with_small_trace() {
     assert_eq!(prover.padded_trace_len, 256);
 
     let io_device = prover.program_io.clone();
-    let (jolt_proof, debug_info) = prover.prove();
+    let (jolt_proof, debug_info) = prover.prove(false);
 
     let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
     RV64IMACVerifier::new(
@@ -754,7 +777,7 @@ fn max_advice_with_small_trace() {
         debug_info,
     )
     .expect("Failed to create verifier")
-    .verify()
+    .verify(false)
     .expect("Verification failed");
 }
 
@@ -800,7 +823,7 @@ fn advice_opening_point_derives_from_unified_point() {
     assert_eq!(prover.padded_trace_len, 256, "test expects small trace");
 
     let io_device = prover.program_io.clone();
-    let (jolt_proof, debug_info) = prover.prove();
+    let (jolt_proof, debug_info) = prover.prove(false);
     let debug_info = debug_info.expect("expected debug_info in tests");
 
     // Get unified opening point and derive expected advice point
@@ -854,7 +877,7 @@ fn advice_opening_point_derives_from_unified_point() {
         Some(debug_info),
     )
     .expect("Failed to create verifier")
-    .verify()
+    .verify(false)
     .expect("Verification failed");
 }
 
@@ -890,7 +913,7 @@ fn truncated_trace() {
         final_memory_state,
     );
 
-    let (proof, _) = prover.prove();
+    let (proof, _) = prover.prove(false);
 
     let verifier_preprocessing = JoltVerifierPreprocessing::new_full(
         prover_preprocessing.shared.clone(),
@@ -899,7 +922,7 @@ fn truncated_trace() {
     );
     let verifier =
         RV64IMACVerifier::new(&verifier_preprocessing, proof, program_io, None, None).unwrap();
-    verifier.verify().unwrap();
+    verifier.verify(false).unwrap();
 }
 
 #[test]
@@ -937,7 +960,7 @@ fn malicious_trace() {
         None,
         final_memory_state,
     );
-    let (proof, _) = prover.prove();
+    let (proof, _) = prover.prove(false);
 
     let verifier_preprocessing = JoltVerifierPreprocessing::new_full(
         prover_preprocessing.shared.clone(),
@@ -946,5 +969,5 @@ fn malicious_trace() {
     );
     let verifier =
         JoltVerifier::new(&verifier_preprocessing, proof, program_io, None, None).unwrap();
-    verifier.verify().unwrap();
+    verifier.verify(false).unwrap();
 }

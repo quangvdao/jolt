@@ -12,6 +12,8 @@ pub use jolt_core::guest;
 pub use jolt_core::poly::commitment::dory::DoryCommitmentScheme as PCS;
 pub use jolt_core::zkvm::config::ProgramMode;
 pub use jolt_core::zkvm::program::ProgramPreprocessing;
+pub use jolt_core::zkvm::serialized_bundle;
+pub use jolt_core::zkvm::streaming_verifier;
 pub use jolt_core::zkvm::{
     proof_serialization::JoltProof, verifier::JoltSharedPreprocessing,
     verifier::JoltVerifierPreprocessing, RV64IMACProof, RV64IMACVerifier, Serializable,

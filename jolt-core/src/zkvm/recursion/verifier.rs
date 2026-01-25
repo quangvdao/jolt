@@ -159,18 +159,26 @@ impl RecursionVerifier<Fq> {
         })?;
         drop(_cycle_stage2);
 
-        // Stage 2 challenges layout: [r_c || r_x].
+        // Stage 2 challenges layout:
+        // - legacy: r_stage2 = r_x (length = num_constraint_vars)
+        // - fused:  r_stage2 = [r_c || r_x] (length >= k + num_constraint_vars)
         let k = self.input.num_constraints_padded.trailing_zeros() as usize;
-        if r_stage2.len() < k + self.input.num_constraint_vars {
+        let num_constraint_vars = self.input.num_constraint_vars;
+        if r_stage2.len() != num_constraint_vars && r_stage2.len() < k + num_constraint_vars {
             return Err(format!(
-                "Stage 2 returned {} challenges, expected at least {} (k + num_constraint_vars)",
+                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (k + num_constraint_vars)",
                 r_stage2.len(),
-                k + self.input.num_constraint_vars
+                num_constraint_vars,
+                k + num_constraint_vars
             )
             .into());
         }
-        let r_c = &r_stage2[..k];
-        let r_x = &r_stage2[r_stage2.len() - self.input.num_constraint_vars..];
+        let (r_c, r_x): (&[<Fq as crate::field::JoltField>::Challenge], &[<Fq as crate::field::JoltField>::Challenge]) =
+            if r_stage2.len() == num_constraint_vars {
+                (&[], &r_stage2)
+            } else {
+                (&r_stage2[..k], &r_stage2[r_stage2.len() - num_constraint_vars..])
+            };
 
         // Debug hook: allow stopping after Stage 2 to isolate failures.
         #[cfg(test)]
@@ -457,18 +465,8 @@ impl RecursionVerifier<Fq> {
 
         // G1 add
         if num_g1_add > 0 {
-            // Add fused G1Add verifier (over global constraint index + x vars) to match the
-            // prover's Stage 2 fused instance and to introduce a global r_c prefix.
-            use super::g1::fused_addition::{FusedG1AddParams, FusedG1AddVerifier};
-            let fused_params = FusedG1AddParams::new(
-                self.input.num_constraints,
-                self.input.num_constraints_padded,
-                self.input.num_constraint_vars,
-            );
-            let fused_verifier =
-                FusedG1AddVerifier::new(fused_params, &self.input.constraint_types, transcript);
-            verifiers.push(Box::new(fused_verifier));
-
+            // NOTE: The fused G1Add verifier exists (see `g1::fused_addition`) but is intentionally
+            // NOT wired into the default verifier pipeline right now.
             use super::g1::addition::{G1AddVerifier, G1AddVerifierSpec};
             let params = G1AddParams::new(num_g1_add);
             let spec = G1AddVerifierSpec::new(params);

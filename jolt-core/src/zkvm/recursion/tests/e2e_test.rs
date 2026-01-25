@@ -12,7 +12,9 @@ use crate::{
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     },
     transcripts::{Blake2bTranscript, Transcript},
-    zkvm::recursion::{ConstraintType, RecursionProver, RecursionVerifier, RecursionVerifierInput},
+    zkvm::recursion::{
+        ConstraintType, RecursionProof, RecursionProver, RecursionVerifier, RecursionVerifierInput,
+    },
 };
 use ark_bn254::{Fq, Fr};
 use ark_ff::UniformRand;
@@ -76,7 +78,7 @@ fn test_recursion_snark_e2e_with_dory() {
     // Create prover using Dory witness generation
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
 
-    let prover = RecursionProver::<Fq>::new_from_dory_proof(
+    let mut prover = RecursionProver::<Fq>::new_from_dory_proof(
         &ark_proof,
         &verifier_setup,
         &mut witness_transcript,
@@ -96,22 +98,10 @@ fn test_recursion_snark_e2e_with_dory() {
     let num_constraint_vars = prover.constraint_system.matrix.num_constraint_vars;
     let num_constraints_padded = prover.constraint_system.matrix.num_constraints_padded;
 
-    // Build dense polynomial, bijection, and mapping for Stage 3
-    let (dense_poly, jagged_bijection, jagged_mapping) =
-        prover.constraint_system.build_dense_polynomial();
-    let dense_num_vars = dense_poly.get_num_vars();
-
-    // Precompute matrix row indices for all polynomial indices
-    let num_polynomials = jagged_bijection.num_polynomials();
-    let mut matrix_rows = Vec::with_capacity(num_polynomials);
-    for poly_idx in 0..num_polynomials {
-        let (constraint_idx, poly_type) = jagged_mapping.decode(poly_idx);
-        let matrix_row = prover
-            .constraint_system
-            .matrix
-            .row_index(poly_type, constraint_idx);
-        matrix_rows.push(matrix_row);
-    }
+    // Determine dense_num_vars for Hyrax setup without extracting dense evals.
+    let (jagged_bijection, _jagged_mapping) = prover.constraint_system.build_jagged_layout();
+    let dense_size = <crate::zkvm::recursion::VarCountJaggedBijection as crate::zkvm::recursion::JaggedTransform<Fq>>::dense_size(&jagged_bijection);
+    let dense_num_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
 
     // Extract constraint types for verification
     let constraint_types: Vec<ConstraintType> = prover
@@ -154,12 +144,7 @@ fn test_recursion_snark_e2e_with_dory() {
         );
     }
 
-    // Extract packed GT exp public inputs for verifier
-    let gt_exp_public_inputs = prover.constraint_system.gt_exp_public_inputs.clone();
-    let g1_scalar_mul_public_inputs = prover.constraint_system.g1_scalar_mul_public_inputs.clone();
-    let g2_scalar_mul_public_inputs = prover.constraint_system.g2_scalar_mul_public_inputs.clone();
-
-    let _ = (num_constraints, num_vars, num_s_vars);
+    // (Verifier input will be constructed from prover-produced metadata later.)
 
     // Create transcript for proving
     let mut prover_transcript = Blake2bTranscript::new(b"recursion_snark");
@@ -170,31 +155,61 @@ fn test_recursion_snark_e2e_with_dory() {
 
     let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(dense_num_vars);
 
-    // Run the unified prover - now uses prove_full which commits internally
-    // The dense polynomial commitment is returned in the proof
-    let (recursion_proof, _metadata) = prover
-        .prove_full::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
-        .expect("Failed to generate recursion proof");
+    // Run the prover phases explicitly (commit → sumchecks → opening).
+    let poly_commit =
+        prover.poly_commit::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
+            .expect("poly_commit failed");
+    let sumchecks = prover
+        .prove_sumchecks::<Blake2bTranscript>(
+            &mut prover_transcript,
+            &poly_commit.metadata,
+            poly_commit.jagged_bundle,
+            poly_commit.dense_poly_for_jagged,
+        )
+        .expect("prove_sumchecks failed");
+    let (opening_proof, opening_claims) = RecursionProver::<Fq>::poly_opening::<
+        Blake2bTranscript,
+        HyraxPCS,
+    >(
+        &mut prover_transcript,
+        &hyrax_prover_setup,
+        sumchecks.accumulator,
+        poly_commit.dense_mlpoly,
+    )
+    .expect("poly_opening failed");
 
-    // Use the commitment from the proof (created inside prove_full)
-    let dense_commitment = recursion_proof.dense_commitment.clone();
+    let dense_commitment = poly_commit.dense_commitment.clone();
+    let recursion_constraint_metadata = poly_commit.metadata.clone();
+    let recursion_proof = RecursionProof::<Fq, Blake2bTranscript, HyraxPCS> {
+        stage1_proof: sumchecks.stage1_proof,
+        stage2_proof: sumchecks.stage2_proof,
+        stage3_m_eval: sumchecks.stage3_m_eval,
+        stage4_proof: sumchecks.stage4_proof,
+        stage5_proof: sumchecks.stage5_proof,
+        opening_proof,
+        gamma: prover.gamma,
+        delta: prover.delta,
+        opening_claims,
+        dense_commitment: dense_commitment.clone(),
+    };
 
     // ============ VERIFY THE RECURSION PROOF ============
 
     // Create verifier input
+    // Prefer the metadata produced by `poly_commit`, to ensure perfect alignment.
     let verifier_input = RecursionVerifierInput {
-        constraint_types,
+        constraint_types: recursion_constraint_metadata.constraint_types,
         num_vars,
         num_constraint_vars,
         num_s_vars,
         num_constraints,
         num_constraints_padded,
-        jagged_bijection,
-        jagged_mapping,
-        matrix_rows,
-        gt_exp_public_inputs,
-        g1_scalar_mul_public_inputs,
-        g2_scalar_mul_public_inputs,
+        jagged_bijection: recursion_constraint_metadata.jagged_bijection,
+        jagged_mapping: recursion_constraint_metadata.jagged_mapping,
+        matrix_rows: recursion_constraint_metadata.matrix_rows,
+        gt_exp_public_inputs: recursion_constraint_metadata.gt_exp_public_inputs,
+        g1_scalar_mul_public_inputs: recursion_constraint_metadata.g1_scalar_mul_public_inputs,
+        g2_scalar_mul_public_inputs: recursion_constraint_metadata.g2_scalar_mul_public_inputs,
     };
 
     // Create verifier

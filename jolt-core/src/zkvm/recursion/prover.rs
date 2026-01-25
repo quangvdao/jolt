@@ -60,7 +60,7 @@ use crate::zkvm::recursion::jagged::bijection::JaggedTransform;
 use super::jagged::bijection::{ConstraintMapping, VarCountJaggedBijection};
 
 #[derive(Clone)]
-struct JaggedBundle {
+pub(crate) struct JaggedBundle {
     bijection: VarCountJaggedBijection,
     mapping: ConstraintMapping,
     matrix_rows: Vec<usize>,
@@ -132,6 +132,27 @@ pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Fie
 pub type RecursionProofResult<T, PCS> =
     Result<(RecursionProof<Fq, T, PCS>, RecursionConstraintMetadata), Box<dyn std::error::Error>>;
 
+// -----------------------------------------------------------------------------
+// Internal phase outputs (private helpers for RecursionProver refactor)
+// -----------------------------------------------------------------------------
+
+pub(crate) struct PolyCommitPhaseOutput<PCS: CommitmentScheme<Field = Fq>> {
+    pub(crate) metadata: RecursionConstraintMetadata,
+    pub(crate) jagged_bundle: JaggedBundle,
+    pub(crate) dense_poly_for_jagged: DensePolynomial<Fq>,
+    pub(crate) dense_commitment: PCS::Commitment,
+    pub(crate) dense_mlpoly: MultilinearPolynomial<Fq>,
+}
+
+pub(crate) struct SumcheckPhaseOutput<T: Transcript> {
+    pub(crate) stage1_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+    pub(crate) stage2_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+    pub(crate) stage3_m_eval: Fq,
+    pub(crate) stage4_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+    pub(crate) stage5_proof: JaggedAssistProof<Fq, T>,
+    pub(crate) accumulator: ProverOpeningAccumulator<Fq>,
+}
+
 /// Unified prover for the recursion SNARK
 #[derive(Clone)]
 pub struct RecursionProver<F: JoltField = Fq> {
@@ -170,23 +191,20 @@ pub struct DoryOpeningSnapshot<F: JoltField, ProofTranscript: Transcript> {
 }
 
 impl RecursionProver<Fq> {
-    /// Create a new recursion prover from Stage 8 snapshot + opening proof by performing
-    /// **all** recursion-only preprocessing in one step:
-    /// - compute joint commitment via combine-witness generation (and return a serializable hint)
-    /// - run PCS recursion witness generation (`witness_gen`) to obtain proving witnesses + Stage 9 hint
-    /// - build the recursion constraint system (and embed combine witnesses as constraints)
+    /// Phase 1: witness generation for recursion proving.
     ///
-    /// Returns the constructed `RecursionProver`, the Stage 8 combine hint (Fq12, for verifier
-    /// offloading), and the PCS hint (`stage9_pcs_hint`) that must be serialized in the top-level
-    /// proof for verifier-side Stage 8 verification.
+    /// This samples `(gamma, delta)` from the main transcript, then performs all recursion-only
+    /// work needed to start recursion proving from the Stage 8 (Dory) opening:
+    /// - combine witness generation (Stage 8 offload) + serialized `stage8_combine_hint`
+    /// - `PCS::witness_gen` (Stage 9) + `stage9_pcs_hint`
+    /// - build the recursion constraint system and return `RecursionProver`
     #[allow(clippy::type_complexity)]
-    pub fn new_from_stage8_snapshot<F, PCS, ProofTranscript>(
-        opening_proof: &PCS::Proof,
-        snapshot: DoryOpeningSnapshot<F, ProofTranscript>,
+    fn witness_generation<F, PCS, ProofTranscript>(
+        transcript: &mut ProofTranscript,
+        stage8_opening_proof: &PCS::Proof,
+        stage8_snapshot: DoryOpeningSnapshot<F, ProofTranscript>,
         verifier_setup: &PCS::VerifierSetup,
         commitments: &std::collections::HashMap<CommittedPolynomial, PCS::Commitment>,
-        gamma: Fq,
-        delta: Fq,
     ) -> Result<(Self, ark_bn254::Fq12, PCS::Hint), Box<dyn std::error::Error>>
     where
         F: JoltField,
@@ -200,8 +218,28 @@ impl RecursionProver<Fq> {
     {
         use crate::poly::rlc_utils::compute_rlc_coefficients;
 
+        // Sample gamma/delta challenges from the main transcript.
+        let gamma: Fq = transcript.challenge_scalar();
+        let delta: Fq = transcript.challenge_scalar();
+
+        // Verify type compatibility at runtime.
+        if std::any::TypeId::of::<F>() != std::any::TypeId::of::<ark_bn254::Fr>() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Recursion SNARK requires F to be Fr (BN254 scalar field)",
+            )));
+        }
+
         // Stage 8 (recursion-only): compute joint commitment via combine-witness generation.
-        let rlc_map = compute_rlc_coefficients(&snapshot.gamma_powers, snapshot.polynomial_claims);
+        let DoryOpeningSnapshot {
+            pre_opening_proof_transcript,
+            opening_point,
+            polynomial_claims,
+            gamma_powers,
+            joint_claim,
+        } = stage8_snapshot;
+
+        let rlc_map = compute_rlc_coefficients(&gamma_powers, polynomial_claims);
 
         let mut coeffs = Vec::with_capacity(rlc_map.len());
         let mut comms = Vec::with_capacity(rlc_map.len());
@@ -219,13 +257,13 @@ impl RecursionProver<Fq> {
 
         // Stage 9: use the PCS recursion extension to generate witnesses + hint for verifying the
         // Stage 8 opening proof.
-        let mut transcript = snapshot.pre_opening_proof_transcript;
+        let mut witness_gen_transcript = pre_opening_proof_transcript;
         let (witness_collection, stage9_pcs_hint) = PCS::witness_gen(
-            opening_proof,
+            stage8_opening_proof,
             verifier_setup,
-            &mut transcript,
-            &snapshot.opening_point,
-            &snapshot.joint_claim,
+            &mut witness_gen_transcript,
+            &opening_point,
+            &joint_claim,
             &joint_commitment,
         )?;
 
@@ -233,6 +271,97 @@ impl RecursionProver<Fq> {
         let prover = Self::new_from_witnesses(&witness_collection, Some(combine_witness), gamma, delta)?;
 
         Ok((prover, stage8_combine_hint_fq12, stage9_pcs_hint))
+    }
+
+    /// Full Stage8→recursion pipeline entrypoint.
+    ///
+    /// This is the definitive call for recursion proving:
+    /// 1) `witness_generation` (Stage 8 offload + Stage 9 `witness_gen` + build CS)\n
+    /// 2) `poly_commit` (Hyrax commit)\n
+    /// 3) `prove_sumchecks` (all recursion sumchecks)\n
+    /// 4) `poly_opening` (Hyrax opening)\n
+    ///
+    /// Returns the recursion proof, verifier metadata, and the Stage 8/9 hints that must be
+    /// serialized in the top-level `JoltProof`.
+    #[allow(clippy::type_complexity)]
+    pub fn prove<F, DoryPCS, ProofTranscript, HyraxPCS>(
+        transcript: &mut ProofTranscript,
+        hyrax_prover_setup: &HyraxPCS::ProverSetup,
+        stage8_opening_proof: &DoryPCS::Proof,
+        stage8_snapshot: DoryOpeningSnapshot<F, ProofTranscript>,
+        verifier_setup: &DoryPCS::VerifierSetup,
+        commitments: &std::collections::HashMap<CommittedPolynomial, DoryPCS::Commitment>,
+    ) -> Result<
+        (
+            RecursionProof<Fq, ProofTranscript, HyraxPCS>,
+            RecursionConstraintMetadata,
+            Option<ark_bn254::Fq12>,
+            <DoryPCS as RecursionExt<F>>::Hint,
+        ),
+        Box<dyn std::error::Error>,
+    >
+    where
+        F: JoltField,
+        DoryPCS: RecursionExt<
+            F,
+            Witness = dory::recursion::WitnessCollection<
+                crate::poly::commitment::dory::recursion::JoltWitness,
+            >,
+        >,
+        ProofTranscript: Transcript,
+        HyraxPCS: CommitmentScheme<Field = Fq>,
+    {
+        // Phase 1: witness generation
+        let (mut prover, stage8_combine_hint_fq12, stage9_pcs_hint) = Self::witness_generation::<
+            F,
+            DoryPCS,
+            ProofTranscript,
+        >(
+            transcript,
+            stage8_opening_proof,
+            stage8_snapshot,
+            verifier_setup,
+            commitments,
+        )?;
+
+        // Phase 2: polynomial commitment (Hyrax)
+        let poly_commit = prover.poly_commit::<ProofTranscript, HyraxPCS>(transcript, hyrax_prover_setup)?;
+
+        // Phase 3: sumchecks
+        let sumchecks = prover.prove_sumchecks::<ProofTranscript>(
+            transcript,
+            &poly_commit.metadata,
+            poly_commit.jagged_bundle,
+            poly_commit.dense_poly_for_jagged,
+        )?;
+
+        // Phase 4: polynomial opening (Hyrax)
+        let (opening_proof, opening_claims) = Self::poly_opening::<ProofTranscript, HyraxPCS>(
+            transcript,
+            hyrax_prover_setup,
+            sumchecks.accumulator,
+            poly_commit.dense_mlpoly,
+        )?;
+
+        let proof = RecursionProof {
+            stage1_proof: sumchecks.stage1_proof,
+            stage2_proof: sumchecks.stage2_proof,
+            stage3_m_eval: sumchecks.stage3_m_eval,
+            stage4_proof: sumchecks.stage4_proof,
+            stage5_proof: sumchecks.stage5_proof,
+            opening_proof,
+            gamma: prover.gamma,
+            delta: prover.delta,
+            opening_claims,
+            dense_commitment: poly_commit.dense_commitment,
+        };
+
+        Ok((
+            proof,
+            poly_commit.metadata,
+            Some(stage8_combine_hint_fq12),
+            stage9_pcs_hint,
+        ))
     }
 
     /// Create a new recursion prover from pre-generated witnesses
@@ -851,42 +980,6 @@ impl RecursionProver<Fq> {
 }
 
 impl RecursionProver<Fq> {
-    /// Run the full recursion prover and generate PCS opening proof.
-    ///
-    /// This is a convenience wrapper around [`prove_full`] that discards the
-    /// constraint metadata. For most use cases, prefer [`prove_full`] which
-    /// returns both the proof and the metadata needed by the verifier.
-    pub fn prove<T: Transcript, PCS: CommitmentScheme<Field = Fq> + RecursionExt<Fq>>(
-        self,
-        transcript: &mut T,
-        prover_setup: &PCS::ProverSetup,
-    ) -> Result<RecursionProof<Fq, T, PCS>, Box<dyn std::error::Error>> {
-        // Delegate to prove_full and discard the metadata
-        let (proof, _metadata) = self.prove_full(transcript, prover_setup)?;
-        Ok(proof)
-    }
-
-    /// Run the full recursion prover for any PCS (without requiring RecursionExt).
-    ///
-    /// # Deprecated
-    /// This method is deprecated in favor of [`prove_full`], which correctly commits
-    /// to the dense polynomial BEFORE running sumchecks (required for soundness).
-    /// This method delegates to `prove_full` and discards the constraint metadata.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use prove_full() instead, which commits before sumchecks (required for soundness)"
-    )]
-    #[tracing::instrument(skip_all, name = "RecursionProver::prove_with_pcs")]
-    pub fn prove_with_pcs<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
-        self,
-        transcript: &mut T,
-        prover_setup: &PCS::ProverSetup,
-    ) -> Result<RecursionProof<Fq, T, PCS>, Box<dyn std::error::Error>> {
-        // Delegate to prove_full and discard the metadata
-        let (proof, _metadata) = self.prove_full(transcript, prover_setup)?;
-        Ok(proof)
-    }
-
     /// Build constraint metadata for the verifier.
     ///
     /// This extracts all metadata the verifier needs from the constraint system,
@@ -936,31 +1029,21 @@ impl RecursionProver<Fq> {
         }
     }
 
-    /// Run the full recursion prover with correct commitment ordering for soundness.
-    ///
-    /// This method:
-    /// 1. Builds constraint metadata for the verifier
-    /// 2. Builds and commits to the dense polynomial BEFORE running sumchecks (for soundness)
-    /// 3. Runs all sumcheck stages (1-5)
-    /// 4. Generates the PCS opening proof
-    ///
-    /// Returns both the proof and the constraint metadata needed by the verifier.
-    #[tracing::instrument(skip_all, name = "RecursionProver::prove_full")]
-    pub fn prove_full<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
-        mut self,
+    #[tracing::instrument(skip_all, name = "RecursionProver::poly_commit")]
+    pub(crate) fn poly_commit<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
+        &mut self,
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
-    ) -> RecursionProofResult<T, PCS> {
+    ) -> Result<PolyCommitPhaseOutput<PCS>, Box<dyn std::error::Error>> {
         // ============ BUILD JAGGED BUNDLE (LAYOUT + ROWS; NO DENSE EXTRACTION) ============
         let jagged_bundle = tracing::info_span!("build_jagged_bundle").in_scope(|| {
             tracing::info!("Building jagged bundle (layout + matrix_rows)");
             JaggedBundle::build(&self.constraint_system)
         });
 
-        let dense_native_size = jagged_bundle.dense_native_size;
         let dense_num_vars = jagged_bundle.dense_num_vars;
 
-        // ============ STAGE 10 (from JoltProver): BUILD METADATA ============
+        // ============ BUILD METADATA (for verifier) ============
         let metadata = tracing::info_span!("build_constraint_metadata").in_scope(|| {
             tracing::info!("Building constraint metadata for verifier");
             let constraint_types: Vec<_> = self
@@ -988,9 +1071,8 @@ impl RecursionProver<Fq> {
             }
         });
 
-        // ============ STAGE 11 (from JoltProver): BUILD + COMMIT DENSE POLYNOMIAL ============
+        // ============ BUILD + COMMIT DENSE POLYNOMIAL ============
         // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
-        // This prevents the prover from adaptively choosing the polynomial.
         let (dense_poly_for_jagged, dense_commitment, dense_mlpoly) =
             tracing::info_span!("build_and_commit_dense_polynomial").in_scope(|| {
                 tracing::info!("Building and committing to dense polynomial");
@@ -1019,7 +1101,24 @@ impl RecursionProver<Fq> {
         // Add commitment to transcript for Fiat-Shamir soundness
         transcript.append_serializable(&dense_commitment);
 
-        // ============ STAGE 12 (from JoltProver): RUN ALL SUMCHECKS ============
+        Ok(PolyCommitPhaseOutput {
+            metadata,
+            jagged_bundle,
+            dense_poly_for_jagged,
+            dense_commitment,
+            dense_mlpoly,
+        })
+    }
+
+    #[tracing::instrument(skip_all, name = "RecursionProver::prove_sumchecks")]
+    pub(crate) fn prove_sumchecks<T: Transcript>(
+        &mut self,
+        transcript: &mut T,
+        metadata: &RecursionConstraintMetadata,
+        jagged_bundle: JaggedBundle,
+        dense_poly_for_jagged: DensePolynomial<Fq>,
+    ) -> Result<SumcheckPhaseOutput<T>, Box<dyn std::error::Error>> {
+        // ============ RUN ALL SUMCHECKS ============
         // Initialize opening accumulator
         let log_T = self.constraint_system.num_vars();
         let mut accumulator = tracing::info_span!("init_opening_accumulator").in_scope(|| {
@@ -1029,8 +1128,8 @@ impl RecursionProver<Fq> {
         });
 
         // Stage 1: Packed GT exp sumcheck
-        let (stage1_proof, _r_stage1_packed) = tracing::info_span!("recursion_prove_full_stage1")
-            .in_scope(|| {
+        let (stage1_proof, _r_stage1_packed) =
+            tracing::info_span!("recursion_prove_stage1").in_scope(|| {
                 tracing::info!("Running Stage 1: Packed GT exp sumcheck");
                 self.prove_stage1(transcript, &mut accumulator)
                     .expect("Failed to run Stage 1 (GtExp)")
@@ -1038,28 +1137,39 @@ impl RecursionProver<Fq> {
 
         // Stage 2: Batched constraint sumchecks
         let (stage2_proof, r_stage2) =
-            tracing::info_span!("recursion_prove_full_stage2").in_scope(|| {
+            tracing::info_span!("recursion_prove_stage2").in_scope(|| {
                 tracing::info!("Running Stage 2: Batched constraint sumchecks");
                 self.prove_stage2(transcript, &mut accumulator)
                     .expect("Failed to run Stage 2 (constraint sumchecks)")
             });
 
-        // Stage 2 challenges layout: [r_c || r_x].
+        // Stage 2 challenges layout:
+        // - legacy: r_stage2 = r_x (length = num_constraint_vars)
+        // - fused:  r_stage2 = [r_c || r_x] (length >= k + num_constraint_vars)
         let k = self.constraint_system.matrix.num_constraint_index_vars;
-        if r_stage2.len() < k + self.constraint_system.matrix.num_constraint_vars {
+        let num_constraint_vars = self.constraint_system.matrix.num_constraint_vars;
+        if r_stage2.len() != num_constraint_vars && r_stage2.len() < k + num_constraint_vars {
             return Err(format!(
-                "Stage 2 returned {} challenges, expected at least {} (k + num_constraint_vars)",
+                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (k + num_constraint_vars)",
                 r_stage2.len(),
-                k + self.constraint_system.matrix.num_constraint_vars
+                num_constraint_vars,
+                k + num_constraint_vars
             )
             .into());
         }
-        let r_c = &r_stage2[..k];
-        let r_x = &r_stage2[r_stage2.len() - self.constraint_system.matrix.num_constraint_vars..];
+        let (r_c, r_x): (&[<Fq as JoltField>::Challenge], &[<Fq as JoltField>::Challenge]) =
+            if r_stage2.len() == num_constraint_vars {
+                (&[], &r_stage2)
+            } else {
+                (
+                    &r_stage2[..k],
+                    &r_stage2[r_stage2.len() - num_constraint_vars..],
+                )
+            };
 
         // Stage 3: Virtualization direct evaluation
         let (stage3_m_eval, r_s) =
-            tracing::info_span!("recursion_prove_full_stage3").in_scope(|| {
+            tracing::info_span!("recursion_prove_stage3").in_scope(|| {
                 tracing::info!("Running Stage 3: Virtualization direct evaluation");
                 // Stage 3 no longer needs the sparse matrix buffer; drop it after Stage 2.
                 let _dropped_matrix_evals =
@@ -1069,8 +1179,9 @@ impl RecursionProver<Fq> {
             });
 
         // Stage 4: Jagged transform sumcheck
+        let dense_native_size = jagged_bundle.dense_native_size;
         let (stage4_proof, r_dense) =
-            tracing::info_span!("recursion_prove_full_stage4").in_scope(|| {
+            tracing::info_span!("recursion_prove_stage4").in_scope(|| {
                 tracing::info!("Running Stage 4: Jagged transform sumcheck");
                 self.prove_stage4(
                     transcript,
@@ -1086,7 +1197,7 @@ impl RecursionProver<Fq> {
             });
 
         // Stage 5: Jagged assist
-        let stage5_proof = tracing::info_span!("recursion_prove_full_stage5").in_scope(|| {
+        let stage5_proof = tracing::info_span!("recursion_prove_stage5").in_scope(|| {
             tracing::info!("Running Stage 5: Jagged assist");
             self.prove_stage5(
                 transcript,
@@ -1099,45 +1210,39 @@ impl RecursionProver<Fq> {
             .expect("Failed to run Stage 5 (jagged assist)")
         });
 
-        // ============ STAGE 13 (from JoltProver): GENERATE PCS OPENING PROOF ============
-        let (opening_proof, opening_claims) =
-            tracing::info_span!("recursion_prove_full_pcs_opening").in_scope(|| {
-                tracing::info!("Generating PCS opening proof");
-
-                // Create polynomial map for opening proof
-                let mut polynomials_map: HashMap<CommittedPolynomial, MultilinearPolynomial<Fq>> =
-                    HashMap::new();
-                polynomials_map.insert(CommittedPolynomial::DoryDenseMatrix, dense_mlpoly);
-
-                // Generate opening proof using PCS
-                let opening_proof = accumulator
-                    .prove_single::<T, PCS>(polynomials_map, prover_setup, transcript)
-                    .expect("Failed to generate PCS opening proof");
-
-                let opening_claims = accumulator.openings.clone();
-                tracing::info!(
-                    "Generated opening proof with {} claims",
-                    opening_claims.len()
-                );
-
-                (opening_proof, opening_claims)
-            });
-
-        // ============ ASSEMBLE PROOF ============
-        let proof = RecursionProof {
+        Ok(SumcheckPhaseOutput {
             stage1_proof,
             stage2_proof,
             stage3_m_eval,
             stage4_proof,
             stage5_proof,
-            opening_proof,
-            gamma: self.gamma,
-            delta: self.delta,
-            opening_claims,
-            dense_commitment,
-        };
+            accumulator,
+        })
+    }
 
-        Ok((proof, metadata))
+    #[tracing::instrument(skip_all, name = "RecursionProver::poly_opening")]
+    pub(crate) fn poly_opening<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
+        transcript: &mut T,
+        prover_setup: &PCS::ProverSetup,
+        mut accumulator: ProverOpeningAccumulator<Fq>,
+        dense_mlpoly: MultilinearPolynomial<Fq>,
+    ) -> Result<(PCS::Proof, Openings<Fq>), Box<dyn std::error::Error>> {
+        tracing::info!("Generating PCS opening proof");
+
+        // Create polynomial map for opening proof
+        let mut polynomials_map: HashMap<CommittedPolynomial, MultilinearPolynomial<Fq>> =
+            HashMap::new();
+        polynomials_map.insert(CommittedPolynomial::DoryDenseMatrix, dense_mlpoly);
+
+        // Generate opening proof using PCS
+        let opening_proof = accumulator
+            .prove_single::<T, PCS>(polynomials_map, prover_setup, transcript)
+            .expect("Failed to generate PCS opening proof");
+
+        let opening_claims = accumulator.openings.clone();
+        tracing::info!("Generated opening proof with {} claims", opening_claims.len());
+
+        Ok((opening_proof, opening_claims))
     }
 
     /// Run Stage 1: Packed GT exp sumcheck
@@ -1448,31 +1553,8 @@ impl RecursionProver<Fq> {
         // G1 add
         let g1_add_constraints = self.constraint_system.extract_g1_add_constraints();
         if !g1_add_constraints.is_empty() {
-            // Add fused G1Add sumcheck (over global constraint index + x vars) to introduce a
-            // global r_c prefix in the batched Stage 2 challenge vector.
-            //
-            // NOTE: We keep the legacy per-instance G1Add sumcheck for now (for Stage 3 legacy
-            // virtualization). The fused sumcheck is used for correctness checks + staging.
-            use super::g1::fused_addition::{FusedG1AddParams, FusedG1AddProver};
-            let constraint_types: Vec<ConstraintType> = self
-                .constraint_system
-                .constraints
-                .iter()
-                .map(|c| c.constraint_type.clone())
-                .collect();
-            let fused_params = FusedG1AddParams::new(
-                self.constraint_system.num_constraints(),
-                self.constraint_system.matrix.num_constraints_padded,
-                self.constraint_system.matrix.num_constraint_vars,
-            );
-            let fused_prover = FusedG1AddProver::new(
-                &self.constraint_system.matrix.evaluations,
-                &constraint_types,
-                fused_params,
-                transcript,
-            );
-            provers.push(Box::new(fused_prover));
-
+            // NOTE: The fused G1Add sumcheck exists (see `g1::fused_addition`) but is intentionally
+            // NOT wired into the default prover pipeline right now.
             use super::g1::addition::{G1AddParams, G1AddProver, G1AddProverSpec};
             let params = G1AddParams::new(g1_add_constraints.len());
             let (spec, constraint_indices) = G1AddProverSpec::new(params, g1_add_constraints);

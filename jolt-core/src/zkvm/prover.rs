@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::poly::commitment::hyrax::{Hyrax, PedersenGenerators};
-use ark_bn254::{Fq, Fq12, Fr};
+use ark_bn254::Fq;
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use itertools::Itertools;
@@ -123,7 +123,7 @@ use crate::{
             raf_evaluation::RafEvaluationSumcheckProver as RamRafEvaluationSumcheckProver,
             read_write_checking::RamReadWriteCheckingProver,
         },
-        recursion::prover::{DoryOpeningSnapshot, RecursionProof, RecursionProver},
+        recursion::prover::{DoryOpeningSnapshot, RecursionProver},
         registers::{
             read_write_checking::RegistersReadWriteCheckingProver,
             val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
@@ -687,16 +687,66 @@ where
         // (Intended to be cached for session-level reuse.)
         let verifier_setup = PCS::setup_verifier(&self.preprocessing.generators);
 
-        // Stages 9-13: Consolidated recursion proof generation
-        // This handles:
-        // - Stage 9: Create RecursionProver from witnesses + sample gamma/delta
-        // - Stage 10: Extract constraint metadata
-        // - Stage 11: Build dense polynomial + commit (BEFORE sumchecks for soundness)
-        // - Stage 12: Run recursion sumchecks (stages 1-5 of RecursionProver)
-        // - Stage 13: Generate Hyrax opening proof
+        // Recursion proving entrypoint (Stages 9-13 live inside `RecursionProver::prove`).
+        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
+        let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
+
+        // Build the minimal commitment map needed for recursion-only Stage 8 offloading.
+        let mut commitments_map = HashMap::new();
+        {
+            let needs_trusted_advice = stage8_snapshot
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice);
+            let needs_untrusted_advice = stage8_snapshot
+                .polynomial_claims
+                .iter()
+                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice);
+
+            let all_polys = all_committed_polynomials(&self.one_hot_params);
+            debug_assert_eq!(
+                all_polys.len(),
+                self.commitments.len(),
+                "commitment vector length mismatch"
+            );
+            for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
+                commitments_map.insert(poly, commitment.clone());
+            }
+
+            if needs_trusted_advice {
+                if let Some(ref commitment) = self.advice.trusted_advice_commitment {
+                    commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                }
+            }
+            if needs_untrusted_advice {
+                if let Some(ref commitment) = self.untrusted_advice_commitment {
+                    commitments_map
+                        .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                }
+            }
+
+            // Include program commitments in committed mode (BytecodeChunk and ProgramImageInit).
+            if let Some(ref program_commitments) = self.preprocessing.program_commitments {
+                for (idx, commitment) in program_commitments.bytecode_commitments.iter().enumerate()
+                {
+                    commitments_map.insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
+                }
+                commitments_map.insert(
+                    CommittedPolynomial::ProgramImageInit,
+                    program_commitments.program_image_commitment.clone(),
+                );
+            }
+        }
+
         let (recursion_proof, recursion_constraint_metadata, stage8_combine_hint, stage9_pcs_hint) =
-            self
-                .prove_stage_recursive(&joint_opening_proof, stage8_snapshot, &verifier_setup)
+            RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript, HyraxPCS>(
+                &mut self.transcript,
+                hyrax_prover_setup,
+                &joint_opening_proof,
+                stage8_snapshot,
+                &verifier_setup,
+                &commitments_map,
+            )
             .expect("Failed to generate recursion proof");
 
         #[cfg(test)]
@@ -2116,144 +2166,6 @@ where
         (opening_proof, snapshot)
     }
 
-    /// Consolidated recursion proof generation (Stages 9-13).
-    ///
-    /// This method consolidates the following stages:
-    /// - Stage 9: Create RecursionProver from witnesses + sample gamma/delta
-    /// - Stage 10: Extract constraint metadata
-    /// - Stage 11: Build dense polynomial + commit (BEFORE sumchecks for soundness)
-    /// - Stage 12: Run recursion sumchecks (stages 1-5 of RecursionProver)
-    /// - Stage 13: Generate Hyrax opening proof
-    ///
-    /// Returns the recursion proof and constraint metadata for the verifier.
-    #[tracing::instrument(skip_all, name = "prove_stage_recursive")]
-    fn prove_stage_recursive(
-        &mut self,
-        stage8_opening_proof: &PCS::Proof,
-        stage8_snapshot: DoryOpeningSnapshot<F, ProofTranscript>,
-        verifier_setup: &PCS::VerifierSetup,
-    ) -> Result<
-        (
-            RecursionProof<Fq, ProofTranscript, Hyrax<1, GrumpkinProjective>>,
-            crate::zkvm::proof_serialization::RecursionConstraintMetadata,
-            Option<Fq12>, // combine_hint for homomorphic combining offload
-            <PCS as RecursionExt<F>>::Hint,
-        ),
-        Box<dyn std::error::Error>,
-    >
-    where
-        PCS: RecursionExt<
-            F,
-            Witness = dory::recursion::WitnessCollection<
-                crate::poly::commitment::dory::recursion::JoltWitness,
-            >,
-        >,
-        <PCS as RecursionExt<F>>::Hint: Send + Sync + 'static,
-    {
-        tracing::info!("Starting consolidated recursion proof (Stages 9-13)");
-
-        // ============ STAGE 9: Create RecursionProver ============
-        // Sample gamma/delta challenges from the main transcript
-        let (gamma, delta) = tracing::info_span!("sample_recursion_challenges").in_scope(|| {
-            let g: Fq = self.transcript.challenge_scalar();
-            let d: Fq = self.transcript.challenge_scalar();
-            tracing::info!("Sampled gamma and delta challenges");
-            (g, d)
-        });
-
-        // Verify type compatibility at runtime
-        if std::any::TypeId::of::<F>() != std::any::TypeId::of::<Fr>() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Recursion SNARK requires F to be Fr (BN254 scalar field)",
-            )));
-        }
-
-        // Build the minimal commitment map needed for recursion-only Stage 8 offloading.
-        let mut commitments_map = HashMap::new();
-        {
-            let all_polys = all_committed_polynomials(&self.one_hot_params);
-            debug_assert_eq!(
-                all_polys.len(),
-                self.commitments.len(),
-                "commitment vector length mismatch"
-            );
-            for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
-                commitments_map.insert(poly, commitment.clone());
-            }
-
-            // Include advice commitments if they were folded into the Stage 8 RLC.
-            if stage8_snapshot
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
-            {
-                if let Some(ref commitment) = self.advice.trusted_advice_commitment {
-                    commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-                }
-            }
-            if stage8_snapshot
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
-            {
-                if let Some(ref commitment) = self.untrusted_advice_commitment {
-                    commitments_map
-                        .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
-                }
-            }
-
-            // Include program commitments in committed mode (BytecodeChunk and ProgramImageInit).
-            if let Some(ref program_commitments) = self.preprocessing.program_commitments {
-                for (idx, commitment) in program_commitments.bytecode_commitments.iter().enumerate()
-                {
-                    commitments_map.insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
-                }
-                commitments_map.insert(
-                    CommittedPolynomial::ProgramImageInit,
-                    program_commitments.program_image_commitment.clone(),
-                );
-            }
-        }
-
-        // Create RecursionProver by performing all recursion-only Stage 8 work and Stage 9 witness generation.
-        let (recursion_prover, stage8_combine_hint, stage9_pcs_hint) =
-            tracing::info_span!("create_recursion_prover_from_stage8").in_scope(|| {
-                let (prover, combine_hint_fq12, hint) =
-                    RecursionProver::<Fq>::new_from_stage8_snapshot::<F, PCS, ProofTranscript>(
-                    stage8_opening_proof,
-                    stage8_snapshot,
-                    verifier_setup,
-                    &commitments_map,
-                    gamma,
-                    delta,
-                )?;
-                tracing::info!("Created RecursionProver from Stage 8 opening data");
-                Ok::<_, Box<dyn std::error::Error>>((prover, Some(combine_hint_fq12), hint))
-            })?;
-
-        // ============ STAGES 10-13: Delegate to RecursionProver::prove_full ============
-        // This method handles:
-        // - Stage 10: Build constraint metadata
-        // - Stage 11: Build dense polynomial + commit (BEFORE sumchecks)
-        // - Stage 12: Run all recursion sumchecks (stages 1-5)
-        // - Stage 13: Generate Hyrax opening proof
-        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-        let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
-
-        let (recursion_proof, metadata) = tracing::info_span!("recursion_prover_prove_full")
-            .in_scope(|| {
-                recursion_prover
-                    .prove_full::<ProofTranscript, HyraxPCS>(
-                        &mut self.transcript,
-                        hyrax_prover_setup,
-                    )
-                    .expect("Failed to run RecursionProver::prove_full")
-            });
-
-        tracing::info!("Completed consolidated recursion proof");
-        Ok((recursion_proof, metadata, stage8_combine_hint, stage9_pcs_hint))
-    }
 }
 
 pub struct JoltAdvice<F: JoltField, PCS: CommitmentScheme<Field = F>> {

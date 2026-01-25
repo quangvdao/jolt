@@ -57,6 +57,11 @@ struct ProfileArgs {
     #[clap(long, default_value = "false")]
     committed: bool,
 
+    /// Enable recursion proving/verifying (skips native Stage 8 verification and verifies via
+    /// transcript replay + recursion SNARK).
+    #[clap(long, default_value = "false")]
+    recursion: bool,
+
     /// Dory matrix layout (cycle-major or address-major)
     #[clap(long, value_enum, default_value = "cycle-major")]
     layout: LayoutArg,
@@ -163,12 +168,14 @@ fn setup_tracing(formats: Option<Vec<Format>>, trace_name: &str) -> Vec<Box<dyn 
 fn trace(args: ProfileArgs) {
     let bench_name = normalize_bench_name(&args.name.to_string());
     let mode_suffix = if args.committed { "_committed" } else { "" };
+    let recursion_suffix = if args.recursion { "_recursion" } else { "" };
     let layout_suffix = match args.layout {
         LayoutArg::CycleMajor => "",
         LayoutArg::AddressMajor => "_addr_major",
     };
     let timestamp = Local::now().format("%Y%m%d-%H%M");
-    let trace_name = format!("{bench_name}{mode_suffix}{layout_suffix}_{timestamp}");
+    let trace_name =
+        format!("{bench_name}{mode_suffix}{recursion_suffix}{layout_suffix}_{timestamp}");
     let _guards = setup_tracing(args.format, &trace_name);
 
     // Set the Dory layout before running benchmarks
@@ -176,7 +183,7 @@ fn trace(args: ProfileArgs) {
     DoryGlobals::set_layout(layout);
     tracing::info!("Using Dory layout: {:?}", layout);
 
-    for (span, bench) in benchmarks(args.name, args.committed).into_iter() {
+    for (span, bench) in benchmarks(args.name, args.committed, args.recursion).into_iter() {
         span.in_scope(|| {
             bench();
             tracing::info!("Bench Complete");
@@ -199,7 +206,12 @@ fn run_benchmark(args: BenchmarkArgs) {
         LayoutArg::CycleMajor => "",
         LayoutArg::AddressMajor => "_addr_major",
     };
-    let trace_name = format!("{bench_name}{layout_suffix}_{scale}");
+    let recursion_suffix = if args.profile_args.recursion {
+        "_recursion"
+    } else {
+        ""
+    };
+    let trace_name = format!("{bench_name}{recursion_suffix}{layout_suffix}_{scale}");
     let _guards = setup_tracing(args.profile_args.format, &trace_name);
 
     // Set the Dory layout before running benchmarks
@@ -209,7 +221,13 @@ fn run_benchmark(args: BenchmarkArgs) {
 
     // Call master_benchmark with parameters
     for (span, bench) in
-        master_benchmark(args.profile_args.name, scale, args.target_trace_size).into_iter()
+        master_benchmark(
+            args.profile_args.name,
+            scale,
+            args.target_trace_size,
+            args.profile_args.recursion,
+        )
+        .into_iter()
     {
         span.in_scope(|| {
             bench();

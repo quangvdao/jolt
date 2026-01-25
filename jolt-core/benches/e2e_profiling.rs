@@ -39,54 +39,59 @@ pub enum BenchType {
 pub fn benchmarks(
     bench_type: BenchType,
     committed: bool,
+    recursion: bool,
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     match bench_type {
-        BenchType::BTreeMap => btreemap(committed),
-        BenchType::Sha2 => sha2(committed),
-        BenchType::Sha3 => sha3(committed),
-        BenchType::Sha2Chain => sha2_chain(committed),
-        BenchType::Sha3Chain => sha3_chain(committed),
-        BenchType::Fibonacci => fibonacci(committed),
+        BenchType::BTreeMap => btreemap(committed, recursion),
+        BenchType::Sha2 => sha2(committed, recursion),
+        BenchType::Sha3 => sha3(committed, recursion),
+        BenchType::Sha2Chain => sha2_chain(committed, recursion),
+        BenchType::Sha3Chain => sha3_chain(committed, recursion),
+        BenchType::Fibonacci => fibonacci(committed, recursion),
     }
 }
 
-fn fibonacci(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn fibonacci(committed: bool, recursion: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     prove_example(
         "fibonacci-guest",
         postcard::to_stdvec(&400000u32).unwrap(),
         committed,
+        recursion,
     )
 }
 
-fn sha2(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha2(committed: bool, recursion: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
     prove_example(
         "sha2-guest",
         postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
         committed,
+        recursion,
     )
 }
 
-fn sha3(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha3(committed: bool, recursion: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_keccak256 as _;
     prove_example(
         "sha3-guest",
         postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
         committed,
+        recursion,
     )
 }
 
-fn btreemap(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn btreemap(committed: bool, recursion: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     prove_example(
         "btreemap-guest",
         postcard::to_stdvec(&50u32).unwrap(),
         committed,
+        recursion,
     )
 }
 
-fn sha2_chain(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha2_chain(committed: bool, recursion: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
     let mut inputs = vec![];
@@ -96,22 +101,23 @@ fn sha2_chain(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
         CYCLES_PER_SHA256,
     );
     inputs.append(&mut postcard::to_stdvec(&iters).unwrap());
-    prove_example("sha2-chain-guest", inputs, committed)
+    prove_example("sha2-chain-guest", inputs, committed, recursion)
 }
 
-fn sha3_chain(committed: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha3_chain(committed: bool, recursion: bool) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     extern crate jolt_inlines_keccak256;
     let mut inputs = vec![];
     inputs.append(&mut postcard::to_stdvec(&[5u8; 32]).unwrap());
     inputs.append(&mut postcard::to_stdvec(&20u32).unwrap());
-    prove_example("sha3-chain-guest", inputs, committed)
+    prove_example("sha3-chain-guest", inputs, committed, recursion)
 }
 
 pub fn master_benchmark(
     bench_type: BenchType,
     bench_scale: usize,
     target_trace_size: Option<usize>,
+    recursion: bool,
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     // Ensure SHA2 inline library is linked and auto-registered
     #[cfg(feature = "host")]
@@ -169,6 +175,7 @@ pub fn master_benchmark(
             max_trace_length,
             bench_name,
             bench_scale,
+            recursion,
         );
 
         let proving_hz = trace_length as f64 / duration.as_secs_f64();
@@ -221,6 +228,7 @@ fn prove_example(
     example_name: &str,
     serialized_input: Vec<u8>,
     committed: bool,
+    recursion: bool,
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     let mut tasks = Vec::new();
     let mut program = host::Program::new(example_name);
@@ -270,7 +278,7 @@ fn prove_example(
             program_mode,
         );
         let program_io = prover.program_io.clone();
-        let (jolt_proof, _) = prover.prove();
+        let (jolt_proof, _) = prover.prove(recursion);
 
         // Verifier preprocessing is derived from prover preprocessing
         // This automatically uses committed mode if preprocessing was committed
@@ -278,7 +286,7 @@ fn prove_example(
         let verifier =
             RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
                 .expect("Failed to create verifier");
-        verifier.verify().unwrap();
+        verifier.verify(recursion).unwrap();
     };
 
     let span_name = if committed {
@@ -300,6 +308,7 @@ fn prove_example_with_trace(
     max_trace_length: usize,
     _bench_name: &str,
     _scale: usize,
+    recursion: bool,
 ) -> (std::time::Duration, usize, usize, usize) {
     let mut program = host::Program::new(example_name);
     let (instructions, init_memory_state, _) = program.decode();
@@ -337,7 +346,7 @@ fn prove_example_with_trace(
         None,
     );
     let now = Instant::now();
-    let (jolt_proof, _) = prover.prove();
+    let (jolt_proof, _) = prover.prove(recursion);
     let prove_duration = now.elapsed();
     drop(span);
     let proof_size = jolt_proof.serialized_size(ark_serialize::Compress::Yes);
@@ -368,7 +377,7 @@ fn prove_example_with_trace(
     let verifier =
         RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
             .expect("Failed to create verifier");
-    verifier.verify().unwrap();
+    verifier.verify(recursion).unwrap();
 
     (
         prove_duration,

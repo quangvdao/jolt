@@ -1,5 +1,10 @@
 // NOTE: recursion-guest currently requires `std` due to transitive dependencies
 // (e.g. dory uses std-only crates like `once_cell`).
+//
+// Trust model:
+// This guest program is intended to consume *trusted* inputs produced by a trusted host pipeline
+// (e.g. `jolt_sdk::decompress_transport_bytes_to_guest_bytes`). Do not treat the guest encoding as
+// a general wire format.
 
 use jolt_sdk::{self as jolt};
 

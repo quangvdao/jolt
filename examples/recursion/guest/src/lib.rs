@@ -1,11 +1,14 @@
-// #![cfg_attr(feature = "guest", no_std)]
+// NOTE: recursion-guest currently requires `std` due to transitive dependencies
+// (e.g. dory uses std-only crates like `once_cell`).
 
 use jolt_sdk::{self as jolt};
 
 extern crate alloc;
 
 use ark_serialize::{CanonicalDeserialize, Compress, Validate};
-use jolt::{JoltDevice, JoltVerifierPreprocessing, RV64IMACProof, RV64IMACVerifier, F, PCS};
+use jolt::{JoltDevice, JoltVerifierPreprocessing, F, PCS};
+#[cfg(all(not(feature = "native-input"), not(feature = "proof-bundle")))]
+use jolt::{RV64IMACProof, RV64IMACVerifier};
 
 #[cfg(feature = "proof-bundle")]
 use jolt::serialized_bundle::ProofBundleReader;
@@ -29,7 +32,8 @@ fn verify(bytes: &[u8]) -> u32 {
         embedded_bytes::EMBEDDED_BYTES
     };
 
-    let mut cursor = std::io::Cursor::new(data_bytes);
+    // `&mut &[u8]` implements arkworks' `Read` and advances as bytes are consumed (no `std::io`).
+    let mut cursor: &[u8] = data_bytes;
 
     start_cycle_tracking("deserialize preprocessing");
     let verifier_preprocessing: JoltVerifierPreprocessing<F, PCS> =
@@ -54,7 +58,9 @@ fn verify(bytes: &[u8]) -> u32 {
         start_cycle_tracking("verification");
         let verifier = RV64IMACVerifier::new(&verifier_preprocessing, proof, device, None, None);
         let is_valid = verifier.is_ok_and(|verifier| {
-            let result = verifier.verify();
+            // Auto-select verification mode based on whether the proof contains a recursion payload.
+            let recursion = verifier.proof.recursion.is_some();
+            let result = verifier.verify(recursion);
             core::hint::black_box(result).is_ok()
         });
         end_cycle_tracking("verification");
@@ -89,7 +95,7 @@ fn verify(bytes: &[u8]) -> u32 {
     };
     let verifier_preprocessing: JoltVerifierPreprocessing<F, PCS> =
         JoltVerifierPreprocessing::<F, PCS>::deserialize_with_mode(
-            &mut std::io::Cursor::new(bundle.preprocessing_bytes()),
+            &mut (bundle.preprocessing_bytes() as &[u8]),
             compress,
             Validate::No,
         )
@@ -104,7 +110,7 @@ fn verify(bytes: &[u8]) -> u32 {
 
         start_cycle_tracking("deserialize device");
         let device =
-            JoltDevice::deserialize_with_mode(&mut std::io::Cursor::new(entry.device_bytes), Compress::Yes, Validate::No)
+            JoltDevice::deserialize_with_mode(&mut (entry.device_bytes as &[u8]), Compress::Yes, Validate::No)
                 .unwrap();
         end_cycle_tracking("deserialize device");
 

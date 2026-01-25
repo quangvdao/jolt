@@ -53,6 +53,9 @@ enum Commands {
         /// Use committed program mode (verifier only gets commitments, not full program)
         #[arg(long, default_value_t = false)]
         committed: bool,
+        /// Enable recursion proving/verifying for the *inner* proofs (strict extension payload).
+        #[arg(long, default_value_t = false)]
+        recursion: bool,
         /// Dory matrix layout (cycle-major or address-major)
         #[arg(long, value_enum, default_value_t = LayoutArg::CycleMajor)]
         layout: LayoutArg,
@@ -361,6 +364,7 @@ fn collect_guest_proofs(
     target_dir: &str,
     use_embed: bool,
     use_committed: bool,
+    recursion: bool,
 ) -> Vec<u8> {
     info!("Starting collect_guest_proofs for {}", guest.name());
     info!("Using committed program mode: {use_committed}");
@@ -449,6 +453,7 @@ fn collect_guest_proofs(
             &input_bytes,
             &[],
             &[],
+            recursion,
             None,
             None,
             &mut output_bytes,
@@ -481,6 +486,7 @@ fn collect_guest_proofs(
             &input_bytes,
             None,
             &output_bytes,
+            recursion,
             proof,
             &guest_verifier_preprocessing,
         )
@@ -730,7 +736,13 @@ fn load_proof_data(guest: GuestProgram, workdir: &Path) -> Vec<u8> {
     proof_data
 }
 
-fn generate_proofs(guest: GuestProgram, workdir: &Path, use_committed: bool, layout: DoryLayout) {
+fn generate_proofs(
+    guest: GuestProgram,
+    workdir: &Path,
+    use_committed: bool,
+    recursion: bool,
+    layout: DoryLayout,
+) {
     info!("Generating proofs for {} guest program...", guest.name());
     info!("Using committed program mode: {use_committed}");
     info!("Using Dory layout: {layout:?}");
@@ -741,7 +753,7 @@ fn generate_proofs(guest: GuestProgram, workdir: &Path, use_committed: bool, lay
     let target_dir = "/tmp/jolt-guest-targets";
 
     // Collect guest proofs
-    let all_groups_data = collect_guest_proofs(guest, target_dir, false, use_committed);
+    let all_groups_data = collect_guest_proofs(guest, target_dir, false, use_committed, recursion);
 
     // Save proof data
     save_proof_data(guest, &all_groups_data, workdir);
@@ -809,6 +821,7 @@ fn run_recursion_proof(
                 &input_bytes,
                 &[],
                 &[],
+                false,
                 None,
                 None,
                 &mut output_bytes,
@@ -818,6 +831,7 @@ fn run_recursion_proof(
                 &input_bytes,
                 None,
                 &output_bytes,
+                false,
                 proof,
                 &recursion_verifier_preprocessing,
             )
@@ -929,6 +943,7 @@ fn main() {
             example,
             workdir,
             committed,
+            recursion,
             layout,
         }) => {
             let guest = match GuestProgram::from_str(example) {
@@ -938,7 +953,7 @@ fn main() {
                     return;
                 }
             };
-            generate_proofs(guest, workdir, *committed, (*layout).into());
+            generate_proofs(guest, workdir, *committed, *recursion, (*layout).into());
         }
         Some(Commands::Verify {
             example,

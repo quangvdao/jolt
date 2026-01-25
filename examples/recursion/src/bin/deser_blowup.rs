@@ -68,11 +68,15 @@ fn main() {
 
         if i == 0 {
             report("proof[0].total", &proof);
-            report(
-                "proof[0].stage10_recursion_metadata",
-                &proof.stage10_recursion_metadata,
-            );
-            report("proof[0].recursion_proof", &proof.recursion_proof);
+            if let Some(ref payload) = proof.recursion {
+                report(
+                    "proof[0].recursion.stage10_recursion_metadata",
+                    &payload.stage10_recursion_metadata,
+                );
+                report("proof[0].recursion.recursion_proof", &payload.recursion_proof);
+            } else {
+                println!("proof[0].recursion: None");
+            }
             report("device[0].total", &device);
         }
     }

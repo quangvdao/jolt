@@ -27,6 +27,7 @@ impl Program {
         Self {
             guest: guest.to_string(),
             func: None,
+            guest_features: "guest".to_string(),
             memory_size: DEFAULT_MEMORY_SIZE,
             stack_size: DEFAULT_STACK_SIZE,
             max_input_size: DEFAULT_MAX_INPUT_SIZE,
@@ -44,6 +45,13 @@ impl Program {
 
     pub fn set_func(&mut self, func: &str) {
         self.func = Some(func.to_string())
+    }
+
+    /// Set the cargo features used when building the guest crate.
+    ///
+    /// Default is `"guest"`.
+    pub fn set_guest_features(&mut self, features: &str) {
+        self.guest_features = features.to_string();
     }
 
     pub fn set_memory_config(&mut self, memory_config: MemoryConfig) {
@@ -196,7 +204,7 @@ impl Program {
                 "build",
                 "--release",
                 "--features",
-                "guest",
+                &self.guest_features,
                 "-p",
                 &self.guest,
                 "--target-dir",

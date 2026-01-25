@@ -272,6 +272,49 @@ fn generate_provable_macro(guest: GuestProgram, use_embed: bool, output_dir: &Pa
 fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     info!("Checking data integrity...");
 
+    // Proof-bundle format: avoid trying to ark-deserialize the whole blob as a preprocessing.
+    if all_groups_data.starts_with(jolt_sdk::serialized_bundle::PROOF_BUNDLE_MAGIC) {
+        let mut bundle = jolt_sdk::serialized_bundle::ProofBundleReader::new(all_groups_data)
+            .expect("invalid proof bundle");
+
+        use ark_serialize::{CanonicalDeserialize, Compress, Validate};
+        let compress = if bundle.version() == 1 {
+            Compress::Yes
+        } else {
+            Compress::No
+        };
+        let verifier_preprocessing: jolt_sdk::JoltVerifierPreprocessing<
+            jolt_sdk::F,
+            jolt_sdk::PCS,
+        > = jolt_sdk::JoltVerifierPreprocessing::deserialize_with_mode(
+            &mut std::io::Cursor::new(bundle.preprocessing_bytes()),
+            compress,
+            Validate::No,
+        )
+        .unwrap();
+        let verifier_bytes = verifier_preprocessing.serialize_to_bytes().unwrap();
+        info!(
+            "✓ Verifier preprocessing deserialized successfully ({} bytes)",
+            verifier_bytes.len()
+        );
+
+        let mut n = 0u32;
+        while let Some(entry) = bundle.next_entry().unwrap() {
+            n += 1;
+            match JoltDevice::deserialize_compressed(&mut std::io::Cursor::new(entry.device_bytes))
+            {
+                Ok(_) => info!("✓ Device {n} deserialized"),
+                Err(e) => error!("✗ Failed to deserialize device {n}: {e:?}"),
+            }
+            // Proof bytes are in the proof-record encoding; sanity-check the version prefix.
+            if entry.proof_bytes.len() < 4 {
+                error!("✗ Proof {n} too short");
+            }
+        }
+        info!("✓ Number of entries: {n}");
+        return (n, 0);
+    }
+
     let mut cursor = std::io::Cursor::new(all_groups_data);
 
     let verifier_preprocessing =
@@ -354,17 +397,31 @@ fn collect_guest_proofs(
 
     let inputs = guest.inputs();
     info!("Got inputs: {inputs:?}");
+    let n = inputs.len() as u32;
 
-    let mut all_groups_data = Vec::new();
+    #[cfg(feature = "proof-bundle")]
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new(); // (device_bytes, proof_bytes)
+
+    #[cfg(not(feature = "proof-bundle"))]
+    let mut all_groups_data: Vec<u8> = Vec::new();
+    #[cfg(not(feature = "proof-bundle"))]
     let mut cursor = std::io::Cursor::new(&mut all_groups_data);
     let mut total_prove_time = 0.0;
 
-    guest_verifier_preprocessing
-        .serialize_compressed(&mut cursor)
-        .unwrap();
-
-    let n = inputs.len() as u32;
-    u32::serialize_compressed(&n, &mut cursor).unwrap();
+    // Serialize verifier preprocessing and the proof/device pairs.
+    //
+    // Default format:
+    //   [preprocessing][u32 n][(proof)(device)]^n
+    //
+    // Proof-bundle format (feature-gated):
+    //   [magic/version][preprocessing_len][preprocessing][u32 n][(device_len)(device)(proof_len)(proof)]^n
+    #[cfg(not(feature = "proof-bundle"))]
+    {
+        guest_verifier_preprocessing
+            .serialize_compressed(&mut cursor)
+            .unwrap();
+        u32::serialize_compressed(&n, &mut cursor).unwrap();
+    }
 
     info!("Starting {} recursion with {}", guest.name(), n);
 
@@ -404,8 +461,20 @@ fn collect_guest_proofs(
             &input_bytes, prove_time
         );
 
-        proof.serialize_compressed(&mut cursor).unwrap();
-        io_device.serialize_compressed(&mut cursor).unwrap();
+        #[cfg(not(feature = "proof-bundle"))]
+        {
+            proof.serialize_compressed(&mut cursor).unwrap();
+            io_device.serialize_compressed(&mut cursor).unwrap();
+        }
+
+        #[cfg(feature = "proof-bundle")]
+        {
+            let mut proof_bytes = Vec::new();
+            let mut device_bytes = Vec::new();
+            jolt_sdk::serialized_bundle::write_proof_record(&mut proof_bytes, &proof).unwrap();
+            io_device.serialize_compressed(&mut device_bytes).unwrap();
+            entries.push((device_bytes, proof_bytes));
+        }
 
         info!("  Verifying...");
         let is_valid = jolt_sdk::guest::verifier::verify(
@@ -419,8 +488,30 @@ fn collect_guest_proofs(
         info!("  Verification result: {is_valid}");
     }
     info!("Total prove time: {total_prove_time:.3}s");
-    info!("Total data size: {} bytes", all_groups_data.len());
-    all_groups_data
+
+    #[cfg(feature = "proof-bundle")]
+    {
+        use ark_serialize::CanonicalSerialize;
+        let mut preprocessing_bytes = Vec::new();
+        guest_verifier_preprocessing
+            .serialize_uncompressed(&mut preprocessing_bytes)
+            .unwrap();
+        let mut bundled = Vec::new();
+        jolt_sdk::serialized_bundle::write_proof_bundle(
+            &mut bundled,
+            &preprocessing_bytes,
+            &entries,
+        )
+        .unwrap();
+        info!("Total data size: {} bytes", bundled.len());
+        bundled
+    }
+
+    #[cfg(not(feature = "proof-bundle"))]
+    {
+        info!("Total data size: {} bytes", all_groups_data.len());
+        all_groups_data
+    }
 }
 
 fn debug_deserialize_proof_fields(proof_file: &Path) {
@@ -678,6 +769,8 @@ fn run_recursion_proof(
     let mut program = jolt_sdk::host::Program::new("recursion-guest");
     program.set_func("verify");
     program.set_std(true);
+    #[cfg(feature = "proof-bundle")]
+    program.set_guest_features("guest,proof-bundle");
     program.set_memory_config(memory_config);
     program.build(target_dir);
     let elf_contents = program.get_elf_contents().unwrap();

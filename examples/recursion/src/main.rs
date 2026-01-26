@@ -59,6 +59,9 @@ enum Commands {
         /// Dory matrix layout (cycle-major or address-major)
         #[arg(long, value_enum, default_value_t = LayoutArg::CycleMajor)]
         layout: LayoutArg,
+        /// Target trace size as power of 2 (e.g., 25 for ~33M cycles). If not specified, uses default small input.
+        #[arg(long, value_name = "POWER")]
+        scale: Option<u8>,
     },
     /// Verify proofs and optionally embed them
     Verify {
@@ -160,6 +163,37 @@ impl GuestProgram {
             GuestProgram::Muldiv => {
                 vec![postcard::to_stdvec(&(10u32, 5u32, 2u32)).unwrap()]
             }
+        }
+    }
+
+    /// Compute inputs scaled to achieve approximately `1 << scale` cycles.
+    /// Uses empirical cycles-per-operation constants from benchmarks.
+    fn inputs_for_scale(&self, scale: u8) -> Vec<Vec<u8>> {
+        const CYCLES_PER_FIBONACCI_UNIT: f64 = 12.0;
+        const SAFETY_MARGIN: f64 = 0.9; // Use 90% of max trace capacity
+
+        let target_cycles = ((1usize << scale) as f64 * SAFETY_MARGIN) as usize;
+
+        match self {
+            GuestProgram::Fibonacci => {
+                let n = std::cmp::max(1, (target_cycles as f64 / CYCLES_PER_FIBONACCI_UNIT) as u32);
+                info!("Scaling fibonacci to n={n} for ~2^{scale} cycles");
+                vec![postcard::to_stdvec(&n).unwrap()]
+            }
+            GuestProgram::Muldiv => {
+                // Muldiv is a single operation, can't really scale it meaningfully
+                // Just return the default input
+                info!("Warning: muldiv cannot be scaled, using default input");
+                vec![postcard::to_stdvec(&(10u32, 5u32, 2u32)).unwrap()]
+            }
+        }
+    }
+
+    /// Get max_trace_length based on scale, or default if no scale provided.
+    fn get_max_trace_length_for_scale(&self, scale: Option<u8>) -> usize {
+        match scale {
+            Some(s) => 1usize << s,
+            None => self.get_max_trace_length(false),
         }
     }
 
@@ -330,10 +364,16 @@ fn collect_guest_proofs(
     use_embed: bool,
     use_committed: bool,
     recursion: bool,
+    scale: Option<u8>,
 ) -> Vec<u8> {
     info!("Starting collect_guest_proofs for {}", guest.name());
     info!("Using committed program mode: {use_committed}");
-    let max_trace_length = guest.get_max_trace_length(use_embed);
+    info!("Scale: {:?}", scale);
+    let max_trace_length = if use_embed {
+        guest.get_max_trace_length(true)
+    } else {
+        guest.get_max_trace_length_for_scale(scale)
+    };
 
     // This should match the example being run, it can cause layout issues if the guest's macro and our assumption here differ
     let memory_config = MemoryConfig {
@@ -364,7 +404,10 @@ fn collect_guest_proofs(
     let guest_verifier_preprocessing =
         jolt_sdk::JoltVerifierPreprocessing::from(&guest_prover_preprocessing);
 
-    let inputs = guest.inputs();
+    let inputs = match scale {
+        Some(s) => guest.inputs_for_scale(s),
+        None => guest.inputs(),
+    };
     info!("Got inputs: {inputs:?}");
     let n = inputs.len() as u32;
 
@@ -655,10 +698,12 @@ fn generate_proofs(
     use_committed: bool,
     recursion: bool,
     layout: DoryLayout,
+    scale: Option<u8>,
 ) {
     info!("Generating proofs for {} guest program...", guest.name());
     info!("Using committed program mode: {use_committed}");
     info!("Using Dory layout: {layout:?}");
+    info!("Scale: {:?}", scale);
 
     // Set the Dory layout before any preprocessing
     DoryGlobals::set_layout(layout);
@@ -666,7 +711,8 @@ fn generate_proofs(
     let target_dir = "/tmp/jolt-guest-targets";
 
     // Collect guest proofs
-    let all_groups_data = collect_guest_proofs(guest, target_dir, false, use_committed, recursion);
+    let all_groups_data =
+        collect_guest_proofs(guest, target_dir, false, use_committed, recursion, scale);
 
     // Save proof data
     save_proof_data(guest, &all_groups_data, workdir);
@@ -894,6 +940,7 @@ fn main() {
             committed,
             recursion,
             layout,
+            scale,
         }) => {
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
@@ -902,7 +949,7 @@ fn main() {
                     return;
                 }
             };
-            generate_proofs(guest, workdir, *committed, *recursion, (*layout).into());
+            generate_proofs(guest, workdir, *committed, *recursion, (*layout).into(), *scale);
         }
         Some(Commands::Verify {
             example,
@@ -985,17 +1032,18 @@ fn main() {
         }
         None => {
             info!("No subcommand specified. Available commands:");
-            info!("  generate --example <fibonacci|muldiv> [--workdir <DIR>] [--committed] [--layout <cycle-major|address-major>]");
-            info!("  verify --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed] [--layout <cycle-major|address-major>]");
-            info!("  trace --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed] [--layout <cycle-major|address-major>]");
+            info!("  generate --example <fibonacci|muldiv> [--workdir <DIR>] [--committed] [--recursion] [--layout <cycle-major|address-major>] [--scale <POWER>]");
+            info!("  verify --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed] [--cycle-tracking] [--layout <cycle-major|address-major>]");
+            info!("  trace --example <fibonacci|muldiv> [--workdir <DIR>] [--embed <DIR>] [--committed] [--cycle-tracking] [--layout <cycle-major|address-major>]");
             info!("");
             info!("Examples:");
             info!("  cargo run --release -- generate --example fibonacci");
             info!("  cargo run --release -- generate --example fibonacci --workdir ./output --committed");
             info!("  cargo run --release -- generate --example fibonacci --layout address-major");
+            info!("  cargo run --release -- generate --example fibonacci --scale 25 --committed --layout address-major --recursion");
             info!("  cargo run --release -- verify --example fibonacci");
             info!("  cargo run --release -- verify --example fibonacci --workdir ./output --embed --committed");
-            info!("  cargo run --release -- trace --example fibonacci --embed --committed");
+            info!("  cargo run --release -- trace --example fibonacci --cycle-tracking");
             info!(
                 "  cargo run --release -- trace --example fibonacci --embed --layout address-major"
             );

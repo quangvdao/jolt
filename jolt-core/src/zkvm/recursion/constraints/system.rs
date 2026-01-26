@@ -1624,7 +1624,7 @@ pub enum ConstraintType {
 // -----------------------------------------------------------------------------
 // Canonical mapping: ConstraintType -> committed PolyTypes (+ native variable count)
 //
-// This is used to keep matrix construction, jagged layout, and tests consistent.
+// This is used to keep matrix construction, prefix-packing layout, and tests consistent.
 // -----------------------------------------------------------------------------
 
 #[cfg(not(feature = "experimental-pairing-recursion"))]

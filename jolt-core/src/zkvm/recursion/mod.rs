@@ -22,20 +22,12 @@
 //! ### Virtualization (Direct Evaluation)
 //! Verifies virtual polynomial claims using direct evaluation over the matrix.
 //!
-//! ### Jagged Transform
-//! Uses sumcheck to open the sparse constraint matrix at a random point.
-//!
-//! ### Jagged Assist (Optimization)
-//! Batch verification protocol that reduces verifier cost for evaluating multiple
-//! polynomial openings from O(K × bits) to O(bits) operations.
-//!
 //! ## Module Structure
 //! - `constraints/`: Constraint system management and configuration
 //! - `g1/`: G1 curve operations (addition, scalar multiplication)
 //! - `g2/`: G2 curve operations (addition, scalar multiplication)
 //! - `gt/`: GT group operations (exponentiation, multiplication, claim reduction)
 //! - `pairing/`: Pairing operations (multi-miller loop)
-//! - `jagged/`: Jagged transform and assist protocols
 //! - `virtualization`: Direct evaluation protocol
 //! - `utils/`: Shared utilities and helpers
 //! - `prover`: Unified prover orchestrating all stages
@@ -46,7 +38,6 @@ pub mod curve;
 pub mod g1;
 pub mod g2;
 pub mod gt;
-pub mod jagged;
 pub mod pairing;
 pub mod prefix_packing;
 pub mod prover;
@@ -63,9 +54,6 @@ pub use constraints::{
     ConstraintSystem, ConstraintSystemConfig, ConstraintType, DoryMatrixBuilder, PolyType,
     PreparedGtMulWitness, RecursionMetadataBuilder, CONFIG,
 };
-
-// Re-export jagged types
-pub use jagged::{ConstraintMapping, JaggedTransform, VarCountJaggedBijection};
 
 // Re-export prover/verifier
 pub use prover::{RecursionProof, RecursionProofResult, RecursionProver};
@@ -90,13 +78,6 @@ pub use virtualization::{
     extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
     DirectEvaluationVerifier,
 };
-
-// Jagged exports
-pub use jagged::{
-    JaggedAssistEvalPoint, JaggedAssistParams, JaggedAssistProof, JaggedAssistProver,
-    JaggedAssistVerifier,
-};
-pub use jagged::{JaggedSumcheckParams, JaggedSumcheckProver, JaggedSumcheckVerifier};
 
 pub use witness::{
     DoryRecursionWitness, G1ScalarMulWitness, GTExpWitness, GTMulWitness, WitnessData,

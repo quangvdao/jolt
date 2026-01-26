@@ -1,8 +1,16 @@
-//! Stage 3: Direct Evaluation Protocol for Recursion SNARK
+//! Stage 2/3 helpers for the recursion SNARK.
 //!
-//! This module implements the optimized Stage 3 protocol that directly evaluates
-//! M(r_s, r_x) without running a sumcheck. The key insight is that M is the
-//! multilinear extension of the virtual claims v_i from Stage 2.
+//! - **Stage 2 (sumchecks)** produce “virtual claims” \(v_i = f_i(r_x)\) at a shared point `r_x`.
+//! - **Stage 3 (prefix packing)** reduces all \(v_i\) into one packed evaluation.
+//!   To do that deterministically, we need a canonical ordering / indexing of the claims, plus
+//!   a helper to extract them from the opening accumulator.
+//!
+//! This file contains:
+//! - `extract_virtual_claims_from_accumulator`: used by Stage 3 prefix packing (prover + verifier).
+//! - `virtual_claim_index` / `matrix_s_index`: used by tests and by legacy code paths.
+//! - `DirectEvaluation{Prover,Verifier}`: a legacy “direct evaluation” helper that is not part of
+//!   the current prefix-packing recursion pipeline, but is kept for now as a debugging/prototyping
+//!   tool.
 //!
 //! ## Mathematical Foundation
 //!

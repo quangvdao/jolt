@@ -93,7 +93,7 @@ pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Fie
     pub opening_proof: PCS::Proof,
     /// Opening claims for virtual polynomials
     pub opening_claims: Openings<F>,
-    /// Dense polynomial commitment after jagged transform
+    /// Dense polynomial commitment after Stage 3 prefix packing.
     pub dense_commitment: PCS::Commitment,
 }
 

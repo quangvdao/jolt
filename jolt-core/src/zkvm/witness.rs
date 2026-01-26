@@ -37,7 +37,7 @@ pub enum CommittedPolynomial {
     /// Note that for RAM, ra and wa are the same polynomial because
     /// there is at most one load or store per cycle.
     RamRa(usize),
-    /// Dory dense matrix polynomial for recursion (after jagged transform)
+    /// Dory dense matrix polynomial for recursion (after prefix packing).
     DoryDenseMatrix,
     /// Trusted advice polynomial - committed before proving, verifier has commitment.
     /// Length cannot exceed max_trace_length.

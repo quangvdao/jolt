@@ -70,7 +70,7 @@ pub struct RecursionPayload<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> 
     /// Constraint metadata extracted from recursion prover.
     pub stage10_recursion_metadata: RecursionConstraintMetadata,
     /// Combined proof containing:
-    /// - Stage 11: Recursion sumchecks (constraint, virtualization, jagged)
+    /// - Stage 11: Recursion sumchecks (constraint + virtualization)
     /// - Stage 12: Dense polynomial commitment
     /// - Stage 13: Hyrax opening proof
     pub recursion_proof: RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>,

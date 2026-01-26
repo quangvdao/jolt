@@ -833,7 +833,7 @@ In the recursion implementation, we embed all of them into a **common 11-var col
 
 This embedding is done by **padding / gating** (typically zero-padding so the polynomial is supported only on a subcube),
 so the additional “padding variables” do not increase the *logical* information content—only the *ambient* domain.
-The jagged transform in Stage 3 later exploits this sparsity/jaggedness.
+Stage 3 prefix packing exploits this sparsity to avoid committing padded zeros.
 
 #### Constraints (G1Add) over \(\mathbb{F}_q\)
 
@@ -1163,123 +1163,9 @@ For the precise mapping, see:
 
 ## 5. Stage 4: Jagged Transform Sum-Check
 
-> **Legacy (not used)**: Stages 4 and 5 were the previous “jagged polynomial commitment” pipeline.
-> The recursion implementation now uses **prefix packing** (Stage 3) and does **not** execute the jagged transform/assist stages.
-> The material below is retained for historical context only.
-
-The matrix $M$ is sparse: 4-variable polynomials (GT) are zero-padded to 8 variables. Stage 4 compresses to a dense representation.
-
-### 5.1 Why Jaggedness
-
-| Operation | Native Variables | Native Size | Padded Size |
-|-----------|-----------------|-------------|-------------|
-| GT Exp/Mul | 4 | 16 | 256 (zero-padded) |
-| G1 Scalar Mul | 8 | 256 | 256 (native) |
-
-The jagged transform eliminates redundant zeros, reducing commitment size.
-
-### 5.2 Sparse-to-Dense Bijection
-
-**Sparse**: $M(s, x)$ with row $s$ and column $x \in \{0,1\}^8$
-
-**Dense**: $q(i)$ containing only non-redundant entries
-
-Bijection:
-- `row(i)` = polynomial index for dense index $i$
-- `col(i)` = evaluation index within that polynomial
-- Cumulative sizes track where each polynomial's entries begin
-
-### 5.3 Differences from Jagged PCS Paper
-
-| Paper | Our Implementation |
-|-------|-------------------|
-| Column-wise jaggedness | Row-wise jaggedness |
-| Direct bijection to matrix | Three-level mapping |
-| Simple row/col | poly_idx → (constraint_idx, poly_type) → matrix_row |
-
-The three-level mapping handles multiple polynomial types per constraint.
-
-### 5.4 The Jagged Indicator Function
-
-$$\hat{f}_{\text{jagged}}(r_s, r_x, r_{\text{dense}}) = \sum_{y \in \text{rows}} \text{eq}(r_s, y) \cdot \hat{g}(r_x, r_{\text{dense}}, t_{y-1}, t_y)$$
-
-where $g(a, b, c, d) = 1$ iff $b < d$ AND $b = a + c$.
-
-### 5.5 Branching Program Optimization
-
-The function $\hat{g}$ can be computed in $O(n)$ time via a width-4 read-once branching program:
-- Tracks carry bit (addition check: $b = a + c$)
-- Tracks comparison bit ($b < d$)
-- Processes bits LSB to MSB
-
-This avoids naive $O(2^{4n})$ computation.
-
-### 5.6 Sum-Check Protocol
-
-**Input**: $M(r_{s,\text{final}}, r_x) = v_{\text{sparse}}$ from Stage 2
-
-**Relation**:
-$$v_{\text{sparse}} = \sum_{i \in \{0,1\}^{\ell_{\text{dense}}}} q(i) \cdot \hat{f}_{\text{jagged}}(r_s, r_x, i)$$
-
-**Protocol**:
-1. Prover materializes dense $q(i)$ and indicator $\hat{f}_{\text{jagged}}$
-2. Sum-check over $\ell_{\text{dense}}$ rounds (degree 2)
-3. At challenge $r_{\text{dense}}$: claim $q(r_{\text{dense}}) = v_{\text{dense}}$
-4. Verifier computes $\hat{f}_{\text{jagged}}(r_s, r_x, r_{\text{dense}})$ via branching program
-5. Verify: output = $v_{\text{dense}} \cdot \hat{f}_{\text{jagged}}$
-
-**Output**: $(q, r_{\text{dense}}, v_{\text{dense}})$
-
-### 5.7 Stage 5: Jagged Assist
-
-After Stage 3's sumcheck, the verifier must compute:
-$$\hat{f}_{\text{jagged}}(r_s, r_x, r_{\text{dense}}) = \sum_{y \in [K]} \text{eq}(r_s, y) \cdot \hat{g}(r_x, r_{\text{dense}}, t_{y-1}, t_y)$$
-
-where $K$ is the number of polynomials. For large systems, this requires $K \times O(\text{bits})$ field operations.
-
-#### The Jagged Assist Protocol
-
-Instead of computing all $K$ evaluations, we use batch verification:
-
-1. **Prover sends**: $v_y = \hat{g}(r_x, r_{\text{dense}}, t_{y-1}, t_y)$ for all $y \in [K]$
-
-2. **Verifier samples**: Batching coefficient $r \leftarrow \mathbb{F}$
-
-3. **Batch claim**:
-   $$\sum_{y=0}^{K-1} r^y \cdot \hat{g}(x_y) = \sum_{y=0}^{K-1} r^y \cdot v_y$$
-
-4. **Sumcheck**: Over $P(b) = g(b) \cdot \sum_y r^y \cdot \text{eq}(b, x_y)$
-
-5. **Final verification**: At random point $\rho$:
-   - Compute $\hat{g}(\rho)$ using branching program
-   - Compute $\sum_y r^y \cdot \text{eq}(\rho, x_y)$
-   - Verify $P(\rho) = \hat{g}(\rho) \cdot \text{eq\_sum}$
-
-#### Mathematical Correctness
-
-**Theorem (Jagged Assist Soundness)**: If $\exists y^* : v_{y^*} \neq \hat{g}(x_{y^*})$, then the verifier accepts with probability at most $\frac{2m}{|\mathbb{F}|}$.
-
-**Proof Sketch**:
-1. Define polynomial $R(Z) = \sum_{y=0}^{K-1} Z^y \cdot (\hat{g}(x_y) - v_y)$
-2. If any $v_{y^*}$ is incorrect, then $R(Z) \not\equiv 0$ and $\deg(R) \leq K-1$
-3. By Schwartz-Zippel, $\Pr[R(r) = 0] \leq \frac{K-1}{|\mathbb{F}|}$
-4. If $R(r) \neq 0$, the sumcheck polynomial $P$ differs from the honest polynomial
-5. Sumcheck soundness: $\Pr[\text{accept} | R(r) \neq 0] \leq \frac{2m}{|\mathbb{F}|}$
-6. Union bound: $\Pr[\text{accept}] \leq \frac{K-1 + 2m}{|\mathbb{F}|} \approx \frac{2m}{|\mathbb{F}|}$
-
-**Key Insight**: The protocol converts $K$ individual checks into one batched sumcheck with negligible soundness loss.
-
-#### Benefits
-
-| Metric | Without Assist | With Assist | Improvement |
-|--------|----------------|-------------|-------------|
-| Verifier ops | $K \times 1,300$ | $330K$ | ~64× |
-| Extra rounds | 0 | $2m$ | Acceptable |
-| Soundness error | 0 | $\frac{2m}{|\mathbb{F}|}$ | Negligible |
-
-The protocol leverages Lemma 4.6 (forward-backward decomposition) for efficient prover computation.
-
----
+> **Removed**: Stages 4 and 5 were a previous “jagged polynomial commitment” pipeline.
+> The recursion implementation now uses **prefix packing** (Stage 3) and does not execute a jagged transform / assist protocol.
+> If we ever need to revisit the jagged approach, we can recover it from git history.
 
 ## 6. PCS Opening Proof (Hyrax over Grumpkin)
 
@@ -1567,11 +1453,6 @@ jolt-core/src/zkvm/recursion/
 ├── pairing/
 │   ├── multi_miller_loop.rs   # Stage 2 (`MultiMillerLoop`)
 │   └── shift.rs               # Stage 2 (`ShiftMultiMillerLoop`)
-└── jagged/                    # legacy (no longer wired)
-    ├── bijection.rs
-    ├── sumcheck.rs
-    ├── branching_program.rs
-    └── assist.rs
 ```
 
 **Note on stage naming**: The “Stage 1..3” names refer to protocol phases (see Section 1.4 and the prover/verifier in `prover.rs` / `verifier.rs`).
@@ -1788,18 +1669,14 @@ impl RecursionProver {
         );
         let (stage2_proof, stage2_claim) = stage2_prover.prove(...);
 
-        // Stage 3: Jagged transform
-        let stage3_prover = JaggedSumcheckProver::new(
-            &bijection,
-            &stage2_claim,
-            transcript,
-        );
-        let (stage3_proof, dense_claim) = stage3_prover.prove(...);
+        // Stage 3: Prefix packing reduction (no sumcheck)
+        // Reduce all Stage-2 virtual openings into a single packed-evaluation claim.
+        let stage3_packed_eval = prove_stage3_prefix_packing(...);
 
         // PCS opening
         let opening_proof = accumulator.prove_openings(pcs, transcript);
 
-        RecursionProof { stage1_proof, stage2_proof, stage3_proof, opening_proof }
+        RecursionProof { stage1_proof, stage2_proof, stage3_packed_eval, opening_proof, ... }
     }
 }
 ```
@@ -1833,13 +1710,8 @@ impl RecursionVerifier {
         let stage2_verifier = RecursionVirtualizationVerifier::new(...);
         let stage2_claim = stage2_verifier.verify(&proof.stage2_proof, ...)?;
 
-        // Stage 3: Verify jagged transform
-        // Verifier computes f_jagged using branching program (O(n) time)
-        let stage3_verifier = JaggedSumcheckVerifier::new(
-            &verifier_input.bijection,
-            &verifier_input.matrix_rows,  // Precomputed
-        );
-        let dense_claim = stage3_verifier.verify(&proof.stage3_proof, ...)?;
+        // Stage 3: Verify prefix packing reduction
+        verify_stage3_prefix_packing(...)?;
 
         // PCS verification
         accumulator.verify_openings(pcs, &proof.opening_proof, transcript)?;
@@ -1876,60 +1748,11 @@ accumulator.append_committed(
 );
 ```
 
-### 8.8 Jagged Bijection
+### 8.8 Prefix Packing Layout
 
-The `VarCountJaggedBijection` maps between sparse and dense indices:
+Stage 3 uses a deterministic **prefix packing** layout to place each committed witness polynomial into a disjoint prefix-defined subcube of one packed dense multilinear.
 
-```rust
-impl JaggedTransform for VarCountJaggedBijection {
-    /// Given dense index i, return which polynomial it belongs to
-    fn row(&self, dense_idx: usize) -> usize {
-        // Binary search in cumulative_sizes
-        self.cumulative_sizes.partition_point(|&s| s <= dense_idx)
-    }
-
-    /// Given dense index i, return offset within that polynomial
-    fn col(&self, dense_idx: usize) -> usize {
-        let poly_idx = self.row(dense_idx);
-        dense_idx - self.cumulative_sizes[poly_idx]
-    }
-
-    /// Map (poly_idx, eval_idx) to dense index, if valid
-    fn sparse_to_dense(&self, poly_idx: usize, eval_idx: usize) -> Option<usize> {
-        if eval_idx < self.poly_sizes[poly_idx] {
-            Some(self.cumulative_sizes[poly_idx] + eval_idx)
-        } else {
-            None  // Padded region
-        }
-    }
-}
-```
-
-### 8.9 Matrix Row Mapping
-
-The three-level mapping converts polynomial indices to matrix rows:
-
-```rust
-// Level 1: Dense index → Polynomial index (via bijection)
-let poly_idx = bijection.row(dense_idx);
-
-// Level 2: Polynomial index → (constraint_idx, poly_type)
-let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-
-// Level 3: (constraint_idx, poly_type) → Matrix row
-let matrix_row = poly_type as usize * num_constraints_padded + constraint_idx;
-```
-
-This mapping is precomputed for the verifier:
-
-```rust
-let matrix_rows: Vec<usize> = (0..num_polynomials)
-    .map(|poly_idx| {
-        let (constraint_idx, poly_type) = mapping.decode(poly_idx);
-        poly_type as usize * num_constraints_padded + constraint_idx
-    })
-    .collect();
-```
+The canonical ordering, offsets, and the packed-variable mapping are implemented by `PrefixPackingLayout` in `jolt-core/src/zkvm/recursion/prefix_packing.rs`.
 
 ### 8.10 Polynomial Type Enumeration
 
@@ -1966,8 +1789,8 @@ The recursion prover has a clear separation between orchestration logic (Rust) a
 | Component | Operation | Why GPU |
 |-----------|-----------|---------|
 | Stage 1 Sumcheck | Polynomial evaluations over hypercube | Parallel evaluation of $2^n$ points |
-| Stage 3 Direct Eval | Direct polynomial evaluation | Efficient dot product computation |
-| Stage 4 Sumcheck | Jagged transform sumcheck | Dense polynomial operations |
+| Stage 2 Direct Eval | Virtualization / direct evaluation | Efficient dot product computation |
+| Stage 3 Prefix Packing | Packing reduction | Efficient linear reduction over claims |
 | Hyrax Commit | Multi-scalar multiplication (MSM) | $O(\sqrt{N})$ group operations |
 | Hyrax VMP | Vector-matrix product | Parallelizable linear algebra |
 
@@ -1977,8 +1800,7 @@ The following remain on the CPU/Rust side:
 
 - **Witness generation**: `TraceContext` collection during Dory verify
 - **Transcript management**: Fiat-Shamir challenge generation
-- **Bijection logic**: `VarCountJaggedBijection` index computations
-- **Matrix row mapping**: Three-level decode (poly_idx → constraint_idx → matrix_row)
+- **Prefix packing layout**: derive a canonical packing layout from public `constraint_types`
 - **AST extraction**: `AstGraph` extraction and (verifier-side) deterministic reconstruction for wiring
 - **Proof assembly**: Collecting stage outputs into `RecursionProof` (including the external pairing boundary outputs)
 
@@ -1998,13 +1820,13 @@ The following remain on the CPU/Rust side:
 │  ├─────────────────────────────────────────────────────────────────┤   │
 │  │  Stage 1: sumcheck_prove(polys, eq_evals) → round_polys         │   │
 │  │  Stage 2: direct_eval(virtual_claims, eq_evals) → evaluation    │   │
-│  │  Stage 3: sumcheck_prove(dense, f_jagged) → round_polys         │   │
+│  │  Stage 3: prefix_pack_reduce(claims, layout) → packed_eval      │   │
 │  │  Hyrax:   msm(scalars, bases) → commitments                     │   │
 │  │           vmp(matrix, vector) → result                          │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │       │                                                                 │
 │       ▼                                                                 │
-│  RecursionProof { stage1, stage2, stage3, opening }                    │
+│  RecursionProof { stage1, stage2, stage3_packed_eval, opening }        │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -2045,7 +1867,7 @@ trait HyraxGpuKernel {
 | Stage 3 | $O(\text{dense\_size})$ | Compressed representation |
 | Hyrax | $O(\sqrt{N})$ bases + scalars | MSM working set |
 
-The jagged transform (Stage 3) reduces GPU memory pressure by ~60× compared to operating on the sparse matrix directly.
+Prefix packing (Stage 3) reduces GPU memory pressure by avoiding padded sparse representations.
 
 ---
 

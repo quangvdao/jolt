@@ -8,3 +8,5 @@ mod matrix_definition_test;
 mod pipeline_invariants_test;
 #[cfg(test)]
 mod prefix_packing_semantics_test;
+#[cfg(test)]
+mod wiring_integration_test;

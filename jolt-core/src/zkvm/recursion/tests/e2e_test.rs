@@ -12,12 +12,14 @@ use crate::{
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     },
     transcripts::{Blake2bTranscript, Transcript},
+    zkvm::proof_serialization::PairingBoundary,
     zkvm::recursion::{
         ConstraintType, RecursionProof, RecursionProver, RecursionVerifier, RecursionVerifierInput,
+        WiringPlan,
     },
 };
-use ark_bn254::{Fq, Fr};
-use ark_ff::UniformRand;
+use ark_bn254::{Fq, Fr, Fq12, G1Affine, G2Affine};
+use ark_ff::{UniformRand, Zero};
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_std::test_rng;
 use serial_test::serial;
@@ -182,6 +184,17 @@ fn test_recursion_snark_e2e_with_dory() {
         gt_exp_public_inputs: recursion_constraint_metadata.gt_exp_public_inputs,
         g1_scalar_mul_public_inputs: recursion_constraint_metadata.g1_scalar_mul_public_inputs,
         g2_scalar_mul_public_inputs: recursion_constraint_metadata.g2_scalar_mul_public_inputs,
+        wiring: WiringPlan::default(),
+        pairing_boundary: PairingBoundary {
+            p1_g1: G1Affine::identity(),
+            p1_g2: G2Affine::identity(),
+            p2_g1: G1Affine::identity(),
+            p2_g2: G2Affine::identity(),
+            p3_g1: G1Affine::identity(),
+            p3_g2: G2Affine::identity(),
+            rhs: Fq12::zero(),
+        },
+        joint_commitment: Fq12::zero(),
     };
 
     // Create verifier

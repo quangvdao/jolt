@@ -440,6 +440,88 @@ pub struct WiringGtVerifier {
     gt_exp_bases: Vec<Fq12>,
 }
 
+/// Legacy wiring value source: read per-instance port openings from the accumulator.
+///
+/// This is the *current* wiring backend and is the main coupling point with other Stage-2
+/// families: if we later fuse GTExp/GTMul openings, we can swap this backend without touching
+/// the wiring polynomial structure.
+struct LegacyGtWiringValueSource<'a> {
+    acc: &'a VerifierOpeningAccumulator<Fq>,
+    r_step: &'a [<Fq as JoltField>::Challenge],
+    r_elem: &'a [Fq],
+    gt_exp_out_step: &'a [usize],
+    gt_exp_bases: &'a [Fq12],
+    joint_commitment: &'a Fq12,
+    pairing_boundary: &'a PairingBoundary,
+}
+
+impl<'a> LegacyGtWiringValueSource<'a> {
+    #[inline]
+    fn eq_s_for_src(&self, src: GtProducer) -> Fq {
+        match src {
+            GtProducer::GtExpRho { instance } => {
+                let s_out = self.gt_exp_out_step[instance];
+                self.r_step
+                    .iter()
+                    .enumerate()
+                    .map(|(b, c)| {
+                        let r_b: Fq = (*c).into();
+                        if ((s_out >> b) & 1) == 1 {
+                            r_b
+                        } else {
+                            Fq::one() - r_b
+                        }
+                    })
+                    .product()
+            }
+            // For u-only values (GTMul), the prover replicates across step vars and the verifier
+            // uses Eq(s, 0) as the step selector.
+            GtProducer::GtMulResult { .. } => self
+                .r_step
+                .iter()
+                .map(|c| {
+                    let r_b: Fq = (*c).into();
+                    Fq::one() - r_b
+                })
+                .product(),
+        }
+    }
+
+    #[inline]
+    fn src_at_r(&self, src: GtProducer) -> Fq {
+        match src {
+            GtProducer::GtExpRho { instance } => self
+                .acc
+                .get_virtual_polynomial_opening(
+                    VirtualPolynomial::gt_exp_rho(instance),
+                    SumcheckId::GtExpClaimReduction,
+                )
+                .1,
+            GtProducer::GtMulResult { instance } => self
+                .acc
+                .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_result(instance), SumcheckId::GtMul)
+                .1,
+        }
+    }
+
+    #[inline]
+    fn dst_at_r(&self, dst: GtConsumer) -> Fq {
+        match dst {
+            GtConsumer::GtMulLhs { instance } => self
+                .acc
+                .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_lhs(instance), SumcheckId::GtMul)
+                .1,
+            GtConsumer::GtMulRhs { instance } => self
+                .acc
+                .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_rhs(instance), SumcheckId::GtMul)
+                .1,
+            GtConsumer::GtExpBase { instance } => eval_fq12_packed_at(&self.gt_exp_bases[instance], self.r_elem),
+            GtConsumer::JointCommitment => eval_fq12_packed_at(self.joint_commitment, self.r_elem),
+            GtConsumer::PairingBoundaryRhs => eval_fq12_packed_at(&self.pairing_boundary.rhs, self.r_elem),
+        }
+    }
+}
+
 impl WiringGtVerifier {
     pub fn new<T: Transcript>(input: &RecursionVerifierInput, transcript: &mut T) -> Self {
         // Must mirror prover sampling order: τ (element selector), then λ edge coefficients.
@@ -496,73 +578,21 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let r_elem: Vec<Fq> = r_elem_chal.iter().map(|c| (*c).into()).collect();
 
         let eq_u = eq_lsb_mle::<Fq>(&self.tau, r_elem_chal);
-        let eq_s_default: Fq = r_step
-            .iter()
-            .map(|c| {
-                let r_b: Fq = (*c).into();
-                Fq::one() - r_b
-            })
-            .product();
+        let vs = LegacyGtWiringValueSource {
+            acc,
+            r_step,
+            r_elem: &r_elem,
+            gt_exp_out_step: &self.gt_exp_out_step,
+            gt_exp_bases: &self.gt_exp_bases,
+            joint_commitment: &self.joint_commitment,
+            pairing_boundary: &self.pairing_boundary,
+        };
 
         let mut delta = Fq::zero();
         for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
-            let (src, eq_s) = match edge.src {
-                GtProducer::GtExpRho { instance } => {
-                    let s_out = self.gt_exp_out_step[instance];
-                    let eq_s_val: Fq = r_step
-                        .iter()
-                        .enumerate()
-                        .map(|(b, c)| {
-                            let r_b: Fq = (*c).into();
-                            if ((s_out >> b) & 1) == 1 {
-                                r_b
-                            } else {
-                                Fq::one() - r_b
-                            }
-                        })
-                        .product();
-                    let src = acc
-                        .get_virtual_polynomial_opening(
-                            VirtualPolynomial::gt_exp_rho(instance),
-                            SumcheckId::GtExpClaimReduction,
-                        )
-                        .1;
-                    (src, eq_s_val)
-                }
-                GtProducer::GtMulResult { instance } => {
-                    let src = acc
-                        .get_virtual_polynomial_opening(
-                            VirtualPolynomial::gt_mul_result(instance),
-                            SumcheckId::GtMul,
-                        )
-                        .1;
-                    (src, eq_s_default)
-                }
-            };
-
-            let dst = match edge.dst {
-                GtConsumer::GtMulLhs { instance } => {
-                    acc.get_virtual_polynomial_opening(
-                        VirtualPolynomial::gt_mul_lhs(instance),
-                        SumcheckId::GtMul,
-                    )
-                    .1
-                }
-                GtConsumer::GtMulRhs { instance } => {
-                    acc.get_virtual_polynomial_opening(
-                        VirtualPolynomial::gt_mul_rhs(instance),
-                        SumcheckId::GtMul,
-                    )
-                    .1
-                }
-                GtConsumer::GtExpBase { instance } => {
-                    eval_fq12_packed_at(&self.gt_exp_bases[instance], &r_elem)
-                }
-                GtConsumer::JointCommitment => eval_fq12_packed_at(&self.joint_commitment, &r_elem),
-                GtConsumer::PairingBoundaryRhs => {
-                    eval_fq12_packed_at(&self.pairing_boundary.rhs, &r_elem)
-                }
-            };
+            let src = vs.src_at_r(edge.src);
+            let eq_s = vs.eq_s_for_src(edge.src);
+            let dst = vs.dst_at_r(edge.dst);
 
             let weight = eq_u * eq_s;
             delta += *lambda * weight * (src - dst);

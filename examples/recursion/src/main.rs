@@ -74,6 +74,9 @@ enum Commands {
         /// Use committed program mode (verifier only gets commitments, not full program)
         #[arg(long, default_value_t = false)]
         committed: bool,
+        /// Enable cycle tracking markers in the recursion guest (off by default).
+        #[arg(long, default_value_t = false)]
+        cycle_tracking: bool,
         /// Dory matrix layout (cycle-major or address-major)
         #[arg(long, value_enum, default_value_t = LayoutArg::CycleMajor)]
         layout: LayoutArg,
@@ -95,6 +98,9 @@ enum Commands {
         /// Use committed program mode (verifier only gets commitments, not full program)
         #[arg(long, default_value_t = false)]
         committed: bool,
+        /// Enable cycle tracking markers in the recursion guest (off by default).
+        #[arg(long, default_value_t = false)]
+        cycle_tracking: bool,
         /// Dory matrix layout (cycle-major or address-major)
         #[arg(long, value_enum, default_value_t = LayoutArg::CycleMajor)]
         layout: LayoutArg,
@@ -275,49 +281,8 @@ fn generate_provable_macro(guest: GuestProgram, use_embed: bool, output_dir: &Pa
 fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     info!("Checking data integrity...");
 
-    // Proof-bundle format: avoid trying to ark-deserialize the whole blob as a preprocessing.
-    if all_groups_data.starts_with(jolt_sdk::serialized_bundle::PROOF_BUNDLE_MAGIC) {
-        let mut bundle = jolt_sdk::serialized_bundle::ProofBundleReader::new(all_groups_data)
-            .expect("invalid proof bundle");
-
-        use ark_serialize::{CanonicalDeserialize, Compress, Validate};
-        let compress = if bundle.version() == 1 {
-            Compress::Yes
-        } else {
-            Compress::No
-        };
-        let verifier_preprocessing: jolt_sdk::JoltVerifierPreprocessing<
-            jolt_sdk::F,
-            jolt_sdk::PCS,
-        > = jolt_sdk::JoltVerifierPreprocessing::deserialize_with_mode(
-            &mut std::io::Cursor::new(bundle.preprocessing_bytes()),
-            compress,
-            Validate::No,
-        )
-        .unwrap();
-        let verifier_bytes = verifier_preprocessing.serialize_to_bytes().unwrap();
-        info!(
-            "✓ Verifier preprocessing deserialized successfully ({} bytes)",
-            verifier_bytes.len()
-        );
-
-        let mut n = 0u32;
-        while let Some(entry) = bundle.next_entry().unwrap() {
-            n += 1;
-            match JoltDevice::deserialize_compressed(&mut std::io::Cursor::new(entry.device_bytes))
-            {
-                Ok(_) => info!("✓ Device {n} deserialized"),
-                Err(e) => error!("✗ Failed to deserialize device {n}: {e:?}"),
-            }
-            // Proof bytes are in the proof-record encoding; sanity-check the version prefix.
-            if entry.proof_bytes.len() < 4 {
-                error!("✗ Proof {n} too short");
-            }
-        }
-        info!("✓ Number of entries: {n}");
-        return (n, 0);
-    }
-
+    // Expect canonical transport encoding:
+    //   [preprocessing][u32 n][(proof)(device)]^n
     let mut cursor = std::io::Cursor::new(all_groups_data);
 
     let verifier_preprocessing =
@@ -403,12 +368,7 @@ fn collect_guest_proofs(
     info!("Got inputs: {inputs:?}");
     let n = inputs.len() as u32;
 
-    #[cfg(feature = "proof-bundle")]
-    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new(); // (device_bytes, proof_bytes)
-
-    #[cfg(not(feature = "proof-bundle"))]
     let mut all_groups_data: Vec<u8> = Vec::new();
-    #[cfg(not(feature = "proof-bundle"))]
     let mut cursor = std::io::Cursor::new(&mut all_groups_data);
     let mut total_prove_time = 0.0;
 
@@ -416,10 +376,6 @@ fn collect_guest_proofs(
     //
     // Default format:
     //   [preprocessing][u32 n][(proof)(device)]^n
-    //
-    // Proof-bundle format (feature-gated):
-    //   [magic/version][preprocessing_len][preprocessing][u32 n][(device_len)(device)(proof_len)(proof)]^n
-    #[cfg(not(feature = "proof-bundle"))]
     {
         guest_verifier_preprocessing
             .serialize_compressed(&mut cursor)
@@ -466,20 +422,8 @@ fn collect_guest_proofs(
             &input_bytes, prove_time
         );
 
-        #[cfg(not(feature = "proof-bundle"))]
-        {
-            proof.serialize_compressed(&mut cursor).unwrap();
-            io_device.serialize_compressed(&mut cursor).unwrap();
-        }
-
-        #[cfg(feature = "proof-bundle")]
-        {
-            let mut proof_bytes = Vec::new();
-            let mut device_bytes = Vec::new();
-            jolt_sdk::serialized_bundle::write_proof_record(&mut proof_bytes, &proof).unwrap();
-            io_device.serialize_compressed(&mut device_bytes).unwrap();
-            entries.push((device_bytes, proof_bytes));
-        }
+        proof.serialize_compressed(&mut cursor).unwrap();
+        io_device.serialize_compressed(&mut cursor).unwrap();
 
         info!("  Verifying...");
         let is_valid = jolt_sdk::guest::verifier::verify(
@@ -495,29 +439,8 @@ fn collect_guest_proofs(
     }
     info!("Total prove time: {total_prove_time:.3}s");
 
-    #[cfg(feature = "proof-bundle")]
-    {
-        use ark_serialize::CanonicalSerialize;
-        let mut preprocessing_bytes = Vec::new();
-        guest_verifier_preprocessing
-            .serialize_uncompressed(&mut preprocessing_bytes)
-            .unwrap();
-        let mut bundled = Vec::new();
-        jolt_sdk::serialized_bundle::write_proof_bundle(
-            &mut bundled,
-            &preprocessing_bytes,
-            &entries,
-        )
-        .unwrap();
-        info!("Total data size: {} bytes", bundled.len());
-        bundled
-    }
-
-    #[cfg(not(feature = "proof-bundle"))]
-    {
-        info!("Total data size: {} bytes", all_groups_data.len());
-        all_groups_data
-    }
+    info!("Total data size: {} bytes", all_groups_data.len());
+    all_groups_data
 }
 
 fn debug_deserialize_proof_fields(proof_file: &Path) {
@@ -759,6 +682,7 @@ fn run_recursion_proof(
     mut max_trace_length: usize,
     _use_committed: bool, // Note: committed mode only applies to inner proof, not recursion guest
     layout: DoryLayout,
+    cycle_tracking: bool,
 ) {
     let target_dir = "/tmp/jolt-guest-targets";
 
@@ -771,10 +695,10 @@ fn run_recursion_proof(
     let mut program = jolt_sdk::host::Program::new("recursion-guest");
     program.set_func("verify");
     program.set_std(true);
-    #[cfg(feature = "proof-bundle")]
-    program.set_guest_features("guest,proof-bundle");
     program.set_memory_config(memory_config);
-    program.add_guest_feature("cycle-tracking");
+    if cycle_tracking {
+        program.add_guest_feature("cycle-tracking");
+    }
     program.build(target_dir);
     let elf_contents = program.get_elf_contents().unwrap();
     let mut recursion = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
@@ -859,6 +783,7 @@ fn verify_proofs(
     run_config: RunConfig,
     use_committed: bool,
     layout: DoryLayout,
+    cycle_tracking: bool,
 ) {
     info!("Verifying proofs for {} guest program...", guest.name());
     info!("Using embed mode: {use_embed}");
@@ -872,8 +797,9 @@ fn verify_proofs(
     let (n, _remaining) = check_data_integrity(&all_groups_data);
 
     // Decompress+convert (native, validated) into guest-optimized encoding.
-    let guest_bytes = jolt_sdk::decompress_transport_bytes_to_guest_bytes(&all_groups_data)
-        .expect("decompress transport -> guest bytes");
+    let guest_bytes =
+        jolt_sdk::decompression::decompress_transport_bytes_to_guest_bytes(&all_groups_data)
+            .expect("decompress transport -> guest bytes");
 
     if use_embed {
         info!("Running {} recursion with embedded bytes...", guest.name());
@@ -893,6 +819,7 @@ fn verify_proofs(
             guest.get_max_trace_length(use_embed),
             use_committed,
             layout,
+            cycle_tracking,
         );
     } else {
         info!("Running {} recursion with input data...", guest.name());
@@ -922,6 +849,7 @@ fn verify_proofs(
             guest.get_max_trace_length(use_embed),
             use_committed,
             layout,
+            cycle_tracking,
         );
     }
 }
@@ -953,6 +881,7 @@ fn main() {
             workdir,
             embed,
             committed,
+            cycle_tracking,
             layout,
         }) => {
             let guest = match GuestProgram::from_str(example) {
@@ -975,6 +904,7 @@ fn main() {
                 RunConfig::Prove,
                 *committed,
                 (*layout).into(),
+                *cycle_tracking,
             );
         }
         Some(Commands::Trace {
@@ -983,6 +913,7 @@ fn main() {
             embed,
             trace_to_file,
             committed,
+            cycle_tracking,
             layout,
         }) => {
             let guest = match GuestProgram::from_str(example) {
@@ -1010,6 +941,7 @@ fn main() {
                 run_config,
                 *committed,
                 (*layout).into(),
+                *cycle_tracking,
             );
         }
         Some(Commands::Debug { example, workdir }) => {

@@ -12,7 +12,11 @@ use crate::poly::commitment::{
     dory::{DoryContext, DoryGlobals},
     hyrax::{Hyrax, PedersenGenerators},
 };
-use crate::poly::opening_proof::{OpeningId, PolynomialId};
+// Dory-specific imports for recursion mode (used at runtime when PCS is Dory)
+#[allow(unused_imports)]
+use crate::poly::commitment::dory::{
+    derive_from_dory_ast, wrappers::ArkDoryProof, wrappers::ArkGT, wrappers::ArkworksVerifierSetup,
+};
 use crate::subprotocols::sumcheck::BatchedSumcheck;
 use crate::zkvm::bytecode::chunks::total_lanes;
 use crate::zkvm::claim_reductions::advice::ReductionPhase;
@@ -57,7 +61,7 @@ use crate::zkvm::{
         val_evaluation::ValEvaluationSumcheckVerifier as RamValEvaluationSumcheckVerifier,
         verifier_accumulate_advice,
     },
-    recursion::verifier::{RecursionVerifier, RecursionVerifierInput},
+    recursion::verifier::RecursionVerifier,
     registers::{
         read_write_checking::RegistersReadWriteCheckingVerifier,
         val_evaluation::ValEvaluationSumcheckVerifier as RegistersValEvaluationSumcheckVerifier,
@@ -130,6 +134,11 @@ impl Drop for CycleMarkerGuard {
 /// performing actual PCS verification.
 #[derive(Clone, Debug)]
 struct DoryVerifySnapshot<F: JoltField> {
+    /// Unified opening point (big-endian).
+    opening_point:
+        crate::poly::opening_proof::OpeningPoint<{ crate::poly::opening_proof::BIG_ENDIAN }, F>,
+    /// Ordered (polynomial, claim) pairs in prover-matching order.
+    polynomial_claims: Vec<(CommittedPolynomial, F)>,
     /// Ordered claims for transcript replay.
     /// Order matters: must match the prover's ordering for gamma-power sampling.
     claims: Vec<F>,
@@ -160,8 +169,6 @@ impl<
         PCS: CommitmentScheme<Field = F> + RecursionExt<F>,
         ProofTranscript: Transcript,
     > JoltVerifier<'a, F, PCS, ProofTranscript>
-where
-    <PCS as RecursionExt<F>>::Hint: Send + Sync + Clone + 'static,
 {
     pub fn new(
         preprocessing: &'a JoltVerifierPreprocessing<F, PCS>,
@@ -908,7 +915,11 @@ where
 
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
 
-        Ok(DoryVerifySnapshot { claims })
+        Ok(DoryVerifySnapshot {
+            opening_point,
+            polynomial_claims,
+            claims,
+        })
     }
 
     /// Stage 8: Dory batch opening verification.
@@ -1187,6 +1198,10 @@ where
     fn verify_stage8_with_recursion(&mut self) -> Result<(), anyhow::Error>
     where
         PCS: RecursionExt<F>,
+        PCS::Ast: 'static,
+        PCS::Commitment: 'static,
+        PCS::Proof: 'static,
+        PCS::VerifierSetup: 'static,
     {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8);
         let payload: &RecursionPayload<F, PCS, ProofTranscript> =
@@ -1194,122 +1209,203 @@ where
                 anyhow::anyhow!("recursion payload is required in recursion mode")
             })?;
 
-        // 1) Stage 8 transcript replay (no PCS checks): advance transcript to match
-        // the prover's post-Stage8 Fiat–Shamir state.
+        // 1) Reconstruct the Stage 8 batching state + build the symbolic AST at the pre-Stage8
+        // transcript state. Then replay the PCS transcript interactions (no native PCS checks).
         let dory_snap = self.build_dory_verify_snapshot()?;
-        {
-            let _span = tracing::info_span!("stage8_fs_replay").entered();
+        let (
+            _gamma_powers,
+            _joint_claim,
+            joint_commitment,
+            combine_coeffs,
+            combine_commitments,
+            ast,
+        ) = {
+            let _span = tracing::info_span!("stage8_reconstruct_ast_and_batching").entered();
             let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DORY_PCS);
+
             // Must match prover ordering: append claims then sample gamma powers.
             self.transcript.append_scalars(&dory_snap.claims);
-            let _gamma_powers: Vec<F> = self
+            let gamma_powers: Vec<F> = self
                 .transcript
                 .challenge_scalar_powers(dory_snap.claims.len());
-            // Now replay the PCS opening proof's transcript interactions.
+
+            // Build state for computing joint commitment/claim.
+            let state = DoryOpeningState {
+                opening_point: dory_snap.opening_point.r.clone(),
+                gamma_powers: gamma_powers.clone(),
+                polynomial_claims: dory_snap.polynomial_claims.clone(),
+            };
+
+            // Build commitments map (must match Stage 8 native verifier path).
+            let mut commitments_map = HashMap::new();
+            for (polynomial, commitment) in all_committed_polynomials(&self.one_hot_params)
+                .into_iter()
+                .zip_eq(&self.proof.commitments)
+            {
+                commitments_map.insert(polynomial, commitment.clone());
+            }
+
+            // Add advice commitments if they're part of the batch.
+            if let Some(ref commitment) = self.trusted_advice_commitment {
+                if state
+                    .polynomial_claims
+                    .iter()
+                    .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+                {
+                    commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                }
+            }
+            if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
+                if state
+                    .polynomial_claims
+                    .iter()
+                    .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+                {
+                    commitments_map
+                        .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                }
+            }
+
+            if self.proof.program_mode == ProgramMode::Committed {
+                let committed = self.preprocessing.program.as_committed()?;
+                for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
+                    commitments_map
+                        .entry(CommittedPolynomial::BytecodeChunk(idx))
+                        .or_insert_with(|| commitment.clone());
+                }
+
+                // Add trusted program-image commitment if it's part of the batch.
+                if state
+                    .polynomial_claims
+                    .iter()
+                    .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
+                {
+                    commitments_map.insert(
+                        CommittedPolynomial::ProgramImageInit,
+                        committed.program_image_commitment.clone(),
+                    );
+                }
+            }
+
+            // Deterministic combine plan (must match prover's BTreeMap iteration).
+            use crate::poly::rlc_utils::{compute_joint_claim, compute_rlc_coefficients};
+            let joint_claim: F = compute_joint_claim(&gamma_powers, &dory_snap.claims);
+            let rlc_map = compute_rlc_coefficients(&gamma_powers, state.polynomial_claims.clone());
+            let (combine_coeffs, combine_commitments): (Vec<F>, Vec<PCS::Commitment>) = rlc_map
+                .into_iter()
+                .map(|(poly, coeff)| {
+                    (
+                        coeff,
+                        commitments_map
+                            .get(&poly)
+                            .expect("missing commitment for polynomial in batch")
+                            .clone(),
+                    )
+                })
+                .unzip();
+            let joint_commitment = PCS::combine_commitments(&combine_commitments, &combine_coeffs);
+
+            // Build AST on a transcript clone at the pre-Stage8-proof state.
+            let mut ast_transcript = self.transcript.clone();
+            let ast = PCS::build_symbolic_ast(
+                &self.proof.stage8_opening_proof,
+                &self.preprocessing.generators,
+                &mut ast_transcript,
+                &state.opening_point,
+                &joint_claim,
+                &joint_commitment,
+            )
+            .map_err(|e| anyhow::anyhow!("Stage 8 symbolic AST build failed: {e:?}"))?;
+
+            // Now replay the PCS opening proof's transcript interactions on the real transcript.
             PCS::replay_opening_proof_transcript(
                 &self.proof.stage8_opening_proof,
                 &mut self.transcript,
             )
             .map_err(|e| anyhow::anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
+
+            (
+                gamma_powers,
+                joint_claim,
+                joint_commitment,
+                combine_coeffs,
+                combine_commitments,
+                ast,
+            )
+        };
+
+        // 2) Derive RecursionVerifierInput (constraint plan + public inputs) from the AST.
+        let derived = {
+            let _span = tracing::info_span!("stage8_derive_recursion_instance_plan").entered();
+            use std::any::Any;
+
+            // Convert combine coeffs to BN254 Fr for bit extraction.
+            let combine_coeffs_fr: Vec<ark_bn254::Fr> = combine_coeffs
+                .iter()
+                .map(|c| {
+                    let mut buf = Vec::new();
+                    c.serialize_compressed(&mut buf)
+                        .map_err(|e| anyhow::anyhow!("serialize combine coeff failed: {e:?}"))?;
+                    ark_bn254::Fr::deserialize_compressed(&*buf).map_err(|e| {
+                        anyhow::anyhow!("deserialize combine coeff as Fr failed: {e:?}")
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+
+            // Dory-specific plan derivation (recursion mode currently only supported for Dory).
+            let ast_graph = (&ast as &dyn Any)
+                .downcast_ref::<dory::recursion::ast::AstGraph<dory::backends::arkworks::BN254>>()
+                .ok_or_else(|| anyhow::anyhow!("recursion mode requires Dory AST"))?;
+            let dory_proof = (&self.proof.stage8_opening_proof as &dyn Any)
+                .downcast_ref::<ArkDoryProof>()
+                .ok_or_else(|| anyhow::anyhow!("recursion mode requires Dory opening proof"))?;
+            let dory_setup = (&self.preprocessing.generators as &dyn Any)
+                .downcast_ref::<ArkworksVerifierSetup>()
+                .ok_or_else(|| anyhow::anyhow!("recursion mode requires Dory verifier setup"))?;
+            let joint_commitment_dory = (&joint_commitment as &dyn Any)
+                .downcast_ref::<ArkGT>()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("recursion mode requires Dory commitment type"))?;
+            let combine_commitments_dory: Vec<ArkGT> = combine_commitments
+                .iter()
+                .map(|c| {
+                    (c as &dyn Any)
+                        .downcast_ref::<ArkGT>()
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("recursion mode requires Dory commitment type")
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+
+            derive_from_dory_ast(
+                ast_graph,
+                dory_proof,
+                dory_setup,
+                joint_commitment_dory,
+                &combine_commitments_dory,
+                &combine_coeffs_fr,
+            )
+            .map_err(|e| anyhow::anyhow!("AST->instance-plan derivation failed: {e:?}"))?
+        };
+
+        if derived.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {
+            return Err(anyhow::anyhow!(
+                "dense_num_vars {} exceeds max {}",
+                derived.dense_num_vars,
+                MAX_RECURSION_DENSE_NUM_VARS
+            ));
         }
 
-        // 2) Extract data for RecursionVerifier
+        // 3) Verify recursion proof.
         let recursion_proof = &payload.recursion_proof;
-
-        // Build RecursionVerifierInput from proof data
-        // Note: This is a simplified version. In practice, this data would come from preprocessing
-        // or be computed from the proof structure
-
-        // Extract constraint counts from the opening claims in recursion_proof
-        // We can infer the structure from the types of virtual polynomials
-        let (_num_gt_exp, _num_gt_mul, _num_g1_scalar_mul) = {
-            let _span = tracing::info_span!(
-                "stage8_count_constraint_types",
-                num_claims = recursion_proof.opening_claims.len()
-            )
-            .entered();
-            let mut num_gt_exp = 0;
-            let mut num_gt_mul = 0;
-            let mut num_g1_scalar_mul = 0;
-
-            // Count constraint types based on the virtual polynomial types in opening claims
-            use crate::zkvm::witness::{RecursionPoly, VirtualPolynomial};
-            for key in recursion_proof.opening_claims.keys() {
-                if let OpeningId::Polynomial(
-                    PolynomialId::Virtual(VirtualPolynomial::Recursion(rec_poly)),
-                    _,
-                ) = key
-                {
-                    match rec_poly {
-                        RecursionPoly::GtExp { instance, .. } => {
-                            num_gt_exp = num_gt_exp.max(instance + 1);
-                        }
-                        RecursionPoly::GtMul { instance, .. } => {
-                            num_gt_mul = num_gt_mul.max(instance + 1);
-                        }
-                        RecursionPoly::G1ScalarMul { instance, .. } => {
-                            num_g1_scalar_mul = num_g1_scalar_mul.max(instance + 1);
-                        }
-                        _ => {} // G1Add, G2Add, G2ScalarMul - ignore for now
-                    }
-                }
-            }
-            (num_gt_exp, num_gt_mul, num_g1_scalar_mul)
-        };
-
-        // Use metadata from recursion payload.
-        let metadata = &payload.stage10_recursion_metadata;
-
-        let verifier_input = {
-            let _span = tracing::info_span!("stage8_build_verifier_input").entered();
-            let constraint_types = metadata.constraint_types.clone();
-            let num_constraints = constraint_types.len();
-            let num_constraints_padded = num_constraints.next_power_of_two();
-
-            // The recursion verifier commits to a single packed dense polynomial (Hyrax).
-            // We should use the actual `dense_num_vars` from the metadata rather than
-            // trying to recalculate it.
-
-            // Calculate the constraint system parameters for the verifier input.
-            //
-            // IMPORTANT: These must match the recursion prover's matrix construction:
-            // - `num_constraint_vars = 11` (uniform matrix compatible with packed GT exp)
-            // - `num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded`
-            use crate::zkvm::recursion::constraints::system::PolyType;
-            let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
-            let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
-            let num_constraint_vars = 11; // All constraints padded to 11 variables (zero padding)
-            let num_vars = num_s_vars + num_constraint_vars;
-
-            RecursionVerifierInput {
-                constraint_types,
-                num_vars,
-                num_constraint_vars,
-                num_s_vars,
-                num_constraints,
-                num_constraints_padded,
-                gt_exp_public_inputs: metadata.gt_exp_public_inputs.clone(),
-                g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
-                g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),
-            }
-        };
-
-        // 3. Verify recursion proof
         let recursion_verifier = {
             let _span = tracing::info_span!("stage8_create_recursion_verifier").entered();
-            RecursionVerifier::<Fq>::new(verifier_input)
+            RecursionVerifier::<Fq>::new(derived.verifier_input)
         };
 
         type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-
-        // Use cached Hyrax setup from preprocessing (avoids 40ms regeneration)
         let hyrax_verifier_setup = &self.preprocessing.hyrax_recursion_setup;
-        assert!(
-            metadata.dense_num_vars <= MAX_RECURSION_DENSE_NUM_VARS,
-            "dense_num_vars {} exceeds max {}",
-            metadata.dense_num_vars,
-            MAX_RECURSION_DENSE_NUM_VARS
-        );
 
         let verification_result = {
             let _span = tracing::info_span!("stage8_recursion_verifier_verify").entered();
@@ -1323,9 +1419,45 @@ where
                 )
                 .map_err(|e| anyhow::anyhow!("Recursion verification failed: {e:?}"))?
         };
-
         if !verification_result {
             return Err(anyhow::anyhow!("Recursion proof verification failed"));
+        }
+
+        // 4) Pairing boundary binding + external pairing check.
+        let expected = &derived.pairing_boundary;
+        let got = &payload.pairing_boundary;
+        if expected.p1_g1 != got.p1_g1
+            || expected.p1_g2 != got.p1_g2
+            || expected.p2_g1 != got.p2_g1
+            || expected.p2_g2 != got.p2_g2
+            || expected.p3_g1 != got.p3_g1
+            || expected.p3_g2 != got.p3_g2
+            || expected.rhs != got.rhs
+        {
+            return Err(anyhow::anyhow!(
+                "pairing boundary mismatch (expected from AST vs payload)"
+            ));
+        }
+
+        // Minimal binding: recompute multi-pairing and check equality.
+        let lhs = {
+            use ark_ec::AffineRepr;
+            use dory::backends::arkworks::{ArkG1, ArkG2, BN254};
+            use dory::primitives::arithmetic::PairingCurve;
+            let g1s = [
+                ArkG1(got.p1_g1.into_group()),
+                ArkG1(got.p2_g1.into_group()),
+                ArkG1(got.p3_g1.into_group()),
+            ];
+            let g2s = [
+                ArkG2(got.p1_g2.into_group()),
+                ArkG2(got.p2_g2.into_group()),
+                ArkG2(got.p3_g2.into_group()),
+            ];
+            BN254::multi_pair(&g1s, &g2s)
+        };
+        if lhs.0 != got.rhs {
+            return Err(anyhow::anyhow!("external pairing check failed"));
         }
 
         Ok(())

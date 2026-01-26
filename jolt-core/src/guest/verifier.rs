@@ -44,10 +44,7 @@ pub fn verify<
     recursion: bool,
     proof: JoltProof<F, PCS, FS>,
     preprocessing: &JoltVerifierPreprocessing<F, PCS>,
-) -> Result<(), ProofVerifyError>
-where
-    <PCS as RecursionExt<F>>::Hint: Send + Sync + Clone + 'static,
-{
+) -> Result<(), ProofVerifyError> {
     use common::jolt_device::JoltDevice;
     let memory_layout = &preprocessing.shared.memory_layout;
     let memory_config = MemoryConfig {

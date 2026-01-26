@@ -55,6 +55,21 @@ pub struct RecursionConstraintMetadata {
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 }
 
+/// Boundary outputs for the final external pairing check in recursion mode.
+///
+/// The verifier must **not trust** prover-supplied values here; it should re-derive the expected
+/// boundary from public inputs (proof + setup) and compare.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct PairingBoundary {
+    pub p1_g1: ark_bn254::G1Affine,
+    pub p1_g2: ark_bn254::G2Affine,
+    pub p2_g1: ark_bn254::G1Affine,
+    pub p2_g2: ark_bn254::G2Affine,
+    pub p3_g1: ark_bn254::G1Affine,
+    pub p3_g2: ark_bn254::G2Affine,
+    pub rhs: ark_bn254::Fq12,
+}
+
 /// Optional recursion payload (strict extension of the base proof).
 ///
 /// When present, the verifier can skip native Stage 8 PCS verification and instead
@@ -64,16 +79,15 @@ pub struct RecursionPayload<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> 
     /// Hint for combine_commitments offloading (the combined GT element), used by some
     /// non-recursive fast paths and by legacy verifiers.
     pub stage8_combine_hint: Option<Fq12>,
-    /// PCS hint produced during recursion witness generation (used by some streaming
-    /// and legacy verification paths).
-    pub stage9_pcs_hint: <PCS as RecursionExt<F>>::Hint,
-    /// Constraint metadata extracted from recursion prover.
-    pub stage10_recursion_metadata: RecursionConstraintMetadata,
+    /// Boundary outputs for the external pairing check (see `spec.md`).
+    pub pairing_boundary: PairingBoundary,
     /// Combined proof containing:
     /// - Stage 11: Recursion sumchecks (constraint + virtualization)
     /// - Stage 12: Dense polynomial commitment
     /// - Stage 13: Hyrax opening proof
     pub recursion_proof: RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>,
+    #[doc(hidden)]
+    pub _marker: std::marker::PhantomData<(F, PCS)>,
 }
 
 impl GuestSerialize for RecursionConstraintMetadata {
@@ -99,17 +113,42 @@ impl GuestDeserialize for RecursionConstraintMetadata {
     }
 }
 
+impl GuestSerialize for PairingBoundary {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.p1_g1.guest_serialize(w)?;
+        self.p1_g2.guest_serialize(w)?;
+        self.p2_g1.guest_serialize(w)?;
+        self.p2_g2.guest_serialize(w)?;
+        self.p3_g1.guest_serialize(w)?;
+        self.p3_g2.guest_serialize(w)?;
+        self.rhs.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for PairingBoundary {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            p1_g1: ark_bn254::G1Affine::guest_deserialize(r)?,
+            p1_g2: ark_bn254::G2Affine::guest_deserialize(r)?,
+            p2_g1: ark_bn254::G1Affine::guest_deserialize(r)?,
+            p2_g2: ark_bn254::G2Affine::guest_deserialize(r)?,
+            p3_g1: ark_bn254::G1Affine::guest_deserialize(r)?,
+            p3_g2: ark_bn254::G2Affine::guest_deserialize(r)?,
+            rhs: ark_bn254::Fq12::guest_deserialize(r)?,
+        })
+    }
+}
+
 impl<F, PCS, FS> GuestSerialize for RecursionPayload<F, PCS, FS>
 where
     F: JoltField,
     PCS: RecursionExt<F>,
-    <PCS as RecursionExt<F>>::Hint: GuestSerialize,
     FS: Transcript,
 {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.stage8_combine_hint.guest_serialize(w)?;
-        self.stage9_pcs_hint.guest_serialize(w)?;
-        self.stage10_recursion_metadata.guest_serialize(w)?;
+        self.pairing_boundary.guest_serialize(w)?;
         self.recursion_proof.guest_serialize(w)?;
         Ok(())
     }
@@ -119,16 +158,15 @@ impl<F, PCS, FS> GuestDeserialize for RecursionPayload<F, PCS, FS>
 where
     F: JoltField,
     PCS: RecursionExt<F>,
-    <PCS as RecursionExt<F>>::Hint: GuestDeserialize,
     FS: Transcript,
 {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
-            stage9_pcs_hint: <PCS as RecursionExt<F>>::Hint::guest_deserialize(r)?,
-            stage10_recursion_metadata: RecursionConstraintMetadata::guest_deserialize(r)?,
+            pairing_boundary: PairingBoundary::guest_deserialize(r)?,
             recursion_proof:
                 RecursionProof::<Fq, FS, Hyrax<1, GrumpkinProjective>>::guest_deserialize(r)?,
+            _marker: std::marker::PhantomData,
         })
     }
 }
@@ -528,7 +566,6 @@ impl<F, PCS, FS> GuestSerialize for JoltProof<F, PCS, FS>
 where
     F: JoltField + GuestSerialize,
     PCS: RecursionExt<F>,
-    <PCS as RecursionExt<F>>::Hint: GuestSerialize,
     PCS::Commitment: GuestSerialize,
     PCS::Proof: GuestSerialize,
     FS: Transcript,
@@ -570,7 +607,6 @@ impl<F, PCS, FS> GuestDeserialize for JoltProof<F, PCS, FS>
 where
     F: JoltField + GuestDeserialize,
     PCS: RecursionExt<F>,
-    <PCS as RecursionExt<F>>::Hint: GuestDeserialize,
     PCS::Commitment: GuestDeserialize,
     PCS::Proof: GuestDeserialize,
     FS: Transcript,

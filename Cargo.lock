@@ -990,7 +990,7 @@ dependencies = [
 [[package]]
 name = "dory-derive"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#6dd2c562f49bbf8f5f8637bf37af7ecc0bc12970"
+source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#692d9487fa25b4c5d15f5ca3609d3e7456792950"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1000,7 +1000,7 @@ dependencies = [
 [[package]]
 name = "dory-pcs"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#6dd2c562f49bbf8f5f8637bf37af7ecc0bc12970"
+source = "git+https://github.com/LayerZero-Research/dory?branch=lz-recursion#692d9487fa25b4c5d15f5ca3609d3e7456792950"
 dependencies = [
  "ark-bn254",
  "ark-ec",

@@ -66,6 +66,7 @@ pub fn prove<
             Witness = dory::recursion::WitnessCollection<
                 crate::poly::commitment::dory::recursion::JoltWitness,
             >,
+            Ast = dory::recursion::ast::AstGraph<dory::backends::arkworks::BN254>,
         >,
     FS: Transcript,
 >(
@@ -84,7 +85,7 @@ pub fn prove<
     Option<ProverDebugInfo<F, FS, PCS>>,
 )
 where
-    <PCS as RecursionExt<F>>::Hint: Send + Sync + 'static,
+    PCS::CombineHint: Send,
 {
     use crate::zkvm::config::ProgramMode;
     use crate::zkvm::prover::JoltCpuProver;

@@ -156,36 +156,63 @@ pub trait StreamingCommitmentScheme: CommitmentScheme {
     ) -> (Self::Commitment, Self::OpeningProofHint);
 }
 
-/// Generic extension trait for commitment schemes that adds recursion support
+/// Extension trait for commitment schemes that adds recursion support.
+///
+/// This trait enables a commitment scheme to be used with Jolt's recursion SNARK.
+/// Currently only Dory implements this trait.
+///
+/// ## AST-Driven Verification
+///
+/// The recursion verifier uses an AST-based approach where:
+/// - `witness_gen_with_ast`: Prover generates witnesses + computation graph (AST)
+/// - `build_symbolic_ast`: Verifier reconstructs AST topology without group ops
+/// - The AST is used to derive constraint ordering and public inputs deterministically
+///
+/// ## Instance Plan Derivation
+///
+/// After obtaining the AST, callers should use the PCS-specific derivation function
+/// to convert it to a `RecursionVerifierInput`. For Dory, this is:
+/// `crate::poly::commitment::dory::derive_from_dory_ast`.
+///
+/// Future versions may add a `derive_instance_plan` trait method for multi-PCS support.
 pub trait RecursionExt<F: JoltField>: CommitmentScheme<Field = F> {
-    /// verifier computations
+    /// Witness collection type for recursion constraint building.
     type Witness;
-    /// hints for efficient verification (must be serializable for proof transport)
-    type Hint: CanonicalSerialize + CanonicalDeserialize + Clone + Send + Sync;
-    /// Hint for combine_commitments offloading (the final combined commitment)
+
+    /// Commitment-scheme specific AST type used to derive recursion obligations.
+    ///
+    /// For Dory this is `dory::recursion::ast::AstGraph<BN254>`.
+    type Ast;
+
+    /// Hint for combine_commitments offloading (the final combined commitment).
     type CombineHint;
 
-    /// Generate witnesses and convert them to hints
-    /// Returns both the full witnesses (for proving) and hints (for verification)
-    fn witness_gen<ProofTranscript: Transcript>(
+    /// Generate recursion witnesses and an AST for the Stage 8 opening proof verification.
+    ///
+    /// This is used by the recursion prover to:
+    /// - (a) Build the recursion constraint system from witnesses
+    /// - (b) Derive a canonical ordering / wiring from the AST
+    fn witness_gen_with_ast<ProofTranscript: Transcript>(
         proof: &Self::Proof,
         setup: &Self::VerifierSetup,
         transcript: &mut ProofTranscript,
         point: &[<F as JoltField>::Challenge],
         evaluation: &F,
         commitment: &Self::Commitment,
-    ) -> Result<(Self::Witness, Self::Hint), ProofVerifyError>;
+    ) -> Result<(Self::Witness, Self::Ast), ProofVerifyError>;
 
-    /// Verify with hint-based approach
-    fn verify_with_hint<ProofTranscript: Transcript>(
+    /// Build the verification AST in symbolic mode (no group ops).
+    ///
+    /// Callers should pass a **clone** of the verifier transcript if they need to avoid mutating
+    /// the main transcript state (e.g. recursion-mode verification does transcript replay once).
+    fn build_symbolic_ast<ProofTranscript: Transcript>(
         proof: &Self::Proof,
         setup: &Self::VerifierSetup,
         transcript: &mut ProofTranscript,
         point: &[<F as JoltField>::Challenge],
         evaluation: &F,
         commitment: &Self::Commitment,
-        hint: &Self::Hint,
-    ) -> Result<(), ProofVerifyError>;
+    ) -> Result<Self::Ast, ProofVerifyError>;
 
     /// Replay the Fiat–Shamir transcript interactions for an opening proof,
     /// without performing any group checks.
@@ -212,8 +239,14 @@ pub trait RecursionExt<F: JoltField>: CommitmentScheme<Field = F> {
     fn combine_with_hint(hint: &Self::CombineHint) -> Self::Commitment;
 
     /// Extract the underlying Fq12 from the combine hint for serialization.
+    ///
+    /// **Note**: This method is BN254/Dory-specific. Future multi-PCS support may
+    /// require moving this to a Dory-specific extension trait.
     fn combine_hint_to_fq12(hint: &Self::CombineHint) -> ark_bn254::Fq12;
 
     /// Reconstruct commitment from serialized Fq12 hint.
+    ///
+    /// **Note**: This method is BN254/Dory-specific. Future multi-PCS support may
+    /// require moving this to a Dory-specific extension trait.
     fn combine_with_hint_fq12(hint: &ark_bn254::Fq12) -> Self::Commitment;
 }

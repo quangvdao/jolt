@@ -193,8 +193,6 @@ impl<
         PCS: StreamingCommitmentScheme<Field = F> + RecursionExt<F>,
         ProofTranscript: Transcript,
     > JoltCpuProver<'a, F, PCS, ProofTranscript>
-where
-    <PCS as RecursionExt<F>>::Hint: Send + Sync + 'static,
 {
     pub fn gen_from_elf(
         preprocessing: &'a JoltProverPreprocessing<F, PCS>,
@@ -576,7 +574,9 @@ where
             Witness = dory::recursion::WitnessCollection<
                 crate::poly::commitment::dory::recursion::JoltWitness,
             >,
+            Ast = dory::recursion::ast::AstGraph<dory::backends::arkworks::BN254>,
         >,
+        PCS::CombineHint: Send,
     {
         let _pprof_prove = pprof_scope!("prove");
 
@@ -596,11 +596,18 @@ where
         // Reset DoryGlobals before commitment generation to clear any pollution
         // from the trace phase (e.g., when the recursion guest ran inner verifications
         // that set different Dory parameters).
+        //
+        // IMPORTANT: Preserve the configured Dory layout across reset. The layout is a
+        // run-configuration knob (tests set it explicitly) and must match the layout
+        // used during committed-program preprocessing (TrustedProgramCommitments::derive).
+        let configured_layout = DoryGlobals::get_layout();
         DoryGlobals::reset();
+        DoryGlobals::set_layout(configured_layout);
         tracing::info!(
-            "DoryGlobals reset before commitment generation. padded_trace_len={}, log_k_chunk={}",
+            "DoryGlobals reset before commitment generation. padded_trace_len={}, log_k_chunk={}, layout={:?}",
             self.padded_trace_len,
             self.one_hot_params.log_k_chunk,
+            DoryGlobals::get_layout(),
         );
 
         let (commitments, mut opening_proof_hints) = self.generate_and_commit_witness_polynomials();
@@ -755,24 +762,26 @@ where
 
             let (
                 recursion_proof,
-                recursion_constraint_metadata,
+                _recursion_constraint_metadata,
+                pairing_boundary,
                 stage8_combine_hint,
-                stage9_pcs_hint,
             ) = RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript, HyraxPCS>(
                 &mut self.transcript,
                 hyrax_prover_setup,
-                &joint_opening_proof,
-                stage8_snapshot,
-                &verifier_setup,
-                &commitments_map,
+                crate::zkvm::recursion::prover::RecursionInput {
+                    stage8_opening_proof: &joint_opening_proof,
+                    stage8_snapshot,
+                    verifier_setup: &verifier_setup,
+                    commitments: &commitments_map,
+                },
             )
             .expect("Failed to generate recursion proof");
 
             Some(RecursionPayload {
                 stage8_combine_hint,
-                stage9_pcs_hint,
-                stage10_recursion_metadata: recursion_constraint_metadata,
+                pairing_boundary,
                 recursion_proof,
+                _marker: std::marker::PhantomData,
             })
         } else {
             None

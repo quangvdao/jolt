@@ -65,20 +65,20 @@ struct ProfileArgs {
     /// Dory matrix layout (cycle-major or address-major)
     #[clap(long, value_enum, default_value = "cycle-major")]
     layout: LayoutArg,
-}
 
-#[derive(Args, Debug)]
-struct BenchmarkArgs {
-    #[clap(flatten)]
-    profile_args: ProfileArgs,
-
-    /// Max trace length as 2^scale (optional if target-trace-size is provided)
+    /// Max trace length as 2^scale (optional, uses default inputs if not provided)
     #[clap(short, long)]
     scale: Option<usize>,
 
     /// Target specific cycle count (optional, defaults to 90% of 2^scale)
     #[clap(short, long)]
     target_trace_size: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+struct BenchmarkArgs {
+    #[clap(flatten)]
+    profile_args: ProfileArgs,
 }
 
 #[derive(Debug, Clone, ValueEnum, PartialEq)]
@@ -173,17 +173,32 @@ fn trace(args: ProfileArgs) {
         LayoutArg::CycleMajor => "",
         LayoutArg::AddressMajor => "_addr_major",
     };
+    let scale_suffix = args.scale.map_or(String::new(), |s| format!("_2^{s}"));
     let timestamp = Local::now().format("%Y%m%d-%H%M");
     let trace_name =
-        format!("{bench_name}{mode_suffix}{recursion_suffix}{layout_suffix}_{timestamp}");
-    let _guards = setup_tracing(args.format, &trace_name);
+        format!("{bench_name}{mode_suffix}{recursion_suffix}{layout_suffix}{scale_suffix}_{timestamp}");
+    let _guards = setup_tracing(args.format.clone(), &trace_name);
 
     // Set the Dory layout before running benchmarks
     let layout: DoryLayout = args.layout.into();
     DoryGlobals::set_layout(layout);
     tracing::info!("Using Dory layout: {:?}", layout);
 
-    for (span, bench) in benchmarks(args.name, args.committed, args.recursion).into_iter() {
+    // If scale is provided, use master_benchmark for scaled traces
+    let tasks = if let Some(scale) = args.scale {
+        tracing::info!("Running with scale 2^{}", scale);
+        master_benchmark(
+            args.name,
+            scale,
+            args.target_trace_size,
+            args.recursion,
+            args.committed,
+        )
+    } else {
+        benchmarks(args.name, args.committed, args.recursion)
+    };
+
+    for (span, bench) in tasks.into_iter() {
         span.in_scope(|| {
             bench();
             tracing::info!("Bench Complete");
@@ -192,7 +207,7 @@ fn trace(args: ProfileArgs) {
 }
 
 fn run_benchmark(args: BenchmarkArgs) {
-    let scale = match (args.scale, args.target_trace_size) {
+    let scale = match (args.profile_args.scale, args.profile_args.target_trace_size) {
         (Some(s), _) => s, // Scale provided, use it
         (None, Some(target)) => target.next_power_of_two().trailing_zeros() as usize,
         (None, None) => {
@@ -223,7 +238,7 @@ fn run_benchmark(args: BenchmarkArgs) {
     for (span, bench) in master_benchmark(
         args.profile_args.name,
         scale,
-        args.target_trace_size,
+        args.profile_args.target_trace_size,
         args.profile_args.recursion,
         args.profile_args.committed,
     )

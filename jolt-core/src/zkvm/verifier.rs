@@ -167,6 +167,10 @@ pub struct JoltVerifier<'a, F: JoltField, PCS: RecursionExt<F>, ProofTranscript:
     /// The bytecode claim reduction sumcheck effectively spans two stages (6b and 7).
     /// Cache the verifier state here between stages.
     bytecode_reduction_verifier: Option<BytecodeClaimReductionVerifier<F>>,
+    /// Bytecode read RAF params, cached between Stage 6a and 6b.
+    bytecode_read_raf_params: Option<BytecodeReadRafSumcheckParams<F>>,
+    /// Booleanity params, cached between Stage 6a and 6b.
+    booleanity_params: Option<BooleanitySumcheckParams<F>>,
     pub spartan_key: UniformSpartanKey<F>,
     pub one_hot_params: OneHotParams,
 }
@@ -278,6 +282,8 @@ impl<
             advice_reduction_verifier_trusted: None,
             advice_reduction_verifier_untrusted: None,
             bytecode_reduction_verifier: None,
+            bytecode_read_raf_params: None,
+            booleanity_params: None,
             spartan_key,
             one_hot_params,
         })
@@ -322,8 +328,8 @@ impl<
         self.verify_stage3()?;
         self.verify_stage4()?;
         self.verify_stage5()?;
-        let (bytecode_read_raf_params, booleanity_params) = self.verify_stage6a()?;
-        self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
+        self.verify_stage6a()?;
+        self.verify_stage6b()?;
         self.verify_stage7()?;
         if recursion {
             // Recursion mode: require payload and skip native Stage 8 verification.
@@ -561,15 +567,7 @@ impl<
     }
 
     #[tracing::instrument(skip_all, name = "verify_stage6a")]
-    fn verify_stage6a(
-        &mut self,
-    ) -> Result<
-        (
-            BytecodeReadRafSumcheckParams<F>,
-            BooleanitySumcheckParams<F>,
-        ),
-        anyhow::Error,
-    > {
+    fn verify_stage6a(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE6A);
         let n_cycle_vars = self.proof.trace_length.log_2();
         let program_preprocessing = match self.proof.program_mode {
@@ -606,16 +604,26 @@ impl<
             &mut self.transcript,
         )
         .context("Stage 6a")?;
-        Ok((bytecode_read_raf.into_params(), booleanity.into_params()))
+
+        // Store params for Stage 6b
+        self.bytecode_read_raf_params = Some(bytecode_read_raf.into_params());
+        self.booleanity_params = Some(booleanity.into_params());
+
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, name = "verify_stage6b")]
-    fn verify_stage6b(
-        &mut self,
-        bytecode_read_raf_params: BytecodeReadRafSumcheckParams<F>,
-        booleanity_params: BooleanitySumcheckParams<F>,
-    ) -> Result<(), anyhow::Error> {
+    fn verify_stage6b(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE6B);
+        // Take params cached from Stage 6a
+        let bytecode_read_raf_params = self
+            .bytecode_read_raf_params
+            .take()
+            .expect("bytecode_read_raf_params must be set by verify_stage6a");
+        let booleanity_params = self
+            .booleanity_params
+            .take()
+            .expect("booleanity_params must be set by verify_stage6a");
         // Initialize Stage 6b cycle verifiers from scratch (Option B).
         let booleanity = BooleanityCycleSumcheckVerifier::new(booleanity_params);
         let ram_hamming_booleanity =

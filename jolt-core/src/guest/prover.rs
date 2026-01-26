@@ -4,10 +4,14 @@ use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::commitment_scheme::{RecursionExt, StreamingCommitmentScheme};
 use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
+use crate::zkvm::program::ProgramPreprocessing;
 use crate::zkvm::proof_serialization::JoltProof;
+use crate::zkvm::prover::JoltCpuProver;
 use crate::zkvm::prover::JoltProverPreprocessing;
+use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::zkvm::ProverDebugInfo;
 use common::jolt_device::MemoryLayout;
+use std::sync::Arc;
 use tracer::JoltDevice;
 
 #[allow(clippy::type_complexity)]
@@ -16,10 +20,6 @@ pub fn preprocess(
     guest: &Program,
     max_trace_length: usize,
 ) -> JoltProverPreprocessing<ark_bn254::Fr, DoryCommitmentScheme> {
-    use crate::zkvm::program::ProgramPreprocessing;
-    use crate::zkvm::verifier::JoltSharedPreprocessing;
-    use std::sync::Arc;
-
     let (instructions, memory_init, program_size) = guest.decode();
 
     let mut memory_config = guest.memory_config;
@@ -88,7 +88,6 @@ where
     PCS::CombineHint: Send,
 {
     use crate::zkvm::config::ProgramMode;
-    use crate::zkvm::prover::JoltCpuProver;
 
     // Detect program mode from preprocessing: if program_commitments is Some, use Committed mode
     let program_mode = if preprocessing.is_committed_mode() {

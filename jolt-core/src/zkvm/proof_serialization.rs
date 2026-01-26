@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fs::File,
     io::{Read, Write},
 };
 
@@ -1155,7 +1156,6 @@ pub fn serialize_and_print_size(
     file_name: &str,
     item: &impl CanonicalSerialize,
 ) -> Result<(), SerializationError> {
-    use std::fs::File;
     let mut file = File::create(file_name)?;
     item.serialize_compressed(&mut file)?;
     let file_size_bytes = file.metadata()?.len();

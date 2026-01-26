@@ -33,6 +33,7 @@
 //! - `prover`: Unified prover orchestrating all stages
 //! - `verifier`: Unified verifier for the complete protocol
 
+pub mod combine_dag;
 pub mod constraints;
 pub mod curve;
 pub mod g1;
@@ -57,9 +58,10 @@ pub use constraints::{
 };
 
 // Re-export prover/verifier
+pub use combine_dag::{CombineDag, CombineLayer, CombineMul};
+pub use metadata::RecursionConstraintMetadata;
 pub use prover::{RecursionProof, RecursionProofResult, RecursionProver};
 pub use verifier::{RecursionVerifier, RecursionVerifierInput};
-pub use metadata::RecursionConstraintMetadata;
 
 // G1 exports
 pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier};

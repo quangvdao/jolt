@@ -8,6 +8,7 @@ use super::wrappers::{
     ark_to_jolt, ArkDoryProof, ArkFr, ArkG1, ArkG2, ArkGT, ArkworksVerifierSetup, BN254,
 };
 use crate::utils::errors::ProofVerifyError;
+use crate::zkvm::proof_serialization::NonInputBaseHints;
 use crate::zkvm::proof_serialization::PairingBoundary;
 use crate::zkvm::recursion::constraints::system::ConstraintType;
 use crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs;
@@ -15,8 +16,8 @@ use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::exponentiation::GtExpPublicInputs;
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::verifier::RecursionVerifierInput;
+use crate::zkvm::recursion::CombineDag;
 use crate::zkvm::recursion::PolyType;
-use crate::zkvm::proof_serialization::NonInputBaseHints;
 
 use ark_bn254::{Fq12, Fr, G1Affine, G2Affine};
 use ark_ec::CurveGroup;
@@ -527,8 +528,18 @@ pub fn derive_plan_with_hints(
     let mut g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs> = Vec::new();
 
     // Dory GTExp
-    for ((_, base_id, scalar), base_hint) in gt_exp_ops.iter().zip(non_input_hints.gt_exp_base_hints.iter()) {
-        let base = resolve_gt_input_or_hint(ast, proof, &dory_setup, joint_commitment, *base_id, base_hint)?;
+    for ((_, base_id, scalar), base_hint) in gt_exp_ops
+        .iter()
+        .zip(non_input_hints.gt_exp_base_hints.iter())
+    {
+        let base = resolve_gt_input_or_hint(
+            ast,
+            proof,
+            &dory_setup,
+            joint_commitment,
+            *base_id,
+            base_hint,
+        )?;
         let exponent: Fr = ark_to_jolt(scalar);
         let bits = bits_from_exponent_msb_no_leading_zeros(exponent);
         constraint_types.push(ConstraintType::GtExp);
@@ -580,7 +591,7 @@ pub fn derive_plan_with_hints(
         constraint_types.push(ConstraintType::GtExp);
         gt_exp_public_inputs.push(GtExpPublicInputs::new(commitment.0, bits));
     }
-    let combine_mul_count = combine_commitments.len().saturating_sub(1);
+    let combine_mul_count = CombineDag::new(combine_commitments.len()).num_muls_total();
     for _ in 0..combine_mul_count {
         constraint_types.push(ConstraintType::GtMul);
     }
@@ -742,7 +753,7 @@ pub fn derive_from_dory_ast(
         gt_exp_public_inputs.push(GtExpPublicInputs::new(commitment.0, bits));
     }
     // Then: GTMul constraints for the reduction tree.
-    let combine_mul_count = combine_commitments.len().saturating_sub(1);
+    let combine_mul_count = CombineDag::new(combine_commitments.len()).num_muls_total();
     for _ in 0..combine_mul_count {
         constraint_types.push(ConstraintType::GtMul);
     }

@@ -280,102 +280,10 @@ fn prove_example(
             program_mode,
         );
         let program_io = prover.program_io.clone();
-        let (jolt_proof, _) = prover.prove(recursion);
+        let (jolt_proof, _) = prover.prove();
 
         if recursion {
-            match jolt_proof.recursion.as_ref() {
-                Some(payload) => {
-                    let recursion_payload_size_bytes =
-                        payload.serialized_size(ark_serialize::Compress::Yes);
-                    let stage8_combine_hint_size_bytes = payload
-                        .stage8_combine_hint
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let pairing_boundary_size_bytes = payload
-                        .pairing_boundary
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let non_input_base_hints_size_bytes = payload
-                        .non_input_base_hints
-                        .serialized_size(ark_serialize::Compress::Yes);
-
-                    let recursion_proof_size_bytes = payload
-                        .recursion_proof
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_stage1_size_bytes = payload
-                        .recursion_proof
-                        .stage1_proof
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_stage2_size_bytes = payload
-                        .recursion_proof
-                        .stage2_proof
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_stage3_eval_size_bytes = payload
-                        .recursion_proof
-                        .stage3_packed_eval
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_opening_proof_size_bytes = payload
-                        .recursion_proof
-                        .opening_proof
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_opening_claims_size_bytes = payload
-                        .recursion_proof
-                        .opening_claims
-                        .serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_dense_commitment_size_bytes = payload
-                        .recursion_proof
-                        .dense_commitment
-                        .serialized_size(ark_serialize::Compress::Yes);
-
-                    println!(
-                        "RecursionPayload size (compressed): {} bytes ({:.2} MiB)",
-                        recursion_payload_size_bytes,
-                        recursion_payload_size_bytes as f64 / (1024.0 * 1024.0)
-                    );
-                    println!(
-                        "RecursionPayload.stage8_combine_hint size (compressed): {} bytes",
-                        stage8_combine_hint_size_bytes
-                    );
-                    println!(
-                        "RecursionPayload.pairing_boundary size (compressed): {} bytes",
-                        pairing_boundary_size_bytes
-                    );
-                    println!(
-                        "RecursionPayload.non_input_base_hints size (compressed): {} bytes",
-                        non_input_base_hints_size_bytes
-                    );
-                    println!(
-                        "RecursionPayload.recursion_proof size (compressed): {} bytes ({:.2} MiB)",
-                        recursion_proof_size_bytes,
-                        recursion_proof_size_bytes as f64 / (1024.0 * 1024.0)
-                    );
-                    println!(
-                        "RecursionProof.stage1_proof size (compressed): {} bytes",
-                        recursion_stage1_size_bytes
-                    );
-                    println!(
-                        "RecursionProof.stage2_proof size (compressed): {} bytes",
-                        recursion_stage2_size_bytes
-                    );
-                    println!(
-                        "RecursionProof.stage3_packed_eval size (compressed): {} bytes",
-                        recursion_stage3_eval_size_bytes
-                    );
-                    println!(
-                        "RecursionProof.opening_proof size (compressed): {} bytes",
-                        recursion_opening_proof_size_bytes
-                    );
-                    println!(
-                        "RecursionProof.opening_claims size (compressed): {} bytes",
-                        recursion_opening_claims_size_bytes
-                    );
-                    println!(
-                        "RecursionProof.dense_commitment size (compressed): {} bytes",
-                        recursion_dense_commitment_size_bytes
-                    );
-                }
-                None => {
-                    println!("Recursion requested, but proof.recursion payload was None");
-                }
-            }
+            println!("recursion benchmarking moved to the jolt-recursion crate");
         }
 
         // Verifier preprocessing is derived from prover preprocessing
@@ -384,7 +292,7 @@ fn prove_example(
         let verifier =
             RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
                 .expect("Failed to create verifier");
-        verifier.verify(recursion).unwrap();
+        verifier.verify().unwrap();
     };
 
     let span_name = if committed {
@@ -455,104 +363,13 @@ fn prove_example_with_trace(
         program_mode,
     );
     let now = Instant::now();
-    let (jolt_proof, _) = prover.prove(recursion);
+    let (jolt_proof, _) = prover.prove();
     let prove_duration = now.elapsed();
     drop(span);
     let proof_size = jolt_proof.serialized_size(ark_serialize::Compress::Yes);
 
     if recursion {
-        match jolt_proof.recursion.as_ref() {
-            Some(payload) => {
-                let recursion_payload_size_bytes =
-                    payload.serialized_size(ark_serialize::Compress::Yes);
-                let stage8_combine_hint_size_bytes = payload
-                    .stage8_combine_hint
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let pairing_boundary_size_bytes = payload
-                    .pairing_boundary
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let non_input_base_hints_size_bytes = payload
-                    .non_input_base_hints
-                    .serialized_size(ark_serialize::Compress::Yes);
-
-                let recursion_proof_size_bytes = payload
-                    .recursion_proof
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let recursion_stage1_size_bytes = payload
-                    .recursion_proof
-                    .stage1_proof
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let recursion_stage2_size_bytes = payload
-                    .recursion_proof
-                    .stage2_proof
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let recursion_stage3_eval_size_bytes = payload
-                    .recursion_proof
-                    .stage3_packed_eval
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let recursion_opening_proof_size_bytes = payload
-                    .recursion_proof
-                    .opening_proof
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let recursion_opening_claims_size_bytes = payload
-                    .recursion_proof
-                    .opening_claims
-                    .serialized_size(ark_serialize::Compress::Yes);
-                let recursion_dense_commitment_size_bytes = payload
-                    .recursion_proof
-                    .dense_commitment
-                    .serialized_size(ark_serialize::Compress::Yes);
-                println!(
-                    "RecursionPayload size (compressed): {} bytes ({:.2} MiB)",
-                    recursion_payload_size_bytes,
-                    recursion_payload_size_bytes as f64 / (1024.0 * 1024.0)
-                );
-                println!(
-                    "RecursionPayload.stage8_combine_hint size (compressed): {} bytes",
-                    stage8_combine_hint_size_bytes
-                );
-                println!(
-                    "RecursionPayload.pairing_boundary size (compressed): {} bytes",
-                    pairing_boundary_size_bytes
-                );
-                println!(
-                    "RecursionPayload.non_input_base_hints size (compressed): {} bytes",
-                    non_input_base_hints_size_bytes
-                );
-                println!(
-                    "RecursionPayload.recursion_proof size (compressed): {} bytes ({:.2} MiB)",
-                    recursion_proof_size_bytes,
-                    recursion_proof_size_bytes as f64 / (1024.0 * 1024.0)
-                );
-                println!(
-                    "RecursionProof.stage1_proof size (compressed): {} bytes",
-                    recursion_stage1_size_bytes
-                );
-                println!(
-                    "RecursionProof.stage2_proof size (compressed): {} bytes",
-                    recursion_stage2_size_bytes
-                );
-                println!(
-                    "RecursionProof.stage3_packed_eval size (compressed): {} bytes",
-                    recursion_stage3_eval_size_bytes
-                );
-                println!(
-                    "RecursionProof.opening_proof size (compressed): {} bytes",
-                    recursion_opening_proof_size_bytes
-                );
-                println!(
-                    "RecursionProof.opening_claims size (compressed): {} bytes",
-                    recursion_opening_claims_size_bytes
-                );
-                println!(
-                    "RecursionProof.dense_commitment size (compressed): {} bytes",
-                    recursion_dense_commitment_size_bytes
-                );
-            }
-            None => {
-                println!("Recursion requested, but proof.recursion payload was None");
-            }
-        }
+        println!("recursion benchmarking moved to the jolt-recursion crate");
     }
 
     // Stage 8: Dory opening proof (curve points - benefits from compression)
@@ -581,7 +398,7 @@ fn prove_example_with_trace(
     let verifier =
         RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
             .expect("Failed to create verifier");
-    verifier.verify(recursion).unwrap();
+    verifier.verify().unwrap();
 
     (
         prove_duration,

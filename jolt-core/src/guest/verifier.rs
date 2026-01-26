@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::field::JoltField;
 use crate::guest::program::Program;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
-use crate::poly::commitment::commitment_scheme::{RecursionExt, StreamingCommitmentScheme};
+use crate::poly::commitment::commitment_scheme::StreamingCommitmentScheme;
 use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
 use crate::utils::errors::ProofVerifyError;
@@ -30,15 +30,10 @@ pub fn preprocess(
     JoltVerifierPreprocessing::new_full(shared, verifier_setup, program)
 }
 
-pub fn verify<
-    F: JoltField,
-    PCS: StreamingCommitmentScheme<Field = F> + RecursionExt<F>,
-    FS: Transcript,
->(
+pub fn verify<F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, FS: Transcript>(
     inputs_bytes: &[u8],
     trusted_advice_commitment: Option<<PCS as CommitmentScheme>::Commitment>,
     outputs_bytes: &[u8],
-    recursion: bool,
     proof: JoltProof<F, PCS, FS>,
     preprocessing: &JoltVerifierPreprocessing<F, PCS>,
 ) -> Result<(), ProofVerifyError> {
@@ -64,7 +59,7 @@ pub fn verify<
         trusted_advice_commitment,
         None,
     )?;
-    if let Err(_e) = verifier.verify(recursion) {
+    if let Err(_e) = verifier.verify() {
         #[cfg(debug_assertions)]
         eprintln!("Jolt verifier failed: {_e:?}");
         return Err(ProofVerifyError::InternalError);

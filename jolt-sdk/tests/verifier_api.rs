@@ -12,9 +12,8 @@ mod tests {
             common::jolt_device::JoltDevice::from_file("tests/fixtures/fib_io_device.bin").unwrap();
         let start = std::time::Instant::now();
         println!("Verifying proof...");
-        let recursion = proof.recursion.is_some();
         let verifier = RV64IMACVerifier::new(&preprocessing, proof, device, None, None).unwrap();
-        verifier.verify(recursion).unwrap();
+        verifier.verify().unwrap();
         let duration = start.elapsed();
         println!("Verification took: {} ms", duration.as_millis());
     }

@@ -15,7 +15,8 @@ use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::{
     field::JoltField,
     poly::{
-        commitment::{commitment_scheme::RecursionExt, dory::DoryLayout, hyrax::Hyrax},
+        commitment::commitment_scheme::CommitmentScheme,
+        commitment::dory::DoryLayout,
         opening_proof::{OpeningId, OpeningPoint, Openings, SumcheckId},
     },
     subprotocols::sumcheck::SumcheckInstanceProof,
@@ -23,155 +24,15 @@ use crate::{
     zkvm::{
         config::{OneHotConfig, ProgramMode, ReadWriteConfig},
         instruction::{CircuitFlags, InstructionFlags},
-        recursion::prover::RecursionProof,
-        witness::{
-            CommittedPolynomial, FrobeniusTerm, G1AddTerm, G1ScalarMulTerm, G2AddTerm,
-            G2ScalarMulTerm, GtExpTerm, GtMulTerm, MultiMillerLoopTerm, RecursionPoly, TermEnum,
-            VirtualPolynomial,
-        },
+        witness::{CommittedPolynomial, VirtualPolynomial},
     },
 };
 use crate::{
     poly::opening_proof::PolynomialId, subprotocols::univariate_skip::UniSkipFirstRoundProof,
 };
-use ark_bn254::{Fq, Fq12};
-use ark_grumpkin::Projective as GrumpkinProjective;
-
-/// Boundary outputs for the final external pairing check in recursion mode.
-///
-/// The verifier must **not trust** prover-supplied values here; it should re-derive the expected
-/// boundary from public inputs (proof + setup) and compare.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct PairingBoundary {
-    pub p1_g1: ark_bn254::G1Affine,
-    pub p1_g2: ark_bn254::G2Affine,
-    pub p2_g1: ark_bn254::G1Affine,
-    pub p2_g2: ark_bn254::G2Affine,
-    pub p3_g1: ark_bn254::G1Affine,
-    pub p3_g2: ark_bn254::G2Affine,
-    pub rhs: ark_bn254::Fq12,
-}
-
-/// Hints for recursion instance-plan derivation when an op's base/point is not an `AstOp::Input`.
-///
-/// These are used to avoid requiring the verifier to evaluate the full Dory verification DAG just
-/// to recover bases/points for public inputs in the recursion verifier input.
-///
-/// **Security note**: without wiring/boundary constraints, these hints are not bound to the Dory
-/// verification computation. They are intended for performance/profiling until wiring is added.
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct NonInputBaseHints {
-    /// One entry per Dory-traced `GTExp` op, in OpId-sorted order.
-    /// `None` means the base was an `AstOp::Input` and can be resolved by the verifier.
-    pub gt_exp_base_hints: Vec<Option<Fq12>>,
-    /// One entry per Dory-traced `G1ScalarMul` op, in OpId-sorted order.
-    pub g1_scalar_mul_base_hints: Vec<Option<ark_bn254::G1Affine>>,
-    /// One entry per Dory-traced `G2ScalarMul` op, in OpId-sorted order.
-    pub g2_scalar_mul_base_hints: Vec<Option<ark_bn254::G2Affine>>,
-}
-
-impl GuestSerialize for NonInputBaseHints {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.gt_exp_base_hints.guest_serialize(w)?;
-        self.g1_scalar_mul_base_hints.guest_serialize(w)?;
-        self.g2_scalar_mul_base_hints.guest_serialize(w)?;
-        Ok(())
-    }
-}
-impl GuestDeserialize for NonInputBaseHints {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(Self {
-            gt_exp_base_hints: Vec::<Option<Fq12>>::guest_deserialize(r)?,
-            g1_scalar_mul_base_hints: Vec::<Option<ark_bn254::G1Affine>>::guest_deserialize(r)?,
-            g2_scalar_mul_base_hints: Vec::<Option<ark_bn254::G2Affine>>::guest_deserialize(r)?,
-        })
-    }
-}
-
-/// Optional recursion payload (strict extension of the base proof).
-///
-/// When present, the verifier can skip native Stage 8 PCS verification and instead
-/// do Stage 8 Fiat–Shamir replay + recursion SNARK verification.
-#[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
-pub struct RecursionPayload<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
-    /// Hint for combine_commitments offloading (the combined GT element), used by some
-    /// non-recursive fast paths and by legacy verifiers.
-    pub stage8_combine_hint: Option<Fq12>,
-    /// Boundary outputs for the external pairing check (see `spec.md`).
-    pub pairing_boundary: PairingBoundary,
-    /// Minimal hints for instance-plan derivation (see `NonInputBaseHints`).
-    pub non_input_base_hints: NonInputBaseHints,
-    /// Combined proof containing:
-    /// - Stage 11: Recursion sumchecks (constraint + virtualization)
-    /// - Stage 12: Dense polynomial commitment
-    /// - Stage 13: Hyrax opening proof
-    pub recursion_proof: RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>,
-    #[doc(hidden)]
-    pub _marker: std::marker::PhantomData<(F, PCS)>,
-}
-
-impl GuestSerialize for PairingBoundary {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.p1_g1.guest_serialize(w)?;
-        self.p1_g2.guest_serialize(w)?;
-        self.p2_g1.guest_serialize(w)?;
-        self.p2_g2.guest_serialize(w)?;
-        self.p3_g1.guest_serialize(w)?;
-        self.p3_g2.guest_serialize(w)?;
-        self.rhs.guest_serialize(w)?;
-        Ok(())
-    }
-}
-
-impl GuestDeserialize for PairingBoundary {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(Self {
-            p1_g1: ark_bn254::G1Affine::guest_deserialize(r)?,
-            p1_g2: ark_bn254::G2Affine::guest_deserialize(r)?,
-            p2_g1: ark_bn254::G1Affine::guest_deserialize(r)?,
-            p2_g2: ark_bn254::G2Affine::guest_deserialize(r)?,
-            p3_g1: ark_bn254::G1Affine::guest_deserialize(r)?,
-            p3_g2: ark_bn254::G2Affine::guest_deserialize(r)?,
-            rhs: ark_bn254::Fq12::guest_deserialize(r)?,
-        })
-    }
-}
-
-impl<F, PCS, FS> GuestSerialize for RecursionPayload<F, PCS, FS>
-where
-    F: JoltField,
-    PCS: RecursionExt<F>,
-    FS: Transcript,
-{
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.stage8_combine_hint.guest_serialize(w)?;
-        self.pairing_boundary.guest_serialize(w)?;
-        self.non_input_base_hints.guest_serialize(w)?;
-        self.recursion_proof.guest_serialize(w)?;
-        Ok(())
-    }
-}
-
-impl<F, PCS, FS> GuestDeserialize for RecursionPayload<F, PCS, FS>
-where
-    F: JoltField,
-    PCS: RecursionExt<F>,
-    FS: Transcript,
-{
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(Self {
-            stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
-            pairing_boundary: PairingBoundary::guest_deserialize(r)?,
-            non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
-            recursion_proof:
-                RecursionProof::<Fq, FS, Hyrax<1, GrumpkinProjective>>::guest_deserialize(r)?,
-            _marker: std::marker::PhantomData,
-        })
-    }
-}
 
 /// Jolt proof structure organized by verification stages
-pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
+pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> {
     pub opening_claims: Claims<F>,
     pub commitments: Vec<PCS::Commitment>,
 
@@ -193,9 +54,6 @@ pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
 
     /// Dory polynomial commitment opening proof
     pub stage8_opening_proof: PCS::Proof,
-
-    /// Recursion payload (strict extension).
-    pub recursion: Option<RecursionPayload<F, PCS, FS>>,
 
     /// Trusted advice opening proof at point from RamValEvaluation
     pub trusted_advice_val_evaluation_proof: Option<PCS::Proof>,
@@ -250,7 +108,7 @@ impl CanonicalDeserialize for DoryLayout {
     }
 }
 
-impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
+impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalSerialize
     for JoltProof<F, PCS, FS>
 {
     fn serialize_with_mode<W: Write>(
@@ -284,7 +142,6 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             .serialize_with_mode(&mut writer, compress)?;
         self.stage8_opening_proof
             .serialize_with_mode(&mut writer, compress)?;
-        self.recursion.serialize_with_mode(&mut writer, compress)?;
         self.trusted_advice_val_evaluation_proof
             .serialize_with_mode(&mut writer, compress)?;
         self.trusted_advice_val_final_proof
@@ -327,7 +184,6 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             + self.stage6b_sumcheck_proof.serialized_size(compress)
             + self.stage7_sumcheck_proof.serialized_size(compress)
             + self.stage8_opening_proof.serialized_size(compress)
-            + self.recursion.serialized_size(compress)
             + self
                 .trusted_advice_val_evaluation_proof
                 .serialized_size(compress)
@@ -351,13 +207,15 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
     }
 }
 
-impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> Valid for JoltProof<F, PCS, FS> {
+impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> Valid
+    for JoltProof<F, PCS, FS>
+{
     fn check(&self) -> Result<(), SerializationError> {
         Ok(())
     }
 }
 
-impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalDeserialize
+impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalDeserialize
     for JoltProof<F, PCS, FS>
 {
     fn deserialize_with_mode<R: Read>(
@@ -423,7 +281,6 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalDeserialize
                 compress,
                 validate,
             )?,
-            recursion: Option::deserialize_with_mode(&mut reader, compress, validate)?,
             trusted_advice_val_evaluation_proof: Option::deserialize_with_mode(
                 &mut reader,
                 compress,
@@ -551,7 +408,7 @@ where
 impl<F, PCS, FS> GuestSerialize for JoltProof<F, PCS, FS>
 where
     F: JoltField + GuestSerialize,
-    PCS: RecursionExt<F>,
+    PCS: CommitmentScheme<Field = F>,
     PCS::Commitment: GuestSerialize,
     PCS::Proof: GuestSerialize,
     FS: Transcript,
@@ -570,7 +427,6 @@ where
         self.stage6b_sumcheck_proof.guest_serialize(w)?;
         self.stage7_sumcheck_proof.guest_serialize(w)?;
         self.stage8_opening_proof.guest_serialize(w)?;
-        self.recursion.guest_serialize(w)?;
         self.trusted_advice_val_evaluation_proof
             .guest_serialize(w)?;
         self.trusted_advice_val_final_proof.guest_serialize(w)?;
@@ -592,7 +448,7 @@ where
 impl<F, PCS, FS> GuestDeserialize for JoltProof<F, PCS, FS>
 where
     F: JoltField + GuestDeserialize,
-    PCS: RecursionExt<F>,
+    PCS: CommitmentScheme<Field = F>,
     PCS::Commitment: GuestDeserialize,
     PCS::Proof: GuestDeserialize,
     FS: Transcript,
@@ -616,7 +472,6 @@ where
             stage6b_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
             stage7_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
             stage8_opening_proof: PCS::Proof::guest_deserialize(r)?,
-            recursion: Option::<RecursionPayload<F, PCS, FS>>::guest_deserialize(r)?,
             trusted_advice_val_evaluation_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
             trusted_advice_val_final_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
             untrusted_advice_val_evaluation_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
@@ -900,42 +755,11 @@ impl CanonicalSerialize for VirtualPolynomial {
             Self::ProgramImageInitContributionRaf => {
                 46u8.serialize_with_mode(&mut writer, compress)
             }
-            // Recursion polynomials - hierarchical serialization
-            // Format: tag 47, then op_type (u8), term_index (u8), instance (u32)
-            Self::Recursion(rec_poly) => {
-                47u8.serialize_with_mode(&mut writer, compress)?;
-                let (op_type, term_index, instance) = match rec_poly {
-                    RecursionPoly::G1Add { term, instance } => {
-                        (0u8, term.to_index() as u8, *instance)
-                    }
-                    RecursionPoly::G1AddFused { term } => (8u8, term.to_index() as u8, 0usize),
-                    RecursionPoly::G1ScalarMul { term, instance } => {
-                        (1u8, term.to_index() as u8, *instance)
-                    }
-                    RecursionPoly::G2Add { term, instance } => {
-                        (2u8, term.to_index() as u8, *instance)
-                    }
-                    RecursionPoly::G2ScalarMul { term, instance } => {
-                        (3u8, term.to_index() as u8, *instance)
-                    }
-                    RecursionPoly::GtMul { term, instance } => {
-                        (4u8, term.to_index() as u8, *instance)
-                    }
-                    RecursionPoly::GtExp { term, instance } => {
-                        (5u8, term.to_index() as u8, *instance)
-                    }
-                    RecursionPoly::MultiMillerLoop { term, instance } => {
-                        (6u8, term.to_index() as u8, *instance)
-                    }
-                    RecursionPoly::Frobenius { term, instance } => {
-                        (7u8, term.to_index() as u8, *instance)
-                    }
-                };
-                op_type.serialize_with_mode(&mut writer, compress)?;
-                term_index.serialize_with_mode(&mut writer, compress)?;
-                (instance as u32).serialize_with_mode(&mut writer, compress)
+            Self::Recursion(_) | Self::DorySparseConstraintMatrix => {
+                unreachable!(
+                    "recursion virtual polynomial serialization is not supported in jolt-core"
+                )
             }
-            Self::DorySparseConstraintMatrix => 48u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -978,7 +802,6 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::RamValFinal
             | Self::RamHammingWeight
             | Self::UnivariateSkip
-            | Self::DorySparseConstraintMatrix
             | Self::BytecodeReadRafAddrClaim
             | Self::BooleanityAddrClaim
             | Self::BytecodeClaimReductionIntermediate
@@ -989,8 +812,9 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::InstructionFlags(_)
             | Self::LookupTableFlag(_)
             | Self::BytecodeValStage(_) => 2,
-            // Recursion: 1 byte tag + 1 byte op_type + 1 byte term_index + 4 bytes instance
-            Self::Recursion(_) => 7,
+            Self::Recursion(_) | Self::DorySparseConstraintMatrix => unreachable!(
+                "recursion virtual polynomial serialization is not supported in jolt-core"
+            ),
         }
     }
 }
@@ -1076,62 +900,6 @@ impl CanonicalDeserialize for VirtualPolynomial {
                 44 => Self::BytecodeClaimReductionIntermediate,
                 45 => Self::ProgramImageInitContributionRw,
                 46 => Self::ProgramImageInitContributionRaf,
-                // Recursion polynomials - hierarchical deserialization
-                47 => {
-                    let op_type = u8::deserialize_with_mode(&mut reader, compress, validate)?;
-                    let term_index = u8::deserialize_with_mode(&mut reader, compress, validate)?;
-                    let instance =
-                        u32::deserialize_with_mode(&mut reader, compress, validate)? as usize;
-                    let rec_poly = match op_type {
-                        0 => RecursionPoly::G1Add {
-                            term: G1AddTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        8 => RecursionPoly::G1AddFused {
-                            term: G1AddTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                        },
-                        1 => RecursionPoly::G1ScalarMul {
-                            term: G1ScalarMulTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        2 => RecursionPoly::G2Add {
-                            term: G2AddTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        3 => RecursionPoly::G2ScalarMul {
-                            term: G2ScalarMulTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        4 => RecursionPoly::GtMul {
-                            term: GtMulTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        5 => RecursionPoly::GtExp {
-                            term: GtExpTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        6 => RecursionPoly::MultiMillerLoop {
-                            term: MultiMillerLoopTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        7 => RecursionPoly::Frobenius {
-                            term: FrobeniusTerm::from_index(term_index as usize)
-                                .ok_or(SerializationError::InvalidData)?,
-                            instance,
-                        },
-                        _ => return Err(SerializationError::InvalidData),
-                    };
-                    Self::Recursion(rec_poly)
-                }
-                48 => Self::DorySparseConstraintMatrix,
                 _ => return Err(SerializationError::InvalidData),
             },
         )

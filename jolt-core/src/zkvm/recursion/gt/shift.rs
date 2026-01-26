@@ -90,22 +90,17 @@ impl GtShiftParams {
 }
 
 /// Prover for shift rho sumcheck
-#[cfg_attr(feature = "allocative", derive(Allocative))]
 pub struct GtShiftProver<F: JoltField, T: Transcript> {
     /// Parameters
-    #[cfg_attr(feature = "allocative", allocative(skip))]
     pub params: GtShiftParams,
 
     /// Rho polynomials (11-var, one per claim)
-    #[cfg_attr(feature = "allocative", allocative(skip))]
     pub rho_polys: Vec<MultilinearPolynomial<F>>,
 
     /// EqPlusOne polynomial for step variables (7-var, shared by all claims)
-    #[cfg_attr(feature = "allocative", allocative(skip))]
     pub eq_plus_one_poly: MultilinearPolynomial<F>,
 
     /// Eq polynomial for element variables (4-var, shared by all claims)
-    #[cfg_attr(feature = "allocative", allocative(skip))]
     pub eq_x_poly: MultilinearPolynomial<F>,
 
     /// Gamma for batching
@@ -118,6 +113,11 @@ pub struct GtShiftProver<F: JoltField, T: Transcript> {
     pub claimed_values: Vec<F>,
 
     pub _marker: std::marker::PhantomData<T>,
+}
+
+#[cfg(feature = "allocative")]
+impl<F: JoltField, T: Transcript> allocative::Allocative for GtShiftProver<F, T> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
 impl<F: JoltField, T: Transcript> GtShiftProver<F, T> {

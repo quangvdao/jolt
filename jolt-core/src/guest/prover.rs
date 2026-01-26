@@ -1,7 +1,7 @@
 use super::program::Program;
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
-use crate::poly::commitment::commitment_scheme::{RecursionExt, StreamingCommitmentScheme};
+use crate::poly::commitment::commitment_scheme::StreamingCommitmentScheme;
 use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
 use crate::zkvm::program::ProgramPreprocessing;
@@ -58,23 +58,11 @@ pub fn preprocess_committed(
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "prover")]
-pub fn prove<
-    F: JoltField,
-    PCS: StreamingCommitmentScheme<Field = F>
-        + RecursionExt<
-            F,
-            Witness = dory::recursion::WitnessCollection<
-                crate::poly::commitment::dory::recursion::JoltWitness,
-            >,
-            Ast = dory::recursion::ast::AstGraph<dory::backends::arkworks::BN254>,
-        >,
-    FS: Transcript,
->(
+pub fn prove<F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, FS: Transcript>(
     guest: &Program,
     inputs_bytes: &[u8],
     untrusted_advice_bytes: &[u8],
     trusted_advice_bytes: &[u8],
-    recursion: bool,
     trusted_advice_commitment: Option<<PCS as CommitmentScheme>::Commitment>,
     trusted_advice_hint: Option<<PCS as CommitmentScheme>::OpeningProofHint>,
     output_bytes: &mut [u8],
@@ -83,10 +71,7 @@ pub fn prove<
     JoltProof<F, PCS, FS>,
     JoltDevice,
     Option<ProverDebugInfo<F, FS, PCS>>,
-)
-where
-    PCS::CombineHint: Send,
-{
+) {
     use crate::zkvm::config::ProgramMode;
 
     // Detect program mode from preprocessing: if program_commitments is Some, use Committed mode
@@ -107,7 +92,7 @@ where
         program_mode,
     );
     let io_device = prover.program_io.clone();
-    let (proof, debug_info) = prover.prove(recursion);
+    let (proof, debug_info) = prover.prove();
     output_bytes[..io_device.outputs.len()].copy_from_slice(&io_device.outputs);
     (proof, io_device, debug_info)
 }

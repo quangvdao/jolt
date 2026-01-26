@@ -75,6 +75,7 @@ use crate::zkvm::recursion::gt::shift::{
 /// In the batched sumcheck, it is **suffix-aligned** via `round_offset`.
 const STEP_VARS: usize = 8;
 
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
 #[derive(Clone, Debug)]
 struct ShiftPair<F: JoltField> {
     a_poly: MultilinearPolynomial<F>,
@@ -102,6 +103,7 @@ fn not_last_lsb_mle<F: JoltField>(y_step: &[F::Challenge]) -> F {
     one - prod
 }
 
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
 #[derive(Clone)]
 pub struct ShiftScalarMulParams {
     pub num_vars: usize,
@@ -130,6 +132,11 @@ pub struct ShiftScalarMulProver<F: JoltField, T: Transcript> {
     gamma: F,
     round: usize,
     pub _marker: core::marker::PhantomData<T>,
+}
+
+#[cfg(feature = "allocative")]
+impl<F: JoltField, T: Transcript> allocative::Allocative for ShiftScalarMulProver<F, T> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
 impl<F: JoltField, T: Transcript> ShiftScalarMulProver<F, T> {

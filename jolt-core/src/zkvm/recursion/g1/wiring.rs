@@ -77,6 +77,11 @@ pub struct WiringG1Prover<T: Transcript> {
     _marker: std::marker::PhantomData<T>,
 }
 
+#[cfg(feature = "allocative")]
+impl<T: Transcript> allocative::Allocative for WiringG1Prover<T> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
+}
+
 impl<T: Transcript> WiringG1Prover<T> {
     pub fn new(
         cs: &ConstraintSystem,

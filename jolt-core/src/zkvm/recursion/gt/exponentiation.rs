@@ -437,6 +437,7 @@ fn digits_from_bits_msb(bits_msb: &[bool]) -> Vec<(bool, bool)> {
 
 /// Parameters for packed GT exp sumcheck
 #[derive(Clone)]
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
 pub struct GtExpParams {
     /// Total number of constraint variables (11 = 7 step + 4 element)
     pub num_constraint_vars: usize,
@@ -477,7 +478,6 @@ impl Default for GtExpParams {
 /// Note: digit and base power polynomials are used internally during sumcheck computation
 /// but are NOT committed as virtual claims. The verifier computes these evaluations
 /// directly from public inputs (base Fq12 and scalar bits).
-#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
 pub struct GtExpProver<F: JoltField> {
     /// Parameters
     pub params: GtExpParams,
@@ -537,6 +537,11 @@ pub struct GtExpProver<F: JoltField> {
     pub rho_claims: Vec<F>,
     pub rho_next_claims: Vec<F>,
     pub quotient_claims: Vec<F>,
+}
+
+#[cfg(feature = "allocative")]
+impl<F: JoltField> allocative::Allocative for GtExpProver<F> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
 impl<F: JoltField> GtExpProver<F> {

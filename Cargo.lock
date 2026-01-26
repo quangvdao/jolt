@@ -2124,6 +2124,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "jolt-recursion"
+version = "0.1.0"
+dependencies = [
+ "allocative",
+ "anyhow",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff",
+ "ark-grumpkin",
+ "ark-serialize",
+ "ark-std",
+ "derive_more 2.1.1",
+ "dory-pcs",
+ "itertools 0.10.5",
+ "jolt-core",
+ "jolt-optimizations",
+ "jolt-platform",
+ "num-traits",
+ "paste",
+ "postcard",
+ "rand 0.8.5",
+ "rayon",
+ "serial_test",
+ "thiserror 1.0.69",
+ "tracer",
+ "tracing",
+]
+
+[[package]]
 name = "jolt-sdk"
 version = "0.1.0"
 dependencies = [
@@ -3278,6 +3307,7 @@ dependencies = [
  "ark-serialize",
  "clap",
  "jolt-inlines-grumpkin",
+ "jolt-recursion",
  "jolt-sdk",
  "postcard",
  "tracing",

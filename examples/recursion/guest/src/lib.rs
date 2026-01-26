@@ -57,9 +57,9 @@ fn verify(bytes: &[u8]) -> u32 {
         start_cycle_tracking("verification");
         let verifier = RV64IMACVerifier::new(&verifier_preprocessing, proof, device, None, None);
         let is_valid = verifier.is_ok_and(|verifier| {
-            // Auto-select verification mode based on whether the proof contains a recursion payload.
-            let recursion = verifier.proof.recursion.is_some();
-            let result = verifier.verify(recursion);
+            // Recursion verification was extracted to `jolt-recursion`; guest verification only
+            // supports the base Jolt verifier path.
+            let result = verifier.verify();
             core::hint::black_box(result).is_ok()
         });
         end_cycle_tracking("verification");

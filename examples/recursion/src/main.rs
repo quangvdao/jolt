@@ -1,6 +1,9 @@
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use clap::{Parser, Subcommand, ValueEnum};
+use jolt_sdk::guest::program::Program as JoltGuestProgram;
+use jolt_sdk::guest::{prover, verifier};
+use jolt_sdk::host;
 use jolt_sdk::{DoryGlobals, DoryLayout, JoltDevice, MemoryConfig, RV64IMACProof, Serializable};
 use std::cmp::PartialEq;
 use std::path::{Path, PathBuf};
@@ -382,7 +385,7 @@ fn collect_guest_proofs(
     };
 
     info!("Creating program...");
-    let mut program = jolt_sdk::host::Program::new(guest.name());
+    let mut program = host::Program::new(guest.name());
     program.set_func(guest.func());
     program.set_std(false);
     program.set_memory_config(memory_config);
@@ -391,14 +394,14 @@ fn collect_guest_proofs(
     info!("Getting ELF contents...");
     let elf_contents = program.get_elf_contents().unwrap();
     info!("Creating guest program...");
-    let mut guest_prog = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
+    let mut guest_prog = JoltGuestProgram::new(&elf_contents, &memory_config);
     guest_prog.elf = program.elf;
 
     info!("Preprocessing guest prover (committed={use_committed})...");
     let guest_prover_preprocessing = if use_committed {
-        jolt_sdk::guest::prover::preprocess_committed(&guest_prog, max_trace_length)
+        prover::preprocess_committed(&guest_prog, max_trace_length)
     } else {
-        jolt_sdk::guest::prover::preprocess(&guest_prog, max_trace_length)
+        prover::preprocess(&guest_prog, max_trace_length)
     };
     info!("Preprocessing guest verifier...");
     let guest_verifier_preprocessing =
@@ -447,12 +450,11 @@ fn collect_guest_proofs(
         assert!(!device_io.panic, "Guest program panicked during tracing");
 
         info!("  Proving...");
-        let (proof, io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
+        let (proof, io_device, _debug): (RV64IMACProof, _, _) = prover::prove(
             &guest_prog,
             &input_bytes,
             &[],
             &[],
-            recursion,
             None,
             None,
             &mut output_bytes,
@@ -469,16 +471,38 @@ fn collect_guest_proofs(
         io_device.serialize_compressed(&mut cursor).unwrap();
 
         info!("  Verifying...");
-        let is_valid = jolt_sdk::guest::verifier::verify(
-            &input_bytes,
-            None,
-            &output_bytes,
-            recursion,
-            proof,
-            &guest_verifier_preprocessing,
-        )
-        .is_ok();
-        info!("  Verification result: {is_valid}");
+        if recursion {
+            // Recursion mode: generate recursion proof and verify with jolt-recursion
+            info!("  Generating recursion proof...");
+            let recursion_proof = jolt_recursion::prove_recursion::<jolt_sdk::FS>(
+                &guest_verifier_preprocessing,
+                io_device.clone(),
+                None,
+                &proof,
+            )
+            .expect("Failed to generate recursion proof");
+            info!("  Recursion proof generated, verifying...");
+            let is_valid = jolt_recursion::verify_recursion::<jolt_sdk::FS>(
+                &guest_verifier_preprocessing,
+                io_device,
+                None,
+                &proof,
+                &recursion_proof,
+            )
+            .is_ok();
+            info!("  Recursion verification result: {is_valid}");
+        } else {
+            // Standard verification (no recursion)
+            let is_valid = verifier::verify(
+                &input_bytes,
+                None,
+                &output_bytes,
+                proof,
+                &guest_verifier_preprocessing,
+            )
+            .is_ok();
+            info!("  Verification result: {is_valid}");
+        }
     }
     info!("Total prove time: {total_prove_time:.3}s");
 
@@ -738,7 +762,7 @@ fn run_recursion_proof(
     // Note: We always use Full mode for the recursion guest itself.
     // The --committed flag controls whether the inner proof (fibonacci/muldiv) uses committed mode.
 
-    let mut program = jolt_sdk::host::Program::new("recursion-guest");
+    let mut program = host::Program::new("recursion-guest");
     program.set_func("verify");
     program.set_std(true);
     program.set_memory_config(memory_config);
@@ -747,7 +771,7 @@ fn run_recursion_proof(
     }
     program.build(target_dir);
     let elf_contents = program.get_elf_contents().unwrap();
-    let mut recursion = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
+    let mut recursion = JoltGuestProgram::new(&elf_contents, &memory_config);
     recursion.elf = program.elf;
 
     if run_config == RunConfig::Trace || run_config == RunConfig::TraceToFile {
@@ -755,8 +779,7 @@ fn run_recursion_proof(
         max_trace_length = 0;
     }
     // Always use Full mode for the recursion guest (outer proof)
-    let recursion_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length);
+    let recursion_prover_preprocessing = prover::preprocess(&recursion, max_trace_length);
     let recursion_verifier_preprocessing =
         jolt_sdk::JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
 
@@ -782,22 +805,20 @@ fn run_recursion_proof(
             DoryGlobals::reset();
             info!("DoryGlobals reset before proving (inner verification may have polluted)");
 
-            let (proof, _io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
+            let (proof, _io_device, _debug): (RV64IMACProof, _, _) = prover::prove(
                 &recursion,
                 &input_bytes,
                 &[],
                 &[],
-                false,
                 None,
                 None,
                 &mut output_bytes,
                 &recursion_prover_preprocessing,
             );
-            let is_valid = jolt_sdk::guest::verifier::verify(
+            let is_valid = verifier::verify(
                 &input_bytes,
                 None,
                 &output_bytes,
-                false,
                 proof,
                 &recursion_verifier_preprocessing,
             )

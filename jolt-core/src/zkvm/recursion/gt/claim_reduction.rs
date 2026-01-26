@@ -61,7 +61,6 @@ impl<F: JoltField> SumcheckInstanceParams<F> for GtExpClaimReductionParams {
     }
 }
 
-#[derive(Allocative)]
 pub struct GtExpClaimReductionProver<F: JoltField, T: Transcript> {
     pub params: GtExpClaimReductionParams,
     pub gamma: F,
@@ -70,6 +69,11 @@ pub struct GtExpClaimReductionProver<F: JoltField, T: Transcript> {
     pub polys: Vec<MultilinearPolynomial<F>>,
     pub claimed_values: Vec<F>,
     _marker: std::marker::PhantomData<T>,
+}
+
+#[cfg(feature = "allocative")]
+impl<F: JoltField, T: Transcript> allocative::Allocative for GtExpClaimReductionProver<F, T> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
 impl<F: JoltField, T: Transcript> GtExpClaimReductionProver<F, T> {
@@ -226,6 +230,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for GtExpClaimRed
         }
     }
 
+    #[cfg(feature = "allocative")]
     #[cfg(feature = "allocative")]
     fn update_flamegraph(&self, flamegraph: &mut allocative::FlameGraphBuilder) {
         flamegraph.visit_root(self);

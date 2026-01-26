@@ -13,13 +13,8 @@ use std::{
     time::Instant,
 };
 
-use crate::poly::commitment::hyrax::{Hyrax, PedersenGenerators};
-use ark_bn254::Fq;
-use ark_grumpkin::Projective as GrumpkinProjective;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use itertools::Itertools;
-
-use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::profiling::print_current_memory_usage;
@@ -39,7 +34,6 @@ use crate::{
             ProverOpeningAccumulator, SumcheckId,
         },
         rlc_polynomial::{RLCStreamingData, TraceSource},
-        rlc_utils::compute_joint_claim,
     },
     pprof_scope,
     subprotocols::{
@@ -104,7 +98,7 @@ use crate::{
     },
 };
 use crate::{
-    poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt},
+    poly::commitment::commitment_scheme::CommitmentScheme,
     zkvm::{
         bytecode::read_raf_checking::{
             BytecodeReadRafAddressSumcheckProver, BytecodeReadRafCycleSumcheckProver,
@@ -114,7 +108,7 @@ use crate::{
             ra_virtual::InstructionRaSumcheckProver as LookupsRaSumcheckProver,
             read_raf_checking::InstructionReadRafSumcheckProver,
         },
-        proof_serialization::{Claims, JoltProof, RecursionPayload},
+        proof_serialization::{Claims, JoltProof},
         r1cs::key::UniformSpartanKey,
         ram::{
             gen_ram_memory_states, hamming_booleanity::HammingBooleanitySumcheckProver,
@@ -123,7 +117,6 @@ use crate::{
             raf_evaluation::RafEvaluationSumcheckProver as RamRafEvaluationSumcheckProver,
             read_write_checking::RamReadWriteCheckingProver,
         },
-        recursion::prover::{DoryOpeningSnapshot, RecursionProver},
         registers::{
             read_write_checking::RegistersReadWriteCheckingProver,
             val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
@@ -188,12 +181,8 @@ pub struct JoltCpuProver<
     /// First-class selection of full vs committed bytecode mode.
     pub program_mode: ProgramMode,
 }
-impl<
-        'a,
-        F: JoltField,
-        PCS: StreamingCommitmentScheme<Field = F> + RecursionExt<F>,
-        ProofTranscript: Transcript,
-    > JoltCpuProver<'a, F, PCS, ProofTranscript>
+impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscript: Transcript>
+    JoltCpuProver<'a, F, PCS, ProofTranscript>
 {
     pub fn gen_from_elf(
         preprocessing: &'a JoltProverPreprocessing<F, PCS>,
@@ -564,21 +553,10 @@ impl<
     #[tracing::instrument(skip_all)]
     pub fn prove(
         mut self,
-        recursion: bool,
     ) -> (
         JoltProof<F, PCS, ProofTranscript>,
         Option<ProverDebugInfo<F, ProofTranscript, PCS>>,
-    )
-    where
-        PCS: RecursionExt<
-            F,
-            Witness = dory::recursion::WitnessCollection<
-                crate::poly::commitment::dory::recursion::JoltWitness,
-            >,
-            Ast = dory::recursion::ast::AstGraph<dory::backends::arkworks::BN254>,
-        >,
-        PCS::CombineHint: Send,
-    {
+    ) {
         let _pprof_prove = pprof_scope!("prove");
 
         let start = Instant::now();
@@ -699,180 +677,8 @@ impl<
         let stage6b_sumcheck_proof = self.prove_stage6b();
         let stage7_sumcheck_proof = self.prove_stage7();
 
-        // Stage 8: Dory batch opening proof (plus a recursion-agnostic snapshot).
-        let (joint_opening_proof, stage8_snapshot) = self.prove_stage8(opening_proof_hints);
-
-        let recursion_payload: Option<RecursionPayload<F, PCS, ProofTranscript>> = if recursion {
-            // Derive verifier setup once for recursion witness generation.
-            // (Intended to be cached for session-level reuse.)
-            let verifier_setup = PCS::setup_verifier(&self.preprocessing.generators);
-
-            // Recursion proving entrypoint (Stages 9-13 live inside `RecursionProver::prove`).
-            let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
-
-            // Build the minimal commitment map needed for recursion-only Stage 8 offloading.
-            let mut commitments_map = HashMap::new();
-            {
-                let needs_trusted_advice = stage8_snapshot
-                    .polynomial_claims
-                    .iter()
-                    .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice);
-                let needs_untrusted_advice = stage8_snapshot
-                    .polynomial_claims
-                    .iter()
-                    .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice);
-
-                let all_polys = all_committed_polynomials(&self.one_hot_params);
-                debug_assert_eq!(
-                    all_polys.len(),
-                    self.commitments.len(),
-                    "commitment vector length mismatch"
-                );
-                for (poly, commitment) in all_polys.into_iter().zip(self.commitments.iter()) {
-                    commitments_map.insert(poly, commitment.clone());
-                }
-
-                if needs_trusted_advice {
-                    if let Some(ref commitment) = self.advice.trusted_advice_commitment {
-                        commitments_map
-                            .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-                    }
-                }
-                if needs_untrusted_advice {
-                    if let Some(ref commitment) = self.untrusted_advice_commitment {
-                        commitments_map
-                            .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
-                    }
-                }
-
-                // Include program commitments in committed mode (BytecodeChunk and ProgramImageInit).
-                if let Some(ref program_commitments) = self.preprocessing.program_commitments {
-                    for (idx, commitment) in
-                        program_commitments.bytecode_commitments.iter().enumerate()
-                    {
-                        commitments_map
-                            .insert(CommittedPolynomial::BytecodeChunk(idx), commitment.clone());
-                    }
-                    commitments_map.insert(
-                        CommittedPolynomial::ProgramImageInit,
-                        program_commitments.program_image_commitment.clone(),
-                    );
-                }
-            }
-
-            let (
-                recursion_proof,
-                _recursion_constraint_metadata,
-                pairing_boundary,
-                stage8_combine_hint,
-                non_input_base_hints,
-            ) = RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript>(
-                &mut self.transcript,
-                hyrax_prover_setup,
-                crate::zkvm::recursion::prover::RecursionInput {
-                    stage8_opening_proof: &joint_opening_proof,
-                    stage8_snapshot,
-                    verifier_setup: &verifier_setup,
-                    commitments: &commitments_map,
-                },
-            )
-            .expect("Failed to generate recursion proof");
-
-            Some(RecursionPayload {
-                stage8_combine_hint,
-                pairing_boundary,
-                non_input_base_hints,
-                recursion_proof,
-                _marker: std::marker::PhantomData,
-            })
-        } else {
-            None
-        };
-
-        if let Some(ref payload) = recursion_payload {
-            let recursion_payload_size_bytes = payload.serialized_size(Compress::Yes);
-
-            let stage8_combine_hint_size_bytes =
-                payload.stage8_combine_hint.serialized_size(Compress::Yes);
-            let pairing_boundary_size_bytes =
-                payload.pairing_boundary.serialized_size(Compress::Yes);
-            let non_input_base_hints_size_bytes =
-                payload.non_input_base_hints.serialized_size(Compress::Yes);
-
-            let recursion_proof_size_bytes = payload.recursion_proof.serialized_size(Compress::Yes);
-            let recursion_stage1_size_bytes = payload
-                .recursion_proof
-                .stage1_proof
-                .serialized_size(Compress::Yes);
-            let recursion_stage2_size_bytes = payload
-                .recursion_proof
-                .stage2_proof
-                .serialized_size(Compress::Yes);
-            let recursion_stage3_eval_size_bytes = payload
-                .recursion_proof
-                .stage3_packed_eval
-                .serialized_size(Compress::Yes);
-            let recursion_opening_proof_size_bytes = payload
-                .recursion_proof
-                .opening_proof
-                .serialized_size(Compress::Yes);
-            let recursion_opening_claims_size_bytes = payload
-                .recursion_proof
-                .opening_claims
-                .serialized_size(Compress::Yes);
-            let recursion_dense_commitment_size_bytes = payload
-                .recursion_proof
-                .dense_commitment
-                .serialized_size(Compress::Yes);
-
-            tracing::info!(
-                "RecursionPayload size (compressed): {} bytes ({:.2} MiB)",
-                recursion_payload_size_bytes,
-                recursion_payload_size_bytes as f64 / (1024.0 * 1024.0)
-            );
-            tracing::info!(
-                "RecursionPayload.stage8_combine_hint size (compressed): {} bytes",
-                stage8_combine_hint_size_bytes
-            );
-            tracing::info!(
-                "RecursionPayload.pairing_boundary size (compressed): {} bytes",
-                pairing_boundary_size_bytes
-            );
-            tracing::info!(
-                "RecursionPayload.non_input_base_hints size (compressed): {} bytes",
-                non_input_base_hints_size_bytes
-            );
-            tracing::info!(
-                "RecursionPayload.recursion_proof size (compressed): {} bytes ({:.2} MiB)",
-                recursion_proof_size_bytes,
-                recursion_proof_size_bytes as f64 / (1024.0 * 1024.0)
-            );
-
-            tracing::info!(
-                "RecursionProof.stage1_proof size (compressed): {} bytes",
-                recursion_stage1_size_bytes
-            );
-            tracing::info!(
-                "RecursionProof.stage2_proof size (compressed): {} bytes",
-                recursion_stage2_size_bytes
-            );
-            tracing::info!(
-                "RecursionProof.stage3_packed_eval size (compressed): {} bytes",
-                recursion_stage3_eval_size_bytes
-            );
-            tracing::info!(
-                "RecursionProof.opening_proof size (compressed): {} bytes",
-                recursion_opening_proof_size_bytes
-            );
-            tracing::info!(
-                "RecursionProof.opening_claims size (compressed): {} bytes",
-                recursion_opening_claims_size_bytes
-            );
-            tracing::info!(
-                "RecursionProof.dense_commitment size (compressed): {} bytes",
-                recursion_dense_commitment_size_bytes
-            );
-        }
+        // Stage 8: Dory batch opening proof.
+        let joint_opening_proof = self.prove_stage8(opening_proof_hints);
 
         #[cfg(test)]
         assert!(
@@ -908,7 +714,6 @@ impl<
             stage6b_sumcheck_proof,
             stage7_sumcheck_proof,
             stage8_opening_proof: joint_opening_proof,
-            recursion: recursion_payload,
             trusted_advice_val_evaluation_proof: None,
             trusted_advice_val_final_proof: None,
             untrusted_advice_val_evaluation_proof: None,
@@ -1899,15 +1704,11 @@ impl<
     /// Stage 8: Dory batch opening proof.
     ///
     /// Builds streaming RLC polynomial directly from trace (no witness regeneration needed).
-    ///
-    /// Output is recursion-agnostic: it returns the opening proof plus a snapshot of the
-    /// transcript/claims state right before `PCS::prove`, which can be consumed by recursion logic.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all)]
     fn prove_stage8(
         &mut self,
         opening_proof_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
-    ) -> (PCS::Proof, DoryOpeningSnapshot<F, ProofTranscript>) {
+    ) -> PCS::Proof {
         tracing::info!("Stage 8 proving (Dory batch opening)");
 
         let _guard = tracing::info_span!("stage8_init_dory_context").in_scope(|| {
@@ -2161,7 +1962,7 @@ impl<
         }
 
         // 2. Sample gamma and compute powers for RLC
-        let (claims, gamma_powers) =
+        let (_claims, gamma_powers) =
             tracing::info_span!("stage8_sample_gamma_powers").in_scope(|| {
                 let start = Instant::now();
                 let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
@@ -2250,12 +2051,6 @@ impl<
         // (Some helper paths may temporarily switch contexts for advice handling.)
         let _ctx_main = DoryGlobals::with_context(DoryContext::Main);
 
-        // Fork transcript state right after gamma sampling (before `PCS::prove`).
-        //
-        // This is recursion-agnostic: if recursion is enabled, the recursion prover consumes this
-        // snapshot for `PCS::witness_gen` replay. If recursion is disabled, the snapshot is unused.
-        let pre_opening_proof_transcript = self.transcript.clone();
-
         // Dory opening proof at the unified point
         let opening_proof = tracing::info_span!("stage8_pcs_prove").in_scope(|| {
             let start = Instant::now();
@@ -2272,26 +2067,7 @@ impl<
             );
             proof
         });
-
-        // Compute the joint claim Σ γ_i · claim_i (needed by recursion witness generation).
-        let joint_claim = compute_joint_claim(&gamma_powers, &claims);
-
-        // Move polynomial claims out of the opening state for the Stage 8 snapshot.
-        let DoryOpeningState {
-            polynomial_claims,
-            gamma_powers: _,
-            opening_point: _,
-        } = state;
-
-        let snapshot = DoryOpeningSnapshot {
-            pre_opening_proof_transcript,
-            opening_point: opening_point.r.clone(),
-            polynomial_claims,
-            gamma_powers,
-            joint_claim,
-        };
-
-        (opening_proof, snapshot)
+        opening_proof
     }
 }
 
@@ -2333,7 +2109,6 @@ fn write_instance_flamegraph_svg(
 pub struct JoltProverPreprocessing<F: JoltField, PCS: CommitmentScheme<Field = F>> {
     pub generators: PCS::ProverSetup,
     pub shared: JoltSharedPreprocessing,
-    pub hyrax_recursion_setup: PedersenGenerators<GrumpkinProjective>,
     /// Full program preprocessing (prover always has full access for witness computation).
     pub program: Arc<ProgramPreprocessing>,
     /// Trusted program commitments (only in Committed mode).
@@ -2395,14 +2170,9 @@ where
         program: Arc<ProgramPreprocessing>,
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators(&shared);
-        // Precompute Hyrax setup for recursion proving.
-        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-        let hyrax_recursion_setup =
-            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
         JoltProverPreprocessing {
             generators,
             shared,
-            hyrax_recursion_setup,
             program,
             program_commitments: None,
             program_hints: None,
@@ -2419,10 +2189,6 @@ where
         program: Arc<ProgramPreprocessing>,
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators_committed(&shared, &program);
-        // Precompute Hyrax setup for recursion proving.
-        type HyraxPCS = Hyrax<1, GrumpkinProjective>;
-        let hyrax_recursion_setup =
-            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
         let max_t_any: usize = shared
             .max_padded_trace_length
             .max(shared.bytecode_size())
@@ -2438,7 +2204,6 @@ where
         JoltProverPreprocessing {
             generators,
             shared,
-            hyrax_recursion_setup,
             program,
             program_commitments: Some(program_commitments),
             program_hints: Some(program_hints),

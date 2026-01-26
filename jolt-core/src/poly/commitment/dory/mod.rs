@@ -7,30 +7,18 @@ use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 
 mod commitment_scheme;
 mod dory_globals;
-pub mod instance_plan;
 mod jolt_dory_routines;
-pub mod recursion;
-pub mod witness;
 pub mod wrappers;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod recursion_test;
-
 pub use commitment_scheme::DoryCommitmentScheme;
 pub use dory_globals::{DoryContext, DoryGlobals, DoryLayout};
 pub use jolt_dory_routines::{JoltG1Routines, JoltG2Routines};
-pub use recursion::{JoltWitness, JoltWitnessGenerator};
 pub use wrappers::{
     ArkDoryProof, ArkFr, ArkG1, ArkG2, ArkGT, ArkworksProverSetup, ArkworksVerifierSetup,
     JoltFieldWrapper, BN254,
-};
-
-// Re-export instance plan for recursion
-pub use instance_plan::{
-    derive_from_dory_ast, derive_plan_with_hints, DerivedRecursionInput, DerivedRecursionPlan,
 };
 
 /// Deserializes a Dory opening proof with fine-grained cycle markers.

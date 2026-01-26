@@ -341,7 +341,7 @@ impl MacroBuilder {
                     io_device.panic = panic;
 
                     let verifier = RV64IMACVerifier::new(&preprocessing, proof, io_device, #commitment_arg_in_verify, None);
-                    verifier.is_ok_and(|verifier| verifier.verify(false).is_ok())
+                    verifier.is_ok_and(|verifier| verifier.verify().is_ok())
                 };
 
                 verify_closure
@@ -810,7 +810,7 @@ impl MacroBuilder {
                     jolt::ProgramMode::Full,
                 );
                 let io_device = prover.program_io.clone();
-                let (jolt_proof, _) = prover.prove(false);
+                let (jolt_proof, _) = prover.prove();
 
                 #handle_return
 
@@ -907,7 +907,7 @@ impl MacroBuilder {
                     jolt::ProgramMode::Committed,
                 );
                 let io_device = prover.program_io.clone();
-                let (jolt_proof, _) = prover.prove(false);
+                let (jolt_proof, _) = prover.prove();
 
                 #handle_return
 

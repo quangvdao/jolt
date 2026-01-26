@@ -689,10 +689,10 @@ impl RecursionProver<Fq> {
     ) -> Result<SumcheckPhaseOutput<T>, Box<dyn std::error::Error>> {
         // ============ RUN ALL SUMCHECKS ============
         // Initialize opening accumulator
-        let log_T = self.constraint_system.num_vars();
+        let log_t = self.constraint_system.num_vars();
         let mut accumulator = tracing::info_span!("init_opening_accumulator").in_scope(|| {
-            let acc = ProverOpeningAccumulator::<Fq>::new(log_T);
-            tracing::info!("Initialized opening accumulator with {} variables", log_T);
+            let acc = ProverOpeningAccumulator::<Fq>::new(log_t);
+            tracing::info!("Initialized opening accumulator with {} variables", log_t);
             acc
         });
 

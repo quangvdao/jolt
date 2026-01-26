@@ -299,13 +299,11 @@ pub fn run_e2e_test(config: E2ETestConfig) {
         program_mode,
     );
     let io_device = prover.program_io.clone();
-    let (jolt_proof, debug_info) = prover.prove(config.recursion);
+    if config.recursion {
+        panic!("recursion tests moved to the `jolt-recursion` crate");
+    }
+    let (jolt_proof, debug_info) = prover.prove();
     assert_eq!(jolt_proof.program_mode, program_mode);
-    assert_eq!(
-        jolt_proof.recursion.is_some(),
-        config.recursion,
-        "proof recursion payload presence mismatch"
-    );
 
     // Create verifier preprocessing from prover (respects mode)
     let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
@@ -326,9 +324,7 @@ pub fn run_e2e_test(config: E2ETestConfig) {
         debug_info,
     )
     .expect("Failed to create verifier");
-    verifier
-        .verify(config.recursion)
-        .expect("Verification failed");
+    verifier.verify().expect("Verification failed");
 
     // Check expected output if specified
     if let Some(expected) = config.expected_output {
@@ -770,7 +766,7 @@ fn max_advice_with_small_trace() {
     assert_eq!(prover.padded_trace_len, 256);
 
     let io_device = prover.program_io.clone();
-    let (jolt_proof, debug_info) = prover.prove(false);
+    let (jolt_proof, debug_info) = prover.prove();
 
     let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
     RV64IMACVerifier::new(
@@ -781,7 +777,7 @@ fn max_advice_with_small_trace() {
         debug_info,
     )
     .expect("Failed to create verifier")
-    .verify(false)
+    .verify()
     .expect("Verification failed");
 }
 
@@ -827,7 +823,7 @@ fn advice_opening_point_derives_from_unified_point() {
     assert_eq!(prover.padded_trace_len, 256, "test expects small trace");
 
     let io_device = prover.program_io.clone();
-    let (jolt_proof, debug_info) = prover.prove(false);
+    let (jolt_proof, debug_info) = prover.prove();
     let debug_info = debug_info.expect("expected debug_info in tests");
 
     // Get unified opening point and derive expected advice point
@@ -881,7 +877,7 @@ fn advice_opening_point_derives_from_unified_point() {
         Some(debug_info),
     )
     .expect("Failed to create verifier")
-    .verify(false)
+    .verify()
     .expect("Verification failed");
 }
 
@@ -917,7 +913,7 @@ fn truncated_trace() {
         final_memory_state,
     );
 
-    let (proof, _) = prover.prove(false);
+    let (proof, _) = prover.prove();
 
     let verifier_preprocessing = JoltVerifierPreprocessing::new_full(
         prover_preprocessing.shared.clone(),
@@ -926,7 +922,7 @@ fn truncated_trace() {
     );
     let verifier =
         RV64IMACVerifier::new(&verifier_preprocessing, proof, program_io, None, None).unwrap();
-    verifier.verify(false).unwrap();
+    verifier.verify().unwrap();
 }
 
 #[test]
@@ -964,7 +960,7 @@ fn malicious_trace() {
         None,
         final_memory_state,
     );
-    let (proof, _) = prover.prove(false);
+    let (proof, _) = prover.prove();
 
     let verifier_preprocessing = JoltVerifierPreprocessing::new_full(
         prover_preprocessing.shared.clone(),
@@ -973,5 +969,5 @@ fn malicious_trace() {
     );
     let verifier =
         JoltVerifier::new(&verifier_preprocessing, proof, program_io, None, None).unwrap();
-    verifier.verify(false).unwrap();
+    verifier.verify().unwrap();
 }

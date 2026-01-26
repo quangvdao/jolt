@@ -18,6 +18,7 @@ use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::verifier::RecursionVerifierInput;
 use crate::zkvm::recursion::CombineDag;
 use crate::zkvm::recursion::PolyType;
+use crate::zkvm::recursion::wiring_plan::derive_wiring_plan;
 
 use ark_bn254::{Fq12, Fr, G1Affine, G2Affine};
 use ark_ec::CurveGroup;
@@ -467,6 +468,8 @@ pub fn derive_plan_with_hints(
     combine_commitments: &[ArkGT],
     combine_coeffs: &[Fr],
     non_input_hints: &NonInputBaseHints,
+    pairing_boundary: PairingBoundary,
+    joint_commitment_fq12: Fq12,
 ) -> Result<DerivedRecursionPlan, ProofVerifyError> {
     let dory_setup: VerifierSetup<BN254> = setup.clone().into();
 
@@ -606,6 +609,8 @@ pub fn derive_plan_with_hints(
     let num_constraint_vars = 11usize;
     let num_vars = num_s_vars + num_constraint_vars;
 
+    let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
+
     Ok(DerivedRecursionPlan {
         verifier_input: RecursionVerifierInput {
             constraint_types,
@@ -617,6 +622,9 @@ pub fn derive_plan_with_hints(
             gt_exp_public_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
+            wiring,
+            pairing_boundary,
+            joint_commitment: joint_commitment_fq12,
         },
         dense_num_vars,
     })
@@ -854,6 +862,7 @@ pub fn derive_from_dory_ast(
         p3_g2: eval_g2(g2s[2])?,
         rhs: rhs_val,
     };
+    let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
 
     Ok(DerivedRecursionInput {
         verifier_input: RecursionVerifierInput {
@@ -866,6 +875,9 @@ pub fn derive_from_dory_ast(
             gt_exp_public_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
+            wiring,
+            pairing_boundary: pairing_boundary.clone(),
+            joint_commitment: joint_commitment.0,
         },
         dense_num_vars,
         pairing_boundary,

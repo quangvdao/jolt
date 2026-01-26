@@ -16,7 +16,7 @@ use crate::{
     transcripts::Transcript,
     zkvm::witness::{CommittedPolynomial, VirtualPolynomial},
 };
-use ark_bn254::Fq;
+use ark_bn254::{Fq, Fq12};
 use ark_std::Zero;
 
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
@@ -42,6 +42,7 @@ use super::{
         shift::{
             g1_shift_params, g2_shift_params, ShiftG1ScalarMulVerifier, ShiftG2ScalarMulVerifier,
         },
+        WiringG1Verifier,
     },
     g2::{
         addition::{G2AddParams, G2AddVerifier, G2AddVerifierSpec},
@@ -49,18 +50,22 @@ use super::{
             G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier,
             G2ScalarMulVerifierSpec,
         },
+        WiringG2Verifier,
     },
     gt::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionVerifier},
         exponentiation::{GtExpParams, GtExpPublicInputs, GtExpVerifier},
         multiplication::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
         shift::{GtShiftParams, GtShiftVerifier},
+        WiringGtVerifier,
     },
     prover::RecursionProof,
     virtualization::extract_virtual_claims_from_accumulator,
+    WiringPlan,
 };
 
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
+use crate::zkvm::proof_serialization::PairingBoundary;
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_RECURSION_STAGE1: &str = "jolt_recursion_stage1";
@@ -104,6 +109,13 @@ pub struct RecursionVerifierInput {
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
+
+    /// Verifier-derived wiring plan (explicit edges), used by Stage-2 wiring sumchecks.
+    pub wiring: WiringPlan,
+    /// Boundary outputs for the external pairing check, bound by wiring/boundary constraints.
+    pub pairing_boundary: PairingBoundary,
+    /// Stage-8 joint commitment (GT), bound to combine-commitments GT ops by wiring constraints.
+    pub joint_commitment: Fq12,
 }
 
 /// Unified verifier for the recursion SNARK
@@ -273,6 +285,10 @@ impl RecursionVerifier<Fq> {
         let enable_shift_g2_scalar_mul =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
+        let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
+        let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
+        let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
+        let enable_wiring_g2 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G2", true);
         #[cfg(feature = "experimental-pairing-recursion")]
         let enable_shift_multi_miller_loop =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_MULTI_MILLER_LOOP", true);
@@ -512,7 +528,18 @@ impl RecursionVerifier<Fq> {
             verifiers.push(Box::new(verifier));
         }
 
-        // TODO: wiring/boundary constraints.
+        // ---- Wiring/boundary constraints (AST-driven), appended LAST in Stage 2 ----
+        if enable_wiring {
+            if enable_wiring_gt && !self.input.wiring.gt.is_empty() {
+                verifiers.push(Box::new(WiringGtVerifier::new(&self.input, transcript)));
+            }
+            if enable_wiring_g1 && !self.input.wiring.g1.is_empty() {
+                verifiers.push(Box::new(WiringG1Verifier::new(&self.input, transcript)));
+            }
+            if enable_wiring_g2 && !self.input.wiring.g2.is_empty() {
+                verifiers.push(Box::new(WiringG2Verifier::new(&self.input, transcript)));
+            }
+        }
 
         if verifiers.is_empty() {
             return Err("No constraints to verify in Stage 2".into());

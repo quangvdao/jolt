@@ -47,6 +47,7 @@ use super::{
             G1ScalarMulProverSpec,
         },
         shift::{g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver},
+        WiringG1Prover,
     },
     g2::{
         addition::{G2AddParams, G2AddProver, G2AddProverSpec},
@@ -54,15 +55,18 @@ use super::{
             G2ScalarMulConstraintPolynomials, G2ScalarMulParams, G2ScalarMulProver,
             G2ScalarMulProverSpec,
         },
+        WiringG2Prover,
     },
     gt::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionProver},
         exponentiation::{GtExpParams, GtExpProver},
         multiplication::{GtMulConstraintPolynomials, GtMulParams, GtMulProver, GtMulProverSpec},
         shift::{GtShiftParams, GtShiftProver},
+        WiringGtProver,
     },
     virtualization::extract_virtual_claims_from_accumulator,
     witness_generation,
+    wiring_plan::derive_wiring_plan,
 };
 use crate::poly::commitment::dory::recursion::JoltWitness;
 use crate::poly::rlc_utils::compute_rlc_coefficients;
@@ -177,6 +181,12 @@ pub struct RecursionProver<F: JoltField = Fq> {
     pub(crate) prefix_layout_cache: Option<PrefixPackingLayout>,
     /// AST graph for wiring constraints (optional, only present when using AST-enabled mode)
     pub ast: Option<AstGraph<BN254>>,
+    /// Pairing boundary outputs (bound by wiring/boundary constraints once enabled).
+    pub pairing_boundary: Option<PairingBoundary>,
+    /// Stage-8 joint commitment value (Fq12), bound to combine-commitments GT ops once wiring is enabled.
+    pub joint_commitment: Option<ark_bn254::Fq12>,
+    /// Number of leaf commitments in the Stage-8 combine DAG.
+    pub combine_leaves: usize,
     /// Phantom for field type
     _marker: std::marker::PhantomData<F>,
 }
@@ -324,7 +334,9 @@ impl RecursionProver<Fq> {
         })?;
 
         // Build constraint system from generated witnesses and include combine witness constraints.
-        let prover = Self::new_from_witnesses(&witness_collection, Some(combine_witness))?;
+        let mut prover = Self::new_from_witnesses(&witness_collection, Some(combine_witness))?;
+        prover.pairing_boundary = Some(pairing_boundary.clone());
+        prover.joint_commitment = Some(stage8_combine_hint_fq12);
 
         // Non-input base/point hints for verifier-side instance-plan derivation (perf-only until wiring is added).
         let non_input_base_hints =
@@ -529,6 +541,12 @@ impl RecursionProver<Fq> {
             dense_poly_cache: None,
             prefix_layout_cache: None,
             ast: None,
+            pairing_boundary: None,
+            joint_commitment: None,
+            combine_leaves: combine_witness
+                .as_ref()
+                .map(|cw| cw.exp_witnesses.len())
+                .unwrap_or(0),
             _marker: std::marker::PhantomData,
         })
     }
@@ -844,6 +862,10 @@ impl RecursionProver<Fq> {
         let enable_shift_g2_scalar_mul =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
+        let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
+        let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
+        let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
+        let enable_wiring_g2 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G2", true);
         #[cfg(feature = "experimental-pairing-recursion")]
         let enable_shift_multi_miller_loop =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_MULTI_MILLER_LOOP", true);
@@ -1136,7 +1158,43 @@ impl RecursionProver<Fq> {
             let _ = enable_shift_multi_miller_loop;
         }
 
-        // TODO: Add wiring/boundary constraints sumcheck (AST-driven).
+        // ---- Wiring/boundary constraints (AST-driven), appended LAST in Stage 2 ----
+        if enable_wiring {
+            if let (Some(ast), Some(pairing_boundary), Some(joint_commitment)) = (
+                self.ast.as_ref(),
+                self.pairing_boundary.as_ref(),
+                self.joint_commitment.as_ref(),
+            ) {
+                let wiring = derive_wiring_plan(ast, self.combine_leaves, pairing_boundary)
+                    .map_err(|_e| "AST->wiring-plan derivation failed")?;
+
+                if enable_wiring_gt && !wiring.gt.is_empty() {
+                    provers.push(Box::new(WiringGtProver::<T>::new(
+                        &self.constraint_system,
+                        wiring.gt.clone(),
+                        pairing_boundary,
+                        joint_commitment.clone(),
+                        transcript,
+                    )));
+                }
+                if enable_wiring_g1 && !wiring.g1.is_empty() {
+                    provers.push(Box::new(WiringG1Prover::<T>::new(
+                        &self.constraint_system,
+                        wiring.g1.clone(),
+                        pairing_boundary,
+                        transcript,
+                    )));
+                }
+                if enable_wiring_g2 && !wiring.g2.is_empty() {
+                    provers.push(Box::new(WiringG2Prover::<T>::new(
+                        &self.constraint_system,
+                        wiring.g2.clone(),
+                        pairing_boundary,
+                        transcript,
+                    )));
+                }
+            }
+        }
 
         if provers.is_empty() {
             return Err("No constraints to prove in Stage 2".into());

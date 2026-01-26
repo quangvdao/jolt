@@ -1405,6 +1405,8 @@ impl<
                 &combine_commitments_dory,
                 &combine_coeffs_fr,
                 &payload.non_input_base_hints,
+                payload.pairing_boundary.clone(),
+                joint_commitment_dory.0,
             )
             .map_err(|e| anyhow::anyhow!("AST->instance-plan derivation failed: {e:?}"))?
         };

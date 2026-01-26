@@ -48,6 +48,7 @@ pub mod verifier;
 pub mod virtualization;
 pub mod witness;
 pub mod witness_generation;
+pub mod wiring_plan;
 
 #[cfg(test)]
 mod tests;
@@ -64,6 +65,7 @@ pub use combine_dag::{CombineDag, CombineLayer, CombineMul};
 pub use metadata::RecursionConstraintMetadata;
 pub use prover::{RecursionProof, RecursionProofResult, RecursionProver};
 pub use verifier::{RecursionVerifier, RecursionVerifierInput};
+pub use wiring_plan::WiringPlan;
 
 // G1 exports
 pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier};

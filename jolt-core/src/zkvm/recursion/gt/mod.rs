@@ -10,6 +10,7 @@ pub mod claim_reduction;
 pub mod exponentiation;
 pub mod multiplication;
 pub mod shift;
+pub mod wiring;
 
 pub use claim_reduction::{
     GtExpClaimReductionParams, GtExpClaimReductionProver, GtExpClaimReductionVerifier,
@@ -17,3 +18,4 @@ pub use claim_reduction::{
 pub use exponentiation::{GtExpProver, GtExpPublicInputs, GtExpVerifier};
 pub use multiplication::{GtMulProver, GtMulVerifier};
 pub use shift::{GtShiftClaim, GtShiftParams, GtShiftProver, GtShiftVerifier};
+pub use wiring::{WiringGtProver, WiringGtVerifier};

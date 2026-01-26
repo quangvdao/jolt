@@ -15,9 +15,11 @@
 
 pub mod addition;
 pub mod scalar_multiplication;
+pub mod wiring;
 
 pub use addition::{G2AddProver, G2AddVerifier};
 pub use scalar_multiplication::{G2ScalarMulProver, G2ScalarMulPublicInputs, G2ScalarMulVerifier};
+pub use wiring::{WiringG2Prover, WiringG2Verifier};
 
 use crate::field::JoltField;
 

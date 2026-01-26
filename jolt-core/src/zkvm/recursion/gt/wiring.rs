@@ -21,8 +21,7 @@ use crate::{
         unipoly::UniPoly,
     },
     subprotocols::{
-        sumcheck_prover::SumcheckInstanceProver,
-        sumcheck_verifier::SumcheckInstanceVerifier,
+        sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
     },
     transcripts::Transcript,
     zkvm::{
@@ -44,7 +43,11 @@ const ELEM_VARS: usize = 4;
 const DEGREE: usize = 2;
 
 fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
-    debug_assert_eq!(mle_4var.len(), 1 << ELEM_VARS, "expected 4-var MLE (len 16)");
+    debug_assert_eq!(
+        mle_4var.len(),
+        1 << ELEM_VARS,
+        "expected 4-var MLE (len 16)"
+    );
     let mut mle_11var = vec![Fq::zero(); 1 << NUM_VARS];
     // Layout matches packed GT exp: index = x * 128 + s (s in low 7 bits).
     for x in 0..(1 << ELEM_VARS) {
@@ -57,7 +60,11 @@ fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
 }
 
 fn pad_7var_to_11var_replicated(mle_7var: &[Fq]) -> Vec<Fq> {
-    debug_assert_eq!(mle_7var.len(), 1 << STEP_VARS, "expected 7-var MLE (len 128)");
+    debug_assert_eq!(
+        mle_7var.len(),
+        1 << STEP_VARS,
+        "expected 7-var MLE (len 128)"
+    );
     let mut mle_11var = vec![Fq::zero(); 1 << NUM_VARS];
     // Layout matches packed GT exp: index = x * 128 + s (s in low 7 bits).
     for x in 0..(1 << ELEM_VARS) {
@@ -129,7 +136,8 @@ impl<T: Transcript> WiringGtProver<T> {
         transcript: &mut T,
     ) -> Self {
         // Selector for element variables: Eq(u, τ), where τ is sampled once.
-        let tau: Vec<<Fq as JoltField>::Challenge> = transcript.challenge_vector_optimized::<Fq>(ELEM_VARS);
+        let tau: Vec<<Fq as JoltField>::Challenge> =
+            transcript.challenge_vector_optimized::<Fq>(ELEM_VARS);
         let eq_u_4 = eq_lsb_evals::<Fq>(&tau);
         let eq_u_poly = MultilinearPolynomial::from(pad_4var_to_11var_replicated(&eq_u_4));
 
@@ -202,7 +210,9 @@ impl<T: Transcript> WiringGtProver<T> {
             .enumerate()
             .map(|(i, need)| {
                 need.then(|| {
-                    MultilinearPolynomial::from(pad_4var_to_11var_replicated(&cs.gt_mul_rows[i].lhs))
+                    MultilinearPolynomial::from(pad_4var_to_11var_replicated(
+                        &cs.gt_mul_rows[i].lhs,
+                    ))
                 })
             })
             .collect();
@@ -211,7 +221,9 @@ impl<T: Transcript> WiringGtProver<T> {
             .enumerate()
             .map(|(i, need)| {
                 need.then(|| {
-                    MultilinearPolynomial::from(pad_4var_to_11var_replicated(&cs.gt_mul_rows[i].rhs))
+                    MultilinearPolynomial::from(pad_4var_to_11var_replicated(
+                        &cs.gt_mul_rows[i].rhs,
+                    ))
                 })
             })
             .collect();
@@ -315,7 +327,10 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
         NUM_VARS
     }
 
-    fn input_claim(&self, _accumulator: &crate::poly::opening_proof::ProverOpeningAccumulator<Fq>) -> Fq {
+    fn input_claim(
+        &self,
+        _accumulator: &crate::poly::opening_proof::ProverOpeningAccumulator<Fq>,
+    ) -> Fq {
         Fq::zero()
     }
 
@@ -396,7 +411,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
             poly.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
         self.eq_u_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
-        self.eq_s_default.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.eq_s_default
+            .bind_parallel(r_j, BindingOrder::LowToHigh);
         for poly in self.eq_s_by_exp.iter_mut().flatten() {
             poly.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
@@ -525,12 +541,20 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             };
 
             let dst = match edge.dst {
-                GtConsumer::GtMulLhs { instance } => acc
-                    .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_lhs(instance), SumcheckId::GtMul)
-                    .1,
-                GtConsumer::GtMulRhs { instance } => acc
-                    .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_rhs(instance), SumcheckId::GtMul)
-                    .1,
+                GtConsumer::GtMulLhs { instance } => {
+                    acc.get_virtual_polynomial_opening(
+                        VirtualPolynomial::gt_mul_lhs(instance),
+                        SumcheckId::GtMul,
+                    )
+                    .1
+                }
+                GtConsumer::GtMulRhs { instance } => {
+                    acc.get_virtual_polynomial_opening(
+                        VirtualPolynomial::gt_mul_rhs(instance),
+                        SumcheckId::GtMul,
+                    )
+                    .1
+                }
                 GtConsumer::GtExpBase { instance } => {
                     eval_fq12_packed_at(&self.gt_exp_bases[instance], &r_elem)
                 }
@@ -556,4 +580,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         // No-op: wiring verifier reads openings cached by earlier instances.
     }
 }
-

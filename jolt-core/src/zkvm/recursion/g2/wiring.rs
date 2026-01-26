@@ -26,6 +26,7 @@ use crate::{
             gt::shift::{eq_lsb_evals, eq_lsb_mle},
             verifier::RecursionVerifierInput,
             wiring_plan::{G2ValueRef, G2WiringEdge},
+            ConstraintType,
         },
         witness::VirtualPolynomial,
     },
@@ -82,7 +83,8 @@ impl<T: Transcript> WiringG2Prover<T> {
         pairing_boundary: &PairingBoundary,
         transcript: &mut T,
     ) -> Self {
-        let a_g2: Vec<<Fq as JoltField>::Challenge> = (0..NUM_VARS).map(|_| Fq::one().into()).collect();
+        let a_g2: Vec<<Fq as JoltField>::Challenge> =
+            (0..NUM_VARS).map(|_| Fq::one().into()).collect();
         let eq_poly = MultilinearPolynomial::from(eq_lsb_evals::<Fq>(&a_g2));
 
         let mu: Fq = transcript.challenge_scalar();
@@ -127,35 +129,45 @@ impl<T: Transcript> WiringG2Prover<T> {
             .iter()
             .enumerate()
             .map(|(i, &need)| {
-                need.then(|| MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].x_a_next_c0.clone()))
+                need.then(|| {
+                    MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].x_a_next_c0.clone())
+                })
             })
             .collect();
         let xa_next_c1 = need_smul_out
             .iter()
             .enumerate()
             .map(|(i, &need)| {
-                need.then(|| MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].x_a_next_c1.clone()))
+                need.then(|| {
+                    MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].x_a_next_c1.clone())
+                })
             })
             .collect();
         let ya_next_c0 = need_smul_out
             .iter()
             .enumerate()
             .map(|(i, &need)| {
-                need.then(|| MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].y_a_next_c0.clone()))
+                need.then(|| {
+                    MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].y_a_next_c0.clone())
+                })
             })
             .collect();
         let ya_next_c1 = need_smul_out
             .iter()
             .enumerate()
             .map(|(i, &need)| {
-                need.then(|| MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].y_a_next_c1.clone()))
+                need.then(|| {
+                    MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].y_a_next_c1.clone())
+                })
             })
             .collect();
         let a_ind = need_smul_out
             .into_iter()
             .enumerate()
             .map(|(i, need)| {
-                need.then(|| MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].a_indicator.clone()))
+                need.then(|| {
+                    MultilinearPolynomial::from(cs.g2_scalar_mul_rows[i].a_indicator.clone())
+                })
             })
             .collect();
 
@@ -207,7 +219,13 @@ impl<T: Transcript> WiringG2Prover<T> {
         &self,
         v: G2ValueRef,
         i: usize,
-    ) -> ([Fq; DEGREE], [Fq; DEGREE], [Fq; DEGREE], [Fq; DEGREE], [Fq; DEGREE]) {
+    ) -> (
+        [Fq; DEGREE],
+        [Fq; DEGREE],
+        [Fq; DEGREE],
+        [Fq; DEGREE],
+        [Fq; DEGREE],
+    ) {
         match v {
             G2ValueRef::G2ScalarMulOut { instance } => {
                 let x0 = self.xa_next_c0[instance]
@@ -414,7 +432,8 @@ pub struct WiringG2Verifier {
 
 impl WiringG2Verifier {
     pub fn new<T: Transcript>(input: &RecursionVerifierInput, transcript: &mut T) -> Self {
-        let a_g2: Vec<<Fq as JoltField>::Challenge> = (0..NUM_VARS).map(|_| Fq::one().into()).collect();
+        let a_g2: Vec<<Fq as JoltField>::Challenge> =
+            (0..NUM_VARS).map(|_| Fq::one().into()).collect();
         let mu: Fq = transcript.challenge_scalar();
         let mu2 = mu * mu;
         let mu3 = mu2 * mu;
@@ -427,7 +446,7 @@ impl WiringG2Verifier {
             .constraint_types
             .iter()
             .filter_map(|ct| match ct {
-                crate::zkvm::recursion::ConstraintType::G2ScalarMul { base_point } => Some((
+                ConstraintType::G2ScalarMul { base_point } => Some((
                     base_point.0.c0,
                     base_point.0.c1,
                     base_point.1.c0,
@@ -486,25 +505,85 @@ impl WiringG2Verifier {
                 .1,
             ),
             G2ValueRef::G2AddOut { instance } => (
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_xr_c0(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_xr_c1(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_yr_c0(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_yr_c1(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_r_indicator(instance), SumcheckId::G2Add).1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xr_c0(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xr_c1(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yr_c0(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yr_c1(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_r_indicator(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
             ),
             G2ValueRef::G2AddInP { instance } => (
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_xp_c0(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_xp_c1(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_yp_c0(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_yp_c1(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_p_indicator(instance), SumcheckId::G2Add).1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xp_c0(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xp_c1(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yp_c0(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yp_c1(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_p_indicator(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
             ),
             G2ValueRef::G2AddInQ { instance } => (
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_xq_c0(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_xq_c1(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_yq_c0(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_yq_c1(instance), SumcheckId::G2Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g2_add_q_indicator(instance), SumcheckId::G2Add).1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xq_c0(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_xq_c1(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yq_c0(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_yq_c1(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g2_add_q_indicator(instance),
+                    SumcheckId::G2Add,
+                )
+                .1,
             ),
             G2ValueRef::G2ScalarMulBase { instance } => self.smul_bases[instance],
             G2ValueRef::PairingBoundaryP1 => g2_const_from_affine(&self.pairing_boundary.p1_g2),
@@ -559,4 +638,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
         // No-op.
     }
 }
-

@@ -3,7 +3,10 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::{CommitmentScheme, RecursionExt},
-            dory::{instance_plan::derive_plan_with_hints, DoryCommitmentScheme, DoryContext, DoryGlobals},
+            dory::{
+                instance_plan::derive_plan_with_hints, DoryCommitmentScheme, DoryContext,
+                DoryGlobals,
+            },
             hyrax::Hyrax,
         },
         dense_mlpoly::DensePolynomial,
@@ -63,7 +66,8 @@ fn build_fixture() -> RecursionFixture {
 
     let prover_setup = <DoryCommitmentScheme as CommitmentScheme>::setup_prover(num_vars);
     let verifier_setup = <DoryCommitmentScheme as CommitmentScheme>::setup_verifier(&prover_setup);
-    let (commitment, hint) = <DoryCommitmentScheme as CommitmentScheme>::commit(&poly, &prover_setup);
+    let (commitment, hint) =
+        <DoryCommitmentScheme as CommitmentScheme>::commit(&poly, &prover_setup);
 
     // Opening point (big-endian challenges for Dory).
     let mut point_transcript: Blake2bTranscript = Transcript::new(b"pt");
@@ -88,11 +92,14 @@ fn build_fixture() -> RecursionFixture {
         Some(hint),
         &mut stage8_transcript,
     );
-    let ark_dory_proof = crate::poly::commitment::dory::wrappers::ArkDoryProof::from(dory_proof.clone());
+    let ark_dory_proof =
+        crate::poly::commitment::dory::wrappers::ArkDoryProof::from(dory_proof.clone());
 
     // Commitments map for recursion (Stage8 snapshot → combine).
-    let mut commitments: HashMap<CommittedPolynomial, <DoryCommitmentScheme as CommitmentScheme>::Commitment> =
-        HashMap::new();
+    let mut commitments: HashMap<
+        CommittedPolynomial,
+        <DoryCommitmentScheme as CommitmentScheme>::Commitment,
+    > = HashMap::new();
     commitments.insert(CommittedPolynomial::RdInc, commitment.clone());
 
     // Minimal Stage8 snapshot.
@@ -105,7 +112,8 @@ fn build_fixture() -> RecursionFixture {
     };
 
     // Hyrax setup (upper bound is fine).
-    let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
+    let hyrax_prover_setup =
+        <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
 
     // Produce recursion proof from Stage8 artifacts.
     let mut recursion_transcript: Blake2bTranscript = Transcript::new(b"recursion");
@@ -116,20 +124,28 @@ fn build_fixture() -> RecursionFixture {
         commitments: &commitments,
     };
 
-    let (recursion_proof, _metadata, pairing_boundary, stage8_combine_hint_fq12_opt, non_input_base_hints) =
-        RecursionProver::<Fq>::prove::<Fr, DoryCommitmentScheme, Blake2bTranscript>(
-            &mut recursion_transcript,
-            &hyrax_prover_setup,
-            input,
-        )
-        .expect("recursion proving must succeed");
+    let (
+        recursion_proof,
+        _metadata,
+        pairing_boundary,
+        stage8_combine_hint_fq12_opt,
+        non_input_base_hints,
+    ) = RecursionProver::<Fq>::prove::<Fr, DoryCommitmentScheme, Blake2bTranscript>(
+        &mut recursion_transcript,
+        &hyrax_prover_setup,
+        input,
+    )
+    .expect("recursion proving must succeed");
 
     let stage8_combine_hint_fq12 =
         stage8_combine_hint_fq12_opt.expect("recursion prover should emit stage8 combine hint");
-    let joint_commitment = <DoryCommitmentScheme as RecursionExt<Fr>>::combine_with_hint_fq12(&stage8_combine_hint_fq12);
+    let joint_commitment = <DoryCommitmentScheme as RecursionExt<Fr>>::combine_with_hint_fq12(
+        &stage8_combine_hint_fq12,
+    );
 
     // Deterministic combine ordering (BTreeMap order).
-    let rlc_map = crate::poly::rlc_utils::compute_rlc_coefficients(&gamma_powers, polynomial_claims);
+    let rlc_map =
+        crate::poly::rlc_utils::compute_rlc_coefficients(&gamma_powers, polynomial_claims);
     let mut combine_coeffs = Vec::with_capacity(rlc_map.len());
     let mut combine_commitments = Vec::with_capacity(rlc_map.len());
     for (poly_id, coeff) in rlc_map.into_iter() {
@@ -161,15 +177,14 @@ fn verify_with_input(
 ) -> bool {
     let verifier = RecursionVerifier::<Fq>::new(verifier_input);
     let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
-    let hyrax_verifier_setup = <HyraxPCS as CommitmentScheme>::setup_verifier(&fixture.hyrax_prover_setup);
-    match verifier
-        .verify::<Blake2bTranscript, HyraxPCS>(
-            &fixture.recursion_proof,
-            &mut transcript,
-            &fixture.recursion_proof.dense_commitment,
-            &hyrax_verifier_setup,
-        )
-    {
+    let hyrax_verifier_setup =
+        <HyraxPCS as CommitmentScheme>::setup_verifier(&fixture.hyrax_prover_setup);
+    match verifier.verify::<Blake2bTranscript, HyraxPCS>(
+        &fixture.recursion_proof,
+        &mut transcript,
+        &fixture.recursion_proof.dense_commitment,
+        &hyrax_verifier_setup,
+    ) {
         Ok(ok) => ok,
         Err(_e) => false,
     }
@@ -268,4 +283,3 @@ fn wiring_rejects_tampered_non_input_base_hint() {
         "tampered non-input base hints must not verify"
     );
 }
-

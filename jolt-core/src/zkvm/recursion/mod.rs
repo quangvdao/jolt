@@ -46,9 +46,9 @@ pub mod prover;
 pub mod utils;
 pub mod verifier;
 pub mod virtualization;
+pub mod wiring_plan;
 pub mod witness;
 pub mod witness_generation;
-pub mod wiring_plan;
 
 #[cfg(test)]
 mod tests;

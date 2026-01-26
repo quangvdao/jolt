@@ -94,8 +94,14 @@ use crate::{
     zkvm::witness::CommittedPolynomial,
 };
 use anyhow::Context;
+#[allow(unused_imports)]
+use ark_ec::AffineRepr;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
+#[allow(unused_imports)]
+use dory::backends::arkworks::{ArkG1, ArkG2, BN254};
+#[allow(unused_imports)]
+use dory::primitives::arithmetic::PairingCurve;
 use itertools::Itertools;
 use tracer::JoltDevice;
 
@@ -1450,9 +1456,6 @@ impl<
 
         // Minimal binding: recompute multi-pairing and check equality.
         let lhs = {
-            use ark_ec::AffineRepr;
-            use dory::backends::arkworks::{ArkG1, ArkG2, BN254};
-            use dory::primitives::arithmetic::PairingCurve;
             let g1s = [
                 ArkG1(got.p1_g1.into_group()),
                 ArkG1(got.p2_g1.into_group()),

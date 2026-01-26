@@ -31,6 +31,7 @@ use crate::{
             gt::shift::{eq_lsb_evals, eq_lsb_mle},
             verifier::RecursionVerifierInput,
             wiring_plan::{G1ValueRef, G1WiringEdge},
+            ConstraintType,
         },
         witness::VirtualPolynomial,
     },
@@ -84,7 +85,8 @@ impl<T: Transcript> WiringG1Prover<T> {
         transcript: &mut T,
     ) -> Self {
         // Selector point a_G1 = [1,1,...,1] (LSB-first order).
-        let a_g1: Vec<<Fq as JoltField>::Challenge> = (0..NUM_VARS).map(|_| Fq::one().into()).collect();
+        let a_g1: Vec<<Fq as JoltField>::Challenge> =
+            (0..NUM_VARS).map(|_| Fq::one().into()).collect();
         let eq_poly = MultilinearPolynomial::from(eq_lsb_evals::<Fq>(&a_g1));
 
         let mu: Fq = transcript.challenge_scalar();
@@ -141,14 +143,24 @@ impl<T: Transcript> WiringG1Prover<T> {
             .into_iter()
             .enumerate()
             .map(|(i, need)| {
-                need.then(|| MultilinearPolynomial::from(cs.g1_scalar_mul_rows[i].a_indicator.clone()))
+                need.then(|| {
+                    MultilinearPolynomial::from(cs.g1_scalar_mul_rows[i].a_indicator.clone())
+                })
             })
             .collect();
 
         let smul_base = need_smul_base
             .into_iter()
             .enumerate()
-            .map(|(i, need)| need.then(|| (cs.g1_scalar_mul_rows[i].base_point.0, cs.g1_scalar_mul_rows[i].base_point.1, Fq::zero())))
+            .map(|(i, need)| {
+                need.then(|| {
+                    (
+                        cs.g1_scalar_mul_rows[i].base_point.0,
+                        cs.g1_scalar_mul_rows[i].base_point.1,
+                        Fq::zero(),
+                    )
+                })
+            })
             .collect();
 
         let add_rows = need_add
@@ -331,7 +343,8 @@ pub struct WiringG1Verifier {
 
 impl WiringG1Verifier {
     pub fn new<T: Transcript>(input: &RecursionVerifierInput, transcript: &mut T) -> Self {
-        let a_g1: Vec<<Fq as JoltField>::Challenge> = (0..NUM_VARS).map(|_| Fq::one().into()).collect();
+        let a_g1: Vec<<Fq as JoltField>::Challenge> =
+            (0..NUM_VARS).map(|_| Fq::one().into()).collect();
         let mu: Fq = transcript.challenge_scalar();
         let mu2 = mu * mu;
 
@@ -343,7 +356,7 @@ impl WiringG1Verifier {
             .constraint_types
             .iter()
             .filter_map(|ct| match ct {
-                crate::zkvm::recursion::ConstraintType::G1ScalarMul { base_point } => {
+                ConstraintType::G1ScalarMul { base_point } => {
                     Some((base_point.0, base_point.1, Fq::zero()))
                 }
                 _ => None,
@@ -391,19 +404,55 @@ impl WiringG1Verifier {
                 (x, y, ind)
             }
             G1ValueRef::G1AddOut { instance } => (
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_xr(instance), SumcheckId::G1Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_yr(instance), SumcheckId::G1Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_r_indicator(instance), SumcheckId::G1Add).1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_xr(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_yr(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_r_indicator(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
             ),
             G1ValueRef::G1AddInP { instance } => (
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_xp(instance), SumcheckId::G1Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_yp(instance), SumcheckId::G1Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_p_indicator(instance), SumcheckId::G1Add).1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_xp(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_yp(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_p_indicator(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
             ),
             G1ValueRef::G1AddInQ { instance } => (
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_xq(instance), SumcheckId::G1Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_yq(instance), SumcheckId::G1Add).1,
-                acc.get_virtual_polynomial_opening(VirtualPolynomial::g1_add_q_indicator(instance), SumcheckId::G1Add).1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_xq(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_yq(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
+                acc.get_virtual_polynomial_opening(
+                    VirtualPolynomial::g1_add_q_indicator(instance),
+                    SumcheckId::G1Add,
+                )
+                .1,
             ),
             G1ValueRef::G1ScalarMulBase { instance } => self.smul_bases[instance],
             G1ValueRef::PairingBoundaryP1 => g1_const_from_affine(&self.pairing_boundary.p1_g1),
@@ -453,4 +502,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
         // No-op.
     }
 }
-

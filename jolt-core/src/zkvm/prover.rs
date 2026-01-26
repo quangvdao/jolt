@@ -800,18 +800,30 @@ impl<
                 payload.non_input_base_hints.serialized_size(Compress::Yes);
 
             let recursion_proof_size_bytes = payload.recursion_proof.serialized_size(Compress::Yes);
-            let recursion_stage1_size_bytes =
-                payload.recursion_proof.stage1_proof.serialized_size(Compress::Yes);
-            let recursion_stage2_size_bytes =
-                payload.recursion_proof.stage2_proof.serialized_size(Compress::Yes);
-            let recursion_stage3_eval_size_bytes =
-                payload.recursion_proof.stage3_packed_eval.serialized_size(Compress::Yes);
-            let recursion_opening_proof_size_bytes =
-                payload.recursion_proof.opening_proof.serialized_size(Compress::Yes);
-            let recursion_opening_claims_size_bytes =
-                payload.recursion_proof.opening_claims.serialized_size(Compress::Yes);
-            let recursion_dense_commitment_size_bytes =
-                payload.recursion_proof.dense_commitment.serialized_size(Compress::Yes);
+            let recursion_stage1_size_bytes = payload
+                .recursion_proof
+                .stage1_proof
+                .serialized_size(Compress::Yes);
+            let recursion_stage2_size_bytes = payload
+                .recursion_proof
+                .stage2_proof
+                .serialized_size(Compress::Yes);
+            let recursion_stage3_eval_size_bytes = payload
+                .recursion_proof
+                .stage3_packed_eval
+                .serialized_size(Compress::Yes);
+            let recursion_opening_proof_size_bytes = payload
+                .recursion_proof
+                .opening_proof
+                .serialized_size(Compress::Yes);
+            let recursion_opening_claims_size_bytes = payload
+                .recursion_proof
+                .opening_claims
+                .serialized_size(Compress::Yes);
+            let recursion_dense_commitment_size_bytes = payload
+                .recursion_proof
+                .dense_commitment
+                .serialized_size(Compress::Yes);
 
             tracing::info!(
                 "RecursionPayload size (compressed): {} bytes ({:.2} MiB)",

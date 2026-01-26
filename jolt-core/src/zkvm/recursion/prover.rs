@@ -41,7 +41,7 @@ use jolt_optimizations::get_g_mle;
 use super::{
     constraints::system::{ConstraintSystem, PolyType},
     g1::{
-        addition::{G1AddParams, G1AddProver, G1AddProverSpec},
+        addition::{G1AddParams, G1AddProver, G1AddProverSpec, G1AddWitness},
         scalar_multiplication::{
             G1ScalarMulConstraintPolynomials, G1ScalarMulParams, G1ScalarMulProver,
             G1ScalarMulProverSpec,
@@ -50,7 +50,7 @@ use super::{
         WiringG1Prover,
     },
     g2::{
-        addition::{G2AddParams, G2AddProver, G2AddProverSpec},
+        addition::{G2AddParams, G2AddProver, G2AddProverSpec, G2AddWitness},
         scalar_multiplication::{
             G2ScalarMulConstraintPolynomials, G2ScalarMulParams, G2ScalarMulProver,
             G2ScalarMulProverSpec,
@@ -65,8 +65,8 @@ use super::{
         WiringGtProver,
     },
     virtualization::extract_virtual_claims_from_accumulator,
-    witness_generation,
     wiring_plan::derive_wiring_plan,
+    witness_generation,
 };
 use crate::poly::commitment::dory::recursion::JoltWitness;
 use crate::poly::rlc_utils::compute_rlc_coefficients;
@@ -597,8 +597,8 @@ impl RecursionProver<Fq> {
         // ============ EMIT PREFIX-PACKED DENSE POLYNOMIAL ============
         // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
         if self.dense_poly_cache.is_none() || self.prefix_layout_cache.is_none() {
-            let (dense_poly, prefix_layout) =
-                tracing::info_span!("emit_prefix_packed_dense").in_scope(|| {
+            let (dense_poly, prefix_layout) = tracing::info_span!("emit_prefix_packed_dense")
+                .in_scope(|| {
                     tracing::info!("Emitting prefix-packed dense polynomial");
                     witness_generation::emit_dense(&self.constraint_system)
                 });
@@ -714,7 +714,10 @@ impl RecursionProver<Fq> {
         // (`round_offset = max_num_rounds - num_rounds`), so shorter points are suffixes of longer
         // ones in the batched challenge order. We therefore interpret `r_x` as the **suffix** of
         // the Stage-2 challenge vector.
-        let k = self.constraint_system.num_constraints_padded().trailing_zeros() as usize;
+        let k = self
+            .constraint_system
+            .num_constraints_padded()
+            .trailing_zeros() as usize;
         let num_constraint_vars = self.constraint_system.num_constraint_vars();
         if r_stage2.len() != num_constraint_vars && r_stage2.len() < num_constraint_vars + k {
             return Err(format!(
@@ -1084,27 +1087,26 @@ impl RecursionProver<Fq> {
         // G1 add
         let g1_add_rows = &self.constraint_system.g1_add_rows;
         if !g1_add_rows.is_empty() {
-            let g1_add_constraints: Vec<crate::zkvm::recursion::g1::addition::G1AddWitness<Fq>> =
-                g1_add_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(constraint_index, w)| crate::zkvm::recursion::g1::addition::G1AddWitness {
-                        x_p: vec![w.x_p],
-                        y_p: vec![w.y_p],
-                        ind_p: vec![w.ind_p],
-                        x_q: vec![w.x_q],
-                        y_q: vec![w.y_q],
-                        ind_q: vec![w.ind_q],
-                        x_r: vec![w.x_r],
-                        y_r: vec![w.y_r],
-                        ind_r: vec![w.ind_r],
-                        lambda: vec![w.lambda],
-                        inv_delta_x: vec![w.inv_delta_x],
-                        is_double: vec![w.is_double],
-                        is_inverse: vec![w.is_inverse],
-                        constraint_index,
-                    })
-                    .collect();
+            let g1_add_constraints: Vec<G1AddWitness<Fq>> = g1_add_rows
+                .iter()
+                .enumerate()
+                .map(|(constraint_index, w)| G1AddWitness {
+                    x_p: vec![w.x_p],
+                    y_p: vec![w.y_p],
+                    ind_p: vec![w.ind_p],
+                    x_q: vec![w.x_q],
+                    y_q: vec![w.y_q],
+                    ind_q: vec![w.ind_q],
+                    x_r: vec![w.x_r],
+                    y_r: vec![w.y_r],
+                    ind_r: vec![w.ind_r],
+                    lambda: vec![w.lambda],
+                    inv_delta_x: vec![w.inv_delta_x],
+                    is_double: vec![w.is_double],
+                    is_inverse: vec![w.is_inverse],
+                    constraint_index,
+                })
+                .collect();
             // NOTE: The fused G1Add sumcheck exists (see `g1::fused_addition`) but is intentionally
             // NOT wired into the default prover pipeline right now.
             let params = G1AddParams::new(g1_add_constraints.len());
@@ -1116,35 +1118,34 @@ impl RecursionProver<Fq> {
         // G2 add
         let g2_add_rows = &self.constraint_system.g2_add_rows;
         if !g2_add_rows.is_empty() {
-            let g2_add_constraints: Vec<crate::zkvm::recursion::g2::addition::G2AddWitness<Fq>> =
-                g2_add_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(constraint_index, w)| crate::zkvm::recursion::g2::addition::G2AddWitness {
-                        x_p_c0: vec![w.x_p_c0],
-                        x_p_c1: vec![w.x_p_c1],
-                        y_p_c0: vec![w.y_p_c0],
-                        y_p_c1: vec![w.y_p_c1],
-                        ind_p: vec![w.ind_p],
-                        x_q_c0: vec![w.x_q_c0],
-                        x_q_c1: vec![w.x_q_c1],
-                        y_q_c0: vec![w.y_q_c0],
-                        y_q_c1: vec![w.y_q_c1],
-                        ind_q: vec![w.ind_q],
-                        x_r_c0: vec![w.x_r_c0],
-                        x_r_c1: vec![w.x_r_c1],
-                        y_r_c0: vec![w.y_r_c0],
-                        y_r_c1: vec![w.y_r_c1],
-                        ind_r: vec![w.ind_r],
-                        lambda_c0: vec![w.lambda_c0],
-                        lambda_c1: vec![w.lambda_c1],
-                        inv_delta_x_c0: vec![w.inv_delta_x_c0],
-                        inv_delta_x_c1: vec![w.inv_delta_x_c1],
-                        is_double: vec![w.is_double],
-                        is_inverse: vec![w.is_inverse],
-                        constraint_index,
-                    })
-                    .collect();
+            let g2_add_constraints: Vec<G2AddWitness<Fq>> = g2_add_rows
+                .iter()
+                .enumerate()
+                .map(|(constraint_index, w)| G2AddWitness {
+                    x_p_c0: vec![w.x_p_c0],
+                    x_p_c1: vec![w.x_p_c1],
+                    y_p_c0: vec![w.y_p_c0],
+                    y_p_c1: vec![w.y_p_c1],
+                    ind_p: vec![w.ind_p],
+                    x_q_c0: vec![w.x_q_c0],
+                    x_q_c1: vec![w.x_q_c1],
+                    y_q_c0: vec![w.y_q_c0],
+                    y_q_c1: vec![w.y_q_c1],
+                    ind_q: vec![w.ind_q],
+                    x_r_c0: vec![w.x_r_c0],
+                    x_r_c1: vec![w.x_r_c1],
+                    y_r_c0: vec![w.y_r_c0],
+                    y_r_c1: vec![w.y_r_c1],
+                    ind_r: vec![w.ind_r],
+                    lambda_c0: vec![w.lambda_c0],
+                    lambda_c1: vec![w.lambda_c1],
+                    inv_delta_x_c0: vec![w.inv_delta_x_c0],
+                    inv_delta_x_c1: vec![w.inv_delta_x_c1],
+                    is_double: vec![w.is_double],
+                    is_inverse: vec![w.is_inverse],
+                    constraint_index,
+                })
+                .collect();
             let params = G2AddParams::new(g2_add_constraints.len());
             let (spec, constraint_indices) = G2AddProverSpec::new(params, g2_add_constraints);
             let prover = G2AddProver::from_spec(spec, constraint_indices, transcript);

@@ -71,19 +71,29 @@ pub struct GtWiringEdge {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum G1ValueRef {
     /// Output point of a G1 scalar mul: (x_a_next(s), y_a_next(s), a_indicator(s)).
-    G1ScalarMulOut { instance: usize },
+    G1ScalarMulOut {
+        instance: usize,
+    },
     /// Output point of a G1 add: (x_r, y_r, ind_r) (0-var).
-    G1AddOut { instance: usize },
+    G1AddOut {
+        instance: usize,
+    },
 
     /// Input P of a G1 add: (x_p, y_p, ind_p) (0-var).
-    G1AddInP { instance: usize },
+    G1AddInP {
+        instance: usize,
+    },
     /// Input Q of a G1 add: (x_q, y_q, ind_q) (0-var).
-    G1AddInQ { instance: usize },
+    G1AddInQ {
+        instance: usize,
+    },
 
     /// Boundary constant: base point for the given G1 scalar mul constraint.
     ///
     /// The constant value is taken from `ConstraintType::G1ScalarMul { base_point }` (local index).
-    G1ScalarMulBase { instance: usize },
+    G1ScalarMulBase {
+        instance: usize,
+    },
 
     /// Boundary constant: external pairing check point (p1/p2/p3).
     PairingBoundaryP1,
@@ -104,19 +114,29 @@ pub struct G1WiringEdge {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum G2ValueRef {
     /// Output point of a G2 scalar mul: (x_a_next(s), y_a_next(s), a_indicator(s)).
-    G2ScalarMulOut { instance: usize },
+    G2ScalarMulOut {
+        instance: usize,
+    },
     /// Output point of a G2 add: (x_r, y_r, ind_r) (0-var).
-    G2AddOut { instance: usize },
+    G2AddOut {
+        instance: usize,
+    },
 
     /// Input P of a G2 add: (x_p, y_p, ind_p) (0-var).
-    G2AddInP { instance: usize },
+    G2AddInP {
+        instance: usize,
+    },
     /// Input Q of a G2 add: (x_q, y_q, ind_q) (0-var).
-    G2AddInQ { instance: usize },
+    G2AddInQ {
+        instance: usize,
+    },
 
     /// Boundary constant: base point for the given G2 scalar mul constraint.
     ///
     /// The constant value is taken from `ConstraintType::G2ScalarMul { base_point }` (local index).
-    G2ScalarMulBase { instance: usize },
+    G2ScalarMulBase {
+        instance: usize,
+    },
 
     /// Boundary constant: external pairing check point (p1/p2/p3).
     PairingBoundaryP1,
@@ -155,12 +175,24 @@ fn collect_op_ids(ast: &AstGraph<dory::backends::arkworks::BN254>) -> OpIdOrder 
     };
     for node in &ast.nodes {
         match &node.op {
-            AstOp::GTExp { op_id: Some(id), .. } => out.gt_exp.push(*id),
-            AstOp::GTMul { op_id: Some(id), .. } => out.gt_mul.push(*id),
-            AstOp::G1ScalarMul { op_id: Some(id), .. } => out.g1_smul.push(*id),
-            AstOp::G2ScalarMul { op_id: Some(id), .. } => out.g2_smul.push(*id),
-            AstOp::G1Add { op_id: Some(id), .. } => out.g1_add.push(*id),
-            AstOp::G2Add { op_id: Some(id), .. } => out.g2_add.push(*id),
+            AstOp::GTExp {
+                op_id: Some(id), ..
+            } => out.gt_exp.push(*id),
+            AstOp::GTMul {
+                op_id: Some(id), ..
+            } => out.gt_mul.push(*id),
+            AstOp::G1ScalarMul {
+                op_id: Some(id), ..
+            } => out.g1_smul.push(*id),
+            AstOp::G2ScalarMul {
+                op_id: Some(id), ..
+            } => out.g2_smul.push(*id),
+            AstOp::G1Add {
+                op_id: Some(id), ..
+            } => out.g1_add.push(*id),
+            AstOp::G2Add {
+                op_id: Some(id), ..
+            } => out.g2_add.push(*id),
             _ => {}
         }
     }
@@ -174,7 +206,12 @@ fn collect_op_ids(ast: &AstGraph<dory::backends::arkworks::BN254>) -> OpIdOrder 
 }
 
 fn index_map(op_ids: &[OpId]) -> std::collections::BTreeMap<OpId, usize> {
-    op_ids.iter().copied().enumerate().map(|(i, id)| (id, i)).collect()
+    op_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect()
 }
 
 fn gt_producer_from_value(
@@ -188,11 +225,15 @@ fn gt_producer_from_value(
         return None;
     }
     match &ast.nodes[idx].op {
-        AstOp::GTExp { op_id: Some(id), .. } => gt_exp_index
+        AstOp::GTExp {
+            op_id: Some(id), ..
+        } => gt_exp_index
             .get(id)
             .copied()
             .map(|instance| GtProducer::GtExpRho { instance }),
-        AstOp::GTMul { op_id: Some(id), .. } => gt_mul_index
+        AstOp::GTMul {
+            op_id: Some(id), ..
+        } => gt_mul_index
             .get(id)
             .copied()
             .map(|instance| GtProducer::GtMulResult { instance }),
@@ -211,12 +252,18 @@ fn g1_value_from_output(
         return None;
     }
     match &ast.nodes[idx].op {
-        AstOp::G1ScalarMul { op_id: Some(id), .. } => {
-            g1_smul_index.get(id).copied().map(|instance| G1ValueRef::G1ScalarMulOut { instance })
-        }
-        AstOp::G1Add { op_id: Some(id), .. } => {
-            g1_add_index.get(id).copied().map(|instance| G1ValueRef::G1AddOut { instance })
-        }
+        AstOp::G1ScalarMul {
+            op_id: Some(id), ..
+        } => g1_smul_index
+            .get(id)
+            .copied()
+            .map(|instance| G1ValueRef::G1ScalarMulOut { instance }),
+        AstOp::G1Add {
+            op_id: Some(id), ..
+        } => g1_add_index
+            .get(id)
+            .copied()
+            .map(|instance| G1ValueRef::G1AddOut { instance }),
         _ => None,
     }
 }
@@ -232,12 +279,18 @@ fn g2_value_from_output(
         return None;
     }
     match &ast.nodes[idx].op {
-        AstOp::G2ScalarMul { op_id: Some(id), .. } => {
-            g2_smul_index.get(id).copied().map(|instance| G2ValueRef::G2ScalarMulOut { instance })
-        }
-        AstOp::G2Add { op_id: Some(id), .. } => {
-            g2_add_index.get(id).copied().map(|instance| G2ValueRef::G2AddOut { instance })
-        }
+        AstOp::G2ScalarMul {
+            op_id: Some(id), ..
+        } => g2_smul_index
+            .get(id)
+            .copied()
+            .map(|instance| G2ValueRef::G2ScalarMulOut { instance }),
+        AstOp::G2Add {
+            op_id: Some(id), ..
+        } => g2_add_index
+            .get(id)
+            .copied()
+            .map(|instance| G2ValueRef::G2AddOut { instance }),
         _ => None,
     }
 }
@@ -274,7 +327,9 @@ pub fn derive_wiring_plan(
                 rhs,
                 ..
             } => {
-                let Some(&mul_instance) = gt_mul_index.get(id) else { continue };
+                let Some(&mul_instance) = gt_mul_index.get(id) else {
+                    continue;
+                };
                 if let Some(src) = gt_producer_from_value(ast, &gt_exp_index, &gt_mul_index, *lhs) {
                     plan.gt.push(GtWiringEdge {
                         src,
@@ -298,7 +353,9 @@ pub fn derive_wiring_plan(
                 b,
                 ..
             } => {
-                let Some(&add_instance) = g1_add_index.get(id) else { continue };
+                let Some(&add_instance) = g1_add_index.get(id) else {
+                    continue;
+                };
                 if let Some(src) = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *a) {
                     plan.g1.push(G1WiringEdge {
                         src,
@@ -322,7 +379,9 @@ pub fn derive_wiring_plan(
                 b,
                 ..
             } => {
-                let Some(&add_instance) = g2_add_index.get(id) else { continue };
+                let Some(&add_instance) = g2_add_index.get(id) else {
+                    continue;
+                };
                 if let Some(src) = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *a) {
                     plan.g2.push(G2WiringEdge {
                         src,
@@ -352,8 +411,11 @@ pub fn derive_wiring_plan(
                 base,
                 ..
             } => {
-                let Some(&exp_instance) = gt_exp_index.get(id) else { continue };
-                if let Some(src) = gt_producer_from_value(ast, &gt_exp_index, &gt_mul_index, *base) {
+                let Some(&exp_instance) = gt_exp_index.get(id) else {
+                    continue;
+                };
+                if let Some(src) = gt_producer_from_value(ast, &gt_exp_index, &gt_mul_index, *base)
+                {
                     plan.gt.push(GtWiringEdge {
                         src,
                         dst: GtConsumer::GtExpBase {
@@ -367,9 +429,10 @@ pub fn derive_wiring_plan(
                 point,
                 ..
             } => {
-                let Some(&smul_instance) = g1_smul_index.get(id) else { continue };
-                if let Some(src) =
-                    g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *point)
+                let Some(&smul_instance) = g1_smul_index.get(id) else {
+                    continue;
+                };
+                if let Some(src) = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *point)
                 {
                     plan.g1.push(G1WiringEdge {
                         src,
@@ -384,9 +447,10 @@ pub fn derive_wiring_plan(
                 point,
                 ..
             } => {
-                let Some(&smul_instance) = g2_smul_index.get(id) else { continue };
-                if let Some(src) =
-                    g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *point)
+                let Some(&smul_instance) = g2_smul_index.get(id) else {
+                    continue;
+                };
+                if let Some(src) = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *point)
                 {
                     plan.g2.push(G2WiringEdge {
                         src,
@@ -530,4 +594,3 @@ pub fn derive_wiring_plan(
 
     Ok(plan)
 }
-

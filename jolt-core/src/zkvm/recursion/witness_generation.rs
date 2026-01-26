@@ -30,10 +30,7 @@ fn env_flag_default(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-#[tracing::instrument(
-    skip_all,
-    fields(num_constraints)
-)]
+#[tracing::instrument(skip_all, fields(num_constraints))]
 fn compute_shape(num_constraints: usize) -> RecursionMatrixShape {
     let num_constraints_padded = num_constraints.next_power_of_two();
     let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
@@ -995,7 +992,10 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             }
 
             // Not part of any `ConstraintType::committed_poly_specs()` today.
-            _ => panic!("Unexpected prefix-packing PolyType entry: {:?}", entry.poly_type),
+            _ => panic!(
+                "Unexpected prefix-packing PolyType entry: {:?}",
+                entry.poly_type
+            ),
         }
     }
 

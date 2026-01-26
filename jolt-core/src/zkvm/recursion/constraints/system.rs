@@ -7,7 +7,9 @@ use crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs;
 use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness};
 use ark_bn254::{Fq, Fq2};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
+};
 
 /// Convert index to binary representation as field elements (little-endian).
 pub fn index_to_binary<F: JoltField>(index: usize, num_vars: usize) -> Vec<F> {
@@ -591,14 +593,28 @@ pub struct RecursionMatrixShape {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ConstraintLocator {
-    GtExp { local: usize },
-    GtMul { local: usize },
-    G1ScalarMul { local: usize },
-    G2ScalarMul { local: usize },
-    G1Add { local: usize },
-    G2Add { local: usize },
+    GtExp {
+        local: usize,
+    },
+    GtMul {
+        local: usize,
+    },
+    G1ScalarMul {
+        local: usize,
+    },
+    G2ScalarMul {
+        local: usize,
+    },
+    G1Add {
+        local: usize,
+    },
+    G2Add {
+        local: usize,
+    },
     #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoop { local: usize },
+    MultiMillerLoop {
+        local: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -696,11 +712,11 @@ pub struct ConstraintSystem {
     pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
 
     // Stage 2 native stores
-    pub gt_mul_rows: Vec<GtMulNativeRows>,          // each field len 16
+    pub gt_mul_rows: Vec<GtMulNativeRows>, // each field len 16
     pub g1_scalar_mul_rows: Vec<G1ScalarMulNative>, // each field len 256
     pub g2_scalar_mul_rows: Vec<G2ScalarMulNative>, // each field len 256
-    pub g1_add_rows: Vec<G1AddNative>,              // scalars
-    pub g2_add_rows: Vec<G2AddNative>,              // scalars
+    pub g1_add_rows: Vec<G1AddNative>,     // scalars
+    pub g2_add_rows: Vec<G2AddNative>,     // scalars
 
     // Public inputs
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
@@ -901,4 +917,3 @@ impl Valid for ConstraintType {
         Ok(())
     }
 }
-

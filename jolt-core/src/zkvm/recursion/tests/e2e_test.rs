@@ -18,7 +18,7 @@ use crate::{
         WiringPlan,
     },
 };
-use ark_bn254::{Fq, Fr, Fq12, G1Affine, G2Affine};
+use ark_bn254::{Fq, Fq12, Fr, G1Affine, G2Affine};
 use ark_ff::{UniformRand, Zero};
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_std::test_rng;

@@ -46,9 +46,7 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
     let g_poly_4var = DensePolynomial::new(vec![Fq::zero(); 16]);
 
     let rho_packed: Vec<Fq> = (0..2048).map(|i| Fq::from(i as u64)).collect();
-    let quotient_packed: Vec<Fq> = (0..2048)
-        .map(|i| Fq::from((10_000 + i) as u64))
-        .collect();
+    let quotient_packed: Vec<Fq> = (0..2048).map(|i| Fq::from((10_000 + i) as u64)).collect();
     let gt_exp_witness = GtExpWitness::<Fq> {
         rho_packed,
         rho_next_packed: vec![Fq::zero(); 2048],
@@ -124,7 +122,11 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
         g2_scalar_mul_rows: vec![],
         g1_add_rows: vec![g1_add],
         g2_add_rows: vec![],
-        g1_scalar_mul_public_inputs: vec![crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs::new(Fr::from(0u64))],
+        g1_scalar_mul_public_inputs: vec![
+            crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs::new(
+                Fr::from(0u64),
+            ),
+        ],
         g2_scalar_mul_public_inputs: vec![],
     };
 
@@ -234,4 +236,3 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
         assert!(v.is_zero());
     }
 }
-

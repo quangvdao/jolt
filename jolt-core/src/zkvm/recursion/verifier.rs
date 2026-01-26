@@ -64,8 +64,8 @@ use super::{
     WiringPlan,
 };
 
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use crate::zkvm::proof_serialization::PairingBoundary;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_RECURSION_STAGE1: &str = "jolt_recursion_stage1";

@@ -287,28 +287,43 @@ fn prove_example(
                 Some(payload) => {
                     let recursion_payload_size_bytes =
                         payload.serialized_size(ark_serialize::Compress::Yes);
-                    let stage8_combine_hint_size_bytes =
-                        payload.stage8_combine_hint.serialized_size(ark_serialize::Compress::Yes);
-                    let pairing_boundary_size_bytes =
-                        payload.pairing_boundary.serialized_size(ark_serialize::Compress::Yes);
-                    let non_input_base_hints_size_bytes =
-                        payload.non_input_base_hints.serialized_size(ark_serialize::Compress::Yes);
+                    let stage8_combine_hint_size_bytes = payload
+                        .stage8_combine_hint
+                        .serialized_size(ark_serialize::Compress::Yes);
+                    let pairing_boundary_size_bytes = payload
+                        .pairing_boundary
+                        .serialized_size(ark_serialize::Compress::Yes);
+                    let non_input_base_hints_size_bytes = payload
+                        .non_input_base_hints
+                        .serialized_size(ark_serialize::Compress::Yes);
 
                     let recursion_proof_size_bytes = payload
                         .recursion_proof
                         .serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_stage1_size_bytes =
-                        payload.recursion_proof.stage1_proof.serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_stage2_size_bytes =
-                        payload.recursion_proof.stage2_proof.serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_stage3_eval_size_bytes =
-                        payload.recursion_proof.stage3_packed_eval.serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_opening_proof_size_bytes =
-                        payload.recursion_proof.opening_proof.serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_opening_claims_size_bytes =
-                        payload.recursion_proof.opening_claims.serialized_size(ark_serialize::Compress::Yes);
-                    let recursion_dense_commitment_size_bytes =
-                        payload.recursion_proof.dense_commitment.serialized_size(ark_serialize::Compress::Yes);
+                    let recursion_stage1_size_bytes = payload
+                        .recursion_proof
+                        .stage1_proof
+                        .serialized_size(ark_serialize::Compress::Yes);
+                    let recursion_stage2_size_bytes = payload
+                        .recursion_proof
+                        .stage2_proof
+                        .serialized_size(ark_serialize::Compress::Yes);
+                    let recursion_stage3_eval_size_bytes = payload
+                        .recursion_proof
+                        .stage3_packed_eval
+                        .serialized_size(ark_serialize::Compress::Yes);
+                    let recursion_opening_proof_size_bytes = payload
+                        .recursion_proof
+                        .opening_proof
+                        .serialized_size(ark_serialize::Compress::Yes);
+                    let recursion_opening_claims_size_bytes = payload
+                        .recursion_proof
+                        .opening_claims
+                        .serialized_size(ark_serialize::Compress::Yes);
+                    let recursion_dense_commitment_size_bytes = payload
+                        .recursion_proof
+                        .dense_commitment
+                        .serialized_size(ark_serialize::Compress::Yes);
 
                     println!(
                         "RecursionPayload size (compressed): {} bytes ({:.2} MiB)",
@@ -450,12 +465,15 @@ fn prove_example_with_trace(
             Some(payload) => {
                 let recursion_payload_size_bytes =
                     payload.serialized_size(ark_serialize::Compress::Yes);
-                let stage8_combine_hint_size_bytes =
-                    payload.stage8_combine_hint.serialized_size(ark_serialize::Compress::Yes);
-                let pairing_boundary_size_bytes =
-                    payload.pairing_boundary.serialized_size(ark_serialize::Compress::Yes);
-                let non_input_base_hints_size_bytes =
-                    payload.non_input_base_hints.serialized_size(ark_serialize::Compress::Yes);
+                let stage8_combine_hint_size_bytes = payload
+                    .stage8_combine_hint
+                    .serialized_size(ark_serialize::Compress::Yes);
+                let pairing_boundary_size_bytes = payload
+                    .pairing_boundary
+                    .serialized_size(ark_serialize::Compress::Yes);
+                let non_input_base_hints_size_bytes = payload
+                    .non_input_base_hints
+                    .serialized_size(ark_serialize::Compress::Yes);
 
                 let recursion_proof_size_bytes = payload
                     .recursion_proof

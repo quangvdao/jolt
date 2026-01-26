@@ -16,9 +16,9 @@ use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::exponentiation::GtExpPublicInputs;
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::verifier::RecursionVerifierInput;
+use crate::zkvm::recursion::wiring_plan::derive_wiring_plan;
 use crate::zkvm::recursion::CombineDag;
 use crate::zkvm::recursion::PolyType;
-use crate::zkvm::recursion::wiring_plan::derive_wiring_plan;
 
 use ark_bn254::{Fq12, Fr, G1Affine, G2Affine};
 use ark_ec::CurveGroup;

@@ -338,6 +338,7 @@ impl<
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, name = "verify_stage1")]
     fn verify_stage1(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE1);
         let uni_skip_params = verify_stage1_uni_skip(
@@ -366,6 +367,7 @@ impl<
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, name = "verify_stage2")]
     fn verify_stage2(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE2);
         let uni_skip_params = verify_stage2_uni_skip(
@@ -417,6 +419,7 @@ impl<
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, name = "verify_stage3")]
     fn verify_stage3(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE3);
         let spartan_shift = ShiftSumcheckVerifier::new(
@@ -447,6 +450,7 @@ impl<
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, name = "verify_stage4")]
     fn verify_stage4(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE4);
         verifier_accumulate_advice::<F>(
@@ -514,6 +518,7 @@ impl<
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, name = "verify_stage5")]
     fn verify_stage5(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE5);
         let n_cycle_vars = self.proof.trace_length.log_2();
@@ -547,6 +552,7 @@ impl<
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, name = "verify_stage6a")]
     fn verify_stage6a(
         &mut self,
     ) -> Result<
@@ -595,6 +601,7 @@ impl<
         Ok((bytecode_read_raf.into_params(), booleanity.into_params()))
     }
 
+    #[tracing::instrument(skip_all, name = "verify_stage6b")]
     fn verify_stage6b(
         &mut self,
         bytecode_read_raf_params: BytecodeReadRafSumcheckParams<F>,
@@ -734,6 +741,7 @@ impl<
     }
 
     /// Stage 7: HammingWeight claim reduction verification.
+    #[tracing::instrument(skip_all, name = "verify_stage7")]
     fn verify_stage7(&mut self) -> Result<(), anyhow::Error> {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE7);
         // Create verifier for HammingWeightClaimReduction

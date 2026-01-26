@@ -1225,6 +1225,29 @@ impl<
                 anyhow::anyhow!("recursion payload is required in recursion mode")
             })?;
 
+        // IMPORTANT: Ensure DoryGlobals are initialized with the proof's layout before any
+        // Stage-8 transcript replay / AST derivation. In host pipelines, this can be accidentally
+        // true due to leftover global state from proving; in the tracer/guest path we often call
+        // `DoryGlobals::reset()`, which reverts the layout to CycleMajor.
+        //
+        // This mirrors the native Stage 8 verifier initialization path.
+        let _dory_globals_guard = if self.proof.program_mode == ProgramMode::Committed {
+            let committed = self.preprocessing.program.as_committed()?;
+            DoryGlobals::initialize_main_context_with_num_columns(
+                1 << self.one_hot_params.log_k_chunk,
+                self.proof.trace_length.next_power_of_two(),
+                committed.bytecode_num_columns,
+                Some(self.proof.dory_layout),
+            )
+        } else {
+            DoryGlobals::initialize_context(
+                1 << self.one_hot_params.log_k_chunk,
+                self.proof.trace_length.next_power_of_two(),
+                DoryContext::Main,
+                Some(self.proof.dory_layout),
+            )
+        };
+
         // 1) Reconstruct the Stage 8 batching state + build the symbolic AST at the pre-Stage8
         // transcript state. Then replay the PCS transcript interactions (no native PCS checks).
         let dory_snap = self.build_dory_verify_snapshot()?;

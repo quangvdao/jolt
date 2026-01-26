@@ -2084,11 +2084,11 @@ impl ConstraintSystem {
         point: &[<Fr as JoltField>::Challenge],
         evaluation: &Fr,
         commitment: &ArkGT,
-    ) -> Result<(Self, <DoryCommitmentScheme as RecursionExt<Fr>>::Hint), ProofVerifyError>
+    ) -> Result<(Self, <DoryCommitmentScheme as RecursionExt<Fr>>::Ast), ProofVerifyError>
     where
         T: Transcript,
     {
-        let (witnesses, hints) = <DoryCommitmentScheme as RecursionExt<Fr>>::witness_gen(
+        let (witnesses, ast) = <DoryCommitmentScheme as RecursionExt<Fr>>::witness_gen_with_ast(
             proof, setup, transcript, point, evaluation, commitment,
         )?;
 
@@ -2170,7 +2170,7 @@ impl ConstraintSystem {
                 g1_add_witnesses: Vec::new(),
                 g2_add_witnesses: Vec::new(),
             },
-            hints,
+            ast,
         ))
     }
 
@@ -3629,7 +3629,7 @@ mod tests {
 
         let _start = std::time::Instant::now();
 
-        let (system, hints) = ConstraintSystem::new(
+        let (system, _ast) = ConstraintSystem::new(
             &proof,
             &verifier_setup,
             &mut extract_transcript,
@@ -3705,18 +3705,6 @@ mod tests {
                 );
             }
         }
-        let mut verify_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-        DoryCommitmentScheme::verify_with_hint(
-            &proof,
-            &verifier_setup,
-            &mut verify_transcript,
-            &point,
-            &evaluation,
-            &commitment,
-            &hints,
-        )
-        .expect("Verification with hint should succeed");
-
         let mut verify_transcript_no_hint = crate::transcripts::Blake2bTranscript::new(b"test");
         DoryCommitmentScheme::verify(
             &proof,

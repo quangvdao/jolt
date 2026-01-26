@@ -98,69 +98,53 @@ impl GtExpPublicInputs {
         Self { base, scalar_bits }
     }
 
-    /// Evaluate digit_lo MLE at challenge point r_s* (7-variable MLE, 128 points).
-    pub fn evaluate_digit_lo_mle<F: JoltField>(&self, r_s_star: &[F]) -> F {
-        debug_assert_eq!(r_s_star.len(), NUM_STEP_VARS);
-        let eq_evals = EqPolynomial::<F>::evals(r_s_star);
+    /// Evaluate both digit MLEs using pre-computed eq_evals.
+    /// Caller must provide `eq_evals = EqPolynomial::<F>::evals(r_s_star)`.
+    /// Returns (digit_lo, digit_hi).
+    pub fn evaluate_digit_mles<F: JoltField>(&self, eq_evals: &[F]) -> (F, F) {
+        debug_assert_eq!(eq_evals.len(), 1 << NUM_STEP_VARS);
         let digits = digits_from_bits_msb(&self.scalar_bits);
 
-        eq_evals
-            .iter()
-            .enumerate()
-            .map(|(s, eq)| {
-                if s < digits.len() && digits[s].1 {
-                    *eq
-                } else {
-                    F::zero()
+        let mut digit_lo = F::zero();
+        let mut digit_hi = F::zero();
+
+        for (s, eq) in eq_evals.iter().enumerate() {
+            if s < digits.len() {
+                if digits[s].1 {
+                    digit_lo += *eq;
                 }
-            })
-            .fold(F::zero(), |acc, x| acc + x)
-    }
-
-    /// Evaluate digit_hi MLE at challenge point r_s* (7-variable MLE, 128 points).
-    pub fn evaluate_digit_hi_mle<F: JoltField>(&self, r_s_star: &[F]) -> F {
-        debug_assert_eq!(r_s_star.len(), NUM_STEP_VARS);
-        let eq_evals = EqPolynomial::<F>::evals(r_s_star);
-        let digits = digits_from_bits_msb(&self.scalar_bits);
-
-        eq_evals
-            .iter()
-            .enumerate()
-            .map(|(s, eq)| {
-                if s < digits.len() && digits[s].0 {
-                    *eq
-                } else {
-                    F::zero()
+                if digits[s].0 {
+                    digit_hi += *eq;
                 }
-            })
-            .fold(F::zero(), |acc, x| acc + x)
+            }
+        }
+
+        (digit_lo, digit_hi)
     }
 
-    /// Evaluate the base MLE at challenge point r_x* (4-variable MLE, 16 points).
-    pub fn evaluate_base_mle(&self, r_x_star: &[Fq]) -> Fq {
-        self.evaluate_fq12_mle(&self.base, r_x_star)
-    }
+    /// Evaluate base, base^2, and base^3 MLEs using pre-computed eq_evals.
+    /// Caller must provide `eq_evals = EqPolynomial::<Fq>::evals(r_x_star)`.
+    /// Returns (base_eval, base2_eval, base3_eval).
+    pub fn evaluate_base_powers_mle(&self, eq_evals: &[Fq]) -> (Fq, Fq, Fq) {
+        debug_assert_eq!(eq_evals.len(), 1 << NUM_ELEMENT_VARS);
 
-    /// Evaluate base^2 MLE at challenge point r_x* (4-variable MLE, 16 points).
-    pub fn evaluate_base2_mle(&self, r_x_star: &[Fq]) -> Fq {
+        let base_eval = self.evaluate_fq12_mle(&self.base, eq_evals);
         let base2 = self.base * self.base;
-        self.evaluate_fq12_mle(&base2, r_x_star)
-    }
-
-    /// Evaluate base^3 MLE at challenge point r_x* (4-variable MLE, 16 points).
-    pub fn evaluate_base3_mle(&self, r_x_star: &[Fq]) -> Fq {
-        let base2 = self.base * self.base;
+        let base2_eval = self.evaluate_fq12_mle(&base2, eq_evals);
         let base3 = base2 * self.base;
-        self.evaluate_fq12_mle(&base3, r_x_star)
+        let base3_eval = self.evaluate_fq12_mle(&base3, eq_evals);
+        (base_eval, base2_eval, base3_eval)
     }
 
-    fn evaluate_fq12_mle(&self, fq12: &Fq12, r_x_star: &[Fq]) -> Fq {
-        debug_assert_eq!(r_x_star.len(), NUM_ELEMENT_VARS);
-
-        // Expand GT element to base-field MLE evaluations, then evaluate at r_x*.
-        let base_mle = <Bn254Recursion as RecursionCurve>::fq12_to_mle(fq12); // 16 Fq values
-        let base_poly = DensePolynomial::new(base_mle);
-        base_poly.evaluate(r_x_star)
+    /// Evaluate an Fq12 element as an MLE using pre-computed eq_evals (direct dot product).
+    fn evaluate_fq12_mle(&self, fq12: &Fq12, eq_evals: &[Fq]) -> Fq {
+        let mle_coeffs = <Bn254Recursion as RecursionCurve>::fq12_to_mle(fq12); // 16 Fq values
+                                                                                // Direct dot product: sum_i mle_coeffs[i] * eq_evals[i]
+        mle_coeffs
+            .iter()
+            .zip(eq_evals.iter())
+            .map(|(c, eq)| *c * *eq)
+            .fold(Fq::zero(), |acc, x| acc + x)
     }
 }
 
@@ -1049,9 +1033,23 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             g_poly.evaluate_dot_product::<Fq>(&r_x_star)
         };
 
+        // Precompute eq_evals for both step and element variables (shared across all witnesses)
+        let eq_evals_s = EqPolynomial::<Fq>::evals(&r_s_star);
+        let eq_evals_x = EqPolynomial::<Fq>::evals(&r_x_star);
+
+        // Precompute gamma powers upfront (avoids sequential multiplication in loop)
+        let gamma_powers: Vec<Fq> = {
+            let mut powers = Vec::with_capacity(self.num_witnesses);
+            let mut current = self.gamma;
+            for _ in 0..self.num_witnesses {
+                powers.push(current);
+                current *= self.gamma;
+            }
+            powers
+        };
+
         // Compute batched constraint value with gamma
         let mut total_constraint = Fq::zero();
-        let mut gamma_power = self.gamma;
 
         for w in 0..self.num_witnesses {
             // Get all polynomial claims from accumulator (including virtual rho_next)
@@ -1065,12 +1063,12 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             let rho_next_claim = claims[1];
             let quotient_claim = claims[2];
 
-            // Compute digit bits and base evaluations directly from public inputs
-            let digit_lo = self.public_inputs[w].evaluate_digit_lo_mle(&r_s_star);
-            let digit_hi = self.public_inputs[w].evaluate_digit_hi_mle(&r_s_star);
-            let base_claim = self.public_inputs[w].evaluate_base_mle(&r_x_star);
-            let base2_claim = self.public_inputs[w].evaluate_base2_mle(&r_x_star);
-            let base3_claim = self.public_inputs[w].evaluate_base3_mle(&r_x_star);
+            // Compute digit bits using pre-computed eq_evals
+            let (digit_lo, digit_hi) = self.public_inputs[w].evaluate_digit_mles(&eq_evals_s);
+
+            // Compute base, base^2, base^3 MLEs using pre-computed eq_evals
+            let (base_claim, base2_claim, base3_claim) =
+                self.public_inputs[w].evaluate_base_powers_mle(&eq_evals_x);
 
             let u = digit_lo;
             let v = digit_hi;
@@ -1086,8 +1084,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             let rho4 = rho2 * rho2;
             let constraint_eval = rho_next_claim - rho4 * base_power - quotient_claim * g_eval;
 
-            total_constraint += gamma_power * constraint_eval;
-            gamma_power *= self.gamma;
+            total_constraint += gamma_powers[w] * constraint_eval;
         }
 
         // Expected output = eq_x(r_x, r_x*) × eq_s(r_s, r_s*) × Σ_w γ^w C_w(r_s*, r_x*)

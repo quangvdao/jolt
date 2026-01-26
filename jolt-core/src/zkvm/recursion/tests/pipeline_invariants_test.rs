@@ -19,7 +19,7 @@ use serial_test::serial;
 ///
 /// In Stage 8 we must fork the transcript **after** sampling gamma (from claims) but **before**
 /// `PCS::prove` mutates the main transcript. The fork is what recursion uses for `PCS::witness_gen`,
-/// and `witness_gen` must bring that fork to the same final transcript state as the prover’s
+/// and `witness_gen_with_ast` must bring that fork to the same final transcript state as the prover’s
 /// transcript after `prove`.
 #[test]
 #[serial]
@@ -67,8 +67,8 @@ fn test_stage8_transcript_fork_matches_prover_after_witness_gen() {
     );
     let prover_final_state = prover_transcript.state;
 
-    // `witness_gen` should bring the forked transcript to the same final state.
-    let _ = <DoryCommitmentScheme as RecursionExt<Fr>>::witness_gen(
+    // `witness_gen_with_ast` should bring the forked transcript to the same final state.
+    let _ = <DoryCommitmentScheme as RecursionExt<Fr>>::witness_gen_with_ast(
         &proof,
         &verifier_setup,
         &mut witness_gen_transcript,

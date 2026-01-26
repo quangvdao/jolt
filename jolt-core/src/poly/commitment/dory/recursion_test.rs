@@ -154,9 +154,9 @@ mod recursion_tests {
         // Evaluate polynomial
         let evaluation = PolynomialEvaluation::evaluate(&poly, &point);
 
-        // Use extension trait for witness generation
+        // Use recursion extension for witness generation (captures AST).
         let mut witness_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-        let (witnesses, hints) = DoryCommitmentScheme::witness_gen(
+        let (witnesses, ast) = DoryCommitmentScheme::witness_gen_with_ast(
             &proof,
             &verifier_setup,
             &mut witness_transcript,
@@ -166,25 +166,26 @@ mod recursion_tests {
         )
         .expect("Witness generation should succeed");
 
-        // Now we have both witnesses (for proving) and hints (for verification)
         println!(
-            "Successfully generated hints for {} rounds",
-            hints.0.num_rounds
+            "Successfully generated AST: nodes={}, constraints={}",
+            ast.nodes.len(),
+            ast.constraints.len()
         );
         println!("Collected {} GT exp witnesses", witnesses.gt_exp.len());
 
-        // Now verify with hint
-        let mut hint_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-        DoryCommitmentScheme::verify_with_hint(
+        // Symbolic AST build should succeed and match the traced AST shape.
+        let mut sym_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
+        let sym_ast = DoryCommitmentScheme::build_symbolic_ast(
             &proof,
             &verifier_setup,
-            &mut hint_transcript,
+            &mut sym_transcript,
             &point,
             &evaluation,
             &commitment,
-            &hints,
         )
-        .expect("Verify with hint should succeed");
+        .expect("Symbolic AST build should succeed");
+        assert_eq!(sym_ast.nodes.len(), ast.nodes.len());
+        assert_eq!(sym_ast.constraints.len(), ast.constraints.len());
     }
 
     #[test]
@@ -243,9 +244,9 @@ mod recursion_tests {
 
         assert!(normal_result.is_ok(), "Normal verification should succeed");
 
-        // Now generate witnesses and hints using extension trait
+        // Now generate witnesses + AST using recursion extension
         let mut witness_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-        let (witnesses, hints) = DoryCommitmentScheme::witness_gen(
+        let (witnesses, ast) = DoryCommitmentScheme::witness_gen_with_ast(
             &proof,
             &verifier_setup,
             &mut witness_transcript,
@@ -255,25 +256,25 @@ mod recursion_tests {
         )
         .expect("Witness generation should succeed");
 
-        // Both witnesses and hints successfully generated
-        assert!(hints.0.num_rounds > 0, "Should have generated hints");
+        // Both witnesses and AST successfully generated
         assert!(
             !witnesses.gt_exp.is_empty(),
             "Should have collected witnesses"
         );
 
-        // Verify with hint should also succeed
-        let mut hint_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
-        let hint_result = DoryCommitmentScheme::verify_with_hint(
+        // Symbolic AST build should also succeed and match the traced AST shape.
+        let mut sym_transcript = crate::transcripts::Blake2bTranscript::new(b"test");
+        let sym_ast = DoryCommitmentScheme::build_symbolic_ast(
             &proof,
             &verifier_setup,
-            &mut hint_transcript,
+            &mut sym_transcript,
             &point,
             &evaluation,
             &commitment,
-            &hints,
         );
-
-        assert!(hint_result.is_ok(), "Verify with hint should also succeed");
+        assert!(sym_ast.is_ok(), "Symbolic AST build should succeed");
+        let sym_ast = sym_ast.unwrap();
+        assert_eq!(sym_ast.nodes.len(), ast.nodes.len());
+        assert_eq!(sym_ast.constraints.len(), ast.constraints.len());
     }
 }

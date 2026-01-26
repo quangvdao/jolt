@@ -541,6 +541,7 @@ pub struct GtExpProver<F: JoltField> {
 
 impl<F: JoltField> GtExpProver<F> {
     /// Create a new packed GT exp prover with multiple witnesses and gamma batching
+    #[tracing::instrument(skip_all, name = "GtExpProver::new")]
     pub fn new<T: Transcript>(
         params: GtExpParams,
         witnesses: &[GtExpWitness<F>],

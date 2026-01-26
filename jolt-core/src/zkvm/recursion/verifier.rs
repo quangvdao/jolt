@@ -135,15 +135,20 @@ impl RecursionVerifier<Fq> {
         // Bind the Hyrax dense commitment into the transcript.
         //
         // Prover order: commit dense polynomial (Hyrax) → append commitment → run recursion sumchecks.
-        transcript.append_serializable(matrix_commitment);
-
-        // Initialize opening accumulator
-        let mut accumulator = VerifierOpeningAccumulator::<Fq>::new(self.input.num_vars);
-
-        // Populate accumulator with opening claims from proof
-        for (key, value) in &proof.opening_claims {
-            accumulator.openings.insert(*key, value.clone());
+        {
+            let _span = tracing::info_span!("transcript_append_commitment").entered();
+            transcript.append_serializable(matrix_commitment);
         }
+
+        // Initialize opening accumulator and populate with opening claims from proof
+        let mut accumulator = {
+            let _span = tracing::info_span!("accumulator_init").entered();
+            let mut acc = VerifierOpeningAccumulator::<Fq>::new(self.input.num_vars);
+            for (key, value) in &proof.opening_claims {
+                acc.openings.insert(*key, value.clone());
+            }
+            acc
+        };
 
         // ============ STAGE 1: Packed GT Exp ============
         let _cycle_stage1 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE1);

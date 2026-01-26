@@ -59,7 +59,7 @@ impl RecursionMetadataBuilder {
     }
 
     /// Build the metadata, extracting all necessary information
-    pub fn build(self) -> crate::zkvm::proof_serialization::RecursionConstraintMetadata {
+    pub fn build(self) -> crate::zkvm::recursion::RecursionConstraintMetadata {
         // Extract constraint types
         let constraint_types: Vec<_> = self
             .constraint_system
@@ -75,7 +75,7 @@ impl RecursionMetadataBuilder {
             );
         let dense_num_vars = layout.num_dense_vars;
 
-        crate::zkvm::proof_serialization::RecursionConstraintMetadata {
+        crate::zkvm::recursion::RecursionConstraintMetadata {
             constraint_types,
             dense_num_vars,
             gt_exp_public_inputs: self.constraint_system.gt_exp_public_inputs.clone(),

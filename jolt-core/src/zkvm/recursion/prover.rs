@@ -21,10 +21,11 @@ use crate::{
     },
     transcripts::Transcript,
     zkvm::{
-        proof_serialization::{PairingBoundary, RecursionConstraintMetadata},
+        proof_serialization::PairingBoundary,
         witness::{CommittedPolynomial, VirtualPolynomial},
     },
 };
+use crate::zkvm::recursion::RecursionConstraintMetadata;
 use crate::zkvm::proof_serialization::NonInputBaseHints;
 use ark_bn254::{Fq, Fr};
 use ark_grumpkin::Projective as GrumpkinProjective;

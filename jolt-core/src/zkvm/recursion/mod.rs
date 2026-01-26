@@ -38,6 +38,7 @@ pub mod curve;
 pub mod g1;
 pub mod g2;
 pub mod gt;
+pub mod metadata;
 pub mod pairing;
 pub mod prefix_packing;
 pub mod prover;
@@ -58,6 +59,7 @@ pub use constraints::{
 // Re-export prover/verifier
 pub use prover::{RecursionProof, RecursionProofResult, RecursionProver};
 pub use verifier::{RecursionVerifier, RecursionVerifierInput};
+pub use metadata::RecursionConstraintMetadata;
 
 // G1 exports
 pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier};

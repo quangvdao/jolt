@@ -22,12 +22,7 @@ use crate::{
     zkvm::{
         config::{OneHotConfig, ProgramMode, ReadWriteConfig},
         instruction::{CircuitFlags, InstructionFlags},
-        recursion::{
-            constraints::system::ConstraintType,
-            g1::scalar_multiplication::G1ScalarMulPublicInputs,
-            g2::scalar_multiplication::G2ScalarMulPublicInputs,
-            gt::exponentiation::GtExpPublicInputs, prover::RecursionProof,
-        },
+        recursion::{prover::RecursionProof},
         witness::{
             CommittedPolynomial, FrobeniusTerm, G1AddTerm, G1ScalarMulTerm, G2AddTerm,
             G2ScalarMulTerm, GtExpTerm, GtMulTerm, MultiMillerLoopTerm, RecursionPoly, TermEnum,
@@ -40,20 +35,6 @@ use crate::{
 };
 use ark_bn254::{Fq, Fq12};
 use ark_grumpkin::Projective as GrumpkinProjective;
-
-/// Constraint metadata for the recursion verifier
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct RecursionConstraintMetadata {
-    pub constraint_types: Vec<ConstraintType>,
-    /// Number of variables of the packed dense polynomial committed via Hyrax.
-    pub dense_num_vars: usize,
-    /// Public inputs for packed GT exp (base Fq12 and scalar bits for each GT exp)
-    pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
-    /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
-    pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
-    /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
-    pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
-}
 
 /// Boundary outputs for the final external pairing check in recursion mode.
 ///
@@ -126,29 +107,6 @@ pub struct RecursionPayload<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> 
     pub recursion_proof: RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>,
     #[doc(hidden)]
     pub _marker: std::marker::PhantomData<(F, PCS)>,
-}
-
-impl GuestSerialize for RecursionConstraintMetadata {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.constraint_types.guest_serialize(w)?;
-        self.dense_num_vars.guest_serialize(w)?;
-        self.gt_exp_public_inputs.guest_serialize(w)?;
-        self.g1_scalar_mul_public_inputs.guest_serialize(w)?;
-        self.g2_scalar_mul_public_inputs.guest_serialize(w)?;
-        Ok(())
-    }
-}
-
-impl GuestDeserialize for RecursionConstraintMetadata {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(Self {
-            constraint_types: Vec::<ConstraintType>::guest_deserialize(r)?,
-            dense_num_vars: usize::guest_deserialize(r)?,
-            gt_exp_public_inputs: Vec::<GtExpPublicInputs>::guest_deserialize(r)?,
-            g1_scalar_mul_public_inputs: Vec::<G1ScalarMulPublicInputs>::guest_deserialize(r)?,
-            g2_scalar_mul_public_inputs: Vec::<G2ScalarMulPublicInputs>::guest_deserialize(r)?,
-        })
-    }
 }
 
 impl GuestSerialize for PairingBoundary {

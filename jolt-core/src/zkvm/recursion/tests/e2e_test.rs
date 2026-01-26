@@ -87,17 +87,11 @@ fn test_recursion_snark_e2e_with_dory() {
     let num_constraints = prover.constraint_system.num_constraints();
     let num_vars = prover.constraint_system.num_vars();
     let num_s_vars = prover.constraint_system.num_s_vars();
-    let _matrix_num_vars = prover.constraint_system.matrix.num_vars;
-    let num_constraint_vars = prover.constraint_system.matrix.num_constraint_vars;
-    let num_constraints_padded = prover.constraint_system.matrix.num_constraints_padded;
+    let num_constraint_vars = prover.constraint_system.num_constraint_vars();
+    let num_constraints_padded = prover.constraint_system.num_constraints_padded();
 
     // Extract constraint types for verification
-    let constraint_types: Vec<ConstraintType> = prover
-        .constraint_system
-        .constraints
-        .iter()
-        .map(|c| c.constraint_type.clone())
-        .collect();
+    let constraint_types: Vec<ConstraintType> = prover.constraint_system.constraint_types.clone();
 
     // Determine dense_num_vars for Hyrax setup without extracting dense evals.
     let dense_num_vars =

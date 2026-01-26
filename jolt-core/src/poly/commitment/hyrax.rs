@@ -85,21 +85,28 @@ impl<G: CurveGroup> PedersenGenerators<G> {
 
 /// Hyrax commits to a multilinear polynomial by interpreting its coefficients as a
 /// matrix. Given the number of variables in the polynomial, and the desired "aspect
-/// ratio", returns the column and row size of that matrix.
+/// ratio", returns the `(L_size, R_size)` dimensions used throughout this module.
+///
+/// Concretely, we interpret the coefficients as an `L_size × R_size` matrix where:
+/// - `L_size` is the number of rows (and thus the number of row commitments),
+/// - `R_size` is the row width (and thus the length of the opening proof vector).
 pub fn matrix_dimensions(num_vars: usize, matrix_aspect_ratio: usize) -> (usize, usize) {
     if num_vars == 0 {
         panic!("Hyrax matrix_dimensions called with num_vars = 0!");
     }
 
-    let mut row_size = (num_vars / 2).pow2();
-    row_size = (row_size * matrix_aspect_ratio.sqrt()).next_power_of_two();
+    // Start from the "balanced" split and bias the final dimensions so that for odd `num_vars`,
+    // we end up with `R_size >= L_size`. This reduces the number of row commitments (group
+    // elements) at the cost of a larger opening vector (field elements).
+    let mut l_size = (num_vars / 2).pow2();
+    l_size = (l_size * matrix_aspect_ratio.sqrt()).next_power_of_two();
 
-    let right_num_vars = std::cmp::min(row_size.log_2(), num_vars - 1);
-    row_size = right_num_vars.pow2();
-    let left_num_vars = num_vars - right_num_vars;
-    let col_size = left_num_vars.pow2();
+    let l_num_vars = std::cmp::min(l_size.log_2(), num_vars - 1);
+    l_size = l_num_vars.pow2();
+    let r_num_vars = num_vars - l_num_vars;
+    let r_size = r_num_vars.pow2();
 
-    (col_size, row_size)
+    (l_size, r_size)
 }
 
 #[derive(Default, Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
@@ -167,7 +174,7 @@ where
         );
 
         let ell = n.log_2();
-        let (L_size, R_size) = matrix_dimensions(ell, 1);
+        let (L_size, R_size) = matrix_dimensions(ell, RATIO);
         assert_eq!(L_size * R_size, n);
 
         let full_rows = unpadded_len / R_size;

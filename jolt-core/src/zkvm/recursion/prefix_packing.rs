@@ -15,22 +15,10 @@
 //! Both prover and verifier can derive the exact same packing layout from public data
 //! (`constraint_types`), and the leftover region (if any) is implicitly zero.
 
-use crate::poly::dense_mlpoly::DensePolynomial;
-use crate::zkvm::recursion::constraints::system::{ConstraintSystem, ConstraintType, PolyType};
+use crate::zkvm::recursion::constraints::system::{ConstraintType, PolyType};
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-
-/// Reverse the lowest `bits` bits of `x`.
-#[inline]
-fn bit_reverse(mut x: usize, bits: usize) -> usize {
-    let mut y = 0usize;
-    for _ in 0..bits {
-        y = (y << 1) | (x & 1);
-        x >>= 1;
-    }
-    y
-}
 
 /// One packed polynomial entry: identifies the source row and where it lives in the packed table.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -175,58 +163,6 @@ impl PrefixPackingLayout {
             };
         }
         acc
-    }
-}
-
-impl ConstraintSystem {
-    /// Build the packed dense evaluation table under the given `layout`.
-    ///
-    /// NOTE: This currently extracts native prefixes out of the padded sparse matrix rows.
-    /// This is correct under the current row encoding (native values stored first, zeros after),
-    /// and will be further optimized to avoid materializing padded rows entirely.
-    pub fn build_prefix_packed_evals(&self, layout: &PrefixPackingLayout) -> Vec<Fq> {
-        let mut packed = vec![Fq::zero(); layout.packed_size()];
-        if layout.entries.is_empty() {
-            return packed;
-        }
-
-        // The underlying sparse matrix rows are stored with `matrix.num_constraint_vars` variables
-        // (currently 11). We take only the first `2^num_vars` entries as the native table.
-        for entry in &layout.entries {
-            let native_size = 1usize << entry.num_vars;
-            let dst = &mut packed[entry.offset..entry.offset + native_size];
-
-            let row = self.matrix.row_index(entry.poly_type, entry.constraint_idx);
-            let row_off = self.matrix.storage_offset(row);
-            let src = &self.matrix.evaluations[row_off..row_off + native_size];
-
-            // IMPORTANT: Sumcheck binds variables in `BindingOrder::LowToHigh` (LSB-first), and
-            // recursion Stage 2 is **suffix-aligned** in the batched sumcheck. As a result, the
-            // Stage-2 opening points for an m-var polynomial correspond to the *suffix* of the
-            // common 11-var challenge vector.
-            //
-            // For the prefix-packing Stage 3 reduction, we reverse the Stage-2 `r_x` vector before
-            // embedding it as the low bits of the packed opening point. To keep claim semantics
-            // unchanged, we also reverse the variable order of every packed block by bit-reversing
-            // its evaluation table.
-            for t in 0..native_size {
-                dst[t] = src[bit_reverse(t, entry.num_vars)];
-            }
-        }
-
-        packed
-    }
-
-    /// Convenience wrapper: build layout + packed dense polynomial evals.
-    pub fn build_prefix_packed_polynomial(&self) -> (DensePolynomial<Fq>, PrefixPackingLayout) {
-        let constraint_types: Vec<ConstraintType> = self
-            .constraints
-            .iter()
-            .map(|c| c.constraint_type.clone())
-            .collect();
-        let layout = PrefixPackingLayout::from_constraint_types(&constraint_types);
-        let evals = self.build_prefix_packed_evals(&layout);
-        (DensePolynomial::new(evals), layout)
     }
 }
 

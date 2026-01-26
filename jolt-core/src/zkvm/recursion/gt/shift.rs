@@ -123,7 +123,7 @@ pub struct GtShiftProver<F: JoltField, T: Transcript> {
 impl<F: JoltField, T: Transcript> GtShiftProver<F, T> {
     pub fn new(
         params: GtShiftParams,
-        rho_polys: Vec<Vec<F>>,
+        rho_polys: Vec<MultilinearPolynomial<F>>,
         claim_indices: Vec<usize>,
         accumulator: &ProverOpeningAccumulator<F>,
         transcript: &mut T,
@@ -136,7 +136,7 @@ impl<F: JoltField, T: Transcript> GtShiftProver<F, T> {
 
         struct ShiftEntry<F: JoltField> {
             constraint_idx: usize,
-            rho_poly: Vec<F>,
+            rho_poly: MultilinearPolynomial<F>,
             point: OpeningPoint<BIG_ENDIAN, F>,
             claimed_value: F,
         }
@@ -173,11 +173,10 @@ impl<F: JoltField, T: Transcript> GtShiftProver<F, T> {
             );
         }
 
-        // Convert rho polynomials
-        let rho_polys = entries
-            .iter()
-            .map(|entry| MultilinearPolynomial::from(entry.rho_poly.clone()))
-            .collect::<Vec<_>>();
+        // Extract rho polynomials and claimed values in the sorted order.
+        let claimed_values: Vec<F> = entries.iter().map(|entry| entry.claimed_value).collect();
+        let rho_polys: Vec<MultilinearPolynomial<F>> =
+            entries.into_iter().map(|entry| entry.rho_poly).collect();
 
         // Eq eval tables expect MSB-first ordering; sumcheck challenges are LSB-first.
         let r_s: Vec<_> = point.r[..7].to_vec();
@@ -193,12 +192,6 @@ impl<F: JoltField, T: Transcript> GtShiftProver<F, T> {
         // Same endianness convention as above.
         let eq_x_evals = eq_lsb_evals::<F>(&r_x);
         let eq_x_poly = MultilinearPolynomial::from(eq_x_evals);
-
-        // Collect all claimed values in the same order as rho polynomials.
-        let claimed_values = entries
-            .into_iter()
-            .map(|entry| entry.claimed_value)
-            .collect();
 
         Self {
             params,

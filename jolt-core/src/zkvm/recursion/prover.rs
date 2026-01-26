@@ -32,14 +32,12 @@ use ark_ff::Zero;
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::backends::arkworks::ArkGT;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::zkvm::recursion::DoryMatrixBuilder;
 use dory::backends::arkworks::BN254;
 use dory::recursion::{ast::AstGraph, WitnessCollection};
-use jolt_optimizations::{fq12_to_multilinear_evals, get_g_mle};
+use jolt_optimizations::get_g_mle;
 
 use super::{
     constraints::system::{ConstraintSystem, PolyType},
@@ -47,7 +45,7 @@ use super::{
         addition::{G1AddParams, G1AddProver, G1AddProverSpec},
         scalar_multiplication::{
             G1ScalarMulConstraintPolynomials, G1ScalarMulParams, G1ScalarMulProver,
-            G1ScalarMulProverSpec, G1ScalarMulPublicInputs,
+            G1ScalarMulProverSpec,
         },
         shift::{g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG2ScalarMulProver},
     },
@@ -55,16 +53,17 @@ use super::{
         addition::{G2AddParams, G2AddProver, G2AddProverSpec},
         scalar_multiplication::{
             G2ScalarMulConstraintPolynomials, G2ScalarMulParams, G2ScalarMulProver,
-            G2ScalarMulProverSpec, G2ScalarMulPublicInputs,
+            G2ScalarMulProverSpec,
         },
     },
     gt::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionProver},
-        exponentiation::{GtExpParams, GtExpProver, GtExpPublicInputs, GtExpWitness},
+        exponentiation::{GtExpParams, GtExpProver},
         multiplication::{GtMulConstraintPolynomials, GtMulParams, GtMulProver, GtMulProverSpec},
         shift::{GtShiftParams, GtShiftProver},
     },
     virtualization::extract_virtual_claims_from_accumulator,
+    witness_generation,
 };
 use crate::poly::commitment::dory::{derive_from_dory_ast, recursion::JoltWitness};
 use crate::poly::rlc_utils::compute_rlc_coefficients;
@@ -173,6 +172,10 @@ pub(crate) struct SumcheckPhaseOutput<T: Transcript> {
 pub struct RecursionProver<F: JoltField = Fq> {
     /// The constraint system containing all constraints and witness data
     pub constraint_system: ConstraintSystem,
+    /// Cached prefix-packed dense polynomial (emitted from stores).
+    pub(crate) dense_poly_cache: Option<DensePolynomial<Fq>>,
+    /// Cached prefix-packing layout (publicly derivable from `constraint_types`).
+    pub(crate) prefix_layout_cache: Option<PrefixPackingLayout>,
     /// AST graph for wiring constraints (optional, only present when using AST-enabled mode)
     pub ast: Option<AstGraph<BN254>>,
     /// Phantom for field type
@@ -651,6 +654,8 @@ impl RecursionProver<Fq> {
 
         Ok(Self {
             constraint_system,
+            dense_poly_cache: None,
+            prefix_layout_cache: None,
             ast: None,
             _marker: std::marker::PhantomData,
         })
@@ -688,259 +693,7 @@ impl RecursionProver<Fq> {
         combine_witness: Option<&GTCombineWitness>,
         g_poly: DensePolynomial<Fq>,
     ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
-        // Constraint-family toggles (useful to isolate failures).
-        // Defaults enable the full constraint set; disable families by setting env vars to "0".
-        let env_flag_default = |name: &str, default: bool| -> bool {
-            std::env::var(name)
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(default)
-        };
-        let enable_gt_mul = env_flag_default("JOLT_RECURSION_ENABLE_GT_MUL", true);
-        let enable_g1_scalar_mul = env_flag_default("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL", true);
-        let enable_g2_scalar_mul = env_flag_default("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL", true);
-        let enable_g1_add = env_flag_default("JOLT_RECURSION_ENABLE_G1_ADD", true);
-        let enable_g2_add = env_flag_default("JOLT_RECURSION_ENABLE_G2_ADD", true);
-        #[cfg(feature = "experimental-pairing-recursion")]
-        let enable_pairing = env_flag_default("JOLT_RECURSION_ENABLE_PAIRING", true);
-
-        // Calculate expected constraint count for pre-allocation
-        let expected_constraints = witness_collection.gt_exp.len()
-            + witness_collection.gt_mul.len()
-            + witness_collection.g1_scalar_mul.len()
-            + witness_collection.g2_scalar_mul.len()
-            + witness_collection.g1_add.len()
-            + witness_collection.g2_add.len()
-            + combine_witness.map_or(0, |cw| {
-                cw.exp_witnesses.len() + cw.mul_layers.iter().map(|l| l.len()).sum::<usize>()
-            });
-
-        // Use DoryMatrixBuilder with 11 variables and pre-allocated capacity
-        let mut builder = DoryMatrixBuilder::with_capacity(11, expected_constraints);
-
-        // Build packed GT exp witnesses and add to matrix
-        tracing::info!(
-            "[build_constraint_system] Processing {} direct GT exp witnesses",
-            witness_collection.gt_exp.len()
-        );
-        let gt_exp_span = tracing::info_span!(
-            "build_gt_exp_witnesses",
-            count = witness_collection.gt_exp.len()
-        )
-        .entered();
-        let mut g1_scalar_mul_public_inputs =
-            Vec::with_capacity(witness_collection.g1_scalar_mul.len());
-        let mut g2_scalar_mul_public_inputs =
-            Vec::with_capacity(witness_collection.g2_scalar_mul.len());
-
-        // Sort once, then parallelize expensive witness preparation
-        let mut gt_exp_items: Vec<_> = witness_collection.gt_exp.iter().collect();
-        gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
-
-        // Parallel computation of packed witnesses (expensive work)
-        let prepared_gt_exp: Vec<_> = gt_exp_items
-            .par_iter()
-            .map(|(_op_id, witness)| {
-                // Convert base ArkGT to 4-var MLE (expensive)
-                let base_mle = fq12_to_multilinear_evals(&witness.base);
-                let base2 = witness.base * witness.base;
-                let base2_mle = fq12_to_multilinear_evals(&base2);
-                let base3 = base2 * witness.base;
-                let base3_mle = fq12_to_multilinear_evals(&base3);
-
-                // Create packed witness (expensive)
-                let packed = GtExpWitness::from_steps(
-                    &witness.rho_mles,
-                    &witness.quotient_mles,
-                    &witness.bits,
-                    &base_mle,
-                    &base2_mle,
-                    &base3_mle,
-                );
-
-                let public_input = GtExpPublicInputs::new(witness.base, witness.bits.clone());
-                (packed, public_input)
-            })
-            .collect();
-
-        // Sequential addition to builder (requires mutable state)
-        let mut gt_exp_witnesses = Vec::with_capacity(prepared_gt_exp.len());
-        let mut gt_exp_public_inputs = Vec::with_capacity(prepared_gt_exp.len());
-        for (packed, public_input) in prepared_gt_exp {
-            builder.add_gt_exp_witness(&packed);
-            gt_exp_witnesses.push(packed);
-            gt_exp_public_inputs.push(public_input);
-        }
-        drop(gt_exp_span);
-
-        // Add GT mul witnesses (optional) - parallelized preparation
-        if enable_gt_mul {
-            let gt_mul_span = tracing::info_span!(
-                "add_gt_mul_witnesses",
-                count = witness_collection.gt_mul.len()
-            )
-            .entered();
-            let mut gt_mul_items: Vec<_> = witness_collection.gt_mul.iter().collect();
-            gt_mul_items.sort_by_key(|(op_id, _)| *op_id);
-
-            // Parallel preparation of GT mul witnesses (expensive fq12_to_multilinear_evals)
-            let num_constraint_vars = 11; // Same as builder
-            let prepared_gt_mul: Vec<_> = gt_mul_items
-                .par_iter()
-                .map(|(_op_id, witness)| {
-                    DoryMatrixBuilder::prepare_gt_mul_witness(witness, num_constraint_vars)
-                })
-                .collect();
-
-            // Sequential addition to builder (requires mutable state)
-            for prepared in prepared_gt_mul {
-                builder.add_prepared_gt_mul_witness(prepared);
-            }
-            drop(gt_mul_span);
-        }
-
-        // Add G1 scalar mul witnesses (optional)
-        if enable_g1_scalar_mul {
-            let g1_scalar_mul_span = tracing::info_span!(
-                "add_g1_scalar_mul_witnesses",
-                count = witness_collection.g1_scalar_mul.len()
-            )
-            .entered();
-            let mut g1_items: Vec<_> = witness_collection.g1_scalar_mul.iter().collect();
-            g1_items.sort_by_key(|(op_id, _)| *op_id);
-            for (_op_id, witness) in g1_items {
-                builder.add_g1_scalar_mul_witness(witness);
-                g1_scalar_mul_public_inputs.push(G1ScalarMulPublicInputs::new(witness.scalar));
-            }
-            drop(g1_scalar_mul_span);
-        }
-
-        // Add G2 scalar mul witnesses (optional)
-        if enable_g2_scalar_mul {
-            let g2_scalar_mul_span = tracing::info_span!(
-                "add_g2_scalar_mul_witnesses",
-                count = witness_collection.g2_scalar_mul.len()
-            )
-            .entered();
-            let mut g2_items: Vec<_> = witness_collection.g2_scalar_mul.iter().collect();
-            g2_items.sort_by_key(|(op_id, _)| *op_id);
-            for (_op_id, witness) in g2_items {
-                builder.add_g2_scalar_mul_witness(witness);
-                g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(witness.scalar));
-            }
-            drop(g2_scalar_mul_span);
-        }
-
-        // Add G1 add witnesses (optional; into the matrix)
-        if enable_g1_add {
-            let g1_add_span = tracing::info_span!(
-                "add_g1_add_witnesses",
-                count = witness_collection.g1_add.len()
-            )
-            .entered();
-            let mut g1_add_items: Vec<_> = witness_collection.g1_add.iter().collect();
-            g1_add_items.sort_by_key(|(op_id, _)| *op_id);
-            for (_op_id, witness) in g1_add_items {
-                builder.add_g1_add_witness(witness);
-            }
-            drop(g1_add_span);
-        }
-
-        // Add G2 add witnesses (optional; into the matrix)
-        if enable_g2_add {
-            let g2_add_span = tracing::info_span!(
-                "add_g2_add_witnesses",
-                count = witness_collection.g2_add.len()
-            )
-            .entered();
-            let mut g2_add_items: Vec<_> = witness_collection.g2_add.iter().collect();
-            g2_add_items.sort_by_key(|(op_id, _)| *op_id);
-            for (_op_id, witness) in g2_add_items {
-                builder.add_g2_add_witness(witness);
-            }
-            drop(g2_add_span);
-        }
-
-        // Add pairing (Multi-Miller loop) witnesses (experimental; into the matrix)
-        #[cfg(feature = "experimental-pairing-recursion")]
-        if enable_pairing {
-            let pairing_span = tracing::info_span!(
-                "add_pairing_witnesses",
-                count = witness_collection.pairing.len(),
-                multi_count = witness_collection.multi_pairing.len()
-            )
-            .entered();
-
-            let mut pairing_items: Vec<_> = witness_collection.pairing.iter().collect();
-            pairing_items.sort_by_key(|(op_id, _)| *op_id);
-            for (_op_id, witness) in pairing_items {
-                builder.add_multi_miller_loop_witness(witness);
-            }
-
-            let mut multi_pairing_items: Vec<_> = witness_collection.multi_pairing.iter().collect();
-            multi_pairing_items.sort_by_key(|(op_id, _)| *op_id);
-            for (_op_id, witness) in multi_pairing_items {
-                builder.add_multi_miller_loop_witness(witness);
-            }
-
-            drop(pairing_span);
-        }
-
-        // Add combine_commitments witnesses (homomorphic combine offloading)
-        if let Some(cw) = combine_witness {
-            let combine_span = tracing::info_span!(
-                "add_homomorphic_combine_witnesses",
-                gt_exp_count = cw.exp_witnesses.len(),
-                gt_mul_count = cw.mul_layers.iter().map(|l| l.len()).sum::<usize>()
-            )
-            .entered();
-
-            let pre_count = builder.constraint_count();
-            tracing::info!(
-                "[Homomorphic Combine] Adding {} GT exp + {} GT mul constraints (pre-count: {})",
-                cw.exp_witnesses.len(),
-                cw.mul_layers.iter().map(|l| l.len()).sum::<usize>(),
-                pre_count
-            );
-
-            // Also collect public inputs for the combine witnesses
-            for exp_wit in &cw.exp_witnesses {
-                gt_exp_public_inputs
-                    .push(GtExpPublicInputs::new(exp_wit.base, exp_wit.bits.clone()));
-            }
-
-            let combined_packed_witnesses = builder.add_combine_witness(cw);
-            tracing::info!(
-                "[Homomorphic Combine] Post-add constraint count: {}, packed witnesses: {}",
-                builder.constraint_count(),
-                combined_packed_witnesses.len()
-            );
-            // Add the combined witnesses to our list
-            tracing::info!(
-                "[Homomorphic Combine] Before extend: {} witnesses, adding {} more",
-                gt_exp_witnesses.len(),
-                combined_packed_witnesses.len()
-            );
-            gt_exp_witnesses.extend(combined_packed_witnesses);
-            drop(combine_span);
-        }
-
-        let build_matrix_span = tracing::info_span!("build_matrix").entered();
-        let (matrix, constraints) = builder.build();
-        drop(build_matrix_span);
-
-        Ok(ConstraintSystem {
-            constraints,
-            matrix,
-            g_poly,
-            gt_exp_witnesses,
-            gt_exp_public_inputs,
-            g1_scalar_mul_public_inputs,
-            g2_scalar_mul_public_inputs,
-            // G1/G2 add constraints are stored in the matrix; Stage 1 extracts them from the matrix.
-            g1_add_witnesses: Vec::new(),
-            g2_add_witnesses: Vec::new(),
-        })
+        witness_generation::plan_constraint_system(witness_collection, combine_witness, g_poly)
     }
 }
 
@@ -951,13 +704,26 @@ impl RecursionProver<Fq> {
         transcript: &mut T,
         prover_setup: &PedersenGenerators<GrumpkinProjective>,
     ) -> Result<HyraxPolyCommitPhaseOutput, Box<dyn std::error::Error>> {
-        // ============ BUILD PREFIX-PACKED DENSE POLYNOMIAL ============
+        // ============ EMIT PREFIX-PACKED DENSE POLYNOMIAL ============
         // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
-        let (dense_poly, prefix_layout) = tracing::info_span!("build_prefix_packed_polynomial")
-            .in_scope(|| {
-                tracing::info!("Building prefix-packed dense polynomial");
-                self.constraint_system.build_prefix_packed_polynomial()
-            });
+        if self.dense_poly_cache.is_none() || self.prefix_layout_cache.is_none() {
+            let (dense_poly, prefix_layout) =
+                tracing::info_span!("emit_prefix_packed_dense").in_scope(|| {
+                    tracing::info!("Emitting prefix-packed dense polynomial");
+                    witness_generation::emit_dense(&self.constraint_system)
+                });
+            self.dense_poly_cache = Some(dense_poly);
+            self.prefix_layout_cache = Some(prefix_layout);
+        }
+
+        let dense_poly = self
+            .dense_poly_cache
+            .as_ref()
+            .expect("dense_poly_cache must be populated");
+        let prefix_layout = self
+            .prefix_layout_cache
+            .as_ref()
+            .expect("prefix_layout_cache must be populated");
 
         let dense_num_vars = prefix_layout.num_dense_vars;
         let unpadded_len = prefix_layout.unpadded_len();
@@ -983,12 +749,7 @@ impl RecursionProver<Fq> {
         // ============ BUILD METADATA (for verifier) ============
         let metadata = tracing::info_span!("build_constraint_metadata").in_scope(|| {
             tracing::info!("Building constraint metadata for verifier");
-            let constraint_types: Vec<_> = self
-                .constraint_system
-                .constraints
-                .iter()
-                .map(|c| c.constraint_type.clone())
-                .collect();
+            let constraint_types = self.constraint_system.constraint_types.clone();
 
             RecursionConstraintMetadata {
                 constraint_types,
@@ -1007,13 +768,13 @@ impl RecursionProver<Fq> {
 
         // Hyrax commit (optimized): avoid MSM work on zero-padded suffix.
         let dense_commitment = HyraxCommitment::<1, GrumpkinProjective>::commit_with_unpadded_len(
-            &dense_poly,
+            dense_poly,
             prover_setup,
             unpadded_len,
         );
 
         // Convert to multilinear polynomial for downstream sumchecks / opening proof.
-        let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z);
+        let dense_mlpoly = MultilinearPolynomial::from(dense_poly.evals());
         tracing::info!(
             "Hyrax commitment terms: {}, unpadded_len: {}",
             dense_mlpoly.len(),
@@ -1063,8 +824,8 @@ impl RecursionProver<Fq> {
         // (`round_offset = max_num_rounds - num_rounds`), so shorter points are suffixes of longer
         // ones in the batched challenge order. We therefore interpret `r_x` as the **suffix** of
         // the Stage-2 challenge vector.
-        let k = self.constraint_system.matrix.num_constraint_index_vars;
-        let num_constraint_vars = self.constraint_system.matrix.num_constraint_vars;
+        let k = self.constraint_system.num_constraints_padded().trailing_zeros() as usize;
+        let num_constraint_vars = self.constraint_system.num_constraint_vars();
         if r_stage2.len() != num_constraint_vars && r_stage2.len() < num_constraint_vars + k {
             return Err(format!(
                 "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (num_constraint_vars + k)",
@@ -1148,8 +909,21 @@ impl RecursionProver<Fq> {
 
         // Packed GT exp uses layout x * 128 + s (s in low bits), so g needs replication
         // across the step variables.
-        let g_4var: Vec<Fq> = self.constraint_system.g_poly.evals()[0..16].to_vec();
-        let g_replicated = DoryMatrixBuilder::pad_4var_to_11var_replicated(&g_4var);
+        fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
+            debug_assert_eq!(mle_4var.len(), 16, "Input must be a 4-variable MLE");
+            let mut mle_11var = vec![Fq::zero(); 2048];
+            // index = x * 128 + s (x in high 4 bits, s in low 7 bits)
+            for x in 0..16 {
+                let g_x = mle_4var[x];
+                for s in 0..128 {
+                    mle_11var[x * 128 + s] = g_x;
+                }
+            }
+            mle_11var
+        }
+
+        let g_4var: Vec<Fq> = self.constraint_system.g_poly.evals();
+        let g_replicated = pad_4var_to_11var_replicated(&g_4var);
         let g_poly_replicated_f = DensePolynomial::new(g_replicated);
 
         let params = GtExpParams::new();
@@ -1210,11 +984,11 @@ impl RecursionProver<Fq> {
             let claim_indices: Vec<usize> = (0..num_gt_exp).collect();
 
             if enable_shift_rho {
-                let rho_polys: Vec<Vec<Fq>> = self
+                let rho_polys: Vec<MultilinearPolynomial<Fq>> = self
                     .constraint_system
                     .gt_exp_witnesses
                     .iter()
-                    .map(|w| w.rho_packed.clone())
+                    .map(|w| MultilinearPolynomial::from(w.rho_packed.clone()))
                     .collect();
                 let shift_params = GtShiftParams::new(num_gt_exp);
                 let shift_prover = GtShiftProver::<Fq, T>::new(
@@ -1261,22 +1035,20 @@ impl RecursionProver<Fq> {
         let g_poly_f = self.constraint_system.g_poly.clone();
 
         // GT mul
-        let gt_mul_constraints_tuples = self.constraint_system.extract_gt_mul_constraints();
-        if !gt_mul_constraints_tuples.is_empty() {
-            let constraint_indices: Vec<usize> = (0..gt_mul_constraints_tuples.len()).collect();
-            let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> =
-                gt_mul_constraints_tuples
-                    .into_iter()
-                    .map(
-                        |(idx, lhs, rhs, result, quotient)| GtMulConstraintPolynomials {
-                            lhs,
-                            rhs,
-                            result,
-                            quotient,
-                            constraint_index: idx,
-                        },
-                    )
-                    .collect();
+        let gt_mul_rows = &self.constraint_system.gt_mul_rows;
+        if !gt_mul_rows.is_empty() {
+            let constraint_indices: Vec<usize> = (0..gt_mul_rows.len()).collect();
+            let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> = gt_mul_rows
+                .iter()
+                .enumerate()
+                .map(|(i, rows)| GtMulConstraintPolynomials {
+                    lhs: rows.lhs.clone(),
+                    rhs: rows.rhs.clone(),
+                    result: rows.result.clone(),
+                    quotient: rows.quotient.clone(),
+                    constraint_index: i,
+                })
+                .collect();
 
             let params = GtMulParams::new(gt_mul_constraints_fq.len());
             let spec = GtMulProverSpec::new(params, gt_mul_constraints_fq, g_poly_f.clone());
@@ -1285,21 +1057,19 @@ impl RecursionProver<Fq> {
         }
 
         // G1 scalar mul
-        let g1_scalar_mul_constraints_tuples =
-            self.constraint_system.extract_g1_scalar_mul_constraints();
-        if !g1_scalar_mul_constraints_tuples.is_empty() {
+        let g1_rows = &self.constraint_system.g1_scalar_mul_rows;
+        if !g1_rows.is_empty() {
             debug_assert_eq!(
                 self.constraint_system.g1_scalar_mul_public_inputs.len(),
-                g1_scalar_mul_constraints_tuples.len(),
+                g1_rows.len(),
                 "ConstraintSystem.g1_scalar_mul_public_inputs must match extracted G1 scalar-mul constraints"
             );
 
             if enable_shift_g1_scalar_mul {
                 let mut pairs: Vec<(VirtualPolynomial, Vec<Fq>, VirtualPolynomial, Vec<Fq>)> =
-                    Vec::with_capacity(g1_scalar_mul_constraints_tuples.len() * 2);
+                    Vec::with_capacity(g1_rows.len() * 2);
 
-                for w in &g1_scalar_mul_constraints_tuples {
-                    let i = w.constraint_index;
+                for (i, w) in g1_rows.iter().enumerate() {
                     let xa = VirtualPolynomial::g1_scalar_mul_xa(i);
                     let xa_next = VirtualPolynomial::g1_scalar_mul_xa_next(i);
                     pairs.push((xa, w.x_a.clone(), xa_next, w.x_a_next.clone()));
@@ -1316,21 +1086,20 @@ impl RecursionProver<Fq> {
             }
 
             let mut g1_scalar_mul_constraints: Vec<G1ScalarMulConstraintPolynomials<Fq>> =
-                Vec::with_capacity(g1_scalar_mul_constraints_tuples.len());
-            let mut g1_scalar_mul_base_points: Vec<(Fq, Fq)> =
-                Vec::with_capacity(g1_scalar_mul_constraints_tuples.len());
+                Vec::with_capacity(g1_rows.len());
+            let mut g1_scalar_mul_base_points: Vec<(Fq, Fq)> = Vec::with_capacity(g1_rows.len());
 
-            for w in g1_scalar_mul_constraints_tuples {
+            for (i, w) in g1_rows.iter().enumerate() {
                 g1_scalar_mul_constraints.push(G1ScalarMulConstraintPolynomials {
-                    x_a: w.x_a,
-                    y_a: w.y_a,
-                    x_t: w.x_t,
-                    y_t: w.y_t,
-                    x_a_next: w.x_a_next,
-                    y_a_next: w.y_a_next,
-                    t_indicator: w.t_indicator,
-                    a_indicator: w.a_indicator,
-                    constraint_index: w.constraint_index,
+                    x_a: w.x_a.clone(),
+                    y_a: w.y_a.clone(),
+                    x_t: w.x_t.clone(),
+                    y_t: w.y_t.clone(),
+                    x_a_next: w.x_a_next.clone(),
+                    y_a_next: w.y_a_next.clone(),
+                    t_indicator: w.t_indicator.clone(),
+                    a_indicator: w.a_indicator.clone(),
+                    constraint_index: i,
                 });
                 g1_scalar_mul_base_points.push(w.base_point);
             }
@@ -1347,20 +1116,18 @@ impl RecursionProver<Fq> {
         }
 
         // G2 scalar mul
-        let g2_scalar_mul_constraints_tuples =
-            self.constraint_system.extract_g2_scalar_mul_constraints();
-        if !g2_scalar_mul_constraints_tuples.is_empty() {
+        let g2_rows = &self.constraint_system.g2_scalar_mul_rows;
+        if !g2_rows.is_empty() {
             debug_assert_eq!(
                 self.constraint_system.g2_scalar_mul_public_inputs.len(),
-                g2_scalar_mul_constraints_tuples.len(),
+                g2_rows.len(),
                 "ConstraintSystem.g2_scalar_mul_public_inputs must match extracted G2 scalar-mul constraints"
             );
 
             if enable_shift_g2_scalar_mul {
                 let mut pairs: Vec<(VirtualPolynomial, Vec<Fq>, VirtualPolynomial, Vec<Fq>)> =
-                    Vec::with_capacity(g2_scalar_mul_constraints_tuples.len() * 4);
-                for w in &g2_scalar_mul_constraints_tuples {
-                    let i = w.constraint_index;
+                    Vec::with_capacity(g2_rows.len() * 4);
+                for (i, w) in g2_rows.iter().enumerate() {
                     let xa_c0 = VirtualPolynomial::g2_scalar_mul_xa_c0(i);
                     let xa_next_c0 = VirtualPolynomial::g2_scalar_mul_xa_next_c0(i);
                     pairs.push((xa_c0, w.x_a_c0.clone(), xa_next_c0, w.x_a_next_c0.clone()));
@@ -1385,27 +1152,26 @@ impl RecursionProver<Fq> {
             }
 
             let mut g2_scalar_mul_constraints: Vec<G2ScalarMulConstraintPolynomials<Fq>> =
-                Vec::with_capacity(g2_scalar_mul_constraints_tuples.len());
-            let mut g2_scalar_mul_base_points =
-                Vec::with_capacity(g2_scalar_mul_constraints_tuples.len());
+                Vec::with_capacity(g2_rows.len());
+            let mut g2_scalar_mul_base_points = Vec::with_capacity(g2_rows.len());
 
-            for w in g2_scalar_mul_constraints_tuples {
+            for (i, w) in g2_rows.iter().enumerate() {
                 g2_scalar_mul_constraints.push(G2ScalarMulConstraintPolynomials {
-                    x_a_c0: w.x_a_c0,
-                    x_a_c1: w.x_a_c1,
-                    y_a_c0: w.y_a_c0,
-                    y_a_c1: w.y_a_c1,
-                    x_t_c0: w.x_t_c0,
-                    x_t_c1: w.x_t_c1,
-                    y_t_c0: w.y_t_c0,
-                    y_t_c1: w.y_t_c1,
-                    x_a_next_c0: w.x_a_next_c0,
-                    x_a_next_c1: w.x_a_next_c1,
-                    y_a_next_c0: w.y_a_next_c0,
-                    y_a_next_c1: w.y_a_next_c1,
-                    t_indicator: w.t_indicator,
-                    a_indicator: w.a_indicator,
-                    constraint_index: w.constraint_index,
+                    x_a_c0: w.x_a_c0.clone(),
+                    x_a_c1: w.x_a_c1.clone(),
+                    y_a_c0: w.y_a_c0.clone(),
+                    y_a_c1: w.y_a_c1.clone(),
+                    x_t_c0: w.x_t_c0.clone(),
+                    x_t_c1: w.x_t_c1.clone(),
+                    y_t_c0: w.y_t_c0.clone(),
+                    y_t_c1: w.y_t_c1.clone(),
+                    x_a_next_c0: w.x_a_next_c0.clone(),
+                    x_a_next_c1: w.x_a_next_c1.clone(),
+                    y_a_next_c0: w.y_a_next_c0.clone(),
+                    y_a_next_c1: w.y_a_next_c1.clone(),
+                    t_indicator: w.t_indicator.clone(),
+                    a_indicator: w.a_indicator.clone(),
+                    constraint_index: i,
                 });
                 g2_scalar_mul_base_points.push(w.base_point);
             }
@@ -1422,8 +1188,29 @@ impl RecursionProver<Fq> {
         }
 
         // G1 add
-        let g1_add_constraints = self.constraint_system.extract_g1_add_constraints();
-        if !g1_add_constraints.is_empty() {
+        let g1_add_rows = &self.constraint_system.g1_add_rows;
+        if !g1_add_rows.is_empty() {
+            let g1_add_constraints: Vec<crate::zkvm::recursion::g1::addition::G1AddWitness<Fq>> =
+                g1_add_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(constraint_index, w)| crate::zkvm::recursion::g1::addition::G1AddWitness {
+                        x_p: vec![w.x_p],
+                        y_p: vec![w.y_p],
+                        ind_p: vec![w.ind_p],
+                        x_q: vec![w.x_q],
+                        y_q: vec![w.y_q],
+                        ind_q: vec![w.ind_q],
+                        x_r: vec![w.x_r],
+                        y_r: vec![w.y_r],
+                        ind_r: vec![w.ind_r],
+                        lambda: vec![w.lambda],
+                        inv_delta_x: vec![w.inv_delta_x],
+                        is_double: vec![w.is_double],
+                        is_inverse: vec![w.is_inverse],
+                        constraint_index,
+                    })
+                    .collect();
             // NOTE: The fused G1Add sumcheck exists (see `g1::fused_addition`) but is intentionally
             // NOT wired into the default prover pipeline right now.
             let params = G1AddParams::new(g1_add_constraints.len());
@@ -1433,8 +1220,37 @@ impl RecursionProver<Fq> {
         }
 
         // G2 add
-        let g2_add_constraints = self.constraint_system.extract_g2_add_constraints();
-        if !g2_add_constraints.is_empty() {
+        let g2_add_rows = &self.constraint_system.g2_add_rows;
+        if !g2_add_rows.is_empty() {
+            let g2_add_constraints: Vec<crate::zkvm::recursion::g2::addition::G2AddWitness<Fq>> =
+                g2_add_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(constraint_index, w)| crate::zkvm::recursion::g2::addition::G2AddWitness {
+                        x_p_c0: vec![w.x_p_c0],
+                        x_p_c1: vec![w.x_p_c1],
+                        y_p_c0: vec![w.y_p_c0],
+                        y_p_c1: vec![w.y_p_c1],
+                        ind_p: vec![w.ind_p],
+                        x_q_c0: vec![w.x_q_c0],
+                        x_q_c1: vec![w.x_q_c1],
+                        y_q_c0: vec![w.y_q_c0],
+                        y_q_c1: vec![w.y_q_c1],
+                        ind_q: vec![w.ind_q],
+                        x_r_c0: vec![w.x_r_c0],
+                        x_r_c1: vec![w.x_r_c1],
+                        y_r_c0: vec![w.y_r_c0],
+                        y_r_c1: vec![w.y_r_c1],
+                        ind_r: vec![w.ind_r],
+                        lambda_c0: vec![w.lambda_c0],
+                        lambda_c1: vec![w.lambda_c1],
+                        inv_delta_x_c0: vec![w.inv_delta_x_c0],
+                        inv_delta_x_c1: vec![w.inv_delta_x_c1],
+                        is_double: vec![w.is_double],
+                        is_inverse: vec![w.is_inverse],
+                        constraint_index,
+                    })
+                    .collect();
             let params = G2AddParams::new(g2_add_constraints.len());
             let (spec, constraint_indices) = G2AddProverSpec::new(params, g2_add_constraints);
             let prover = G2AddProver::from_spec(spec, constraint_indices, transcript);
@@ -1444,59 +1260,8 @@ impl RecursionProver<Fq> {
         // Multi-Miller loop (pairing Miller loop) + shift chaining (experimental)
         #[cfg(feature = "experimental-pairing-recursion")]
         {
-            let mml_constraints = self
-                .constraint_system
-                .extract_multi_miller_loop_constraints();
-            if !mml_constraints.is_empty() {
-                if enable_shift_multi_miller_loop {
-                    let mut pairs: Vec<(VirtualPolynomial, Vec<Fq>, VirtualPolynomial, Vec<Fq>)> =
-                        Vec::with_capacity(mml_constraints.len() * 5);
-                    for w in &mml_constraints {
-                        let i = w.constraint_index;
-                        pairs.push((
-                            VirtualPolynomial::multi_miller_loop_f(i),
-                            w.f.clone(),
-                            VirtualPolynomial::multi_miller_loop_f_next(i),
-                            w.f_next.clone(),
-                        ));
-                        pairs.push((
-                            VirtualPolynomial::multi_miller_loop_t_x_c0(i),
-                            w.t_x_c0.clone(),
-                            VirtualPolynomial::multi_miller_loop_t_x_c0_next(i),
-                            w.t_x_c0_next.clone(),
-                        ));
-                        pairs.push((
-                            VirtualPolynomial::multi_miller_loop_t_x_c1(i),
-                            w.t_x_c1.clone(),
-                            VirtualPolynomial::multi_miller_loop_t_x_c1_next(i),
-                            w.t_x_c1_next.clone(),
-                        ));
-                        pairs.push((
-                            VirtualPolynomial::multi_miller_loop_t_y_c0(i),
-                            w.t_y_c0.clone(),
-                            VirtualPolynomial::multi_miller_loop_t_y_c0_next(i),
-                            w.t_y_c0_next.clone(),
-                        ));
-                        pairs.push((
-                            VirtualPolynomial::multi_miller_loop_t_y_c1(i),
-                            w.t_y_c1.clone(),
-                            VirtualPolynomial::multi_miller_loop_t_y_c1_next(i),
-                            w.t_y_c1_next.clone(),
-                        ));
-                    }
-
-                    let shift_params = ShiftMultiMillerLoopParams::new(pairs.len());
-                    let shift_prover =
-                        ShiftMultiMillerLoopProver::<Fq, T>::new(shift_params, pairs, transcript);
-                    provers.push(Box::new(shift_prover));
-                }
-
-                let params = MultiMillerLoopParams::new(mml_constraints.len());
-                let (spec, constraint_indices) =
-                    MultiMillerLoopProverSpec::new(params, mml_constraints);
-                let prover = MultiMillerLoopProver::from_spec(spec, constraint_indices, transcript);
-                provers.push(Box::new(prover));
-            }
+            // TODO: wire up pairing recursion native stores in the streaming pipeline.
+            let _ = enable_shift_multi_miller_loop;
         }
 
         // TODO: Add wiring/boundary constraints sumcheck (AST-driven).
@@ -1526,9 +1291,6 @@ impl RecursionProver<Fq> {
         metadata: &RecursionConstraintMetadata,
         r_x: &[<Fq as JoltField>::Challenge],
     ) -> Result<Fq, Box<dyn std::error::Error>> {
-        // We no longer need the sparse matrix after Stage 2 (the PCS commitment is already bound).
-        let _dropped_matrix_evals = std::mem::take(&mut self.constraint_system.matrix.evaluations);
-
         // Derive the public packing layout.
         let layout = PrefixPackingLayout::from_constraint_types(&metadata.constraint_types);
         if layout.num_dense_vars != metadata.dense_num_vars {

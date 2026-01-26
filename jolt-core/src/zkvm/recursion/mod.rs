@@ -47,14 +47,16 @@ pub mod utils;
 pub mod verifier;
 pub mod virtualization;
 pub mod witness;
+pub mod witness_generation;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export constraint types
 pub use constraints::{
-    ConstraintSystem, ConstraintSystemConfig, ConstraintType, DoryMatrixBuilder, PolyType,
-    PreparedGtMulWitness, RecursionMetadataBuilder, CONFIG,
+    ConstraintLocator, ConstraintSystem, ConstraintSystemConfig, ConstraintType, G1AddNative,
+    G1ScalarMulNative, G2AddNative, G2ScalarMulNative, GtMulNativeRows, PolyType,
+    RecursionMatrixShape, RecursionMetadataBuilder, CONFIG,
 };
 
 // Re-export prover/verifier

@@ -807,9 +807,6 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
         &mut prover_transcript,
     );
 
-    let gamma = Fq::rand(&mut rng);
-    let delta = Fq::rand(&mut rng);
-
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
 
     let ark_proof = ArkDoryProof::from(opening_proof);
@@ -822,8 +819,6 @@ fn test_sparse_dense_bijection_with_real_dory_witness() {
         &point_challenges,
         &evaluation,
         &ark_commitment,
-        gamma,
-        delta,
     )
     .expect("Failed to create recursion prover");
 

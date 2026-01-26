@@ -2775,14 +2775,17 @@ impl ConstraintSystem {
     ///
     /// Takes only x variables and evaluates F(x) = Σ_i γ^i * C_i(x)
     /// This is used in the GT exponentiation sumcheck.
-    pub fn evaluate_constraints_batched(&self, x_vars: &[Fq], gamma: Fq) -> Fq {
+    ///
+    /// `delta` is the term-batching coefficient for constraints that batch multiple terms
+    /// (e.g., G1Add, G2Add).
+    pub fn evaluate_constraints_batched(&self, x_vars: &[Fq], gamma: Fq, delta: Fq) -> Fq {
         assert_eq!(x_vars.len(), self.matrix.num_constraint_vars);
 
         let mut result = Fq::zero();
         let mut gamma_power = gamma;
 
         for constraint in self.constraints.iter() {
-            let constraint_eval = self.evaluate_constraint(constraint, x_vars);
+            let constraint_eval = self.evaluate_constraint(constraint, x_vars, delta);
             result += gamma_power * constraint_eval;
             gamma_power *= gamma;
         }
@@ -2794,7 +2797,10 @@ impl ConstraintSystem {
     ///
     /// Point structure: [x_vars, s_vars]
     /// Returns F(x, s) where s selects which constraint to evaluate
-    pub fn evaluate(&self, point: &[Fq]) -> Fq {
+    ///
+    /// `delta` is the term-batching coefficient for constraints that batch multiple terms
+    /// (e.g., G1Add, G2Add).
+    pub fn evaluate(&self, point: &[Fq], delta: Fq) -> Fq {
         let num_x_vars = self.matrix.num_constraint_vars;
         let num_s_vars = self.matrix.num_s_vars;
 
@@ -2822,7 +2828,7 @@ impl ConstraintSystem {
                 let row_binary = index_to_binary::<Fq>(row_idx, num_s_vars);
                 let eq_eval = EqPolynomial::mle(&row_binary, s_vars);
 
-                let constraint_eval = self.evaluate_constraint(constraint, x_vars);
+                let constraint_eval = self.evaluate_constraint(constraint, x_vars, delta);
                 result += eq_eval * constraint_eval;
             }
         }
@@ -2831,7 +2837,10 @@ impl ConstraintSystem {
     }
 
     /// Evaluate a single constraint C_i(x) using the matrix layout.
-    fn evaluate_constraint(&self, constraint: &MatrixConstraint, x: &[Fq]) -> Fq {
+    ///
+    /// `delta` is the term-batching coefficient for constraints that batch multiple terms
+    /// (e.g., G1Add, G2Add).
+    fn evaluate_constraint(&self, constraint: &MatrixConstraint, x: &[Fq], delta: Fq) -> Fq {
         let idx = constraint.constraint_index;
 
         match constraint.constraint_type {
@@ -3152,7 +3161,6 @@ impl ConstraintSystem {
             }
             ConstraintType::G1Add => {
                 use crate::zkvm::recursion::g1::addition::G1AddValues;
-                let delta = Fq::from(7u64);
 
                 let x_p_row = self.matrix.row_index(PolyType::G1AddXP, idx);
                 let y_p_row = self.matrix.row_index(PolyType::G1AddYP, idx);
@@ -3188,7 +3196,6 @@ impl ConstraintSystem {
             }
             ConstraintType::G2Add => {
                 use crate::zkvm::recursion::g2::addition::G2AddValues;
-                let delta = Fq::from(7u64);
 
                 let x_p_c0_row = self.matrix.row_index(PolyType::G2AddXPC0, idx);
                 let x_p_c1_row = self.matrix.row_index(PolyType::G2AddXPC1, idx);
@@ -3264,7 +3271,10 @@ impl ConstraintSystem {
                     x >>= 1;
                 }
 
-                let constraint_eval = self.evaluate_constraint(constraint, &x_binary);
+                // Use a fixed delta for testing - constraint should evaluate to 0 for any delta
+                // when the witness is valid
+                let delta = Fq::from(7u64);
+                let constraint_eval = self.evaluate_constraint(constraint, &x_binary, delta);
 
                 assert!(
                     constraint_eval == Fq::zero(),
@@ -3693,7 +3703,9 @@ mod tests {
                     });
                 }
 
-                let eval = system.evaluate_constraint(constraint, &x_point);
+                // Use a random delta for term batching in test
+                let delta = Fq::rand(&mut rng);
+                let eval = system.evaluate_constraint(constraint, &x_point, delta);
                 assert_eq!(
                     eval,
                     Fq::zero(),

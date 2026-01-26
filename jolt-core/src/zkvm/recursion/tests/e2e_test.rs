@@ -70,14 +70,7 @@ fn test_recursion_snark_e2e_with_dory() {
     let ark_proof = ArkDoryProof::from(opening_proof);
     let ark_commitment = commitment;
 
-    // ============ CREATE RECURSION PROVER FROM DORY PROOF ============
-    // Create transcript for proving recursion and sample (gamma, delta) from it.
-    //
-    // This mirrors the end-to-end pipeline where recursion batching challenges are derived
-    // from Fiat–Shamir transcript state (not RNG).
     let mut prover_transcript = Blake2bTranscript::new(b"recursion_snark");
-    let gamma: Fq = prover_transcript.challenge_scalar();
-    let delta: Fq = prover_transcript.challenge_scalar();
 
     // Create prover using Dory witness generation
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
@@ -89,8 +82,6 @@ fn test_recursion_snark_e2e_with_dory() {
         &point_challenges,
         &evaluation,
         &ark_commitment,
-        gamma,
-        delta,
     )
     .expect("Failed to create recursion prover");
 
@@ -181,8 +172,6 @@ fn test_recursion_snark_e2e_with_dory() {
         stage2_proof: sumchecks.stage2_proof,
         stage3_packed_eval: sumchecks.stage3_packed_eval,
         opening_proof,
-        gamma: prover.gamma,
-        delta: prover.delta,
         opening_claims,
         dense_commitment: dense_commitment.clone(),
     };

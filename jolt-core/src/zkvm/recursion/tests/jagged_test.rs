@@ -208,9 +208,6 @@ fn test_jagged_relation_dory_witness() {
     );
 
     // Create RecursionProver from Dory proof
-    let gamma = Fq::rand(&mut rng);
-    let delta = Fq::rand(&mut rng);
-
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
 
     use crate::poly::commitment::dory::wrappers::ArkDoryProof;
@@ -225,8 +222,6 @@ fn test_jagged_relation_dory_witness() {
         &point_challenges,
         &evaluation,
         &ark_commitment,
-        gamma,
-        delta,
     )
     .expect("Failed to create recursion prover");
 

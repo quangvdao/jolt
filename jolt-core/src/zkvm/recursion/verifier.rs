@@ -114,20 +114,6 @@ impl RecursionVerifier<Fq> {
         matrix_commitment: &PCS::Commitment,
         verifier_setup: &PCS::VerifierSetup,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        // Synchronize Fiat–Shamir transcript state with the prover.
-        //
-        // In the end-to-end pipeline, these are sampled from the main transcript *after* Stage 8
-        // (Dory batch opening) and *before* any recursion sumchecks/Hyrax operations.
-        let gamma: Fq = transcript.challenge_scalar();
-        let delta: Fq = transcript.challenge_scalar();
-        if gamma != proof.gamma || delta != proof.delta {
-            return Err(format!(
-                "Recursion FS mismatch: transcript sampled (gamma, delta)=({gamma}, {delta}) but proof has (gamma, delta)=({}, {})",
-                proof.gamma, proof.delta
-            )
-            .into());
-        }
-
         // Bind the Hyrax dense commitment into the transcript.
         //
         // Prover order: commit dense polynomial (Hyrax) → append commitment → run recursion sumchecks.

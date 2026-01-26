@@ -71,9 +71,6 @@ fn test_sumcheck_relation_with_mapping() {
         &mut prover_transcript,
     );
 
-    let gamma = Fq::rand(&mut rng);
-    let delta = Fq::rand(&mut rng);
-
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
 
     use crate::poly::commitment::dory::wrappers::ArkDoryProof;
@@ -88,8 +85,6 @@ fn test_sumcheck_relation_with_mapping() {
         &point_challenges,
         &evaluation,
         &ark_commitment,
-        gamma,
-        delta,
     )
     .expect("Failed to create recursion prover");
 

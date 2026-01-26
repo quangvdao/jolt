@@ -75,10 +75,6 @@ pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Fie
     pub stage3_packed_eval: F,
     /// PCS opening proof for the constraint matrix
     pub opening_proof: PCS::Proof,
-    /// Gamma value used for batching constraints
-    pub gamma: F,
-    /// Delta value used for batching within constraints
-    pub delta: F,
     /// Opening claims for virtual polynomials
     pub opening_claims: Openings<F>,
     /// Dense polynomial commitment after jagged transform
@@ -99,8 +95,6 @@ where
         self.stage2_proof.guest_serialize(w)?;
         self.stage3_packed_eval.guest_serialize(w)?;
         self.opening_proof.guest_serialize(w)?;
-        self.gamma.guest_serialize(w)?;
-        self.delta.guest_serialize(w)?;
         self.opening_claims.guest_serialize(w)?;
         self.dense_commitment.guest_serialize(w)?;
         Ok(())
@@ -122,8 +116,6 @@ where
             stage2_proof: SumcheckInstanceProof::<F, T>::guest_deserialize(r)?,
             stage3_packed_eval: F::guest_deserialize(r)?,
             opening_proof: PCS::Proof::guest_deserialize(r)?,
-            gamma: F::guest_deserialize(r)?,
-            delta: F::guest_deserialize(r)?,
             opening_claims: crate::poly::opening_proof::Openings::<F>::guest_deserialize(r)?,
             dense_commitment: PCS::Commitment::guest_deserialize(r)?,
         })
@@ -158,12 +150,10 @@ pub(crate) struct SumcheckPhaseOutput<T: Transcript> {
 pub struct RecursionProver<F: JoltField = Fq> {
     /// The constraint system containing all constraints and witness data
     pub constraint_system: ConstraintSystem,
-    /// Gamma value for batching across constraints
-    pub gamma: F,
-    /// Delta value for batching within constraints
-    pub delta: F,
     /// AST graph for wiring constraints (optional, only present when using AST-enabled mode)
     pub ast: Option<AstGraph<BN254>>,
+    /// Phantom for field type
+    _marker: std::marker::PhantomData<F>,
 }
 
 /// Recursion-agnostic snapshot of the Stage 8 (Dory) opening state needed to kick off recursion proving.
@@ -193,15 +183,13 @@ pub struct DoryOpeningSnapshot<F: JoltField, ProofTranscript: Transcript> {
 impl RecursionProver<Fq> {
     /// Phase 1: witness generation for recursion proving.
     ///
-    /// This samples `(gamma, delta)` from the main transcript, then performs all recursion-only
-    /// work needed to start recursion proving from the Stage 8 (Dory) opening:
+    /// Performs all recursion-only work needed to start recursion proving from the Stage 8 (Dory) opening:
     /// - combine witness generation (Stage 8 offload) + serialized `stage8_combine_hint`
     /// - `PCS::witness_gen` (Stage 9) + `stage9_pcs_hint`
     /// - build the recursion constraint system and return `RecursionProver`
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all, name = "RecursionProver::witness_generation")]
     fn witness_generation<F, PCS, ProofTranscript>(
-        transcript: &mut ProofTranscript,
         stage8_opening_proof: &PCS::Proof,
         stage8_snapshot: DoryOpeningSnapshot<F, ProofTranscript>,
         verifier_setup: &PCS::VerifierSetup,
@@ -212,10 +200,6 @@ impl RecursionProver<Fq> {
         PCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>>,
         ProofTranscript: Transcript,
     {
-        // Sample gamma/delta challenges from the main transcript.
-        let gamma: Fq = transcript.challenge_scalar();
-        let delta: Fq = transcript.challenge_scalar();
-
         // Verify type compatibility at runtime.
         if std::any::TypeId::of::<F>() != std::any::TypeId::of::<ark_bn254::Fr>() {
             return Err(Box::new(std::io::Error::new(
@@ -262,8 +246,7 @@ impl RecursionProver<Fq> {
         )?;
 
         // Build constraint system from generated witnesses and include combine witness constraints.
-        let prover =
-            Self::new_from_witnesses(&witness_collection, Some(combine_witness), gamma, delta)?;
+        let prover = Self::new_from_witnesses(&witness_collection, Some(combine_witness))?;
 
         Ok((prover, stage8_combine_hint_fq12, stage9_pcs_hint))
     }
@@ -304,7 +287,6 @@ impl RecursionProver<Fq> {
         // Phase 1: witness generation
         let (mut prover, stage8_combine_hint_fq12, stage9_pcs_hint) =
             Self::witness_generation::<F, DoryPCS, ProofTranscript>(
-                transcript,
                 stage8_opening_proof,
                 stage8_snapshot,
                 verifier_setup,
@@ -332,8 +314,6 @@ impl RecursionProver<Fq> {
             stage2_proof: sumchecks.stage2_proof,
             stage3_packed_eval: sumchecks.stage3_packed_eval,
             opening_proof,
-            gamma: prover.gamma,
-            delta: prover.delta,
             opening_claims,
             dense_commitment: poly_commit.dense_commitment,
         };
@@ -350,8 +330,6 @@ impl RecursionProver<Fq> {
     pub fn new_from_witnesses(
         witness_collection: &WitnessCollection<JoltWitness>,
         combine_witness: Option<GTCombineWitness>,
-        gamma: Fq,
-        delta: Fq,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         tracing::debug!(
             "Creating RecursionProver from witnesses: GT exp count = {}, GT mul count = {}",
@@ -376,14 +354,12 @@ impl RecursionProver<Fq> {
 
         Ok(Self {
             constraint_system,
-            gamma,
-            delta,
             ast: None,
+            _marker: std::marker::PhantomData,
         })
     }
 
     /// Create a new recursion prover by generating witnesses from a Dory proof
-    #[allow(clippy::too_many_arguments)]
     pub fn new_from_dory_proof<T: Transcript>(
         dory_proof: &ArkDoryProof,
         verifier_setup: &ArkworksVerifierSetup,
@@ -391,8 +367,6 @@ impl RecursionProver<Fq> {
         point: &[<Fr as JoltField>::Challenge],
         evaluation: &Fr,
         commitment: &ArkGT,
-        gamma: Fq,
-        delta: Fq,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Use Dory's witness_gen to generate witnesses
         let (witness_collection, _hints) = DoryCommitmentScheme::witness_gen(
@@ -405,7 +379,7 @@ impl RecursionProver<Fq> {
         )?;
 
         // Delegate to new_from_witnesses (no combine_witness from direct Dory proof)
-        Self::new_from_witnesses(&witness_collection, None, gamma, delta)
+        Self::new_from_witnesses(&witness_collection, None)
     }
 
     /// Create a new recursion prover with AST tracing enabled.

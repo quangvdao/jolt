@@ -8,18 +8,16 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
+            dory::{wrappers::ArkDoryProof, DoryCommitmentScheme, DoryContext, DoryGlobals},
         },
         eq_poly::EqPolynomial,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     },
     transcripts::{Blake2bTranscript, Transcript},
-    zkvm::recursion::RecursionProver,
+    zkvm::recursion::{ConstraintSystem as RecursionConstraintSystem, RecursionProver},
 };
-use ark_bn254::Fq;
-use ark_bn254::Fr;
-use ark_ff::UniformRand;
-use ark_ff::{One, Zero};
+use ark_bn254::{Fq, Fr};
+use ark_ff::{One, UniformRand, Zero};
 use ark_std::test_rng;
 use rand::{rngs::StdRng, SeedableRng};
 use serial_test::serial;
@@ -475,17 +473,6 @@ fn test_out_of_bounds_access() {
 #[test]
 #[serial]
 fn test_jagged_bijection_with_real_dory_proof() {
-    use crate::poly::{
-        commitment::{
-            commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryGlobals},
-        },
-        multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
-    };
-    use crate::zkvm::recursion::ConstraintSystem;
-    use ark_bn254::Fr;
-    use ark_ff::UniformRand;
-
     DoryGlobals::reset();
     DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 
@@ -515,7 +502,7 @@ fn test_jagged_bijection_with_real_dory_proof() {
     let evaluation = PolynomialEvaluation::evaluate(&poly, &point);
     let mut extract_transcript = crate::transcripts::Blake2bTranscript::new(b"test_jagged");
 
-    let (system, _hints) = ConstraintSystem::new(
+    let (system, _hints) = RecursionConstraintSystem::new(
         &proof,
         &verifier_setup,
         &mut extract_transcript,
@@ -774,8 +761,6 @@ fn test_sparse_dense_isomorphism_value_by_value() {
 #[test]
 #[serial]
 fn test_sparse_dense_bijection_with_real_dory_witness() {
-    use crate::poly::commitment::dory::wrappers::ArkDoryProof;
-
     DoryGlobals::reset();
     DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);
 

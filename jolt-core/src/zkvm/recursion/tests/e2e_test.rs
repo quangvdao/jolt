@@ -5,7 +5,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
+            dory::{wrappers::ArkDoryProof, DoryCommitmentScheme, DoryContext, DoryGlobals},
             hyrax::Hyrax,
         },
         dense_mlpoly::DensePolynomial,
@@ -25,8 +25,6 @@ use serial_test::serial;
 #[test]
 #[serial]
 fn test_recursion_snark_e2e_with_dory() {
-    use crate::poly::commitment::dory::wrappers::ArkDoryProof;
-
     // Initialize test environment
     DoryGlobals::reset();
     DoryGlobals::initialize_context(1 << 2, 1 << 2, DoryContext::Main, None);

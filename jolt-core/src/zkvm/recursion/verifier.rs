@@ -19,17 +19,37 @@ use crate::{
 use ark_bn254::Fq;
 use ark_std::Zero;
 
+use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
+use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
+use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
+
+#[cfg(feature = "experimental-pairing-recursion")]
+use super::pairing::{
+    multi_miller_loop::{
+        MultiMillerLoopParams, MultiMillerLoopVerifier, MultiMillerLoopVerifierSpec,
+    },
+    shift::{ShiftMultiMillerLoopParams, ShiftMultiMillerLoopVerifier},
+};
 use super::{
     constraints::system::{ConstraintType, PolyType},
     curve::Bn254Recursion,
     g1::{
-        addition::G1AddParams,
-        scalar_multiplication::G1ScalarMulPublicInputs,
+        addition::{G1AddParams, G1AddVerifier, G1AddVerifierSpec},
+        scalar_multiplication::{
+            G1ScalarMulParams, G1ScalarMulPublicInputs, G1ScalarMulVerifier,
+            G1ScalarMulVerifierSpec,
+        },
         shift::{
             g1_shift_params, g2_shift_params, ShiftG1ScalarMulVerifier, ShiftG2ScalarMulVerifier,
         },
     },
-    g2::{addition::G2AddParams, scalar_multiplication::G2ScalarMulPublicInputs},
+    g2::{
+        addition::{G2AddParams, G2AddVerifier, G2AddVerifierSpec},
+        scalar_multiplication::{
+            G2ScalarMulParams, G2ScalarMulPublicInputs, G2ScalarMulVerifier,
+            G2ScalarMulVerifierSpec,
+        },
+    },
     gt::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionVerifier},
         exponentiation::{GtExpParams, GtExpPublicInputs, GtExpVerifier},
@@ -39,8 +59,6 @@ use super::{
     prover::RecursionProof,
     virtualization::extract_virtual_claims_from_accumulator,
 };
-use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
-use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
@@ -163,8 +181,8 @@ impl RecursionVerifier<Fq> {
             .into());
         }
         let (_r_c, r_x): (
-            &[<Fq as crate::field::JoltField>::Challenge],
-            &[<Fq as crate::field::JoltField>::Challenge],
+            &[<Fq as JoltField>::Challenge],
+            &[<Fq as JoltField>::Challenge],
         ) = if r_stage2.len() == num_constraint_vars {
             (&[], &r_stage2)
         } else {
@@ -217,7 +235,7 @@ impl RecursionVerifier<Fq> {
         proof: &SumcheckInstanceProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
-    ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<<Fq as JoltField>::Challenge>, Box<dyn std::error::Error>> {
         if self.input.gt_exp_public_inputs.is_empty() {
             return Err("No GtExp constraints to verify in Stage 1".into());
         }
@@ -237,7 +255,7 @@ impl RecursionVerifier<Fq> {
         proof: &SumcheckInstanceProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
-    ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<<Fq as JoltField>::Challenge>, Box<dyn std::error::Error>> {
         let env_flag_default = |name: &str, default: bool| -> bool {
             std::env::var(name)
                 .ok()
@@ -365,10 +383,6 @@ impl RecursionVerifier<Fq> {
 
         // G1 scalar mul
         if num_g1_scalar_mul > 0 {
-            use super::g1::scalar_multiplication::{
-                G1ScalarMulParams, G1ScalarMulVerifier, G1ScalarMulVerifierSpec,
-            };
-
             let params = G1ScalarMulParams::new(num_g1_scalar_mul);
             debug_assert_eq!(
                 self.input.g1_scalar_mul_public_inputs.len(),
@@ -415,10 +429,6 @@ impl RecursionVerifier<Fq> {
 
         // G2 scalar mul
         if num_g2_scalar_mul > 0 {
-            use super::g2::scalar_multiplication::{
-                G2ScalarMulParams, G2ScalarMulVerifier, G2ScalarMulVerifierSpec,
-            };
-
             let params = G2ScalarMulParams::new(num_g2_scalar_mul);
             debug_assert_eq!(
                 self.input.g2_scalar_mul_public_inputs.len(),
@@ -438,7 +448,6 @@ impl RecursionVerifier<Fq> {
         if num_g1_add > 0 {
             // NOTE: The fused G1Add verifier exists (see `g1::fused_addition`) but is intentionally
             // NOT wired into the default verifier pipeline right now.
-            use super::g1::addition::{G1AddVerifier, G1AddVerifierSpec};
             let params = G1AddParams::new(num_g1_add);
             let spec = G1AddVerifierSpec::new(params);
             let verifier = G1AddVerifier::from_spec(spec, g1_add_indices, transcript);
@@ -447,7 +456,6 @@ impl RecursionVerifier<Fq> {
 
         // G2 add
         if num_g2_add > 0 {
-            use super::g2::addition::{G2AddVerifier, G2AddVerifierSpec};
             let params = G2AddParams::new(num_g2_add);
             let spec = G2AddVerifierSpec::new(params);
             let verifier = G2AddVerifier::from_spec(spec, g2_add_indices, transcript);
@@ -457,8 +465,6 @@ impl RecursionVerifier<Fq> {
         // Multi-Miller loop shift: link f/t and *_next columns (experimental)
         #[cfg(feature = "experimental-pairing-recursion")]
         if enable_shift_multi_miller_loop && num_multi_miller_loop > 0 {
-            use super::pairing::shift::{ShiftMultiMillerLoopParams, ShiftMultiMillerLoopVerifier};
-
             let mut pairs: Vec<(VirtualPolynomial, VirtualPolynomial)> =
                 Vec::with_capacity(num_multi_miller_loop * 5);
             for i in 0..num_multi_miller_loop {
@@ -494,9 +500,6 @@ impl RecursionVerifier<Fq> {
         // Multi-Miller loop (experimental)
         #[cfg(feature = "experimental-pairing-recursion")]
         if num_multi_miller_loop > 0 {
-            use super::pairing::multi_miller_loop::{
-                MultiMillerLoopParams, MultiMillerLoopVerifier, MultiMillerLoopVerifierSpec,
-            };
             let params = MultiMillerLoopParams::new(num_multi_miller_loop);
             let spec = MultiMillerLoopVerifierSpec::new(params);
             let verifier =
@@ -524,13 +527,9 @@ impl RecursionVerifier<Fq> {
         &self,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
-        r_x: &[<Fq as crate::field::JoltField>::Challenge],
+        r_x: &[<Fq as JoltField>::Challenge],
         stage3_packed_eval: Fq,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::zkvm::recursion::prefix_packing::{
-            packed_eval_from_claims, PrefixPackingLayout,
-        };
-
         // Derive the public packing layout.
         let layout = PrefixPackingLayout::from_constraint_types(&self.input.constraint_types);
         let max_native_vars = layout.entries.iter().map(|e| e.num_vars).max().unwrap_or(0);

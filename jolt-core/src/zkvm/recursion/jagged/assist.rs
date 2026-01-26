@@ -25,7 +25,8 @@ use crate::{
         unipoly::UniPoly,
     },
     subprotocols::{
-        sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
+        sumcheck::SumcheckInstanceProof, sumcheck_prover::SumcheckInstanceProver,
+        sumcheck_verifier::SumcheckInstanceVerifier,
     },
     transcripts::Transcript,
 };
@@ -65,7 +66,7 @@ pub struct JaggedAssistProof<F: JoltField, T: Transcript> {
     /// Claimed evaluations v_k = ĝ(r_x, r_dense, t_{k-1}, t_k) for each polynomial k
     pub claimed_evaluations: Vec<F>,
     /// Sumcheck proof for the batch verification
-    pub sumcheck_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
+    pub sumcheck_proof: SumcheckInstanceProof<F, T>,
 }
 
 /// Parameters for the Jagged Assist sumcheck

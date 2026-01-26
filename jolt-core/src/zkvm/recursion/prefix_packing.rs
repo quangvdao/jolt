@@ -15,6 +15,7 @@
 //! Both prover and verifier can derive the exact same packing layout from public data
 //! (`constraint_types`), and the leftover region (if any) is implicitly zero.
 
+use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::zkvm::recursion::constraints::system::{ConstraintSystem, ConstraintType, PolyType};
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
@@ -204,12 +205,7 @@ impl ConstraintSystem {
     }
 
     /// Convenience wrapper: build layout + packed dense polynomial evals.
-    pub fn build_prefix_packed_polynomial(
-        &self,
-    ) -> (
-        crate::poly::dense_mlpoly::DensePolynomial<Fq>,
-        PrefixPackingLayout,
-    ) {
+    pub fn build_prefix_packed_polynomial(&self) -> (DensePolynomial<Fq>, PrefixPackingLayout) {
         let constraint_types: Vec<ConstraintType> = self
             .constraints
             .iter()
@@ -217,10 +213,7 @@ impl ConstraintSystem {
             .collect();
         let layout = PrefixPackingLayout::from_constraint_types(&constraint_types);
         let evals = self.build_prefix_packed_evals(&layout);
-        (
-            crate::poly::dense_mlpoly::DensePolynomial::new(evals),
-            layout,
-        )
+        (DensePolynomial::new(evals), layout)
     }
 }
 

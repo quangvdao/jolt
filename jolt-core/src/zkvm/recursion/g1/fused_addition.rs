@@ -33,7 +33,7 @@ use crate::{
     zkvm::witness::TermEnum,
     zkvm::{
         recursion::{
-            constraints::system::{ConstraintType, PolyType},
+            constraints::system::{index_to_binary, ConstraintType, PolyType},
             g1::addition::G1AddValues,
         },
         witness::{G1AddTerm, VirtualPolynomial},
@@ -357,7 +357,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1AddVerifier {
             .collect();
         let mut ind_eval = Fq::zero();
         for &idx in &self.g1add_indices {
-            let bits = crate::zkvm::recursion::constraints::system::index_to_binary::<Fq>(idx, k);
+            let bits = index_to_binary::<Fq>(idx, k);
             ind_eval += EqPolynomial::mle(&r_c, &bits);
         }
 

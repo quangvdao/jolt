@@ -17,15 +17,17 @@ use crate::{
     transcripts::Transcript,
     utils::errors::ProofVerifyError,
     zkvm::recursion::{
-        g1::scalar_multiplication::G1ScalarMulPublicInputs,
-        g2::scalar_multiplication::G2ScalarMulPublicInputs,
-        gt::exponentiation::GtExpPublicInputs,
+        g1::{addition::G1AddValues, scalar_multiplication::G1ScalarMulPublicInputs},
+        g2::{addition::G2AddValues, scalar_multiplication::G2ScalarMulPublicInputs},
+        gt::exponentiation::{GtExpPublicInputs, GtExpWitness},
         witness::{GTCombineWitness, GTMulOpWitness},
     },
 };
 use ark_bn254::{Fq, Fq2, Fr};
 use ark_ff::{One, Zero};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
+};
 use dory::backends::arkworks::ArkGT;
 use jolt_optimizations::{fq12_to_multilinear_evals, get_g_mle};
 use rayon::prelude::*;
@@ -1364,11 +1366,7 @@ impl DoryMatrixBuilder {
 
     /// Add all constraints from a GTCombineWitness (homomorphic combine offloading).
     /// Returns the packed GT exp witnesses that were created.
-    pub fn add_combine_witness(
-        &mut self,
-        witness: &GTCombineWitness,
-    ) -> Vec<crate::zkvm::recursion::gt::exponentiation::GtExpWitness<Fq>> {
-        use crate::zkvm::recursion::gt::exponentiation::GtExpWitness;
+    pub fn add_combine_witness(&mut self, witness: &GTCombineWitness) -> Vec<GtExpWitness<Fq>> {
         let mut packed_witnesses = Vec::new();
 
         tracing::info!(
@@ -3160,8 +3158,6 @@ impl ConstraintSystem {
                     + c7_yt_c1
             }
             ConstraintType::G1Add => {
-                use crate::zkvm::recursion::g1::addition::G1AddValues;
-
                 let x_p_row = self.matrix.row_index(PolyType::G1AddXP, idx);
                 let y_p_row = self.matrix.row_index(PolyType::G1AddYP, idx);
                 let ind_p_row = self.matrix.row_index(PolyType::G1AddPIndicator, idx);
@@ -3195,8 +3191,6 @@ impl ConstraintSystem {
                 values.eval_constraint(delta)
             }
             ConstraintType::G2Add => {
-                use crate::zkvm::recursion::g2::addition::G2AddValues;
-
                 let x_p_c0_row = self.matrix.row_index(PolyType::G2AddXPC0, idx);
                 let x_p_c1_row = self.matrix.row_index(PolyType::G2AddXPC1, idx);
                 let y_p_c0_row = self.matrix.row_index(PolyType::G2AddYPC0, idx);
@@ -3286,8 +3280,6 @@ impl ConstraintSystem {
 }
 
 // Manual serialization implementations for enums
-
-use ark_serialize::{Compress, SerializationError, Valid};
 
 impl CanonicalSerialize for PolyType {
     fn serialize_with_mode<W: ark_serialize::Write>(

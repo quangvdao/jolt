@@ -65,7 +65,9 @@ use crate::{
 };
 use rayon::prelude::*;
 
-use crate::zkvm::recursion::gt::shift::{eq_lsb_mle, eq_plus_one_lsb_mle};
+use crate::zkvm::recursion::gt::shift::{
+    eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
+};
 
 /// Number of step variables (256 steps).
 ///
@@ -143,9 +145,8 @@ impl<F: JoltField, T: Transcript> ShiftScalarMulProver<F, T> {
         let gamma: F = transcript.challenge_scalar_optimized::<F>().into();
 
         // Build weight polynomials (native 8-var).
-        let eq_step_8 = crate::zkvm::recursion::gt::shift::eq_lsb_evals::<F>(&step_ref);
-        let eq_minus_one_8 =
-            crate::zkvm::recursion::gt::shift::eq_plus_one_lsb_evals::<F>(&step_ref);
+        let eq_step_8 = eq_lsb_evals::<F>(&step_ref);
+        let eq_minus_one_8 = eq_plus_one_lsb_evals::<F>(&step_ref);
         let eq_step_poly = MultilinearPolynomial::from(eq_step_8);
         let eq_minus_one_step_poly = MultilinearPolynomial::from(eq_minus_one_8);
         let not_last_poly = not_last_poly::<F>();

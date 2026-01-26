@@ -39,7 +39,11 @@ use crate::{
     transcripts::Transcript,
     virtual_claims,
     zkvm::{
-        recursion::{constraints::config::CONFIG, utils::virtual_polynomial_utils::*},
+        recursion::{
+            constraints::config::CONFIG,
+            curve::{Bn254Recursion, RecursionCurve},
+            utils::virtual_polynomial_utils::*,
+        },
         witness::VirtualPolynomial,
     },
 };
@@ -47,6 +51,7 @@ use ark_bn254::{Fq, Fq12};
 use ark_ff::Zero;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::One;
+use jolt_optimizations::get_g_mle;
 use rayon::prelude::*;
 
 /// Number of step variables (7 for 128 base-4 steps)
@@ -153,8 +158,7 @@ impl GtExpPublicInputs {
         debug_assert_eq!(r_x_star.len(), NUM_ELEMENT_VARS);
 
         // Expand GT element to base-field MLE evaluations, then evaluate at r_x*.
-        let base_mle =
-            <crate::zkvm::recursion::curve::Bn254Recursion as crate::zkvm::recursion::curve::RecursionCurve>::fq12_to_mle(fq12); // 16 Fq values
+        let base_mle = <Bn254Recursion as RecursionCurve>::fq12_to_mle(fq12); // 16 Fq values
         let base_poly = DensePolynomial::new(base_mle);
         base_poly.evaluate(r_x_star)
     }
@@ -255,8 +259,6 @@ impl GtExpWitness<Fq> {
         // - the packed GT exp constraint is still satisfied on the Boolean hypercube.
         let mut quotient_mles_padded = quotient_mles.to_vec();
         if num_steps_padded > num_steps {
-            use jolt_optimizations::get_g_mle;
-
             let g_mle = get_g_mle();
             let rho_prev = &rho_mles[num_steps];
 
@@ -357,8 +359,6 @@ impl GtExpWitness<Fq> {
         // Debug: verify all constraints are zero over the Boolean hypercube
         #[cfg(test)]
         {
-            use jolt_optimizations::get_g_mle;
-
             let g_mle = get_g_mle();
             let mut failed_constraints = Vec::new();
 
@@ -1015,8 +1015,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        use crate::poly::dense_mlpoly::DensePolynomial;
-
         // Data layout: index = x * 128 + s (s in low 7 bits, x in high 4 bits)
         // With LowToHigh binding:
         // - Phase 1 (rounds 0-6): bind s variables → challenges[0..7]
@@ -1045,8 +1043,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
 
         // Compute g(r_x*) - g only depends on element variables (4-var)
         let g_eval: Fq = {
-            let g_mle_4var =
-                <crate::zkvm::recursion::curve::Bn254Recursion as crate::zkvm::recursion::curve::RecursionCurve>::g_mle();
+            let g_mle_4var = <Bn254Recursion as RecursionCurve>::g_mle();
             let g_poly =
                 MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_4var));
             g_poly.evaluate_dot_product::<Fq>(&r_x_star)

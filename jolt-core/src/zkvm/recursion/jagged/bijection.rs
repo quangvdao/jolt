@@ -8,6 +8,7 @@
 //! excludes these redundant padded values to achieve compression.
 
 use crate::field::JoltField;
+use crate::poly::dense_mlpoly::DensePolynomial;
 use ark_bn254::Fq;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
@@ -397,16 +398,12 @@ impl ConstraintSystem {
     pub fn build_dense_polynomial(
         &self,
     ) -> (
-        crate::poly::dense_mlpoly::DensePolynomial<Fq>,
+        DensePolynomial<Fq>,
         VarCountJaggedBijection,
         ConstraintMapping,
     ) {
         let (bijection, mapping) = self.build_jagged_layout();
         let dense_evals = self.extract_dense_evals(&bijection, &mapping);
-        (
-            crate::poly::dense_mlpoly::DensePolynomial::new(dense_evals),
-            bijection,
-            mapping,
-        )
+        (DensePolynomial::new(dense_evals), bijection, mapping)
     }
 }

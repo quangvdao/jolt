@@ -5,7 +5,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryContext, DoryGlobals},
+            dory::{wrappers::ArkDoryProof, DoryCommitmentScheme, DoryContext, DoryGlobals},
         },
         dense_mlpoly::DensePolynomial,
         eq_poly::EqPolynomial,
@@ -72,8 +72,6 @@ fn test_sumcheck_relation_with_mapping() {
     );
 
     let mut witness_transcript: Blake2bTranscript = Transcript::new(b"dory_test_proof");
-
-    use crate::poly::commitment::dory::wrappers::ArkDoryProof;
 
     let ark_proof = ArkDoryProof::from(opening_proof);
     let ark_commitment = commitment;

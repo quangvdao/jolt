@@ -3,9 +3,7 @@
 //! This module provides a high-level verifier that verifies:
 //! - Stage 1: Packed GT exp sumcheck
 //! - Stage 2: Batched constraint sumchecks (shift + claim reduction + remaining constraints)
-//! - Stage 3: Virtualization direct evaluation
-//! - Stage 4: Jagged transform sumcheck
-//! - Stage 5: Jagged assist sumcheck
+//! - Stage 3: Prefix packing reduction to a single dense polynomial opening
 //!
 //! The verifier returns an opening accumulator for PCS verification.
 

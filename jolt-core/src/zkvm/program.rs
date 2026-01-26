@@ -25,6 +25,7 @@ use crate::zkvm::bytecode::chunks::{
     build_bytecode_chunks, build_bytecode_chunks_for_main_matrix, total_lanes,
 };
 pub use crate::zkvm::bytecode::BytecodePCMapper;
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ProgramPreprocessing - Full program data (prover + full-mode verifier)
@@ -63,6 +64,27 @@ impl Default for ProgramPreprocessing {
             min_bytecode_address: 0,
             program_image_words: Vec::new(),
         }
+    }
+}
+
+impl GuestSerialize for ProgramPreprocessing {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.instructions.guest_serialize(w)?;
+        self.pc_map.guest_serialize(w)?;
+        self.min_bytecode_address.guest_serialize(w)?;
+        self.program_image_words.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for ProgramPreprocessing {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            instructions: Vec::<Instruction>::guest_deserialize(r)?,
+            pc_map: BytecodePCMapper::guest_deserialize(r)?,
+            min_bytecode_address: u64::guest_deserialize(r)?,
+            program_image_words: Vec::<u64>::guest_deserialize(r)?,
+        })
     }
 }
 
@@ -197,6 +219,25 @@ impl ProgramMetadata {
     }
 }
 
+impl GuestSerialize for ProgramMetadata {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.min_bytecode_address.guest_serialize(w)?;
+        self.program_image_len_words.guest_serialize(w)?;
+        self.bytecode_len.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for ProgramMetadata {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            min_bytecode_address: u64::guest_deserialize(r)?,
+            program_image_len_words: usize::guest_deserialize(r)?,
+            bytecode_len: usize::guest_deserialize(r)?,
+        })
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TrustedProgramCommitments - Unified commitments for committed mode
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +279,41 @@ pub struct TrustedProgramCommitments<PCS: CommitmentScheme> {
     pub program_image_num_columns: usize,
     /// Number of program-image words (power-of-two padded).
     pub program_image_num_words: usize,
+}
+
+impl<PCS: CommitmentScheme> GuestSerialize for TrustedProgramCommitments<PCS>
+where
+    PCS::Commitment: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.bytecode_commitments.guest_serialize(w)?;
+        self.bytecode_num_columns.guest_serialize(w)?;
+        self.log_k_chunk.guest_serialize(w)?;
+        self.bytecode_len.guest_serialize(w)?;
+        self.bytecode_T.guest_serialize(w)?;
+        self.program_image_commitment.guest_serialize(w)?;
+        self.program_image_num_columns.guest_serialize(w)?;
+        self.program_image_num_words.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl<PCS: CommitmentScheme> GuestDeserialize for TrustedProgramCommitments<PCS>
+where
+    PCS::Commitment: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            bytecode_commitments: Vec::<PCS::Commitment>::guest_deserialize(r)?,
+            bytecode_num_columns: usize::guest_deserialize(r)?,
+            log_k_chunk: u8::guest_deserialize(r)?,
+            bytecode_len: usize::guest_deserialize(r)?,
+            bytecode_T: usize::guest_deserialize(r)?,
+            program_image_commitment: PCS::Commitment::guest_deserialize(r)?,
+            program_image_num_columns: usize::guest_deserialize(r)?,
+            program_image_num_words: usize::guest_deserialize(r)?,
+        })
+    }
 }
 
 /// Opening hints for `TrustedProgramCommitments`.
@@ -471,6 +547,44 @@ pub enum VerifierProgram<PCS: CommitmentScheme> {
     Full(Arc<ProgramPreprocessing>),
     /// Only trusted commitments available (Committed mode).
     Committed(TrustedProgramCommitments<PCS>),
+}
+
+impl<PCS: CommitmentScheme> GuestSerialize for VerifierProgram<PCS>
+where
+    PCS::Commitment: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        match self {
+            VerifierProgram::Full(p) => {
+                0u8.guest_serialize(w)?;
+                p.as_ref().guest_serialize(w)
+            }
+            VerifierProgram::Committed(c) => {
+                1u8.guest_serialize(w)?;
+                c.guest_serialize(w)
+            }
+        }
+    }
+}
+
+impl<PCS: CommitmentScheme> GuestDeserialize for VerifierProgram<PCS>
+where
+    PCS::Commitment: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        match u8::guest_deserialize(r)? {
+            0 => Ok(VerifierProgram::Full(Arc::new(
+                ProgramPreprocessing::guest_deserialize(r)?,
+            ))),
+            1 => Ok(VerifierProgram::Committed(
+                TrustedProgramCommitments::<PCS>::guest_deserialize(r)?,
+            )),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid VerifierProgram tag",
+            )),
+        }
+    }
 }
 
 impl<PCS: CommitmentScheme> VerifierProgram<PCS> {

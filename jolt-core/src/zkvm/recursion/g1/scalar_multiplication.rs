@@ -12,6 +12,7 @@
 //! The scalar bits are treated as **public inputs** (derived from the scalar),
 //! so we do NOT emit openings for the bit polynomial.
 
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::{
     field::JoltField,
     poly::{
@@ -45,6 +46,19 @@ const OPENING_SPECS: [OpeningSpec; NUM_COMMITTED_KINDS] = sequential_opening_spe
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct G1ScalarMulPublicInputs {
     pub scalar: Fr,
+}
+
+impl GuestSerialize for G1ScalarMulPublicInputs {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.scalar.guest_serialize(w)
+    }
+}
+impl GuestDeserialize for G1ScalarMulPublicInputs {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            scalar: Fr::guest_deserialize(r)?,
+        })
+    }
 }
 
 impl G1ScalarMulPublicInputs {

@@ -3280,7 +3280,6 @@ dependencies = [
  "jolt-inlines-grumpkin",
  "jolt-sdk",
  "postcard",
- "recursion-guest",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3289,7 +3288,6 @@ dependencies = [
 name = "recursion-guest"
 version = "0.1.0"
 dependencies = [
- "ark-serialize",
  "jolt-sdk",
  "postcard",
 ]

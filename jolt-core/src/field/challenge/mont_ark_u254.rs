@@ -5,6 +5,7 @@
 use crate::field::OptimizedMul;
 use crate::field::{tracked_ark::TrackedFr, JoltField};
 //use crate::impl_field_ops_inline;
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use allocative::Allocative;
 use ark_ff::UniformRand;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -28,6 +29,26 @@ use std::ops::*;
 )]
 pub struct Mont254BitChallenge<F: JoltField> {
     value: F,
+}
+
+impl<F> GuestSerialize for Mont254BitChallenge<F>
+where
+    F: JoltField + GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.value.guest_serialize(w)
+    }
+}
+
+impl<F> GuestDeserialize for Mont254BitChallenge<F>
+where
+    F: JoltField + GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            value: F::guest_deserialize(r)?,
+        })
+    }
 }
 
 impl<F: JoltField> Mont254BitChallenge<F> {

@@ -95,7 +95,7 @@ pub struct RAMPreprocessing {
 impl GuestSerialize for RAMPreprocessing {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.min_bytecode_address.guest_serialize(w)?;
-        self.bytecode_words.guest_serialize(w)?;
+        self.program_image_len_words.guest_serialize(w)?;
         Ok(())
     }
 }
@@ -104,7 +104,7 @@ impl GuestDeserialize for RAMPreprocessing {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             min_bytecode_address: u64::guest_deserialize(r)?,
-            bytecode_words: Vec::<u64>::guest_deserialize(r)?,
+            program_image_len_words: usize::guest_deserialize(r)?,
         })
     }
 }

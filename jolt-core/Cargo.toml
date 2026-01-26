@@ -56,6 +56,7 @@ minimal = [
     "rayon",
     "dory/arkworks",
     "dory/cache",
+    "dory/recursion",
 ]
 allocative = ["dep:inferno"]
 monitor = ["dep:sysinfo"]

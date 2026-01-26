@@ -76,6 +76,63 @@ pub struct RecursionPayload<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> 
     pub recursion_proof: RecursionProof<Fq, FS, Hyrax<1, GrumpkinProjective>>,
 }
 
+impl GuestSerialize for RecursionConstraintMetadata {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.constraint_types.guest_serialize(w)?;
+        self.dense_num_vars.guest_serialize(w)?;
+        self.gt_exp_public_inputs.guest_serialize(w)?;
+        self.g1_scalar_mul_public_inputs.guest_serialize(w)?;
+        self.g2_scalar_mul_public_inputs.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for RecursionConstraintMetadata {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            constraint_types: Vec::<ConstraintType>::guest_deserialize(r)?,
+            dense_num_vars: usize::guest_deserialize(r)?,
+            gt_exp_public_inputs: Vec::<GtExpPublicInputs>::guest_deserialize(r)?,
+            g1_scalar_mul_public_inputs: Vec::<G1ScalarMulPublicInputs>::guest_deserialize(r)?,
+            g2_scalar_mul_public_inputs: Vec::<G2ScalarMulPublicInputs>::guest_deserialize(r)?,
+        })
+    }
+}
+
+impl<F, PCS, FS> GuestSerialize for RecursionPayload<F, PCS, FS>
+where
+    F: JoltField,
+    PCS: RecursionExt<F>,
+    <PCS as RecursionExt<F>>::Hint: GuestSerialize,
+    FS: Transcript,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.stage8_combine_hint.guest_serialize(w)?;
+        self.stage9_pcs_hint.guest_serialize(w)?;
+        self.stage10_recursion_metadata.guest_serialize(w)?;
+        self.recursion_proof.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl<F, PCS, FS> GuestDeserialize for RecursionPayload<F, PCS, FS>
+where
+    F: JoltField,
+    PCS: RecursionExt<F>,
+    <PCS as RecursionExt<F>>::Hint: GuestDeserialize,
+    FS: Transcript,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
+            stage9_pcs_hint: <PCS as RecursionExt<F>>::Hint::guest_deserialize(r)?,
+            stage10_recursion_metadata: RecursionConstraintMetadata::guest_deserialize(r)?,
+            recursion_proof:
+                RecursionProof::<Fq, FS, Hyrax<1, GrumpkinProjective>>::guest_deserialize(r)?,
+        })
+    }
+}
+
 /// Jolt proof structure organized by verification stages
 pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
     // ============ Shared Data ============
@@ -470,7 +527,8 @@ where
 impl<F, PCS, FS> GuestSerialize for JoltProof<F, PCS, FS>
 where
     F: JoltField + GuestSerialize,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: RecursionExt<F>,
+    <PCS as RecursionExt<F>>::Hint: GuestSerialize,
     PCS::Commitment: GuestSerialize,
     PCS::Proof: GuestSerialize,
     FS: Transcript,
@@ -485,13 +543,22 @@ where
         self.stage3_sumcheck_proof.guest_serialize(w)?;
         self.stage4_sumcheck_proof.guest_serialize(w)?;
         self.stage5_sumcheck_proof.guest_serialize(w)?;
-        self.stage6_sumcheck_proof.guest_serialize(w)?;
+        self.stage6a_sumcheck_proof.guest_serialize(w)?;
+        self.stage6b_sumcheck_proof.guest_serialize(w)?;
         self.stage7_sumcheck_proof.guest_serialize(w)?;
-        self.joint_opening_proof.guest_serialize(w)?;
+        self.stage8_opening_proof.guest_serialize(w)?;
+        self.recursion.guest_serialize(w)?;
+        self.trusted_advice_val_evaluation_proof
+            .guest_serialize(w)?;
+        self.trusted_advice_val_final_proof.guest_serialize(w)?;
+        self.untrusted_advice_val_evaluation_proof
+            .guest_serialize(w)?;
+        self.untrusted_advice_val_final_proof.guest_serialize(w)?;
         self.untrusted_advice_commitment.guest_serialize(w)?;
         self.trace_length.guest_serialize(w)?;
         self.ram_K.guest_serialize(w)?;
         self.bytecode_K.guest_serialize(w)?;
+        self.program_mode.guest_serialize(w)?;
         self.rw_config.guest_serialize(w)?;
         self.one_hot_config.guest_serialize(w)?;
         self.dory_layout.guest_serialize(w)?;
@@ -502,7 +569,8 @@ where
 impl<F, PCS, FS> GuestDeserialize for JoltProof<F, PCS, FS>
 where
     F: JoltField + GuestDeserialize,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: RecursionExt<F>,
+    <PCS as RecursionExt<F>>::Hint: GuestDeserialize,
     PCS::Commitment: GuestDeserialize,
     PCS::Proof: GuestDeserialize,
     FS: Transcript,
@@ -522,13 +590,20 @@ where
             stage3_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
             stage4_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
             stage5_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
-            stage6_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
+            stage6a_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
+            stage6b_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
             stage7_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
-            joint_opening_proof: PCS::Proof::guest_deserialize(r)?,
+            stage8_opening_proof: PCS::Proof::guest_deserialize(r)?,
+            recursion: Option::<RecursionPayload<F, PCS, FS>>::guest_deserialize(r)?,
+            trusted_advice_val_evaluation_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
+            trusted_advice_val_final_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
+            untrusted_advice_val_evaluation_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
+            untrusted_advice_val_final_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
             untrusted_advice_commitment: Option::<PCS::Commitment>::guest_deserialize(r)?,
             trace_length: usize::guest_deserialize(r)?,
             ram_K: usize::guest_deserialize(r)?,
             bytecode_K: usize::guest_deserialize(r)?,
+            program_mode: ProgramMode::guest_deserialize(r)?,
             rw_config: ReadWriteConfig::guest_deserialize(r)?,
             one_hot_config: OneHotConfig::guest_deserialize(r)?,
             dory_layout: DoryLayout::guest_deserialize(r)?,

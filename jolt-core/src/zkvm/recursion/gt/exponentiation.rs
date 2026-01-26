@@ -20,6 +20,7 @@
 //! - Phase 1: 7 rounds over step variables (s)
 //! - Phase 2: 4 rounds over element variables (x)
 
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::{
     field::JoltField,
     poly::{
@@ -67,6 +68,23 @@ pub struct GtExpPublicInputs {
     pub base: Fq12,
     /// Scalar bits (MSB-first, no leading zeros)
     pub scalar_bits: Vec<bool>,
+}
+
+impl GuestSerialize for GtExpPublicInputs {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.base.guest_serialize(w)?;
+        self.scalar_bits.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for GtExpPublicInputs {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            base: Fq12::guest_deserialize(r)?,
+            scalar_bits: Vec::<bool>::guest_deserialize(r)?,
+        })
+    }
 }
 
 impl GtExpPublicInputs {

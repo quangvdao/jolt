@@ -1,5 +1,6 @@
 //! Batches constraints into a single indexed polynomial F(z, x) = Σ_i eq(z, i) * C_i(x)
 
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::{
     field::JoltField,
     poly::{
@@ -547,12 +548,34 @@ pub struct DoryMatrixBuilder {
     constraint_types: Vec<ConstraintType>,
 }
 
+/// Pre-prepared GT mul witness with padded MLEs.
+///
+/// Use `DoryMatrixBuilder::prepare_gt_mul_witness` to create this from a raw witness.
+pub struct PreparedGtMulWitness {
+    pub lhs_mle: Vec<Fq>,
+    pub rhs_mle: Vec<Fq>,
+    pub result_mle: Vec<Fq>,
+    pub quotient_mle: Vec<Fq>,
+}
+
 impl DoryMatrixBuilder {
     pub fn new(num_constraint_vars: usize) -> Self {
         Self {
             num_constraint_vars,
             rows_by_type: std::array::from_fn(|_| Vec::new()),
             constraint_types: Vec::new(),
+        }
+    }
+
+    /// Create a new builder with pre-allocated capacity for the expected number of constraints.
+    ///
+    /// This avoids reallocations as constraints are added, improving performance
+    /// when the constraint count is known ahead of time.
+    pub fn with_capacity(num_constraint_vars: usize, expected_constraints: usize) -> Self {
+        Self {
+            num_constraint_vars,
+            rows_by_type: std::array::from_fn(|_| Vec::with_capacity(expected_constraints)),
+            constraint_types: Vec::with_capacity(expected_constraints),
         }
     }
 
@@ -668,6 +691,10 @@ impl DoryMatrixBuilder {
     /// - RhoNext: rho_next(s,x) - shifted intermediates (NOT COMMITTED - verified via shift sumcheck)
     /// - Quotient: quotient(s,x) - all quotients packed
     /// - Digit bits: digit_lo/hi(s) - scalar digits (7-var padded to 11-var, public input)
+    ///
+    /// Note: This clones rho_packed and quotient_packed because the same data is also
+    /// needed by sumcheck provers later. The clone is unavoidable with current design.
+    /// Future optimization: use Arc<Vec<Fq>> for shared ownership.
     pub fn add_gt_exp_witness(
         &mut self,
         witness: &crate::zkvm::recursion::gt::exponentiation::GtExpWitness<Fq>,
@@ -690,6 +717,7 @@ impl DoryMatrixBuilder {
         assert_eq!(witness.base3_packed.len(), row_size);
 
         // Add only the 2 committed GT exp polynomials (base/digits/rho_next are not committed)
+        // Clone is required - the same vectors are also used by sumcheck provers
         self.rows_by_type[PolyType::RhoPrev as usize].push(witness.rho_packed.clone());
         self.rows_by_type[PolyType::Quotient as usize].push(witness.quotient_packed.clone());
 
@@ -700,58 +728,33 @@ impl DoryMatrixBuilder {
         self.constraint_types.push(ConstraintType::GtExp);
     }
 
-    /// Add constraint from a GT multiplication witness.
-    /// Creates one constraint using:
-    /// - lhs: the left operand a
-    /// - rhs: the right operand b
-    /// - result: the product c = a * b
-    /// - quotient: Q such that a(x) * b(x) - c(x) = Q(x) * g(x)
-    pub fn add_gt_mul_witness(&mut self, witness: &JoltGtMulWitness) {
+    /// Prepare a GT mul witness for addition to the builder.
+    /// This does the expensive `fq12_to_multilinear_evals` calls and can be parallelized.
+    pub fn prepare_gt_mul_witness(
+        witness: &JoltGtMulWitness,
+        num_constraint_vars: usize,
+    ) -> PreparedGtMulWitness {
         let lhs_mle_4var = fq12_to_multilinear_evals(&witness.lhs);
         let rhs_mle_4var = fq12_to_multilinear_evals(&witness.rhs);
         let result_mle_4var = fq12_to_multilinear_evals(&witness.result);
         let quotient_mle_4var = witness.quotient_mle.clone();
 
-        assert_eq!(
-            lhs_mle_4var.len(),
-            16,
-            "GT mul witness should have 4-variable MLEs"
-        );
-        assert_eq!(
-            rhs_mle_4var.len(),
-            16,
-            "GT mul witness should have 4-variable MLEs"
-        );
-        assert_eq!(
-            result_mle_4var.len(),
-            16,
-            "GT mul witness should have 4-variable MLEs"
-        );
-        assert_eq!(
-            quotient_mle_4var.len(),
-            16,
-            "GT mul witness should have 4-variable MLEs"
-        );
-
         // Handle padding from 4-var to target vars
-        let (lhs_mle, rhs_mle, result_mle, quotient_mle) = if self.num_constraint_vars == 11 {
-            // Pad 4-variable MLEs to 11 variables using zero padding
+        let (lhs_mle, rhs_mle, result_mle, quotient_mle) = if num_constraint_vars == 11 {
             (
                 Self::pad_4var_to_11var_zero_padding(&lhs_mle_4var),
                 Self::pad_4var_to_11var_zero_padding(&rhs_mle_4var),
                 Self::pad_4var_to_11var_zero_padding(&result_mle_4var),
                 Self::pad_4var_to_11var_zero_padding(&quotient_mle_4var),
             )
-        } else if self.num_constraint_vars == 8 {
-            // Pad 4-variable MLEs to 8 variables using zero padding
+        } else if num_constraint_vars == 8 {
             (
                 Self::pad_4var_to_8var_zero_padding(&lhs_mle_4var),
                 Self::pad_4var_to_8var_zero_padding(&rhs_mle_4var),
                 Self::pad_4var_to_8var_zero_padding(&result_mle_4var),
                 Self::pad_4var_to_8var_zero_padding(&quotient_mle_4var),
             )
-        } else if self.num_constraint_vars == 4 {
-            // Use MLEs as-is
+        } else if num_constraint_vars == 4 {
             (
                 lhs_mle_4var,
                 rhs_mle_4var,
@@ -761,26 +764,51 @@ impl DoryMatrixBuilder {
         } else {
             panic!(
                 "Unsupported number of constraint variables: {}",
-                self.num_constraint_vars
+                num_constraint_vars
             );
         };
 
-        assert_eq!(lhs_mle.len(), 1 << self.num_constraint_vars);
-        assert_eq!(rhs_mle.len(), 1 << self.num_constraint_vars);
-        assert_eq!(result_mle.len(), 1 << self.num_constraint_vars);
-        assert_eq!(quotient_mle.len(), 1 << self.num_constraint_vars);
+        PreparedGtMulWitness {
+            lhs_mle,
+            rhs_mle,
+            result_mle,
+            quotient_mle,
+        }
+    }
 
-        // Add rows for GT mul polynomials (keeping GT exp rows empty)
-        self.rows_by_type[PolyType::MulLhs as usize].push(lhs_mle);
-        self.rows_by_type[PolyType::MulRhs as usize].push(rhs_mle);
-        self.rows_by_type[PolyType::MulResult as usize].push(result_mle);
-        self.rows_by_type[PolyType::MulQuotient as usize].push(quotient_mle);
+    /// Add a pre-prepared GT mul witness to the builder.
+    /// Use this with `prepare_gt_mul_witness` for parallel preparation.
+    pub fn add_prepared_gt_mul_witness(&mut self, prepared: PreparedGtMulWitness) {
+        let row_size = 1 << self.num_constraint_vars;
+        assert_eq!(prepared.lhs_mle.len(), row_size);
+        assert_eq!(prepared.rhs_mle.len(), row_size);
+        assert_eq!(prepared.result_mle.len(), row_size);
+        assert_eq!(prepared.quotient_mle.len(), row_size);
 
-        // Add empty rows for all other polynomial types to maintain consistent indexing
-        self.push_zero_rows_except(1 << self.num_constraint_vars, &GT_MUL_POLYS);
+        // Add rows for GT mul polynomials (no clone - move ownership)
+        self.rows_by_type[PolyType::MulLhs as usize].push(prepared.lhs_mle);
+        self.rows_by_type[PolyType::MulRhs as usize].push(prepared.rhs_mle);
+        self.rows_by_type[PolyType::MulResult as usize].push(prepared.result_mle);
+        self.rows_by_type[PolyType::MulQuotient as usize].push(prepared.quotient_mle);
+
+        // Add empty rows for all other polynomial types
+        self.push_zero_rows_except(row_size, &GT_MUL_POLYS);
 
         // Store constraint type
         self.constraint_types.push(ConstraintType::GtMul);
+    }
+
+    /// Add constraint from a GT multiplication witness.
+    /// Creates one constraint using:
+    /// - lhs: the left operand a
+    /// - rhs: the right operand b
+    /// - result: the product c = a * b
+    /// - quotient: Q such that a(x) * b(x) - c(x) = Q(x) * g(x)
+    ///
+    /// Note: For parallel processing, use `prepare_gt_mul_witness` + `add_prepared_gt_mul_witness`.
+    pub fn add_gt_mul_witness(&mut self, witness: &JoltGtMulWitness) {
+        let prepared = Self::prepare_gt_mul_witness(witness, self.num_constraint_vars);
+        self.add_prepared_gt_mul_witness(prepared);
     }
 
     /// Add constraints from a G1 scalar multiplication witness.
@@ -3480,6 +3508,54 @@ impl CanonicalDeserialize for ConstraintType {
             #[cfg(feature = "experimental-pairing-recursion")]
             6 => Ok(ConstraintType::MultiMillerLoop),
             _ => Err(SerializationError::InvalidData),
+        }
+    }
+}
+
+impl GuestSerialize for ConstraintType {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        match self {
+            ConstraintType::GtExp => 0u8.guest_serialize(w),
+            ConstraintType::GtMul => 1u8.guest_serialize(w),
+            ConstraintType::G1ScalarMul { base_point } => {
+                2u8.guest_serialize(w)?;
+                base_point.0.guest_serialize(w)?;
+                base_point.1.guest_serialize(w)?;
+                Ok(())
+            }
+            ConstraintType::G2ScalarMul { base_point } => {
+                3u8.guest_serialize(w)?;
+                base_point.0.guest_serialize(w)?;
+                base_point.1.guest_serialize(w)?;
+                Ok(())
+            }
+            ConstraintType::G1Add => 4u8.guest_serialize(w),
+            ConstraintType::G2Add => 5u8.guest_serialize(w),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            ConstraintType::MultiMillerLoop => 6u8.guest_serialize(w),
+        }
+    }
+}
+
+impl GuestDeserialize for ConstraintType {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        match u8::guest_deserialize(r)? {
+            0 => Ok(ConstraintType::GtExp),
+            1 => Ok(ConstraintType::GtMul),
+            2 => Ok(ConstraintType::G1ScalarMul {
+                base_point: (Fq::guest_deserialize(r)?, Fq::guest_deserialize(r)?),
+            }),
+            3 => Ok(ConstraintType::G2ScalarMul {
+                base_point: (Fq2::guest_deserialize(r)?, Fq2::guest_deserialize(r)?),
+            }),
+            4 => Ok(ConstraintType::G1Add),
+            5 => Ok(ConstraintType::G2Add),
+            #[cfg(feature = "experimental-pairing-recursion")]
+            6 => Ok(ConstraintType::MultiMillerLoop),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid ConstraintType",
+            )),
         }
     }
 }

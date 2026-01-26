@@ -22,6 +22,7 @@ use super::{
     commitment::commitment_scheme::CommitmentScheme, multilinear_polynomial::MultilinearPolynomial,
 };
 use crate::utils::errors::ProofVerifyError;
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::{
     field::JoltField,
     transcripts::Transcript,
@@ -37,6 +38,26 @@ pub const LITTLE_ENDIAN: Endianness = true;
 )]
 pub struct OpeningPoint<const E: Endianness, F: JoltField> {
     pub r: Vec<F::Challenge>,
+}
+
+impl<const E: Endianness, F: JoltField> GuestSerialize for OpeningPoint<E, F>
+where
+    F::Challenge: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.r.guest_serialize(w)
+    }
+}
+
+impl<const E: Endianness, F: JoltField> GuestDeserialize for OpeningPoint<E, F>
+where
+    F::Challenge: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            r: Vec::<F::Challenge>::guest_deserialize(r)?,
+        })
+    }
 }
 
 impl<const E: Endianness, F: JoltField> std::ops::Index<usize> for OpeningPoint<E, F> {
@@ -228,6 +249,45 @@ impl OpeningId {
 /// (point, claim)
 pub type Opening<F> = (OpeningPoint<BIG_ENDIAN, F>, F);
 pub type Openings<F> = BTreeMap<OpeningId, Opening<F>>;
+
+impl<F> GuestSerialize for BTreeMap<OpeningId, Opening<F>>
+where
+    F: JoltField + GuestSerialize,
+    F::Challenge: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        (self.len() as u64).guest_serialize(w)?;
+        for (key, (point, claim)) in self.iter() {
+            key.serialize_compressed(&mut *w)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "OpeningId"))?;
+            point.guest_serialize(w)?;
+            claim.guest_serialize(w)?;
+        }
+        Ok(())
+    }
+}
+
+impl<F> GuestDeserialize for BTreeMap<OpeningId, Opening<F>>
+where
+    F: JoltField + GuestDeserialize,
+    F::Challenge: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        let size_u64 = u64::guest_deserialize(r)?;
+        let size = usize::try_from(size_u64).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "Openings length overflow")
+        })?;
+        let mut out = BTreeMap::new();
+        for _ in 0..size {
+            let key = OpeningId::deserialize_compressed(&mut *r)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "OpeningId"))?;
+            let point = OpeningPoint::<BIG_ENDIAN, F>::guest_deserialize(r)?;
+            let claim = F::guest_deserialize(r)?;
+            out.insert(key, (point, claim));
+        }
+        Ok(out)
+    }
+}
 
 /// Accumulates openings computed by the prover over the course of Jolt,
 /// so that they can all be reduced to a single opening proof using sumcheck.

@@ -80,6 +80,24 @@ impl CanonicalDeserialize for ProgramMode {
     }
 }
 
+impl GuestSerialize for ProgramMode {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        (*self as u8).guest_serialize(w)
+    }
+}
+impl GuestDeserialize for ProgramMode {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        match u8::guest_deserialize(r)? {
+            0 => Ok(Self::Full),
+            1 => Ok(Self::Committed),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid ProgramMode",
+            )),
+        }
+    }
+}
+
 /// Configuration for read-write checking sumchecks.
 ///
 /// Contains parameters that control phase structure for RAM and register

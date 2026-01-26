@@ -123,18 +123,15 @@ impl Drop for CycleMarkerGuard {
     }
 }
 
-/// Minimal snapshot of verifier state needed to drive Stage 8 (Dory) verification.
+/// Minimal snapshot of verifier state needed to drive Stage 8 transcript replay.
 ///
 /// Built after Stage 7, before any Stage 8 transcript mutations.
+/// Used in recursion mode to replay the Fiat-Shamir transcript without
+/// performing actual PCS verification.
 #[derive(Clone, Debug)]
 struct DoryVerifySnapshot<F: JoltField> {
-    /// Unified opening point (big-endian challenges).
-    opening_point_r: Vec<F::Challenge>,
-    /// Ordered list of (polynomial, claim) pairs, with any required embedding factors applied.
-    ///
-    /// Order matters: this must match the prover's ordering for gamma-power sampling.
-    polynomial_claims: Vec<(CommittedPolynomial, F)>,
-    /// Convenience: `polynomial_claims` projected to just the scalar claims.
+    /// Ordered claims for transcript replay.
+    /// Order matters: must match the prover's ordering for gamma-power sampling.
     claims: Vec<F>,
 }
 pub struct JoltVerifier<'a, F: JoltField, PCS: RecursionExt<F>, ProofTranscript: Transcript> {
@@ -911,149 +908,10 @@ where
 
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
 
-        Ok(DoryVerifySnapshot {
-            opening_point_r: opening_point.r.clone(),
-            polynomial_claims,
-            claims,
-        })
-    }
-
-    fn verify_stage8_with_pcs_hint_from_snapshot(
-        &mut self,
-        snap: &DoryVerifySnapshot<F>,
-        stage8_hint: &<PCS as RecursionExt<F>>::Hint,
-    ) -> Result<(), anyhow::Error>
-    where
-        PCS: RecursionExt<F>,
-    {
-        // Initialize DoryGlobals with the layout from the proof.
-        // In committed mode, we must also match the Main-context sigma used to derive trusted
-        // bytecode commitments, otherwise Stage 8 batching will be inconsistent.
-        let _dory_guard = if self.proof.program_mode == ProgramMode::Committed {
-            let committed = self.preprocessing.program.as_committed()?;
-            DoryGlobals::initialize_main_context_with_num_columns(
-                1 << self.one_hot_params.log_k_chunk,
-                self.proof.trace_length.next_power_of_two(),
-                committed.bytecode_num_columns,
-                Some(self.proof.dory_layout),
-            )
-        } else {
-            DoryGlobals::initialize_context(
-                1 << self.one_hot_params.log_k_chunk,
-                self.proof.trace_length.next_power_of_two(),
-                DoryContext::Main,
-                Some(self.proof.dory_layout),
-            )
-        };
-
-        // Sample gamma and compute powers for RLC (must match prover).
-        let gamma_powers: Vec<F> = {
-            let _span = tracing::info_span!("stage8_gamma_powers", num_claims = snap.claims.len())
-                .entered();
-            self.transcript.append_scalars(&snap.claims);
-            self.transcript.challenge_scalar_powers(snap.claims.len())
-        };
-
-        // Build state for computing joint commitment/claim.
-        let state = DoryOpeningState {
-            opening_point: snap.opening_point_r.clone(),
-            gamma_powers: gamma_powers.clone(),
-            polynomial_claims: snap.polynomial_claims.clone(),
-        };
-
-        // Compute joint commitment: Σ γ_i · C_i
-        // Use precomputed hint if available, otherwise compute directly.
-        let joint_commitment = {
-            let _span = tracing::info_span!("stage8_joint_commitment").entered();
-            let combine_hint = self
-                .proof
-                .recursion
-                .as_ref()
-                .and_then(|p| p.stage8_combine_hint.as_ref());
-            if let Some(combine_hint) = combine_hint {
-                PCS::combine_with_hint_fq12(combine_hint)
-            } else {
-                let mut commitments_map = HashMap::new();
-                for (polynomial, commitment) in all_committed_polynomials(&self.one_hot_params)
-                    .into_iter()
-                    .zip_eq(&self.proof.commitments)
-                {
-                    commitments_map.insert(polynomial, commitment.clone());
-                }
-
-                // Add advice commitments if they're part of the batch.
-                if let Some(ref commitment) = self.trusted_advice_commitment {
-                    if state
-                        .polynomial_claims
-                        .iter()
-                        .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
-                    {
-                        commitments_map
-                            .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-                    }
-                }
-                if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
-                    if state
-                        .polynomial_claims
-                        .iter()
-                        .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
-                    {
-                        commitments_map
-                            .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
-                    }
-                }
-
-                // Add program commitments in committed mode.
-                if self.proof.program_mode == ProgramMode::Committed {
-                    if let Ok(committed) = self.preprocessing.program.as_committed() {
-                        for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
-                            commitments_map
-                                .entry(CommittedPolynomial::BytecodeChunk(idx))
-                                .or_insert_with(|| commitment.clone());
-                        }
-                        // Add trusted program-image commitment if it's part of the batch.
-                        if state
-                            .polynomial_claims
-                            .iter()
-                            .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
-                        {
-                            commitments_map.insert(
-                                CommittedPolynomial::ProgramImageInit,
-                                committed.program_image_commitment.clone(),
-                            );
-                        }
-                    }
-                }
-
-                self.compute_joint_commitment(&mut commitments_map, &state)
-            }
-        };
-
-        // Compute joint claim: Σ γ_i · claim_i.
-        let joint_claim: F = {
-            let _span = tracing::info_span!("stage8_joint_claim").entered();
-            gamma_powers
-                .iter()
-                .zip(snap.claims.iter())
-                .map(|(gamma, claim)| *gamma * *claim)
-                .sum()
-        };
-
-        // Verify opening using the hint-based PCS verifier.
-        PCS::verify_with_hint(
-            &self.proof.stage8_opening_proof,
-            &self.preprocessing.generators,
-            &mut self.transcript,
-            &snap.opening_point_r,
-            &joint_claim,
-            &joint_commitment,
-            stage8_hint,
-        )
-        .context("Stage 8 (hint)")
+        Ok(DoryVerifySnapshot { claims })
     }
 
     /// Stage 8: Dory batch opening verification.
-    #[allow(dead_code)]
     fn verify_stage8(&mut self) -> Result<(), anyhow::Error> {
         // Initialize DoryGlobals with the layout from the proof.
         // In committed mode, we must also match the Main-context sigma used to derive trusted
@@ -1301,19 +1159,6 @@ where
         Ok(())
     }
 
-    /// Stage 8: PCS batch opening verification using a recursion hint (when supported by the PCS).
-    #[tracing::instrument(skip_all, name = "verify_stage8_with_pcs_hint")]
-    fn verify_stage8_with_pcs_hint(
-        &mut self,
-        stage8_hint: &<PCS as RecursionExt<F>>::Hint,
-    ) -> Result<(), anyhow::Error>
-    where
-        PCS: RecursionExt<F>,
-    {
-        let snap = self.build_dory_verify_snapshot()?;
-        self.verify_stage8_with_pcs_hint_from_snapshot(&snap, stage8_hint)
-    }
-
     /// Compute joint commitment for the batch opening.
     fn compute_joint_commitment(
         &self,
@@ -1485,135 +1330,6 @@ where
 
         Ok(())
     }
-
-    #[allow(dead_code)]
-    fn verify_trusted_advice_opening_proofs(&mut self) -> Result<(), anyhow::Error> {
-        if let Some(ref commitment) = self.trusted_advice_commitment {
-            // Verify at RamValEvaluation point
-            let Some(ref proof) = self.proof.trusted_advice_val_evaluation_proof else {
-                return Err(anyhow::anyhow!(
-                    "Trusted advice val evaluation proof not found"
-                ));
-            };
-            let Some((point, eval)) = self
-                .opening_accumulator
-                .get_advice_opening(AdviceKind::Trusted, SumcheckId::RamValEvaluation)
-            else {
-                return Err(anyhow::anyhow!("Trusted advice opening not found"));
-            };
-            PCS::verify(
-                proof,
-                &self.preprocessing.generators,
-                &mut self.transcript,
-                &point.r,
-                &eval,
-                commitment,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("Trusted advice opening proof verification failed: {e:?}")
-            })?;
-
-            // Verify at RamValFinalEvaluation point - only if different from ValEvaluation
-            if !self
-                .proof
-                .rw_config
-                .needs_single_advice_opening(self.proof.trace_length.log_2())
-            {
-                let Some(ref proof_val_final) = self.proof.trusted_advice_val_final_proof else {
-                    return Err(anyhow::anyhow!("Trusted advice val final proof not found"));
-                };
-                let Some((point_val_final, eval_val_final)) = self
-                    .opening_accumulator
-                    .get_advice_opening(AdviceKind::Trusted, SumcheckId::RamValFinalEvaluation)
-                else {
-                    return Err(anyhow::anyhow!(
-                        "Trusted advice val final opening not found"
-                    ));
-                };
-                PCS::verify(
-                    proof_val_final,
-                    &self.preprocessing.generators,
-                    &mut self.transcript,
-                    &point_val_final.r,
-                    &eval_val_final,
-                    commitment,
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Trusted advice val final opening proof verification failed: {e:?}"
-                    )
-                })?;
-            }
-        }
-
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn verify_untrusted_advice_opening_proofs(&mut self) -> Result<(), anyhow::Error> {
-        use crate::poly::opening_proof::SumcheckId;
-        if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
-            // Verify at RamValEvaluation point
-            let Some(ref proof) = self.proof.untrusted_advice_val_evaluation_proof else {
-                return Err(anyhow::anyhow!(
-                    "Untrusted advice val evaluation proof not found"
-                ));
-            };
-            let Some((point, eval)) = self
-                .opening_accumulator
-                .get_advice_opening(AdviceKind::Untrusted, SumcheckId::RamValEvaluation)
-            else {
-                return Err(anyhow::anyhow!("Untrusted advice opening not found"));
-            };
-            PCS::verify(
-                proof,
-                &self.preprocessing.generators,
-                &mut self.transcript,
-                &point.r,
-                &eval,
-                commitment,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("Untrusted advice opening proof verification failed: {e:?}")
-            })?;
-
-            // Verify at RamValFinalEvaluation point - only if different from ValEvaluation
-            if !self
-                .proof
-                .rw_config
-                .needs_single_advice_opening(self.proof.trace_length.log_2())
-            {
-                let Some(ref proof_val_final) = self.proof.untrusted_advice_val_final_proof else {
-                    return Err(anyhow::anyhow!(
-                        "Untrusted advice val final proof not found"
-                    ));
-                };
-                let Some((point_val_final, eval_val_final)) = self
-                    .opening_accumulator
-                    .get_advice_opening(AdviceKind::Untrusted, SumcheckId::RamValFinalEvaluation)
-                else {
-                    return Err(anyhow::anyhow!(
-                        "Untrusted advice val final opening not found"
-                    ));
-                };
-                PCS::verify(
-                    proof_val_final,
-                    &self.preprocessing.generators,
-                    &mut self.transcript,
-                    &point_val_final.r,
-                    &eval_val_final,
-                    commitment,
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Untrusted advice val final opening proof verification failed: {e:?}"
-                    )
-                })?;
-            }
-        }
-
-        Ok(())
-    }
 }
 
 /// Shared preprocessing between prover and verifier.
@@ -1667,6 +1383,25 @@ impl JoltSharedPreprocessing {
     }
 }
 
+impl GuestSerialize for JoltSharedPreprocessing {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.program_meta.guest_serialize(w)?;
+        self.memory_layout.guest_serialize(w)?;
+        self.max_padded_trace_length.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for JoltSharedPreprocessing {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            program_meta: ProgramMetadata::guest_deserialize(r)?,
+            memory_layout: MemoryLayout::guest_deserialize(r)?,
+            max_padded_trace_length: usize::guest_deserialize(r)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct JoltVerifierPreprocessing<F, PCS>
 where
@@ -1675,13 +1410,48 @@ where
 {
     pub generators: PCS::VerifierSetup,
     pub shared: JoltSharedPreprocessing,
-    /// Cached Hyrax setup for recursion verification (avoids 40ms regeneration per verify)
+    /// Cached Hyrax setup for recursion verification
     pub hyrax_recursion_setup: PedersenGenerators<GrumpkinProjective>,
     /// Program information for verification.
     ///
     /// In Full mode: contains full program preprocessing (bytecode + program image).
     /// In Committed mode: contains only commitments (succinct).
     pub program: VerifierProgram<PCS>,
+}
+
+impl<F, PCS> GuestSerialize for JoltVerifierPreprocessing<F, PCS>
+where
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+    PCS::VerifierSetup: GuestSerialize,
+    PedersenGenerators<GrumpkinProjective>: GuestSerialize,
+    VerifierProgram<PCS>: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.generators.guest_serialize(w)?;
+        self.shared.guest_serialize(w)?;
+        self.hyrax_recursion_setup.guest_serialize(w)?;
+        self.program.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl<F, PCS> GuestDeserialize for JoltVerifierPreprocessing<F, PCS>
+where
+    F: JoltField,
+    PCS: CommitmentScheme<Field = F>,
+    PCS::VerifierSetup: GuestDeserialize,
+    PedersenGenerators<GrumpkinProjective>: GuestDeserialize,
+    VerifierProgram<PCS>: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            generators: PCS::VerifierSetup::guest_deserialize(r)?,
+            shared: JoltSharedPreprocessing::guest_deserialize(r)?,
+            hyrax_recursion_setup: PedersenGenerators::<GrumpkinProjective>::guest_deserialize(r)?,
+            program: VerifierProgram::<PCS>::guest_deserialize(r)?,
+        })
+    }
 }
 
 impl<F, PCS> CanonicalSerialize for JoltVerifierPreprocessing<F, PCS>
@@ -1745,33 +1515,6 @@ where
             shared,
             hyrax_recursion_setup,
             program,
-        })
-    }
-}
-
-impl<F, PCS> GuestSerialize for JoltVerifierPreprocessing<F, PCS>
-where
-    F: JoltField,
-    PCS: CommitmentScheme<Field = F>,
-    PCS::VerifierSetup: GuestSerialize,
-{
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.generators.guest_serialize(w)?;
-        self.shared.guest_serialize(w)?;
-        Ok(())
-    }
-}
-
-impl<F, PCS> GuestDeserialize for JoltVerifierPreprocessing<F, PCS>
-where
-    F: JoltField,
-    PCS: CommitmentScheme<Field = F>,
-    PCS::VerifierSetup: GuestDeserialize,
-{
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(Self {
-            generators: PCS::VerifierSetup::guest_deserialize(r)?,
-            shared: JoltSharedPreprocessing::guest_deserialize(r)?,
         })
     }
 }

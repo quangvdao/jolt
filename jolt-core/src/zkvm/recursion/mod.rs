@@ -61,7 +61,7 @@ mod tests;
 // Re-export constraint types
 pub use constraints::{
     ConstraintSystem, ConstraintSystemConfig, ConstraintType, DoryMatrixBuilder, PolyType,
-    RecursionMetadataBuilder, CONFIG,
+    PreparedGtMulWitness, RecursionMetadataBuilder, CONFIG,
 };
 
 // Re-export jagged types

@@ -396,6 +396,45 @@ impl GuestDeserialize for ark_bn254::g2::G2Affine {
     }
 }
 
+// ---------------- Grumpkin field / curve points (for Hyrax recursion) ----------------
+
+impl GuestSerialize for ark_grumpkin::Affine {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        use ark_ec::AffineRepr;
+        self.is_zero().guest_serialize(w)?;
+        self.x.guest_serialize(w)?;
+        self.y.guest_serialize(w)?;
+        Ok(())
+    }
+}
+impl GuestDeserialize for ark_grumpkin::Affine {
+    fn guest_deserialize<R: Read>(r: &mut R) -> io::Result<Self> {
+        use ark_ec::AffineRepr;
+        let is_inf = bool::guest_deserialize(r)?;
+        let x = ark_grumpkin::Fq::guest_deserialize(r)?;
+        let y = ark_grumpkin::Fq::guest_deserialize(r)?;
+        if is_inf {
+            Ok(ark_grumpkin::Affine::zero())
+        } else {
+            Ok(ark_grumpkin::Affine::new_unchecked(x, y))
+        }
+    }
+}
+
+impl GuestSerialize for ark_grumpkin::Projective {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        use ark_ec::CurveGroup;
+        self.into_affine().guest_serialize(w)
+    }
+}
+impl GuestDeserialize for ark_grumpkin::Projective {
+    fn guest_deserialize<R: Read>(r: &mut R) -> io::Result<Self> {
+        use ark_ec::AffineRepr;
+        let aff = ark_grumpkin::Affine::guest_deserialize(r)?;
+        Ok(aff.into_group())
+    }
+}
+
 // ---------------- JoltDevice / MemoryLayout (raw bytes) ----------------
 
 impl GuestSerialize for common::jolt_device::MemoryLayout {

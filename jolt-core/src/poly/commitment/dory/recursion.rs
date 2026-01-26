@@ -1,5 +1,6 @@
 //! Jolt implementation of Dory's recursion backend
 
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use ark_bn254::{Fq, Fq12, Fr, G1Affine, G2Affine};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Write};
 use dory::evaluation_proof::verify_with_backend;
@@ -82,6 +83,101 @@ impl CanonicalDeserialize for JoltHintMap {
             HintMap::deserialize_with_mode(&bytes[..], DoryCompress::Yes, DoryValidate::Yes)
                 .map_err(|_| SerializationError::InvalidData)?;
         Ok(JoltHintMap(hint_map))
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Guest (decompressed) encoding helpers
+// -------------------------------------------------------------------------------------------------
+
+impl GuestSerialize for JoltHintMap {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        // Encode (num_rounds, len, entries...) in a deterministic order.
+        self.0.num_rounds.guest_serialize(w)?;
+
+        let len_u64: u64 = self
+            .0
+            .len()
+            .try_into()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "HintMap len"))?;
+        len_u64.guest_serialize(w)?;
+
+        let mut entries: Vec<_> = self.0.iter().collect();
+        entries.sort_by_key(|(id, _)| **id);
+
+        for (id, result) in entries {
+            id.round.guest_serialize(w)?;
+            (id.op_type as u8).guest_serialize(w)?;
+            id.index.guest_serialize(w)?;
+
+            match result {
+                dory::recursion::HintResult::G1(g1) => {
+                    0u8.guest_serialize(w)?;
+                    g1.guest_serialize(w)?;
+                }
+                dory::recursion::HintResult::G2(g2) => {
+                    1u8.guest_serialize(w)?;
+                    g2.guest_serialize(w)?;
+                }
+                dory::recursion::HintResult::GT(gt) => {
+                    2u8.guest_serialize(w)?;
+                    gt.guest_serialize(w)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for JoltHintMap {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        let num_rounds = usize::guest_deserialize(r)?;
+        let len_u64 = u64::guest_deserialize(r)?;
+        let len = usize::try_from(len_u64)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "HintMap len"))?;
+
+        let mut map = HintMap::<BN254>::new(num_rounds);
+
+        for _ in 0..len {
+            let round = u16::guest_deserialize(r)?;
+            let op_type_u8 = u8::guest_deserialize(r)?;
+            let index = u16::guest_deserialize(r)?;
+
+            let op_type = match op_type_u8 {
+                0 => OpType::G1Add,
+                1 => OpType::G1ScalarMul,
+                2 => OpType::MsmG1,
+                3 => OpType::G2Add,
+                4 => OpType::G2ScalarMul,
+                5 => OpType::MsmG2,
+                6 => OpType::GtMul,
+                7 => OpType::GtExp,
+                8 => OpType::Pairing,
+                9 => OpType::MultiPairing,
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid OpType",
+                    ))
+                }
+            };
+            let id = OpId::new(round, op_type, index);
+
+            match u8::guest_deserialize(r)? {
+                0 => map.insert_g1(id, dory::backends::arkworks::ArkG1::guest_deserialize(r)?),
+                1 => map.insert_g2(id, dory::backends::arkworks::ArkG2::guest_deserialize(r)?),
+                2 => map.insert_gt(id, dory::backends::arkworks::ArkGT::guest_deserialize(r)?),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid HintResult tag",
+                    ))
+                }
+            }
+        }
+
+        Ok(JoltHintMap(map))
     }
 }
 

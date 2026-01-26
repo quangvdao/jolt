@@ -15,5 +15,6 @@ pub use sumcheck::{
     ConstraintListVerifier, ConstraintListVerifierSpec, OpeningSpec,
 };
 pub use system::{
-    ConstraintSystem, ConstraintType, DoryMatrixBuilder, PolyType, RecursionMetadataBuilder,
+    ConstraintSystem, ConstraintType, DoryMatrixBuilder, PolyType, PreparedGtMulWitness,
+    RecursionMetadataBuilder,
 };

@@ -9,6 +9,7 @@ use crate::transcripts::{AppendToTranscript, Transcript};
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::math::Math;
 use crate::utils::{compute_dotproduct, mul_0_1_optimized};
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use ark_ec::CurveGroup;
 use ark_grumpkin;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -44,6 +45,26 @@ impl Drop for CycleMarkerGuard {
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PedersenGenerators<G: CurveGroup> {
     pub(crate) generators: Vec<G::Affine>,
+}
+
+impl<G: CurveGroup> GuestSerialize for PedersenGenerators<G>
+where
+    G::Affine: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.generators.guest_serialize(w)
+    }
+}
+
+impl<G: CurveGroup> GuestDeserialize for PedersenGenerators<G>
+where
+    G::Affine: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            generators: Vec::<G::Affine>::guest_deserialize(r)?,
+        })
+    }
 }
 
 impl<G: CurveGroup> PedersenGenerators<G> {
@@ -83,6 +104,26 @@ pub fn matrix_dimensions(num_vars: usize, matrix_aspect_ratio: usize) -> (usize,
 #[derive(Default, Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct HyraxCommitment<const RATIO: usize, G: CurveGroup> {
     pub row_commitments: Vec<G>,
+}
+
+impl<const RATIO: usize, G: CurveGroup> GuestSerialize for HyraxCommitment<RATIO, G>
+where
+    G: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.row_commitments.guest_serialize(w)
+    }
+}
+
+impl<const RATIO: usize, G: CurveGroup> GuestDeserialize for HyraxCommitment<RATIO, G>
+where
+    G: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            row_commitments: Vec::<G>::guest_deserialize(r)?,
+        })
+    }
 }
 
 impl<const RATIO: usize, G: CurveGroup> HyraxCommitment<RATIO, G>
@@ -130,6 +171,26 @@ impl<const RATIO: usize, G: CurveGroup> AppendToTranscript for HyraxCommitment<R
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct HyraxOpeningProof<const RATIO: usize, G: CurveGroup> {
     pub vector_matrix_product: Vec<G::ScalarField>,
+}
+
+impl<const RATIO: usize, G: CurveGroup> GuestSerialize for HyraxOpeningProof<RATIO, G>
+where
+    G::ScalarField: GuestSerialize,
+{
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.vector_matrix_product.guest_serialize(w)
+    }
+}
+
+impl<const RATIO: usize, G: CurveGroup> GuestDeserialize for HyraxOpeningProof<RATIO, G>
+where
+    G::ScalarField: GuestDeserialize,
+{
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            vector_matrix_product: Vec::<G::ScalarField>::guest_deserialize(r)?,
+        })
+    }
 }
 
 /// See Section 14.3 of Thaler's Proofs, Arguments, and Zero-Knowledge

@@ -1119,8 +1119,9 @@ This ordering guarantees:
 - **Determinism**: The layout is identical for prover and verifier, computed from public data only.
 - **Stability**: The ordering is independent of prover choices and stable across implementations.
 
-**Compatibility note**: This ordering is part of the proof format (`RECURSION_PROOF_BUNDLE_VERSION`). Any future
-modifications must be versioned to avoid proof incompatibility.
+**Compatibility note**: This ordering is part of the recursion proof semantics and therefore part of the
+serialized proof/encoding. Any future modifications must be versioned (and artifacts regenerated) to avoid
+proof incompatibility.
 
 This is implemented by `PrefixPackingLayout::from_constraint_types` in `jolt-core/src/zkvm/recursion/prefix_packing.rs`.
 

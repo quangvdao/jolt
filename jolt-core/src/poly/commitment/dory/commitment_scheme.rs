@@ -239,8 +239,6 @@ impl CommitmentScheme for DoryCommitmentScheme {
         commitments: &[C],
         coeffs: &[Self::Field],
     ) -> Self::Commitment {
-        let _span = trace_span!("DoryCommitmentScheme::combine_commitments").entered();
-
         // Combine GT elements using parallel RLC
         let commitments_vec: Vec<&ArkGT> = commitments.iter().map(|c| c.borrow()).collect();
         coeffs

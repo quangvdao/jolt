@@ -172,43 +172,31 @@ where
 
 /// Jolt proof structure organized by verification stages
 pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
-    // ============ Shared Data ============
     pub opening_claims: Claims<F>,
     pub commitments: Vec<PCS::Commitment>,
 
-    // ============ Stage 1: R1CS Proof ============
     pub stage1_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
     pub stage1_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
-    // ============ Stage 2: Spartan Virtual Remainder ============
     pub stage2_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
     pub stage2_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
-    // ============ Stage 3: Spartan Shift ============
     pub stage3_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
-    // ============ Stage 4: Read-Write Memory Checking ============
     pub stage4_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
-    // ============ Stage 5: Registers & Bytecode ============
     pub stage5_sumcheck_proof: SumcheckInstanceProof<F, FS>,
-    // ============ Stage 6a: Bytecode Claim Reduction ============
     pub stage6a_sumcheck_proof: SumcheckInstanceProof<F, FS>,
-    // ============ Stage 6b: Hamming Weight & Ra Claims ============
     pub stage6b_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
-    // ============ Stage 7: Inc Claims & Virtualization ============
     pub stage7_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
-    // ============ Stage 8: Dory Batch Opening ============
     /// Dory polynomial commitment opening proof
     pub stage8_opening_proof: PCS::Proof,
 
-    // ============ Optional Recursion Payload ============
     /// Recursion payload (strict extension).
     pub recursion: Option<RecursionPayload<F, PCS, FS>>,
 
-    // ============ Advice Proofs ============
     /// Trusted advice opening proof at point from RamValEvaluation
     pub trusted_advice_val_evaluation_proof: Option<PCS::Proof>,
     /// Trusted advice opening proof at point from RamValFinalEvaluation
@@ -219,7 +207,6 @@ pub struct JoltProof<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> {
     pub untrusted_advice_val_final_proof: Option<PCS::Proof>,
     pub untrusted_advice_commitment: Option<PCS::Commitment>,
 
-    // ============ Configuration ============
     pub trace_length: usize,
     pub ram_K: usize,
     pub bytecode_K: usize,

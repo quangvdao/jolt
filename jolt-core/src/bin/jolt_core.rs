@@ -175,8 +175,9 @@ fn trace(args: ProfileArgs) {
     };
     let scale_suffix = args.scale.map_or(String::new(), |s| format!("_2^{s}"));
     let timestamp = Local::now().format("%Y%m%d-%H%M");
-    let trace_name =
-        format!("{bench_name}{mode_suffix}{recursion_suffix}{layout_suffix}{scale_suffix}_{timestamp}");
+    let trace_name = format!(
+        "{bench_name}{mode_suffix}{recursion_suffix}{layout_suffix}{scale_suffix}_{timestamp}"
+    );
     let _guards = setup_tracing(args.format.clone(), &trace_name);
 
     // Set the Dory layout before running benchmarks

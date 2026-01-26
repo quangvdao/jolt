@@ -490,34 +490,51 @@ impl<'a> LegacyGtWiringValueSource<'a> {
     #[inline]
     fn src_at_r(&self, src: GtProducer) -> Fq {
         match src {
-            GtProducer::GtExpRho { instance } => self
-                .acc
-                .get_virtual_polynomial_opening(
-                    VirtualPolynomial::gt_exp_rho(instance),
-                    SumcheckId::GtExpClaimReduction,
-                )
-                .1,
-            GtProducer::GtMulResult { instance } => self
-                .acc
-                .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_result(instance), SumcheckId::GtMul)
-                .1,
+            GtProducer::GtExpRho { instance } => {
+                self.acc
+                    .get_virtual_polynomial_opening(
+                        VirtualPolynomial::gt_exp_rho(instance),
+                        SumcheckId::GtExpClaimReduction,
+                    )
+                    .1
+            }
+            GtProducer::GtMulResult { instance } => {
+                self.acc
+                    .get_virtual_polynomial_opening(
+                        VirtualPolynomial::gt_mul_result(instance),
+                        SumcheckId::GtMul,
+                    )
+                    .1
+            }
         }
     }
 
     #[inline]
     fn dst_at_r(&self, dst: GtConsumer) -> Fq {
         match dst {
-            GtConsumer::GtMulLhs { instance } => self
-                .acc
-                .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_lhs(instance), SumcheckId::GtMul)
-                .1,
-            GtConsumer::GtMulRhs { instance } => self
-                .acc
-                .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_rhs(instance), SumcheckId::GtMul)
-                .1,
-            GtConsumer::GtExpBase { instance } => eval_fq12_packed_at(&self.gt_exp_bases[instance], self.r_elem),
+            GtConsumer::GtMulLhs { instance } => {
+                self.acc
+                    .get_virtual_polynomial_opening(
+                        VirtualPolynomial::gt_mul_lhs(instance),
+                        SumcheckId::GtMul,
+                    )
+                    .1
+            }
+            GtConsumer::GtMulRhs { instance } => {
+                self.acc
+                    .get_virtual_polynomial_opening(
+                        VirtualPolynomial::gt_mul_rhs(instance),
+                        SumcheckId::GtMul,
+                    )
+                    .1
+            }
+            GtConsumer::GtExpBase { instance } => {
+                eval_fq12_packed_at(&self.gt_exp_bases[instance], self.r_elem)
+            }
             GtConsumer::JointCommitment => eval_fq12_packed_at(self.joint_commitment, self.r_elem),
-            GtConsumer::PairingBoundaryRhs => eval_fq12_packed_at(&self.pairing_boundary.rhs, self.r_elem),
+            GtConsumer::PairingBoundaryRhs => {
+                eval_fq12_packed_at(&self.pairing_boundary.rhs, self.r_elem)
+            }
         }
     }
 }

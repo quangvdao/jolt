@@ -69,7 +69,7 @@ impl JaggedSumcheckParams {
             num_s_vars,
             num_constraint_vars,
             num_dense_vars,
-            sumcheck_id: SumcheckId::RecursionJagged,
+            sumcheck_id: SumcheckId::RecursionPacked,
             polynomial: CommittedPolynomial::DoryDenseMatrix,
         }
     }

@@ -55,6 +55,24 @@ pub struct PrefixPackingLayout {
 
 impl PrefixPackingLayout {
     /// Build a canonical packing layout from the public constraint list.
+    ///
+    /// # Canonical Ordering Specification
+    ///
+    /// The packing layout is **deterministic** and **publicly derivable** from the constraint list.
+    /// Both prover and verifier compute the identical layout without any additional communication.
+    ///
+    /// **Sort key** (lexicographic, applied to each committed polynomial):
+    /// 1. **`num_vars` descending**: Larger polynomials (more variables) come first.
+    /// 2. **`PolyType` ascending**: Within same size, order by `PolyType` discriminant.
+    /// 3. **`constraint_idx` ascending**: Within same size and type, order by constraint index.
+    ///
+    /// This ordering ensures:
+    /// - Power-of-two alignment is maintained (larger blocks first guarantees alignment).
+    /// - The layout is stable across runs and implementations.
+    /// - The ordering is independent of prover choices.
+    ///
+    /// **Stability Note**: This ordering is part of the proof format. Changing it would break
+    /// proof compatibility. Any future modifications must be versioned.
     pub fn from_constraint_types(constraint_types: &[ConstraintType]) -> Self {
         // Collect all committed polynomial "rows" with their native var counts.
         let mut polys: Vec<(usize, PolyType, usize)> = Vec::new();
@@ -65,6 +83,7 @@ impl PrefixPackingLayout {
         }
 
         // Canonical ordering: decreasing size (num_vars), then PolyType-major, then constraint index.
+        // IMPORTANT: This ordering is part of the proof format and must remain stable.
         polys.sort_by_key(|(constraint_idx, poly_type, num_vars)| {
             (
                 std::cmp::Reverse(*num_vars),

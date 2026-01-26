@@ -1103,9 +1103,24 @@ to a **single PCS opening claim** of one packed multilinear polynomial.
 Both prover and verifier deterministically derive a packing layout from the **public constraint list** (`constraint_types`):
 
 - Each constraint family contributes a fixed set of witness polynomials (indexed by `PolyType`) with known native arities (e.g. 4-var, 8-var, 11-var).
-- We order these polynomials canonically (non-increasing power-of-two sizes, with deterministic tie-breaking) and assign them disjoint
-  prefix-defined subcubes of \(\{0,1\}^{n_{\text{dense}}}\).
+- We order these polynomials canonically and assign them disjoint prefix-defined subcubes of \(\{0,1\}^{n_{\text{dense}}}\).
 - Unused regions of the ambient \(\{0,1\}^{n_{\text{dense}}}\) hypercube are treated as zero.
+
+#### Canonical ordering specification
+
+The polynomials are sorted using the following **lexicographic sort key** (applied to each committed polynomial):
+
+1. **`num_vars` descending**: Larger polynomials (more variables) come first.
+2. **`PolyType` ascending**: Within same size, order by `PolyType` enum discriminant.
+3. **`constraint_idx` ascending**: Within same size and type, order by constraint index in the public constraint list.
+
+This ordering guarantees:
+- **Alignment**: Power-of-two alignment is maintained (larger blocks placed first ensures subsequent blocks align).
+- **Determinism**: The layout is identical for prover and verifier, computed from public data only.
+- **Stability**: The ordering is independent of prover choices and stable across implementations.
+
+**Compatibility note**: This ordering is part of the proof format (`RECURSION_PROOF_BUNDLE_VERSION`). Any future
+modifications must be versioned to avoid proof incompatibility.
 
 This is implemented by `PrefixPackingLayout::from_constraint_types` in `jolt-core/src/zkvm/recursion/prefix_packing.rs`.
 
@@ -1134,8 +1149,13 @@ Stage-2 sumchecks bind variables in `BindingOrder::LowToHigh` (LSB-first) and ar
 Stage 3 therefore interprets `r_x` as a suffix and maps it into the low variables of the packed opening point in the same order expected by
 the prefix packing layout.
 
-For the precise mapping (including the per-block bit-reversal used to preserve claim semantics), see:
-- `jolt-core/src/zkvm/recursion/prefix_packing.rs`
+**Bit-reversal for claim consistency**: Before embedding `r_x` as the low bits of the packed opening point, we **reverse** the
+vector (so that the Stage-2 suffix becomes a prefix in packed coordinates). Correspondingly, each native polynomial's evaluation
+table is bit-reversed when building the packed dense polynomial. This ensures that
+\(\mathrm{packed\_eval} = \sum_e w_e(r_{\mathrm{pack}}) \cdot f_e(r_x)\) correctly reduces to the committed table values.
+
+For the precise mapping, see:
+- `jolt-core/src/zkvm/recursion/prefix_packing.rs` (`build_prefix_packed_evals`, `packed_eval_from_claims`)
 - `RecursionProver::prove_stage3_prefix_packing` / `RecursionVerifier::verify_stage3_prefix_packing`
 
 ---

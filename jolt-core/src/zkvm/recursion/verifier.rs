@@ -22,7 +22,7 @@ use ark_bn254::Fq;
 use ark_std::Zero;
 
 use super::{
-    constraints::system::ConstraintType,
+    constraints::system::{ConstraintType, PolyType},
     curve::Bn254Recursion,
     g1::{
         addition::G1AddParams,
@@ -39,9 +39,7 @@ use super::{
         shift::{GtShiftParams, GtShiftVerifier},
     },
     prover::RecursionProof,
-    virtualization::{
-        extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationVerifier,
-    },
+    virtualization::extract_virtual_claims_from_accumulator,
 };
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
@@ -52,8 +50,6 @@ use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 const CYCLE_RECURSION_STAGE1: &str = "jolt_recursion_stage1";
 const CYCLE_RECURSION_STAGE2: &str = "jolt_recursion_stage2";
 const CYCLE_RECURSION_STAGE3: &str = "jolt_recursion_stage3";
-const CYCLE_RECURSION_STAGE4: &str = "jolt_recursion_stage4";
-const CYCLE_RECURSION_STAGE5: &str = "jolt_recursion_stage5";
 const CYCLE_RECURSION_PCS_OPENING: &str = "jolt_recursion_pcs_opening";
 
 struct CycleMarkerGuard(&'static str);
@@ -536,45 +532,6 @@ impl RecursionVerifier<Fq> {
         Ok(r_stage2)
     }
 
-    /// Verify Stage 3: Direct evaluation protocol (virtualization).
-    #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage3")]
-    fn verify_stage3<T: Transcript>(
-        &self,
-        transcript: &mut T,
-        accumulator: &mut VerifierOpeningAccumulator<Fq>,
-        r_c: &[<Fq as crate::field::JoltField>::Challenge],
-        r_x: &[<Fq as crate::field::JoltField>::Challenge],
-        stage3_m_eval: Fq,
-    ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
-        let accumulator_fq: &mut VerifierOpeningAccumulator<Fq> = accumulator;
-        let r_c_fq: Vec<Fq> = r_c.iter().map(|c| (*c).into()).collect();
-        let r_x_fq: Vec<Fq> = r_x.iter().map(|c| (*c).into()).collect();
-
-        let virtual_claims = extract_virtual_claims_from_accumulator(
-            accumulator_fq,
-            &self.input.constraint_types,
-            &self.input.gt_exp_public_inputs,
-        );
-
-        let params = DirectEvaluationParams::new(
-            self.input.num_s_vars,
-            self.input.num_constraints,
-            self.input.num_constraints_padded,
-            self.input.num_constraint_vars,
-        );
-
-        let verifier = DirectEvaluationVerifier::new(params, virtual_claims, r_x_fq);
-        let m_eval_fq: Fq = stage3_m_eval;
-        let r_s = verifier
-            .verify_with_r_c(&r_c_fq, transcript, accumulator_fq, m_eval_fq)
-            .map_err(Box::<dyn std::error::Error>::from)?;
-
-        let r_s_challenges: Vec<<Fq as JoltField>::Challenge> =
-            r_s.into_iter().rev().map(|f| f.into()).collect();
-
-        Ok(r_s_challenges)
-    }
-
     /// Verify Stage 3: Prefix packing reduction.
     ///
     /// This mirrors `RecursionProver::prove_stage3_prefix_packing`.
@@ -628,7 +585,7 @@ impl RecursionVerifier<Fq> {
             &self.input.constraint_types,
             &self.input.gt_exp_public_inputs,
         );
-        let num_poly_types = super::constraints::system::PolyType::NUM_TYPES;
+        let num_poly_types = PolyType::NUM_TYPES;
 
         // Compute the expected packed evaluation.
         let expected =
@@ -656,7 +613,7 @@ impl RecursionVerifier<Fq> {
         accumulator.append_dense(
             transcript,
             CommittedPolynomial::DoryDenseMatrix,
-            SumcheckId::RecursionJagged,
+            SumcheckId::RecursionPacked,
             opening_point,
         );
 

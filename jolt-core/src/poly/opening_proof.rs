@@ -182,7 +182,7 @@ pub enum SumcheckId {
     GtShift,
     GtExpClaimReduction,
     RecursionVirtualization,
-    RecursionJagged,
+    RecursionPacked,
     OpeningReduction,
     G2ScalarMul,
     G2Add,

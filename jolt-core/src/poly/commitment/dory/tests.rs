@@ -756,7 +756,7 @@ mod tests {
                 "mul_layers[{level}] should have floor(prev_len/2) witnesses"
             );
 
-            let mut next: Vec<ark_bn254::Fq12> = Vec::with_capacity((nodes.len() + 1) / 2);
+            let mut next: Vec<ark_bn254::Fq12> = Vec::with_capacity(nodes.len().div_ceil(2));
             for (j, chunk) in nodes.chunks(2).enumerate() {
                 if let [a, b] = chunk {
                     let wit = &layer_wits[j];

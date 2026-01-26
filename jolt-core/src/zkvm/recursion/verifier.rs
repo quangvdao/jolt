@@ -13,10 +13,10 @@ use crate::{
     field::JoltField,
     poly::{
         commitment::commitment_scheme::CommitmentScheme,
-        opening_proof::{OpeningAccumulator, SumcheckId, VerifierOpeningAccumulator},
+        opening_proof::{SumcheckId, VerifierOpeningAccumulator},
     },
     transcripts::Transcript,
-    zkvm::witness::VirtualPolynomial,
+    zkvm::witness::{CommittedPolynomial, VirtualPolynomial},
 };
 use ark_bn254::Fq;
 use ark_std::Zero;
@@ -38,17 +38,13 @@ use super::{
         multiplication::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
         shift::{GtShiftParams, GtShiftVerifier},
     },
-    jagged::{
-        assist::JaggedAssistVerifier,
-        bijection::{ConstraintMapping, VarCountJaggedBijection},
-        sumcheck::{JaggedSumcheckParams, JaggedSumcheckVerifier},
-    },
     prover::RecursionProof,
     virtualization::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationVerifier,
     },
 };
-use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_verifier::SumcheckInstanceVerifier};
+use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
+use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
@@ -90,12 +86,6 @@ pub struct RecursionVerifierInput {
     pub num_constraints: usize,
     /// Padded number of constraints
     pub num_constraints_padded: usize,
-    /// Jagged bijection for Stage 3
-    pub jagged_bijection: VarCountJaggedBijection,
-    /// Mapping for decoding polynomial indices to matrix rows
-    pub jagged_mapping: ConstraintMapping,
-    /// Precomputed matrix row indices for each polynomial index
-    pub matrix_rows: Vec<usize>,
     /// Public inputs for packed GT exp (base Fq12 and scalar bits)
     pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
     /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
@@ -175,28 +165,33 @@ impl RecursionVerifier<Fq> {
 
         // Stage 2 challenges layout:
         // - legacy: r_stage2 = r_x (length = num_constraint_vars)
-        // - fused:  r_stage2 = [r_c || r_x] (length >= k + num_constraint_vars)
+        // - fused:  r_stage2 includes extra index variables `r_c` (length >= num_constraint_vars + k)
+        //
+        // NOTE: Recursion constraint sumchecks are **suffix-aligned** in the batched sumcheck
+        // (`round_offset = max_num_rounds - num_rounds`), so shorter points are suffixes of longer
+        // ones in the batched challenge order. We therefore interpret `r_x` as the **suffix** of
+        // the Stage-2 challenge vector.
         let k = self.input.num_constraints_padded.trailing_zeros() as usize;
         let num_constraint_vars = self.input.num_constraint_vars;
-        if r_stage2.len() != num_constraint_vars && r_stage2.len() < k + num_constraint_vars {
+        if r_stage2.len() != num_constraint_vars && r_stage2.len() < num_constraint_vars + k {
             return Err(format!(
-                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (k + num_constraint_vars)",
+                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (num_constraint_vars + k)",
                 r_stage2.len(),
                 num_constraint_vars,
-                k + num_constraint_vars
+                num_constraint_vars + k
             )
             .into());
         }
-        let (r_c, r_x): (
+        let (_r_c, r_x): (
             &[<Fq as crate::field::JoltField>::Challenge],
             &[<Fq as crate::field::JoltField>::Challenge],
         ) = if r_stage2.len() == num_constraint_vars {
             (&[], &r_stage2)
         } else {
-            (
-                &r_stage2[..k],
-                &r_stage2[r_stage2.len() - num_constraint_vars..],
-            )
+            let r_x_start = r_stage2.len() - num_constraint_vars;
+            let r_x = &r_stage2[r_x_start..];
+            let r_c = &r_stage2[r_x_start - k..r_x_start];
+            (r_c, r_x)
         };
 
         // Debug hook: allow stopping after Stage 2 to isolate failures.
@@ -205,41 +200,18 @@ impl RecursionVerifier<Fq> {
             return Ok(true);
         }
 
-        // ============ STAGE 3: Virtualization Direct Evaluation ============
+        // ============ STAGE 3: Prefix Packing Reduction ============
         let _cycle_stage3 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE3);
-        let r_s = tracing::info_span!("verify_recursion_stage3").in_scope(|| {
-            tracing::info!("Verifying Stage 3: Virtualization direct evaluation");
-            self.verify_stage3(transcript, &mut accumulator, r_c, r_x, proof.stage3_m_eval)
+        tracing::info_span!("verify_recursion_stage3").in_scope(|| {
+            tracing::info!("Verifying Stage 3: Prefix packing reduction");
+            self.verify_stage3_prefix_packing(
+                transcript,
+                &mut accumulator,
+                r_x,
+                proof.stage3_packed_eval,
+            )
         })?;
         drop(_cycle_stage3);
-
-        // ============ STAGE 4: Jagged Transform Sumcheck ============
-        let _cycle_stage4 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE4);
-        let r_dense = tracing::info_span!("verify_recursion_stage4").in_scope(|| {
-            tracing::info!("Verifying Stage 4: Jagged transform sumcheck");
-            self.verify_stage4(
-                &proof.stage4_proof,
-                &proof.stage5_proof,
-                transcript,
-                &mut accumulator,
-                &r_s,
-            )
-        })?;
-        drop(_cycle_stage4);
-
-        // ============ STAGE 5: Jagged Assist ============
-        let _cycle_stage5 = CycleMarkerGuard::new(CYCLE_RECURSION_STAGE5);
-        tracing::info_span!("verify_recursion_stage5").in_scope(|| {
-            tracing::info!("Verifying Stage 5: Jagged assist");
-            self.verify_stage5(
-                &proof.stage5_proof,
-                transcript,
-                &mut accumulator,
-                &r_dense,
-                &r_x,
-            )
-        })?;
-        drop(_cycle_stage5);
 
         // ============ PCS OPENING VERIFICATION ============
         let _cycle_pcs = CycleMarkerGuard::new(CYCLE_RECURSION_PCS_OPENING);
@@ -262,7 +234,7 @@ impl RecursionVerifier<Fq> {
     #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage1")]
     fn verify_stage1<T: Transcript>(
         &self,
-        proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+        proof: &SumcheckInstanceProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
     ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
@@ -282,7 +254,7 @@ impl RecursionVerifier<Fq> {
     #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage2")]
     fn verify_stage2<T: Transcript>(
         &self,
-        proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+        proof: &SumcheckInstanceProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
     ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
@@ -603,139 +575,90 @@ impl RecursionVerifier<Fq> {
         Ok(r_s_challenges)
     }
 
-    /// Verify Stage 4: Jagged transform sumcheck.
-    #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage4")]
-    fn verify_stage4<T: Transcript>(
+    /// Verify Stage 3: Prefix packing reduction.
+    ///
+    /// This mirrors `RecursionProver::prove_stage3_prefix_packing`.
+    #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage3_prefix_packing")]
+    fn verify_stage3_prefix_packing<T: Transcript>(
         &self,
-        stage4_proof: &crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
-        stage5_proof: &super::jagged::assist::JaggedAssistProof<Fq, T>,
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
-        r_s: &[<Fq as crate::field::JoltField>::Challenge],
-    ) -> Result<Vec<<Fq as crate::field::JoltField>::Challenge>, Box<dyn std::error::Error>> {
-        let (_, sparse_claim) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::DorySparseConstraintMatrix,
-            SumcheckId::RecursionVirtualization,
-        );
-
-        let r_s_final: Vec<Fq> = r_s
-            .iter()
-            .take(self.input.num_s_vars)
-            .map(|c| (*c).into())
-            .collect();
-
-        let dense_size = <VarCountJaggedBijection as crate::zkvm::recursion::jagged::bijection::JaggedTransform<Fq>>::dense_size(&self.input.jagged_bijection);
-        let num_dense_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
-
-        let params = JaggedSumcheckParams::new(
-            self.input.num_s_vars,
-            self.input.num_constraint_vars,
-            num_dense_vars,
-        );
-
-        // Convert per-polynomial claimed evals → per-row evals.
-        let num_rows = 1usize << self.input.num_s_vars;
-        let mut claimed_evaluations_by_row = vec![Fq::zero(); num_rows];
-        for (poly_idx, claimed_eval) in stage5_proof.claimed_evaluations.iter().enumerate() {
-            let matrix_row = self.input.matrix_rows[poly_idx];
-            if matrix_row < num_rows {
-                claimed_evaluations_by_row[matrix_row] += *claimed_eval;
-            }
-        }
-
-        let verifier = JaggedSumcheckVerifier::new(
-            r_s_final,
-            sparse_claim,
-            params,
-            claimed_evaluations_by_row,
-        );
-
-        let r_dense =
-            BatchedSumcheck::verify(stage4_proof, vec![&verifier], accumulator, transcript)?;
-
-        Ok(r_dense)
-    }
-
-    /// Verify Stage 5: Jagged assist (batch MLE verification).
-    #[tracing::instrument(skip_all, name = "RecursionVerifier::verify_stage5")]
-    fn verify_stage5<T: Transcript>(
-        &self,
-        stage5_proof: &super::jagged::assist::JaggedAssistProof<Fq, T>,
-        transcript: &mut T,
-        accumulator: &mut VerifierOpeningAccumulator<Fq>,
-        r_dense: &[<Fq as crate::field::JoltField>::Challenge],
         r_x: &[<Fq as crate::field::JoltField>::Challenge],
+        stage3_packed_eval: Fq,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let r_dense_fq: Vec<Fq> = r_dense.iter().map(|c| (*c).into()).collect();
-        let r_x_prev: Vec<Fq> = r_x.iter().map(|c| (*c).into()).collect();
+        use crate::zkvm::recursion::prefix_packing::{
+            packed_eval_from_claims, PrefixPackingLayout,
+        };
 
-        let dense_size = <VarCountJaggedBijection as crate::zkvm::recursion::jagged::bijection::JaggedTransform<Fq>>::dense_size(&self.input.jagged_bijection);
-        let num_dense_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
-        let num_bits = std::cmp::max(self.input.num_constraint_vars, num_dense_vars);
-
-        // Sanity-check "constant-in-x" polynomials (native_size == 1) directly.
-        //
-        // These polynomials are excluded from the Jagged Assist sumcheck (for efficiency),
-        // so we must ensure their claimed evaluations are correct here.
-        //
-        // For such a polynomial with dense index `t_prev`, the correct verifier-side value is:
-        //   v_k = eq(r_dense, t_prev)
-        // (independent of r_x).
-        fn eq_at_index_lsb_first(r: &[Fq], index: usize) -> Fq {
-            let one = Fq::from(1u64);
-            r.iter()
-                .enumerate()
-                .map(|(i, r_i)| {
-                    if (index >> i) & 1 == 1 {
-                        *r_i
-                    } else {
-                        one - *r_i
-                    }
-                })
-                .product()
-        }
-
-        let mut r_dense_padded = r_dense_fq.clone();
-        r_dense_padded.resize(num_bits, Fq::zero());
-
-        let num_polynomials = self.input.jagged_bijection.num_polynomials();
-        if stage5_proof.claimed_evaluations.len() != num_polynomials {
+        // Derive the public packing layout.
+        let layout = PrefixPackingLayout::from_constraint_types(&self.input.constraint_types);
+        let max_native_vars = layout.entries.iter().map(|e| e.num_vars).max().unwrap_or(0);
+        if r_x.len() < max_native_vars {
             return Err(format!(
-                "Stage5 claimed_evaluations length mismatch: got {}, expected {}",
-                stage5_proof.claimed_evaluations.len(),
-                num_polynomials
+                "Stage 2 produced r_x of length {}, but prefix packing needs at least {} bits",
+                r_x.len(),
+                max_native_vars
             )
             .into());
         }
-        for poly_idx in 0..num_polynomials {
-            let t_prev = self.input.jagged_bijection.cumulative_size_before(poly_idx);
-            let t_curr = self.input.jagged_bijection.cumulative_size(poly_idx);
-            if t_curr - t_prev == 1 {
-                let expected = eq_at_index_lsb_first(&r_dense_padded, t_prev);
-                let got = stage5_proof.claimed_evaluations[poly_idx];
-                if got != expected {
-                    return Err(format!(
-                        "Stage5 constant-poly claimed_eval mismatch at poly_idx={poly_idx}: got {got}, expected {expected} (t_prev={t_prev}, num_bits={num_bits})"
-                    ).into());
-                }
-            }
+
+        // Low variables: shared `r_x` portion (suffix-aligned Stage 2), **reversed**.
+        //
+        // See `RecursionProver::prove_stage3_prefix_packing` for rationale.
+        let mut r_x_fq: Vec<Fq> = r_x[r_x.len() - max_native_vars..]
+            .iter()
+            .map(|c| (*c).into())
+            .collect();
+        r_x_fq.reverse();
+
+        // High variables: fresh packing challenges (Fiat–Shamir).
+        let pack_len = layout.num_dense_vars.saturating_sub(max_native_vars);
+        let r_pack: Vec<Fq> = (0..pack_len)
+            .map(|_| transcript.challenge_scalar::<Fq>())
+            .collect();
+
+        // Full packed opening point in little-endian (low-to-high) variable order.
+        let mut r_full_lsb: Vec<Fq> = Vec::with_capacity(layout.num_dense_vars);
+        r_full_lsb.extend_from_slice(&r_x_fq);
+        r_full_lsb.extend_from_slice(&r_pack);
+
+        // Extract Stage 2 virtual claims in the standard [constraint-major, poly-type-minor] layout.
+        let virtual_claims = extract_virtual_claims_from_accumulator(
+            accumulator,
+            &self.input.constraint_types,
+            &self.input.gt_exp_public_inputs,
+        );
+        let num_poly_types = super::constraints::system::PolyType::NUM_TYPES;
+
+        // Compute the expected packed evaluation.
+        let expected =
+            packed_eval_from_claims(&layout, &r_full_lsb, |constraint_idx, poly_type| {
+                let claim_idx = constraint_idx * num_poly_types + (poly_type as usize);
+                virtual_claims
+                    .get(claim_idx)
+                    .copied()
+                    .unwrap_or_else(Fq::zero)
+            });
+
+        if expected != stage3_packed_eval {
+            return Err(format!(
+                "Stage 3 packed eval mismatch: expected {expected} but proof has {stage3_packed_eval}"
+            )
+            .into());
         }
 
-        let assist_verifier = JaggedAssistVerifier::<Fq, T>::new(
-            stage5_proof.claimed_evaluations.clone(),
-            r_x_prev,
-            r_dense_fq,
-            &self.input.jagged_bijection,
-            num_bits,
-            transcript,
-        );
+        // Append as a Fiat–Shamir message (matches prover transcript pattern).
+        transcript.append_scalar(&stage3_packed_eval);
 
-        let _r_assist = BatchedSumcheck::verify(
-            &stage5_proof.sumcheck_proof,
-            vec![&assist_verifier],
-            accumulator,
+        // Register the committed dense opening (this appends the claimed eval again).
+        let opening_point: Vec<<Fq as JoltField>::Challenge> =
+            r_full_lsb.into_iter().rev().map(|f| f.into()).collect();
+        accumulator.append_dense(
             transcript,
-        )?;
+            CommittedPolynomial::DoryDenseMatrix,
+            SumcheckId::RecursionJagged,
+            opening_point,
+        );
 
         Ok(())
     }

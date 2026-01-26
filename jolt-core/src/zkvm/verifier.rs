@@ -841,7 +841,10 @@ where
         {
             let lagrange_factor =
                 compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((CommittedPolynomial::TrustedAdvice, advice_claim * lagrange_factor));
+            polynomial_claims.push((
+                CommittedPolynomial::TrustedAdvice,
+                advice_claim * lagrange_factor,
+            ));
         }
         if let Some((advice_point, advice_claim)) = self
             .opening_accumulator
@@ -849,7 +852,10 @@ where
         {
             let lagrange_factor =
                 compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((CommittedPolynomial::UntrustedAdvice, advice_claim * lagrange_factor));
+            polynomial_claims.push((
+                CommittedPolynomial::UntrustedAdvice,
+                advice_claim * lagrange_factor,
+            ));
         }
 
         // Bytecode chunk polynomials: committed in Bytecode context and embedded into the
@@ -879,22 +885,27 @@ where
                     CommittedPolynomial::BytecodeChunk(i),
                     SumcheckId::BytecodeClaimReduction,
                 );
-                polynomial_claims.push((CommittedPolynomial::BytecodeChunk(i), claim * lagrange_factor));
+                polynomial_claims.push((
+                    CommittedPolynomial::BytecodeChunk(i),
+                    claim * lagrange_factor,
+                ));
             }
         }
 
         // Program-image polynomial: opened by ProgramImageClaimReduction in Stage 6b.
         // Embed into the top-left block of the main matrix (same trick as advice).
         if self.proof.program_mode == ProgramMode::Committed {
-            let (prog_point, prog_claim) = self
-                .opening_accumulator
-                .get_committed_polynomial_opening(
+            let (prog_point, prog_claim) =
+                self.opening_accumulator.get_committed_polynomial_opening(
                     CommittedPolynomial::ProgramImageInit,
                     SumcheckId::ProgramImageClaimReduction,
                 );
             let lagrange_factor =
                 compute_advice_lagrange_factor::<F>(&opening_point.r, &prog_point.r);
-            polynomial_claims.push((CommittedPolynomial::ProgramImageInit, prog_claim * lagrange_factor));
+            polynomial_claims.push((
+                CommittedPolynomial::ProgramImageInit,
+                prog_claim * lagrange_factor,
+            ));
         }
 
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
@@ -936,7 +947,8 @@ where
 
         // Sample gamma and compute powers for RLC (must match prover).
         let gamma_powers: Vec<F> = {
-            let _span = tracing::info_span!("stage8_gamma_powers", num_claims = snap.claims.len()).entered();
+            let _span = tracing::info_span!("stage8_gamma_powers", num_claims = snap.claims.len())
+                .entered();
             self.transcript.append_scalars(&snap.claims);
             self.transcript.challenge_scalar_powers(snap.claims.len())
         };
@@ -975,7 +987,8 @@ where
                         .iter()
                         .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
                     {
-                        commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+                        commitments_map
+                            .insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
                     }
                 }
                 if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
@@ -984,7 +997,8 @@ where
                         .iter()
                         .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
                     {
-                        commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+                        commitments_map
+                            .insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
                     }
                 }
 
@@ -1329,11 +1343,10 @@ where
         PCS: RecursionExt<F>,
     {
         let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8);
-        let payload: &RecursionPayload<F, PCS, ProofTranscript> = self
-            .proof
-            .recursion
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("recursion payload is required in recursion mode"))?;
+        let payload: &RecursionPayload<F, PCS, ProofTranscript> =
+            self.proof.recursion.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("recursion payload is required in recursion mode")
+            })?;
 
         // 1) Stage 8 transcript replay (no PCS checks): advance transcript to match
         // the prover's post-Stage8 Fiat–Shamir state.
@@ -1343,10 +1356,15 @@ where
             let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DORY_PCS);
             // Must match prover ordering: append claims then sample gamma powers.
             self.transcript.append_scalars(&dory_snap.claims);
-            let _gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(dory_snap.claims.len());
+            let _gamma_powers: Vec<F> = self
+                .transcript
+                .challenge_scalar_powers(dory_snap.claims.len());
             // Now replay the PCS opening proof's transcript interactions.
-            PCS::replay_opening_proof_transcript(&self.proof.stage8_opening_proof, &mut self.transcript)
-                .map_err(|e| anyhow::anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
+            PCS::replay_opening_proof_transcript(
+                &self.proof.stage8_opening_proof,
+                &mut self.transcript,
+            )
+            .map_err(|e| anyhow::anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
         }
 
         // 2) Extract data for RecursionVerifier
@@ -1402,9 +1420,9 @@ where
             let num_constraints = constraint_types.len();
             let num_constraints_padded = num_constraints.next_power_of_two();
 
-            // The dense polynomial is created by the jagged bijection which compresses
-            // the sparse matrix by removing redundant evaluations. We should use the
-            // actual dense_num_vars from the metadata rather than trying to recalculate it.
+            // The recursion verifier commits to a single packed dense polynomial (Hyrax).
+            // We should use the actual `dense_num_vars` from the metadata rather than
+            // trying to recalculate it.
 
             // Calculate the constraint system parameters for the verifier input.
             //
@@ -1417,10 +1435,6 @@ where
             let num_constraint_vars = 11; // All constraints padded to 11 variables (zero padding)
             let num_vars = num_s_vars + num_constraint_vars;
 
-            let jagged_bijection = metadata.jagged_bijection.clone();
-            let jagged_mapping = metadata.jagged_mapping.clone();
-            let matrix_rows = metadata.matrix_rows.clone();
-
             RecursionVerifierInput {
                 constraint_types,
                 num_vars,
@@ -1428,9 +1442,6 @@ where
                 num_s_vars,
                 num_constraints,
                 num_constraints_padded,
-                jagged_bijection,
-                jagged_mapping,
-                matrix_rows,
                 gt_exp_public_inputs: metadata.gt_exp_public_inputs.clone(),
                 g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
                 g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),

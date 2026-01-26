@@ -3,13 +3,12 @@
 //! Goal: avoid expensive arkworks curve-point decompression by storing:
 //! - Dory HintMap results as uncompressed affine coordinates (unchecked reconstruction)
 //! - Hyrax dense commitment row points as uncompressed affine coordinates (unchecked reconstruction)
-//! while keeping everything self-delimiting for streaming decode.
+//!   while keeping everything self-delimiting for streaming decode.
 
 use crate::field::JoltField;
 use crate::poly::opening_proof::{OpeningId, OpeningPoint, BIG_ENDIAN};
 use crate::subprotocols::sumcheck::SumcheckInstanceProof;
 use crate::zkvm::proof_serialization::RecursionConstraintMetadata;
-use crate::zkvm::recursion::jagged::assist::JaggedAssistProof;
 use crate::zkvm::recursion::prover::RecursionProof;
 use crate::zkvm::streaming_decode::{DecodeError, SliceReader};
 
@@ -22,11 +21,12 @@ use dory::backends::arkworks::{ArkG1, ArkG2, ArkGT, BN254};
 use dory::recursion::{HintMap, HintResult, OpId as DoryOpId, OpType as DoryOpType};
 
 use crate::poly::commitment::dory::recursion::JoltHintMap;
+use crate::poly::commitment::hyrax::{Hyrax, HyraxCommitment, HyraxOpeningProof};
 
-type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, ark_grumpkin::Projective>;
+type HyraxPCS = Hyrax<1, ark_grumpkin::Projective>;
 
 /// RecursionProofBundle record format version.
-pub const RECURSION_PROOF_BUNDLE_VERSION: u32 = 1;
+pub const RECURSION_PROOF_BUNDLE_VERSION: u32 = 2;
 
 const HINT_TAG_G1: u8 = 0;
 const HINT_TAG_G2: u8 = 1;
@@ -125,10 +125,7 @@ fn write_bn254_g2_uncompressed(
     Ok(())
 }
 
-fn write_bn254_gt(
-    mut out: impl ark_std::io::Write,
-    gt: &ArkGT,
-) -> Result<(), ark_std::io::Error> {
+fn write_bn254_gt(mut out: impl ark_std::io::Write, gt: &ArkGT) -> Result<(), ark_std::io::Error> {
     // Field element; canonical encoding is already "uncompressed" in practice.
     gt.0.serialize_compressed(&mut out)
         .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))
@@ -274,7 +271,8 @@ fn write_openings_record(
                 .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
         }
 
-        claim.serialize_compressed(&mut out)
+        claim
+            .serialize_compressed(&mut out)
             .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
     }
     Ok(())
@@ -337,7 +335,10 @@ pub(crate) fn write_recursion_proof_record<T: crate::transcripts::Transcript>(
         .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
 
     // Dense commitment (HyraxCommitment row points, uncompressed affine coords)
-    write_u32_le(&mut out, proof.dense_commitment.row_commitments.len() as u32)?;
+    write_u32_le(
+        &mut out,
+        proof.dense_commitment.row_commitments.len() as u32,
+    )?;
     for p in &proof.dense_commitment.row_commitments {
         write_grumpkin_point_uncompressed(&mut out, p)?;
     }
@@ -345,25 +346,19 @@ pub(crate) fn write_recursion_proof_record<T: crate::transcripts::Transcript>(
     // Opening claims
     write_openings_record(&mut out, &proof.opening_claims)?;
 
-    // Stages 1–5
+    // Stages 1–3
     write_sumcheck_instance_proof_record(&mut out, &proof.stage1_proof)?;
     write_sumcheck_instance_proof_record(&mut out, &proof.stage2_proof)?;
     proof
-        .stage3_m_eval
+        .stage3_packed_eval
         .serialize_compressed(&mut out)
         .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
-    write_sumcheck_instance_proof_record(&mut out, &proof.stage4_proof)?;
-
-    // Jagged assist
-    write_u32_le(&mut out, proof.stage5_proof.claimed_evaluations.len() as u32)?;
-    for v in &proof.stage5_proof.claimed_evaluations {
-        v.serialize_compressed(&mut out)
-            .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
-    }
-    write_sumcheck_instance_proof_record(&mut out, &proof.stage5_proof.sumcheck_proof)?;
 
     // Hyrax opening proof is just the vector-matrix product (scalars)
-    write_u32_le(&mut out, proof.opening_proof.vector_matrix_product.len() as u32)?;
+    write_u32_le(
+        &mut out,
+        proof.opening_proof.vector_matrix_product.len() as u32,
+    )?;
     for s in &proof.opening_proof.vector_matrix_product {
         s.serialize_compressed(&mut out)
             .map_err(|e| ark_std::io::Error::new(ark_std::io::ErrorKind::InvalidData, e))?;
@@ -385,31 +380,17 @@ pub(crate) fn read_recursion_proof_record<'a, T: crate::transcripts::Transcript>
     for _ in 0..n_rows {
         rows.push(read_grumpkin_point_uncompressed(r)?);
     }
-    let dense_commitment = crate::poly::commitment::hyrax::HyraxCommitment::<
-        1,
-        ark_grumpkin::Projective,
-    > { row_commitments: rows };
+    let dense_commitment = HyraxCommitment::<1, ark_grumpkin::Projective> {
+        row_commitments: rows,
+    };
 
     // Opening claims
     let opening_claims = read_openings_record(r)?;
 
-    // Stages 1–5
+    // Stages 1–3
     let stage1_proof = read_sumcheck_instance_proof_record::<T>(r)?;
     let stage2_proof = read_sumcheck_instance_proof_record::<T>(r)?;
-    let stage3_m_eval: Fq = r.read_canonical(Compress::Yes, Validate::No)?;
-    let stage4_proof = read_sumcheck_instance_proof_record::<T>(r)?;
-
-    // Jagged assist
-    let claimed_len = r.read_u32_le()? as usize;
-    let mut claimed_evaluations = Vec::with_capacity(claimed_len);
-    for _ in 0..claimed_len {
-        claimed_evaluations.push(r.read_canonical(Compress::Yes, Validate::No)?);
-    }
-    let stage5_sumcheck = read_sumcheck_instance_proof_record::<T>(r)?;
-    let stage5_proof: JaggedAssistProof<Fq, T> = JaggedAssistProof {
-        claimed_evaluations,
-        sumcheck_proof: stage5_sumcheck,
-    };
+    let stage3_packed_eval: Fq = r.read_canonical(Compress::Yes, Validate::No)?;
 
     // Hyrax opening proof (vector-matrix product scalars)
     let vlen = r.read_u32_le()? as usize;
@@ -417,19 +398,14 @@ pub(crate) fn read_recursion_proof_record<'a, T: crate::transcripts::Transcript>
     for _ in 0..vlen {
         v.push(r.read_canonical(Compress::Yes, Validate::No)?);
     }
-    let opening_proof = crate::poly::commitment::hyrax::HyraxOpeningProof::<
-        1,
-        ark_grumpkin::Projective,
-    > {
+    let opening_proof = HyraxOpeningProof::<1, ark_grumpkin::Projective> {
         vector_matrix_product: v,
     };
 
     Ok(RecursionProof {
         stage1_proof,
         stage2_proof,
-        stage3_m_eval,
-        stage4_proof,
-        stage5_proof,
+        stage3_packed_eval,
         opening_proof,
         gamma,
         delta,
@@ -455,11 +431,19 @@ pub fn write_recursion_proof_bundle<T: crate::transcripts::Transcript>(
 /// Read the full RecursionProofBundle section (version + hint map + metadata + recursion proof).
 pub fn read_recursion_proof_bundle<'a, T: crate::transcripts::Transcript>(
     r: &mut SliceReader<'a>,
-) -> Result<(JoltHintMap, RecursionConstraintMetadata, RecursionProof<Fq, T, HyraxPCS>), DecodeError>
-{
+) -> Result<
+    (
+        JoltHintMap,
+        RecursionConstraintMetadata,
+        RecursionProof<Fq, T, HyraxPCS>,
+    ),
+    DecodeError,
+> {
     let version = r.read_u32_le()?;
     if version != RECURSION_PROOF_BUNDLE_VERSION {
-        return Err(DecodeError::Invalid("unsupported RecursionProofBundle version"));
+        return Err(DecodeError::Invalid(
+            "unsupported RecursionProofBundle version",
+        ));
     }
     let hint = read_hint_map_record(r)?;
     let metadata = read_recursion_constraint_metadata_record(r)?;
@@ -493,11 +477,16 @@ mod tests {
         let j2 = read_hint_map_record(&mut r).unwrap();
         assert_eq!(r.remaining(), 0);
 
-        let mut a: Vec<_> = j.0.iter().map(|(k, v)| (*k, v.is_gt(), v.is_g1())).collect();
-        let mut b: Vec<_> = j2.0.iter().map(|(k, v)| (*k, v.is_gt(), v.is_g1())).collect();
+        let mut a: Vec<_> =
+            j.0.iter()
+                .map(|(k, v)| (*k, v.is_gt(), v.is_g1()))
+                .collect();
+        let mut b: Vec<_> =
+            j2.0.iter()
+                .map(|(k, v)| (*k, v.is_gt(), v.is_g1()))
+                .collect();
         a.sort_by_key(|(k, _, _)| *k);
         b.sort_by_key(|(k, _, _)| *k);
         assert_eq!(a, b);
     }
 }
-

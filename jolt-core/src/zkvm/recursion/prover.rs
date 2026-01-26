@@ -56,8 +56,12 @@ use super::{
         extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
     },
 };
-use crate::subprotocols::{sumcheck::BatchedSumcheck, sumcheck_prover::SumcheckInstanceProver};
+use crate::poly::commitment::dory::recursion::JoltWitness;
+use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
+use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::zkvm::recursion::jagged::bijection::JaggedTransform;
+use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
+use crate::zkvm::recursion::witness::GTCombineWitness;
 
 #[derive(Clone)]
 pub(crate) struct JaggedBundle {
@@ -100,20 +104,16 @@ impl JaggedBundle {
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Field = F>> {
     /// Stage 1: Packed GT exp sumcheck proof
-    pub stage1_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
+    pub stage1_proof: SumcheckInstanceProof<F, T>,
     /// Stage 2: Batched constraint sumchecks proof.
     ///
     /// Includes:
     /// - packed-GT-exp internal consistency (shift rho)
     /// - packed-GT-exp claim reduction to a shared `r_x`
     /// - all other constraint families (GT mul, G1/G2 scalar mul, G1/G2 add, ...)
-    pub stage2_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
-    /// Stage 3: Direct evaluation result \(M(r_s, r_x)\).
-    pub stage3_m_eval: F,
-    /// Stage 4: Jagged transform sumcheck proof.
-    pub stage4_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<F, T>,
-    /// Stage 5: Jagged assist proof (batch MLE verification).
-    pub stage5_proof: JaggedAssistProof<F, T>,
+    pub stage2_proof: SumcheckInstanceProof<F, T>,
+    /// Stage 3: Prefix-packed evaluation claim \(F(r_x \| r_{\mathrm{pack}})\).
+    pub stage3_packed_eval: F,
     /// PCS opening proof for the constraint matrix
     pub opening_proof: PCS::Proof,
     /// Gamma value used for batching constraints
@@ -138,18 +138,15 @@ pub type RecursionProofResult<T, PCS> =
 
 pub(crate) struct PolyCommitPhaseOutput<PCS: CommitmentScheme<Field = Fq>> {
     pub(crate) metadata: RecursionConstraintMetadata,
-    pub(crate) jagged_bundle: JaggedBundle,
-    pub(crate) dense_poly_for_jagged: DensePolynomial<Fq>,
+    pub(crate) dense_poly: DensePolynomial<Fq>,
     pub(crate) dense_commitment: PCS::Commitment,
     pub(crate) dense_mlpoly: MultilinearPolynomial<Fq>,
 }
 
 pub(crate) struct SumcheckPhaseOutput<T: Transcript> {
-    pub(crate) stage1_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
-    pub(crate) stage2_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
-    pub(crate) stage3_m_eval: Fq,
-    pub(crate) stage4_proof: crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
-    pub(crate) stage5_proof: JaggedAssistProof<Fq, T>,
+    pub(crate) stage1_proof: SumcheckInstanceProof<Fq, T>,
+    pub(crate) stage2_proof: SumcheckInstanceProof<Fq, T>,
+    pub(crate) stage3_packed_eval: Fq,
     pub(crate) accumulator: ProverOpeningAccumulator<Fq>,
 }
 
@@ -208,12 +205,7 @@ impl RecursionProver<Fq> {
     ) -> Result<(Self, ark_bn254::Fq12, PCS::Hint), Box<dyn std::error::Error>>
     where
         F: JoltField,
-        PCS: RecursionExt<
-            F,
-            Witness = dory::recursion::WitnessCollection<
-                crate::poly::commitment::dory::recursion::JoltWitness,
-            >,
-        >,
+        PCS: RecursionExt<F, Witness = dory::recursion::WitnessCollection<JoltWitness>>,
         ProofTranscript: Transcript,
     {
         use crate::poly::rlc_utils::compute_rlc_coefficients;
@@ -303,12 +295,7 @@ impl RecursionProver<Fq> {
     >
     where
         F: JoltField,
-        DoryPCS: RecursionExt<
-            F,
-            Witness = dory::recursion::WitnessCollection<
-                crate::poly::commitment::dory::recursion::JoltWitness,
-            >,
-        >,
+        DoryPCS: RecursionExt<F, Witness = dory::recursion::WitnessCollection<JoltWitness>>,
         ProofTranscript: Transcript,
         HyraxPCS: CommitmentScheme<Field = Fq>,
     {
@@ -327,12 +314,8 @@ impl RecursionProver<Fq> {
             prover.poly_commit::<ProofTranscript, HyraxPCS>(transcript, hyrax_prover_setup)?;
 
         // Phase 3: sumchecks
-        let sumchecks = prover.prove_sumchecks::<ProofTranscript>(
-            transcript,
-            &poly_commit.metadata,
-            poly_commit.jagged_bundle,
-            poly_commit.dense_poly_for_jagged,
-        )?;
+        let sumchecks =
+            prover.prove_sumchecks::<ProofTranscript>(transcript, &poly_commit.metadata)?;
 
         // Phase 4: polynomial opening (Hyrax)
         let (opening_proof, opening_claims) = Self::poly_opening::<ProofTranscript, HyraxPCS>(
@@ -345,9 +328,7 @@ impl RecursionProver<Fq> {
         let proof = RecursionProof {
             stage1_proof: sumchecks.stage1_proof,
             stage2_proof: sumchecks.stage2_proof,
-            stage3_m_eval: sumchecks.stage3_m_eval,
-            stage4_proof: sumchecks.stage4_proof,
-            stage5_proof: sumchecks.stage5_proof,
+            stage3_packed_eval: sumchecks.stage3_packed_eval,
             opening_proof,
             gamma: prover.gamma,
             delta: prover.delta,
@@ -365,10 +346,8 @@ impl RecursionProver<Fq> {
 
     /// Create a new recursion prover from pre-generated witnesses
     pub fn new_from_witnesses(
-        witness_collection: &dory::recursion::WitnessCollection<
-            crate::poly::commitment::dory::recursion::JoltWitness,
-        >,
-        combine_witness: Option<crate::zkvm::recursion::witness::GTCombineWitness>,
+        witness_collection: &dory::recursion::WitnessCollection<JoltWitness>,
+        combine_witness: Option<GTCombineWitness>,
         gamma: Fq,
         delta: Fq,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -381,11 +360,11 @@ impl RecursionProver<Fq> {
         // Compute g_poly directly (was previously computed in witnesses_to_dory_recursion)
         // g(x) is the irreducible polynomial defining the Fq12 extension field
         let g_poly = {
-            use super::constraints::system::DoryMatrixBuilder;
             use jolt_optimizations::get_g_mle;
             let g_mle_4var = get_g_mle();
-            let g_poly_values = DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var);
-            DensePolynomial::new(g_poly_values)
+            // Keep `g(x)` in its native 4-var form (size 16). Any embeddings are handled
+            // locally by the specific constraint family.
+            DensePolynomial::new(g_mle_4var)
         };
 
         // Build constraint system from witness collection using DoryMatrixBuilder
@@ -459,11 +438,10 @@ impl RecursionProver<Fq> {
 
         // Compute g_poly directly (same as new_from_witnesses)
         let g_poly = {
-            use super::constraints::system::DoryMatrixBuilder;
             use jolt_optimizations::get_g_mle;
             let g_mle_4var = get_g_mle();
-            let g_poly_values = DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var);
-            DensePolynomial::new(g_poly_values)
+            // Keep `g(x)` in its native 4-var form (size 16).
+            DensePolynomial::new(g_mle_4var)
         };
 
         // Build constraint system from witness collection
@@ -489,10 +467,8 @@ impl RecursionProver<Fq> {
     /// in `new_from_witnesses`. Keeping for reference/testing purposes.
     #[allow(dead_code)]
     fn witnesses_to_dory_recursion(
-        witnesses: &dory::recursion::WitnessCollection<
-            crate::poly::commitment::dory::recursion::JoltWitness,
-        >,
-        combine_witness: Option<crate::zkvm::recursion::witness::GTCombineWitness>,
+        witnesses: &dory::recursion::WitnessCollection<JoltWitness>,
+        combine_witness: Option<GTCombineWitness>,
     ) -> Result<DoryRecursionWitness, Box<dyn std::error::Error>> {
         let _span = tracing::info_span!("witnesses_to_dory_recursion").entered();
 
@@ -555,13 +531,12 @@ impl RecursionProver<Fq> {
         // Get the proper g(x) polynomial from jolt_optimizations
         // This is the irreducible polynomial defining the Fq12 extension field
         let g_poly_span = tracing::info_span!("process_g_polynomial").entered();
-        use super::constraints::system::DoryMatrixBuilder;
         use jolt_optimizations::get_g_mle;
 
         let g_mle_4var = get_g_mle();
 
-        // Pad g(x) to 11 variables (matching constraint system)
-        let g_poly_values = DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var);
+        // Keep `g(x)` in its native 4-var form (size 16).
+        let g_poly_values = g_mle_4var;
         let g_poly = DensePolynomial::new(g_poly_values.clone());
         let g_values = g_poly_values;
         drop(g_poly_span);
@@ -738,10 +713,8 @@ impl RecursionProver<Fq> {
 
     /// Build constraint system from recursion witness
     fn build_constraint_system(
-        witness_collection: &dory::recursion::WitnessCollection<
-            crate::poly::commitment::dory::recursion::JoltWitness,
-        >,
-        combine_witness: Option<&crate::zkvm::recursion::witness::GTCombineWitness>,
+        witness_collection: &dory::recursion::WitnessCollection<JoltWitness>,
+        combine_witness: Option<&GTCombineWitness>,
         g_poly: DensePolynomial<Fq>,
     ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
         use super::constraints::system::DoryMatrixBuilder;
@@ -979,7 +952,7 @@ impl RecursionProver<Fq> {
     /// Build constraint metadata for the verifier.
     ///
     /// This extracts all metadata the verifier needs from the constraint system,
-    /// including constraint types, jagged bijection info, and public inputs.
+    /// including constraint types, packed dense size, and public inputs.
     #[tracing::instrument(skip_all, name = "RecursionProver::build_constraint_metadata")]
     pub fn build_constraint_metadata(&self) -> RecursionConstraintMetadata {
         // Extract constraint types
@@ -990,33 +963,11 @@ impl RecursionProver<Fq> {
             .map(|c| c.constraint_type.clone())
             .collect();
 
-        // Build jagged layout (bijection + mapping) WITHOUT extracting dense evals.
-        let (jagged_bijection, jagged_mapping) = self.constraint_system.build_jagged_layout();
-
-        // dense_num_vars is defined by the padded dense length (power-of-two).
-        let dense_size = <super::jagged::bijection::VarCountJaggedBijection as JaggedTransform<
-            Fq,
-        >>::dense_size(&jagged_bijection);
-        let dense_num_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
-
-        // Compute matrix rows for the verifier
-        let num_polynomials = jagged_bijection.num_polynomials();
-        let mut matrix_rows = Vec::with_capacity(num_polynomials);
-
-        for poly_idx in 0..num_polynomials {
-            let (constraint_idx, poly_type) = jagged_mapping.decode(poly_idx);
-            let matrix_row = self
-                .constraint_system
-                .matrix
-                .row_index(poly_type, constraint_idx);
-            matrix_rows.push(matrix_row);
-        }
+        let dense_num_vars =
+            PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
 
         RecursionConstraintMetadata {
             constraint_types,
-            jagged_bijection,
-            jagged_mapping,
-            matrix_rows,
             dense_num_vars,
             gt_exp_public_inputs: self.constraint_system.gt_exp_public_inputs.clone(),
             g1_scalar_mul_public_inputs: self.constraint_system.g1_scalar_mul_public_inputs.clone(),
@@ -1030,13 +981,15 @@ impl RecursionProver<Fq> {
         transcript: &mut T,
         prover_setup: &PCS::ProverSetup,
     ) -> Result<PolyCommitPhaseOutput<PCS>, Box<dyn std::error::Error>> {
-        // ============ BUILD JAGGED BUNDLE (LAYOUT + ROWS; NO DENSE EXTRACTION) ============
-        let jagged_bundle = tracing::info_span!("build_jagged_bundle").in_scope(|| {
-            tracing::info!("Building jagged bundle (layout + matrix_rows)");
-            JaggedBundle::build(&self.constraint_system)
-        });
+        // ============ BUILD PREFIX-PACKED DENSE POLYNOMIAL ============
+        // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
+        let (dense_poly, prefix_layout) = tracing::info_span!("build_prefix_packed_polynomial")
+            .in_scope(|| {
+                tracing::info!("Building prefix-packed dense polynomial");
+                self.constraint_system.build_prefix_packed_polynomial()
+            });
 
-        let dense_num_vars = jagged_bundle.dense_num_vars;
+        let dense_num_vars = prefix_layout.num_dense_vars;
 
         // ============ BUILD METADATA (for verifier) ============
         let metadata = tracing::info_span!("build_constraint_metadata").in_scope(|| {
@@ -1050,9 +1003,6 @@ impl RecursionProver<Fq> {
 
             RecursionConstraintMetadata {
                 constraint_types,
-                jagged_bijection: jagged_bundle.bijection.clone(),
-                jagged_mapping: jagged_bundle.mapping.clone(),
-                matrix_rows: jagged_bundle.matrix_rows.clone(),
                 dense_num_vars,
                 gt_exp_public_inputs: self.constraint_system.gt_exp_public_inputs.clone(),
                 g1_scalar_mul_public_inputs: self
@@ -1066,40 +1016,17 @@ impl RecursionProver<Fq> {
             }
         });
 
-        // ============ BUILD + COMMIT DENSE POLYNOMIAL ============
-        // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
-        let (dense_poly_for_jagged, dense_commitment, dense_mlpoly) =
-            tracing::info_span!("build_and_commit_dense_polynomial").in_scope(|| {
-                tracing::info!("Building and committing to dense polynomial");
-
-                // Extract dense evals ONCE from the sparse matrix using the pre-built layout.
-                let dense_evals = self
-                    .constraint_system
-                    .extract_dense_evals(&jagged_bundle.bijection, &jagged_bundle.mapping);
-                let dense_poly = DensePolynomial::new(dense_evals);
-
-                // Convert to multilinear polynomial
-                let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z.clone());
-
-                // Commit to dense polynomial BEFORE sumchecks
-                tracing::info!("Hyrax commitment terms: {}", dense_mlpoly.len());
-                let (dense_commitment, _) = PCS::commit(&dense_mlpoly, prover_setup);
-
-                tracing::info!(
-                    "Committed to dense polynomial with {} variables",
-                    dense_poly.get_num_vars()
-                );
-
-                (dense_poly, dense_commitment, dense_mlpoly)
-            });
+        // Convert to multilinear polynomial + commit
+        let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z.clone());
+        tracing::info!("Hyrax commitment terms: {}", dense_mlpoly.len());
+        let (dense_commitment, _) = PCS::commit(&dense_mlpoly, prover_setup);
 
         // Add commitment to transcript for Fiat-Shamir soundness
         transcript.append_serializable(&dense_commitment);
 
         Ok(PolyCommitPhaseOutput {
             metadata,
-            jagged_bundle,
-            dense_poly_for_jagged,
+            dense_poly,
             dense_commitment,
             dense_mlpoly,
         })
@@ -1110,8 +1037,6 @@ impl RecursionProver<Fq> {
         &mut self,
         transcript: &mut T,
         metadata: &RecursionConstraintMetadata,
-        jagged_bundle: JaggedBundle,
-        dense_poly_for_jagged: DensePolynomial<Fq>,
     ) -> Result<SumcheckPhaseOutput<T>, Box<dyn std::error::Error>> {
         // ============ RUN ALL SUMCHECKS ============
         // Initialize opening accumulator
@@ -1140,78 +1065,46 @@ impl RecursionProver<Fq> {
 
         // Stage 2 challenges layout:
         // - legacy: r_stage2 = r_x (length = num_constraint_vars)
-        // - fused:  r_stage2 = [r_c || r_x] (length >= k + num_constraint_vars)
+        // - fused:  r_stage2 includes extra index variables `r_c` (length >= num_constraint_vars + k)
+        //
+        // NOTE: Recursion constraint sumchecks are **suffix-aligned** in the batched sumcheck
+        // (`round_offset = max_num_rounds - num_rounds`), so shorter points are suffixes of longer
+        // ones in the batched challenge order. We therefore interpret `r_x` as the **suffix** of
+        // the Stage-2 challenge vector.
         let k = self.constraint_system.matrix.num_constraint_index_vars;
         let num_constraint_vars = self.constraint_system.matrix.num_constraint_vars;
-        if r_stage2.len() != num_constraint_vars && r_stage2.len() < k + num_constraint_vars {
+        if r_stage2.len() != num_constraint_vars && r_stage2.len() < num_constraint_vars + k {
             return Err(format!(
-                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (k + num_constraint_vars)",
+                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (num_constraint_vars + k)",
                 r_stage2.len(),
                 num_constraint_vars,
-                k + num_constraint_vars
+                num_constraint_vars + k
             )
             .into());
         }
-        let (r_c, r_x): (
+        let (_r_c, r_x): (
             &[<Fq as JoltField>::Challenge],
             &[<Fq as JoltField>::Challenge],
         ) = if r_stage2.len() == num_constraint_vars {
             (&[], &r_stage2)
         } else {
-            (
-                &r_stage2[..k],
-                &r_stage2[r_stage2.len() - num_constraint_vars..],
-            )
+            let r_x_start = r_stage2.len() - num_constraint_vars;
+            let r_x = &r_stage2[r_x_start..];
+            let r_c = &r_stage2[r_x_start - k..r_x_start];
+            (r_c, r_x)
         };
 
-        // Stage 3: Virtualization direct evaluation
-        let (stage3_m_eval, r_s) = tracing::info_span!("recursion_prove_stage3").in_scope(|| {
-            tracing::info!("Running Stage 3: Virtualization direct evaluation");
-            // Stage 3 no longer needs the sparse matrix buffer; drop it after Stage 2.
-            let _dropped_matrix_evals =
-                std::mem::take(&mut self.constraint_system.matrix.evaluations);
-            self.prove_stage3(transcript, &mut accumulator, r_c, r_x)
-                .expect("Failed to run Stage 3 (virtualization)")
-        });
-
-        // Stage 4: Jagged transform sumcheck
-        let dense_native_size = jagged_bundle.dense_native_size;
-        let (stage4_proof, r_dense) =
-            tracing::info_span!("recursion_prove_stage4").in_scope(|| {
-                tracing::info!("Running Stage 4: Jagged transform sumcheck");
-                self.prove_stage4(
-                    transcript,
-                    &mut accumulator,
-                    &r_s,
-                    r_x,
-                    dense_poly_for_jagged,
-                    jagged_bundle.bijection,
-                    jagged_bundle.mapping,
-                    jagged_bundle.matrix_rows,
-                )
-                .expect("Failed to run Stage 4 (jagged)")
-            });
-
-        // Stage 5: Jagged assist
-        let stage5_proof = tracing::info_span!("recursion_prove_stage5").in_scope(|| {
-            tracing::info!("Running Stage 5: Jagged assist");
-            self.prove_stage5(
-                transcript,
-                &mut accumulator,
-                &r_dense,
-                r_x,
-                &metadata.jagged_bijection,
-                dense_native_size,
-            )
-            .expect("Failed to run Stage 5 (jagged assist)")
+        // Stage 3: Prefix packing (direct reduction to a single Hyrax opening)
+        let stage3_packed_eval = tracing::info_span!("recursion_prove_stage3").in_scope(|| {
+            tracing::info!("Running Stage 3: Prefix packing reduction");
+            self.prove_stage3_prefix_packing(transcript, &mut accumulator, metadata, r_x)
+                .expect("Failed to run Stage 3 (prefix packing)")
         });
 
         Ok(SumcheckPhaseOutput {
             stage1_proof,
             stage2_proof,
-            stage3_m_eval,
-            stage4_proof,
-            stage5_proof,
+            stage3_packed_eval,
             accumulator,
         })
     }
@@ -1253,7 +1146,7 @@ impl RecursionProver<Fq> {
         accumulator: &mut ProverOpeningAccumulator<Fq>,
     ) -> Result<
         (
-            crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+            SumcheckInstanceProof<Fq, T>,
             Vec<<Fq as JoltField>::Challenge>,
         ),
         Box<dyn std::error::Error>,
@@ -1298,7 +1191,7 @@ impl RecursionProver<Fq> {
         accumulator: &mut ProverOpeningAccumulator<Fq>,
     ) -> Result<
         (
-            crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+            SumcheckInstanceProof<Fq, T>,
             Vec<<Fq as JoltField>::Challenge>, // r_stage2 = [r_c || r_x]
         ),
         Box<dyn std::error::Error>,
@@ -1648,6 +1541,79 @@ impl RecursionProver<Fq> {
             transcript,
         );
 
+        // Debug helper: sanity-check how GT-mul virtual claims relate to `r_stage2`.
+        //
+        // This is useful when debugging endianness / round-order mismatches in the
+        // `ConstraintListVerifier` expected-output-claim computation.
+        #[cfg(test)]
+        if std::env::var("JOLT_DEBUG_GT_MUL_POINT").is_ok() {
+            use crate::poly::opening_proof::SumcheckId;
+            use crate::zkvm::witness::VirtualPolynomial;
+
+            fn eval_mle_lsb_first(mut evals: Vec<Fq>, r_lsb: &[Fq]) -> Fq {
+                debug_assert_eq!(evals.len(), 1usize << r_lsb.len());
+                let mut len = evals.len();
+                for &r_i in r_lsb {
+                    let half = len / 2;
+                    let one_minus = Fq::one() - r_i;
+                    for j in 0..half {
+                        let a = evals[2 * j];
+                        let b = evals[2 * j + 1];
+                        evals[j] = a * one_minus + b * r_i;
+                    }
+                    len = half;
+                }
+                evals[0]
+            }
+
+            let gt_mul_constraints = self.constraint_system.extract_gt_mul_constraints();
+            if !gt_mul_constraints.is_empty() {
+                let gt_mul_idx = 0usize;
+                let r4_lsb: Vec<Fq> = r_stage2.iter().take(4).map(|c| (*c).into()).collect();
+                let r4_msb: Vec<Fq> = r4_lsb.iter().rev().copied().collect();
+
+                let (_, lhs_evals, _rhs_evals, _res_evals, _q_evals) = &gt_mul_constraints[0];
+                let lhs_at_lsb = eval_mle_lsb_first(lhs_evals.clone(), &r4_lsb);
+                let lhs_at_msb = eval_mle_lsb_first(lhs_evals.clone(), &r4_msb);
+
+                let (_, lhs_claim) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::gt_mul_lhs(gt_mul_idx),
+                    SumcheckId::GtMul,
+                );
+
+                eprintln!("[debug][gt_mul] r4_lsb = {r4_lsb:?}");
+                eprintln!("[debug][gt_mul] lhs_claim = {lhs_claim:?}");
+                eprintln!("[debug][gt_mul] lhs_at_lsb = {lhs_at_lsb:?}");
+                eprintln!("[debug][gt_mul] lhs_at_msb = {lhs_at_msb:?}");
+
+                // Check the GT-mul constraint residual under two plausible g-eval conventions.
+                let (_, rhs_claim) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::gt_mul_rhs(gt_mul_idx),
+                    SumcheckId::GtMul,
+                );
+                let (_, result_claim) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::gt_mul_result(gt_mul_idx),
+                    SumcheckId::GtMul,
+                );
+                let (_, quotient_claim) = accumulator.get_virtual_polynomial_opening(
+                    VirtualPolynomial::gt_mul_quotient(gt_mul_idx),
+                    SumcheckId::GtMul,
+                );
+
+                let g_mle = jolt_optimizations::get_g_mle();
+                let g_at_lsb = eval_mle_lsb_first(g_mle.clone(), &r4_lsb);
+                let g_at_msb = DensePolynomial::new(g_mle).evaluate_dot_product::<Fq>(&r4_msb);
+
+                let resid_lsb = lhs_claim * rhs_claim - result_claim - quotient_claim * g_at_lsb;
+                let resid_msb = lhs_claim * rhs_claim - result_claim - quotient_claim * g_at_msb;
+
+                eprintln!("[debug][gt_mul] g_at_lsb = {g_at_lsb:?}");
+                eprintln!("[debug][gt_mul] g_at_msb = {g_at_msb:?}");
+                eprintln!("[debug][gt_mul] resid_lsb = {resid_lsb:?}");
+                eprintln!("[debug][gt_mul] resid_msb = {resid_msb:?}");
+            }
+        }
+
         Ok((proof, r_stage2))
     }
 
@@ -1701,6 +1667,210 @@ impl RecursionProver<Fq> {
         Ok((m_eval, r_s_challenges))
     }
 
+    /// Run Stage 3: Prefix packing reduction.
+    ///
+    /// This samples fresh "packing prefix" challenges and reduces all Stage 2 virtual openings
+    /// to a single opening of the packed dense polynomial `CommittedPolynomial::DoryDenseMatrix`.
+    #[tracing::instrument(skip_all, name = "RecursionProver::prove_stage3_prefix_packing")]
+    pub(crate) fn prove_stage3_prefix_packing<T: Transcript>(
+        &mut self,
+        transcript: &mut T,
+        accumulator: &mut ProverOpeningAccumulator<Fq>,
+        metadata: &RecursionConstraintMetadata,
+        r_x: &[<Fq as JoltField>::Challenge],
+    ) -> Result<Fq, Box<dyn std::error::Error>> {
+        use crate::poly::multilinear_polynomial::BindingOrder;
+        use crate::zkvm::recursion::prefix_packing::{
+            packed_eval_from_claims, PrefixPackingLayout,
+        };
+
+        // We no longer need the sparse matrix after Stage 2 (the PCS commitment is already bound).
+        let _dropped_matrix_evals = std::mem::take(&mut self.constraint_system.matrix.evaluations);
+
+        // Derive the public packing layout.
+        let layout = PrefixPackingLayout::from_constraint_types(&metadata.constraint_types);
+        if layout.num_dense_vars != metadata.dense_num_vars {
+            return Err(format!(
+                "prefix packing layout mismatch: metadata.dense_num_vars={} but derived layout has {}",
+                metadata.dense_num_vars, layout.num_dense_vars
+            )
+            .into());
+        }
+
+        let max_native_vars = layout.entries.iter().map(|e| e.num_vars).max().unwrap_or(0);
+        if r_x.len() < max_native_vars {
+            return Err(format!(
+                "Stage 2 produced r_x of length {}, but prefix packing needs at least {} bits",
+                r_x.len(),
+                max_native_vars
+            )
+            .into());
+        }
+
+        // Low variables: shared `r_x` portion (suffix-aligned Stage 2), **reversed**.
+        //
+        // Stage 2 constraint sumchecks are suffix-aligned in the batched sumcheck, so an m-var
+        // polynomial is opened at the *suffix* of the common 11-var challenge vector. For the
+        // prefix-packing reduction we want these to appear as prefixes, so we reverse `r_x` here.
+        let mut r_x_fq: Vec<Fq> = r_x[r_x.len() - max_native_vars..]
+            .iter()
+            .map(|c| (*c).into())
+            .collect();
+        r_x_fq.reverse();
+
+        // High variables: fresh packing challenges.
+        let pack_len = layout.num_dense_vars.saturating_sub(max_native_vars);
+        let r_pack: Vec<Fq> = (0..pack_len)
+            .map(|_| transcript.challenge_scalar::<Fq>())
+            .collect();
+
+        // Full packed opening point in little-endian (low-to-high) variable order.
+        let mut r_full_lsb: Vec<Fq> = Vec::with_capacity(layout.num_dense_vars);
+        r_full_lsb.extend_from_slice(&r_x_fq);
+        r_full_lsb.extend_from_slice(&r_pack);
+
+        // Extract Stage 2 virtual claims in the standard [constraint-major, poly-type-minor] layout.
+        let virtual_claims = extract_virtual_claims_from_accumulator(
+            accumulator,
+            &metadata.constraint_types,
+            &self.constraint_system.gt_exp_public_inputs,
+        );
+        let num_poly_types = super::constraints::system::PolyType::NUM_TYPES;
+
+        // Compute packed evaluation claim: F(r) = Σ_i eq(prefix_i, codeword_i) · f_i(r_x_prefix).
+        let packed_eval =
+            packed_eval_from_claims(&layout, &r_full_lsb, |constraint_idx, poly_type| {
+                let claim_idx = constraint_idx * num_poly_types + (poly_type as usize);
+                virtual_claims
+                    .get(claim_idx)
+                    .copied()
+                    .unwrap_or_else(Fq::zero)
+            });
+
+        #[cfg(test)]
+        if std::env::var("JOLT_DEBUG_PREFIX_PACKING").is_ok() {
+            // Recompute the packed dense polynomial eval at the opening point, and compare.
+            //
+            // NOTE: This is debug-only and may be expensive for large instances.
+            let mut rebuilt_evals = vec![Fq::zero(); layout.packed_size()];
+            let full_row_size = 1usize << self.constraint_system.matrix.num_constraint_vars;
+            fn bit_reverse(mut x: usize, bits: usize) -> usize {
+                let mut y = 0usize;
+                for _ in 0..bits {
+                    y = (y << 1) | (x & 1);
+                    x >>= 1;
+                }
+                y
+            }
+            for entry in &layout.entries {
+                let native_size = 1usize << entry.num_vars;
+                let dst = &mut rebuilt_evals[entry.offset..entry.offset + native_size];
+                let row = self
+                    .constraint_system
+                    .matrix
+                    .row_index(entry.poly_type, entry.constraint_idx);
+                let row_off = row * full_row_size;
+                let src = &_dropped_matrix_evals[row_off..row_off + native_size];
+                for t in 0..native_size {
+                    dst[t] = src[bit_reverse(t, entry.num_vars)];
+                }
+            }
+            let dense = DensePolynomial::new(rebuilt_evals);
+
+            // Opening point as currently registered (BIG_ENDIAN challenges).
+            let opening_point_be: Vec<Fq> = r_full_lsb.iter().rev().copied().collect();
+            let dense_eval_be = dense.evaluate(&opening_point_be);
+            let dense_eval_round = dense.evaluate(&r_full_lsb);
+            let dense_eval_bind_lsb = {
+                let mut p = DensePolynomial::new(dense.Z.clone());
+                for &r_i in &r_full_lsb {
+                    p.bind(r_i.into(), BindingOrder::LowToHigh);
+                }
+                debug_assert_eq!(p.len(), 1);
+                p.Z[0]
+            };
+
+            eprintln!("[debug][prefix_packing] packed_eval_from_claims = {packed_eval}");
+            eprintln!(
+                "[debug][prefix_packing] dense_eval(opening_point_be=rev(r_full_lsb)) = {dense_eval_be}"
+            );
+            eprintln!("[debug][prefix_packing] dense_eval(r_full_lsb as-be) = {dense_eval_round}");
+            eprintln!(
+                "[debug][prefix_packing] dense_eval(bind_lsb at r_full_lsb) = {dense_eval_bind_lsb}"
+            );
+
+            // Also sanity-check GT-mul instance 0 (if present): which r-slice does Stage 2 use?
+            fn eval_mle_lsb_first(mut evals: Vec<Fq>, r_lsb: &[Fq]) -> Fq {
+                let mut len = evals.len();
+                for &r_i in r_lsb {
+                    let half = len / 2;
+                    for j in 0..half {
+                        let a = evals[2 * j];
+                        let b = evals[2 * j + 1];
+                        evals[j] = a + r_i * (b - a);
+                    }
+                    len = half;
+                }
+                debug_assert_eq!(len, 1);
+                evals[0]
+            }
+
+            if let Some((global_idx, _)) = metadata
+                .constraint_types
+                .iter()
+                .enumerate()
+                .find(|(_, ct)| matches!(ct, super::constraints::system::ConstraintType::GtMul))
+            {
+                let r_stage2_fq: Vec<Fq> = r_x.iter().map(|c| (*c).into()).collect();
+                if r_stage2_fq.len() >= 4 {
+                    let off = r_stage2_fq.len() - 4;
+                    let p_prefix = &r_stage2_fq[..4];
+                    let p_suffix = &r_stage2_fq[off..];
+
+                    let row = self
+                        .constraint_system
+                        .matrix
+                        .row_index(super::constraints::system::PolyType::MulLhs, global_idx);
+                    let row_off =
+                        row * (1usize << self.constraint_system.matrix.num_constraint_vars);
+                    let lhs_evals = _dropped_matrix_evals[row_off..row_off + 16].to_vec();
+
+                    let lhs_claim = virtual_claims[global_idx * num_poly_types
+                        + (super::constraints::system::PolyType::MulLhs as usize)];
+                    let lhs_at_prefix = eval_mle_lsb_first(lhs_evals.clone(), p_prefix);
+                    let lhs_at_suffix = eval_mle_lsb_first(lhs_evals, p_suffix);
+                    eprintln!(
+                        "[debug][prefix_packing][GtMul] global_idx={global_idx} lhs_claim={lhs_claim}"
+                    );
+                    eprintln!(
+                        "[debug][prefix_packing][GtMul] lhs_at_prefix(r_x[..4])={lhs_at_prefix}"
+                    );
+                    eprintln!(
+                        "[debug][prefix_packing][GtMul] lhs_at_suffix(r_x[len-4..])={lhs_at_suffix}"
+                    );
+                }
+            }
+        }
+
+        // Append as a Fiat–Shamir message (matches existing Stage 3 transcript pattern).
+        transcript.append_scalar(&packed_eval);
+
+        // Register a committed opening on the packed dense polynomial.
+        //
+        // Opening points are stored in BIG_ENDIAN order for PCS verification.
+        let opening_point: Vec<<Fq as JoltField>::Challenge> =
+            r_full_lsb.into_iter().rev().map(|f| f.into()).collect();
+        accumulator.append_dense(
+            transcript,
+            CommittedPolynomial::DoryDenseMatrix,
+            SumcheckId::RecursionJagged,
+            opening_point,
+            packed_eval,
+        );
+
+        Ok(packed_eval)
+    }
+
     /// Run Stage 4: Jagged transform sumcheck.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip_all, name = "RecursionProver::prove_stage4")]
@@ -1716,7 +1886,7 @@ impl RecursionProver<Fq> {
         matrix_rows: Vec<usize>,
     ) -> Result<
         (
-            crate::subprotocols::sumcheck::SumcheckInstanceProof<Fq, T>,
+            SumcheckInstanceProof<Fq, T>,
             Vec<<Fq as JoltField>::Challenge>, // r_dense
         ),
         Box<dyn std::error::Error>,

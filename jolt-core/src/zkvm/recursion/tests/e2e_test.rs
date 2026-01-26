@@ -102,11 +102,6 @@ fn test_recursion_snark_e2e_with_dory() {
     let num_constraint_vars = prover.constraint_system.matrix.num_constraint_vars;
     let num_constraints_padded = prover.constraint_system.matrix.num_constraints_padded;
 
-    // Determine dense_num_vars for Hyrax setup without extracting dense evals.
-    let (jagged_bijection, _jagged_mapping) = prover.constraint_system.build_jagged_layout();
-    let dense_size = <crate::zkvm::recursion::VarCountJaggedBijection as crate::zkvm::recursion::JaggedTransform<Fq>>::dense_size(&jagged_bijection);
-    let dense_num_vars = dense_size.next_power_of_two().trailing_zeros() as usize;
-
     // Extract constraint types for verification
     let constraint_types: Vec<ConstraintType> = prover
         .constraint_system
@@ -114,6 +109,13 @@ fn test_recursion_snark_e2e_with_dory() {
         .iter()
         .map(|c| c.constraint_type.clone())
         .collect();
+
+    // Determine dense_num_vars for Hyrax setup without extracting dense evals.
+    let dense_num_vars =
+        crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types(
+            &constraint_types,
+        )
+        .num_dense_vars;
 
     let num_g1_add = constraint_types
         .iter()
@@ -161,12 +163,7 @@ fn test_recursion_snark_e2e_with_dory() {
         .poly_commit::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
         .expect("poly_commit failed");
     let sumchecks = prover
-        .prove_sumchecks::<Blake2bTranscript>(
-            &mut prover_transcript,
-            &poly_commit.metadata,
-            poly_commit.jagged_bundle,
-            poly_commit.dense_poly_for_jagged,
-        )
+        .prove_sumchecks::<Blake2bTranscript>(&mut prover_transcript, &poly_commit.metadata)
         .expect("prove_sumchecks failed");
     let (opening_proof, opening_claims) =
         RecursionProver::<Fq>::poly_opening::<Blake2bTranscript, HyraxPCS>(
@@ -182,9 +179,7 @@ fn test_recursion_snark_e2e_with_dory() {
     let recursion_proof = RecursionProof::<Fq, Blake2bTranscript, HyraxPCS> {
         stage1_proof: sumchecks.stage1_proof,
         stage2_proof: sumchecks.stage2_proof,
-        stage3_m_eval: sumchecks.stage3_m_eval,
-        stage4_proof: sumchecks.stage4_proof,
-        stage5_proof: sumchecks.stage5_proof,
+        stage3_packed_eval: sumchecks.stage3_packed_eval,
         opening_proof,
         gamma: prover.gamma,
         delta: prover.delta,
@@ -203,9 +198,6 @@ fn test_recursion_snark_e2e_with_dory() {
         num_s_vars,
         num_constraints,
         num_constraints_padded,
-        jagged_bijection: recursion_constraint_metadata.jagged_bijection,
-        jagged_mapping: recursion_constraint_metadata.jagged_mapping,
-        matrix_rows: recursion_constraint_metadata.matrix_rows,
         gt_exp_public_inputs: recursion_constraint_metadata.gt_exp_public_inputs,
         g1_scalar_mul_public_inputs: recursion_constraint_metadata.g1_scalar_mul_public_inputs,
         g2_scalar_mul_public_inputs: recursion_constraint_metadata.g2_scalar_mul_public_inputs,

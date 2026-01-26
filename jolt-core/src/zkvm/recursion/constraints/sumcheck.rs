@@ -251,6 +251,15 @@ where
         self.spec.num_rounds()
     }
 
+    /// Recursion constraint sumchecks are **suffix-aligned** in the batched sumcheck.
+    ///
+    /// This is the alignment expected by `BatchedSumcheck`'s claim-scaling logic: shorter
+    /// instances are padded with dummy rounds *first*, so that the scaled claim is reduced back
+    /// to the correct size before the instance becomes active.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.spec.num_rounds()
+    }
+
     fn input_claim(&self, accumulator: &ProverOpeningAccumulator<F>) -> F {
         self.spec.input_claim(accumulator)
     }
@@ -448,6 +457,12 @@ where
         self.spec.num_rounds()
     }
 
+    /// See [`ConstraintListProver::round_offset`]. The verifier must use the same
+    /// global round alignment as the prover.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.spec.num_rounds()
+    }
+
     fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {
         self.spec.input_claim(accumulator)
     }
@@ -458,19 +473,22 @@ where
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
         let eq_point_f: Vec<F> = self.eq_point.iter().map(|c| (*c).into()).collect();
-        // Convert sumcheck challenges to evaluation point (reversed for little-endian)
-        let eval_point: Vec<F> = sumcheck_challenges
-            .iter()
-            .rev()
-            .map(|c| (*c).into())
-            .collect();
-        let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
+        // The sumcheck challenges arrive in the prover's binding order (`LowToHigh`),
+        // i.e. low-significance variable first.
+        //
+        // - Constraint-family verifier logic (e.g. public polynomial evaluation) expects the
+        //   point in this **round order**.
+        // - The eq-table (`EqPolynomial::evals`) uses the opposite convention internally, so we
+        //   reverse only for the eq factor.
+        let eval_point_round: Vec<F> = sumcheck_challenges.iter().map(|c| (*c).into()).collect();
+        let eval_point_for_eq: Vec<F> = eval_point_round.iter().rev().copied().collect();
+        let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point_for_eq);
 
         let sumcheck_id = self.spec.sumcheck_id();
         let opening_specs = self.spec.opening_specs();
 
         // Compute shared scalars ONCE (e.g., g(eval_point) for GT ops)
-        let shared_scalars = self.spec.compute_shared_scalars(&eval_point);
+        let shared_scalars = self.spec.compute_shared_scalars(&eval_point_round);
 
         let mut total = F::zero();
         let mut batch_power = self.instance_batch_coeff;
@@ -488,7 +506,7 @@ where
                 i,
                 &claims,
                 &shared_scalars,
-                &eval_point,
+                &eval_point_round,
                 self.term_batch_coeff,
             );
             total += batch_power * constraint_value;

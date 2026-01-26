@@ -317,7 +317,7 @@ impl GTCombineWitness {
                 ));
             }
 
-            let mut next = Vec::with_capacity((prev.len() + 1) / 2);
+            let mut next = Vec::with_capacity(prev.len().div_ceil(2));
             for j in 0..expected_pairs {
                 let expected_lhs = prev[2 * j];
                 let expected_rhs = prev[2 * j + 1];

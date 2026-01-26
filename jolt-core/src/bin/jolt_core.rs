@@ -220,14 +220,13 @@ fn run_benchmark(args: BenchmarkArgs) {
     tracing::info!("Using Dory layout: {:?}", layout);
 
     // Call master_benchmark with parameters
-    for (span, bench) in
-        master_benchmark(
-            args.profile_args.name,
-            scale,
-            args.target_trace_size,
-            args.profile_args.recursion,
-        )
-        .into_iter()
+    for (span, bench) in master_benchmark(
+        args.profile_args.name,
+        scale,
+        args.target_trace_size,
+        args.profile_args.recursion,
+    )
+    .into_iter()
     {
         span.in_scope(|| {
             bench();

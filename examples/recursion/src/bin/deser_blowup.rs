@@ -73,7 +73,10 @@ fn main() {
                     "proof[0].recursion.stage10_recursion_metadata",
                     &payload.stage10_recursion_metadata,
                 );
-                report("proof[0].recursion.recursion_proof", &payload.recursion_proof);
+                report(
+                    "proof[0].recursion.recursion_proof",
+                    &payload.recursion_proof,
+                );
             } else {
                 println!("proof[0].recursion: None");
             }

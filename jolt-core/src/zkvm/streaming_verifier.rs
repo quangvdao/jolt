@@ -64,7 +64,8 @@ const CYCLE_VERIFY_STAGE8_DECODE_COMBINE_HINT: &str = "jolt_verify_stage8_decode
 const CYCLE_VERIFY_STAGE8_DECODE_PCS_HINT: &str = "jolt_verify_stage8_decode_pcs_hint";
 const CYCLE_VERIFY_STAGE8_DECODE_RECURSION_METADATA: &str =
     "jolt_verify_stage8_decode_recursion_metadata";
-const CYCLE_VERIFY_STAGE8_DECODE_RECURSION_PROOF: &str = "jolt_verify_stage8_decode_recursion_proof";
+const CYCLE_VERIFY_STAGE8_DECODE_RECURSION_PROOF: &str =
+    "jolt_verify_stage8_decode_recursion_proof";
 const CYCLE_VERIFY_STAGE8_BUILD_RECURSION_INPUT: &str = "jolt_verify_stage8_build_recursion_input";
 const CYCLE_VERIFY_STAGE8_CREATE_RECURSION_VERIFIER: &str =
     "jolt_verify_stage8_create_recursion_verifier";
@@ -862,8 +863,8 @@ where
             let lagrange_factor =
                 compute_advice_lagrange_factor::<F>(&opening_point.r, &bytecode_point.r);
 
-            let num_chunks = crate::zkvm::bytecode::chunks::total_lanes()
-                .div_ceil(self.one_hot_params.k_chunk);
+            let num_chunks =
+                crate::zkvm::bytecode::chunks::total_lanes().div_ceil(self.one_hot_params.k_chunk);
             for i in 0..num_chunks {
                 let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                     CommittedPolynomial::BytecodeChunk(i),
@@ -878,10 +879,11 @@ where
 
         // Program-image polynomial (Committed mode)
         if self.program_mode == ProgramMode::Committed {
-            let (prog_point, prog_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::ProgramImageInit,
-                SumcheckId::ProgramImageClaimReduction,
-            );
+            let (prog_point, prog_claim) =
+                self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::ProgramImageInit,
+                    SumcheckId::ProgramImageClaimReduction,
+                );
             let lagrange_factor =
                 compute_advice_lagrange_factor::<F>(&opening_point.r, &prog_point.r);
             polynomial_claims.push((
@@ -1114,7 +1116,8 @@ where
         use crate::zkvm::witness::all_committed_polynomials;
         use itertools::Itertools;
 
-        let (opening_point, polynomial_claims, claims) = self.compute_stage8_opening_point_and_claims();
+        let (opening_point, polynomial_claims, claims) =
+            self.compute_stage8_opening_point_and_claims();
 
         let gamma_powers: Vec<F> = {
             self.transcript.append_scalars(&claims);
@@ -1267,7 +1270,9 @@ where
                 .read_u32_le()
                 .map_err(|e| anyhow::anyhow!("decode RecursionProofBundle version: {e:?}"))?;
             if v != crate::zkvm::recursion_proof_bundle::RECURSION_PROOF_BUNDLE_VERSION {
-                return Err(anyhow::anyhow!("unsupported RecursionProofBundle version: {v}"));
+                return Err(anyhow::anyhow!(
+                    "unsupported RecursionProofBundle version: {v}"
+                ));
             }
             crate::zkvm::recursion_proof_bundle::read_hint_map_record(r)
                 .map_err(|e| anyhow::anyhow!("decode stage9_pcs_hint record: {e:?}"))?
@@ -1295,7 +1300,8 @@ where
         // the prover's post-Stage8 state expected by the recursion SNARK verifier.
         {
             let _cycle = CycleMarkerGuard::new(CYCLE_VERIFY_STAGE8_DORY_PCS);
-            let (_opening_point, _poly_claims, claims) = self.compute_stage8_opening_point_and_claims();
+            let (_opening_point, _poly_claims, claims) =
+                self.compute_stage8_opening_point_and_claims();
             self.transcript.append_scalars(&claims);
             let _gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
             PCS::replay_opening_proof_transcript(&stage8_opening_proof, &mut self.transcript)
@@ -1320,9 +1326,6 @@ where
                 num_s_vars,
                 num_constraints,
                 num_constraints_padded,
-                jagged_bijection: metadata.jagged_bijection.clone(),
-                jagged_mapping: metadata.jagged_mapping.clone(),
-                matrix_rows: metadata.matrix_rows.clone(),
                 gt_exp_public_inputs: metadata.gt_exp_public_inputs.clone(),
                 g1_scalar_mul_public_inputs: metadata.g1_scalar_mul_public_inputs.clone(),
                 g2_scalar_mul_public_inputs: metadata.g2_scalar_mul_public_inputs.clone(),
@@ -1460,7 +1463,7 @@ fn verify_batched_sumcheck_streaming<F: JoltField, ProofTranscript: Transcript>(
         let mut running_point: F = x.into();
         let mut running_sum = c0 + x * linear_term;
         for i in 1..coeffs_len {
-            running_point = running_point * &x; // x^{i+1}
+            running_point = running_point * x; // x^{i+1}
             running_sum += coeffs[i] * running_point;
         }
         e = running_sum;

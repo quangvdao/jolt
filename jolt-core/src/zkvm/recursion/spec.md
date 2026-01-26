@@ -119,36 +119,22 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 3: Direct Evaluation (Virtualization)                        │
-│  ───────────────────────────────────────────                        │
-│  Direct evaluation of matrix M(s,x) → claim M(r_s, r_x)              │
-│  (sumcheck-free)                                                     │
-└──────────────────────────────────┬──────────────────────────────────┘
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 4: Jagged Transform Sumcheck                                 │
+│  Stage 3: Prefix Packing Reduction                                  │
 │  ───────────────────────────────────                                │
-│  Goal: reduce the sparse “row-of-polynomials” view into one dense    │
-│  multilinear polynomial q and a single evaluation claim q(r_dense).  │
+│  Goal: connect Stage-2 virtual openings of many native-size witness  │
+│  polynomials to ONE PCS opening of ONE packed multilinear.           │
 │                                                                      │
-│  Input: the sparse matrix claim M(r_s, r_x) from Stage 3             │
-│  Output: (stage4_proof, r_dense) and a dense claim q(r_dense)        │
-└──────────────────────────────────┬──────────────────────────────────┘
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 5: Jagged Assist Sumcheck                                    │
-│  ───────────────────────────────────                                │
-│  Goal: batch-verify the many per-row indicator/gadget evaluations    │
-│  required by the jagged transform without paying K separate checks.  │
-│                                                                      │
-│  Output: stage5_proof (field-element proof + claimed evaluations)    │
+│  - Derive a public, canonical prefix-packing layout                  │
+│  - Sample fresh packing challenges `r_pack` (Fiat–Shamir)            │
+│  - Compute `packed_eval` from Stage-2 virtual claims                 │
+│  Output: `stage3_packed_eval` and packed opening point `r_full`      │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PCS Opening Proof (Hyrax over Grumpkin)                             │
 │  ───────────────────────────────────                                │
-│  Goal: prove the committed dense polynomial opens correctly at       │
-│  r_dense (and any other accumulated openings).                       │
+│  Goal: prove the committed packed polynomial opens correctly at      │
+│  `r_full` (and any other accumulated openings).                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1106,88 +1092,59 @@ where \(\lambda_e\) are transcript challenges (Fiat–Shamir) to prevent cancell
 
 ---
 
-## 4. Stage 3: Direct Evaluation (Virtualization)
+## 4. Stage 3: Prefix Packing Reduction
 
-### 4.1 Why Direct Evaluation
+Stage 3 replaces the previous “direct-eval → jagged transform” pipeline.
+Its purpose is to **reduce many Stage-2 virtual openings** (native-size witness polynomials evaluated at the shared Stage-2 point)
+to a **single PCS opening claim** of one packed multilinear polynomial.
 
-The constraint matrix $M$ has a special structure:
-$$M(i, r_x) = v_i \text{ for all } i$$
+### 4.1 Public packing layout (canonical)
 
-Therefore:
-$$M(r_s, r_x) = \sum_{i \in \{0,1\}^{\log n}} \text{eq}(r_s, i) \cdot M(i, r_x) = \sum_{i} \text{eq}(r_s, i) \cdot v_i$$
+Both prover and verifier deterministically derive a packing layout from the **public constraint list** (`constraint_types`):
 
-This allows direct computation without sumcheck rounds.
+- Each constraint family contributes a fixed set of witness polynomials (indexed by `PolyType`) with known native arities (e.g. 4-var, 8-var, 11-var).
+- We order these polynomials canonically (non-increasing power-of-two sizes, with deterministic tie-breaking) and assign them disjoint
+  prefix-defined subcubes of \(\{0,1\}^{n_{\text{dense}}}\).
+- Unused regions of the ambient \(\{0,1\}^{n_{\text{dense}}}\) hypercube are treated as zero.
 
-### 4.2 Matrix Organization
+This is implemented by `PrefixPackingLayout::from_constraint_types` in `jolt-core/src/zkvm/recursion/prefix_packing.rs`.
 
-Define matrix $M : \{0,1\}^s \times \{0,1\}^x \to \mathbb{F}_q$ where:
-- Row index $s$ selects polynomial type and constraint index
-- Column index $x$ selects evaluation point (4 or 8 bits)
+### 4.2 Stage 3 protocol
 
-Row indexing:
-```
-row = poly_type × num_constraints_padded + constraint_idx
-```
-
-Polynomial types:
-
-The sparse matrix rows correspond to the set of “virtual polynomials” emitted by Stage 1 for all supported op types.
-This includes:
-
-- GT ops: GT mul ports and (packed) GT exp committed polynomials (e.g., \(\rho\) and \(Q\))
-- G1 scalar mul ports (x/y for \(A,T,A'\) plus infinity indicators)
-- G2 scalar mul ports (same, with Fq2 split into c0/c1 components)
-- (NEW) G1 add / G2 add ports (for explicit add nodes in Dory’s AST)
-
-**Implementation notes**:
-- The exact enumeration and ordering is defined by the `PolyType` enum in `jolt-core/src/zkvm/recursion/constraints/system.rs`.
-- The number of `PolyType`s evolves as we add gadget families (e.g. MultiMillerLoop) and refine layouts.
-- **G1Add/G2Add status**: Wired end-to-end: Dory witness generation → matrix rows (`DoryMatrixBuilder::{add_g1_add_witness, add_g2_add_witness}`) → Stage 1 sumchecks → Stage 2 virtualization claim extraction.
-
-### 4.3 Direct Evaluation Protocol
-
-**Input**: Virtual claims $\{v_i\}$ from Stage 1 at point $r_x$
+**Inputs**:
+- Stage-2 shared point `r_x` (in sumcheck round order; shorter Stage-2 instances are suffix-aligned in the batched sumcheck)
+- Stage-2 virtual opening claims \(v_{c,p} = f_{c,p}(r_x)\) for each constraint index \(c\) and polynomial type \(p\)
 
 **Protocol**:
-1. **Sample**: $r_s \leftarrow \mathbb{F}^{\log n}$ from transcript
-2. **Prover**:
-   - Evaluate $M(r_s, r_x)$ by binding matrix to challenges
-   - Send evaluation to verifier
-3. **Verifier**:
-   - Compute $\text{eq}_{\text{evals}} = \text{EqPolynomial::evals}(r_s)$
-   - Compute $v = \sum_i \text{eq}_{\text{evals}}[s_i] \cdot v_i$ where $s_i = \text{matrix\_s\_index}(i)$
-   - Verify prover's evaluation matches $v$
+1. **Sample**: fresh packing challenges `r_pack` from the transcript (Fiat–Shamir).
+2. **Form**: packed opening point `r_full = [r_x || r_pack]` (implementation maps `r_x` into the packed low-variable order).
+3. **Compute**: packed evaluation
+   \[
+   \mathrm{packed\_eval} \;=\; \sum_{e \in \text{layout}} w_e(r_{\text{pack}})\cdot v_e,
+   \]
+   where \(w_e\) is the multilinear weight for the prefix-coded subcube selector of entry \(e\).
+4. **Prover sends** `stage3_packed_eval = packed_eval` (one field element) and appends it to the transcript.
+5. **Both sides register** a PCS opening claim for the committed packed polynomial at point `r_full`.
 
-**Output**: Opening claim $M(r_s, r_x) = v_{\text{sparse}}$
+**Output**: a single dense opening claim \(\mathrm{PackedPoly}(r_{\text{full}})=\mathrm{stage3\_packed\_eval}\).
 
-#### Mathematical Correctness
+### 4.3 Implementation note: suffix alignment and variable order
 
-**Theorem**: Direct evaluation is sound with the same security as sumcheck.
+Stage-2 sumchecks bind variables in `BindingOrder::LowToHigh` (LSB-first) and are **suffix-aligned** in the batched sumcheck.
+Stage 3 therefore interprets `r_x` as a suffix and maps it into the low variables of the packed opening point in the same order expected by
+the prefix packing layout.
 
-**Proof**: The multilinear extension $\tilde{M}$ is unique. For the boolean hypercube:
-$$\tilde{M}(s, x) = M(s, x) \text{ for all } s \in \{0,1\}^{\log n}, x$$
-
-By linearity of multilinear extensions:
-$$\tilde{M}(r_s, r_x) = \sum_{i \in \{0,1\}^{\log n}} M(i, r_x) \cdot \text{eq}(r_s, i)$$
-
-Since $M(i, r_x) = v_i$ by construction:
-$$\tilde{M}(r_s, r_x) = \sum_i v_i \cdot \text{eq}(r_s, i)$$
-
-The verifier computes exactly this sum, so the protocol is perfectly sound. □
-
-**Security Guarantees**:
-- No additional soundness error (deterministic protocol)
-- Fiat-Shamir security maintained through transcript inclusion
-- Binding: Prover committed to $v_i$ values in Stage 1
-
-**Benefits**:
-- Eliminates $\log n$ sumcheck rounds
-- Reduces proof size by $3\log n$ field elements
-- Verifier work remains $O(n)$
+For the precise mapping (including the per-block bit-reversal used to preserve claim semantics), see:
+- `jolt-core/src/zkvm/recursion/prefix_packing.rs`
+- `RecursionProver::prove_stage3_prefix_packing` / `RecursionVerifier::verify_stage3_prefix_packing`
 
 ---
 
 ## 5. Stage 4: Jagged Transform Sum-Check
+
+> **Legacy (not used)**: Stages 4 and 5 were the previous “jagged polynomial commitment” pipeline.
+> The recursion implementation now uses **prefix packing** (Stage 3) and does **not** execute the jagged transform/assist stages.
+> The material below is retained for historical context only.
 
 The matrix $M$ is sparse: 4-variable polynomials (GT) are zero-padded to 8 variables. Stage 4 compresses to a dense representation.
 
@@ -1305,8 +1262,8 @@ The protocol leverages Lemma 4.6 (forward-backward decomposition) for efficient 
 
 ## 6. PCS Opening Proof (Hyrax over Grumpkin)
 
-After Stage 4 (jagged transform) and Stage 5 (jagged assist), we have:
-- a dense polynomial commitment target (the jagged-transformed dense polynomial), and
+After Stage 3 (prefix packing reduction), we have:
+- a single packed polynomial commitment target (the prefix-packed dense polynomial), and
 - an accumulated set of opening claims stored in the opening accumulator.
 
 This final PCS step proves those openings using Hyrax over Grumpkin.
@@ -1326,7 +1283,7 @@ For polynomial $q$ with $2^n$ evaluations:
 
 ### 6.3 Opening Protocol
 
-**Input**: Commitment $C$, point $r_{\text{dense}}$, claimed value $v_{\text{dense}}$
+**Input**: Commitment $C$, point $r_{\text{full}}$, claimed value $\mathrm{stage3\_packed\_eval}$
 
 **Protocol**:
 1. Decompose point into row/column components
@@ -1338,8 +1295,7 @@ For polynomial $q$ with $2^n$ evaluations:
 
 The verifier accepts iff all checks pass:
 - Stage 1 and Stage 2 sumcheck verifications (including shift checks and, when implemented, wiring/boundary checks)
-- Stage 4 (jagged transform) sumcheck verification
-- Stage 5 (jagged assist) sumcheck verification
+- Stage 3 (prefix packing reduction) check
 - PCS opening proof verification (Hyrax over Grumpkin)
 
 ---
@@ -1354,19 +1310,17 @@ This section provides analytical formulas for proof sizes, constraint counts, an
 |-------|----------|--------|--------|----------------|
 | 1 | GT Exponentiation (unpacked) | 4 | 4 | 5 |
 | 1 | GT Exponentiation (packed) | 7 | 11 | 8 |
-| 1 | GT Multiplication | 3 | 11 | 4 |
-| 1 | G1 Scalar Multiplication | 6 | 11 | 7 |
+| 2 | GT Multiplication | 3 | 4 | 4 |
+| 2 | G1 Scalar Multiplication | 6 | 8 | 7 |
+| 2 | Shift G1/G2 Scalar Mul | 3 | 8 | 4 |
 | 2 | Wiring / boundary constraints | - | - | - |
-| 3 | Direct Evaluation | - | 0 | 1 |
-| 4 | Jagged Transform | 2 | $d$ | 3 |
-| 5 | Jagged Assist | 2 | $2m$ | 3 |
+| 3 | Prefix Packing Reduction | - | 0 | 1 |
 
-**Note**: GT Multiplication uses 11 rounds (padded from 4 native variables to 11 for uniform matrix layout).
+**Note**: Stage-2 instances are batched in one `BatchedSumcheck`. Instances with fewer rounds are suffix-aligned via `round_offset`.
 
 Where:
 - $\ell = \lceil \log_2 n \rceil$ for $n$-bit scalar
-- $d = \lceil \log_2(\text{dense\_size}) \rceil$
-- $m = $ number of jagged indicator evaluations (typically $\log K$ where $K$ is polynomial count)
+- \(n_{\text{dense}} = \lceil \log_2(\text{dense\_size}) \rceil\) is the number of variables of the packed polynomial.
 
 ### 7.2 Constraint Counts
 
@@ -1376,7 +1330,7 @@ Where:
 - **GT Exp (packed, base-4)**: 1 packed constraint covering up to 128 base-4 steps. The packed witness tables include
   \((\rho,\rho_{\text{next}},Q)\), but \(\rho_{\text{next}}\) is **not committed** (it is verified via `GtShift`).
 - **GT Mul**: 1 constraint, 4 polynomial types (lhs, rhs, result, quotient).
-- **G1 Scalar Mul (256-bit)**: 1 constraint over an 11-var domain (8 step bits padded to 11), with accumulator/double/next coordinates plus indicators.
+- **G1 Scalar Mul (256-bit)**: 1 constraint over an 8-var step domain, with accumulator/double/next coordinates plus indicators.
 - **G2 Scalar Mul (256-bit)**: same shape as G1 but with Fq2 split into (c0,c1) components and additional constraints.
 - **G1Add / G2Add (new)**: 1 constraint per add node (with the exact polynomial interface defined by the add sumcheck implementation).
 
@@ -1408,7 +1362,7 @@ where $c_{\text{pad}} = 2^{\lceil \log_2 c \rceil}$ and $c$ = total constraints.
 
 ### 7.4 Dense Size Computation
 
-The jagged transform compresses the sparse matrix by removing zero-padding:
+Prefix packing builds a single packed polynomial by concatenating native-size witness polynomials without padding:
 
 $$\text{dense\_size} = \sum_{\text{poly } p} 2^{\text{num\_vars}(p)}$$
 
@@ -1425,7 +1379,8 @@ where:
 | G1 Scalar Mul (1 constraint × 7 types) | 7 | 256 | 1,792 |
 | **Total** | 27 | — | **2,112** |
 
-$\Rightarrow d = \lceil \log_2 2112 \rceil = 12$ rounds for Stage 3.
+$\Rightarrow n_{\text{dense}} = \lceil \log_2 2112 \rceil = 12$ packed variables.
+Stage 3 itself is sumcheck-free (it contributes one field element `stage3_packed_eval` plus a PCS opening claim).
 
 ### 7.5 Proof Size Formulas
 
@@ -1439,21 +1394,19 @@ $$|P_1| = \sum_{\text{type } t} (\text{degree}_t + 1) \times \text{rounds}_t$$
 | GT Mul | 3 | 4 | 16 |
 | G1 Scalar Mul | 6 | $\ell$ | $7\ell$ |
 
-**Stage 2** (direct evaluation):
-$$|P_2| = 1 \text{ element}$$
+**Stage 2** (batched sumcheck):
+The Stage-2 proof size is \(O(\text{max\_num\_rounds} \cdot \text{max\_degree})\) field elements (one batched sumcheck proof).
 
-**Stage 3** (jagged transform):
-$$|P_3| = 3d \text{ elements}$$
+**Stage 3** (prefix packing reduction):
+$$|P_3| = 1 \text{ element} \quad (\mathrm{stage3\_packed\_eval})$$
 
-**Stage 5** (jagged assist):
-$$|P_{3b}| = K + 3(2m) \text{ elements}$$
-where $K$ is the number of $\hat{g}$ evaluations sent
+**Legacy (removed)**: Stage 4/5 jagged transform + assist are no longer part of the proof.
 
 **PCS opening proof** (Hyrax over Grumpkin):
 $$|P_{\text{pcs}}| = O(\sqrt{\text{dense\_size}}) \text{ group elements}$$
 
 **Total proof size** (field elements, excluding PCS):
-$$|P| = |P_1| + |P_2| + |P_3| + |P_{3b}| + \text{virtual claims}$$
+$$|P| = |P_1| + |P_2| + |P_3| + \text{virtual claims}$$
 
 ### 7.6 Concrete Example: Single 256-bit GT Exponentiation (Unpacked vs Packed)
 
@@ -1478,8 +1431,7 @@ This example isolates just the Stage 1 representation cost for a single 256-bit 
 |-------|-----------|------------|
 | Stage 1 | Sumcheck per round | $O(2^{\text{vars}} \cdot \text{degree})$ |
 | Stage 2 | Batched sumchecks | $O(\#\text{instances} \cdot 2^{11} \cdot \text{degree})$ |
-| Stage 3 | Direct evaluation | $O(2^s)$ |
-| Stage 4 | Jagged transform | $O(\text{dense\_size})$ |
+| Stage 3 | Prefix packing reduction | $O(\#\text{packed polys} \cdot n_{\text{dense}})$ field ops |
 | PCS | Hyrax commitment/opening | $O(\text{dense\_size})$ MSMs |
 
 **Dominant cost**: Stage 1 sumcheck computation scales with constraint count.
@@ -1492,13 +1444,15 @@ This example isolates just the Stage 1 representation cost for a single 256-bit 
 |-------|-----------|------------|
 | Stage 1 | Sumcheck verification | $O(\text{rounds} \cdot \text{degree})$ |
 | Stage 2 | Batched sumcheck verification | $O(\text{rounds} \cdot \text{degree})$ |
-| Stage 3 | Claim aggregation | $O(c)$ |
-| Stage 4 | Branching program | $O(\text{num\_polys} \cdot \text{bits})$ |
+| Stage 3 | Prefix packing reduction | $O(\#\text{packed polys} \cdot n_{\text{dense}})$ field ops |
 | PCS | Hyrax verification | $O(\sqrt{\text{dense\_size}})$ |
 
-**Key efficiency**: Stage 3 verifier uses $O(n)$ branching program instead of naive $O(2^{4n})$ MLE evaluation.
+**Key efficiency**: prefix packing avoids Stage 4/5 entirely; the verifier computes `stage3_packed_eval` in time linear in the number of packed polynomials and then checks one PCS opening.
 
 ### 7.9 Comparison: Sparse vs Dense
+
+> **Legacy note**: The discussion below compares the removed jagged pipeline to a sparse, padded matrix representation.
+> With prefix packing, we commit directly to the packed polynomial of size `dense_size` (no padding) and do not run Stage 4/5.
 
 Without jagged transform (sparse):
 - Matrix size: $15 \cdot c_{\text{pad}} \times 256$
@@ -1571,7 +1525,8 @@ jolt-core/src/zkvm/recursion/
 ├── witness.rs
 ├── prover.rs                  # orchestrates stages
 ├── verifier.rs
-├── virtualization.rs          # Stage 3 (direct evaluation)
+├── prefix_packing.rs          # Stage 3 (prefix packing reduction)
+├── virtualization.rs          # helper utilities for virtual claims
 ├── constraints/               # constraint-system + matrix layout
 │   ├── config.rs
 │   ├── sumcheck.rs
@@ -1591,15 +1546,15 @@ jolt-core/src/zkvm/recursion/
 ├── pairing/
 │   ├── multi_miller_loop.rs   # Stage 2 (`MultiMillerLoop`)
 │   └── shift.rs               # Stage 2 (`ShiftMultiMillerLoop`)
-└── jagged/                    # Stages 4 + 5
+└── jagged/                    # legacy (no longer wired)
     ├── bijection.rs
     ├── sumcheck.rs
     ├── branching_program.rs
     └── assist.rs
 ```
 
-**Note on stage naming**: The “Stage 1..5” names refer to protocol phases (see Section 1.4 and the prover/verifier in `prover.rs` / `verifier.rs`).
-The code is organized by gadget family (`gt/`, `g1/`, `g2/`, `pairing/`) plus the shared back-end (`constraints/`, `virtualization.rs`, `jagged/`).
+**Note on stage naming**: The “Stage 1..3” names refer to protocol phases (see Section 1.4 and the prover/verifier in `prover.rs` / `verifier.rs`).
+The code is organized by gadget family (`gt/`, `g1/`, `g2/`, `pairing/`) plus the shared back-end (`constraints/`, `prefix_packing.rs`, `virtualization.rs`).
 
 ### 8.2 The Offloading Pattern
 

@@ -24,9 +24,7 @@ use crate::{
             constraints::system::ConstraintType,
             g1::scalar_multiplication::G1ScalarMulPublicInputs,
             g2::scalar_multiplication::G2ScalarMulPublicInputs,
-            gt::exponentiation::GtExpPublicInputs,
-            jagged::bijection::{ConstraintMapping, VarCountJaggedBijection},
-            prover::RecursionProof,
+            gt::exponentiation::GtExpPublicInputs, prover::RecursionProof,
         },
         witness::{
             CommittedPolynomial, FrobeniusTerm, G1AddTerm, G1ScalarMulTerm, G2AddTerm,
@@ -45,9 +43,7 @@ use ark_grumpkin::Projective as GrumpkinProjective;
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RecursionConstraintMetadata {
     pub constraint_types: Vec<ConstraintType>,
-    pub jagged_bijection: VarCountJaggedBijection,
-    pub jagged_mapping: ConstraintMapping,
-    pub matrix_rows: Vec<usize>,
+    /// Number of variables of the packed dense polynomial committed via Hyrax.
     pub dense_num_vars: usize,
     /// Public inputs for packed GT exp (base Fq12 and scalar bits for each GT exp)
     pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
@@ -205,8 +201,7 @@ impl<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> CanonicalSerialize
             .serialize_with_mode(&mut writer, compress)?;
         self.stage8_opening_proof
             .serialize_with_mode(&mut writer, compress)?;
-        self.recursion
-            .serialize_with_mode(&mut writer, compress)?;
+        self.recursion.serialize_with_mode(&mut writer, compress)?;
         self.trusted_advice_val_evaluation_proof
             .serialize_with_mode(&mut writer, compress)?;
         self.trusted_advice_val_final_proof

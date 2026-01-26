@@ -183,7 +183,7 @@ impl DoryTranscript for ChallengeReplayTranscript {
                 assert!(self.in_final, "challenge_scalar(d) requested before gamma");
                 self.challenges.d
             }
-            _ => panic!("Unexpected transcript challenge label: {:?}", label),
+            _ => panic!("Unexpected transcript challenge label: {label:?}"),
         }
     }
 
@@ -1525,7 +1525,7 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         for (op_id, value_id) in ast.opid_to_value.iter() {
             let v = results
                 .get(value_id)
-                .unwrap_or_else(|| panic!("Missing AST eval result for {}", value_id));
+                .unwrap_or_else(|| panic!("Missing AST eval result for {value_id}"));
             match v {
                 EvalResult::G1(g1) => hints.insert_g1(*op_id, *g1),
                 EvalResult::G2(g2) => hints.insert_g2(*op_id, *g2),
@@ -1825,7 +1825,7 @@ pub fn witness_gen_with_ast<ProofTranscript: crate::transcripts::Transcript>(
     for (op_id, value_id) in ast.opid_to_value.iter() {
         let v = results
             .get(value_id)
-            .unwrap_or_else(|| panic!("Missing AST eval result for {}", value_id));
+            .unwrap_or_else(|| panic!("Missing AST eval result for {value_id}"));
         match v {
             EvalResult::G1(g1) => hints.insert_g1(*op_id, *g1),
             EvalResult::G2(g2) => hints.insert_g2(*op_id, *g2),

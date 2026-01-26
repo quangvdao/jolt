@@ -132,6 +132,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for GtExpClaimRed
         self.params.num_vars
     }
 
+    /// See `BatchedSumcheck`: shorter instances are suffix-aligned.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.params.num_vars
+    }
+
     fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
         let mut sum = F::zero();
         let mut gamma_power = F::one();
@@ -258,6 +263,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
     fn num_rounds(&self) -> usize {
         self.params.num_vars
+    }
+
+    /// See `GtExpClaimReductionProver::round_offset`.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.params.num_vars
     }
 
     fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {

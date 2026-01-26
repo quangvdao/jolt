@@ -15,8 +15,8 @@
 use crate::{
     field::JoltField,
     poly::{
-        dense_mlpoly::DensePolynomial, eq_poly::EqPolynomial,
-        multilinear_polynomial::MultilinearPolynomial, opening_proof::SumcheckId,
+        dense_mlpoly::DensePolynomial, multilinear_polynomial::MultilinearPolynomial,
+        opening_proof::SumcheckId,
     },
     zkvm::recursion::constraints::sumcheck::{
         sequential_opening_specs, ConstraintListProver, ConstraintListProverSpec,
@@ -58,17 +58,53 @@ impl G1ScalarMulPublicInputs {
     }
 
     pub fn evaluate_bit_mle<F: JoltField>(&self, eval_point: &[F]) -> F {
-        assert_eq!(eval_point.len(), 11);
-        let bits = self.bits_msb();
-        let pad_factor = EqPolynomial::<F>::zero_selector(&eval_point[..3]);
-        let eq_step = EqPolynomial::<F>::evals(&eval_point[3..]);
-        let mut acc = F::zero();
-        for (i, eq) in eq_step.iter().enumerate() {
-            if bits[i] {
-                acc += *eq;
+        // In the optimized recursion layout, the scalar-mul witness polynomials are native 8-var MLEs,
+        // so the bit MLE is evaluated on 8 variables.
+        //
+        // Some legacy/debug paths still pass an 11-var point (the matrix layout's ambient domain).
+        // In that case, the scalar-mul traces live on the 8-var subcube where the top 3 "pad" vars
+        // are 0 (zero padding), so we multiply by the pad selector Eq(0, pad).
+        //
+        // IMPORTANT: Constraint sumchecks bind variables in `BindingOrder::LowToHigh` (LSB-first),
+        // so `ConstraintListVerifier` provides `eval_point` in **sumcheck round order**.
+        let (step_point, pad_sel) = match eval_point.len() {
+            8 => (eval_point, F::one()),
+            11 => {
+                let (step, pad) = eval_point.split_at(8);
+                let mut sel = F::one();
+                let one = F::one();
+                for &p_i in pad {
+                    sel *= one - p_i;
+                }
+                (step, sel)
             }
+            _ => panic!(
+                "G1ScalarMulPublicInputs::evaluate_bit_mle expected 8 (native) or 11 (padded) vars, got {}",
+                eval_point.len()
+            ),
+        };
+        let bits = self.bits_msb();
+
+        // Materialize the 8-var bit MLE table (256 entries) in the same index order as
+        // `build_bit_poly`, then fold LSB-first.
+        let mut evals: Vec<F> = bits
+            .iter()
+            .map(|&b| if b { F::one() } else { F::zero() })
+            .collect();
+        debug_assert_eq!(evals.len(), 256);
+
+        let mut len = evals.len();
+        for &r_i in step_point {
+            let half = len / 2;
+            for j in 0..half {
+                let a = evals[2 * j];
+                let b = evals[2 * j + 1];
+                evals[j] = a + r_i * (b - a);
+            }
+            len = half;
         }
-        pad_factor * acc
+        debug_assert_eq!(len, 1);
+        pad_sel * evals[0]
     }
 
     fn build_bit_poly(&self, num_vars: usize) -> Vec<Fq> {
@@ -106,7 +142,7 @@ pub struct G1ScalarMulParams {
 impl G1ScalarMulParams {
     pub fn new(num_constraints: usize) -> Self {
         Self {
-            num_constraint_vars: 11,
+            num_constraint_vars: 8,
             num_constraints,
             sumcheck_id: SumcheckId::G1ScalarMul,
         }
@@ -409,6 +445,13 @@ impl ConstraintListVerifierSpec<Fq, DEGREE> for G1ScalarMulVerifierSpec {
     ) -> Fq {
         let vals = G1ScalarMulValues::from_claims(opened_claims);
         let bit = self.public_inputs[instance].evaluate_bit_mle(eval_point);
+        #[cfg(test)]
+        if std::env::var("JOLT_DEBUG_G1_SCALAR_MUL").is_ok() && instance < 3 {
+            eprintln!(
+                "[debug][g1_scalar_mul][verifier][{instance}] eval_point_round = {eval_point:?}"
+            );
+            eprintln!("[debug][g1_scalar_mul][verifier][{instance}] bit_eval = {bit:?}");
+        }
         let (x_p, y_p) = self.base_points[instance];
         let delta = term_batch_coeff.expect("requires term_batch_coeff");
         vals.eval_constraint(bit, x_p, y_p, delta)

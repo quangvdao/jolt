@@ -303,6 +303,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for GtShiftProver
         self.params.num_vars
     }
 
+    /// See `BatchedSumcheck`: shorter instances are suffix-aligned.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.params.num_vars
+    }
+
     fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
         // The sum should equal the batched claimed values
         let mut sum = F::zero();
@@ -487,6 +492,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for GtShiftVeri
 
     fn num_rounds(&self) -> usize {
         self.params.num_vars
+    }
+
+    /// See `GtShiftProver::round_offset`.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.params.num_vars
     }
 
     fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<F>) -> F {

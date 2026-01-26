@@ -383,7 +383,11 @@ fn fib_e2e_small_trace() {
 #[test]
 #[serial]
 fn fib_e2e_small_trace_recursion() {
-    run_e2e_test(E2ETestConfig::fibonacci(5).with_small_trace().with_recursion());
+    run_e2e_test(
+        E2ETestConfig::fibonacci(5)
+            .with_small_trace()
+            .with_recursion(),
+    );
 }
 
 #[test]

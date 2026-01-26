@@ -47,7 +47,9 @@ pub struct GtMulConstraintPolynomials<F: JoltField> {
 /// Parameters for GT mul sumcheck
 #[derive(Clone, Allocative)]
 pub struct GtMulParams {
-    /// Number of constraint variables (x) - fixed at 11 for uniform matrix
+    /// Number of constraint variables (x).
+    ///
+    /// GT mul witnesses are 4-var MLEs (size 16) representing an Fq12 element.
     pub num_constraint_vars: usize,
 
     /// Number of constraints
@@ -60,7 +62,7 @@ pub struct GtMulParams {
 impl GtMulParams {
     pub fn new(num_constraints: usize) -> Self {
         Self {
-            num_constraint_vars: 11, // 11 vars for uniform matrix (4 element + 7 padding)
+            num_constraint_vars: 4,
             num_constraints,
             sumcheck_id: SumcheckId::GtMul,
         }
@@ -233,21 +235,28 @@ impl<C: RecursionCurve> ConstraintListVerifierSpec<C::Fq, 3> for GtMulVerifierSp
     fn compute_shared_scalars(&self, eval_point: &[C::Fq]) -> Vec<C::Fq> {
         // Compute g(eval_point) once from the public g MLE.
         // The g polynomial is the MLE of the irreducible polynomial p(X) for Fq12.
-        use crate::zkvm::recursion::constraints::system::DoryMatrixBuilder;
-
         let g_mle_4var = C::g_mle();
-        let g_mle_padded = if eval_point.len() == 11 {
-            DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var)
-        } else if eval_point.len() == 8 {
-            DoryMatrixBuilder::pad_4var_to_8var_zero_padding(&g_mle_4var)
-        } else {
-            g_mle_4var
-        };
+        debug_assert_eq!(
+            eval_point.len(),
+            4,
+            "GtMul expects a 4-var evaluation point"
+        );
 
-        // Evaluate g polynomial at eval_point
-        let g_poly =
-            MultilinearPolynomial::<C::Fq>::LargeScalars(DensePolynomial::new(g_mle_padded));
-        let g_eval = g_poly.evaluate_dot_product::<C::Fq>(eval_point);
+        // `ConstraintListVerifier` provides `eval_point` in the **sumcheck round order**
+        // (low-significance variable first). Evaluate the 4-var g MLE in that same order.
+        let mut evals = g_mle_4var;
+        let mut len = evals.len();
+        for &r_i in eval_point {
+            let half = len / 2;
+            for j in 0..half {
+                let a = evals[2 * j];
+                let b = evals[2 * j + 1];
+                evals[j] = a + r_i * (b - a);
+            }
+            len = half;
+        }
+        debug_assert_eq!(len, 1);
+        let g_eval = evals[0];
 
         vec![g_eval]
     }

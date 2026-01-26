@@ -48,6 +48,7 @@ pub mod g2;
 pub mod gt;
 pub mod jagged;
 pub mod pairing;
+pub mod prefix_packing;
 pub mod prover;
 pub mod utils;
 pub mod verifier;

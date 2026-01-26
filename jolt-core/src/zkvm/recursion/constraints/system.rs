@@ -65,29 +65,15 @@ impl RecursionMetadataBuilder {
             .map(|c| c.constraint_type.clone())
             .collect();
 
-        // Build dense polynomial and get bijection info
-        let (dense_poly, jagged_bijection, jagged_mapping) =
-            self.constraint_system.build_dense_polynomial();
-        let dense_num_vars = dense_poly.get_num_vars();
-
-        // Compute matrix rows for the verifier
-        let num_polynomials = jagged_bijection.num_polynomials();
-        let mut matrix_rows = Vec::with_capacity(num_polynomials);
-
-        for poly_idx in 0..num_polynomials {
-            let (constraint_idx, poly_type) = jagged_mapping.decode(poly_idx);
-            let matrix_row = self
-                .constraint_system
-                .matrix
-                .row_index(poly_type, constraint_idx);
-            matrix_rows.push(matrix_row);
-        }
+        // Prefix packing dense polynomial size (publicly derivable from constraint types).
+        let layout =
+            crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types(
+                &constraint_types,
+            );
+        let dense_num_vars = layout.num_dense_vars;
 
         crate::zkvm::proof_serialization::RecursionConstraintMetadata {
             constraint_types,
-            jagged_bijection,
-            jagged_mapping,
-            matrix_rows,
             dense_num_vars,
             gt_exp_public_inputs: self.constraint_system.gt_exp_public_inputs.clone(),
             g1_scalar_mul_public_inputs: self.constraint_system.g1_scalar_mul_public_inputs.clone(),
@@ -2140,16 +2126,11 @@ impl ConstraintSystem {
         // Get the 4-variable g(x) polynomial
         let g_mle_4var = get_g_mle();
 
-        // Pad g(x) to match constraint vars
-        let g_poly = if matrix.num_constraint_vars == 11 {
-            let padded_g = DoryMatrixBuilder::pad_4var_to_11var_zero_padding(&g_mle_4var);
-            DensePolynomial::new(padded_g)
-        } else if matrix.num_constraint_vars == 8 {
-            let padded_g = DoryMatrixBuilder::pad_4var_to_8var_zero_padding(&g_mle_4var);
-            DensePolynomial::new(padded_g)
-        } else {
-            DensePolynomial::new(g_mle_4var)
-        };
+        // Keep `g(x)` in its native 4-var form (size 16).
+        //
+        // Individual constraint families that conceptually "pad" g into a larger domain
+        // (e.g., packed GT exp) handle that locally.
+        let g_poly = DensePolynomial::new(g_mle_4var);
 
         Ok((
             Self {
@@ -2170,8 +2151,8 @@ impl ConstraintSystem {
     /// Extract GT mul constraint data for gt_mul sumcheck
     #[allow(clippy::type_complexity)]
     pub fn extract_gt_mul_constraints(&self) -> Vec<(usize, Vec<Fq>, Vec<Fq>, Vec<Fq>, Vec<Fq>)> {
-        let num_constraint_vars = self.matrix.num_constraint_vars;
-        let row_size = 1 << num_constraint_vars;
+        // GT mul witness polynomials are native 4-var MLEs.
+        let row_size = 1usize << 4;
 
         // Pre-allocate with exact capacity
         let gt_mul_count = self
@@ -2200,8 +2181,8 @@ impl ConstraintSystem {
     /// Returns a vector of [`G1ScalarMulWitness`] containing the witness polynomials
     /// for each G1 scalar multiplication constraint.
     pub fn extract_g1_scalar_mul_constraints(&self) -> Vec<G1ScalarMulWitness<Fq>> {
-        let num_constraint_vars = self.matrix.num_constraint_vars;
-        let row_size = 1 << num_constraint_vars;
+        // G1 scalar mul witness polynomials are native 8-var MLEs.
+        let row_size = 1usize << 8;
 
         // Pre-allocate with exact capacity
         let g1_scalar_mul_count = self
@@ -2251,8 +2232,8 @@ impl ConstraintSystem {
     /// Returns a vector of [`G2ScalarMulWitness`] containing the witness polynomials
     /// for each G2 scalar multiplication constraint.
     pub fn extract_g2_scalar_mul_constraints(&self) -> Vec<G2ScalarMulWitness<Fq>> {
-        let num_constraint_vars = self.matrix.num_constraint_vars;
-        let row_size = 1 << num_constraint_vars;
+        // G2 scalar mul witness polynomials are native 8-var MLEs.
+        let row_size = 1usize << 8;
 
         // Pre-allocate with exact capacity
         let g2_scalar_mul_count = self
@@ -2316,8 +2297,8 @@ impl ConstraintSystem {
     pub fn extract_g1_add_constraints(
         &self,
     ) -> Vec<crate::zkvm::recursion::g1::addition::G1AddWitness<ark_bn254::Fq>> {
-        let num_constraint_vars = self.matrix.num_constraint_vars;
-        let row_size = 1 << num_constraint_vars;
+        // G1Add witness polynomials are 0-var (constants).
+        let row_size = 1usize << 0;
 
         let g1_add_count = self
             .constraints
@@ -2372,8 +2353,8 @@ impl ConstraintSystem {
     pub fn extract_g2_add_constraints(
         &self,
     ) -> Vec<crate::zkvm::recursion::g2::addition::G2AddWitness<ark_bn254::Fq>> {
-        let num_constraint_vars = self.matrix.num_constraint_vars;
-        let row_size = 1 << num_constraint_vars;
+        // G2Add witness polynomials are 0-var (constants).
+        let row_size = 1usize << 0;
 
         let g2_add_count = self
             .constraints
@@ -2585,11 +2566,19 @@ impl ConstraintSystem {
         &self,
         poly_type: PolyType,
         constraint_idx: usize,
-        row_size: usize,
+        native_size: usize,
     ) -> Vec<Fq> {
-        let type_start = (poly_type as usize) * self.matrix.num_constraints_padded * row_size;
-        let row_start = type_start + constraint_idx * row_size;
-        let row_end = row_start + row_size;
+        // Matrix rows are physically stored with a single fixed width determined by the
+        // constraint-variable count used to build the Dory matrix (currently 11).
+        //
+        // Some constraint families embed smaller "native" witness polynomials into that
+        // 11-var row via **zero padding** (placing the native table in the low indices and
+        // leaving the remainder zero). For those families, callers pass `native_size` to
+        // extract only the meaningful prefix.
+        let full_row_size = 1usize << self.matrix.num_constraint_vars;
+        let type_start = (poly_type as usize) * self.matrix.num_constraints_padded * full_row_size;
+        let row_start = type_start + constraint_idx * full_row_size;
+        let row_end = row_start + native_size;
         self.matrix.evaluations[row_start..row_end].to_vec()
     }
 
@@ -2930,17 +2919,17 @@ impl ConstraintSystem {
                 // Extract base point coordinates
                 let (x_p, y_p) = base_point;
 
-                // Evaluate bit MLE at x using verifier-known public input scalar.
-                // `x` is little-endian for the matrix, but public-bit evaluation expects big-endian.
+                // Evaluate the public scalar-bit MLE at this point.
+                //
+                // Note: `x` is provided in the recursion sumcheck binding order (`LowToHigh` / LSB-first).
                 let g1_scalar_mul_idx = self
                     .constraints
                     .iter()
                     .take(idx)
                     .filter(|c| matches!(c.constraint_type, ConstraintType::G1ScalarMul { .. }))
                     .count();
-                let x_be: Vec<Fq> = x.iter().rev().copied().collect();
-                let bit = self.g1_scalar_mul_public_inputs[g1_scalar_mul_idx]
-                    .evaluate_bit_mle::<Fq>(&x_be);
+                let bit =
+                    self.g1_scalar_mul_public_inputs[g1_scalar_mul_idx].evaluate_bit_mle::<Fq>(x);
 
                 // C1: Doubling x-coordinate constraint
                 // 4y_A^2(x_T + 2x_A) - 9x_A^4 = 0
@@ -3043,16 +3032,15 @@ impl ConstraintSystem {
 
                 let (x_p, y_p) = base_point;
 
-                // Evaluate bit at x from public inputs (big-endian point expected).
+                // Evaluate bit at x from public inputs.
                 let g2_scalar_mul_idx = self
                     .constraints
                     .iter()
                     .take(idx)
                     .filter(|c| matches!(c.constraint_type, ConstraintType::G2ScalarMul { .. }))
                     .count();
-                let x_be: Vec<Fq> = x.iter().rev().copied().collect();
-                let bit = self.g2_scalar_mul_public_inputs[g2_scalar_mul_idx]
-                    .evaluate_bit_mle::<Fq>(&x_be);
+                let bit =
+                    self.g2_scalar_mul_public_inputs[g2_scalar_mul_idx].evaluate_bit_mle::<Fq>(x);
 
                 let fq2_from_fq = |v: Fq| Fq2::new(v, Fq::zero());
 

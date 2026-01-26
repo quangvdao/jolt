@@ -67,8 +67,11 @@ use rayon::prelude::*;
 
 use crate::zkvm::recursion::gt::shift::{eq_lsb_mle, eq_plus_one_lsb_mle};
 
-const NUM_VARS: usize = 11;
-const STEP_VARS: usize = 8; // low 8 bits encode the 256 steps
+/// Number of step variables (256 steps).
+///
+/// NOTE: This sumcheck is defined over the native 8-var scalar-mul trace polynomials.
+/// In the batched sumcheck, it is **suffix-aligned** via `round_offset`.
+const STEP_VARS: usize = 8;
 
 #[derive(Clone, Debug)]
 struct ShiftPair<F: JoltField> {
@@ -78,21 +81,11 @@ struct ShiftPair<F: JoltField> {
     a_next_id: VirtualPolynomial,
 }
 
-fn replicate_8var_to_11var<F: JoltField>(mle_8: Vec<F>) -> Vec<F> {
-    debug_assert_eq!(mle_8.len(), 1 << STEP_VARS);
-    let mut mle_11 = Vec::with_capacity(1 << NUM_VARS);
-    for _ in 0..(1 << (NUM_VARS - STEP_VARS)) {
-        mle_11.extend_from_slice(&mle_8);
-    }
-    debug_assert_eq!(mle_11.len(), 1 << NUM_VARS);
-    mle_11
-}
-
-/// not_last(s) = 1 for all s != 2^n-1, 0 at the last index; lifted to 11 vars by replication.
-fn not_last_poly_11<F: JoltField>() -> MultilinearPolynomial<F> {
+/// not_last(s) = 1 for all s != 2^n-1, 0 at the last index.
+fn not_last_poly<F: JoltField>() -> MultilinearPolynomial<F> {
     let mut evals_8 = vec![F::one(); 1 << STEP_VARS];
     evals_8[(1 << STEP_VARS) - 1] = F::zero();
-    MultilinearPolynomial::from(replicate_8var_to_11var(evals_8))
+    MultilinearPolynomial::from(evals_8)
 }
 
 fn not_last_lsb_mle<F: JoltField>(y_step: &[F::Challenge]) -> F {
@@ -117,7 +110,7 @@ pub struct ShiftScalarMulParams {
 impl ShiftScalarMulParams {
     pub fn new(sumcheck_id: SumcheckId, num_pairs: usize) -> Self {
         Self {
-            num_vars: NUM_VARS,
+            num_vars: STEP_VARS,
             num_pairs,
             sumcheck_id,
         }
@@ -149,14 +142,13 @@ impl<F: JoltField, T: Transcript> ShiftScalarMulProver<F, T> {
             .collect();
         let gamma: F = transcript.challenge_scalar_optimized::<F>().into();
 
-        // Build weight polynomials (11-var by replication across the top 3 pad vars).
+        // Build weight polynomials (native 8-var).
         let eq_step_8 = crate::zkvm::recursion::gt::shift::eq_lsb_evals::<F>(&step_ref);
         let eq_minus_one_8 =
             crate::zkvm::recursion::gt::shift::eq_plus_one_lsb_evals::<F>(&step_ref);
-        let eq_step_poly = MultilinearPolynomial::from(replicate_8var_to_11var(eq_step_8));
-        let eq_minus_one_step_poly =
-            MultilinearPolynomial::from(replicate_8var_to_11var(eq_minus_one_8));
-        let not_last_poly = not_last_poly_11::<F>();
+        let eq_step_poly = MultilinearPolynomial::from(eq_step_8);
+        let eq_minus_one_step_poly = MultilinearPolynomial::from(eq_minus_one_8);
+        let not_last_poly = not_last_poly::<F>();
 
         let pairs = pairs
             .into_iter()
@@ -191,6 +183,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for ShiftScalarMu
 
     fn num_rounds(&self) -> usize {
         self.params.num_vars
+    }
+
+    /// See `BatchedSumcheck`: shorter instances are suffix-aligned.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.params.num_vars
     }
 
     fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
@@ -336,6 +333,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftScalar
         self.params.num_vars
     }
 
+    /// See `ShiftScalarMulProver::round_offset`.
+    fn round_offset(&self, max_num_rounds: usize) -> usize {
+        max_num_rounds - self.params.num_vars
+    }
+
     fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<F>) -> F {
         F::zero()
     }
@@ -345,7 +347,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for ShiftScalar
         accumulator: &VerifierOpeningAccumulator<F>,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
-        let y_step = &sumcheck_challenges[..STEP_VARS];
+        debug_assert_eq!(sumcheck_challenges.len(), STEP_VARS);
+        let y_step = sumcheck_challenges;
 
         let eq = eq_lsb_mle::<F>(&self.step_ref, y_step);
         let eqm1 = eq_plus_one_lsb_mle::<F>(&self.step_ref, y_step);

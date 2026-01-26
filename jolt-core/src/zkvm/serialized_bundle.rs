@@ -1,10 +1,10 @@
+use crate::zkvm::recursion_proof_bundle;
 use crate::zkvm::streaming_decode::{DecodeError, SliceReader};
 use crate::{
     field::JoltField, poly::commitment::commitment_scheme::RecursionExt, transcripts::Transcript,
     zkvm::proof_serialization::JoltProof,
 };
 use ark_serialize::CanonicalSerialize;
-use crate::zkvm::recursion_proof_bundle;
 
 /// Proof bundle magic header.
 ///

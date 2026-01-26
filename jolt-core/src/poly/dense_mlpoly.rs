@@ -69,6 +69,11 @@ impl<F: JoltField> DensePolynomial<F> {
     }
 
     pub fn bind(&mut self, r: F::Challenge, order: BindingOrder) {
+        // Binding a 0-var (constant) polynomial is a no-op.
+        if self.num_vars == 0 {
+            debug_assert_eq!(self.len(), 1);
+            return;
+        }
         match order {
             BindingOrder::LowToHigh => self.bound_poly_var_bot(&r),
             BindingOrder::HighToLow => self.bound_poly_var_top(&r),
@@ -76,6 +81,11 @@ impl<F: JoltField> DensePolynomial<F> {
     }
 
     pub fn bind_parallel(&mut self, r: F::Challenge, order: BindingOrder) {
+        // Binding a 0-var (constant) polynomial is a no-op.
+        if self.num_vars == 0 {
+            debug_assert_eq!(self.len(), 1);
+            return;
+        }
         match order {
             BindingOrder::LowToHigh => self.bound_poly_var_bot_01_optimized(&r),
             BindingOrder::HighToLow => self.bound_poly_var_top_zero_optimized(&r),

@@ -389,9 +389,9 @@ Stage 2: Shift sumcheck (`GtShift`)
   - 11 rounds, degree 3
   - Outputs: verified rho(r_s*+1, r_x*) opening under SumcheckId::GtShift
   ↓
-Stage 3: Direct Evaluation Protocol
-  - Uses the matrix claims accumulated through Stage 2.
-  - No changes needed for the direct-evaluation math itself
+Stage 3: Prefix packing reduction + PCS opening
+  - Reduces all Stage-2 virtual openings to one committed opening claim on the packed dense polynomial.
+  - Proves that opening via Hyrax.
 ```
 
 #### Accumulator communication (as implemented)
@@ -690,9 +690,15 @@ to other (non-padded) ports, one must include the appropriate pad selector (see 
 
 ### 2.7 Multi-Miller loop (BN254 pairing Miller loop)
 
-**Implementation status**: integrated into the Stage 2 batched constraint sumchecks as:
+**Implementation status (current code)**: pairing recursion is **experimental** and gated behind `feature = "experimental-pairing-recursion"`.
+The gadgets exist (`jolt-core/src/zkvm/recursion/pairing/*`), and the Stage-2 prover/verifier contain feature-gated hooks, but the **streaming**
+recursion pipeline does not currently include pairing-native stores by default:
+- Prover: `RecursionProver::prove_stage2` has a TODO to wire pairing recursion native stores into the pipeline (`jolt-core/src/zkvm/recursion/prover.rs`, ~L1260–L1265).
+- Planner: `witness_generation::plan_constraint_system` currently does not claim pairing support in the streaming plan (`jolt-core/src/zkvm/recursion/witness_generation.rs`, “Pairing (experimental)” section).
+
+When enabled end-to-end, the intended Stage-2 integration is:
 - `SumcheckId::MultiMillerLoop` (`jolt-core/src/zkvm/recursion/pairing/multi_miller_loop.rs`)
-- `SumcheckId::ShiftMultiMillerLoop` (`jolt-core/src/zkvm/recursion/pairing/shift.rs`) for step-to-step chaining of `*_next` columns.
+- `SumcheckId::ShiftMultiMillerLoop` (`jolt-core/src/zkvm/recursion/pairing/shift.rs`)
 
 This gadget is intended to prove correctness of the **Miller-loop** part of a BN254 pairing computation:
 \[
@@ -1027,8 +1033,9 @@ so the outside verifier can perform the final pairing check.
 ## 3. Stage 2: Wiring / Boundary Constraints (Copy Constraints) [TODO]
 
 > **Implementation status**: AST-derived wiring/boundary constraints are **not yet implemented**. When added, they will be executed as
-> another sumcheck instance inside the Stage 2 batched sumcheck. See TODO in `jolt-core/src/zkvm/recursion/prover.rs`.
-> The design is documented in `wiring_sumcheck_design.md`, `wiring_gt.md`, `wiring_g1.md`, and `wiring_g2.md`.
+> another sumcheck instance inside the Stage 2 batched sumcheck.
+> See TODOs in `jolt-core/src/zkvm/recursion/prover.rs` (~L1267) and `jolt-core/src/zkvm/recursion/verifier.rs` (~L515).
+> The current design doc is `WIRING_SUMCHECK_PLAN.md` (repo root), plus this Section 3.
 
 After Stage 2, we have many virtual polynomial claims $(v_0, v_1, \ldots, v_{n-1})$ at a shared point $r_x$.
 
@@ -1598,153 +1605,79 @@ Layout: For 11-variable MLEs with `s ∈ {0,1}^7` and `x ∈ {0,1}^4`:
 
 ### 8.4 Constraint System Construction
 
-The recursion constraint system is constructed from:
+**Current code path**: the streaming recursion constraint system is planned from the **witness stores**, not from the AST topology.
 
-- the extracted `WitnessCollection` (concrete witness traces), and
-- the extracted `AstGraph` (the authoritative operation DAG / topology).
+The planner is `witness_generation::plan_constraint_system` (`jolt-core/src/zkvm/recursion/witness_generation.rs`), which takes:
+- a `WitnessCollection<JoltWitness>` (from `PCS::witness_gen_with_ast`), and
+- an optional `GTCombineWitness` (from `PCS::generate_combine_witness`),
+and produces a `ConstraintSystem` containing:
+- the public `constraint_types` list (this is the verifier “program” for Stage 2/3), and
+- per-family native witness stores (GT mul 4-var, scalar-mul traces 8-var, add ports 0-var, etc.).
 
-Conceptually, we traverse the AST nodes and:
-- allocate a constraint instance for each operation node we prove inside the SNARK (GT exp/mul, G1/G2 scalar mul, G1/G2 add),
-- attach the corresponding witness polynomials from `WitnessCollection` (for traced ops), and
-- attach any needed public inputs (setup/proof elements and transcript-derived scalars).
+**Determinism rule (important for prover/verifier agreement)**:
+- Each witness map is sorted by `OpId` before being appended to the plan (see `witness_generation.rs`, GT exp/GT mul/G1/G2 sections).
+- Combine witnesses are appended after the direct witnesses (exp first, then muls in layer order).
 
-```rust
-let mut builder = DoryMatrixBuilder::new();
-
-// Pseudocode: iterate AST nodes in topological order
-for node in ast.nodes {
-    match node.op {
-        AstOp::GTExp { .. } => builder.add_packed_gt_exp_witness(...),
-        AstOp::GTMul { .. } => builder.add_gt_mul_witness(...),
-        AstOp::G1ScalarMul { .. } => builder.add_g1_scalar_mul_witness(...),
-        AstOp::G2ScalarMul { .. } => builder.add_g2_scalar_mul_witness(...),
-        AstOp::G1Add { .. } => builder.add_g1_add_witness(...),
-        AstOp::G2Add { .. } => builder.add_g2_add_witness(...),
-        _ => { /* inputs, negations, pairings handled elsewhere */ }
-    }
-}
-
-let constraint_system: ConstraintSystem = builder.build();
-```
-
-The resulting `DoryMultilinearMatrix` has shape:
-
-```
-M : {0,1}^num_s_vars × {0,1}^num_x_vars → Fq
-
-where:
-  num_s_vars = ⌈log₂(15 × num_constraints_padded)⌉
-  num_x_vars = 8  (max of 4-var GT and 8-var G1 polynomials)
-```
+**Role of the AST today**:
+- The AST is captured on the prover side and re-derived on the verifier side for binding and for future wiring/copy constraints.
+- The AST is **not** currently used to define the Stage-2 `constraint_types` ordering (because wiring is still TODO).
 
 ### 8.5 Prover Flow
 
-```rust
-impl RecursionProver {
-    pub fn prove(
-        constraint_system: &ConstraintSystem,
-        witnesses: &WitnessCollection,
-        transcript: &mut Transcript,
-    ) -> RecursionProof {
-        // Stage 1: Run sumchecks in parallel
-        let stage1_provers = vec![
-            GtExpProver::new(...),
-            GtMulProver::new(...),
-            G1ScalarMulProver::new(...),
-            G2ScalarMulProver::new(...),
-            G1AddProver::new(...),
-            G2AddProver::new(...),
-        ];
-        let (stage1_proof, stage1_claims) = BatchedSumcheck::prove(
-            stage1_provers,
-            &mut accumulator,
-            transcript,
-        );
+**Current code path**: `RecursionProver::prove` (`jolt-core/src/zkvm/recursion/prover.rs`) is the end-to-end entrypoint. It is a 4-phase pipeline:
 
-        // Stage 2: Virtualization
-        let stage2_prover = RecursionVirtualizationProver::new(
-            constraint_system,
-            &stage1_claims,
-            transcript,
-        );
-        let (stage2_proof, stage2_claim) = stage2_prover.prove(...);
+1. **Witness generation (Stage 8/9 boundary)**: `RecursionProver::witness_generation`
+   - compute Stage-8 combine witness (`PCS::generate_combine_witness`)
+   - run Stage-9 witness generation with AST capture (`PCS::witness_gen_with_ast`)
+   - derive a `PairingBoundary` from the AST
+   - build the recursion `ConstraintSystem` via `witness_generation::plan_constraint_system`
 
-        // Stage 3: Prefix packing reduction (no sumcheck)
-        // Reduce all Stage-2 virtual openings into a single packed-evaluation claim.
-        let stage3_packed_eval = prove_stage3_prefix_packing(...);
+2. **Commit (Hyrax)**: `RecursionProver::poly_commit`
+   - emits the prefix-packed dense polynomial via `witness_generation::emit_dense`
+   - derives `RecursionConstraintMetadata` (notably `constraint_types`, `dense_num_vars`, and public inputs)
+   - commits via Hyrax and appends the commitment to the transcript
 
-        // PCS opening
-        let opening_proof = accumulator.prove_openings(pcs, transcript);
+3. **Sumchecks**: `RecursionProver::prove_sumchecks`
+   - Stage 1: packed GT exp (`GtExp`) only
+   - Stage 2: batched constraint sumchecks (shift + claim reduction + GT mul + G1/G2 scalar mul + G1/G2 add; wiring TODO)
+   - Stage 3: prefix packing reduction (no sumcheck; registers a single committed opening claim)
 
-        RecursionProof { stage1_proof, stage2_proof, stage3_packed_eval, opening_proof, ... }
-    }
-}
-```
+4. **PCS opening**: `RecursionProver::poly_opening`
+   - proves the accumulated openings against the Hyrax commitment
 
 ### 8.6 Verifier Flow
 
-```rust
-impl RecursionVerifier {
-    pub fn verify(
-        proof: &RecursionProof,
-        verifier_input: &RecursionVerifierInput,
-        transcript: &mut Transcript,
-    ) -> Result<()> {
-        // Stage 1: Verify batched sumcheck
-        let stage1_verifiers = vec![
-            GtExpVerifier::new(...),
-            GtMulVerifier::new(...),
-            G1ScalarMulVerifier::new(...),
-            G2ScalarMulVerifier::new(...),
-            G1AddVerifier::new(...),
-            G2AddVerifier::new(...),
-        ];
-        let stage1_claims = BatchedSumcheck::verify(
-            stage1_verifiers,
-            &proof.stage1_proof,
-            &mut accumulator,
-            transcript,
-        );
+**Current code path**: `RecursionVerifier::verify` (`jolt-core/src/zkvm/recursion/verifier.rs`) mirrors the prover:
 
-        // Stage 2: Verify virtualization
-        let stage2_verifier = RecursionVirtualizationVerifier::new(...);
-        let stage2_claim = stage2_verifier.verify(&proof.stage2_proof, ...)?;
-
-        // Stage 3: Verify prefix packing reduction
-        verify_stage3_prefix_packing(...)?;
-
-        // PCS verification
-        accumulator.verify_openings(pcs, &proof.opening_proof, transcript)?;
-
-        Ok(())
-    }
-}
-```
+- Bind the dense commitment into the transcript (must match prover ordering).
+- Initialize the opening accumulator from `proof.opening_claims`.
+- Verify:
+  - Stage 1 packed GT exp sumcheck,
+  - Stage 2 batched constraint sumchecks (wiring TODO),
+  - Stage 3 prefix-packing reduction (recompute `stage3_packed_eval`, then register the committed opening),
+  - Hyrax opening proof verification.
 
 ### 8.7 Opening Accumulator
 
 The `OpeningAccumulator` tracks virtual polynomial claims across stages:
 
 ```rust
-// Stage 1 appends virtual claims
-accumulator.append_virtual(
-    VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho, instance: constraint_idx }),
-    SumcheckId::GtExp,
-    opening_point,
-    claimed_value,
+// Example: a sumcheck instance caches virtual openings under a SumcheckId.
+append_virtual_claims(
+    accumulator,
+    transcript,
+    SumcheckId::GtExpClaimReduction,
+    &opening_point,
+    &virtual_claims![VirtualPolynomial::gt_exp_rho(i) => rho_eval],
 );
 
-// Stage 3 reads Stage 1 claims
-let (point, value) = accumulator.get_virtual_polynomial_opening(
-    VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho, instance: i }),
-    SumcheckId::GtExp,
-);
-
-// Stage 3 outputs committed polynomial claim
-accumulator.append_committed(
-    CommittedPolynomial::DenseMatrix,
-    opening_point,
-    claimed_value,
+// Stage 3 registers the single committed opening on the prefix-packed dense polynomial.
+accumulator.append_dense(
+    transcript,
+    CommittedPolynomial::DoryDenseMatrix,
+    SumcheckId::RecursionPacked,
+    opening_point, // big-endian point (matches PCS verifier format)
+    packed_eval,
 );
 ```
 
@@ -1763,22 +1696,30 @@ and refine packed protocols (e.g., packed GT exp). The authoritative definition 
 
 ### 8.11 Dory Integration: Witness + AST Extraction (No HintMap)
 
-We run Dory verification once (prover-side) with a trace context that records:
+We run Stage 8/9 recursion witness generation (prover-side) in a way that records:
 
 - a **WitnessCollection**: per-op witness traces for Stage 1 sumchecks, and
 - an **AstGraph**: the full computation DAG used to derive wiring/copy constraints deterministically.
 
-Dory supports enabling AST tracing via `TraceContext::for_witness_gen_with_ast()` and extracting both artifacts via `finalize_with_ast()`.
+In the current codebase, this is done via the PCS recursion extension APIs in `RecursionProver::witness_generation` (`jolt-core/src/zkvm/recursion/prover.rs`):
+- `PCS::witness_gen_with_ast(...) -> (WitnessCollection, AstGraph)`
+- `PCS::generate_combine_witness(...) -> (GTCombineWitness, CombineHint)`
 
 ```rust
-let ctx = Rc::new(TraceContext::<W, E, Gen>::for_witness_gen_with_ast());
-verify_recursive(commitment, evaluation, point, proof, setup, transcript, ctx.clone())?;
-let (witnesses_opt, ast_opt) = Rc::try_unwrap(ctx).ok().unwrap().finalize_with_ast();
+let (witness_collection, ast) = PCS::witness_gen_with_ast(
+    stage8_opening_proof,
+    verifier_setup,
+    &mut witness_gen_transcript,
+    &opening_point,
+    &joint_claim,
+    &joint_commitment,
+)?;
+let prover = RecursionProver::new_from_witnesses(&witness_collection, Some(combine_witness))?;
 ```
 
-**Verifier-side topology**: the recursion verifier must not trust a prover-supplied AST. The intended design is that the recursion verifier
-reconstructs the same AST skeleton deterministically from public inputs (Dory proof, setup, and transcript-derived scalars), without performing
-any expensive group operations.
+**Verifier-side topology**: the recursion verifier must not trust a prover-supplied AST. In the current verifier, Stage 8 recursion verification
+already reconstructs a symbolic AST deterministically from public inputs (`jolt-core/src/zkvm/verifier.rs::verify_stage8_with_recursion`).
+Wiring/copy constraints (when implemented) should use that verifier-derived AST.
 
 ### 8.12 GPU Considerations
 
@@ -1789,7 +1730,7 @@ The recursion prover has a clear separation between orchestration logic (Rust) a
 | Component | Operation | Why GPU |
 |-----------|-----------|---------|
 | Stage 1 Sumcheck | Polynomial evaluations over hypercube | Parallel evaluation of $2^n$ points |
-| Stage 2 Direct Eval | Virtualization / direct evaluation | Efficient dot product computation |
+| Stage 2 Sumcheck | Batched constraint sumchecks | Parallel evaluation of $2^n$ points across many instances |
 | Stage 3 Prefix Packing | Packing reduction | Efficient linear reduction over claims |
 | Hyrax Commit | Multi-scalar multiplication (MSM) | $O(\sqrt{N})$ group operations |
 | Hyrax VMP | Vector-matrix product | Parallelizable linear algebra |
@@ -1810,7 +1751,8 @@ The following remain on the CPU/Rust side:
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           RUST (CPU)                                    │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  dory_verify_trace() ──→ (WitnessCollection, AstGraph) ──→ ConstraintSystem │
+│  Stage 8/9 recursion witness-gen ──→ WitnessCollection (+ AstGraph)      │
+│  WitnessCollection (+ combine witness) ──→ ConstraintSystem              │
 │                                              │                          │
 │  Transcript ←─────────────────────────────── │ ←── challenges           │
 │       │                                      │                          │
@@ -1819,7 +1761,7 @@ The following remain on the CPU/Rust side:
 │  │                         GPU KERNELS                              │   │
 │  ├─────────────────────────────────────────────────────────────────┤   │
 │  │  Stage 1: sumcheck_prove(polys, eq_evals) → round_polys         │   │
-│  │  Stage 2: direct_eval(virtual_claims, eq_evals) → evaluation    │   │
+│  │  Stage 2: batched_sumcheck_prove(instances) → round_polys       │   │
 │  │  Stage 3: prefix_pack_reduce(claims, layout) → packed_eval      │   │
 │  │  Hyrax:   msm(scalars, bases) → commitments                     │   │
 │  │           vmp(matrix, vector) → result                          │   │

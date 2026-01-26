@@ -11,7 +11,7 @@ use dory::{
         WitnessGenerator, WitnessResult,
     },
 };
-use std::{marker::PhantomData, rc::Rc};
+use std::{collections::HashMap, marker::PhantomData, rc::Rc};
 
 #[cfg(feature = "experimental-pairing-recursion")]
 use super::witness::multi_miller_loop::MultiMillerLoopSteps;
@@ -28,13 +28,14 @@ use super::{
     },
 };
 use crate::poly::commitment::commitment_scheme::RecursionExt;
+use crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout;
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};
+use crate::zkvm::recursion::CombineDag;
 
 /// Jolt witness backend implementation for dory recursion
 #[derive(Debug, Clone)]
 pub struct JoltWitness;
-
 
 // `verify_recursive` is fundamentally sequential (transcript + dependency order), but the *witness
 // payload construction* for Jolt's recursion SNARK is often more expensive than the underlying
@@ -356,8 +357,6 @@ impl WitnessGenerator<DeferredJoltWitness, BN254> for DeferredJoltWitnessGenerat
 fn expand_deferred_witnesses(
     deferred: WitnessCollection<DeferredJoltWitness>,
 ) -> WitnessCollection<JoltWitness> {
-    use std::collections::HashMap;
-
     let mut out = WitnessCollection::<JoltWitness>::new();
     out.num_rounds = deferred.num_rounds;
 
@@ -492,16 +491,18 @@ fn expand_deferred_witnesses(
             .into_iter()
             .map(|(op_id, w)| {
                 let exp_steps = Base4ExponentiationSteps::new(w.base, w.exponent);
-                (op_id,
-                 JoltGtExpWitness {
-                    base: exp_steps.base,
-                    exponent: exp_steps.exponent,
-                    result: exp_steps.result,
-                    rho_mles: exp_steps.rho_mles,
-                    quotient_mles: exp_steps.quotient_mles,
-                    bits: exp_steps.bits,
-                    ark_result: w.ark_result,
-                 })
+                (
+                    op_id,
+                    JoltGtExpWitness {
+                        base: exp_steps.base,
+                        exponent: exp_steps.exponent,
+                        result: exp_steps.result,
+                        rho_mles: exp_steps.rho_mles,
+                        quotient_mles: exp_steps.quotient_mles,
+                        bits: exp_steps.bits,
+                        ark_result: w.ark_result,
+                    },
+                )
             })
             .collect();
         out.gt_mul = deferred
@@ -509,14 +510,16 @@ fn expand_deferred_witnesses(
             .into_iter()
             .map(|(op_id, w)| {
                 let mul_steps = MultiplicationSteps::new(w.lhs, w.rhs);
-                (op_id,
-                 JoltGtMulWitness {
-                    lhs: mul_steps.lhs,
-                    rhs: mul_steps.rhs,
-                    result: mul_steps.result,
-                    quotient_mle: mul_steps.quotient_mle,
-                    ark_result: w.ark_result,
-                 })
+                (
+                    op_id,
+                    JoltGtMulWitness {
+                        lhs: mul_steps.lhs,
+                        rhs: mul_steps.rhs,
+                        result: mul_steps.result,
+                        quotient_mle: mul_steps.quotient_mle,
+                        ark_result: w.ark_result,
+                    },
+                )
             })
             .collect();
         out.g1_scalar_mul = deferred
@@ -524,23 +527,25 @@ fn expand_deferred_witnesses(
             .into_iter()
             .map(|(op_id, w)| {
                 let steps = ScalarMultiplicationSteps::new(w.point_base, w.scalar);
-                (op_id,
-                 JoltG1ScalarMulWitness {
-                    point_base: steps.point_base,
-                    scalar: steps.scalar,
-                    result: steps.result,
-                    x_a_mles: steps.x_a_mles,
-                    y_a_mles: steps.y_a_mles,
-                    x_t_mles: steps.x_t_mles,
-                    y_t_mles: steps.y_t_mles,
-                    x_a_next_mles: steps.x_a_next_mles,
-                    y_a_next_mles: steps.y_a_next_mles,
-                    t_is_infinity_mles: steps.t_is_infinity_mles,
-                    a_is_infinity_mles: steps.a_is_infinity_mles,
-                    bit_mles: steps.bit_mles,
-                    bits: steps.bits,
-                    ark_result: w.ark_result,
-                 })
+                (
+                    op_id,
+                    JoltG1ScalarMulWitness {
+                        point_base: steps.point_base,
+                        scalar: steps.scalar,
+                        result: steps.result,
+                        x_a_mles: steps.x_a_mles,
+                        y_a_mles: steps.y_a_mles,
+                        x_t_mles: steps.x_t_mles,
+                        y_t_mles: steps.y_t_mles,
+                        x_a_next_mles: steps.x_a_next_mles,
+                        y_a_next_mles: steps.y_a_next_mles,
+                        t_is_infinity_mles: steps.t_is_infinity_mles,
+                        a_is_infinity_mles: steps.a_is_infinity_mles,
+                        bit_mles: steps.bit_mles,
+                        bits: steps.bits,
+                        ark_result: w.ark_result,
+                    },
+                )
             })
             .collect();
         out.g2_scalar_mul = deferred
@@ -548,29 +553,31 @@ fn expand_deferred_witnesses(
             .into_iter()
             .map(|(op_id, w)| {
                 let steps = G2ScalarMultiplicationSteps::new(w.point_base, w.scalar);
-                (op_id,
-                 JoltG2ScalarMulWitness {
-                    point_base: steps.point_base,
-                    scalar: steps.scalar,
-                    result: steps.result,
-                    x_a_c0_mles: steps.x_a_c0_mles,
-                    x_a_c1_mles: steps.x_a_c1_mles,
-                    y_a_c0_mles: steps.y_a_c0_mles,
-                    y_a_c1_mles: steps.y_a_c1_mles,
-                    x_t_c0_mles: steps.x_t_c0_mles,
-                    x_t_c1_mles: steps.x_t_c1_mles,
-                    y_t_c0_mles: steps.y_t_c0_mles,
-                    y_t_c1_mles: steps.y_t_c1_mles,
-                    x_a_next_c0_mles: steps.x_a_next_c0_mles,
-                    x_a_next_c1_mles: steps.x_a_next_c1_mles,
-                    y_a_next_c0_mles: steps.y_a_next_c0_mles,
-                    y_a_next_c1_mles: steps.y_a_next_c1_mles,
-                    t_is_infinity_mles: steps.t_is_infinity_mles,
-                    a_is_infinity_mles: steps.a_is_infinity_mles,
-                    bit_mles: steps.bit_mles,
-                    bits: steps.bits,
-                    ark_result: w.ark_result,
-                 })
+                (
+                    op_id,
+                    JoltG2ScalarMulWitness {
+                        point_base: steps.point_base,
+                        scalar: steps.scalar,
+                        result: steps.result,
+                        x_a_c0_mles: steps.x_a_c0_mles,
+                        x_a_c1_mles: steps.x_a_c1_mles,
+                        y_a_c0_mles: steps.y_a_c0_mles,
+                        y_a_c1_mles: steps.y_a_c1_mles,
+                        x_t_c0_mles: steps.x_t_c0_mles,
+                        x_t_c1_mles: steps.x_t_c1_mles,
+                        y_t_c0_mles: steps.y_t_c0_mles,
+                        y_t_c1_mles: steps.y_t_c1_mles,
+                        x_a_next_c0_mles: steps.x_a_next_c0_mles,
+                        x_a_next_c1_mles: steps.x_a_next_c1_mles,
+                        y_a_next_c0_mles: steps.y_a_next_c0_mles,
+                        y_a_next_c1_mles: steps.y_a_next_c1_mles,
+                        t_is_infinity_mles: steps.t_is_infinity_mles,
+                        a_is_infinity_mles: steps.a_is_infinity_mles,
+                        bit_mles: steps.bit_mles,
+                        bits: steps.bits,
+                        ark_result: w.ark_result,
+                    },
+                )
             })
             .collect();
         out.g1_add = deferred
@@ -1531,10 +1538,7 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         commitment: &ArkGT,
     ) -> Result<(Self::Witness, Self::Ast), ProofVerifyError> {
         // Convert Jolt types to dory types
-        let reordered_point =
-            crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout::<Fr>(
-                point,
-            );
+        let reordered_point = reorder_opening_point_for_layout::<Fr>(point);
         let ark_point: Vec<ArkFr> = reordered_point
             .iter()
             .rev() // Reverse for dory endianness
@@ -1553,9 +1557,11 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         // recursion witnesses (packed traces, quotient polynomials, etc.) is very expensive.
         // We therefore record only minimal per-op inputs/outputs during verification and
         // expand them into full witnesses in parallel afterwards.
-        let ctx = Rc::new(
-            TraceContext::<DeferredJoltWitness, BN254, DeferredJoltWitnessGenerator>::for_witness_gen_with_ast(),
-        );
+        let ctx = Rc::new(TraceContext::<
+            DeferredJoltWitness,
+            BN254,
+            DeferredJoltWitnessGenerator,
+        >::for_witness_gen_with_ast());
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
         verify_recursive::<_, BN254, JoltG1Routines, JoltG2Routines, _, _, _>(
             *commitment,
@@ -1592,10 +1598,7 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
         commitment: &ArkGT,
     ) -> Result<Self::Ast, ProofVerifyError> {
         // Convert point for dory
-        let reordered_point =
-            crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout::<Fr>(
-                point,
-            );
+        let reordered_point = reorder_opening_point_for_layout::<Fr>(point);
         let ark_point: Vec<ArkFr> = reordered_point
             .iter()
             .rev() // Reverse for dory endianness
@@ -1756,6 +1759,19 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
             exp_witnesses,
             mul_layers,
         };
+        debug_assert_eq!(
+            CombineDag::new(witness.exp_witnesses.len())
+                .layers
+                .iter()
+                .map(|l| l.muls.len())
+                .collect::<Vec<_>>(),
+            witness
+                .mul_layers
+                .iter()
+                .map(|l| l.len())
+                .collect::<Vec<_>>(),
+            "GTCombineWitness.mul_layers shape must match CombineDag"
+        );
         debug_assert!(
             witness.validate_tree_wiring().is_ok(),
             "GTCombineWitness tree wiring invalid"

@@ -22,7 +22,7 @@ use crate::{
     zkvm::{
         config::{OneHotConfig, ProgramMode, ReadWriteConfig},
         instruction::{CircuitFlags, InstructionFlags},
-        recursion::{prover::RecursionProof},
+        recursion::prover::RecursionProof,
         witness::{
             CommittedPolynomial, FrobeniusTerm, G1AddTerm, G1ScalarMulTerm, G2AddTerm,
             G2ScalarMulTerm, GtExpTerm, GtMulTerm, MultiMillerLoopTerm, RecursionPoly, TermEnum,

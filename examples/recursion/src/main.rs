@@ -949,7 +949,14 @@ fn main() {
                     return;
                 }
             };
-            generate_proofs(guest, workdir, *committed, *recursion, (*layout).into(), *scale);
+            generate_proofs(
+                guest,
+                workdir,
+                *committed,
+                *recursion,
+                (*layout).into(),
+                *scale,
+            );
         }
         Some(Commands::Verify {
             example,

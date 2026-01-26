@@ -193,8 +193,9 @@ where
         if rem != 0 {
             let row_start = full_rows * R_size;
             let row = &poly.Z[row_start..row_start + rem];
-            let row_commitment = VariableBaseMSM::msm_sequential(&generators.generators[..rem], row)
-                .expect("partial row length should match generator length");
+            let row_commitment =
+                VariableBaseMSM::msm_sequential(&generators.generators[..rem], row)
+                    .expect("partial row length should match generator length");
             row_commitments.push(row_commitment);
         }
 

@@ -15,8 +15,10 @@ use crate::poly::commitment::{
 // Dory-specific imports for recursion mode (used at runtime when PCS is Dory)
 #[allow(unused_imports)]
 use crate::poly::commitment::dory::{
-    derive_from_dory_ast, wrappers::ArkDoryProof, wrappers::ArkGT, wrappers::ArkworksVerifierSetup,
+    derive_from_dory_ast, derive_plan_with_hints, wrappers::ArkDoryProof, wrappers::ArkGT,
+    wrappers::ArkworksVerifierSetup,
 };
+use crate::poly::rlc_utils::{compute_joint_claim, compute_rlc_coefficients};
 use crate::subprotocols::sumcheck::BatchedSumcheck;
 use crate::zkvm::bytecode::chunks::total_lanes;
 use crate::zkvm::claim_reductions::advice::ReductionPhase;
@@ -1296,7 +1298,6 @@ impl<
             }
 
             // Deterministic combine plan (must match prover's BTreeMap iteration).
-            use crate::poly::rlc_utils::{compute_joint_claim, compute_rlc_coefficients};
             let joint_claim: F = compute_joint_claim(&gamma_powers, &dory_snap.claims);
             let rlc_map = compute_rlc_coefficients(&gamma_powers, state.polynomial_claims.clone());
             let (combine_coeffs, combine_commitments): (Vec<F>, Vec<PCS::Commitment>) = rlc_map
@@ -1311,7 +1312,15 @@ impl<
                     )
                 })
                 .unzip();
-            let joint_commitment = PCS::combine_commitments(&combine_commitments, &combine_coeffs);
+            // Recursion mode: prefer the prover-supplied Stage-8 combine hint to avoid expensive
+            // `PCS::combine_commitments` on the verifier.
+            //
+            // NOTE: This is not sound until wiring/boundary constraints bind the hinted value to
+            // the Dory AST (tracked separately).
+            let joint_commitment = match payload.stage8_combine_hint.as_ref() {
+                Some(hint_fq12) => PCS::combine_with_hint_fq12(hint_fq12),
+                None => PCS::combine_commitments(&combine_commitments, &combine_coeffs),
+            };
 
             // Build AST on a transcript clone at the pre-Stage8-proof state.
             let mut ast_transcript = self.transcript.clone();
@@ -1388,7 +1397,7 @@ impl<
                 })
                 .collect::<Result<_, _>>()?;
 
-            crate::poly::commitment::dory::derive_plan_with_hints(
+            derive_plan_with_hints(
                 ast_graph,
                 dory_proof,
                 dory_setup,

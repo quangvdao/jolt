@@ -22,4 +22,3 @@ pub struct RecursionConstraintMetadata {
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
     pub g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs>,
 }
-

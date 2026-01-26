@@ -30,6 +30,7 @@ use super::{
 use crate::poly::commitment::commitment_scheme::RecursionExt;
 use crate::poly::commitment::dory::commitment_scheme::reorder_opening_point_for_layout;
 use crate::utils::errors::ProofVerifyError;
+use crate::zkvm::proof_serialization::PairingBoundary;
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};
 use crate::zkvm::recursion::CombineDag;
 
@@ -1793,6 +1794,25 @@ impl RecursionExt<Fr> for DoryCommitmentScheme {
 
     fn combine_with_hint_fq12(hint: &Fq12) -> Self::Commitment {
         ArkGT(*hint)
+    }
+
+    fn derive_pairing_boundary_from_ast(
+        ast: &Self::Ast,
+        proof: &Self::Proof,
+        setup: &Self::VerifierSetup,
+        joint_commitment: Self::Commitment,
+        combine_commitments: &[Self::Commitment],
+        combine_coeffs: &[Fr],
+    ) -> Result<PairingBoundary, ProofVerifyError> {
+        let derived = crate::poly::commitment::dory::derive_from_dory_ast(
+            ast,
+            proof,
+            setup,
+            joint_commitment,
+            combine_commitments,
+            combine_coeffs,
+        )?;
+        Ok(derived.pairing_boundary)
     }
 }
 

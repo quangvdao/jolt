@@ -7,6 +7,7 @@ use crate::{
     field::JoltField,
     poly::multilinear_polynomial::MultilinearPolynomial,
     utils::{errors::ProofVerifyError, small_scalar::SmallScalar},
+    zkvm::proof_serialization::PairingBoundary,
     zkvm::recursion::witness::GTCombineWitness,
 };
 
@@ -213,6 +214,19 @@ pub trait RecursionExt<F: JoltField>: CommitmentScheme<Field = F> {
         evaluation: &F,
         commitment: &Self::Commitment,
     ) -> Result<Self::Ast, ProofVerifyError>;
+
+    /// Derive the pairing boundary (verifier-side public inputs) from a realized AST.
+    ///
+    /// This is PCS-specific. For Dory, this is equivalent to (and implemented via)
+    /// `crate::poly::commitment::dory::derive_from_dory_ast(...).pairing_boundary`.
+    fn derive_pairing_boundary_from_ast(
+        ast: &Self::Ast,
+        proof: &Self::Proof,
+        setup: &Self::VerifierSetup,
+        joint_commitment: Self::Commitment,
+        combine_commitments: &[Self::Commitment],
+        combine_coeffs: &[F],
+    ) -> Result<PairingBoundary, ProofVerifyError>;
 
     /// Replay the Fiat–Shamir transcript interactions for an opening proof,
     /// without performing any group checks.

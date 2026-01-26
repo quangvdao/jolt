@@ -33,7 +33,6 @@ use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::backends::arkworks::ArkGT;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use dory::backends::arkworks::BN254;
 use dory::recursion::{ast::AstGraph, WitnessCollection};
@@ -65,7 +64,7 @@ use super::{
     virtualization::extract_virtual_claims_from_accumulator,
     witness_generation,
 };
-use crate::poly::commitment::dory::{derive_from_dory_ast, recursion::JoltWitness};
+use crate::poly::commitment::dory::recursion::JoltWitness;
 use crate::poly::rlc_utils::compute_rlc_coefficients;
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
@@ -242,21 +241,10 @@ impl RecursionProver<Fq> {
         F: JoltField,
         PCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>,
         ProofTranscript: Transcript,
-        PCS::Proof: 'static,
-        PCS::VerifierSetup: 'static,
-        PCS::Commitment: 'static,
         PCS::CombineHint: Send,
     {
         let stage8_opening_proof = input.stage8_opening_proof;
         let verifier_setup = input.verifier_setup;
-
-        // Verify type compatibility at runtime.
-        if std::any::TypeId::of::<F>() != std::any::TypeId::of::<ark_bn254::Fr>() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Recursion SNARK requires F to be Fr (BN254 scalar field)",
-            )));
-        }
 
         // Stage 8 (recursion-only): compute joint commitment (value-only).
         let DoryOpeningSnapshot {
@@ -282,79 +270,20 @@ impl RecursionProver<Fq> {
 
         let joint_commitment = PCS::combine_commitments(&comms, &coeffs);
 
-        // Phase E3 (host/prover only): overlap combine-witness generation with the Stage 9
-        // witness-gen (both are expensive but independent once `joint_commitment` is known).
+        // Phase E3: overlap combine-witness generation with Stage 9 witness generation.
         //
-        // In verifier-only builds, keep sequential to avoid thread usage.
-        let (witness_collection, ast, combine_witness, stage8_combine_hint_fq12) = {
-            #[cfg(feature = "prover")]
-            {
-                let combine_out: Arc<Mutex<Option<(GTCombineWitness, PCS::CombineHint)>>> =
-                    Arc::new(Mutex::new(None));
-
-                let mut witness_out: Option<Result<(WitnessCollection<JoltWitness>, PCS::Ast), _>> =
-                    None;
-
-                rayon::scope(|s| {
-                    // Spawn combine witness generation on the rayon threadpool.
-                    let combine_out2 = combine_out.clone();
-                    let comms_ref = &comms;
-                    let coeffs_ref = &coeffs;
-                    s.spawn(move |_| {
-                        let _span = tracing::info_span!(
-                            "stage8_generate_combine_witness",
-                            num_commitments = comms_ref.len()
-                        )
-                        .entered();
-                        let res = PCS::generate_combine_witness(comms_ref, coeffs_ref);
-                        *combine_out2.lock().expect("combine_out mutex") = Some(res);
-                    });
-
-                    // Stage 9: use the PCS recursion extension to generate witnesses + AST for verifying
-                    // the Stage 8 opening proof.
-                    let mut witness_gen_transcript = pre_opening_proof_transcript;
-                    let span = tracing::info_span!(
-                        "stage9_witness_gen_with_ast",
-                        opening_point_len = opening_point.len()
-                    );
-                    witness_out = Some(span.in_scope(|| {
-                        PCS::witness_gen_with_ast(
-                            stage8_opening_proof,
-                            verifier_setup,
-                            &mut witness_gen_transcript,
-                            &opening_point,
-                            &joint_claim,
-                            &joint_commitment,
-                        )
-                    }));
-                });
-
-                let (witness_collection, ast) = witness_out
-                    .expect("witness_out must be set in rayon scope")
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-                let (combine_witness, combine_hint) = combine_out
-                    .lock()
-                    .expect("combine_out mutex")
-                    .take()
-                    .expect("combine witness must be produced");
-                let stage8_combine_hint_fq12 = PCS::combine_hint_to_fq12(&combine_hint);
-
-                (
-                    witness_collection,
-                    ast,
-                    combine_witness,
-                    stage8_combine_hint_fq12,
+        // Both are expensive but independent once `joint_commitment` is known.
+        let (combine_out, witness_out) = rayon::join(
+            || {
+                tracing::info_span!(
+                    "stage8_generate_combine_witness",
+                    num_commitments = comms.len()
                 )
-            }
-            #[cfg(not(feature = "prover"))]
-            {
-                let (combine_witness, combine_hint) =
-                    PCS::generate_combine_witness(&comms, &coeffs);
-                let stage8_combine_hint_fq12 = PCS::combine_hint_to_fq12(&combine_hint);
-
+                .in_scope(|| PCS::generate_combine_witness(&comms, &coeffs))
+            },
+            || {
                 let mut witness_gen_transcript = pre_opening_proof_transcript;
-                let (witness_collection, ast) = tracing::info_span!(
+                tracing::info_span!(
                     "stage9_witness_gen_with_ast",
                     opening_point_len = opening_point.len()
                 )
@@ -367,82 +296,25 @@ impl RecursionProver<Fq> {
                         &joint_claim,
                         &joint_commitment,
                     )
-                })?;
+                })
+            },
+        );
 
-                (
-                    witness_collection,
-                    ast,
-                    combine_witness,
-                    stage8_combine_hint_fq12,
-                )
-            }
-        };
+        let (combine_witness, combine_hint) = combine_out;
+        let stage8_combine_hint_fq12 = PCS::combine_hint_to_fq12(&combine_hint);
+        let (witness_collection, ast) =
+            witness_out.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         // Phase F (pairing boundary): derive boundary from the (fully realized) AST and Stage 8 inputs.
         //
         // This is later re-derived by the verifier from a symbolic AST for binding.
-        use std::any::Any;
-
-        // `coeffs` are sampled over the Stage-8 transcript field `F`.
-        // In recursion mode we require `F = ark_bn254::Fr` (enforced above), so avoid
-        // serialize/deserialize round-trips which are extremely expensive for large batches.
-        let combine_coeffs_fr: Vec<Fr> = coeffs
-            .iter()
-            .map(|c| {
-                (c as &dyn Any)
-                    .downcast_ref::<Fr>()
-                    .copied()
-                    .ok_or(ark_serialize::SerializationError::InvalidData)
-            })
-            .collect::<Result<_, ark_serialize::SerializationError>>()?;
-
-        let dory_proof = (stage8_opening_proof as &dyn Any)
-            .downcast_ref::<ArkDoryProof>()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Recursion SNARK requires Dory proof type",
-                )
-            })?;
-        let dory_setup = (verifier_setup as &dyn Any)
-            .downcast_ref::<ArkworksVerifierSetup>()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Recursion SNARK requires Dory verifier setup type",
-                )
-            })?;
-        let joint_commitment_dory = (&joint_commitment as &dyn Any)
-            .downcast_ref::<ArkGT>()
-            .cloned()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Recursion SNARK requires Dory commitment type",
-                )
-            })?;
-        let comms_dory: Vec<ArkGT> = comms
-            .iter()
-            .map(|c| {
-                (c as &dyn Any)
-                    .downcast_ref::<ArkGT>()
-                    .cloned()
-                    .ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "Recursion SNARK requires Dory commitment type",
-                        )
-                    })
-            })
-            .collect::<Result<_, _>>()?;
-
-        let derived = derive_from_dory_ast(
+        let pairing_boundary = PCS::derive_pairing_boundary_from_ast(
             &ast,
-            dory_proof,
-            dory_setup,
-            joint_commitment_dory,
-            &comms_dory,
-            &combine_coeffs_fr,
+            stage8_opening_proof,
+            verifier_setup,
+            joint_commitment,
+            &comms,
+            &coeffs,
         )
         .map_err(|_e| {
             std::io::Error::new(
@@ -553,7 +425,7 @@ impl RecursionProver<Fq> {
             prover,
             stage8_combine_hint_fq12,
             ast,
-            derived.pairing_boundary,
+            pairing_boundary,
             non_input_base_hints,
         ))
     }

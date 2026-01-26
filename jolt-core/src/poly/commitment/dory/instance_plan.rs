@@ -626,6 +626,7 @@ pub fn derive_plan_with_hints(
 ///
 /// `combine_commitments` and `combine_coeffs` must be in the same deterministic order as the
 /// recursion prover's `compute_rlc_coefficients` iteration (BTreeMap order).
+#[tracing::instrument(skip_all)]
 pub fn derive_from_dory_ast(
     ast: &AstGraph<BN254>,
     proof: &ArkDoryProof,

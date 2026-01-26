@@ -731,6 +731,11 @@ fn run_recursion_proof(
     ];
     match run_config {
         RunConfig::Prove => {
+            // Reset DoryGlobals again before proving - the trace may have polluted them
+            // when running the inner proof's recursion verification inside the guest.
+            DoryGlobals::reset();
+            info!("DoryGlobals reset before proving (inner verification may have polluted)");
+
             let (proof, _io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
                 &recursion,
                 &input_bytes,
@@ -811,12 +816,20 @@ fn verify_proofs(
         let input_bytes = vec![];
         info!("Using empty input bytes (embedded mode)");
 
+        // Reset DoryGlobals before running recursion proof to avoid pollution
+        // from the inner proof's context (which may have different parameters).
+        DoryGlobals::reset();
+
+        // The recursion guest has a MUCH larger trace than the inner guest.
+        let recursion_max_trace_length = 1 << 30; // 1B cycles (safe upper bound)
+        info!("Using recursion max_trace_length: {recursion_max_trace_length}");
+
         run_recursion_proof(
             guest,
             run_config,
             input_bytes,
             memory_config,
-            guest.get_max_trace_length(use_embed),
+            recursion_max_trace_length,
             use_committed,
             layout,
             cycle_tracking,
@@ -841,12 +854,27 @@ fn verify_proofs(
             "Input size is too large"
         );
 
+        // Reset DoryGlobals before running recursion proof to avoid pollution
+        // from the inner proof's context (which may have different parameters).
+        info!("Resetting DoryGlobals before recursion proof (non-embed path)");
+        DoryGlobals::reset();
+        info!("DoryGlobals reset complete");
+
+        // The recursion guest has a MUCH larger trace than the inner guest.
+        // Use the max_trace_length from the provable_macro.rs config (generated earlier)
+        // which is sized for the recursion verifier's actual cycle count.
+        // With --recursion: ~300M cycles, without: ~1.1B cycles
+        // We use the memory_config.max_trace_length which was set to 5M for the inner guest,
+        // but we need a larger value for the recursion guest itself.
+        let recursion_max_trace_length = 1 << 30; // 1B cycles (safe upper bound)
+        info!("Using recursion max_trace_length: {recursion_max_trace_length}");
+
         run_recursion_proof(
             guest,
             run_config,
             input_bytes,
             memory_config,
-            guest.get_max_trace_length(use_embed),
+            recursion_max_trace_length,
             use_committed,
             layout,
             cycle_tracking,

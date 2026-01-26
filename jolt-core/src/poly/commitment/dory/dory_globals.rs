@@ -769,8 +769,13 @@ impl DoryGlobals {
         Some(())
     }
 
-    /// Reset global state
-    #[cfg(test)]
+    /// Reset global state.
+    ///
+    /// # Safety
+    /// This function resets all global Dory state. It should only be called
+    /// when transitioning between proof contexts with different Dory configurations
+    /// (e.g., before running a recursion proof that uses different parameters
+    /// than the inner proofs).
     pub fn reset() {
         #[allow(static_mut_refs)]
         unsafe {

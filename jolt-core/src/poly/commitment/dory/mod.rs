@@ -29,7 +29,7 @@ pub use wrappers::{
 };
 
 // Re-export instance plan for recursion
-pub use instance_plan::{derive_from_dory_ast, DerivedRecursionInput};
+pub use instance_plan::{derive_from_dory_ast, derive_plan_with_hints, DerivedRecursionInput, DerivedRecursionPlan};
 
 /// Deserializes a Dory opening proof with fine-grained cycle markers.
 ///

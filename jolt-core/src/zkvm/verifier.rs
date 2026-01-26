@@ -1335,7 +1335,11 @@ impl<
         };
 
         // 2) Derive RecursionVerifierInput (constraint plan + public inputs) from the AST.
-        let derived = {
+        //
+        // NOTE: We treat pairing boundary (multi-pairing inputs) as prover-supplied hints for now.
+        // Binding those values to the Dory AST requires wiring/boundary constraints which are not
+        // yet implemented.
+        let derived_plan = {
             let _span = tracing::info_span!("stage8_derive_recursion_instance_plan").entered();
             use std::any::Any;
 
@@ -1343,12 +1347,10 @@ impl<
             let combine_coeffs_fr: Vec<ark_bn254::Fr> = combine_coeffs
                 .iter()
                 .map(|c| {
-                    let mut buf = Vec::new();
-                    c.serialize_compressed(&mut buf)
-                        .map_err(|e| anyhow::anyhow!("serialize combine coeff failed: {e:?}"))?;
-                    ark_bn254::Fr::deserialize_compressed(&*buf).map_err(|e| {
-                        anyhow::anyhow!("deserialize combine coeff as Fr failed: {e:?}")
-                    })
+                    (c as &dyn Any)
+                        .downcast_ref::<ark_bn254::Fr>()
+                        .copied()
+                        .ok_or_else(|| anyhow::anyhow!("recursion mode requires F = ark_bn254::Fr"))
                 })
                 .collect::<Result<_, _>>()?;
 
@@ -1378,21 +1380,22 @@ impl<
                 })
                 .collect::<Result<_, _>>()?;
 
-            derive_from_dory_ast(
+            crate::poly::commitment::dory::derive_plan_with_hints(
                 ast_graph,
                 dory_proof,
                 dory_setup,
                 joint_commitment_dory,
                 &combine_commitments_dory,
                 &combine_coeffs_fr,
+                &payload.non_input_base_hints,
             )
             .map_err(|e| anyhow::anyhow!("AST->instance-plan derivation failed: {e:?}"))?
         };
 
-        if derived.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {
+        if derived_plan.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {
             return Err(anyhow::anyhow!(
                 "dense_num_vars {} exceeds max {}",
-                derived.dense_num_vars,
+                derived_plan.dense_num_vars,
                 MAX_RECURSION_DENSE_NUM_VARS
             ));
         }
@@ -1401,7 +1404,7 @@ impl<
         let recursion_proof = &payload.recursion_proof;
         let recursion_verifier = {
             let _span = tracing::info_span!("stage8_create_recursion_verifier").entered();
-            RecursionVerifier::<Fq>::new(derived.verifier_input)
+            RecursionVerifier::<Fq>::new(derived_plan.verifier_input)
         };
 
         type HyraxPCS = Hyrax<1, GrumpkinProjective>;
@@ -1423,21 +1426,8 @@ impl<
             return Err(anyhow::anyhow!("Recursion proof verification failed"));
         }
 
-        // 4) Pairing boundary binding + external pairing check.
-        let expected = &derived.pairing_boundary;
+        // 4) External pairing check (pairing boundary treated as prover hint for now).
         let got = &payload.pairing_boundary;
-        if expected.p1_g1 != got.p1_g1
-            || expected.p1_g2 != got.p1_g2
-            || expected.p2_g1 != got.p2_g1
-            || expected.p2_g2 != got.p2_g2
-            || expected.p3_g1 != got.p3_g1
-            || expected.p3_g2 != got.p3_g2
-            || expected.rhs != got.rhs
-        {
-            return Err(anyhow::anyhow!(
-                "pairing boundary mismatch (expected from AST vs payload)"
-            ));
-        }
 
         // Minimal binding: recompute multi-pairing and check equality.
         let lhs = {

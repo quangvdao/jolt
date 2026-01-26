@@ -25,6 +25,7 @@ use crate::{
         witness::{CommittedPolynomial, VirtualPolynomial},
     },
 };
+use crate::zkvm::proof_serialization::NonInputBaseHints;
 use ark_bn254::{Fq, Fr};
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_ff::Zero;
@@ -223,7 +224,10 @@ impl RecursionProver<Fq> {
     #[tracing::instrument(skip_all, name = "RecursionProver::witness_generation")]
     fn witness_generation<F, PCS, ProofTranscript>(
         input: RecursionInput<'_, F, PCS, ProofTranscript>,
-    ) -> Result<(Self, ark_bn254::Fq12, PCS::Ast, PairingBoundary), Box<dyn std::error::Error>>
+    ) -> Result<
+        (Self, ark_bn254::Fq12, PCS::Ast, PairingBoundary, NonInputBaseHints),
+        Box<dyn std::error::Error>,
+    >
     where
         F: JoltField,
         PCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>,
@@ -440,11 +444,106 @@ impl RecursionProver<Fq> {
         // Build constraint system from generated witnesses and include combine witness constraints.
         let prover = Self::new_from_witnesses(&witness_collection, Some(combine_witness))?;
 
+        // Non-input base/point hints for verifier-side instance-plan derivation (perf-only until wiring is added).
+        let non_input_base_hints = tracing::info_span!("derive_non_input_base_hints").in_scope(|| {
+            use dory::recursion::ast::AstOp;
+            use dory::recursion::OpId;
+
+            // Collect op lists in OpId order (must match verifier derivation).
+            let mut gt_exp: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
+            let mut g1_smul: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
+            let mut g2_smul: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
+            for node in &ast.nodes {
+                match &node.op {
+                    AstOp::GTExp {
+                        op_id: Some(id),
+                        base,
+                        ..
+                    } => gt_exp.push((*id, *base)),
+                    AstOp::G1ScalarMul {
+                        op_id: Some(id),
+                        point,
+                        ..
+                    } => g1_smul.push((*id, *point)),
+                    AstOp::G2ScalarMul {
+                        op_id: Some(id),
+                        point,
+                        ..
+                    } => g2_smul.push((*id, *point)),
+                    _ => {}
+                }
+            }
+            gt_exp.sort_by_key(|(id, _)| *id);
+            g1_smul.sort_by_key(|(id, _)| *id);
+            g2_smul.sort_by_key(|(id, _)| *id);
+
+            let is_input = |vid: dory::recursion::ast::ValueId| -> bool {
+                let idx = vid.0 as usize;
+                idx < ast.nodes.len() && matches!(ast.nodes[idx].op, AstOp::Input { .. })
+            };
+
+            let gt_exp_base_hints = gt_exp
+                .iter()
+                .map(|(op_id, base_id)| {
+                    if is_input(*base_id) {
+                        None
+                    } else {
+                        Some(
+                            witness_collection
+                                .gt_exp
+                                .get(op_id)
+                                .expect("missing GTExp witness for op_id")
+                                .base,
+                        )
+                    }
+                })
+                .collect();
+            let g1_scalar_mul_base_hints = g1_smul
+                .iter()
+                .map(|(op_id, point_id)| {
+                    if is_input(*point_id) {
+                        None
+                    } else {
+                        Some(
+                            witness_collection
+                                .g1_scalar_mul
+                                .get(op_id)
+                                .expect("missing G1ScalarMul witness for op_id")
+                                .point_base,
+                        )
+                    }
+                })
+                .collect();
+            let g2_scalar_mul_base_hints = g2_smul
+                .iter()
+                .map(|(op_id, point_id)| {
+                    if is_input(*point_id) {
+                        None
+                    } else {
+                        Some(
+                            witness_collection
+                                .g2_scalar_mul
+                                .get(op_id)
+                                .expect("missing G2ScalarMul witness for op_id")
+                                .point_base,
+                        )
+                    }
+                })
+                .collect();
+
+            NonInputBaseHints {
+                gt_exp_base_hints,
+                g1_scalar_mul_base_hints,
+                g2_scalar_mul_base_hints,
+            }
+        });
+
         Ok((
             prover,
             stage8_combine_hint_fq12,
             ast,
             derived.pairing_boundary,
+            non_input_base_hints,
         ))
     }
 
@@ -468,6 +567,7 @@ impl RecursionProver<Fq> {
             RecursionConstraintMetadata,
             PairingBoundary,
             Option<ark_bn254::Fq12>,
+            NonInputBaseHints,
         ),
         Box<dyn std::error::Error>,
     >
@@ -478,7 +578,7 @@ impl RecursionProver<Fq> {
         ProofTranscript: Transcript,
     {
         // Phase 1: witness generation
-        let (mut prover, stage8_combine_hint_fq12, ast, pairing_boundary) =
+        let (mut prover, stage8_combine_hint_fq12, ast, pairing_boundary, non_input_base_hints) =
             Self::witness_generation::<F, DoryPCS, ProofTranscript>(input)?;
         prover.ast = Some(ast);
 
@@ -511,6 +611,7 @@ impl RecursionProver<Fq> {
             poly_commit.metadata,
             pairing_boundary,
             Some(stage8_combine_hint_fq12),
+            non_input_base_hints,
         ))
     }
 

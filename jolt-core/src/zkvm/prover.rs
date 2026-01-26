@@ -764,6 +764,7 @@ impl<
                 _recursion_constraint_metadata,
                 pairing_boundary,
                 stage8_combine_hint,
+                non_input_base_hints,
             ) = RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript>(
                 &mut self.transcript,
                 hyrax_prover_setup,
@@ -779,6 +780,7 @@ impl<
             Some(RecursionPayload {
                 stage8_combine_hint,
                 pairing_boundary,
+                non_input_base_hints,
                 recursion_proof,
                 _marker: std::marker::PhantomData,
             })

@@ -16,6 +16,7 @@ use crate::zkvm::recursion::gt::exponentiation::GtExpPublicInputs;
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::verifier::RecursionVerifierInput;
 use crate::zkvm::recursion::PolyType;
+use crate::zkvm::proof_serialization::NonInputBaseHints;
 
 use ark_bn254::{Fq12, Fr, G1Affine, G2Affine};
 use ark_ec::CurveGroup;
@@ -399,6 +400,215 @@ pub struct DerivedRecursionInput {
     pub dense_num_vars: usize,
     /// Pairing boundary for external 3-way multi-pairing check.
     pub pairing_boundary: PairingBoundary,
+}
+
+/// Result of deriving only the recursion verifier input (instance plan) from a Dory AST.
+///
+/// This intentionally excludes `PairingBoundary` extraction so callers can treat pairing inputs
+/// as prover-supplied hints for performance (until wiring/boundary constraints exist).
+pub struct DerivedRecursionPlan {
+    pub verifier_input: RecursionVerifierInput,
+    pub dense_num_vars: usize,
+}
+
+fn resolve_gt_input_or_hint(
+    ast: &AstGraph<BN254>,
+    proof: &ArkDoryProof,
+    setup: &VerifierSetup<BN254>,
+    joint_commitment: ArkGT,
+    value_id: ValueId,
+    hint: &Option<Fq12>,
+) -> Result<Fq12, ProofVerifyError> {
+    let idx = value_id.0 as usize;
+    debug_assert!(idx < ast.nodes.len(), "ValueId out of bounds");
+    match &ast.nodes[idx].op {
+        AstOp::Input { source } => Ok(resolve_input_gt(proof, setup, joint_commitment, source)?.0),
+        _ => hint.ok_or(ProofVerifyError::default()),
+    }
+}
+
+fn resolve_g1_input_or_hint(
+    ast: &AstGraph<BN254>,
+    proof: &ArkDoryProof,
+    setup: &VerifierSetup<BN254>,
+    value_id: ValueId,
+    hint: &Option<G1Affine>,
+) -> Result<G1Affine, ProofVerifyError> {
+    let idx = value_id.0 as usize;
+    debug_assert!(idx < ast.nodes.len(), "ValueId out of bounds");
+    match &ast.nodes[idx].op {
+        AstOp::Input { source } => Ok(resolve_input_g1(proof, setup, source)?.0.into_affine()),
+        _ => hint.ok_or(ProofVerifyError::default()),
+    }
+}
+
+fn resolve_g2_input_or_hint(
+    ast: &AstGraph<BN254>,
+    proof: &ArkDoryProof,
+    setup: &VerifierSetup<BN254>,
+    value_id: ValueId,
+    hint: &Option<G2Affine>,
+) -> Result<G2Affine, ProofVerifyError> {
+    let idx = value_id.0 as usize;
+    debug_assert!(idx < ast.nodes.len(), "ValueId out of bounds");
+    match &ast.nodes[idx].op {
+        AstOp::Input { source } => Ok(resolve_input_g2(proof, setup, source)?.0.into_affine()),
+        _ => hint.ok_or(ProofVerifyError::default()),
+    }
+}
+
+/// Derive the recursion verifier input from a Dory AST, using hints when a base/point is not an input.
+pub fn derive_plan_with_hints(
+    ast: &AstGraph<BN254>,
+    proof: &ArkDoryProof,
+    setup: &ArkworksVerifierSetup,
+    joint_commitment: ArkGT,
+    combine_commitments: &[ArkGT],
+    combine_coeffs: &[Fr],
+    non_input_hints: &NonInputBaseHints,
+) -> Result<DerivedRecursionPlan, ProofVerifyError> {
+    let dory_setup: VerifierSetup<BN254> = setup.clone().into();
+
+    // Collect ops by type (sorted by OpId for Dory-traced operations).
+    let mut gt_exp_ops: Vec<(OpId, ValueId, ArkFr)> = Vec::new();
+    let mut gt_mul_ops: Vec<OpId> = Vec::new();
+    let mut g1_scalar_mul_ops: Vec<(OpId, ValueId, ArkFr)> = Vec::new();
+    let mut g2_scalar_mul_ops: Vec<(OpId, ValueId, ArkFr)> = Vec::new();
+    let mut g1_add_ops: Vec<OpId> = Vec::new();
+    let mut g2_add_ops: Vec<OpId> = Vec::new();
+
+    for node in &ast.nodes {
+        match &node.op {
+            AstOp::GTExp {
+                op_id: Some(id),
+                base,
+                scalar,
+            } => gt_exp_ops.push((*id, *base, scalar.value)),
+            AstOp::GTMul {
+                op_id: Some(id), ..
+            } => gt_mul_ops.push(*id),
+            AstOp::G1ScalarMul {
+                op_id: Some(id),
+                point,
+                scalar,
+            } => g1_scalar_mul_ops.push((*id, *point, scalar.value)),
+            AstOp::G2ScalarMul {
+                op_id: Some(id),
+                point,
+                scalar,
+            } => g2_scalar_mul_ops.push((*id, *point, scalar.value)),
+            AstOp::G1Add {
+                op_id: Some(id), ..
+            } => g1_add_ops.push(*id),
+            AstOp::G2Add {
+                op_id: Some(id), ..
+            } => g2_add_ops.push(*id),
+            _ => {}
+        }
+    }
+
+    gt_exp_ops.sort_by_key(|(id, _, _)| *id);
+    gt_mul_ops.sort();
+    g1_scalar_mul_ops.sort_by_key(|(id, _, _)| *id);
+    g2_scalar_mul_ops.sort_by_key(|(id, _, _)| *id);
+    g1_add_ops.sort();
+    g2_add_ops.sort();
+
+    if non_input_hints.gt_exp_base_hints.len() != gt_exp_ops.len()
+        || non_input_hints.g1_scalar_mul_base_hints.len() != g1_scalar_mul_ops.len()
+        || non_input_hints.g2_scalar_mul_base_hints.len() != g2_scalar_mul_ops.len()
+    {
+        return Err(ProofVerifyError::default());
+    }
+
+    let mut constraint_types: Vec<ConstraintType> = Vec::new();
+    let mut gt_exp_public_inputs: Vec<GtExpPublicInputs> = Vec::new();
+    let mut g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs> = Vec::new();
+    let mut g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs> = Vec::new();
+
+    // Dory GTExp
+    for ((_, base_id, scalar), base_hint) in gt_exp_ops.iter().zip(non_input_hints.gt_exp_base_hints.iter()) {
+        let base = resolve_gt_input_or_hint(ast, proof, &dory_setup, joint_commitment, *base_id, base_hint)?;
+        let exponent: Fr = ark_to_jolt(scalar);
+        let bits = bits_from_exponent_msb_no_leading_zeros(exponent);
+        constraint_types.push(ConstraintType::GtExp);
+        gt_exp_public_inputs.push(GtExpPublicInputs::new(base, bits));
+    }
+
+    // Dory GTMul
+    for _ in &gt_mul_ops {
+        constraint_types.push(ConstraintType::GtMul);
+    }
+
+    // Dory G1 scalar mul
+    for ((_, point_id, scalar), point_hint) in g1_scalar_mul_ops
+        .iter()
+        .zip(non_input_hints.g1_scalar_mul_base_hints.iter())
+    {
+        let p = resolve_g1_input_or_hint(ast, proof, &dory_setup, *point_id, point_hint)?;
+        let scalar_fr: Fr = ark_to_jolt(scalar);
+        constraint_types.push(ConstraintType::G1ScalarMul {
+            base_point: (p.x, p.y),
+        });
+        g1_scalar_mul_public_inputs.push(G1ScalarMulPublicInputs::new(scalar_fr));
+    }
+
+    // Dory G2 scalar mul
+    for ((_, point_id, scalar), point_hint) in g2_scalar_mul_ops
+        .iter()
+        .zip(non_input_hints.g2_scalar_mul_base_hints.iter())
+    {
+        let p = resolve_g2_input_or_hint(ast, proof, &dory_setup, *point_id, point_hint)?;
+        let scalar_fr: Fr = ark_to_jolt(scalar);
+        constraint_types.push(ConstraintType::G2ScalarMul {
+            base_point: (p.x, p.y),
+        });
+        g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(scalar_fr));
+    }
+
+    // Dory adds
+    for _ in &g1_add_ops {
+        constraint_types.push(ConstraintType::G1Add);
+    }
+    for _ in &g2_add_ops {
+        constraint_types.push(ConstraintType::G2Add);
+    }
+
+    // Combine commitments constraints are appended at the end (matching prover builder).
+    for (commitment, coeff) in combine_commitments.iter().zip(combine_coeffs.iter()) {
+        let bits = bits_from_exponent_msb_no_leading_zeros(*coeff);
+        constraint_types.push(ConstraintType::GtExp);
+        gt_exp_public_inputs.push(GtExpPublicInputs::new(commitment.0, bits));
+    }
+    let combine_mul_count = combine_commitments.len().saturating_sub(1);
+    for _ in 0..combine_mul_count {
+        constraint_types.push(ConstraintType::GtMul);
+    }
+
+    let dense_num_vars =
+        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
+
+    let num_constraints = constraint_types.len();
+    let num_constraints_padded = num_constraints.next_power_of_two();
+    let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
+    let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
+    let num_constraint_vars = 11usize;
+    let num_vars = num_s_vars + num_constraint_vars;
+
+    Ok(DerivedRecursionPlan {
+        verifier_input: RecursionVerifierInput {
+            constraint_types,
+            num_vars,
+            num_constraint_vars,
+            num_s_vars,
+            num_constraints,
+            num_constraints_padded,
+            gt_exp_public_inputs,
+            g1_scalar_mul_public_inputs,
+            g2_scalar_mul_public_inputs,
+        },
+        dense_num_vars,
+    })
 }
 
 /// Derive the recursion verifier input and pairing boundary from a Dory AST.

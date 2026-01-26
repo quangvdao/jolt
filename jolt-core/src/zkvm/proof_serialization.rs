@@ -70,6 +70,42 @@ pub struct PairingBoundary {
     pub rhs: ark_bn254::Fq12,
 }
 
+/// Hints for recursion instance-plan derivation when an op's base/point is not an `AstOp::Input`.
+///
+/// These are used to avoid requiring the verifier to evaluate the full Dory verification DAG just
+/// to recover bases/points for public inputs in the recursion verifier input.
+///
+/// **Security note**: without wiring/boundary constraints, these hints are not bound to the Dory
+/// verification computation. They are intended for performance/profiling until wiring is added.
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct NonInputBaseHints {
+    /// One entry per Dory-traced `GTExp` op, in OpId-sorted order.
+    /// `None` means the base was an `AstOp::Input` and can be resolved by the verifier.
+    pub gt_exp_base_hints: Vec<Option<Fq12>>,
+    /// One entry per Dory-traced `G1ScalarMul` op, in OpId-sorted order.
+    pub g1_scalar_mul_base_hints: Vec<Option<ark_bn254::G1Affine>>,
+    /// One entry per Dory-traced `G2ScalarMul` op, in OpId-sorted order.
+    pub g2_scalar_mul_base_hints: Vec<Option<ark_bn254::G2Affine>>,
+}
+
+impl GuestSerialize for NonInputBaseHints {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.gt_exp_base_hints.guest_serialize(w)?;
+        self.g1_scalar_mul_base_hints.guest_serialize(w)?;
+        self.g2_scalar_mul_base_hints.guest_serialize(w)?;
+        Ok(())
+    }
+}
+impl GuestDeserialize for NonInputBaseHints {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            gt_exp_base_hints: Vec::<Option<Fq12>>::guest_deserialize(r)?,
+            g1_scalar_mul_base_hints: Vec::<Option<ark_bn254::G1Affine>>::guest_deserialize(r)?,
+            g2_scalar_mul_base_hints: Vec::<Option<ark_bn254::G2Affine>>::guest_deserialize(r)?,
+        })
+    }
+}
+
 /// Optional recursion payload (strict extension of the base proof).
 ///
 /// When present, the verifier can skip native Stage 8 PCS verification and instead
@@ -81,6 +117,8 @@ pub struct RecursionPayload<F: JoltField, PCS: RecursionExt<F>, FS: Transcript> 
     pub stage8_combine_hint: Option<Fq12>,
     /// Boundary outputs for the external pairing check (see `spec.md`).
     pub pairing_boundary: PairingBoundary,
+    /// Minimal hints for instance-plan derivation (see `NonInputBaseHints`).
+    pub non_input_base_hints: NonInputBaseHints,
     /// Combined proof containing:
     /// - Stage 11: Recursion sumchecks (constraint + virtualization)
     /// - Stage 12: Dense polynomial commitment
@@ -149,6 +187,7 @@ where
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.stage8_combine_hint.guest_serialize(w)?;
         self.pairing_boundary.guest_serialize(w)?;
+        self.non_input_base_hints.guest_serialize(w)?;
         self.recursion_proof.guest_serialize(w)?;
         Ok(())
     }
@@ -164,6 +203,7 @@ where
         Ok(Self {
             stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
             pairing_boundary: PairingBoundary::guest_deserialize(r)?,
+            non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
             recursion_proof:
                 RecursionProof::<Fq, FS, Hyrax<1, GrumpkinProjective>>::guest_deserialize(r)?,
             _marker: std::marker::PhantomData,

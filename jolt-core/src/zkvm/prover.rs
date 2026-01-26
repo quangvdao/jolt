@@ -16,7 +16,7 @@ use std::{
 use crate::poly::commitment::hyrax::{Hyrax, PedersenGenerators};
 use ark_bn254::Fq;
 use ark_grumpkin::Projective as GrumpkinProjective;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
 use itertools::Itertools;
 
 use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
@@ -787,6 +787,79 @@ impl<
         } else {
             None
         };
+
+        if let Some(ref payload) = recursion_payload {
+            let recursion_payload_size_bytes = payload.serialized_size(Compress::Yes);
+
+            let stage8_combine_hint_size_bytes =
+                payload.stage8_combine_hint.serialized_size(Compress::Yes);
+            let pairing_boundary_size_bytes =
+                payload.pairing_boundary.serialized_size(Compress::Yes);
+            let non_input_base_hints_size_bytes =
+                payload.non_input_base_hints.serialized_size(Compress::Yes);
+
+            let recursion_proof_size_bytes = payload.recursion_proof.serialized_size(Compress::Yes);
+            let recursion_stage1_size_bytes =
+                payload.recursion_proof.stage1_proof.serialized_size(Compress::Yes);
+            let recursion_stage2_size_bytes =
+                payload.recursion_proof.stage2_proof.serialized_size(Compress::Yes);
+            let recursion_stage3_eval_size_bytes =
+                payload.recursion_proof.stage3_packed_eval.serialized_size(Compress::Yes);
+            let recursion_opening_proof_size_bytes =
+                payload.recursion_proof.opening_proof.serialized_size(Compress::Yes);
+            let recursion_opening_claims_size_bytes =
+                payload.recursion_proof.opening_claims.serialized_size(Compress::Yes);
+            let recursion_dense_commitment_size_bytes =
+                payload.recursion_proof.dense_commitment.serialized_size(Compress::Yes);
+
+            tracing::info!(
+                "RecursionPayload size (compressed): {} bytes ({:.2} MiB)",
+                recursion_payload_size_bytes,
+                recursion_payload_size_bytes as f64 / (1024.0 * 1024.0)
+            );
+            tracing::info!(
+                "RecursionPayload.stage8_combine_hint size (compressed): {} bytes",
+                stage8_combine_hint_size_bytes
+            );
+            tracing::info!(
+                "RecursionPayload.pairing_boundary size (compressed): {} bytes",
+                pairing_boundary_size_bytes
+            );
+            tracing::info!(
+                "RecursionPayload.non_input_base_hints size (compressed): {} bytes",
+                non_input_base_hints_size_bytes
+            );
+            tracing::info!(
+                "RecursionPayload.recursion_proof size (compressed): {} bytes ({:.2} MiB)",
+                recursion_proof_size_bytes,
+                recursion_proof_size_bytes as f64 / (1024.0 * 1024.0)
+            );
+
+            tracing::info!(
+                "RecursionProof.stage1_proof size (compressed): {} bytes",
+                recursion_stage1_size_bytes
+            );
+            tracing::info!(
+                "RecursionProof.stage2_proof size (compressed): {} bytes",
+                recursion_stage2_size_bytes
+            );
+            tracing::info!(
+                "RecursionProof.stage3_packed_eval size (compressed): {} bytes",
+                recursion_stage3_eval_size_bytes
+            );
+            tracing::info!(
+                "RecursionProof.opening_proof size (compressed): {} bytes",
+                recursion_opening_proof_size_bytes
+            );
+            tracing::info!(
+                "RecursionProof.opening_claims size (compressed): {} bytes",
+                recursion_opening_claims_size_bytes
+            );
+            tracing::info!(
+                "RecursionProof.dense_commitment size (compressed): {} bytes",
+                recursion_dense_commitment_size_bytes
+            );
+        }
 
         #[cfg(test)]
         assert!(

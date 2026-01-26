@@ -225,6 +225,7 @@ fn run_benchmark(args: BenchmarkArgs) {
         scale,
         args.target_trace_size,
         args.profile_args.recursion,
+        args.profile_args.committed,
     )
     .into_iter()
     {

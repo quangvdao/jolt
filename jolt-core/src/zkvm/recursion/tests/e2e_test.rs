@@ -149,7 +149,7 @@ fn test_recursion_snark_e2e_with_dory() {
 
     // Run the prover phases explicitly (commit → sumchecks → opening).
     let poly_commit = prover
-        .poly_commit::<Blake2bTranscript, HyraxPCS>(&mut prover_transcript, &hyrax_prover_setup)
+        .poly_commit::<Blake2bTranscript>(&mut prover_transcript, &hyrax_prover_setup)
         .expect("poly_commit failed");
     let sumchecks = prover
         .prove_sumchecks::<Blake2bTranscript>(&mut prover_transcript, &poly_commit.metadata)

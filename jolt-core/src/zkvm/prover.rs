@@ -707,7 +707,6 @@ impl<
             let verifier_setup = PCS::setup_verifier(&self.preprocessing.generators);
 
             // Recursion proving entrypoint (Stages 9-13 live inside `RecursionProver::prove`).
-            type HyraxPCS = Hyrax<1, GrumpkinProjective>;
             let hyrax_prover_setup = &self.preprocessing.hyrax_recursion_setup;
 
             // Build the minimal commitment map needed for recursion-only Stage 8 offloading.
@@ -765,7 +764,7 @@ impl<
                 _recursion_constraint_metadata,
                 pairing_boundary,
                 stage8_combine_hint,
-            ) = RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript, HyraxPCS>(
+            ) = RecursionProver::<Fq>::prove::<F, PCS, ProofTranscript>(
                 &mut self.transcript,
                 hyrax_prover_setup,
                 crate::zkvm::recursion::prover::RecursionInput {

@@ -126,6 +126,19 @@ impl PrefixPackingLayout {
         1usize << self.num_dense_vars
     }
 
+    /// Length of the packed evaluation table that is actually populated by real data
+    /// (i.e. before zero padding to `packed_size()`).
+    ///
+    /// For this prefix packing layout, populated entries are contiguous from 0..unpadded_len(),
+    /// and the suffix [unpadded_len()..packed_size()) is implicitly zero.
+    #[inline]
+    pub fn unpadded_len(&self) -> usize {
+        self.entries
+            .last()
+            .map(|e| e.offset + (1usize << e.num_vars))
+            .unwrap_or(0)
+    }
+
     #[inline]
     pub fn codeword_len(&self, num_vars: usize) -> usize {
         debug_assert!(self.num_dense_vars >= num_vars);

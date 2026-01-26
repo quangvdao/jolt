@@ -14,6 +14,7 @@ use ark_ec::CurveGroup;
 use ark_grumpkin;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::vec::Vec;
+use ark_std::Zero;
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use num_integer::Roots;
 use rand::SeedableRng;
@@ -135,25 +136,70 @@ where
         poly: &DensePolynomial<G::ScalarField>,
         generators: &PedersenGenerators<G>,
     ) -> Self {
-        let n = poly.len();
-        let ell = n.log_2();
+        Self::commit_with_unpadded_len(poly, generators, poly.len())
+    }
 
+    /// Commit to a dense polynomial while optionally skipping work on a known-zero padded suffix.
+    ///
+    /// `unpadded_len` must satisfy:
+    /// - `unpadded_len <= poly.len()`
+    /// - `poly[unpadded_len..]` is all zeros (debug-asserted)
+    ///
+    /// This is particularly useful when the caller constructs `poly` by packing real data
+    /// and then padding with zeros to the next power of two (as in recursion prefix packing).
+    #[tracing::instrument(skip_all, name = "HyraxCommitment::commit_with_unpadded_len")]
+    pub fn commit_with_unpadded_len(
+        poly: &DensePolynomial<G::ScalarField>,
+        generators: &PedersenGenerators<G>,
+        unpadded_len: usize,
+    ) -> Self {
+        let n = poly.len();
+        assert!(
+            unpadded_len <= n,
+            "Hyrax commit_with_unpadded_len: unpadded_len={unpadded_len} > poly.len()={n}"
+        );
+
+        debug_assert!(
+            poly.Z[unpadded_len..]
+                .iter()
+                .all(|x| *x == G::ScalarField::zero()),
+            "Hyrax commit_with_unpadded_len: expected poly[unpadded_len..] to be all-zero padding"
+        );
+
+        let ell = n.log_2();
         let (L_size, R_size) = matrix_dimensions(ell, 1);
         assert_eq!(L_size * R_size, n);
+
+        let full_rows = unpadded_len / R_size;
+        let rem = unpadded_len % R_size;
 
         let gens = &generators.generators[..R_size];
 
         // This commitment method is used on the prover side (host). Keep it simple and
         // parallelize over rows while running a sequential MSM per row to avoid nested
         // rayon oversubscription in upstream callsites.
-        let row_commitments = poly
+        let mut row_commitments: Vec<G> = poly
             .Z
             .par_chunks(R_size)
+            .take(full_rows)
             .map(|row| {
                 VariableBaseMSM::msm_sequential(gens, row)
                     .expect("row length should match generator length")
             })
             .collect();
+
+        // Handle a partial last row (if any) by truncating both the row and generators;
+        // this is equivalent to padding the row with zeros.
+        if rem != 0 {
+            let row_start = full_rows * R_size;
+            let row = &poly.Z[row_start..row_start + rem];
+            let row_commitment = VariableBaseMSM::msm_sequential(&generators.generators[..rem], row)
+                .expect("partial row length should match generator length");
+            row_commitments.push(row_commitment);
+        }
+
+        // The remaining rows are all-zero padding; their commitments are the identity.
+        row_commitments.resize(L_size, G::zero());
 
         Self { row_commitments }
     }

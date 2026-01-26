@@ -13,6 +13,7 @@ use crate::{
         commitment::{
             commitment_scheme::{CommitmentScheme, RecursionExt},
             dory::{wrappers::ArkDoryProof, ArkworksVerifierSetup, DoryCommitmentScheme},
+            hyrax::{matrix_dimensions, Hyrax, HyraxCommitment, PedersenGenerators},
         },
         dense_mlpoly::DensePolynomial,
         multilinear_polynomial::MultilinearPolynomial,
@@ -25,6 +26,7 @@ use crate::{
     },
 };
 use ark_bn254::{Fq, Fr};
+use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_ff::Zero;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::backends::arkworks::ArkGT;
@@ -149,9 +151,11 @@ pub type RecursionProofResult<T, PCS> =
 // Internal phase outputs (private helpers for RecursionProver refactor)
 // -----------------------------------------------------------------------------
 
-pub(crate) struct PolyCommitPhaseOutput<PCS: CommitmentScheme<Field = Fq>> {
+pub(crate) type HyraxPCS = Hyrax<1, GrumpkinProjective>;
+
+pub(crate) struct HyraxPolyCommitPhaseOutput {
     pub(crate) metadata: RecursionConstraintMetadata,
-    pub(crate) dense_commitment: PCS::Commitment,
+    pub(crate) dense_commitment: HyraxCommitment<1, GrumpkinProjective>,
     pub(crate) dense_mlpoly: MultilinearPolynomial<Fq>,
 }
 
@@ -283,6 +287,11 @@ impl RecursionProver<Fq> {
                     let comms_ref = &comms;
                     let coeffs_ref = &coeffs;
                     s.spawn(move |_| {
+                        let _span = tracing::info_span!(
+                            "stage8_generate_combine_witness",
+                            num_commitments = comms_ref.len()
+                        )
+                        .entered();
                         let res = PCS::generate_combine_witness(comms_ref, coeffs_ref);
                         *combine_out2.lock().expect("combine_out mutex") = Some(res);
                     });
@@ -290,14 +299,20 @@ impl RecursionProver<Fq> {
                     // Stage 9: use the PCS recursion extension to generate witnesses + AST for verifying
                     // the Stage 8 opening proof.
                     let mut witness_gen_transcript = pre_opening_proof_transcript;
-                    witness_out = Some(PCS::witness_gen_with_ast(
-                        stage8_opening_proof,
-                        verifier_setup,
-                        &mut witness_gen_transcript,
-                        &opening_point,
-                        &joint_claim,
-                        &joint_commitment,
-                    ));
+                    let span = tracing::info_span!(
+                        "stage9_witness_gen_with_ast",
+                        opening_point_len = opening_point.len()
+                    );
+                    witness_out = Some(span.in_scope(|| {
+                        PCS::witness_gen_with_ast(
+                            stage8_opening_proof,
+                            verifier_setup,
+                            &mut witness_gen_transcript,
+                            &opening_point,
+                            &joint_claim,
+                            &joint_commitment,
+                        )
+                    }));
                 });
 
                 let (witness_collection, ast) = witness_out
@@ -325,14 +340,20 @@ impl RecursionProver<Fq> {
                 let stage8_combine_hint_fq12 = PCS::combine_hint_to_fq12(&combine_hint);
 
                 let mut witness_gen_transcript = pre_opening_proof_transcript;
-                let (witness_collection, ast) = PCS::witness_gen_with_ast(
-                    stage8_opening_proof,
-                    verifier_setup,
-                    &mut witness_gen_transcript,
-                    &opening_point,
-                    &joint_claim,
-                    &joint_commitment,
-                )?;
+                let (witness_collection, ast) = tracing::info_span!(
+                    "stage9_witness_gen_with_ast",
+                    opening_point_len = opening_point.len()
+                )
+                .in_scope(|| {
+                    PCS::witness_gen_with_ast(
+                        stage8_opening_proof,
+                        verifier_setup,
+                        &mut witness_gen_transcript,
+                        &opening_point,
+                        &joint_claim,
+                        &joint_commitment,
+                    )
+                })?;
 
                 (
                     witness_collection,
@@ -348,12 +369,16 @@ impl RecursionProver<Fq> {
         // This is later re-derived by the verifier from a symbolic AST for binding.
         use std::any::Any;
 
+        // `coeffs` are sampled over the Stage-8 transcript field `F`.
+        // In recursion mode we require `F = ark_bn254::Fr` (enforced above), so avoid
+        // serialize/deserialize round-trips which are extremely expensive for large batches.
         let combine_coeffs_fr: Vec<Fr> = coeffs
             .iter()
             .map(|c| {
-                let mut buf = Vec::new();
-                c.serialize_compressed(&mut buf)?;
-                Ok(Fr::deserialize_compressed(&*buf)?)
+                (c as &dyn Any)
+                    .downcast_ref::<Fr>()
+                    .copied()
+                    .ok_or(ark_serialize::SerializationError::InvalidData)
             })
             .collect::<Result<_, ark_serialize::SerializationError>>()?;
 
@@ -433,9 +458,9 @@ impl RecursionProver<Fq> {
     ///
     /// Returns the recursion proof and internal verifier metadata.
     #[allow(clippy::type_complexity)]
-    pub fn prove<F, DoryPCS, ProofTranscript, HyraxPCS>(
+    pub fn prove<F, DoryPCS, ProofTranscript>(
         transcript: &mut ProofTranscript,
-        hyrax_prover_setup: &HyraxPCS::ProverSetup,
+        hyrax_prover_setup: &PedersenGenerators<GrumpkinProjective>,
         input: RecursionInput<'_, F, DoryPCS, ProofTranscript>,
     ) -> Result<
         (
@@ -451,7 +476,6 @@ impl RecursionProver<Fq> {
         DoryPCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>,
         DoryPCS::CombineHint: Send,
         ProofTranscript: Transcript,
-        HyraxPCS: CommitmentScheme<Field = Fq>,
     {
         // Phase 1: witness generation
         let (mut prover, stage8_combine_hint_fq12, ast, pairing_boundary) =
@@ -459,8 +483,7 @@ impl RecursionProver<Fq> {
         prover.ast = Some(ast);
 
         // Phase 2: polynomial commitment (Hyrax)
-        let poly_commit =
-            prover.poly_commit::<ProofTranscript, HyraxPCS>(transcript, hyrax_prover_setup)?;
+        let poly_commit = prover.poly_commit::<ProofTranscript>(transcript, hyrax_prover_setup)?;
 
         // Phase 3: sumchecks
         let sumchecks =
@@ -613,7 +636,8 @@ impl RecursionProver<Fq> {
                 let base_mle = fq12_to_multilinear_evals(&witness.base);
                 let base2 = witness.base * witness.base;
                 let base2_mle = fq12_to_multilinear_evals(&base2);
-                let base3_mle = fq12_to_multilinear_evals(&(base2 * witness.base));
+                let base3 = base2 * witness.base;
+                let base3_mle = fq12_to_multilinear_evals(&base3);
 
                 // Create packed witness (expensive)
                 let packed = GtExpWitness::from_steps(
@@ -813,11 +837,11 @@ impl RecursionProver<Fq> {
 
 impl RecursionProver<Fq> {
     #[tracing::instrument(skip_all, name = "RecursionProver::poly_commit")]
-    pub(crate) fn poly_commit<T: Transcript, PCS: CommitmentScheme<Field = Fq>>(
+    pub(crate) fn poly_commit<T: Transcript>(
         &mut self,
         transcript: &mut T,
-        prover_setup: &PCS::ProverSetup,
-    ) -> Result<PolyCommitPhaseOutput<PCS>, Box<dyn std::error::Error>> {
+        prover_setup: &PedersenGenerators<GrumpkinProjective>,
+    ) -> Result<HyraxPolyCommitPhaseOutput, Box<dyn std::error::Error>> {
         // ============ BUILD PREFIX-PACKED DENSE POLYNOMIAL ============
         // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
         let (dense_poly, prefix_layout) = tracing::info_span!("build_prefix_packed_polynomial")
@@ -827,6 +851,25 @@ impl RecursionProver<Fq> {
             });
 
         let dense_num_vars = prefix_layout.num_dense_vars;
+        let unpadded_len = prefix_layout.unpadded_len();
+        let padded_len = dense_poly.len();
+
+        // Log how much Hyrax work we skip by avoiding padded zeros.
+        let (l_size, r_size) = matrix_dimensions(dense_num_vars, 1);
+        debug_assert_eq!(l_size * r_size, padded_len);
+        let used_rows = unpadded_len.div_ceil(r_size);
+        let skipped_rows = l_size.saturating_sub(used_rows);
+        tracing::info!(
+            dense_num_vars,
+            unpadded_len,
+            padded_len,
+            r_size,
+            l_size,
+            used_rows,
+            skipped_rows,
+            tail_elems = (unpadded_len % r_size),
+            "Hyrax commit skipping zero-padded tail"
+        );
 
         // ============ BUILD METADATA (for verifier) ============
         let metadata = tracing::info_span!("build_constraint_metadata").in_scope(|| {
@@ -853,15 +896,25 @@ impl RecursionProver<Fq> {
             }
         });
 
-        // Convert to multilinear polynomial + commit
-        let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z.clone());
-        tracing::info!("Hyrax commitment terms: {}", dense_mlpoly.len());
-        let (dense_commitment, _) = PCS::commit(&dense_mlpoly, prover_setup);
+        // Hyrax commit (optimized): avoid MSM work on zero-padded suffix.
+        let dense_commitment = HyraxCommitment::<1, GrumpkinProjective>::commit_with_unpadded_len(
+            &dense_poly,
+            prover_setup,
+            unpadded_len,
+        );
+
+        // Convert to multilinear polynomial for downstream sumchecks / opening proof.
+        let dense_mlpoly = MultilinearPolynomial::from(dense_poly.Z);
+        tracing::info!(
+            "Hyrax commitment terms: {}, unpadded_len: {}",
+            dense_mlpoly.len(),
+            unpadded_len
+        );
 
         // Add commitment to transcript for Fiat-Shamir soundness
         transcript.append_serializable(&dense_commitment);
 
-        Ok(PolyCommitPhaseOutput {
+        Ok(HyraxPolyCommitPhaseOutput {
             metadata,
             dense_commitment,
             dense_mlpoly,

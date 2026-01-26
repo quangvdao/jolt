@@ -593,6 +593,16 @@ where
             self.preprocessing.shared.bytecode_size()
         );
 
+        // Reset DoryGlobals before commitment generation to clear any pollution
+        // from the trace phase (e.g., when the recursion guest ran inner verifications
+        // that set different Dory parameters).
+        DoryGlobals::reset();
+        tracing::info!(
+            "DoryGlobals reset before commitment generation. padded_trace_len={}, log_k_chunk={}",
+            self.padded_trace_len,
+            self.one_hot_params.log_k_chunk,
+        );
+
         let (commitments, mut opening_proof_hints) = self.generate_and_commit_witness_polynomials();
         self.commitments = commitments.clone();
         let untrusted_advice_commitment = self.generate_and_commit_untrusted_advice();
@@ -858,6 +868,12 @@ where
 
         let polys = all_committed_polynomials(&self.one_hot_params);
         let T = DoryGlobals::get_T();
+        let num_columns = DoryGlobals::get_num_columns();
+        tracing::info!(
+            "After initialize_context: T={}, num_columns={}",
+            T,
+            num_columns,
+        );
 
         // For AddressMajor, use non-streaming commit path since streaming assumes CycleMajor layout
         let (commitments, hint_map) = if DoryGlobals::get_layout() == DoryLayout::AddressMajor {

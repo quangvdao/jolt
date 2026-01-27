@@ -1,0 +1,22 @@
+[package]
+name = "jolt-profiler"
+version = "0.1.0"
+edition = "2021"
+description = "Profiler for Jolt with recursion support"
+
+[dependencies]
+jolt-core = { workspace = true, features = ["host"] }
+jolt-recursion = { workspace = true, features = ["host"] }
+clap.workspace = true
+tracing.workspace = true
+tracing-chrome.workspace = true
+tracing-subscriber.workspace = true
+ark-serialize.workspace = true
+postcard = { workspace = true, features = ["use-std"] }
+chrono.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+
+[[bin]]
+name = "jolt-profiler"
+path = "src/main.rs"

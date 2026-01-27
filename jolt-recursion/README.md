@@ -150,14 +150,39 @@ cargo run -p recursion --release -- generate \
     --recursion
 ```
 
-### Profiling with jolt-core CLI
+### Profiling with Recursion
+
+Use the `jolt-profiler` tool for profiling with recursion support. This is a separate binary because `jolt-core` cannot depend on `jolt-recursion` (circular dependency).
 
 ```bash
-# Profile with recursion enabled (note: recursion benchmarking in jolt-recursion)
-cargo run -p jolt-core --release -- profile \
+# Profile recursion proving with Chrome/Perfetto trace output
+cargo run --release -p jolt-profiler -- profile \
+    --name fibonacci \
+    --recursion \
+    --format chrome
+
+# With scale, committed mode, and address-major layout
+cargo run --release -p jolt-profiler -- profile \
     --name fibonacci \
     --scale 20 \
-    --recursion
+    --committed \
+    --layout address-major \
+    --recursion \
+    --format chrome
+
+# Benchmark mode (requires --scale or --target-trace-size)
+cargo run --release -p jolt-profiler -- benchmark \
+    --name fibonacci \
+    --scale 22 \
+    --recursion \
+    --format chrome
+```
+
+Traces are saved to `benchmark-runs/perfetto_traces/` and can be viewed at https://ui.perfetto.dev/
+
+**Note**: For profiling *without* recursion, you can still use `jolt-core`:
+```bash
+cargo run --release -p jolt-core profile --name fibonacci --format chrome
 ```
 
 ## Programmatic Usage

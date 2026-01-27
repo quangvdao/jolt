@@ -231,13 +231,6 @@ impl BatchedSumcheck {
             .sum();
 
         if output_claim != expected_output_claim {
-            #[cfg(debug_assertions)]
-            {
-                eprintln!("\n=== SUMCHECK VERIFICATION FAILURE ===");
-                eprintln!("output_claim         = {output_claim:?}");
-                eprintln!("expected_output_claim = {expected_output_claim:?}");
-                eprintln!("=====================================\n");
-            }
             return Err(ProofVerifyError::SumcheckVerificationError);
         }
 

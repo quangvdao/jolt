@@ -96,11 +96,21 @@ fn test_recursion_snark_e2e_with_dory() {
     let constraint_types: Vec<ConstraintType> = prover.constraint_system.constraint_types.clone();
 
     // Determine dense_num_vars for Hyrax setup without extracting dense evals.
-    let dense_num_vars =
+    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+        .ok()
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false);
+    let dense_num_vars = if enable_gt_fused_end_to_end {
+        crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types_gt_fused(
+            &constraint_types,
+        )
+        .num_dense_vars
+    } else {
         crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types(
             &constraint_types,
         )
-        .num_dense_vars;
+        .num_dense_vars
+    };
 
     let num_g1_add = constraint_types
         .iter()

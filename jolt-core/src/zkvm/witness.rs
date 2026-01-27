@@ -595,6 +595,38 @@ pub enum GtExpTerm {
     Quotient,
 }
 
+/// GT wiring auxiliary terms (scalars at the Stage-2 point).
+#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]
+pub enum GtWiringTerm {
+    /// Σ_e λ_e · Eq(r_c, c_src(e)) · Eq_s(e) · src_val(e)
+    SrcSum,
+    /// Σ_e λ_e · Eq(r_c, c_dst(e)) · Eq_s(e) · dst_val(e)
+    DstSum,
+}
+
+impl TermEnum for GtWiringTerm {
+    const COUNT: usize = 2;
+
+    fn from_index(i: usize) -> Option<Self> {
+        match i {
+            0 => Some(Self::SrcSum),
+            1 => Some(Self::DstSum),
+            _ => None,
+        }
+    }
+
+    fn to_index(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::SrcSum => "src_sum",
+            Self::DstSum => "dst_sum",
+        }
+    }
+}
+
 impl TermEnum for GtExpTerm {
     const COUNT: usize = 3;
 
@@ -794,9 +826,28 @@ pub enum RecursionPoly {
         term: GtMulTerm,
         instance: usize,
     },
+    /// Fused GT multiplication term polynomial across all constraints.
+    ///
+    /// Intended to mirror `G1AddFused`: Stage 2 can append a *single* opening per term at the
+    /// fused point (r_c, r_x), rather than per-instance openings.
+    GtMulFused {
+        term: GtMulTerm,
+    },
     GtExp {
         term: GtExpTerm,
         instance: usize,
+    },
+    /// Fused packed-GT-exp term polynomial across all constraints.
+    ///
+    /// This is a transitional variant for the fused-virtual-polynomials port. In the current
+    /// pipeline, GT-exp witnesses are reduced to a shared Stage-2 point by `GtExpClaimReduction`,
+    /// and wiring reads those reduced openings.
+    GtExpFused {
+        term: GtExpTerm,
+    },
+    /// Auxiliary GT wiring scalar claims (at the Stage-2 point).
+    GtWiringFused {
+        term: GtWiringTerm,
     },
     MultiMillerLoop {
         term: MultiMillerLoopTerm,
@@ -817,7 +868,10 @@ impl RecursionPoly {
             Self::G2Add { instance, .. } => *instance,
             Self::G2ScalarMul { instance, .. } => *instance,
             Self::GtMul { instance, .. } => *instance,
+            Self::GtMulFused { .. } => 0,
             Self::GtExp { instance, .. } => *instance,
+            Self::GtExpFused { .. } => 0,
+            Self::GtWiringFused { .. } => 0,
             Self::MultiMillerLoop { instance, .. } => *instance,
             Self::Frobenius { instance, .. } => *instance,
         }
@@ -831,7 +885,10 @@ impl RecursionPoly {
             Self::G2Add { term, .. } => term.to_index(),
             Self::G2ScalarMul { term, .. } => term.to_index(),
             Self::GtMul { term, .. } => term.to_index(),
+            Self::GtMulFused { term } => term.to_index(),
             Self::GtExp { term, .. } => term.to_index(),
+            Self::GtExpFused { term } => term.to_index(),
+            Self::GtWiringFused { term } => term.to_index(),
             Self::MultiMillerLoop { term, .. } => term.to_index(),
             Self::Frobenius { term, .. } => term.to_index(),
         }
@@ -852,6 +909,9 @@ const RECURSION_POLY_TAG_GT_MUL: u8 = 5;
 const RECURSION_POLY_TAG_GT_EXP: u8 = 6;
 const RECURSION_POLY_TAG_MULTI_MILLER_LOOP: u8 = 7;
 const RECURSION_POLY_TAG_FROBENIUS: u8 = 8;
+const RECURSION_POLY_TAG_GT_MUL_FUSED: u8 = 9;
+const RECURSION_POLY_TAG_GT_EXP_FUSED: u8 = 10;
+const RECURSION_POLY_TAG_GT_WIRING_FUSED: u8 = 11;
 
 impl CanonicalSerialize for RecursionPoly {
     fn serialize_with_mode<W: Write>(
@@ -892,6 +952,15 @@ impl CanonicalSerialize for RecursionPoly {
             ),
             RecursionPoly::Frobenius { term, instance } => {
                 (RECURSION_POLY_TAG_FROBENIUS, term.to_index(), instance)
+            }
+            RecursionPoly::GtMulFused { term } => {
+                (RECURSION_POLY_TAG_GT_MUL_FUSED, term.to_index(), 0)
+            }
+            RecursionPoly::GtExpFused { term } => {
+                (RECURSION_POLY_TAG_GT_EXP_FUSED, term.to_index(), 0)
+            }
+            RecursionPoly::GtWiringFused { term } => {
+                (RECURSION_POLY_TAG_GT_WIRING_FUSED, term.to_index(), 0)
             }
         };
 
@@ -963,6 +1032,15 @@ impl CanonicalDeserialize for RecursionPoly {
                 term: FrobeniusTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
                 instance,
             },
+            RECURSION_POLY_TAG_GT_MUL_FUSED => Self::GtMulFused {
+                term: GtMulTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+            },
+            RECURSION_POLY_TAG_GT_EXP_FUSED => Self::GtExpFused {
+                term: GtExpTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+            },
+            RECURSION_POLY_TAG_GT_WIRING_FUSED => Self::GtWiringFused {
+                term: GtWiringTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -1004,6 +1082,15 @@ impl GuestSerialize for RecursionPoly {
             ),
             RecursionPoly::Frobenius { term, instance } => {
                 (RECURSION_POLY_TAG_FROBENIUS, term.to_index(), instance)
+            }
+            RecursionPoly::GtMulFused { term } => {
+                (RECURSION_POLY_TAG_GT_MUL_FUSED, term.to_index(), 0)
+            }
+            RecursionPoly::GtExpFused { term } => {
+                (RECURSION_POLY_TAG_GT_EXP_FUSED, term.to_index(), 0)
+            }
+            RecursionPoly::GtWiringFused { term } => {
+                (RECURSION_POLY_TAG_GT_WIRING_FUSED, term.to_index(), 0)
             }
         };
         tag.guest_serialize(w)?;
@@ -1089,6 +1176,21 @@ impl GuestDeserialize for RecursionPoly {
                     )
                 })?,
                 instance,
+            },
+            RECURSION_POLY_TAG_GT_MUL_FUSED => Self::GtMulFused {
+                term: GtMulTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid GtMulTerm index")
+                })?,
+            },
+            RECURSION_POLY_TAG_GT_EXP_FUSED => Self::GtExpFused {
+                term: GtExpTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid GtExpTerm index")
+                })?,
+            },
+            RECURSION_POLY_TAG_GT_WIRING_FUSED => Self::GtWiringFused {
+                term: GtWiringTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid GtWiringTerm index")
+                })?,
             },
             _ => {
                 return Err(std::io::Error::new(
@@ -1352,11 +1454,17 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
+    pub fn gt_mul_lhs_fused() -> Self {
+        Self::Recursion(RecursionPoly::GtMulFused { term: GtMulTerm::Lhs })
+    }
     pub fn gt_mul_rhs(i: usize) -> Self {
         Self::Recursion(RecursionPoly::GtMul {
             term: GtMulTerm::Rhs,
             instance: i,
         })
+    }
+    pub fn gt_mul_rhs_fused() -> Self {
+        Self::Recursion(RecursionPoly::GtMulFused { term: GtMulTerm::Rhs })
     }
     pub fn gt_mul_result(i: usize) -> Self {
         Self::Recursion(RecursionPoly::GtMul {
@@ -1364,10 +1472,20 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
+    pub fn gt_mul_result_fused() -> Self {
+        Self::Recursion(RecursionPoly::GtMulFused {
+            term: GtMulTerm::Result,
+        })
+    }
     pub fn gt_mul_quotient(i: usize) -> Self {
         Self::Recursion(RecursionPoly::GtMul {
             term: GtMulTerm::Quotient,
             instance: i,
+        })
+    }
+    pub fn gt_mul_quotient_fused() -> Self {
+        Self::Recursion(RecursionPoly::GtMulFused {
+            term: GtMulTerm::Quotient,
         })
     }
 
@@ -1378,16 +1496,41 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
+    pub fn gt_exp_rho_fused() -> Self {
+        Self::Recursion(RecursionPoly::GtExpFused { term: GtExpTerm::Rho })
+    }
     pub fn gt_exp_rho_next(i: usize) -> Self {
         Self::Recursion(RecursionPoly::GtExp {
             term: GtExpTerm::RhoNext,
             instance: i,
         })
     }
+    pub fn gt_exp_rho_next_fused() -> Self {
+        Self::Recursion(RecursionPoly::GtExpFused {
+            term: GtExpTerm::RhoNext,
+        })
+    }
     pub fn gt_exp_quotient(i: usize) -> Self {
         Self::Recursion(RecursionPoly::GtExp {
             term: GtExpTerm::Quotient,
             instance: i,
+        })
+    }
+    pub fn gt_exp_quotient_fused() -> Self {
+        Self::Recursion(RecursionPoly::GtExpFused {
+            term: GtExpTerm::Quotient,
+        })
+    }
+
+    // --- GT wiring (auxiliary fused sums) ---
+    pub fn gt_wiring_src_sum() -> Self {
+        Self::Recursion(RecursionPoly::GtWiringFused {
+            term: GtWiringTerm::SrcSum,
+        })
+    }
+    pub fn gt_wiring_dst_sum() -> Self {
+        Self::Recursion(RecursionPoly::GtWiringFused {
+            term: GtWiringTerm::DstSum,
         })
     }
 

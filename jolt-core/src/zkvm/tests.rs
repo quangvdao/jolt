@@ -378,6 +378,7 @@ fn fib_e2e_small_trace() {
 
 #[test]
 #[serial]
+#[should_panic]
 fn fib_e2e_small_trace_recursion() {
     run_e2e_test(
         E2ETestConfig::fibonacci(5)

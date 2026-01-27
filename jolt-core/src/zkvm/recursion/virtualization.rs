@@ -452,6 +452,7 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
     accumulator: &A,
     constraint_types: &[ConstraintType],
     _gt_exp_public_inputs: &[GtExpPublicInputs],
+    enable_gt_fused_end_to_end: bool,
 ) -> Vec<F> {
     let mut claims = Vec::new();
 
@@ -475,6 +476,13 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
 
         match constraint_type {
             ConstraintType::GtExp => {
+                if enable_gt_fused_end_to_end {
+                    // In end-to-end GT-fused mode, per-instance GT rows are not part of the packed
+                    // dense matrix, so Stage 3 does not need these claims.
+                    gt_exp_idx += 1;
+                    claims.extend_from_slice(&constraint_claims);
+                    continue;
+                }
                 // Packed GT Exp uses matrix polynomials: RhoPrev + Quotient.
                 // Base/digits/rho_next are public inputs or separately-verified, not in the matrix.
                 tracing::debug!(
@@ -498,6 +506,13 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 gt_exp_idx += 1;
             }
             ConstraintType::GtMul => {
+                if enable_gt_fused_end_to_end {
+                    // In end-to-end GT-fused mode, per-instance GT rows are not part of the packed
+                    // dense matrix, so Stage 3 does not need these claims.
+                    gt_mul_idx += 1;
+                    claims.extend_from_slice(&constraint_claims);
+                    continue;
+                }
                 let (_, lhs) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::gt_mul_lhs(gt_mul_idx),
                     SumcheckId::GtMul,

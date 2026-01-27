@@ -19,7 +19,7 @@ use crate::{
         },
         dense_mlpoly::DensePolynomial,
         multilinear_polynomial::MultilinearPolynomial,
-        opening_proof::{Openings, ProverOpeningAccumulator, SumcheckId},
+        opening_proof::{OpeningAccumulator, Openings, ProverOpeningAccumulator, SumcheckId},
     },
     transcripts::Transcript,
     zkvm::{
@@ -60,8 +60,14 @@ use super::{
     gt::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionProver},
         exponentiation::{GtExpParams, GtExpProver},
+        fused_exponentiation::{FusedGtExpParams, FusedGtExpProver},
+        fused_stage2_openings::FusedGtExpStage2OpeningsProver,
+        fused_multiplication::{FusedGtMulParams, FusedGtMulProver},
+        fused_shift::{FusedGtShiftParams, FusedGtShiftProver},
+        indexing::k_gt,
         multiplication::{GtMulConstraintPolynomials, GtMulParams, GtMulProver, GtMulProverSpec},
         shift::{GtShiftParams, GtShiftProver},
+        wiring_binding::GtWiringBindingProver,
         WiringGtProver,
     },
     virtualization::extract_virtual_claims_from_accumulator,
@@ -714,21 +720,18 @@ impl RecursionProver<Fq> {
         // (`round_offset = max_num_rounds - num_rounds`), so shorter points are suffixes of longer
         // ones in the batched challenge order. We therefore interpret `r_x` as the **suffix** of
         // the Stage-2 challenge vector.
-        let k = self
-            .constraint_system
-            .num_constraints_padded()
-            .trailing_zeros() as usize;
+        let k = k_gt(&self.constraint_system.constraint_types);
         let num_constraint_vars = self.constraint_system.num_constraint_vars();
         if r_stage2.len() != num_constraint_vars && r_stage2.len() < num_constraint_vars + k {
             return Err(format!(
-                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (num_constraint_vars + k)",
+                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (num_constraint_vars + k_gt)",
                 r_stage2.len(),
                 num_constraint_vars,
                 num_constraint_vars + k
             )
             .into());
         }
-        let (_r_c, r_x): (
+        let (_r_c, _r_x): (
             &[<Fq as JoltField>::Challenge],
             &[<Fq as JoltField>::Challenge],
         ) = if r_stage2.len() == num_constraint_vars {
@@ -742,7 +745,7 @@ impl RecursionProver<Fq> {
 
         // Stage 3: Prefix packing (direct reduction to a single Hyrax opening)
         let stage3_packed_eval = self
-            .prove_stage3_prefix_packing(transcript, &mut accumulator, metadata, r_x)
+            .prove_stage3_prefix_packing(transcript, &mut accumulator, metadata, &r_stage2)
             .expect("Failed to run Stage 3 (prefix packing)");
 
         Ok(SumcheckPhaseOutput {
@@ -800,6 +803,12 @@ impl RecursionProver<Fq> {
             return Err("No GtExp constraints to prove in Stage 1".into());
         }
 
+        let enable_gt_fused_end_to_end =
+            std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
+
         // Packed GT exp uses layout x * 128 + s (s in low bits), so g needs replication
         // across the step variables.
         fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
@@ -819,17 +828,32 @@ impl RecursionProver<Fq> {
         let g_replicated = pad_4var_to_11var_replicated(&g_4var);
         let g_poly_replicated_f = DensePolynomial::new(g_replicated);
 
-        let params = GtExpParams::new();
-        tracing::info!(
-            "[Stage 1] Creating GtExpProver with {} witnesses",
-            packed_witnesses.len()
-        );
-        let mut packed_gt_exp_prover =
-            GtExpProver::new(params, packed_witnesses, g_poly_replicated_f, transcript);
+        let mut packed_gt_exp_prover: Box<dyn SumcheckInstanceProver<Fq, T>> = if enable_gt_fused_end_to_end {
+            let params = FusedGtExpParams::from_constraint_types(&self.constraint_system.constraint_types);
+            tracing::info!(
+                "[Stage 1] Creating FusedGtExpProver with {} GTExp witnesses",
+                packed_witnesses.len()
+            );
+            Box::new(FusedGtExpProver::new(
+                params,
+                &self.constraint_system.constraint_types,
+                &self.constraint_system.locator_by_constraint,
+                packed_witnesses,
+                g_poly_replicated_f,
+                transcript,
+            ))
+        } else {
+            let params = GtExpParams::new();
+            tracing::info!(
+                "[Stage 1] Creating GtExpProver with {} witnesses",
+                packed_witnesses.len()
+            );
+            Box::new(GtExpProver::new(params, packed_witnesses, g_poly_replicated_f, transcript))
+        };
 
         // Run the (single-instance) sumcheck.
         let (proof, r_stage1) =
-            BatchedSumcheck::prove(vec![&mut packed_gt_exp_prover], accumulator, transcript);
+            BatchedSumcheck::prove(vec![&mut *packed_gt_exp_prover], accumulator, transcript);
 
         Ok((proof, r_stage1))
     }
@@ -865,6 +889,8 @@ impl RecursionProver<Fq> {
         let enable_shift_g2_scalar_mul =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
+        let enable_gt_fused_end_to_end =
+            env_flag_default("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END", false);
         let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
         let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
         let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
@@ -880,47 +906,74 @@ impl RecursionProver<Fq> {
         if num_gt_exp > 0 {
             let claim_indices: Vec<usize> = (0..num_gt_exp).collect();
 
-            if enable_shift_rho {
-                let rho_polys: Vec<MultilinearPolynomial<Fq>> = self
-                    .constraint_system
-                    .gt_exp_witnesses
-                    .iter()
-                    .map(|w| MultilinearPolynomial::from(w.rho_packed.clone()))
-                    .collect();
-                let shift_params = GtShiftParams::new(num_gt_exp);
-                let shift_prover = GtShiftProver::<Fq, T>::new(
-                    shift_params,
-                    rho_polys,
-                    claim_indices.clone(),
-                    accumulator,
-                    transcript,
-                );
-                provers.push(Box::new(shift_prover));
-            }
+            if enable_gt_fused_end_to_end {
+                // In end-to-end GT-fused mode, we want the fused GTExp claim-reduction/openings
+                // to be available before the fused shift verifier runs (ordering matters in
+                // `BatchedSumcheck::verify`).
+                if enable_claim_reduction {
+                    let prover = FusedGtExpStage2OpeningsProver::<T>::new(
+                        &self.constraint_system.constraint_types,
+                        &self.constraint_system.locator_by_constraint,
+                        &self.constraint_system.gt_exp_witnesses,
+                    );
+                    provers.push(Box::new(prover));
+                }
 
-            if enable_claim_reduction {
-                let rho_polys: Vec<MultilinearPolynomial<Fq>> = self
-                    .constraint_system
-                    .gt_exp_witnesses
-                    .iter()
-                    .map(|w| MultilinearPolynomial::from(w.rho_packed.clone()))
-                    .collect();
-                let quotient_polys: Vec<MultilinearPolynomial<Fq>> = self
-                    .constraint_system
-                    .gt_exp_witnesses
-                    .iter()
-                    .map(|w| MultilinearPolynomial::from(w.quotient_packed.clone()))
-                    .collect();
-                let reduction_params = GtExpClaimReductionParams::new(2 * num_gt_exp);
-                let reduction_prover = GtExpClaimReductionProver::<Fq, T>::new(
-                    reduction_params,
-                    &claim_indices,
-                    rho_polys,
-                    quotient_polys,
-                    accumulator,
-                    transcript,
-                );
-                provers.push(Box::new(reduction_prover));
+                if enable_shift_rho {
+                    let params =
+                        FusedGtShiftParams::from_constraint_types(&self.constraint_system.constraint_types);
+                    let prover = FusedGtShiftProver::new(
+                        params,
+                        &self.constraint_system.constraint_types,
+                        &self.constraint_system.locator_by_constraint,
+                        &self.constraint_system.gt_exp_witnesses,
+                        accumulator,
+                    );
+                    provers.push(Box::new(prover));
+                }
+            } else {
+                if enable_shift_rho {
+                    let rho_polys: Vec<MultilinearPolynomial<Fq>> = self
+                        .constraint_system
+                        .gt_exp_witnesses
+                        .iter()
+                        .map(|w| MultilinearPolynomial::from(w.rho_packed.clone()))
+                        .collect();
+                    let shift_params = GtShiftParams::new(num_gt_exp);
+                    let shift_prover = GtShiftProver::<Fq, T>::new(
+                        shift_params,
+                        rho_polys,
+                        claim_indices.clone(),
+                        accumulator,
+                        transcript,
+                    );
+                    provers.push(Box::new(shift_prover));
+                }
+
+                if enable_claim_reduction {
+                    let rho_polys: Vec<MultilinearPolynomial<Fq>> = self
+                        .constraint_system
+                        .gt_exp_witnesses
+                        .iter()
+                        .map(|w| MultilinearPolynomial::from(w.rho_packed.clone()))
+                        .collect();
+                    let quotient_polys: Vec<MultilinearPolynomial<Fq>> = self
+                        .constraint_system
+                        .gt_exp_witnesses
+                        .iter()
+                        .map(|w| MultilinearPolynomial::from(w.quotient_packed.clone()))
+                        .collect();
+                    let reduction_params = GtExpClaimReductionParams::new(2 * num_gt_exp);
+                    let reduction_prover = GtExpClaimReductionProver::<Fq, T>::new(
+                        reduction_params,
+                        &claim_indices,
+                        rho_polys,
+                        quotient_polys,
+                        accumulator,
+                        transcript,
+                    );
+                    provers.push(Box::new(reduction_prover));
+                }
             }
         }
 
@@ -934,7 +987,6 @@ impl RecursionProver<Fq> {
         // GT mul
         let gt_mul_rows = &self.constraint_system.gt_mul_rows;
         if !gt_mul_rows.is_empty() {
-            let constraint_indices: Vec<usize> = (0..gt_mul_rows.len()).collect();
             let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> = gt_mul_rows
                 .iter()
                 .enumerate()
@@ -946,11 +998,25 @@ impl RecursionProver<Fq> {
                     constraint_index: i,
                 })
                 .collect();
-
-            let params = GtMulParams::new(gt_mul_constraints_fq.len());
-            let spec = GtMulProverSpec::new(params, gt_mul_constraints_fq, g_poly_f.clone());
-            let prover = GtMulProver::from_spec(spec, constraint_indices, transcript);
-            provers.push(Box::new(prover));
+            if enable_gt_fused_end_to_end {
+                let num_gt_constraints = num_gt_exp + gt_mul_constraints_fq.len();
+                let num_gt_constraints_padded = num_gt_constraints.max(1).next_power_of_two();
+                let params = FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded);
+                let prover = FusedGtMulProver::new(
+                    params,
+                    &self.constraint_system.constraint_types,
+                    &gt_mul_constraints_fq,
+                    &g_poly_f,
+                    transcript,
+                );
+                provers.push(Box::new(prover));
+            } else {
+                let constraint_indices: Vec<usize> = (0..gt_mul_rows.len()).collect();
+                let params = GtMulParams::new(gt_mul_constraints_fq.len());
+                let spec = GtMulProverSpec::new(params, gt_mul_constraints_fq, g_poly_f.clone());
+                let prover = GtMulProver::from_spec(spec, constraint_indices, transcript);
+                provers.push(Box::new(prover));
+            }
         }
 
         // G1 scalar mul
@@ -1170,13 +1236,21 @@ impl RecursionProver<Fq> {
                     .map_err(|_e| "AST->wiring-plan derivation failed")?;
 
                 if enable_wiring_gt && !wiring.gt.is_empty() {
-                    provers.push(Box::new(WiringGtProver::<T>::new(
+                    let wiring_gt = WiringGtProver::<T>::new(
                         &self.constraint_system,
                         wiring.gt.clone(),
                         pairing_boundary,
                         joint_commitment.clone(),
                         transcript,
-                    )));
+                    );
+                    // Legacy safety net: keep wiring/boundary binding check unless we're on the
+                    // fully fused end-to-end GT path.
+                    if !enable_gt_fused_end_to_end {
+                        provers.push(Box::new(GtWiringBindingProver::<T>::new(
+                            wiring_gt.num_rounds(),
+                        )));
+                    }
+                    provers.push(Box::new(wiring_gt));
                 }
                 if enable_wiring_g1 && !wiring.g1.is_empty() {
                     provers.push(Box::new(WiringG1Prover::<T>::new(
@@ -1220,10 +1294,18 @@ impl RecursionProver<Fq> {
         transcript: &mut T,
         accumulator: &mut ProverOpeningAccumulator<Fq>,
         metadata: &RecursionConstraintMetadata,
-        r_x: &[<Fq as JoltField>::Challenge],
+        r_stage2: &[<Fq as JoltField>::Challenge],
     ) -> Result<Fq, Box<dyn std::error::Error>> {
         // Derive the public packing layout.
-        let layout = PrefixPackingLayout::from_constraint_types(&metadata.constraint_types);
+        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+        let layout = if enable_gt_fused_end_to_end {
+            PrefixPackingLayout::from_constraint_types_gt_fused(&metadata.constraint_types)
+        } else {
+            PrefixPackingLayout::from_constraint_types(&metadata.constraint_types)
+        };
         if layout.num_dense_vars != metadata.dense_num_vars {
             return Err(format!(
                 "prefix packing layout mismatch: metadata.dense_num_vars={} but derived layout has {}",
@@ -1233,25 +1315,26 @@ impl RecursionProver<Fq> {
         }
 
         let max_native_vars = layout.entries.iter().map(|e| e.num_vars).max().unwrap_or(0);
-        if r_x.len() < max_native_vars {
+        if r_stage2.len() < max_native_vars {
             return Err(format!(
-                "Stage 2 produced r_x of length {}, but prefix packing needs at least {} bits",
-                r_x.len(),
+                "Stage 2 produced r_stage2 of length {}, but prefix packing needs at least {} bits",
+                r_stage2.len(),
                 max_native_vars
             )
             .into());
         }
 
-        // Low variables: shared `r_x` portion (suffix-aligned Stage 2), **reversed**.
+        // Low variables: Stage-2 point suffix (suffix-aligned Stage 2), **reversed**.
         //
         // Stage 2 constraint sumchecks are suffix-aligned in the batched sumcheck, so an m-var
-        // polynomial is opened at the *suffix* of the common 11-var challenge vector. For the
-        // prefix-packing reduction we want these to appear as prefixes, so we reverse `r_x` here.
-        let mut r_x_fq: Vec<Fq> = r_x[r_x.len() - max_native_vars..]
+        // polynomial is opened at the *suffix* of the common challenge vector. For the
+        // prefix-packing reduction we want these to appear as prefixes, so we reverse the suffix
+        // here.
+        let mut r_native_fq: Vec<Fq> = r_stage2[r_stage2.len() - max_native_vars..]
             .iter()
             .map(|c| (*c).into())
             .collect();
-        r_x_fq.reverse();
+        r_native_fq.reverse();
 
         // High variables: fresh packing challenges.
         let pack_len = layout.num_dense_vars.saturating_sub(max_native_vars);
@@ -1261,7 +1344,7 @@ impl RecursionProver<Fq> {
 
         // Full packed opening point in little-endian (low-to-high) variable order.
         let mut r_full_lsb: Vec<Fq> = Vec::with_capacity(layout.num_dense_vars);
-        r_full_lsb.extend_from_slice(&r_x_fq);
+        r_full_lsb.extend_from_slice(&r_native_fq);
         r_full_lsb.extend_from_slice(&r_pack);
 
         // Extract Stage 2 virtual claims in the standard [constraint-major, poly-type-minor] layout.
@@ -1269,18 +1352,29 @@ impl RecursionProver<Fq> {
             accumulator,
             &metadata.constraint_types,
             &self.constraint_system.gt_exp_public_inputs,
+            enable_gt_fused_end_to_end,
         );
         let num_poly_types = PolyType::NUM_TYPES;
 
         // Compute packed evaluation claim: F(r) = Σ_i eq(prefix_i, codeword_i) · f_i(r_x_prefix).
-        let packed_eval =
-            packed_eval_from_claims(&layout, &r_full_lsb, |constraint_idx, poly_type| {
-                let claim_idx = constraint_idx * num_poly_types + (poly_type as usize);
-                virtual_claims
-                    .get(claim_idx)
-                    .copied()
-                    .unwrap_or_else(Fq::zero)
-            });
+        let packed_eval = packed_eval_from_claims(&layout, &r_full_lsb, |entry| {
+            if enable_gt_fused_end_to_end && entry.is_gt_fused {
+                let (sumcheck, vp) = match entry.poly_type {
+                    PolyType::RhoPrev => (SumcheckId::GtExpClaimReduction, VirtualPolynomial::gt_exp_rho_fused()),
+                    PolyType::Quotient => (SumcheckId::GtExpClaimReduction, VirtualPolynomial::gt_exp_quotient_fused()),
+                    PolyType::MulLhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_lhs_fused()),
+                    PolyType::MulRhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_rhs_fused()),
+                    PolyType::MulResult => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result_fused()),
+                    PolyType::MulQuotient => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_quotient_fused()),
+                    _ => return Fq::zero(),
+                };
+                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, sumcheck);
+                claim
+            } else {
+                let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);
+                virtual_claims.get(claim_idx).copied().unwrap_or_else(Fq::zero)
+            }
+        });
 
         // Append as a Fiat–Shamir message (matches existing Stage 3 transcript pattern).
         transcript.append_scalar(&packed_eval);

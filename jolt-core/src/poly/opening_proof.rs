@@ -214,6 +214,10 @@ pub enum SumcheckId {
     ShiftG2ScalarMul,
     /// Shift-check for MultiMillerLoop packed traces: links `*_next(s,x)` to `*(s+1,x)` on step vars.
     ShiftMultiMillerLoop,
+    /// GT wiring/boundary sumcheck (AST-driven).
+    ///
+    /// Used to namespace auxiliary virtual openings emitted by wiring checks.
+    GtWiring,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]
@@ -604,15 +608,13 @@ where
         // 2. Get the single committed opening and polynomial ID
         let (opening_id, (opening_point, _opening_claim)) = committed_openings[0];
 
-        let poly_id = match opening_id {
-            OpeningId::Polynomial(PolynomialId::Committed(poly_id), _) => poly_id,
+        let poly_id: CommittedPolynomial = match opening_id {
+            OpeningId::Polynomial(PolynomialId::Committed(poly_id), _) => *poly_id,
             _ => unreachable!("Already filtered for committed polynomials"),
         };
 
         // 3. Get the polynomial from the provided map
-        let polynomial = polynomials
-            .get(poly_id)
-            .ok_or(ProofVerifyError::InternalError)?;
+        let polynomial = polynomials.get(&poly_id).ok_or(ProofVerifyError::InternalError)?;
 
         // 4. Direct PCS proof (no sumcheck, no batching, no hints)
         let proof = PCS::prove(pcs_setup, polynomial, &opening_point.r, None, transcript);

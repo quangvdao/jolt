@@ -27,6 +27,11 @@ pub struct PrefixPackedEntry {
     pub constraint_idx: usize,
     /// Which committed polynomial within that constraint (PolyType row)
     pub poly_type: PolyType,
+    /// If true, this entry is a GT-fused row (not tied to a single `constraint_idx`).
+    ///
+    /// In GT-fused end-to-end mode we pack GT rows as fused blocks over a GT-local `c` domain.
+    /// Such entries are keyed only by `poly_type`, and `constraint_idx` is ignored.
+    pub is_gt_fused: bool,
     /// Native variable count `m` (native size = 2^m)
     pub num_vars: usize,
     /// Starting offset in the packed evaluation table (must be aligned to `2^num_vars`)
@@ -94,6 +99,88 @@ impl PrefixPackingLayout {
             entries.push(PrefixPackedEntry {
                 constraint_idx,
                 poly_type,
+                is_gt_fused: false,
+                num_vars,
+                offset,
+            });
+            offset += native_size;
+        }
+
+        let padded_size = std::cmp::max(1usize, offset).next_power_of_two();
+        let num_dense_vars = padded_size.trailing_zeros() as usize;
+
+        Self {
+            num_dense_vars,
+            entries,
+        }
+    }
+
+    /// Build a packing layout that replaces per-instance GT rows with GT-fused rows.
+    ///
+    /// This is used by the **end-to-end GT fusion** path. It intentionally breaks the legacy
+    /// proof format by changing the committed witness packing layout.
+    pub fn from_constraint_types_gt_fused(constraint_types: &[ConstraintType]) -> Self {
+        use crate::zkvm::recursion::gt::indexing::k_gt;
+
+        let has_gt = constraint_types
+            .iter()
+            .any(|ct| matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul));
+        if !has_gt {
+            return Self::from_constraint_types(constraint_types);
+        }
+
+        let k = k_gt(constraint_types);
+        let num_vars_gt = 11usize + k;
+
+        // Collect all committed polynomial "rows" with their native var counts.
+        // In GT-fused mode, we skip per-instance GT rows and append fixed GT-fused rows instead.
+        let mut polys: Vec<(usize, PolyType, bool, usize)> = Vec::new();
+        for (constraint_idx, ct) in constraint_types.iter().enumerate() {
+            if matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul) {
+                continue;
+            }
+            for &(poly_type, num_vars) in ct.committed_poly_specs() {
+                polys.push((constraint_idx, poly_type, false, num_vars));
+            }
+        }
+
+        // Append GT-fused rows (all share the same GT-local `c` prefix vars).
+        for poly_type in [
+            PolyType::RhoPrev,
+            PolyType::Quotient,
+            PolyType::MulLhs,
+            PolyType::MulRhs,
+            PolyType::MulResult,
+            PolyType::MulQuotient,
+        ] {
+            polys.push((0usize, poly_type, true, num_vars_gt));
+        }
+
+        // Canonical ordering: decreasing size (num_vars), then PolyType-major, then fused flag,
+        // then constraint index.
+        polys.sort_by_key(|(constraint_idx, poly_type, is_gt_fused, num_vars)| {
+            (
+                std::cmp::Reverse(*num_vars),
+                *poly_type as usize,
+                *is_gt_fused as usize,
+                *constraint_idx,
+            )
+        });
+
+        // Assign aligned offsets by cumulative sum (alignment holds for power-of-two sizes).
+        let mut entries: Vec<PrefixPackedEntry> = Vec::with_capacity(polys.len());
+        let mut offset: usize = 0;
+        for (constraint_idx, poly_type, is_gt_fused, num_vars) in polys {
+            let native_size = 1usize << num_vars;
+            debug_assert_eq!(
+                offset % native_size,
+                0,
+                "prefix packing requires aligned offsets (offset={offset}, native_size={native_size})"
+            );
+            entries.push(PrefixPackedEntry {
+                constraint_idx,
+                poly_type,
+                is_gt_fused,
                 num_vars,
                 offset,
             });
@@ -178,11 +265,11 @@ pub fn packed_eval_from_claims<FGet>(
     mut get_claim: FGet,
 ) -> Fq
 where
-    FGet: FnMut(usize, PolyType) -> Fq,
+    FGet: FnMut(&PrefixPackedEntry) -> Fq,
 {
     let mut acc = Fq::zero();
     for entry in &layout.entries {
-        let claim = get_claim(entry.constraint_idx, entry.poly_type);
+        let claim = get_claim(entry);
         let w = layout.codeword_weight_lsb(entry, r_full_lsb);
         acc += claim * w;
     }

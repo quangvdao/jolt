@@ -23,8 +23,13 @@ include!("./provable_macro.rs");
 
 provable_with_config! {
 fn verify(bytes: &[u8]) -> u32 {
+    // Top-level span for this guest entrypoint. If you sum the `*_total` spans (and DO NOT sum
+    // the nested detailed spans), you should get close to this total.
+    start_cycle_tracking("guest_verify_total");
+
     // In embed mode, the host passes an empty input slice and we fall back to the embedded bytes.
     // In non-embed mode, always prefer the explicit input bytes (even if embedded bytes exist).
+    start_cycle_tracking("guest_select_input_total");
     let data_bytes = if !bytes.is_empty() {
         bytes
     } else {
@@ -33,6 +38,7 @@ fn verify(bytes: &[u8]) -> u32 {
 
     // `&mut &[u8]` implements arkworks' `Read` and advances as bytes are consumed (no `std::io`).
     let mut cursor: &[u8] = data_bytes;
+    end_cycle_tracking("guest_select_input_total");
 
     start_cycle_tracking("deserialize preprocessing");
     let verifier_preprocessing: JoltVerifierPreprocessing<F, PCS> =
@@ -46,6 +52,7 @@ fn verify(bytes: &[u8]) -> u32 {
 
     let mut all_valid = true;
     for _ in 0..n {
+        start_cycle_tracking("guest_one_proof_total");
         start_cycle_tracking("deserialize device");
         let device = JoltDevice::guest_deserialize(&mut cursor).unwrap();
         end_cycle_tracking("deserialize device");
@@ -59,7 +66,9 @@ fn verify(bytes: &[u8]) -> u32 {
             Option::guest_deserialize(&mut cursor).unwrap();
         end_cycle_tracking("deserialize recursion artifact");
 
-        start_cycle_tracking("verification");
+        // This span is intended to be the *flat* total for verification (ignore nested detail spans
+        // when summing).
+        start_cycle_tracking("guest_verify_one_proof_total");
         let is_valid = if let Some(ref artifact) = recursion_artifact {
             // Recursion verification path: replay stages 1–7 and verify recursion SNARK in-guest.
             //
@@ -81,11 +90,13 @@ fn verify(bytes: &[u8]) -> u32 {
                 core::hint::black_box(result).is_ok()
             })
         };
-        end_cycle_tracking("verification");
+        end_cycle_tracking("guest_verify_one_proof_total");
 
         all_valid = all_valid && is_valid;
+        end_cycle_tracking("guest_one_proof_total");
     }
 
+    end_cycle_tracking("guest_verify_total");
     all_valid as u32
 }
 }

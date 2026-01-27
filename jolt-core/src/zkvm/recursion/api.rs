@@ -257,6 +257,7 @@ pub fn verify_recursion<FS: Transcript>(
 ) -> Result<()> {
     type F = Fr;
 
+    start_cycle_tracking("verify_recursion_total");
     let base_proof = clone_base_proof_via_guest_serde(base_proof)?;
     let mut v = JoltVerifier::new(
         preprocessing,
@@ -269,7 +270,9 @@ pub fn verify_recursion<FS: Transcript>(
 
     v.initialize_transcript_preamble()?;
 
+    start_cycle_tracking("verify_recursion_base_stages_1_to_7_total");
     v.verify_stages_1_to_7()?;
+    end_cycle_tracking("verify_recursion_base_stages_1_to_7_total");
 
     // Ensure Dory globals match the proof layout before any Stage 8 replay / AST derivation.
     let _dory_globals_guard = if v.proof.program_mode == ProgramMode::Committed {
@@ -289,6 +292,7 @@ pub fn verify_recursion<FS: Transcript>(
         )
     };
 
+    start_cycle_tracking("verify_recursion_stage8_prep_total");
     let (dory_snap, pre_opening_proof_transcript, gamma_powers, joint_claim) =
         v.build_stage8_recursion_prep()?;
 
@@ -405,6 +409,7 @@ pub fn verify_recursion<FS: Transcript>(
         *hint_fq12,
     )
     .map_err(|e| anyhow!("AST->recursion-plan derivation (with hints) failed: {e:?}"))?;
+    end_cycle_tracking("verify_recursion_stage8_prep_total");
 
     if plan.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {
         return Err(anyhow!(
@@ -418,6 +423,7 @@ pub fn verify_recursion<FS: Transcript>(
     let hyrax_verifier_setup = &preprocessing.hyrax_recursion_setup;
 
     let recursion_verifier = RecursionVerifier::<Fq>::new(plan.verifier_input);
+    start_cycle_tracking("verify_recursion_snark_verify_total");
     let ok = recursion_verifier
         .verify::<FS, HyraxPCS>(
             &recursion.proof,
@@ -426,6 +432,7 @@ pub fn verify_recursion<FS: Transcript>(
             hyrax_verifier_setup,
         )
         .map_err(|e| anyhow!("Recursion verification failed: {e:?}"))?;
+    end_cycle_tracking("verify_recursion_snark_verify_total");
     if !ok {
         return Err(anyhow!("Recursion proof verification failed"));
     }
@@ -451,5 +458,6 @@ pub fn verify_recursion<FS: Transcript>(
         return Err(anyhow!("external pairing check failed"));
     }
 
+    end_cycle_tracking("verify_recursion_total");
     Ok(())
 }

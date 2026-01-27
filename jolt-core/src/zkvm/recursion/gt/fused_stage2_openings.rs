@@ -19,7 +19,9 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
-    zkvm::recursion::gt::indexing::{gt_constraint_indices, k_gt, num_gt_constraints_padded},
+    zkvm::recursion::gt::indexing::{
+        gt_exp_c_tail_range, k_exp, k_gt, num_gt_exp_constraints_padded,
+    },
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -27,29 +29,21 @@ use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::Zero;
 
-#[inline]
-fn transpose_xc_to_cx(input: &[Fq], num_constraints_padded: usize, row_size: usize) -> Vec<Fq> {
-    debug_assert_eq!(input.len(), num_constraints_padded * row_size);
-    let mut out = vec![Fq::zero(); input.len()];
-    for c in 0..num_constraints_padded {
-        let row_off = c * row_size;
-        for x in 0..row_size {
-            out[x * num_constraints_padded + c] = input[row_off + x];
-        }
-    }
-    out
-}
-
 #[derive(Clone, Debug, Allocative)]
 pub struct FusedGtExpStage2OpeningsParams {
-    pub num_rounds: usize, // k_gt + 11
+    pub num_rounds: usize, // k_common + 11
+    pub k_common: usize,
+    pub k_exp: usize,
 }
 
 impl FusedGtExpStage2OpeningsParams {
     pub fn from_constraint_types(constraint_types: &[ConstraintType]) -> Self {
-        let num_c_vars = k_gt(constraint_types);
+        let k_common = k_gt(constraint_types);
+        let k_exp = k_exp(constraint_types);
         Self {
-            num_rounds: num_c_vars + CONFIG.packed_vars,
+            num_rounds: k_common + CONFIG.packed_vars,
+            k_common,
+            k_exp,
         }
     }
 }
@@ -75,32 +69,28 @@ impl<T: Transcript> FusedGtExpStage2OpeningsProver<T> {
         let params = FusedGtExpStage2OpeningsParams::from_constraint_types(constraint_types);
 
         let row_size = 1usize << CONFIG.packed_vars;
-        let num_gt_constraints_padded = num_gt_constraints_padded(constraint_types);
-
-        let gt_globals = gt_constraint_indices(constraint_types);
+        let num_gt_constraints_padded = num_gt_exp_constraints_padded(constraint_types);
 
         let mut rho_xc = vec![Fq::zero(); num_gt_constraints_padded * row_size];
         let mut quotient_xc = vec![Fq::zero(); num_gt_constraints_padded * row_size];
 
-        for (c_gt, &global_idx) in gt_globals.iter().enumerate() {
+        for global_idx in 0..constraint_types.len() {
             if let ConstraintLocator::GtExp { local } = locator_by_constraint[global_idx] {
                 let rho_src = &gt_exp_witnesses[local].rho_packed;
                 let quo_src = &gt_exp_witnesses[local].quotient_packed;
                 debug_assert_eq!(rho_src.len(), row_size);
                 debug_assert_eq!(quo_src.len(), row_size);
-                let off = c_gt * row_size;
+                let off = local * row_size;
                 rho_xc[off..off + row_size].copy_from_slice(rho_src);
                 quotient_xc[off..off + row_size].copy_from_slice(quo_src);
             }
         }
 
-        let rho_cx = transpose_xc_to_cx(&rho_xc, num_gt_constraints_padded, row_size);
-        let quotient_cx = transpose_xc_to_cx(&quotient_xc, num_gt_constraints_padded, row_size);
-
         Self {
             params,
-            rho: MultilinearPolynomial::LargeScalars(DensePolynomial::new(rho_cx)),
-            quotient: MultilinearPolynomial::LargeScalars(DensePolynomial::new(quotient_cx)),
+            // Store in [x11 low bits, c_gt high bits] order so `c_gt` is a suffix in Stage 2.
+            rho: MultilinearPolynomial::LargeScalars(DensePolynomial::new(rho_xc)),
+            quotient: MultilinearPolynomial::LargeScalars(DensePolynomial::new(quotient_xc)),
             _marker: core::marker::PhantomData,
         }
     }
@@ -120,7 +110,24 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsPr
         UniPoly::from_coeff(vec![Fq::zero()])
     }
 
-    fn ingest_challenge(&mut self, r_j: <Fq as JoltField>::Challenge, _round: usize) {
+    fn ingest_challenge(&mut self, r_j: <Fq as JoltField>::Challenge, round: usize) {
+        // This instance participates with `num_rounds = 11 + k_common` so its (s,u) challenges
+        // align with other GT instances in Stage 2, but the committed fused rows use only `k_exp`.
+        //
+        // We therefore bind:
+        // - all 11 x-bits, and
+        // - only the tail `k_exp` bits of the c-suffix (skip the first k_common-k_exp c-bits).
+        let x_vars = CONFIG.packed_vars; // 11
+        if round < x_vars {
+            self.rho.bind_parallel(r_j, BindingOrder::LowToHigh);
+            self.quotient.bind_parallel(r_j, BindingOrder::LowToHigh);
+            return;
+        }
+        let c_round = round - x_vars;
+        let dummy = self.params.k_common.saturating_sub(self.params.k_exp);
+        if c_round < dummy {
+            return;
+        }
         self.rho.bind_parallel(r_j, BindingOrder::LowToHigh);
         self.quotient.bind_parallel(r_j, BindingOrder::LowToHigh);
     }
@@ -131,7 +138,14 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsPr
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
+        // Opening point must match the committed fused row arity: (s,u,c_exp_tail).
+        debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds);
+        let x_vars = CONFIG.packed_vars; // 11
+        let mut r = Vec::with_capacity(x_vars + self.params.k_exp);
+        r.extend_from_slice(&sumcheck_challenges[..x_vars]);
+        let tail = gt_exp_c_tail_range(self.params.k_common, self.params.k_exp);
+        r.extend_from_slice(&sumcheck_challenges[tail]);
+        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);
         accumulator.append_virtual(
             transcript,
             VirtualPolynomial::gt_exp_rho_fused(),
@@ -186,7 +200,14 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpStage2Openings
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
+        // Opening point must match the committed fused row arity: (s,u,c_exp_tail).
+        debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds);
+        let x_vars = CONFIG.packed_vars; // 11
+        let mut r = Vec::with_capacity(x_vars + self.params.k_exp);
+        r.extend_from_slice(&sumcheck_challenges[..x_vars]);
+        let tail = gt_exp_c_tail_range(self.params.k_common, self.params.k_exp);
+        r.extend_from_slice(&sumcheck_challenges[tail]);
+        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);
         for vp in [
             VirtualPolynomial::gt_exp_rho_fused(),
             VirtualPolynomial::gt_exp_quotient_fused(),

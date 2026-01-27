@@ -19,7 +19,7 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
-    zkvm::recursion::gt::indexing::{gt_constraint_indices, k_gt, num_gt_constraints_padded},
+    zkvm::recursion::gt::indexing::{k_gt, num_gt_constraints_padded},
     zkvm::recursion::gt::shift::{
         eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
     },
@@ -33,19 +33,6 @@ use rayon::prelude::*;
 
 /// Degree bound: we take a conservative bound (EqPlusOne * Eq * Eq * rho).
 const DEGREE: usize = 4;
-
-#[inline]
-fn transpose_xc_to_cx(input: &[Fq], num_constraints_padded: usize, row_size: usize) -> Vec<Fq> {
-    debug_assert_eq!(input.len(), num_constraints_padded * row_size);
-    let mut out = vec![Fq::zero(); input.len()];
-    for c in 0..num_constraints_padded {
-        let row_off = c * row_size;
-        for x in 0..row_size {
-            out[x * num_constraints_padded + c] = input[row_off + x];
-        }
-    }
-    out
-}
 
 #[inline]
 fn evals_skip_one<const D: usize>(a0: Fq, a1: Fq) -> [Fq; D] {
@@ -111,7 +98,7 @@ impl SumcheckInstanceParams<Fq> for FusedGtShiftParams {
 #[derive(Allocative)]
 pub struct FusedGtShiftProver {
     params: FusedGtShiftParams,
-    /// P(y) = Eq(r_c, c) * EqPlusOne(r_s, s) * Eq(r_x, x)  (as a fused (c,s,x) table)
+    /// P(y) = Eq(r_c, c) * EqPlusOne(r_s, s) * Eq(r_u, u)  (as a fused (s,u,c) table)
     eq_prod: MultilinearPolynomial<Fq>,
     /// Fused rho(c,s,x) table.
     rho: MultilinearPolynomial<Fq>,
@@ -136,26 +123,28 @@ impl FusedGtShiftProver {
         debug_assert_eq!(r1.len(), params.num_rounds());
 
         let k = params.num_c_vars;
-        let r1_c = &r1[..k];
-        let r1_s = &r1[k..k + params.num_step_vars];
-        let r1_x = &r1[k + params.num_step_vars..];
+        let s_len = params.num_step_vars;
+        let u_len = params.num_elem_vars;
+        let r1_s = &r1[..s_len];
+        let r1_x = &r1[s_len..s_len + u_len];
+        let r1_c = &r1[s_len + u_len..];
+        debug_assert_eq!(r1_c.len(), k);
 
         // Build fused rho(c_gt,x11) from GTExp witnesses (zero elsewhere).
         let row_size = 1usize << params.num_x_vars;
-        let gt_globals = gt_constraint_indices(constraint_types);
         let mut rho_xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
-        for (c_gt, &global_idx) in gt_globals.iter().enumerate() {
+        for global_idx in 0..constraint_types.len() {
             if let ConstraintLocator::GtExp { local } = locator_by_constraint[global_idx] {
                 let src = &gt_exp_witnesses[local].rho_packed;
                 debug_assert_eq!(src.len(), row_size);
-                let off = c_gt * row_size;
+                let off = local * row_size;
                 rho_xc[off..off + row_size].copy_from_slice(src);
             }
         }
-        let rho_cx = transpose_xc_to_cx(&rho_xc, params.num_gt_constraints_padded, row_size);
-        let rho = MultilinearPolynomial::LargeScalars(DensePolynomial::new(rho_cx));
+        // Store in [x11 low bits, c_gt high bits] order so `c_gt` is a suffix in Stage 2.
+        let rho = MultilinearPolynomial::LargeScalars(DensePolynomial::new(rho_xc));
 
-        // Build eq product table over (c,s,x) with LSB-first indexing for each component.
+        // Build eq product table over (s,u,c) with LSB-first indexing for each component.
         let eq_c = eq_lsb_evals::<Fq>(r1_c);
         let eq_plus_one = eq_plus_one_lsb_evals::<Fq>(r1_s);
         let eq_x = eq_lsb_evals::<Fq>(r1_x);
@@ -171,8 +160,7 @@ impl FusedGtShiftProver {
                 eq_xc[off + x11] = w;
             }
         }
-        let eq_cx = transpose_xc_to_cx(&eq_xc, params.num_gt_constraints_padded, row_size);
-        let eq_prod = MultilinearPolynomial::LargeScalars(DensePolynomial::new(eq_cx));
+        let eq_prod = MultilinearPolynomial::LargeScalars(DensePolynomial::new(eq_xc));
 
         Self {
             params,
@@ -283,13 +271,16 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtShiftVerifier {
         debug_assert_eq!(r1.len(), self.params.num_rounds());
 
         let k = self.params.num_c_vars;
-        let r1_c = &r1[..k];
-        let r1_s = &r1[k..k + self.params.num_step_vars];
-        let r1_x = &r1[k + self.params.num_step_vars..];
+        let s_len = self.params.num_step_vars;
+        let u_len = self.params.num_elem_vars;
+        let r1_s = &r1[..s_len];
+        let r1_x = &r1[s_len..s_len + u_len];
+        let r1_c = &r1[s_len + u_len..];
+        debug_assert_eq!(r1_c.len(), k);
 
-        let r2_c = &sumcheck_challenges[..k];
-        let r2_s = &sumcheck_challenges[k..k + self.params.num_step_vars];
-        let r2_x = &sumcheck_challenges[k + self.params.num_step_vars..];
+        let r2_s = &sumcheck_challenges[..s_len];
+        let r2_x = &sumcheck_challenges[s_len..s_len + u_len];
+        let r2_c = &sumcheck_challenges[s_len + u_len..];
 
         let eq_c = eq_lsb_mle::<Fq>(r1_c, r2_c);
         let eq_plus_one = eq_plus_one_lsb_mle::<Fq>(r1_s, r2_s);

@@ -625,6 +625,48 @@ impl RecursionProver<Fq> {
         let unpadded_len = prefix_layout.unpadded_len();
         let padded_len = dense_poly.len();
 
+        // Extra diagnostics for GT-fused end-to-end mode: the packed dense polynomial size can
+        // jump due to GT-local padding (`num_gt_constraints_padded`) and GTMul's 4->11 var lift.
+        //
+        // NOTE: Keep this at `info` so it can be enabled via `RUST_LOG=jolt_core=info`.
+        let enable_gt_fused_end_to_end =
+            std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
+        if enable_gt_fused_end_to_end {
+            use crate::zkvm::recursion::gt::indexing::{
+                k_gt, num_gt_constraints, num_gt_constraints_padded,
+            };
+            let num_constraints = self.constraint_system.constraint_types.len();
+            let num_gt_exp_ops = self.constraint_system.gt_exp_witnesses.len();
+            let num_gt_mul_ops = self.constraint_system.gt_mul_rows.len();
+            let num_gt = num_gt_constraints(&self.constraint_system.constraint_types);
+            let num_gt_padded = num_gt_constraints_padded(&self.constraint_system.constraint_types);
+            let k = k_gt(&self.constraint_system.constraint_types);
+            tracing::info!(
+                num_constraints,
+                num_gt_exp_ops,
+                num_gt_mul_ops,
+                num_gt_constraints = num_gt,
+                num_gt_constraints_padded = num_gt_padded,
+                k_gt = k,
+                dense_num_vars,
+                unpadded_len,
+                padded_len,
+                "GT-fused prefix packing stats"
+            );
+            for e in prefix_layout.entries.iter().filter(|e| e.is_gt_fused) {
+                tracing::info!(
+                    ?e.poly_type,
+                    e.num_vars,
+                    native_size = (1usize << e.num_vars),
+                    e.offset,
+                    "GT-fused packed entry"
+                );
+            }
+        }
+
         // Log how much Hyrax work we skip by avoiding padded zeros.
         let (l_size, r_size) = matrix_dimensions(dense_num_vars, 1);
         debug_assert_eq!(l_size * r_size, padded_len);
@@ -1007,9 +1049,15 @@ impl RecursionProver<Fq> {
                 })
                 .collect();
             if enable_gt_fused_end_to_end {
-                let num_gt_constraints = num_gt_exp + gt_mul_constraints_fq.len();
-                let num_gt_constraints_padded = num_gt_constraints.max(1).next_power_of_two();
-                let params = FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded);
+                let num_gt_constraints = gt_mul_constraints_fq.len();
+                let k_common =
+                    crate::zkvm::recursion::gt::indexing::k_gt(&self.constraint_system.constraint_types);
+                let num_gt_constraints_padded =
+                    crate::zkvm::recursion::gt::indexing::num_gt_mul_constraints_padded(
+                        &self.constraint_system.constraint_types,
+                    );
+                let params =
+                    FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
                 let prover = FusedGtMulProver::new(
                     params,
                     &self.constraint_system.constraint_types,

@@ -120,7 +120,7 @@ impl PrefixPackingLayout {
     /// This is used by the **end-to-end GT fusion** path. It intentionally breaks the legacy
     /// proof format by changing the committed witness packing layout.
     pub fn from_constraint_types_gt_fused(constraint_types: &[ConstraintType]) -> Self {
-        use crate::zkvm::recursion::gt::indexing::k_gt;
+        use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
 
         let has_gt = constraint_types
             .iter()
@@ -129,8 +129,9 @@ impl PrefixPackingLayout {
             return Self::from_constraint_types(constraint_types);
         }
 
-        let k = k_gt(constraint_types);
-        let num_vars_gt = 11usize + k;
+        // Option B: commit exp/mul fused rows at their family-local padded sizes.
+        let num_vars_gt_exp = 11usize + k_exp(constraint_types);
+        let num_vars_gt_mul = 4usize + k_mul(constraint_types);
 
         // Collect all committed polynomial "rows" with their native var counts.
         // In GT-fused mode, we skip per-instance GT rows and append fixed GT-fused rows instead.
@@ -144,16 +145,20 @@ impl PrefixPackingLayout {
             }
         }
 
-        // Append GT-fused rows (all share the same GT-local `c` prefix vars).
+        // Append GT-fused rows.
+        //
+        // IMPORTANT (no-padding GTMul): in end-to-end fusion, GTExp rows are 11-var (s,u) plus
+        // k GT-local index vars, but GTMul rows are natively 4-var (u) plus the same k vars.
+        for poly_type in [PolyType::RhoPrev, PolyType::Quotient] {
+            polys.push((0usize, poly_type, true, num_vars_gt_exp));
+        }
         for poly_type in [
-            PolyType::RhoPrev,
-            PolyType::Quotient,
             PolyType::MulLhs,
             PolyType::MulRhs,
             PolyType::MulResult,
             PolyType::MulQuotient,
         ] {
-            polys.push((0usize, poly_type, true, num_vars_gt));
+            polys.push((0usize, poly_type, true, num_vars_gt_mul));
         }
 
         // Canonical ordering: decreasing size (num_vars), then PolyType-major, then fused flag,

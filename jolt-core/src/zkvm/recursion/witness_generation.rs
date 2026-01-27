@@ -570,99 +570,90 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
 
     fn fill_entry(dst: &mut [Fq], cs: &ConstraintSystem, entry: &PrefixPackedEntry) {
         if entry.is_gt_fused {
-            use crate::zkvm::recursion::gt::indexing::{
-                global_to_c_gt, gt_constraint_indices, k_gt,
-            };
+            use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
 
-            let k = k_gt(&cs.constraint_types);
-            let expected_num_vars = 11usize + k;
-            if entry.num_vars != expected_num_vars {
-                panic!(
-                    "GT-fused prefix packing entry has num_vars={}, expected {} (11 + k_gt)",
-                    entry.num_vars, expected_num_vars
-                );
-            }
+            // Option B: commit exp/mul fused rows at their family-local padded sizes.
+            let num_vars_gt_exp = 11usize + k_exp(&cs.constraint_types);
+            let num_vars_gt_mul = 4usize + k_mul(&cs.constraint_types);
 
-            // Build a fused source table in standard (non-bit-reversed) order where:
-            // - low bits are `c_gt` (k bits),
-            // - high bits are `x` (11 bits, same as packed GT exp).
+            // IMPORTANT (no-padding GTMul + c-suffix):
+            // - for GTExp fused rows, variables are (x11 low bits, c_gt high bits), size 2^(11+k)
+            // - for GTMul fused rows, variables are (u low bits, c_gt high bits), size 2^(4+k)
             //
-            // Index: idx = c_gt + (x_idx << k)
+            // This avoids the old 4→11 replication for GTMul.
             let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
-            let gt_indices = gt_constraint_indices(&cs.constraint_types);
-            let global_to_c = global_to_c_gt(&cs.constraint_types);
 
-            for global_idx in gt_indices {
-                let Some(c_gt) = global_to_c[global_idx] else {
-                    continue;
-                };
-                let loc = cs.locator_by_constraint[global_idx];
-                match (entry.poly_type, loc) {
-                    // GT exp (11-var)
-                    (
-                        crate::zkvm::recursion::constraints::system::PolyType::RhoPrev,
-                        ConstraintLocator::GtExp { local },
-                    ) => {
-                        let src = &cs.gt_exp_witnesses[local].rho_packed;
-                        for x_idx in 0..(1usize << 11) {
-                            fused_src[c_gt + (x_idx << k)] = src[x_idx];
-                        }
+            match entry.poly_type {
+                crate::zkvm::recursion::constraints::system::PolyType::RhoPrev
+                | crate::zkvm::recursion::constraints::system::PolyType::Quotient => {
+                    if entry.num_vars != num_vars_gt_exp {
+                        panic!(
+                            "GT-fused GTExp entry has num_vars={}, expected {} (11 + k_exp)",
+                            entry.num_vars, num_vars_gt_exp
+                        );
                     }
-                    (
-                        crate::zkvm::recursion::constraints::system::PolyType::Quotient,
-                        ConstraintLocator::GtExp { local },
-                    ) => {
-                        let src = &cs.gt_exp_witnesses[local].quotient_packed;
-                        for x_idx in 0..(1usize << 11) {
-                            fused_src[c_gt + (x_idx << k)] = src[x_idx];
-                        }
+                    let row_size = 1usize << 11;
+                    for global_idx in 0..cs.constraint_types.len() {
+                        let ConstraintLocator::GtExp { local } =
+                            cs.locator_by_constraint[global_idx]
+                        else {
+                            continue;
+                        };
+                        let c_exp = local;
+                        let src = match entry.poly_type {
+                            crate::zkvm::recursion::constraints::system::PolyType::RhoPrev => {
+                                &cs.gt_exp_witnesses[local].rho_packed
+                            }
+                            crate::zkvm::recursion::constraints::system::PolyType::Quotient => {
+                                &cs.gt_exp_witnesses[local].quotient_packed
+                            }
+                            _ => unreachable!(),
+                        };
+                        debug_assert_eq!(src.len(), row_size);
+                        let off = c_exp << 11;
+                        fused_src[off..off + row_size].copy_from_slice(src);
                     }
-
-                    // GT mul (4-var) padded to 11 vars by replication over 7 step bits:
-                    // x_idx = step + (u_idx << 7), with u_idx in [0,16).
-                    (
-                        crate::zkvm::recursion::constraints::system::PolyType::MulLhs,
-                        ConstraintLocator::GtMul { local },
-                    ) => {
-                        let src4 = &cs.gt_mul_rows[local].lhs;
-                        for x_idx in 0..(1usize << 11) {
-                            let u_idx = x_idx >> 7;
-                            fused_src[c_gt + (x_idx << k)] = src4[u_idx];
-                        }
+                }
+                crate::zkvm::recursion::constraints::system::PolyType::MulLhs
+                | crate::zkvm::recursion::constraints::system::PolyType::MulRhs
+                | crate::zkvm::recursion::constraints::system::PolyType::MulResult
+                | crate::zkvm::recursion::constraints::system::PolyType::MulQuotient => {
+                    if entry.num_vars != num_vars_gt_mul {
+                        panic!(
+                            "GT-fused GTMul entry has num_vars={}, expected {} (4 + k_mul)",
+                            entry.num_vars, num_vars_gt_mul
+                        );
                     }
-                    (
-                        crate::zkvm::recursion::constraints::system::PolyType::MulRhs,
-                        ConstraintLocator::GtMul { local },
-                    ) => {
-                        let src4 = &cs.gt_mul_rows[local].rhs;
-                        for x_idx in 0..(1usize << 11) {
-                            let u_idx = x_idx >> 7;
-                            fused_src[c_gt + (x_idx << k)] = src4[u_idx];
-                        }
+                    let row_size = 1usize << 4;
+                    for global_idx in 0..cs.constraint_types.len() {
+                        let ConstraintLocator::GtMul { local } =
+                            cs.locator_by_constraint[global_idx]
+                        else {
+                            continue;
+                        };
+                        let c_mul = local;
+                        let src4 = match entry.poly_type {
+                            crate::zkvm::recursion::constraints::system::PolyType::MulLhs => {
+                                &cs.gt_mul_rows[local].lhs
+                            }
+                            crate::zkvm::recursion::constraints::system::PolyType::MulRhs => {
+                                &cs.gt_mul_rows[local].rhs
+                            }
+                            crate::zkvm::recursion::constraints::system::PolyType::MulResult => {
+                                &cs.gt_mul_rows[local].result
+                            }
+                            crate::zkvm::recursion::constraints::system::PolyType::MulQuotient => {
+                                &cs.gt_mul_rows[local].quotient
+                            }
+                            _ => unreachable!(),
+                        };
+                        debug_assert_eq!(src4.len(), row_size);
+                        let off = c_mul << 4;
+                        fused_src[off..off + row_size].copy_from_slice(src4);
                     }
-                    (
-                        crate::zkvm::recursion::constraints::system::PolyType::MulResult,
-                        ConstraintLocator::GtMul { local },
-                    ) => {
-                        let src4 = &cs.gt_mul_rows[local].result;
-                        for x_idx in 0..(1usize << 11) {
-                            let u_idx = x_idx >> 7;
-                            fused_src[c_gt + (x_idx << k)] = src4[u_idx];
-                        }
-                    }
-                    (
-                        crate::zkvm::recursion::constraints::system::PolyType::MulQuotient,
-                        ConstraintLocator::GtMul { local },
-                    ) => {
-                        let src4 = &cs.gt_mul_rows[local].quotient;
-                        for x_idx in 0..(1usize << 11) {
-                            let u_idx = x_idx >> 7;
-                            fused_src[c_gt + (x_idx << k)] = src4[u_idx];
-                        }
-                    }
-
-                    // Other combinations contribute 0 at this (c_gt, x) slice.
-                    _ => {}
+                }
+                _ => {
+                    // Other poly types are not GT-fused.
                 }
             }
 

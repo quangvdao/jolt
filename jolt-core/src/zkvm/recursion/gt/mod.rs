@@ -26,7 +26,7 @@ pub use fused_exponentiation::{FusedGtExpParams, FusedGtExpProver, FusedGtExpVer
 pub use fused_multiplication::{FusedGtMulParams, FusedGtMulProver, FusedGtMulVerifier};
 pub use fused_shift::{FusedGtShiftParams, FusedGtShiftProver, FusedGtShiftVerifier};
 pub use fused_stage2_openings::{FusedGtExpStage2OpeningsProver, FusedGtExpStage2OpeningsVerifier};
-pub use indexing::{global_to_c_gt, gt_constraint_indices, k_gt, num_gt_constraints_padded};
+pub use indexing::{gt_constraint_indices, k_gt, num_gt_constraints_padded};
 pub use multiplication::{GtMulProver, GtMulVerifier};
 pub use shift::{GtShiftClaim, GtShiftParams, GtShiftProver, GtShiftVerifier};
 pub use wiring::{WiringGtProver, WiringGtVerifier};

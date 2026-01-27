@@ -546,9 +546,15 @@ impl RecursionVerifier<Fq> {
         // GT mul
         if num_gt_mul > 0 {
             if enable_gt_fused_end_to_end {
-                let num_gt_constraints = num_gt_exp + num_gt_mul;
-                let num_gt_constraints_padded = num_gt_constraints.max(1).next_power_of_two();
-                let params = FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded);
+                let num_gt_constraints = num_gt_mul;
+                let k_common =
+                    crate::zkvm::recursion::gt::indexing::k_gt(&self.input.constraint_types);
+                let num_gt_constraints_padded =
+                    crate::zkvm::recursion::gt::indexing::num_gt_mul_constraints_padded(
+                        &self.input.constraint_types,
+                    );
+                let params =
+                    FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
                 let verifier = FusedGtMulVerifier::new(
                     params,
                     &self.input.constraint_types,

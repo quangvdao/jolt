@@ -160,10 +160,11 @@ impl<T: Transcript> WiringGtProver<T> {
         // Use GT-local c-domain for end-to-end GT fusion.
         let num_c_vars = k_gt(&cs.constraint_types);
 
-        // Map local instance -> GT-local constraint index (for c-binding weights).
+        // Map local instance -> family-local constraint index (embedded in the shared c-domain).
         let mut gt_exp_constraint_idx = vec![usize::MAX; cs.gt_exp_witnesses.len()];
         let mut gt_mul_constraint_idx = vec![usize::MAX; cs.gt_mul_rows.len()];
-        let mut c_gt = 0usize;
+        let mut c_exp = 0usize;
+        let mut c_mul = 0usize;
         for (global_idx, ct) in cs.constraint_types.iter().enumerate() {
             match ct {
                 ConstraintType::GtExp => {
@@ -171,18 +172,18 @@ impl<T: Transcript> WiringGtProver<T> {
                         local,
                     } = cs.locator_by_constraint[global_idx]
                     {
-                        gt_exp_constraint_idx[local] = c_gt;
+                        gt_exp_constraint_idx[local] = c_exp;
                     }
-                    c_gt += 1;
+                    c_exp += 1;
                 }
                 ConstraintType::GtMul => {
                     if let crate::zkvm::recursion::constraints::system::ConstraintLocator::GtMul {
                         local,
                     } = cs.locator_by_constraint[global_idx]
                     {
-                        gt_mul_constraint_idx[local] = c_gt;
+                        gt_mul_constraint_idx[local] = c_mul;
                     }
-                    c_gt += 1;
+                    c_mul += 1;
                 }
                 _ => {}
             }
@@ -889,16 +890,17 @@ impl WiringGtVerifier {
         let num_c_vars = k_gt(&input.constraint_types);
         let mut gt_exp_constraint_idx = Vec::with_capacity(input.gt_exp_public_inputs.len());
         let mut gt_mul_constraint_idx = Vec::new();
-        let mut c_gt = 0usize;
+        let mut c_exp = 0usize;
+        let mut c_mul = 0usize;
         for ct in input.constraint_types.iter() {
             match ct {
                 ConstraintType::GtExp => {
-                    gt_exp_constraint_idx.push(c_gt);
-                    c_gt += 1;
+                    gt_exp_constraint_idx.push(c_exp);
+                    c_exp += 1;
                 }
                 ConstraintType::GtMul => {
-                    gt_mul_constraint_idx.push(c_gt);
-                    c_gt += 1;
+                    gt_mul_constraint_idx.push(c_mul);
+                    c_mul += 1;
                 }
                 _ => {}
             }

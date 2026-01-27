@@ -31,7 +31,7 @@ use crate::{
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
     zkvm::recursion::curve::{Bn254Recursion, RecursionCurve},
     zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness},
-    zkvm::recursion::gt::indexing::{gt_constraint_indices, k_gt, num_gt_constraints_padded},
+    zkvm::recursion::gt::indexing::{k_gt, num_gt_constraints_padded},
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -43,19 +43,6 @@ use rayon::prelude::*;
 /// Degree bound matches existing packed GT exp (see `gt/exponentiation.rs`).
 /// This bound is used by the batching sumcheck interface and by UniPoly compression.
 const DEGREE: usize = 8; // Was 7, but eq*C has degree 1+7=8
-
-#[inline]
-fn transpose_xc_to_cx(input: &[Fq], num_constraints_padded: usize, row_size: usize) -> Vec<Fq> {
-    debug_assert_eq!(input.len(), num_constraints_padded * row_size);
-    let mut out = vec![Fq::zero(); input.len()];
-    for c in 0..num_constraints_padded {
-        let row_off = c * row_size;
-        for x in 0..row_size {
-            out[x * num_constraints_padded + c] = input[row_off + x];
-        }
-    }
-    out
-}
 
 #[derive(Clone, Allocative)]
 pub struct FusedGtExpParams {
@@ -145,22 +132,18 @@ impl FusedGtExpProver {
             .collect();
         let eq_poly = MultilinearPolynomial::from(EqPolynomial::<Fq>::evals(&eq_point));
 
-        // Build GT-local constraint list in global order, and fill packed rows for GtExp only.
-        let gt_globals = gt_constraint_indices(constraint_types);
-        debug_assert_eq!(gt_globals.len(), params.num_gt_constraints);
-
         let build_from_witness = |get: fn(&GtExpWitness<Fq>) -> &Vec<Fq>| {
             let mut xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
-            for (c_gt, &global_idx) in gt_globals.iter().enumerate() {
+            for global_idx in 0..constraint_types.len() {
                 if let ConstraintLocator::GtExp { local } = locator_by_constraint[global_idx] {
                     let src = get(&witnesses[local]);
                     debug_assert_eq!(src.len(), row_size);
-                    let off = c_gt * row_size;
+                    let off = local * row_size;
                     xc[off..off + row_size].copy_from_slice(src);
                 }
             }
-            let cx = transpose_xc_to_cx(&xc, params.num_gt_constraints_padded, row_size);
-            MultilinearPolynomial::LargeScalars(DensePolynomial::new(cx))
+            // Store in [x11 low bits, c_gt high bits] order so `c_gt` is a suffix in Stage 2.
+            MultilinearPolynomial::LargeScalars(DensePolynomial::new(xc))
         };
 
         let rho = build_from_witness(|w| &w.rho_packed);
@@ -180,8 +163,7 @@ impl FusedGtExpProver {
             let off = c * row_size;
             g_xc[off..off + row_size].copy_from_slice(&g_11);
         }
-        let g_cx = transpose_xc_to_cx(&g_xc, params.num_gt_constraints_padded, row_size);
-        let g = MultilinearPolynomial::LargeScalars(DensePolynomial::new(g_cx));
+        let g = MultilinearPolynomial::LargeScalars(DensePolynomial::new(g_xc));
 
         Self {
             params,
@@ -350,15 +332,13 @@ impl FusedGtExpVerifier {
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
 
-        // Build GTExp -> c_gt mapping by scanning global order and counting GT constraints.
+        // Build GTExp -> c index mapping (family-local: 0..num_gt_exp in global order).
         let mut gtexp_c_indices = Vec::new();
-        let mut c_gt = 0usize;
+        let mut c_exp = 0usize;
         for ct in constraint_types {
-            if matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul) {
-                if matches!(ct, ConstraintType::GtExp) {
-                    gtexp_c_indices.push(c_gt);
-                }
-                c_gt += 1;
+            if matches!(ct, ConstraintType::GtExp) {
+                gtexp_c_indices.push(c_exp);
+                c_exp += 1;
             }
         }
 
@@ -399,11 +379,14 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
         let eq_point_f: Vec<Fq> = self.eq_point.iter().map(|c| (*c).into()).collect();
         let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
 
-        // Parse (c,s,x) portions from the sumcheck point.
+        // Parse (s,u,c) portions from the sumcheck point.
+        //
+        // Variable order (LSB-first rounds) is:
+        // - step bits s (7), then elem bits u (4), then c_gt bits (k) as a suffix.
         let k = self.params.num_c_vars;
-        let s0 = k;
-        let x0 = k + self.params.num_step_vars;
-        let r_c_lsb: Vec<Fq> = sumcheck_challenges[..k]
+        let s0 = 0usize;
+        let x0 = self.params.num_step_vars; // 7
+        let r_c_lsb: Vec<Fq> = sumcheck_challenges[CONFIG.packed_vars..]
             .iter()
             .map(|c| (*c).into())
             .collect();
@@ -415,7 +398,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
             .rev()
             .map(|c| (*c).into())
             .collect();
-        let r_x_star: Vec<Fq> = sumcheck_challenges[x0..]
+        let r_x_star: Vec<Fq> = sumcheck_challenges[x0..CONFIG.packed_vars]
             .iter()
             .rev()
             .map(|c| (*c).into())

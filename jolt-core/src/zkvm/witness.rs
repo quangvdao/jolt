@@ -1,13 +1,18 @@
 #![allow(static_mut_refs)]
 
 use allocative::Allocative;
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
+};
 use common::constants::XLEN;
 use common::jolt_device::MemoryLayout;
 use rayon::prelude::*;
+use std::io::{Read, Write};
 use tracer::instruction::Cycle;
 
 use crate::poly::commitment::commitment_scheme::StreamingCommitmentScheme;
 use crate::zkvm::config::OneHotParams;
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::zkvm::instruction::InstructionFlags;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::{
@@ -830,6 +835,448 @@ impl RecursionPoly {
             Self::MultiMillerLoop { term, .. } => term.to_index(),
             Self::Frobenius { term, .. } => term.to_index(),
         }
+    }
+}
+
+// =============================================================================
+// Serialization (canonical + guest) for RecursionPoly and VirtualPolynomial
+// =============================================================================
+
+// RecursionPoly canonical encoding: (tag: u8, term_index: u32, instance: u32)
+const RECURSION_POLY_TAG_G1_ADD: u8 = 0;
+const RECURSION_POLY_TAG_G1_ADD_FUSED: u8 = 1;
+const RECURSION_POLY_TAG_G1_SCALAR_MUL: u8 = 2;
+const RECURSION_POLY_TAG_G2_ADD: u8 = 3;
+const RECURSION_POLY_TAG_G2_SCALAR_MUL: u8 = 4;
+const RECURSION_POLY_TAG_GT_MUL: u8 = 5;
+const RECURSION_POLY_TAG_GT_EXP: u8 = 6;
+const RECURSION_POLY_TAG_MULTI_MILLER_LOOP: u8 = 7;
+const RECURSION_POLY_TAG_FROBENIUS: u8 = 8;
+
+impl CanonicalSerialize for RecursionPoly {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        let (tag, term_index, instance) = match *self {
+            RecursionPoly::G1Add { term, instance } => {
+                (RECURSION_POLY_TAG_G1_ADD, term.to_index(), instance)
+            }
+            RecursionPoly::G1AddFused { term } => {
+                (RECURSION_POLY_TAG_G1_ADD_FUSED, term.to_index(), 0)
+            }
+            RecursionPoly::G1ScalarMul { term, instance } => (
+                RECURSION_POLY_TAG_G1_SCALAR_MUL,
+                term.to_index(),
+                instance,
+            ),
+            RecursionPoly::G2Add { term, instance } => {
+                (RECURSION_POLY_TAG_G2_ADD, term.to_index(), instance)
+            }
+            RecursionPoly::G2ScalarMul { term, instance } => (
+                RECURSION_POLY_TAG_G2_SCALAR_MUL,
+                term.to_index(),
+                instance,
+            ),
+            RecursionPoly::GtMul { term, instance } => {
+                (RECURSION_POLY_TAG_GT_MUL, term.to_index(), instance)
+            }
+            RecursionPoly::GtExp { term, instance } => {
+                (RECURSION_POLY_TAG_GT_EXP, term.to_index(), instance)
+            }
+            RecursionPoly::MultiMillerLoop { term, instance } => (
+                RECURSION_POLY_TAG_MULTI_MILLER_LOOP,
+                term.to_index(),
+                instance,
+            ),
+            RecursionPoly::Frobenius { term, instance } => {
+                (RECURSION_POLY_TAG_FROBENIUS, term.to_index(), instance)
+            }
+        };
+
+        tag.serialize_with_mode(&mut writer, compress)?;
+        (term_index as u32).serialize_with_mode(&mut writer, compress)?;
+        (instance as u32).serialize_with_mode(&mut writer, compress)?;
+        Ok(())
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        let _ = compress;
+        // tag (u8) + term_index (u32) + instance (u32)
+        1 + 4 + 4
+    }
+}
+
+impl Valid for RecursionPoly {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for RecursionPoly {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+        let term_index = u32::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+        let instance = u32::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+
+        Ok(match tag {
+            RECURSION_POLY_TAG_G1_ADD => Self::G1Add {
+                term: G1AddTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            RECURSION_POLY_TAG_G1_ADD_FUSED => Self::G1AddFused {
+                term: G1AddTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+            },
+            RECURSION_POLY_TAG_G1_SCALAR_MUL => Self::G1ScalarMul {
+                term: G1ScalarMulTerm::from_index(term_index)
+                    .ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            RECURSION_POLY_TAG_G2_ADD => Self::G2Add {
+                term: G2AddTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            RECURSION_POLY_TAG_G2_SCALAR_MUL => Self::G2ScalarMul {
+                term: G2ScalarMulTerm::from_index(term_index)
+                    .ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            RECURSION_POLY_TAG_GT_MUL => Self::GtMul {
+                term: GtMulTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            RECURSION_POLY_TAG_GT_EXP => Self::GtExp {
+                term: GtExpTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            RECURSION_POLY_TAG_MULTI_MILLER_LOOP => Self::MultiMillerLoop {
+                term: MultiMillerLoopTerm::from_index(term_index)
+                    .ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            RECURSION_POLY_TAG_FROBENIUS => Self::Frobenius {
+                term: FrobeniusTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
+            _ => return Err(SerializationError::InvalidData),
+        })
+    }
+}
+
+impl GuestSerialize for RecursionPoly {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        // Match the canonical shape: tag + term_index + instance.
+        let (tag, term_index, instance) = match *self {
+            RecursionPoly::G1Add { term, instance } => {
+                (RECURSION_POLY_TAG_G1_ADD, term.to_index(), instance)
+            }
+            RecursionPoly::G1AddFused { term } => {
+                (RECURSION_POLY_TAG_G1_ADD_FUSED, term.to_index(), 0)
+            }
+            RecursionPoly::G1ScalarMul { term, instance } => (
+                RECURSION_POLY_TAG_G1_SCALAR_MUL,
+                term.to_index(),
+                instance,
+            ),
+            RecursionPoly::G2Add { term, instance } => {
+                (RECURSION_POLY_TAG_G2_ADD, term.to_index(), instance)
+            }
+            RecursionPoly::G2ScalarMul { term, instance } => (
+                RECURSION_POLY_TAG_G2_SCALAR_MUL,
+                term.to_index(),
+                instance,
+            ),
+            RecursionPoly::GtMul { term, instance } => {
+                (RECURSION_POLY_TAG_GT_MUL, term.to_index(), instance)
+            }
+            RecursionPoly::GtExp { term, instance } => {
+                (RECURSION_POLY_TAG_GT_EXP, term.to_index(), instance)
+            }
+            RecursionPoly::MultiMillerLoop { term, instance } => (
+                RECURSION_POLY_TAG_MULTI_MILLER_LOOP,
+                term.to_index(),
+                instance,
+            ),
+            RecursionPoly::Frobenius { term, instance } => {
+                (RECURSION_POLY_TAG_FROBENIUS, term.to_index(), instance)
+            }
+        };
+        tag.guest_serialize(w)?;
+        let term_index_u32 = u32::try_from(term_index).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "RecursionPoly term_index overflow")
+        })?;
+        let instance_u32 = u32::try_from(instance).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "RecursionPoly instance overflow")
+        })?;
+        term_index_u32.guest_serialize(w)?;
+        instance_u32.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for RecursionPoly {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        let tag = u8::guest_deserialize(r)?;
+        let term_index = u32::guest_deserialize(r)? as usize;
+        let instance = u32::guest_deserialize(r)? as usize;
+        Ok(match tag {
+            RECURSION_POLY_TAG_G1_ADD => Self::G1Add {
+                term: G1AddTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid G1AddTerm index")
+                })?,
+                instance,
+            },
+            RECURSION_POLY_TAG_G1_ADD_FUSED => Self::G1AddFused {
+                term: G1AddTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid G1AddTerm index")
+                })?,
+            },
+            RECURSION_POLY_TAG_G1_SCALAR_MUL => Self::G1ScalarMul {
+                term: G1ScalarMulTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid G1ScalarMulTerm index",
+                    )
+                })?,
+                instance,
+            },
+            RECURSION_POLY_TAG_G2_ADD => Self::G2Add {
+                term: G2AddTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid G2AddTerm index")
+                })?,
+                instance,
+            },
+            RECURSION_POLY_TAG_G2_SCALAR_MUL => Self::G2ScalarMul {
+                term: G2ScalarMulTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid G2ScalarMulTerm index",
+                    )
+                })?,
+                instance,
+            },
+            RECURSION_POLY_TAG_GT_MUL => Self::GtMul {
+                term: GtMulTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid GtMulTerm index")
+                })?,
+                instance,
+            },
+            RECURSION_POLY_TAG_GT_EXP => Self::GtExp {
+                term: GtExpTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid GtExpTerm index")
+                })?,
+                instance,
+            },
+            RECURSION_POLY_TAG_MULTI_MILLER_LOOP => Self::MultiMillerLoop {
+                term: MultiMillerLoopTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid MultiMillerLoopTerm index",
+                    )
+                })?,
+                instance,
+            },
+            RECURSION_POLY_TAG_FROBENIUS => Self::Frobenius {
+                term: FrobeniusTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid FrobeniusTerm index",
+                    )
+                })?,
+                instance,
+            },
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid RecursionPoly tag",
+                ))
+            }
+        })
+    }
+}
+
+impl GuestSerialize for VirtualPolynomial {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        // Match the canonical tags used in `zkvm/proof_serialization.rs`.
+        match *self {
+            VirtualPolynomial::PC => 0u8.guest_serialize(w),
+            VirtualPolynomial::UnexpandedPC => 1u8.guest_serialize(w),
+            VirtualPolynomial::NextPC => 2u8.guest_serialize(w),
+            VirtualPolynomial::NextUnexpandedPC => 3u8.guest_serialize(w),
+            VirtualPolynomial::NextIsNoop => 4u8.guest_serialize(w),
+            VirtualPolynomial::NextIsVirtual => 5u8.guest_serialize(w),
+            VirtualPolynomial::NextIsFirstInSequence => 6u8.guest_serialize(w),
+            VirtualPolynomial::LeftLookupOperand => 7u8.guest_serialize(w),
+            VirtualPolynomial::RightLookupOperand => 8u8.guest_serialize(w),
+            VirtualPolynomial::LeftInstructionInput => 9u8.guest_serialize(w),
+            VirtualPolynomial::RightInstructionInput => 10u8.guest_serialize(w),
+            VirtualPolynomial::Product => 11u8.guest_serialize(w),
+            VirtualPolynomial::ShouldJump => 12u8.guest_serialize(w),
+            VirtualPolynomial::ShouldBranch => 13u8.guest_serialize(w),
+            VirtualPolynomial::WritePCtoRD => 14u8.guest_serialize(w),
+            VirtualPolynomial::WriteLookupOutputToRD => 15u8.guest_serialize(w),
+            VirtualPolynomial::Rd => 16u8.guest_serialize(w),
+            VirtualPolynomial::Imm => 17u8.guest_serialize(w),
+            VirtualPolynomial::Rs1Value => 18u8.guest_serialize(w),
+            VirtualPolynomial::Rs2Value => 19u8.guest_serialize(w),
+            VirtualPolynomial::RdWriteValue => 20u8.guest_serialize(w),
+            VirtualPolynomial::Rs1Ra => 21u8.guest_serialize(w),
+            VirtualPolynomial::Rs2Ra => 22u8.guest_serialize(w),
+            VirtualPolynomial::RdWa => 23u8.guest_serialize(w),
+            VirtualPolynomial::LookupOutput => 24u8.guest_serialize(w),
+            VirtualPolynomial::InstructionRaf => 25u8.guest_serialize(w),
+            VirtualPolynomial::InstructionRafFlag => 26u8.guest_serialize(w),
+            VirtualPolynomial::InstructionRa(i) => {
+                27u8.guest_serialize(w)?;
+                let i_u32 = u32::try_from(i).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "VirtualPolynomial::InstructionRa index overflow",
+                    )
+                })?;
+                i_u32.guest_serialize(w)
+            }
+            VirtualPolynomial::RegistersVal => 28u8.guest_serialize(w),
+            VirtualPolynomial::RamAddress => 29u8.guest_serialize(w),
+            VirtualPolynomial::RamRa => 30u8.guest_serialize(w),
+            VirtualPolynomial::RamReadValue => 31u8.guest_serialize(w),
+            VirtualPolynomial::RamWriteValue => 32u8.guest_serialize(w),
+            VirtualPolynomial::RamVal => 33u8.guest_serialize(w),
+            VirtualPolynomial::RamValInit => 34u8.guest_serialize(w),
+            VirtualPolynomial::RamValFinal => 35u8.guest_serialize(w),
+            VirtualPolynomial::RamHammingWeight => 36u8.guest_serialize(w),
+            VirtualPolynomial::UnivariateSkip => 37u8.guest_serialize(w),
+            VirtualPolynomial::OpFlags(flags) => {
+                38u8.guest_serialize(w)?;
+                (flags as u8).guest_serialize(w)
+            }
+            VirtualPolynomial::InstructionFlags(flags) => {
+                39u8.guest_serialize(w)?;
+                (flags as u8).guest_serialize(w)
+            }
+            VirtualPolynomial::LookupTableFlag(flag) => {
+                40u8.guest_serialize(w)?;
+                let b = u8::try_from(flag).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "VirtualPolynomial::LookupTableFlag overflow",
+                    )
+                })?;
+                b.guest_serialize(w)
+            }
+            VirtualPolynomial::BytecodeValStage(stage) => {
+                41u8.guest_serialize(w)?;
+                let b = u8::try_from(stage).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "VirtualPolynomial::BytecodeValStage overflow",
+                    )
+                })?;
+                b.guest_serialize(w)
+            }
+            VirtualPolynomial::BytecodeReadRafAddrClaim => 42u8.guest_serialize(w),
+            VirtualPolynomial::BooleanityAddrClaim => 43u8.guest_serialize(w),
+            VirtualPolynomial::BytecodeClaimReductionIntermediate => 44u8.guest_serialize(w),
+            VirtualPolynomial::ProgramImageInitContributionRw => 45u8.guest_serialize(w),
+            VirtualPolynomial::ProgramImageInitContributionRaf => 46u8.guest_serialize(w),
+            VirtualPolynomial::Recursion(poly) => {
+                47u8.guest_serialize(w)?;
+                poly.guest_serialize(w)
+            }
+            VirtualPolynomial::DorySparseConstraintMatrix => 48u8.guest_serialize(w),
+        }
+    }
+}
+
+impl GuestDeserialize for VirtualPolynomial {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        let tag = u8::guest_deserialize(r)?;
+        Ok(match tag {
+            0 => Self::PC,
+            1 => Self::UnexpandedPC,
+            2 => Self::NextPC,
+            3 => Self::NextUnexpandedPC,
+            4 => Self::NextIsNoop,
+            5 => Self::NextIsVirtual,
+            6 => Self::NextIsFirstInSequence,
+            7 => Self::LeftLookupOperand,
+            8 => Self::RightLookupOperand,
+            9 => Self::LeftInstructionInput,
+            10 => Self::RightInstructionInput,
+            11 => Self::Product,
+            12 => Self::ShouldJump,
+            13 => Self::ShouldBranch,
+            14 => Self::WritePCtoRD,
+            15 => Self::WriteLookupOutputToRD,
+            16 => Self::Rd,
+            17 => Self::Imm,
+            18 => Self::Rs1Value,
+            19 => Self::Rs2Value,
+            20 => Self::RdWriteValue,
+            21 => Self::Rs1Ra,
+            22 => Self::Rs2Ra,
+            23 => Self::RdWa,
+            24 => Self::LookupOutput,
+            25 => Self::InstructionRaf,
+            26 => Self::InstructionRafFlag,
+            27 => {
+                let i = u32::guest_deserialize(r)? as usize;
+                Self::InstructionRa(i)
+            }
+            28 => Self::RegistersVal,
+            29 => Self::RamAddress,
+            30 => Self::RamRa,
+            31 => Self::RamReadValue,
+            32 => Self::RamWriteValue,
+            33 => Self::RamVal,
+            34 => Self::RamValInit,
+            35 => Self::RamValFinal,
+            36 => Self::RamHammingWeight,
+            37 => Self::UnivariateSkip,
+            38 => {
+                let d = u8::guest_deserialize(r)?;
+                let flags = CircuitFlags::from_repr(d).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid CircuitFlags")
+                })?;
+                Self::OpFlags(flags)
+            }
+            39 => {
+                let d = u8::guest_deserialize(r)?;
+                let flags = InstructionFlags::from_repr(d).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid InstructionFlags",
+                    )
+                })?;
+                Self::InstructionFlags(flags)
+            }
+            40 => {
+                let d = u8::guest_deserialize(r)? as usize;
+                Self::LookupTableFlag(d)
+            }
+            41 => {
+                let d = u8::guest_deserialize(r)? as usize;
+                Self::BytecodeValStage(d)
+            }
+            42 => Self::BytecodeReadRafAddrClaim,
+            43 => Self::BooleanityAddrClaim,
+            44 => Self::BytecodeClaimReductionIntermediate,
+            45 => Self::ProgramImageInitContributionRw,
+            46 => Self::ProgramImageInitContributionRaf,
+            47 => Self::Recursion(RecursionPoly::guest_deserialize(r)?),
+            48 => Self::DorySparseConstraintMatrix,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid VirtualPolynomial tag",
+                ))
+            }
+        })
     }
 }
 

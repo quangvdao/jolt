@@ -16,12 +16,17 @@ use crate::{
     transcripts::Transcript,
     zkvm::witness::{CommittedPolynomial, VirtualPolynomial},
 };
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
+};
 use ark_bn254::{Fq, Fq12};
 use ark_std::Zero;
+use std::io::{Read, Write};
 
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
 use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 
 #[cfg(feature = "experimental-pairing-recursion")]
 use super::pairing::{
@@ -116,6 +121,122 @@ pub struct RecursionVerifierInput {
     pub pairing_boundary: PairingBoundary,
     /// Stage-8 joint commitment (GT), bound to combine-commitments GT ops by wiring constraints.
     pub joint_commitment: Fq12,
+}
+
+impl CanonicalSerialize for RecursionVerifierInput {
+    fn serialize_with_mode<W: Write>(
+        &self,
+        mut writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        self.constraint_types
+            .serialize_with_mode(&mut writer, compress)?;
+        self.num_vars.serialize_with_mode(&mut writer, compress)?;
+        self.num_constraint_vars
+            .serialize_with_mode(&mut writer, compress)?;
+        self.num_s_vars.serialize_with_mode(&mut writer, compress)?;
+        self.num_constraints
+            .serialize_with_mode(&mut writer, compress)?;
+        self.num_constraints_padded
+            .serialize_with_mode(&mut writer, compress)?;
+        self.gt_exp_public_inputs
+            .serialize_with_mode(&mut writer, compress)?;
+        self.g1_scalar_mul_public_inputs
+            .serialize_with_mode(&mut writer, compress)?;
+        self.g2_scalar_mul_public_inputs
+            .serialize_with_mode(&mut writer, compress)?;
+        self.wiring.serialize_with_mode(&mut writer, compress)?;
+        self.pairing_boundary
+            .serialize_with_mode(&mut writer, compress)?;
+        self.joint_commitment
+            .serialize_with_mode(&mut writer, compress)?;
+        Ok(())
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.constraint_types.serialized_size(compress)
+            + self.num_vars.serialized_size(compress)
+            + self.num_constraint_vars.serialized_size(compress)
+            + self.num_s_vars.serialized_size(compress)
+            + self.num_constraints.serialized_size(compress)
+            + self.num_constraints_padded.serialized_size(compress)
+            + self.gt_exp_public_inputs.serialized_size(compress)
+            + self.g1_scalar_mul_public_inputs.serialized_size(compress)
+            + self.g2_scalar_mul_public_inputs.serialized_size(compress)
+            + self.wiring.serialized_size(compress)
+            + self.pairing_boundary.serialized_size(compress)
+            + self.joint_commitment.serialized_size(compress)
+    }
+}
+
+impl Valid for RecursionVerifierInput {
+    fn check(&self) -> Result<(), SerializationError> {
+        Ok(())
+    }
+}
+
+impl CanonicalDeserialize for RecursionVerifierInput {
+    fn deserialize_with_mode<R: Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        Ok(Self {
+            constraint_types: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            num_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
+            num_constraint_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
+            num_s_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
+            num_constraints: usize::deserialize_with_mode(&mut reader, compress, validate)?,
+            num_constraints_padded: usize::deserialize_with_mode(&mut reader, compress, validate)?,
+            gt_exp_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            g1_scalar_mul_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            g2_scalar_mul_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            wiring: WiringPlan::deserialize_with_mode(&mut reader, compress, validate)?,
+            pairing_boundary: crate::zkvm::proof_serialization::PairingBoundary::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
+            joint_commitment: Fq12::deserialize_with_mode(&mut reader, compress, validate)?,
+        })
+    }
+}
+
+impl GuestSerialize for RecursionVerifierInput {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.constraint_types.guest_serialize(w)?;
+        self.num_vars.guest_serialize(w)?;
+        self.num_constraint_vars.guest_serialize(w)?;
+        self.num_s_vars.guest_serialize(w)?;
+        self.num_constraints.guest_serialize(w)?;
+        self.num_constraints_padded.guest_serialize(w)?;
+        self.gt_exp_public_inputs.guest_serialize(w)?;
+        self.g1_scalar_mul_public_inputs.guest_serialize(w)?;
+        self.g2_scalar_mul_public_inputs.guest_serialize(w)?;
+        self.wiring.guest_serialize(w)?;
+        self.pairing_boundary.guest_serialize(w)?;
+        self.joint_commitment.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for RecursionVerifierInput {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            constraint_types: Vec::guest_deserialize(r)?,
+            num_vars: usize::guest_deserialize(r)?,
+            num_constraint_vars: usize::guest_deserialize(r)?,
+            num_s_vars: usize::guest_deserialize(r)?,
+            num_constraints: usize::guest_deserialize(r)?,
+            num_constraints_padded: usize::guest_deserialize(r)?,
+            gt_exp_public_inputs: Vec::guest_deserialize(r)?,
+            g1_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
+            g2_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
+            wiring: WiringPlan::guest_deserialize(r)?,
+            pairing_boundary: crate::zkvm::proof_serialization::PairingBoundary::guest_deserialize(r)?,
+            joint_commitment: Fq12::guest_deserialize(r)?,
+        })
+    }
 }
 
 /// Unified verifier for the recursion SNARK

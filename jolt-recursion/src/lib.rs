@@ -226,6 +226,33 @@ pub struct PairingBoundary {
     pub rhs: Fq12,
 }
 
+impl GuestSerialize for PairingBoundary {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.p1_g1.guest_serialize(w)?;
+        self.p1_g2.guest_serialize(w)?;
+        self.p2_g1.guest_serialize(w)?;
+        self.p2_g2.guest_serialize(w)?;
+        self.p3_g1.guest_serialize(w)?;
+        self.p3_g2.guest_serialize(w)?;
+        self.rhs.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for PairingBoundary {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            p1_g1: ark_bn254::g1::G1Affine::guest_deserialize(r)?,
+            p1_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
+            p2_g1: ark_bn254::g1::G1Affine::guest_deserialize(r)?,
+            p2_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
+            p3_g1: ark_bn254::g1::G1Affine::guest_deserialize(r)?,
+            p3_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
+            rhs: Fq12::guest_deserialize(r)?,
+        })
+    }
+}
+
 /// Hints for recursion instance-plan derivation when an op's base/point is not an `AstOp::Input`.
 ///
 /// These are used to avoid requiring the verifier to evaluate the full Dory verification DAG just

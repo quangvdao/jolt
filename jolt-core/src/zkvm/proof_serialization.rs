@@ -697,15 +697,15 @@ impl CanonicalSerialize for VirtualPolynomial {
             Self::ProgramImageInitContributionRaf => {
                 46u8.serialize_with_mode(&mut writer, compress)
             }
-            Self::Recursion(_) | Self::DorySparseConstraintMatrix => {
-                unreachable!(
-                    "recursion virtual polynomial serialization is not supported in jolt-core"
-                )
+            Self::Recursion(poly) => {
+                47u8.serialize_with_mode(&mut writer, compress)?;
+                poly.serialize_with_mode(&mut writer, compress)
             }
+            Self::DorySparseConstraintMatrix => 48u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
-    fn serialized_size(&self, _compress: Compress) -> usize {
+    fn serialized_size(&self, compress: Compress) -> usize {
         match self {
             Self::PC
             | Self::UnexpandedPC
@@ -754,9 +754,8 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::InstructionFlags(_)
             | Self::LookupTableFlag(_)
             | Self::BytecodeValStage(_) => 2,
-            Self::Recursion(_) | Self::DorySparseConstraintMatrix => unreachable!(
-                "recursion virtual polynomial serialization is not supported in jolt-core"
-            ),
+            Self::Recursion(poly) => 1 + poly.serialized_size(compress),
+            Self::DorySparseConstraintMatrix => 1,
         }
     }
 }
@@ -842,6 +841,15 @@ impl CanonicalDeserialize for VirtualPolynomial {
                 44 => Self::BytecodeClaimReductionIntermediate,
                 45 => Self::ProgramImageInitContributionRw,
                 46 => Self::ProgramImageInitContributionRaf,
+                47 => {
+                    let poly = crate::zkvm::witness::RecursionPoly::deserialize_with_mode(
+                        &mut reader,
+                        compress,
+                        validate,
+                    )?;
+                    Self::Recursion(poly)
+                }
+                48 => Self::DorySparseConstraintMatrix,
                 _ => return Err(SerializationError::InvalidData),
             },
         )

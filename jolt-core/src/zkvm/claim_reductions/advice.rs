@@ -368,6 +368,32 @@ impl<F: JoltField> AdviceClaimReductionProver<F> {
         }
     }
 
+    /// Create a prover from already-bound polynomial state.
+    /// 
+    /// # Arguments
+    /// * `params` - Parameters already transitioned to AddressVariables phase
+    /// * `advice_coeffs` - Bound advice polynomial coefficients from Stage 6
+    /// * `eq_coeffs` - Bound eq polynomial coefficients from Stage 6
+    /// * `scale` - Scale factor
+    pub fn initialize_address_phase(
+        params: AdviceClaimReductionParams<F>,
+        advice_coeffs: Vec<F>,
+        eq_coeffs: Vec<F>,
+        scale: F,
+    ) -> Self {
+        assert_eq!(
+            advice_coeffs.len(),
+            eq_coeffs.len(),
+            "Advice and EQ polynomial lengths must match"
+        );
+        Self {
+            params,
+            advice_poly: advice_coeffs.into(),
+            eq_poly: eq_coeffs.into(),
+            scale,
+        }
+    }
+
     fn compute_message_unscaled(&mut self, previous_claim_unscaled: F) -> UniPoly<F> {
         let half = self.advice_poly.len() / 2;
         let evals: [F; DEGREE_BOUND] = (0..half)

@@ -278,6 +278,20 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
 
+        // IMPORTANT: The verifier runs in both host and zkVM guest environments.
+        // Host code usually sets `DoryGlobals` layout/config externally (CLI flag), but the guest has
+        // its own global state and must initialize it from the proof.
+        //
+        // If this is not done early, Stage 6b can diverge (notably the advice claim reduction round
+        // schedule depends on `DoryGlobals::get_layout()`), causing sumcheck failure even when the
+        // same bytes verify natively.
+        DoryGlobals::initialize_context(
+            1 << self.one_hot_params.log_k_chunk,
+            self.proof.trace_length.next_power_of_two(),
+            DoryContext::Main,
+            Some(self.proof.dory_layout),
+        );
+
         fiat_shamir_preamble(
             &self.program_io,
             self.proof.ram_K,

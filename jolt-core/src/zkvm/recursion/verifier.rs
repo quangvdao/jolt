@@ -16,17 +16,17 @@ use crate::{
     transcripts::Transcript,
     zkvm::witness::{CommittedPolynomial, VirtualPolynomial},
 };
+use ark_bn254::{Fq, Fq12};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
-use ark_bn254::{Fq, Fq12};
 use ark_std::Zero;
 use std::io::{Read, Write};
 
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
-use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
+use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
 
 #[cfg(feature = "experimental-pairing-recursion")]
 use super::pairing::{
@@ -61,9 +61,9 @@ use super::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionVerifier},
         exponentiation::{GtExpParams, GtExpPublicInputs, GtExpVerifier},
         fused_exponentiation::{FusedGtExpParams, FusedGtExpVerifier},
-        fused_stage2_openings::FusedGtExpStage2OpeningsVerifier,
         fused_multiplication::{FusedGtMulParams, FusedGtMulVerifier},
         fused_shift::{FusedGtShiftParams, FusedGtShiftVerifier},
+        fused_stage2_openings::FusedGtExpStage2OpeningsVerifier,
         indexing::k_gt,
         multiplication::{GtMulParams, GtMulVerifier, GtMulVerifierSpec},
         shift::{GtShiftParams, GtShiftVerifier},
@@ -195,14 +195,23 @@ impl CanonicalDeserialize for RecursionVerifierInput {
             num_constraints: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_constraints_padded: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             gt_exp_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
-            g1_scalar_mul_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
-            g2_scalar_mul_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
-            wiring: WiringPlan::deserialize_with_mode(&mut reader, compress, validate)?,
-            pairing_boundary: crate::zkvm::proof_serialization::PairingBoundary::deserialize_with_mode(
+            g1_scalar_mul_public_inputs: Vec::deserialize_with_mode(
                 &mut reader,
                 compress,
                 validate,
             )?,
+            g2_scalar_mul_public_inputs: Vec::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
+            wiring: WiringPlan::deserialize_with_mode(&mut reader, compress, validate)?,
+            pairing_boundary:
+                crate::zkvm::proof_serialization::PairingBoundary::deserialize_with_mode(
+                    &mut reader,
+                    compress,
+                    validate,
+                )?,
             joint_commitment: Fq12::deserialize_with_mode(&mut reader, compress, validate)?,
         })
     }
@@ -239,7 +248,9 @@ impl GuestDeserialize for RecursionVerifierInput {
             g1_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
             g2_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
             wiring: WiringPlan::guest_deserialize(r)?,
-            pairing_boundary: crate::zkvm::proof_serialization::PairingBoundary::guest_deserialize(r)?,
+            pairing_boundary: crate::zkvm::proof_serialization::PairingBoundary::guest_deserialize(
+                r,
+            )?,
             joint_commitment: Fq12::guest_deserialize(r)?,
         })
     }
@@ -384,11 +395,10 @@ impl RecursionVerifier<Fq> {
             return Err("No GtExp constraints to verify in Stage 1".into());
         }
 
-        let enable_gt_fused_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
+        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
 
         let r_stage1 = if enable_gt_fused_end_to_end {
             let params = FusedGtExpParams::from_constraint_types(&self.input.constraint_types);
@@ -508,7 +518,8 @@ impl RecursionVerifier<Fq> {
                 }
 
                 if enable_shift_rho {
-                    let params = FusedGtShiftParams::from_constraint_types(&self.input.constraint_types);
+                    let params =
+                        FusedGtShiftParams::from_constraint_types(&self.input.constraint_types);
                     verifiers.push(Box::new(FusedGtShiftVerifier::new(params)));
                 }
             } else {
@@ -794,19 +805,33 @@ impl RecursionVerifier<Fq> {
         let expected = packed_eval_from_claims(&layout, &r_full_lsb, |entry| {
             if enable_gt_fused_end_to_end && entry.is_gt_fused {
                 let (sumcheck, vp) = match entry.poly_type {
-                    PolyType::RhoPrev => (SumcheckId::GtExpClaimReduction, VirtualPolynomial::gt_exp_rho_fused()),
-                    PolyType::Quotient => (SumcheckId::GtExpClaimReduction, VirtualPolynomial::gt_exp_quotient_fused()),
+                    PolyType::RhoPrev => (
+                        SumcheckId::GtExpClaimReduction,
+                        VirtualPolynomial::gt_exp_rho_fused(),
+                    ),
+                    PolyType::Quotient => (
+                        SumcheckId::GtExpClaimReduction,
+                        VirtualPolynomial::gt_exp_quotient_fused(),
+                    ),
                     PolyType::MulLhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_lhs_fused()),
                     PolyType::MulRhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_rhs_fused()),
-                    PolyType::MulResult => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result_fused()),
-                    PolyType::MulQuotient => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_quotient_fused()),
+                    PolyType::MulResult => {
+                        (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result_fused())
+                    }
+                    PolyType::MulQuotient => (
+                        SumcheckId::GtMul,
+                        VirtualPolynomial::gt_mul_quotient_fused(),
+                    ),
                     _ => return Fq::zero(),
                 };
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, sumcheck);
                 claim
             } else {
                 let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);
-                virtual_claims.get(claim_idx).copied().unwrap_or_else(Fq::zero)
+                virtual_claims
+                    .get(claim_idx)
+                    .copied()
+                    .unwrap_or_else(Fq::zero)
             }
         });
 

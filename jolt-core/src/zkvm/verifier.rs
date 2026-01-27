@@ -358,6 +358,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     /// - Stage 8 claim ordering snapshot (needed to rebuild combine plan deterministically)\n
     /// - a transcript fork at the \"pre-opening-proof\" state (after gamma sampling)\n
     /// - gamma powers and the joint claim\n
+    #[cfg(feature = "recursion")]
     pub(crate) fn build_stage8_recursion_prep(
         &self,
     ) -> Result<(DoryVerifySnapshot<F>, ProofTranscript, Vec<F>, F), anyhow::Error>
@@ -376,7 +377,12 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             .map(|(g, c)| *g * c)
             .sum();
 
-        Ok((dory_snap, pre_opening_proof_transcript, gamma_powers, joint_claim))
+        Ok((
+            dory_snap,
+            pre_opening_proof_transcript,
+            gamma_powers,
+            joint_claim,
+        ))
     }
 
     #[tracing::instrument(skip_all, name = "verify_stage1")]

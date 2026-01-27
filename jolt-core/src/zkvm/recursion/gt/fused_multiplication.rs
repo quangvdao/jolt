@@ -119,7 +119,9 @@ impl FusedGtMulProver {
     pub fn new<T: Transcript>(
         params: FusedGtMulParams,
         constraint_types: &[ConstraintType],
-        gt_mul_rows: &[crate::zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials<Fq>],
+        gt_mul_rows: &[crate::zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials<
+            Fq,
+        >],
         g_poly_4var: &DensePolynomial<Fq>,
         transcript: &mut T,
     ) -> Self {
@@ -158,7 +160,8 @@ impl FusedGtMulProver {
         // Indicator table in [x_low, c_high] layout, then transpose to [c_low, x_high].
         let mut ind_xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
         for c in 0..params.num_gt_constraints_padded {
-            let is_gtmul = c < params.num_gt_constraints && matches!(gt_kinds[c], ConstraintType::GtMul);
+            let is_gtmul =
+                c < params.num_gt_constraints && matches!(gt_kinds[c], ConstraintType::GtMul);
             if is_gtmul {
                 let off = c * row_size;
                 for x in 0..row_size {
@@ -188,7 +191,9 @@ impl FusedGtMulProver {
         let g_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(g_cx));
 
         // Helper to build a fused GTMul term table (padded to 11 vars).
-        let build_term = |get_term4: fn(&crate::zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials<Fq>) -> &Vec<Fq>| {
+        let build_term = |get_term4: fn(
+            &crate::zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials<Fq>,
+        ) -> &Vec<Fq>| {
             let mut term_xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
             for c in 0..params.num_gt_constraints_padded {
                 let Some(local) = (c < params.num_gt_constraints)
@@ -234,25 +239,36 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedGtMulProver {
 
     fn compute_message(&mut self, _round: usize, previous_claim: Fq) -> UniPoly<Fq> {
         let num_remaining = self.eq_poly.get_num_vars();
-        debug_assert!(num_remaining > 0, "fused gtmul should have at least one round");
+        debug_assert!(
+            num_remaining > 0,
+            "fused gtmul should have at least one round"
+        );
         let half = 1usize << (num_remaining - 1);
 
         let total_evals: [Fq; DEGREE] = (0..half)
             .into_par_iter()
             .map(|idx| {
-                let eq_evals = self.eq_poly.sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
-                let ind_evals =
-                    self.indicator_poly
-                        .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
-                let lhs_e = self.lhs.sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
-                let rhs_e = self.rhs.sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
-                let res_e =
-                    self.result
-                        .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let eq_evals = self
+                    .eq_poly
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let ind_evals = self
+                    .indicator_poly
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let lhs_e = self
+                    .lhs
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let rhs_e = self
+                    .rhs
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let res_e = self
+                    .result
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
                 let quo_e = self
                     .quotient
                     .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
-                let g_e = self.g_poly.sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let g_e = self
+                    .g_poly
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
 
                 let mut out = [Fq::zero(); DEGREE];
                 for eval_index in 0..DEGREE {
@@ -395,13 +411,21 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtMulVerifier {
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
         // Reverse challenges to form the evaluation point used by EqPolynomial::mle.
-        let eval_point: Vec<Fq> = sumcheck_challenges.iter().rev().map(|c| (*c).into()).collect();
+        let eval_point: Vec<Fq> = sumcheck_challenges
+            .iter()
+            .rev()
+            .map(|c| (*c).into())
+            .collect();
         let eq_point_f: Vec<Fq> = self.eq_point.iter().map(|c| (*c).into()).collect();
         let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
 
         // Indicator I_gtmul(r_c) as Σ_{c in gtmul_c_indices} Eq(r_c, c).
         let k = self.params.num_constraint_index_vars;
-        let r_c: Vec<Fq> = sumcheck_challenges.iter().take(k).map(|c| (*c).into()).collect();
+        let r_c: Vec<Fq> = sumcheck_challenges
+            .iter()
+            .take(k)
+            .map(|c| (*c).into())
+            .collect();
         let mut ind_eval = Fq::zero();
         for &c in &self.gtmul_c_indices {
             let bits = index_to_binary::<Fq>(c, k);
@@ -410,7 +434,10 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtMulVerifier {
 
         // Extract u (last 4 x-bits) and evaluate g(u).
         let x_start = k;
-        let r_x: Vec<Fq> = sumcheck_challenges[x_start..].iter().map(|c| (*c).into()).collect();
+        let r_x: Vec<Fq> = sumcheck_challenges[x_start..]
+            .iter()
+            .map(|c| (*c).into())
+            .collect();
         debug_assert_eq!(r_x.len(), 11);
         let r_u = &r_x[7..11];
         let g_eval = self.eval_g_at_u(r_u);
@@ -454,4 +481,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtMulVerifier {
         }
     }
 }
-

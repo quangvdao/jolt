@@ -7,10 +7,15 @@ use crate::{
     poly::{
         dense_mlpoly::DensePolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
-        opening_proof::{OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator, BIG_ENDIAN},
+        opening_proof::{
+            OpeningPoint, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
+            BIG_ENDIAN,
+        },
         unipoly::UniPoly,
     },
-    subprotocols::{sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier},
+    subprotocols::{
+        sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
+    },
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
@@ -102,9 +107,15 @@ impl<T: Transcript> FusedGtExpStage2OpeningsProver<T> {
 }
 
 impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsProver<T> {
-    fn degree(&self) -> usize { 1 }
-    fn num_rounds(&self) -> usize { self.params.num_rounds }
-    fn input_claim(&self, _acc: &ProverOpeningAccumulator<Fq>) -> Fq { Fq::zero() }
+    fn degree(&self) -> usize {
+        1
+    }
+    fn num_rounds(&self) -> usize {
+        self.params.num_rounds
+    }
+    fn input_claim(&self, _acc: &ProverOpeningAccumulator<Fq>) -> Fq {
+        Fq::zero()
+    }
     fn compute_message(&mut self, _round: usize, _previous_claim: Fq) -> UniPoly<Fq> {
         UniPoly::from_coeff(vec![Fq::zero()])
     }
@@ -152,14 +163,22 @@ impl FusedGtExpStage2OpeningsVerifier {
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpStage2OpeningsVerifier {
-    fn degree(&self) -> usize { 1 }
-    fn num_rounds(&self) -> usize { self.params.num_rounds }
-    fn input_claim(&self, _acc: &VerifierOpeningAccumulator<Fq>) -> Fq { Fq::zero() }
+    fn degree(&self) -> usize {
+        1
+    }
+    fn num_rounds(&self) -> usize {
+        self.params.num_rounds
+    }
+    fn input_claim(&self, _acc: &VerifierOpeningAccumulator<Fq>) -> Fq {
+        Fq::zero()
+    }
     fn expected_output_claim(
         &self,
         _acc: &VerifierOpeningAccumulator<Fq>,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
-    ) -> Fq { Fq::zero() }
+    ) -> Fq {
+        Fq::zero()
+    }
 
     fn cache_openings(
         &self,
@@ -172,8 +191,12 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpStage2Openings
             VirtualPolynomial::gt_exp_rho_fused(),
             VirtualPolynomial::gt_exp_quotient_fused(),
         ] {
-            accumulator.append_virtual(transcript, vp, SumcheckId::GtExpClaimReduction, opening_point.clone());
+            accumulator.append_virtual(
+                transcript,
+                vp,
+                SumcheckId::GtExpClaimReduction,
+                opening_point.clone(),
+            );
         }
     }
 }
-

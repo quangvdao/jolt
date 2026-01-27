@@ -167,16 +167,18 @@ impl<T: Transcript> WiringGtProver<T> {
         for (global_idx, ct) in cs.constraint_types.iter().enumerate() {
             match ct {
                 ConstraintType::GtExp => {
-                    if let crate::zkvm::recursion::constraints::system::ConstraintLocator::GtExp { local } =
-                        cs.locator_by_constraint[global_idx]
+                    if let crate::zkvm::recursion::constraints::system::ConstraintLocator::GtExp {
+                        local,
+                    } = cs.locator_by_constraint[global_idx]
                     {
                         gt_exp_constraint_idx[local] = c_gt;
                     }
                     c_gt += 1;
                 }
                 ConstraintType::GtMul => {
-                    if let crate::zkvm::recursion::constraints::system::ConstraintLocator::GtMul { local } =
-                        cs.locator_by_constraint[global_idx]
+                    if let crate::zkvm::recursion::constraints::system::ConstraintLocator::GtMul {
+                        local,
+                    } = cs.locator_by_constraint[global_idx]
                     {
                         gt_mul_constraint_idx[local] = c_gt;
                     }
@@ -451,11 +453,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
             // Compute g(0) and g(1), then extrapolate g(2) = 2*g(1) - g(0).
             let mut g0 = Fq::zero();
             let mut g1 = Fq::zero();
-            for (edge_idx, (lambda, edge)) in self
-                .lambdas
-                .iter()
-                .zip(self.edges.iter())
-                .enumerate()
+            for (edge_idx, (lambda, edge)) in self.lambdas.iter().zip(self.edges.iter()).enumerate()
             {
                 let src_c = match edge.src {
                     GtProducer::GtExpRho { instance } => self.gt_exp_constraint_idx[instance],
@@ -560,9 +558,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                         .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
                     for t in 0..DEGREE {
                         let weight = eq_u_evals[t] * eq_s_evals[t];
-                        delta_evals[t] += *lambda
-                            * weight
-                            * (w_src * src_evals[t] - w_dst * dst_evals[t]);
+                        delta_evals[t] +=
+                            *lambda * weight * (w_src * src_evals[t] - w_dst * dst_evals[t]);
                     }
                 }
                 delta_evals
@@ -589,11 +586,19 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
 
             for (i, w) in self.gt_exp_c_prefix.iter_mut().enumerate() {
                 let c = self.gt_exp_constraint_idx[i];
-                *w *= if ((c >> bit_pos) & 1) == 1 { r } else { one_minus };
+                *w *= if ((c >> bit_pos) & 1) == 1 {
+                    r
+                } else {
+                    one_minus
+                };
             }
             for (i, w) in self.gt_mul_c_prefix.iter_mut().enumerate() {
                 let c = self.gt_mul_constraint_idx[i];
-                *w *= if ((c >> bit_pos) & 1) == 1 { r } else { one_minus };
+                *w *= if ((c >> bit_pos) & 1) == 1 {
+                    r
+                } else {
+                    one_minus
+                };
             }
             return;
         }
@@ -661,7 +666,10 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
             };
 
             let eq_s = match edge.src {
-                GtProducer::GtExpRho { instance } => self.eq_s_by_exp[instance].as_ref().unwrap().get_bound_coeff(0),
+                GtProducer::GtExpRho { instance } => self.eq_s_by_exp[instance]
+                    .as_ref()
+                    .unwrap()
+                    .get_bound_coeff(0),
                 GtProducer::GtMulResult { .. } => eq_s_default,
             };
 
@@ -775,11 +783,10 @@ impl<'a> LegacyGtWiringValueSource<'a> {
 
     #[inline]
     pub(crate) fn src_at_r(&self, src: GtProducer) -> Fq {
-        let enable_gt_fused_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
+        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
         match src {
             GtProducer::GtExpRho { instance } => {
                 if enable_gt_fused_end_to_end {
@@ -820,11 +827,10 @@ impl<'a> LegacyGtWiringValueSource<'a> {
 
     #[inline]
     pub(crate) fn dst_at_r(&self, dst: GtConsumer) -> Fq {
-        let enable_gt_fused_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
+        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
         match dst {
             GtConsumer::GtMulLhs { instance } => {
                 if enable_gt_fused_end_to_end {

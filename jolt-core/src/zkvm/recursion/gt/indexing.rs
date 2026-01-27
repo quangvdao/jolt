@@ -14,7 +14,9 @@ pub fn gt_constraint_indices(constraint_types: &[ConstraintType]) -> Vec<usize> 
     constraint_types
         .iter()
         .enumerate()
-        .filter_map(|(i, ct)| matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul).then_some(i))
+        .filter_map(|(i, ct)| {
+            matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul).then_some(i)
+        })
         .collect()
 }
 
@@ -28,7 +30,9 @@ pub fn num_gt_constraints(constraint_types: &[ConstraintType]) -> usize {
 
 /// Padded GT constraint count (power of two, min 1).
 pub fn num_gt_constraints_padded(constraint_types: &[ConstraintType]) -> usize {
-    num_gt_constraints(constraint_types).max(1).next_power_of_two()
+    num_gt_constraints(constraint_types)
+        .max(1)
+        .next_power_of_two()
 }
 
 /// `k_gt = log2(num_gt_constraints_padded)`.
@@ -48,4 +52,3 @@ pub fn global_to_c_gt(constraint_types: &[ConstraintType]) -> Vec<Option<usize>>
     }
     out
 }
-

@@ -61,9 +61,9 @@ use super::{
         claim_reduction::{GtExpClaimReductionParams, GtExpClaimReductionProver},
         exponentiation::{GtExpParams, GtExpProver},
         fused_exponentiation::{FusedGtExpParams, FusedGtExpProver},
-        fused_stage2_openings::FusedGtExpStage2OpeningsProver,
         fused_multiplication::{FusedGtMulParams, FusedGtMulProver},
         fused_shift::{FusedGtShiftParams, FusedGtShiftProver},
+        fused_stage2_openings::FusedGtExpStage2OpeningsProver,
         indexing::k_gt,
         multiplication::{GtMulConstraintPolynomials, GtMulParams, GtMulProver, GtMulProverSpec},
         shift::{GtShiftParams, GtShiftProver},
@@ -803,11 +803,10 @@ impl RecursionProver<Fq> {
             return Err("No GtExp constraints to prove in Stage 1".into());
         }
 
-        let enable_gt_fused_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
+        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
 
         // Packed GT exp uses layout x * 128 + s (s in low bits), so g needs replication
         // across the step variables.
@@ -828,28 +827,36 @@ impl RecursionProver<Fq> {
         let g_replicated = pad_4var_to_11var_replicated(&g_4var);
         let g_poly_replicated_f = DensePolynomial::new(g_replicated);
 
-        let mut packed_gt_exp_prover: Box<dyn SumcheckInstanceProver<Fq, T>> = if enable_gt_fused_end_to_end {
-            let params = FusedGtExpParams::from_constraint_types(&self.constraint_system.constraint_types);
-            tracing::info!(
-                "[Stage 1] Creating FusedGtExpProver with {} GTExp witnesses",
-                packed_witnesses.len()
-            );
-            Box::new(FusedGtExpProver::new(
-                params,
-                &self.constraint_system.constraint_types,
-                &self.constraint_system.locator_by_constraint,
-                packed_witnesses,
-                g_poly_replicated_f,
-                transcript,
-            ))
-        } else {
-            let params = GtExpParams::new();
-            tracing::info!(
-                "[Stage 1] Creating GtExpProver with {} witnesses",
-                packed_witnesses.len()
-            );
-            Box::new(GtExpProver::new(params, packed_witnesses, g_poly_replicated_f, transcript))
-        };
+        let mut packed_gt_exp_prover: Box<dyn SumcheckInstanceProver<Fq, T>> =
+            if enable_gt_fused_end_to_end {
+                let params = FusedGtExpParams::from_constraint_types(
+                    &self.constraint_system.constraint_types,
+                );
+                tracing::info!(
+                    "[Stage 1] Creating FusedGtExpProver with {} GTExp witnesses",
+                    packed_witnesses.len()
+                );
+                Box::new(FusedGtExpProver::new(
+                    params,
+                    &self.constraint_system.constraint_types,
+                    &self.constraint_system.locator_by_constraint,
+                    packed_witnesses,
+                    g_poly_replicated_f,
+                    transcript,
+                ))
+            } else {
+                let params = GtExpParams::new();
+                tracing::info!(
+                    "[Stage 1] Creating GtExpProver with {} witnesses",
+                    packed_witnesses.len()
+                );
+                Box::new(GtExpProver::new(
+                    params,
+                    packed_witnesses,
+                    g_poly_replicated_f,
+                    transcript,
+                ))
+            };
 
         // Run the (single-instance) sumcheck.
         let (proof, r_stage1) =
@@ -920,8 +927,9 @@ impl RecursionProver<Fq> {
                 }
 
                 if enable_shift_rho {
-                    let params =
-                        FusedGtShiftParams::from_constraint_types(&self.constraint_system.constraint_types);
+                    let params = FusedGtShiftParams::from_constraint_types(
+                        &self.constraint_system.constraint_types,
+                    );
                     let prover = FusedGtShiftProver::new(
                         params,
                         &self.constraint_system.constraint_types,
@@ -1360,19 +1368,33 @@ impl RecursionProver<Fq> {
         let packed_eval = packed_eval_from_claims(&layout, &r_full_lsb, |entry| {
             if enable_gt_fused_end_to_end && entry.is_gt_fused {
                 let (sumcheck, vp) = match entry.poly_type {
-                    PolyType::RhoPrev => (SumcheckId::GtExpClaimReduction, VirtualPolynomial::gt_exp_rho_fused()),
-                    PolyType::Quotient => (SumcheckId::GtExpClaimReduction, VirtualPolynomial::gt_exp_quotient_fused()),
+                    PolyType::RhoPrev => (
+                        SumcheckId::GtExpClaimReduction,
+                        VirtualPolynomial::gt_exp_rho_fused(),
+                    ),
+                    PolyType::Quotient => (
+                        SumcheckId::GtExpClaimReduction,
+                        VirtualPolynomial::gt_exp_quotient_fused(),
+                    ),
                     PolyType::MulLhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_lhs_fused()),
                     PolyType::MulRhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_rhs_fused()),
-                    PolyType::MulResult => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result_fused()),
-                    PolyType::MulQuotient => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_quotient_fused()),
+                    PolyType::MulResult => {
+                        (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result_fused())
+                    }
+                    PolyType::MulQuotient => (
+                        SumcheckId::GtMul,
+                        VirtualPolynomial::gt_mul_quotient_fused(),
+                    ),
                     _ => return Fq::zero(),
                 };
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, sumcheck);
                 claim
             } else {
                 let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);
-                virtual_claims.get(claim_idx).copied().unwrap_or_else(Fq::zero)
+                virtual_claims
+                    .get(claim_idx)
+                    .copied()
+                    .unwrap_or_else(Fq::zero)
             }
         });
 

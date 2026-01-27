@@ -12,7 +12,7 @@ extern crate alloc;
 
 use jolt::{
     end_cycle_tracking, start_cycle_tracking, GuestDeserialize, JoltDevice,
-    JoltVerifierPreprocessing, RecursionArtifact, RV64IMACProof, RV64IMACVerifier, F, PCS,
+    JoltVerifierPreprocessing, RV64IMACProof, RV64IMACVerifier, RecursionArtifact, F, PCS,
 };
 
 mod embedded_bytes {

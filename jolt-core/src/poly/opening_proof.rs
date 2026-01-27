@@ -614,7 +614,9 @@ where
         };
 
         // 3. Get the polynomial from the provided map
-        let polynomial = polynomials.get(&poly_id).ok_or(ProofVerifyError::InternalError)?;
+        let polynomial = polynomials
+            .get(&poly_id)
+            .ok_or(ProofVerifyError::InternalError)?;
 
         // 4. Direct PCS proof (no sumcheck, no batching, no hints)
         let proof = PCS::prove(pcs_setup, polynomial, &opening_point.r, None, transcript);

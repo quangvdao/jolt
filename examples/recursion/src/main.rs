@@ -489,7 +489,9 @@ fn collect_guest_proofs(
 
         io_device.serialize_compressed(&mut cursor).unwrap();
         proof.serialize_compressed(&mut cursor).unwrap();
-        recursion_artifact.serialize_compressed(&mut cursor).unwrap();
+        recursion_artifact
+            .serialize_compressed(&mut cursor)
+            .unwrap();
 
         info!("  Verifying...");
         if let Some(ref recursion_artifact) = recursion_artifact {

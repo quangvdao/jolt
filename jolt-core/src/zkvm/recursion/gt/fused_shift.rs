@@ -20,7 +20,9 @@ use crate::{
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
     zkvm::recursion::gt::indexing::{gt_constraint_indices, k_gt, num_gt_constraints_padded},
-    zkvm::recursion::gt::shift::{eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle},
+    zkvm::recursion::gt::shift::{
+        eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
+    },
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -312,4 +314,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtShiftVerifier {
         // No-op.
     }
 }
-

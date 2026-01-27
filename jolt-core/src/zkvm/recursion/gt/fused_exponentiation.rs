@@ -214,16 +214,36 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpProver {
             .into_par_iter()
             .map(|i| {
                 // Use sumcheck_evals_array like FusedG1Add does
-                let eq = self.eq_poly.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let rho = self.rho.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let rho_next = self.rho_next.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let quotient = self.quotient.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let digit_lo = self.digit_lo.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let digit_hi = self.digit_hi.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let base = self.base.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let base2 = self.base2.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let base3 = self.base3.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
-                let g = self.g.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let eq = self
+                    .eq_poly
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let rho = self
+                    .rho
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let rho_next = self
+                    .rho_next
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let quotient = self
+                    .quotient
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let digit_lo = self
+                    .digit_lo
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let digit_hi = self
+                    .digit_hi
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let base = self
+                    .base
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let base2 = self
+                    .base2
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let base3 = self
+                    .base3
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                let g = self
+                    .g
+                    .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
 
                 let mut out = [Fq::zero(); DEGREE];
                 for t in 0..DEGREE {
@@ -383,7 +403,10 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
         let k = self.params.num_c_vars;
         let s0 = k;
         let x0 = k + self.params.num_step_vars;
-        let r_c_lsb: Vec<Fq> = sumcheck_challenges[..k].iter().map(|c| (*c).into()).collect();
+        let r_c_lsb: Vec<Fq> = sumcheck_challenges[..k]
+            .iter()
+            .map(|c| (*c).into())
+            .collect();
 
         // For digit/base evaluation helpers, match the existing packed GT exp verifier convention:
         // reverse within each chunk (big-endian).
@@ -415,7 +438,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
         // Compute g(r_x_star) using the public 4-var g MLE.
         let g_eval: Fq = {
             let g_mle_4var = <Bn254Recursion as RecursionCurve>::g_mle();
-            let g_poly = MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_4var));
+            let g_poly =
+                MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_4var));
             g_poly.evaluate_dot_product::<Fq>(&r_x_star)
         };
 
@@ -475,4 +499,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
         }
     }
 }
-

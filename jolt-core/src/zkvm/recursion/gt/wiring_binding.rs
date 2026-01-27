@@ -14,7 +14,9 @@ use crate::{
         opening_proof::{OpeningAccumulator, SumcheckId, VerifierOpeningAccumulator},
         unipoly::UniPoly,
     },
-    subprotocols::{sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier},
+    subprotocols::{
+        sumcheck_prover::SumcheckInstanceProver, sumcheck_verifier::SumcheckInstanceVerifier,
+    },
     transcripts::Transcript,
     zkvm::recursion::gt::wiring::{ELEM_VARS, STEP_VARS},
     zkvm::recursion::wiring_plan::{GtConsumer, GtProducer, GtWiringEdge},
@@ -60,9 +62,15 @@ impl<T: Transcript> allocative::Allocative for GtWiringBindingProver<T> {
 }
 
 impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtWiringBindingProver<T> {
-    fn degree(&self) -> usize { 1 }
-    fn num_rounds(&self) -> usize { self.num_rounds }
-    fn input_claim(&self, _acc: &crate::poly::opening_proof::ProverOpeningAccumulator<Fq>) -> Fq { Fq::zero() }
+    fn degree(&self) -> usize {
+        1
+    }
+    fn num_rounds(&self) -> usize {
+        self.num_rounds
+    }
+    fn input_claim(&self, _acc: &crate::poly::opening_proof::ProverOpeningAccumulator<Fq>) -> Fq {
+        Fq::zero()
+    }
     fn compute_message(&mut self, _round: usize, _previous_claim: Fq) -> UniPoly<Fq> {
         UniPoly::from_coeff(vec![Fq::zero()])
     }
@@ -93,16 +101,26 @@ impl GtWiringBindingVerifier {
             .enumerate()
             .map(|(b, c)| {
                 let r_b: Fq = (*c).into();
-                if ((idx >> b) & 1) == 1 { r_b } else { Fq::one() - r_b }
+                if ((idx >> b) & 1) == 1 {
+                    r_b
+                } else {
+                    Fq::one() - r_b
+                }
             })
             .product()
     }
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtWiringBindingVerifier {
-    fn degree(&self) -> usize { 1 }
-    fn num_rounds(&self) -> usize { self.inner.num_c_vars + STEP_VARS + ELEM_VARS }
-    fn input_claim(&self, _acc: &VerifierOpeningAccumulator<Fq>) -> Fq { Fq::zero() }
+    fn degree(&self) -> usize {
+        1
+    }
+    fn num_rounds(&self) -> usize {
+        self.inner.num_c_vars + STEP_VARS + ELEM_VARS
+    }
+    fn input_claim(&self, _acc: &VerifierOpeningAccumulator<Fq>) -> Fq {
+        Fq::zero()
+    }
 
     fn expected_output_claim(
         &self,
@@ -187,4 +205,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtWiringBindingVerifier 
         // No-op.
     }
 }
-

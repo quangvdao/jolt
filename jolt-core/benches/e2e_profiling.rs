@@ -10,6 +10,94 @@ use std::fs;
 use std::io::Write;
 use std::time::Instant;
 
+#[cfg(feature = "recursion")]
+mod recursion_sizes {
+    use super::*;
+    use ark_serialize::Compress;
+
+    fn sz<T: CanonicalSerialize>(v: &T, compress: Compress) -> usize {
+        v.serialized_size(compress)
+    }
+
+    fn log_size(label: &str, bytes: usize) {
+        println!("{label}: {bytes} bytes");
+    }
+
+    fn log_sizes<T: CanonicalSerialize>(label: &str, v: &T) -> (usize, usize) {
+        let c = sz(v, Compress::Yes);
+        let u = sz(v, Compress::No);
+        println!("{label}: {c} bytes (compressed), {u} bytes (uncompressed)");
+        (c, u)
+    }
+
+    pub fn log_jolt_proof_breakdown(
+        proof: &jolt_core::zkvm::proof_serialization::JoltProof<
+            jolt_core::ark_bn254::Fr,
+            jolt_core::poly::commitment::dory::DoryCommitmentScheme,
+            jolt_core::transcripts::Blake2bTranscript,
+        >,
+    ) {
+        println!("--- base JoltProof size breakdown (ark_serialize canonical) ---");
+        log_sizes("opening_claims", &proof.opening_claims);
+        log_sizes("commitments", &proof.commitments);
+        log_sizes(
+            "stage1_uni_skip_first_round_proof",
+            &proof.stage1_uni_skip_first_round_proof,
+        );
+        log_sizes("stage1_sumcheck_proof", &proof.stage1_sumcheck_proof);
+        log_sizes(
+            "stage2_uni_skip_first_round_proof",
+            &proof.stage2_uni_skip_first_round_proof,
+        );
+        log_sizes("stage2_sumcheck_proof", &proof.stage2_sumcheck_proof);
+        log_sizes("stage3_sumcheck_proof", &proof.stage3_sumcheck_proof);
+        log_sizes("stage4_sumcheck_proof", &proof.stage4_sumcheck_proof);
+        log_sizes("stage5_sumcheck_proof", &proof.stage5_sumcheck_proof);
+        log_sizes("stage6a_sumcheck_proof", &proof.stage6a_sumcheck_proof);
+        log_sizes("stage6b_sumcheck_proof", &proof.stage6b_sumcheck_proof);
+        log_sizes("stage7_sumcheck_proof", &proof.stage7_sumcheck_proof);
+        log_sizes("joint_opening_proof", &proof.joint_opening_proof);
+        log_sizes(
+            "untrusted_advice_commitment",
+            &proof.untrusted_advice_commitment,
+        );
+        log_size("trace_length", sz(&proof.trace_length, Compress::Yes));
+        log_size("ram_K", sz(&proof.ram_K, Compress::Yes));
+        log_size("bytecode_K", sz(&proof.bytecode_K, Compress::Yes));
+        log_size("program_mode", sz(&proof.program_mode, Compress::Yes));
+        log_size("rw_config", sz(&proof.rw_config, Compress::Yes));
+        log_size("one_hot_config", sz(&proof.one_hot_config, Compress::Yes));
+        log_size("dory_layout", sz(&proof.dory_layout, Compress::Yes));
+        log_size("TOTAL (compressed)", sz(proof, Compress::Yes));
+        log_size("TOTAL (uncompressed)", sz(proof, Compress::No));
+    }
+
+    pub fn log_recursion_artifact_breakdown(
+        artifact: &jolt_core::zkvm::recursion::RecursionArtifact<
+            jolt_core::transcripts::Blake2bTranscript,
+        >,
+    ) {
+        println!("--- RecursionArtifact size breakdown (ark_serialize canonical) ---");
+        log_sizes("stage8_combine_hint", &artifact.stage8_combine_hint);
+        log_sizes("pairing_boundary", &artifact.pairing_boundary);
+        log_sizes("non_input_base_hints", &artifact.non_input_base_hints);
+
+        println!("--- recursion SNARK proof (inner) ---");
+        log_sizes("proof.stage1_proof", &artifact.proof.stage1_proof);
+        log_sizes("proof.stage2_proof", &artifact.proof.stage2_proof);
+        log_sizes(
+            "proof.stage3_packed_eval",
+            &artifact.proof.stage3_packed_eval,
+        );
+        log_sizes("proof.opening_proof", &artifact.proof.opening_proof);
+        log_sizes("proof.opening_claims", &artifact.proof.opening_claims);
+        log_sizes("proof.dense_commitment", &artifact.proof.dense_commitment);
+
+        log_size("TOTAL (compressed)", sz(artifact, Compress::Yes));
+        log_size("TOTAL (uncompressed)", sz(artifact, Compress::No));
+    }
+}
+
 // Empirically measured cycles per operation for RV64IMAC
 const CYCLES_PER_SHA256: f64 = 3396.0;
 const CYCLES_PER_SHA3: f64 = 4330.0;
@@ -282,13 +370,44 @@ fn prove_example(
         let program_io = prover.program_io.clone();
         let (jolt_proof, _) = prover.prove();
 
+        // Verifier preprocessing is derived from prover preprocessing.
+        // This automatically uses committed mode if preprocessing was committed.
+        let verifier_preprocessing = JoltVerifierPreprocessing::from(&preprocessing);
+
         if recursion {
-            println!("recursion benchmarking moved to the jolt-recursion crate");
+            #[cfg(feature = "recursion")]
+            {
+                use jolt_core::transcripts::Blake2bTranscript;
+                let recursion_artifact =
+                    jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
+                        &verifier_preprocessing,
+                        program_io.clone(),
+                        None,
+                        &jolt_proof,
+                    )
+                    .expect("Failed to generate recursion artifact");
+
+                recursion_sizes::log_jolt_proof_breakdown(&jolt_proof);
+                recursion_sizes::log_recursion_artifact_breakdown(&recursion_artifact);
+
+                jolt_core::zkvm::recursion::verify_recursion::<Blake2bTranscript>(
+                    &verifier_preprocessing,
+                    program_io,
+                    None,
+                    &jolt_proof,
+                    &recursion_artifact,
+                )
+                .expect("Recursion verification failed");
+                return;
+            }
+            #[cfg(not(feature = "recursion"))]
+            {
+                println!(
+                    "recursion requested, but jolt-core was built without `--features recursion`"
+                );
+            }
         }
 
-        // Verifier preprocessing is derived from prover preprocessing
-        // This automatically uses committed mode if preprocessing was committed
-        let verifier_preprocessing = JoltVerifierPreprocessing::from(&preprocessing);
         let verifier =
             RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
                 .expect("Failed to create verifier");
@@ -368,10 +487,6 @@ fn prove_example_with_trace(
     drop(span);
     let proof_size = jolt_proof.serialized_size(ark_serialize::Compress::Yes);
 
-    if recursion {
-        println!("recursion benchmarking moved to the jolt-recursion crate");
-    }
-
     // Stage 8: Dory opening proof (curve points - benefits from compression)
     let stage8_size_compressed = jolt_proof
         .joint_opening_proof
@@ -395,15 +510,65 @@ fn prove_example_with_trace(
         + (commitments_size_uncompressed / 3);
 
     let verifier_preprocessing = JoltVerifierPreprocessing::from(&preprocessing);
-    let verifier =
-        RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
-            .expect("Failed to create verifier");
-    verifier.verify().unwrap();
+
+    #[cfg(feature = "recursion")]
+    let mut total_size = proof_size;
+    #[cfg(not(feature = "recursion"))]
+    let total_size = proof_size;
+
+    #[cfg(feature = "recursion")]
+    let mut total_size_full_compressed = proof_size_full_compressed;
+    #[cfg(not(feature = "recursion"))]
+    let total_size_full_compressed = proof_size_full_compressed;
+
+    if recursion {
+        #[cfg(feature = "recursion")]
+        {
+            use jolt_core::transcripts::Blake2bTranscript;
+            let recursion_artifact =
+                jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
+                    &verifier_preprocessing,
+                    program_io.clone(),
+                    None,
+                    &jolt_proof,
+                )
+                .expect("Failed to generate recursion artifact");
+
+            recursion_sizes::log_jolt_proof_breakdown(&jolt_proof);
+            recursion_sizes::log_recursion_artifact_breakdown(&recursion_artifact);
+
+            let rec_size = recursion_artifact.serialized_size(ark_serialize::Compress::Yes);
+            total_size += rec_size;
+            total_size_full_compressed += rec_size;
+
+            jolt_core::zkvm::recursion::verify_recursion::<Blake2bTranscript>(
+                &verifier_preprocessing,
+                program_io,
+                None,
+                &jolt_proof,
+                &recursion_artifact,
+            )
+            .expect("Recursion verification failed");
+        }
+        #[cfg(not(feature = "recursion"))]
+        {
+            println!("recursion requested, but jolt-core was built without `--features recursion`");
+            let verifier =
+                RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
+                    .expect("Failed to create verifier");
+            verifier.verify().unwrap();
+        }
+    } else {
+        let verifier =
+            RV64IMACVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
+                .expect("Failed to create verifier");
+        verifier.verify().unwrap();
+    }
 
     (
         prove_duration,
-        proof_size,
-        proof_size_full_compressed,
+        total_size,
+        total_size_full_compressed,
         trace.len(),
     )
 }

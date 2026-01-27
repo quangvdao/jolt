@@ -7,9 +7,9 @@ use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 
 mod commitment_scheme;
 mod dory_globals;
-mod jolt_dory_routines;
 #[cfg(feature = "recursion")]
 pub mod instance_plan;
+mod jolt_dory_routines;
 #[cfg(feature = "recursion")]
 pub mod recursion;
 #[cfg(feature = "recursion")]

@@ -209,7 +209,10 @@ pub trait RecursionExt<F: JoltField>: CommitmentScheme<Field = F> {
     fn generate_combine_witness<C: Borrow<Self::Commitment>>(
         commitments: &[C],
         coeffs: &[F],
-    ) -> (crate::zkvm::recursion::witness::GTCombineWitness, Self::CombineHint);
+    ) -> (
+        crate::zkvm::recursion::witness::GTCombineWitness,
+        Self::CombineHint,
+    );
 
     fn combine_with_hint(hint: &Self::CombineHint) -> Self::Commitment;
 

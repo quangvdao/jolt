@@ -235,14 +235,20 @@ impl GuestSerialize for GtProducer {
             GtProducer::GtExpRho { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "GtProducer instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "GtProducer instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             GtProducer::GtMulResult { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "GtProducer instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "GtProducer instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
@@ -341,21 +347,30 @@ impl GuestSerialize for GtConsumer {
             GtConsumer::GtMulLhs { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "GtConsumer instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "GtConsumer instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             GtConsumer::GtMulRhs { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "GtConsumer instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "GtConsumer instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             GtConsumer::GtExpBase { instance } => {
                 2u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "GtConsumer instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "GtConsumer instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
@@ -576,35 +591,50 @@ impl GuestSerialize for G1ValueRef {
             G1ValueRef::G1ScalarMulOut { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G1ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G1ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1AddOut { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G1ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G1ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1AddInP { instance } => {
                 2u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G1ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G1ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1AddInQ { instance } => {
                 3u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G1ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G1ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1ScalarMulBase { instance } => {
                 4u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G1ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G1ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
@@ -833,35 +863,50 @@ impl GuestSerialize for G2ValueRef {
             G2ValueRef::G2ScalarMulOut { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G2ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G2ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2AddOut { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G2ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G2ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2AddInP { instance } => {
                 2u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G2ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G2ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2AddInQ { instance } => {
                 3u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G2ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G2ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2ScalarMulBase { instance } => {
                 4u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "G2ValueRef instance overflow")
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G2ValueRef instance overflow",
+                    )
                 })?)
                 .guest_serialize(w)
             }

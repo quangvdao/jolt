@@ -161,7 +161,9 @@ fn setup_tracing(formats: Option<Vec<Format>>, trace_name: &str) -> Vec<Box<dyn 
                 .build();
             layers.push(chrome_layer.boxed());
             guards.push(Box::new(guard));
-            tracing::info!("Chrome tracing enabled. Output: benchmark-runs/perfetto_traces/{trace_name}.json");
+            tracing::info!(
+                "Chrome tracing enabled. Output: benchmark-runs/perfetto_traces/{trace_name}.json"
+            );
         }
     }
 
@@ -266,13 +268,31 @@ pub fn benchmarks(
     recursion: bool,
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     match bench_type {
-        BenchType::BTreeMap => prove_example("btreemap-guest", postcard::to_stdvec(&50u32).unwrap(), committed, recursion),
-        BenchType::Sha2 => prove_example("sha2-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap(), committed, recursion),
-        BenchType::Sha3 => prove_example("sha3-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap(), committed, recursion),
+        BenchType::BTreeMap => prove_example(
+            "btreemap-guest",
+            postcard::to_stdvec(&50u32).unwrap(),
+            committed,
+            recursion,
+        ),
+        BenchType::Sha2 => prove_example(
+            "sha2-guest",
+            postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
+            committed,
+            recursion,
+        ),
+        BenchType::Sha3 => prove_example(
+            "sha3-guest",
+            postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
+            committed,
+            recursion,
+        ),
         BenchType::Sha2Chain => {
             let mut inputs = vec![];
             inputs.append(&mut postcard::to_stdvec(&[5u8; 32]).unwrap());
-            let iters = scale_to_target_ops(((1 << 24) as f64 * SAFETY_MARGIN) as usize, CYCLES_PER_SHA256);
+            let iters = scale_to_target_ops(
+                ((1 << 24) as f64 * SAFETY_MARGIN) as usize,
+                CYCLES_PER_SHA256,
+            );
             inputs.append(&mut postcard::to_stdvec(&iters).unwrap());
             prove_example("sha2-chain-guest", inputs, committed, recursion)
         }
@@ -282,7 +302,12 @@ pub fn benchmarks(
             inputs.append(&mut postcard::to_stdvec(&20u32).unwrap());
             prove_example("sha3-chain-guest", inputs, committed, recursion)
         }
-        BenchType::Fibonacci => prove_example("fibonacci-guest", postcard::to_stdvec(&400000u32).unwrap(), committed, recursion),
+        BenchType::Fibonacci => prove_example(
+            "fibonacci-guest",
+            postcard::to_stdvec(&400000u32).unwrap(),
+            committed,
+            recursion,
+        ),
     }
 }
 
@@ -304,7 +329,8 @@ pub fn master_benchmark(
 
         let (bench_name, input_fn): (&str, fn(usize) -> Vec<u8>) = match bench_type {
             BenchType::Fibonacci => ("fibonacci", |target| {
-                postcard::to_stdvec(&scale_to_target_ops(target, CYCLES_PER_FIBONACCI_UNIT)).unwrap()
+                postcard::to_stdvec(&scale_to_target_ops(target, CYCLES_PER_FIBONACCI_UNIT))
+                    .unwrap()
             }),
             BenchType::Sha2Chain => ("sha2-chain", |target| {
                 let iterations = scale_to_target_ops(target, CYCLES_PER_SHA256);
@@ -333,13 +359,8 @@ pub fn master_benchmark(
 
         let guest_name = format!("{bench_name}-guest");
         let input = input_fn(bench_target);
-        let (duration, proof_size, proof_size_comp, trace_length) = prove_example_with_trace(
-            &guest_name,
-            input,
-            max_trace_length,
-            recursion,
-            committed,
-        );
+        let (duration, proof_size, proof_size_comp, trace_length) =
+            prove_example_with_trace(&guest_name, input, max_trace_length, recursion, committed);
 
         let proving_hz = trace_length as f64 / duration.as_secs_f64();
         let padded_proving_hz = trace_length.next_power_of_two() as f64 / duration.as_secs_f64();
@@ -443,14 +464,13 @@ fn prove_example(
         if recursion {
             // Actual recursion proving and verification
             let _recursion_span = tracing::info_span!("recursion_proving").entered();
-            let recursion_proof =
-                jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
-                    &verifier_preprocessing,
-                    program_io.clone(),
-                    None,
-                    &jolt_proof,
-                )
-                .expect("Failed to generate recursion proof");
+            let recursion_proof = jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
+                &verifier_preprocessing,
+                program_io.clone(),
+                None,
+                &jolt_proof,
+            )
+            .expect("Failed to generate recursion proof");
             drop(_recursion_span);
 
             let _verify_span = tracing::info_span!("recursion_verification").entered();
@@ -563,14 +583,13 @@ fn prove_example_with_trace(
     if recursion {
         // Actual recursion proving and verification
         let _recursion_span = tracing::info_span!("recursion_proving").entered();
-        let recursion_proof =
-            jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
-                &verifier_preprocessing,
-                program_io.clone(),
-                None,
-                &jolt_proof,
-            )
-            .expect("Failed to generate recursion proof");
+        let recursion_proof = jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
+            &verifier_preprocessing,
+            program_io.clone(),
+            None,
+            &jolt_proof,
+        )
+        .expect("Failed to generate recursion proof");
         drop(_recursion_span);
 
         let _verify_span = tracing::info_span!("recursion_verification").entered();

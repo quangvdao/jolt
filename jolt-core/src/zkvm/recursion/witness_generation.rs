@@ -599,13 +599,19 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                 let loc = cs.locator_by_constraint[global_idx];
                 match (entry.poly_type, loc) {
                     // GT exp (11-var)
-                    (crate::zkvm::recursion::constraints::system::PolyType::RhoPrev, ConstraintLocator::GtExp { local }) => {
+                    (
+                        crate::zkvm::recursion::constraints::system::PolyType::RhoPrev,
+                        ConstraintLocator::GtExp { local },
+                    ) => {
                         let src = &cs.gt_exp_witnesses[local].rho_packed;
                         for x_idx in 0..(1usize << 11) {
                             fused_src[c_gt + (x_idx << k)] = src[x_idx];
                         }
                     }
-                    (crate::zkvm::recursion::constraints::system::PolyType::Quotient, ConstraintLocator::GtExp { local }) => {
+                    (
+                        crate::zkvm::recursion::constraints::system::PolyType::Quotient,
+                        ConstraintLocator::GtExp { local },
+                    ) => {
                         let src = &cs.gt_exp_witnesses[local].quotient_packed;
                         for x_idx in 0..(1usize << 11) {
                             fused_src[c_gt + (x_idx << k)] = src[x_idx];
@@ -614,28 +620,40 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
 
                     // GT mul (4-var) padded to 11 vars by replication over 7 step bits:
                     // x_idx = step + (u_idx << 7), with u_idx in [0,16).
-                    (crate::zkvm::recursion::constraints::system::PolyType::MulLhs, ConstraintLocator::GtMul { local }) => {
+                    (
+                        crate::zkvm::recursion::constraints::system::PolyType::MulLhs,
+                        ConstraintLocator::GtMul { local },
+                    ) => {
                         let src4 = &cs.gt_mul_rows[local].lhs;
                         for x_idx in 0..(1usize << 11) {
                             let u_idx = x_idx >> 7;
                             fused_src[c_gt + (x_idx << k)] = src4[u_idx];
                         }
                     }
-                    (crate::zkvm::recursion::constraints::system::PolyType::MulRhs, ConstraintLocator::GtMul { local }) => {
+                    (
+                        crate::zkvm::recursion::constraints::system::PolyType::MulRhs,
+                        ConstraintLocator::GtMul { local },
+                    ) => {
                         let src4 = &cs.gt_mul_rows[local].rhs;
                         for x_idx in 0..(1usize << 11) {
                             let u_idx = x_idx >> 7;
                             fused_src[c_gt + (x_idx << k)] = src4[u_idx];
                         }
                     }
-                    (crate::zkvm::recursion::constraints::system::PolyType::MulResult, ConstraintLocator::GtMul { local }) => {
+                    (
+                        crate::zkvm::recursion::constraints::system::PolyType::MulResult,
+                        ConstraintLocator::GtMul { local },
+                    ) => {
                         let src4 = &cs.gt_mul_rows[local].result;
                         for x_idx in 0..(1usize << 11) {
                             let u_idx = x_idx >> 7;
                             fused_src[c_gt + (x_idx << k)] = src4[u_idx];
                         }
                     }
-                    (crate::zkvm::recursion::constraints::system::PolyType::MulQuotient, ConstraintLocator::GtMul { local }) => {
+                    (
+                        crate::zkvm::recursion::constraints::system::PolyType::MulQuotient,
+                        ConstraintLocator::GtMul { local },
+                    ) => {
                         let src4 = &cs.gt_mul_rows[local].quotient;
                         for x_idx in 0..(1usize << 11) {
                             let u_idx = x_idx >> 7;

@@ -41,6 +41,8 @@ type HyraxPCS = crate::zkvm::recursion::prover::HyraxPCS;
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RecursionArtifact<FS: Transcript> {
     /// Hint for Stage 8 combine_commitments offloading (the combined GT element).
+    ///
+    /// This is **required** by the verifier: if absent, verification rejects.
     pub stage8_combine_hint: Option<Fq12>,
     /// Boundary outputs for the external pairing check (treated as a hint; guest recomputes).
     pub pairing_boundary: PairingBoundary,
@@ -210,18 +212,29 @@ pub fn prove_recursion<FS: Transcript>(
     let hyrax_prover_setup =
         <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
 
-    let (recursion_snark_proof, _constraint_metadata, pairing_boundary, stage8_combine_hint, non_input_base_hints) =
-        RecursionProver::<Fq>::prove::<F, DoryPCS, FS>(
-            &mut v.transcript,
-            &hyrax_prover_setup,
-            RecursionInput {
-                joint_opening_proof: &v.proof.joint_opening_proof,
-                stage8_snapshot,
-                verifier_setup: &v.preprocessing.generators,
-                commitments: &commitments_map,
-            },
-        )
-        .map_err(|e| anyhow!("failed to generate recursion proof: {e:?}"))?;
+    let (
+        recursion_snark_proof,
+        _constraint_metadata,
+        pairing_boundary,
+        stage8_combine_hint,
+        non_input_base_hints,
+    ) = RecursionProver::<Fq>::prove::<F, DoryPCS, FS>(
+        &mut v.transcript,
+        &hyrax_prover_setup,
+        RecursionInput {
+            joint_opening_proof: &v.proof.joint_opening_proof,
+            stage8_snapshot,
+            verifier_setup: &v.preprocessing.generators,
+            commitments: &commitments_map,
+        },
+    )
+    .map_err(|e| anyhow!("failed to generate recursion proof: {e:?}"))?;
+
+    if stage8_combine_hint.is_none() {
+        return Err(anyhow!(
+            "missing required Stage 8 combine hint (stage8_combine_hint)"
+        ));
+    }
 
     Ok(RecursionArtifact {
         stage8_combine_hint,
@@ -324,29 +337,29 @@ pub fn verify_recursion<FS: Transcript>(
 
     // Deterministic combine plan (must match the prover's ordering).
     let rlc_map = compute_rlc_coefficients(&gamma_powers, dory_snap.polynomial_claims.clone());
-    let (combine_coeffs, combine_commitments): (Vec<F>, Vec<<DoryPCS as CommitmentScheme>::Commitment>) =
-        rlc_map
-            .into_iter()
-            .map(|(poly, coeff)| {
-                (
-                    coeff,
-                    commitments_map
-                        .get(&poly)
-                        .expect("missing commitment for polynomial in batch")
-                        .clone(),
-                )
-            })
-            .unzip();
+    let (combine_coeffs, combine_commitments): (
+        Vec<F>,
+        Vec<<DoryPCS as CommitmentScheme>::Commitment>,
+    ) = rlc_map
+        .into_iter()
+        .map(|(poly, coeff)| {
+            (
+                coeff,
+                commitments_map
+                    .get(&poly)
+                    .expect("missing commitment for polynomial in batch")
+                    .clone(),
+            )
+        })
+        .unzip();
 
-    // Use the prover-supplied Stage 8 combine hint when provided (fast path).
+    // Get Stage 8 combine hint
+    let hint_fq12 = recursion
+        .stage8_combine_hint
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing required Stage 8 combine hint (stage8_combine_hint)"))?;
     let joint_commitment: <DoryPCS as CommitmentScheme>::Commitment =
-        match recursion.stage8_combine_hint.as_ref() {
-            Some(hint_fq12) => <DoryPCS as RecursionExt<F>>::combine_with_hint_fq12(hint_fq12),
-            None => <DoryPCS as CommitmentScheme>::combine_commitments(
-                &combine_commitments,
-                &combine_coeffs,
-            ),
-        };
+        <DoryPCS as RecursionExt<F>>::combine_with_hint_fq12(hint_fq12);
 
     // Build symbolic AST on a transcript clone at the pre-Stage8-proof state.
     let mut ast_transcript = pre_opening_proof_transcript.clone();
@@ -434,4 +447,3 @@ pub fn verify_recursion<FS: Transcript>(
 
     Ok(())
 }
-

@@ -2124,6 +2124,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "jolt-profiler"
+version = "0.1.0"
+dependencies = [
+ "ark-serialize",
+ "chrono",
+ "clap",
+ "jolt-core",
+ "jolt-recursion",
+ "postcard",
+ "strum 0.26.3",
+ "strum_macros 0.26.4",
+ "tracing",
+ "tracing-chrome",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "jolt-recursion"
 version = "0.1.0"
 dependencies = [

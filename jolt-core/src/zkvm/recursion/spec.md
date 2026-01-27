@@ -58,11 +58,12 @@ Concretely:
    - `SumcheckId::ShiftMultiMillerLoop` for Multi-Miller loop packed traces (\(f_{\text{next}}(s,x)=f(s+1,x)\), \(T_{\text{next}}(s)=T(s+1)\))
 4. **Wiring / copy constraints (Stage 2)**: We prove that the output of each operation is exactly the input consumed by downstream
    operations, so the witness represents a single coherent computation DAG (not a bag of unrelated correct ops).
-   > **Implementation status**: AST-derived wiring/boundary constraints are not yet implemented, but when added they will be executed
-   > inside the same Stage 2 batched sumcheck as the other Stage 2 instances (see TODO in `jolt-core/src/zkvm/recursion/prover.rs`).
-4. **Boundary outputs for the outside verifier**: The recursion SNARK exposes the **three (G1,G2) pairing input pairs** used by Dory’s
-   final optimized check (a 3-way multi-pairing), and (optionally) the corresponding GT “rhs” value. The outside verifier then computes
-   the multi-pairing and checks equality itself.
+   > **Implementation status**: AST-derived wiring/boundary constraints are **implemented** and enabled by default. They run as additional
+   > sumcheck instances appended at the end of the Stage 2 batched sumcheck (see `jolt-core/src/zkvm/recursion/{gt,g1,g2}/wiring.rs` and
+   > `jolt-core/src/zkvm/recursion/verifier.rs`).
+5. **Boundary outputs for the outside verifier**: The recursion SNARK exposes the **three (G1,G2) pairing input pairs** used by Dory’s
+   final optimized check (a 3-way multi-pairing), and the corresponding GT “rhs” value (serialized as `PairingBoundary::rhs`). The outside
+   verifier then computes the multi-pairing and checks equality itself.
 
 #### Why AST (and not prover-supplied wiring metadata)
 
@@ -103,7 +104,7 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │  Stage 1: Packed GT Exp Sumcheck                                    │
 │  ─────────────────────────────                                      │
 │  Prove packed GT exponentiation constraints                           │
-│  Output: virtual claims (incl. `rho_next(r*)` claim, unverified)      │
+│  Output: openings at `r*` (rho, rho_next, quotient); shift checked in Stage 2 │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -114,7 +115,7 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │    (`GtShift`, `ShiftG1ScalarMul`, `ShiftG2ScalarMul`, `ShiftMultiMillerLoop`) │
 │  - Packed GT exp claim reduction to a shared `r_x` (`GtExpClaimReduction`)     │
 │  - All other op constraints (GT mul, G1/G2 scalar mul, G1/G2 add, MultiMillerLoop, ...)│
-│  - Wiring/boundary constraints (TODO; will be included here)          │
+│  - Wiring/boundary constraints (implemented; appended last)           │
 │  Output: all virtual openings at a shared point `r_x`                │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
@@ -150,13 +151,12 @@ pairing product and compares it against the (public) GT rhs.
 Packed GT exponentiation has a “next-state” table \(\rho_{\text{next}}(s,x)\) that must satisfy the **shift** relation
 \(\rho_{\text{next}}(s,x)=\rho(s+1,x)\) in order to chain steps soundly.
 
-- **Current practice (smaller commitments)**: we do **not** commit to \(\rho_{\text{next}}\). Stage 1 (`GtExp`) emits the evaluation
-  \(\rho_{\text{next}}(r^\*)\) as an *unverified virtual claim* at the Stage-1 point \(r^\*\). Stage 2 runs `GtShift` to verify that
-  claim against the committed \(\rho\), then uses `GtExpClaimReduction` to move the committed GT-exp openings (for \(\rho\) and \(Q\)) onto
-  the shared Stage-2 point \(r_x\) used by the rest of the system.
-- **Alternative (simpler staging)**: if we are OK committing to the “next” table (paying a commitment/opening for \(\rho_{\text{next}}\)),
-  then `GtExp` can be run directly inside Stage 2 at the shared point \(r_x\), and Stage 1 + `GtExpClaimReduction` can be removed. The
-  shift relation still needs to be enforced (e.g. via `GtShift`, or by redesigning the witness so it is implicit).
+- **Current practice (as in code today)**: the packed witness includes \(\rho\), \(\rho_{\text{next}}\), and \(Q\) as committed columns in the
+  recursion dense commitment. Stage 2 runs `GtShift` to enforce the global shift relation \(\rho_{\text{next}}(s,x)=\rho(s+1,x)\), and runs
+  `GtExpClaimReduction` to move the GT-exp openings onto the shared Stage-2 point \(r_x\) used by the rest of the system.
+- **Potential optimization (not yet enabled)**: eliminate the committed \(\rho_{\text{next}}\) column and instead treat
+  \(\rho_{\text{next}}(r^\*)\) as a purely virtual claim derived from \(\rho\) via `GtShift`. This would reduce committed witness size, but
+  would change proof semantics and must be versioned.
 
 Concretely (matching Dory’s `DoryVerifierState::verify_final`), the three pairs are:
 
@@ -176,11 +176,39 @@ All SNARK arithmetic is over $\mathbb{F}_q$ (BN254 base field), which equals the
 - GT witnesses produce $\mathbb{F}_q$ elements (from Fq12 representation)
 - Hyrax PCS operates over Grumpkin, whose scalar field is $\mathbb{F}_q$
 
+### 1.6 Public API (Recursion Artifact)
+
+The public wrapper API lives in `jolt-core/src/zkvm/recursion/api.rs` and exposes:
+
+- `prove_recursion(...) -> RecursionArtifact`
+- `verify_recursion(..., recursion: &RecursionArtifact) -> Result<()>`
+
+The standalone artifact is serialized separately from the base `JoltProof`:
+
+```rust
+pub struct RecursionArtifact<FS: Transcript> {
+    /// Required by the verifier (rejects if `None`).
+    pub stage8_combine_hint: Option<Fq12>,
+    /// External pairing boundary (3 pairing input pairs + expected GT rhs).
+    pub pairing_boundary: PairingBoundary,
+    /// Hints used for verifier-side plan derivation (guest recomputes without trusting).
+    pub non_input_base_hints: NonInputBaseHints,
+    /// The recursion SNARK proof (sumchecks + Hyrax opening).
+    pub proof: RecursionProof<Fq, FS, HyraxPCS>,
+}
+```
+
+**Trust model**:
+- The verifier must treat `pairing_boundary` and `non_input_base_hints` as *hints* (untrusted data). With wiring/boundary constraints enabled
+  (default), Stage 2 binds these values to the verifier-derived AST. The outside verifier then performs the final pairing check against
+  `pairing_boundary.rhs`.
+- `stage8_combine_hint` is also a hint, but is currently **required** for verification (it is `Option` for serialization compatibility).
+
 ---
 
-## 2. Stage 1: Constraint Sum-Checks
+## 2. Constraint Sumchecks (Stage 1 + Stage 2)
 
-Stage 1 proves correctness of each expensive operation via constraint-specific sum-checks. Each produces virtual polynomial claims that feed into Stage 2.
+Stage 1 runs the packed GT exponentiation sumcheck (`SumcheckId::GtExp`). Stage 2 runs the remaining sumchecks (shift checks, claim reduction, GT mul, G1/G2 scalar mul, G1/G2 add, wiring/boundary constraints) batched together. This section documents the gadget-level constraints independent of which stage they run in.
 
 ### 2.1 Ring Switching & Quotient Technique
 
@@ -196,7 +224,7 @@ where $g(x)$ is the MLE of $p$ on the hypercube.
 
 This transforms high-degree $\mathbb{F}_{q^{12}}$ operations into low-degree constraints over $\mathbb{F}_q$ by introducing the quotient as auxiliary witness.
 
-### 2.2 GT Exponentiation
+### 2.2 GT Exponentiation (Stage 1)
 
 Computes $b = a^k$ using iterative exponentiation.
 
@@ -287,9 +315,9 @@ $$0 = \sum_{s \in \{0,1\}^7} \sum_{x \in \{0,1\}^4} \text{eq}(r_s, s) \cdot \tex
 #### Output Claims
 
 After final challenges $(r_s^*, r_x^*)$:
-- `GtExpRho(i)`: $\rho(r_s^*, r_x^*)$
-- `GtExpRhoNext(i)`: $\rho_{\text{next}}(r_s^*, r_x^*)$
-- `GtExpQuotient(i)`: $Q(r_s^*, r_x^*)$
+- `VirtualPolynomial::gt_exp_rho(i)`: $\rho(r_s^*, r_x^*)$
+- `VirtualPolynomial::gt_exp_rho_next(i)`: $\rho_{\text{next}}(r_s^*, r_x^*)$
+- `VirtualPolynomial::gt_exp_quotient(i)`: $Q(r_s^*, r_x^*)$
 
 The verifier computes \(\text{digit\_lo}(r_s^*)\), \(\text{digit\_hi}(r_s^*)\), and \(\text{base}(r_x^*)\), \(\text{base}^2(r_x^*)\), \(\text{base}^3(r_x^*)\)
 directly from public inputs (scalar bits and base), so these are **not** emitted as openings/claims.
@@ -340,24 +368,24 @@ and constraint satisfaction is preserved. □
 
 ---
 
-### 2.2.1 GtShift: Packed GT exp internal shift check (implemented in Stage 2)
+### 2.2.1 GtShift: Packed GT exp internal shift check (Stage 2)
 
-The packed GT exponentiation can be optimized by eliminating the `rho_next` commitment: `rho_next` is fully determined by `rho` via a one-step shift in the step index.
+The packed GT exponentiation witness contains both `rho(s,x)` and `rho_next(s,x)` columns. The `GtExp` constraint enforces the *local* per-step
+transition using these columns, but it does **not** by itself enforce that the prover’s `rho_next` column is globally consistent with `rho` across
+all steps. The `GtShift` sumcheck enforces the global shift relation:
+\[
+\rho_{\text{next}}(s,x) = \rho(s+1,x).
+\]
 
-#### The Problem
+#### What `GtShift` proves (as implemented)
 
-In a straightforward packed witness, we would commit to three polynomials per GT exponentiation:
-- `rho(s,x)` - intermediate values at each step
-- `rho_next(s,x)` - shifted values where `rho_next(s,x) = rho(s+1,x)`
-- `quotient(s,x)` - quotient polynomials
+Let \(r^*=(r_s^*, r_x^*)\) be the opening point used by the Stage-1 `GtExp` sumcheck. Let \(v\) denote the opened value of the witness column
+\(\rho_{\text{next}}\) at that point:
+\[
+v := \rho_{\text{next}}(r_s^*, r_x^*).
+\]
 
-In the current implementation we **do not** commit to `rho_next`; it is treated as a virtual claim and verified via `GtShift`.
-
-Since `rho_next` is completely determined by `rho` through the shift relationship, committing to it is redundant.
-
-#### The Solution: Shift Sumcheck
-
-Instead of committing to `rho_next`, the prover treats `rho_next(r_s^*, r_x^*)` as a **virtual claim** (produced by the `GtExp` sumcheck), and then proves that this claim is consistent with the committed `rho` table via a shift sumcheck (`SumcheckId::GtShift`).
+The `GtShift` sumcheck proves that this opened value is consistent with the committed `rho` column shifted by one in the step index:
 
 Let \(r^*=(r_s^*, r_x^*)\) be the opening point used by `GtExp`. Let \(v\) denote the claimed value:
 \[
@@ -376,18 +404,17 @@ Where:
 - `EqPlusOne(r_s*, s)` = 1 if `s = r_s* + 1`, 0 otherwise
 - The sum evaluates to exactly `rho(r_s*+1, r_x*)` = `rho_next(r_s*, r_x*)`
 
-#### Modified Protocol Flow
+#### Protocol positioning (Stage 1 → Stage 2)
 
 ```
 Stage 1: Packed GT Constraint Sumcheck (`GtExp`)
-  - Commits only to rho and quotient (NOT rho_next)
-  - Outputs: virtual claims for rho, quotient
-  - Outputs: unverified claim v = rho_next(r_s*, r_x*)
+  - Uses committed witness columns: rho, rho_next, quotient
+  - Outputs openings at r*: rho(r*), rho_next(r*), quotient(r*)
   ↓
 Stage 2: Shift sumcheck (`GtShift`)
-  - Proves that v = rho(r_s*+1, r_x*)
+  - Proves that rho_next(r_s*, r_x*) = rho(r_s*+1, r_x*)
   - 11 rounds, degree 3
-  - Outputs: verified rho(r_s*+1, r_x*) opening under SumcheckId::GtShift
+  - Caches the corresponding rho opening under `SumcheckId::GtShift` for later reductions
   ↓
 Stage 3: Prefix packing reduction + PCS opening
   - Reduces all Stage-2 virtual openings to one committed opening claim on the packed dense polynomial.
@@ -402,11 +429,17 @@ In the implementation:
 
 The verifier checks consistency by combining these cached openings with the appropriate Eq/EqPlusOne selector evaluations (see `jolt-core/src/zkvm/recursion/gt/shift.rs`).
 
+#### Notes / future optimization
+
+It is possible to remove the committed `rho_next` column entirely (since it is determined by `rho` via a shift), but doing so requires treating
+`rho_next(r^*)` as a purely virtual claim derived from `rho` and adjusting the proof format. The current code keeps `rho_next` as a committed
+witness column and uses `GtShift` to enforce its consistency with `rho`.
+
 #### Benefits and Trade-offs
 
 **Benefits**:
-- Reduces committed polynomials by **1 per GT exp** (eliminates `rho_next`)
-- Reduces memory requirements (no rho_next storage)
+- Enforces the global packed-trace consistency relation \(\rho_{\text{next}}(s,x)=\rho(s+1,x)\) (required for soundness).
+- Enables a future optimization where the committed `rho_next` column could be removed (with proof-format versioning).
 
 **Trade-offs**:
 - Adds 11 sumcheck rounds
@@ -417,7 +450,7 @@ The verifier checks consistency by combining these cached openings with the appr
 
 ---
 
-### 2.3 GT Multiplication
+### 2.3 GT Multiplication (Stage 2)
 
 Proves $c = a \cdot b$ for $a, b, c \in \mathbb{G}_T$.
 
@@ -445,14 +478,14 @@ $$0 = \sum_{x \in \{0,1\}^4} \text{eq}(r_x, x) \cdot \sum_{i=0}^{m-1} \gamma^i \
 
 #### Output Claims
 
-- `RecursionMulLhs(i)`: $\tilde{a}_i(r_x')$
-- `RecursionMulRhs(i)`: $\tilde{b}_i(r_x')$
-- `RecursionMulResult(i)`: $\tilde{c}_i(r_x')$
-- `RecursionMulQuotient(i)`: $\tilde{Q}_i(r_x')$
+- `VirtualPolynomial::gt_mul_lhs(i)`: $\tilde{a}_i(r_x')$
+- `VirtualPolynomial::gt_mul_rhs(i)`: $\tilde{b}_i(r_x')$
+- `VirtualPolynomial::gt_mul_result(i)`: $\tilde{c}_i(r_x')$
+- `VirtualPolynomial::gt_mul_quotient(i)`: $\tilde{Q}_i(r_x')$
 
 ---
 
-### 2.4 G1 Scalar Multiplication
+### 2.4 G1 Scalar Multiplication (Stage 2)
 
 Proves $Q = [k]P$ using double-and-add.
 
@@ -530,28 +563,28 @@ $$\text{ind}_T \cdot x_T = 0 \qquad\text{and}\qquad \text{ind}_T \cdot y_T = 0$$
 
 #### Sum-Check
 
-The implementation uses 11 constraint variables (8 step variables, zero-padded to 11 for the
-uniform Dory matrix layout). For each scalar-mul instance, constraints are batched with $\delta$,
+The scalar-mul trace is a native **8-variable** MLE over the 256 steps. For each scalar-mul instance, constraints are batched with $\delta$,
 and multiple instances are batched with $\gamma$:
 
 $$
-0 = \sum_{x \in \{0,1\}^{11}} \text{eq}(r_x, x)\cdot \sum_{i}\gamma^i\cdot\Big(\sum_{j}\delta^j\cdot C_{i,j}(x)\Big)
+0 = \sum_{x \in \{0,1\}^{8}} \text{eq}(r_x, x)\cdot \sum_{i}\gamma^i\cdot\Big(\sum_{j}\delta^j\cdot C_{i,j}(x)\Big)
 $$
 
-- 11 rounds (one per constraint variable)
+- 8 rounds (one per step variable). In the Stage-2 batched sumcheck, shorter instances are suffix-aligned, so their \(r_x\) point is the
+  suffix of the overall Stage-2 challenge vector.
 - Degree 6 overall (max constraint degree 5, times $\text{eq}(r_x,x)$ which is multilinear)
 
 #### Output Claims
 
-- `RecursionG1ScalarMulXA(i)`, `RecursionG1ScalarMulYA(i)` - accumulator coordinates
-- `RecursionG1ScalarMulXT(i)`, `RecursionG1ScalarMulYT(i)` - doubled point coordinates
-- `RecursionG1ScalarMulXANext(i)`, `RecursionG1ScalarMulYANext(i)` - next accumulator
-- `RecursionG1ScalarMulTIndicator(i)` - 1 if T = O (infinity), 0 otherwise
-- `RecursionG1ScalarMulAIndicator(i)` - 1 if A = O (infinity), 0 otherwise
+- `VirtualPolynomial::g1_scalar_mul_xa(i)`, `VirtualPolynomial::g1_scalar_mul_ya(i)` - accumulator coordinates
+- `VirtualPolynomial::g1_scalar_mul_xt(i)`, `VirtualPolynomial::g1_scalar_mul_yt(i)` - doubled point coordinates
+- `VirtualPolynomial::g1_scalar_mul_xa_next(i)`, `VirtualPolynomial::g1_scalar_mul_ya_next(i)` - next accumulator
+- `VirtualPolynomial::g1_scalar_mul_t_indicator(i)` - 1 if T = O (infinity), 0 otherwise
+- `VirtualPolynomial::g1_scalar_mul_a_indicator(i)` - 1 if A = O (infinity), 0 otherwise
 
 ---
 
-### 2.5 G2 Scalar Multiplication
+### 2.5 G2 Scalar Multiplication (Stage 2)
 
 Proves $R = [k]Q$ for $Q \in \mathbb{G}_2$ using the same 256-step MSB-first double-and-add trace
 as G1, but with coordinates in the quadratic extension field $\mathbb{F}_{q^2}$.
@@ -614,7 +647,7 @@ Infinity handling is enforced in $\mathbb{F}_q$:
 
 #### Sum-Check (implemented batching layout)
 
-The sumcheck runs over 11 variables (8 step vars padded to 11 for the uniform Dory matrix layout).
+The sumcheck runs over **8** step variables (256 steps).
 Because each $\mathbb{F}_{q^2}$ constraint contributes two $\mathbb{F}_q$ equations (c0 and c1),
 the implementation batches **13** $\mathbb{F}_q$ constraint terms per instance:
 
@@ -628,27 +661,27 @@ the implementation batches **13** $\mathbb{F}_q$ constraint terms per instance:
 These are batched with $\delta$, and multiple instances are batched with $\gamma$:
 
 $$
-0 = \sum_{x \in \{0,1\}^{11}} \text{eq}(r_x, x)\cdot \sum_{i}\gamma^i\cdot\Big(\sum_{j}\delta^j\cdot C_{i,j}(x)\Big)
+0 = \sum_{x \in \{0,1\}^{8}} \text{eq}(r_x, x)\cdot \sum_{i}\gamma^i\cdot\Big(\sum_{j}\delta^j\cdot C_{i,j}(x)\Big)
 $$
 
-- 11 rounds
+- 8 rounds (suffix-aligned in the Stage-2 batched sumcheck)
 - Degree 6 overall (max term degree 5, times $\text{eq}(r_x,x)$)
 
 #### Output Claims
 
 All opened values are over $\mathbb{F}_q$ (components of $\mathbb{F}_{q^2}$):
 
-- `RecursionG2ScalarMulXAC0(i)`, `RecursionG2ScalarMulXAC1(i)`
-- `RecursionG2ScalarMulYAC0(i)`, `RecursionG2ScalarMulYAC1(i)`
-- `RecursionG2ScalarMulXTC0(i)`, `RecursionG2ScalarMulXTC1(i)`
-- `RecursionG2ScalarMulYTC0(i)`, `RecursionG2ScalarMulYTC1(i)`
-- `RecursionG2ScalarMulXANextC0(i)`, `RecursionG2ScalarMulXANextC1(i)`
-- `RecursionG2ScalarMulYANextC0(i)`, `RecursionG2ScalarMulYANextC1(i)`
-- `RecursionG2ScalarMulTIndicator(i)`, `RecursionG2ScalarMulAIndicator(i)`
+- `VirtualPolynomial::g2_scalar_mul_xa_c0(i)`, `VirtualPolynomial::g2_scalar_mul_xa_c1(i)`
+- `VirtualPolynomial::g2_scalar_mul_ya_c0(i)`, `VirtualPolynomial::g2_scalar_mul_ya_c1(i)`
+- `VirtualPolynomial::g2_scalar_mul_xt_c0(i)`, `VirtualPolynomial::g2_scalar_mul_xt_c1(i)`
+- `VirtualPolynomial::g2_scalar_mul_yt_c0(i)`, `VirtualPolynomial::g2_scalar_mul_yt_c1(i)`
+- `VirtualPolynomial::g2_scalar_mul_xa_next_c0(i)`, `VirtualPolynomial::g2_scalar_mul_xa_next_c1(i)`
+- `VirtualPolynomial::g2_scalar_mul_ya_next_c0(i)`, `VirtualPolynomial::g2_scalar_mul_ya_next_c1(i)`
+- `VirtualPolynomial::g2_scalar_mul_t_indicator(i)`, `VirtualPolynomial::g2_scalar_mul_a_indicator(i)`
 
 ---
 
-### 2.6 Shift checks for scalar-mul traces (implemented in Stage 2)
+### 2.6 Shift checks for scalar-mul traces (Stage 2)
 
 Scalar multiplication witnesses include both an “accumulator” column \(A_i\) and an explicitly shifted “next accumulator” column
 \(A'_{i}=A_{i+1}\) (named `A_next` / `x_a_next` / `y_a_next` in the code). Without an explicit shift constraint, a prover could
@@ -670,21 +703,18 @@ The shift relation we need is:
 \forall i \in \{0,\dots,254\}:\quad A_{\text{next}}(i)=A(i+1).
 \]
 
-#### Randomized check (11-var ambient domain)
+#### Randomized check (native 8-var step domain)
 
-In the implementation (`jolt-core/src/zkvm/recursion/g1/shift.rs`), we treat the step index as an 8-bit Boolean cube
-and prove a random linear check that enforces the one-step shift over all indices \(0..254\), while excluding the terminal boundary
-\(A_{\text{next}}(255)\) (which has no matching \(A(256)\) value inside the `A` column):
+In the implementation (`jolt-core/src/zkvm/recursion/g1/shift.rs`), we treat the step index as an 8-bit Boolean cube and prove a randomized
+linear identity that enforces the one-step shift over all indices \(0..254\), while excluding the terminal boundary \(A_{\text{next}}(255)\):
 \[
 \sum_{s} \mathrm{Eq}(r^*, s)\cdot (1-\mathrm{Eq}(s,2^8\!-\!1))\cdot A_{\text{next}}(s)
 \;=\;
 \sum_{s} \mathrm{Eq}(r^*, s-1)\cdot A(s).
 \]
 
-**Note on padding**: G1/G2 scalar-mul trace polynomials are embedded into the global 11-var recursion domain via **zero padding**
-(3 pad vars + 8 step vars). The shift sumcheck operates on the full 11-var polynomials; since both `A` and `A_next` share the same
-padding rule, this consistency check is well-defined without introducing additional “pad selectors”. For wiring/boundary extraction
-to other (non-padded) ports, one must include the appropriate pad selector (see Section 3.3).
+This shift sumcheck is defined over the **native 8-var** scalar-mul trace polynomials. In the Stage-2 batched sumcheck, it is suffix-aligned
+via `round_offset` so it can be batched with other instances that have more rounds.
 
 ---
 
@@ -825,21 +855,11 @@ Define:
 S_\text{finite} = (1-\mathrm{ind}_P)(1-\mathrm{ind}_Q).
 \]
 
-All of the above are witness polynomials over the recursion Stage-1 domain \(\{0,1\}^{11}\)
-(i.e., 11 variables / 2048 evaluations), matching the uniform Dory matrix layout.
+All of the above are witness values for a single add instance. In the current recursion constraint system, the `G1Add` and `G2Add` sumchecks use
+`num_vars = 0`: there are no \(x\)-variables to range over, and the sumcheck checks the (batched) algebraic constraints at a single point.
 
-**Why 11 variables (even if an op is “smaller”)?** Many underlying objects are naturally lower-variate:
-- GT mul/field-element slices are naturally 4-var MLEs (size 16),
-- scalar-mul traces are naturally 8-var MLEs (size 256),
-- a single add instance’s ports are “morally” 0-var (just a single point).
-
-In the recursion implementation, we embed all of them into a **common 11-var column domain** so that:
-- Stage 1 can use a single shared opening point \(r_x^\*\) across all op types, and
-- Stage 2/3 can treat every port polynomial uniformly as a row of the recursion matrix.
-
-This embedding is done by **padding / gating** (typically zero-padding so the polynomial is supported only on a subcube),
-so the additional “padding variables” do not increase the *logical* information content—only the *ambient* domain.
-Stage 3 prefix packing exploits this sparsity to avoid committing padded zeros.
+More generally, different constraint families use different native arities (e.g. GT operations are 4-var, scalar-mul traces are 8-var, packed GT exp is
+11-var). In the Stage-2 `BatchedSumcheck`, instances with fewer rounds are **suffix-aligned** via `round_offset` so they can be verified together.
 
 #### Constraints (G1Add) over \(\mathbb{F}_q\)
 
@@ -943,25 +963,23 @@ C(P,Q,R,\lambda,\mathrm{inv\_dx},b_d,b_i) \;=\; \sum_{j} \delta^j \cdot C_j.
 \]
 Across instances, we batch with \(\gamma\). The sumcheck proves:
 \[
-0 = \sum_{x\in\{0,1\}^{11}} \mathrm{eq}(r_x,x)\cdot\sum_{i}\gamma^i\cdot C_i(x).
+0 = \sum_{i}\gamma^i\cdot C_i.
 \]
 
-- Rounds: 11
-- Degree bound: 6 (max constraint degree 5, times \(\mathrm{eq}(r_x,x)\) which is multilinear)
+- Rounds: 0 (`num_vars = 0` in the current implementation)
+- Degree bound: 6
 
-*Note:* “Rounds: 11” refers to this **ambient** 11-var embedding. A given witness polynomial may be zero-padded / independent
-of some of those variables, but we still run the sumcheck over the full 11-var domain to match the matrix layout and shared
-opening point.
+*Note:* In the Stage-2 `BatchedSumcheck`, this 0-round instance is suffix-aligned via `round_offset`.
 
 #### Output claims (ports)
 
-At the final Stage-1 evaluation point \(r_x^\*\), Stage 1 emits virtual claims for the input/output ports and auxiliaries:
+At the (empty) evaluation point, Stage 2 caches virtual openings for the add ports/auxiliaries using `VirtualPolynomial::g1_add_*` helpers:
 
-- `RecursionG1AddXP(i)`, `RecursionG1AddYP(i)`, `RecursionG1AddPIndicator(i)`
-- `RecursionG1AddXQ(i)`, `RecursionG1AddYQ(i)`, `RecursionG1AddQIndicator(i)`
-- `RecursionG1AddXR(i)`, `RecursionG1AddYR(i)`, `RecursionG1AddRIndicator(i)`
-- `RecursionG1AddLambda(i)`, `RecursionG1AddInvDeltaX(i)`
-- `RecursionG1AddIsDouble(i)`, `RecursionG1AddIsInverse(i)`
+- `VirtualPolynomial::g1_add_xp(i)`, `VirtualPolynomial::g1_add_yp(i)`, `VirtualPolynomial::g1_add_p_indicator(i)`
+- `VirtualPolynomial::g1_add_xq(i)`, `VirtualPolynomial::g1_add_yq(i)`, `VirtualPolynomial::g1_add_q_indicator(i)`
+- `VirtualPolynomial::g1_add_xr(i)`, `VirtualPolynomial::g1_add_yr(i)`, `VirtualPolynomial::g1_add_r_indicator(i)`
+- `VirtualPolynomial::g1_add_lambda(i)`, `VirtualPolynomial::g1_add_inv_delta_x(i)`
+- `VirtualPolynomial::g1_add_is_double(i)`, `VirtualPolynomial::g1_add_is_inverse(i)`
 
 These are the values Stage 2 wiring uses to connect add nodes to the rest of the AST DAG.
 
@@ -1009,20 +1027,20 @@ Concretely, the implementation in `g2/addition.rs` enforces the following \(\mat
    - Non-inverse: \(\mathrm{ind}_R=0\) and the affine formulas
      \(x_R=\lambda^2-x_P-x_Q\), \(y_R=\lambda(x_P-x_R)-y_P\) hold component-wise.
 
-The sumcheck batching/round structure matches G1Add (11 rounds, degree bound 6), and Stage 1 emits the
-corresponding virtual port claims at \(r_x^\*\) for Stage 2 wiring:
+The sumcheck batching/round structure matches G1Add (`num_vars = 0`, degree bound 6). Stage 2 caches the corresponding virtual openings for
+wiring using `VirtualPolynomial::g2_add_*` helpers:
 
-- `RecursionG2AddXPC0(i)`, `RecursionG2AddXPC1(i)`, `RecursionG2AddYPC0(i)`, `RecursionG2AddYPC1(i)`, `RecursionG2AddPIndicator(i)`
-- `RecursionG2AddXQC0(i)`, `RecursionG2AddXQC1(i)`, `RecursionG2AddYQC0(i)`, `RecursionG2AddYQC1(i)`, `RecursionG2AddQIndicator(i)`
-- `RecursionG2AddXRC0(i)`, `RecursionG2AddXRC1(i)`, `RecursionG2AddYRC0(i)`, `RecursionG2AddYRC1(i)`, `RecursionG2AddRIndicator(i)`
-- `RecursionG2AddLambdaC0(i)`, `RecursionG2AddLambdaC1(i)`, `RecursionG2AddInvDeltaXC0(i)`, `RecursionG2AddInvDeltaXC1(i)`
-- `RecursionG2AddIsDouble(i)`, `RecursionG2AddIsInverse(i)`
+- `VirtualPolynomial::g2_add_xp_c0(i)`, `VirtualPolynomial::g2_add_xp_c1(i)`, `VirtualPolynomial::g2_add_yp_c0(i)`, `VirtualPolynomial::g2_add_yp_c1(i)`, `VirtualPolynomial::g2_add_p_indicator(i)`
+- `VirtualPolynomial::g2_add_xq_c0(i)`, `VirtualPolynomial::g2_add_xq_c1(i)`, `VirtualPolynomial::g2_add_yq_c0(i)`, `VirtualPolynomial::g2_add_yq_c1(i)`, `VirtualPolynomial::g2_add_q_indicator(i)`
+- `VirtualPolynomial::g2_add_xr_c0(i)`, `VirtualPolynomial::g2_add_xr_c1(i)`, `VirtualPolynomial::g2_add_yr_c0(i)`, `VirtualPolynomial::g2_add_yr_c1(i)`, `VirtualPolynomial::g2_add_r_indicator(i)`
+- `VirtualPolynomial::g2_add_lambda_c0(i)`, `VirtualPolynomial::g2_add_lambda_c1(i)`, `VirtualPolynomial::g2_add_inv_delta_x_c0(i)`, `VirtualPolynomial::g2_add_inv_delta_x_c1(i)`
+- `VirtualPolynomial::g2_add_is_double(i)`, `VirtualPolynomial::g2_add_is_inverse(i)`
 
 ---
 
 #### Connection to the external pairing boundary
 
-The Dory verifier’s final optimized check is a **3-way multi-pairing** (see `third-party/dory/src/reduce_and_fold.rs::DoryVerifierState::verify_final`).
+The Dory verifier’s final optimized check is a **3-way multi-pairing** (see the `dory` crate’s `DoryVerifierState::verify_final`).
 We do not prove pairings inside this SNARK. Instead:
 - the recursion witness includes all non-pairing operations that produce the three pairing input pairs, and
 - the recursion SNARK exposes those three (G1,G2) pairs as public outputs,
@@ -1030,12 +1048,11 @@ so the outside verifier can perform the final pairing check.
 
 ---
 
-## 3. Stage 2: Wiring / Boundary Constraints (Copy Constraints) [TODO]
+## 3. Stage 2: Wiring / Boundary Constraints (Copy Constraints)
 
-> **Implementation status**: AST-derived wiring/boundary constraints are **not yet implemented**. When added, they will be executed as
-> another sumcheck instance inside the Stage 2 batched sumcheck.
-> See TODOs in `jolt-core/src/zkvm/recursion/prover.rs` (~L1267) and `jolt-core/src/zkvm/recursion/verifier.rs` (~L515).
-> The current design doc is `WIRING_SUMCHECK_PLAN.md` (repo root), plus this Section 3.
+> **Implementation status**: AST-derived wiring/boundary constraints are **implemented** and enabled by default.
+> They run as sumcheck instances appended at the end of the Stage 2 batched sumcheck (see `jolt-core/src/zkvm/recursion/{gt,g1,g2}/wiring.rs`).
+> The design doc is `WIRING_SUMCHECK_PLAN.md` (repo root), plus this Section 3.
 
 After Stage 2, we have many virtual polynomial claims $(v_0, v_1, \ldots, v_{n-1})$ at a shared point $r_x$.
 
@@ -1069,7 +1086,7 @@ is an **endpoint** (e.g., the final accumulator), not the entire trace.
 We define endpoint ports using selector polynomials:
 - **Packed GT exp**: $\rho(s,x)$ is an 11-var MLE with 7 step vars and 4 element vars (layout `index = x * 128 + s`).
   The output port is the last-step slice $\rho(s=\text{last}, x)$.
-- **G1/G2 scalar mul**: trace columns are 11-var MLEs with **zero padding** (3 pad vars + 8 step vars).
+- **G1/G2 scalar mul**: trace columns are native 8-var MLEs over the step index.
   The output port is the last-step accumulator $A(\text{last})$ (including infinity indicator).
 
 These endpoint ports can be expressed as *linear* constraints over the underlying MLEs using Eq selectors.
@@ -1080,10 +1097,9 @@ additional “element vars” \(x\), one can enforce:
 \]
 which is equivalent to \(A(\mathrm{last},x)=B(x)\) for all \(x\).
 
-**Padding / gating caveat**: many recursion polynomials are embedded into the common 11-var domain via padding, e.g. G1/G2 scalar-mul
-traces are 8-var MLEs lifted to 11 vars by zero padding (3 pad vars + 8 step vars). Any extraction/wiring identity must include the pad
-selector \(\mathrm{Eq}(0,\text{pad})\) (implemented in code via `EqPolynomial::zero_selector`) so that the constraint only ranges over the
-supported subcube.
+**Suffix-alignment caveat**: Stage-2 sumcheck instances are batched with suffix alignment. Concretely, the Stage-2 challenge vector has
+length equal to the maximum number of rounds among included instances (typically 11 due to packed GT gadgets). For native 8-var traces (G1/G2
+scalar-mul and their shift checks), the effective opening point is the **suffix** of length 8 of the Stage-2 challenge vector.
 
 For G2 ports, there is no single “element var” \(x\); instead, the \(\mathbb{F}_{q^2}\) coordinates are split into (c0,c1) polynomials.
 Wiring a G2 element is therefore typically done by checking a random linear combination of its components (Fiat–Shamir batching).
@@ -1131,6 +1147,7 @@ serialized proof/encoding. Any future modifications must be versioned (and artif
 proof incompatibility.
 
 This is implemented by `PrefixPackingLayout::from_constraint_types` in `jolt-core/src/zkvm/recursion/prefix_packing.rs`.
+When `JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END` is enabled, the code uses `PrefixPackingLayout::from_constraint_types_gt_fused` instead.
 
 ### 4.2 Stage 3 protocol
 
@@ -1242,7 +1259,7 @@ Where:
 
 - **GT Exp (unpacked, \(t\)-bit)**: \(t\) constraints, 4 polynomial types per bit (base, rho-prev, rho-curr, quotient).
 - **GT Exp (packed, base-4)**: 1 packed constraint covering up to 128 base-4 steps. The packed witness tables include
-  \((\rho,\rho_{\text{next}},Q)\), but \(\rho_{\text{next}}\) is **not committed** (it is verified via `GtShift`).
+  \((\rho,\rho_{\text{next}},Q)\), and Stage 2 runs `GtShift` to enforce the global shift relation \(\rho_{\text{next}}(s,x)=\rho(s+1,x)\).
 - **GT Mul**: 1 constraint, 4 polynomial types (lhs, rhs, result, quotient).
 - **G1 Scalar Mul (256-bit)**: 1 constraint over an 8-var step domain, with accumulator/double/next coordinates plus indicators.
 - **G2 Scalar Mul (256-bit)**: same shape as G1 but with Fq2 split into (c0,c1) components and additional constraints.
@@ -1475,6 +1492,8 @@ The offloading boundary is:
 - **Inside the recursion SNARK**: all non-pairing group/GT computation implied by Dory verification (scalar mul, add, GT exp/mul, wiring).
 - **Outside the recursion SNARK**: transcript hashing / Fiat–Shamir challenge derivation, scalar-field arithmetic (inverses/products), and the
   **final 3-way multi-pairing check**.
+  The verifier also derives the recursion verifier input using hint-based plan derivation (no expensive group operations); with wiring enabled,
+  Stage 2 binds the pairing boundary and non-input bases/points to the verifier-derived AST.
 
 At a high level:
 
@@ -1619,8 +1638,9 @@ and produces a `ConstraintSystem` containing:
 - Combine witnesses are appended after the direct witnesses (exp first, then muls in layer order).
 
 **Role of the AST today**:
-- The AST is captured on the prover side and re-derived on the verifier side for binding and for future wiring/copy constraints.
-- The AST is **not** currently used to define the Stage-2 `constraint_types` ordering (because wiring is still TODO).
+- The AST is captured on the prover side and re-derived on the verifier side for binding and for wiring/copy constraints (via a `WiringPlan`).
+- The AST is **not** used to define the Stage-2 `constraint_types` ordering; that ordering is derived from witness collection ordering and must
+  match between prover and verifier.
 
 ### 8.5 Prover Flow
 
@@ -1639,7 +1659,7 @@ and produces a `ConstraintSystem` containing:
 
 3. **Sumchecks**: `RecursionProver::prove_sumchecks`
    - Stage 1: packed GT exp (`GtExp`) only
-   - Stage 2: batched constraint sumchecks (shift + claim reduction + GT mul + G1/G2 scalar mul + G1/G2 add; wiring TODO)
+   - Stage 2: batched constraint sumchecks (shift + claim reduction + GT mul + G1/G2 scalar mul + G1/G2 add + wiring/boundary constraints)
    - Stage 3: prefix packing reduction (no sumcheck; registers a single committed opening claim)
 
 4. **PCS opening**: `RecursionProver::poly_opening`
@@ -1649,11 +1669,15 @@ and produces a `ConstraintSystem` containing:
 
 **Current code path**: `RecursionVerifier::verify` (`jolt-core/src/zkvm/recursion/verifier.rs`) mirrors the prover:
 
+**Outer wrapper**: `verify_recursion` (`jolt-core/src/zkvm/recursion/api.rs`) replays base stages 1–7 to reconstruct transcript state, builds a
+symbolic AST, derives a `RecursionVerifierInput` via hint-based plan derivation, verifies the recursion SNARK via `RecursionVerifier::verify`,
+and finally performs the external 3-way pairing check against `recursion.pairing_boundary.rhs`.
+
 - Bind the dense commitment into the transcript (must match prover ordering).
 - Initialize the opening accumulator from `proof.opening_claims`.
 - Verify:
   - Stage 1 packed GT exp sumcheck,
-  - Stage 2 batched constraint sumchecks (wiring TODO),
+  - Stage 2 batched constraint sumchecks (including wiring/boundary constraints),
   - Stage 3 prefix-packing reduction (recompute `stage3_packed_eval`, then register the committed opening),
   - Hyrax opening proof verification.
 
@@ -1811,6 +1835,25 @@ trait HyraxGpuKernel {
 
 Prefix packing (Stage 3) reduces GPU memory pressure by avoiding padded sparse representations.
 
+### 8.13 Environment Flags and Feature Gates
+
+The recursion implementation includes several feature toggles (primarily for benchmarking/debugging):
+
+- **Stage 2 verifier toggles** (see `jolt-core/src/zkvm/recursion/verifier.rs`):
+  - `JOLT_RECURSION_ENABLE_SHIFT_RHO` (default `true`)
+  - `JOLT_RECURSION_ENABLE_SHIFT_G1_SCALAR_MUL` (default `true`)
+  - `JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL` (default `true`)
+  - `JOLT_RECURSION_ENABLE_PGX_REDUCTION` (default `true`)
+  - `JOLT_RECURSION_ENABLE_WIRING`, `JOLT_RECURSION_ENABLE_WIRING_GT`, `..._G1`, `..._G2` (defaults `true`)
+  - `JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END` (default `false`): enables the “fused GT” path (changes Stage-2 challenge layout and Stage-3 packing layout).
+  - `JOLT_RECURSION_STOP_AFTER_STAGE2` (tests only): early-exit hook to isolate Stage 2 failures.
+
+- **Witness-generation toggles** (see `jolt-core/src/zkvm/recursion/witness_generation.rs`): enable/disable inclusion of specific constraint families
+  (GT mul, G1/G2 scalar mul, G1/G2 add; pairing is feature-gated).
+
+- **Cargo feature gates**:
+  - `experimental-pairing-recursion`: enables experimental Multi-Miller-loop recursion gadgets.
+
 ---
 
 ## 9. Benchmarking & Cycle Measurement
@@ -1823,13 +1866,13 @@ To measure cycle counts without generating a full proof (which is slow), use the
 
 ```bash
 # Trace fibonacci recursion (committed program mode)
-cargo run --release -p recursion -- trace --example fibonacci --embed --committed
+cargo run --release -p recursion -- trace --example fibonacci --embed --committed --cycle-tracking
 
 # Trace muldiv recursion (committed program mode)
-cargo run --release -p recursion -- trace --example muldiv --embed --committed
+cargo run --release -p recursion -- trace --example muldiv --embed --committed --cycle-tracking
 
 # With disk-based tracing (reduces memory usage for large traces)
-cargo run --release -p recursion -- trace --example fibonacci --embed --committed --disk
+cargo run --release -p recursion -- trace --example fibonacci --embed --committed --cycle-tracking --disk
 ```
 
 ### 9.2 Understanding the Output
@@ -1838,19 +1881,54 @@ The tracer outputs cycle counts for each instrumented section:
 
 | Stage | Description |
 |-------|-------------|
+| `guest_verify_total` | Total guest verifier entrypoint (includes deserialization + verification) |
+| `guest_one_proof_total` | Total work for one proof (includes deserialization + verification) |
+| `guest_verify_one_proof_total` | Total verification for one proof (excluding deserialization) |
 | `deserialize proof` | Deserializing the Jolt proof from bytes |
 | `deserialize device` | Deserializing the I/O device |
+| `deserialize preprocessing` | Deserializing verifier preprocessing |
+| `deserialize recursion artifact` | Deserializing recursion artifact (if present) |
 | `jolt_verify_stage1` - `stage7` | Jolt verifier stages (non-PCS) |
 | `jolt_verify_stage8_dory_pcs` | Dory PCS verification (native) |
-| `jolt_recursion_stage1` - `stage5` | Recursion SNARK stages |
+| `verify_recursion_total` | Recursion verification wrapper (replay base stages 1–7, derive recursion input, verify recursion SNARK, external pairing check) |
+| `verify_recursion_base_stages_1_to_7_total` | Base verifier stages 1–7, replayed inside recursion verification |
+| `verify_recursion_stage8_prep_total` | Stage 8 recursion prep (symbolic AST build + transcript replay + hint-based plan derivation) |
+| `verify_recursion_snark_verify_total` | Recursion SNARK verification (stages 1–3 + PCS opening) |
+| `jolt_external_pairing_check` | Final external pairing check (boundary value bound by wiring constraints) |
+| `jolt_recursion_stage1` - `stage3` | Recursion SNARK stages (sumchecks + reductions) |
+| `jolt_recursion_pcs_opening` | Recursion SNARK PCS opening verification |
 | `jolt_hyrax_msm1`, `jolt_hyrax_msm2` | Hyrax multi-scalar multiplications |
 | `jolt_hyrax_opening_verify` | Hyrax opening verification |
-| `jolt_verify_stage8_recursion` | Total recursion verification |
-| `verification` | Total verification (excluding deserialization) |
 
 Each line shows both:
 - **RV64IMAC cycles**: Raw RISC-V instruction cycles
 - **Virtual cycles**: Cycles including memory operations and other costs
+
+### 9.2.1 Flat totals vs nested drill-down (how to make spans “add up”)
+
+Cycle markers are **nested** in many places (e.g. the Hyrax MSM spans are inside the Hyrax opening span, which is inside the recursion PCS-opening span, etc.). This is great for drill-down, but it means you **must not sum nested spans** (you will double count).
+
+To make accounting easy, the verifier exposes a small set of **non-overlapping “flat totals”** with names ending in `*_total`. These are intended to be summed at a given level:
+
+- **Guest-level total**: `guest_verify_total` should be very close to the tracer-reported `trace length`.
+- **Per-proof**:
+  - `guest_one_proof_total` = (deserialization for that proof) + `guest_verify_one_proof_total`
+  - `guest_verify_one_proof_total` is the “verification-only” total for one proof (no deserialization).
+- **Recursion wrapper** (when verifying with a recursion artifact):
+  - `verify_recursion_total` \(\approx\)
+    `verify_recursion_base_stages_1_to_7_total`
+    + `verify_recursion_stage8_prep_total`
+    + `verify_recursion_snark_verify_total`
+    + `jolt_external_pairing_check`
+    + (small overhead)
+- **Recursion SNARK verifier**:
+  - `verify_recursion_snark_verify_total` \(\approx\)
+    `jolt_recursion_stage1` + `jolt_recursion_stage2` + `jolt_recursion_stage3` + `jolt_recursion_pcs_opening`
+    + (small overhead: transcript/accumulator setup before Stage 1)
+
+Practical rule of thumb:
+- **For totals**: sum only the `*_total` spans (plus any other “flat” top-level spans you care about).
+- **For hotspots**: use nested spans like `jolt_hyrax_msm1` / `jolt_hyrax_msm2` / `jolt_hyrax_opening_verify` to drill down inside `jolt_recursion_pcs_opening`, but do not sum them together with their parents.
 
 ### 9.3 Full Proof Generation & Verification
 

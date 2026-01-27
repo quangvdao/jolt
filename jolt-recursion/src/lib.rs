@@ -394,7 +394,7 @@ pub fn prove_recursion<FS: transcripts::Transcript>(
     // Advance the main transcript to the post-Stage8 state expected by recursion SNARK.
     v.transcript = pre_opening_proof_transcript;
     <DoryPCS as RecursionExt<F>>::replay_opening_proof_transcript(
-        &v.proof.stage8_opening_proof,
+        &v.proof.joint_opening_proof,
         &mut v.transcript,
     )
     .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
@@ -471,7 +471,7 @@ pub fn prove_recursion<FS: transcripts::Transcript>(
         &mut v.transcript,
         &hyrax_prover_setup,
         RecursionInput {
-            stage8_opening_proof: &v.proof.stage8_opening_proof,
+            joint_opening_proof: &v.proof.joint_opening_proof,
             stage8_snapshot,
             verifier_setup: &v.preprocessing.generators,
             commitments: &commitments_map,
@@ -663,7 +663,7 @@ pub fn verify_recursion<FS: transcripts::Transcript>(
     // Build symbolic AST on a transcript clone at the pre-Stage8-proof state.
     let mut ast_transcript = pre_opening_proof_transcript.clone();
     let ast = <DoryPCS as RecursionExt<F>>::build_symbolic_ast(
-        &v.proof.stage8_opening_proof,
+        &v.proof.joint_opening_proof,
         &v.preprocessing.generators,
         &mut ast_transcript,
         &dory_snap.opening_point.r,
@@ -675,7 +675,7 @@ pub fn verify_recursion<FS: transcripts::Transcript>(
     // Advance the main transcript to the post-Stage8 state expected by recursion SNARK.
     v.transcript = pre_opening_proof_transcript;
     <DoryPCS as RecursionExt<F>>::replay_opening_proof_transcript(
-        &v.proof.stage8_opening_proof,
+        &v.proof.joint_opening_proof,
         &mut v.transcript,
     )
     .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
@@ -687,7 +687,7 @@ pub fn verify_recursion<FS: transcripts::Transcript>(
 
     let derived_plan = derive_plan_with_hints(
         &ast,
-        &v.proof.stage8_opening_proof,
+        &v.proof.joint_opening_proof,
         &v.preprocessing.generators,
         joint_commitment_dory,
         &combine_commitments_dory,

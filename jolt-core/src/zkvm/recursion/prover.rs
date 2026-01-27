@@ -220,7 +220,7 @@ pub struct DoryOpeningSnapshot<F: JoltField, ProofTranscript: Transcript> {
 /// This removes parameter sprawl at the Stage8→recursion boundary and makes it harder
 /// to accidentally desynchronize proof/setup/snapshot inputs.
 pub struct RecursionInput<'a, F: JoltField, PCS: RecursionExt<F>, ProofTranscript: Transcript> {
-    pub stage8_opening_proof: &'a PCS::Proof,
+    pub joint_opening_proof: &'a PCS::Proof,
     pub stage8_snapshot: DoryOpeningSnapshot<F, ProofTranscript>,
     pub verifier_setup: &'a PCS::VerifierSetup,
     pub commitments: &'a HashMap<CommittedPolynomial, PCS::Commitment>,
@@ -253,7 +253,7 @@ impl RecursionProver<Fq> {
         ProofTranscript: Transcript,
         PCS::CombineHint: Send,
     {
-        let stage8_opening_proof = input.stage8_opening_proof;
+        let joint_opening_proof = input.joint_opening_proof;
         let verifier_setup = input.verifier_setup;
 
         // Stage 8 (recursion-only): compute joint commitment (value-only).
@@ -299,7 +299,7 @@ impl RecursionProver<Fq> {
                 )
                 .in_scope(|| {
                     PCS::witness_gen_with_ast(
-                        stage8_opening_proof,
+                        joint_opening_proof,
                         verifier_setup,
                         &mut witness_gen_transcript,
                         &opening_point,
@@ -320,7 +320,7 @@ impl RecursionProver<Fq> {
         // This is later re-derived by the verifier from a symbolic AST for binding.
         let pairing_boundary = PCS::derive_pairing_boundary_from_ast(
             &ast,
-            stage8_opening_proof,
+            joint_opening_proof,
             verifier_setup,
             joint_commitment,
             &comms,

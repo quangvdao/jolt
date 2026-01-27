@@ -52,17 +52,9 @@ pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcr
 
     pub stage7_sumcheck_proof: SumcheckInstanceProof<F, FS>,
 
-    /// Dory polynomial commitment opening proof
-    pub stage8_opening_proof: PCS::Proof,
+    /// Dory polynomial commitment opening proof (joint batch opening)
+    pub joint_opening_proof: PCS::Proof,
 
-    /// Trusted advice opening proof at point from RamValEvaluation
-    pub trusted_advice_val_evaluation_proof: Option<PCS::Proof>,
-    /// Trusted advice opening proof at point from RamValFinalEvaluation
-    pub trusted_advice_val_final_proof: Option<PCS::Proof>,
-    /// Untrusted advice opening proof at point from RamValEvaluation
-    pub untrusted_advice_val_evaluation_proof: Option<PCS::Proof>,
-    /// Untrusted advice opening proof at point from RamValFinalEvaluation
-    pub untrusted_advice_val_final_proof: Option<PCS::Proof>,
     pub untrusted_advice_commitment: Option<PCS::Commitment>,
 
     pub trace_length: usize,
@@ -140,15 +132,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalSe
             .serialize_with_mode(&mut writer, compress)?;
         self.stage7_sumcheck_proof
             .serialize_with_mode(&mut writer, compress)?;
-        self.stage8_opening_proof
-            .serialize_with_mode(&mut writer, compress)?;
-        self.trusted_advice_val_evaluation_proof
-            .serialize_with_mode(&mut writer, compress)?;
-        self.trusted_advice_val_final_proof
-            .serialize_with_mode(&mut writer, compress)?;
-        self.untrusted_advice_val_evaluation_proof
-            .serialize_with_mode(&mut writer, compress)?;
-        self.untrusted_advice_val_final_proof
+        self.joint_opening_proof
             .serialize_with_mode(&mut writer, compress)?;
         self.untrusted_advice_commitment
             .serialize_with_mode(&mut writer, compress)?;
@@ -183,19 +167,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalSe
             + self.stage6a_sumcheck_proof.serialized_size(compress)
             + self.stage6b_sumcheck_proof.serialized_size(compress)
             + self.stage7_sumcheck_proof.serialized_size(compress)
-            + self.stage8_opening_proof.serialized_size(compress)
-            + self
-                .trusted_advice_val_evaluation_proof
-                .serialized_size(compress)
-            + self
-                .trusted_advice_val_final_proof
-                .serialized_size(compress)
-            + self
-                .untrusted_advice_val_evaluation_proof
-                .serialized_size(compress)
-            + self
-                .untrusted_advice_val_final_proof
-                .serialized_size(compress)
+            + self.joint_opening_proof.serialized_size(compress)
             + self.untrusted_advice_commitment.serialized_size(compress)
             + self.trace_length.serialized_size(compress)
             + self.ram_K.serialized_size(compress)
@@ -276,27 +248,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalDe
                 compress,
                 validate,
             )?,
-            stage8_opening_proof: PCS::Proof::deserialize_with_mode(
-                &mut reader,
-                compress,
-                validate,
-            )?,
-            trusted_advice_val_evaluation_proof: Option::deserialize_with_mode(
-                &mut reader,
-                compress,
-                validate,
-            )?,
-            trusted_advice_val_final_proof: Option::deserialize_with_mode(
-                &mut reader,
-                compress,
-                validate,
-            )?,
-            untrusted_advice_val_evaluation_proof: Option::deserialize_with_mode(
-                &mut reader,
-                compress,
-                validate,
-            )?,
-            untrusted_advice_val_final_proof: Option::deserialize_with_mode(
+            joint_opening_proof: PCS::Proof::deserialize_with_mode(
                 &mut reader,
                 compress,
                 validate,
@@ -426,13 +378,7 @@ where
         self.stage6a_sumcheck_proof.guest_serialize(w)?;
         self.stage6b_sumcheck_proof.guest_serialize(w)?;
         self.stage7_sumcheck_proof.guest_serialize(w)?;
-        self.stage8_opening_proof.guest_serialize(w)?;
-        self.trusted_advice_val_evaluation_proof
-            .guest_serialize(w)?;
-        self.trusted_advice_val_final_proof.guest_serialize(w)?;
-        self.untrusted_advice_val_evaluation_proof
-            .guest_serialize(w)?;
-        self.untrusted_advice_val_final_proof.guest_serialize(w)?;
+        self.joint_opening_proof.guest_serialize(w)?;
         self.untrusted_advice_commitment.guest_serialize(w)?;
         self.trace_length.guest_serialize(w)?;
         self.ram_K.guest_serialize(w)?;
@@ -471,11 +417,7 @@ where
             stage6a_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
             stage6b_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
             stage7_sumcheck_proof: SumcheckInstanceProof::<F, FS>::guest_deserialize(r)?,
-            stage8_opening_proof: PCS::Proof::guest_deserialize(r)?,
-            trusted_advice_val_evaluation_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
-            trusted_advice_val_final_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
-            untrusted_advice_val_evaluation_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
-            untrusted_advice_val_final_proof: Option::<PCS::Proof>::guest_deserialize(r)?,
+            joint_opening_proof: PCS::Proof::guest_deserialize(r)?,
             untrusted_advice_commitment: Option::<PCS::Commitment>::guest_deserialize(r)?,
             trace_length: usize::guest_deserialize(r)?,
             ram_K: usize::guest_deserialize(r)?,

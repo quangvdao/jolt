@@ -1151,7 +1151,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
         // Verify joint opening
         PCS::verify(
-            &self.proof.stage8_opening_proof,
+            &self.proof.joint_opening_proof,
             &self.preprocessing.generators,
             &mut self.transcript,
             &opening_point.r,

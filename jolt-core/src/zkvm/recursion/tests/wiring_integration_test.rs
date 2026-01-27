@@ -118,7 +118,7 @@ fn build_fixture() -> RecursionFixture {
     // Produce recursion proof from Stage8 artifacts.
     let mut recursion_transcript: Blake2bTranscript = Transcript::new(b"recursion");
     let input = RecursionInput::<Fr, DoryCommitmentScheme, Blake2bTranscript> {
-        stage8_opening_proof: &dory_proof,
+        joint_opening_proof: &dory_proof,
         stage8_snapshot,
         verifier_setup: &verifier_setup,
         commitments: &commitments,

@@ -31,6 +31,94 @@ use crate::{
     poly::opening_proof::PolynomialId, subprotocols::univariate_skip::UniSkipFirstRoundProof,
 };
 
+#[cfg(feature = "recursion")]
+use ark_bn254::{Fq12, G1Affine, G2Affine};
+
+/// Boundary outputs for the final external pairing check in recursion mode.
+///
+/// The verifier must **not trust** prover-supplied values here; it should re-derive the expected
+/// boundary from public inputs (proof + setup) and compare.
+#[cfg(feature = "recursion")]
+#[derive(Clone, Debug, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
+pub struct PairingBoundary {
+    pub p1_g1: G1Affine,
+    pub p1_g2: G2Affine,
+    pub p2_g1: G1Affine,
+    pub p2_g2: G2Affine,
+    pub p3_g1: G1Affine,
+    pub p3_g2: G2Affine,
+    pub rhs: Fq12,
+}
+
+#[cfg(feature = "recursion")]
+impl GuestSerialize for PairingBoundary {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.p1_g1.guest_serialize(w)?;
+        self.p1_g2.guest_serialize(w)?;
+        self.p2_g1.guest_serialize(w)?;
+        self.p2_g2.guest_serialize(w)?;
+        self.p3_g1.guest_serialize(w)?;
+        self.p3_g2.guest_serialize(w)?;
+        self.rhs.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "recursion")]
+impl GuestDeserialize for PairingBoundary {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            p1_g1: ark_bn254::g1::G1Affine::guest_deserialize(r)?,
+            p1_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
+            p2_g1: ark_bn254::g1::G1Affine::guest_deserialize(r)?,
+            p2_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
+            p3_g1: ark_bn254::g1::G1Affine::guest_deserialize(r)?,
+            p3_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
+            rhs: Fq12::guest_deserialize(r)?,
+        })
+    }
+}
+
+/// Hints for recursion instance-plan derivation when an op's base/point is not an `AstOp::Input`.
+///
+/// These are used to avoid requiring the verifier to evaluate the full Dory verification DAG just
+/// to recover bases/points for public inputs in the recursion verifier input.
+///
+/// **Security note**: without wiring/boundary constraints, these hints are not bound to the Dory
+/// verification computation. They are intended for performance/profiling until wiring is added.
+#[cfg(feature = "recursion")]
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct NonInputBaseHints {
+    /// One entry per Dory-traced `GTExp` op, in OpId-sorted order.
+    /// `None` means the base was an `AstOp::Input` and can be resolved by the verifier.
+    pub gt_exp_base_hints: Vec<Option<Fq12>>,
+    /// One entry per Dory-traced `G1ScalarMul` op, in OpId-sorted order.
+    pub g1_scalar_mul_base_hints: Vec<Option<G1Affine>>,
+    /// One entry per Dory-traced `G2ScalarMul` op, in OpId-sorted order.
+    pub g2_scalar_mul_base_hints: Vec<Option<G2Affine>>,
+}
+
+#[cfg(feature = "recursion")]
+impl GuestSerialize for NonInputBaseHints {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.gt_exp_base_hints.guest_serialize(w)?;
+        self.g1_scalar_mul_base_hints.guest_serialize(w)?;
+        self.g2_scalar_mul_base_hints.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "recursion")]
+impl GuestDeserialize for NonInputBaseHints {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            gt_exp_base_hints: Vec::<Option<Fq12>>::guest_deserialize(r)?,
+            g1_scalar_mul_base_hints: Vec::<Option<G1Affine>>::guest_deserialize(r)?,
+            g2_scalar_mul_base_hints: Vec::<Option<G2Affine>>::guest_deserialize(r)?,
+        })
+    }
+}
+
 /// Jolt proof structure organized by verification stages
 pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> {
     pub opening_claims: Claims<F>,

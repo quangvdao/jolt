@@ -8,7 +8,18 @@ use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 mod commitment_scheme;
 mod dory_globals;
 mod jolt_dory_routines;
+#[cfg(feature = "recursion")]
+pub mod instance_plan;
+#[cfg(feature = "recursion")]
+pub mod recursion;
+#[cfg(feature = "recursion")]
+pub mod witness;
 pub mod wrappers;
+
+#[cfg(feature = "recursion")]
+pub use instance_plan::{
+    derive_from_dory_ast, derive_plan_with_hints, DerivedRecursionInput, DerivedRecursionPlan,
+};
 
 #[cfg(test)]
 mod tests;

@@ -154,3 +154,66 @@ pub trait StreamingCommitmentScheme: CommitmentScheme {
         tier1_commitments: &[Self::ChunkState],
     ) -> (Self::Commitment, Self::OpeningProofHint);
 }
+
+// -------------------------------------------------------------------------------------------------
+// Recursion support (feature-gated)
+// -------------------------------------------------------------------------------------------------
+
+/// Extension trait for commitment schemes that adds recursion support.
+///
+/// This trait enables a commitment scheme to be used with Jolt's recursion SNARK.
+/// Currently only Dory implements this trait.
+#[cfg(feature = "recursion")]
+pub trait RecursionExt<F: JoltField>: CommitmentScheme<Field = F> {
+    /// Witness collection type for recursion constraint building.
+    type Witness;
+
+    /// Commitment-scheme specific AST type used to derive recursion obligations.
+    type Ast;
+
+    /// Hint for combine_commitments offloading (the final combined commitment).
+    type CombineHint;
+
+    fn witness_gen_with_ast<ProofTranscript: Transcript>(
+        proof: &Self::Proof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut ProofTranscript,
+        point: &[<F as JoltField>::Challenge],
+        evaluation: &F,
+        commitment: &Self::Commitment,
+    ) -> Result<(Self::Witness, Self::Ast), ProofVerifyError>;
+
+    fn build_symbolic_ast<ProofTranscript: Transcript>(
+        proof: &Self::Proof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut ProofTranscript,
+        point: &[<F as JoltField>::Challenge],
+        evaluation: &F,
+        commitment: &Self::Commitment,
+    ) -> Result<Self::Ast, ProofVerifyError>;
+
+    fn derive_pairing_boundary_from_ast(
+        ast: &Self::Ast,
+        proof: &Self::Proof,
+        setup: &Self::VerifierSetup,
+        joint_commitment: Self::Commitment,
+        combine_commitments: &[Self::Commitment],
+        combine_coeffs: &[F],
+    ) -> Result<crate::zkvm::proof_serialization::PairingBoundary, ProofVerifyError>;
+
+    fn replay_opening_proof_transcript<ProofTranscript: Transcript>(
+        proof: &Self::Proof,
+        transcript: &mut ProofTranscript,
+    ) -> Result<(), ProofVerifyError>;
+
+    fn generate_combine_witness<C: Borrow<Self::Commitment>>(
+        commitments: &[C],
+        coeffs: &[F],
+    ) -> (crate::zkvm::recursion::witness::GTCombineWitness, Self::CombineHint);
+
+    fn combine_with_hint(hint: &Self::CombineHint) -> Self::Commitment;
+
+    fn combine_hint_to_fq12(hint: &Self::CombineHint) -> ark_bn254::Fq12;
+
+    fn combine_with_hint_fq12(hint: &ark_bn254::Fq12) -> Self::Commitment;
+}

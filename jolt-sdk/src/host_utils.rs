@@ -24,6 +24,11 @@ pub use jolt_core::zkvm::{
     verifier::JoltVerifierPreprocessing, RV64IMACProof, RV64IMACVerifier, Serializable,
 };
 
+// Recursion API (feature-gated in jolt-core, enabled by jolt-sdk feature sets used here).
+#[cfg(feature = "host")]
+pub use jolt_core::zkvm::recursion::prove_recursion;
+pub use jolt_core::zkvm::recursion::{verify_recursion, RecursionArtifact};
+
 // Extra re-exports for fine-grained (de)serialization profiling in recursion.
 pub use jolt_core::zkvm::bytecode::{BytecodePCMapper, BytecodePreprocessing};
 pub use tracer::instruction::Instruction;

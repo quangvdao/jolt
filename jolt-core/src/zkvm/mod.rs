@@ -33,6 +33,8 @@ pub mod program;
 pub mod proof_serialization;
 #[cfg(feature = "prover")]
 pub mod prover;
+#[cfg(feature = "recursion")]
+pub mod recursion;
 pub mod r1cs;
 pub mod ram;
 pub mod registers;

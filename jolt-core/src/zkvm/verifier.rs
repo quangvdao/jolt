@@ -278,6 +278,18 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
 
+        self.initialize_transcript_preamble()?;
+        self.verify_stages_1_to_7()?;
+        self.verify_stage8()?;
+
+        Ok(())
+    }
+
+    /// Initialize DoryGlobals and stage-0 Fiat-Shamir transcript state.
+    ///
+    /// This must be called before any stage verification, and it must behave identically in
+    /// host and guest environments.
+    pub(crate) fn initialize_transcript_preamble(&mut self) -> Result<(), anyhow::Error> {
         // IMPORTANT: The verifier runs in both host and zkVM guest environments.
         // Host code usually sets `DoryGlobals` layout/config externally (CLI flag), but the guest has
         // its own global state and must initialize it from the proof.
@@ -322,6 +334,13 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                 .append_serializable(&trusted.program_image_commitment);
         }
 
+        Ok(())
+    }
+
+    /// Verify base stages 1–7.
+    ///
+    /// This is shared between the base verifier path and the recursion wrapper verification path.
+    pub(crate) fn verify_stages_1_to_7(&mut self) -> Result<(), anyhow::Error> {
         self.verify_stage1()?;
         self.verify_stage2()?;
         self.verify_stage3()?;
@@ -330,9 +349,34 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         self.verify_stage6a()?;
         self.verify_stage6b()?;
         self.verify_stage7()?;
-        self.verify_stage8()?;
-
         Ok(())
+    }
+
+    /// Stage-8 pre-plumbing shared by recursion proving/verifying.
+    ///
+    /// Returns:
+    /// - Stage 8 claim ordering snapshot (needed to rebuild combine plan deterministically)\n
+    /// - a transcript fork at the \"pre-opening-proof\" state (after gamma sampling)\n
+    /// - gamma powers and the joint claim\n
+    pub(crate) fn build_stage8_recursion_prep(
+        &self,
+    ) -> Result<(DoryVerifySnapshot<F>, ProofTranscript, Vec<F>, F), anyhow::Error>
+    where
+        ProofTranscript: Clone,
+    {
+        let dory_snap = self.build_dory_verify_snapshot()?;
+
+        let mut pre_opening_proof_transcript = self.transcript.clone();
+        pre_opening_proof_transcript.append_scalars(&dory_snap.claims);
+        let gamma_powers: Vec<F> =
+            pre_opening_proof_transcript.challenge_scalar_powers(dory_snap.claims.len());
+        let joint_claim: F = gamma_powers
+            .iter()
+            .zip(dory_snap.claims.iter())
+            .map(|(g, c)| *g * c)
+            .sum();
+
+        Ok((dory_snap, pre_opening_proof_transcript, gamma_powers, joint_claim))
     }
 
     #[tracing::instrument(skip_all, name = "verify_stage1")]

@@ -78,7 +78,7 @@ jobs:
 
   test-recursion:
     runs-on: ubuntu-latest
-    name: Test jolt-recursion
+    name: Test jolt-core recursion
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -93,8 +93,8 @@ jobs:
         run: rm -rf ~/.cache/dory
       - name: Install nextest
         uses: taiki-e/install-action@nextest
-      - name: Run jolt-recursion tests
-        run: cargo nextest run --release -p jolt-recursion
+      - name: Run jolt-core recursion tests
+        run: cargo nextest run --release -p jolt-core --features recursion,host
 
   typos:
     runs-on: ubuntu-latest

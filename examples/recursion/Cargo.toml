@@ -12,7 +12,7 @@ default = []
 
 [dependencies]
 jolt-sdk = { workspace = true, features = ["host"] }
-jolt-recursion = { workspace = true }
+jolt-core = { workspace = true, features = ["host", "recursion"] }
 jolt-inlines-grumpkin = { workspace = true, features = ["host"] }
 tracing-subscriber.workspace = true
 tracing.workspace = true

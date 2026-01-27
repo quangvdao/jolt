@@ -28,7 +28,7 @@ pub fn main() {
         .expect("Could not serialize preprocessing.");
     }
 
-    let verify_fib = guest::build_verifier_fib(verifier_preprocessing);
+    let _verify_fib = guest::build_verifier_fib(verifier_preprocessing);
 
     let program_summary = guest::analyze_fib(10);
     program_summary
@@ -40,7 +40,7 @@ pub fn main() {
     info!("Trace file written to: {trace_file}.");
 
     let now = Instant::now();
-    let (output, proof, io_device) = if committed_bytecode {
+    let (_output, proof, io_device) = if committed_bytecode {
         let prove_fib = guest::build_prover_committed_fib(program, prover_preprocessing);
         prove_fib(50)
     } else {

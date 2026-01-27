@@ -12,7 +12,7 @@ extern crate alloc;
 
 use jolt::{
     end_cycle_tracking, start_cycle_tracking, GuestDeserialize, JoltDevice,
-    JoltVerifierPreprocessing, RV64IMACProof, RV64IMACVerifier, F, PCS,
+    JoltVerifierPreprocessing, RecursionArtifact, RV64IMACProof, RV64IMACVerifier, F, PCS,
 };
 
 mod embedded_bytes {
@@ -46,22 +46,38 @@ fn verify(bytes: &[u8]) -> u32 {
 
     let mut all_valid = true;
     for _ in 0..n {
-        start_cycle_tracking("deserialize proof");
-        let proof = RV64IMACProof::guest_deserialize(&mut cursor).unwrap();
-        end_cycle_tracking("deserialize proof");
-
         start_cycle_tracking("deserialize device");
         let device = JoltDevice::guest_deserialize(&mut cursor).unwrap();
         end_cycle_tracking("deserialize device");
 
+        start_cycle_tracking("deserialize proof");
+        let proof = RV64IMACProof::guest_deserialize(&mut cursor).unwrap();
+        end_cycle_tracking("deserialize proof");
+
+        start_cycle_tracking("deserialize recursion artifact");
+        let recursion_artifact: Option<RecursionArtifact<jolt::FS>> =
+            Option::guest_deserialize(&mut cursor).unwrap();
+        end_cycle_tracking("deserialize recursion artifact");
+
         start_cycle_tracking("verification");
-        let verifier = RV64IMACVerifier::new(&verifier_preprocessing, proof, device, None, None);
-        let is_valid = verifier.is_ok_and(|verifier| {
-            // Recursion verification was extracted to `jolt-recursion`; guest verification only
-            // supports the base Jolt verifier path.
-            let result = verifier.verify();
-            core::hint::black_box(result).is_ok()
-        });
+        let is_valid = if let Some(ref artifact) = recursion_artifact {
+            // Recursion verification path: replay stages 1–7 and verify recursion SNARK in-guest.
+            jolt::verify_recursion(
+                &verifier_preprocessing,
+                device,
+                None,
+                &proof,
+                artifact,
+            )
+            .is_ok()
+        } else {
+            // Standard verification (no recursion artifact).
+            let verifier = RV64IMACVerifier::new(&verifier_preprocessing, proof, device, None, None);
+            verifier.is_ok_and(|verifier| {
+                let result = verifier.verify();
+                core::hint::black_box(result).is_ok()
+            })
+        };
         end_cycle_tracking("verification");
 
         all_valid = all_valid && is_valid;

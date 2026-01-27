@@ -8,7 +8,7 @@ use std::io;
 
 use ark_serialize::CanonicalDeserialize;
 
-use crate::host_utils::{JoltDevice, JoltVerifierPreprocessing, RV64IMACProof, F, PCS};
+use crate::host_utils::{JoltDevice, JoltVerifierPreprocessing, RV64IMACProof, F, FS, PCS};
 
 /// Convert transport bytes (canonical, compressed) into guest bytes (decompressed+converted).
 ///
@@ -46,24 +46,30 @@ pub fn decompress_transport_bytes_to_guest_bytes(transport: &[u8]) -> io::Result
     // Decode proofs/devices from transport.
     let mut proofs: Vec<RV64IMACProof> = Vec::with_capacity(n as usize);
     let mut devices: Vec<JoltDevice> = Vec::with_capacity(n as usize);
+    let mut recursion_artifacts: Vec<Option<jolt_core::zkvm::recursion::RecursionArtifact<FS>>> =
+        Vec::with_capacity(n as usize);
     for _ in 0..n {
-        let proof = RV64IMACProof::deserialize_compressed(&mut cursor).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "transport proof decode failed")
-        })?;
         let device = JoltDevice::deserialize_compressed(&mut cursor).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "transport device decode failed")
         })?;
+        let proof = RV64IMACProof::deserialize_compressed(&mut cursor).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "transport proof decode failed")
+        })?;
+        let recursion_artifact = Option::<jolt_core::zkvm::recursion::RecursionArtifact<FS>>::deserialize_compressed(&mut cursor)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "transport recursion artifact decode failed"))?;
         proofs.push(proof);
         devices.push(device);
+        recursion_artifacts.push(recursion_artifact);
     }
 
     // Emit guest bytes (decompressed+converted encoding).
     let mut out = Vec::new();
     verifier_preprocessing.guest_serialize(&mut out)?;
     n.guest_serialize(&mut out)?;
-    for (p, d) in proofs.iter().zip(devices.iter()) {
-        p.guest_serialize(&mut out)?;
+    for ((d, p), r) in devices.iter().zip(proofs.iter()).zip(recursion_artifacts.iter()) {
         d.guest_serialize(&mut out)?;
+        p.guest_serialize(&mut out)?;
+        r.guest_serialize(&mut out)?;
     }
     Ok(out)
 }

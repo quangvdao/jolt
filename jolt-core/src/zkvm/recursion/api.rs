@@ -1,0 +1,437 @@
+//! High-level API for generating and verifying recursion proofs for base Jolt proofs.
+//!
+//! This is a *wrapper layer* around:
+//! - the base verifier stages (1–7) in `crate::zkvm::verifier::JoltVerifier`
+//! - the recursion SNARK prover/verifier in `crate::zkvm::recursion::{prover, verifier}`
+//!
+//! The goal is to keep the base Jolt proof format recursion-free, while still allowing a
+//! standalone recursion artifact to be produced and verified (including inside a guest).
+
+use std::collections::HashMap;
+
+use anyhow::{anyhow, Result};
+use ark_ec::AffineRepr;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use dory::primitives::arithmetic::PairingCurve;
+
+use crate::transcripts::Transcript;
+use crate::zkvm::config::ProgramMode;
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
+use crate::zkvm::proof_serialization::{JoltProof, NonInputBaseHints, PairingBoundary};
+use crate::zkvm::verifier::{JoltVerifier, JoltVerifierPreprocessing};
+use crate::zkvm::witness::all_committed_polynomials;
+
+use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
+use crate::poly::commitment::dory::{ArkG1, ArkG2, ArkGT, DoryContext, DoryGlobals, BN254};
+use crate::poly::rlc_utils::compute_rlc_coefficients;
+use crate::zkvm::recursion::prover::{DoryOpeningSnapshot, RecursionInput, RecursionProver};
+use crate::zkvm::recursion::verifier::RecursionVerifier;
+use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
+use crate::zkvm::witness::CommittedPolynomial;
+
+use ark_bn254::{Fq, Fq12, Fr};
+
+type DoryPCS = crate::poly::commitment::dory::DoryCommitmentScheme;
+type HyraxPCS = crate::zkvm::recursion::prover::HyraxPCS;
+
+/// Standalone recursion artifact for a base Jolt proof.
+///
+/// This is separate from the base `JoltProof`. The verifier reconstructs transcript state by
+/// re-verifying base stages 1–7, then verifies this recursion SNARK proof.
+#[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
+pub struct RecursionArtifact<FS: Transcript> {
+    /// Hint for Stage 8 combine_commitments offloading (the combined GT element).
+    pub stage8_combine_hint: Option<Fq12>,
+    /// Boundary outputs for the external pairing check (treated as a hint; guest recomputes).
+    pub pairing_boundary: PairingBoundary,
+    /// Minimal hints for Dory instance-plan derivation (guest recomputes without trusting).
+    pub non_input_base_hints: NonInputBaseHints,
+    /// The recursion SNARK proof itself (Hyrax + sumchecks).
+    pub proof: crate::zkvm::recursion::prover::RecursionProof<Fq, FS, HyraxPCS>,
+}
+
+impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.stage8_combine_hint.guest_serialize(w)?;
+        self.pairing_boundary.guest_serialize(w)?;
+        self.non_input_base_hints.guest_serialize(w)?;
+        self.proof.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl<FS: Transcript> GuestDeserialize for RecursionArtifact<FS> {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
+            pairing_boundary: PairingBoundary::guest_deserialize(r)?,
+            non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
+            proof: crate::zkvm::recursion::prover::RecursionProof::<Fq, FS, HyraxPCS>::guest_deserialize(
+                r,
+            )?,
+        })
+    }
+}
+
+fn clone_base_proof_via_guest_serde<FS: Transcript>(
+    proof: &JoltProof<Fr, DoryPCS, FS>,
+) -> Result<JoltProof<Fr, DoryPCS, FS>> {
+    let mut buf = Vec::new();
+    proof
+        .guest_serialize(&mut buf)
+        .map_err(|e| anyhow!("failed to serialize base proof: {e:?}"))?;
+
+    let mut cursor = std::io::Cursor::new(buf);
+    let cloned = <JoltProof<Fr, DoryPCS, FS> as GuestDeserialize>::guest_deserialize(&mut cursor)
+        .map_err(|e| anyhow!("failed to deserialize base proof: {e:?}"))?;
+    Ok(cloned)
+}
+
+/// Generate a recursion artifact for a base Jolt proof.
+///
+/// This runs base verification Stages 1–7 to reconstruct transcript state, then proves the
+/// recursion SNARK.
+pub fn prove_recursion<FS: Transcript>(
+    preprocessing: &JoltVerifierPreprocessing<Fr, DoryPCS>,
+    program_io: tracer::JoltDevice,
+    trusted_advice_commitment: Option<<DoryPCS as CommitmentScheme>::Commitment>,
+    base_proof: &JoltProof<Fr, DoryPCS, FS>,
+) -> Result<RecursionArtifact<FS>> {
+    type F = Fr;
+
+    let base_proof = clone_base_proof_via_guest_serde(base_proof)?;
+    let mut v = JoltVerifier::new(
+        preprocessing,
+        base_proof,
+        program_io,
+        trusted_advice_commitment,
+        None,
+    )
+    .map_err(|e| anyhow!("failed to construct base verifier: {e:?}"))?;
+
+    v.initialize_transcript_preamble()?;
+
+    // Base stages 1..7 (no Stage 8 PCS verification).
+    v.verify_stages_1_to_7()?;
+
+    // Ensure Dory globals match the proof layout before any Stage 8 replay / witness generation.
+    let _dory_globals_guard = if v.proof.program_mode == ProgramMode::Committed {
+        let committed = v.preprocessing.program.as_committed()?;
+        DoryGlobals::initialize_main_context_with_num_columns(
+            1 << v.one_hot_params.log_k_chunk,
+            v.proof.trace_length.next_power_of_two(),
+            committed.bytecode_num_columns,
+            Some(v.proof.dory_layout),
+        )
+    } else {
+        DoryGlobals::initialize_context(
+            1 << v.one_hot_params.log_k_chunk,
+            v.proof.trace_length.next_power_of_two(),
+            DoryContext::Main,
+            Some(v.proof.dory_layout),
+        )
+    };
+
+    let (dory_snap, pre_opening_proof_transcript, gamma_powers, joint_claim) =
+        v.build_stage8_recursion_prep()?;
+
+    let stage8_snapshot = DoryOpeningSnapshot::<F, FS> {
+        pre_opening_proof_transcript: pre_opening_proof_transcript.clone(),
+        opening_point: dory_snap.opening_point.r.clone(),
+        polynomial_claims: dory_snap.polynomial_claims.clone(),
+        gamma_powers: gamma_powers.clone(),
+        joint_claim,
+    };
+
+    // Advance the main transcript to the post-Stage8 state expected by recursion SNARK.
+    v.transcript = pre_opening_proof_transcript;
+    <DoryPCS as RecursionExt<F>>::replay_opening_proof_transcript(
+        &v.proof.joint_opening_proof,
+        &mut v.transcript,
+    )
+    .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
+
+    // Build the commitments map needed by Stage 8 offloading + instance-plan derivation.
+    let mut commitments_map =
+        HashMap::<CommittedPolynomial, <DoryPCS as CommitmentScheme>::Commitment>::new();
+    let all_polys = all_committed_polynomials(&v.one_hot_params);
+    if all_polys.len() != v.proof.commitments.len() {
+        return Err(anyhow!(
+            "commitment vector length mismatch: expected {}, got {}",
+            all_polys.len(),
+            v.proof.commitments.len()
+        ));
+    }
+    for (poly, commitment) in all_polys.into_iter().zip(v.proof.commitments.iter()) {
+        commitments_map.insert(poly, commitment.clone());
+    }
+
+    // Advice commitments (only if they were folded into the Stage 8 batch).
+    let needs_trusted_advice = stage8_snapshot
+        .polynomial_claims
+        .iter()
+        .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice);
+    let needs_untrusted_advice = stage8_snapshot
+        .polynomial_claims
+        .iter()
+        .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice);
+    if needs_trusted_advice {
+        if let Some(ref commitment) = v.trusted_advice_commitment {
+            commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+        }
+    }
+    if needs_untrusted_advice {
+        if let Some(ref commitment) = v.proof.untrusted_advice_commitment {
+            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+        }
+    }
+
+    // Program commitments (BytecodeChunk and ProgramImageInit) in committed mode.
+    if v.proof.program_mode == ProgramMode::Committed {
+        let committed = v.preprocessing.program.as_committed()?;
+        for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
+            commitments_map
+                .entry(CommittedPolynomial::BytecodeChunk(idx))
+                .or_insert_with(|| commitment.clone());
+        }
+        if stage8_snapshot
+            .polynomial_claims
+            .iter()
+            .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
+        {
+            commitments_map.insert(
+                CommittedPolynomial::ProgramImageInit,
+                committed.program_image_commitment.clone(),
+            );
+        }
+    }
+
+    // Hyrax setup for recursion proving (dense commitment/opening).
+    let hyrax_prover_setup =
+        <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
+
+    let (recursion_snark_proof, _constraint_metadata, pairing_boundary, stage8_combine_hint, non_input_base_hints) =
+        RecursionProver::<Fq>::prove::<F, DoryPCS, FS>(
+            &mut v.transcript,
+            &hyrax_prover_setup,
+            RecursionInput {
+                joint_opening_proof: &v.proof.joint_opening_proof,
+                stage8_snapshot,
+                verifier_setup: &v.preprocessing.generators,
+                commitments: &commitments_map,
+            },
+        )
+        .map_err(|e| anyhow!("failed to generate recursion proof: {e:?}"))?;
+
+    Ok(RecursionArtifact {
+        stage8_combine_hint,
+        pairing_boundary,
+        non_input_base_hints,
+        proof: recursion_snark_proof,
+    })
+}
+
+/// Verify a recursion artifact for a base Jolt proof.
+pub fn verify_recursion<FS: Transcript>(
+    preprocessing: &JoltVerifierPreprocessing<Fr, DoryPCS>,
+    program_io: tracer::JoltDevice,
+    trusted_advice_commitment: Option<<DoryPCS as CommitmentScheme>::Commitment>,
+    base_proof: &JoltProof<Fr, DoryPCS, FS>,
+    recursion: &RecursionArtifact<FS>,
+) -> Result<()> {
+    type F = Fr;
+
+    let base_proof = clone_base_proof_via_guest_serde(base_proof)?;
+    let mut v = JoltVerifier::new(
+        preprocessing,
+        base_proof,
+        program_io,
+        trusted_advice_commitment,
+        None,
+    )
+    .map_err(|e| anyhow!("failed to construct base verifier: {e:?}"))?;
+
+    v.initialize_transcript_preamble()?;
+
+    v.verify_stages_1_to_7()?;
+
+    // Ensure Dory globals match the proof layout before any Stage 8 replay / AST derivation.
+    let _dory_globals_guard = if v.proof.program_mode == ProgramMode::Committed {
+        let committed = v.preprocessing.program.as_committed()?;
+        DoryGlobals::initialize_main_context_with_num_columns(
+            1 << v.one_hot_params.log_k_chunk,
+            v.proof.trace_length.next_power_of_two(),
+            committed.bytecode_num_columns,
+            Some(v.proof.dory_layout),
+        )
+    } else {
+        DoryGlobals::initialize_context(
+            1 << v.one_hot_params.log_k_chunk,
+            v.proof.trace_length.next_power_of_two(),
+            DoryContext::Main,
+            Some(v.proof.dory_layout),
+        )
+    };
+
+    let (dory_snap, pre_opening_proof_transcript, gamma_powers, joint_claim) =
+        v.build_stage8_recursion_prep()?;
+
+    // Build commitments map (must match Stage 8 native verifier path).
+    let mut commitments_map =
+        HashMap::<CommittedPolynomial, <DoryPCS as CommitmentScheme>::Commitment>::new();
+    for (poly, commitment) in all_committed_polynomials(&v.one_hot_params)
+        .into_iter()
+        .zip(v.proof.commitments.iter())
+    {
+        commitments_map.insert(poly, commitment.clone());
+    }
+    if let Some(ref commitment) = v.trusted_advice_commitment {
+        if dory_snap
+            .polynomial_claims
+            .iter()
+            .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
+        {
+            commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+        }
+    }
+    if let Some(ref commitment) = v.proof.untrusted_advice_commitment {
+        if dory_snap
+            .polynomial_claims
+            .iter()
+            .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
+        {
+            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+        }
+    }
+    if v.proof.program_mode == ProgramMode::Committed {
+        let committed = v.preprocessing.program.as_committed()?;
+        for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
+            commitments_map
+                .entry(CommittedPolynomial::BytecodeChunk(idx))
+                .or_insert_with(|| commitment.clone());
+        }
+        if dory_snap
+            .polynomial_claims
+            .iter()
+            .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
+        {
+            commitments_map.insert(
+                CommittedPolynomial::ProgramImageInit,
+                committed.program_image_commitment.clone(),
+            );
+        }
+    }
+
+    // Deterministic combine plan (must match the prover's ordering).
+    let rlc_map = compute_rlc_coefficients(&gamma_powers, dory_snap.polynomial_claims.clone());
+    let (combine_coeffs, combine_commitments): (Vec<F>, Vec<<DoryPCS as CommitmentScheme>::Commitment>) =
+        rlc_map
+            .into_iter()
+            .map(|(poly, coeff)| {
+                (
+                    coeff,
+                    commitments_map
+                        .get(&poly)
+                        .expect("missing commitment for polynomial in batch")
+                        .clone(),
+                )
+            })
+            .unzip();
+
+    // Use the prover-supplied Stage 8 combine hint when provided (fast path).
+    let joint_commitment: <DoryPCS as CommitmentScheme>::Commitment =
+        match recursion.stage8_combine_hint.as_ref() {
+            Some(hint_fq12) => <DoryPCS as RecursionExt<F>>::combine_with_hint_fq12(hint_fq12),
+            None => <DoryPCS as CommitmentScheme>::combine_commitments(
+                &combine_commitments,
+                &combine_coeffs,
+            ),
+        };
+
+    // Build symbolic AST on a transcript clone at the pre-Stage8-proof state.
+    let mut ast_transcript = pre_opening_proof_transcript.clone();
+    let ast = <DoryPCS as RecursionExt<F>>::build_symbolic_ast(
+        &v.proof.joint_opening_proof,
+        &v.preprocessing.generators,
+        &mut ast_transcript,
+        &dory_snap.opening_point.r,
+        &joint_claim,
+        &joint_commitment,
+    )
+    .map_err(|e| anyhow!("Stage 8 symbolic AST build failed: {e:?}"))?;
+
+    // Advance the main transcript to the post-Stage8 state expected by recursion SNARK.
+    v.transcript = pre_opening_proof_transcript;
+    <DoryPCS as RecursionExt<F>>::replay_opening_proof_transcript(
+        &v.proof.joint_opening_proof,
+        &mut v.transcript,
+    )
+    .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
+
+    // Derive recursion verifier input *without trusting hints* by evaluating the AST.
+    let combine_coeffs_fr: Vec<Fr> = combine_coeffs;
+    let joint_commitment_dory: ArkGT = joint_commitment;
+    let combine_commitments_dory: Vec<ArkGT> = combine_commitments;
+    let derived = crate::poly::commitment::dory::derive_from_dory_ast(
+        &ast,
+        &v.proof.joint_opening_proof,
+        &v.preprocessing.generators,
+        joint_commitment_dory,
+        &combine_commitments_dory,
+        &combine_coeffs_fr,
+    )
+    .map_err(|e| anyhow!("AST->recursion-input derivation failed: {e:?}"))?;
+
+    if derived.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {
+        return Err(anyhow!(
+            "dense_num_vars {} exceeds max {}",
+            derived.dense_num_vars,
+            MAX_RECURSION_DENSE_NUM_VARS
+        ));
+    }
+
+    // Verify recursion SNARK.
+    let hyrax_prover_setup =
+        <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
+    let hyrax_verifier_setup = <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
+
+    let recursion_verifier = RecursionVerifier::<Fq>::new(derived.verifier_input);
+    let ok = recursion_verifier
+        .verify::<FS, HyraxPCS>(
+            &recursion.proof,
+            &mut v.transcript,
+            &recursion.proof.dense_commitment,
+            &hyrax_verifier_setup,
+        )
+        .map_err(|e| anyhow!("Recursion verification failed: {e:?}"))?;
+    if !ok {
+        return Err(anyhow!("Recursion proof verification failed"));
+    }
+
+    // External pairing check derived from the AST (do not trust prover-supplied boundary).
+    let got = &derived.pairing_boundary;
+    let lhs = {
+        let g1s = [
+            ArkG1(got.p1_g1.into_group()),
+            ArkG1(got.p2_g1.into_group()),
+            ArkG1(got.p3_g1.into_group()),
+        ];
+        let g2s = [
+            ArkG2(got.p1_g2.into_group()),
+            ArkG2(got.p2_g2.into_group()),
+            ArkG2(got.p3_g2.into_group()),
+        ];
+        BN254::multi_pair(&g1s, &g2s)
+    };
+    if lhs.0 != got.rhs {
+        return Err(anyhow!("external pairing check failed"));
+    }
+
+    // Optional consistency check: compare derived boundary against the provided hint.
+    if got != &recursion.pairing_boundary {
+        return Err(anyhow!("pairing boundary mismatch (derived != provided)"));
+    }
+
+    Ok(())
+}
+

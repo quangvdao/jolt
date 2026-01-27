@@ -5,8 +5,7 @@ edition = "2021"
 description = "Profiler for Jolt with recursion support"
 
 [dependencies]
-jolt-core = { workspace = true, features = ["host"] }
-jolt-recursion = { workspace = true, features = ["host"] }
+jolt-core = { workspace = true, features = ["host", "recursion"] }
 clap.workspace = true
 tracing.workspace = true
 tracing-chrome.workspace = true

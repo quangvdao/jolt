@@ -19,6 +19,7 @@ default = ["jolt-platform/random"]
 cycle-tracking = ["jolt-platform/cycle-tracking"]
 host = [
     "jolt-core/default",
+    "jolt-core/recursion",
     "jolt-platform/std",
     "dep:tracer",
     "dep:common",
@@ -39,7 +40,7 @@ guest-verifier = [
     "dep:tracer",
     "dep:common",
     "dep:ark-bn254",
-    "jolt-core/minimal",
+    "jolt-core/recursion",
 ]
 malloc-shim = ["jolt-platform/malloc-shim"]
 

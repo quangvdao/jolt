@@ -25,7 +25,6 @@ keywords = ["SNARK", "cryptography", "proofs"]
 [workspace]
 members = [
     "jolt-core",
-    "jolt-recursion",
     "tracer",
     "common",
     "jolt-platform",

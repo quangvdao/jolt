@@ -444,7 +444,7 @@ fn prove_example(
             // Actual recursion proving and verification
             let _recursion_span = tracing::info_span!("recursion_proving").entered();
             let recursion_proof =
-                jolt_recursion::prove_recursion::<Blake2bTranscript>(
+                jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
                     &verifier_preprocessing,
                     program_io.clone(),
                     None,
@@ -454,7 +454,7 @@ fn prove_example(
             drop(_recursion_span);
 
             let _verify_span = tracing::info_span!("recursion_verification").entered();
-            jolt_recursion::verify_recursion::<Blake2bTranscript>(
+            jolt_core::zkvm::recursion::verify_recursion::<Blake2bTranscript>(
                 &verifier_preprocessing,
                 program_io,
                 None,
@@ -564,7 +564,7 @@ fn prove_example_with_trace(
         // Actual recursion proving and verification
         let _recursion_span = tracing::info_span!("recursion_proving").entered();
         let recursion_proof =
-            jolt_recursion::prove_recursion::<Blake2bTranscript>(
+            jolt_core::zkvm::recursion::prove_recursion::<Blake2bTranscript>(
                 &verifier_preprocessing,
                 program_io.clone(),
                 None,
@@ -574,7 +574,7 @@ fn prove_example_with_trace(
         drop(_recursion_span);
 
         let _verify_span = tracing::info_span!("recursion_verification").entered();
-        jolt_recursion::verify_recursion::<Blake2bTranscript>(
+        jolt_core::zkvm::recursion::verify_recursion::<Blake2bTranscript>(
             &verifier_preprocessing,
             program_io,
             None,

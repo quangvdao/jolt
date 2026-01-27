@@ -1,6 +1,7 @@
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use clap::{Parser, Subcommand, ValueEnum};
+use jolt_core::zkvm::recursion::RecursionArtifact;
 use jolt_sdk::guest::program::Program as JoltGuestProgram;
 use jolt_sdk::guest::{prover, verifier};
 use jolt_sdk::host;
@@ -319,7 +320,7 @@ fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     info!("Checking data integrity...");
 
     // Expect canonical transport encoding:
-    //   [preprocessing][u32 n][(proof)(device)]^n
+    //   [preprocessing][u32 n][(device)(proof)(recursion_artifact?)]^n
     let mut cursor = std::io::Cursor::new(all_groups_data);
 
     let verifier_preprocessing =
@@ -337,13 +338,17 @@ fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     info!("✓ Number of proofs deserialized: {n}");
 
     for i in 0..n {
+        match JoltDevice::deserialize_compressed(&mut cursor) {
+            Ok(_) => info!("✓ Device {i} deserialized"),
+            Err(e) => error!("✗ Failed to deserialize device {i}: {e:?}"),
+        }
         match RV64IMACProof::deserialize_compressed(&mut cursor) {
             Ok(_) => info!("✓ Proof {i} deserialized"),
             Err(e) => error!("✗ Failed to deserialize proof {i}: {e:?}"),
         }
-        match JoltDevice::deserialize_compressed(&mut cursor) {
-            Ok(_) => info!("✓ Device {i} deserialized"),
-            Err(e) => error!("✗ Failed to deserialize device {i}: {e:?}"),
+        match Option::<RecursionArtifact<jolt_sdk::FS>>::deserialize_compressed(&mut cursor) {
+            Ok(_) => info!("✓ Recursion artifact {i} deserialized"),
+            Err(e) => error!("✗ Failed to deserialize recursion artifact {i}: {e:?}"),
         }
     }
 
@@ -418,10 +423,10 @@ fn collect_guest_proofs(
     let mut cursor = std::io::Cursor::new(&mut all_groups_data);
     let mut total_prove_time = 0.0;
 
-    // Serialize verifier preprocessing and the proof/device pairs.
+    // Serialize verifier preprocessing and per-instance tuples.
     //
     // Default format:
-    //   [preprocessing][u32 n][(proof)(device)]^n
+    //   [preprocessing][u32 n][(device)(proof)(recursion_artifact?)]^n
     {
         guest_verifier_preprocessing
             .serialize_compressed(&mut cursor)
@@ -467,27 +472,33 @@ fn collect_guest_proofs(
             &input_bytes, prove_time
         );
 
-        proof.serialize_compressed(&mut cursor).unwrap();
+        let recursion_artifact: Option<RecursionArtifact<jolt_sdk::FS>> = if recursion {
+            info!("  Generating recursion artifact...");
+            Some(
+                jolt_core::zkvm::recursion::prove_recursion::<jolt_sdk::FS>(
+                    &guest_verifier_preprocessing,
+                    io_device.clone(),
+                    None,
+                    &proof,
+                )
+                .expect("Failed to generate recursion artifact"),
+            )
+        } else {
+            None
+        };
+
         io_device.serialize_compressed(&mut cursor).unwrap();
+        proof.serialize_compressed(&mut cursor).unwrap();
+        recursion_artifact.serialize_compressed(&mut cursor).unwrap();
 
         info!("  Verifying...");
-        if recursion {
-            // Recursion mode: generate recursion proof and verify with jolt-recursion
-            info!("  Generating recursion proof...");
-            let recursion_proof = jolt_recursion::prove_recursion::<jolt_sdk::FS>(
-                &guest_verifier_preprocessing,
-                io_device.clone(),
-                None,
-                &proof,
-            )
-            .expect("Failed to generate recursion proof");
-            info!("  Recursion proof generated, verifying...");
-            let is_valid = jolt_recursion::verify_recursion::<jolt_sdk::FS>(
+        if let Some(ref recursion_artifact) = recursion_artifact {
+            let is_valid = jolt_core::zkvm::recursion::verify_recursion::<jolt_sdk::FS>(
                 &guest_verifier_preprocessing,
                 io_device,
                 None,
                 &proof,
-                &recursion_proof,
+                recursion_artifact,
             )
             .is_ok();
             info!("  Recursion verification result: {is_valid}");
@@ -554,22 +565,23 @@ fn debug_deserialize_proof_fields(proof_file: &Path) {
     info!("Step 3: Attempting to deserialize {} proof(s)...", n);
     for i in 0..n {
         info!(
-            "Proof {}: Starting JoltProof deserialization at position {}...",
+            "Device {}: Attempting JoltDevice deserialization at position {}...",
             i,
             cursor.position()
         );
 
-        // Try to deserialize the entire JoltProof
-        match RV64IMACProof::deserialize_compressed(&mut cursor) {
-            Ok(proof) => {
-                info!("✓ Proof {} deserialized successfully", i);
-                info!("  Trace length: {}", proof.trace_length);
-                info!("  RAM K: {}", proof.ram_K);
-                info!("  Bytecode K: {}", proof.bytecode_K);
+        match JoltDevice::deserialize_compressed(&mut cursor) {
+            Ok(device) => {
+                info!("✓ Device {} deserialized successfully", i);
+                info!(
+                    "  Memory layout size: {:?}",
+                    device.memory_layout.memory_size
+                );
+                info!("  Panic state: {:?}", device.panic);
             }
             Err(e) => {
                 error!(
-                    "✗ FAILED to deserialize proof {} at position {}: {:?}",
+                    "✗ FAILED to deserialize device {} at position {}: {:?}",
                     i,
                     cursor.position(),
                     e
@@ -598,32 +610,50 @@ fn debug_deserialize_proof_fields(proof_file: &Path) {
                         }
                     }
                 }
+                panic!("Cannot continue after device deserialization failure");
+            }
+        }
+
+        info!(
+            "Proof {}: Starting JoltProof deserialization at position {}...",
+            i,
+            cursor.position()
+        );
+        match RV64IMACProof::deserialize_compressed(&mut cursor) {
+            Ok(proof) => {
+                info!("✓ Proof {} deserialized successfully", i);
+                info!("  Trace length: {}", proof.trace_length);
+                info!("  RAM K: {}", proof.ram_K);
+                info!("  Bytecode K: {}", proof.bytecode_K);
+            }
+            Err(e) => {
+                error!(
+                    "✗ FAILED to deserialize proof {} at position {}: {:?}",
+                    i,
+                    cursor.position(),
+                    e
+                );
                 panic!("Cannot continue after proof deserialization failure");
             }
         }
 
         info!(
-            "Proof {}: Attempting JoltDevice deserialization at position {}...",
+            "Recursion artifact {}: Attempting Option<RecursionArtifact> deserialization at position {}...",
             i,
             cursor.position()
         );
-        match JoltDevice::deserialize_compressed(&mut cursor) {
-            Ok(device) => {
-                info!("✓ Device {} deserialized successfully", i);
-                info!(
-                    "  Memory layout size: {:?}",
-                    device.memory_layout.memory_size
-                );
-                info!("  Panic state: {:?}", device.panic);
+        match Option::<RecursionArtifact<jolt_sdk::FS>>::deserialize_compressed(&mut cursor) {
+            Ok(_rec) => {
+                info!("✓ Recursion artifact {} deserialized successfully", i);
             }
             Err(e) => {
                 error!(
-                    "✗ FAILED to deserialize device {} at position {}: {:?}",
+                    "✗ FAILED to deserialize recursion artifact {} at position {}: {:?}",
                     i,
                     cursor.position(),
                     e
                 );
-                panic!("Cannot continue after device deserialization failure");
+                panic!("Cannot continue after recursion artifact deserialization failure");
             }
         }
     }

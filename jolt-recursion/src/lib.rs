@@ -271,6 +271,25 @@ pub struct NonInputBaseHints {
     pub g2_scalar_mul_base_hints: Vec<Option<ark_bn254::G2Affine>>,
 }
 
+impl GuestSerialize for NonInputBaseHints {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.gt_exp_base_hints.guest_serialize(w)?;
+        self.g1_scalar_mul_base_hints.guest_serialize(w)?;
+        self.g2_scalar_mul_base_hints.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl GuestDeserialize for NonInputBaseHints {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            gt_exp_base_hints: Vec::<Option<Fq12>>::guest_deserialize(r)?,
+            g1_scalar_mul_base_hints: Vec::<Option<ark_bn254::G1Affine>>::guest_deserialize(r)?,
+            g2_scalar_mul_base_hints: Vec::<Option<ark_bn254::G2Affine>>::guest_deserialize(r)?,
+        })
+    }
+}
+
 type HyraxPCS = poly::commitment::hyrax::Hyrax<1, ark_grumpkin::Projective>;
 
 /// Recursion proof artifact.
@@ -298,6 +317,37 @@ pub struct RecursionProof<FS: transcripts::Transcript> {
     pub opening_claims: Openings<Fq>,
     /// Dense polynomial commitment.
     pub dense_commitment: <HyraxPCS as CommitmentScheme>::Commitment,
+}
+
+impl<FS: transcripts::Transcript> GuestSerialize for RecursionProof<FS> {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.stage8_combine_hint.guest_serialize(w)?;
+        self.pairing_boundary.guest_serialize(w)?;
+        self.non_input_base_hints.guest_serialize(w)?;
+        self.stage1_proof.guest_serialize(w)?;
+        self.stage2_proof.guest_serialize(w)?;
+        self.stage3_packed_eval.guest_serialize(w)?;
+        self.opening_proof.guest_serialize(w)?;
+        self.opening_claims.guest_serialize(w)?;
+        self.dense_commitment.guest_serialize(w)?;
+        Ok(())
+    }
+}
+
+impl<FS: transcripts::Transcript> GuestDeserialize for RecursionProof<FS> {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
+            pairing_boundary: PairingBoundary::guest_deserialize(r)?,
+            non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
+            stage1_proof: SumcheckInstanceProof::<Fq, FS>::guest_deserialize(r)?,
+            stage2_proof: SumcheckInstanceProof::<Fq, FS>::guest_deserialize(r)?,
+            stage3_packed_eval: Fq::guest_deserialize(r)?,
+            opening_proof: <HyraxPCS as CommitmentScheme>::Proof::guest_deserialize(r)?,
+            opening_claims: Openings::<Fq>::guest_deserialize(r)?,
+            dense_commitment: <HyraxPCS as CommitmentScheme>::Commitment::guest_deserialize(r)?,
+        })
+    }
 }
 
 type DoryPCS = poly::commitment::dory::DoryCommitmentScheme;

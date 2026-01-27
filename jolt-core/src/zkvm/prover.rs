@@ -14,6 +14,7 @@ use std::{
 };
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_grumpkin::Projective as GrumpkinProjective;
 use itertools::Itertools;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2105,6 +2106,8 @@ fn write_instance_flamegraph_svg(
 pub struct JoltProverPreprocessing<F: JoltField, PCS: CommitmentScheme<Field = F>> {
     pub generators: PCS::ProverSetup,
     pub shared: JoltSharedPreprocessing,
+    /// Cached Hyrax setup for recursion verification (avoids in-guest generator derivation).
+    pub hyrax_recursion_setup: crate::poly::commitment::hyrax::PedersenGenerators<GrumpkinProjective>,
     /// Full program preprocessing (prover always has full access for witness computation).
     pub program: Arc<ProgramPreprocessing>,
     /// Trusted program commitments (only in Committed mode).
@@ -2166,9 +2169,15 @@ where
         program: Arc<ProgramPreprocessing>,
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators(&shared);
+        type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, GrumpkinProjective>;
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_recursion_setup =
+            <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         JoltProverPreprocessing {
             generators,
             shared,
+            hyrax_recursion_setup,
             program,
             program_commitments: None,
             program_hints: None,
@@ -2185,6 +2194,11 @@ where
         program: Arc<ProgramPreprocessing>,
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators_committed(&shared, &program);
+        type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, GrumpkinProjective>;
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_recursion_setup =
+            <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         let max_t_any: usize = shared
             .max_padded_trace_length
             .max(shared.bytecode_size())
@@ -2200,6 +2214,7 @@ where
         JoltProverPreprocessing {
             generators,
             shared,
+            hyrax_recursion_setup,
             program,
             program_commitments: Some(program_commitments),
             program_hints: Some(program_hints),

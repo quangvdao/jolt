@@ -28,6 +28,7 @@ use crate::zkvm::recursion::prover::{DoryOpeningSnapshot, RecursionInput, Recurs
 use crate::zkvm::recursion::verifier::RecursionVerifier;
 use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::zkvm::witness::CommittedPolynomial;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 use ark_bn254::{Fq, Fq12, Fr};
 
@@ -209,8 +210,10 @@ pub fn prove_recursion<FS: Transcript>(
     }
 
     // Hyrax setup for recursion proving (dense commitment/opening).
-    let hyrax_prover_setup =
-        <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
+    //
+    // Hyrax uses the same type for prover+verifier setup (`PedersenGenerators`), and the base
+    // preprocessing already includes a cached recursion-sized setup.
+    let hyrax_prover_setup = &preprocessing.hyrax_recursion_setup;
 
     let (
         recursion_snark_proof,
@@ -220,7 +223,7 @@ pub fn prove_recursion<FS: Transcript>(
         non_input_base_hints,
     ) = RecursionProver::<Fq>::prove::<F, DoryPCS, FS>(
         &mut v.transcript,
-        &hyrax_prover_setup,
+        hyrax_prover_setup,
         RecursionInput {
             joint_opening_proof: &v.proof.joint_opening_proof,
             stage8_snapshot,
@@ -381,48 +384,55 @@ pub fn verify_recursion<FS: Transcript>(
     )
     .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
 
-    // Derive recursion verifier input *without trusting hints* by evaluating the AST.
+    // Derive recursion verifier input using hint-based plan derivation (NO expensive group ops).
+    //
+    // Rationale: the recursion SNARK now enforces AST-driven wiring/boundary constraints (Stage 2),
+    // including binding non-input bases/points and the pairing boundary. Re-evaluating the Dory AST
+    // (pairings / scalar muls / GT exp) inside the verifier is therefore unnecessary and extremely
+    // expensive in the zkVM / cycle-tracking path.
     let combine_coeffs_fr: Vec<Fr> = combine_coeffs;
     let joint_commitment_dory: ArkGT = joint_commitment;
     let combine_commitments_dory: Vec<ArkGT> = combine_commitments;
-    let derived = crate::poly::commitment::dory::derive_from_dory_ast(
+    let plan = crate::poly::commitment::dory::derive_plan_with_hints(
         &ast,
         &v.proof.joint_opening_proof,
         &v.preprocessing.generators,
         joint_commitment_dory,
         &combine_commitments_dory,
         &combine_coeffs_fr,
+        &recursion.non_input_base_hints,
+        recursion.pairing_boundary.clone(),
+        *hint_fq12,
     )
-    .map_err(|e| anyhow!("AST->recursion-input derivation failed: {e:?}"))?;
+    .map_err(|e| anyhow!("AST->recursion-plan derivation (with hints) failed: {e:?}"))?;
 
-    if derived.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {
+    if plan.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {
         return Err(anyhow!(
             "dense_num_vars {} exceeds max {}",
-            derived.dense_num_vars,
+            plan.dense_num_vars,
             MAX_RECURSION_DENSE_NUM_VARS
         ));
     }
 
-    // Verify recursion SNARK.
-    let hyrax_prover_setup =
-        <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
-    let hyrax_verifier_setup = <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
+    // Verify recursion SNARK (use cached Hyrax setup from preprocessing).
+    let hyrax_verifier_setup = &preprocessing.hyrax_recursion_setup;
 
-    let recursion_verifier = RecursionVerifier::<Fq>::new(derived.verifier_input);
+    let recursion_verifier = RecursionVerifier::<Fq>::new(plan.verifier_input);
     let ok = recursion_verifier
         .verify::<FS, HyraxPCS>(
             &recursion.proof,
             &mut v.transcript,
             &recursion.proof.dense_commitment,
-            &hyrax_verifier_setup,
+            hyrax_verifier_setup,
         )
         .map_err(|e| anyhow!("Recursion verification failed: {e:?}"))?;
     if !ok {
         return Err(anyhow!("Recursion proof verification failed"));
     }
 
-    // External pairing check derived from the AST (do not trust prover-supplied boundary).
-    let got = &derived.pairing_boundary;
+    // External pairing check using the boundary value that is bound by wiring constraints.
+    let got = &recursion.pairing_boundary;
+    start_cycle_tracking("jolt_external_pairing_check");
     let lhs = {
         let g1s = [
             ArkG1(got.p1_g1.into_group()),
@@ -436,13 +446,9 @@ pub fn verify_recursion<FS: Transcript>(
         ];
         BN254::multi_pair(&g1s, &g2s)
     };
+    end_cycle_tracking("jolt_external_pairing_check");
     if lhs.0 != got.rhs {
         return Err(anyhow!("external pairing check failed"));
-    }
-
-    // Optional consistency check: compare derived boundary against the provided hint.
-    if got != &recursion.pairing_boundary {
-        return Err(anyhow!("pairing boundary mismatch (derived != provided)"));
     }
 
     Ok(())

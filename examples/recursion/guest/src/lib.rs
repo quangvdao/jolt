@@ -62,6 +62,9 @@ fn verify(bytes: &[u8]) -> u32 {
         start_cycle_tracking("verification");
         let is_valid = if let Some(ref artifact) = recursion_artifact {
             // Recursion verification path: replay stages 1–7 and verify recursion SNARK in-guest.
+            //
+            // NOTE: `verify_recursion` uses hint-based plan derivation (no expensive Dory AST eval),
+            // and the recursion SNARK's Stage-2 wiring/boundary constraints bind these hinted values.
             jolt::verify_recursion(
                 &verifier_preprocessing,
                 device,

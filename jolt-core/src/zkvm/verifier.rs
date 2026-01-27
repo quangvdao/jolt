@@ -64,6 +64,7 @@ use crate::zkvm::{
 };
 use crate::{
     field::JoltField,
+    poly::commitment::hyrax::{Hyrax, PedersenGenerators},
     poly::opening_proof::{
         compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator, OpeningPoint,
         SumcheckId, VerifierOpeningAccumulator,
@@ -84,6 +85,7 @@ use anyhow::Context;
 #[allow(unused_imports)]
 use ark_ec::AffineRepr;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_grumpkin::Projective as GrumpkinProjective;
 use common::jolt_device::MemoryLayout;
 #[allow(unused_imports)]
 use dory::backends::arkworks::{ArkG1, ArkG2, BN254};
@@ -93,6 +95,9 @@ use itertools::Itertools;
 use tracer::JoltDevice;
 
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
+
+// Precompute Hyrax generators for recursion verification.
+type HyraxPCS = Hyrax<1, GrumpkinProjective>;
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_VERIFY_STAGE1: &str = "jolt_verify_stage1";
@@ -1330,6 +1335,8 @@ where
 {
     pub generators: PCS::VerifierSetup,
     pub shared: JoltSharedPreprocessing,
+    /// Cached Hyrax setup for recursion verification (avoids expensive generator derivation in-guest).
+    pub hyrax_recursion_setup: PedersenGenerators<GrumpkinProjective>,
     /// Program information for verification.
     ///
     /// In Full mode: contains full program preprocessing (bytecode + program image).
@@ -1347,6 +1354,7 @@ where
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.generators.guest_serialize(w)?;
         self.shared.guest_serialize(w)?;
+        self.hyrax_recursion_setup.guest_serialize(w)?;
         self.program.guest_serialize(w)?;
         Ok(())
     }
@@ -1363,6 +1371,7 @@ where
         Ok(Self {
             generators: PCS::VerifierSetup::guest_deserialize(r)?,
             shared: JoltSharedPreprocessing::guest_deserialize(r)?,
+            hyrax_recursion_setup: PedersenGenerators::<GrumpkinProjective>::guest_deserialize(r)?,
             program: VerifierProgram::<PCS>::guest_deserialize(r)?,
         })
     }
@@ -1380,6 +1389,8 @@ where
     ) -> Result<(), ark_serialize::SerializationError> {
         self.generators.serialize_with_mode(&mut writer, compress)?;
         self.shared.serialize_with_mode(&mut writer, compress)?;
+        self.hyrax_recursion_setup
+            .serialize_with_mode(&mut writer, compress)?;
         self.program.serialize_with_mode(&mut writer, compress)?;
         Ok(())
     }
@@ -1387,6 +1398,7 @@ where
     fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
         self.generators.serialized_size(compress)
             + self.shared.serialized_size(compress)
+            + self.hyrax_recursion_setup.serialized_size(compress)
             + self.program.serialized_size(compress)
     }
 }
@@ -1399,6 +1411,7 @@ where
     fn check(&self) -> Result<(), ark_serialize::SerializationError> {
         self.generators.check()?;
         self.shared.check()?;
+        self.hyrax_recursion_setup.check()?;
         self.program.check()
     }
 }
@@ -1417,10 +1430,13 @@ where
             PCS::VerifierSetup::deserialize_with_mode(&mut reader, compress, validate)?;
         let shared =
             JoltSharedPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
+        let hyrax_recursion_setup =
+            PedersenGenerators::deserialize_with_mode(&mut reader, compress, validate)?;
         let program = VerifierProgram::deserialize_with_mode(&mut reader, compress, validate)?;
         Ok(Self {
             generators,
             shared,
+            hyrax_recursion_setup,
             program,
         })
     }
@@ -1464,9 +1480,14 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         generators: PCS::VerifierSetup,
         program: Arc<ProgramPreprocessing>,
     ) -> JoltVerifierPreprocessing<F, PCS> {
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_recursion_setup =
+            <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         Self {
             generators,
             shared: shared.clone(),
+            hyrax_recursion_setup,
             program: VerifierProgram::Full(program),
         }
     }
@@ -1486,9 +1507,14 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         generators: PCS::VerifierSetup,
         program_commitments: TrustedProgramCommitments<PCS>,
     ) -> JoltVerifierPreprocessing<F, PCS> {
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_recursion_setup =
+            <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         Self {
             generators,
             shared,
+            hyrax_recursion_setup,
             program: VerifierProgram::Committed(program_commitments),
         }
     }
@@ -1509,6 +1535,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> From<&JoltProverPreprocessi
         Self {
             generators,
             shared,
+            hyrax_recursion_setup: prover_preprocessing.hyrax_recursion_setup.clone(),
             program,
         }
     }

@@ -177,6 +177,11 @@ impl<F: JoltField, T: Transcript> ShiftMultiMillerLoopProver<F, T> {
     }
 }
 
+#[cfg(feature = "allocative")]
+impl<F: JoltField, T: Transcript> allocative::Allocative for ShiftMultiMillerLoopProver<F, T> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
+}
+
 impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
     for ShiftMultiMillerLoopProver<F, T>
 {

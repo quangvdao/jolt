@@ -54,6 +54,11 @@ impl<T: Transcript> GtWiringBindingProver<T> {
     }
 }
 
+#[cfg(feature = "allocative")]
+impl<T: Transcript> allocative::Allocative for GtWiringBindingProver<T> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
+}
+
 impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtWiringBindingProver<T> {
     fn degree(&self) -> usize { 1 }
     fn num_rounds(&self) -> usize { self.num_rounds }

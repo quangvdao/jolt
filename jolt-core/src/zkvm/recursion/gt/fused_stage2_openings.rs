@@ -49,12 +49,16 @@ impl FusedGtExpStage2OpeningsParams {
     }
 }
 
-#[derive(Allocative)]
 pub struct FusedGtExpStage2OpeningsProver<T: Transcript> {
     params: FusedGtExpStage2OpeningsParams,
     rho: MultilinearPolynomial<Fq>,
     quotient: MultilinearPolynomial<Fq>,
     _marker: core::marker::PhantomData<T>,
+}
+
+#[cfg(feature = "allocative")]
+impl<T: Transcript> allocative::Allocative for FusedGtExpStage2OpeningsProver<T> {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
 impl<T: Transcript> FusedGtExpStage2OpeningsProver<T> {

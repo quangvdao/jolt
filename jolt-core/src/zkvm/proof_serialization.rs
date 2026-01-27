@@ -119,7 +119,8 @@ impl GuestDeserialize for NonInputBaseHints {
     }
 }
 
-/// Jolt proof structure organized by verification stages
+/// Jolt proof structure organized by verification stages.
+#[derive(Clone)]
 pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> {
     pub opening_claims: Claims<F>,
     pub commitments: Vec<PCS::Commitment>,
@@ -357,6 +358,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> CanonicalDe
     }
 }
 
+#[derive(Clone)]
 pub struct Claims<F: JoltField>(pub Openings<F>);
 
 impl<F: JoltField> CanonicalSerialize for Claims<F> {

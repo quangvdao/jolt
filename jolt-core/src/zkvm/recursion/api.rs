@@ -76,20 +76,6 @@ impl<FS: Transcript> GuestDeserialize for RecursionArtifact<FS> {
     }
 }
 
-fn clone_base_proof_via_guest_serde<FS: Transcript>(
-    proof: &JoltProof<Fr, DoryPCS, FS>,
-) -> Result<JoltProof<Fr, DoryPCS, FS>> {
-    let mut buf = Vec::new();
-    proof
-        .guest_serialize(&mut buf)
-        .map_err(|e| anyhow!("failed to serialize base proof: {e:?}"))?;
-
-    let mut cursor = std::io::Cursor::new(buf);
-    let cloned = <JoltProof<Fr, DoryPCS, FS> as GuestDeserialize>::guest_deserialize(&mut cursor)
-        .map_err(|e| anyhow!("failed to deserialize base proof: {e:?}"))?;
-    Ok(cloned)
-}
-
 /// Generate a recursion artifact for a base Jolt proof.
 ///
 /// This runs base verification Stages 1–7 to reconstruct transcript state, then proves the
@@ -102,7 +88,9 @@ pub fn prove_recursion<FS: Transcript>(
 ) -> Result<RecursionArtifact<FS>> {
     type F = Fr;
 
-    let base_proof = clone_base_proof_via_guest_serde(base_proof)?;
+    // We need an owned proof to build a `JoltVerifier`. A plain clone is much cheaper than the
+    // previous serialize→deserialize roundtrip and is equivalent for verification.
+    let base_proof = base_proof.clone();
     let mut v = JoltVerifier::new(
         preprocessing,
         base_proof,
@@ -258,7 +246,9 @@ pub fn verify_recursion<FS: Transcript>(
     type F = Fr;
 
     start_cycle_tracking("verify_recursion_total");
-    let base_proof = clone_base_proof_via_guest_serde(base_proof)?;
+    // We need an owned proof to build a `JoltVerifier`. A plain clone is much cheaper than the
+    // previous serialize→deserialize roundtrip and is equivalent for verification.
+    let base_proof = base_proof.clone();
     let mut v = JoltVerifier::new(
         preprocessing,
         base_proof,

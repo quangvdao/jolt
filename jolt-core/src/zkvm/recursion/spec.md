@@ -50,12 +50,11 @@ Concretely:
 2. **Operation constraints (Stage 1 + Stage 2)**: For every traced operation instance, we prove “this op is computed correctly in isolation”
    via type-specific sumchecks.
    - Stage 1 proves the packed GT exponentiation constraints (`SumcheckId::GtExp`).
-   - Stage 2 proves all remaining constraint families (GT mul, G1/G2 scalar mul, G1/G2 add, MultiMillerLoop, ...), batched into one sumcheck proof.
+   - Stage 2 proves all remaining constraint families (GT mul, G1/G2 scalar mul, G1/G2 add, ...), batched into one sumcheck proof.
 3. **Internal trace consistency (Stage 2)**: Some witnesses contain “shifted” columns (e.g. `rho_next`, `A_next`) that are redundant.
    We enforce the one-step “next” relation via dedicated shift sumchecks:
    - `SumcheckId::GtShift` for packed GT exponentiation (\(\rho_{\text{next}}(s,x)=\rho(s+1,x)\))
    - `SumcheckId::ShiftG1ScalarMul` / `SumcheckId::ShiftG2ScalarMul` for scalar-mul traces (\(A_{\text{next}}(i)=A(i+1)\))
-   - `SumcheckId::ShiftMultiMillerLoop` for Multi-Miller loop packed traces (\(f_{\text{next}}(s,x)=f(s+1,x)\), \(T_{\text{next}}(s)=T(s+1)\))
 4. **Wiring / copy constraints (Stage 2)**: We prove that the output of each operation is exactly the input consumed by downstream
    operations, so the witness represents a single coherent computation DAG (not a bag of unrelated correct ops).
    > **Implementation status**: AST-derived wiring/boundary constraints are **implemented** and enabled by default. They run as additional
@@ -112,9 +111,9 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │  ────────────────────────────────────                               │
 │  Includes:                                                           │
 │  - Shift sumchecks for redundant “next” columns                       │
-│    (`GtShift`, `ShiftG1ScalarMul`, `ShiftG2ScalarMul`, `ShiftMultiMillerLoop`) │
+│    (`GtShift`, `ShiftG1ScalarMul`, `ShiftG2ScalarMul`) │
 │  - Packed GT exp claim reduction to a shared `r_x` (`GtExpClaimReduction`)     │
-│  - All other op constraints (GT mul, G1/G2 scalar mul, G1/G2 add, MultiMillerLoop, ...)│
+│  - All other op constraints (GT mul, G1/G2 scalar mul, G1/G2 add, ...)│
 │  - Wiring/boundary constraints (implemented; appended last)           │
 │  Output: all virtual openings at a shared point `r_x`                │
 └──────────────────────────────────┬──────────────────────────────────┘
@@ -778,87 +777,6 @@ linear identity that enforces the one-step shift over all indices \(0..254\), wh
 
 This shift sumcheck is defined over the **native 8-var** scalar-mul trace polynomials. In the Stage-2 batched sumcheck, it is suffix-aligned
 via `round_offset` so it can be batched with other instances that have more rounds.
-
----
-
-### 2.7 Multi-Miller loop (BN254 pairing Miller loop)
-
-**Implementation status (current code)**: pairing recursion is **experimental** and gated behind `feature = "experimental-pairing-recursion"`.
-The gadgets exist (`jolt-core/src/zkvm/recursion/pairing/*`), and the Stage-2 prover/verifier contain feature-gated hooks, but the **streaming**
-recursion pipeline does not currently include pairing-native stores by default:
-- Prover: `RecursionProver::prove_stage2` has a TODO to wire pairing recursion native stores into the pipeline (`jolt-core/src/zkvm/recursion/prover.rs`, ~L1260–L1265).
-- Planner: `witness_generation::plan_constraint_system` currently does not claim pairing support in the streaming plan (`jolt-core/src/zkvm/recursion/witness_generation.rs`, “Pairing (experimental)” section).
-
-When enabled end-to-end, the intended Stage-2 integration is:
-- `SumcheckId::MultiMillerLoop` (`jolt-core/src/zkvm/recursion/pairing/multi_miller_loop.rs`)
-- `SumcheckId::ShiftMultiMillerLoop` (`jolt-core/src/zkvm/recursion/pairing/shift.rs`)
-
-This gadget is intended to prove correctness of the **Miller-loop** part of a BN254 pairing computation:
-\[
-f_{\text{out}} \;=\; \prod_{s=0}^{S-1} \Big(f_s^{[2]} \cdot \ell_s(P)\Big)^{\mathbf{1}_{\text{double}}(s)}
-\cdot \Big(f_s \cdot \ell_s(P)\Big)^{\mathbf{1}_{\text{add}}(s)}
-\]
-where each step \(s\) is either a tangent (doubling) step or a chord (addition) step, and \(\ell_s(P)\) is the line function evaluated
-at the G1 input point \(P\). (Final exponentiation and/or the final multi-pairing equality can still remain outside the SNARK boundary.)
-
-#### Packed trace layout (11-variable domain)
-
-We use the same packed layout as the packed GT exponentiation:
-- step variables \(s \in \{0,1\}^7\) (up to 128 steps),
-- element variables \(x \in \{0,1\}^4\) (16 base-field evaluations representing an \(F_{q^{12}}\) element via an MLE),
-- packed index: `idx = x * 128 + s` (step in the low bits).
-
-Each operation instance corresponds to one Miller-loop trace (typically one \((P,Q)\) pair), represented as 11-var MLE columns.
-
-#### Per-step constraints (local semantics)
-
-At each packed point \((s,x)\), the constraint polynomial enforces:
-
-1. **Branch bits** (`is_double`, `is_add`) are boolean and mutually exclusive.
-2. **G2 affine update** (over \(F_{q^2}\), split into base-field components):
-   - doubling slope: \(2y\lambda = 3x^2\),
-   - addition slope: \(\lambda(x_Q-x_T) = y_Q-y_T\), plus an `inv_dx` witness enforcing \((x_Q-x_T)^{-1}\) in the add branch,
-   - affine formulas: \(x'=\lambda^2-x_T-x_{\text{op}}\), \(y'=\lambda(x_T-x')-y_T\).
-3. **Line coefficients** \((c0,c1,c2)\in F_{q^2}\) for the tangent/chord line, using the BN254 `TwistType::D` conventions.
-4. **Line evaluation embedding**: the line is embedded as a sparse-034 \(F_{q^{12}}\) element and evaluated via 6 selector polynomials.
-5. **Accumulator update in \(F_{q^{12}}\)** via ring-switching:
-   \[
-   a(x)\cdot b(x) - c(x) - Q(x)\cdot g(x) = 0
-   \]
-   where \(a\) is either \(f^2\) (double) or \(f\) (add), \(b\) is the embedded line value, \(c\) is \(f_{\text{next}}\), and
-   \(g\) is the fixed tower reduction polynomial MLE.
-
-These per-step constraints are **sound and complete** for the *local* step semantics, assuming all “public” polynomials described below
-are fixed correctly (see caveats).
-
-#### Missing global consistency constraints (required for end-to-end soundness)
-
-Local step correctness alone does **not** imply the trace is a single coherent Miller-loop computation. We must additionally enforce:
-
-1. **Shift (step-to-step chaining)**: for each relevant column \(A\),
-   \[
-   \forall s<127,\forall x:\quad A_{\text{next}}(s,x) = A(s+1,x)
-   \]
-   This prevents a prover from choosing unrelated per-step states. We implement this as a dedicated shift sumcheck:
-   - `SumcheckId::ShiftMultiMillerLoop` (implemented in `jolt-core/src/zkvm/recursion/pairing/shift.rs`),
-   - applied at least to `f`/`f_next` and the four G2 state components `t_*`/`t_*_next`.
-
-2. **Boundary conditions**:
-   - initial state \(f(0)=1\) and \(T(0)=Q\),
-   - correct step schedule (derived from `Bn254Config::ATE_LOOP_COUNT` plus the two final Frobenius additions),
-   - extraction of the final output slice \(f(\text{last},x)\) as the claimed Miller-loop output.
-
-3. **Public constants vs witness values**:
-   - `g(x)` is a fixed, verifier-known polynomial (`get_g_mle()`), and must not be prover-chosen,
-   - the sparse-034 selector polynomials are fixed constants (basis vectors under `fq12_to_multilinear_evals`) and must not be prover-chosen.
-   As with packed GT exponentiation, the intended design is that the verifier computes these values directly from public definitions; if they are
-   carried as witness columns for convenience, we must add explicit constraints that they match their public definitions.
-
-#### Notes / remaining TODOs
-
-The Stage 2 MultiMillerLoop gadgets enforce *local* step semantics and (via `ShiftMultiMillerLoop`) enforce step-to-step chaining for the
-`*_next` columns. Boundary conditions (initialization/finalization) and “public constant” treatment (e.g. `g(x)` / selector columns) should
-be documented/locked down alongside the witness generator.
 
 ### 2.5.1 G1/G2 Addition (NEW)
 
@@ -1602,13 +1520,10 @@ jolt-core/src/zkvm/recursion/
 ├── g2/
 │   ├── scalar_multiplication.rs
 │   └── addition.rs
-├── pairing/
-│   ├── multi_miller_loop.rs   # Stage 2 (`MultiMillerLoop`)
-│   └── shift.rs               # Stage 2 (`ShiftMultiMillerLoop`)
 ```
 
 **Note on stage naming**: The “Stage 1..3” names refer to protocol phases (see Section 1.4 and the prover/verifier in `prover.rs` / `verifier.rs`).
-The code is organized by gadget family (`gt/`, `g1/`, `g2/`, `pairing/`) plus the shared back-end (`constraints/`, `prefix_packing.rs`, `virtualization.rs`).
+The code is organized by gadget family (`gt/`, `g1/`, `g2/`) plus the shared back-end (`constraints/`, `prefix_packing.rs`, `virtualization.rs`).
 
 ### 8.2 The Offloading Pattern
 
@@ -1980,10 +1895,7 @@ The recursion implementation includes several feature toggles (primarily for ben
   - `JOLT_RECURSION_STOP_AFTER_STAGE2` (tests only): early-exit hook to isolate Stage 2 failures.
 
 - **Witness-generation toggles** (see `jolt-core/src/zkvm/recursion/witness_generation.rs`): enable/disable inclusion of specific constraint families
-  (GT mul, G1/G2 scalar mul, G1/G2 add; pairing is feature-gated).
-
-- **Cargo feature gates**:
-  - `experimental-pairing-recursion`: enables experimental Multi-Miller-loop recursion gadgets.
+  (GT mul, G1/G2 scalar mul, G1/G2 add).
 
 ---
 

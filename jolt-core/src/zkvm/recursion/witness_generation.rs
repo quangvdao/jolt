@@ -410,8 +410,6 @@ pub fn plan_constraint_system(
     let enable_g2_scalar_mul = env_flag_default("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL", true);
     let enable_g1_add = env_flag_default("JOLT_RECURSION_ENABLE_G1_ADD", true);
     let enable_g2_add = env_flag_default("JOLT_RECURSION_ENABLE_G2_ADD", true);
-    #[cfg(feature = "experimental-pairing-recursion")]
-    let enable_pairing = env_flag_default("JOLT_RECURSION_ENABLE_PAIRING", true);
 
     // Outputs
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
@@ -493,14 +491,6 @@ pub fn plan_constraint_system(
             constraint_types.push(ConstraintType::G2Add);
             locator_by_constraint.push(ConstraintLocator::G2Add { local });
         }
-    }
-
-    // ---- Pairing (experimental) ----
-    #[cfg(feature = "experimental-pairing-recursion")]
-    if enable_pairing {
-        // NOTE: Streaming pairing recursion stores are wired up later in the plan.
-        // For now, keep behavior consistent by not claiming support here.
-        // (The legacy matrix path still supports this feature.)
     }
 
     // ---- Combine witness (homomorphic combine offloading) ----

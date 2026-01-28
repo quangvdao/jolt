@@ -47,7 +47,6 @@ prover = [
 #
 # This is intentionally feature-gated: most users only need the base prover/verifier.
 recursion = ["minimal", "dory/recursion"]
-experimental-pairing-recursion = []
 # This is for building jolt-core without prover capabilities, e.g. for recursion
 # jolt-core needs std and rayon to compile, so these are the minimal set of features.
 # Minimal feature set for recursion / verifier-only builds.

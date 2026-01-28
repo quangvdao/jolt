@@ -23,18 +23,6 @@ use ark_serialize::{
 use ark_std::Zero;
 use std::io::{Read, Write};
 
-use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
-use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
-use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
-use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
-
-#[cfg(feature = "experimental-pairing-recursion")]
-use super::pairing::{
-    multi_miller_loop::{
-        MultiMillerLoopParams, MultiMillerLoopVerifier, MultiMillerLoopVerifierSpec,
-    },
-    shift::{ShiftMultiMillerLoopParams, ShiftMultiMillerLoopVerifier},
-};
 use super::{
     constraints::system::{ConstraintType, PolyType},
     curve::{Bn254Recursion, RecursionCurve},
@@ -65,6 +53,10 @@ use super::{
     virtualization::extract_virtual_claims_from_accumulator,
     WiringPlan,
 };
+use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
+use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
+use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
 
 use crate::zkvm::proof_serialization::PairingBoundary;
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
@@ -424,9 +416,6 @@ impl RecursionVerifier<Fq> {
         let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
         let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
         let enable_wiring_g2 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G2", true);
-        #[cfg(feature = "experimental-pairing-recursion")]
-        let enable_shift_multi_miller_loop =
-            env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_MULTI_MILLER_LOOP", true);
 
         let mut verifiers: Vec<Box<dyn SumcheckInstanceVerifier<Fq, T>>> = Vec::new();
 
@@ -437,8 +426,6 @@ impl RecursionVerifier<Fq> {
         let mut num_g2_scalar_mul = 0usize;
         let mut num_g1_add = 0usize;
         let mut num_g2_add = 0usize;
-        #[cfg(feature = "experimental-pairing-recursion")]
-        let mut num_multi_miller_loop = 0usize;
 
         let mut gt_mul_indices = Vec::new();
         let mut g1_scalar_mul_base_points = Vec::new();
@@ -447,8 +434,6 @@ impl RecursionVerifier<Fq> {
         let mut g2_scalar_mul_indices = Vec::new();
         let mut g1_add_indices = Vec::new();
         let mut g2_add_indices = Vec::new();
-        #[cfg(feature = "experimental-pairing-recursion")]
-        let mut multi_miller_loop_indices = Vec::new();
 
         for constraint in self.input.constraint_types.iter() {
             match constraint {
@@ -476,11 +461,6 @@ impl RecursionVerifier<Fq> {
                 ConstraintType::G2Add => {
                     g2_add_indices.push(num_g2_add);
                     num_g2_add += 1;
-                }
-                #[cfg(feature = "experimental-pairing-recursion")]
-                ConstraintType::MultiMillerLoop => {
-                    multi_miller_loop_indices.push(num_multi_miller_loop);
-                    num_multi_miller_loop += 1;
                 }
             }
         }
@@ -583,51 +563,6 @@ impl RecursionVerifier<Fq> {
         if num_g2_add > 0 {
             let params = FusedG2AddParams::new(num_g2_add);
             let verifier = FusedG2AddVerifier::new(params, transcript);
-            verifiers.push(Box::new(verifier));
-        }
-
-        // Multi-Miller loop shift: link f/t and *_next columns (experimental)
-        #[cfg(feature = "experimental-pairing-recursion")]
-        if enable_shift_multi_miller_loop && num_multi_miller_loop > 0 {
-            let mut pairs: Vec<(VirtualPolynomial, VirtualPolynomial)> =
-                Vec::with_capacity(num_multi_miller_loop * 5);
-            for i in 0..num_multi_miller_loop {
-                pairs.push((
-                    VirtualPolynomial::multi_miller_loop_f(i),
-                    VirtualPolynomial::multi_miller_loop_f_next(i),
-                ));
-                pairs.push((
-                    VirtualPolynomial::multi_miller_loop_t_x_c0(i),
-                    VirtualPolynomial::multi_miller_loop_t_x_c0_next(i),
-                ));
-                pairs.push((
-                    VirtualPolynomial::multi_miller_loop_t_x_c1(i),
-                    VirtualPolynomial::multi_miller_loop_t_x_c1_next(i),
-                ));
-                pairs.push((
-                    VirtualPolynomial::multi_miller_loop_t_y_c0(i),
-                    VirtualPolynomial::multi_miller_loop_t_y_c0_next(i),
-                ));
-                pairs.push((
-                    VirtualPolynomial::multi_miller_loop_t_y_c1(i),
-                    VirtualPolynomial::multi_miller_loop_t_y_c1_next(i),
-                ));
-            }
-
-            verifiers.push(Box::new(ShiftMultiMillerLoopVerifier::<Fq>::new(
-                ShiftMultiMillerLoopParams::new(pairs.len()),
-                pairs,
-                transcript,
-            )));
-        }
-
-        // Multi-Miller loop (experimental)
-        #[cfg(feature = "experimental-pairing-recursion")]
-        if num_multi_miller_loop > 0 {
-            let params = MultiMillerLoopParams::new(num_multi_miller_loop);
-            let spec = MultiMillerLoopVerifierSpec::new(params);
-            let verifier =
-                MultiMillerLoopVerifier::from_spec(spec, multi_miller_loop_indices, transcript);
             verifiers.push(Box::new(verifier));
         }
 

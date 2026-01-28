@@ -16,9 +16,6 @@
 //! ### GT Operations
 //! Proves constraints for GT exponentiation and multiplication.
 //!
-//! ### Pairing Operations
-//! Proves Multi-Miller loop constraints.
-//!
 //! ### Virtualization (Direct Evaluation)
 //! Verifies virtual polynomial claims using direct evaluation over the matrix.
 //!
@@ -27,7 +24,6 @@
 //! - `g1/`: G1 curve operations (addition, scalar multiplication)
 //! - `g2/`: G2 curve operations (addition, scalar multiplication)
 //! - `gt/`: GT group operations (exponentiation, multiplication, claim reduction)
-//! - `pairing/`: Pairing operations (multi-miller loop)
 //! - `virtualization`: Direct evaluation protocol
 //! - `utils/`: Shared utilities and helpers
 //! - `prover`: Unified prover orchestrating all stages
@@ -41,7 +37,6 @@ pub mod g1;
 pub mod g2;
 pub mod gt;
 pub mod metadata;
-pub mod pairing;
 pub mod prefix_packing;
 pub mod prover;
 pub mod utils;

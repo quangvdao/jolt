@@ -105,67 +105,10 @@ pub enum PolyType {
     G2AddInvDeltaXC1 = 61,
     G2AddIsDouble = 62,
     G2AddIsInverse = 63,
-
-    // Pairing recursion (experimental): Multi-Miller loop packed traces
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopF = 64,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopFNext = 65,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopQuotient = 66,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTXC0 = 67,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTXC1 = 68,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTYC0 = 69,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTYC1 = 70,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTXC0Next = 71,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTXC1Next = 72,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTYC0Next = 73,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopTYC1Next = 74,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopLambdaC0 = 75,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopLambdaC1 = 76,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopInvDeltaXC0 = 77,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopInvDeltaXC1 = 78,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopXP = 79,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopYP = 80,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopXQC0 = 81,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopXQC1 = 82,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopYQC0 = 83,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopYQC1 = 84,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopIsDouble = 85,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopIsAdd = 86,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopLVal = 87,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopInvTwoYC0 = 88,
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoopInvTwoYC1 = 89,
 }
 
 impl PolyType {
-    #[cfg(not(feature = "experimental-pairing-recursion"))]
     pub const NUM_TYPES: usize = 64;
-    #[cfg(feature = "experimental-pairing-recursion")]
-    pub const NUM_TYPES: usize = 90;
 }
 
 impl CanonicalSerialize for PolyType {
@@ -255,58 +198,6 @@ impl CanonicalDeserialize for PolyType {
             61 => PolyType::G2AddInvDeltaXC1,
             62 => PolyType::G2AddIsDouble,
             63 => PolyType::G2AddIsInverse,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            64 => PolyType::MultiMillerLoopF,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            65 => PolyType::MultiMillerLoopFNext,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            66 => PolyType::MultiMillerLoopQuotient,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            67 => PolyType::MultiMillerLoopTXC0,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            68 => PolyType::MultiMillerLoopTXC1,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            69 => PolyType::MultiMillerLoopTYC0,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            70 => PolyType::MultiMillerLoopTYC1,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            71 => PolyType::MultiMillerLoopTXC0Next,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            72 => PolyType::MultiMillerLoopTXC1Next,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            73 => PolyType::MultiMillerLoopTYC0Next,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            74 => PolyType::MultiMillerLoopTYC1Next,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            75 => PolyType::MultiMillerLoopLambdaC0,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            76 => PolyType::MultiMillerLoopLambdaC1,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            77 => PolyType::MultiMillerLoopInvDeltaXC0,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            78 => PolyType::MultiMillerLoopInvDeltaXC1,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            79 => PolyType::MultiMillerLoopXP,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            80 => PolyType::MultiMillerLoopYP,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            81 => PolyType::MultiMillerLoopXQC0,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            82 => PolyType::MultiMillerLoopXQC1,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            83 => PolyType::MultiMillerLoopYQC0,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            84 => PolyType::MultiMillerLoopYQC1,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            85 => PolyType::MultiMillerLoopIsDouble,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            86 => PolyType::MultiMillerLoopIsAdd,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            87 => PolyType::MultiMillerLoopLVal,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            88 => PolyType::MultiMillerLoopInvTwoYC0,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            89 => PolyType::MultiMillerLoopInvTwoYC1,
             _ => return Err(SerializationError::InvalidData),
         };
         Ok(ty)
@@ -334,9 +225,6 @@ pub enum ConstraintType {
     G1Add,
     /// G2 addition constraint
     G2Add,
-    /// Multi-Miller loop constraint (experimental)
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoop,
 }
 
 const GT_EXP_POLYS: [PolyType; 2] = [PolyType::RhoPrev, PolyType::Quotient];
@@ -487,66 +375,6 @@ const G2_ADD_SPECS: [(PolyType, usize); 21] = [
     (PolyType::G2AddIsInverse, 0),
 ];
 
-#[cfg(feature = "experimental-pairing-recursion")]
-const MULTI_MILLER_LOOP_POLYS: [PolyType; 26] = [
-    PolyType::MultiMillerLoopF,
-    PolyType::MultiMillerLoopFNext,
-    PolyType::MultiMillerLoopQuotient,
-    PolyType::MultiMillerLoopTXC0,
-    PolyType::MultiMillerLoopTXC1,
-    PolyType::MultiMillerLoopTYC0,
-    PolyType::MultiMillerLoopTYC1,
-    PolyType::MultiMillerLoopTXC0Next,
-    PolyType::MultiMillerLoopTXC1Next,
-    PolyType::MultiMillerLoopTYC0Next,
-    PolyType::MultiMillerLoopTYC1Next,
-    PolyType::MultiMillerLoopLambdaC0,
-    PolyType::MultiMillerLoopLambdaC1,
-    PolyType::MultiMillerLoopInvDeltaXC0,
-    PolyType::MultiMillerLoopInvDeltaXC1,
-    PolyType::MultiMillerLoopXP,
-    PolyType::MultiMillerLoopYP,
-    PolyType::MultiMillerLoopXQC0,
-    PolyType::MultiMillerLoopXQC1,
-    PolyType::MultiMillerLoopYQC0,
-    PolyType::MultiMillerLoopYQC1,
-    PolyType::MultiMillerLoopIsDouble,
-    PolyType::MultiMillerLoopIsAdd,
-    PolyType::MultiMillerLoopLVal,
-    PolyType::MultiMillerLoopInvTwoYC0,
-    PolyType::MultiMillerLoopInvTwoYC1,
-];
-
-#[cfg(feature = "experimental-pairing-recursion")]
-const MULTI_MILLER_LOOP_SPECS: [(PolyType, usize); 26] = [
-    (PolyType::MultiMillerLoopF, 11),
-    (PolyType::MultiMillerLoopFNext, 11),
-    (PolyType::MultiMillerLoopQuotient, 11),
-    (PolyType::MultiMillerLoopTXC0, 11),
-    (PolyType::MultiMillerLoopTXC1, 11),
-    (PolyType::MultiMillerLoopTYC0, 11),
-    (PolyType::MultiMillerLoopTYC1, 11),
-    (PolyType::MultiMillerLoopTXC0Next, 11),
-    (PolyType::MultiMillerLoopTXC1Next, 11),
-    (PolyType::MultiMillerLoopTYC0Next, 11),
-    (PolyType::MultiMillerLoopTYC1Next, 11),
-    (PolyType::MultiMillerLoopLambdaC0, 11),
-    (PolyType::MultiMillerLoopLambdaC1, 11),
-    (PolyType::MultiMillerLoopInvDeltaXC0, 11),
-    (PolyType::MultiMillerLoopInvDeltaXC1, 11),
-    (PolyType::MultiMillerLoopXP, 11),
-    (PolyType::MultiMillerLoopYP, 11),
-    (PolyType::MultiMillerLoopXQC0, 11),
-    (PolyType::MultiMillerLoopXQC1, 11),
-    (PolyType::MultiMillerLoopYQC0, 11),
-    (PolyType::MultiMillerLoopYQC1, 11),
-    (PolyType::MultiMillerLoopIsDouble, 11),
-    (PolyType::MultiMillerLoopIsAdd, 11),
-    (PolyType::MultiMillerLoopLVal, 11),
-    (PolyType::MultiMillerLoopInvTwoYC0, 11),
-    (PolyType::MultiMillerLoopInvTwoYC1, 11),
-];
-
 impl ConstraintType {
     pub fn committed_poly_types(&self) -> &'static [PolyType] {
         match self {
@@ -556,8 +384,6 @@ impl ConstraintType {
             ConstraintType::G2ScalarMul { .. } => &G2_SCALAR_MUL_POLYS,
             ConstraintType::G1Add => &G1_ADD_POLYS,
             ConstraintType::G2Add => &G2_ADD_POLYS,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            ConstraintType::MultiMillerLoop => &MULTI_MILLER_LOOP_POLYS,
         }
     }
 
@@ -569,8 +395,6 @@ impl ConstraintType {
             ConstraintType::G2ScalarMul { .. } => &G2_SCALAR_MUL_SPECS,
             ConstraintType::G1Add => &G1_ADD_SPECS,
             ConstraintType::G2Add => &G2_ADD_SPECS,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            ConstraintType::MultiMillerLoop => &MULTI_MILLER_LOOP_SPECS,
         }
     }
 }
@@ -586,28 +410,12 @@ pub struct RecursionMatrixShape {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ConstraintLocator {
-    GtExp {
-        local: usize,
-    },
-    GtMul {
-        local: usize,
-    },
-    G1ScalarMul {
-        local: usize,
-    },
-    G2ScalarMul {
-        local: usize,
-    },
-    G1Add {
-        local: usize,
-    },
-    G2Add {
-        local: usize,
-    },
-    #[cfg(feature = "experimental-pairing-recursion")]
-    MultiMillerLoop {
-        local: usize,
-    },
+    GtExp { local: usize },
+    GtMul { local: usize },
+    G1ScalarMul { local: usize },
+    G2ScalarMul { local: usize },
+    G1Add { local: usize },
+    G2Add { local: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -787,8 +595,6 @@ impl CanonicalSerialize for ConstraintType {
             }
             ConstraintType::G1Add => 4u8.serialize_with_mode(&mut writer, compress),
             ConstraintType::G2Add => 5u8.serialize_with_mode(&mut writer, compress),
-            #[cfg(feature = "experimental-pairing-recursion")]
-            ConstraintType::MultiMillerLoop => 6u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -804,8 +610,6 @@ impl CanonicalSerialize for ConstraintType {
             }
             ConstraintType::G1Add => 1,
             ConstraintType::G2Add => 1,
-            #[cfg(feature = "experimental-pairing-recursion")]
-            ConstraintType::MultiMillerLoop => 1,
         }
     }
 }
@@ -832,8 +636,6 @@ impl CanonicalDeserialize for ConstraintType {
             }
             4 => Ok(ConstraintType::G1Add),
             5 => Ok(ConstraintType::G2Add),
-            #[cfg(feature = "experimental-pairing-recursion")]
-            6 => Ok(ConstraintType::MultiMillerLoop),
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -858,8 +660,6 @@ impl GuestSerialize for ConstraintType {
             }
             ConstraintType::G1Add => 4u8.guest_serialize(w),
             ConstraintType::G2Add => 5u8.guest_serialize(w),
-            #[cfg(feature = "experimental-pairing-recursion")]
-            ConstraintType::MultiMillerLoop => 6u8.guest_serialize(w),
         }
     }
 }
@@ -877,8 +677,6 @@ impl GuestDeserialize for ConstraintType {
             }),
             4 => Ok(ConstraintType::G1Add),
             5 => Ok(ConstraintType::G2Add),
-            #[cfg(feature = "experimental-pairing-recursion")]
-            6 => Ok(ConstraintType::MultiMillerLoop),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid ConstraintType",

@@ -207,13 +207,10 @@ pub enum SumcheckId {
     OpeningReduction,
     G2ScalarMul,
     G2Add,
-    MultiMillerLoop,
     /// Shift-check for the G1 scalar-mul accumulator trace: links `A` and `A_next`.
     ShiftG1ScalarMul,
     /// Shift-check for the G2 scalar-mul accumulator trace: links `A` and `A_next`.
     ShiftG2ScalarMul,
-    /// Shift-check for MultiMillerLoop packed traces: links `*_next(s,x)` to `*(s+1,x)` on step vars.
-    ShiftMultiMillerLoop,
     /// GT wiring/boundary sumcheck (AST-driven).
     ///
     /// Used to namespace auxiliary virtual openings emitted by wiring checks.

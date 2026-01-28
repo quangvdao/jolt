@@ -14,6 +14,10 @@
 //! zero-overhead methods for when only one component is needed.
 
 pub mod addition;
+pub mod fused_addition;
+pub mod fused_scalar_multiplication;
+pub mod fused_wiring;
+pub mod indexing;
 pub mod scalar_multiplication;
 pub mod wiring;
 

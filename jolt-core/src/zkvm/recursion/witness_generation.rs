@@ -788,6 +788,175 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             return;
         }
 
+        if entry.is_g2_scalar_mul_fused {
+            // Fused G2 scalar-mul rows are native 8-var step traces plus a family-local padded `c`.
+            let num_g2 = cs.g2_scalar_mul_rows.len();
+            let padded = num_g2.max(1).next_power_of_two();
+            let k = padded.trailing_zeros() as usize;
+            let expected_num_vars = 8usize + k;
+            if entry.num_vars != expected_num_vars {
+                panic!(
+                    "G2-scalar-mul-fused entry has num_vars={}, expected {} (8 + k_g2)",
+                    entry.num_vars, expected_num_vars
+                );
+            }
+
+            let row_size = 1usize << 8;
+            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
+
+            for global_idx in 0..cs.constraint_types.len() {
+                let ConstraintLocator::G2ScalarMul { local } = cs.locator_by_constraint[global_idx]
+                else {
+                    continue;
+                };
+                let c = local;
+                let src8 = match entry.poly_type {
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXAC0 => {
+                        &cs.g2_scalar_mul_rows[local].x_a_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXAC1 => {
+                        &cs.g2_scalar_mul_rows[local].x_a_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYAC0 => {
+                        &cs.g2_scalar_mul_rows[local].y_a_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYAC1 => {
+                        &cs.g2_scalar_mul_rows[local].y_a_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXTC0 => {
+                        &cs.g2_scalar_mul_rows[local].x_t_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXTC1 => {
+                        &cs.g2_scalar_mul_rows[local].x_t_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYTC0 => {
+                        &cs.g2_scalar_mul_rows[local].y_t_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYTC1 => {
+                        &cs.g2_scalar_mul_rows[local].y_t_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXANextC0 => {
+                        &cs.g2_scalar_mul_rows[local].x_a_next_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXANextC1 => {
+                        &cs.g2_scalar_mul_rows[local].x_a_next_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYANextC0 => {
+                        &cs.g2_scalar_mul_rows[local].y_a_next_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYANextC1 => {
+                        &cs.g2_scalar_mul_rows[local].y_a_next_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulTIndicator => {
+                        &cs.g2_scalar_mul_rows[local].t_indicator
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulAIndicator => {
+                        &cs.g2_scalar_mul_rows[local].a_indicator
+                    }
+                    _ => continue,
+                };
+                debug_assert_eq!(src8.len(), row_size);
+                let off = c << 8;
+                fused_src[off..off + row_size].copy_from_slice(src8);
+            }
+
+            fill_block(dst, &fused_src, entry.num_vars);
+            return;
+        }
+
+        if entry.is_g2_add_fused {
+            // Fused G2 add rows are c-only over a family-local padded `c_add`.
+            let num_g2 = cs.g2_add_rows.len();
+            let padded = num_g2.max(1).next_power_of_two();
+            let k = padded.trailing_zeros() as usize;
+            let expected_num_vars = k;
+            if entry.num_vars != expected_num_vars {
+                panic!(
+                    "G2-add-fused entry has num_vars={}, expected {} (k_add)",
+                    entry.num_vars, expected_num_vars
+                );
+            }
+
+            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
+            for global_idx in 0..cs.constraint_types.len() {
+                let ConstraintLocator::G2Add { local } = cs.locator_by_constraint[global_idx]
+                else {
+                    continue;
+                };
+                let c = local;
+                let v = match entry.poly_type {
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXPC0 => {
+                        cs.g2_add_rows[local].x_p_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXPC1 => {
+                        cs.g2_add_rows[local].x_p_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYPC0 => {
+                        cs.g2_add_rows[local].y_p_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYPC1 => {
+                        cs.g2_add_rows[local].y_p_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddPIndicator => {
+                        cs.g2_add_rows[local].ind_p
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXQC0 => {
+                        cs.g2_add_rows[local].x_q_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXQC1 => {
+                        cs.g2_add_rows[local].x_q_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYQC0 => {
+                        cs.g2_add_rows[local].y_q_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYQC1 => {
+                        cs.g2_add_rows[local].y_q_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddQIndicator => {
+                        cs.g2_add_rows[local].ind_q
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXRC0 => {
+                        cs.g2_add_rows[local].x_r_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXRC1 => {
+                        cs.g2_add_rows[local].x_r_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYRC0 => {
+                        cs.g2_add_rows[local].y_r_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYRC1 => {
+                        cs.g2_add_rows[local].y_r_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddRIndicator => {
+                        cs.g2_add_rows[local].ind_r
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddLambdaC0 => {
+                        cs.g2_add_rows[local].lambda_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddLambdaC1 => {
+                        cs.g2_add_rows[local].lambda_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddInvDeltaXC0 => {
+                        cs.g2_add_rows[local].inv_delta_x_c0
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddInvDeltaXC1 => {
+                        cs.g2_add_rows[local].inv_delta_x_c1
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddIsDouble => {
+                        cs.g2_add_rows[local].is_double
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G2AddIsInverse => {
+                        cs.g2_add_rows[local].is_inverse
+                    }
+                    _ => continue,
+                };
+                fused_src[c] = v;
+            }
+
+            fill_block(dst, &fused_src, entry.num_vars);
+            return;
+        }
+
         let loc = cs.locator_by_constraint[entry.constraint_idx];
         match entry.poly_type {
             // Packed GT exp (11-var)
@@ -1242,15 +1411,33 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
         // Full fused G1 wiring requires fused G1Add packing as well.
         let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
 
+        let enable_g2_fused_wiring_end_to_end =
+            std::env::var("JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
+        let enable_g2_scalar_mul_fused_end_to_end =
+            std::env::var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false)
+                || enable_g2_fused_wiring_end_to_end;
+        // Full fused G2 wiring requires fused G2Add packing as well.
+        let enable_g2_add_fused_end_to_end = enable_g2_fused_wiring_end_to_end;
+
         if enable_gt_fused_end_to_end
             || enable_g1_scalar_mul_fused_end_to_end
             || enable_g1_add_fused_end_to_end
+            || enable_g2_scalar_mul_fused_end_to_end
+            || enable_g2_add_fused_end_to_end
         {
             PrefixPackingLayout::from_constraint_types_fused(
                 &cs.constraint_types,
                 enable_gt_fused_end_to_end,
                 enable_g1_scalar_mul_fused_end_to_end,
                 enable_g1_add_fused_end_to_end,
+                enable_g2_scalar_mul_fused_end_to_end,
+                enable_g2_add_fused_end_to_end,
             )
         } else {
             PrefixPackingLayout::from_constraint_types(&cs.constraint_types)

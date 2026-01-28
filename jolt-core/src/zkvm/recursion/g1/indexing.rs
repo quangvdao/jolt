@@ -68,7 +68,9 @@ pub fn num_g1_smul_constraints_padded(constraint_types: &[ConstraintType]) -> us
 
 /// Padded G1Add constraint count (power of two, min 1).
 pub fn num_g1_add_constraints_padded(constraint_types: &[ConstraintType]) -> usize {
-    num_g1_add_constraints(constraint_types).max(1).next_power_of_two()
+    num_g1_add_constraints(constraint_types)
+        .max(1)
+        .next_power_of_two()
 }
 
 /// Shared padded constraint count used by fused G1 wiring (max of the family paddings).
@@ -118,4 +120,3 @@ mod tests {
         assert_eq!(dummy_bits(5, 3), 2);
     }
 }
-

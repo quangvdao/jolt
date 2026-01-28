@@ -1,13 +1,14 @@
-//! Fused G1 scalar multiplication sumchecks (family-local, Option B).
+//! Fused G2 scalar multiplication sumchecks (family-local, Option B).
 //!
-//! This implements a fused variant of the existing per-instance `G1ScalarMul` constraint list:
-//! - We fuse over a **family-local** constraint index `c_g1smul`.
-//! - The native step trace domain remains 8 variables (256 steps).
-//! - All committed witness polynomials are treated as MLEs over `(step, c_g1smul)` with
-//!   `step` in the low bits and `c` as a suffix (LSB-first binding order).
-//! - Padding rows are gated by a public indicator `I_g1smul(c)`.
+//! This mirrors `g1/fused_scalar_multiplication.rs`, but for G2 points over Fq2 (split into
+//! (c0,c1) components over Fq).
 //!
-//! This is the intended Option-B fusion style for scalar multiplication, analogous to fused GT.
+//! Key conventions:
+//! - Native step domain is 8 variables (256 steps).
+//! - We fuse over a **family-local** constraint index `c_g2smul` (k_smul bits).
+//! - For Stage-2 alignment we optionally run over `k_common >= k_smul` c-bits by replicating
+//!   across dummy **low** bits (dummy-low-bits convention).
+//! - The committed witness polynomials are MLEs over `(step, c_g2smul)` (step low bits, c suffix).
 
 use crate::{
     field::JoltField,
@@ -26,22 +27,23 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
-    zkvm::recursion::constraints::system::{index_to_binary, G1ScalarMulNative},
-    zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs,
+    zkvm::recursion::constraints::system::{index_to_binary, G2ScalarMulNative},
+    zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs,
     zkvm::witness::VirtualPolynomial,
 };
 
 use allocative::Allocative;
-use ark_bn254::Fq;
+use ark_bn254::{Fq, Fq2};
 use ark_ff::{One, Zero};
 use rayon::prelude::*;
 
 const STEP_VARS: usize = 8; // 256 steps
-                            // Degree bound:
-                            // - constraint_value has max degree 5 (matches existing per-instance analysis),
-                            // - we multiply by Eq(step,c) (deg 1) and I(c) (deg 1),
-                            // so total per-variable degree is 7.
-const DEGREE: usize = 7;
+
+// Conservative degree bound:
+// - per-instance G2 scalar-mul constraint list uses degree 6,
+// - we multiply by Eq(step,c) (deg 1) and I(c) (deg 1),
+// so we use 8.
+const DEGREE: usize = 8;
 
 #[inline]
 fn k_from_num_constraints(num_constraints: usize) -> usize {
@@ -54,7 +56,7 @@ fn row_size() -> usize {
 }
 
 #[inline]
-fn build_bit_poly_8(public_input: &G1ScalarMulPublicInputs) -> Vec<Fq> {
+fn build_bit_poly_8(public_input: &G2ScalarMulPublicInputs) -> Vec<Fq> {
     let bits = public_input.bits_msb();
     debug_assert_eq!(bits.len(), 256);
     let mut evals = vec![Fq::zero(); 1usize << STEP_VARS];
@@ -65,16 +67,12 @@ fn build_bit_poly_8(public_input: &G1ScalarMulPublicInputs) -> Vec<Fq> {
 }
 
 #[derive(Clone, Allocative)]
-pub struct FusedG1ScalarMulParams {
+pub struct FusedG2ScalarMulParams {
     /// Step variable count (always 8 for the 256-step scalar-mul trace).
     pub num_step_vars: usize,
     /// Family-local constraint-index var count (`k_smul`).
     pub k_smul: usize,
     /// Common suffix length used for Stage-2 alignment (`k_common >= k_smul`).
-    ///
-    /// In fully-fused wiring mode, G1 wiring uses `k_g1 = max(k_smul, k_add)`. We keep the
-    /// committed polynomials family-local (k_smul), but allow the sumcheck to run over k_common
-    /// by replicating across dummy low bits and caching openings at the family-local point.
     pub k_common: usize,
     pub num_constraints: usize,
     /// Padded family-local constraint count (power of two, min 1): `2^{k_smul}`.
@@ -83,7 +81,7 @@ pub struct FusedG1ScalarMulParams {
     pub num_constraints_padded_common: usize,
 }
 
-impl FusedG1ScalarMulParams {
+impl FusedG2ScalarMulParams {
     pub fn new(num_constraints: usize) -> Self {
         let num_constraints_padded = num_constraints.max(1).next_power_of_two();
         let k_smul = num_constraints_padded.trailing_zeros() as usize;
@@ -122,7 +120,7 @@ impl FusedG1ScalarMulParams {
     }
 }
 
-impl SumcheckInstanceParams<Fq> for FusedG1ScalarMulParams {
+impl SumcheckInstanceParams<Fq> for FusedG2ScalarMulParams {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -132,7 +130,6 @@ impl SumcheckInstanceParams<Fq> for FusedG1ScalarMulParams {
     }
 
     fn input_claim(&self, _accumulator: &dyn OpeningAccumulator<Fq>) -> Fq {
-        // Prove the (Eq-weighted) sum is 0.
         Fq::zero()
     }
 
@@ -140,23 +137,13 @@ impl SumcheckInstanceParams<Fq> for FusedG1ScalarMulParams {
         &self,
         challenges: &[<Fq as JoltField>::Challenge],
     ) -> OpeningPoint<BIG_ENDIAN, Fq> {
-        // Stage-2 alignment: this sumcheck can run over `k_common` c-bits, but committed witness
-        // polynomials are family-local over `k_smul` bits.
-        //
-        // Dummy-bit convention: dummy bits are the *low* bits of the common `c` segment, so the
-        // family-local bits are the *suffix* of the common `c`.
+        // Dummy-bit convention: dummy bits are the *low* bits of the common c segment, so the
+        // family-local bits are the *suffix* of the common c.
         let expected = self.num_rounds();
-        assert_eq!(
-            challenges.len(),
-            expected,
-            "expected {} sumcheck challenges, got {}",
-            expected,
-            challenges.len()
-        );
+        assert_eq!(challenges.len(), expected);
         let dummy = self.dummy_bits();
         let step_end = self.num_step_vars;
-        let c_common_start = step_end;
-        let c_tail_start = c_common_start + dummy;
+        let c_tail_start = step_end + dummy;
         let mut opening: Vec<<Fq as JoltField>::Challenge> =
             Vec::with_capacity(self.num_opening_vars());
         opening.extend_from_slice(&challenges[..step_end]);
@@ -167,149 +154,203 @@ impl SumcheckInstanceParams<Fq> for FusedG1ScalarMulParams {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct FusedG1ScalarMulValues {
-    x_a: Fq,
-    y_a: Fq,
-    x_t: Fq,
-    y_t: Fq,
-    x_a_next: Fq,
-    y_a_next: Fq,
+struct FusedG2ScalarMulValues {
+    x_a_c0: Fq,
+    x_a_c1: Fq,
+    y_a_c0: Fq,
+    y_a_c1: Fq,
+    x_t_c0: Fq,
+    x_t_c1: Fq,
+    y_t_c0: Fq,
+    y_t_c1: Fq,
+    x_a_next_c0: Fq,
+    x_a_next_c1: Fq,
+    y_a_next_c0: Fq,
+    y_a_next_c1: Fq,
     t_indicator: Fq,
     a_indicator: Fq,
 }
 
-impl FusedG1ScalarMulValues {
+impl FusedG2ScalarMulValues {
     #[inline]
     fn from_claims(claims: &[Fq]) -> Self {
         Self {
-            x_a: claims[0],
-            y_a: claims[1],
-            x_t: claims[2],
-            y_t: claims[3],
-            x_a_next: claims[4],
-            y_a_next: claims[5],
-            t_indicator: claims[6],
-            a_indicator: claims[7],
+            x_a_c0: claims[0],
+            x_a_c1: claims[1],
+            y_a_c0: claims[2],
+            y_a_c1: claims[3],
+            x_t_c0: claims[4],
+            x_t_c1: claims[5],
+            y_t_c0: claims[6],
+            y_t_c1: claims[7],
+            x_a_next_c0: claims[8],
+            x_a_next_c1: claims[9],
+            y_a_next_c0: claims[10],
+            y_a_next_c1: claims[11],
+            t_indicator: claims[12],
+            a_indicator: claims[13],
         }
     }
 
     #[inline]
     fn from_poly_evals<const D: usize>(poly_evals: &[[Fq; D]], idx: usize) -> Self {
         Self {
-            x_a: poly_evals[0][idx],
-            y_a: poly_evals[1][idx],
-            x_t: poly_evals[2][idx],
-            y_t: poly_evals[3][idx],
-            x_a_next: poly_evals[4][idx],
-            y_a_next: poly_evals[5][idx],
-            t_indicator: poly_evals[6][idx],
-            a_indicator: poly_evals[7][idx],
+            x_a_c0: poly_evals[0][idx],
+            x_a_c1: poly_evals[1][idx],
+            y_a_c0: poly_evals[2][idx],
+            y_a_c1: poly_evals[3][idx],
+            x_t_c0: poly_evals[4][idx],
+            x_t_c1: poly_evals[5][idx],
+            y_t_c0: poly_evals[6][idx],
+            y_t_c1: poly_evals[7][idx],
+            x_a_next_c0: poly_evals[8][idx],
+            x_a_next_c1: poly_evals[9][idx],
+            y_a_next_c0: poly_evals[10][idx],
+            y_a_next_c1: poly_evals[11][idx],
+            t_indicator: poly_evals[12][idx],
+            a_indicator: poly_evals[13][idx],
         }
     }
 
-    /// Evaluate the batched scalar-mul constraint polynomial at a point.
+    /// Evaluate the batched G2 scalar-mul constraint polynomial at a point.
     ///
-    /// Mirrors `g1/scalar_multiplication.rs` (per-instance) constraint semantics.
-    fn eval_constraint(&self, bit: Fq, x_p: Fq, y_p: Fq, delta: Fq) -> Fq {
-        let one = Fq::one();
-        let two = Fq::from(2u64);
-        let three = Fq::from(3u64);
-        let four = Fq::from(4u64);
-        let nine = Fq::from(9u64);
+    /// Mirrors `g2/scalar_multiplication.rs` (per-instance) constraint semantics.
+    fn eval_constraint(&self, bit: Fq, x_p: Fq2, y_p: Fq2, delta: Fq) -> Fq {
+        // Reconstruct Fq2 values
+        let x_a = Fq2::new(self.x_a_c0, self.x_a_c1);
+        let y_a = Fq2::new(self.y_a_c0, self.y_a_c1);
+        let x_t = Fq2::new(self.x_t_c0, self.x_t_c1);
+        let y_t = Fq2::new(self.y_t_c0, self.y_t_c1);
+        let x_a_next = Fq2::new(self.x_a_next_c0, self.x_a_next_c1);
+        let y_a_next = Fq2::new(self.y_a_next_c0, self.y_a_next_c1);
+
+        // Fq2 constants
+        let one2 = Fq2::one();
+        let two2 = Fq2::new(Fq::from(2u64), Fq::zero());
+        let three2 = Fq2::new(Fq::from(3u64), Fq::zero());
+        let four2 = Fq2::new(Fq::from(4u64), Fq::zero());
+        let nine2 = Fq2::new(Fq::from(9u64), Fq::zero());
+        let bit2 = Fq2::new(bit, Fq::zero());
+        let ind_t2 = Fq2::new(self.t_indicator, Fq::zero());
 
         // C1: 4y_A²(x_T + 2x_A) - 9x_A⁴
-        let y_a_sq = self.y_a * self.y_a;
-        let x_a_sq = self.x_a * self.x_a;
-        let c1 = four * y_a_sq * (self.x_t + two * self.x_a) - nine * x_a_sq * x_a_sq;
+        let y_a_sq = y_a * y_a;
+        let x_a_sq = x_a * x_a;
+        let c1 = four2 * y_a_sq * (x_t + two2 * x_a) - nine2 * x_a_sq * x_a_sq;
 
         // C2: 3x_A²(x_T - x_A) + 2y_A(y_T + y_A)
-        let c2 = three * x_a_sq * (self.x_t - self.x_a) + two * self.y_a * (self.y_t + self.y_a);
+        let c2 = three2 * x_a_sq * (x_t - x_a) + two2 * y_a * (y_t + y_a);
 
         // C3: Conditional addition x-coord
-        let c3_skip = (one - bit) * (self.x_a_next - self.x_t);
-        let c3_infinity = bit * self.t_indicator * (self.x_a_next - x_p);
-        let x_diff = x_p - self.x_t;
-        let y_diff = y_p - self.y_t;
-        let chord_x = (self.x_a_next + self.x_t + x_p) * x_diff * x_diff - y_diff * y_diff;
-        let c3_add = bit * (one - self.t_indicator) * chord_x;
+        let c3_skip = (one2 - bit2) * (x_a_next - x_t);
+        let c3_infinity = bit2 * ind_t2 * (x_a_next - x_p);
+        let x_diff = x_p - x_t;
+        let y_diff = y_p - y_t;
+        let chord_x = (x_a_next + x_t + x_p) * x_diff * x_diff - y_diff * y_diff;
+        let c3_add = bit2 * (one2 - ind_t2) * chord_x;
         let c3 = c3_skip + c3_infinity + c3_add;
 
         // C4: Conditional addition y-coord
-        let c4_skip = (one - bit) * (self.y_a_next - self.y_t);
-        let c4_infinity = bit * self.t_indicator * (self.y_a_next - y_p);
-        let chord_y = (self.y_a_next + self.y_t) * x_diff - y_diff * (self.x_t - self.x_a_next);
-        let c4_add = bit * (one - self.t_indicator) * chord_y;
+        let c4_skip = (one2 - bit2) * (y_a_next - y_t);
+        let c4_infinity = bit2 * ind_t2 * (y_a_next - y_p);
+        let chord_y = (y_a_next + y_t) * x_diff - y_diff * (x_t - x_a_next);
+        let c4_add = bit2 * (one2 - ind_t2) * chord_y;
         let c4 = c4_skip + c4_infinity + c4_add;
 
         // C5: ind_A * (1 - ind_T)
+        let one = Fq::one();
         let c5 = self.a_indicator * (one - self.t_indicator);
 
-        // C6: ind_T * x_T, ind_T * y_T
-        let c6_x = self.t_indicator * self.x_t;
-        let c6_y = self.t_indicator * self.y_t;
+        // C6: ind_T * x_T (c0,c1), ind_T * y_T (c0,c1)
+        let c6_xt_c0 = self.t_indicator * self.x_t_c0;
+        let c6_xt_c1 = self.t_indicator * self.x_t_c1;
+        let c6_yt_c0 = self.t_indicator * self.y_t_c0;
+        let c6_yt_c1 = self.t_indicator * self.y_t_c1;
 
-        // Batch with powers of delta
+        // Batch with powers of delta (13 terms)
         let d2 = delta * delta;
         let d3 = d2 * delta;
         let d4 = d3 * delta;
         let d5 = d4 * delta;
         let d6 = d5 * delta;
+        let d7 = d6 * delta;
+        let d8 = d7 * delta;
+        let d9 = d8 * delta;
+        let d10 = d9 * delta;
+        let d11 = d10 * delta;
+        let d12 = d11 * delta;
 
-        c1 + delta * c2 + d2 * c3 + d3 * c4 + d4 * c5 + d5 * c6_x + d6 * c6_y
+        c1.c0
+            + delta * c1.c1
+            + d2 * c2.c0
+            + d3 * c2.c1
+            + d4 * c3.c0
+            + d5 * c3.c1
+            + d6 * c4.c0
+            + d7 * c4.c1
+            + d8 * c5
+            + d9 * c6_xt_c0
+            + d10 * c6_xt_c1
+            + d11 * c6_yt_c0
+            + d12 * c6_yt_c1
     }
 }
 
 #[derive(Allocative)]
-pub struct FusedG1ScalarMulProver {
-    params: FusedG1ScalarMulParams,
+pub struct FusedG2ScalarMulProver {
+    params: FusedG2ScalarMulParams,
     eq_poly: MultilinearPolynomial<Fq>,
     indicator_poly: MultilinearPolynomial<Fq>,
     // committed witness polys over (step,c)
-    x_a: MultilinearPolynomial<Fq>,
-    y_a: MultilinearPolynomial<Fq>,
-    x_t: MultilinearPolynomial<Fq>,
-    y_t: MultilinearPolynomial<Fq>,
-    x_a_next: MultilinearPolynomial<Fq>,
-    y_a_next: MultilinearPolynomial<Fq>,
+    x_a_c0: MultilinearPolynomial<Fq>,
+    x_a_c1: MultilinearPolynomial<Fq>,
+    y_a_c0: MultilinearPolynomial<Fq>,
+    y_a_c1: MultilinearPolynomial<Fq>,
+    x_t_c0: MultilinearPolynomial<Fq>,
+    x_t_c1: MultilinearPolynomial<Fq>,
+    y_t_c0: MultilinearPolynomial<Fq>,
+    y_t_c1: MultilinearPolynomial<Fq>,
+    x_a_next_c0: MultilinearPolynomial<Fq>,
+    x_a_next_c1: MultilinearPolynomial<Fq>,
+    y_a_next_c0: MultilinearPolynomial<Fq>,
+    y_a_next_c1: MultilinearPolynomial<Fq>,
     t_indicator: MultilinearPolynomial<Fq>,
     a_indicator: MultilinearPolynomial<Fq>,
     // public polys over (step,c)
     bit: MultilinearPolynomial<Fq>,
-    x_p: MultilinearPolynomial<Fq>,
-    y_p: MultilinearPolynomial<Fq>,
+    x_p_c0: MultilinearPolynomial<Fq>,
+    x_p_c1: MultilinearPolynomial<Fq>,
+    y_p_c0: MultilinearPolynomial<Fq>,
+    y_p_c1: MultilinearPolynomial<Fq>,
     term_batch_coeff: Fq,
 }
 
-impl FusedG1ScalarMulProver {
+impl FusedG2ScalarMulProver {
     pub fn new<T: Transcript>(
-        rows: &[G1ScalarMulNative],
-        public_inputs: &[G1ScalarMulPublicInputs],
+        rows: &[G2ScalarMulNative],
+        public_inputs: &[G2ScalarMulPublicInputs],
         transcript: &mut T,
     ) -> Self {
-        debug_assert_eq!(
-            rows.len(),
-            public_inputs.len(),
-            "G1ScalarMul rows must match public_inputs length"
-        );
-        let params = FusedG1ScalarMulParams::new(rows.len());
+        debug_assert_eq!(rows.len(), public_inputs.len());
+        let params = FusedG2ScalarMulParams::new(rows.len());
         Self::new_with_params(rows, public_inputs, params, transcript)
     }
 
     pub fn new_with_k_common<T: Transcript>(
-        rows: &[G1ScalarMulNative],
-        public_inputs: &[G1ScalarMulPublicInputs],
+        rows: &[G2ScalarMulNative],
+        public_inputs: &[G2ScalarMulPublicInputs],
         k_common: usize,
         transcript: &mut T,
     ) -> Self {
         debug_assert_eq!(rows.len(), public_inputs.len());
-        let params = FusedG1ScalarMulParams::new_with_k_common(rows.len(), k_common);
+        let params = FusedG2ScalarMulParams::new_with_k_common(rows.len(), k_common);
         Self::new_with_params(rows, public_inputs, params, transcript)
     }
 
     fn new_with_params<T: Transcript>(
-        rows: &[G1ScalarMulNative],
-        public_inputs: &[G1ScalarMulPublicInputs],
-        params: FusedG1ScalarMulParams,
+        rows: &[G2ScalarMulNative],
+        public_inputs: &[G2ScalarMulPublicInputs],
+        params: FusedG2ScalarMulParams,
         transcript: &mut T,
     ) -> Self {
         let num_rounds = params.num_rounds();
@@ -327,6 +368,7 @@ impl FusedG1ScalarMulProver {
         let blocks = params.num_constraints_padded_common;
         let total_len = blocks * rs;
 
+        // Indicator I(c_common): 1 on real constraints (replicated across step and dummy bits), else 0.
         let mut ind_sc = vec![Fq::zero(); total_len];
         let dummy = params.dummy_bits();
         for c_common in 0..blocks {
@@ -340,7 +382,7 @@ impl FusedG1ScalarMulProver {
         }
         let indicator_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_sc));
 
-        let build_term = |get: fn(&G1ScalarMulNative) -> &Vec<Fq>| -> MultilinearPolynomial<Fq> {
+        let build_term = |get: fn(&G2ScalarMulNative) -> &Vec<Fq>| -> MultilinearPolynomial<Fq> {
             let mut v = vec![Fq::zero(); total_len];
             for c_smul in 0..params.num_constraints {
                 let src = get(&rows[c_smul]);
@@ -354,12 +396,18 @@ impl FusedG1ScalarMulProver {
             MultilinearPolynomial::LargeScalars(DensePolynomial::new(v))
         };
 
-        let x_a = build_term(|r| &r.x_a);
-        let y_a = build_term(|r| &r.y_a);
-        let x_t = build_term(|r| &r.x_t);
-        let y_t = build_term(|r| &r.y_t);
-        let x_a_next = build_term(|r| &r.x_a_next);
-        let y_a_next = build_term(|r| &r.y_a_next);
+        let x_a_c0 = build_term(|r| &r.x_a_c0);
+        let x_a_c1 = build_term(|r| &r.x_a_c1);
+        let y_a_c0 = build_term(|r| &r.y_a_c0);
+        let y_a_c1 = build_term(|r| &r.y_a_c1);
+        let x_t_c0 = build_term(|r| &r.x_t_c0);
+        let x_t_c1 = build_term(|r| &r.x_t_c1);
+        let y_t_c0 = build_term(|r| &r.y_t_c0);
+        let y_t_c1 = build_term(|r| &r.y_t_c1);
+        let x_a_next_c0 = build_term(|r| &r.x_a_next_c0);
+        let x_a_next_c1 = build_term(|r| &r.x_a_next_c1);
+        let y_a_next_c0 = build_term(|r| &r.y_a_next_c0);
+        let y_a_next_c1 = build_term(|r| &r.y_a_next_c1);
         let t_indicator = build_term(|r| &r.t_indicator);
         let a_indicator = build_term(|r| &r.a_indicator);
 
@@ -377,53 +425,64 @@ impl FusedG1ScalarMulProver {
         let bit = MultilinearPolynomial::LargeScalars(DensePolynomial::new(bit_sc));
 
         // Public base point polynomials (constant over step, fused over c).
-        let mut x_p_sc = vec![Fq::zero(); total_len];
-        let mut y_p_sc = vec![Fq::zero(); total_len];
+        let mut x_p_c0_sc = vec![Fq::zero(); total_len];
+        let mut x_p_c1_sc = vec![Fq::zero(); total_len];
+        let mut y_p_c0_sc = vec![Fq::zero(); total_len];
+        let mut y_p_c1_sc = vec![Fq::zero(); total_len];
         for c_smul in 0..params.num_constraints {
             let (x_p, y_p) = rows[c_smul].base_point;
             for d in 0..(1usize << dummy) {
                 let c_common = d + (c_smul << dummy);
                 let off = c_common * rs;
                 for s in 0..rs {
-                    x_p_sc[off + s] = x_p;
-                    y_p_sc[off + s] = y_p;
+                    x_p_c0_sc[off + s] = x_p.c0;
+                    x_p_c1_sc[off + s] = x_p.c1;
+                    y_p_c0_sc[off + s] = y_p.c0;
+                    y_p_c1_sc[off + s] = y_p.c1;
                 }
             }
         }
-        let x_p = MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_p_sc));
-        let y_p = MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_p_sc));
+        let x_p_c0 = MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_p_c0_sc));
+        let x_p_c1 = MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_p_c1_sc));
+        let y_p_c0 = MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_p_c0_sc));
+        let y_p_c1 = MultilinearPolynomial::LargeScalars(DensePolynomial::new(y_p_c1_sc));
 
         Self {
             params,
             eq_poly,
             indicator_poly,
-            x_a,
-            y_a,
-            x_t,
-            y_t,
-            x_a_next,
-            y_a_next,
+            x_a_c0,
+            x_a_c1,
+            y_a_c0,
+            y_a_c1,
+            x_t_c0,
+            x_t_c1,
+            y_t_c0,
+            y_t_c1,
+            x_a_next_c0,
+            x_a_next_c1,
+            y_a_next_c0,
+            y_a_next_c1,
             t_indicator,
             a_indicator,
             bit,
-            x_p,
-            y_p,
+            x_p_c0,
+            x_p_c1,
+            y_p_c0,
+            y_p_c1,
             term_batch_coeff,
         }
     }
 }
 
-impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1ScalarMulProver {
+impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG2ScalarMulProver {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
 
     fn compute_message(&mut self, _round: usize, previous_claim: Fq) -> UniPoly<Fq> {
         let num_remaining = self.eq_poly.get_num_vars();
-        debug_assert!(
-            num_remaining > 0,
-            "fused g1 scalar mul should have at least one round"
-        );
+        debug_assert!(num_remaining > 0);
         let half = 1usize << (num_remaining - 1);
 
         let delta = self.term_batch_coeff;
@@ -439,12 +498,18 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1ScalarMulProver
                     .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
 
                 let polys = [
-                    &self.x_a,
-                    &self.y_a,
-                    &self.x_t,
-                    &self.y_t,
-                    &self.x_a_next,
-                    &self.y_a_next,
+                    &self.x_a_c0,
+                    &self.x_a_c1,
+                    &self.y_a_c0,
+                    &self.y_a_c1,
+                    &self.x_t_c0,
+                    &self.x_t_c1,
+                    &self.y_t_c0,
+                    &self.y_t_c1,
+                    &self.x_a_next_c0,
+                    &self.x_a_next_c1,
+                    &self.y_a_next_c0,
+                    &self.y_a_next_c1,
                     &self.t_indicator,
                     &self.a_indicator,
                 ];
@@ -456,17 +521,25 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1ScalarMulProver
                 let bit_e = self
                     .bit
                     .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
-                let x_p_e = self
-                    .x_p
+                let x_p_c0_e = self
+                    .x_p_c0
                     .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
-                let y_p_e = self
-                    .y_p
+                let x_p_c1_e = self
+                    .x_p_c1
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let y_p_c0_e = self
+                    .y_p_c0
+                    .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
+                let y_p_c1_e = self
+                    .y_p_c1
                     .sumcheck_evals_array::<DEGREE>(idx, BindingOrder::LowToHigh);
 
                 let mut out = [Fq::zero(); DEGREE];
                 for t in 0..DEGREE {
-                    let vals = FusedG1ScalarMulValues::from_poly_evals(&poly_evals, t);
-                    let c_val = vals.eval_constraint(bit_e[t], x_p_e[t], y_p_e[t], delta);
+                    let vals = FusedG2ScalarMulValues::from_poly_evals(&poly_evals, t);
+                    let x_p = Fq2::new(x_p_c0_e[t], x_p_c1_e[t]);
+                    let y_p = Fq2::new(y_p_c0_e[t], y_p_c1_e[t]);
+                    let c_val = vals.eval_constraint(bit_e[t], x_p, y_p, delta);
                     out[t] = eq_e[t] * ind_e[t] * c_val;
                 }
                 out
@@ -488,17 +561,25 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1ScalarMulProver
         for p in [
             &mut self.eq_poly,
             &mut self.indicator_poly,
-            &mut self.x_a,
-            &mut self.y_a,
-            &mut self.x_t,
-            &mut self.y_t,
-            &mut self.x_a_next,
-            &mut self.y_a_next,
+            &mut self.x_a_c0,
+            &mut self.x_a_c1,
+            &mut self.y_a_c0,
+            &mut self.y_a_c1,
+            &mut self.x_t_c0,
+            &mut self.x_t_c1,
+            &mut self.y_t_c0,
+            &mut self.y_t_c1,
+            &mut self.x_a_next_c0,
+            &mut self.x_a_next_c1,
+            &mut self.y_a_next_c0,
+            &mut self.y_a_next_c1,
             &mut self.t_indicator,
             &mut self.a_indicator,
             &mut self.bit,
-            &mut self.x_p,
-            &mut self.y_p,
+            &mut self.x_p_c0,
+            &mut self.x_p_c1,
+            &mut self.y_p_c0,
+            &mut self.y_p_c1,
         ] {
             p.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
@@ -511,45 +592,68 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1ScalarMulProver
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
-
         for (vp, claim) in [
             (
-                VirtualPolynomial::g1_scalar_mul_xa_fused(),
-                self.x_a.get_bound_coeff(0),
+                VirtualPolynomial::g2_scalar_mul_xa_c0_fused(),
+                self.x_a_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g1_scalar_mul_ya_fused(),
-                self.y_a.get_bound_coeff(0),
+                VirtualPolynomial::g2_scalar_mul_xa_c1_fused(),
+                self.x_a_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g1_scalar_mul_xt_fused(),
-                self.x_t.get_bound_coeff(0),
+                VirtualPolynomial::g2_scalar_mul_ya_c0_fused(),
+                self.y_a_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g1_scalar_mul_yt_fused(),
-                self.y_t.get_bound_coeff(0),
+                VirtualPolynomial::g2_scalar_mul_ya_c1_fused(),
+                self.y_a_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
-                self.x_a_next.get_bound_coeff(0),
+                VirtualPolynomial::g2_scalar_mul_xt_c0_fused(),
+                self.x_t_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g1_scalar_mul_ya_next_fused(),
-                self.y_a_next.get_bound_coeff(0),
+                VirtualPolynomial::g2_scalar_mul_xt_c1_fused(),
+                self.x_t_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g1_scalar_mul_t_indicator_fused(),
+                VirtualPolynomial::g2_scalar_mul_yt_c0_fused(),
+                self.y_t_c0.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::g2_scalar_mul_yt_c1_fused(),
+                self.y_t_c1.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::g2_scalar_mul_xa_next_c0_fused(),
+                self.x_a_next_c0.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::g2_scalar_mul_xa_next_c1_fused(),
+                self.x_a_next_c1.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::g2_scalar_mul_ya_next_c0_fused(),
+                self.y_a_next_c0.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused(),
+                self.y_a_next_c1.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::g2_scalar_mul_t_indicator_fused(),
                 self.t_indicator.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g1_scalar_mul_a_indicator_fused(),
+                VirtualPolynomial::g2_scalar_mul_a_indicator_fused(),
                 self.a_indicator.get_bound_coeff(0),
             ),
         ] {
             accumulator.append_virtual(
                 transcript,
                 vp,
-                SumcheckId::G1ScalarMul,
+                SumcheckId::G2ScalarMul,
                 opening_point.clone(),
                 claim,
             );
@@ -557,30 +661,30 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1ScalarMulProver
     }
 }
 
-pub struct FusedG1ScalarMulVerifier {
-    params: FusedG1ScalarMulParams,
+pub struct FusedG2ScalarMulVerifier {
+    params: FusedG2ScalarMulParams,
     eq_point: Vec<<Fq as JoltField>::Challenge>,
     term_batch_coeff: Fq,
     num_constraints: usize,
-    public_inputs: Vec<G1ScalarMulPublicInputs>,
-    base_points: Vec<(Fq, Fq)>,
+    public_inputs: Vec<G2ScalarMulPublicInputs>,
+    base_points: Vec<(Fq2, Fq2)>,
 }
 
 #[cfg(feature = "allocative")]
-impl allocative::Allocative for FusedG1ScalarMulVerifier {
+impl allocative::Allocative for FusedG2ScalarMulVerifier {
     fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
-impl FusedG1ScalarMulVerifier {
+impl FusedG2ScalarMulVerifier {
     pub fn new<T: Transcript>(
         num_constraints: usize,
-        public_inputs: Vec<G1ScalarMulPublicInputs>,
-        base_points: Vec<(Fq, Fq)>,
+        public_inputs: Vec<G2ScalarMulPublicInputs>,
+        base_points: Vec<(Fq2, Fq2)>,
         transcript: &mut T,
     ) -> Self {
         debug_assert_eq!(public_inputs.len(), num_constraints);
         debug_assert_eq!(base_points.len(), num_constraints);
-        let params = FusedG1ScalarMulParams::new(num_constraints);
+        let params = FusedG2ScalarMulParams::new(num_constraints);
         Self::new_with_params(
             params,
             num_constraints,
@@ -593,13 +697,13 @@ impl FusedG1ScalarMulVerifier {
     pub fn new_with_k_common<T: Transcript>(
         num_constraints: usize,
         k_common: usize,
-        public_inputs: Vec<G1ScalarMulPublicInputs>,
-        base_points: Vec<(Fq, Fq)>,
+        public_inputs: Vec<G2ScalarMulPublicInputs>,
+        base_points: Vec<(Fq2, Fq2)>,
         transcript: &mut T,
     ) -> Self {
         debug_assert_eq!(public_inputs.len(), num_constraints);
         debug_assert_eq!(base_points.len(), num_constraints);
-        let params = FusedG1ScalarMulParams::new_with_k_common(num_constraints, k_common);
+        let params = FusedG2ScalarMulParams::new_with_k_common(num_constraints, k_common);
         Self::new_with_params(
             params,
             num_constraints,
@@ -610,10 +714,10 @@ impl FusedG1ScalarMulVerifier {
     }
 
     fn new_with_params<T: Transcript>(
-        params: FusedG1ScalarMulParams,
+        params: FusedG2ScalarMulParams,
         num_constraints: usize,
-        public_inputs: Vec<G1ScalarMulPublicInputs>,
-        base_points: Vec<(Fq, Fq)>,
+        public_inputs: Vec<G2ScalarMulPublicInputs>,
+        base_points: Vec<(Fq2, Fq2)>,
         transcript: &mut T,
     ) -> Self {
         let num_rounds = params.num_rounds();
@@ -632,7 +736,7 @@ impl FusedG1ScalarMulVerifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG2ScalarMulVerifier {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
@@ -675,36 +779,43 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
         // - base points are c-only (replicated across step)
         // - bit is step-only per instance, then fused across c by Eq(r_c,c)
         let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
-        let mut x_p = Fq::zero();
-        let mut y_p = Fq::zero();
+        let mut x_p = Fq2::zero();
+        let mut y_p = Fq2::zero();
         let mut bit = Fq::zero();
         for c in 0..self.num_constraints {
             let bits_c = index_to_binary::<Fq>(c, k);
             let w_c = EqPolynomial::mle(&r_c, &bits_c);
             let (xp_i, yp_i) = self.base_points[c];
-            x_p += w_c * xp_i;
-            y_p += w_c * yp_i;
+            let w_c_fq2 = Fq2::new(w_c, Fq::zero());
+            x_p += xp_i * w_c_fq2;
+            y_p += yp_i * w_c_fq2;
             bit += w_c * self.public_inputs[c].evaluate_bit_mle(&r_step_fq);
         }
 
-        // Fetch fused opened claims (8 committed witness polynomials).
-        let mut claims = Vec::with_capacity(8);
+        // Fetch fused opened claims (14 committed witness polynomials).
+        let mut claims = Vec::with_capacity(14);
         for vp in [
-            VirtualPolynomial::g1_scalar_mul_xa_fused(),
-            VirtualPolynomial::g1_scalar_mul_ya_fused(),
-            VirtualPolynomial::g1_scalar_mul_xt_fused(),
-            VirtualPolynomial::g1_scalar_mul_yt_fused(),
-            VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
-            VirtualPolynomial::g1_scalar_mul_ya_next_fused(),
-            VirtualPolynomial::g1_scalar_mul_t_indicator_fused(),
-            VirtualPolynomial::g1_scalar_mul_a_indicator_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_xt_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_xt_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_yt_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_yt_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_next_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_next_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_next_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_t_indicator_fused(),
+            VirtualPolynomial::g2_scalar_mul_a_indicator_fused(),
         ] {
             let (_, claim) =
-                accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
+                accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul);
             claims.push(claim);
         }
 
-        let vals = FusedG1ScalarMulValues::from_claims(&claims);
+        let vals = FusedG2ScalarMulValues::from_claims(&claims);
         let constraint_value = vals.eval_constraint(bit, x_p, y_p, self.term_batch_coeff);
 
         eq_eval * ind_eval * constraint_value
@@ -718,19 +829,25 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
     ) {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for vp in [
-            VirtualPolynomial::g1_scalar_mul_xa_fused(),
-            VirtualPolynomial::g1_scalar_mul_ya_fused(),
-            VirtualPolynomial::g1_scalar_mul_xt_fused(),
-            VirtualPolynomial::g1_scalar_mul_yt_fused(),
-            VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
-            VirtualPolynomial::g1_scalar_mul_ya_next_fused(),
-            VirtualPolynomial::g1_scalar_mul_t_indicator_fused(),
-            VirtualPolynomial::g1_scalar_mul_a_indicator_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_xt_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_xt_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_yt_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_yt_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_next_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_xa_next_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_next_c0_fused(),
+            VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused(),
+            VirtualPolynomial::g2_scalar_mul_t_indicator_fused(),
+            VirtualPolynomial::g2_scalar_mul_a_indicator_fused(),
         ] {
             accumulator.append_virtual(
                 transcript,
                 vp,
-                SumcheckId::G1ScalarMul,
+                SumcheckId::G2ScalarMul,
                 opening_point.clone(),
             );
         }
@@ -738,17 +855,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
 }
 
 // =============================================================================
-// Fused shift check (G1 only)
+// Fused shift check (G2)
 // =============================================================================
 
 #[derive(Clone, Debug, Allocative)]
-pub struct FusedShiftG1ScalarMulParams {
+pub struct FusedShiftG2ScalarMulParams {
     pub num_step_vars: usize, // 8
     pub k_smul: usize,
     pub k_common: usize,
 }
 
-impl FusedShiftG1ScalarMulParams {
+impl FusedShiftG2ScalarMulParams {
     pub fn new(num_constraints: usize) -> Self {
         let k_smul = k_from_num_constraints(num_constraints);
         Self::new_with_k_common(num_constraints, k_smul)
@@ -798,39 +915,43 @@ impl FusedShiftG1ScalarMulParams {
 }
 
 #[derive(Allocative)]
-pub struct FusedShiftG1ScalarMulProver {
-    params: FusedShiftG1ScalarMulParams,
+pub struct FusedShiftG2ScalarMulProver {
+    params: FusedShiftG2ScalarMulParams,
     // full-domain weight polynomials over (step,c)
     eq_step_poly: MultilinearPolynomial<Fq>,
     eq_minus_one_step_poly: MultilinearPolynomial<Fq>,
     not_last_poly: MultilinearPolynomial<Fq>,
     eq_c_poly: MultilinearPolynomial<Fq>,
     // fused witness polys (step,c)
-    x_a: MultilinearPolynomial<Fq>,
-    x_a_next: MultilinearPolynomial<Fq>,
-    y_a: MultilinearPolynomial<Fq>,
-    y_a_next: MultilinearPolynomial<Fq>,
+    x_a_c0: MultilinearPolynomial<Fq>,
+    x_a_c1: MultilinearPolynomial<Fq>,
+    y_a_c0: MultilinearPolynomial<Fq>,
+    y_a_c1: MultilinearPolynomial<Fq>,
+    x_a_next_c0: MultilinearPolynomial<Fq>,
+    x_a_next_c1: MultilinearPolynomial<Fq>,
+    y_a_next_c0: MultilinearPolynomial<Fq>,
+    y_a_next_c1: MultilinearPolynomial<Fq>,
     gamma: Fq,
 }
 
-impl FusedShiftG1ScalarMulProver {
-    pub fn new<T: Transcript>(rows: &[G1ScalarMulNative], transcript: &mut T) -> Self {
-        let params = FusedShiftG1ScalarMulParams::new(rows.len());
+impl FusedShiftG2ScalarMulProver {
+    pub fn new<T: Transcript>(rows: &[G2ScalarMulNative], transcript: &mut T) -> Self {
+        let params = FusedShiftG2ScalarMulParams::new(rows.len());
         Self::new_with_params(rows, params, transcript)
     }
 
     pub fn new_with_k_common<T: Transcript>(
-        rows: &[G1ScalarMulNative],
+        rows: &[G2ScalarMulNative],
         k_common: usize,
         transcript: &mut T,
     ) -> Self {
-        let params = FusedShiftG1ScalarMulParams::new_with_k_common(rows.len(), k_common);
+        let params = FusedShiftG2ScalarMulParams::new_with_k_common(rows.len(), k_common);
         Self::new_with_params(rows, params, transcript)
     }
 
     fn new_with_params<T: Transcript>(
-        rows: &[G1ScalarMulNative],
-        params: FusedShiftG1ScalarMulParams,
+        rows: &[G2ScalarMulNative],
+        params: FusedShiftG2ScalarMulParams,
         transcript: &mut T,
     ) -> Self {
         let k_common = params.k_common;
@@ -847,7 +968,7 @@ impl FusedShiftG1ScalarMulProver {
             .collect();
         let gamma: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
 
-        // Build 8-var step weights.
+        // Build 8-var step weights (LSB-first domain).
         let eq_step_8 = crate::zkvm::recursion::gt::shift::eq_lsb_evals::<Fq>(&step_ref);
         let eq_minus_one_8 =
             crate::zkvm::recursion::gt::shift::eq_plus_one_lsb_evals::<Fq>(&step_ref);
@@ -883,7 +1004,7 @@ impl FusedShiftG1ScalarMulProver {
         let eq_c_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(eq_c_sc));
 
         let dummy = params.dummy_bits();
-        let build_term = |get: fn(&G1ScalarMulNative) -> &Vec<Fq>| -> MultilinearPolynomial<Fq> {
+        let build_term = |get: fn(&G2ScalarMulNative) -> &Vec<Fq>| -> MultilinearPolynomial<Fq> {
             let mut v = vec![Fq::zero(); total_len];
             for c_smul in 0..rows.len() {
                 let src = get(&rows[c_smul]);
@@ -897,10 +1018,14 @@ impl FusedShiftG1ScalarMulProver {
             MultilinearPolynomial::LargeScalars(DensePolynomial::new(v))
         };
 
-        let x_a = build_term(|r| &r.x_a);
-        let x_a_next = build_term(|r| &r.x_a_next);
-        let y_a = build_term(|r| &r.y_a);
-        let y_a_next = build_term(|r| &r.y_a_next);
+        let x_a_c0 = build_term(|r| &r.x_a_c0);
+        let x_a_c1 = build_term(|r| &r.x_a_c1);
+        let y_a_c0 = build_term(|r| &r.y_a_c0);
+        let y_a_c1 = build_term(|r| &r.y_a_c1);
+        let x_a_next_c0 = build_term(|r| &r.x_a_next_c0);
+        let x_a_next_c1 = build_term(|r| &r.x_a_next_c1);
+        let y_a_next_c0 = build_term(|r| &r.y_a_next_c0);
+        let y_a_next_c1 = build_term(|r| &r.y_a_next_c1);
 
         Self {
             params,
@@ -908,18 +1033,22 @@ impl FusedShiftG1ScalarMulProver {
             eq_minus_one_step_poly,
             not_last_poly,
             eq_c_poly,
-            x_a,
-            x_a_next,
-            y_a,
-            y_a_next,
+            x_a_c0,
+            x_a_c1,
+            y_a_c0,
+            y_a_c1,
+            x_a_next_c0,
+            x_a_next_c1,
+            y_a_next_c0,
+            y_a_next_c1,
             gamma,
         }
     }
 }
 
-impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedShiftG1ScalarMulProver {
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedShiftG2ScalarMulProver {
     fn degree(&self) -> usize {
-        // Eq(c)*Eq(step)*not_last*A_next - Eq(c)*EqMinusOne*A
+        // Eq(c)*Eq(step)*not_last*A_next - Eq(c)*EqMinusOne*A (batched across components)
         4
     }
 
@@ -933,11 +1062,14 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedShiftG1ScalarMulProve
 
     fn compute_message(&mut self, _round: usize, previous_claim: Fq) -> UniPoly<Fq> {
         const D: usize = 4;
-        let half = self.x_a.len() / 2;
+        let half = self.x_a_c0.len() / 2;
         if half == 0 {
             return UniPoly::from_evals_and_hint(previous_claim, &[Fq::zero(); D]);
         }
+
         let gamma = self.gamma;
+        let gamma2 = gamma * gamma;
+        let gamma3 = gamma2 * gamma;
 
         let evals = (0..half)
             .into_par_iter()
@@ -955,24 +1087,38 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedShiftG1ScalarMulProve
                     .eq_c_poly
                     .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
 
-                let xa = self
-                    .x_a
+                let xa0 = self
+                    .x_a_c0
                     .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
-                let xan = self
-                    .x_a_next
+                let xa1 = self
+                    .x_a_c1
                     .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
-                let ya = self
-                    .y_a
+                let ya0 = self
+                    .y_a_c0
                     .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
-                let yan = self
-                    .y_a_next
+                let ya1 = self
+                    .y_a_c1
+                    .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
+                let xan0 = self
+                    .x_a_next_c0
+                    .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
+                let xan1 = self
+                    .x_a_next_c1
+                    .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
+                let yan0 = self
+                    .y_a_next_c0
+                    .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
+                let yan1 = self
+                    .y_a_next_c1
                     .sumcheck_evals_array::<D>(i, BindingOrder::LowToHigh);
 
                 let mut out = [Fq::zero(); D];
                 for t in 0..D {
-                    let x_term = eqc[t] * (eqs[t] * not_last[t] * xan[t] - eqm1[t] * xa[t]);
-                    let y_term = eqc[t] * (eqs[t] * not_last[t] * yan[t] - eqm1[t] * ya[t]);
-                    out[t] = x_term + gamma * y_term;
+                    let rel_x0 = eqc[t] * (eqs[t] * not_last[t] * xan0[t] - eqm1[t] * xa0[t]);
+                    let rel_x1 = eqc[t] * (eqs[t] * not_last[t] * xan1[t] - eqm1[t] * xa1[t]);
+                    let rel_y0 = eqc[t] * (eqs[t] * not_last[t] * yan0[t] - eqm1[t] * ya0[t]);
+                    let rel_y1 = eqc[t] * (eqs[t] * not_last[t] * yan1[t] - eqm1[t] * ya1[t]);
+                    out[t] = rel_x0 + gamma * rel_x1 + gamma2 * rel_y0 + gamma3 * rel_y1;
                 }
                 out
             })
@@ -995,10 +1141,14 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedShiftG1ScalarMulProve
             &mut self.eq_minus_one_step_poly,
             &mut self.not_last_poly,
             &mut self.eq_c_poly,
-            &mut self.x_a,
-            &mut self.x_a_next,
-            &mut self.y_a,
-            &mut self.y_a_next,
+            &mut self.x_a_c0,
+            &mut self.x_a_c1,
+            &mut self.y_a_c0,
+            &mut self.y_a_c1,
+            &mut self.x_a_next_c0,
+            &mut self.x_a_next_c1,
+            &mut self.y_a_next_c0,
+            &mut self.y_a_next_c1,
         ] {
             p.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
@@ -1010,21 +1160,21 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedShiftG1ScalarMulProve
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        // No-op: reuse openings cached by `FusedG1ScalarMul*` (same polynomials, same point).
+        // No-op: reuse openings cached by `FusedG2ScalarMul*` (same polynomials, same point).
     }
 }
 
 #[derive(Allocative)]
-pub struct FusedShiftG1ScalarMulVerifier {
-    params: FusedShiftG1ScalarMulParams,
+pub struct FusedShiftG2ScalarMulVerifier {
+    params: FusedShiftG2ScalarMulParams,
     step_ref: Vec<<Fq as JoltField>::Challenge>,
     c_ref: Vec<<Fq as JoltField>::Challenge>,
     gamma: Fq,
 }
 
-impl FusedShiftG1ScalarMulVerifier {
+impl FusedShiftG2ScalarMulVerifier {
     pub fn new<T: Transcript>(num_constraints: usize, transcript: &mut T) -> Self {
-        let params = FusedShiftG1ScalarMulParams::new(num_constraints);
+        let params = FusedShiftG2ScalarMulParams::new(num_constraints);
         Self::new_with_params(params, transcript)
     }
 
@@ -1033,12 +1183,12 @@ impl FusedShiftG1ScalarMulVerifier {
         k_common: usize,
         transcript: &mut T,
     ) -> Self {
-        let params = FusedShiftG1ScalarMulParams::new_with_k_common(num_constraints, k_common);
+        let params = FusedShiftG2ScalarMulParams::new_with_k_common(num_constraints, k_common);
         Self::new_with_params(params, transcript)
     }
 
     fn new_with_params<T: Transcript>(
-        params: FusedShiftG1ScalarMulParams,
+        params: FusedShiftG2ScalarMulParams,
         transcript: &mut T,
     ) -> Self {
         let step_ref: Vec<<Fq as JoltField>::Challenge> = (0..STEP_VARS)
@@ -1057,7 +1207,7 @@ impl FusedShiftG1ScalarMulVerifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedShiftG1ScalarMulVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedShiftG2ScalarMulVerifier {
     fn degree(&self) -> usize {
         4
     }
@@ -1092,26 +1242,48 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedShiftG1ScalarMulVer
 
         let eqc = crate::zkvm::recursion::gt::shift::eq_lsb_mle::<Fq>(&self.c_ref, y_c);
 
-        let (_, xa) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_xa_fused(),
-            SumcheckId::G1ScalarMul,
+        let (_, xa0) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_xa_c0_fused(),
+            SumcheckId::G2ScalarMul,
         );
-        let (_, xan) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
-            SumcheckId::G1ScalarMul,
+        let (_, xa1) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_xa_c1_fused(),
+            SumcheckId::G2ScalarMul,
         );
-        let (_, ya) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_ya_fused(),
-            SumcheckId::G1ScalarMul,
+        let (_, ya0) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_ya_c0_fused(),
+            SumcheckId::G2ScalarMul,
         );
-        let (_, yan) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_ya_next_fused(),
-            SumcheckId::G1ScalarMul,
+        let (_, ya1) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_ya_c1_fused(),
+            SumcheckId::G2ScalarMul,
+        );
+        let (_, xan0) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_xa_next_c0_fused(),
+            SumcheckId::G2ScalarMul,
+        );
+        let (_, xan1) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_xa_next_c1_fused(),
+            SumcheckId::G2ScalarMul,
+        );
+        let (_, yan0) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_ya_next_c0_fused(),
+            SumcheckId::G2ScalarMul,
+        );
+        let (_, yan1) = accumulator.get_virtual_polynomial_opening(
+            VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused(),
+            SumcheckId::G2ScalarMul,
         );
 
-        let x_term = eqc * (eq * not_last * xan - eqm1 * xa);
-        let y_term = eqc * (eq * not_last * yan - eqm1 * ya);
-        x_term + self.gamma * y_term
+        let gamma = self.gamma;
+        let gamma2 = gamma * gamma;
+        let gamma3 = gamma2 * gamma;
+
+        let rel_x0 = eqc * (eq * not_last * xan0 - eqm1 * xa0);
+        let rel_x1 = eqc * (eq * not_last * xan1 - eqm1 * xa1);
+        let rel_y0 = eqc * (eq * not_last * yan0 - eqm1 * ya0);
+        let rel_y1 = eqc * (eq * not_last * yan1 - eqm1 * ya1);
+        rel_x0 + gamma * rel_x1 + gamma2 * rel_y0 + gamma3 * rel_y1
     }
 
     fn cache_openings(
@@ -1120,70 +1292,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedShiftG1ScalarMulVer
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        // No-op: reuse openings cached by `FusedG1ScalarMul*` (same polynomials, same point).
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transcripts::Blake2bTranscript;
-
-    #[test]
-    fn fused_g1_scalar_mul_params_has_expected_rounds() {
-        let p = FusedG1ScalarMulParams::new(3);
-        assert_eq!(p.num_step_vars, 8);
-        assert_eq!(p.k_smul, 2); // padded to 4
-        assert_eq!(p.k_common, 2);
-        assert_eq!(p.num_rounds(), 10);
-    }
-
-    #[test]
-    fn fused_shift_params_has_expected_rounds() {
-        let p = FusedShiftG1ScalarMulParams::new(3);
-        assert_eq!(p.num_rounds(), 10);
-    }
-
-    #[test]
-    fn fused_g1_scalar_mul_builds_tables_with_step_low_c_high_layout() {
-        let rs = row_size();
-        let rows = vec![
-            G1ScalarMulNative {
-                base_point: (Fq::from_u64(5), Fq::from_u64(7)),
-                x_a: vec![Fq::from_u64(1); rs],
-                y_a: vec![Fq::from_u64(2); rs],
-                x_t: vec![Fq::from_u64(3); rs],
-                y_t: vec![Fq::from_u64(4); rs],
-                x_a_next: vec![Fq::from_u64(6); rs],
-                y_a_next: vec![Fq::from_u64(8); rs],
-                t_indicator: vec![Fq::zero(); rs],
-                a_indicator: vec![Fq::zero(); rs],
-            },
-            G1ScalarMulNative {
-                base_point: (Fq::from_u64(9), Fq::from_u64(11)),
-                x_a: vec![Fq::from_u64(10); rs],
-                y_a: vec![Fq::from_u64(20); rs],
-                x_t: vec![Fq::from_u64(30); rs],
-                y_t: vec![Fq::from_u64(40); rs],
-                x_a_next: vec![Fq::from_u64(60); rs],
-                y_a_next: vec![Fq::from_u64(80); rs],
-                t_indicator: vec![Fq::zero(); rs],
-                a_indicator: vec![Fq::zero(); rs],
-            },
-        ];
-        let public_inputs = vec![
-            G1ScalarMulPublicInputs::new(ark_bn254::Fr::from(0u64)),
-            G1ScalarMulPublicInputs::new(ark_bn254::Fr::from(1u64)),
-        ];
-        let mut transcript = Blake2bTranscript::new(b"test_fused_g1_scalar_mul_layout");
-        let prover = FusedG1ScalarMulProver::new(&rows, &public_inputs, &mut transcript);
-        let MultilinearPolynomial::LargeScalars(xa) = &prover.x_a else {
-            panic!("expected LargeScalars");
-        };
-        // total_len = padded(2)->2 * 256
-        assert_eq!(xa.Z.len(), 2 * rs);
-        // c=0 block then c=1 block
-        assert_eq!(xa.Z[0], Fq::from_u64(1));
-        assert_eq!(xa.Z[rs], Fq::from_u64(10));
+        // No-op: reuse openings cached by `FusedG2ScalarMul*` (same polynomials, same point).
     }
 }

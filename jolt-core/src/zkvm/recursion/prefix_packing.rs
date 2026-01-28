@@ -43,6 +43,17 @@ pub struct PrefixPackedEntry {
     /// In fully fused G1 mode we pack G1 add rows as fused blocks over a family-local `c_add`
     /// domain. Such entries are keyed only by `poly_type`, and `constraint_idx` is ignored.
     pub is_g1_add_fused: bool,
+    /// If true, this entry is a fused G2-scalar-mul row (not tied to a single `constraint_idx`).
+    ///
+    /// In end-to-end G2-scalar-mul-fused mode we pack G2 scalar-mul rows as fused blocks over a
+    /// family-local `c` domain. Such entries are keyed only by `poly_type`, and `constraint_idx`
+    /// is ignored.
+    pub is_g2_scalar_mul_fused: bool,
+    /// If true, this entry is a fused G2-add row (not tied to a single `constraint_idx`).
+    ///
+    /// In fully fused G2 mode we pack G2 add rows as fused blocks over a family-local `c_add`
+    /// domain. Such entries are keyed only by `poly_type`, and `constraint_idx` is ignored.
+    pub is_g2_add_fused: bool,
     /// Native variable count `m` (native size = 2^m)
     pub num_vars: usize,
     /// Starting offset in the packed evaluation table (must be aligned to `2^num_vars`)
@@ -113,6 +124,8 @@ impl PrefixPackingLayout {
                 is_gt_fused: false,
                 is_g1_scalar_mul_fused: false,
                 is_g1_add_fused: false,
+                is_g2_scalar_mul_fused: false,
+                is_g2_add_fused: false,
                 num_vars,
                 offset,
             });
@@ -133,7 +146,7 @@ impl PrefixPackingLayout {
     /// This is used by the **end-to-end GT fusion** path. It intentionally breaks the legacy
     /// proof format by changing the committed witness packing layout.
     pub fn from_constraint_types_gt_fused(constraint_types: &[ConstraintType]) -> Self {
-        Self::from_constraint_types_fused(constraint_types, true, false, false)
+        Self::from_constraint_types_fused(constraint_types, true, false, false, false, false)
     }
 
     /// Build a packing layout that can replace per-instance rows with fused-family rows.
@@ -147,12 +160,16 @@ impl PrefixPackingLayout {
         enable_gt_fused_end_to_end: bool,
         enable_g1_scalar_mul_fused_end_to_end: bool,
         enable_g1_add_fused_end_to_end: bool,
+        enable_g2_scalar_mul_fused_end_to_end: bool,
+        enable_g2_add_fused_end_to_end: bool,
     ) -> Self {
         use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
 
         if !enable_gt_fused_end_to_end
             && !enable_g1_scalar_mul_fused_end_to_end
             && !enable_g1_add_fused_end_to_end
+            && !enable_g2_scalar_mul_fused_end_to_end
+            && !enable_g2_add_fused_end_to_end
         {
             return Self::from_constraint_types(constraint_types);
         }
@@ -166,19 +183,55 @@ impl PrefixPackingLayout {
         let has_g1_add = constraint_types
             .iter()
             .any(|ct| matches!(ct, ConstraintType::G1Add));
+        let has_g2_smul = constraint_types
+            .iter()
+            .any(|ct| matches!(ct, ConstraintType::G2ScalarMul { .. }));
+        let has_g2_add = constraint_types
+            .iter()
+            .any(|ct| matches!(ct, ConstraintType::G2Add));
 
-        if enable_gt_fused_end_to_end && !has_gt && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
-            && !(enable_g1_add_fused_end_to_end && has_g1_add)
-        {
-            return Self::from_constraint_types(constraint_types);
-        }
-        if enable_g1_scalar_mul_fused_end_to_end && !has_g1_smul && !(enable_gt_fused_end_to_end && has_gt)
-            && !(enable_g1_add_fused_end_to_end && has_g1_add)
-        {
-            return Self::from_constraint_types(constraint_types);
-        }
-        if enable_g1_add_fused_end_to_end && !has_g1_add && !(enable_gt_fused_end_to_end && has_gt)
+        if enable_gt_fused_end_to_end
+            && !has_gt
             && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
+            && !(enable_g1_add_fused_end_to_end && has_g1_add)
+            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
+            && !(enable_g2_add_fused_end_to_end && has_g2_add)
+        {
+            return Self::from_constraint_types(constraint_types);
+        }
+        if enable_g1_scalar_mul_fused_end_to_end
+            && !has_g1_smul
+            && !(enable_gt_fused_end_to_end && has_gt)
+            && !(enable_g1_add_fused_end_to_end && has_g1_add)
+            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
+            && !(enable_g2_add_fused_end_to_end && has_g2_add)
+        {
+            return Self::from_constraint_types(constraint_types);
+        }
+        if enable_g1_add_fused_end_to_end
+            && !has_g1_add
+            && !(enable_gt_fused_end_to_end && has_gt)
+            && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
+            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
+            && !(enable_g2_add_fused_end_to_end && has_g2_add)
+        {
+            return Self::from_constraint_types(constraint_types);
+        }
+        if enable_g2_scalar_mul_fused_end_to_end
+            && !has_g2_smul
+            && !(enable_gt_fused_end_to_end && has_gt)
+            && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
+            && !(enable_g1_add_fused_end_to_end && has_g1_add)
+            && !(enable_g2_add_fused_end_to_end && has_g2_add)
+        {
+            return Self::from_constraint_types(constraint_types);
+        }
+        if enable_g2_add_fused_end_to_end
+            && !has_g2_add
+            && !(enable_gt_fused_end_to_end && has_gt)
+            && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
+            && !(enable_g1_add_fused_end_to_end && has_g1_add)
+            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
         {
             return Self::from_constraint_types(constraint_types);
         }
@@ -199,14 +252,36 @@ impl PrefixPackingLayout {
         };
         // Option B: commit fused G1 add rows at family-local padded size (c-only).
         let num_vars_g1_add = {
-            let num_g1 = constraint_types.iter().filter(|ct| matches!(ct, ConstraintType::G1Add)).count();
+            let num_g1 = constraint_types
+                .iter()
+                .filter(|ct| matches!(ct, ConstraintType::G1Add))
+                .count();
             let padded = num_g1.max(1).next_power_of_two();
+            padded.trailing_zeros() as usize
+        };
+        // Option B: commit fused G2 scalar-mul rows at family-local padded size.
+        let num_vars_g2_smul = {
+            let num_g2 = constraint_types
+                .iter()
+                .filter(|ct| matches!(ct, ConstraintType::G2ScalarMul { .. }))
+                .count();
+            let padded = num_g2.max(1).next_power_of_two();
+            let k = padded.trailing_zeros() as usize;
+            8usize + k
+        };
+        // Option B: commit fused G2 add rows at family-local padded size (c-only).
+        let num_vars_g2_add = {
+            let num_g2 = constraint_types
+                .iter()
+                .filter(|ct| matches!(ct, ConstraintType::G2Add))
+                .count();
+            let padded = num_g2.max(1).next_power_of_two();
             padded.trailing_zeros() as usize
         };
 
         // Collect all committed polynomial "rows" with their native var counts.
         // In fused mode(s), we skip per-instance rows for those families and append fixed fused rows instead.
-        let mut polys: Vec<(usize, PolyType, bool, bool, bool, usize)> = Vec::new();
+        let mut polys: Vec<(usize, PolyType, bool, bool, bool, bool, bool, usize)> = Vec::new();
         for (constraint_idx, ct) in constraint_types.iter().enumerate() {
             if enable_gt_fused_end_to_end
                 && matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul)
@@ -221,8 +296,25 @@ impl PrefixPackingLayout {
             if enable_g1_add_fused_end_to_end && matches!(ct, ConstraintType::G1Add) {
                 continue;
             }
+            if enable_g2_scalar_mul_fused_end_to_end
+                && matches!(ct, ConstraintType::G2ScalarMul { .. })
+            {
+                continue;
+            }
+            if enable_g2_add_fused_end_to_end && matches!(ct, ConstraintType::G2Add) {
+                continue;
+            }
             for &(poly_type, num_vars) in ct.committed_poly_specs() {
-                polys.push((constraint_idx, poly_type, false, false, false, num_vars));
+                polys.push((
+                    constraint_idx,
+                    poly_type,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    num_vars,
+                ));
             }
         }
 
@@ -232,7 +324,16 @@ impl PrefixPackingLayout {
             // IMPORTANT (no-padding GTMul): in end-to-end fusion, GTExp rows are 11-var (s,u) plus
             // k GT-local index vars, but GTMul rows are natively 4-var (u) plus the same k vars.
             for poly_type in [PolyType::RhoPrev, PolyType::Quotient] {
-                polys.push((0usize, poly_type, true, false, false, num_vars_gt_exp));
+                polys.push((
+                    0usize,
+                    poly_type,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    num_vars_gt_exp,
+                ));
             }
             for poly_type in [
                 PolyType::MulLhs,
@@ -240,7 +341,16 @@ impl PrefixPackingLayout {
                 PolyType::MulResult,
                 PolyType::MulQuotient,
             ] {
-                polys.push((0usize, poly_type, true, false, false, num_vars_gt_mul));
+                polys.push((
+                    0usize,
+                    poly_type,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    num_vars_gt_mul,
+                ));
             }
         }
 
@@ -258,7 +368,16 @@ impl PrefixPackingLayout {
                 PolyType::G1ScalarMulTIndicator,
                 PolyType::G1ScalarMulAIndicator,
             ] {
-                polys.push((0usize, poly_type, false, true, false, num_vars_g1_smul));
+                polys.push((
+                    0usize,
+                    poly_type,
+                    false,
+                    true,
+                    false,
+                    false,
+                    false,
+                    num_vars_g1_smul,
+                ));
             }
         }
 
@@ -279,7 +398,83 @@ impl PrefixPackingLayout {
                 PolyType::G1AddIsDouble,
                 PolyType::G1AddIsInverse,
             ] {
-                polys.push((0usize, poly_type, false, false, true, num_vars_g1_add));
+                polys.push((
+                    0usize,
+                    poly_type,
+                    false,
+                    false,
+                    true,
+                    false,
+                    false,
+                    num_vars_g1_add,
+                ));
+            }
+        }
+
+        if enable_g2_scalar_mul_fused_end_to_end && has_g2_smul {
+            for poly_type in [
+                PolyType::G2ScalarMulXAC0,
+                PolyType::G2ScalarMulXAC1,
+                PolyType::G2ScalarMulYAC0,
+                PolyType::G2ScalarMulYAC1,
+                PolyType::G2ScalarMulXTC0,
+                PolyType::G2ScalarMulXTC1,
+                PolyType::G2ScalarMulYTC0,
+                PolyType::G2ScalarMulYTC1,
+                PolyType::G2ScalarMulXANextC0,
+                PolyType::G2ScalarMulXANextC1,
+                PolyType::G2ScalarMulYANextC0,
+                PolyType::G2ScalarMulYANextC1,
+                PolyType::G2ScalarMulTIndicator,
+                PolyType::G2ScalarMulAIndicator,
+            ] {
+                polys.push((
+                    0usize,
+                    poly_type,
+                    false,
+                    false,
+                    false,
+                    true,
+                    false,
+                    num_vars_g2_smul,
+                ));
+            }
+        }
+
+        if enable_g2_add_fused_end_to_end && has_g2_add {
+            for poly_type in [
+                PolyType::G2AddXPC0,
+                PolyType::G2AddXPC1,
+                PolyType::G2AddYPC0,
+                PolyType::G2AddYPC1,
+                PolyType::G2AddPIndicator,
+                PolyType::G2AddXQC0,
+                PolyType::G2AddXQC1,
+                PolyType::G2AddYQC0,
+                PolyType::G2AddYQC1,
+                PolyType::G2AddQIndicator,
+                PolyType::G2AddXRC0,
+                PolyType::G2AddXRC1,
+                PolyType::G2AddYRC0,
+                PolyType::G2AddYRC1,
+                PolyType::G2AddRIndicator,
+                PolyType::G2AddLambdaC0,
+                PolyType::G2AddLambdaC1,
+                PolyType::G2AddInvDeltaXC0,
+                PolyType::G2AddInvDeltaXC1,
+                PolyType::G2AddIsDouble,
+                PolyType::G2AddIsInverse,
+            ] {
+                polys.push((
+                    0usize,
+                    poly_type,
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                    num_vars_g2_add,
+                ));
             }
         }
 
@@ -292,6 +487,8 @@ impl PrefixPackingLayout {
                 is_gt_fused,
                 is_g1_scalar_mul_fused,
                 is_g1_add_fused,
+                is_g2_scalar_mul_fused,
+                is_g2_add_fused,
                 num_vars,
             )| {
                 (
@@ -300,6 +497,8 @@ impl PrefixPackingLayout {
                     *is_gt_fused as usize,
                     *is_g1_scalar_mul_fused as usize,
                     *is_g1_add_fused as usize,
+                    *is_g2_scalar_mul_fused as usize,
+                    *is_g2_add_fused as usize,
                     *constraint_idx,
                 )
             },
@@ -308,7 +507,17 @@ impl PrefixPackingLayout {
         // Assign aligned offsets by cumulative sum (alignment holds for power-of-two sizes).
         let mut entries: Vec<PrefixPackedEntry> = Vec::with_capacity(polys.len());
         let mut offset: usize = 0;
-        for (constraint_idx, poly_type, is_gt_fused, is_g1_scalar_mul_fused, is_g1_add_fused, num_vars) in polys {
+        for (
+            constraint_idx,
+            poly_type,
+            is_gt_fused,
+            is_g1_scalar_mul_fused,
+            is_g1_add_fused,
+            is_g2_scalar_mul_fused,
+            is_g2_add_fused,
+            num_vars,
+        ) in polys
+        {
             let native_size = 1usize << num_vars;
             debug_assert_eq!(
                 offset % native_size,
@@ -321,6 +530,8 @@ impl PrefixPackingLayout {
                 is_gt_fused,
                 is_g1_scalar_mul_fused,
                 is_g1_add_fused,
+                is_g2_scalar_mul_fused,
+                is_g2_add_fused,
                 num_vars,
                 offset,
             });

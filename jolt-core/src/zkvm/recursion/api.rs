@@ -56,6 +56,16 @@ pub struct RecursionArtifact<FS: Transcript> {
     /// This must be carried explicitly because in-guest verification does not have a reliable
     /// environment-variable channel.
     pub enable_g1_fused_wiring_end_to_end: bool,
+    /// Whether this recursion artifact uses the fused-G2-scalar-mul end-to-end recursion protocol.
+    ///
+    /// This must be carried explicitly because in-guest verification does not have a reliable
+    /// environment-variable channel.
+    pub enable_g2_scalar_mul_fused_end_to_end: bool,
+    /// Whether this recursion artifact uses the **fully fused G2 wiring** end-to-end recursion protocol.
+    ///
+    /// This must be carried explicitly because in-guest verification does not have a reliable
+    /// environment-variable channel.
+    pub enable_g2_fused_wiring_end_to_end: bool,
     /// Hint for Stage 8 combine_commitments offloading (the combined GT element).
     ///
     /// This is **required** by the verifier: if absent, verification rejects.
@@ -73,8 +83,10 @@ impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
         self.enable_gt_fused_end_to_end.guest_serialize(w)?;
         self.enable_g1_scalar_mul_fused_end_to_end
             .guest_serialize(w)?;
-        self.enable_g1_fused_wiring_end_to_end
+        self.enable_g1_fused_wiring_end_to_end.guest_serialize(w)?;
+        self.enable_g2_scalar_mul_fused_end_to_end
             .guest_serialize(w)?;
+        self.enable_g2_fused_wiring_end_to_end.guest_serialize(w)?;
         self.stage8_combine_hint.guest_serialize(w)?;
         self.pairing_boundary.guest_serialize(w)?;
         self.non_input_base_hints.guest_serialize(w)?;
@@ -89,6 +101,8 @@ impl<FS: Transcript> GuestDeserialize for RecursionArtifact<FS> {
             enable_gt_fused_end_to_end: bool::guest_deserialize(r)?,
             enable_g1_scalar_mul_fused_end_to_end: bool::guest_deserialize(r)?,
             enable_g1_fused_wiring_end_to_end: bool::guest_deserialize(r)?,
+            enable_g2_scalar_mul_fused_end_to_end: bool::guest_deserialize(r)?,
+            enable_g2_fused_wiring_end_to_end: bool::guest_deserialize(r)?,
             stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
             pairing_boundary: PairingBoundary::guest_deserialize(r)?,
             non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
@@ -143,6 +157,18 @@ pub fn prove_recursion<FS: Transcript>(
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false)
             || enable_g1_fused_wiring_end_to_end;
+
+    let enable_g2_fused_wiring_end_to_end =
+        std::env::var("JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+    let enable_g2_scalar_mul_fused_end_to_end =
+        std::env::var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false)
+            || enable_g2_fused_wiring_end_to_end;
 
     // Ensure Dory globals match the proof layout before any Stage 8 replay / witness generation.
     let _dory_globals_guard = if v.proof.program_mode == ProgramMode::Committed {
@@ -270,6 +296,8 @@ pub fn prove_recursion<FS: Transcript>(
         enable_gt_fused_end_to_end,
         enable_g1_scalar_mul_fused_end_to_end,
         enable_g1_fused_wiring_end_to_end,
+        enable_g2_scalar_mul_fused_end_to_end,
+        enable_g2_fused_wiring_end_to_end,
         stage8_combine_hint,
         pairing_boundary,
         non_input_base_hints,
@@ -458,8 +486,10 @@ pub fn verify_recursion<FS: Transcript>(
     verifier_input.enable_gt_fused_end_to_end = recursion.enable_gt_fused_end_to_end;
     verifier_input.enable_g1_scalar_mul_fused_end_to_end =
         recursion.enable_g1_scalar_mul_fused_end_to_end;
-    verifier_input.enable_g1_fused_wiring_end_to_end =
-        recursion.enable_g1_fused_wiring_end_to_end;
+    verifier_input.enable_g1_fused_wiring_end_to_end = recursion.enable_g1_fused_wiring_end_to_end;
+    verifier_input.enable_g2_scalar_mul_fused_end_to_end =
+        recursion.enable_g2_scalar_mul_fused_end_to_end;
+    verifier_input.enable_g2_fused_wiring_end_to_end = recursion.enable_g2_fused_wiring_end_to_end;
     let recursion_verifier = RecursionVerifier::<Fq>::new(verifier_input);
     start_cycle_tracking("verify_recursion_snark_verify_total");
     let ok = recursion_verifier

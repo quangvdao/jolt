@@ -11,6 +11,83 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info};
 
+mod bundle_sizes {
+    use super::*;
+    use ark_serialize::Compress;
+
+    fn sz<T: CanonicalSerialize>(v: &T, compress: Compress) -> usize {
+        v.serialized_size(compress)
+    }
+
+    fn log_size(label: &str, bytes: usize) {
+        info!("{label}: {bytes} bytes");
+    }
+
+    fn log_sizes<T: CanonicalSerialize>(label: &str, v: &T) -> (usize, usize) {
+        let c = sz(v, Compress::Yes);
+        let u = sz(v, Compress::No);
+        info!("{label}: {c} bytes (compressed), {u} bytes (uncompressed)");
+        (c, u)
+    }
+
+    pub fn log_jolt_proof_breakdown(proof: &RV64IMACProof) {
+        info!("--- base JoltProof size breakdown (ark_serialize canonical) ---");
+        log_sizes("opening_claims", &proof.opening_claims);
+        log_sizes("commitments", &proof.commitments);
+        log_sizes(
+            "stage1_uni_skip_first_round_proof",
+            &proof.stage1_uni_skip_first_round_proof,
+        );
+        log_sizes("stage1_sumcheck_proof", &proof.stage1_sumcheck_proof);
+        log_sizes(
+            "stage2_uni_skip_first_round_proof",
+            &proof.stage2_uni_skip_first_round_proof,
+        );
+        log_sizes("stage2_sumcheck_proof", &proof.stage2_sumcheck_proof);
+        log_sizes("stage3_sumcheck_proof", &proof.stage3_sumcheck_proof);
+        log_sizes("stage4_sumcheck_proof", &proof.stage4_sumcheck_proof);
+        log_sizes("stage5_sumcheck_proof", &proof.stage5_sumcheck_proof);
+        log_sizes("stage6a_sumcheck_proof", &proof.stage6a_sumcheck_proof);
+        log_sizes("stage6b_sumcheck_proof", &proof.stage6b_sumcheck_proof);
+        log_sizes("stage7_sumcheck_proof", &proof.stage7_sumcheck_proof);
+        log_sizes("joint_opening_proof", &proof.joint_opening_proof);
+        log_sizes(
+            "untrusted_advice_commitment",
+            &proof.untrusted_advice_commitment,
+        );
+        log_size("trace_length", sz(&proof.trace_length, Compress::Yes));
+        log_size("ram_K", sz(&proof.ram_K, Compress::Yes));
+        log_size("bytecode_K", sz(&proof.bytecode_K, Compress::Yes));
+        log_size("program_mode", sz(&proof.program_mode, Compress::Yes));
+        log_size("rw_config", sz(&proof.rw_config, Compress::Yes));
+        log_size("one_hot_config", sz(&proof.one_hot_config, Compress::Yes));
+        log_size("dory_layout", sz(&proof.dory_layout, Compress::Yes));
+        log_size("TOTAL (compressed)", sz(proof, Compress::Yes));
+        log_size("TOTAL (uncompressed)", sz(proof, Compress::No));
+    }
+
+    pub fn log_recursion_artifact_breakdown(artifact: &RecursionArtifact<jolt_sdk::FS>) {
+        info!("--- RecursionArtifact size breakdown (ark_serialize canonical) ---");
+        log_sizes("stage8_combine_hint", &artifact.stage8_combine_hint);
+        log_sizes("pairing_boundary", &artifact.pairing_boundary);
+        log_sizes("non_input_base_hints", &artifact.non_input_base_hints);
+
+        info!("--- recursion SNARK proof (inner) ---");
+        log_sizes("proof.stage1_proof", &artifact.proof.stage1_proof);
+        log_sizes("proof.stage2_proof", &artifact.proof.stage2_proof);
+        log_sizes(
+            "proof.stage3_packed_eval",
+            &artifact.proof.stage3_packed_eval,
+        );
+        log_sizes("proof.opening_proof", &artifact.proof.opening_proof);
+        log_sizes("proof.opening_claims", &artifact.proof.opening_claims);
+        log_sizes("proof.dense_commitment", &artifact.proof.dense_commitment);
+
+        log_size("TOTAL (compressed)", sz(artifact, Compress::Yes));
+        log_size("TOTAL (uncompressed)", sz(artifact, Compress::No));
+    }
+}
+
 /// CLI-friendly layout enum that maps to DoryLayout
 #[derive(Clone, Copy, Debug, Default, ValueEnum, PartialEq, Eq)]
 pub enum LayoutArg {
@@ -323,31 +400,68 @@ fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     //   [preprocessing][u32 n][(device)(proof)(recursion_artifact?)]^n
     let mut cursor = std::io::Cursor::new(all_groups_data);
 
+    let start = cursor.position();
     let verifier_preprocessing =
         jolt_sdk::JoltVerifierPreprocessing::<jolt_sdk::F, jolt_sdk::PCS>::deserialize_compressed(
             &mut cursor,
         )
         .unwrap();
+    let end = cursor.position();
     let verifier_bytes = verifier_preprocessing.serialize_to_bytes().unwrap();
     info!(
-        "✓ Verifier preprocessing deserialized successfully ({} bytes)",
-        verifier_bytes.len()
+        "✓ Verifier preprocessing deserialized successfully (transport {} bytes, canonical {} bytes)",
+        (end - start),
+        verifier_bytes.len(),
     );
 
+    let start = cursor.position();
     let n = u32::deserialize_compressed(&mut cursor).unwrap();
+    let end = cursor.position();
     info!("✓ Number of proofs deserialized: {n}");
+    info!("  (transport {} bytes for proof count)", (end - start));
 
     for i in 0..n {
+        let start = cursor.position();
         match JoltDevice::deserialize_compressed(&mut cursor) {
-            Ok(_) => info!("✓ Device {i} deserialized"),
+            Ok(device) => {
+                let end = cursor.position();
+                info!(
+                    "✓ Device {i} deserialized (transport {} bytes)",
+                    (end - start)
+                );
+                info!(
+                    "  Device {i} canonical size: {} bytes (compressed)",
+                    device.serialized_size(ark_serialize::Compress::Yes)
+                );
+            }
             Err(e) => error!("✗ Failed to deserialize device {i}: {e:?}"),
         }
+        let start = cursor.position();
         match RV64IMACProof::deserialize_compressed(&mut cursor) {
-            Ok(_) => info!("✓ Proof {i} deserialized"),
+            Ok(proof) => {
+                let end = cursor.position();
+                info!(
+                    "✓ Proof {i} deserialized (transport {} bytes)",
+                    (end - start)
+                );
+                bundle_sizes::log_jolt_proof_breakdown(&proof);
+            }
             Err(e) => error!("✗ Failed to deserialize proof {i}: {e:?}"),
         }
+        let start = cursor.position();
         match Option::<RecursionArtifact<jolt_sdk::FS>>::deserialize_compressed(&mut cursor) {
-            Ok(_) => info!("✓ Recursion artifact {i} deserialized"),
+            Ok(artifact_opt) => {
+                let end = cursor.position();
+                info!(
+                    "✓ Recursion artifact {i} deserialized (transport {} bytes)",
+                    (end - start)
+                );
+                if let Some(artifact) = artifact_opt {
+                    bundle_sizes::log_recursion_artifact_breakdown(&artifact);
+                } else {
+                    info!("  (no recursion artifact present)");
+                }
+            }
             Err(e) => error!("✗ Failed to deserialize recursion artifact {i}: {e:?}"),
         }
     }
@@ -428,10 +542,23 @@ fn collect_guest_proofs(
     // Default format:
     //   [preprocessing][u32 n][(device)(proof)(recursion_artifact?)]^n
     {
+        let start = cursor.position();
         guest_verifier_preprocessing
             .serialize_compressed(&mut cursor)
             .unwrap();
+        let end = cursor.position();
+        info!(
+            "Bundle header: preprocessing transport size: {} bytes",
+            (end - start)
+        );
+
+        let start = cursor.position();
         u32::serialize_compressed(&n, &mut cursor).unwrap();
+        let end = cursor.position();
+        info!(
+            "Bundle header: proof-count transport size: {} bytes",
+            (end - start)
+        );
     }
 
     info!("Starting {} recursion with {}", guest.name(), n);
@@ -487,11 +614,37 @@ fn collect_guest_proofs(
             None
         };
 
+        info!("  Bundle size breakdown (this instance):");
+        info!(
+            "  io_device canonical size: {} bytes (compressed)",
+            io_device.serialized_size(ark_serialize::Compress::Yes)
+        );
+        bundle_sizes::log_jolt_proof_breakdown(&proof);
+        if let Some(ref artifact) = recursion_artifact {
+            bundle_sizes::log_recursion_artifact_breakdown(artifact);
+        } else {
+            info!("  (no recursion artifact present)");
+        }
+
+        let start = cursor.position();
         io_device.serialize_compressed(&mut cursor).unwrap();
+        let end = cursor.position();
+        info!("  io_device transport size: {} bytes", (end - start));
+
+        let start = cursor.position();
         proof.serialize_compressed(&mut cursor).unwrap();
+        let end = cursor.position();
+        info!("  proof transport size: {} bytes", (end - start));
+
+        let start = cursor.position();
         recursion_artifact
             .serialize_compressed(&mut cursor)
             .unwrap();
+        let end = cursor.position();
+        info!(
+            "  recursion_artifact transport size: {} bytes",
+            (end - start)
+        );
 
         info!("  Verifying...");
         if let Some(ref recursion_artifact) = recursion_artifact {

@@ -122,6 +122,18 @@ pub struct RecursionVerifierInput {
     /// - fused G1 wiring backend,
     /// and Stage 3 prefix packing uses fused G1Add rows (family-local `k_add`).
     pub enable_g1_fused_wiring_end_to_end: bool,
+    /// Whether to use the fused-G2-scalar-mul end-to-end recursion protocol.
+    ///
+    /// This affects Stage 2 instance selection and packing layout; it must match the
+    /// recursion artifact/proof being verified.
+    pub enable_g2_scalar_mul_fused_end_to_end: bool,
+    /// Whether to use the **fully fused G2 wiring** end-to-end recursion protocol.
+    ///
+    /// When enabled, Stage 2 uses:
+    /// - fused G2ScalarMul (aligned over `k_g2`),
+    /// - fused G2Add, and
+    /// - fused G2 wiring backend.
+    pub enable_g2_fused_wiring_end_to_end: bool,
     /// Number of variables in the constraint system
     pub num_vars: usize,
     /// Number of constraint variables (x variables) in the matrix
@@ -161,6 +173,10 @@ impl CanonicalSerialize for RecursionVerifierInput {
             .serialize_with_mode(&mut writer, compress)?;
         self.enable_g1_fused_wiring_end_to_end
             .serialize_with_mode(&mut writer, compress)?;
+        self.enable_g2_scalar_mul_fused_end_to_end
+            .serialize_with_mode(&mut writer, compress)?;
+        self.enable_g2_fused_wiring_end_to_end
+            .serialize_with_mode(&mut writer, compress)?;
         self.num_vars.serialize_with_mode(&mut writer, compress)?;
         self.num_constraint_vars
             .serialize_with_mode(&mut writer, compress)?;
@@ -191,6 +207,12 @@ impl CanonicalSerialize for RecursionVerifierInput {
                 .serialized_size(compress)
             + self
                 .enable_g1_fused_wiring_end_to_end
+                .serialized_size(compress)
+            + self
+                .enable_g2_scalar_mul_fused_end_to_end
+                .serialized_size(compress)
+            + self
+                .enable_g2_fused_wiring_end_to_end
                 .serialized_size(compress)
             + self.num_vars.serialized_size(compress)
             + self.num_constraint_vars.serialized_size(compress)
@@ -235,6 +257,16 @@ impl CanonicalDeserialize for RecursionVerifierInput {
                 compress,
                 validate,
             )?,
+            enable_g2_scalar_mul_fused_end_to_end: bool::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
+            enable_g2_fused_wiring_end_to_end: bool::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
             num_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_constraint_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_s_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
@@ -269,8 +301,10 @@ impl GuestSerialize for RecursionVerifierInput {
         self.enable_gt_fused_end_to_end.guest_serialize(w)?;
         self.enable_g1_scalar_mul_fused_end_to_end
             .guest_serialize(w)?;
-        self.enable_g1_fused_wiring_end_to_end
+        self.enable_g1_fused_wiring_end_to_end.guest_serialize(w)?;
+        self.enable_g2_scalar_mul_fused_end_to_end
             .guest_serialize(w)?;
+        self.enable_g2_fused_wiring_end_to_end.guest_serialize(w)?;
         self.num_vars.guest_serialize(w)?;
         self.num_constraint_vars.guest_serialize(w)?;
         self.num_s_vars.guest_serialize(w)?;
@@ -293,6 +327,8 @@ impl GuestDeserialize for RecursionVerifierInput {
             enable_gt_fused_end_to_end: bool::guest_deserialize(r)?,
             enable_g1_scalar_mul_fused_end_to_end: bool::guest_deserialize(r)?,
             enable_g1_fused_wiring_end_to_end: bool::guest_deserialize(r)?,
+            enable_g2_scalar_mul_fused_end_to_end: bool::guest_deserialize(r)?,
+            enable_g2_fused_wiring_end_to_end: bool::guest_deserialize(r)?,
             num_vars: usize::guest_deserialize(r)?,
             num_constraint_vars: usize::guest_deserialize(r)?,
             num_s_vars: usize::guest_deserialize(r)?,
@@ -497,9 +533,13 @@ impl RecursionVerifier<Fq> {
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
         let enable_gt_fused_end_to_end = self.input.enable_gt_fused_end_to_end;
         let enable_g1_fused_wiring_end_to_end = self.input.enable_g1_fused_wiring_end_to_end;
-        let enable_g1_scalar_mul_fused_end_to_end = self.input.enable_g1_scalar_mul_fused_end_to_end
-            || enable_g1_fused_wiring_end_to_end;
+        let enable_g1_scalar_mul_fused_end_to_end =
+            self.input.enable_g1_scalar_mul_fused_end_to_end || enable_g1_fused_wiring_end_to_end;
         let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
+        let enable_g2_fused_wiring_end_to_end = self.input.enable_g2_fused_wiring_end_to_end;
+        let enable_g2_scalar_mul_fused_end_to_end =
+            self.input.enable_g2_scalar_mul_fused_end_to_end || enable_g2_fused_wiring_end_to_end;
+        let enable_g2_add_fused_end_to_end = enable_g2_fused_wiring_end_to_end;
         let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
         let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
         let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
@@ -638,16 +678,6 @@ impl RecursionVerifier<Fq> {
                 } else {
                     crate::zkvm::recursion::g1::indexing::k_smul(&self.input.constraint_types)
                 };
-                if enable_shift_g1_scalar_mul {
-                    verifiers.push(Box::new(
-                        crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulVerifier::new_with_k_common(
-                            num_g1_scalar_mul,
-                            k_common,
-                            transcript,
-                        ),
-                    ));
-                }
-
                 debug_assert_eq!(
                     self.input.g1_scalar_mul_public_inputs.len(),
                     num_g1_scalar_mul,
@@ -662,6 +692,17 @@ impl RecursionVerifier<Fq> {
                         transcript,
                     ),
                 ));
+
+                // Fused shift check (no additional openings; reuses scalar-mul cached openings).
+                if enable_shift_g1_scalar_mul {
+                    verifiers.push(Box::new(
+                        crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulVerifier::new_with_k_common(
+                            num_g1_scalar_mul,
+                            k_common,
+                            transcript,
+                        ),
+                    ));
+                }
             } else {
                 // G1 scalar mul shift: link A and A_next (x/y)
                 if enable_shift_g1_scalar_mul {
@@ -702,50 +743,85 @@ impl RecursionVerifier<Fq> {
             }
         }
 
-        // G2 scalar mul shift: link A and A_next (x/y, c0/c1)
-        if enable_shift_g2_scalar_mul && num_g2_scalar_mul > 0 {
-            let mut pairs: Vec<(VirtualPolynomial, VirtualPolynomial)> =
-                Vec::with_capacity(num_g2_scalar_mul * 4);
-            for i in 0..num_g2_scalar_mul {
-                pairs.push((
-                    VirtualPolynomial::g2_scalar_mul_xa_c0(i),
-                    VirtualPolynomial::g2_scalar_mul_xa_next_c0(i),
-                ));
-                pairs.push((
-                    VirtualPolynomial::g2_scalar_mul_xa_c1(i),
-                    VirtualPolynomial::g2_scalar_mul_xa_next_c1(i),
-                ));
-                pairs.push((
-                    VirtualPolynomial::g2_scalar_mul_ya_c0(i),
-                    VirtualPolynomial::g2_scalar_mul_ya_next_c0(i),
-                ));
-                pairs.push((
-                    VirtualPolynomial::g2_scalar_mul_ya_c1(i),
-                    VirtualPolynomial::g2_scalar_mul_ya_next_c1(i),
-                ));
-            }
-            verifiers.push(Box::new(ShiftG2ScalarMulVerifier::<Fq>::new(
-                g2_shift_params(pairs.len()),
-                pairs,
-                transcript,
-            )));
-        }
-
         // G2 scalar mul
         if num_g2_scalar_mul > 0 {
-            let params = G2ScalarMulParams::new(num_g2_scalar_mul);
-            debug_assert_eq!(
-                self.input.g2_scalar_mul_public_inputs.len(),
-                num_g2_scalar_mul,
-                "RecursionVerifierInput.g2_scalar_mul_public_inputs must match number of G2ScalarMul constraints"
-            );
-            let spec = G2ScalarMulVerifierSpec::new(
-                params,
-                self.input.g2_scalar_mul_public_inputs.clone(),
-                g2_scalar_mul_base_points,
-            );
-            let verifier = G2ScalarMulVerifier::from_spec(spec, g2_scalar_mul_indices, transcript);
-            verifiers.push(Box::new(verifier));
+            if enable_g2_scalar_mul_fused_end_to_end {
+                let k_common = if enable_g2_fused_wiring_end_to_end {
+                    crate::zkvm::recursion::g2::indexing::k_g2(&self.input.constraint_types)
+                } else {
+                    crate::zkvm::recursion::g2::indexing::k_smul(&self.input.constraint_types)
+                };
+
+                debug_assert_eq!(
+                    self.input.g2_scalar_mul_public_inputs.len(),
+                    num_g2_scalar_mul,
+                    "RecursionVerifierInput.g2_scalar_mul_public_inputs must match number of G2ScalarMul constraints"
+                );
+                verifiers.push(Box::new(
+                    crate::zkvm::recursion::g2::fused_scalar_multiplication::FusedG2ScalarMulVerifier::new_with_k_common(
+                        num_g2_scalar_mul,
+                        k_common,
+                        self.input.g2_scalar_mul_public_inputs.clone(),
+                        g2_scalar_mul_base_points,
+                        transcript,
+                    ),
+                ));
+
+                // Fused shift check (no additional openings; reuses scalar-mul cached openings).
+                if enable_shift_g2_scalar_mul {
+                    verifiers.push(Box::new(
+                        crate::zkvm::recursion::g2::fused_scalar_multiplication::FusedShiftG2ScalarMulVerifier::new_with_k_common(
+                            num_g2_scalar_mul,
+                            k_common,
+                            transcript,
+                        ),
+                    ));
+                }
+            } else {
+                // G2 scalar mul shift: link A and A_next (x/y, c0/c1)
+                if enable_shift_g2_scalar_mul {
+                    let mut pairs: Vec<(VirtualPolynomial, VirtualPolynomial)> =
+                        Vec::with_capacity(num_g2_scalar_mul * 4);
+                    for i in 0..num_g2_scalar_mul {
+                        pairs.push((
+                            VirtualPolynomial::g2_scalar_mul_xa_c0(i),
+                            VirtualPolynomial::g2_scalar_mul_xa_next_c0(i),
+                        ));
+                        pairs.push((
+                            VirtualPolynomial::g2_scalar_mul_xa_c1(i),
+                            VirtualPolynomial::g2_scalar_mul_xa_next_c1(i),
+                        ));
+                        pairs.push((
+                            VirtualPolynomial::g2_scalar_mul_ya_c0(i),
+                            VirtualPolynomial::g2_scalar_mul_ya_next_c0(i),
+                        ));
+                        pairs.push((
+                            VirtualPolynomial::g2_scalar_mul_ya_c1(i),
+                            VirtualPolynomial::g2_scalar_mul_ya_next_c1(i),
+                        ));
+                    }
+                    verifiers.push(Box::new(ShiftG2ScalarMulVerifier::<Fq>::new(
+                        g2_shift_params(pairs.len()),
+                        pairs,
+                        transcript,
+                    )));
+                }
+
+                let params = G2ScalarMulParams::new(num_g2_scalar_mul);
+                debug_assert_eq!(
+                    self.input.g2_scalar_mul_public_inputs.len(),
+                    num_g2_scalar_mul,
+                    "RecursionVerifierInput.g2_scalar_mul_public_inputs must match number of G2ScalarMul constraints"
+                );
+                let spec = G2ScalarMulVerifierSpec::new(
+                    params,
+                    self.input.g2_scalar_mul_public_inputs.clone(),
+                    g2_scalar_mul_base_points,
+                );
+                let verifier =
+                    G2ScalarMulVerifier::from_spec(spec, g2_scalar_mul_indices, transcript);
+                verifiers.push(Box::new(verifier));
+            }
         }
 
         // G1 add
@@ -753,11 +829,9 @@ impl RecursionVerifier<Fq> {
             if enable_g1_add_fused_end_to_end {
                 let params =
                     crate::zkvm::recursion::g1::fused_addition::FusedG1AddParams::new(num_g1_add);
-                let verifier =
-                    crate::zkvm::recursion::g1::fused_addition::FusedG1AddVerifier::new(
-                        params,
-                        transcript,
-                    );
+                let verifier = crate::zkvm::recursion::g1::fused_addition::FusedG1AddVerifier::new(
+                    params, transcript,
+                );
                 verifiers.push(Box::new(verifier));
             } else {
                 let params = G1AddParams::new(num_g1_add);
@@ -769,10 +843,19 @@ impl RecursionVerifier<Fq> {
 
         // G2 add
         if num_g2_add > 0 {
-            let params = G2AddParams::new(num_g2_add);
-            let spec = G2AddVerifierSpec::new(params);
-            let verifier = G2AddVerifier::from_spec(spec, g2_add_indices, transcript);
-            verifiers.push(Box::new(verifier));
+            if enable_g2_add_fused_end_to_end {
+                let params =
+                    crate::zkvm::recursion::g2::fused_addition::FusedG2AddParams::new(num_g2_add);
+                let verifier = crate::zkvm::recursion::g2::fused_addition::FusedG2AddVerifier::new(
+                    params, transcript,
+                );
+                verifiers.push(Box::new(verifier));
+            } else {
+                let params = G2AddParams::new(num_g2_add);
+                let spec = G2AddVerifierSpec::new(params);
+                let verifier = G2AddVerifier::from_spec(spec, g2_add_indices, transcript);
+                verifiers.push(Box::new(verifier));
+            }
         }
 
         // Multi-Miller loop shift: link f/t and *_next columns (experimental)
@@ -853,7 +936,16 @@ impl RecursionVerifier<Fq> {
                 }
             }
             if enable_wiring_g2 && !self.input.wiring.g2.is_empty() {
-                verifiers.push(Box::new(WiringG2Verifier::new(&self.input, transcript)));
+                if enable_g2_fused_wiring_end_to_end {
+                    verifiers.push(Box::new(
+                        crate::zkvm::recursion::g2::fused_wiring::FusedWiringG2Verifier::new(
+                            &self.input,
+                            transcript,
+                        ),
+                    ));
+                } else {
+                    verifiers.push(Box::new(WiringG2Verifier::new(&self.input, transcript)));
+                }
             }
         }
 
@@ -881,18 +973,26 @@ impl RecursionVerifier<Fq> {
         // Derive the public packing layout.
         let enable_gt_fused_end_to_end = self.input.enable_gt_fused_end_to_end;
         let enable_g1_fused_wiring_end_to_end = self.input.enable_g1_fused_wiring_end_to_end;
-        let enable_g1_scalar_mul_fused_end_to_end = self.input.enable_g1_scalar_mul_fused_end_to_end
-            || enable_g1_fused_wiring_end_to_end;
+        let enable_g1_scalar_mul_fused_end_to_end =
+            self.input.enable_g1_scalar_mul_fused_end_to_end || enable_g1_fused_wiring_end_to_end;
         let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
+        let enable_g2_fused_wiring_end_to_end = self.input.enable_g2_fused_wiring_end_to_end;
+        let enable_g2_scalar_mul_fused_end_to_end =
+            self.input.enable_g2_scalar_mul_fused_end_to_end || enable_g2_fused_wiring_end_to_end;
+        let enable_g2_add_fused_end_to_end = enable_g2_fused_wiring_end_to_end;
         let layout = if enable_gt_fused_end_to_end
             || enable_g1_scalar_mul_fused_end_to_end
             || enable_g1_add_fused_end_to_end
+            || enable_g2_scalar_mul_fused_end_to_end
+            || enable_g2_add_fused_end_to_end
         {
             PrefixPackingLayout::from_constraint_types_fused(
                 &self.input.constraint_types,
                 enable_gt_fused_end_to_end,
                 enable_g1_scalar_mul_fused_end_to_end,
                 enable_g1_add_fused_end_to_end,
+                enable_g2_scalar_mul_fused_end_to_end,
+                enable_g2_add_fused_end_to_end,
             )
         } else {
             PrefixPackingLayout::from_constraint_types(&self.input.constraint_types)
@@ -935,6 +1035,8 @@ impl RecursionVerifier<Fq> {
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
             enable_g1_add_fused_end_to_end,
+            enable_g2_scalar_mul_fused_end_to_end,
+            enable_g2_add_fused_end_to_end,
         );
         let num_poly_types = PolyType::NUM_TYPES;
 
@@ -993,21 +1095,94 @@ impl RecursionVerifier<Fq> {
                     PolyType::G1AddXR => VirtualPolynomial::g1_add_xr_fused(),
                     PolyType::G1AddYR => VirtualPolynomial::g1_add_yr_fused(),
                     PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator_fused(),
-                    PolyType::G1AddLambda => VirtualPolynomial::g1_add_fused(
-                        crate::zkvm::witness::G1AddTerm::Lambda,
-                    ),
-                    PolyType::G1AddInvDeltaX => VirtualPolynomial::g1_add_fused(
-                        crate::zkvm::witness::G1AddTerm::InvDeltaX,
-                    ),
-                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add_fused(
-                        crate::zkvm::witness::G1AddTerm::IsDouble,
-                    ),
-                    PolyType::G1AddIsInverse => VirtualPolynomial::g1_add_fused(
-                        crate::zkvm::witness::G1AddTerm::IsInverse,
-                    ),
+                    PolyType::G1AddLambda => {
+                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::Lambda)
+                    }
+                    PolyType::G1AddInvDeltaX => {
+                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::InvDeltaX)
+                    }
+                    PolyType::G1AddIsDouble => {
+                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::IsDouble)
+                    }
+                    PolyType::G1AddIsInverse => {
+                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::IsInverse)
+                    }
                     _ => return Fq::zero(),
                 };
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1Add);
+                claim
+            } else if enable_g2_scalar_mul_fused_end_to_end && entry.is_g2_scalar_mul_fused {
+                let vp = match entry.poly_type {
+                    PolyType::G2ScalarMulXAC0 => VirtualPolynomial::g2_scalar_mul_xa_c0_fused(),
+                    PolyType::G2ScalarMulXAC1 => VirtualPolynomial::g2_scalar_mul_xa_c1_fused(),
+                    PolyType::G2ScalarMulYAC0 => VirtualPolynomial::g2_scalar_mul_ya_c0_fused(),
+                    PolyType::G2ScalarMulYAC1 => VirtualPolynomial::g2_scalar_mul_ya_c1_fused(),
+                    PolyType::G2ScalarMulXTC0 => VirtualPolynomial::g2_scalar_mul_xt_c0_fused(),
+                    PolyType::G2ScalarMulXTC1 => VirtualPolynomial::g2_scalar_mul_xt_c1_fused(),
+                    PolyType::G2ScalarMulYTC0 => VirtualPolynomial::g2_scalar_mul_yt_c0_fused(),
+                    PolyType::G2ScalarMulYTC1 => VirtualPolynomial::g2_scalar_mul_yt_c1_fused(),
+                    PolyType::G2ScalarMulXANextC0 => {
+                        VirtualPolynomial::g2_scalar_mul_xa_next_c0_fused()
+                    }
+                    PolyType::G2ScalarMulXANextC1 => {
+                        VirtualPolynomial::g2_scalar_mul_xa_next_c1_fused()
+                    }
+                    PolyType::G2ScalarMulYANextC0 => {
+                        VirtualPolynomial::g2_scalar_mul_ya_next_c0_fused()
+                    }
+                    PolyType::G2ScalarMulYANextC1 => {
+                        VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused()
+                    }
+                    PolyType::G2ScalarMulTIndicator => {
+                        VirtualPolynomial::g2_scalar_mul_t_indicator_fused()
+                    }
+                    PolyType::G2ScalarMulAIndicator => {
+                        VirtualPolynomial::g2_scalar_mul_a_indicator_fused()
+                    }
+                    _ => return Fq::zero(),
+                };
+                let (_, claim) =
+                    accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul);
+                claim
+            } else if enable_g2_add_fused_end_to_end && entry.is_g2_add_fused {
+                use crate::zkvm::witness::G2AddTerm;
+                let vp = match entry.poly_type {
+                    PolyType::G2AddXPC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::XPC0),
+                    PolyType::G2AddXPC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::XPC1),
+                    PolyType::G2AddYPC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::YPC0),
+                    PolyType::G2AddYPC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::YPC1),
+                    PolyType::G2AddPIndicator => {
+                        VirtualPolynomial::g2_add_fused(G2AddTerm::PIndicator)
+                    }
+                    PolyType::G2AddXQC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::XQC0),
+                    PolyType::G2AddXQC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::XQC1),
+                    PolyType::G2AddYQC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::YQC0),
+                    PolyType::G2AddYQC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::YQC1),
+                    PolyType::G2AddQIndicator => {
+                        VirtualPolynomial::g2_add_fused(G2AddTerm::QIndicator)
+                    }
+                    PolyType::G2AddXRC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::XRC0),
+                    PolyType::G2AddXRC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::XRC1),
+                    PolyType::G2AddYRC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::YRC0),
+                    PolyType::G2AddYRC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::YRC1),
+                    PolyType::G2AddRIndicator => {
+                        VirtualPolynomial::g2_add_fused(G2AddTerm::RIndicator)
+                    }
+                    PolyType::G2AddLambdaC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::LambdaC0),
+                    PolyType::G2AddLambdaC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::LambdaC1),
+                    PolyType::G2AddInvDeltaXC0 => {
+                        VirtualPolynomial::g2_add_fused(G2AddTerm::InvDeltaXC0)
+                    }
+                    PolyType::G2AddInvDeltaXC1 => {
+                        VirtualPolynomial::g2_add_fused(G2AddTerm::InvDeltaXC1)
+                    }
+                    PolyType::G2AddIsDouble => VirtualPolynomial::g2_add_fused(G2AddTerm::IsDouble),
+                    PolyType::G2AddIsInverse => {
+                        VirtualPolynomial::g2_add_fused(G2AddTerm::IsInverse)
+                    }
+                    _ => return Fq::zero(),
+                };
+                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2Add);
                 claim
             } else {
                 let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);

@@ -135,9 +135,14 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
 
     // For every packed entry, verify the block matches bit-reversal of the native table.
     for entry in &layout.entries {
-        // In end-to-end GT-fused mode, GT rows are emitted as fused blocks over `(c_gt, x11)`.
-        // This legacy test checks per-(constraint,poly_type) blocks only.
-        if entry.is_gt_fused {
+        // In end-to-end fused modes, some families are emitted as fused blocks that are not tied to
+        // a single `(constraint_idx, poly_type)` row. This legacy test checks per-instance blocks.
+        if entry.is_gt_fused
+            || entry.is_g1_scalar_mul_fused
+            || entry.is_g1_add_fused
+            || entry.is_g2_scalar_mul_fused
+            || entry.is_g2_add_fused
+        {
             continue;
         }
         let native_size = 1usize << entry.num_vars;

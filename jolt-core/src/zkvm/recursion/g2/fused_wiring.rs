@@ -3,7 +3,7 @@
 //! This mirrors:
 //! - `gt/fused_wiring.rs` (split-k + β(dummy) normalization), and
 //! - `g1/fused_wiring.rs` (step-then-c phase split for performance),
-//! but for G2 points over Fq2 (batched into a single Fq scalar using μ powers).
+//!   but for G2 points over Fq2 (batched into a single Fq scalar using μ powers).
 //!
 //! Variable order (Stage 2):
 //! - Phase 1 (x): bind `s` (8 step vars).
@@ -40,7 +40,7 @@ use crate::{
         recursion::{
             constraints::system::{index_to_binary, ConstraintSystem, G2AddNative},
             g2::indexing::{k_add, k_g2, k_smul},
-            gt::shift::eq_lsb_evals,
+            gt::types::eq_lsb_evals,
             verifier::RecursionVerifierInput,
             wiring_plan::{G2ValueRef, G2WiringEdge},
             ConstraintType,
@@ -52,8 +52,10 @@ use crate::{
 pub(crate) const STEP_VARS: usize = 8;
 const DEGREE: usize = 2;
 
+type G2Point5 = (Fq, Fq, Fq, Fq, Fq); // (x0,x1,y0,y1,ind)
+
 #[inline]
-fn g2_const_from_affine(p: &G2Affine) -> (Fq, Fq, Fq, Fq, Fq) {
+fn g2_const_from_affine(p: &G2Affine) -> G2Point5 {
     if p.is_zero() {
         (Fq::zero(), Fq::zero(), Fq::zero(), Fq::zero(), Fq::one())
     } else {
@@ -129,12 +131,12 @@ pub struct FusedWiringG2Prover<T: Transcript> {
     add_rows: Vec<Option<G2AddNative>>,
 
     // Scalar-mul base constants, indexed by scalar-mul instance.
-    smul_base: Vec<Option<(Fq, Fq, Fq, Fq, Fq)>>, // (x0,x1,y0,y1,ind)
+    smul_base: Vec<Option<G2Point5>>,
 
     // Pairing boundary constants.
-    pairing_p1: (Fq, Fq, Fq, Fq, Fq),
-    pairing_p2: (Fq, Fq, Fq, Fq, Fq),
-    pairing_p3: (Fq, Fq, Fq, Fq, Fq),
+    pairing_p1: G2Point5,
+    pairing_p2: G2Point5,
+    pairing_p3: G2Point5,
 
     c_state: Option<CPhaseState>,
     _marker: std::marker::PhantomData<T>,

@@ -27,7 +27,7 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::system::{index_to_binary, ConstraintType},
     zkvm::recursion::gt::indexing::gt_mul_c_tail_range,
-    zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials,
+    zkvm::recursion::gt::types::GtMulConstraintPolynomials,
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -134,9 +134,7 @@ impl FusedGtMulProver {
     pub fn new<T: Transcript>(
         params: FusedGtMulParams,
         constraint_types: &[ConstraintType],
-        gt_mul_rows: &[crate::zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials<
-            Fq,
-        >],
+        gt_mul_rows: &[GtMulConstraintPolynomials<Fq>],
         g_poly_4var: &DensePolynomial<Fq>,
         transcript: &mut T,
     ) -> Self {

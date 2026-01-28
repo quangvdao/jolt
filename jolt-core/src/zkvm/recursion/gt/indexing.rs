@@ -177,8 +177,8 @@ mod tests {
     fn split_k_values_are_family_local_and_k_gt_is_max() {
         let mut constraint_types = Vec::new();
         // 5 exp, 300 mul -> k_exp=3 (8), k_mul=9 (512), k_gt=9
-        constraint_types.extend(core::iter::repeat(ConstraintType::GtExp).take(5));
-        constraint_types.extend(core::iter::repeat(ConstraintType::GtMul).take(300));
+        constraint_types.extend(std::iter::repeat_n(ConstraintType::GtExp, 5));
+        constraint_types.extend(std::iter::repeat_n(ConstraintType::GtMul, 300));
 
         assert_eq!(num_gt_exp_constraints(&constraint_types), 5);
         assert_eq!(num_gt_mul_constraints(&constraint_types), 300);

@@ -3,9 +3,9 @@
 use crate::field::JoltField;
 use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
-use crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs;
-use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
-use crate::zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness};
+use crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs;
+use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
+use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use ark_bn254::{Fq, Fq2};
 use ark_serialize::{

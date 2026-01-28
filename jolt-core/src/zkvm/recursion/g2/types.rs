@@ -1,38 +1,181 @@
-//! G2 addition sumcheck for proving G2 group addition constraints.
-//!
-//! This is the G2 analogue of `g1_add.rs`, but for points over Fq2. Since the recursion SNARK
-//! runs over the base field Fq, we split each Fq2 coordinate into (c0,c1) components in Fq and
-//! enforce all constraints component-wise.
-//!
-//! This protocol uses the generic ConstraintListSumcheck wrapper with term batching.
+//! Shared types for G2 group operations.
 
-use crate::{
-    define_constraint, field::JoltField, poly::opening_proof::SumcheckId, zkvm::witness::G2AddTerm,
-};
+use crate::field::JoltField;
+use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
+use crate::zkvm::witness::{G2AddTerm, TermEnum};
+use ark_bn254::Fr;
+use ark_ff::{BigInteger, PrimeField};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use super::{fq2_mul_c0, fq2_mul_c1, fq2_sq_c0, fq2_sq_c1};
 
-define_constraint!(
-    name: G2Add,
-    sumcheck_id: SumcheckId::G2Add,
-    // These witness polynomials are constant over the recursion constraint hypercube (see
-    // `ConstraintSystemBuilder::add_g2_add_witness`), so the Stage 2 sumcheck does not need
-    // to range over any x-variables.
-    num_vars: 0,
-    degree: 6,
-    uses_term_batching: true,
-    term_enum: G2AddTerm,
-    recursion_poly_variant: G2Add,
-    fields: [
-        x_p_c0, x_p_c1, y_p_c0, y_p_c1, ind_p,
-        x_q_c0, x_q_c1, y_q_c0, y_q_c1, ind_q,
-        x_r_c0, x_r_c1, y_r_c0, y_r_c1, ind_r,
-        lambda_c0, lambda_c1, inv_delta_x_c0, inv_delta_x_c1,
-        is_double, is_inverse
-    ]
-);
+/// Public inputs for a single G2 scalar multiplication (the scalar).
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct G2ScalarMulPublicInputs {
+    pub scalar: Fr,
+}
+
+impl GuestSerialize for G2ScalarMulPublicInputs {
+    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.scalar.guest_serialize(w)
+    }
+}
+
+impl GuestDeserialize for G2ScalarMulPublicInputs {
+    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+            scalar: Fr::guest_deserialize(r)?,
+        })
+    }
+}
+
+impl G2ScalarMulPublicInputs {
+    pub fn new(scalar: Fr) -> Self {
+        Self { scalar }
+    }
+
+    pub fn bits_msb(&self) -> Vec<bool> {
+        let scalar_bits_le = self.scalar.into_bigint().to_bits_le();
+        (0..256).rev().map(|i| scalar_bits_le[i]).collect()
+    }
+
+    pub fn evaluate_bit_mle<F: JoltField>(&self, eval_point: &[F]) -> F {
+        let (step_point, pad_sel) = match eval_point.len() {
+            8 => (eval_point, F::one()),
+            11 => {
+                let (step, pad) = eval_point.split_at(8);
+                let mut sel = F::one();
+                let one = F::one();
+                for &p_i in pad {
+                    sel *= one - p_i;
+                }
+                (step, sel)
+            }
+            _ => panic!(
+                "G2ScalarMulPublicInputs::evaluate_bit_mle expected 8 (native) or 11 (padded) vars, got {}",
+                eval_point.len()
+            ),
+        };
+        let bits = self.bits_msb();
+
+        let mut evals: Vec<F> = bits
+            .iter()
+            .map(|&b| if b { F::one() } else { F::zero() })
+            .collect();
+        debug_assert_eq!(evals.len(), 256);
+
+        let mut len = evals.len();
+        for &r_i in step_point {
+            let half = len / 2;
+            for j in 0..half {
+                let a = evals[2 * j];
+                let b = evals[2 * j + 1];
+                evals[j] = a + r_i * (b - a);
+            }
+            len = half;
+        }
+        debug_assert_eq!(len, 1);
+        pad_sel * evals[0]
+    }
+}
+
+/// Values for G2 addition (used during fused addition).
+#[derive(Clone, Debug, Default)]
+pub struct G2AddValues<F> {
+    pub x_p_c0: F,
+    pub x_p_c1: F,
+    pub y_p_c0: F,
+    pub y_p_c1: F,
+    pub ind_p: F,
+    pub x_q_c0: F,
+    pub x_q_c1: F,
+    pub y_q_c0: F,
+    pub y_q_c1: F,
+    pub ind_q: F,
+    pub x_r_c0: F,
+    pub x_r_c1: F,
+    pub y_r_c0: F,
+    pub y_r_c1: F,
+    pub ind_r: F,
+    pub lambda_c0: F,
+    pub lambda_c1: F,
+    pub inv_delta_x_c0: F,
+    pub inv_delta_x_c1: F,
+    pub is_double: F,
+    pub is_inverse: F,
+}
 
 impl<F: JoltField> G2AddValues<F> {
+    /// Construct values from a batch of per-term univariate evaluations.
+    ///
+    /// `poly_evals[t][eval_index]` corresponds to the `t`-th `G2AddTerm` (see `zkvm/witness.rs`)
+    /// evaluated at the `eval_index`-th point (0..degree).
+    pub fn from_poly_evals<const DEGREE: usize>(
+        poly_evals: &[[F; DEGREE]],
+        eval_index: usize,
+    ) -> Self {
+        debug_assert_eq!(
+            poly_evals.len(),
+            G2AddTerm::COUNT,
+            "expected one eval array per G2AddTerm"
+        );
+        Self {
+            x_p_c0: poly_evals[0][eval_index],
+            x_p_c1: poly_evals[1][eval_index],
+            y_p_c0: poly_evals[2][eval_index],
+            y_p_c1: poly_evals[3][eval_index],
+            ind_p: poly_evals[4][eval_index],
+            x_q_c0: poly_evals[5][eval_index],
+            x_q_c1: poly_evals[6][eval_index],
+            y_q_c0: poly_evals[7][eval_index],
+            y_q_c1: poly_evals[8][eval_index],
+            ind_q: poly_evals[9][eval_index],
+            x_r_c0: poly_evals[10][eval_index],
+            x_r_c1: poly_evals[11][eval_index],
+            y_r_c0: poly_evals[12][eval_index],
+            y_r_c1: poly_evals[13][eval_index],
+            ind_r: poly_evals[14][eval_index],
+            lambda_c0: poly_evals[15][eval_index],
+            lambda_c1: poly_evals[16][eval_index],
+            inv_delta_x_c0: poly_evals[17][eval_index],
+            inv_delta_x_c1: poly_evals[18][eval_index],
+            is_double: poly_evals[19][eval_index],
+            is_inverse: poly_evals[20][eval_index],
+        }
+    }
+
+    /// Construct values from opened claims, ordered by `G2AddTerm` index.
+    pub fn from_claims(claims: &[F]) -> Self {
+        debug_assert_eq!(
+            claims.len(),
+            G2AddTerm::COUNT,
+            "expected one claim per G2AddTerm"
+        );
+        Self {
+            x_p_c0: claims[0],
+            x_p_c1: claims[1],
+            y_p_c0: claims[2],
+            y_p_c1: claims[3],
+            ind_p: claims[4],
+            x_q_c0: claims[5],
+            x_q_c1: claims[6],
+            y_q_c0: claims[7],
+            y_q_c1: claims[8],
+            ind_q: claims[9],
+            x_r_c0: claims[10],
+            x_r_c1: claims[11],
+            y_r_c0: claims[12],
+            y_r_c1: claims[13],
+            ind_r: claims[14],
+            lambda_c0: claims[15],
+            lambda_c1: claims[16],
+            inv_delta_x_c0: claims[17],
+            inv_delta_x_c1: claims[18],
+            is_double: claims[19],
+            is_inverse: claims[20],
+        }
+    }
+
     /// Evaluate the batched G2 add constraint polynomial at this point.
     ///
     /// Uses `delta` to batch the constraint terms.
@@ -215,9 +358,5 @@ impl<F: JoltField> G2AddValues<F> {
                 * (self.y_r_c1 - (lam_times_diff_c1 - self.y_p_c1)));
 
         acc
-    }
-
-    pub fn eval_constraint_no_batching(&self) -> F {
-        unreachable!("G2Add uses term batching")
     }
 }

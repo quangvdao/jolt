@@ -2171,9 +2171,10 @@ where
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators(&shared);
         type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, GrumpkinProjective>;
-        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
-            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
-        );
+        // NOTE: keep in sync with `crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS`.
+        const MAX_RECURSION_DENSE_NUM_VARS: usize = 21;
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         JoltProverPreprocessing {
@@ -2197,9 +2198,10 @@ where
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators_committed(&shared, &program);
         type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, GrumpkinProjective>;
-        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
-            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
-        );
+        // NOTE: keep in sync with `crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS`.
+        const MAX_RECURSION_DENSE_NUM_VARS: usize = 21;
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         let max_t_any: usize = shared

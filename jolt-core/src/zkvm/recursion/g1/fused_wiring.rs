@@ -7,7 +7,7 @@
 //! backend that consumes:
 //! - fused G1ScalarMul port openings (under `SumcheckId::G1ScalarMul`), and
 //! - fused G1Add port openings (under `SumcheckId::G1Add`),
-//! while staying compatible with Stage-2 suffix-aligned batching.
+//!   while staying compatible with Stage-2 suffix-aligned batching.
 //!
 //! ## Variable order (Stage 2)
 //! - Phase 1 (x): bind `s` (8 step vars).
@@ -45,7 +45,7 @@ use crate::{
         recursion::{
             constraints::system::{index_to_binary, ConstraintSystem, G1AddNative},
             g1::indexing::{k_add, k_g1, k_smul},
-            gt::shift::eq_lsb_evals,
+            gt::types::eq_lsb_evals,
             verifier::RecursionVerifierInput,
             wiring_plan::{G1ValueRef, G1WiringEdge},
             ConstraintType,

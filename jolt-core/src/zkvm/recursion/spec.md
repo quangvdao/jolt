@@ -1967,13 +1967,8 @@ Prefix packing (Stage 3) reduces GPU memory pressure by avoiding padded sparse r
 
 The recursion implementation includes several feature toggles (primarily for benchmarking/debugging):
 
-- **Important (guest soundness)**: for end-to-end fused modes (GT/G1/G2), the verifier must not rely on environment variables. These booleans
-  are carried in `RecursionVerifierInput` (see `jolt-core/src/zkvm/recursion/verifier.rs`):
-  - `enable_gt_fused_end_to_end`
-  - `enable_g1_scalar_mul_fused_end_to_end`
-  - `enable_g1_fused_wiring_end_to_end`
-  - `enable_g2_scalar_mul_fused_end_to_end`
-  - `enable_g2_fused_wiring_end_to_end`
+- **Important (guest soundness)**: recursion is **fused-only** (GT/G1/G2). The verifier must not
+  rely on environment variables to select between legacy vs fused paths; there is only one path now.
 
 - **Stage 2 verifier toggles** (see `jolt-core/src/zkvm/recursion/verifier.rs`):
   - `JOLT_RECURSION_ENABLE_SHIFT_RHO` (default `true`)
@@ -1981,11 +1976,7 @@ The recursion implementation includes several feature toggles (primarily for ben
   - `JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL` (default `true`)
   - `JOLT_RECURSION_ENABLE_PGX_REDUCTION` (default `true`)
   - `JOLT_RECURSION_ENABLE_WIRING`, `JOLT_RECURSION_ENABLE_WIRING_GT`, `..._G1`, `..._G2` (defaults `true`)
-  - `JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END` (default `false`): enables fused GT (changes Stage-2 instance selection/challenge layout and Stage-3 packing layout).
-  - `JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END` (default `false`): enables fused G1 scalar-mul (Stage 2 + Stage 3 packing).
-  - `JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END` (default `false`): enables fused G2 scalar-mul (Stage 2 + Stage 3 packing).
-  - `JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END` (default `false`): enables fully fused G1 (scalar-mul + add + wiring; implies scalar-mul fusion).
-  - `JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END` (default `false`): enables fully fused G2 (scalar-mul + add + wiring; implies scalar-mul fusion).
+  - (Removed) `JOLT_RECURSION_ENABLE_*_FUSED_END_TO_END`: fused is always enabled.
   - `JOLT_RECURSION_STOP_AFTER_STAGE2` (tests only): early-exit hook to isolate Stage 2 failures.
 
 - **Witness-generation toggles** (see `jolt-core/src/zkvm/recursion/witness_generation.rs`): enable/disable inclusion of specific constraint families

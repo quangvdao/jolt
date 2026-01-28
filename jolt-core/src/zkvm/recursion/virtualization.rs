@@ -71,7 +71,7 @@ use crate::{
     zkvm::{
         recursion::{
             constraints::system::{ConstraintType, PolyType},
-            gt::exponentiation::GtExpPublicInputs,
+            gt::types::GtExpPublicInputs,
         },
         witness::VirtualPolynomial,
     },
@@ -448,6 +448,7 @@ impl DirectEvaluationVerifier {
 ///
 /// # Returns
 /// A vector of virtual claims organized by constraint then polynomial type
+#[allow(clippy::too_many_arguments)]
 pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulator<F>>(
     accumulator: &A,
     constraint_types: &[ConstraintType],

@@ -20,8 +20,8 @@ use crate::{
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
     zkvm::recursion::gt::{
-        exponentiation::GtExpWitness,
         indexing::{gt_exp_c_tail_range, k_exp, k_gt, num_gt_exp_constraints_padded},
+        types::GtExpWitness,
     },
     zkvm::witness::VirtualPolynomial,
 };
@@ -236,8 +236,8 @@ mod tests {
         // - 16 GTMul => padded 16 => k_mul = 4
         // => k_gt = 4, dummy_exp = 2
         let mut constraint_types = Vec::new();
-        constraint_types.extend(core::iter::repeat(ConstraintType::GtExp).take(3));
-        constraint_types.extend(core::iter::repeat(ConstraintType::GtMul).take(16));
+        constraint_types.extend(std::iter::repeat_n(ConstraintType::GtExp, 3));
+        constraint_types.extend(std::iter::repeat_n(ConstraintType::GtMul, 16));
 
         let params = FusedGtExpStage2OpeningsParams::from_constraint_types(&constraint_types);
         assert_eq!(params.k_common, k_gt(&constraint_types));

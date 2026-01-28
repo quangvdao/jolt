@@ -70,18 +70,17 @@ pub use verifier::{RecursionVerifier, RecursionVerifierInput};
 pub use wiring_plan::WiringPlan;
 
 // G1 exports
-pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier};
+pub use g1::{FusedG1ScalarMulProver, FusedG1ScalarMulVerifier, G1ScalarMulPublicInputs};
 
 // G2 exports
-pub use g2::{G2ScalarMulProver, G2ScalarMulVerifier};
+pub use g2::{FusedG2ScalarMulProver, FusedG2ScalarMulVerifier, G2ScalarMulPublicInputs};
 
 // GT exports
 pub use gt::{
-    GtExpClaimReductionParams, GtExpClaimReductionProver, GtExpClaimReductionVerifier, GtExpProver,
-    GtExpVerifier,
+    FusedGtExpParams, FusedGtExpProver, FusedGtExpVerifier, FusedGtMulParams, FusedGtMulProver,
+    FusedGtMulVerifier, FusedGtShiftParams, FusedGtShiftProver, FusedGtShiftVerifier,
+    GtExpPublicInputs,
 };
-pub use gt::{GtMulProver, GtMulVerifier};
-pub use gt::{GtShiftClaim, GtShiftParams, GtShiftProver, GtShiftVerifier};
 
 // Virtualization exports
 pub use virtualization::{
@@ -98,4 +97,4 @@ pub use witness::{
 /// This bounds the size of the dense polynomial opened via Hyrax in the recursion proof.
 /// It is used to size cached Hyrax Pedersen generators in preprocessing (prover + verifier).
 /// Supports up to \(2^{22}\) constraints (see `zkvm/verifier.rs` recursion verification path).
-pub const MAX_RECURSION_DENSE_NUM_VARS: usize = 22;
+pub const MAX_RECURSION_DENSE_NUM_VARS: usize = 21;

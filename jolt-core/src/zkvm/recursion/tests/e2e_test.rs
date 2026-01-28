@@ -95,52 +95,16 @@ fn test_recursion_snark_e2e_with_dory() {
     let constraint_types: Vec<ConstraintType> = prover.constraint_system.constraint_types.clone();
 
     // Determine dense_num_vars for Hyrax setup without extracting dense evals.
-    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-        .ok()
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false);
-    let enable_g1_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g1_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g1_fused_wiring_end_to_end;
-    let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
-    let enable_g2_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g2_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g2_fused_wiring_end_to_end;
-    let enable_g2_add_fused_end_to_end = enable_g2_fused_wiring_end_to_end;
-    let dense_num_vars = if enable_gt_fused_end_to_end
-        || enable_g1_scalar_mul_fused_end_to_end
-        || enable_g1_add_fused_end_to_end
-        || enable_g2_scalar_mul_fused_end_to_end
-        || enable_g2_add_fused_end_to_end
-    {
-        PrefixPackingLayout::from_constraint_types_fused(
-            &constraint_types,
-            enable_gt_fused_end_to_end,
-            enable_g1_scalar_mul_fused_end_to_end,
-            enable_g1_add_fused_end_to_end,
-            enable_g2_scalar_mul_fused_end_to_end,
-            enable_g2_add_fused_end_to_end,
-        )
-        .num_dense_vars
-    } else {
-        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars
-    };
+    // Recursion is fused-only: always use fused prefix packing.
+    let dense_num_vars = PrefixPackingLayout::from_constraint_types_fused(
+        &constraint_types,
+        true,
+        true,
+        true,
+        true,
+        true,
+    )
+    .num_dense_vars;
 
     let num_g1_add = constraint_types
         .iter()
@@ -214,11 +178,6 @@ fn test_recursion_snark_e2e_with_dory() {
     // Prefer the metadata produced by `poly_commit`, to ensure perfect alignment.
     let verifier_input = RecursionVerifierInput {
         constraint_types: recursion_constraint_metadata.constraint_types,
-        enable_gt_fused_end_to_end,
-        enable_g1_scalar_mul_fused_end_to_end,
-        enable_g1_fused_wiring_end_to_end,
-        enable_g2_scalar_mul_fused_end_to_end,
-        enable_g2_fused_wiring_end_to_end,
         num_vars,
         num_constraint_vars,
         num_s_vars,

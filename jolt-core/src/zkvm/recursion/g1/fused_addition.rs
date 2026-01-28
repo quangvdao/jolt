@@ -30,7 +30,7 @@ use crate::{
     zkvm::{
         recursion::{
             constraints::system::{index_to_binary, G1AddNative},
-            g1::addition::G1AddValues,
+            g1::types::G1AddValues,
         },
         witness::{G1AddTerm, TermEnum, VirtualPolynomial},
     },

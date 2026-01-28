@@ -9,10 +9,10 @@ use crate::zkvm::recursion::constraints::system::{
     ConstraintLocator, ConstraintSystem, ConstraintType, G1AddNative, G1ScalarMulNative,
     G2AddNative, G2ScalarMulNative, GtMulNativeRows, PolyType, RecursionMatrixShape,
 };
-use crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs;
-use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
-use crate::zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness};
+use crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs;
+use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
+use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::{PrefixPackedEntry, PrefixPackingLayout};
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};
 
@@ -1267,55 +1267,15 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
         fields(num_constraints = cs.constraint_types.len())
     )]
     fn build_layout(cs: &ConstraintSystem) -> PrefixPackingLayout {
-        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-        let enable_g1_fused_wiring_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
-        let enable_g1_scalar_mul_fused_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false)
-                || enable_g1_fused_wiring_end_to_end;
-        // Full fused G1 wiring requires fused G1Add packing as well.
-        let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
-
-        let enable_g2_fused_wiring_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
-        let enable_g2_scalar_mul_fused_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false)
-                || enable_g2_fused_wiring_end_to_end;
-        // Full fused G2 wiring requires fused G2Add packing as well.
-        let enable_g2_add_fused_end_to_end = enable_g2_fused_wiring_end_to_end;
-
-        if enable_gt_fused_end_to_end
-            || enable_g1_scalar_mul_fused_end_to_end
-            || enable_g1_add_fused_end_to_end
-            || enable_g2_scalar_mul_fused_end_to_end
-            || enable_g2_add_fused_end_to_end
-        {
-            PrefixPackingLayout::from_constraint_types_fused(
-                &cs.constraint_types,
-                enable_gt_fused_end_to_end,
-                enable_g1_scalar_mul_fused_end_to_end,
-                enable_g1_add_fused_end_to_end,
-                enable_g2_scalar_mul_fused_end_to_end,
-                enable_g2_add_fused_end_to_end,
-            )
-        } else {
-            PrefixPackingLayout::from_constraint_types(&cs.constraint_types)
-        }
+        // Fused recursion is the only supported path: always use the fused prefix-packing layout.
+        PrefixPackingLayout::from_constraint_types_fused(
+            &cs.constraint_types,
+            true, // GT fused
+            true, // G1 scalar mul fused
+            true, // G1 add fused
+            true, // G2 scalar mul fused
+            true, // G2 add fused
+        )
     }
 
     #[tracing::instrument(

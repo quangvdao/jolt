@@ -1480,9 +1480,10 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         generators: PCS::VerifierSetup,
         program: Arc<ProgramPreprocessing>,
     ) -> JoltVerifierPreprocessing<F, PCS> {
-        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
-            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
-        );
+        // NOTE: keep in sync with `crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS`.
+        const MAX_RECURSION_DENSE_NUM_VARS: usize = 21;
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         Self {
@@ -1508,9 +1509,10 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         generators: PCS::VerifierSetup,
         program_commitments: TrustedProgramCommitments<PCS>,
     ) -> JoltVerifierPreprocessing<F, PCS> {
-        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
-            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
-        );
+        // NOTE: keep in sync with `crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS`.
+        const MAX_RECURSION_DENSE_NUM_VARS: usize = 21;
+        let hyrax_prover_setup =
+            <HyraxPCS as CommitmentScheme>::setup_prover(MAX_RECURSION_DENSE_NUM_VARS);
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         Self {

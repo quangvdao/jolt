@@ -11,9 +11,9 @@ use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::proof_serialization::NonInputBaseHints;
 use crate::zkvm::proof_serialization::PairingBoundary;
 use crate::zkvm::recursion::constraints::system::ConstraintType;
-use crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs;
-use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
-use crate::zkvm::recursion::gt::exponentiation::GtExpPublicInputs;
+use crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs;
+use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
+use crate::zkvm::recursion::gt::types::GtExpPublicInputs;
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::verifier::RecursionVerifierInput;
 use crate::zkvm::recursion::wiring_plan::derive_wiring_plan;
@@ -175,38 +175,34 @@ fn resolve_input_gt(
     match src {
         InputSource::Setup { name, index } => match (*name, index) {
             ("chi", Some(i)) => {
-                debug_assert!(*i < setup.chi.len(), "chi index {} out of bounds", i);
+                debug_assert!(*i < setup.chi.len(), "chi index {i} out of bounds");
                 Ok(setup.chi[*i])
             }
             ("delta_1l", Some(i)) => {
                 debug_assert!(
                     *i < setup.delta_1l.len(),
-                    "delta_1l index {} out of bounds",
-                    i
+                    "delta_1l index {i} out of bounds"
                 );
                 Ok(setup.delta_1l[*i])
             }
             ("delta_1r", Some(i)) => {
                 debug_assert!(
                     *i < setup.delta_1r.len(),
-                    "delta_1r index {} out of bounds",
-                    i
+                    "delta_1r index {i} out of bounds"
                 );
                 Ok(setup.delta_1r[*i])
             }
             ("delta_2l", Some(i)) => {
                 debug_assert!(
                     *i < setup.delta_2l.len(),
-                    "delta_2l index {} out of bounds",
-                    i
+                    "delta_2l index {i} out of bounds"
                 );
                 Ok(setup.delta_2l[*i])
             }
             ("delta_2r", Some(i)) => {
                 debug_assert!(
                     *i < setup.delta_2r.len(),
-                    "delta_2r index {} out of bounds",
-                    i
+                    "delta_2r index {i} out of bounds"
                 );
                 Ok(setup.delta_2r[*i])
             }
@@ -222,14 +218,12 @@ fn resolve_input_gt(
         InputSource::ProofRound { round, msg, name } => {
             debug_assert!(
                 *round < proof.first_messages.len(),
-                "round {} out of bounds (first_messages len {})",
-                round,
+                "round {round} out of bounds (first_messages len {})",
                 proof.first_messages.len()
             );
             debug_assert!(
                 *round < proof.second_messages.len(),
-                "round {} out of bounds (second_messages len {})",
-                round,
+                "round {round} out of bounds (second_messages len {})",
                 proof.second_messages.len()
             );
             match msg {
@@ -272,8 +266,7 @@ fn eval_ast(
             let idx = id.0 as usize;
             debug_assert!(
                 idx < values.len(),
-                "ValueId {} out of bounds (len {})",
-                idx,
+                "ValueId {idx} out of bounds (len {})",
                 values.len()
             );
             values[idx].as_ref().ok_or(ProofVerifyError::default())
@@ -460,6 +453,7 @@ fn resolve_g2_input_or_hint(
 }
 
 /// Derive the recursion verifier input from a Dory AST, using hints when a base/point is not an input.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_plan_with_hints(
     ast: &AstGraph<BN254>,
     proof: &ArkDoryProof,
@@ -599,54 +593,15 @@ pub fn derive_plan_with_hints(
         constraint_types.push(ConstraintType::GtMul);
     }
 
-    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-        .ok()
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false);
-    let enable_g1_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g1_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g1_fused_wiring_end_to_end;
-    let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
-
-    let enable_g2_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g2_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g2_fused_wiring_end_to_end;
-    let enable_g2_add_fused_end_to_end = enable_g2_fused_wiring_end_to_end;
-
-    let dense_num_vars = if enable_gt_fused_end_to_end
-        || enable_g1_scalar_mul_fused_end_to_end
-        || enable_g1_add_fused_end_to_end
-        || enable_g2_scalar_mul_fused_end_to_end
-        || enable_g2_add_fused_end_to_end
-    {
-        PrefixPackingLayout::from_constraint_types_fused(
-            &constraint_types,
-            enable_gt_fused_end_to_end,
-            enable_g1_scalar_mul_fused_end_to_end,
-            enable_g1_add_fused_end_to_end,
-            enable_g2_scalar_mul_fused_end_to_end,
-            enable_g2_add_fused_end_to_end,
-        )
-        .num_dense_vars
-    } else {
-        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars
-    };
+    let dense_num_vars = PrefixPackingLayout::from_constraint_types_fused(
+        &constraint_types,
+        true,
+        true,
+        true,
+        true,
+        true,
+    )
+    .num_dense_vars;
 
     let num_constraints = constraint_types.len();
     let num_constraints_padded = num_constraints.next_power_of_two();
@@ -660,11 +615,6 @@ pub fn derive_plan_with_hints(
     Ok(DerivedRecursionPlan {
         verifier_input: RecursionVerifierInput {
             constraint_types,
-            enable_gt_fused_end_to_end,
-            enable_g1_scalar_mul_fused_end_to_end,
-            enable_g1_fused_wiring_end_to_end,
-            enable_g2_scalar_mul_fused_end_to_end,
-            enable_g2_fused_wiring_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,
@@ -751,7 +701,7 @@ pub fn derive_from_dory_ast(
     // Dory GTExp
     for (_op_id, base_id, scalar) in &gt_exp_ops {
         let idx = base_id.0 as usize;
-        debug_assert!(idx < values.len(), "base_id {} out of bounds", idx);
+        debug_assert!(idx < values.len(), "base_id {idx} out of bounds");
         let base = match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
             Value::GT(v) => v.0,
             _ => return Err(ProofVerifyError::default()),
@@ -770,7 +720,7 @@ pub fn derive_from_dory_ast(
     // Dory G1 scalar mul
     for (_op_id, point_id, scalar) in &g1_scalar_mul_ops {
         let idx = point_id.0 as usize;
-        debug_assert!(idx < values.len(), "point_id {} out of bounds", idx);
+        debug_assert!(idx < values.len(), "point_id {idx} out of bounds");
         let p = match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
             Value::G1(v) => v.0.into_affine(),
             _ => return Err(ProofVerifyError::default()),
@@ -785,7 +735,7 @@ pub fn derive_from_dory_ast(
     // Dory G2 scalar mul
     for (_op_id, point_id, scalar) in &g2_scalar_mul_ops {
         let idx = point_id.0 as usize;
-        debug_assert!(idx < values.len(), "point_id {} out of bounds", idx);
+        debug_assert!(idx < values.len(), "point_id {idx} out of bounds");
         let p = match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
             Value::G2(v) => v.0.into_affine(),
             _ => return Err(ProofVerifyError::default()),
@@ -818,55 +768,16 @@ pub fn derive_from_dory_ast(
         constraint_types.push(ConstraintType::GtMul);
     }
 
-    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-        .ok()
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false);
-    let enable_g1_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g1_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g1_fused_wiring_end_to_end;
-    let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
-
-    let enable_g2_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g2_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g2_fused_wiring_end_to_end;
-    let enable_g2_add_fused_end_to_end = enable_g2_fused_wiring_end_to_end;
-
     // Dense polynomial var count (needed for Hyrax setup bounds).
-    let dense_num_vars = if enable_gt_fused_end_to_end
-        || enable_g1_scalar_mul_fused_end_to_end
-        || enable_g1_add_fused_end_to_end
-        || enable_g2_scalar_mul_fused_end_to_end
-        || enable_g2_add_fused_end_to_end
-    {
-        PrefixPackingLayout::from_constraint_types_fused(
-            &constraint_types,
-            enable_gt_fused_end_to_end,
-            enable_g1_scalar_mul_fused_end_to_end,
-            enable_g1_add_fused_end_to_end,
-            enable_g2_scalar_mul_fused_end_to_end,
-            enable_g2_add_fused_end_to_end,
-        )
-        .num_dense_vars
-    } else {
-        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars
-    };
+    let dense_num_vars = PrefixPackingLayout::from_constraint_types_fused(
+        &constraint_types,
+        true,
+        true,
+        true,
+        true,
+        true,
+    )
+    .num_dense_vars;
 
     // Recursion verifier input expects matrix parameters derived from constraint counts.
     let num_constraints = constraint_types.len();
@@ -880,8 +791,9 @@ pub fn derive_from_dory_ast(
     let (lhs, rhs) = ast
         .constraints
         .iter()
-        .find_map(|c| match c {
-            AstConstraint::AssertEq { lhs, rhs, .. } => Some((*lhs, *rhs)),
+        .find(|c| matches!(c, AstConstraint::AssertEq { .. }))
+        .map(|c| match c {
+            AstConstraint::AssertEq { lhs, rhs, .. } => (*lhs, *rhs),
         })
         .ok_or(ProofVerifyError::default())?;
 
@@ -921,7 +833,7 @@ pub fn derive_from_dory_ast(
 
     let eval_g1 = |id: ValueId| -> Result<G1Affine, ProofVerifyError> {
         let idx = id.0 as usize;
-        debug_assert!(idx < values.len(), "eval_g1 id {} out of bounds", idx);
+        debug_assert!(idx < values.len(), "eval_g1 id {idx} out of bounds");
         match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
             Value::G1(v) => Ok(v.0.into_affine()),
             _ => Err(ProofVerifyError::default()),
@@ -929,7 +841,7 @@ pub fn derive_from_dory_ast(
     };
     let eval_g2 = |id: ValueId| -> Result<G2Affine, ProofVerifyError> {
         let idx = id.0 as usize;
-        debug_assert!(idx < values.len(), "eval_g2 id {} out of bounds", idx);
+        debug_assert!(idx < values.len(), "eval_g2 id {idx} out of bounds");
         match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
             Value::G2(v) => Ok(v.0.into_affine()),
             _ => Err(ProofVerifyError::default()),
@@ -964,11 +876,6 @@ pub fn derive_from_dory_ast(
     Ok(DerivedRecursionInput {
         verifier_input: RecursionVerifierInput {
             constraint_types,
-            enable_gt_fused_end_to_end,
-            enable_g1_scalar_mul_fused_end_to_end,
-            enable_g1_fused_wiring_end_to_end,
-            enable_g2_scalar_mul_fused_end_to_end,
-            enable_g2_fused_wiring_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,

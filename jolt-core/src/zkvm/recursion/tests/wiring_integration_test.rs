@@ -33,34 +33,6 @@ use std::collections::HashMap;
 
 type HyraxPCS = Hyrax<1, GrumpkinProjective>;
 
-fn set_gt_fused_end_to_end(enabled: bool) {
-    // Fail-closed is removed; this flag should now be safe with GT wiring enabled.
-    std::env::set_var(
-        "JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END",
-        if enabled { "1" } else { "0" },
-    );
-}
-
-fn set_g1_fused_wiring_end_to_end(enabled: bool) {
-    std::env::set_var(
-        "JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END",
-        if enabled { "1" } else { "0" },
-    );
-    // Keep the scalar-mul-fused-only flag off in these tests; the full G1 fused wiring flag
-    // implies it where needed.
-    std::env::set_var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END", "0");
-}
-
-fn set_g2_fused_wiring_end_to_end(enabled: bool) {
-    std::env::set_var(
-        "JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END",
-        if enabled { "1" } else { "0" },
-    );
-    // Keep the scalar-mul-fused-only flag off in these tests; the full G2 fused wiring flag
-    // implies it where needed.
-    std::env::set_var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END", "0");
-}
-
 struct RecursionFixture {
     // Stage-8 artifacts
     dory_proof: <DoryCommitmentScheme as CommitmentScheme>::Proof,
@@ -128,7 +100,7 @@ fn build_fixture() -> RecursionFixture {
         CommittedPolynomial,
         <DoryCommitmentScheme as CommitmentScheme>::Commitment,
     > = HashMap::new();
-    commitments.insert(CommittedPolynomial::RdInc, commitment.clone());
+    commitments.insert(CommittedPolynomial::RdInc, commitment);
 
     // Minimal Stage8 snapshot.
     let stage8_snapshot = DoryOpeningSnapshot {
@@ -207,146 +179,19 @@ fn verify_with_input(
     let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
     let hyrax_verifier_setup =
         <HyraxPCS as CommitmentScheme>::setup_verifier(&fixture.hyrax_prover_setup);
-    match verifier.verify::<Blake2bTranscript, HyraxPCS>(
-        &fixture.recursion_proof,
-        &mut transcript,
-        &fixture.recursion_proof.dense_commitment,
-        &hyrax_verifier_setup,
-    ) {
-        Ok(ok) => ok,
-        Err(_e) => false,
-    }
+    verifier
+        .verify::<Blake2bTranscript, HyraxPCS>(
+            &fixture.recursion_proof,
+            &mut transcript,
+            &fixture.recursion_proof.dense_commitment,
+            &hyrax_verifier_setup,
+        )
+        .unwrap_or_default()
 }
 
 #[test]
 #[serial]
 fn wiring_rejects_tampered_pairing_boundary_rhs() {
-    for g1_fused in [false, true] {
-        for g2_fused in [false, true] {
-            set_gt_fused_end_to_end(false);
-            set_g1_fused_wiring_end_to_end(g1_fused);
-            set_g2_fused_wiring_end_to_end(g2_fused);
-            let fixture = build_fixture();
-
-            // Build symbolic AST (verifier side).
-            let mut sym_transcript = fixture.stage8_pre_transcript.clone();
-            let ast = <DoryCommitmentScheme as RecursionExt<Fr>>::build_symbolic_ast(
-                &fixture.dory_proof,
-                &fixture.verifier_setup,
-                &mut sym_transcript,
-                &fixture.opening_point,
-                &fixture.joint_claim,
-                &fixture.joint_commitment,
-            )
-            .expect("symbolic AST reconstruction must succeed");
-
-            let derived = derive_plan_with_hints(
-                &ast,
-                &fixture.ark_dory_proof,
-                &fixture.verifier_setup,
-                fixture.joint_commitment,
-                &fixture.combine_commitments,
-                &fixture.combine_coeffs,
-                &fixture.non_input_base_hints,
-                fixture.pairing_boundary.clone(),
-                fixture.joint_commitment_fq12,
-            )
-            .expect("instance plan derivation must succeed");
-
-            // Sanity: the untampered proof verifies (show error on failure).
-            {
-                let verifier = RecursionVerifier::<Fq>::new(derived.verifier_input.clone());
-                let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
-                let hyrax_verifier_setup =
-                    <HyraxPCS as CommitmentScheme>::setup_verifier(&fixture.hyrax_prover_setup);
-                let res = verifier.verify::<Blake2bTranscript, HyraxPCS>(
-                    &fixture.recursion_proof,
-                    &mut transcript,
-                    &fixture.recursion_proof.dense_commitment,
-                    &hyrax_verifier_setup,
-                );
-                assert!(
-                    matches!(res, Ok(true)),
-                    "untampered verify failed (g1_fused={g1_fused}, g2_fused={g2_fused}): {res:?}"
-                );
-            }
-
-            // Tamper with the externally visible pairing RHS (payload-style attack).
-            let mut bad_input = derived.verifier_input;
-            bad_input.pairing_boundary.rhs += Fq12::one();
-
-            assert!(
-            !verify_with_input(&fixture, bad_input),
-            "wiring/boundary constraints must bind pairing boundary RHS (g1_fused={g1_fused}, g2_fused={g2_fused})"
-        );
-        }
-    }
-}
-
-#[test]
-#[serial]
-fn wiring_rejects_tampered_non_input_base_hint() {
-    for g1_fused in [false, true] {
-        for g2_fused in [false, true] {
-            set_gt_fused_end_to_end(false);
-            set_g1_fused_wiring_end_to_end(g1_fused);
-            set_g2_fused_wiring_end_to_end(g2_fused);
-            let fixture = build_fixture();
-
-            // Ensure we have at least one non-input GTExp base hint to tamper.
-            let mut bad_hints = fixture.non_input_base_hints.clone();
-            let mut tampered = false;
-            for h in bad_hints.gt_exp_base_hints.iter_mut() {
-                if let Some(v) = h.as_mut() {
-                    *v += Fq12::one();
-                    tampered = true;
-                    break;
-                }
-            }
-            assert!(
-        tampered,
-        "test requires at least one non-input GTExp base hint (otherwise it does not exercise the wiring path)"
-    );
-
-            // Build symbolic AST (verifier side).
-            let mut sym_transcript = fixture.stage8_pre_transcript.clone();
-            let ast = <DoryCommitmentScheme as RecursionExt<Fr>>::build_symbolic_ast(
-                &fixture.dory_proof,
-                &fixture.verifier_setup,
-                &mut sym_transcript,
-                &fixture.opening_point,
-                &fixture.joint_claim,
-                &fixture.joint_commitment,
-            )
-            .expect("symbolic AST reconstruction must succeed");
-
-            let derived = derive_plan_with_hints(
-                &ast,
-                &fixture.ark_dory_proof,
-                &fixture.verifier_setup,
-                fixture.joint_commitment,
-                &fixture.combine_commitments,
-                &fixture.combine_coeffs,
-                &bad_hints,
-                fixture.pairing_boundary.clone(),
-                fixture.joint_commitment_fq12,
-            )
-            .expect("instance plan derivation must succeed");
-
-            assert!(
-                !verify_with_input(&fixture, derived.verifier_input),
-                "tampered non-input base hints must not verify (g1_fused={g1_fused}, g2_fused={g2_fused})"
-            );
-        }
-    }
-}
-
-#[test]
-#[serial]
-fn wiring_rejects_tampered_pairing_boundary_rhs_fused() {
-    set_gt_fused_end_to_end(true);
-    set_g1_fused_wiring_end_to_end(false);
-    set_g2_fused_wiring_end_to_end(false);
     let fixture = build_fixture();
 
     // Build symbolic AST (verifier side).
@@ -376,22 +221,17 @@ fn wiring_rejects_tampered_pairing_boundary_rhs_fused() {
 
     // Sanity: the untampered proof verifies (show error on failure).
     {
+        let verifier = RecursionVerifier::<Fq>::new(derived.verifier_input.clone());
+        let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
         let hyrax_verifier_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&fixture.hyrax_prover_setup);
-        let res = {
-            let verifier = RecursionVerifier::<Fq>::new(derived.verifier_input.clone());
-            let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
-            verifier.verify::<Blake2bTranscript, HyraxPCS>(
-                &fixture.recursion_proof,
-                &mut transcript,
-                &fixture.recursion_proof.dense_commitment,
-                &hyrax_verifier_setup,
-            )
-        };
-        assert!(
-            matches!(res, Ok(true)),
-            "untampered fused verify failed: {res:?}"
+        let res = verifier.verify::<Blake2bTranscript, HyraxPCS>(
+            &fixture.recursion_proof,
+            &mut transcript,
+            &fixture.recursion_proof.dense_commitment,
+            &hyrax_verifier_setup,
         );
+        assert!(matches!(res, Ok(true)), "untampered verify failed: {res:?}");
     }
 
     // Tamper with the externally visible pairing RHS (payload-style attack).
@@ -400,16 +240,13 @@ fn wiring_rejects_tampered_pairing_boundary_rhs_fused() {
 
     assert!(
         !verify_with_input(&fixture, bad_input),
-        "fused GT wiring/boundary constraints must bind pairing boundary RHS"
+        "wiring/boundary constraints must bind pairing boundary RHS"
     );
 }
 
 #[test]
 #[serial]
-fn wiring_rejects_tampered_non_input_base_hint_fused() {
-    set_gt_fused_end_to_end(true);
-    set_g1_fused_wiring_end_to_end(false);
-    set_g2_fused_wiring_end_to_end(false);
+fn wiring_rejects_tampered_non_input_base_hint() {
     let fixture = build_fixture();
 
     // Ensure we have at least one non-input GTExp base hint to tamper.
@@ -454,6 +291,6 @@ fn wiring_rejects_tampered_non_input_base_hint_fused() {
 
     assert!(
         !verify_with_input(&fixture, derived.verifier_input),
-        "tampered non-input base hints must not verify (fused GT mode)"
+        "tampered non-input base hints must not verify"
     );
 }

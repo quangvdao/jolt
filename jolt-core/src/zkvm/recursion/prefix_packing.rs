@@ -189,49 +189,13 @@ impl PrefixPackingLayout {
             .iter()
             .any(|ct| matches!(ct, ConstraintType::G2Add));
 
-        if enable_gt_fused_end_to_end
-            && !has_gt
-            && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
-            && !(enable_g1_add_fused_end_to_end && has_g1_add)
-            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
-            && !(enable_g2_add_fused_end_to_end && has_g2_add)
-        {
-            return Self::from_constraint_types(constraint_types);
-        }
-        if enable_g1_scalar_mul_fused_end_to_end
-            && !has_g1_smul
-            && !(enable_gt_fused_end_to_end && has_gt)
-            && !(enable_g1_add_fused_end_to_end && has_g1_add)
-            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
-            && !(enable_g2_add_fused_end_to_end && has_g2_add)
-        {
-            return Self::from_constraint_types(constraint_types);
-        }
-        if enable_g1_add_fused_end_to_end
-            && !has_g1_add
-            && !(enable_gt_fused_end_to_end && has_gt)
-            && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
-            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
-            && !(enable_g2_add_fused_end_to_end && has_g2_add)
-        {
-            return Self::from_constraint_types(constraint_types);
-        }
-        if enable_g2_scalar_mul_fused_end_to_end
-            && !has_g2_smul
-            && !(enable_gt_fused_end_to_end && has_gt)
-            && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
-            && !(enable_g1_add_fused_end_to_end && has_g1_add)
-            && !(enable_g2_add_fused_end_to_end && has_g2_add)
-        {
-            return Self::from_constraint_types(constraint_types);
-        }
-        if enable_g2_add_fused_end_to_end
-            && !has_g2_add
-            && !(enable_gt_fused_end_to_end && has_gt)
-            && !(enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
-            && !(enable_g1_add_fused_end_to_end && has_g1_add)
-            && !(enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
-        {
+        // If none of the requested fused families are actually present, fall back to legacy packing.
+        let will_fuse_any = (enable_gt_fused_end_to_end && has_gt)
+            || (enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
+            || (enable_g1_add_fused_end_to_end && has_g1_add)
+            || (enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
+            || (enable_g2_add_fused_end_to_end && has_g2_add);
+        if !will_fuse_any {
             return Self::from_constraint_types(constraint_types);
         }
 
@@ -280,7 +244,8 @@ impl PrefixPackingLayout {
 
         // Collect all committed polynomial "rows" with their native var counts.
         // In fused mode(s), we skip per-instance rows for those families and append fixed fused rows instead.
-        let mut polys: Vec<(usize, PolyType, bool, bool, bool, bool, bool, usize)> = Vec::new();
+        type PolySpec = (usize, PolyType, bool, bool, bool, bool, bool, usize);
+        let mut polys: Vec<PolySpec> = Vec::new();
         for (constraint_idx, ct) in constraint_types.iter().enumerate() {
             if enable_gt_fused_end_to_end
                 && matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul)

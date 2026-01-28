@@ -33,9 +33,10 @@ use crate::{
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
     zkvm::recursion::gt::{
-        exponentiation::GtExpWitness,
         indexing::{k_exp, k_gt, num_gt_constraints_padded},
-        shift::{eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle},
+        types::{
+            eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle, GtExpWitness,
+        },
     },
     zkvm::witness::VirtualPolynomial,
 };

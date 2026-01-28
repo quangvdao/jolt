@@ -41,31 +41,6 @@ type HyraxPCS = crate::zkvm::recursion::prover::HyraxPCS;
 /// re-verifying base stages 1–7, then verifies this recursion SNARK proof.
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RecursionArtifact<FS: Transcript> {
-    /// Whether this recursion artifact uses the fused-GT end-to-end recursion protocol.
-    ///
-    /// This must be carried explicitly because in-guest verification does not have a reliable
-    /// environment-variable channel.
-    pub enable_gt_fused_end_to_end: bool,
-    /// Whether this recursion artifact uses the fused-G1-scalar-mul end-to-end recursion protocol.
-    ///
-    /// This must be carried explicitly because in-guest verification does not have a reliable
-    /// environment-variable channel.
-    pub enable_g1_scalar_mul_fused_end_to_end: bool,
-    /// Whether this recursion artifact uses the **fully fused G1 wiring** end-to-end recursion protocol.
-    ///
-    /// This must be carried explicitly because in-guest verification does not have a reliable
-    /// environment-variable channel.
-    pub enable_g1_fused_wiring_end_to_end: bool,
-    /// Whether this recursion artifact uses the fused-G2-scalar-mul end-to-end recursion protocol.
-    ///
-    /// This must be carried explicitly because in-guest verification does not have a reliable
-    /// environment-variable channel.
-    pub enable_g2_scalar_mul_fused_end_to_end: bool,
-    /// Whether this recursion artifact uses the **fully fused G2 wiring** end-to-end recursion protocol.
-    ///
-    /// This must be carried explicitly because in-guest verification does not have a reliable
-    /// environment-variable channel.
-    pub enable_g2_fused_wiring_end_to_end: bool,
     /// Hint for Stage 8 combine_commitments offloading (the combined GT element).
     ///
     /// This is **required** by the verifier: if absent, verification rejects.
@@ -80,13 +55,6 @@ pub struct RecursionArtifact<FS: Transcript> {
 
 impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.enable_gt_fused_end_to_end.guest_serialize(w)?;
-        self.enable_g1_scalar_mul_fused_end_to_end
-            .guest_serialize(w)?;
-        self.enable_g1_fused_wiring_end_to_end.guest_serialize(w)?;
-        self.enable_g2_scalar_mul_fused_end_to_end
-            .guest_serialize(w)?;
-        self.enable_g2_fused_wiring_end_to_end.guest_serialize(w)?;
         self.stage8_combine_hint.guest_serialize(w)?;
         self.pairing_boundary.guest_serialize(w)?;
         self.non_input_base_hints.guest_serialize(w)?;
@@ -98,11 +66,6 @@ impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
 impl<FS: Transcript> GuestDeserialize for RecursionArtifact<FS> {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
-            enable_gt_fused_end_to_end: bool::guest_deserialize(r)?,
-            enable_g1_scalar_mul_fused_end_to_end: bool::guest_deserialize(r)?,
-            enable_g1_fused_wiring_end_to_end: bool::guest_deserialize(r)?,
-            enable_g2_scalar_mul_fused_end_to_end: bool::guest_deserialize(r)?,
-            enable_g2_fused_wiring_end_to_end: bool::guest_deserialize(r)?,
             stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
             pairing_boundary: PairingBoundary::guest_deserialize(r)?,
             non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
@@ -141,34 +104,6 @@ pub fn prove_recursion<FS: Transcript>(
 
     // Base stages 1..7 (no Stage 8 PCS verification).
     v.verify_stages_1_to_7()?;
-
-    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-        .ok()
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false);
-    let enable_g1_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g1_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g1_fused_wiring_end_to_end;
-
-    let enable_g2_fused_wiring_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_FUSED_WIRING_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
-    let enable_g2_scalar_mul_fused_end_to_end =
-        std::env::var("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-            || enable_g2_fused_wiring_end_to_end;
 
     // Ensure Dory globals match the proof layout before any Stage 8 replay / witness generation.
     let _dory_globals_guard = if v.proof.program_mode == ProgramMode::Committed {
@@ -219,7 +154,7 @@ pub fn prove_recursion<FS: Transcript>(
         ));
     }
     for (poly, commitment) in all_polys.into_iter().zip(v.proof.commitments.iter()) {
-        commitments_map.insert(poly, commitment.clone());
+        commitments_map.insert(poly, *commitment);
     }
 
     // Advice commitments (only if they were folded into the Stage 8 batch).
@@ -233,12 +168,12 @@ pub fn prove_recursion<FS: Transcript>(
         .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice);
     if needs_trusted_advice {
         if let Some(ref commitment) = v.trusted_advice_commitment {
-            commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+            commitments_map.insert(CommittedPolynomial::TrustedAdvice, *commitment);
         }
     }
     if needs_untrusted_advice {
         if let Some(ref commitment) = v.proof.untrusted_advice_commitment {
-            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, *commitment);
         }
     }
 
@@ -248,7 +183,7 @@ pub fn prove_recursion<FS: Transcript>(
         for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
             commitments_map
                 .entry(CommittedPolynomial::BytecodeChunk(idx))
-                .or_insert_with(|| commitment.clone());
+                .or_insert(*commitment);
         }
         if stage8_snapshot
             .polynomial_claims
@@ -257,7 +192,7 @@ pub fn prove_recursion<FS: Transcript>(
         {
             commitments_map.insert(
                 CommittedPolynomial::ProgramImageInit,
-                committed.program_image_commitment.clone(),
+                committed.program_image_commitment,
             );
         }
     }
@@ -293,11 +228,6 @@ pub fn prove_recursion<FS: Transcript>(
     }
 
     Ok(RecursionArtifact {
-        enable_gt_fused_end_to_end,
-        enable_g1_scalar_mul_fused_end_to_end,
-        enable_g1_fused_wiring_end_to_end,
-        enable_g2_scalar_mul_fused_end_to_end,
-        enable_g2_fused_wiring_end_to_end,
         stage8_combine_hint,
         pairing_boundary,
         non_input_base_hints,
@@ -363,7 +293,7 @@ pub fn verify_recursion<FS: Transcript>(
         .into_iter()
         .zip(v.proof.commitments.iter())
     {
-        commitments_map.insert(poly, commitment.clone());
+        commitments_map.insert(poly, *commitment);
     }
     if let Some(ref commitment) = v.trusted_advice_commitment {
         if dory_snap
@@ -371,7 +301,7 @@ pub fn verify_recursion<FS: Transcript>(
             .iter()
             .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
         {
-            commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+            commitments_map.insert(CommittedPolynomial::TrustedAdvice, *commitment);
         }
     }
     if let Some(ref commitment) = v.proof.untrusted_advice_commitment {
@@ -380,7 +310,7 @@ pub fn verify_recursion<FS: Transcript>(
             .iter()
             .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
         {
-            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, *commitment);
         }
     }
     if v.proof.program_mode == ProgramMode::Committed {
@@ -388,7 +318,7 @@ pub fn verify_recursion<FS: Transcript>(
         for (idx, commitment) in committed.bytecode_commitments.iter().enumerate() {
             commitments_map
                 .entry(CommittedPolynomial::BytecodeChunk(idx))
-                .or_insert_with(|| commitment.clone());
+                .or_insert(*commitment);
         }
         if dory_snap
             .polynomial_claims
@@ -397,7 +327,7 @@ pub fn verify_recursion<FS: Transcript>(
         {
             commitments_map.insert(
                 CommittedPolynomial::ProgramImageInit,
-                committed.program_image_commitment.clone(),
+                committed.program_image_commitment,
             );
         }
     }
@@ -412,10 +342,9 @@ pub fn verify_recursion<FS: Transcript>(
         .map(|(poly, coeff)| {
             (
                 coeff,
-                commitments_map
+                *commitments_map
                     .get(&poly)
-                    .expect("missing commitment for polynomial in batch")
-                    .clone(),
+                    .expect("missing commitment for polynomial in batch"),
             )
         })
         .unzip();
@@ -482,15 +411,7 @@ pub fn verify_recursion<FS: Transcript>(
     // Verify recursion SNARK (use cached Hyrax setup from preprocessing).
     let hyrax_verifier_setup = &preprocessing.hyrax_recursion_setup;
 
-    let mut verifier_input = plan.verifier_input;
-    verifier_input.enable_gt_fused_end_to_end = recursion.enable_gt_fused_end_to_end;
-    verifier_input.enable_g1_scalar_mul_fused_end_to_end =
-        recursion.enable_g1_scalar_mul_fused_end_to_end;
-    verifier_input.enable_g1_fused_wiring_end_to_end = recursion.enable_g1_fused_wiring_end_to_end;
-    verifier_input.enable_g2_scalar_mul_fused_end_to_end =
-        recursion.enable_g2_scalar_mul_fused_end_to_end;
-    verifier_input.enable_g2_fused_wiring_end_to_end = recursion.enable_g2_fused_wiring_end_to_end;
-    let recursion_verifier = RecursionVerifier::<Fq>::new(verifier_input);
+    let recursion_verifier = RecursionVerifier::<Fq>::new(plan.verifier_input);
     start_cycle_tracking("verify_recursion_snark_verify_total");
     let ok = recursion_verifier
         .verify::<FS, HyraxPCS>(

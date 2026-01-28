@@ -31,7 +31,7 @@ use crate::{
     zkvm::{
         recursion::{
             constraints::system::{index_to_binary, G2AddNative},
-            g2::addition::G2AddValues,
+            g2::types::G2AddValues,
         },
         witness::{G2AddTerm, TermEnum, VirtualPolynomial},
     },

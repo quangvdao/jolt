@@ -30,8 +30,8 @@ use crate::{
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{index_to_binary, ConstraintLocator, ConstraintType},
     zkvm::recursion::curve::{Bn254Recursion, RecursionCurve},
-    zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness},
     zkvm::recursion::gt::indexing::{k_exp, k_gt, num_gt_constraints_padded},
+    zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness},
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -515,8 +515,8 @@ mod tests {
         // - 16 GTMul => padded 16 => k_mul = 4
         // => k_gt = 4, dummy = 2
         let mut constraint_types = Vec::new();
-        constraint_types.extend(core::iter::repeat(ConstraintType::GtExp).take(3));
-        constraint_types.extend(core::iter::repeat(ConstraintType::GtMul).take(16));
+        constraint_types.extend(std::iter::repeat_n(ConstraintType::GtExp, 3));
+        constraint_types.extend(std::iter::repeat_n(ConstraintType::GtMul, 16));
 
         let params = FusedGtExpParams::from_constraint_types(&constraint_types);
         assert_eq!(params.num_c_vars, k_gt(&constraint_types));
@@ -581,7 +581,7 @@ mod tests {
         // For each GTExp local index, rho must be replicated across dummy low bits.
         // Embed: c = d + (local << dummy), for d in [0..2^dummy).
         for local in 0..3usize {
-            let c0 = 0 + (local << dummy);
+            let c0 = local << dummy;
             let c1 = 1 + (local << dummy);
             let c2 = 2 + (local << dummy);
             let c3 = 3 + (local << dummy);

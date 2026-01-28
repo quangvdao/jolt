@@ -42,7 +42,7 @@ impl CombineDag {
         let mut layers = Vec::new();
         while current.len() > 1 {
             let mut muls = Vec::with_capacity(current.len() / 2);
-            let mut next = Vec::with_capacity((current.len() + 1) / 2);
+            let mut next = Vec::with_capacity(current.len().div_ceil(2));
 
             for chunk in current.chunks(2) {
                 if let [a, b] = chunk {

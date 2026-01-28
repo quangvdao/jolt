@@ -27,8 +27,8 @@ use crate::{
     },
     transcripts::Transcript,
     zkvm::recursion::constraints::system::{index_to_binary, G1ScalarMulNative},
-    zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs,
-    zkvm::recursion::gt::shift::{
+    zkvm::recursion::g1::types::G1ScalarMulPublicInputs,
+    zkvm::recursion::gt::types::{
         eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
     },
     zkvm::witness::VirtualPolynomial,

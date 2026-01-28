@@ -5,8 +5,8 @@
 //! from the AST instance plan when needed.
 
 use super::{
-    constraints::system::ConstraintType, g1::scalar_multiplication::G1ScalarMulPublicInputs,
-    g2::scalar_multiplication::G2ScalarMulPublicInputs, gt::exponentiation::GtExpPublicInputs,
+    constraints::system::ConstraintType, g1::types::G1ScalarMulPublicInputs,
+    g2::types::G2ScalarMulPublicInputs, gt::types::GtExpPublicInputs,
 };
 
 /// Constraint metadata for the recursion verifier (internal; not serialized in the proof).

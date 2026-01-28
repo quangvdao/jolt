@@ -1,6 +1,6 @@
 //! Fused GT wiring (copy/boundary) sumcheck (sound, split-k aware).
 //!
-//! This is the GT wiring backend used when `JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END=1`.
+//! This is the GT wiring backend used in fused-only recursion.
 //! It enforces that GT producer outputs match GT consumer inputs (plus boundary constants)
 //! according to the verifier-derived `WiringPlan` edge list.
 //!
@@ -67,7 +67,7 @@ use crate::{
             constraints::system::{index_to_binary, ConstraintSystem},
             curve::{Bn254Recursion, RecursionCurve},
             gt::indexing::{k_exp, k_gt, k_mul},
-            gt::shift::{eq_lsb_evals, eq_lsb_mle},
+            gt::types::{eq_lsb_evals, eq_lsb_mle},
             verifier::RecursionVerifierInput,
             wiring_plan::{GtConsumer, GtProducer, GtWiringEdge},
         },
@@ -324,7 +324,7 @@ impl<T: Transcript> FusedWiringGtProver<T> {
                 // We derive `s_out` from public inputs to match the verifier:
                 // s_out = min(127, ceil(bits_len/2)).
                 let max_s = (1 << STEP_VARS) - 1;
-                let digits_len = (cs.gt_exp_public_inputs[i].scalar_bits.len() + 1) / 2;
+                let digits_len = cs.gt_exp_public_inputs[i].scalar_bits.len().div_ceil(2);
                 let s_out = digits_len.min(max_s);
                 let s_bits: Vec<<Fq as JoltField>::Challenge> = (0..STEP_VARS)
                     .map(|b| {
@@ -833,7 +833,7 @@ impl FusedWiringGtVerifier {
             .gt_exp_public_inputs
             .iter()
             .map(|p| {
-                let digits_len = (p.scalar_bits.len() + 1) / 2;
+                let digits_len = p.scalar_bits.len().div_ceil(2);
                 let max_s = (1 << STEP_VARS) - 1;
                 digits_len.min(max_s)
             })

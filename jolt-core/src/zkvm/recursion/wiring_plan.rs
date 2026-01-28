@@ -1350,8 +1350,9 @@ pub fn derive_wiring_plan(
     let (lhs, rhs) = ast
         .constraints
         .iter()
-        .find_map(|c| match c {
-            AstConstraint::AssertEq { lhs, rhs, .. } => Some((*lhs, *rhs)),
+        .find(|c| matches!(c, AstConstraint::AssertEq { .. }))
+        .map(|c| match c {
+            AstConstraint::AssertEq { lhs, rhs, .. } => (*lhs, *rhs),
         })
         .ok_or(ProofVerifyError::default())?;
 
@@ -1437,7 +1438,7 @@ pub fn derive_wiring_plan(
             .collect();
         let mut mul_idx = 0usize;
         while nodes.len() > 1 {
-            let mut next: Vec<GtProducer> = Vec::with_capacity((nodes.len() + 1) / 2);
+            let mut next: Vec<GtProducer> = Vec::with_capacity(nodes.len().div_ceil(2));
             for chunk in nodes.chunks(2) {
                 if let [a, b] = chunk {
                     let inst = combine_mul_start + mul_idx;

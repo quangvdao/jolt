@@ -3,22 +3,17 @@
 //! This module contains sumcheck protocols for G1 group operations:
 //! - Addition: Proves G1 point addition constraints
 //! - Scalar multiplication: Proves G1 scalar multiplication constraints
-//! - Shift scalar multiplication: Shift sumchecks for scalar multiplication traces
 
-pub mod addition;
 pub mod fused_addition;
 pub mod fused_scalar_multiplication;
 pub mod fused_wiring;
 pub mod indexing;
-pub mod scalar_multiplication;
-pub mod shift;
-pub mod wiring;
+pub mod types;
 
-pub use addition::{G1AddProver, G1AddVerifier};
-pub use fused_wiring::{FusedWiringG1Prover, FusedWiringG1Verifier};
-pub use scalar_multiplication::{G1ScalarMulProver, G1ScalarMulPublicInputs, G1ScalarMulVerifier};
-pub use shift::{
-    g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG1ScalarMulVerifier,
-    ShiftG2ScalarMulProver, ShiftG2ScalarMulVerifier, ShiftScalarMulParams,
+pub use fused_addition::{FusedG1AddParams, FusedG1AddProver, FusedG1AddVerifier};
+pub use fused_scalar_multiplication::{
+    FusedG1ScalarMulProver, FusedG1ScalarMulVerifier, FusedShiftG1ScalarMulProver,
+    FusedShiftG1ScalarMulVerifier,
 };
-pub use wiring::{WiringG1Prover, WiringG1Verifier};
+pub use fused_wiring::{FusedWiringG1Prover, FusedWiringG1Verifier};
+pub use types::{G1AddValues, G1ScalarMulPublicInputs};

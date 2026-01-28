@@ -41,6 +41,16 @@ fn set_gt_fused_end_to_end(enabled: bool) {
     );
 }
 
+fn set_g1_fused_wiring_end_to_end(enabled: bool) {
+    std::env::set_var(
+        "JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END",
+        if enabled { "1" } else { "0" },
+    );
+    // Keep the scalar-mul-fused-only flag off in these tests; the full G1 fused wiring flag
+    // implies it where needed.
+    std::env::set_var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END", "0");
+}
+
 struct RecursionFixture {
     // Stage-8 artifacts
     dory_proof: <DoryCommitmentScheme as CommitmentScheme>::Proof,
@@ -201,64 +211,72 @@ fn verify_with_input(
 #[test]
 #[serial]
 fn wiring_rejects_tampered_pairing_boundary_rhs() {
-    set_gt_fused_end_to_end(false);
-    let fixture = build_fixture();
+    for g1_fused in [false, true] {
+        set_gt_fused_end_to_end(false);
+        set_g1_fused_wiring_end_to_end(g1_fused);
+        let fixture = build_fixture();
 
-    // Build symbolic AST (verifier side).
-    let mut sym_transcript = fixture.stage8_pre_transcript.clone();
-    let ast = <DoryCommitmentScheme as RecursionExt<Fr>>::build_symbolic_ast(
-        &fixture.dory_proof,
-        &fixture.verifier_setup,
-        &mut sym_transcript,
-        &fixture.opening_point,
-        &fixture.joint_claim,
-        &fixture.joint_commitment,
-    )
-    .expect("symbolic AST reconstruction must succeed");
+        // Build symbolic AST (verifier side).
+        let mut sym_transcript = fixture.stage8_pre_transcript.clone();
+        let ast = <DoryCommitmentScheme as RecursionExt<Fr>>::build_symbolic_ast(
+            &fixture.dory_proof,
+            &fixture.verifier_setup,
+            &mut sym_transcript,
+            &fixture.opening_point,
+            &fixture.joint_claim,
+            &fixture.joint_commitment,
+        )
+        .expect("symbolic AST reconstruction must succeed");
 
-    let derived = derive_plan_with_hints(
-        &ast,
-        &fixture.ark_dory_proof,
-        &fixture.verifier_setup,
-        fixture.joint_commitment,
-        &fixture.combine_commitments,
-        &fixture.combine_coeffs,
-        &fixture.non_input_base_hints,
-        fixture.pairing_boundary.clone(),
-        fixture.joint_commitment_fq12,
-    )
-    .expect("instance plan derivation must succeed");
+        let derived = derive_plan_with_hints(
+            &ast,
+            &fixture.ark_dory_proof,
+            &fixture.verifier_setup,
+            fixture.joint_commitment,
+            &fixture.combine_commitments,
+            &fixture.combine_coeffs,
+            &fixture.non_input_base_hints,
+            fixture.pairing_boundary.clone(),
+            fixture.joint_commitment_fq12,
+        )
+        .expect("instance plan derivation must succeed");
 
-    // Sanity: the untampered proof verifies (show error on failure).
-    {
-        let verifier = RecursionVerifier::<Fq>::new(derived.verifier_input.clone());
-        let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
-        let hyrax_verifier_setup =
-            <HyraxPCS as CommitmentScheme>::setup_verifier(&fixture.hyrax_prover_setup);
-        let res = verifier.verify::<Blake2bTranscript, HyraxPCS>(
-            &fixture.recursion_proof,
-            &mut transcript,
-            &fixture.recursion_proof.dense_commitment,
-            &hyrax_verifier_setup,
+        // Sanity: the untampered proof verifies (show error on failure).
+        {
+            let verifier = RecursionVerifier::<Fq>::new(derived.verifier_input.clone());
+            let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
+            let hyrax_verifier_setup =
+                <HyraxPCS as CommitmentScheme>::setup_verifier(&fixture.hyrax_prover_setup);
+            let res = verifier.verify::<Blake2bTranscript, HyraxPCS>(
+                &fixture.recursion_proof,
+                &mut transcript,
+                &fixture.recursion_proof.dense_commitment,
+                &hyrax_verifier_setup,
+            );
+            assert!(
+                matches!(res, Ok(true)),
+                "untampered verify failed (g1_fused={g1_fused}): {res:?}"
+            );
+        }
+
+        // Tamper with the externally visible pairing RHS (payload-style attack).
+        let mut bad_input = derived.verifier_input;
+        bad_input.pairing_boundary.rhs += Fq12::one();
+
+        assert!(
+            !verify_with_input(&fixture, bad_input),
+            "wiring/boundary constraints must bind pairing boundary RHS (g1_fused={g1_fused})"
         );
-        assert!(matches!(res, Ok(true)), "untampered verify failed: {res:?}");
     }
-
-    // Tamper with the externally visible pairing RHS (payload-style attack).
-    let mut bad_input = derived.verifier_input;
-    bad_input.pairing_boundary.rhs += Fq12::one();
-
-    assert!(
-        !verify_with_input(&fixture, bad_input),
-        "wiring/boundary constraints must bind pairing boundary RHS"
-    );
 }
 
 #[test]
 #[serial]
 fn wiring_rejects_tampered_non_input_base_hint() {
-    set_gt_fused_end_to_end(false);
-    let fixture = build_fixture();
+    for g1_fused in [false, true] {
+        set_gt_fused_end_to_end(false);
+        set_g1_fused_wiring_end_to_end(g1_fused);
+        let fixture = build_fixture();
 
     // Ensure we have at least one non-input GTExp base hint to tamper.
     let mut bad_hints = fixture.non_input_base_hints.clone();
@@ -300,16 +318,18 @@ fn wiring_rejects_tampered_non_input_base_hint() {
     )
     .expect("instance plan derivation must succeed");
 
-    assert!(
-        !verify_with_input(&fixture, derived.verifier_input),
-        "tampered non-input base hints must not verify"
-    );
+        assert!(
+            !verify_with_input(&fixture, derived.verifier_input),
+            "tampered non-input base hints must not verify (g1_fused={g1_fused})"
+        );
+    }
 }
 
 #[test]
 #[serial]
 fn wiring_rejects_tampered_pairing_boundary_rhs_fused() {
     set_gt_fused_end_to_end(true);
+    set_g1_fused_wiring_end_to_end(false);
     let fixture = build_fixture();
 
     // Build symbolic AST (verifier side).
@@ -371,6 +391,7 @@ fn wiring_rejects_tampered_pairing_boundary_rhs_fused() {
 #[serial]
 fn wiring_rejects_tampered_non_input_base_hint_fused() {
     set_gt_fused_end_to_end(true);
+    set_g1_fused_wiring_end_to_end(false);
     let fixture = build_fixture();
 
     // Ensure we have at least one non-input GTExp base hint to tamper.

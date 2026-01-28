@@ -114,6 +114,14 @@ pub struct RecursionVerifierInput {
     /// This affects Stage 2 instance selection and packing layout; it must match the
     /// recursion artifact/proof being verified.
     pub enable_g1_scalar_mul_fused_end_to_end: bool,
+    /// Whether to use the **fully fused G1 wiring** end-to-end recursion protocol.
+    ///
+    /// When enabled, Stage 2 uses:
+    /// - fused G1ScalarMul (aligned over `k_g1`),
+    /// - fused G1Add, and
+    /// - fused G1 wiring backend,
+    /// and Stage 3 prefix packing uses fused G1Add rows (family-local `k_add`).
+    pub enable_g1_fused_wiring_end_to_end: bool,
     /// Number of variables in the constraint system
     pub num_vars: usize,
     /// Number of constraint variables (x variables) in the matrix
@@ -151,6 +159,8 @@ impl CanonicalSerialize for RecursionVerifierInput {
             .serialize_with_mode(&mut writer, compress)?;
         self.enable_g1_scalar_mul_fused_end_to_end
             .serialize_with_mode(&mut writer, compress)?;
+        self.enable_g1_fused_wiring_end_to_end
+            .serialize_with_mode(&mut writer, compress)?;
         self.num_vars.serialize_with_mode(&mut writer, compress)?;
         self.num_constraint_vars
             .serialize_with_mode(&mut writer, compress)?;
@@ -178,6 +188,9 @@ impl CanonicalSerialize for RecursionVerifierInput {
             + self.enable_gt_fused_end_to_end.serialized_size(compress)
             + self
                 .enable_g1_scalar_mul_fused_end_to_end
+                .serialized_size(compress)
+            + self
+                .enable_g1_fused_wiring_end_to_end
                 .serialized_size(compress)
             + self.num_vars.serialized_size(compress)
             + self.num_constraint_vars.serialized_size(compress)
@@ -217,6 +230,11 @@ impl CanonicalDeserialize for RecursionVerifierInput {
                 compress,
                 validate,
             )?,
+            enable_g1_fused_wiring_end_to_end: bool::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
             num_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_constraint_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_s_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
@@ -251,6 +269,8 @@ impl GuestSerialize for RecursionVerifierInput {
         self.enable_gt_fused_end_to_end.guest_serialize(w)?;
         self.enable_g1_scalar_mul_fused_end_to_end
             .guest_serialize(w)?;
+        self.enable_g1_fused_wiring_end_to_end
+            .guest_serialize(w)?;
         self.num_vars.guest_serialize(w)?;
         self.num_constraint_vars.guest_serialize(w)?;
         self.num_s_vars.guest_serialize(w)?;
@@ -272,6 +292,7 @@ impl GuestDeserialize for RecursionVerifierInput {
             constraint_types: Vec::guest_deserialize(r)?,
             enable_gt_fused_end_to_end: bool::guest_deserialize(r)?,
             enable_g1_scalar_mul_fused_end_to_end: bool::guest_deserialize(r)?,
+            enable_g1_fused_wiring_end_to_end: bool::guest_deserialize(r)?,
             num_vars: usize::guest_deserialize(r)?,
             num_constraint_vars: usize::guest_deserialize(r)?,
             num_s_vars: usize::guest_deserialize(r)?,
@@ -475,8 +496,10 @@ impl RecursionVerifier<Fq> {
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
         let enable_gt_fused_end_to_end = self.input.enable_gt_fused_end_to_end;
-        let enable_g1_scalar_mul_fused_end_to_end =
-            self.input.enable_g1_scalar_mul_fused_end_to_end;
+        let enable_g1_fused_wiring_end_to_end = self.input.enable_g1_fused_wiring_end_to_end;
+        let enable_g1_scalar_mul_fused_end_to_end = self.input.enable_g1_scalar_mul_fused_end_to_end
+            || enable_g1_fused_wiring_end_to_end;
+        let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
         let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
         let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
         let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
@@ -610,10 +633,16 @@ impl RecursionVerifier<Fq> {
 
         if num_g1_scalar_mul > 0 {
             if enable_g1_scalar_mul_fused_end_to_end {
+                let k_common = if enable_g1_fused_wiring_end_to_end {
+                    crate::zkvm::recursion::g1::indexing::k_g1(&self.input.constraint_types)
+                } else {
+                    crate::zkvm::recursion::g1::indexing::k_smul(&self.input.constraint_types)
+                };
                 if enable_shift_g1_scalar_mul {
                     verifiers.push(Box::new(
-                        crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulVerifier::new(
+                        crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulVerifier::new_with_k_common(
                             num_g1_scalar_mul,
+                            k_common,
                             transcript,
                         ),
                     ));
@@ -625,8 +654,9 @@ impl RecursionVerifier<Fq> {
                     "RecursionVerifierInput.g1_scalar_mul_public_inputs must match number of G1ScalarMul constraints"
                 );
                 verifiers.push(Box::new(
-                    crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedG1ScalarMulVerifier::new(
+                    crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedG1ScalarMulVerifier::new_with_k_common(
                         num_g1_scalar_mul,
+                        k_common,
                         self.input.g1_scalar_mul_public_inputs.clone(),
                         g1_scalar_mul_base_points,
                         transcript,
@@ -720,12 +750,21 @@ impl RecursionVerifier<Fq> {
 
         // G1 add
         if num_g1_add > 0 {
-            // NOTE: The fused G1Add verifier exists (see `g1::fused_addition`) but is intentionally
-            // NOT wired into the default verifier pipeline right now.
-            let params = G1AddParams::new(num_g1_add);
-            let spec = G1AddVerifierSpec::new(params);
-            let verifier = G1AddVerifier::from_spec(spec, g1_add_indices, transcript);
-            verifiers.push(Box::new(verifier));
+            if enable_g1_add_fused_end_to_end {
+                let params =
+                    crate::zkvm::recursion::g1::fused_addition::FusedG1AddParams::new(num_g1_add);
+                let verifier =
+                    crate::zkvm::recursion::g1::fused_addition::FusedG1AddVerifier::new(
+                        params,
+                        transcript,
+                    );
+                verifiers.push(Box::new(verifier));
+            } else {
+                let params = G1AddParams::new(num_g1_add);
+                let spec = G1AddVerifierSpec::new(params);
+                let verifier = G1AddVerifier::from_spec(spec, g1_add_indices, transcript);
+                verifiers.push(Box::new(verifier));
+            }
         }
 
         // G2 add
@@ -802,7 +841,16 @@ impl RecursionVerifier<Fq> {
                 }
             }
             if enable_wiring_g1 && !self.input.wiring.g1.is_empty() {
-                verifiers.push(Box::new(WiringG1Verifier::new(&self.input, transcript)));
+                if enable_g1_fused_wiring_end_to_end {
+                    verifiers.push(Box::new(
+                        crate::zkvm::recursion::g1::fused_wiring::FusedWiringG1Verifier::new(
+                            &self.input,
+                            transcript,
+                        ),
+                    ));
+                } else {
+                    verifiers.push(Box::new(WiringG1Verifier::new(&self.input, transcript)));
+                }
             }
             if enable_wiring_g2 && !self.input.wiring.g2.is_empty() {
                 verifiers.push(Box::new(WiringG2Verifier::new(&self.input, transcript)));
@@ -832,13 +880,19 @@ impl RecursionVerifier<Fq> {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Derive the public packing layout.
         let enable_gt_fused_end_to_end = self.input.enable_gt_fused_end_to_end;
-        let enable_g1_scalar_mul_fused_end_to_end =
-            self.input.enable_g1_scalar_mul_fused_end_to_end;
-        let layout = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+        let enable_g1_fused_wiring_end_to_end = self.input.enable_g1_fused_wiring_end_to_end;
+        let enable_g1_scalar_mul_fused_end_to_end = self.input.enable_g1_scalar_mul_fused_end_to_end
+            || enable_g1_fused_wiring_end_to_end;
+        let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
+        let layout = if enable_gt_fused_end_to_end
+            || enable_g1_scalar_mul_fused_end_to_end
+            || enable_g1_add_fused_end_to_end
+        {
             PrefixPackingLayout::from_constraint_types_fused(
                 &self.input.constraint_types,
                 enable_gt_fused_end_to_end,
                 enable_g1_scalar_mul_fused_end_to_end,
+                enable_g1_add_fused_end_to_end,
             )
         } else {
             PrefixPackingLayout::from_constraint_types(&self.input.constraint_types)
@@ -880,6 +934,7 @@ impl RecursionVerifier<Fq> {
             &self.input.gt_exp_public_inputs,
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
+            enable_g1_add_fused_end_to_end,
         );
         let num_poly_types = PolyType::NUM_TYPES;
 
@@ -926,6 +981,33 @@ impl RecursionVerifier<Fq> {
                 };
                 let (_, claim) =
                     accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
+                claim
+            } else if enable_g1_add_fused_end_to_end && entry.is_g1_add_fused {
+                let vp = match entry.poly_type {
+                    PolyType::G1AddXP => VirtualPolynomial::g1_add_xp_fused(),
+                    PolyType::G1AddYP => VirtualPolynomial::g1_add_yp_fused(),
+                    PolyType::G1AddPIndicator => VirtualPolynomial::g1_add_p_indicator_fused(),
+                    PolyType::G1AddXQ => VirtualPolynomial::g1_add_xq_fused(),
+                    PolyType::G1AddYQ => VirtualPolynomial::g1_add_yq_fused(),
+                    PolyType::G1AddQIndicator => VirtualPolynomial::g1_add_q_indicator_fused(),
+                    PolyType::G1AddXR => VirtualPolynomial::g1_add_xr_fused(),
+                    PolyType::G1AddYR => VirtualPolynomial::g1_add_yr_fused(),
+                    PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator_fused(),
+                    PolyType::G1AddLambda => VirtualPolynomial::g1_add_fused(
+                        crate::zkvm::witness::G1AddTerm::Lambda,
+                    ),
+                    PolyType::G1AddInvDeltaX => VirtualPolynomial::g1_add_fused(
+                        crate::zkvm::witness::G1AddTerm::InvDeltaX,
+                    ),
+                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add_fused(
+                        crate::zkvm::witness::G1AddTerm::IsDouble,
+                    ),
+                    PolyType::G1AddIsInverse => VirtualPolynomial::g1_add_fused(
+                        crate::zkvm::witness::G1AddTerm::IsInverse,
+                    ),
+                    _ => return Fq::zero(),
+                };
+                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1Add);
                 claim
             } else {
                 let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);

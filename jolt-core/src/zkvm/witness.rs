@@ -1751,6 +1751,33 @@ impl VirtualPolynomial {
     pub fn g1_add_fused(term: G1AddTerm) -> Self {
         Self::Recursion(RecursionPoly::G1AddFused { term })
     }
+    pub fn g1_add_xp_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::XP)
+    }
+    pub fn g1_add_yp_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::YP)
+    }
+    pub fn g1_add_p_indicator_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::PIndicator)
+    }
+    pub fn g1_add_xq_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::XQ)
+    }
+    pub fn g1_add_yq_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::YQ)
+    }
+    pub fn g1_add_q_indicator_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::QIndicator)
+    }
+    pub fn g1_add_xr_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::XR)
+    }
+    pub fn g1_add_yr_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::YR)
+    }
+    pub fn g1_add_r_indicator_fused() -> Self {
+        Self::g1_add_fused(G1AddTerm::RIndicator)
+    }
     pub fn g1_add_xp(i: usize) -> Self {
         Self::Recursion(RecursionPoly::G1Add {
             term: G1AddTerm::XP,

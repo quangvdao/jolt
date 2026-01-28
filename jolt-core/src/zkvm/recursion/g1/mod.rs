@@ -8,6 +8,8 @@
 pub mod addition;
 pub mod fused_addition;
 pub mod fused_scalar_multiplication;
+pub mod fused_wiring;
+pub mod indexing;
 pub mod scalar_multiplication;
 pub mod shift;
 pub mod wiring;
@@ -18,4 +20,5 @@ pub use shift::{
     g1_shift_params, g2_shift_params, ShiftG1ScalarMulProver, ShiftG1ScalarMulVerifier,
     ShiftG2ScalarMulProver, ShiftG2ScalarMulVerifier, ShiftScalarMulParams,
 };
+pub use fused_wiring::{FusedWiringG1Prover, FusedWiringG1Verifier};
 pub use wiring::{WiringG1Prover, WiringG1Verifier};

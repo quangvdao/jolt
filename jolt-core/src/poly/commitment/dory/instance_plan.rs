@@ -603,17 +603,28 @@ pub fn derive_plan_with_hints(
         .ok()
         .map(|v| v != "0" && v.to_lowercase() != "false")
         .unwrap_or(false);
+    let enable_g1_fused_wiring_end_to_end =
+        std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
     let enable_g1_scalar_mul_fused_end_to_end =
         std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || enable_g1_fused_wiring_end_to_end;
+    let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
 
-    let dense_num_vars = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+    let dense_num_vars = if enable_gt_fused_end_to_end
+        || enable_g1_scalar_mul_fused_end_to_end
+        || enable_g1_add_fused_end_to_end
+    {
         PrefixPackingLayout::from_constraint_types_fused(
             &constraint_types,
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
+            enable_g1_add_fused_end_to_end,
         )
         .num_dense_vars
     } else {
@@ -634,6 +645,7 @@ pub fn derive_plan_with_hints(
             constraint_types,
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
+            enable_g1_fused_wiring_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,
@@ -791,18 +803,29 @@ pub fn derive_from_dory_ast(
         .ok()
         .map(|v| v != "0" && v.to_lowercase() != "false")
         .unwrap_or(false);
+    let enable_g1_fused_wiring_end_to_end =
+        std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
     let enable_g1_scalar_mul_fused_end_to_end =
         std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || enable_g1_fused_wiring_end_to_end;
+    let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
 
     // Dense polynomial var count (needed for Hyrax setup bounds).
-    let dense_num_vars = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+    let dense_num_vars = if enable_gt_fused_end_to_end
+        || enable_g1_scalar_mul_fused_end_to_end
+        || enable_g1_add_fused_end_to_end
+    {
         PrefixPackingLayout::from_constraint_types_fused(
             &constraint_types,
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
+            enable_g1_add_fused_end_to_end,
         )
         .num_dense_vars
     } else {
@@ -907,6 +930,7 @@ pub fn derive_from_dory_ast(
             constraint_types,
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
+            enable_g1_fused_wiring_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,

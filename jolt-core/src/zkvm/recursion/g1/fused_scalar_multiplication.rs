@@ -66,27 +66,59 @@ fn build_bit_poly_8(public_input: &G1ScalarMulPublicInputs) -> Vec<Fq> {
 
 #[derive(Clone, Allocative)]
 pub struct FusedG1ScalarMulParams {
-    pub num_step_vars: usize,             // 8
-    pub num_constraint_index_vars: usize, // k
+    /// Step variable count (always 8 for the 256-step scalar-mul trace).
+    pub num_step_vars: usize,
+    /// Family-local constraint-index var count (`k_smul`).
+    pub k_smul: usize,
+    /// Common suffix length used for Stage-2 alignment (`k_common >= k_smul`).
+    ///
+    /// In fully-fused wiring mode, G1 wiring uses `k_g1 = max(k_smul, k_add)`. We keep the
+    /// committed polynomials family-local (k_smul), but allow the sumcheck to run over k_common
+    /// by replicating across dummy low bits and caching openings at the family-local point.
+    pub k_common: usize,
     pub num_constraints: usize,
+    /// Padded family-local constraint count (power of two, min 1): `2^{k_smul}`.
     pub num_constraints_padded: usize,
+    /// Padded common constraint count (power of two, min 1): `2^{k_common}`.
+    pub num_constraints_padded_common: usize,
 }
 
 impl FusedG1ScalarMulParams {
     pub fn new(num_constraints: usize) -> Self {
         let num_constraints_padded = num_constraints.max(1).next_power_of_two();
-        let num_constraint_index_vars = num_constraints_padded.trailing_zeros() as usize;
+        let k_smul = num_constraints_padded.trailing_zeros() as usize;
+        Self::new_with_k_common(num_constraints, k_smul)
+    }
+
+    pub fn new_with_k_common(num_constraints: usize, k_common: usize) -> Self {
+        let num_constraints_padded = num_constraints.max(1).next_power_of_two();
+        let k_smul = num_constraints_padded.trailing_zeros() as usize;
+        let k_common = core::cmp::max(k_common, k_smul);
+        let num_constraints_padded_common = 1usize << k_common;
         Self {
             num_step_vars: STEP_VARS,
-            num_constraint_index_vars,
+            k_smul,
+            k_common,
             num_constraints,
             num_constraints_padded,
+            num_constraints_padded_common,
         }
     }
 
     #[inline]
     pub fn num_rounds(&self) -> usize {
-        self.num_step_vars + self.num_constraint_index_vars
+        self.num_step_vars + self.k_common
+    }
+
+    #[inline]
+    pub fn num_opening_vars(&self) -> usize {
+        // Family-local opening point length.
+        self.num_step_vars + self.k_smul
+    }
+
+    #[inline]
+    pub fn dummy_bits(&self) -> usize {
+        self.k_common.saturating_sub(self.k_smul)
     }
 }
 
@@ -108,8 +140,29 @@ impl SumcheckInstanceParams<Fq> for FusedG1ScalarMulParams {
         &self,
         challenges: &[<Fq as JoltField>::Challenge],
     ) -> OpeningPoint<BIG_ENDIAN, Fq> {
-        // Use the raw sumcheck challenges as the opening point.
-        OpeningPoint::<BIG_ENDIAN, Fq>::new(challenges.to_vec())
+        // Stage-2 alignment: this sumcheck can run over `k_common` c-bits, but committed witness
+        // polynomials are family-local over `k_smul` bits.
+        //
+        // Dummy-bit convention: dummy bits are the *low* bits of the common `c` segment, so the
+        // family-local bits are the *suffix* of the common `c`.
+        let expected = self.num_rounds();
+        assert_eq!(
+            challenges.len(),
+            expected,
+            "expected {} sumcheck challenges, got {}",
+            expected,
+            challenges.len()
+        );
+        let dummy = self.dummy_bits();
+        let step_end = self.num_step_vars;
+        let c_common_start = step_end;
+        let c_tail_start = c_common_start + dummy;
+        let mut opening: Vec<<Fq as JoltField>::Challenge> =
+            Vec::with_capacity(self.num_opening_vars());
+        opening.extend_from_slice(&challenges[..step_end]);
+        opening.extend_from_slice(&challenges[c_tail_start..]);
+        debug_assert_eq!(opening.len(), self.num_opening_vars());
+        OpeningPoint::<BIG_ENDIAN, Fq>::new(opening)
     }
 }
 
@@ -239,6 +292,26 @@ impl FusedG1ScalarMulProver {
             "G1ScalarMul rows must match public_inputs length"
         );
         let params = FusedG1ScalarMulParams::new(rows.len());
+        Self::new_with_params(rows, public_inputs, params, transcript)
+    }
+
+    pub fn new_with_k_common<T: Transcript>(
+        rows: &[G1ScalarMulNative],
+        public_inputs: &[G1ScalarMulPublicInputs],
+        k_common: usize,
+        transcript: &mut T,
+    ) -> Self {
+        debug_assert_eq!(rows.len(), public_inputs.len());
+        let params = FusedG1ScalarMulParams::new_with_k_common(rows.len(), k_common);
+        Self::new_with_params(rows, public_inputs, params, transcript)
+    }
+
+    fn new_with_params<T: Transcript>(
+        rows: &[G1ScalarMulNative],
+        public_inputs: &[G1ScalarMulPublicInputs],
+        params: FusedG1ScalarMulParams,
+        transcript: &mut T,
+    ) -> Self {
         let num_rounds = params.num_rounds();
 
         // Sample eq point for the fused (step,c) domain.
@@ -251,13 +324,15 @@ impl FusedG1ScalarMulProver {
         let term_batch_coeff: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
 
         let rs = row_size();
-        let blocks = params.num_constraints_padded;
+        let blocks = params.num_constraints_padded_common;
         let total_len = blocks * rs;
 
         let mut ind_sc = vec![Fq::zero(); total_len];
-        for c in 0..blocks {
-            if c < params.num_constraints {
-                let off = c * rs;
+        let dummy = params.dummy_bits();
+        for c_common in 0..blocks {
+            let c_smul = c_common >> dummy;
+            if c_smul < params.num_constraints {
+                let off = c_common * rs;
                 for s in 0..rs {
                     ind_sc[off + s] = Fq::one();
                 }
@@ -267,11 +342,14 @@ impl FusedG1ScalarMulProver {
 
         let build_term = |get: fn(&G1ScalarMulNative) -> &Vec<Fq>| -> MultilinearPolynomial<Fq> {
             let mut v = vec![Fq::zero(); total_len];
-            for c in 0..params.num_constraints {
-                let src = get(&rows[c]);
+            for c_smul in 0..params.num_constraints {
+                let src = get(&rows[c_smul]);
                 debug_assert_eq!(src.len(), rs);
-                let off = c * rs;
-                v[off..off + rs].copy_from_slice(src);
+                for d in 0..(1usize << dummy) {
+                    let c_common = d + (c_smul << dummy);
+                    let off = c_common * rs;
+                    v[off..off + rs].copy_from_slice(src);
+                }
             }
             MultilinearPolynomial::LargeScalars(DensePolynomial::new(v))
         };
@@ -287,23 +365,29 @@ impl FusedG1ScalarMulProver {
 
         // Public bit polynomial per instance: 8-var bit table, fused over c.
         let mut bit_sc = vec![Fq::zero(); total_len];
-        for c in 0..params.num_constraints {
-            let src = build_bit_poly_8(&public_inputs[c]);
+        for c_smul in 0..params.num_constraints {
+            let src = build_bit_poly_8(&public_inputs[c_smul]);
             debug_assert_eq!(src.len(), rs);
-            let off = c * rs;
-            bit_sc[off..off + rs].copy_from_slice(&src);
+            for d in 0..(1usize << dummy) {
+                let c_common = d + (c_smul << dummy);
+                let off = c_common * rs;
+                bit_sc[off..off + rs].copy_from_slice(&src);
+            }
         }
         let bit = MultilinearPolynomial::LargeScalars(DensePolynomial::new(bit_sc));
 
         // Public base point polynomials (constant over step, fused over c).
         let mut x_p_sc = vec![Fq::zero(); total_len];
         let mut y_p_sc = vec![Fq::zero(); total_len];
-        for c in 0..params.num_constraints {
-            let (x_p, y_p) = rows[c].base_point;
-            let off = c * rs;
-            for s in 0..rs {
-                x_p_sc[off + s] = x_p;
-                y_p_sc[off + s] = y_p;
+        for c_smul in 0..params.num_constraints {
+            let (x_p, y_p) = rows[c_smul].base_point;
+            for d in 0..(1usize << dummy) {
+                let c_common = d + (c_smul << dummy);
+                let off = c_common * rs;
+                for s in 0..rs {
+                    x_p_sc[off + s] = x_p;
+                    y_p_sc[off + s] = y_p;
+                }
             }
         }
         let x_p = MultilinearPolynomial::LargeScalars(DensePolynomial::new(x_p_sc));
@@ -497,6 +581,29 @@ impl FusedG1ScalarMulVerifier {
         debug_assert_eq!(public_inputs.len(), num_constraints);
         debug_assert_eq!(base_points.len(), num_constraints);
         let params = FusedG1ScalarMulParams::new(num_constraints);
+        Self::new_with_params(params, num_constraints, public_inputs, base_points, transcript)
+    }
+
+    pub fn new_with_k_common<T: Transcript>(
+        num_constraints: usize,
+        k_common: usize,
+        public_inputs: Vec<G1ScalarMulPublicInputs>,
+        base_points: Vec<(Fq, Fq)>,
+        transcript: &mut T,
+    ) -> Self {
+        debug_assert_eq!(public_inputs.len(), num_constraints);
+        debug_assert_eq!(base_points.len(), num_constraints);
+        let params = FusedG1ScalarMulParams::new_with_k_common(num_constraints, k_common);
+        Self::new_with_params(params, num_constraints, public_inputs, base_points, transcript)
+    }
+
+    fn new_with_params<T: Transcript>(
+        params: FusedG1ScalarMulParams,
+        num_constraints: usize,
+        public_inputs: Vec<G1ScalarMulPublicInputs>,
+        base_points: Vec<(Fq, Fq)>,
+        transcript: &mut T,
+    ) -> Self {
         let num_rounds = params.num_rounds();
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
@@ -537,10 +644,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
         // Split step/c portions from the sumcheck point (round order is LSB-first).
         let r_step = &sumcheck_challenges[..STEP_VARS];
         let r_c_chal = &sumcheck_challenges[STEP_VARS..];
-        let k = self.params.num_constraint_index_vars;
-        debug_assert_eq!(r_c_chal.len(), k);
+        debug_assert_eq!(r_c_chal.len(), self.params.k_common);
+        let dummy = self.params.dummy_bits();
+        let k = self.params.k_smul;
+        let r_c_tail = &r_c_chal[dummy..];
+        debug_assert_eq!(r_c_tail.len(), k);
 
-        let r_c: Vec<Fq> = r_c_chal.iter().map(|c| (*c).into()).collect();
+        let r_c: Vec<Fq> = r_c_tail.iter().map(|c| (*c).into()).collect();
 
         // Indicator I(c): sum_{c < num_constraints} Eq(r_c, c).
         let mut ind_eval = Fq::zero();
@@ -621,21 +731,57 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
 
 #[derive(Clone, Debug, Allocative)]
 pub struct FusedShiftG1ScalarMulParams {
-    pub num_step_vars: usize,             // 8
-    pub num_constraint_index_vars: usize, // k
+    pub num_step_vars: usize, // 8
+    pub k_smul: usize,
+    pub k_common: usize,
 }
 
 impl FusedShiftG1ScalarMulParams {
     pub fn new(num_constraints: usize) -> Self {
+        let k_smul = k_from_num_constraints(num_constraints);
+        Self::new_with_k_common(num_constraints, k_smul)
+    }
+
+    pub fn new_with_k_common(num_constraints: usize, k_common: usize) -> Self {
+        let k_smul = k_from_num_constraints(num_constraints);
         Self {
             num_step_vars: STEP_VARS,
-            num_constraint_index_vars: k_from_num_constraints(num_constraints),
+            k_smul,
+            k_common: core::cmp::max(k_common, k_smul),
         }
     }
 
     #[inline]
     pub fn num_rounds(&self) -> usize {
-        self.num_step_vars + self.num_constraint_index_vars
+        self.num_step_vars + self.k_common
+    }
+
+    #[inline]
+    pub fn num_opening_vars(&self) -> usize {
+        self.num_step_vars + self.k_smul
+    }
+
+    #[inline]
+    pub fn dummy_bits(&self) -> usize {
+        self.k_common.saturating_sub(self.k_smul)
+    }
+
+    #[inline]
+    pub fn normalize_opening_point(
+        &self,
+        challenges: &[<Fq as JoltField>::Challenge],
+    ) -> OpeningPoint<BIG_ENDIAN, Fq> {
+        let expected = self.num_rounds();
+        assert_eq!(challenges.len(), expected);
+        let dummy = self.dummy_bits();
+        let step_end = self.num_step_vars;
+        let c_tail_start = step_end + dummy;
+        let mut opening: Vec<<Fq as JoltField>::Challenge> =
+            Vec::with_capacity(self.num_opening_vars());
+        opening.extend_from_slice(&challenges[..step_end]);
+        opening.extend_from_slice(&challenges[c_tail_start..]);
+        debug_assert_eq!(opening.len(), self.num_opening_vars());
+        OpeningPoint::<BIG_ENDIAN, Fq>::new(opening)
     }
 }
 
@@ -658,16 +804,33 @@ pub struct FusedShiftG1ScalarMulProver {
 impl FusedShiftG1ScalarMulProver {
     pub fn new<T: Transcript>(rows: &[G1ScalarMulNative], transcript: &mut T) -> Self {
         let params = FusedShiftG1ScalarMulParams::new(rows.len());
-        let k = params.num_constraint_index_vars;
+        Self::new_with_params(rows, params, transcript)
+    }
+
+    pub fn new_with_k_common<T: Transcript>(
+        rows: &[G1ScalarMulNative],
+        k_common: usize,
+        transcript: &mut T,
+    ) -> Self {
+        let params = FusedShiftG1ScalarMulParams::new_with_k_common(rows.len(), k_common);
+        Self::new_with_params(rows, params, transcript)
+    }
+
+    fn new_with_params<T: Transcript>(
+        rows: &[G1ScalarMulNative],
+        params: FusedShiftG1ScalarMulParams,
+        transcript: &mut T,
+    ) -> Self {
+        let k_common = params.k_common;
         let rs = row_size();
-        let blocks = rows.len().max(1).next_power_of_two();
+        let blocks = 1usize << k_common;
         let total_len = blocks * rs;
 
         // Sample reference points (step*, c*) and batching gamma.
         let step_ref: Vec<<Fq as JoltField>::Challenge> = (0..STEP_VARS)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
-        let c_ref: Vec<<Fq as JoltField>::Challenge> = (0..k)
+        let c_ref: Vec<<Fq as JoltField>::Challenge> = (0..k_common)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
         let gamma: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
@@ -679,9 +842,9 @@ impl FusedShiftG1ScalarMulProver {
         let mut not_last_8 = vec![Fq::one(); rs];
         not_last_8[rs - 1] = Fq::zero();
 
-        // Build k-var Eq(c_ref, c) table.
+        // Build k_common-var Eq(c_ref, c) table.
         let eq_c_k = crate::zkvm::recursion::gt::shift::eq_lsb_evals::<Fq>(&c_ref);
-        debug_assert_eq!(eq_c_k.len(), 1usize << k);
+        debug_assert_eq!(eq_c_k.len(), 1usize << k_common);
 
         // Embed weights into full (step,c) domain.
         let mut eq_step_sc = vec![Fq::zero(); total_len];
@@ -695,11 +858,7 @@ impl FusedShiftG1ScalarMulProver {
             eqm1_step_sc[off..off + rs].copy_from_slice(&eq_minus_one_8);
             not_last_sc[off..off + rs].copy_from_slice(&not_last_8);
             // c-only weight replicated across step
-            let eqc = if c < (1usize << k) {
-                eq_c_k[c]
-            } else {
-                Fq::zero()
-            };
+            let eqc = eq_c_k[c];
             for s in 0..rs {
                 eq_c_sc[off + s] = eqc;
             }
@@ -711,13 +870,17 @@ impl FusedShiftG1ScalarMulProver {
         let not_last_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(not_last_sc));
         let eq_c_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(eq_c_sc));
 
+        let dummy = params.dummy_bits();
         let build_term = |get: fn(&G1ScalarMulNative) -> &Vec<Fq>| -> MultilinearPolynomial<Fq> {
             let mut v = vec![Fq::zero(); total_len];
-            for c in 0..rows.len() {
-                let src = get(&rows[c]);
+            for c_smul in 0..rows.len() {
+                let src = get(&rows[c_smul]);
                 debug_assert_eq!(src.len(), rs);
-                let off = c * rs;
-                v[off..off + rs].copy_from_slice(src);
+                for d in 0..(1usize << dummy) {
+                    let c_common = d + (c_smul << dummy);
+                    let off = c_common * rs;
+                    v[off..off + rs].copy_from_slice(src);
+                }
             }
             MultilinearPolynomial::LargeScalars(DensePolynomial::new(v))
         };
@@ -835,7 +998,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedShiftG1ScalarMulProve
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
+        let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for (vp, claim) in [
             (
                 VirtualPolynomial::g1_scalar_mul_xa_fused(),
@@ -876,10 +1039,23 @@ pub struct FusedShiftG1ScalarMulVerifier {
 impl FusedShiftG1ScalarMulVerifier {
     pub fn new<T: Transcript>(num_constraints: usize, transcript: &mut T) -> Self {
         let params = FusedShiftG1ScalarMulParams::new(num_constraints);
+        Self::new_with_params(params, transcript)
+    }
+
+    pub fn new_with_k_common<T: Transcript>(
+        num_constraints: usize,
+        k_common: usize,
+        transcript: &mut T,
+    ) -> Self {
+        let params = FusedShiftG1ScalarMulParams::new_with_k_common(num_constraints, k_common);
+        Self::new_with_params(params, transcript)
+    }
+
+    fn new_with_params<T: Transcript>(params: FusedShiftG1ScalarMulParams, transcript: &mut T) -> Self {
         let step_ref: Vec<<Fq as JoltField>::Challenge> = (0..STEP_VARS)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
-        let c_ref: Vec<<Fq as JoltField>::Challenge> = (0..params.num_constraint_index_vars)
+        let c_ref: Vec<<Fq as JoltField>::Challenge> = (0..params.k_common)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
         let gamma: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
@@ -955,7 +1131,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedShiftG1ScalarMulVer
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
+        let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for vp in [
             VirtualPolynomial::g1_scalar_mul_xa_fused(),
             VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
@@ -981,7 +1157,8 @@ mod tests {
     fn fused_g1_scalar_mul_params_has_expected_rounds() {
         let p = FusedG1ScalarMulParams::new(3);
         assert_eq!(p.num_step_vars, 8);
-        assert_eq!(p.num_constraint_index_vars, 2); // padded to 4
+        assert_eq!(p.k_smul, 2); // padded to 4
+        assert_eq!(p.k_common, 2);
         assert_eq!(p.num_rounds(), 10);
     }
 

@@ -937,10 +937,13 @@ impl RecursionProver<Fq> {
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
         let enable_gt_fused_end_to_end =
             env_flag_default("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END", false);
+        let enable_g1_fused_wiring_end_to_end =
+            env_flag_default("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END", false);
         let enable_g1_scalar_mul_fused_end_to_end = env_flag_default(
             "JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END",
             false,
-        );
+        ) || enable_g1_fused_wiring_end_to_end;
+        let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
         let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
         let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
         let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
@@ -1087,23 +1090,28 @@ impl RecursionProver<Fq> {
             );
 
             if enable_g1_scalar_mul_fused_end_to_end {
+                let k_common = if enable_g1_fused_wiring_end_to_end {
+                    crate::zkvm::recursion::g1::indexing::k_g1(&self.constraint_system.constraint_types)
+                } else {
+                    crate::zkvm::recursion::g1::indexing::k_smul(&self.constraint_system.constraint_types)
+                };
                 // Fused shift check (opens 4 fused polynomials at one point).
                 if enable_shift_g1_scalar_mul {
-                    let prover =
-                        crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulProver::new(
-                            g1_rows,
-                            transcript,
-                        );
+                    let prover = crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulProver::new_with_k_common(
+                        g1_rows,
+                        k_common,
+                        transcript,
+                    );
                     provers.push(Box::new(prover));
                 }
 
                 // Fused scalar-mul constraints (opens 8 fused polynomials at one point).
-                let prover =
-                    crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedG1ScalarMulProver::new(
-                        g1_rows,
-                        &self.constraint_system.g1_scalar_mul_public_inputs,
-                        transcript,
-                    );
+                let prover = crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedG1ScalarMulProver::new_with_k_common(
+                    g1_rows,
+                    &self.constraint_system.g1_scalar_mul_public_inputs,
+                    k_common,
+                    transcript,
+                );
                 provers.push(Box::new(prover));
             } else {
                 if enable_shift_g1_scalar_mul {
@@ -1233,32 +1241,38 @@ impl RecursionProver<Fq> {
         // G1 add
         let g1_add_rows = &self.constraint_system.g1_add_rows;
         if !g1_add_rows.is_empty() {
-            let g1_add_constraints: Vec<G1AddWitness<Fq>> = g1_add_rows
-                .iter()
-                .enumerate()
-                .map(|(constraint_index, w)| G1AddWitness {
-                    x_p: vec![w.x_p],
-                    y_p: vec![w.y_p],
-                    ind_p: vec![w.ind_p],
-                    x_q: vec![w.x_q],
-                    y_q: vec![w.y_q],
-                    ind_q: vec![w.ind_q],
-                    x_r: vec![w.x_r],
-                    y_r: vec![w.y_r],
-                    ind_r: vec![w.ind_r],
-                    lambda: vec![w.lambda],
-                    inv_delta_x: vec![w.inv_delta_x],
-                    is_double: vec![w.is_double],
-                    is_inverse: vec![w.is_inverse],
-                    constraint_index,
-                })
-                .collect();
-            // NOTE: The fused G1Add sumcheck exists (see `g1::fused_addition`) but is intentionally
-            // NOT wired into the default prover pipeline right now.
-            let params = G1AddParams::new(g1_add_constraints.len());
-            let (spec, constraint_indices) = G1AddProverSpec::new(params, g1_add_constraints);
-            let prover = G1AddProver::from_spec(spec, constraint_indices, transcript);
-            provers.push(Box::new(prover));
+            if enable_g1_add_fused_end_to_end {
+                let prover = crate::zkvm::recursion::g1::fused_addition::FusedG1AddProver::new(
+                    g1_add_rows,
+                    transcript,
+                );
+                provers.push(Box::new(prover));
+            } else {
+                let g1_add_constraints: Vec<G1AddWitness<Fq>> = g1_add_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(constraint_index, w)| G1AddWitness {
+                        x_p: vec![w.x_p],
+                        y_p: vec![w.y_p],
+                        ind_p: vec![w.ind_p],
+                        x_q: vec![w.x_q],
+                        y_q: vec![w.y_q],
+                        ind_q: vec![w.ind_q],
+                        x_r: vec![w.x_r],
+                        y_r: vec![w.y_r],
+                        ind_r: vec![w.ind_r],
+                        lambda: vec![w.lambda],
+                        inv_delta_x: vec![w.inv_delta_x],
+                        is_double: vec![w.is_double],
+                        is_inverse: vec![w.is_inverse],
+                        constraint_index,
+                    })
+                    .collect();
+                let params = G1AddParams::new(g1_add_constraints.len());
+                let (spec, constraint_indices) = G1AddProverSpec::new(params, g1_add_constraints);
+                let prover = G1AddProver::from_spec(spec, constraint_indices, transcript);
+                provers.push(Box::new(prover));
+            }
         }
 
         // G2 add
@@ -1345,12 +1359,23 @@ impl RecursionProver<Fq> {
                     }
                 }
                 if enable_wiring_g1 && !wiring.g1.is_empty() {
-                    provers.push(Box::new(WiringG1Prover::<T>::new(
-                        &self.constraint_system,
-                        wiring.g1.clone(),
-                        pairing_boundary,
-                        transcript,
-                    )));
+                    if enable_g1_fused_wiring_end_to_end {
+                        provers.push(Box::new(
+                            crate::zkvm::recursion::g1::fused_wiring::FusedWiringG1Prover::<T>::new(
+                                &self.constraint_system,
+                                wiring.g1.clone(),
+                                pairing_boundary,
+                                transcript,
+                            ),
+                        ));
+                    } else {
+                        provers.push(Box::new(WiringG1Prover::<T>::new(
+                            &self.constraint_system,
+                            wiring.g1.clone(),
+                            pairing_boundary,
+                            transcript,
+                        )));
+                    }
                 }
                 if enable_wiring_g2 && !wiring.g2.is_empty() {
                     provers.push(Box::new(WiringG2Prover::<T>::new(
@@ -1393,16 +1418,27 @@ impl RecursionProver<Fq> {
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
+        let enable_g1_fused_wiring_end_to_end =
+            std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
         let enable_g1_scalar_mul_fused_end_to_end =
             std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
                 .ok()
                 .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
-        let layout = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+                .unwrap_or(false)
+                || enable_g1_fused_wiring_end_to_end;
+        let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
+        let layout = if enable_gt_fused_end_to_end
+            || enable_g1_scalar_mul_fused_end_to_end
+            || enable_g1_add_fused_end_to_end
+        {
             PrefixPackingLayout::from_constraint_types_fused(
                 &metadata.constraint_types,
                 enable_gt_fused_end_to_end,
                 enable_g1_scalar_mul_fused_end_to_end,
+                enable_g1_add_fused_end_to_end,
             )
         } else {
             PrefixPackingLayout::from_constraint_types(&metadata.constraint_types)
@@ -1455,6 +1491,7 @@ impl RecursionProver<Fq> {
             &self.constraint_system.gt_exp_public_inputs,
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
+            enable_g1_add_fused_end_to_end,
         );
         let num_poly_types = PolyType::NUM_TYPES;
 
@@ -1501,6 +1538,34 @@ impl RecursionProver<Fq> {
                 };
                 let (_, claim) =
                     accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
+                claim
+            } else if enable_g1_add_fused_end_to_end && entry.is_g1_add_fused {
+                let vp = match entry.poly_type {
+                    PolyType::G1AddXP => VirtualPolynomial::g1_add_xp_fused(),
+                    PolyType::G1AddYP => VirtualPolynomial::g1_add_yp_fused(),
+                    PolyType::G1AddPIndicator => VirtualPolynomial::g1_add_p_indicator_fused(),
+                    PolyType::G1AddXQ => VirtualPolynomial::g1_add_xq_fused(),
+                    PolyType::G1AddYQ => VirtualPolynomial::g1_add_yq_fused(),
+                    PolyType::G1AddQIndicator => VirtualPolynomial::g1_add_q_indicator_fused(),
+                    PolyType::G1AddXR => VirtualPolynomial::g1_add_xr_fused(),
+                    PolyType::G1AddYR => VirtualPolynomial::g1_add_yr_fused(),
+                    PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator_fused(),
+                    // Non-port terms are still fused/packed in fully fused G1 mode.
+                    PolyType::G1AddLambda => VirtualPolynomial::g1_add_fused(
+                        crate::zkvm::witness::G1AddTerm::Lambda,
+                    ),
+                    PolyType::G1AddInvDeltaX => {
+                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::InvDeltaX)
+                    }
+                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add_fused(
+                        crate::zkvm::witness::G1AddTerm::IsDouble,
+                    ),
+                    PolyType::G1AddIsInverse => {
+                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::IsInverse)
+                    }
+                    _ => return Fq::zero(),
+                };
+                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1Add);
                 claim
             } else {
                 let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);

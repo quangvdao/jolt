@@ -454,6 +454,7 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
     _gt_exp_public_inputs: &[GtExpPublicInputs],
     enable_gt_fused_end_to_end: bool,
     enable_g1_scalar_mul_fused_end_to_end: bool,
+    enable_g1_add_fused_end_to_end: bool,
 ) -> Vec<F> {
     let mut claims = Vec::new();
 
@@ -663,6 +664,13 @@ pub fn extract_virtual_claims_from_accumulator<F: JoltField, A: OpeningAccumulat
                 g2_scalar_mul_idx += 1;
             }
             ConstraintType::G1Add => {
+                if enable_g1_add_fused_end_to_end {
+                    // In fully fused G1 mode, per-instance G1 add rows are not part of the packed
+                    // dense matrix, so Stage 3 does not need these claims.
+                    g1_add_idx += 1;
+                    claims.extend_from_slice(&constraint_claims);
+                    continue;
+                }
                 let (_, x_p) = accumulator.get_virtual_polynomial_opening(
                     VirtualPolynomial::g1_add_xp(g1_add_idx),
                     SumcheckId::G1Add,

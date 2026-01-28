@@ -719,6 +719,75 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             return;
         }
 
+        if entry.is_g1_add_fused {
+            // Fused G1 add rows are c-only over a family-local padded `c_add`.
+            let num_g1 = cs.g1_add_rows.len();
+            let padded = num_g1.max(1).next_power_of_two();
+            let k = padded.trailing_zeros() as usize;
+            let expected_num_vars = k;
+            if entry.num_vars != expected_num_vars {
+                panic!(
+                    "G1-add-fused entry has num_vars={}, expected {} (k_add)",
+                    entry.num_vars, expected_num_vars
+                );
+            }
+
+            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
+            for global_idx in 0..cs.constraint_types.len() {
+                let ConstraintLocator::G1Add { local } = cs.locator_by_constraint[global_idx]
+                else {
+                    continue;
+                };
+                let c = local;
+                let v = match entry.poly_type {
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddXP => {
+                        cs.g1_add_rows[local].x_p
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddYP => {
+                        cs.g1_add_rows[local].y_p
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddPIndicator => {
+                        cs.g1_add_rows[local].ind_p
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddXQ => {
+                        cs.g1_add_rows[local].x_q
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddYQ => {
+                        cs.g1_add_rows[local].y_q
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddQIndicator => {
+                        cs.g1_add_rows[local].ind_q
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddXR => {
+                        cs.g1_add_rows[local].x_r
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddYR => {
+                        cs.g1_add_rows[local].y_r
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddRIndicator => {
+                        cs.g1_add_rows[local].ind_r
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddLambda => {
+                        cs.g1_add_rows[local].lambda
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddInvDeltaX => {
+                        cs.g1_add_rows[local].inv_delta_x
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddIsDouble => {
+                        cs.g1_add_rows[local].is_double
+                    }
+                    crate::zkvm::recursion::constraints::system::PolyType::G1AddIsInverse => {
+                        cs.g1_add_rows[local].is_inverse
+                    }
+                    _ => continue,
+                };
+                fused_src[c] = v;
+            }
+
+            fill_block(dst, &fused_src, entry.num_vars);
+            return;
+        }
+
         let loc = cs.locator_by_constraint[entry.constraint_idx];
         match entry.poly_type {
             // Packed GT exp (11-var)
@@ -1159,17 +1228,29 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
+        let enable_g1_fused_wiring_end_to_end =
+            std::env::var("JOLT_RECURSION_ENABLE_G1_FUSED_WIRING_END_TO_END")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
         let enable_g1_scalar_mul_fused_end_to_end =
             std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
                 .ok()
                 .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || enable_g1_fused_wiring_end_to_end;
+        // Full fused G1 wiring requires fused G1Add packing as well.
+        let enable_g1_add_fused_end_to_end = enable_g1_fused_wiring_end_to_end;
 
-        if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+        if enable_gt_fused_end_to_end
+            || enable_g1_scalar_mul_fused_end_to_end
+            || enable_g1_add_fused_end_to_end
+        {
             PrefixPackingLayout::from_constraint_types_fused(
                 &cs.constraint_types,
                 enable_gt_fused_end_to_end,
                 enable_g1_scalar_mul_fused_end_to_end,
+                enable_g1_add_fused_end_to_end,
             )
         } else {
             PrefixPackingLayout::from_constraint_types(&cs.constraint_types)

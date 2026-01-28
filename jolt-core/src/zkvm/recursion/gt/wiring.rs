@@ -237,6 +237,11 @@ impl<T: Transcript> WiringGtProver<T> {
                         need_mul_result[instance] = true;
                     }
                 }
+                GtProducer::GtExpBase { instance } => {
+                    if instance < num_gt_exp {
+                        need_exp_base[instance] = true;
+                    }
+                }
             }
             match e.dst {
                 GtConsumer::GtMulLhs { instance } => {
@@ -358,10 +363,12 @@ impl<T: Transcript> WiringGtProver<T> {
             let eq_s_poly = match edge.src {
                 GtProducer::GtExpRho { instance } => eq_s_by_exp[instance].as_ref().unwrap(),
                 GtProducer::GtMulResult { .. } => &eq_s_default,
+                GtProducer::GtExpBase { .. } => &eq_s_default,
             };
             let src_poly = match edge.src {
                 GtProducer::GtExpRho { instance } => rho_polys[instance].as_ref().unwrap(),
                 GtProducer::GtMulResult { instance } => mul_result[instance].as_ref().unwrap(),
+                GtProducer::GtExpBase { instance } => exp_base[instance].as_ref().unwrap(),
             };
             let dst_poly = match edge.dst {
                 GtConsumer::GtMulLhs { instance } => mul_lhs[instance].as_ref().unwrap(),
@@ -415,6 +422,7 @@ impl<T: Transcript> WiringGtProver<T> {
         match src {
             GtProducer::GtExpRho { instance } => self.rho_polys[instance].as_ref().unwrap(),
             GtProducer::GtMulResult { instance } => self.mul_result[instance].as_ref().unwrap(),
+            GtProducer::GtExpBase { instance } => self.exp_base[instance].as_ref().unwrap(),
         }
     }
 
@@ -459,6 +467,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                 let src_c = match edge.src {
                     GtProducer::GtExpRho { instance } => self.gt_exp_constraint_idx[instance],
                     GtProducer::GtMulResult { instance } => self.gt_mul_constraint_idx[instance],
+                    GtProducer::GtExpBase { instance } => self.gt_exp_constraint_idx[instance],
                 };
                 // Destination c-index: for global constants, anchor to producer.
                 let dst_c = match edge.dst {
@@ -472,6 +481,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                 let src_prefix = match edge.src {
                     GtProducer::GtExpRho { instance } => self.gt_exp_c_prefix[instance],
                     GtProducer::GtMulResult { instance } => self.gt_mul_c_prefix[instance],
+                    GtProducer::GtExpBase { instance } => self.gt_exp_c_prefix[instance],
                 };
                 let dst_prefix = match edge.dst {
                     GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
@@ -532,6 +542,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                     let w_src = match edge.src {
                         GtProducer::GtExpRho { instance } => gt_exp_w[instance],
                         GtProducer::GtMulResult { instance } => gt_mul_w[instance],
+                        GtProducer::GtExpBase { instance } => gt_exp_w[instance],
                     };
                     let w_dst = match edge.dst {
                         GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
@@ -547,6 +558,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                             self.eq_s_by_exp[instance].as_ref().unwrap()
                         }
                         GtProducer::GtMulResult { .. } => &self.eq_s_default,
+                        GtProducer::GtExpBase { .. } => &self.eq_s_default,
                     };
                     let eq_s_evals =
                         eq_s_poly.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
@@ -656,6 +668,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
             let w_src = match edge.src {
                 GtProducer::GtExpRho { instance } => self.gt_exp_c_prefix[instance],
                 GtProducer::GtMulResult { instance } => self.gt_mul_c_prefix[instance],
+                GtProducer::GtExpBase { instance } => self.gt_exp_c_prefix[instance],
             };
             let w_dst = match edge.dst {
                 GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
@@ -672,6 +685,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                     .unwrap()
                     .get_bound_coeff(0),
                 GtProducer::GtMulResult { .. } => eq_s_default,
+                GtProducer::GtExpBase { .. } => eq_s_default,
             };
 
             let src = self.src_poly(edge.src).get_bound_coeff(0);
@@ -771,7 +785,7 @@ impl<'a> LegacyGtWiringValueSource<'a> {
             }
             // For u-only values (GTMul), the prover replicates across step vars and the verifier
             // uses Eq(s, 0) as the step selector.
-            GtProducer::GtMulResult { .. } => self
+            GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => self
                 .r_step
                 .iter()
                 .map(|c| {
@@ -822,6 +836,9 @@ impl<'a> LegacyGtWiringValueSource<'a> {
                         )
                         .1
                 }
+            }
+            GtProducer::GtExpBase { instance } => {
+                eval_fq12_packed_at(&self.gt_exp_bases[instance], self.r_elem)
             }
         }
     }

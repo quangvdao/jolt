@@ -332,10 +332,10 @@ impl RecursionProver<Fq> {
             &comms,
             &coeffs,
         )
-        .map_err(|_e| {
+        .map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "AST->pairing-boundary derivation failed",
+                format!("AST->pairing-boundary derivation failed: {e}"),
             )
         })?;
 

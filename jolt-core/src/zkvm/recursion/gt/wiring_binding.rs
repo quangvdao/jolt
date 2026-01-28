@@ -171,6 +171,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtWiringBindingVerifier 
                 GtProducer::GtMulResult { instance } => {
                     Self::eq_rc_at(r_c, self.inner.gt_mul_constraint_idx[instance])
                 }
+                GtProducer::GtExpBase { instance } => {
+                    Self::eq_rc_at(r_c, self.inner.gt_exp_constraint_idx[instance])
+                }
             };
 
             let w_dst = match edge.dst {

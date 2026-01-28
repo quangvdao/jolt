@@ -363,7 +363,7 @@ impl<T: Transcript> FusedWiringGtProver<T> {
     fn eq_s_poly_for_src(&self, src: GtProducer) -> &MultilinearPolynomial<Fq> {
         match src {
             GtProducer::GtExpRho { instance } => self.eq_s_by_exp[instance].as_ref().unwrap(),
-            GtProducer::GtMulResult { .. } => &self.eq_s_default,
+            GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => &self.eq_s_default,
         }
     }
 
@@ -371,6 +371,7 @@ impl<T: Transcript> FusedWiringGtProver<T> {
         match src {
             GtProducer::GtExpRho { instance } => self.rho_polys[instance].as_ref().unwrap(),
             GtProducer::GtMulResult { instance } => self.mul_result[instance].as_ref().unwrap(),
+            GtProducer::GtExpBase { instance } => self.exp_base[instance].as_ref().unwrap(),
         }
     }
 
@@ -488,7 +489,7 @@ impl<T: Transcript> FusedWiringGtProver<T> {
                     .as_ref()
                     .unwrap()
                     .get_bound_coeff(0),
-                GtProducer::GtMulResult { .. } => eq_s_default_at_r,
+                GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => eq_s_default_at_r,
             })
             .collect();
 
@@ -523,6 +524,9 @@ impl<T: Transcript> FusedWiringGtProver<T> {
                 }
                 GtProducer::GtMulResult { instance } => {
                     let _ = ensure_selector(dummy_mul, self.k_mul, instance);
+                }
+                GtProducer::GtExpBase { instance } => {
+                    let _ = ensure_selector(dummy_exp, self.k_exp, instance);
                 }
             }
             match edge.dst {
@@ -664,6 +668,12 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
                                 mul_out_e,
                                 beta_mul,
                             ),
+                            GtProducer::GtExpBase { instance } => (
+                                selector_key(dummy_exp, self.k_exp, instance),
+                                // Constant source; we ignore `src_port_e` and use `exp_base_at_r` below.
+                                rho_e,
+                                beta_exp,
+                            ),
                         };
                         let sel_src = state
                             .selectors
@@ -695,8 +705,13 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
                         let dst_is_mul_lhs = matches!(edge.dst, GtConsumer::GtMulLhs { .. });
                         let dst_is_mul_rhs = matches!(edge.dst, GtConsumer::GtMulRhs { .. });
 
+                        let src_const = match edge.src {
+                            GtProducer::GtExpBase { instance } => Some(state.exp_base_at_r[instance]),
+                            _ => None,
+                        };
                         for t in 0..DEGREE {
-                            let src_term = sel_src_e[t] * src_port_e[t];
+                            let src_val = src_const.unwrap_or(src_port_e[t]);
+                            let src_term = sel_src_e[t] * src_val;
 
                             let dst_term = if dst_is_mul_lhs {
                                 sel_dst_e[t] * mul_lhs_e[t]
@@ -855,7 +870,7 @@ impl FusedWiringGtVerifier {
                     })
                     .product()
             }
-            GtProducer::GtMulResult { .. } => r_step
+            GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => r_step
                 .iter()
                 .map(|c| {
                     let r_b: Fq = (*c).into();
@@ -941,6 +956,14 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringGtVerifier {
                     rho_fused,
                     beta_exp,
                 ),
+                GtProducer::GtExpBase { instance } => {
+                    let base_eval = eval_fq12_packed_at(&self.gt_exp_bases[instance], &r_elem);
+                    (
+                        self.eq_c_tail(r_c_exp_tail, instance, self.k_exp),
+                        base_eval,
+                        beta_exp,
+                    )
+                }
                 GtProducer::GtMulResult { instance } => (
                     self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
                     mul_out_fused,

@@ -98,6 +98,12 @@ pub enum GtProducer {
     /// In the wiring polynomial, the endpoint selection is enforced by fixing the step bits
     /// in the Eq-kernel selector point; the producer is still `rho(s,x)` as a full 11-var MLE.
     GtExpRho { instance: usize },
+    /// Boundary constant: base for the given GTExp instance.
+    ///
+    /// This is used when the Dory AST wires an *input* GT value into another port (e.g. GTMul
+    /// lhs/rhs). In that case we treat the input as the GTExp-base constant for that instance,
+    /// whose value is available to the verifier via `RecursionVerifierInput.gt_exp_public_inputs`.
+    GtExpBase { instance: usize },
     /// Output of a GT multiplication: result(x) (4-var).
     GtMulResult { instance: usize },
 }
@@ -194,6 +200,10 @@ impl CanonicalSerialize for GtProducer {
                 1u8.serialize_with_mode(&mut writer, compress)?;
                 (*instance as u32).serialize_with_mode(&mut writer, compress)
             }
+            GtProducer::GtExpBase { instance } => {
+                2u8.serialize_with_mode(&mut writer, compress)?;
+                (*instance as u32).serialize_with_mode(&mut writer, compress)
+            }
         }
     }
 
@@ -224,6 +234,9 @@ impl CanonicalDeserialize for GtProducer {
             1 => Self::GtMulResult {
                 instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
             },
+            2 => Self::GtExpBase {
+                instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -252,6 +265,16 @@ impl GuestSerialize for GtProducer {
                 })?)
                 .guest_serialize(w)
             }
+            GtProducer::GtExpBase { instance } => {
+                2u8.guest_serialize(w)?;
+                (u32::try_from(*instance).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "GtProducer instance overflow",
+                    )
+                })?)
+                .guest_serialize(w)
+            }
         }
     }
 }
@@ -264,6 +287,9 @@ impl GuestDeserialize for GtProducer {
                 instance: u32::guest_deserialize(r)? as usize,
             },
             1 => Self::GtMulResult {
+                instance: u32::guest_deserialize(r)? as usize,
+            },
+            2 => Self::GtExpBase {
                 instance: u32::guest_deserialize(r)? as usize,
             },
             _ => {
@@ -1017,6 +1043,7 @@ fn gt_producer_from_value(
     ast: &AstGraph<dory::backends::arkworks::BN254>,
     gt_exp_index: &std::collections::BTreeMap<OpId, usize>,
     gt_mul_index: &std::collections::BTreeMap<OpId, usize>,
+    gt_exp_base_by_value: &std::collections::BTreeMap<ValueId, usize>,
     value: ValueId,
 ) -> Option<GtProducer> {
     let idx = value.0 as usize;
@@ -1036,8 +1063,23 @@ fn gt_producer_from_value(
             .get(id)
             .copied()
             .map(|instance| GtProducer::GtMulResult { instance }),
+        AstOp::Input { .. } => gt_exp_base_by_value
+            .get(&value)
+            .copied()
+            .map(|instance| GtProducer::GtExpBase { instance }),
         _ => None,
     }
+}
+
+fn is_ast_input(
+    ast: &AstGraph<dory::backends::arkworks::BN254>,
+    value: ValueId,
+) -> bool {
+    let idx = value.0 as usize;
+    if idx >= ast.nodes.len() {
+        return false;
+    }
+    matches!(&ast.nodes[idx].op, AstOp::Input { .. })
 }
 
 fn g1_value_from_output(
@@ -1116,6 +1158,22 @@ pub fn derive_wiring_plan(
     let g2_add_index = index_map(&order.g2_add);
 
     let mut plan = WiringPlan::default();
+    // Map ValueId(Input GT value) -> GTExp instance index whose base is that ValueId.
+    // This lets us treat GT inputs as the corresponding GTExp base constant in wiring.
+    let mut gt_exp_base_by_value: std::collections::BTreeMap<ValueId, usize> =
+        std::collections::BTreeMap::new();
+    for node in &ast.nodes {
+        if let AstOp::GTExp {
+            op_id: Some(id),
+            base,
+            ..
+        } = &node.op
+        {
+            if let Some(&instance) = gt_exp_index.get(id) {
+                gt_exp_base_by_value.entry(*base).or_insert(instance);
+            }
+        }
+    }
 
     // --- AST internal dataflow edges (copy constraints) ---
     for node in &ast.nodes {
@@ -1129,21 +1187,42 @@ pub fn derive_wiring_plan(
                 let Some(&mul_instance) = gt_mul_index.get(id) else {
                     continue;
                 };
-                if let Some(src) = gt_producer_from_value(ast, &gt_exp_index, &gt_mul_index, *lhs) {
+                if let Some(src) = gt_producer_from_value(
+                    ast,
+                    &gt_exp_index,
+                    &gt_mul_index,
+                    &gt_exp_base_by_value,
+                    *lhs,
+                ) {
                     plan.gt.push(GtWiringEdge {
                         src,
                         dst: GtConsumer::GtMulLhs {
                             instance: mul_instance,
                         },
                     });
+                } else if !is_ast_input(ast, *lhs) {
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired GTMul lhs value {lhs:?}"
+                    )));
                 }
-                if let Some(src) = gt_producer_from_value(ast, &gt_exp_index, &gt_mul_index, *rhs) {
+
+                if let Some(src) = gt_producer_from_value(
+                    ast,
+                    &gt_exp_index,
+                    &gt_mul_index,
+                    &gt_exp_base_by_value,
+                    *rhs,
+                ) {
                     plan.gt.push(GtWiringEdge {
                         src,
                         dst: GtConsumer::GtMulRhs {
                             instance: mul_instance,
                         },
                     });
+                } else if !is_ast_input(ast, *rhs) {
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired GTMul rhs value {rhs:?}"
+                    )));
                 }
             }
             AstOp::G1Add {
@@ -1162,6 +1241,10 @@ pub fn derive_wiring_plan(
                             instance: add_instance,
                         },
                     });
+                } else if !is_ast_input(ast, *a) {
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired G1Add input a value {a:?}"
+                    )));
                 }
                 if let Some(src) = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *b) {
                     plan.g1.push(G1WiringEdge {
@@ -1170,6 +1253,10 @@ pub fn derive_wiring_plan(
                             instance: add_instance,
                         },
                     });
+                } else if !is_ast_input(ast, *b) {
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired G1Add input b value {b:?}"
+                    )));
                 }
             }
             AstOp::G2Add {
@@ -1188,6 +1275,10 @@ pub fn derive_wiring_plan(
                             instance: add_instance,
                         },
                     });
+                } else if !is_ast_input(ast, *a) {
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired G2Add input a value {a:?}"
+                    )));
                 }
                 if let Some(src) = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *b) {
                     plan.g2.push(G2WiringEdge {
@@ -1196,6 +1287,10 @@ pub fn derive_wiring_plan(
                             instance: add_instance,
                         },
                     });
+                } else if !is_ast_input(ast, *b) {
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired G2Add input b value {b:?}"
+                    )));
                 }
             }
             _ => {}
@@ -1213,7 +1308,13 @@ pub fn derive_wiring_plan(
                 let Some(&exp_instance) = gt_exp_index.get(id) else {
                     continue;
                 };
-                if let Some(src) = gt_producer_from_value(ast, &gt_exp_index, &gt_mul_index, *base)
+                if let Some(src) = gt_producer_from_value(
+                    ast,
+                    &gt_exp_index,
+                    &gt_mul_index,
+                    &gt_exp_base_by_value,
+                    *base,
+                )
                 {
                     plan.gt.push(GtWiringEdge {
                         src,
@@ -1324,7 +1425,13 @@ pub fn derive_wiring_plan(
     }
 
     // Bind pairing RHS (GT).
-    if let Some(src) = gt_producer_from_value(ast, &gt_exp_index, &gt_mul_index, rhs_id) {
+    if let Some(src) = gt_producer_from_value(
+        ast,
+        &gt_exp_index,
+        &gt_mul_index,
+        &gt_exp_base_by_value,
+        rhs_id,
+    ) {
         plan.gt.push(GtWiringEdge {
             src,
             dst: GtConsumer::PairingBoundaryRhs,

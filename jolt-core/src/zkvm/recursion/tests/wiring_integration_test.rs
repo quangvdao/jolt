@@ -16,7 +16,7 @@ use crate::{
     zkvm::{
         proof_serialization::NonInputBaseHints,
         recursion::{
-            prover::{DoryOpeningSnapshot, RecursionInput, RecursionProver},
+            prover::{DoryOpeningSnapshot, RecursionInput, RecursionProof, RecursionProver},
             verifier::RecursionVerifier,
             MAX_RECURSION_DENSE_NUM_VARS,
         },
@@ -31,12 +31,15 @@ use ark_std::test_rng;
 use serial_test::serial;
 use std::collections::HashMap;
 
+use crate::poly::commitment::dory::wrappers::ArkDoryProof;
+use crate::zkvm::proof_serialization::PairingBoundary;
+
 type HyraxPCS = Hyrax<1, GrumpkinProjective>;
 
 struct RecursionFixture {
     // Stage-8 artifacts
     dory_proof: <DoryCommitmentScheme as CommitmentScheme>::Proof,
-    ark_dory_proof: crate::poly::commitment::dory::wrappers::ArkDoryProof,
+    ark_dory_proof: ArkDoryProof,
     verifier_setup: <DoryCommitmentScheme as CommitmentScheme>::VerifierSetup,
     stage8_pre_transcript: Blake2bTranscript,
     opening_point: Vec<<Fr as JoltField>::Challenge>,
@@ -46,9 +49,9 @@ struct RecursionFixture {
     joint_commitment: <DoryCommitmentScheme as CommitmentScheme>::Commitment,
     joint_commitment_fq12: Fq12,
     // Recursion outputs
-    recursion_proof: crate::zkvm::recursion::RecursionProof<Fq, Blake2bTranscript, HyraxPCS>,
+    recursion_proof: RecursionProof<Fq, Blake2bTranscript, HyraxPCS>,
     non_input_base_hints: NonInputBaseHints,
-    pairing_boundary: crate::zkvm::proof_serialization::PairingBoundary,
+    pairing_boundary: PairingBoundary,
     hyrax_prover_setup: <HyraxPCS as CommitmentScheme>::ProverSetup,
 }
 
@@ -92,8 +95,7 @@ fn build_fixture() -> RecursionFixture {
         Some(hint),
         &mut stage8_transcript,
     );
-    let ark_dory_proof =
-        crate::poly::commitment::dory::wrappers::ArkDoryProof::from(dory_proof.clone());
+    let ark_dory_proof = ArkDoryProof::from(dory_proof.clone());
 
     // Commitments map for recursion (Stage8 snapshot → combine).
     let mut commitments: HashMap<

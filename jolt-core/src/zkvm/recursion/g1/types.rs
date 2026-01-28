@@ -2,7 +2,7 @@
 
 use crate::field::JoltField;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
-use crate::zkvm::witness::TermEnum;
+use crate::zkvm::witness::{G1AddTerm, TermEnum};
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -106,7 +106,7 @@ impl<F: JoltField> G1AddValues<F> {
     ) -> Self {
         debug_assert_eq!(
             poly_evals.len(),
-            crate::zkvm::witness::G1AddTerm::COUNT,
+            G1AddTerm::COUNT,
             "expected one eval array per G1AddTerm"
         );
         Self {
@@ -130,7 +130,7 @@ impl<F: JoltField> G1AddValues<F> {
     pub fn from_claims(claims: &[F]) -> Self {
         debug_assert_eq!(
             claims.len(),
-            crate::zkvm::witness::G1AddTerm::COUNT,
+            G1AddTerm::COUNT,
             "expected one claim per G1AddTerm"
         );
         Self {

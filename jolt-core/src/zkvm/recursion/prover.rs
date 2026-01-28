@@ -24,7 +24,7 @@ use crate::{
     transcripts::Transcript,
     zkvm::{
         proof_serialization::PairingBoundary,
-        witness::{CommittedPolynomial, VirtualPolynomial},
+        witness::{CommittedPolynomial, G1AddTerm, VirtualPolynomial},
     },
 };
 use ark_bn254::{Fq, Fr};
@@ -1217,17 +1217,13 @@ impl RecursionProver<Fq> {
                     PolyType::G1AddYR => VirtualPolynomial::g1_add_yr_fused(),
                     PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator_fused(),
                     // Non-port terms are still fused/packed in fully fused G1 mode.
-                    PolyType::G1AddLambda => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::Lambda)
-                    }
+                    PolyType::G1AddLambda => VirtualPolynomial::g1_add_fused(G1AddTerm::Lambda),
                     PolyType::G1AddInvDeltaX => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::InvDeltaX)
+                        VirtualPolynomial::g1_add_fused(G1AddTerm::InvDeltaX)
                     }
-                    PolyType::G1AddIsDouble => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::IsDouble)
-                    }
+                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add_fused(G1AddTerm::IsDouble),
                     PolyType::G1AddIsInverse => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::IsInverse)
+                        VirtualPolynomial::g1_add_fused(G1AddTerm::IsInverse)
                     }
                     _ => return Fq::zero(),
                 };

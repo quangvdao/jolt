@@ -14,6 +14,7 @@ use ark_ec::AffineRepr;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::primitives::arithmetic::PairingCurve;
 
+use crate::poly::commitment::dory::instance_plan::derive_plan_with_hints;
 use crate::transcripts::Transcript;
 use crate::zkvm::config::ProgramMode;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
@@ -21,7 +22,9 @@ use crate::zkvm::proof_serialization::{JoltProof, NonInputBaseHints, PairingBoun
 use crate::zkvm::verifier::{JoltVerifier, JoltVerifierPreprocessing};
 use crate::zkvm::witness::all_committed_polynomials;
 
-use super::prover::{DoryOpeningSnapshot, RecursionInput, RecursionProver};
+use super::prover::{
+    DoryOpeningSnapshot, HyraxPCS, RecursionInput, RecursionProof, RecursionProver,
+};
 use super::verifier::RecursionVerifier;
 use super::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
@@ -33,7 +36,6 @@ use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use ark_bn254::{Fq, Fq12, Fr};
 
 type DoryPCS = crate::poly::commitment::dory::DoryCommitmentScheme;
-type HyraxPCS = crate::zkvm::recursion::prover::HyraxPCS;
 
 /// Standalone recursion artifact for a base Jolt proof.
 ///
@@ -50,7 +52,7 @@ pub struct RecursionArtifact<FS: Transcript> {
     /// Minimal hints for Dory instance-plan derivation (guest recomputes without trusting).
     pub non_input_base_hints: NonInputBaseHints,
     /// The recursion SNARK proof itself (Hyrax + sumchecks).
-    pub proof: crate::zkvm::recursion::prover::RecursionProof<Fq, FS, HyraxPCS>,
+    pub proof: RecursionProof<Fq, FS, HyraxPCS>,
 }
 
 impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
@@ -69,9 +71,7 @@ impl<FS: Transcript> GuestDeserialize for RecursionArtifact<FS> {
             stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
             pairing_boundary: PairingBoundary::guest_deserialize(r)?,
             non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
-            proof: crate::zkvm::recursion::prover::RecursionProof::<Fq, FS, HyraxPCS>::guest_deserialize(
-                r,
-            )?,
+            proof: RecursionProof::<Fq, FS, HyraxPCS>::guest_deserialize(r)?,
         })
     }
 }
@@ -386,7 +386,7 @@ pub fn verify_recursion<FS: Transcript>(
     let combine_coeffs_fr: Vec<Fr> = combine_coeffs;
     let joint_commitment_dory: ArkGT = joint_commitment;
     let combine_commitments_dory: Vec<ArkGT> = combine_commitments;
-    let plan = crate::poly::commitment::dory::derive_plan_with_hints(
+    let plan = derive_plan_with_hints(
         &ast,
         &v.proof.joint_opening_proof,
         &v.preprocessing.generators,

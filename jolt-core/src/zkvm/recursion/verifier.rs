@@ -14,7 +14,7 @@ use crate::{
         opening_proof::{OpeningAccumulator, SumcheckId, VerifierOpeningAccumulator},
     },
     transcripts::Transcript,
-    zkvm::witness::{CommittedPolynomial, G2AddTerm, VirtualPolynomial},
+    zkvm::witness::{CommittedPolynomial, G1AddTerm, G2AddTerm, VirtualPolynomial},
 };
 use ark_bn254::{Fq, Fq12};
 use ark_serialize::{
@@ -781,17 +781,13 @@ impl RecursionVerifier<Fq> {
                     PolyType::G1AddXR => VirtualPolynomial::g1_add_xr_fused(),
                     PolyType::G1AddYR => VirtualPolynomial::g1_add_yr_fused(),
                     PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator_fused(),
-                    PolyType::G1AddLambda => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::Lambda)
-                    }
+                    PolyType::G1AddLambda => VirtualPolynomial::g1_add_fused(G1AddTerm::Lambda),
                     PolyType::G1AddInvDeltaX => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::InvDeltaX)
+                        VirtualPolynomial::g1_add_fused(G1AddTerm::InvDeltaX)
                     }
-                    PolyType::G1AddIsDouble => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::IsDouble)
-                    }
+                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add_fused(G1AddTerm::IsDouble),
                     PolyType::G1AddIsInverse => {
-                        VirtualPolynomial::g1_add_fused(crate::zkvm::witness::G1AddTerm::IsInverse)
+                        VirtualPolynomial::g1_add_fused(G1AddTerm::IsInverse)
                     }
                     _ => return Fq::zero(),
                 };

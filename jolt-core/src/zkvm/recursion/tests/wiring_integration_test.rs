@@ -241,10 +241,7 @@ fn wiring_rejects_tampered_pairing_boundary_rhs() {
             &fixture.recursion_proof.dense_commitment,
             &hyrax_verifier_setup,
         );
-        assert!(
-            matches!(res, Ok(true)),
-            "untampered verify failed: {res:?}"
-        );
+        assert!(matches!(res, Ok(true)), "untampered verify failed: {res:?}");
     }
 
     // Tamper with the externally visible pairing RHS (payload-style attack).

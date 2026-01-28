@@ -1,17 +1,14 @@
-//! Fused G1 addition sumcheck (over global constraint index + x variables).
+//! Fused G1 addition sumcheck (family-local, Option B).
 //!
-//! This is a transitional implementation used to introduce a global `r_c` prefix
-//! (constraint-index challenges) in Stage 2, while keeping `r_x` as the last 11
-//! challenges (constraint variables) as usual.
+//! This is the intended "Option B" fusion style for G1Add:
+//! - We fuse the family over a **family-local** constraint index `c_g1add`.
+//! - Each committed G1Add term (XP, YP, ..., IsInverse) is treated as an MLE over `c_g1add`.
+//! - Padding rows are gated by a public indicator `I_g1add(c)` so the fused constraint is 0
+//!   outside the real constraint range.
 //!
-//! Variable order for this sumcheck instance (round order, `BindingOrder::LowToHigh`):
-//! - first `k = log2(num_constraints_padded)` rounds bind the global constraint index `c` (LSB first)
-//! - last 11 rounds bind the matrix x-variables `x` (LSB first)
-//!
-//! The witness polynomials for each term are derived from the recursion matrix rows
-//! for the corresponding `PolyType::G1Add*` columns, interpreted as fused polynomials
-//! `P_term(c, x)`; we gate the constraint by a public indicator `I_g1add(c)` so the
-//! fused constraint is 0 on non-G1Add constraints.
+//! Variable order (round order, `BindingOrder::LowToHigh`):
+//! - `k = log2(next_pow2(num_g1add).max(1))` rounds bind the family-local constraint index `c_g1add`
+//!   (LSB first).
 
 use crate::{
     field::JoltField,
@@ -30,13 +27,12 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
-    zkvm::witness::TermEnum,
     zkvm::{
         recursion::{
-            constraints::system::{index_to_binary, ConstraintType, PolyType},
+            constraints::system::{index_to_binary, G1AddNative},
             g1::addition::G1AddValues,
         },
-        witness::{G1AddTerm, VirtualPolynomial},
+        witness::{G1AddTerm, TermEnum, VirtualPolynomial},
     },
 };
 
@@ -48,60 +44,19 @@ use rayon::prelude::*;
 /// Degree bound for the G1Add constraint polynomial (see `g1/addition.rs`).
 const DEGREE_BOUND: usize = 6;
 
-/// Transpose a `[x_low, c_high]` table into `[c_low, x_high]`.
-///
-/// Input layout: `in[c * row_size + x]` (x varies fastest within a constraint row)
-/// Output layout: `out[x * num_constraints_padded + c]` (c varies fastest within an x-slice)
-#[inline]
-fn transpose_xc_to_cx(input: &[Fq], num_constraints_padded: usize, row_size: usize) -> Vec<Fq> {
-    debug_assert_eq!(input.len(), num_constraints_padded * row_size);
-    let mut out = vec![Fq::zero(); input.len()];
-    for c in 0..num_constraints_padded {
-        let row_off = c * row_size;
-        for x in 0..row_size {
-            out[x * num_constraints_padded + c] = input[row_off + x];
-        }
-    }
-    out
-}
-
-fn term_to_poly_type(term: G1AddTerm) -> PolyType {
-    match term {
-        G1AddTerm::XP => PolyType::G1AddXP,
-        G1AddTerm::YP => PolyType::G1AddYP,
-        G1AddTerm::PIndicator => PolyType::G1AddPIndicator,
-        G1AddTerm::XQ => PolyType::G1AddXQ,
-        G1AddTerm::YQ => PolyType::G1AddYQ,
-        G1AddTerm::QIndicator => PolyType::G1AddQIndicator,
-        G1AddTerm::XR => PolyType::G1AddXR,
-        G1AddTerm::YR => PolyType::G1AddYR,
-        G1AddTerm::RIndicator => PolyType::G1AddRIndicator,
-        G1AddTerm::Lambda => PolyType::G1AddLambda,
-        G1AddTerm::InvDeltaX => PolyType::G1AddInvDeltaX,
-        G1AddTerm::IsDouble => PolyType::G1AddIsDouble,
-        G1AddTerm::IsInverse => PolyType::G1AddIsInverse,
-    }
-}
-
 #[derive(Clone, Allocative)]
 pub struct FusedG1AddParams {
     pub num_constraint_index_vars: usize, // k
-    pub num_constraint_vars: usize,       // 11
     pub num_constraints: usize,
     pub num_constraints_padded: usize,
 }
 
 impl FusedG1AddParams {
-    pub fn new(
-        num_constraints: usize,
-        num_constraints_padded: usize,
-        num_constraint_vars: usize,
-    ) -> Self {
-        debug_assert!(num_constraints_padded.is_power_of_two());
+    pub fn new(num_constraints: usize) -> Self {
+        let num_constraints_padded = num_constraints.max(1).next_power_of_two();
         let num_constraint_index_vars = num_constraints_padded.trailing_zeros() as usize;
         Self {
             num_constraint_index_vars,
-            num_constraint_vars,
             num_constraints,
             num_constraints_padded,
         }
@@ -109,7 +64,7 @@ impl FusedG1AddParams {
 
     #[inline]
     pub fn num_rounds(&self) -> usize {
-        self.num_constraint_index_vars + self.num_constraint_vars
+        self.num_constraint_index_vars
     }
 }
 
@@ -150,16 +105,11 @@ pub struct FusedG1AddProver {
 }
 
 impl FusedG1AddProver {
-    pub fn new<T: Transcript>(
-        matrix_evals: &[Fq],
-        constraint_types: &[ConstraintType],
-        params: FusedG1AddParams,
-        transcript: &mut T,
-    ) -> Self {
+    pub fn new<T: Transcript>(g1_add_rows: &[G1AddNative], transcript: &mut T) -> Self {
+        let params = FusedG1AddParams::new(g1_add_rows.len());
         let num_rounds = params.num_rounds();
-        let row_size = 1usize << params.num_constraint_vars;
 
-        // Sample eq_point for the fused (c,x) domain.
+        // Sample eq_point for the fused c_g1add domain.
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -168,34 +118,41 @@ impl FusedG1AddProver {
         // Sample δ for term batching.
         let term_batch_coeff: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
 
-        // Build indicator table in [x_low, c_high] layout, then transpose to [c_low, x_high].
-        let mut ind_xc = vec![Fq::zero(); params.num_constraints_padded * row_size];
-        for c in 0..params.num_constraints_padded {
-            let is_g1add =
-                c < constraint_types.len() && matches!(constraint_types[c], ConstraintType::G1Add);
-            if is_g1add {
-                let off = c * row_size;
-                for x in 0..row_size {
-                    ind_xc[off + x] = Fq::one();
-                }
-            }
+        // Family-local indicator I_g1add(c): 1 on real constraints, 0 on padding.
+        let mut ind = vec![Fq::zero(); params.num_constraints_padded];
+        for c in 0..params.num_constraints {
+            ind[c] = Fq::one();
         }
-        let ind_cx = transpose_xc_to_cx(&ind_xc, params.num_constraints_padded, row_size);
-        let indicator_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind_cx));
+        let indicator_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(ind));
 
-        // Build fused term polynomials by slicing the matrix by PolyType block, then transposing.
-        let block_size = params.num_constraints_padded * row_size;
+        // Helper to extract a term scalar from a native G1Add row.
+        let term_value = |row: &G1AddNative, term: G1AddTerm| -> Fq {
+            match term {
+                G1AddTerm::XP => row.x_p,
+                G1AddTerm::YP => row.y_p,
+                G1AddTerm::PIndicator => row.ind_p,
+                G1AddTerm::XQ => row.x_q,
+                G1AddTerm::YQ => row.y_q,
+                G1AddTerm::QIndicator => row.ind_q,
+                G1AddTerm::XR => row.x_r,
+                G1AddTerm::YR => row.y_r,
+                G1AddTerm::RIndicator => row.ind_r,
+                G1AddTerm::Lambda => row.lambda,
+                G1AddTerm::InvDeltaX => row.inv_delta_x,
+                G1AddTerm::IsDouble => row.is_double,
+                G1AddTerm::IsInverse => row.is_inverse,
+            }
+        };
+
+        // Build fused term polynomials P_term(c) (one per term), padded to 2^k.
         let mut term_polys = Vec::with_capacity(G1AddTerm::COUNT);
         for term_idx in 0..G1AddTerm::COUNT {
             let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");
-            let poly_type = term_to_poly_type(term) as usize;
-            let start = poly_type * block_size;
-            let end = start + block_size;
-            let block_xc = &matrix_evals[start..end];
-            let block_cx = transpose_xc_to_cx(block_xc, params.num_constraints_padded, row_size);
-            term_polys.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(
-                block_cx,
-            )));
+            let mut v = vec![Fq::zero(); params.num_constraints_padded];
+            for (c, row) in g1_add_rows.iter().enumerate() {
+                v[c] = term_value(row, term);
+            }
+            term_polys.push(MultilinearPolynomial::LargeScalars(DensePolynomial::new(v)));
         }
 
         Self {
@@ -297,31 +254,22 @@ pub struct FusedG1AddVerifier {
     params: FusedG1AddParams,
     eq_point: Vec<<Fq as JoltField>::Challenge>,
     term_batch_coeff: Fq,
-    /// Global constraint indices where `ConstraintType::G1Add` holds.
-    g1add_indices: Vec<usize>,
+    /// Number of (family-local) G1Add constraints.
+    num_constraints: usize,
 }
 
 impl FusedG1AddVerifier {
-    pub fn new<T: Transcript>(
-        params: FusedG1AddParams,
-        constraint_types: &[ConstraintType],
-        transcript: &mut T,
-    ) -> Self {
+    pub fn new<T: Transcript>(params: FusedG1AddParams, transcript: &mut T) -> Self {
         let num_rounds = params.num_rounds();
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
         let term_batch_coeff: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
-        let g1add_indices: Vec<usize> = constraint_types
-            .iter()
-            .enumerate()
-            .filter_map(|(i, ct)| matches!(ct, ConstraintType::G1Add).then_some(i))
-            .collect();
         Self {
+            num_constraints: params.num_constraints,
             params,
             eq_point,
             term_batch_coeff,
-            g1add_indices,
         }
     }
 }
@@ -346,7 +294,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1AddVerifier {
         let eq_point_f: Vec<Fq> = self.eq_point.iter().map(|c| (*c).into()).collect();
         let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
 
-        // Compute I_g1add(r_c) as Σ_{i in g1add_indices} Eq(r_c, i).
+        // Compute I_g1add(r_c) as Σ_{c < num_constraints} Eq(r_c, c).
         // We treat the first k sumcheck challenges as the `c` variables in *round order*
         // (LSB-first), so we use `index_to_binary` (little-endian) for the indices.
         let k = self.params.num_constraint_index_vars;
@@ -356,8 +304,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1AddVerifier {
             .map(|c| (*c).into())
             .collect();
         let mut ind_eval = Fq::zero();
-        for &idx in &self.g1add_indices {
-            let bits = index_to_binary::<Fq>(idx, k);
+        for c in 0..self.num_constraints {
+            let bits = index_to_binary::<Fq>(c, k);
             ind_eval += EqPolynomial::mle(&r_c, &bits);
         }
 
@@ -394,5 +342,81 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1AddVerifier {
                 opening_point.clone(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcripts::Blake2bTranscript;
+
+    #[test]
+    fn fused_g1add_is_family_local_over_c_only() {
+        let rows = vec![
+            G1AddNative {
+                x_p: Fq::from_u64(1),
+                y_p: Fq::zero(),
+                ind_p: Fq::zero(),
+                x_q: Fq::zero(),
+                y_q: Fq::zero(),
+                ind_q: Fq::zero(),
+                x_r: Fq::zero(),
+                y_r: Fq::zero(),
+                ind_r: Fq::zero(),
+                lambda: Fq::zero(),
+                inv_delta_x: Fq::zero(),
+                is_double: Fq::zero(),
+                is_inverse: Fq::zero(),
+            },
+            G1AddNative {
+                x_p: Fq::from_u64(2),
+                y_p: Fq::zero(),
+                ind_p: Fq::zero(),
+                x_q: Fq::zero(),
+                y_q: Fq::zero(),
+                ind_q: Fq::zero(),
+                x_r: Fq::zero(),
+                y_r: Fq::zero(),
+                ind_r: Fq::zero(),
+                lambda: Fq::zero(),
+                inv_delta_x: Fq::zero(),
+                is_double: Fq::zero(),
+                is_inverse: Fq::zero(),
+            },
+            G1AddNative {
+                x_p: Fq::from_u64(3),
+                y_p: Fq::zero(),
+                ind_p: Fq::zero(),
+                x_q: Fq::zero(),
+                y_q: Fq::zero(),
+                ind_q: Fq::zero(),
+                x_r: Fq::zero(),
+                y_r: Fq::zero(),
+                ind_r: Fq::zero(),
+                lambda: Fq::zero(),
+                inv_delta_x: Fq::zero(),
+                is_double: Fq::zero(),
+                is_inverse: Fq::zero(),
+            },
+        ];
+
+        let mut transcript = Blake2bTranscript::new(b"test_fused_g1add_family_local");
+        let prover = FusedG1AddProver::new(&rows, &mut transcript);
+        assert_eq!(prover.params.num_constraints, 3);
+        assert_eq!(prover.params.num_constraints_padded, 4);
+        assert_eq!(prover.params.num_rounds(), 2);
+        assert_eq!(prover.term_polys.len(), G1AddTerm::COUNT);
+
+        // Term polynomials are c-only tables padded to 2^k.
+        let xp_idx = G1AddTerm::XP.to_index();
+        let MultilinearPolynomial::LargeScalars(xp_poly) = &prover.term_polys[xp_idx] else {
+            panic!("expected LargeScalars term poly");
+        };
+        assert_eq!(xp_poly.Z.len(), prover.params.num_constraints_padded);
+        assert_eq!(xp_poly.Z[0], Fq::from_u64(1));
+        assert_eq!(xp_poly.Z[1], Fq::from_u64(2));
+        assert_eq!(xp_poly.Z[2], Fq::from_u64(3));
+        // padding row
+        assert_eq!(xp_poly.Z[3], Fq::zero());
     }
 }

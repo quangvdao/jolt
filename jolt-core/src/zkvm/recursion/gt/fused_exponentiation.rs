@@ -31,7 +31,7 @@ use crate::{
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
     zkvm::recursion::curve::{Bn254Recursion, RecursionCurve},
     zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness},
-    zkvm::recursion::gt::indexing::{k_gt, num_gt_constraints_padded},
+    zkvm::recursion::gt::indexing::{k_exp, k_gt, num_gt_constraints_padded},
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -46,7 +46,13 @@ const DEGREE: usize = 8; // Was 7, but eq*C has degree 1+7=8
 
 #[derive(Clone, Allocative)]
 pub struct FusedGtExpParams {
-    pub num_c_vars: usize,    // k_gt
+    /// Number of c-index variables for Stage 1 (k_gt).
+    ///
+    /// Stage 1 uses the GT-local c domain so that Stage-2 subprotocols (fused shift + wiring)
+    /// can consume Stage-1 openings at a point whose `(s,u)` challenges align with Stage 2.
+    pub num_c_vars: usize,
+    /// Family-local GTExp suffix length (k_exp).
+    pub k_exp: usize,
     pub num_x_vars: usize,    // 11
     pub num_step_vars: usize, // 7
     pub num_elem_vars: usize, // 4
@@ -58,8 +64,10 @@ impl FusedGtExpParams {
     pub fn from_constraint_types(constraint_types: &[ConstraintType]) -> Self {
         let num_gt_constraints_padded = num_gt_constraints_padded(constraint_types);
         let num_c_vars = k_gt(constraint_types);
+        let k_exp = k_exp(constraint_types);
         Self {
             num_c_vars,
+            k_exp,
             num_x_vars: CONFIG.packed_vars,
             num_step_vars: CONFIG.step_vars,
             num_elem_vars: CONFIG.element_vars,
@@ -134,12 +142,18 @@ impl FusedGtExpProver {
 
         let build_from_witness = |get: fn(&GtExpWitness<Fq>) -> &Vec<Fq>| {
             let mut xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
+            let dummy = params.num_c_vars.saturating_sub(params.k_exp);
             for global_idx in 0..constraint_types.len() {
                 if let ConstraintLocator::GtExp { local } = locator_by_constraint[global_idx] {
                     let src = get(&witnesses[local]);
                     debug_assert_eq!(src.len(), row_size);
-                    let off = local * row_size;
-                    xc[off..off + row_size].copy_from_slice(src);
+                    // Split-k convention: the GTExp family index lives in the **high** bits of c_gt,
+                    // and the low `dummy` bits are replicated.
+                    for d in 0..(1usize << dummy) {
+                        let c = d + (local << dummy);
+                        let off = c * row_size;
+                        xc[off..off + row_size].copy_from_slice(src);
+                    }
                 }
             }
             // Store in [x11 low bits, c_gt high bits] order so `c_gt` is a suffix in Stage 2.
@@ -383,10 +397,14 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
         //
         // Variable order (LSB-first rounds) is:
         // - step bits s (7), then elem bits u (4), then c_gt bits (k) as a suffix.
-        let k = self.params.num_c_vars;
+        let k_gt = self.params.num_c_vars;
+        let k_exp = self.params.k_exp;
+        let dummy = k_gt.saturating_sub(k_exp);
         let s0 = 0usize;
         let x0 = self.params.num_step_vars; // 7
-        let r_c_lsb: Vec<Fq> = sumcheck_challenges[CONFIG.packed_vars..]
+                                            // Split-k convention: dummy bits are the first `dummy` *low* bits of the c suffix.
+                                            // The GTExp family index lives in the remaining `k_exp` high bits.
+        let r_c_tail_lsb: Vec<Fq> = sumcheck_challenges[CONFIG.packed_vars + dummy..]
             .iter()
             .map(|c| (*c).into())
             .collect();
@@ -438,8 +456,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
 
         for (w, &c_idx) in self.gtexp_c_indices.iter().enumerate() {
             // Eq(r_c, c_idx) using little-endian bits for indices (round order is LSB-first).
-            let bits = crate::zkvm::recursion::constraints::system::index_to_binary::<Fq>(c_idx, k);
-            let w_c = EqPolynomial::mle(&r_c_lsb, &bits);
+            let bits =
+                crate::zkvm::recursion::constraints::system::index_to_binary::<Fq>(c_idx, k_exp);
+            let w_c = EqPolynomial::mle(&r_c_tail_lsb, &bits);
 
             let (u, v) = self.public_inputs[w].evaluate_digit_mles(&eq_evals_s);
             let (b1, b2, b3v) = self.public_inputs[w].evaluate_base_powers_mle(&eq_evals_x);
@@ -479,6 +498,110 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
             VirtualPolynomial::gt_exp_quotient_fused(),
         ] {
             accumulator.append_virtual(transcript, vp, SumcheckId::GtExp, opening_point.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::poly::dense_mlpoly::DensePolynomial;
+    use crate::transcripts::Blake2bTranscript;
+    use crate::zkvm::recursion::constraints::system::ConstraintLocator;
+
+    #[test]
+    fn stage1_fused_gtexp_replicates_across_dummy_c_bits() {
+        // Split-k scenario:
+        // - 3 GTExp => padded 4 => k_exp = 2
+        // - 16 GTMul => padded 16 => k_mul = 4
+        // => k_gt = 4, dummy = 2
+        let mut constraint_types = Vec::new();
+        constraint_types.extend(core::iter::repeat(ConstraintType::GtExp).take(3));
+        constraint_types.extend(core::iter::repeat(ConstraintType::GtMul).take(16));
+
+        let params = FusedGtExpParams::from_constraint_types(&constraint_types);
+        assert_eq!(params.num_c_vars, k_gt(&constraint_types));
+        assert_eq!(params.k_exp, k_exp(&constraint_types));
+        let dummy = params.num_c_vars - params.k_exp;
+        assert_eq!(dummy, 2);
+
+        // Build locator_by_constraint with family-local ranks.
+        let mut locator_by_constraint = Vec::with_capacity(constraint_types.len());
+        let mut exp_rank = 0usize;
+        let mut mul_rank = 0usize;
+        for ct in &constraint_types {
+            match ct {
+                ConstraintType::GtExp => {
+                    locator_by_constraint.push(ConstraintLocator::GtExp { local: exp_rank });
+                    exp_rank += 1;
+                }
+                ConstraintType::GtMul => {
+                    locator_by_constraint.push(ConstraintLocator::GtMul { local: mul_rank });
+                    mul_rank += 1;
+                }
+                _ => unreachable!("test only uses GTExp/GTMul"),
+            }
+        }
+        assert_eq!(exp_rank, 3);
+        assert_eq!(mul_rank, 16);
+
+        // Fake witnesses: each row is constant per instance so replication is easy to observe.
+        let row_size = 1usize << CONFIG.packed_vars; // 2048
+        let mk = |v: u64| vec![Fq::from_u64(v); row_size];
+        let witnesses: Vec<GtExpWitness<Fq>> = (0..3)
+            .map(|i| GtExpWitness::<Fq> {
+                rho_packed: mk(10 + i as u64),
+                rho_next_packed: mk(20 + i as u64),
+                quotient_packed: mk(30 + i as u64),
+                digit_lo_packed: mk(40 + i as u64),
+                digit_hi_packed: mk(50 + i as u64),
+                base_packed: mk(60 + i as u64),
+                base2_packed: mk(70 + i as u64),
+                base3_packed: mk(80 + i as u64),
+                num_steps: 1,
+            })
+            .collect();
+
+        let g_poly_11var = DensePolynomial::new(vec![Fq::one(); row_size]);
+        let mut transcript = Blake2bTranscript::new(b"test_fused_gtexp_replication");
+        let prover = FusedGtExpProver::new(
+            params.clone(),
+            &constraint_types,
+            &locator_by_constraint,
+            &witnesses,
+            g_poly_11var,
+            &mut transcript,
+        );
+
+        // Inspect the backing table for rho(c_gt, x11) in [x11_low, c_gt_high] layout.
+        let MultilinearPolynomial::LargeScalars(rho_dense) = &prover.rho else {
+            panic!("expected LargeScalars rho polynomial");
+        };
+        let z = &rho_dense.Z;
+
+        // For each GTExp local index, rho must be replicated across dummy low bits.
+        // Embed: c = d + (local << dummy), for d in [0..2^dummy).
+        for local in 0..3usize {
+            let c0 = 0 + (local << dummy);
+            let c1 = 1 + (local << dummy);
+            let c2 = 2 + (local << dummy);
+            let c3 = 3 + (local << dummy);
+            for x in 0..row_size {
+                let v0 = z[c0 * row_size + x];
+                assert_eq!(v0, z[c1 * row_size + x]);
+                assert_eq!(v0, z[c2 * row_size + x]);
+                assert_eq!(v0, z[c3 * row_size + x]);
+            }
+        }
+
+        // Padding GTExp local index = 3 (since padded to 4) should remain all-zero across its
+        // replicated block.
+        let pad_local = 3usize;
+        for d in 0..(1usize << dummy) {
+            let c = d + (pad_local << dummy);
+            for x in 0..row_size {
+                assert_eq!(z[c * row_size + x], Fq::zero());
+            }
         }
     }
 }

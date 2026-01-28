@@ -261,13 +261,19 @@ impl<T: Transcript> FusedWiringGtProver<T> {
         // verification fails.
         let num_gt_exp = cs.gt_exp_witnesses.len();
         let num_gt_mul = cs.gt_mul_rows.len();
-        let need_joint = edges.iter().any(|e| matches!(e.dst, GtConsumer::JointCommitment));
+        let need_joint = edges
+            .iter()
+            .any(|e| matches!(e.dst, GtConsumer::JointCommitment));
         let need_pairing_rhs = edges
             .iter()
             .any(|e| matches!(e.dst, GtConsumer::PairingBoundaryRhs));
 
         let rho_polys: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
-            .map(|i| Some(MultilinearPolynomial::from(cs.gt_exp_witnesses[i].rho_packed.clone())))
+            .map(|i| {
+                Some(MultilinearPolynomial::from(
+                    cs.gt_exp_witnesses[i].rho_packed.clone(),
+                ))
+            })
             .collect();
 
         let mul_lhs: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_mul)
@@ -295,7 +301,9 @@ impl<T: Transcript> FusedWiringGtProver<T> {
         let exp_base: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
             .map(|i| {
                 let mle_4 = Bn254Recursion::fq12_to_mle(&cs.gt_exp_public_inputs[i].base);
-                Some(MultilinearPolynomial::from(pad_4var_to_11var_replicated(&mle_4)))
+                Some(MultilinearPolynomial::from(pad_4var_to_11var_replicated(
+                    &mle_4,
+                )))
             })
             .collect();
 
@@ -569,15 +577,15 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
             let evals = (0..half)
                 .into_par_iter()
                 .map(|i| {
-                    let eq_u_evals =
-                        self.eq_u_poly
-                            .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                    let eq_u_evals = self
+                        .eq_u_poly
+                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
 
                     let mut delta_evals = [Fq::zero(); DEGREE];
                     for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
                         let eq_s_poly = self.eq_s_poly_for_src(edge.src);
-                        let eq_s_evals = eq_s_poly
-                            .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                        let eq_s_evals =
+                            eq_s_poly.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
 
                         let src_evals = self
                             .src_poly_x(edge.src)
@@ -665,7 +673,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
                             sel_src.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
 
                         let (sel_dst_key, beta_dst) = match edge.dst {
-                            GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                            GtConsumer::GtMulLhs { instance }
+                            | GtConsumer::GtMulRhs { instance } => {
                                 (selector_key(dummy_mul, self.k_mul, instance), beta_mul)
                             }
                             GtConsumer::GtExpBase { instance } => {
@@ -857,12 +866,7 @@ impl FusedWiringGtVerifier {
     }
 
     #[inline]
-    fn eq_c_tail(
-        &self,
-        r_c_tail: &[Fq],
-        idx: usize,
-        k_family: usize,
-    ) -> Fq {
+    fn eq_c_tail(&self, r_c_tail: &[Fq], idx: usize, k_family: usize) -> Fq {
         let bits = index_to_binary::<Fq>(idx, k_family);
         EqPolynomial::mle(r_c_tail, &bits)
     }
@@ -945,20 +949,16 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringGtVerifier {
             };
 
             let (eq_c_dst, dst_val, beta_dst) = match edge.dst {
-                GtConsumer::GtMulLhs { instance } => {
-                    (
-                        self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                        mul_lhs_fused,
-                        beta_mul,
-                    )
-                }
-                GtConsumer::GtMulRhs { instance } => {
-                    (
-                        self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                        mul_rhs_fused,
-                        beta_mul,
-                    )
-                }
+                GtConsumer::GtMulLhs { instance } => (
+                    self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
+                    mul_lhs_fused,
+                    beta_mul,
+                ),
+                GtConsumer::GtMulRhs { instance } => (
+                    self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
+                    mul_rhs_fused,
+                    beta_mul,
+                ),
                 GtConsumer::GtExpBase { instance } => {
                     let base_eval = eval_fq12_packed_at(&self.gt_exp_bases[instance], &r_elem);
                     (
@@ -987,4 +987,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringGtVerifier {
         // No-op.
     }
 }
-

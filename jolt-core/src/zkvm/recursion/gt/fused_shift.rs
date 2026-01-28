@@ -1,6 +1,19 @@
 //! Fused shift sumcheck for verifying `rho_next_fused` consistency.
 //!
-//! This is the GT-fused analogue of `gt/shift.rs`:\n//! - Stage 1 (fused GTExp) emits `gt_exp_rho_next_fused()` at point `r1 = (r_c, r_s, r_x)`.\n//! - This sumcheck proves that `rho_next_fused(r1)` is consistent with the fused committed `rho`\n//!   table via a one-step shift on the step variables.\n+//!\n+//! In end-to-end fusion we want **no per-instance GTExp openings**, so this protocol:\n+//! - takes the single Stage-1 fused `rho_next` claim as its input claim\n+//! - uses the fused rho table over `(c_gt,x11)` as its witness\n+//! - emits **no** additional openings (it is purely a check)\n+//!\n+//! Variable order (round order, `BindingOrder::LowToHigh`):\n+//! - first `k_gt` rounds: GT-local constraint index `c_gt` (LSB first)\n+//! - next 7 rounds: step variables `s` (LSB first)\n+//! - last 4 rounds: element variables `x` (LSB first)\n+
+//! GT-fused analogue of `gt/shift.rs`:
+//! - Stage 1 (fused GTExp) emits `gt_exp_rho_next_fused()` at point `r1 = (r_s, r_u, r_c_exp)`.
+//! - This sumcheck proves that `rho_next_fused(r1)` is consistent with the fused committed `rho`
+//!   table via a one-step shift on the step variables.
+//!
+//! In end-to-end fusion we want **no per-instance GTExp openings**, so this protocol:
+//! - takes the single Stage-1 fused `rho_next` claim as its input claim
+//! - uses the fused rho table over `(x11, c_exp)` as its witness
+//! - emits **no** additional openings (it is purely a check)
+//!
+//! Variable order (round order, `BindingOrder::LowToHigh`):
+//! - first 7 rounds: step variables `s` (LSB first)
+//! - next 4 rounds: element variables `u` (LSB first)
+//! - last `k_gt` rounds: GT-local constraint index `c_gt` (LSB first, as a suffix)
 use crate::{
     field::JoltField,
     poly::{
@@ -132,9 +145,9 @@ impl FusedGtShiftProver {
 
         // Build fused rho(c_gt,x11) from GTExp witnesses (zero elsewhere).
         //
-        // Split-k note: `c_gt` is the Stage-2 common GT-local domain (k_gt bits). When
-        // `k_gt > k_exp`, the GTExp family occupies only the tail `k_exp` bits; the first
-        // `dummy = k_gt - k_exp` low bits are dummy and rho is replicated across them.
+        // Split-k convention (shared with GT wiring): when `k_gt > k_exp`, the GTExp family
+        // occupies only the tail `k_exp` bits of `c_gt`; the first `dummy = k_gt-k_exp` low bits
+        // are dummy and rho is replicated across them.
         let row_size = 1usize << params.num_x_vars;
         let mut rho_xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
         let k_gt = params.num_c_vars;
@@ -144,7 +157,6 @@ impl FusedGtShiftProver {
             if let ConstraintLocator::GtExp { local } = locator_by_constraint[global_idx] {
                 let src = &gt_exp_witnesses[local].rho_packed;
                 debug_assert_eq!(src.len(), row_size);
-                // Replicate this GTExp row across all assignments of the dummy low bits.
                 for d in 0..(1usize << dummy) {
                     let c = d + (local << dummy);
                     let off = c * row_size;

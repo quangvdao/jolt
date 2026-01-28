@@ -7,6 +7,7 @@
 
 pub mod addition;
 pub mod fused_addition;
+pub mod fused_scalar_multiplication;
 pub mod scalar_multiplication;
 pub mod shift;
 pub mod wiring;

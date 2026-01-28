@@ -100,9 +100,16 @@ fn test_recursion_snark_e2e_with_dory() {
         .ok()
         .map(|v| v != "0" && v.to_lowercase() != "false")
         .unwrap_or(false);
-    let dense_num_vars = if enable_gt_fused_end_to_end {
-        crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types_gt_fused(
+    let enable_g1_scalar_mul_fused_end_to_end =
+        std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+    let dense_num_vars = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+        crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types_fused(
             &constraint_types,
+            enable_gt_fused_end_to_end,
+            enable_g1_scalar_mul_fused_end_to_end,
         )
         .num_dense_vars
     } else {
@@ -187,6 +194,7 @@ fn test_recursion_snark_e2e_with_dory() {
     let verifier_input = RecursionVerifierInput {
         constraint_types: recursion_constraint_metadata.constraint_types,
         enable_gt_fused_end_to_end,
+        enable_g1_scalar_mul_fused_end_to_end,
         num_vars,
         num_constraint_vars,
         num_s_vars,

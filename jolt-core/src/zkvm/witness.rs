@@ -812,6 +812,13 @@ pub enum RecursionPoly {
         term: G1ScalarMulTerm,
         instance: usize,
     },
+    /// Fused G1 scalar multiplication term polynomial across all constraints.
+    ///
+    /// Analogous to `GtMulFused` / `GtExpFused`: a single term polynomial over a family-local
+    /// constraint index `c` (plus any native step variables).
+    G1ScalarMulFused {
+        term: G1ScalarMulTerm,
+    },
     // G2 operations
     G2Add {
         term: G2AddTerm,
@@ -865,6 +872,7 @@ impl RecursionPoly {
             Self::G1Add { instance, .. } => *instance,
             Self::G1AddFused { .. } => 0,
             Self::G1ScalarMul { instance, .. } => *instance,
+            Self::G1ScalarMulFused { .. } => 0,
             Self::G2Add { instance, .. } => *instance,
             Self::G2ScalarMul { instance, .. } => *instance,
             Self::GtMul { instance, .. } => *instance,
@@ -882,6 +890,7 @@ impl RecursionPoly {
             Self::G1Add { term, .. } => term.to_index(),
             Self::G1AddFused { term } => term.to_index(),
             Self::G1ScalarMul { term, .. } => term.to_index(),
+            Self::G1ScalarMulFused { term } => term.to_index(),
             Self::G2Add { term, .. } => term.to_index(),
             Self::G2ScalarMul { term, .. } => term.to_index(),
             Self::GtMul { term, .. } => term.to_index(),
@@ -912,6 +921,7 @@ const RECURSION_POLY_TAG_FROBENIUS: u8 = 8;
 const RECURSION_POLY_TAG_GT_MUL_FUSED: u8 = 9;
 const RECURSION_POLY_TAG_GT_EXP_FUSED: u8 = 10;
 const RECURSION_POLY_TAG_GT_WIRING_FUSED: u8 = 11;
+const RECURSION_POLY_TAG_G1_SCALAR_MUL_FUSED: u8 = 12;
 
 impl CanonicalSerialize for RecursionPoly {
     fn serialize_with_mode<W: Write>(
@@ -928,6 +938,9 @@ impl CanonicalSerialize for RecursionPoly {
             }
             RecursionPoly::G1ScalarMul { term, instance } => {
                 (RECURSION_POLY_TAG_G1_SCALAR_MUL, term.to_index(), instance)
+            }
+            RecursionPoly::G1ScalarMulFused { term } => {
+                (RECURSION_POLY_TAG_G1_SCALAR_MUL_FUSED, term.to_index(), 0)
             }
             RecursionPoly::G2Add { term, instance } => {
                 (RECURSION_POLY_TAG_G2_ADD, term.to_index(), instance)
@@ -1002,6 +1015,10 @@ impl CanonicalDeserialize for RecursionPoly {
                     .ok_or(SerializationError::InvalidData)?,
                 instance,
             },
+            RECURSION_POLY_TAG_G1_SCALAR_MUL_FUSED => Self::G1ScalarMulFused {
+                term: G1ScalarMulTerm::from_index(term_index)
+                    .ok_or(SerializationError::InvalidData)?,
+            },
             RECURSION_POLY_TAG_G2_ADD => Self::G2Add {
                 term: G2AddTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
                 instance,
@@ -1056,6 +1073,9 @@ impl GuestSerialize for RecursionPoly {
             }
             RecursionPoly::G1ScalarMul { term, instance } => {
                 (RECURSION_POLY_TAG_G1_SCALAR_MUL, term.to_index(), instance)
+            }
+            RecursionPoly::G1ScalarMulFused { term } => {
+                (RECURSION_POLY_TAG_G1_SCALAR_MUL_FUSED, term.to_index(), 0)
             }
             RecursionPoly::G2Add { term, instance } => {
                 (RECURSION_POLY_TAG_G2_ADD, term.to_index(), instance)
@@ -1131,6 +1151,14 @@ impl GuestDeserialize for RecursionPoly {
                     )
                 })?,
                 instance,
+            },
+            RECURSION_POLY_TAG_G1_SCALAR_MUL_FUSED => Self::G1ScalarMulFused {
+                term: G1ScalarMulTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid G1ScalarMulTerm index",
+                    )
+                })?,
             },
             RECURSION_POLY_TAG_G2_ADD => Self::G2Add {
                 term: G2AddTerm::from_index(term_index).ok_or_else(|| {
@@ -1809,10 +1837,20 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
+    pub fn g1_scalar_mul_xa_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::XA,
+        })
+    }
     pub fn g1_scalar_mul_ya(i: usize) -> Self {
         Self::Recursion(RecursionPoly::G1ScalarMul {
             term: G1ScalarMulTerm::YA,
             instance: i,
+        })
+    }
+    pub fn g1_scalar_mul_ya_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::YA,
         })
     }
     pub fn g1_scalar_mul_xt(i: usize) -> Self {
@@ -1821,10 +1859,20 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
+    pub fn g1_scalar_mul_xt_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::XT,
+        })
+    }
     pub fn g1_scalar_mul_yt(i: usize) -> Self {
         Self::Recursion(RecursionPoly::G1ScalarMul {
             term: G1ScalarMulTerm::YT,
             instance: i,
+        })
+    }
+    pub fn g1_scalar_mul_yt_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::YT,
         })
     }
     pub fn g1_scalar_mul_xa_next(i: usize) -> Self {
@@ -1833,10 +1881,20 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
+    pub fn g1_scalar_mul_xa_next_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::XANext,
+        })
+    }
     pub fn g1_scalar_mul_ya_next(i: usize) -> Self {
         Self::Recursion(RecursionPoly::G1ScalarMul {
             term: G1ScalarMulTerm::YANext,
             instance: i,
+        })
+    }
+    pub fn g1_scalar_mul_ya_next_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::YANext,
         })
     }
     pub fn g1_scalar_mul_t_indicator(i: usize) -> Self {
@@ -1845,10 +1903,20 @@ impl VirtualPolynomial {
             instance: i,
         })
     }
+    pub fn g1_scalar_mul_t_indicator_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::TIndicator,
+        })
+    }
     pub fn g1_scalar_mul_a_indicator(i: usize) -> Self {
         Self::Recursion(RecursionPoly::G1ScalarMul {
             term: G1ScalarMulTerm::AIndicator,
             instance: i,
+        })
+    }
+    pub fn g1_scalar_mul_a_indicator_fused() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::AIndicator,
         })
     }
     pub fn g1_scalar_mul_bit(i: usize) -> Self {

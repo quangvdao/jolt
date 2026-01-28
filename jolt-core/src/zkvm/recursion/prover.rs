@@ -629,11 +629,10 @@ impl RecursionProver<Fq> {
         // jump due to GT-local padding (`num_gt_constraints_padded`) and GTMul's 4->11 var lift.
         //
         // NOTE: Keep this at `info` so it can be enabled via `RUST_LOG=jolt_core=info`.
-        let enable_gt_fused_end_to_end =
-            std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(false);
+        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
         if enable_gt_fused_end_to_end {
             use crate::zkvm::recursion::gt::indexing::{
                 k_gt, num_gt_constraints, num_gt_constraints_padded,
@@ -762,27 +761,25 @@ impl RecursionProver<Fq> {
         // (`round_offset = max_num_rounds - num_rounds`), so shorter points are suffixes of longer
         // ones in the batched challenge order. We therefore interpret `r_x` as the **suffix** of
         // the Stage-2 challenge vector.
-        let k = k_gt(&self.constraint_system.constraint_types);
         let num_constraint_vars = self.constraint_system.num_constraint_vars();
-        if r_stage2.len() != num_constraint_vars && r_stage2.len() < num_constraint_vars + k {
+        if r_stage2.len() < num_constraint_vars {
             return Err(format!(
-                "Stage 2 returned {} challenges, expected {} (legacy) or at least {} (num_constraint_vars + k_gt)",
+                "Stage 2 returned {} challenges, expected at least {} (num_constraint_vars)",
                 r_stage2.len(),
                 num_constraint_vars,
-                num_constraint_vars + k
             )
             .into());
         }
-        let (_r_c, _r_x): (
-            &[<Fq as JoltField>::Challenge],
-            &[<Fq as JoltField>::Challenge],
-        ) = if r_stage2.len() == num_constraint_vars {
-            (&[], &r_stage2)
+        // Interpret `r_x` as the suffix of length `num_constraint_vars`.
+        let r_x_start = r_stage2.len() - num_constraint_vars;
+        let _r_x = &r_stage2[r_x_start..];
+        // If the Stage-2 point contains the GT-local `c_gt` suffix (length k_gt), it is the slice
+        // immediately before `r_x`. Other fused-family suffixes may exist, but are not interpreted here.
+        let k = k_gt(&self.constraint_system.constraint_types);
+        let _r_c_gt = if r_x_start >= k {
+            &r_stage2[r_x_start - k..r_x_start]
         } else {
-            let r_x_start = r_stage2.len() - num_constraint_vars;
-            let r_x = &r_stage2[r_x_start..];
-            let r_c = &r_stage2[r_x_start - k..r_x_start];
-            (r_c, r_x)
+            &[][..]
         };
 
         // Stage 3: Prefix packing (direct reduction to a single Hyrax opening)
@@ -940,6 +937,10 @@ impl RecursionProver<Fq> {
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
         let enable_gt_fused_end_to_end =
             env_flag_default("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END", false);
+        let enable_g1_scalar_mul_fused_end_to_end = env_flag_default(
+            "JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END",
+            false,
+        );
         let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
         let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
         let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
@@ -1050,8 +1051,9 @@ impl RecursionProver<Fq> {
                 .collect();
             if enable_gt_fused_end_to_end {
                 let num_gt_constraints = gt_mul_constraints_fq.len();
-                let k_common =
-                    crate::zkvm::recursion::gt::indexing::k_gt(&self.constraint_system.constraint_types);
+                let k_common = crate::zkvm::recursion::gt::indexing::k_gt(
+                    &self.constraint_system.constraint_types,
+                );
                 let num_gt_constraints_padded =
                     crate::zkvm::recursion::gt::indexing::num_gt_mul_constraints_padded(
                         &self.constraint_system.constraint_types,
@@ -1084,54 +1086,76 @@ impl RecursionProver<Fq> {
                 "ConstraintSystem.g1_scalar_mul_public_inputs must match extracted G1 scalar-mul constraints"
             );
 
-            if enable_shift_g1_scalar_mul {
-                let mut pairs: Vec<(VirtualPolynomial, Vec<Fq>, VirtualPolynomial, Vec<Fq>)> =
-                    Vec::with_capacity(g1_rows.len() * 2);
-
-                for (i, w) in g1_rows.iter().enumerate() {
-                    let xa = VirtualPolynomial::g1_scalar_mul_xa(i);
-                    let xa_next = VirtualPolynomial::g1_scalar_mul_xa_next(i);
-                    pairs.push((xa, w.x_a.clone(), xa_next, w.x_a_next.clone()));
-
-                    let ya = VirtualPolynomial::g1_scalar_mul_ya(i);
-                    let ya_next = VirtualPolynomial::g1_scalar_mul_ya_next(i);
-                    pairs.push((ya, w.y_a.clone(), ya_next, w.y_a_next.clone()));
+            if enable_g1_scalar_mul_fused_end_to_end {
+                // Fused shift check (opens 4 fused polynomials at one point).
+                if enable_shift_g1_scalar_mul {
+                    let prover =
+                        crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulProver::new(
+                            g1_rows,
+                            transcript,
+                        );
+                    provers.push(Box::new(prover));
                 }
 
-                let shift_params = g1_shift_params(pairs.len());
-                let shift_prover =
-                    ShiftG1ScalarMulProver::<Fq, T>::new(shift_params, pairs, transcript);
-                provers.push(Box::new(shift_prover));
+                // Fused scalar-mul constraints (opens 8 fused polynomials at one point).
+                let prover =
+                    crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedG1ScalarMulProver::new(
+                        g1_rows,
+                        &self.constraint_system.g1_scalar_mul_public_inputs,
+                        transcript,
+                    );
+                provers.push(Box::new(prover));
+            } else {
+                if enable_shift_g1_scalar_mul {
+                    let mut pairs: Vec<(VirtualPolynomial, Vec<Fq>, VirtualPolynomial, Vec<Fq>)> =
+                        Vec::with_capacity(g1_rows.len() * 2);
+
+                    for (i, w) in g1_rows.iter().enumerate() {
+                        let xa = VirtualPolynomial::g1_scalar_mul_xa(i);
+                        let xa_next = VirtualPolynomial::g1_scalar_mul_xa_next(i);
+                        pairs.push((xa, w.x_a.clone(), xa_next, w.x_a_next.clone()));
+
+                        let ya = VirtualPolynomial::g1_scalar_mul_ya(i);
+                        let ya_next = VirtualPolynomial::g1_scalar_mul_ya_next(i);
+                        pairs.push((ya, w.y_a.clone(), ya_next, w.y_a_next.clone()));
+                    }
+
+                    let shift_params = g1_shift_params(pairs.len());
+                    let shift_prover =
+                        ShiftG1ScalarMulProver::<Fq, T>::new(shift_params, pairs, transcript);
+                    provers.push(Box::new(shift_prover));
+                }
+
+                let mut g1_scalar_mul_constraints: Vec<G1ScalarMulConstraintPolynomials<Fq>> =
+                    Vec::with_capacity(g1_rows.len());
+                let mut g1_scalar_mul_base_points: Vec<(Fq, Fq)> =
+                    Vec::with_capacity(g1_rows.len());
+
+                for (i, w) in g1_rows.iter().enumerate() {
+                    g1_scalar_mul_constraints.push(G1ScalarMulConstraintPolynomials {
+                        x_a: w.x_a.clone(),
+                        y_a: w.y_a.clone(),
+                        x_t: w.x_t.clone(),
+                        y_t: w.y_t.clone(),
+                        x_a_next: w.x_a_next.clone(),
+                        y_a_next: w.y_a_next.clone(),
+                        t_indicator: w.t_indicator.clone(),
+                        a_indicator: w.a_indicator.clone(),
+                        constraint_index: i,
+                    });
+                    g1_scalar_mul_base_points.push(w.base_point);
+                }
+
+                let params = G1ScalarMulParams::new(g1_scalar_mul_constraints.len());
+                let (spec, constraint_indices) = G1ScalarMulProverSpec::new(
+                    params,
+                    g1_scalar_mul_constraints,
+                    &self.constraint_system.g1_scalar_mul_public_inputs,
+                    g1_scalar_mul_base_points,
+                );
+                let prover = G1ScalarMulProver::from_spec(spec, constraint_indices, transcript);
+                provers.push(Box::new(prover));
             }
-
-            let mut g1_scalar_mul_constraints: Vec<G1ScalarMulConstraintPolynomials<Fq>> =
-                Vec::with_capacity(g1_rows.len());
-            let mut g1_scalar_mul_base_points: Vec<(Fq, Fq)> = Vec::with_capacity(g1_rows.len());
-
-            for (i, w) in g1_rows.iter().enumerate() {
-                g1_scalar_mul_constraints.push(G1ScalarMulConstraintPolynomials {
-                    x_a: w.x_a.clone(),
-                    y_a: w.y_a.clone(),
-                    x_t: w.x_t.clone(),
-                    y_t: w.y_t.clone(),
-                    x_a_next: w.x_a_next.clone(),
-                    y_a_next: w.y_a_next.clone(),
-                    t_indicator: w.t_indicator.clone(),
-                    a_indicator: w.a_indicator.clone(),
-                    constraint_index: i,
-                });
-                g1_scalar_mul_base_points.push(w.base_point);
-            }
-
-            let params = G1ScalarMulParams::new(g1_scalar_mul_constraints.len());
-            let (spec, constraint_indices) = G1ScalarMulProverSpec::new(
-                params,
-                g1_scalar_mul_constraints,
-                &self.constraint_system.g1_scalar_mul_public_inputs,
-                g1_scalar_mul_base_points,
-            );
-            let prover = G1ScalarMulProver::from_spec(spec, constraint_indices, transcript);
-            provers.push(Box::new(prover));
         }
 
         // G2 scalar mul
@@ -1294,13 +1318,14 @@ impl RecursionProver<Fq> {
                 if enable_wiring_gt && !wiring.gt.is_empty() {
                     if enable_gt_fused_end_to_end {
                         // Fully fused GT wiring backend (no aux sums / no legacy binding check).
-                        let wiring_gt = crate::zkvm::recursion::gt::fused_wiring::FusedWiringGtProver::<T>::new(
-                            &self.constraint_system,
-                            wiring.gt.clone(),
-                            pairing_boundary,
-                            joint_commitment.clone(),
-                            transcript,
-                        );
+                        let wiring_gt =
+                            crate::zkvm::recursion::gt::fused_wiring::FusedWiringGtProver::<T>::new(
+                                &self.constraint_system,
+                                wiring.gt.clone(),
+                                pairing_boundary,
+                                joint_commitment.clone(),
+                                transcript,
+                            );
                         provers.push(Box::new(wiring_gt));
                     } else {
                         // Legacy backend (aux sums + binding safety net).
@@ -1368,8 +1393,17 @@ impl RecursionProver<Fq> {
             .ok()
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
-        let layout = if enable_gt_fused_end_to_end {
-            PrefixPackingLayout::from_constraint_types_gt_fused(&metadata.constraint_types)
+        let enable_g1_scalar_mul_fused_end_to_end =
+            std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
+                .ok()
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
+        let layout = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+            PrefixPackingLayout::from_constraint_types_fused(
+                &metadata.constraint_types,
+                enable_gt_fused_end_to_end,
+                enable_g1_scalar_mul_fused_end_to_end,
+            )
         } else {
             PrefixPackingLayout::from_constraint_types(&metadata.constraint_types)
         };
@@ -1420,6 +1454,7 @@ impl RecursionProver<Fq> {
             &metadata.constraint_types,
             &self.constraint_system.gt_exp_public_inputs,
             enable_gt_fused_end_to_end,
+            enable_g1_scalar_mul_fused_end_to_end,
         );
         let num_poly_types = PolyType::NUM_TYPES;
 
@@ -1447,6 +1482,25 @@ impl RecursionProver<Fq> {
                     _ => return Fq::zero(),
                 };
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, sumcheck);
+                claim
+            } else if enable_g1_scalar_mul_fused_end_to_end && entry.is_g1_scalar_mul_fused {
+                let vp = match entry.poly_type {
+                    PolyType::G1ScalarMulXA => VirtualPolynomial::g1_scalar_mul_xa_fused(),
+                    PolyType::G1ScalarMulYA => VirtualPolynomial::g1_scalar_mul_ya_fused(),
+                    PolyType::G1ScalarMulXT => VirtualPolynomial::g1_scalar_mul_xt_fused(),
+                    PolyType::G1ScalarMulYT => VirtualPolynomial::g1_scalar_mul_yt_fused(),
+                    PolyType::G1ScalarMulXANext => VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
+                    PolyType::G1ScalarMulYANext => VirtualPolynomial::g1_scalar_mul_ya_next_fused(),
+                    PolyType::G1ScalarMulTIndicator => {
+                        VirtualPolynomial::g1_scalar_mul_t_indicator_fused()
+                    }
+                    PolyType::G1ScalarMulAIndicator => {
+                        VirtualPolynomial::g1_scalar_mul_a_indicator_fused()
+                    }
+                    _ => return Fq::zero(),
+                };
+                let (_, claim) =
+                    accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
                 claim
             } else {
                 let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);

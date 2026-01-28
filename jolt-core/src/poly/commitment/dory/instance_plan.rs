@@ -599,8 +599,26 @@ pub fn derive_plan_with_hints(
         constraint_types.push(ConstraintType::GtMul);
     }
 
-    let dense_num_vars =
-        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
+    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+        .ok()
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false);
+    let enable_g1_scalar_mul_fused_end_to_end =
+        std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+
+    let dense_num_vars = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+        PrefixPackingLayout::from_constraint_types_fused(
+            &constraint_types,
+            enable_gt_fused_end_to_end,
+            enable_g1_scalar_mul_fused_end_to_end,
+        )
+        .num_dense_vars
+    } else {
+        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars
+    };
 
     let num_constraints = constraint_types.len();
     let num_constraints_padded = num_constraints.next_power_of_two();
@@ -609,17 +627,13 @@ pub fn derive_plan_with_hints(
     let num_constraint_vars = 11usize;
     let num_vars = num_s_vars + num_constraint_vars;
 
-    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-        .ok()
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false);
-
     let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
 
     Ok(DerivedRecursionPlan {
         verifier_input: RecursionVerifierInput {
             constraint_types,
             enable_gt_fused_end_to_end,
+            enable_g1_scalar_mul_fused_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,
@@ -773,9 +787,27 @@ pub fn derive_from_dory_ast(
         constraint_types.push(ConstraintType::GtMul);
     }
 
+    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+        .ok()
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false);
+    let enable_g1_scalar_mul_fused_end_to_end =
+        std::env::var("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL_FUSED_END_TO_END")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+
     // Dense polynomial var count (needed for Hyrax setup bounds).
-    let dense_num_vars =
-        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
+    let dense_num_vars = if enable_gt_fused_end_to_end || enable_g1_scalar_mul_fused_end_to_end {
+        PrefixPackingLayout::from_constraint_types_fused(
+            &constraint_types,
+            enable_gt_fused_end_to_end,
+            enable_g1_scalar_mul_fused_end_to_end,
+        )
+        .num_dense_vars
+    } else {
+        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars
+    };
 
     // Recursion verifier input expects matrix parameters derived from constraint counts.
     let num_constraints = constraint_types.len();
@@ -784,11 +816,6 @@ pub fn derive_from_dory_ast(
     let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
     let num_constraint_vars = 11usize;
     let num_vars = num_s_vars + num_constraint_vars;
-
-    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-        .ok()
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false);
 
     // Pairing boundary extraction from the final AssertEq constraint.
     let (lhs, rhs) = ast
@@ -879,6 +906,7 @@ pub fn derive_from_dory_ast(
         verifier_input: RecursionVerifierInput {
             constraint_types,
             enable_gt_fused_end_to_end,
+            enable_g1_scalar_mul_fused_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,

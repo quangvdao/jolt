@@ -13,8 +13,8 @@ use std::{
     time::Instant,
 };
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_grumpkin::Projective as GrumpkinProjective;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use itertools::Itertools;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2107,7 +2107,8 @@ pub struct JoltProverPreprocessing<F: JoltField, PCS: CommitmentScheme<Field = F
     pub generators: PCS::ProverSetup,
     pub shared: JoltSharedPreprocessing,
     /// Cached Hyrax setup for recursion verification (avoids in-guest generator derivation).
-    pub hyrax_recursion_setup: crate::poly::commitment::hyrax::PedersenGenerators<GrumpkinProjective>,
+    pub hyrax_recursion_setup:
+        crate::poly::commitment::hyrax::PedersenGenerators<GrumpkinProjective>,
     /// Full program preprocessing (prover always has full access for witness computation).
     pub program: Arc<ProgramPreprocessing>,
     /// Trusted program commitments (only in Committed mode).
@@ -2170,8 +2171,9 @@ where
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators(&shared);
         type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, GrumpkinProjective>;
-        let hyrax_prover_setup =
-            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
+            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
+        );
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         JoltProverPreprocessing {
@@ -2195,8 +2197,9 @@ where
     ) -> JoltProverPreprocessing<F, PCS> {
         let generators = Self::setup_generators_committed(&shared, &program);
         type HyraxPCS = crate::poly::commitment::hyrax::Hyrax<1, GrumpkinProjective>;
-        let hyrax_prover_setup =
-            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
+            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
+        );
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         let max_t_any: usize = shared

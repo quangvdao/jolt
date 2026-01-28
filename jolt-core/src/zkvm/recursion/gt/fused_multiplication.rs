@@ -47,14 +47,18 @@ pub struct FusedGtMulParams {
     pub num_constraint_index_vars_common: usize,
     /// Number of c-index variables actually used by the committed GTMul fused rows (k_mul).
     pub num_constraint_index_vars_family: usize,
-    pub num_constraint_vars: usize,       // 4 (u-vars)
+    pub num_constraint_vars: usize, // 4 (u-vars)
     /// Number of GTMul constraints (family-local).
     pub num_gt_constraints: usize,
     pub num_gt_constraints_padded: usize,
 }
 
 impl FusedGtMulParams {
-    pub fn new(num_gt_constraints: usize, num_gt_constraints_padded: usize, k_common: usize) -> Self {
+    pub fn new(
+        num_gt_constraints: usize,
+        num_gt_constraints_padded: usize,
+        k_common: usize,
+    ) -> Self {
         debug_assert!(num_gt_constraints_padded.is_power_of_two());
         let num_constraint_index_vars_family = num_gt_constraints_padded.trailing_zeros() as usize;
         debug_assert!(
@@ -104,7 +108,10 @@ impl SumcheckInstanceParams<Fq> for FusedGtMulParams {
         let u_vars = self.num_constraint_vars; // 4
         let mut r = Vec::with_capacity(u_vars + self.num_constraint_index_vars_family);
         r.extend_from_slice(&challenges[..u_vars]);
-        let tail = gt_mul_c_tail_range(self.num_constraint_index_vars_common, self.num_constraint_index_vars_family);
+        let tail = gt_mul_c_tail_range(
+            self.num_constraint_index_vars_common,
+            self.num_constraint_index_vars_family,
+        );
         r.extend_from_slice(&challenges[tail]);
         OpeningPoint::<BIG_ENDIAN, Fq>::new(r)
     }

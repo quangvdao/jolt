@@ -84,8 +84,8 @@ use crate::{
 use anyhow::Context;
 #[allow(unused_imports)]
 use ark_ec::AffineRepr;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_grumpkin::Projective as GrumpkinProjective;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
 #[allow(unused_imports)]
 use dory::backends::arkworks::{ArkG1, ArkG2, BN254};
@@ -1480,8 +1480,9 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         generators: PCS::VerifierSetup,
         program: Arc<ProgramPreprocessing>,
     ) -> JoltVerifierPreprocessing<F, PCS> {
-        let hyrax_prover_setup =
-            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
+            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
+        );
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         Self {
@@ -1507,8 +1508,9 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> JoltVerifierPreprocessing<F
         generators: PCS::VerifierSetup,
         program_commitments: TrustedProgramCommitments<PCS>,
     ) -> JoltVerifierPreprocessing<F, PCS> {
-        let hyrax_prover_setup =
-            <HyraxPCS as CommitmentScheme>::setup_prover(crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS);
+        let hyrax_prover_setup = <HyraxPCS as CommitmentScheme>::setup_prover(
+            crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS,
+        );
         let hyrax_recursion_setup =
             <HyraxPCS as CommitmentScheme>::setup_verifier(&hyrax_prover_setup);
         Self {

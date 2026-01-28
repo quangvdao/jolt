@@ -369,7 +369,7 @@ impl<F: JoltField> AdviceClaimReductionProver<F> {
     }
 
     /// Create a prover from already-bound polynomial state.
-    /// 
+    ///
     /// # Arguments
     /// * `params` - Parameters already transitioned to AddressVariables phase
     /// * `advice_coeffs` - Bound advice polynomial coefficients from Stage 6

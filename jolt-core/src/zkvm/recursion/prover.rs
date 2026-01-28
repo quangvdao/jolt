@@ -42,6 +42,10 @@ use super::{
     constraints::system::{ConstraintSystem, PolyType},
     g1::{
         addition::{G1AddParams, G1AddProver, G1AddProverSpec, G1AddWitness},
+        fused_addition::FusedG1AddProver,
+        fused_scalar_multiplication::{FusedG1ScalarMulProver, FusedShiftG1ScalarMulProver},
+        fused_wiring::FusedWiringG1Prover,
+        indexing::{k_g1, k_smul as k_smul_g1},
         scalar_multiplication::{
             G1ScalarMulConstraintPolynomials, G1ScalarMulParams, G1ScalarMulProver,
             G1ScalarMulProverSpec,
@@ -51,6 +55,10 @@ use super::{
     },
     g2::{
         addition::{G2AddParams, G2AddProver, G2AddProverSpec, G2AddWitness},
+        fused_addition::FusedG2AddProver,
+        fused_scalar_multiplication::{FusedG2ScalarMulProver, FusedShiftG2ScalarMulProver},
+        fused_wiring::FusedWiringG2Prover,
+        indexing::{k_g2, k_smul as k_smul_g2},
         scalar_multiplication::{
             G2ScalarMulConstraintPolynomials, G2ScalarMulParams, G2ScalarMulProver,
             G2ScalarMulProverSpec,
@@ -64,7 +72,10 @@ use super::{
         fused_multiplication::{FusedGtMulParams, FusedGtMulProver},
         fused_shift::{FusedGtShiftParams, FusedGtShiftProver},
         fused_stage2_openings::FusedGtExpStage2OpeningsProver,
-        indexing::k_gt,
+        fused_wiring::FusedWiringGtProver,
+        indexing::{
+            k_gt, num_gt_constraints, num_gt_constraints_padded, num_gt_mul_constraints_padded,
+        },
         multiplication::{GtMulConstraintPolynomials, GtMulParams, GtMulProver, GtMulProverSpec},
         shift::{GtShiftParams, GtShiftProver},
         wiring_binding::GtWiringBindingProver,
@@ -634,9 +645,6 @@ impl RecursionProver<Fq> {
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
         if enable_gt_fused_end_to_end {
-            use crate::zkvm::recursion::gt::indexing::{
-                k_gt, num_gt_constraints, num_gt_constraints_padded,
-            };
             let num_constraints = self.constraint_system.constraint_types.len();
             let num_gt_exp_ops = self.constraint_system.gt_exp_witnesses.len();
             let num_gt_mul_ops = self.constraint_system.gt_mul_rows.len();
@@ -1061,13 +1069,9 @@ impl RecursionProver<Fq> {
                 .collect();
             if enable_gt_fused_end_to_end {
                 let num_gt_constraints = gt_mul_constraints_fq.len();
-                let k_common = crate::zkvm::recursion::gt::indexing::k_gt(
-                    &self.constraint_system.constraint_types,
-                );
+                let k_common = k_gt(&self.constraint_system.constraint_types);
                 let num_gt_constraints_padded =
-                    crate::zkvm::recursion::gt::indexing::num_gt_mul_constraints_padded(
-                        &self.constraint_system.constraint_types,
-                    );
+                    num_gt_mul_constraints_padded(&self.constraint_system.constraint_types);
                 let params =
                     FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
                 let prover = FusedGtMulProver::new(
@@ -1098,16 +1102,12 @@ impl RecursionProver<Fq> {
 
             if enable_g1_scalar_mul_fused_end_to_end {
                 let k_common = if enable_g1_fused_wiring_end_to_end {
-                    crate::zkvm::recursion::g1::indexing::k_g1(
-                        &self.constraint_system.constraint_types,
-                    )
+                    k_g1(&self.constraint_system.constraint_types)
                 } else {
-                    crate::zkvm::recursion::g1::indexing::k_smul(
-                        &self.constraint_system.constraint_types,
-                    )
+                    k_smul_g1(&self.constraint_system.constraint_types)
                 };
                 // Fused scalar-mul constraints (opens 8 fused polynomials at one point).
-                let prover = crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedG1ScalarMulProver::new_with_k_common(
+                let prover = FusedG1ScalarMulProver::new_with_k_common(
                     g1_rows,
                     &self.constraint_system.g1_scalar_mul_public_inputs,
                     k_common,
@@ -1117,10 +1117,8 @@ impl RecursionProver<Fq> {
 
                 // Fused shift check (no additional openings; reuses scalar-mul cached openings).
                 if enable_shift_g1_scalar_mul {
-                    let prover = crate::zkvm::recursion::g1::fused_scalar_multiplication::FusedShiftG1ScalarMulProver::new_with_k_common(
-                        g1_rows,
-                        k_common,
-                        transcript,
+                    let prover = FusedShiftG1ScalarMulProver::new_with_k_common(
+                        g1_rows, k_common, transcript,
                     );
                     provers.push(Box::new(prover));
                 }
@@ -1188,17 +1186,13 @@ impl RecursionProver<Fq> {
 
             if enable_g2_scalar_mul_fused_end_to_end {
                 let k_common = if enable_g2_fused_wiring_end_to_end {
-                    crate::zkvm::recursion::g2::indexing::k_g2(
-                        &self.constraint_system.constraint_types,
-                    )
+                    k_g2(&self.constraint_system.constraint_types)
                 } else {
-                    crate::zkvm::recursion::g2::indexing::k_smul(
-                        &self.constraint_system.constraint_types,
-                    )
+                    k_smul_g2(&self.constraint_system.constraint_types)
                 };
 
                 // Fused scalar-mul constraints (opens 14 fused witness polynomials).
-                let prover = crate::zkvm::recursion::g2::fused_scalar_multiplication::FusedG2ScalarMulProver::new_with_k_common(
+                let prover = FusedG2ScalarMulProver::new_with_k_common(
                     g2_rows,
                     &self.constraint_system.g2_scalar_mul_public_inputs,
                     k_common,
@@ -1208,10 +1202,8 @@ impl RecursionProver<Fq> {
 
                 // Fused shift check (no additional openings; reuses scalar-mul cached openings).
                 if enable_shift_g2_scalar_mul {
-                    let prover = crate::zkvm::recursion::g2::fused_scalar_multiplication::FusedShiftG2ScalarMulProver::new_with_k_common(
-                        g2_rows,
-                        k_common,
-                        transcript,
+                    let prover = FusedShiftG2ScalarMulProver::new_with_k_common(
+                        g2_rows, k_common, transcript,
                     );
                     provers.push(Box::new(prover));
                 }
@@ -1284,10 +1276,7 @@ impl RecursionProver<Fq> {
         let g1_add_rows = &self.constraint_system.g1_add_rows;
         if !g1_add_rows.is_empty() {
             if enable_g1_add_fused_end_to_end {
-                let prover = crate::zkvm::recursion::g1::fused_addition::FusedG1AddProver::new(
-                    g1_add_rows,
-                    transcript,
-                );
+                let prover = FusedG1AddProver::new(g1_add_rows, transcript);
                 provers.push(Box::new(prover));
             } else {
                 let g1_add_constraints: Vec<G1AddWitness<Fq>> = g1_add_rows
@@ -1321,10 +1310,7 @@ impl RecursionProver<Fq> {
         let g2_add_rows = &self.constraint_system.g2_add_rows;
         if !g2_add_rows.is_empty() {
             if enable_g2_add_fused_end_to_end {
-                let prover = crate::zkvm::recursion::g2::fused_addition::FusedG2AddProver::new(
-                    g2_add_rows,
-                    transcript,
-                );
+                let prover = FusedG2AddProver::new(g2_add_rows, transcript);
                 provers.push(Box::new(prover));
             } else {
                 let g2_add_constraints: Vec<G2AddWitness<Fq>> = g2_add_rows
@@ -1382,14 +1368,13 @@ impl RecursionProver<Fq> {
                 if enable_wiring_gt && !wiring.gt.is_empty() {
                     if enable_gt_fused_end_to_end {
                         // Fully fused GT wiring backend (no aux sums / no legacy binding check).
-                        let wiring_gt =
-                            crate::zkvm::recursion::gt::fused_wiring::FusedWiringGtProver::<T>::new(
-                                &self.constraint_system,
-                                wiring.gt.clone(),
-                                pairing_boundary,
-                                joint_commitment.clone(),
-                                transcript,
-                            );
+                        let wiring_gt = FusedWiringGtProver::<T>::new(
+                            &self.constraint_system,
+                            wiring.gt.clone(),
+                            pairing_boundary,
+                            joint_commitment.clone(),
+                            transcript,
+                        );
                         provers.push(Box::new(wiring_gt));
                     } else {
                         // Legacy backend (aux sums + binding safety net).
@@ -1410,14 +1395,12 @@ impl RecursionProver<Fq> {
                 }
                 if enable_wiring_g1 && !wiring.g1.is_empty() {
                     if enable_g1_fused_wiring_end_to_end {
-                        provers.push(Box::new(
-                            crate::zkvm::recursion::g1::fused_wiring::FusedWiringG1Prover::<T>::new(
-                                &self.constraint_system,
-                                wiring.g1.clone(),
-                                pairing_boundary,
-                                transcript,
-                            ),
-                        ));
+                        provers.push(Box::new(FusedWiringG1Prover::<T>::new(
+                            &self.constraint_system,
+                            wiring.g1.clone(),
+                            pairing_boundary,
+                            transcript,
+                        )));
                     } else {
                         provers.push(Box::new(WiringG1Prover::<T>::new(
                             &self.constraint_system,
@@ -1429,14 +1412,12 @@ impl RecursionProver<Fq> {
                 }
                 if enable_wiring_g2 && !wiring.g2.is_empty() {
                     if enable_g2_fused_wiring_end_to_end {
-                        provers.push(Box::new(
-                            crate::zkvm::recursion::g2::fused_wiring::FusedWiringG2Prover::<T>::new(
-                                &self.constraint_system,
-                                wiring.g2.clone(),
-                                pairing_boundary,
-                                transcript,
-                            ),
-                        ));
+                        provers.push(Box::new(FusedWiringG2Prover::<T>::new(
+                            &self.constraint_system,
+                            wiring.g2.clone(),
+                            pairing_boundary,
+                            transcript,
+                        )));
                     } else {
                         provers.push(Box::new(WiringG2Prover::<T>::new(
                             &self.constraint_system,

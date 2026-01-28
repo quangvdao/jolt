@@ -706,7 +706,9 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
                         let dst_is_mul_rhs = matches!(edge.dst, GtConsumer::GtMulRhs { .. });
 
                         let src_const = match edge.src {
-                            GtProducer::GtExpBase { instance } => Some(state.exp_base_at_r[instance]),
+                            GtProducer::GtExpBase { instance } => {
+                                Some(state.exp_base_at_r[instance])
+                            }
                             _ => None,
                         };
                         for t in 0..DEGREE {

@@ -1071,10 +1071,7 @@ fn gt_producer_from_value(
     }
 }
 
-fn is_ast_input(
-    ast: &AstGraph<dory::backends::arkworks::BN254>,
-    value: ValueId,
-) -> bool {
+fn is_ast_input(ast: &AstGraph<dory::backends::arkworks::BN254>, value: ValueId) -> bool {
     let idx = value.0 as usize;
     if idx >= ast.nodes.len() {
         return false;
@@ -1314,8 +1311,7 @@ pub fn derive_wiring_plan(
                     &gt_mul_index,
                     &gt_exp_base_by_value,
                     *base,
-                )
-                {
+                ) {
                     plan.gt.push(GtWiringEdge {
                         src,
                         dst: GtConsumer::GtExpBase {

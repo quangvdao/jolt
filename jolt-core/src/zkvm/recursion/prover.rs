@@ -1292,21 +1292,32 @@ impl RecursionProver<Fq> {
                     .map_err(|_e| "AST->wiring-plan derivation failed")?;
 
                 if enable_wiring_gt && !wiring.gt.is_empty() {
-                    let wiring_gt = WiringGtProver::<T>::new(
-                        &self.constraint_system,
-                        wiring.gt.clone(),
-                        pairing_boundary,
-                        joint_commitment.clone(),
-                        transcript,
-                    );
-                    // Legacy safety net: keep wiring/boundary binding check unless we're on the
-                    // fully fused end-to-end GT path.
-                    if !enable_gt_fused_end_to_end {
+                    if enable_gt_fused_end_to_end {
+                        // Fully fused GT wiring backend (no aux sums / no legacy binding check).
+                        let wiring_gt = crate::zkvm::recursion::gt::fused_wiring::FusedWiringGtProver::<T>::new(
+                            &self.constraint_system,
+                            wiring.gt.clone(),
+                            pairing_boundary,
+                            joint_commitment.clone(),
+                            transcript,
+                        );
+                        provers.push(Box::new(wiring_gt));
+                    } else {
+                        // Legacy backend (aux sums + binding safety net).
+                        let wiring_gt = WiringGtProver::<T>::new(
+                            &self.constraint_system,
+                            wiring.gt.clone(),
+                            pairing_boundary,
+                            joint_commitment.clone(),
+                            transcript,
+                        );
+                        // Legacy safety net: bind prover-emitted wiring sums to the actual per-edge
+                        // wiring expression.
                         provers.push(Box::new(GtWiringBindingProver::<T>::new(
                             wiring_gt.num_rounds(),
                         )));
+                        provers.push(Box::new(wiring_gt));
                     }
-                    provers.push(Box::new(wiring_gt));
                 }
                 if enable_wiring_g1 && !wiring.g1.is_empty() {
                     provers.push(Box::new(WiringG1Prover::<T>::new(

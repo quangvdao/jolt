@@ -104,6 +104,11 @@ impl Drop for CycleMarkerGuard {
 pub struct RecursionVerifierInput {
     /// Constraint types to verify
     pub constraint_types: Vec<ConstraintType>,
+    /// Whether to use the fused-GT end-to-end recursion protocol.
+    ///
+    /// This affects Stage 1/2/3 instance selection and packing layout; it must match the
+    /// recursion artifact/proof being verified (in-guest there is no reliable env-var channel).
+    pub enable_gt_fused_end_to_end: bool,
     /// Number of variables in the constraint system
     pub num_vars: usize,
     /// Number of constraint variables (x variables) in the matrix
@@ -137,6 +142,8 @@ impl CanonicalSerialize for RecursionVerifierInput {
     ) -> Result<(), SerializationError> {
         self.constraint_types
             .serialize_with_mode(&mut writer, compress)?;
+        self.enable_gt_fused_end_to_end
+            .serialize_with_mode(&mut writer, compress)?;
         self.num_vars.serialize_with_mode(&mut writer, compress)?;
         self.num_constraint_vars
             .serialize_with_mode(&mut writer, compress)?;
@@ -161,6 +168,7 @@ impl CanonicalSerialize for RecursionVerifierInput {
 
     fn serialized_size(&self, compress: Compress) -> usize {
         self.constraint_types.serialized_size(compress)
+            + self.enable_gt_fused_end_to_end.serialized_size(compress)
             + self.num_vars.serialized_size(compress)
             + self.num_constraint_vars.serialized_size(compress)
             + self.num_s_vars.serialized_size(compress)
@@ -189,6 +197,11 @@ impl CanonicalDeserialize for RecursionVerifierInput {
     ) -> Result<Self, SerializationError> {
         Ok(Self {
             constraint_types: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            enable_gt_fused_end_to_end: bool::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
             num_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_constraint_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_s_vars: usize::deserialize_with_mode(&mut reader, compress, validate)?,
@@ -220,6 +233,7 @@ impl CanonicalDeserialize for RecursionVerifierInput {
 impl GuestSerialize for RecursionVerifierInput {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.constraint_types.guest_serialize(w)?;
+        self.enable_gt_fused_end_to_end.guest_serialize(w)?;
         self.num_vars.guest_serialize(w)?;
         self.num_constraint_vars.guest_serialize(w)?;
         self.num_s_vars.guest_serialize(w)?;
@@ -239,6 +253,7 @@ impl GuestDeserialize for RecursionVerifierInput {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             constraint_types: Vec::guest_deserialize(r)?,
+            enable_gt_fused_end_to_end: bool::guest_deserialize(r)?,
             num_vars: usize::guest_deserialize(r)?,
             num_constraint_vars: usize::guest_deserialize(r)?,
             num_s_vars: usize::guest_deserialize(r)?,
@@ -305,7 +320,7 @@ impl RecursionVerifier<Fq> {
         let _r_stage1_packed = tracing::info_span!("verify_recursion_stage1").in_scope(|| {
             tracing::info!("Verifying Stage 1: Packed GT exp sumcheck");
             self.verify_stage1(&proof.stage1_proof, transcript, &mut accumulator)
-        })?;
+        }).map_err(|e| format!("Stage 1 failed: {e}"))?;
         drop(_cycle_stage1);
 
         // ============ STAGE 2: Batched Constraint Sumchecks ============
@@ -313,7 +328,7 @@ impl RecursionVerifier<Fq> {
         let r_stage2 = tracing::info_span!("verify_recursion_stage2").in_scope(|| {
             tracing::info!("Verifying Stage 2: Batched constraint sumchecks");
             self.verify_stage2(&proof.stage2_proof, transcript, &mut accumulator)
-        })?;
+        }).map_err(|e| format!("Stage 2 failed: {e}"))?;
         drop(_cycle_stage2);
 
         // Stage 2 challenges layout:
@@ -363,7 +378,8 @@ impl RecursionVerifier<Fq> {
                 &r_stage2,
                 proof.stage3_packed_eval,
             )
-        })?;
+        })
+        .map_err(|e| format!("Stage 3 failed: {e}"))?;
         drop(_cycle_stage3);
 
         // ============ PCS OPENING VERIFICATION ============
@@ -377,7 +393,8 @@ impl RecursionVerifier<Fq> {
                 verifier_setup,
                 transcript,
             )
-        })?;
+        })
+        .map_err(|e| format!("PCS opening failed: {e}"))?;
         drop(_cycle_pcs);
 
         Ok(true)
@@ -395,10 +412,7 @@ impl RecursionVerifier<Fq> {
             return Err("No GtExp constraints to verify in Stage 1".into());
         }
 
-        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
+        let enable_gt_fused_end_to_end = self.input.enable_gt_fused_end_to_end;
 
         let r_stage1 = if enable_gt_fused_end_to_end {
             let params = FusedGtExpParams::from_constraint_types(&self.input.constraint_types);
@@ -438,8 +452,7 @@ impl RecursionVerifier<Fq> {
         let enable_shift_g2_scalar_mul =
             env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
         let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
-        let enable_gt_fused_end_to_end =
-            env_flag_default("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END", false);
+        let enable_gt_fused_end_to_end = self.input.enable_gt_fused_end_to_end;
         let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
         let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
         let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
@@ -721,13 +734,22 @@ impl RecursionVerifier<Fq> {
         // ---- Wiring/boundary constraints (AST-driven), appended LAST in Stage 2 ----
         if enable_wiring {
             if enable_wiring_gt && !self.input.wiring.gt.is_empty() {
-                let wiring_gt = WiringGtVerifier::new(&self.input, transcript);
-                // Legacy safety net: keep wiring/boundary binding check unless we're on the
-                // fully fused end-to-end GT path.
-                if !enable_gt_fused_end_to_end {
+                if enable_gt_fused_end_to_end {
+                    // Fully fused GT wiring backend (no aux sums / no legacy binding check).
+                    verifiers.push(Box::new(
+                        crate::zkvm::recursion::gt::fused_wiring::FusedWiringGtVerifier::new(
+                            &self.input,
+                            transcript,
+                        ),
+                    ));
+                } else {
+                    // Legacy backend (aux sums + binding safety net).
+                    let wiring_gt = WiringGtVerifier::new(&self.input, transcript);
+                    // Legacy safety net: bind prover-emitted wiring sums to the actual per-edge
+                    // wiring expression.
                     verifiers.push(Box::new(GtWiringBindingVerifier::new(wiring_gt.binding())));
+                    verifiers.push(Box::new(wiring_gt));
                 }
-                verifiers.push(Box::new(wiring_gt));
             }
             if enable_wiring_g1 && !self.input.wiring.g1.is_empty() {
                 verifiers.push(Box::new(WiringG1Verifier::new(&self.input, transcript)));
@@ -759,10 +781,7 @@ impl RecursionVerifier<Fq> {
         stage3_packed_eval: Fq,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Derive the public packing layout.
-        let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
+        let enable_gt_fused_end_to_end = self.input.enable_gt_fused_end_to_end;
         let layout = if enable_gt_fused_end_to_end {
             PrefixPackingLayout::from_constraint_types_gt_fused(&self.input.constraint_types)
         } else {

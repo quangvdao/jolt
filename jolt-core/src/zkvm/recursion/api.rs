@@ -41,6 +41,11 @@ type HyraxPCS = crate::zkvm::recursion::prover::HyraxPCS;
 /// re-verifying base stages 1–7, then verifies this recursion SNARK proof.
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RecursionArtifact<FS: Transcript> {
+    /// Whether this recursion artifact uses the fused-GT end-to-end recursion protocol.
+    ///
+    /// This must be carried explicitly because in-guest verification does not have a reliable
+    /// environment-variable channel.
+    pub enable_gt_fused_end_to_end: bool,
     /// Hint for Stage 8 combine_commitments offloading (the combined GT element).
     ///
     /// This is **required** by the verifier: if absent, verification rejects.
@@ -55,6 +60,7 @@ pub struct RecursionArtifact<FS: Transcript> {
 
 impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        self.enable_gt_fused_end_to_end.guest_serialize(w)?;
         self.stage8_combine_hint.guest_serialize(w)?;
         self.pairing_boundary.guest_serialize(w)?;
         self.non_input_base_hints.guest_serialize(w)?;
@@ -66,6 +72,7 @@ impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
 impl<FS: Transcript> GuestDeserialize for RecursionArtifact<FS> {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
+            enable_gt_fused_end_to_end: bool::guest_deserialize(r)?,
             stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
             pairing_boundary: PairingBoundary::guest_deserialize(r)?,
             non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
@@ -104,6 +111,11 @@ pub fn prove_recursion<FS: Transcript>(
 
     // Base stages 1..7 (no Stage 8 PCS verification).
     v.verify_stages_1_to_7()?;
+
+    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+        .ok()
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false);
 
     // Ensure Dory globals match the proof layout before any Stage 8 replay / witness generation.
     let _dory_globals_guard = if v.proof.program_mode == ProgramMode::Committed {
@@ -228,6 +240,7 @@ pub fn prove_recursion<FS: Transcript>(
     }
 
     Ok(RecursionArtifact {
+        enable_gt_fused_end_to_end,
         stage8_combine_hint,
         pairing_boundary,
         non_input_base_hints,
@@ -412,7 +425,9 @@ pub fn verify_recursion<FS: Transcript>(
     // Verify recursion SNARK (use cached Hyrax setup from preprocessing).
     let hyrax_verifier_setup = &preprocessing.hyrax_recursion_setup;
 
-    let recursion_verifier = RecursionVerifier::<Fq>::new(plan.verifier_input);
+    let mut verifier_input = plan.verifier_input;
+    verifier_input.enable_gt_fused_end_to_end = recursion.enable_gt_fused_end_to_end;
+    let recursion_verifier = RecursionVerifier::<Fq>::new(verifier_input);
     start_cycle_tracking("verify_recursion_snark_verify_total");
     let ok = recursion_verifier
         .verify::<FS, HyraxPCS>(

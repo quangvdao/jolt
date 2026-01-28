@@ -609,11 +609,17 @@ pub fn derive_plan_with_hints(
     let num_constraint_vars = 11usize;
     let num_vars = num_s_vars + num_constraint_vars;
 
+    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+        .ok()
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false);
+
     let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
 
     Ok(DerivedRecursionPlan {
         verifier_input: RecursionVerifierInput {
             constraint_types,
+            enable_gt_fused_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,
@@ -779,6 +785,11 @@ pub fn derive_from_dory_ast(
     let num_constraint_vars = 11usize;
     let num_vars = num_s_vars + num_constraint_vars;
 
+    let enable_gt_fused_end_to_end = std::env::var("JOLT_RECURSION_ENABLE_GT_FUSED_END_TO_END")
+        .ok()
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false);
+
     // Pairing boundary extraction from the final AssertEq constraint.
     let (lhs, rhs) = ast
         .constraints
@@ -867,6 +878,7 @@ pub fn derive_from_dory_ast(
     Ok(DerivedRecursionInput {
         verifier_input: RecursionVerifierInput {
             constraint_types,
+            enable_gt_fused_end_to_end,
             num_vars,
             num_constraint_vars,
             num_s_vars,

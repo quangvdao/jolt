@@ -186,6 +186,7 @@ fn test_recursion_snark_e2e_with_dory() {
     // Prefer the metadata produced by `poly_commit`, to ensure perfect alignment.
     let verifier_input = RecursionVerifierInput {
         constraint_types: recursion_constraint_metadata.constraint_types,
+        enable_gt_fused_end_to_end,
         num_vars,
         num_constraint_vars,
         num_s_vars,

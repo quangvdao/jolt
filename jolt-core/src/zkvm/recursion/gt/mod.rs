@@ -12,6 +12,7 @@ pub mod fused_exponentiation;
 pub mod fused_multiplication;
 pub mod fused_shift;
 pub mod fused_stage2_openings;
+pub mod fused_wiring;
 pub mod indexing;
 pub mod multiplication;
 pub mod shift;
@@ -26,6 +27,7 @@ pub use fused_exponentiation::{FusedGtExpParams, FusedGtExpProver, FusedGtExpVer
 pub use fused_multiplication::{FusedGtMulParams, FusedGtMulProver, FusedGtMulVerifier};
 pub use fused_shift::{FusedGtShiftParams, FusedGtShiftProver, FusedGtShiftVerifier};
 pub use fused_stage2_openings::{FusedGtExpStage2OpeningsProver, FusedGtExpStage2OpeningsVerifier};
+pub use fused_wiring::{FusedWiringGtProver, FusedWiringGtVerifier};
 pub use indexing::{gt_constraint_indices, k_gt, num_gt_constraints_padded};
 pub use multiplication::{GtMulProver, GtMulVerifier};
 pub use shift::{GtShiftClaim, GtShiftParams, GtShiftProver, GtShiftVerifier};

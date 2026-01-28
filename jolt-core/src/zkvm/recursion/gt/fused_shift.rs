@@ -131,14 +131,25 @@ impl FusedGtShiftProver {
         debug_assert_eq!(r1_c.len(), k);
 
         // Build fused rho(c_gt,x11) from GTExp witnesses (zero elsewhere).
+        //
+        // Split-k note: `c_gt` is the Stage-2 common GT-local domain (k_gt bits). When
+        // `k_gt > k_exp`, the GTExp family occupies only the tail `k_exp` bits; the first
+        // `dummy = k_gt - k_exp` low bits are dummy and rho is replicated across them.
         let row_size = 1usize << params.num_x_vars;
         let mut rho_xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
+        let k_gt = params.num_c_vars;
+        let k_exp = crate::zkvm::recursion::gt::indexing::k_exp(constraint_types);
+        let dummy = k_gt.saturating_sub(k_exp);
         for global_idx in 0..constraint_types.len() {
             if let ConstraintLocator::GtExp { local } = locator_by_constraint[global_idx] {
                 let src = &gt_exp_witnesses[local].rho_packed;
                 debug_assert_eq!(src.len(), row_size);
-                let off = local * row_size;
-                rho_xc[off..off + row_size].copy_from_slice(src);
+                // Replicate this GTExp row across all assignments of the dummy low bits.
+                for d in 0..(1usize << dummy) {
+                    let c = d + (local << dummy);
+                    let off = c * row_size;
+                    rho_xc[off..off + row_size].copy_from_slice(src);
+                }
             }
         }
         // Store in [x11 low bits, c_gt high bits] order so `c_gt` is a suffix in Stage 2.

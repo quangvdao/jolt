@@ -27,10 +27,6 @@ pub use wiring::{WiringG2Prover, WiringG2Verifier};
 
 use crate::field::JoltField;
 
-// =============================================================================
-// Fq2Components
-// =============================================================================
-
 /// Represents an Fq2 element split into (c0, c1) components over a base field F.
 ///
 /// Fq2 = Fq[u]/(u^2 + 1), so (c0, c1) represents c0 + c1*u where u^2 = -1.
@@ -165,10 +161,6 @@ impl<F: JoltField> Fq2Components<F> {
         F::from_u64(2) * self.c0 * self.c1
     }
 }
-
-// =============================================================================
-// Standalone helper functions (for backwards compatibility / convenience)
-// =============================================================================
 
 /// Compute the c0 component of Fq2 multiplication: (a0,a1) * (b0,b1).
 /// Returns: a0*b0 - a1*b1

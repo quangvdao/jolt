@@ -28,6 +28,9 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::system::{index_to_binary, G1ScalarMulNative},
     zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs,
+    zkvm::recursion::gt::shift::{
+        eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
+    },
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -737,10 +740,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
     }
 }
 
-// =============================================================================
-// Fused shift check (G1 only)
-// =============================================================================
-
 #[derive(Clone, Debug, Allocative)]
 pub struct FusedShiftG1ScalarMulParams {
     pub num_step_vars: usize, // 8
@@ -848,14 +847,13 @@ impl FusedShiftG1ScalarMulProver {
         let gamma: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
 
         // Build 8-var step weights.
-        let eq_step_8 = crate::zkvm::recursion::gt::shift::eq_lsb_evals::<Fq>(&step_ref);
-        let eq_minus_one_8 =
-            crate::zkvm::recursion::gt::shift::eq_plus_one_lsb_evals::<Fq>(&step_ref);
+        let eq_step_8 = eq_lsb_evals::<Fq>(&step_ref);
+        let eq_minus_one_8 = eq_plus_one_lsb_evals::<Fq>(&step_ref);
         let mut not_last_8 = vec![Fq::one(); rs];
         not_last_8[rs - 1] = Fq::zero();
 
         // Build k_common-var Eq(c_ref, c) table.
-        let eq_c_k = crate::zkvm::recursion::gt::shift::eq_lsb_evals::<Fq>(&c_ref);
+        let eq_c_k = eq_lsb_evals::<Fq>(&c_ref);
         debug_assert_eq!(eq_c_k.len(), 1usize << k_common);
 
         // Embed weights into full (step,c) domain.
@@ -1079,9 +1077,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedShiftG1ScalarMulVer
         let y_step = &sumcheck_challenges[..STEP_VARS];
         let y_c = &sumcheck_challenges[STEP_VARS..];
 
-        let eq = crate::zkvm::recursion::gt::shift::eq_lsb_mle::<Fq>(&self.step_ref, y_step);
-        let eqm1 =
-            crate::zkvm::recursion::gt::shift::eq_plus_one_lsb_mle::<Fq>(&self.step_ref, y_step);
+        let eq = eq_lsb_mle::<Fq>(&self.step_ref, y_step);
+        let eqm1 = eq_plus_one_lsb_mle::<Fq>(&self.step_ref, y_step);
         // not_last(y) = 1 - ∏ y_i  (last index is all-ones)
         let mut prod = Fq::one();
         for &y in y_step {
@@ -1090,7 +1087,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedShiftG1ScalarMulVer
         }
         let not_last = Fq::one() - prod;
 
-        let eqc = crate::zkvm::recursion::gt::shift::eq_lsb_mle::<Fq>(&self.c_ref, y_c);
+        let eqc = eq_lsb_mle::<Fq>(&self.c_ref, y_c);
 
         let (_, xa) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::g1_scalar_mul_xa_fused(),

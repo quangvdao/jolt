@@ -30,17 +30,9 @@ use ark_bn254::{Fq, Fr};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-// =============================================================================
-// Constants
-// =============================================================================
-
 const NUM_COMMITTED_KINDS: usize = 8;
 const DEGREE: usize = 6;
 const OPENING_SPECS: [OpeningSpec; NUM_COMMITTED_KINDS] = sequential_opening_specs();
-
-// =============================================================================
-// Data Types
-// =============================================================================
 
 /// Public inputs for a single G1 scalar multiplication (the scalar).
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -255,10 +247,6 @@ impl G1ScalarMulValues {
     }
 }
 
-// =============================================================================
-// Prover Spec
-// =============================================================================
-
 #[derive(Clone, Allocative)]
 pub struct G1ScalarMulProverSpec {
     params: G1ScalarMulParams,
@@ -392,10 +380,6 @@ impl ConstraintListProverSpec<Fq, DEGREE> for G1ScalarMulProverSpec {
     }
 }
 
-// =============================================================================
-// Verifier Spec
-// =============================================================================
-
 #[derive(Clone, Allocative)]
 pub struct G1ScalarMulVerifierSpec {
     params: G1ScalarMulParams,
@@ -471,10 +455,6 @@ impl ConstraintListVerifierSpec<Fq, DEGREE> for G1ScalarMulVerifierSpec {
         vals.eval_constraint(bit, x_p, y_p, delta)
     }
 }
-
-// =============================================================================
-// Type Aliases
-// =============================================================================
 
 pub type G1ScalarMulProver<F> = ConstraintListProver<F, G1ScalarMulProverSpec, DEGREE>;
 pub type G1ScalarMulVerifier<F> = ConstraintListVerifier<F, G1ScalarMulVerifierSpec, DEGREE>;

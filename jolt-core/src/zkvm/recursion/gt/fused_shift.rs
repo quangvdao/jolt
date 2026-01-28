@@ -32,9 +32,10 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
-    zkvm::recursion::gt::indexing::{k_gt, num_gt_constraints_padded},
-    zkvm::recursion::gt::shift::{
-        eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
+    zkvm::recursion::gt::{
+        exponentiation::GtExpWitness,
+        indexing::{k_exp, k_gt, num_gt_constraints_padded},
+        shift::{eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle},
     },
     zkvm::witness::VirtualPolynomial,
 };
@@ -124,7 +125,7 @@ impl FusedGtShiftProver {
         params: FusedGtShiftParams,
         constraint_types: &[ConstraintType],
         locator_by_constraint: &[ConstraintLocator],
-        gt_exp_witnesses: &[crate::zkvm::recursion::gt::exponentiation::GtExpWitness<Fq>],
+        gt_exp_witnesses: &[GtExpWitness<Fq>],
         accumulator: &ProverOpeningAccumulator<Fq>,
     ) -> Self {
         // Read Stage-1 fused rho_next claim and its opening point r1.
@@ -151,7 +152,7 @@ impl FusedGtShiftProver {
         let row_size = 1usize << params.num_x_vars;
         let mut rho_xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
         let k_gt = params.num_c_vars;
-        let k_exp = crate::zkvm::recursion::gt::indexing::k_exp(constraint_types);
+        let k_exp = k_exp(constraint_types);
         let dummy = k_gt.saturating_sub(k_exp);
         for global_idx in 0..constraint_types.len() {
             if let ConstraintLocator::GtExp { local } = locator_by_constraint[global_idx] {

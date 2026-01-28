@@ -19,8 +19,9 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
-    zkvm::recursion::gt::indexing::{
-        gt_exp_c_tail_range, k_exp, k_gt, num_gt_exp_constraints_padded,
+    zkvm::recursion::gt::{
+        exponentiation::GtExpWitness,
+        indexing::{gt_exp_c_tail_range, k_exp, k_gt, num_gt_exp_constraints_padded},
     },
     zkvm::witness::VirtualPolynomial,
 };
@@ -60,7 +61,7 @@ impl<T: Transcript> FusedGtExpStage2OpeningsProver<T> {
     pub fn new(
         constraint_types: &[ConstraintType],
         locator_by_constraint: &[ConstraintLocator],
-        gt_exp_witnesses: &[crate::zkvm::recursion::gt::exponentiation::GtExpWitness<Fq>],
+        gt_exp_witnesses: &[GtExpWitness<Fq>],
     ) -> Self {
         let params = FusedGtExpStage2OpeningsParams::from_constraint_types(constraint_types);
 
@@ -262,7 +263,7 @@ mod tests {
         }
         let row_size = 1usize << CONFIG.packed_vars;
         let witnesses = vec![
-            crate::zkvm::recursion::gt::exponentiation::GtExpWitness::<Fq> {
+            GtExpWitness::<Fq> {
                 rho_packed: vec![Fq::zero(); row_size],
                 rho_next_packed: vec![Fq::zero(); row_size],
                 quotient_packed: vec![Fq::zero(); row_size],

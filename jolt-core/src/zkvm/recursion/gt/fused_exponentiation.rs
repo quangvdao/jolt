@@ -28,7 +28,7 @@ use crate::{
     },
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
-    zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
+    zkvm::recursion::constraints::system::{index_to_binary, ConstraintLocator, ConstraintType},
     zkvm::recursion::curve::{Bn254Recursion, RecursionCurve},
     zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness},
     zkvm::recursion::gt::indexing::{k_exp, k_gt, num_gt_constraints_padded},
@@ -456,8 +456,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
 
         for (w, &c_idx) in self.gtexp_c_indices.iter().enumerate() {
             // Eq(r_c, c_idx) using little-endian bits for indices (round order is LSB-first).
-            let bits =
-                crate::zkvm::recursion::constraints::system::index_to_binary::<Fq>(c_idx, k_exp);
+            let bits = index_to_binary::<Fq>(c_idx, k_exp);
             let w_c = EqPolynomial::mle(&r_c_tail_lsb, &bits);
 
             let (u, v) = self.public_inputs[w].evaluate_digit_mles(&eq_evals_s);

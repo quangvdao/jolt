@@ -36,6 +36,7 @@ use crate::{
 };
 use rayon::prelude::*;
 
+use crate::poly::commitment::dory::witness::multi_miller_loop::MultiMillerLoopSteps;
 use crate::zkvm::recursion::gt::shift::{
     eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
 };
@@ -419,11 +420,7 @@ mod tests {
     fn test_shift_multi_miller_loop_honest_trace_verifies() {
         let p = G1Affine::generator();
         let q = G2Affine::generator();
-        let steps =
-            crate::poly::commitment::dory::witness::multi_miller_loop::MultiMillerLoopSteps::new(
-                &[p],
-                &[q],
-            );
+        let steps = MultiMillerLoopSteps::new(&[p], &[q]);
         let pair = 0usize;
 
         let pairs_prover: Vec<(VirtualPolynomial, Vec<Fq>, VirtualPolynomial, Vec<Fq>)> = vec![
@@ -519,11 +516,7 @@ mod tests {
     fn test_shift_multi_miller_loop_detects_corruption() {
         let p = G1Affine::generator();
         let q = G2Affine::generator();
-        let steps =
-            crate::poly::commitment::dory::witness::multi_miller_loop::MultiMillerLoopSteps::new(
-                &[p],
-                &[q],
-            );
+        let steps = MultiMillerLoopSteps::new(&[p], &[q]);
         let pair = 0usize;
 
         let mut bad_f_next = steps.f_next_packed_mles[pair].clone();

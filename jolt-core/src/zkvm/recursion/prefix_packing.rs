@@ -15,7 +15,8 @@
 //! Both prover and verifier can derive the exact same packing layout from public data
 //! (`constraint_types`), and the leftover region (if any) is implicitly zero.
 
-use crate::zkvm::recursion::constraints::system::{ConstraintType, PolyType};
+use super::constraints::system::{ConstraintType, PolyType};
+use super::gt::indexing::{k_exp, k_mul};
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -163,8 +164,6 @@ impl PrefixPackingLayout {
         enable_g2_scalar_mul_fused_end_to_end: bool,
         enable_g2_add_fused_end_to_end: bool,
     ) -> Self {
-        use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
-
         if !enable_gt_fused_end_to_end
             && !enable_g1_scalar_mul_fused_end_to_end
             && !enable_g1_add_fused_end_to_end

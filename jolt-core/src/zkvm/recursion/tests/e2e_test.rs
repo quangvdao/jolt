@@ -14,8 +14,8 @@ use crate::{
     transcripts::{Blake2bTranscript, Transcript},
     zkvm::proof_serialization::PairingBoundary,
     zkvm::recursion::{
-        ConstraintType, RecursionProof, RecursionProver, RecursionVerifier, RecursionVerifierInput,
-        WiringPlan,
+        prefix_packing::PrefixPackingLayout, ConstraintType, RecursionProof, RecursionProver,
+        RecursionVerifier, RecursionVerifierInput, WiringPlan,
     },
 };
 use ark_bn254::{Fq, Fq12, Fr, G1Affine, G2Affine};
@@ -33,7 +33,6 @@ fn test_recursion_snark_e2e_with_dory() {
 
     let mut rng = test_rng();
 
-    // ============ CREATE A DORY PROOF TO VERIFY ============
     // Create test polynomial
     let num_vars = 4;
     let poly_coefficients: Vec<Fr> = (0..(1 << num_vars)).map(|_| Fr::rand(&mut rng)).collect();
@@ -130,7 +129,7 @@ fn test_recursion_snark_e2e_with_dory() {
         || enable_g2_scalar_mul_fused_end_to_end
         || enable_g2_add_fused_end_to_end
     {
-        crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types_fused(
+        PrefixPackingLayout::from_constraint_types_fused(
             &constraint_types,
             enable_gt_fused_end_to_end,
             enable_g1_scalar_mul_fused_end_to_end,
@@ -140,10 +139,7 @@ fn test_recursion_snark_e2e_with_dory() {
         )
         .num_dense_vars
     } else {
-        crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types(
-            &constraint_types,
-        )
-        .num_dense_vars
+        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars
     };
 
     let num_g1_add = constraint_types
@@ -213,8 +209,6 @@ fn test_recursion_snark_e2e_with_dory() {
         opening_claims,
         dense_commitment: dense_commitment.clone(),
     };
-
-    // ============ VERIFY THE RECURSION PROOF ============
 
     // Create verifier input
     // Prefer the metadata produced by `poly_commit`, to ensure perfect alignment.

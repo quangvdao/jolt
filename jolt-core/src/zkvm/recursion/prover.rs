@@ -7,8 +7,8 @@
 //!
 //! The prover returns a proof and opening accumulator for PCS verification.
 
+use super::RecursionConstraintMetadata;
 use crate::zkvm::proof_serialization::NonInputBaseHints;
-use crate::zkvm::recursion::RecursionConstraintMetadata;
 use crate::{
     field::JoltField,
     poly::{
@@ -35,9 +35,11 @@ use dory::backends::arkworks::ArkGT;
 use std::collections::HashMap;
 
 use dory::backends::arkworks::BN254;
-use dory::recursion::{ast::AstGraph, WitnessCollection};
+use dory::recursion::{ast::AstGraph, ast::AstOp, OpId, WitnessCollection};
 use jolt_optimizations::get_g_mle;
 
+use super::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
+use super::witness::GTCombineWitness;
 use super::{
     constraints::system::{ConstraintSystem, PolyType},
     g1::{
@@ -90,8 +92,7 @@ use crate::poly::rlc_utils::compute_rlc_coefficients;
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
-use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
-use crate::zkvm::recursion::witness::GTCombineWitness;
+use crate::zkvm::witness::G2AddTerm;
 
 #[cfg(feature = "experimental-pairing-recursion")]
 use super::pairing::{
@@ -167,10 +168,6 @@ where
 /// Contains the proof and constraint metadata needed by the verifier.
 pub type RecursionProofResult<T, PCS> =
     Result<(RecursionProof<Fq, T, PCS>, RecursionConstraintMetadata), Box<dyn std::error::Error>>;
-
-// -----------------------------------------------------------------------------
-// Internal phase outputs (private helpers for RecursionProver refactor)
-// -----------------------------------------------------------------------------
 
 pub(crate) type HyraxPCS = Hyrax<1, GrumpkinProjective>;
 
@@ -358,9 +355,6 @@ impl RecursionProver<Fq> {
         // Non-input base/point hints for verifier-side instance-plan derivation (perf-only until wiring is added).
         let non_input_base_hints =
             tracing::info_span!("derive_non_input_base_hints").in_scope(|| {
-                use dory::recursion::ast::AstOp;
-                use dory::recursion::OpId;
-
                 // Collect op lists in OpId order (must match verifier derivation).
                 let mut gt_exp: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
                 let mut g1_smul: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
@@ -611,7 +605,6 @@ impl RecursionProver<Fq> {
         transcript: &mut T,
         prover_setup: &PedersenGenerators<GrumpkinProjective>,
     ) -> Result<HyraxPolyCommitPhaseOutput, Box<dyn std::error::Error>> {
-        // ============ EMIT PREFIX-PACKED DENSE POLYNOMIAL ============
         // IMPORTANT: Commitment must happen BEFORE sumchecks for soundness!
         if self.dense_poly_cache.is_none() || self.prefix_layout_cache.is_none() {
             let (dense_poly, prefix_layout) = tracing::info_span!("emit_prefix_packed_dense")
@@ -691,7 +684,6 @@ impl RecursionProver<Fq> {
             "Hyrax commit skipping zero-padded tail"
         );
 
-        // ============ BUILD METADATA (for verifier) ============
         let metadata = tracing::info_span!("build_constraint_metadata").in_scope(|| {
             tracing::info!("Building constraint metadata for verifier");
             let constraint_types = self.constraint_system.constraint_types.clone();
@@ -742,7 +734,6 @@ impl RecursionProver<Fq> {
         transcript: &mut T,
         metadata: &RecursionConstraintMetadata,
     ) -> Result<SumcheckPhaseOutput<T>, Box<dyn std::error::Error>> {
-        // ============ RUN ALL SUMCHECKS ============
         // Initialize opening accumulator
         let log_t = self.constraint_system.num_vars();
         let mut accumulator = tracing::info_span!("init_opening_accumulator").in_scope(|| {
@@ -969,7 +960,6 @@ impl RecursionProver<Fq> {
 
         let mut provers: Vec<Box<dyn SumcheckInstanceProver<Fq, T>>> = Vec::new();
 
-        // ---- Packed GT exp (shift rho + claim reduction) ----
         let num_gt_exp = self.constraint_system.gt_exp_witnesses.len();
         if num_gt_exp > 0 {
             let claim_indices: Vec<usize> = (0..num_gt_exp).collect();
@@ -1046,9 +1036,8 @@ impl RecursionProver<Fq> {
             }
         }
 
-        // ---- GT mul / G1+G2 scalar mul / G1+G2 add (and any other Stage 2 constraints) ----
-        //
-        // NOTE: These were previously run in Stage 1; we keep their logic but batch them here.
+        // NOTE: GT mul / G1+G2 scalar mul / G1+G2 add were previously run in Stage 1;
+        // we keep their logic but batch them here.
 
         // Convert g_poly for GT mul (uses zero padding layout: s * 16 + x)
         let g_poly_f = self.constraint_system.g_poly.clone();
@@ -1355,7 +1344,7 @@ impl RecursionProver<Fq> {
             let _ = enable_shift_multi_miller_loop;
         }
 
-        // ---- Wiring/boundary constraints (AST-driven), appended LAST in Stage 2 ----
+        // Wiring/boundary constraints (AST-driven), appended LAST in Stage 2
         if enable_wiring {
             if let (Some(ast), Some(pairing_boundary), Some(joint_commitment)) = (
                 self.ast.as_ref(),
@@ -1661,7 +1650,6 @@ impl RecursionProver<Fq> {
                     accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul);
                 claim
             } else if enable_g2_add_fused_end_to_end && entry.is_g2_add_fused {
-                use crate::zkvm::witness::G2AddTerm;
                 let vp = match entry.poly_type {
                     PolyType::G2AddXPC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::XPC0),
                     PolyType::G2AddXPC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::XPC1),

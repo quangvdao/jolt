@@ -12,6 +12,7 @@ use crate::zkvm::recursion::constraints::system::{
 use crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs;
 use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness};
+use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
 use crate::zkvm::recursion::prefix_packing::{PrefixPackedEntry, PrefixPackingLayout};
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};
 
@@ -570,8 +571,6 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
 
     fn fill_entry(dst: &mut [Fq], cs: &ConstraintSystem, entry: &PrefixPackedEntry) {
         if entry.is_gt_fused {
-            use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
-
             // Option B: commit exp/mul fused rows at their family-local padded sizes.
             let num_vars_gt_exp = 11usize + k_exp(&cs.constraint_types);
             let num_vars_gt_mul = 4usize + k_mul(&cs.constraint_types);
@@ -584,8 +583,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
 
             match entry.poly_type {
-                crate::zkvm::recursion::constraints::system::PolyType::RhoPrev
-                | crate::zkvm::recursion::constraints::system::PolyType::Quotient => {
+                PolyType::RhoPrev | PolyType::Quotient => {
                     if entry.num_vars != num_vars_gt_exp {
                         panic!(
                             "GT-fused GTExp entry has num_vars={}, expected {} (11 + k_exp)",
@@ -601,12 +599,8 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                         };
                         let c_exp = local;
                         let src = match entry.poly_type {
-                            crate::zkvm::recursion::constraints::system::PolyType::RhoPrev => {
-                                &cs.gt_exp_witnesses[local].rho_packed
-                            }
-                            crate::zkvm::recursion::constraints::system::PolyType::Quotient => {
-                                &cs.gt_exp_witnesses[local].quotient_packed
-                            }
+                            PolyType::RhoPrev => &cs.gt_exp_witnesses[local].rho_packed,
+                            PolyType::Quotient => &cs.gt_exp_witnesses[local].quotient_packed,
                             _ => unreachable!(),
                         };
                         debug_assert_eq!(src.len(), row_size);
@@ -614,10 +608,10 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                         fused_src[off..off + row_size].copy_from_slice(src);
                     }
                 }
-                crate::zkvm::recursion::constraints::system::PolyType::MulLhs
-                | crate::zkvm::recursion::constraints::system::PolyType::MulRhs
-                | crate::zkvm::recursion::constraints::system::PolyType::MulResult
-                | crate::zkvm::recursion::constraints::system::PolyType::MulQuotient => {
+                PolyType::MulLhs
+                | PolyType::MulRhs
+                | PolyType::MulResult
+                | PolyType::MulQuotient => {
                     if entry.num_vars != num_vars_gt_mul {
                         panic!(
                             "GT-fused GTMul entry has num_vars={}, expected {} (4 + k_mul)",
@@ -633,18 +627,10 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                         };
                         let c_mul = local;
                         let src4 = match entry.poly_type {
-                            crate::zkvm::recursion::constraints::system::PolyType::MulLhs => {
-                                &cs.gt_mul_rows[local].lhs
-                            }
-                            crate::zkvm::recursion::constraints::system::PolyType::MulRhs => {
-                                &cs.gt_mul_rows[local].rhs
-                            }
-                            crate::zkvm::recursion::constraints::system::PolyType::MulResult => {
-                                &cs.gt_mul_rows[local].result
-                            }
-                            crate::zkvm::recursion::constraints::system::PolyType::MulQuotient => {
-                                &cs.gt_mul_rows[local].quotient
-                            }
+                            PolyType::MulLhs => &cs.gt_mul_rows[local].lhs,
+                            PolyType::MulRhs => &cs.gt_mul_rows[local].rhs,
+                            PolyType::MulResult => &cs.gt_mul_rows[local].result,
+                            PolyType::MulQuotient => &cs.gt_mul_rows[local].quotient,
                             _ => unreachable!(),
                         };
                         debug_assert_eq!(src4.len(), row_size);
@@ -684,30 +670,14 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                 };
                 let c = local;
                 let src8 = match entry.poly_type {
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulXA => {
-                        &cs.g1_scalar_mul_rows[local].x_a
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulYA => {
-                        &cs.g1_scalar_mul_rows[local].y_a
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulXT => {
-                        &cs.g1_scalar_mul_rows[local].x_t
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulYT => {
-                        &cs.g1_scalar_mul_rows[local].y_t
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulXANext => {
-                        &cs.g1_scalar_mul_rows[local].x_a_next
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulYANext => {
-                        &cs.g1_scalar_mul_rows[local].y_a_next
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulTIndicator => {
-                        &cs.g1_scalar_mul_rows[local].t_indicator
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulAIndicator => {
-                        &cs.g1_scalar_mul_rows[local].a_indicator
-                    }
+                    PolyType::G1ScalarMulXA => &cs.g1_scalar_mul_rows[local].x_a,
+                    PolyType::G1ScalarMulYA => &cs.g1_scalar_mul_rows[local].y_a,
+                    PolyType::G1ScalarMulXT => &cs.g1_scalar_mul_rows[local].x_t,
+                    PolyType::G1ScalarMulYT => &cs.g1_scalar_mul_rows[local].y_t,
+                    PolyType::G1ScalarMulXANext => &cs.g1_scalar_mul_rows[local].x_a_next,
+                    PolyType::G1ScalarMulYANext => &cs.g1_scalar_mul_rows[local].y_a_next,
+                    PolyType::G1ScalarMulTIndicator => &cs.g1_scalar_mul_rows[local].t_indicator,
+                    PolyType::G1ScalarMulAIndicator => &cs.g1_scalar_mul_rows[local].a_indicator,
                     _ => continue,
                 };
                 debug_assert_eq!(src8.len(), row_size);
@@ -740,45 +710,19 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                 };
                 let c = local;
                 let v = match entry.poly_type {
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddXP => {
-                        cs.g1_add_rows[local].x_p
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddYP => {
-                        cs.g1_add_rows[local].y_p
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddPIndicator => {
-                        cs.g1_add_rows[local].ind_p
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddXQ => {
-                        cs.g1_add_rows[local].x_q
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddYQ => {
-                        cs.g1_add_rows[local].y_q
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddQIndicator => {
-                        cs.g1_add_rows[local].ind_q
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddXR => {
-                        cs.g1_add_rows[local].x_r
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddYR => {
-                        cs.g1_add_rows[local].y_r
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddRIndicator => {
-                        cs.g1_add_rows[local].ind_r
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddLambda => {
-                        cs.g1_add_rows[local].lambda
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddInvDeltaX => {
-                        cs.g1_add_rows[local].inv_delta_x
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddIsDouble => {
-                        cs.g1_add_rows[local].is_double
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G1AddIsInverse => {
-                        cs.g1_add_rows[local].is_inverse
-                    }
+                    PolyType::G1AddXP => cs.g1_add_rows[local].x_p,
+                    PolyType::G1AddYP => cs.g1_add_rows[local].y_p,
+                    PolyType::G1AddPIndicator => cs.g1_add_rows[local].ind_p,
+                    PolyType::G1AddXQ => cs.g1_add_rows[local].x_q,
+                    PolyType::G1AddYQ => cs.g1_add_rows[local].y_q,
+                    PolyType::G1AddQIndicator => cs.g1_add_rows[local].ind_q,
+                    PolyType::G1AddXR => cs.g1_add_rows[local].x_r,
+                    PolyType::G1AddYR => cs.g1_add_rows[local].y_r,
+                    PolyType::G1AddRIndicator => cs.g1_add_rows[local].ind_r,
+                    PolyType::G1AddLambda => cs.g1_add_rows[local].lambda,
+                    PolyType::G1AddInvDeltaX => cs.g1_add_rows[local].inv_delta_x,
+                    PolyType::G1AddIsDouble => cs.g1_add_rows[local].is_double,
+                    PolyType::G1AddIsInverse => cs.g1_add_rows[local].is_inverse,
                     _ => continue,
                 };
                 fused_src[c] = v;
@@ -811,48 +755,20 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                 };
                 let c = local;
                 let src8 = match entry.poly_type {
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXAC0 => {
-                        &cs.g2_scalar_mul_rows[local].x_a_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXAC1 => {
-                        &cs.g2_scalar_mul_rows[local].x_a_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYAC0 => {
-                        &cs.g2_scalar_mul_rows[local].y_a_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYAC1 => {
-                        &cs.g2_scalar_mul_rows[local].y_a_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXTC0 => {
-                        &cs.g2_scalar_mul_rows[local].x_t_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXTC1 => {
-                        &cs.g2_scalar_mul_rows[local].x_t_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYTC0 => {
-                        &cs.g2_scalar_mul_rows[local].y_t_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYTC1 => {
-                        &cs.g2_scalar_mul_rows[local].y_t_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXANextC0 => {
-                        &cs.g2_scalar_mul_rows[local].x_a_next_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXANextC1 => {
-                        &cs.g2_scalar_mul_rows[local].x_a_next_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYANextC0 => {
-                        &cs.g2_scalar_mul_rows[local].y_a_next_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYANextC1 => {
-                        &cs.g2_scalar_mul_rows[local].y_a_next_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulTIndicator => {
-                        &cs.g2_scalar_mul_rows[local].t_indicator
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulAIndicator => {
-                        &cs.g2_scalar_mul_rows[local].a_indicator
-                    }
+                    PolyType::G2ScalarMulXAC0 => &cs.g2_scalar_mul_rows[local].x_a_c0,
+                    PolyType::G2ScalarMulXAC1 => &cs.g2_scalar_mul_rows[local].x_a_c1,
+                    PolyType::G2ScalarMulYAC0 => &cs.g2_scalar_mul_rows[local].y_a_c0,
+                    PolyType::G2ScalarMulYAC1 => &cs.g2_scalar_mul_rows[local].y_a_c1,
+                    PolyType::G2ScalarMulXTC0 => &cs.g2_scalar_mul_rows[local].x_t_c0,
+                    PolyType::G2ScalarMulXTC1 => &cs.g2_scalar_mul_rows[local].x_t_c1,
+                    PolyType::G2ScalarMulYTC0 => &cs.g2_scalar_mul_rows[local].y_t_c0,
+                    PolyType::G2ScalarMulYTC1 => &cs.g2_scalar_mul_rows[local].y_t_c1,
+                    PolyType::G2ScalarMulXANextC0 => &cs.g2_scalar_mul_rows[local].x_a_next_c0,
+                    PolyType::G2ScalarMulXANextC1 => &cs.g2_scalar_mul_rows[local].x_a_next_c1,
+                    PolyType::G2ScalarMulYANextC0 => &cs.g2_scalar_mul_rows[local].y_a_next_c0,
+                    PolyType::G2ScalarMulYANextC1 => &cs.g2_scalar_mul_rows[local].y_a_next_c1,
+                    PolyType::G2ScalarMulTIndicator => &cs.g2_scalar_mul_rows[local].t_indicator,
+                    PolyType::G2ScalarMulAIndicator => &cs.g2_scalar_mul_rows[local].a_indicator,
                     _ => continue,
                 };
                 debug_assert_eq!(src8.len(), row_size);
@@ -885,69 +801,27 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                 };
                 let c = local;
                 let v = match entry.poly_type {
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXPC0 => {
-                        cs.g2_add_rows[local].x_p_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXPC1 => {
-                        cs.g2_add_rows[local].x_p_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYPC0 => {
-                        cs.g2_add_rows[local].y_p_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYPC1 => {
-                        cs.g2_add_rows[local].y_p_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddPIndicator => {
-                        cs.g2_add_rows[local].ind_p
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXQC0 => {
-                        cs.g2_add_rows[local].x_q_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXQC1 => {
-                        cs.g2_add_rows[local].x_q_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYQC0 => {
-                        cs.g2_add_rows[local].y_q_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYQC1 => {
-                        cs.g2_add_rows[local].y_q_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddQIndicator => {
-                        cs.g2_add_rows[local].ind_q
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXRC0 => {
-                        cs.g2_add_rows[local].x_r_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddXRC1 => {
-                        cs.g2_add_rows[local].x_r_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYRC0 => {
-                        cs.g2_add_rows[local].y_r_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddYRC1 => {
-                        cs.g2_add_rows[local].y_r_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddRIndicator => {
-                        cs.g2_add_rows[local].ind_r
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddLambdaC0 => {
-                        cs.g2_add_rows[local].lambda_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddLambdaC1 => {
-                        cs.g2_add_rows[local].lambda_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddInvDeltaXC0 => {
-                        cs.g2_add_rows[local].inv_delta_x_c0
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddInvDeltaXC1 => {
-                        cs.g2_add_rows[local].inv_delta_x_c1
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddIsDouble => {
-                        cs.g2_add_rows[local].is_double
-                    }
-                    crate::zkvm::recursion::constraints::system::PolyType::G2AddIsInverse => {
-                        cs.g2_add_rows[local].is_inverse
-                    }
+                    PolyType::G2AddXPC0 => cs.g2_add_rows[local].x_p_c0,
+                    PolyType::G2AddXPC1 => cs.g2_add_rows[local].x_p_c1,
+                    PolyType::G2AddYPC0 => cs.g2_add_rows[local].y_p_c0,
+                    PolyType::G2AddYPC1 => cs.g2_add_rows[local].y_p_c1,
+                    PolyType::G2AddPIndicator => cs.g2_add_rows[local].ind_p,
+                    PolyType::G2AddXQC0 => cs.g2_add_rows[local].x_q_c0,
+                    PolyType::G2AddXQC1 => cs.g2_add_rows[local].x_q_c1,
+                    PolyType::G2AddYQC0 => cs.g2_add_rows[local].y_q_c0,
+                    PolyType::G2AddYQC1 => cs.g2_add_rows[local].y_q_c1,
+                    PolyType::G2AddQIndicator => cs.g2_add_rows[local].ind_q,
+                    PolyType::G2AddXRC0 => cs.g2_add_rows[local].x_r_c0,
+                    PolyType::G2AddXRC1 => cs.g2_add_rows[local].x_r_c1,
+                    PolyType::G2AddYRC0 => cs.g2_add_rows[local].y_r_c0,
+                    PolyType::G2AddYRC1 => cs.g2_add_rows[local].y_r_c1,
+                    PolyType::G2AddRIndicator => cs.g2_add_rows[local].ind_r,
+                    PolyType::G2AddLambdaC0 => cs.g2_add_rows[local].lambda_c0,
+                    PolyType::G2AddLambdaC1 => cs.g2_add_rows[local].lambda_c1,
+                    PolyType::G2AddInvDeltaXC0 => cs.g2_add_rows[local].inv_delta_x_c0,
+                    PolyType::G2AddInvDeltaXC1 => cs.g2_add_rows[local].inv_delta_x_c1,
+                    PolyType::G2AddIsDouble => cs.g2_add_rows[local].is_double,
+                    PolyType::G2AddIsInverse => cs.g2_add_rows[local].is_inverse,
                     _ => continue,
                 };
                 fused_src[c] = v;
@@ -960,13 +834,13 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
         let loc = cs.locator_by_constraint[entry.constraint_idx];
         match entry.poly_type {
             // Packed GT exp (11-var)
-            crate::zkvm::recursion::constraints::system::PolyType::RhoPrev => {
+            PolyType::RhoPrev => {
                 let ConstraintLocator::GtExp { local } = loc else {
                     panic!("RhoPrev entry with non-GtExp locator: {loc:?}");
                 };
                 fill_block(dst, &cs.gt_exp_witnesses[local].rho_packed, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::Quotient => {
+            PolyType::Quotient => {
                 let ConstraintLocator::GtExp { local } = loc else {
                     panic!("Quotient entry with non-GtExp locator: {loc:?}");
                 };
@@ -978,25 +852,25 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             }
 
             // GT mul (4-var)
-            crate::zkvm::recursion::constraints::system::PolyType::MulLhs => {
+            PolyType::MulLhs => {
                 let ConstraintLocator::GtMul { local } = loc else {
                     panic!("MulLhs entry with non-GtMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.gt_mul_rows[local].lhs, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::MulRhs => {
+            PolyType::MulRhs => {
                 let ConstraintLocator::GtMul { local } = loc else {
                     panic!("MulRhs entry with non-GtMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.gt_mul_rows[local].rhs, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::MulResult => {
+            PolyType::MulResult => {
                 let ConstraintLocator::GtMul { local } = loc else {
                     panic!("MulResult entry with non-GtMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.gt_mul_rows[local].result, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::MulQuotient => {
+            PolyType::MulQuotient => {
                 let ConstraintLocator::GtMul { local } = loc else {
                     panic!("MulQuotient entry with non-GtMul locator: {loc:?}");
                 };
@@ -1004,43 +878,43 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             }
 
             // G1 scalar mul (8-var)
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulXA => {
+            PolyType::G1ScalarMulXA => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulXA entry with non-G1ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g1_scalar_mul_rows[local].x_a, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulYA => {
+            PolyType::G1ScalarMulYA => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulYA entry with non-G1ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g1_scalar_mul_rows[local].y_a, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulXT => {
+            PolyType::G1ScalarMulXT => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulXT entry with non-G1ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g1_scalar_mul_rows[local].x_t, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulYT => {
+            PolyType::G1ScalarMulYT => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulYT entry with non-G1ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g1_scalar_mul_rows[local].y_t, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulXANext => {
+            PolyType::G1ScalarMulXANext => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulXANext entry with non-G1ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g1_scalar_mul_rows[local].x_a_next, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulYANext => {
+            PolyType::G1ScalarMulYANext => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulYANext entry with non-G1ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g1_scalar_mul_rows[local].y_a_next, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulTIndicator => {
+            PolyType::G1ScalarMulTIndicator => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulTIndicator entry with non-G1ScalarMul locator: {loc:?}");
                 };
@@ -1050,7 +924,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     entry.num_vars,
                 );
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1ScalarMulAIndicator => {
+            PolyType::G1ScalarMulAIndicator => {
                 let ConstraintLocator::G1ScalarMul { local } = loc else {
                     panic!("G1ScalarMulAIndicator entry with non-G1ScalarMul locator: {loc:?}");
                 };
@@ -1062,55 +936,55 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             }
 
             // G2 scalar mul (8-var)
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXAC0 => {
+            PolyType::G2ScalarMulXAC0 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulXAC0 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].x_a_c0, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXAC1 => {
+            PolyType::G2ScalarMulXAC1 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulXAC1 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].x_a_c1, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYAC0 => {
+            PolyType::G2ScalarMulYAC0 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulYAC0 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].y_a_c0, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYAC1 => {
+            PolyType::G2ScalarMulYAC1 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulYAC1 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].y_a_c1, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXTC0 => {
+            PolyType::G2ScalarMulXTC0 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulXTC0 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].x_t_c0, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXTC1 => {
+            PolyType::G2ScalarMulXTC1 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulXTC1 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].x_t_c1, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYTC0 => {
+            PolyType::G2ScalarMulYTC0 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulYTC0 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].y_t_c0, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYTC1 => {
+            PolyType::G2ScalarMulYTC1 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulYTC1 entry with non-G2ScalarMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.g2_scalar_mul_rows[local].y_t_c1, entry.num_vars);
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXANextC0 => {
+            PolyType::G2ScalarMulXANextC0 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulXANextC0 entry with non-G2ScalarMul locator: {loc:?}");
                 };
@@ -1120,7 +994,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     entry.num_vars,
                 );
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulXANextC1 => {
+            PolyType::G2ScalarMulXANextC1 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulXANextC1 entry with non-G2ScalarMul locator: {loc:?}");
                 };
@@ -1130,7 +1004,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     entry.num_vars,
                 );
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYANextC0 => {
+            PolyType::G2ScalarMulYANextC0 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulYANextC0 entry with non-G2ScalarMul locator: {loc:?}");
                 };
@@ -1140,7 +1014,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     entry.num_vars,
                 );
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulYANextC1 => {
+            PolyType::G2ScalarMulYANextC1 => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulYANextC1 entry with non-G2ScalarMul locator: {loc:?}");
                 };
@@ -1150,7 +1024,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     entry.num_vars,
                 );
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulTIndicator => {
+            PolyType::G2ScalarMulTIndicator => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulTIndicator entry with non-G2ScalarMul locator: {loc:?}");
                 };
@@ -1160,7 +1034,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     entry.num_vars,
                 );
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2ScalarMulAIndicator => {
+            PolyType::G2ScalarMulAIndicator => {
                 let ConstraintLocator::G2ScalarMul { local } = loc else {
                     panic!("G2ScalarMulAIndicator entry with non-G2ScalarMul locator: {loc:?}");
                 };
@@ -1172,79 +1046,79 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             }
 
             // G1 add (0-var)
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddXP => {
+            PolyType::G1AddXP => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddXP entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].x_p;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddYP => {
+            PolyType::G1AddYP => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddYP entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].y_p;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddPIndicator => {
+            PolyType::G1AddPIndicator => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddPIndicator entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].ind_p;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddXQ => {
+            PolyType::G1AddXQ => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddXQ entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].x_q;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddYQ => {
+            PolyType::G1AddYQ => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddYQ entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].y_q;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddQIndicator => {
+            PolyType::G1AddQIndicator => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddQIndicator entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].ind_q;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddXR => {
+            PolyType::G1AddXR => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddXR entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].x_r;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddYR => {
+            PolyType::G1AddYR => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddYR entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].y_r;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddRIndicator => {
+            PolyType::G1AddRIndicator => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddRIndicator entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].ind_r;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddLambda => {
+            PolyType::G1AddLambda => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddLambda entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].lambda;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddInvDeltaX => {
+            PolyType::G1AddInvDeltaX => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddInvDeltaX entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].inv_delta_x;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddIsDouble => {
+            PolyType::G1AddIsDouble => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddIsDouble entry with non-G1Add locator: {loc:?}");
                 };
                 dst[0] = cs.g1_add_rows[local].is_double;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G1AddIsInverse => {
+            PolyType::G1AddIsInverse => {
                 let ConstraintLocator::G1Add { local } = loc else {
                     panic!("G1AddIsInverse entry with non-G1Add locator: {loc:?}");
                 };
@@ -1252,127 +1126,127 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             }
 
             // G2 add (0-var)
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddXPC0 => {
+            PolyType::G2AddXPC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddXPC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].x_p_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddXPC1 => {
+            PolyType::G2AddXPC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddXPC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].x_p_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddYPC0 => {
+            PolyType::G2AddYPC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddYPC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].y_p_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddYPC1 => {
+            PolyType::G2AddYPC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddYPC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].y_p_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddPIndicator => {
+            PolyType::G2AddPIndicator => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddPIndicator entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].ind_p;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddXQC0 => {
+            PolyType::G2AddXQC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddXQC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].x_q_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddXQC1 => {
+            PolyType::G2AddXQC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddXQC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].x_q_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddYQC0 => {
+            PolyType::G2AddYQC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddYQC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].y_q_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddYQC1 => {
+            PolyType::G2AddYQC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddYQC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].y_q_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddQIndicator => {
+            PolyType::G2AddQIndicator => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddQIndicator entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].ind_q;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddXRC0 => {
+            PolyType::G2AddXRC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddXRC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].x_r_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddXRC1 => {
+            PolyType::G2AddXRC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddXRC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].x_r_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddYRC0 => {
+            PolyType::G2AddYRC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddYRC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].y_r_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddYRC1 => {
+            PolyType::G2AddYRC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddYRC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].y_r_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddRIndicator => {
+            PolyType::G2AddRIndicator => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddRIndicator entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].ind_r;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddLambdaC0 => {
+            PolyType::G2AddLambdaC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddLambdaC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].lambda_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddLambdaC1 => {
+            PolyType::G2AddLambdaC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddLambdaC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].lambda_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddInvDeltaXC0 => {
+            PolyType::G2AddInvDeltaXC0 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddInvDeltaXC0 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].inv_delta_x_c0;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddInvDeltaXC1 => {
+            PolyType::G2AddInvDeltaXC1 => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddInvDeltaXC1 entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].inv_delta_x_c1;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddIsDouble => {
+            PolyType::G2AddIsDouble => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddIsDouble entry with non-G2Add locator: {loc:?}");
                 };
                 dst[0] = cs.g2_add_rows[local].is_double;
             }
-            crate::zkvm::recursion::constraints::system::PolyType::G2AddIsInverse => {
+            PolyType::G2AddIsInverse => {
                 let ConstraintLocator::G2Add { local } = loc else {
                     panic!("G2AddIsInverse entry with non-G2Add locator: {loc:?}");
                 };

@@ -6,6 +6,7 @@ use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::zkvm::recursion::g1::scalar_multiplication::G1ScalarMulPublicInputs;
 use crate::zkvm::recursion::g2::scalar_multiplication::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::exponentiation::{GtExpPublicInputs, GtExpWitness};
+use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use ark_bn254::{Fq, Fq2};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
@@ -338,10 +339,6 @@ pub enum ConstraintType {
     MultiMillerLoop,
 }
 
-// -----------------------------------------------------------------------------
-// Public mapping: ConstraintType -> committed PolyTypes (+ native num_vars)
-// -----------------------------------------------------------------------------
-
 const GT_EXP_POLYS: [PolyType; 2] = [PolyType::RhoPrev, PolyType::Quotient];
 const GT_EXP_SPECS: [(PolyType, usize); 2] = [(PolyType::RhoPrev, 11), (PolyType::Quotient, 11)];
 
@@ -578,10 +575,6 @@ impl ConstraintType {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Streaming recursion "plan output" types.
-// -----------------------------------------------------------------------------
-
 #[derive(Clone, Debug)]
 pub struct RecursionMatrixShape {
     pub num_constraints: usize,
@@ -759,10 +752,7 @@ impl RecursionMetadataBuilder {
 
     pub fn build(self) -> crate::zkvm::recursion::RecursionConstraintMetadata {
         let constraint_types = self.constraint_system.constraint_types.clone();
-        let layout =
-            crate::zkvm::recursion::prefix_packing::PrefixPackingLayout::from_constraint_types(
-                &constraint_types,
-            );
+        let layout = PrefixPackingLayout::from_constraint_types(&constraint_types);
         let dense_num_vars = layout.num_dense_vars;
         crate::zkvm::recursion::RecursionConstraintMetadata {
             constraint_types,
@@ -773,10 +763,6 @@ impl RecursionMetadataBuilder {
         }
     }
 }
-
-// -----------------------------------------------------------------------------
-// Serialization for ConstraintType (needed across host/guest boundaries).
-// -----------------------------------------------------------------------------
 
 impl CanonicalSerialize for ConstraintType {
     fn serialize_with_mode<W: ark_serialize::Write>(

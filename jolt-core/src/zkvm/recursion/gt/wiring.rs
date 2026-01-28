@@ -28,8 +28,7 @@ use crate::{
     zkvm::{
         proof_serialization::PairingBoundary,
         recursion::{
-            constraints::system::ConstraintSystem,
-            constraints::system::ConstraintType,
+            constraints::system::{ConstraintLocator, ConstraintSystem, ConstraintType},
             curve::{Bn254Recursion, RecursionCurve},
             gt::indexing::k_gt,
             gt::shift::{eq_lsb_evals, eq_lsb_mle},
@@ -168,18 +167,14 @@ impl<T: Transcript> WiringGtProver<T> {
         for (global_idx, ct) in cs.constraint_types.iter().enumerate() {
             match ct {
                 ConstraintType::GtExp => {
-                    if let crate::zkvm::recursion::constraints::system::ConstraintLocator::GtExp {
-                        local,
-                    } = cs.locator_by_constraint[global_idx]
+                    if let ConstraintLocator::GtExp { local } = cs.locator_by_constraint[global_idx]
                     {
                         gt_exp_constraint_idx[local] = c_exp;
                     }
                     c_exp += 1;
                 }
                 ConstraintType::GtMul => {
-                    if let crate::zkvm::recursion::constraints::system::ConstraintLocator::GtMul {
-                        local,
-                    } = cs.locator_by_constraint[global_idx]
+                    if let ConstraintLocator::GtMul { local } = cs.locator_by_constraint[global_idx]
                     {
                         gt_mul_constraint_idx[local] = c_mul;
                     }
@@ -697,14 +692,14 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
 
         accumulator.append_virtual(
             transcript,
-            crate::zkvm::witness::VirtualPolynomial::gt_wiring_src_sum(),
+            VirtualPolynomial::gt_wiring_src_sum(),
             SumcheckId::GtWiring,
             opening_point.clone(),
             src_sum,
         );
         accumulator.append_virtual(
             transcript,
-            crate::zkvm::witness::VirtualPolynomial::gt_wiring_dst_sum(),
+            VirtualPolynomial::gt_wiring_dst_sum(),
             SumcheckId::GtWiring,
             opening_point,
             dst_sum,
@@ -989,11 +984,11 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let eq_u = eq_lsb_mle::<Fq>(&self.tau, r_elem_chal);
 
         let (_, src_sum) = acc.get_virtual_polynomial_opening(
-            crate::zkvm::witness::VirtualPolynomial::gt_wiring_src_sum(),
+            VirtualPolynomial::gt_wiring_src_sum(),
             SumcheckId::GtWiring,
         );
         let (_, dst_sum) = acc.get_virtual_polynomial_opening(
-            crate::zkvm::witness::VirtualPolynomial::gt_wiring_dst_sum(),
+            VirtualPolynomial::gt_wiring_dst_sum(),
             SumcheckId::GtWiring,
         );
         eq_u * (src_sum - dst_sum)
@@ -1009,13 +1004,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         // Mirror prover transcript order by appending opening points (and claims) now.
         acc.append_virtual(
             transcript,
-            crate::zkvm::witness::VirtualPolynomial::gt_wiring_src_sum(),
+            VirtualPolynomial::gt_wiring_src_sum(),
             SumcheckId::GtWiring,
             opening_point.clone(),
         );
         acc.append_virtual(
             transcript,
-            crate::zkvm::witness::VirtualPolynomial::gt_wiring_dst_sum(),
+            VirtualPolynomial::gt_wiring_dst_sum(),
             SumcheckId::GtWiring,
             opening_point,
         );

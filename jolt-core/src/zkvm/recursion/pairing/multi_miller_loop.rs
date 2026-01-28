@@ -26,10 +26,6 @@ use ark_bn254::{Fq, Fq12, Fq2, Fq6};
 use ark_ff::{One, Zero};
 use jolt_optimizations::{fq12_to_multilinear_evals, get_g_mle};
 
-// =============================================================================
-// Constants
-// =============================================================================
-
 const NUM_VARS: usize = 11;
 const STEP_VARS: usize = 7;
 const ELEM_VARS: usize = 4;
@@ -39,10 +35,6 @@ const ELEM_SIZE: usize = 1 << ELEM_VARS; // 16
 const NUM_COMMITTED_KINDS: usize = 26; // Must match MultiMillerLoopTerm::COUNT
 const DEGREE: usize = 6;
 const OPENING_SPECS: [OpeningSpec; NUM_COMMITTED_KINDS] = sequential_opening_specs();
-
-// =============================================================================
-// Fq2 helpers (u^2 = -1)
-// =============================================================================
 
 #[inline(always)]
 fn fq2_mul_c0<F: JoltField>(a0: F, a1: F, b0: F, b1: F) -> F {
@@ -63,10 +55,6 @@ fn fq2_sq_c0<F: JoltField>(a0: F, a1: F) -> F {
 fn fq2_sq_c1<F: JoltField>(two: F, a0: F, a1: F) -> F {
     two * a0 * a1
 }
-
-// =============================================================================
-// Witness / Params
-// =============================================================================
 
 /// Constraint polynomials for one MultiMillerLoop instance (one traced (G1,G2) pair).
 #[derive(Clone, Debug, Allocative)]
@@ -125,10 +113,6 @@ impl MultiMillerLoopParams {
         }
     }
 }
-
-// =============================================================================
-// Shared constants (g + selectors)
-// =============================================================================
 
 #[derive(Clone, Copy, Debug)]
 struct SharedScalars<F> {
@@ -244,14 +228,6 @@ fn compute_shared_scalars(eval_point: &[Fq]) -> SharedScalars<Fq> {
         sel5,
     }
 }
-
-// =============================================================================
-// Values + constraint logic
-// =============================================================================
-
-// ============================================================================
-// Logic Implementation
-// ============================================================================
 
 #[derive(Clone, Copy, Debug)]
 pub struct MultiMillerLoopValues<F: JoltField> {
@@ -492,10 +468,6 @@ impl<F: JoltField> MultiMillerLoopValues<F> {
         acc
     }
 }
-
-// =============================================================================
-// Prover / Verifier specs (ConstraintList)
-// =============================================================================
 
 #[derive(Clone, Allocative)]
 pub struct MultiMillerLoopProverSpec<F: JoltField + Allocative> {

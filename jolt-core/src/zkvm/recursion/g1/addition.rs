@@ -30,10 +30,6 @@ define_constraint!(
     ]
 );
 
-// ============================================================================
-// Logic Implementation
-// ============================================================================
-
 impl<F: JoltField> G1AddValues<F> {
     /// Evaluate the batched G1 add constraint polynomial at this point.
     ///
@@ -151,10 +147,6 @@ impl<F: JoltField> G1AddValues<F> {
         unreachable!("G1Add uses term batching")
     }
 }
-
-// ============================================================================
-// Public Inputs
-// ============================================================================
 
 /// Public inputs for a single G1 addition.
 /// There are no public inputs for this sumcheck: all operands/results are witness polynomials.

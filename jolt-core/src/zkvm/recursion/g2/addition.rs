@@ -32,10 +32,6 @@ define_constraint!(
     ]
 );
 
-// ============================================================================
-// Logic Implementation
-// ============================================================================
-
 impl<F: JoltField> G2AddValues<F> {
     /// Evaluate the batched G2 add constraint polynomial at this point.
     ///

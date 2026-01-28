@@ -4,7 +4,7 @@
 //! the recursion prover (`poly_commit`) and can be deterministically re-derived by the verifier
 //! from the AST instance plan when needed.
 
-use crate::zkvm::recursion::{
+use super::{
     constraints::system::ConstraintType, g1::scalar_multiplication::G1ScalarMulPublicInputs,
     g2::scalar_multiplication::G2ScalarMulPublicInputs, gt::exponentiation::GtExpPublicInputs,
 };

@@ -34,10 +34,6 @@ use crate::{
 use allocative::Allocative;
 use rayon::prelude::*;
 
-// ============================================================================
-// OpeningSpec: Data-driven specification for virtual polynomial openings
-// ============================================================================
-
 /// Specifies one virtual opening to emit per instance.
 ///
 /// - `kind` indexes into the prover's `polys_by_kind()[kind][instance]`.
@@ -73,10 +69,6 @@ pub const fn sequential_opening_specs<const N: usize>() -> [OpeningSpec; N] {
     }
     specs
 }
-
-// ============================================================================
-// Spec Traits: Base trait + Prover/Verifier extensions
-// ============================================================================
 
 /// Common metadata shared by prover and verifier specs.
 pub trait ConstraintListSpec: Send + Sync + Allocative {
@@ -178,10 +170,6 @@ pub trait ConstraintListVerifierSpec<F: JoltField, const DEGREE: usize>:
         term_batch_coeff: Option<F>,
     ) -> F;
 }
-
-// ============================================================================
-// ConstraintListProver: Generic prover core
-// ============================================================================
 
 /// Generic prover core for a "list of constraints" sumcheck.
 #[derive(Allocative)]
@@ -389,10 +377,6 @@ where
     }
 }
 
-// ============================================================================
-// ConstraintListVerifier: Generic verifier core
-// ============================================================================
-
 /// Generic verifier core for a "list of constraints" sumcheck.
 #[derive(Allocative)]
 pub struct ConstraintListVerifier<F: JoltField, Spec, const DEGREE: usize> {
@@ -536,10 +520,6 @@ where
         }
     }
 }
-
-// ============================================================================
-// Macro: Full constraint type definition
-// ============================================================================
 
 /// Macro to define a complete constraint type with all boilerplate auto-generated.
 ///

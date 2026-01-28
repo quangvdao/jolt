@@ -10,9 +10,9 @@
 //! - `g1/wiring.rs`
 //! - `g2/wiring.rs`
 
+use super::CombineDag;
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::proof_serialization::PairingBoundary;
-use crate::zkvm::recursion::CombineDag;
 use crate::zkvm::{guest_serde::GuestDeserialize, guest_serde::GuestSerialize};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
@@ -86,10 +86,6 @@ impl GuestDeserialize for WiringPlan {
         })
     }
 }
-
-// =============================================================================
-// GT wiring
-// =============================================================================
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GtProducer {
@@ -431,10 +427,6 @@ impl GuestDeserialize for GtConsumer {
     }
 }
 
-// =============================================================================
-// G1 wiring
-// =============================================================================
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum G1ValueRef {
     /// Output point of a G1 scalar mul: (x_a_next(s), y_a_next(s), a_indicator(s)).
@@ -703,10 +695,6 @@ impl GuestDeserialize for G1ValueRef {
     }
 }
 
-// =============================================================================
-// G2 wiring
-// =============================================================================
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum G2ValueRef {
     /// Output point of a G2 scalar mul: (x_a_next(s), y_a_next(s), a_indicator(s)).
@@ -974,10 +962,6 @@ impl GuestDeserialize for G2ValueRef {
         })
     }
 }
-
-// =============================================================================
-// Plan derivation
-// =============================================================================
 
 #[derive(Clone, Debug)]
 struct OpIdOrder {

@@ -21,12 +21,12 @@ use crate::zkvm::proof_serialization::{JoltProof, NonInputBaseHints, PairingBoun
 use crate::zkvm::verifier::{JoltVerifier, JoltVerifierPreprocessing};
 use crate::zkvm::witness::all_committed_polynomials;
 
+use super::prover::{DoryOpeningSnapshot, RecursionInput, RecursionProver};
+use super::verifier::RecursionVerifier;
+use super::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
 use crate::poly::commitment::dory::{ArkG1, ArkG2, ArkGT, DoryContext, DoryGlobals, BN254};
 use crate::poly::rlc_utils::compute_rlc_coefficients;
-use crate::zkvm::recursion::prover::{DoryOpeningSnapshot, RecursionInput, RecursionProver};
-use crate::zkvm::recursion::verifier::RecursionVerifier;
-use crate::zkvm::recursion::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::zkvm::witness::CommittedPolynomial;
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 

@@ -27,6 +27,7 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::system::{index_to_binary, ConstraintType},
     zkvm::recursion::gt::indexing::gt_mul_c_tail_range,
+    zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials,
     zkvm::witness::VirtualPolynomial,
 };
 
@@ -180,9 +181,7 @@ impl FusedGtMulProver {
         let g_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(g_uc));
 
         // Helper to build a fused GTMul term table (native 4 vars).
-        let build_term = |get_term4: fn(
-            &crate::zkvm::recursion::gt::multiplication::GtMulConstraintPolynomials<Fq>,
-        ) -> &Vec<Fq>| {
+        let build_term = |get_term4: fn(&GtMulConstraintPolynomials<Fq>) -> &Vec<Fq>| {
             let mut term_uc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
             for c in 0..params.num_gt_constraints_padded {
                 if c >= params.num_gt_constraints {

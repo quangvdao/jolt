@@ -32,17 +32,9 @@ use ark_bn254::{Fq, Fq2, Fr};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-// =============================================================================
-// Constants
-// =============================================================================
-
 const NUM_COMMITTED_KINDS: usize = 14;
 const DEGREE: usize = 6;
 const OPENING_SPECS: [OpeningSpec; NUM_COMMITTED_KINDS] = sequential_opening_specs();
-
-// =============================================================================
-// Data Types
-// =============================================================================
 
 /// Public inputs for a single G2 scalar multiplication.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
@@ -468,10 +460,6 @@ impl ConstraintListProverSpec<Fq, DEGREE> for G2ScalarMulProverSpec {
     }
 }
 
-// =============================================================================
-// Verifier Spec
-// =============================================================================
-
 #[derive(Clone, Allocative)]
 pub struct G2ScalarMulVerifierSpec {
     params: G2ScalarMulParams,
@@ -540,10 +528,6 @@ impl ConstraintListVerifierSpec<Fq, DEGREE> for G2ScalarMulVerifierSpec {
         vals.eval_constraint(bit, x_p, y_p, delta)
     }
 }
-
-// =============================================================================
-// Type Aliases
-// =============================================================================
 
 pub type G2ScalarMulProver<F> = ConstraintListProver<F, G2ScalarMulProverSpec, DEGREE>;
 pub type G2ScalarMulVerifier<F> = ConstraintListVerifier<F, G2ScalarMulVerifierSpec, DEGREE>;

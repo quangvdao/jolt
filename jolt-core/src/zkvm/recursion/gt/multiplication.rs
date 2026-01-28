@@ -24,15 +24,7 @@ use crate::zkvm::recursion::constraints::sumcheck::{
 use crate::zkvm::recursion::curve::RecursionCurve;
 use allocative::Allocative;
 
-// ============================================================================
-// Opening Specs - 4 polynomial types (lhs, rhs, result, quotient)
-// ============================================================================
-
 const GT_MUL_OPENING_SPECS: [OpeningSpec; 4] = sequential_opening_specs::<4>();
-
-// ============================================================================
-// Parameters and Witness Types
-// ============================================================================
 
 /// Individual polynomial data for a single GT mul constraint
 #[derive(Clone, Allocative)]
@@ -68,10 +60,6 @@ impl GtMulParams {
         }
     }
 }
-
-// ============================================================================
-// Prover Spec
-// ============================================================================
 
 /// Prover-side specification for GT mul constraints.
 #[derive(Clone, Allocative)]
@@ -182,10 +170,6 @@ impl<F: JoltField + Allocative> ConstraintListProverSpec<F, 3> for GtMulProverSp
     }
 }
 
-// ============================================================================
-// Verifier Spec
-// ============================================================================
-
 /// Verifier-side specification for GT mul constraints.
 #[derive(Clone)]
 pub struct GtMulVerifierSpec<C: RecursionCurve> {
@@ -278,10 +262,6 @@ impl<C: RecursionCurve> ConstraintListVerifierSpec<C::Fq, 3> for GtMulVerifierSp
         lhs * rhs - result - quotient * g_eval
     }
 }
-
-// ============================================================================
-// Type Aliases (no wrapper structs needed!)
-// ============================================================================
 
 /// Prover for GT mul sumcheck.
 ///

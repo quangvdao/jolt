@@ -5,8 +5,8 @@
 //!
 //! Rationale:
 //! - Using a single union GT index space over `{GtExp,GtMul}` forces padding to
-//!   `next_pow2(num_gt_exp + num_gt_mul)` and introduces "type-mismatch zeros" in fused rows.
-//! - We instead pad each family separately and then take the max padded size so all GT-fused
+//!   `next_pow2(num_gt_exp + num_gt_mul)` and introduces "type-mismatch zeros" in GT rows.
+//! - We instead pad each family separately and then take the max padded size so all GT
 //!   instances can share the same Stage-2 index suffix length `k`.
 //!
 //! Definitions:
@@ -14,7 +14,7 @@
 //! - `c_mul` is the rank of a `GtMul` constraint among GTMul constraints (in global order).
 //! - `k_exp = log2(next_pow2(num_gt_exp).max(1))`
 //! - `k_mul = log2(next_pow2(num_gt_mul).max(1))`
-//! - `k_gt = max(k_exp, k_mul)` (shared Stage-2 suffix length for GT-fused mode)
+//! - `k_gt = max(k_exp, k_mul)` (shared Stage-2 suffix length for GT)
 //! - `num_gt_constraints_padded = 2^k_gt`
 
 use crate::zkvm::recursion::constraints::system::ConstraintType;
@@ -61,7 +61,7 @@ pub fn num_gt_constraints(constraint_types: &[ConstraintType]) -> usize {
 
 /// Return the global constraint indices that are GT constraints (GtExp or GtMul), in global order.
 ///
-/// This is a convenience helper for scans; it does **not** define the fused `c` indexing scheme.
+/// This is a convenience helper for scans; it does **not** define the `c` indexing scheme.
 pub fn gt_constraint_indices(constraint_types: &[ConstraintType]) -> Vec<usize> {
     constraint_types
         .iter()
@@ -86,7 +86,7 @@ pub fn num_gt_mul_constraints_padded(constraint_types: &[ConstraintType]) -> usi
         .next_power_of_two()
 }
 
-/// Shared padded GT constraint count used by GT-fused mode.
+/// Shared padded GT constraint count used by GT.
 ///
 /// This is `max(next_pow2(num_gt_exp), next_pow2(num_gt_mul))` (min 1), so both families can
 /// share the same `k` without paying the union padding factor.

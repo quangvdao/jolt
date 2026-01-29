@@ -1,4 +1,4 @@
-//! Fused G2 wiring (copy/boundary) sumcheck (GT-style split-k aware).
+//! G2 wiring (copy/boundary) sumcheck (GT-style split-k aware).
 //!
 //! This mirrors:
 //! - `gt/fused_wiring.rs` (split-k + β(dummy) normalization), and
@@ -821,7 +821,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringG2Prover<T> {
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        // No-op: this instance only reads cached openings (from fused G2 gadgets).
+        // No-op: this instance only reads cached openings (from G2 gadgets).
     }
 }
 
@@ -929,7 +929,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG2Verifier {
         let r_c_smul_tail = &r_c_fq[dummy_smul..];
         let r_c_add_tail = &r_c_fq[dummy_add..];
 
-        // Fetch fused scalar-mul port openings.
+        // Fetch scalar-mul port openings.
         let get_smul = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul)
                 .1
@@ -940,7 +940,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG2Verifier {
             + self.mu3 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused())
             + self.mu4 * get_smul(VirtualPolynomial::g2_scalar_mul_a_indicator_fused());
 
-        // Fetch fused add port openings.
+        // Fetch add port openings.
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G2Add).1
         };

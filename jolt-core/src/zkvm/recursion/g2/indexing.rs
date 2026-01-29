@@ -4,10 +4,10 @@
 //! but for the *G2 group*.
 //!
 //! Goals:
-//! - Keep **committed/prefix-packed** fused polynomials **family-local**:
-//!   - G2ScalarMul fused rows use `k_smul`.
-//!   - G2Add fused rows use `k_add`.
-//! - Allow a **single** fused wiring sumcheck to use a common suffix length
+//! - Keep **committed/prefix-packed** polynomials **family-local**:
+//!   - G2ScalarMul rows use `k_smul`.
+//!   - G2Add rows use `k_add`.
+//! - Allow a **single** wiring sumcheck to use a common suffix length
 //!   `k_g2 = max(k_smul, k_add)` and consume family-local openings via:
 //!   - dummy-low-bits embedding, and
 //!   - β(dummy) normalization (marginalizing dummy bits).
@@ -19,7 +19,7 @@
 //! - `k_add  = log2(next_pow2(num_g2_add ).max(1))`
 //! - `k_g2   = max(k_smul, k_add)` (common wiring suffix length)
 //!
-//! Dummy-bit convention (uniform across fused families):
+//! Dummy-bit convention (uniform across families):
 //! - The *dummy* bits are the **low** bits of the common `c` domain.
 //! - Family-local index bits are a **suffix** of the common `c` vector.
 //! - `embed(idx) = idx << dummy` where `dummy = k_common - k_family`.
@@ -74,7 +74,7 @@ pub fn num_g2_add_constraints_padded(constraint_types: &[ConstraintType]) -> usi
         .next_power_of_two()
 }
 
-/// Shared padded constraint count used by fused G2 wiring (max of the family paddings).
+/// Shared padded constraint count used by G2 wiring (max of the family paddings).
 pub fn num_g2_constraints_padded(constraint_types: &[ConstraintType]) -> usize {
     core::cmp::max(
         num_g2_smul_constraints_padded(constraint_types),

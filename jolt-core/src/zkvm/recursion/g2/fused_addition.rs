@@ -1,10 +1,10 @@
-//! Fused G2 addition sumcheck (family-local, Option B).
+//! G2 addition sumcheck (family-local).
 //!
 //! Mirrors `g1/fused_addition.rs`, but for G2 points over Fq2 split into (c0,c1) components over Fq.
 //!
-//! - We fuse the family over a **family-local** constraint index `c_g2add`.
+//! - We batch the family over a **family-local** constraint index `c_g2add`.
 //! - Each committed G2Add term is treated as an MLE over `c_g2add`.
-//! - Padding rows are gated by a public indicator `I_g2add(c)` so the fused constraint is 0
+//! - Padding rows are gated by a public indicator `I_g2add(c)` so the constraint is 0
 //!   outside the real constraint range.
 //!
 //! Variable order (round order, `BindingOrder::LowToHigh`):
@@ -174,7 +174,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG2AddProver {
         let num_remaining = self.eq_poly.get_num_vars();
         debug_assert!(
             num_remaining > 0,
-            "fused g2add should have at least one round"
+            "g2add should have at least one round"
         );
         let half = 1usize << (num_remaining - 1);
 

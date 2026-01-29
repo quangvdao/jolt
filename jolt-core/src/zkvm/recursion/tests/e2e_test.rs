@@ -95,16 +95,7 @@ fn test_recursion_snark_e2e_with_dory() {
     let constraint_types: Vec<ConstraintType> = prover.constraint_system.constraint_types.clone();
 
     // Determine dense_num_vars for Hyrax setup without extracting dense evals.
-    // Recursion is fused-only: always use fused prefix packing.
-    let dense_num_vars = PrefixPackingLayout::from_constraint_types_fused(
-        &constraint_types,
-        true,
-        true,
-        true,
-        true,
-        true,
-    )
-    .num_dense_vars;
+    let dense_num_vars = PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
 
     let num_g1_add = constraint_types
         .iter()
@@ -115,29 +106,14 @@ fn test_recursion_snark_e2e_with_dory() {
         .filter(|t| matches!(t, ConstraintType::G2Add))
         .count();
 
-    // Allow selectively disabling constraint families when debugging recursion composition.
-    // By default, we expect these constraint families to be present.
-    let env_flag_default = |name: &str, default: bool| -> bool {
-        std::env::var(name)
-            .ok()
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(default)
-    };
-    let enable_g1_add = env_flag_default("JOLT_RECURSION_ENABLE_G1_ADD", true);
-    let enable_g2_add = env_flag_default("JOLT_RECURSION_ENABLE_G2_ADD", true);
-
-    if enable_g1_add {
-        assert!(
-            num_g1_add > 0,
-            "Expected at least one G1Add constraint in recursion constraint system"
-        );
-    }
-    if enable_g2_add {
-        assert!(
-            num_g2_add > 0,
-            "Expected at least one G2Add constraint in recursion constraint system"
-        );
-    }
+    assert!(
+        num_g1_add > 0,
+        "Expected at least one G1Add constraint in recursion constraint system"
+    );
+    assert!(
+        num_g2_add > 0,
+        "Expected at least one G2Add constraint in recursion constraint system"
+    );
 
     // (Verifier input will be constructed from prover-produced metadata later.)
 

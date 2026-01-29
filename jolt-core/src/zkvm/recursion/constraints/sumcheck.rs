@@ -12,7 +12,7 @@
 //!
 //! IMPORTANT: Transcript ordering is consensus-critical. In particular, the order of
 //! `accumulator.append_virtual(transcript, ...)` calls in `cache_openings` must match the
-//! legacy per-op implementations.
+//! existing per-op implementations.
 
 use crate::{
     field::JoltField,

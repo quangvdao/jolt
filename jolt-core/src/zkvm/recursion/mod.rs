@@ -16,15 +16,15 @@
 //! ### GT Operations
 //! Proves constraints for GT exponentiation and multiplication.
 //!
-//! ### Virtualization (Direct Evaluation)
-//! Verifies virtual polynomial claims using direct evaluation over the matrix.
+//! ### Prefix packing
+//! Recursion uses prefix packing (Stage 3) to reduce Stage-2 openings.
 //!
 //! ## Module Structure
 //! - `constraints/`: Constraint system management and configuration
 //! - `g1/`: G1 curve operations (addition, scalar multiplication)
 //! - `g2/`: G2 curve operations (addition, scalar multiplication)
 //! - `gt/`: GT group operations (exponentiation, multiplication, claim reduction)
-//! - `virtualization`: Direct evaluation protocol
+//! - `prefix_packing`: Stage-3 packing layout + reducer
 //! - `utils/`: Shared utilities and helpers
 //! - `prover`: Unified prover orchestrating all stages
 //! - `verifier`: Unified verifier for the complete protocol
@@ -41,7 +41,6 @@ pub mod prefix_packing;
 pub mod prover;
 pub mod utils;
 pub mod verifier;
-pub mod virtualization;
 pub mod wiring_plan;
 pub mod witness;
 pub mod witness_generation;
@@ -75,12 +74,6 @@ pub use gt::{
     FusedGtExpParams, FusedGtExpProver, FusedGtExpVerifier, FusedGtMulParams, FusedGtMulProver,
     FusedGtMulVerifier, FusedGtShiftParams, FusedGtShiftProver, FusedGtShiftVerifier,
     GtExpPublicInputs,
-};
-
-// Virtualization exports
-pub use virtualization::{
-    extract_virtual_claims_from_accumulator, DirectEvaluationParams, DirectEvaluationProver,
-    DirectEvaluationVerifier,
 };
 
 pub use witness::{

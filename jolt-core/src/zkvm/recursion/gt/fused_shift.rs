@@ -1,13 +1,13 @@
-//! Fused shift sumcheck for verifying `rho_next_fused` consistency.
+//! Shift sumcheck for verifying `rho_next` consistency.
 //!
-//! GT-fused analogue of `gt/shift.rs`:
-//! - Stage 1 (fused GTExp) emits `gt_exp_rho_next_fused()` at point `r1 = (r_s, r_u, r_c_exp)`.
-//! - This sumcheck proves that `rho_next_fused(r1)` is consistent with the fused committed `rho`
+//! Analogue of `gt/shift.rs`:
+//! - Stage 1 (GTExp) emits `gt_exp_rho_next_fused()` at point `r1 = (r_s, r_u, r_c_exp)`.
+//! - This sumcheck proves that `rho_next(r1)` is consistent with the committed `rho`
 //!   table via a one-step shift on the step variables.
 //!
-//! In end-to-end fusion we want **no per-instance GTExp openings**, so this protocol:
-//! - takes the single Stage-1 fused `rho_next` claim as its input claim
-//! - uses the fused rho table over `(x11, c_exp)` as its witness
+//! We want **no per-instance GTExp openings**, so this protocol:
+//! - takes the single Stage-1 `rho_next` claim as its input claim
+//! - uses the rho table over `(x11, c_exp)` as its witness
 //! - emits **no** additional openings (it is purely a check)
 //!
 //! Variable order (round order, `BindingOrder::LowToHigh`):
@@ -113,9 +113,9 @@ impl SumcheckInstanceParams<Fq> for FusedGtShiftParams {
 #[derive(Allocative)]
 pub struct FusedGtShiftProver {
     params: FusedGtShiftParams,
-    /// P(y) = Eq(r_c, c) * EqPlusOne(r_s, s) * Eq(r_u, u)  (as a fused (s,u,c) table)
+    /// P(y) = Eq(r_c, c) * EqPlusOne(r_s, s) * Eq(r_u, u)  (as a (s,u,c) table)
     eq_prod: MultilinearPolynomial<Fq>,
-    /// Fused rho(c,s,x) table.
+    /// rho(c,s,x) table.
     rho: MultilinearPolynomial<Fq>,
     /// Input claim = rho_next_fused(r1).
     input_claim: Fq,
@@ -129,7 +129,7 @@ impl FusedGtShiftProver {
         gt_exp_witnesses: &[GtExpWitness<Fq>],
         accumulator: &ProverOpeningAccumulator<Fq>,
     ) -> Self {
-        // Read Stage-1 fused rho_next claim and its opening point r1.
+        // Read Stage-1 rho_next claim and its opening point r1.
         let (r1_point, input_claim) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho_next_fused(),
             SumcheckId::GtExp,
@@ -145,7 +145,7 @@ impl FusedGtShiftProver {
         let r1_c = &r1[s_len + u_len..];
         debug_assert_eq!(r1_c.len(), k);
 
-        // Build fused rho(c_gt,x11) from GTExp witnesses (zero elsewhere).
+        // Build rho(c_gt,x11) from GTExp witnesses (zero elsewhere).
         //
         // Split-k convention (shared with GT wiring): when `k_gt > k_exp`, the GTExp family
         // occupies only the tail `k_exp` bits of `c_gt`; the first `dummy = k_gt-k_exp` low bits
@@ -287,7 +287,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtShiftVerifier {
     ) -> Fq {
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
 
-        // Stage-1 point r1 comes from the fused rho_next opening under SumcheckId::GtExp.
+        // Stage-1 point r1 comes from the rho_next opening under SumcheckId::GtExp.
         let (rho_next_point, _rho_next_claim) = acc.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho_next_fused(),
             SumcheckId::GtExp,
@@ -312,7 +312,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtShiftVerifier {
         let eq_x = eq_lsb_mle::<Fq>(r1_x, r2_x);
         let eq_prod = eq_c * eq_plus_one * eq_x;
 
-        // Consume the fused rho opening at the Stage-2 point (emitted elsewhere).
+        // Consume the rho opening at the Stage-2 point (emitted elsewhere).
         let (_pt, rho_eval) = acc.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho_fused(),
             SumcheckId::GtExpClaimReduction,

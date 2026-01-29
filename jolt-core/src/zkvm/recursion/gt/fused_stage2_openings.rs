@@ -1,7 +1,14 @@
-//! Cache-only Stage-2 GTExp fused openings at the Stage-2 point.
+//! Cache-only Stage-2 GTExp openings at the Stage-2 point.
 //!
-//! End-to-end GT fusion needs `gt_exp_{rho,quotient}_fused()` available at the full Stage-2
-//! point `r_stage2 = (r_c_gt, r_x)` so that:\n//! - Stage-3 prefix packing can consume fused GT claims, and\n//! - fused GT shift / wiring can consume fused GT values without per-instance openings.\n+//!\n+//! This is implemented as a no-op (zero) sumcheck instance that:\n+//! - participates in Stage-2 batching only to obtain the Stage-2 point,\n+//! - binds the fused polynomials along the Stage-2 challenges,\n+//! - appends the resulting claims as virtual openings under `SumcheckId::GtExpClaimReduction`.\n+
+//! This ensures `gt_exp_{rho,quotient}_fused()` is available at the full Stage-2 point
+//! `r_stage2 = (r_c_gt, r_x)` so that:
+//! - Stage 3 prefix packing can consume GT claims, and
+//! - GT shift / wiring can consume GT values without per-instance openings.
+//!
+//! Implemented as a no-op (zero) sumcheck instance that:
+//! - participates in Stage-2 batching only to obtain the Stage-2 point,
+//! - binds the committed polynomials along the Stage-2 challenges,
+//! - appends resulting claims as virtual openings under `SumcheckId::GtExpClaimReduction`.
 use crate::{
     field::JoltField,
     poly::{
@@ -99,7 +106,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsPr
     }
     fn num_rounds(&self) -> usize {
         // We participate with (x11 + k_common) rounds so the x11 challenges align with other GT
-        // Stage-2 instances (notably the GT wiring backend). The committed fused rows only use
+        // Stage-2 instances (notably the GT wiring backend). The committed rows only use
         // `k_exp`, so we skip the first `k_common-k_exp` dummy c rounds.
         CONFIG.packed_vars + self.params.k_common
     }
@@ -133,7 +140,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsPr
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        // Opening point must match the committed fused row arity: (s,u,c_exp_tail).
+        // Opening point must match the committed row arity: (s,u,c_exp_tail).
         debug_assert_eq!(
             sumcheck_challenges.len(),
             CONFIG.packed_vars + self.params.k_common
@@ -198,7 +205,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpStage2Openings
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        // Opening point must match the committed fused row arity: (s,u,c_exp_tail).
+        // Opening point must match the committed row arity: (s,u,c_exp_tail).
         debug_assert_eq!(
             sumcheck_challenges.len(),
             CONFIG.packed_vars + self.params.k_common
@@ -296,7 +303,6 @@ mod tests {
         expected.extend_from_slice(&sumcheck_challenges[..x_vars]);
         expected.extend_from_slice(&sumcheck_challenges[tail]);
         assert_eq!(expected.len(), x_vars + params.k_exp);
-
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(expected.clone());
         assert_eq!(opening_point.r, expected);
     }

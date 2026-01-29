@@ -1,13 +1,10 @@
-//! Fused G1 scalar multiplication sumchecks (family-local, Option B).
+//! G1 scalar multiplication sumchecks (family-local).
 //!
-//! This implements a fused variant of the existing per-instance `G1ScalarMul` constraint list:
-//! - We fuse over a **family-local** constraint index `c_g1smul`.
+//! - We batch over a **family-local** constraint index `c_g1smul`.
 //! - The native step trace domain remains 8 variables (256 steps).
 //! - All committed witness polynomials are treated as MLEs over `(step, c_g1smul)` with
 //!   `step` in the low bits and `c` as a suffix (LSB-first binding order).
 //! - Padding rows are gated by a public indicator `I_g1smul(c)`.
-//!
-//! This is the intended Option-B fusion style for scalar multiplication, analogous to fused GT.
 
 use crate::{
     field::JoltField,
@@ -75,7 +72,7 @@ pub struct FusedG1ScalarMulParams {
     pub k_smul: usize,
     /// Common suffix length used for Stage-2 alignment (`k_common >= k_smul`).
     ///
-    /// In fully-fused wiring mode, G1 wiring uses `k_g1 = max(k_smul, k_add)`. We keep the
+    /// G1 wiring uses `k_g1 = max(k_smul, k_add)`. We keep the
     /// committed polynomials family-local (k_smul), but allow the sumcheck to run over k_common
     /// by replicating across dummy low bits and caching openings at the family-local point.
     pub k_common: usize,
@@ -317,7 +314,7 @@ impl FusedG1ScalarMulProver {
     ) -> Self {
         let num_rounds = params.num_rounds();
 
-        // Sample eq point for the fused (step,c) domain.
+        // Sample eq point for the (step,c) domain.
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -366,7 +363,7 @@ impl FusedG1ScalarMulProver {
         let t_indicator = build_term(|r| &r.t_indicator);
         let a_indicator = build_term(|r| &r.a_indicator);
 
-        // Public bit polynomial per instance: 8-var bit table, fused over c.
+        // Public bit polynomial per instance: 8-var bit table, batched over c.
         let mut bit_sc = vec![Fq::zero(); total_len];
         for c_smul in 0..params.num_constraints {
             let src = build_bit_poly_8(&public_inputs[c_smul]);
@@ -379,7 +376,7 @@ impl FusedG1ScalarMulProver {
         }
         let bit = MultilinearPolynomial::LargeScalars(DensePolynomial::new(bit_sc));
 
-        // Public base point polynomials (constant over step, fused over c).
+        // Public base point polynomials (constant over step, batched over c).
         let mut x_p_sc = vec![Fq::zero(); total_len];
         let mut y_p_sc = vec![Fq::zero(); total_len];
         for c_smul in 0..params.num_constraints {
@@ -425,7 +422,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1ScalarMulProver
         let num_remaining = self.eq_poly.get_num_vars();
         debug_assert!(
             num_remaining > 0,
-            "fused g1 scalar mul should have at least one round"
+            "g1 scalar mul should have at least one round"
         );
         let half = 1usize << (num_remaining - 1);
 
@@ -674,9 +671,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
             ind_eval += EqPolynomial::mle(&r_c, &bits);
         }
 
-        // Fused public inputs at this point:
+        // Public inputs at this point:
         // - base points are c-only (replicated across step)
-        // - bit is step-only per instance, then fused across c by Eq(r_c,c)
+        // - bit is step-only per instance, then batched across c by Eq(r_c,c)
         let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
         let mut x_p = Fq::zero();
         let mut y_p = Fq::zero();
@@ -690,7 +687,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1ScalarMulVerifier
             bit += w_c * self.public_inputs[c].evaluate_bit_mle(&r_step_fq);
         }
 
-        // Fetch fused opened claims (8 committed witness polynomials).
+        // Fetch opened claims (8 committed witness polynomials).
         let mut claims = Vec::with_capacity(8);
         for vp in [
             VirtualPolynomial::g1_scalar_mul_xa_fused(),
@@ -804,7 +801,7 @@ pub struct FusedShiftG1ScalarMulProver {
     eq_minus_one_step_poly: MultilinearPolynomial<Fq>,
     not_last_poly: MultilinearPolynomial<Fq>,
     eq_c_poly: MultilinearPolynomial<Fq>,
-    // fused witness polys (step,c)
+    // witness polys (step,c)
     x_a: MultilinearPolynomial<Fq>,
     x_a_next: MultilinearPolynomial<Fq>,
     y_a: MultilinearPolynomial<Fq>,

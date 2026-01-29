@@ -28,32 +28,32 @@ pub struct PrefixPackedEntry {
     pub constraint_idx: usize,
     /// Which committed polynomial within that constraint (PolyType row)
     pub poly_type: PolyType,
-    /// If true, this entry is a GT-fused row (not tied to a single `constraint_idx`).
+    /// If true, this entry is a GT row (not tied to a single `constraint_idx`).
     ///
-    /// In GT-fused end-to-end mode we pack GT rows as fused blocks over a GT-local `c` domain.
-    /// Such entries are keyed only by `poly_type`, and `constraint_idx` is ignored.
+    /// GT rows are packed as blocks over a GT-local `c` domain.
+    /// Such entries are keyed only by `poly_type`; `constraint_idx` is ignored.
     pub is_gt_fused: bool,
-    /// If true, this entry is a fused G1-scalar-mul row (not tied to a single `constraint_idx`).
+    /// If true, this entry is a G1-scalar-mul row (not tied to a single `constraint_idx`).
     ///
-    /// In G1-scalar-mul-fused end-to-end mode we pack G1 scalar-mul rows as fused blocks over a
-    /// family-local `c` domain. Such entries are keyed only by `poly_type`, and `constraint_idx`
-    /// is ignored.
+    /// G1 scalar-mul rows are packed as blocks over a
+    /// family-local `c` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is
+    /// ignored.
     pub is_g1_scalar_mul_fused: bool,
-    /// If true, this entry is a fused G1-add row (not tied to a single `constraint_idx`).
+    /// If true, this entry is a G1-add row (not tied to a single `constraint_idx`).
     ///
-    /// In fully fused G1 mode we pack G1 add rows as fused blocks over a family-local `c_add`
-    /// domain. Such entries are keyed only by `poly_type`, and `constraint_idx` is ignored.
+    /// G1 add rows are packed as blocks over a family-local
+    /// `c_add` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is ignored.
     pub is_g1_add_fused: bool,
-    /// If true, this entry is a fused G2-scalar-mul row (not tied to a single `constraint_idx`).
+    /// If true, this entry is a G2-scalar-mul row (not tied to a single `constraint_idx`).
     ///
-    /// In end-to-end G2-scalar-mul-fused mode we pack G2 scalar-mul rows as fused blocks over a
-    /// family-local `c` domain. Such entries are keyed only by `poly_type`, and `constraint_idx`
-    /// is ignored.
+    /// G2 scalar-mul rows are packed as blocks over a
+    /// family-local `c` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is
+    /// ignored.
     pub is_g2_scalar_mul_fused: bool,
-    /// If true, this entry is a fused G2-add row (not tied to a single `constraint_idx`).
+    /// If true, this entry is a G2-add row (not tied to a single `constraint_idx`).
     ///
-    /// In fully fused G2 mode we pack G2 add rows as fused blocks over a family-local `c_add`
-    /// domain. Such entries are keyed only by `poly_type`, and `constraint_idx` is ignored.
+    /// G2 add rows are packed as blocks over a family-local
+    /// `c_add` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is ignored.
     pub is_g2_add_fused: bool,
     /// Native variable count `m` (native size = 2^m)
     pub num_vars: usize,
@@ -71,7 +71,7 @@ pub struct PrefixPackingLayout {
 }
 
 impl PrefixPackingLayout {
-    /// Build a canonical packing layout from the public constraint list.
+    /// Build the packing layout from the public constraint list.
     ///
     /// # Canonical Ordering Specification
     ///
@@ -81,7 +81,8 @@ impl PrefixPackingLayout {
     /// **Sort key** (lexicographic, applied to each committed polynomial):
     /// 1. **`num_vars` descending**: Larger polynomials (more variables) come first.
     /// 2. **`PolyType` ascending**: Within same size, order by `PolyType` discriminant.
-    /// 3. **`constraint_idx` ascending**: Within same size and type, order by constraint index.
+    /// 3. **Family flags ascending**: Tie-breaker to keep ordering stable if `PolyType` ever
+    ///    overlaps across families (today it does not).
     ///
     /// This ordering ensures:
     /// - Power-of-two alignment is maintained (larger blocks first guarantees alignment).
@@ -91,213 +92,60 @@ impl PrefixPackingLayout {
     /// **Stability Note**: This ordering is part of the proof format. Changing it would break
     /// proof compatibility. Any future modifications must be versioned.
     pub fn from_constraint_types(constraint_types: &[ConstraintType]) -> Self {
-        // Collect all committed polynomial "rows" with their native var counts.
-        let mut polys: Vec<(usize, PolyType, usize)> = Vec::new();
-        for (constraint_idx, ct) in constraint_types.iter().enumerate() {
-            for &(poly_type, num_vars) in ct.committed_poly_specs() {
-                polys.push((constraint_idx, poly_type, num_vars));
-            }
-        }
-
-        // Canonical ordering: decreasing size (num_vars), then PolyType-major, then constraint index.
-        // IMPORTANT: This ordering is part of the proof format and must remain stable.
-        polys.sort_by_key(|(constraint_idx, poly_type, num_vars)| {
-            (
-                std::cmp::Reverse(*num_vars),
-                *poly_type as usize,
-                *constraint_idx,
-            )
-        });
-
-        // Assign aligned offsets by cumulative sum (alignment holds for power-of-two sizes).
-        let mut entries: Vec<PrefixPackedEntry> = Vec::with_capacity(polys.len());
-        let mut offset: usize = 0;
-        for (constraint_idx, poly_type, num_vars) in polys {
-            let native_size = 1usize << num_vars;
-            debug_assert_eq!(
-                offset % native_size,
-                0,
-                "prefix packing requires aligned offsets (offset={offset}, native_size={native_size})"
-            );
-            entries.push(PrefixPackedEntry {
-                constraint_idx,
-                poly_type,
-                is_gt_fused: false,
-                is_g1_scalar_mul_fused: false,
-                is_g1_add_fused: false,
-                is_g2_scalar_mul_fused: false,
-                is_g2_add_fused: false,
-                num_vars,
-                offset,
-            });
-            offset += native_size;
-        }
-
-        let padded_size = std::cmp::max(1usize, offset).next_power_of_two();
-        let num_dense_vars = padded_size.trailing_zeros() as usize;
-
-        Self {
-            num_dense_vars,
-            entries,
-        }
-    }
-
-    /// Build a packing layout that replaces per-instance GT rows with GT-fused rows.
-    ///
-    /// This is used by the **end-to-end GT fusion** path. It intentionally breaks the legacy
-    /// proof format by changing the committed witness packing layout.
-    pub fn from_constraint_types_gt_fused(constraint_types: &[ConstraintType]) -> Self {
-        Self::from_constraint_types_fused(constraint_types, true, false, false, false, false)
-    }
-
-    /// Build a packing layout that can replace per-instance rows with fused-family rows.
-    ///
-    /// - If `enable_gt_fused_end_to_end`, skip per-instance GTExp/GTMul rows and append GT-fused rows.
-    /// - If `enable_g1_scalar_mul_fused_end_to_end`, skip per-instance G1-scalar-mul rows and append
-    ///   fused G1-scalar-mul rows.
-    /// - If `enable_g1_add_fused_end_to_end`, skip per-instance G1-add rows and append fused G1-add rows.
-    pub fn from_constraint_types_fused(
-        constraint_types: &[ConstraintType],
-        enable_gt_fused_end_to_end: bool,
-        enable_g1_scalar_mul_fused_end_to_end: bool,
-        enable_g1_add_fused_end_to_end: bool,
-        enable_g2_scalar_mul_fused_end_to_end: bool,
-        enable_g2_add_fused_end_to_end: bool,
-    ) -> Self {
-        if !enable_gt_fused_end_to_end
-            && !enable_g1_scalar_mul_fused_end_to_end
-            && !enable_g1_add_fused_end_to_end
-            && !enable_g2_scalar_mul_fused_end_to_end
-            && !enable_g2_add_fused_end_to_end
-        {
-            return Self::from_constraint_types(constraint_types);
-        }
-
-        let has_gt = constraint_types
+        let num_gt = constraint_types
             .iter()
-            .any(|ct| matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul));
-        let has_g1_smul = constraint_types
+            .filter(|ct| matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul))
+            .count();
+        let num_g1_smul = constraint_types
             .iter()
-            .any(|ct| matches!(ct, ConstraintType::G1ScalarMul { .. }));
-        let has_g1_add = constraint_types
+            .filter(|ct| matches!(ct, ConstraintType::G1ScalarMul { .. }))
+            .count();
+        let num_g1_add = constraint_types
             .iter()
-            .any(|ct| matches!(ct, ConstraintType::G1Add));
-        let has_g2_smul = constraint_types
+            .filter(|ct| matches!(ct, ConstraintType::G1Add))
+            .count();
+        let num_g2_smul = constraint_types
             .iter()
-            .any(|ct| matches!(ct, ConstraintType::G2ScalarMul { .. }));
-        let has_g2_add = constraint_types
+            .filter(|ct| matches!(ct, ConstraintType::G2ScalarMul { .. }))
+            .count();
+        let num_g2_add = constraint_types
             .iter()
-            .any(|ct| matches!(ct, ConstraintType::G2Add));
+            .filter(|ct| matches!(ct, ConstraintType::G2Add))
+            .count();
 
-        // If none of the requested fused families are actually present, fall back to legacy packing.
-        let will_fuse_any = (enable_gt_fused_end_to_end && has_gt)
-            || (enable_g1_scalar_mul_fused_end_to_end && has_g1_smul)
-            || (enable_g1_add_fused_end_to_end && has_g1_add)
-            || (enable_g2_scalar_mul_fused_end_to_end && has_g2_smul)
-            || (enable_g2_add_fused_end_to_end && has_g2_add);
-        if !will_fuse_any {
-            return Self::from_constraint_types(constraint_types);
-        }
-
-        // Option B: commit GT fused rows at their family-local padded sizes.
+        // GT rows are committed at their family-local padded sizes.
         let num_vars_gt_exp = 11usize + k_exp(constraint_types);
         let num_vars_gt_mul = 4usize + k_mul(constraint_types);
 
-        // Option B: commit fused G1 scalar-mul rows at family-local padded size.
+        // Scalar-mul rows: native 8-var step traces plus a family-local padded `c` suffix.
         let num_vars_g1_smul = {
-            let num_g1 = constraint_types
-                .iter()
-                .filter(|ct| matches!(ct, ConstraintType::G1ScalarMul { .. }))
-                .count();
-            let padded = num_g1.max(1).next_power_of_two();
-            let k = padded.trailing_zeros() as usize;
-            8usize + k
+            let padded = num_g1_smul.max(1).next_power_of_two();
+            8usize + (padded.trailing_zeros() as usize)
         };
-        // Option B: commit fused G1 add rows at family-local padded size (c-only).
+        let num_vars_g2_smul = {
+            let padded = num_g2_smul.max(1).next_power_of_two();
+            8usize + (padded.trailing_zeros() as usize)
+        };
+
+        // Add rows: family-local padded `c_add` suffix only.
         let num_vars_g1_add = {
-            let num_g1 = constraint_types
-                .iter()
-                .filter(|ct| matches!(ct, ConstraintType::G1Add))
-                .count();
-            let padded = num_g1.max(1).next_power_of_two();
+            let padded = num_g1_add.max(1).next_power_of_two();
             padded.trailing_zeros() as usize
         };
-        // Option B: commit fused G2 scalar-mul rows at family-local padded size.
-        let num_vars_g2_smul = {
-            let num_g2 = constraint_types
-                .iter()
-                .filter(|ct| matches!(ct, ConstraintType::G2ScalarMul { .. }))
-                .count();
-            let padded = num_g2.max(1).next_power_of_two();
-            let k = padded.trailing_zeros() as usize;
-            8usize + k
-        };
-        // Option B: commit fused G2 add rows at family-local padded size (c-only).
         let num_vars_g2_add = {
-            let num_g2 = constraint_types
-                .iter()
-                .filter(|ct| matches!(ct, ConstraintType::G2Add))
-                .count();
-            let padded = num_g2.max(1).next_power_of_two();
+            let padded = num_g2_add.max(1).next_power_of_two();
             padded.trailing_zeros() as usize
         };
 
-        // Collect all committed polynomial "rows" with their native var counts.
-        // In fused mode(s), we skip per-instance rows for those families and append fixed fused rows instead.
+        // Collect committed polynomial rows. For family-packed entries, `constraint_idx` is ignored.
         type PolySpec = (usize, PolyType, bool, bool, bool, bool, bool, usize);
         let mut polys: Vec<PolySpec> = Vec::new();
-        for (constraint_idx, ct) in constraint_types.iter().enumerate() {
-            if enable_gt_fused_end_to_end
-                && matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul)
-            {
-                continue;
-            }
-            if enable_g1_scalar_mul_fused_end_to_end
-                && matches!(ct, ConstraintType::G1ScalarMul { .. })
-            {
-                continue;
-            }
-            if enable_g1_add_fused_end_to_end && matches!(ct, ConstraintType::G1Add) {
-                continue;
-            }
-            if enable_g2_scalar_mul_fused_end_to_end
-                && matches!(ct, ConstraintType::G2ScalarMul { .. })
-            {
-                continue;
-            }
-            if enable_g2_add_fused_end_to_end && matches!(ct, ConstraintType::G2Add) {
-                continue;
-            }
-            for &(poly_type, num_vars) in ct.committed_poly_specs() {
-                polys.push((
-                    constraint_idx,
-                    poly_type,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    num_vars,
-                ));
-            }
-        }
 
-        if enable_gt_fused_end_to_end && has_gt {
-            // Append GT-fused rows.
-            //
-            // IMPORTANT (no-padding GTMul): in end-to-end fusion, GTExp rows are 11-var (s,u) plus
-            // k GT-local index vars, but GTMul rows are natively 4-var (u) plus the same k vars.
+        if num_gt > 0 {
+            // IMPORTANT (no-padding GTMul): GTExp rows are 11-var (s,x) plus k vars, but GTMul rows
+            // are natively 4-var (x) plus the same k vars.
             for poly_type in [PolyType::RhoPrev, PolyType::Quotient] {
-                polys.push((
-                    0usize,
-                    poly_type,
-                    true,
-                    false,
-                    false,
-                    false,
-                    false,
-                    num_vars_gt_exp,
-                ));
+                polys.push((0usize, poly_type, true, false, false, false, false, num_vars_gt_exp));
             }
             for poly_type in [
                 PolyType::MulLhs,
@@ -305,23 +153,11 @@ impl PrefixPackingLayout {
                 PolyType::MulResult,
                 PolyType::MulQuotient,
             ] {
-                polys.push((
-                    0usize,
-                    poly_type,
-                    true,
-                    false,
-                    false,
-                    false,
-                    false,
-                    num_vars_gt_mul,
-                ));
+                polys.push((0usize, poly_type, true, false, false, false, false, num_vars_gt_mul));
             }
         }
 
-        if enable_g1_scalar_mul_fused_end_to_end && has_g1_smul {
-            // Append fused G1 scalar-mul rows.
-            //
-            // These are native 8-var step traces plus a family-local padded `c` suffix.
+        if num_g1_smul > 0 {
             for poly_type in [
                 PolyType::G1ScalarMulXA,
                 PolyType::G1ScalarMulYA,
@@ -345,8 +181,7 @@ impl PrefixPackingLayout {
             }
         }
 
-        if enable_g1_add_fused_end_to_end && has_g1_add {
-            // Append fused G1 add rows (c-only).
+        if num_g1_add > 0 {
             for poly_type in [
                 PolyType::G1AddXP,
                 PolyType::G1AddYP,
@@ -375,7 +210,7 @@ impl PrefixPackingLayout {
             }
         }
 
-        if enable_g2_scalar_mul_fused_end_to_end && has_g2_smul {
+        if num_g2_smul > 0 {
             for poly_type in [
                 PolyType::G2ScalarMulXAC0,
                 PolyType::G2ScalarMulXAC1,
@@ -405,7 +240,7 @@ impl PrefixPackingLayout {
             }
         }
 
-        if enable_g2_add_fused_end_to_end && has_g2_add {
+        if num_g2_add > 0 {
             for poly_type in [
                 PolyType::G2AddXPC0,
                 PolyType::G2AddXPC1,
@@ -442,7 +277,7 @@ impl PrefixPackingLayout {
             }
         }
 
-        // Canonical ordering: decreasing size (num_vars), then PolyType-major, then fused flags,
+        // Canonical ordering: decreasing size (num_vars), then PolyType-major, then family flags,
         // then constraint index.
         polys.sort_by_key(
             |(

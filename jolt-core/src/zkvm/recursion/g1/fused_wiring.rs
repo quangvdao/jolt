@@ -1,12 +1,12 @@
-//! Fused G1 wiring (copy/boundary) sumcheck (GT-style split-k aware).
+//! G1 wiring (copy/boundary) sumcheck (GT-style split-k aware).
 //!
 //! This is the G1 analogue of `gt/fused_wiring.rs`.
 //!
 //! ## Goal
-//! Replace legacy per-instance wiring openings (see `g1/wiring.rs`) with a fully fused wiring
+//! Replace per-instance wiring openings with a wiring
 //! backend that consumes:
-//! - fused G1ScalarMul port openings (under `SumcheckId::G1ScalarMul`), and
-//! - fused G1Add port openings (under `SumcheckId::G1Add`),
+//! - G1ScalarMul port openings (under `SumcheckId::G1ScalarMul`), and
+//! - G1Add port openings (under `SumcheckId::G1Add`),
 //!   while staying compatible with Stage-2 suffix-aligned batching.
 //!
 //! ## Variable order (Stage 2)
@@ -18,7 +18,7 @@
 //! For a family with `k_family` bits:
 //! - `dummy = k_common - k_family`
 //! - selectors use `beta(dummy) * Eq(c_tail, idx)` where `c_tail = c_common[dummy..]`
-//!   (matches the GT fused wiring convention).
+//!   (matches the GT wiring convention).
 
 use ark_bn254::{Fq, G1Affine};
 use ark_ec::AffineRepr;
@@ -720,7 +720,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringG1Prover<T> {
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        // No-op: this instance only reads cached openings (from fused G1 gadgets).
+        // No-op: this instance only reads cached openings (from G1 gadgets).
     }
 }
 
@@ -818,7 +818,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG1Verifier {
         let r_c_smul_tail = &r_c_fq[dummy_smul..];
         let r_c_add_tail = &r_c_fq[dummy_add..];
 
-        // Fetch fused scalar-mul port openings.
+        // Fetch scalar-mul port openings.
         let (_, xa_next) = acc.get_virtual_polynomial_opening(
             VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
             SumcheckId::G1ScalarMul,
@@ -833,7 +833,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG1Verifier {
         );
         let smul_out_fused = xa_next + self.mu * ya_next + self.mu2 * a_ind;
 
-        // Fetch fused add port openings.
+        // Fetch add port openings.
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G1Add).1
         };

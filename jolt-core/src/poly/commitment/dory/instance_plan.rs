@@ -593,15 +593,7 @@ pub fn derive_plan_with_hints(
         constraint_types.push(ConstraintType::GtMul);
     }
 
-    let dense_num_vars = PrefixPackingLayout::from_constraint_types_fused(
-        &constraint_types,
-        true,
-        true,
-        true,
-        true,
-        true,
-    )
-    .num_dense_vars;
+    let dense_num_vars = PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
 
     let num_constraints = constraint_types.len();
     let num_constraints_padded = num_constraints.next_power_of_two();
@@ -769,15 +761,7 @@ pub fn derive_from_dory_ast(
     }
 
     // Dense polynomial var count (needed for Hyrax setup bounds).
-    let dense_num_vars = PrefixPackingLayout::from_constraint_types_fused(
-        &constraint_types,
-        true,
-        true,
-        true,
-        true,
-        true,
-    )
-    .num_dense_vars;
+    let dense_num_vars = PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
 
     // Recursion verifier input expects matrix parameters derived from constraint counts.
     let num_constraints = constraint_types.len();

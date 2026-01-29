@@ -18,18 +18,12 @@ use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpW
 
 use ark_bn254::Fq;
 use ark_ff::Zero;
+use dory::recursion::OpId;
 use dory::recursion::WitnessCollection;
 use jolt_optimizations::fq12_to_multilinear_evals;
 use rayon::prelude::*;
 
-use crate::poly::commitment::dory::recursion::JoltWitness;
-
-fn env_flag_default(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(default)
-}
+use crate::poly::commitment::dory::recursion::{JoltGtExpWitness, JoltGtMulWitness, JoltWitness};
 
 #[tracing::instrument(skip_all, fields(num_constraints))]
 fn compute_shape(num_constraints: usize) -> RecursionMatrixShape {
@@ -47,70 +41,78 @@ fn compute_shape(num_constraints: usize) -> RecursionMatrixShape {
     }
 }
 
-fn pack_gt_exp_op_witness(exp_wit: &GTExpOpWitness) -> GtExpWitness<Fq> {
-    // Matches the legacy logic in `DoryMatrixBuilder::add_combine_witness`.
-    if exp_wit.bits.is_empty() {
-        let base_mle = fq12_to_multilinear_evals(&exp_wit.base);
-        let base2_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base));
-        let base3_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base * exp_wit.base));
+fn pack_gt_exp_op_witness(exp_wit: GTExpOpWitness) -> (GtExpWitness<Fq>, GtExpPublicInputs) {
+    // Matches the `DoryMatrixBuilder::add_combine_witness` packing logic.
+    let GTExpOpWitness {
+        base,
+        result,
+        rho_mles,
+        quotient_mles,
+        bits,
+        ..
+    } = exp_wit;
 
-        let rho_mles = if exp_wit.rho_mles.is_empty() {
-            vec![fq12_to_multilinear_evals(&exp_wit.result)]
+    // Move scalar bits exactly once: keep them in the public inputs, and borrow for witness packing.
+    let public_input = GtExpPublicInputs::new(base, bits);
+
+    let base_mle = fq12_to_multilinear_evals(&public_input.base);
+    let base2 = public_input.base * public_input.base;
+    let base2_mle = fq12_to_multilinear_evals(&base2);
+    let base3 = base2 * public_input.base;
+    let base3_mle = fq12_to_multilinear_evals(&base3);
+
+    let num_steps = public_input.scalar_bits.len().div_ceil(2);
+    if public_input.scalar_bits.is_empty() {
+        // Degenerate exponentiation: treat as one rho row (the result) and no quotient rows.
+        let rho_mles = if rho_mles.is_empty() {
+            vec![fq12_to_multilinear_evals(&result)]
         } else {
-            exp_wit.rho_mles.clone()
+            rho_mles
         };
-        let quotient_mles = exp_wit.quotient_mles.clone();
-
-        return GtExpWitness::from_steps(
+        let packed = GtExpWitness::from_steps(
             &rho_mles,
-            &quotient_mles,
-            &exp_wit.bits,
+            &[],
+            &public_input.scalar_bits,
             &base_mle,
             &base2_mle,
             &base3_mle,
         );
+        return (packed, public_input);
     }
 
-    let base_mle = fq12_to_multilinear_evals(&exp_wit.base);
-    let base2_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base));
-    let base3_mle = fq12_to_multilinear_evals(&(exp_wit.base * exp_wit.base * exp_wit.base));
-
-    let num_steps = exp_wit.bits.len().div_ceil(2);
-    let (rho_mles, quotient_mles) = if exp_wit.quotient_mles.len() != num_steps {
-        let mut fixed_quotients = exp_wit.quotient_mles.clone();
+    let mut fixed_quotients = quotient_mles;
+    if fixed_quotients.len() != num_steps {
         fixed_quotients.resize(num_steps, vec![Fq::zero(); 16]);
+    }
 
-        let mut fixed_rhos = exp_wit.rho_mles.clone();
-        if fixed_rhos.len() < num_steps + 1 {
-            let result_mle = fq12_to_multilinear_evals(&exp_wit.result);
-            while fixed_rhos.len() < num_steps + 1 {
-                fixed_rhos.push(result_mle.clone());
-            }
+    let mut fixed_rhos = rho_mles;
+    if fixed_rhos.len() < num_steps + 1 {
+        let result_mle = fq12_to_multilinear_evals(&result);
+        while fixed_rhos.len() < num_steps + 1 {
+            fixed_rhos.push(result_mle.clone());
         }
-        (fixed_rhos, fixed_quotients)
-    } else {
-        (exp_wit.rho_mles.clone(), exp_wit.quotient_mles.clone())
-    };
+    }
 
-    GtExpWitness::from_steps(
-        &rho_mles,
-        &quotient_mles,
-        &exp_wit.bits,
+    let packed = GtExpWitness::from_steps(
+        &fixed_rhos,
+        &fixed_quotients,
+        &public_input.scalar_bits,
         &base_mle,
         &base2_mle,
         &base3_mle,
-    )
+    );
+    (packed, public_input)
 }
 
-fn gt_mul_rows_from_op_witness(w: &GTMulOpWitness) -> Option<GtMulNativeRows> {
-    // Matches the legacy guard in `DoryMatrixBuilder::add_gt_mul_op_witness`.
+fn gt_mul_rows_from_op_witness(w: GTMulOpWitness) -> Option<GtMulNativeRows> {
+    // Matches the `DoryMatrixBuilder::add_gt_mul_op_witness` guard.
     if w.quotient_mle.is_empty() {
         return None;
     }
     let lhs = fq12_to_multilinear_evals(&w.lhs);
     let rhs = fq12_to_multilinear_evals(&w.rhs);
     let result = fq12_to_multilinear_evals(&w.result);
-    let quotient = w.quotient_mle.clone();
+    let quotient = w.quotient_mle;
     debug_assert_eq!(lhs.len(), 16);
     debug_assert_eq!(rhs.len(), 16);
     debug_assert_eq!(result.len(), 16);
@@ -125,33 +127,41 @@ fn gt_mul_rows_from_op_witness(w: &GTMulOpWitness) -> Option<GtMulNativeRows> {
 
 #[tracing::instrument(
     skip_all,
-    name = "recursion.witness_gen.plan.gt_exp_direct",
-    fields(num_ops = witness_collection.gt_exp.len())
+    name = "recursion.witness_gen.plan.gt_exp",
+    fields(num_ops = gt_exp_items.len())
 )]
-fn plan_gt_exp_direct(
-    witness_collection: &WitnessCollection<JoltWitness>,
+fn plan_gt_exp(
+    mut gt_exp_items: Vec<(OpId, JoltGtExpWitness)>,
 ) -> Vec<(GtExpWitness<Fq>, GtExpPublicInputs)> {
-    let mut gt_exp_items: Vec<_> = witness_collection.gt_exp.iter().collect();
     gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
 
     gt_exp_items
-        .par_iter()
+        .into_par_iter()
         .map(|(_op_id, witness)| {
-            let base_mle = fq12_to_multilinear_evals(&witness.base);
-            let base2 = witness.base * witness.base;
+            let JoltGtExpWitness {
+                base,
+                bits,
+                rho_mles,
+                quotient_mles,
+                ..
+            } = witness;
+
+            let public_input = GtExpPublicInputs::new(base, bits);
+
+            let base_mle = fq12_to_multilinear_evals(&public_input.base);
+            let base2 = public_input.base * public_input.base;
             let base2_mle = fq12_to_multilinear_evals(&base2);
-            let base3 = base2 * witness.base;
+            let base3 = base2 * public_input.base;
             let base3_mle = fq12_to_multilinear_evals(&base3);
 
             let packed = GtExpWitness::from_steps(
-                &witness.rho_mles,
-                &witness.quotient_mles,
-                &witness.bits,
+                &rho_mles,
+                &quotient_mles,
+                &public_input.scalar_bits,
                 &base_mle,
                 &base2_mle,
                 &base3_mle,
             );
-            let public_input = GtExpPublicInputs::new(witness.base, witness.bits.clone());
             (packed, public_input)
         })
         .collect()
@@ -159,20 +169,19 @@ fn plan_gt_exp_direct(
 
 #[tracing::instrument(
     skip_all,
-    name = "recursion.witness_gen.plan.gt_mul_direct",
-    fields(num_ops = witness_collection.gt_mul.len())
+    name = "recursion.witness_gen.plan.gt_mul",
+    fields(num_ops = gt_mul_items.len())
 )]
-fn plan_gt_mul_direct(witness_collection: &WitnessCollection<JoltWitness>) -> Vec<GtMulNativeRows> {
-    let mut gt_mul_items: Vec<_> = witness_collection.gt_mul.iter().collect();
+fn plan_gt_mul(mut gt_mul_items: Vec<(OpId, JoltGtMulWitness)>) -> Vec<GtMulNativeRows> {
     gt_mul_items.sort_by_key(|(op_id, _)| *op_id);
 
     gt_mul_items
-        .par_iter()
+        .into_par_iter()
         .map(|(_op_id, witness)| {
             let lhs = fq12_to_multilinear_evals(&witness.lhs);
             let rhs = fq12_to_multilinear_evals(&witness.rhs);
             let result = fq12_to_multilinear_evals(&witness.result);
-            let quotient = witness.quotient_mle.clone();
+            let quotient = witness.quotient_mle;
             debug_assert_eq!(lhs.len(), 16);
             debug_assert_eq!(rhs.len(), 16);
             debug_assert_eq!(result.len(), 16);
@@ -189,172 +198,11 @@ fn plan_gt_mul_direct(witness_collection: &WitnessCollection<JoltWitness>) -> Ve
 
 #[tracing::instrument(
     skip_all,
-    name = "recursion.witness_gen.plan.g1_scalar_mul_direct",
-    fields(num_ops = witness_collection.g1_scalar_mul.len())
-)]
-fn plan_g1_scalar_mul_direct(
-    witness_collection: &WitnessCollection<JoltWitness>,
-) -> Vec<(G1ScalarMulNative, G1ScalarMulPublicInputs)> {
-    let mut g1_items: Vec<_> = witness_collection.g1_scalar_mul.iter().collect();
-    g1_items.sort_by_key(|(op_id, _)| *op_id);
-
-    g1_items
-        .into_iter()
-        .map(|(_op_id, witness)| {
-            debug_assert_eq!(witness.x_a_mles.len(), 1);
-            debug_assert_eq!(witness.y_a_mles.len(), 1);
-            debug_assert_eq!(witness.x_t_mles.len(), 1);
-            debug_assert_eq!(witness.y_t_mles.len(), 1);
-            debug_assert_eq!(witness.x_a_next_mles.len(), 1);
-            debug_assert_eq!(witness.y_a_next_mles.len(), 1);
-            debug_assert_eq!(witness.t_is_infinity_mles.len(), 1);
-            debug_assert_eq!(witness.a_is_infinity_mles.len(), 1);
-
-            let base_point = (witness.point_base.x, witness.point_base.y);
-            let rows = G1ScalarMulNative {
-                base_point,
-                x_a: witness.x_a_mles[0].clone(),
-                y_a: witness.y_a_mles[0].clone(),
-                x_t: witness.x_t_mles[0].clone(),
-                y_t: witness.y_t_mles[0].clone(),
-                x_a_next: witness.x_a_next_mles[0].clone(),
-                y_a_next: witness.y_a_next_mles[0].clone(),
-                t_indicator: witness.t_is_infinity_mles[0].clone(),
-                a_indicator: witness.a_is_infinity_mles[0].clone(),
-            };
-            let public_input = G1ScalarMulPublicInputs::new(witness.scalar);
-            (rows, public_input)
-        })
-        .collect()
-}
-
-#[tracing::instrument(
-    skip_all,
-    name = "recursion.witness_gen.plan.g2_scalar_mul_direct",
-    fields(num_ops = witness_collection.g2_scalar_mul.len())
-)]
-fn plan_g2_scalar_mul_direct(
-    witness_collection: &WitnessCollection<JoltWitness>,
-) -> Vec<(G2ScalarMulNative, G2ScalarMulPublicInputs)> {
-    let mut g2_items: Vec<_> = witness_collection.g2_scalar_mul.iter().collect();
-    g2_items.sort_by_key(|(op_id, _)| *op_id);
-
-    g2_items
-        .into_iter()
-        .map(|(_op_id, witness)| {
-            debug_assert_eq!(witness.x_a_c0_mles.len(), 1);
-            debug_assert_eq!(witness.x_a_c1_mles.len(), 1);
-            debug_assert_eq!(witness.y_a_c0_mles.len(), 1);
-            debug_assert_eq!(witness.y_a_c1_mles.len(), 1);
-            debug_assert_eq!(witness.x_t_c0_mles.len(), 1);
-            debug_assert_eq!(witness.x_t_c1_mles.len(), 1);
-            debug_assert_eq!(witness.y_t_c0_mles.len(), 1);
-            debug_assert_eq!(witness.y_t_c1_mles.len(), 1);
-            debug_assert_eq!(witness.x_a_next_c0_mles.len(), 1);
-            debug_assert_eq!(witness.x_a_next_c1_mles.len(), 1);
-            debug_assert_eq!(witness.y_a_next_c0_mles.len(), 1);
-            debug_assert_eq!(witness.y_a_next_c1_mles.len(), 1);
-            debug_assert_eq!(witness.t_is_infinity_mles.len(), 1);
-            debug_assert_eq!(witness.a_is_infinity_mles.len(), 1);
-
-            let base_point = (witness.point_base.x, witness.point_base.y);
-            let rows = G2ScalarMulNative {
-                base_point,
-                x_a_c0: witness.x_a_c0_mles[0].clone(),
-                x_a_c1: witness.x_a_c1_mles[0].clone(),
-                y_a_c0: witness.y_a_c0_mles[0].clone(),
-                y_a_c1: witness.y_a_c1_mles[0].clone(),
-                x_t_c0: witness.x_t_c0_mles[0].clone(),
-                x_t_c1: witness.x_t_c1_mles[0].clone(),
-                y_t_c0: witness.y_t_c0_mles[0].clone(),
-                y_t_c1: witness.y_t_c1_mles[0].clone(),
-                x_a_next_c0: witness.x_a_next_c0_mles[0].clone(),
-                x_a_next_c1: witness.x_a_next_c1_mles[0].clone(),
-                y_a_next_c0: witness.y_a_next_c0_mles[0].clone(),
-                y_a_next_c1: witness.y_a_next_c1_mles[0].clone(),
-                t_indicator: witness.t_is_infinity_mles[0].clone(),
-                a_indicator: witness.a_is_infinity_mles[0].clone(),
-            };
-
-            let public_input = G2ScalarMulPublicInputs::new(witness.scalar);
-            (rows, public_input)
-        })
-        .collect()
-}
-
-#[tracing::instrument(
-    skip_all,
-    name = "recursion.witness_gen.plan.g1_add_direct",
-    fields(num_ops = witness_collection.g1_add.len())
-)]
-fn plan_g1_add_direct(witness_collection: &WitnessCollection<JoltWitness>) -> Vec<G1AddNative> {
-    let mut g1_add_items: Vec<_> = witness_collection.g1_add.iter().collect();
-    g1_add_items.sort_by_key(|(op_id, _)| *op_id);
-
-    g1_add_items
-        .into_iter()
-        .map(|(_op_id, witness)| G1AddNative {
-            x_p: witness.x_p,
-            y_p: witness.y_p,
-            ind_p: witness.ind_p,
-            x_q: witness.x_q,
-            y_q: witness.y_q,
-            ind_q: witness.ind_q,
-            x_r: witness.x_r,
-            y_r: witness.y_r,
-            ind_r: witness.ind_r,
-            lambda: witness.lambda,
-            inv_delta_x: witness.inv_delta_x,
-            is_double: witness.is_double,
-            is_inverse: witness.is_inverse,
-        })
-        .collect()
-}
-
-#[tracing::instrument(
-    skip_all,
-    name = "recursion.witness_gen.plan.g2_add_direct",
-    fields(num_ops = witness_collection.g2_add.len())
-)]
-fn plan_g2_add_direct(witness_collection: &WitnessCollection<JoltWitness>) -> Vec<G2AddNative> {
-    let mut g2_add_items: Vec<_> = witness_collection.g2_add.iter().collect();
-    g2_add_items.sort_by_key(|(op_id, _)| *op_id);
-
-    g2_add_items
-        .into_iter()
-        .map(|(_op_id, witness)| G2AddNative {
-            x_p_c0: witness.x_p_c0,
-            x_p_c1: witness.x_p_c1,
-            y_p_c0: witness.y_p_c0,
-            y_p_c1: witness.y_p_c1,
-            ind_p: witness.ind_p,
-            x_q_c0: witness.x_q_c0,
-            x_q_c1: witness.x_q_c1,
-            y_q_c0: witness.y_q_c0,
-            y_q_c1: witness.y_q_c1,
-            ind_q: witness.ind_q,
-            x_r_c0: witness.x_r_c0,
-            x_r_c1: witness.x_r_c1,
-            y_r_c0: witness.y_r_c0,
-            y_r_c1: witness.y_r_c1,
-            ind_r: witness.ind_r,
-            lambda_c0: witness.lambda_c0,
-            lambda_c1: witness.lambda_c1,
-            inv_delta_x_c0: witness.inv_delta_x_c0,
-            inv_delta_x_c1: witness.inv_delta_x_c1,
-            is_double: witness.is_double,
-            is_inverse: witness.is_inverse,
-        })
-        .collect()
-}
-
-#[tracing::instrument(
-    skip_all,
     name = "recursion.witness_gen.plan.combine_witness",
     fields(num_exp = cw.exp_witnesses.len(), num_mul_layers = cw.mul_layers.len())
 )]
 fn plan_combine_witness(
-    cw: &GTCombineWitness,
+    cw: GTCombineWitness,
     constraint_types: &mut Vec<ConstraintType>,
     locator_by_constraint: &mut Vec<ConstraintLocator>,
     gt_exp_witnesses: &mut Vec<GtExpWitness<Fq>>,
@@ -362,9 +210,8 @@ fn plan_combine_witness(
     gt_mul_rows: &mut Vec<GtMulNativeRows>,
 ) {
     // Append GT exp constraints for combine terms.
-    for exp_wit in &cw.exp_witnesses {
-        let packed = pack_gt_exp_op_witness(exp_wit);
-        let public_input = GtExpPublicInputs::new(exp_wit.base, exp_wit.bits.clone());
+    for exp_wit in cw.exp_witnesses {
+        let (packed, public_input) = pack_gt_exp_op_witness(exp_wit);
         let local = gt_exp_witnesses.len();
         gt_exp_witnesses.push(packed);
         gt_exp_public_inputs.push(public_input);
@@ -373,7 +220,7 @@ fn plan_combine_witness(
     }
 
     // Append GT mul constraints for combine reduction tree.
-    for layer in &cw.mul_layers {
+    for layer in cw.mul_layers {
         for mul_wit in layer {
             if let Some(rows) = gt_mul_rows_from_op_witness(mul_wit) {
                 let local = gt_mul_rows.len();
@@ -400,16 +247,12 @@ fn plan_combine_witness(
     )
 )]
 pub fn plan_constraint_system(
-    witness_collection: &WitnessCollection<JoltWitness>,
-    combine_witness: Option<&GTCombineWitness>,
+    witness_collection: WitnessCollection<JoltWitness>,
+    combine_witness: Option<GTCombineWitness>,
     g_poly_4var: DensePolynomial<Fq>,
 ) -> Result<ConstraintSystem, Box<dyn std::error::Error>> {
-    // Constraint-family toggles (useful to isolate failures).
-    let enable_gt_mul = env_flag_default("JOLT_RECURSION_ENABLE_GT_MUL", true);
-    let enable_g1_scalar_mul = env_flag_default("JOLT_RECURSION_ENABLE_G1_SCALAR_MUL", true);
-    let enable_g2_scalar_mul = env_flag_default("JOLT_RECURSION_ENABLE_G2_SCALAR_MUL", true);
-    let enable_g1_add = env_flag_default("JOLT_RECURSION_ENABLE_G1_ADD", true);
-    let enable_g2_add = env_flag_default("JOLT_RECURSION_ENABLE_G2_ADD", true);
+    // Always include all constraint families present in the witness collection (plus combine
+    // constraints when provided).
 
     // Outputs
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
@@ -427,8 +270,20 @@ pub fn plan_constraint_system(
     let mut g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs> = Vec::new();
     let mut g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs> = Vec::new();
 
-    // ---- GT exp (direct) ----
-    let prepared_gt_exp = plan_gt_exp_direct(witness_collection);
+    // Move out the per-family witness maps (we’ll sort by OpId for determinism and move large
+    // evaluation tables out without cloning).
+    let WitnessCollection {
+        gt_exp,
+        gt_mul,
+        g1_scalar_mul,
+        g2_scalar_mul,
+        g1_add,
+        g2_add,
+        ..
+    } = witness_collection;
+
+    // ---- GT exp ----
+    let prepared_gt_exp = plan_gt_exp(gt_exp.into_iter().collect());
 
     for (packed, public_input) in prepared_gt_exp {
         let local = gt_exp_witnesses.len();
@@ -438,9 +293,9 @@ pub fn plan_constraint_system(
         locator_by_constraint.push(ConstraintLocator::GtExp { local });
     }
 
-    // ---- GT mul (direct) ----
-    if enable_gt_mul {
-        let prepared_gt_mul = plan_gt_mul_direct(witness_collection);
+    // ---- GT mul ----
+    {
+        let prepared_gt_mul = plan_gt_mul(gt_mul.into_iter().collect());
         for rows in prepared_gt_mul {
             let local = gt_mul_rows.len();
             gt_mul_rows.push(rows);
@@ -450,9 +305,38 @@ pub fn plan_constraint_system(
     }
 
     // ---- G1 scalar mul ----
-    if enable_g1_scalar_mul {
-        for (rows, public_input) in plan_g1_scalar_mul_direct(witness_collection) {
-            let base_point = rows.base_point;
+    {
+        let mut g1_items: Vec<_> = g1_scalar_mul.into_iter().collect();
+        g1_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, mut witness) in g1_items {
+            let base_point = (witness.point_base.x, witness.point_base.y);
+            let rows = G1ScalarMulNative {
+                base_point,
+                x_a: witness.x_a_mles.pop().expect("missing x_a MLE"),
+                y_a: witness.y_a_mles.pop().expect("missing y_a MLE"),
+                x_t: witness.x_t_mles.pop().expect("missing x_t MLE"),
+                y_t: witness.y_t_mles.pop().expect("missing y_t MLE"),
+                x_a_next: witness.x_a_next_mles.pop().expect("missing x_a_next MLE"),
+                y_a_next: witness.y_a_next_mles.pop().expect("missing y_a_next MLE"),
+                t_indicator: witness
+                    .t_is_infinity_mles
+                    .pop()
+                    .expect("missing t_is_infinity MLE"),
+                a_indicator: witness
+                    .a_is_infinity_mles
+                    .pop()
+                    .expect("missing a_is_infinity MLE"),
+            };
+            debug_assert!(witness.x_a_mles.is_empty());
+            debug_assert!(witness.y_a_mles.is_empty());
+            debug_assert!(witness.x_t_mles.is_empty());
+            debug_assert!(witness.y_t_mles.is_empty());
+            debug_assert!(witness.x_a_next_mles.is_empty());
+            debug_assert!(witness.y_a_next_mles.is_empty());
+            debug_assert!(witness.t_is_infinity_mles.is_empty());
+            debug_assert!(witness.a_is_infinity_mles.is_empty());
+
+            let public_input = G1ScalarMulPublicInputs::new(witness.scalar);
             let local = g1_scalar_mul_rows.len();
             g1_scalar_mul_rows.push(rows);
             g1_scalar_mul_public_inputs.push(public_input);
@@ -462,9 +346,62 @@ pub fn plan_constraint_system(
     }
 
     // ---- G2 scalar mul ----
-    if enable_g2_scalar_mul {
-        for (rows, public_input) in plan_g2_scalar_mul_direct(witness_collection) {
-            let base_point = rows.base_point;
+    {
+        let mut g2_items: Vec<_> = g2_scalar_mul.into_iter().collect();
+        g2_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, mut witness) in g2_items {
+            let base_point = (witness.point_base.x, witness.point_base.y);
+            let rows = G2ScalarMulNative {
+                base_point,
+                x_a_c0: witness.x_a_c0_mles.pop().expect("missing x_a_c0 MLE"),
+                x_a_c1: witness.x_a_c1_mles.pop().expect("missing x_a_c1 MLE"),
+                y_a_c0: witness.y_a_c0_mles.pop().expect("missing y_a_c0 MLE"),
+                y_a_c1: witness.y_a_c1_mles.pop().expect("missing y_a_c1 MLE"),
+                x_t_c0: witness.x_t_c0_mles.pop().expect("missing x_t_c0 MLE"),
+                x_t_c1: witness.x_t_c1_mles.pop().expect("missing x_t_c1 MLE"),
+                y_t_c0: witness.y_t_c0_mles.pop().expect("missing y_t_c0 MLE"),
+                y_t_c1: witness.y_t_c1_mles.pop().expect("missing y_t_c1 MLE"),
+                x_a_next_c0: witness
+                    .x_a_next_c0_mles
+                    .pop()
+                    .expect("missing x_a_next_c0 MLE"),
+                x_a_next_c1: witness
+                    .x_a_next_c1_mles
+                    .pop()
+                    .expect("missing x_a_next_c1 MLE"),
+                y_a_next_c0: witness
+                    .y_a_next_c0_mles
+                    .pop()
+                    .expect("missing y_a_next_c0 MLE"),
+                y_a_next_c1: witness
+                    .y_a_next_c1_mles
+                    .pop()
+                    .expect("missing y_a_next_c1 MLE"),
+                t_indicator: witness
+                    .t_is_infinity_mles
+                    .pop()
+                    .expect("missing t_is_infinity MLE"),
+                a_indicator: witness
+                    .a_is_infinity_mles
+                    .pop()
+                    .expect("missing a_is_infinity MLE"),
+            };
+            debug_assert!(witness.x_a_c0_mles.is_empty());
+            debug_assert!(witness.x_a_c1_mles.is_empty());
+            debug_assert!(witness.y_a_c0_mles.is_empty());
+            debug_assert!(witness.y_a_c1_mles.is_empty());
+            debug_assert!(witness.x_t_c0_mles.is_empty());
+            debug_assert!(witness.x_t_c1_mles.is_empty());
+            debug_assert!(witness.y_t_c0_mles.is_empty());
+            debug_assert!(witness.y_t_c1_mles.is_empty());
+            debug_assert!(witness.x_a_next_c0_mles.is_empty());
+            debug_assert!(witness.x_a_next_c1_mles.is_empty());
+            debug_assert!(witness.y_a_next_c0_mles.is_empty());
+            debug_assert!(witness.y_a_next_c1_mles.is_empty());
+            debug_assert!(witness.t_is_infinity_mles.is_empty());
+            debug_assert!(witness.a_is_infinity_mles.is_empty());
+
+            let public_input = G2ScalarMulPublicInputs::new(witness.scalar);
             let local = g2_scalar_mul_rows.len();
             g2_scalar_mul_rows.push(rows);
             g2_scalar_mul_public_inputs.push(public_input);
@@ -474,8 +411,25 @@ pub fn plan_constraint_system(
     }
 
     // ---- G1 add ----
-    if enable_g1_add {
-        for rows in plan_g1_add_direct(witness_collection) {
+    {
+        let mut g1_add_items: Vec<_> = g1_add.into_iter().collect();
+        g1_add_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, witness) in g1_add_items {
+            let rows = G1AddNative {
+                x_p: witness.x_p,
+                y_p: witness.y_p,
+                ind_p: witness.ind_p,
+                x_q: witness.x_q,
+                y_q: witness.y_q,
+                ind_q: witness.ind_q,
+                x_r: witness.x_r,
+                y_r: witness.y_r,
+                ind_r: witness.ind_r,
+                lambda: witness.lambda,
+                inv_delta_x: witness.inv_delta_x,
+                is_double: witness.is_double,
+                is_inverse: witness.is_inverse,
+            };
             let local = g1_add_rows.len();
             g1_add_rows.push(rows);
             constraint_types.push(ConstraintType::G1Add);
@@ -484,8 +438,33 @@ pub fn plan_constraint_system(
     }
 
     // ---- G2 add ----
-    if enable_g2_add {
-        for rows in plan_g2_add_direct(witness_collection) {
+    {
+        let mut g2_add_items: Vec<_> = g2_add.into_iter().collect();
+        g2_add_items.sort_by_key(|(op_id, _)| *op_id);
+        for (_op_id, witness) in g2_add_items {
+            let rows = G2AddNative {
+                x_p_c0: witness.x_p_c0,
+                x_p_c1: witness.x_p_c1,
+                y_p_c0: witness.y_p_c0,
+                y_p_c1: witness.y_p_c1,
+                ind_p: witness.ind_p,
+                x_q_c0: witness.x_q_c0,
+                x_q_c1: witness.x_q_c1,
+                y_q_c0: witness.y_q_c0,
+                y_q_c1: witness.y_q_c1,
+                ind_q: witness.ind_q,
+                x_r_c0: witness.x_r_c0,
+                x_r_c1: witness.x_r_c1,
+                y_r_c0: witness.y_r_c0,
+                y_r_c1: witness.y_r_c1,
+                ind_r: witness.ind_r,
+                lambda_c0: witness.lambda_c0,
+                lambda_c1: witness.lambda_c1,
+                inv_delta_x_c0: witness.inv_delta_x_c0,
+                inv_delta_x_c1: witness.inv_delta_x_c1,
+                is_double: witness.is_double,
+                is_inverse: witness.is_inverse,
+            };
             let local = g2_add_rows.len();
             g2_add_rows.push(rows);
             constraint_types.push(ConstraintType::G2Add);
@@ -559,43 +538,56 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
         }
     }
 
+    #[inline]
+    fn fill_fused_block_bit_reversed(
+        dst: &mut [Fq],
+        src: &[Fq],
+        num_vars: usize,
+        c: usize,
+        row_bits: usize,
+    ) {
+        let row_size = 1usize << row_bits;
+        debug_assert_eq!(src.len(), row_size);
+        debug_assert_eq!(dst.len(), 1usize << num_vars);
+        let off = c << row_bits;
+        for u in 0..row_size {
+            let src_idx = off + u;
+            dst[bit_reverse(src_idx, num_vars)] = src[u];
+        }
+    }
+
+    #[inline]
+    fn fill_fused_scalar_bit_reversed(dst: &mut [Fq], num_vars: usize, c: usize, v: Fq) {
+        debug_assert_eq!(dst.len(), 1usize << num_vars);
+        dst[bit_reverse(c, num_vars)] = v;
+    }
+
     fn fill_entry(dst: &mut [Fq], cs: &ConstraintSystem, entry: &PrefixPackedEntry) {
         if entry.is_gt_fused {
-            // Option B: commit exp/mul fused rows at their family-local padded sizes.
+            // Commit exp/mul rows at family-local padded sizes.
             let num_vars_gt_exp = 11usize + k_exp(&cs.constraint_types);
             let num_vars_gt_mul = 4usize + k_mul(&cs.constraint_types);
 
             // IMPORTANT (no-padding GTMul + c-suffix):
-            // - for GTExp fused rows, variables are (x11 low bits, c_gt high bits), size 2^(11+k)
-            // - for GTMul fused rows, variables are (u low bits, c_gt high bits), size 2^(4+k)
+            // - for GTExp rows, variables are (x11 low bits, c_gt high bits), size 2^(11+k)
+            // - for GTMul rows, variables are (u low bits, c_gt high bits), size 2^(4+k)
             //
             // This avoids the old 4→11 replication for GTMul.
-            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
-
             match entry.poly_type {
                 PolyType::RhoPrev | PolyType::Quotient => {
                     if entry.num_vars != num_vars_gt_exp {
                         panic!(
-                            "GT-fused GTExp entry has num_vars={}, expected {} (11 + k_exp)",
+                            "GTExp entry has num_vars={}, expected {} (11 + k_exp)",
                             entry.num_vars, num_vars_gt_exp
                         );
                     }
-                    let row_size = 1usize << 11;
-                    for global_idx in 0..cs.constraint_types.len() {
-                        let ConstraintLocator::GtExp { local } =
-                            cs.locator_by_constraint[global_idx]
-                        else {
-                            continue;
-                        };
-                        let c_exp = local;
+                    for c_exp in 0..cs.gt_exp_witnesses.len() {
                         let src = match entry.poly_type {
-                            PolyType::RhoPrev => &cs.gt_exp_witnesses[local].rho_packed,
-                            PolyType::Quotient => &cs.gt_exp_witnesses[local].quotient_packed,
+                            PolyType::RhoPrev => &cs.gt_exp_witnesses[c_exp].rho_packed,
+                            PolyType::Quotient => &cs.gt_exp_witnesses[c_exp].quotient_packed,
                             _ => unreachable!(),
                         };
-                        debug_assert_eq!(src.len(), row_size);
-                        let off = c_exp << 11;
-                        fused_src[off..off + row_size].copy_from_slice(src);
+                        fill_fused_block_bit_reversed(dst, src, entry.num_vars, c_exp, 11);
                     }
                 }
                 PolyType::MulLhs
@@ -604,220 +596,168 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                 | PolyType::MulQuotient => {
                     if entry.num_vars != num_vars_gt_mul {
                         panic!(
-                            "GT-fused GTMul entry has num_vars={}, expected {} (4 + k_mul)",
+                            "GTMul entry has num_vars={}, expected {} (4 + k_mul)",
                             entry.num_vars, num_vars_gt_mul
                         );
                     }
-                    let row_size = 1usize << 4;
-                    for global_idx in 0..cs.constraint_types.len() {
-                        let ConstraintLocator::GtMul { local } =
-                            cs.locator_by_constraint[global_idx]
-                        else {
-                            continue;
-                        };
-                        let c_mul = local;
+                    for c_mul in 0..cs.gt_mul_rows.len() {
                         let src4 = match entry.poly_type {
-                            PolyType::MulLhs => &cs.gt_mul_rows[local].lhs,
-                            PolyType::MulRhs => &cs.gt_mul_rows[local].rhs,
-                            PolyType::MulResult => &cs.gt_mul_rows[local].result,
-                            PolyType::MulQuotient => &cs.gt_mul_rows[local].quotient,
+                            PolyType::MulLhs => &cs.gt_mul_rows[c_mul].lhs,
+                            PolyType::MulRhs => &cs.gt_mul_rows[c_mul].rhs,
+                            PolyType::MulResult => &cs.gt_mul_rows[c_mul].result,
+                            PolyType::MulQuotient => &cs.gt_mul_rows[c_mul].quotient,
                             _ => unreachable!(),
                         };
-                        debug_assert_eq!(src4.len(), row_size);
-                        let off = c_mul << 4;
-                        fused_src[off..off + row_size].copy_from_slice(src4);
+                        fill_fused_block_bit_reversed(dst, src4, entry.num_vars, c_mul, 4);
                     }
                 }
                 _ => {
-                    // Other poly types are not GT-fused.
+                    // Other poly types are not GT.
                 }
             }
-
-            fill_block(dst, &fused_src, entry.num_vars);
             return;
         }
 
         if entry.is_g1_scalar_mul_fused {
-            // Fused G1 scalar-mul rows are native 8-var step traces plus a family-local padded `c`.
+            // G1 scalar-mul rows are native 8-var step traces plus a family-local padded `c`.
             let num_g1 = cs.g1_scalar_mul_rows.len();
             let padded = num_g1.max(1).next_power_of_two();
             let k = padded.trailing_zeros() as usize;
             let expected_num_vars = 8usize + k;
             if entry.num_vars != expected_num_vars {
                 panic!(
-                    "G1-scalar-mul-fused entry has num_vars={}, expected {} (8 + k_g1)",
+                    "G1 scalar-mul entry has num_vars={}, expected {} (8 + k_g1)",
                     entry.num_vars, expected_num_vars
                 );
             }
-
-            let row_size = 1usize << 8;
-            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
-
-            for global_idx in 0..cs.constraint_types.len() {
-                let ConstraintLocator::G1ScalarMul { local } = cs.locator_by_constraint[global_idx]
-                else {
-                    continue;
-                };
-                let c = local;
+            for c in 0..cs.g1_scalar_mul_rows.len() {
                 let src8 = match entry.poly_type {
-                    PolyType::G1ScalarMulXA => &cs.g1_scalar_mul_rows[local].x_a,
-                    PolyType::G1ScalarMulYA => &cs.g1_scalar_mul_rows[local].y_a,
-                    PolyType::G1ScalarMulXT => &cs.g1_scalar_mul_rows[local].x_t,
-                    PolyType::G1ScalarMulYT => &cs.g1_scalar_mul_rows[local].y_t,
-                    PolyType::G1ScalarMulXANext => &cs.g1_scalar_mul_rows[local].x_a_next,
-                    PolyType::G1ScalarMulYANext => &cs.g1_scalar_mul_rows[local].y_a_next,
-                    PolyType::G1ScalarMulTIndicator => &cs.g1_scalar_mul_rows[local].t_indicator,
-                    PolyType::G1ScalarMulAIndicator => &cs.g1_scalar_mul_rows[local].a_indicator,
+                    PolyType::G1ScalarMulXA => &cs.g1_scalar_mul_rows[c].x_a,
+                    PolyType::G1ScalarMulYA => &cs.g1_scalar_mul_rows[c].y_a,
+                    PolyType::G1ScalarMulXT => &cs.g1_scalar_mul_rows[c].x_t,
+                    PolyType::G1ScalarMulYT => &cs.g1_scalar_mul_rows[c].y_t,
+                    PolyType::G1ScalarMulXANext => &cs.g1_scalar_mul_rows[c].x_a_next,
+                    PolyType::G1ScalarMulYANext => &cs.g1_scalar_mul_rows[c].y_a_next,
+                    PolyType::G1ScalarMulTIndicator => &cs.g1_scalar_mul_rows[c].t_indicator,
+                    PolyType::G1ScalarMulAIndicator => &cs.g1_scalar_mul_rows[c].a_indicator,
                     _ => continue,
                 };
-                debug_assert_eq!(src8.len(), row_size);
-                let off = c << 8;
-                fused_src[off..off + row_size].copy_from_slice(src8);
+                fill_fused_block_bit_reversed(dst, src8, entry.num_vars, c, 8);
             }
-
-            fill_block(dst, &fused_src, entry.num_vars);
             return;
         }
 
         if entry.is_g1_add_fused {
-            // Fused G1 add rows are c-only over a family-local padded `c_add`.
+            // G1 add rows are c-only over a family-local padded `c_add`.
             let num_g1 = cs.g1_add_rows.len();
             let padded = num_g1.max(1).next_power_of_two();
             let k = padded.trailing_zeros() as usize;
             let expected_num_vars = k;
             if entry.num_vars != expected_num_vars {
                 panic!(
-                    "G1-add-fused entry has num_vars={}, expected {} (k_add)",
+                    "G1 add entry has num_vars={}, expected {} (k_add)",
                     entry.num_vars, expected_num_vars
                 );
             }
 
-            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
-            for global_idx in 0..cs.constraint_types.len() {
-                let ConstraintLocator::G1Add { local } = cs.locator_by_constraint[global_idx]
-                else {
-                    continue;
-                };
-                let c = local;
+            for c in 0..cs.g1_add_rows.len() {
                 let v = match entry.poly_type {
-                    PolyType::G1AddXP => cs.g1_add_rows[local].x_p,
-                    PolyType::G1AddYP => cs.g1_add_rows[local].y_p,
-                    PolyType::G1AddPIndicator => cs.g1_add_rows[local].ind_p,
-                    PolyType::G1AddXQ => cs.g1_add_rows[local].x_q,
-                    PolyType::G1AddYQ => cs.g1_add_rows[local].y_q,
-                    PolyType::G1AddQIndicator => cs.g1_add_rows[local].ind_q,
-                    PolyType::G1AddXR => cs.g1_add_rows[local].x_r,
-                    PolyType::G1AddYR => cs.g1_add_rows[local].y_r,
-                    PolyType::G1AddRIndicator => cs.g1_add_rows[local].ind_r,
-                    PolyType::G1AddLambda => cs.g1_add_rows[local].lambda,
-                    PolyType::G1AddInvDeltaX => cs.g1_add_rows[local].inv_delta_x,
-                    PolyType::G1AddIsDouble => cs.g1_add_rows[local].is_double,
-                    PolyType::G1AddIsInverse => cs.g1_add_rows[local].is_inverse,
+                    PolyType::G1AddXP => cs.g1_add_rows[c].x_p,
+                    PolyType::G1AddYP => cs.g1_add_rows[c].y_p,
+                    PolyType::G1AddPIndicator => cs.g1_add_rows[c].ind_p,
+                    PolyType::G1AddXQ => cs.g1_add_rows[c].x_q,
+                    PolyType::G1AddYQ => cs.g1_add_rows[c].y_q,
+                    PolyType::G1AddQIndicator => cs.g1_add_rows[c].ind_q,
+                    PolyType::G1AddXR => cs.g1_add_rows[c].x_r,
+                    PolyType::G1AddYR => cs.g1_add_rows[c].y_r,
+                    PolyType::G1AddRIndicator => cs.g1_add_rows[c].ind_r,
+                    PolyType::G1AddLambda => cs.g1_add_rows[c].lambda,
+                    PolyType::G1AddInvDeltaX => cs.g1_add_rows[c].inv_delta_x,
+                    PolyType::G1AddIsDouble => cs.g1_add_rows[c].is_double,
+                    PolyType::G1AddIsInverse => cs.g1_add_rows[c].is_inverse,
                     _ => continue,
                 };
-                fused_src[c] = v;
+                fill_fused_scalar_bit_reversed(dst, entry.num_vars, c, v);
             }
-
-            fill_block(dst, &fused_src, entry.num_vars);
             return;
         }
 
         if entry.is_g2_scalar_mul_fused {
-            // Fused G2 scalar-mul rows are native 8-var step traces plus a family-local padded `c`.
+            // G2 scalar-mul rows are native 8-var step traces plus a family-local padded `c`.
             let num_g2 = cs.g2_scalar_mul_rows.len();
             let padded = num_g2.max(1).next_power_of_two();
             let k = padded.trailing_zeros() as usize;
             let expected_num_vars = 8usize + k;
             if entry.num_vars != expected_num_vars {
                 panic!(
-                    "G2-scalar-mul-fused entry has num_vars={}, expected {} (8 + k_g2)",
+                    "G2 scalar-mul entry has num_vars={}, expected {} (8 + k_g2)",
                     entry.num_vars, expected_num_vars
                 );
             }
 
-            let row_size = 1usize << 8;
-            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
-
-            for global_idx in 0..cs.constraint_types.len() {
-                let ConstraintLocator::G2ScalarMul { local } = cs.locator_by_constraint[global_idx]
-                else {
-                    continue;
-                };
-                let c = local;
+            for c in 0..cs.g2_scalar_mul_rows.len() {
                 let src8 = match entry.poly_type {
-                    PolyType::G2ScalarMulXAC0 => &cs.g2_scalar_mul_rows[local].x_a_c0,
-                    PolyType::G2ScalarMulXAC1 => &cs.g2_scalar_mul_rows[local].x_a_c1,
-                    PolyType::G2ScalarMulYAC0 => &cs.g2_scalar_mul_rows[local].y_a_c0,
-                    PolyType::G2ScalarMulYAC1 => &cs.g2_scalar_mul_rows[local].y_a_c1,
-                    PolyType::G2ScalarMulXTC0 => &cs.g2_scalar_mul_rows[local].x_t_c0,
-                    PolyType::G2ScalarMulXTC1 => &cs.g2_scalar_mul_rows[local].x_t_c1,
-                    PolyType::G2ScalarMulYTC0 => &cs.g2_scalar_mul_rows[local].y_t_c0,
-                    PolyType::G2ScalarMulYTC1 => &cs.g2_scalar_mul_rows[local].y_t_c1,
-                    PolyType::G2ScalarMulXANextC0 => &cs.g2_scalar_mul_rows[local].x_a_next_c0,
-                    PolyType::G2ScalarMulXANextC1 => &cs.g2_scalar_mul_rows[local].x_a_next_c1,
-                    PolyType::G2ScalarMulYANextC0 => &cs.g2_scalar_mul_rows[local].y_a_next_c0,
-                    PolyType::G2ScalarMulYANextC1 => &cs.g2_scalar_mul_rows[local].y_a_next_c1,
-                    PolyType::G2ScalarMulTIndicator => &cs.g2_scalar_mul_rows[local].t_indicator,
-                    PolyType::G2ScalarMulAIndicator => &cs.g2_scalar_mul_rows[local].a_indicator,
+                    PolyType::G2ScalarMulXAC0 => &cs.g2_scalar_mul_rows[c].x_a_c0,
+                    PolyType::G2ScalarMulXAC1 => &cs.g2_scalar_mul_rows[c].x_a_c1,
+                    PolyType::G2ScalarMulYAC0 => &cs.g2_scalar_mul_rows[c].y_a_c0,
+                    PolyType::G2ScalarMulYAC1 => &cs.g2_scalar_mul_rows[c].y_a_c1,
+                    PolyType::G2ScalarMulXTC0 => &cs.g2_scalar_mul_rows[c].x_t_c0,
+                    PolyType::G2ScalarMulXTC1 => &cs.g2_scalar_mul_rows[c].x_t_c1,
+                    PolyType::G2ScalarMulYTC0 => &cs.g2_scalar_mul_rows[c].y_t_c0,
+                    PolyType::G2ScalarMulYTC1 => &cs.g2_scalar_mul_rows[c].y_t_c1,
+                    PolyType::G2ScalarMulXANextC0 => &cs.g2_scalar_mul_rows[c].x_a_next_c0,
+                    PolyType::G2ScalarMulXANextC1 => &cs.g2_scalar_mul_rows[c].x_a_next_c1,
+                    PolyType::G2ScalarMulYANextC0 => &cs.g2_scalar_mul_rows[c].y_a_next_c0,
+                    PolyType::G2ScalarMulYANextC1 => &cs.g2_scalar_mul_rows[c].y_a_next_c1,
+                    PolyType::G2ScalarMulTIndicator => &cs.g2_scalar_mul_rows[c].t_indicator,
+                    PolyType::G2ScalarMulAIndicator => &cs.g2_scalar_mul_rows[c].a_indicator,
                     _ => continue,
                 };
-                debug_assert_eq!(src8.len(), row_size);
-                let off = c << 8;
-                fused_src[off..off + row_size].copy_from_slice(src8);
+                fill_fused_block_bit_reversed(dst, src8, entry.num_vars, c, 8);
             }
-
-            fill_block(dst, &fused_src, entry.num_vars);
             return;
         }
 
         if entry.is_g2_add_fused {
-            // Fused G2 add rows are c-only over a family-local padded `c_add`.
+            // G2 add rows are c-only over a family-local padded `c_add`.
             let num_g2 = cs.g2_add_rows.len();
             let padded = num_g2.max(1).next_power_of_two();
             let k = padded.trailing_zeros() as usize;
             let expected_num_vars = k;
             if entry.num_vars != expected_num_vars {
                 panic!(
-                    "G2-add-fused entry has num_vars={}, expected {} (k_add)",
+                    "G2 add entry has num_vars={}, expected {} (k_add)",
                     entry.num_vars, expected_num_vars
                 );
             }
 
-            let mut fused_src = vec![Fq::zero(); 1usize << entry.num_vars];
-            for global_idx in 0..cs.constraint_types.len() {
-                let ConstraintLocator::G2Add { local } = cs.locator_by_constraint[global_idx]
-                else {
-                    continue;
-                };
-                let c = local;
+            for c in 0..cs.g2_add_rows.len() {
                 let v = match entry.poly_type {
-                    PolyType::G2AddXPC0 => cs.g2_add_rows[local].x_p_c0,
-                    PolyType::G2AddXPC1 => cs.g2_add_rows[local].x_p_c1,
-                    PolyType::G2AddYPC0 => cs.g2_add_rows[local].y_p_c0,
-                    PolyType::G2AddYPC1 => cs.g2_add_rows[local].y_p_c1,
-                    PolyType::G2AddPIndicator => cs.g2_add_rows[local].ind_p,
-                    PolyType::G2AddXQC0 => cs.g2_add_rows[local].x_q_c0,
-                    PolyType::G2AddXQC1 => cs.g2_add_rows[local].x_q_c1,
-                    PolyType::G2AddYQC0 => cs.g2_add_rows[local].y_q_c0,
-                    PolyType::G2AddYQC1 => cs.g2_add_rows[local].y_q_c1,
-                    PolyType::G2AddQIndicator => cs.g2_add_rows[local].ind_q,
-                    PolyType::G2AddXRC0 => cs.g2_add_rows[local].x_r_c0,
-                    PolyType::G2AddXRC1 => cs.g2_add_rows[local].x_r_c1,
-                    PolyType::G2AddYRC0 => cs.g2_add_rows[local].y_r_c0,
-                    PolyType::G2AddYRC1 => cs.g2_add_rows[local].y_r_c1,
-                    PolyType::G2AddRIndicator => cs.g2_add_rows[local].ind_r,
-                    PolyType::G2AddLambdaC0 => cs.g2_add_rows[local].lambda_c0,
-                    PolyType::G2AddLambdaC1 => cs.g2_add_rows[local].lambda_c1,
-                    PolyType::G2AddInvDeltaXC0 => cs.g2_add_rows[local].inv_delta_x_c0,
-                    PolyType::G2AddInvDeltaXC1 => cs.g2_add_rows[local].inv_delta_x_c1,
-                    PolyType::G2AddIsDouble => cs.g2_add_rows[local].is_double,
-                    PolyType::G2AddIsInverse => cs.g2_add_rows[local].is_inverse,
+                    PolyType::G2AddXPC0 => cs.g2_add_rows[c].x_p_c0,
+                    PolyType::G2AddXPC1 => cs.g2_add_rows[c].x_p_c1,
+                    PolyType::G2AddYPC0 => cs.g2_add_rows[c].y_p_c0,
+                    PolyType::G2AddYPC1 => cs.g2_add_rows[c].y_p_c1,
+                    PolyType::G2AddPIndicator => cs.g2_add_rows[c].ind_p,
+                    PolyType::G2AddXQC0 => cs.g2_add_rows[c].x_q_c0,
+                    PolyType::G2AddXQC1 => cs.g2_add_rows[c].x_q_c1,
+                    PolyType::G2AddYQC0 => cs.g2_add_rows[c].y_q_c0,
+                    PolyType::G2AddYQC1 => cs.g2_add_rows[c].y_q_c1,
+                    PolyType::G2AddQIndicator => cs.g2_add_rows[c].ind_q,
+                    PolyType::G2AddXRC0 => cs.g2_add_rows[c].x_r_c0,
+                    PolyType::G2AddXRC1 => cs.g2_add_rows[c].x_r_c1,
+                    PolyType::G2AddYRC0 => cs.g2_add_rows[c].y_r_c0,
+                    PolyType::G2AddYRC1 => cs.g2_add_rows[c].y_r_c1,
+                    PolyType::G2AddRIndicator => cs.g2_add_rows[c].ind_r,
+                    PolyType::G2AddLambdaC0 => cs.g2_add_rows[c].lambda_c0,
+                    PolyType::G2AddLambdaC1 => cs.g2_add_rows[c].lambda_c1,
+                    PolyType::G2AddInvDeltaXC0 => cs.g2_add_rows[c].inv_delta_x_c0,
+                    PolyType::G2AddInvDeltaXC1 => cs.g2_add_rows[c].inv_delta_x_c1,
+                    PolyType::G2AddIsDouble => cs.g2_add_rows[c].is_double,
+                    PolyType::G2AddIsInverse => cs.g2_add_rows[c].is_inverse,
                     _ => continue,
                 };
-                fused_src[c] = v;
+                fill_fused_scalar_bit_reversed(dst, entry.num_vars, c, v);
             }
-
-            fill_block(dst, &fused_src, entry.num_vars);
             return;
         }
 
@@ -1257,15 +1197,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
         fields(num_constraints = cs.constraint_types.len())
     )]
     fn build_layout(cs: &ConstraintSystem) -> PrefixPackingLayout {
-        // Fused recursion is the only supported path: always use the fused prefix-packing layout.
-        PrefixPackingLayout::from_constraint_types_fused(
-            &cs.constraint_types,
-            true, // GT fused
-            true, // G1 scalar mul fused
-            true, // G1 add fused
-            true, // G2 scalar mul fused
-            true, // G2 add fused
-        )
+        PrefixPackingLayout::from_constraint_types(&cs.constraint_types)
     }
 
     #[tracing::instrument(

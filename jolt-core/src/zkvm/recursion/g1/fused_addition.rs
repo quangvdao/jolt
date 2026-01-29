@@ -1,9 +1,8 @@
-//! Fused G1 addition sumcheck (family-local, Option B).
+//! G1 addition sumcheck (family-local).
 //!
-//! This is the intended "Option B" fusion style for G1Add:
-//! - We fuse the family over a **family-local** constraint index `c_g1add`.
+//! - We batch the family over a **family-local** constraint index `c_g1add`.
 //! - Each committed G1Add term (XP, YP, ..., IsInverse) is treated as an MLE over `c_g1add`.
-//! - Padding rows are gated by a public indicator `I_g1add(c)` so the fused constraint is 0
+//! - Padding rows are gated by a public indicator `I_g1add(c)` so the constraint is 0
 //!   outside the real constraint range.
 //!
 //! Variable order (round order, `BindingOrder::LowToHigh`):
@@ -96,9 +95,9 @@ pub struct FusedG1AddProver {
     pub params: FusedG1AddParams,
     /// Eq polynomial evaluations for the sampled eq_point (over (c,x) domain).
     eq_poly: MultilinearPolynomial<Fq>,
-    /// Public indicator polynomial I_g1add(c), embedded as a fused (c,x) MLE constant in x.
+    /// Public indicator polynomial I_g1add(c), embedded as a (c,x) MLE constant in x.
     indicator_poly: MultilinearPolynomial<Fq>,
-    /// Fused witness polynomials for each G1Add term, interpreted as P_term(c,x).
+    /// Witness polynomials for each G1Add term, interpreted as P_term(c,x).
     term_polys: Vec<MultilinearPolynomial<Fq>>,
     /// Term batching coefficient (δ) for combining constraint terms.
     term_batch_coeff: Fq,
@@ -109,7 +108,7 @@ impl FusedG1AddProver {
         let params = FusedG1AddParams::new(g1_add_rows.len());
         let num_rounds = params.num_rounds();
 
-        // Sample eq_point for the fused c_g1add domain.
+        // Sample eq_point for the c_g1add domain.
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -144,7 +143,7 @@ impl FusedG1AddProver {
             }
         };
 
-        // Build fused term polynomials P_term(c) (one per term), padded to 2^k.
+        // Build term polynomials P_term(c) (one per term), padded to 2^k.
         let mut term_polys = Vec::with_capacity(G1AddTerm::COUNT);
         for term_idx in 0..G1AddTerm::COUNT {
             let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");
@@ -174,7 +173,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedG1AddProver {
         let num_remaining = self.eq_poly.get_num_vars();
         debug_assert!(
             num_remaining > 0,
-            "fused g1add should have at least one round"
+            "g1add should have at least one round"
         );
         let half = 1usize << (num_remaining - 1);
 
@@ -309,7 +308,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG1AddVerifier {
             ind_eval += EqPolynomial::mle(&r_c, &bits);
         }
 
-        // Fetch fused opened claims (one per term).
+        // Fetch opened claims (one per term).
         let mut claims = Vec::with_capacity(G1AddTerm::COUNT);
         for term_idx in 0..G1AddTerm::COUNT {
             let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");

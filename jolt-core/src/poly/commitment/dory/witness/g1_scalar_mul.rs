@@ -4,7 +4,7 @@
 //! See `g1_scalar_mul_spec.md` for the full specification and soundness proof.
 
 use ark_bn254::{Fq, Fr, G1Affine, G1Projective};
-use ark_ec::AffineRepr;
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::ops::Add;
@@ -68,36 +68,30 @@ impl ScalarMultiplicationSteps {
         // For 256-bit scalars, we need 8 variables (2^8 = 256)
         let num_vars = 8;
 
-        // Initialize arrays to collect values for each coordinate across all steps
         let n = bits_msb.len();
-        let mut x_a_values = Vec::with_capacity(n + 1); // A_0, A_1, ..., A_n
-        let mut y_a_values = Vec::with_capacity(n + 1);
-        let mut x_t_values = Vec::with_capacity(n); // T_0, T_1, ..., T_{n-1}
-        let mut y_t_values = Vec::with_capacity(n);
         let mut t_is_infinity_values = Vec::with_capacity(n); // Indicator for T_i = O
         let mut a_is_infinity_values = Vec::with_capacity(n); // Indicator for A_i = O
         let mut bit_values = Vec::with_capacity(n); // Scalar bits as Fq
 
-        // Initialize accumulator with point at infinity (identity)
-        let mut accumulator = G1Projective::zero();
+        // Collect projective points, then batch-normalize once.
+        //
+        // The old code converted to affine on every step, which performs a field inversion per
+        // conversion. For 256 steps, that is extremely expensive. Batch normalization uses a
+        // single batched inversion to convert all points.
+        let mut a_proj: Vec<G1Projective> = Vec::with_capacity(n + 1); // A_0..A_256 (257)
+        let mut t_proj: Vec<G1Projective> = Vec::with_capacity(n); // T_0..T_255 (256)
 
-        // Store A_0 = O (point at infinity)
-        let a_0: G1Affine = accumulator.into();
-        let (x_a_0, y_a_0) = if a_0.is_zero() {
-            (Fq::zero(), Fq::zero())
-        } else {
-            (a_0.x, a_0.y)
-        };
-        x_a_values.push(x_a_0);
-        y_a_values.push(y_a_0);
+        // Initialize accumulator with point at infinity (identity).
+        let mut accumulator = G1Projective::zero();
+        a_proj.push(accumulator);
+        let base_proj = point.into_group();
 
         // Perform double-and-add algorithm and collect values
         // For each bit b_i (i = 0 to 255), compute:
         // T_i = [2]A_i and A_{i+1} = T_i + b_i * P
         for &bit in bits_msb.iter() {
-            // Record if current accumulator is infinity BEFORE doubling
-            let a_affine: G1Affine = accumulator.into();
-            let a_is_inf = if a_affine.is_zero() {
+            // Record if current accumulator is infinity BEFORE doubling.
+            let a_is_inf = if accumulator.is_zero() {
                 Fq::one()
             } else {
                 Fq::zero()
@@ -109,17 +103,10 @@ impl ScalarMultiplicationSteps {
 
             // Double: T_i = [2]A_i
             let doubled = accumulator + accumulator;
-            let t_affine: G1Affine = doubled.into();
-            let (x_t, y_t) = if t_affine.is_zero() {
-                (Fq::zero(), Fq::zero())
-            } else {
-                (t_affine.x, t_affine.y)
-            };
-            x_t_values.push(x_t);
-            y_t_values.push(y_t);
+            t_proj.push(doubled);
 
-            // Compute infinity indicator for T_i
-            let t_is_inf = if t_affine.is_zero() {
+            // Compute infinity indicator for T_i.
+            let t_is_inf = if doubled.is_zero() {
                 Fq::one()
             } else {
                 Fq::zero()
@@ -128,43 +115,69 @@ impl ScalarMultiplicationSteps {
 
             // Conditional add: A_{i+1} = T_i + b_i * P
             accumulator = if bit {
-                doubled.add(&point.into_group())
+                doubled.add(&base_proj)
             } else {
                 doubled
             };
 
-            // Store A_{i+1} coordinates
-            let a_next: G1Affine = accumulator.into();
-            let (x_a_next, y_a_next) = if a_next.is_zero() {
-                (Fq::zero(), Fq::zero())
+            // Store A_{i+1} projective point.
+            a_proj.push(accumulator);
+        }
+
+        // Batch-normalize A_0..A_256 and T_0..T_255 to affine.
+        let a_affines: Vec<G1Affine> = G1Projective::normalize_batch(&a_proj);
+        let t_affines: Vec<G1Affine> = G1Projective::normalize_batch(&t_proj);
+
+        // Extract affine coordinates, using (0,0) for the point at infinity (matches previous code).
+        let mut x_a_values: Vec<Fq> = Vec::with_capacity(256); // A_0..A_255
+        let mut y_a_values: Vec<Fq> = Vec::with_capacity(256);
+        let mut x_t_values: Vec<Fq> = Vec::with_capacity(256); // T_0..T_255
+        let mut y_t_values: Vec<Fq> = Vec::with_capacity(256);
+        let mut x_a_next_values: Vec<Fq> = Vec::with_capacity(256); // A_1..A_256
+        let mut y_a_next_values: Vec<Fq> = Vec::with_capacity(256);
+
+        for i in 0..256 {
+            let a_i = a_affines[i];
+            if a_i.is_zero() {
+                x_a_values.push(Fq::zero());
+                y_a_values.push(Fq::zero());
             } else {
-                (a_next.x, a_next.y)
-            };
-            x_a_values.push(x_a_next);
-            y_a_values.push(y_a_next);
+                x_a_values.push(a_i.x);
+                y_a_values.push(a_i.y);
+            }
+
+            let t_i = t_affines[i];
+            if t_i.is_zero() {
+                x_t_values.push(Fq::zero());
+                y_t_values.push(Fq::zero());
+            } else {
+                x_t_values.push(t_i.x);
+                y_t_values.push(t_i.y);
+            }
+
+            let a_next = a_affines[i + 1];
+            if a_next.is_zero() {
+                x_a_next_values.push(Fq::zero());
+                y_a_next_values.push(Fq::zero());
+            } else {
+                x_a_next_values.push(a_next.x);
+                y_a_next_values.push(a_next.y);
+            }
         }
 
         // Build MLEs from collected values
-        // x_a_values has 257 elements [A_0, ..., A_256], but MLE only needs first 256
-        let x_a_mle = build_mle_from_steps(&x_a_values[..256], num_vars);
-        let y_a_mle = build_mle_from_steps(&y_a_values[..256], num_vars);
+        let x_a_mle = build_mle_from_steps(&x_a_values, num_vars);
+        let y_a_mle = build_mle_from_steps(&y_a_values, num_vars);
         let x_t_mle = build_mle_from_steps(&x_t_values, num_vars);
         let y_t_mle = build_mle_from_steps(&y_t_values, num_vars);
         let t_is_infinity_mle = build_mle_from_steps(&t_is_infinity_values, num_vars);
         let a_is_infinity_mle = build_mle_from_steps(&a_is_infinity_values, num_vars);
         let bit_mle = build_mle_from_steps(&bit_values, num_vars);
 
-        // Build shifted MLEs for A_{i+1} values
-        // x_a_values contains [A_0, A_1, ..., A_256] (257 elements)
-        // We want x_a_next to contain [A_1, A_2, ..., A_256] (256 elements)
-        // This is exactly x_a_values[1..257]
-        let x_a_next_values = x_a_values[1..257].to_vec();
-        let y_a_next_values = y_a_values[1..257].to_vec();
-
         let x_a_next_mle = build_mle_from_steps(&x_a_next_values, num_vars);
         let y_a_next_mle = build_mle_from_steps(&y_a_next_values, num_vars);
 
-        let result: G1Affine = accumulator.into();
+        let result: G1Affine = a_affines[256];
 
         Self {
             point_base: point,

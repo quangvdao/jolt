@@ -1,11 +1,11 @@
-//! Fused G2 scalar multiplication sumchecks (family-local, Option B).
+//! G2 scalar multiplication sumchecks (family-local).
 //!
 //! This mirrors `g1/fused_scalar_multiplication.rs`, but for G2 points over Fq2 (split into
 //! (c0,c1) components over Fq).
 //!
 //! Key conventions:
 //! - Native step domain is 8 variables (256 steps).
-//! - We fuse over a **family-local** constraint index `c_g2smul` (k_smul bits).
+//! - We batch over a **family-local** constraint index `c_g2smul` (k_smul bits).
 //! - For Stage-2 alignment we optionally run over `k_common >= k_smul` c-bits by replicating
 //!   across dummy **low** bits (dummy-low-bits convention).
 //! - The committed witness polynomials are MLEs over `(step, c_g2smul)` (step low bits, c suffix).
@@ -358,7 +358,7 @@ impl FusedG2ScalarMulProver {
     ) -> Self {
         let num_rounds = params.num_rounds();
 
-        // Sample eq point for the fused (step,c) domain.
+        // Sample eq point for the (step,c) domain.
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -414,7 +414,7 @@ impl FusedG2ScalarMulProver {
         let t_indicator = build_term(|r| &r.t_indicator);
         let a_indicator = build_term(|r| &r.a_indicator);
 
-        // Public bit polynomial per instance: 8-var bit table, fused over c.
+        // Public bit polynomial per instance: 8-var bit table, batched over c.
         let mut bit_sc = vec![Fq::zero(); total_len];
         for c_smul in 0..params.num_constraints {
             let src = build_bit_poly_8(&public_inputs[c_smul]);
@@ -427,7 +427,7 @@ impl FusedG2ScalarMulProver {
         }
         let bit = MultilinearPolynomial::LargeScalars(DensePolynomial::new(bit_sc));
 
-        // Public base point polynomials (constant over step, fused over c).
+        // Public base point polynomials (constant over step, batched over c).
         let mut x_p_c0_sc = vec![Fq::zero(); total_len];
         let mut x_p_c1_sc = vec![Fq::zero(); total_len];
         let mut y_p_c0_sc = vec![Fq::zero(); total_len];
@@ -778,9 +778,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG2ScalarMulVerifier
             ind_eval += EqPolynomial::mle(&r_c, &bits);
         }
 
-        // Fused public inputs at this point:
+        // Public inputs at this point:
         // - base points are c-only (replicated across step)
-        // - bit is step-only per instance, then fused across c by Eq(r_c,c)
+        // - bit is step-only per instance, then batched across c by Eq(r_c,c)
         let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
         let mut x_p = Fq2::zero();
         let mut y_p = Fq2::zero();
@@ -795,7 +795,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedG2ScalarMulVerifier
             bit += w_c * self.public_inputs[c].evaluate_bit_mle(&r_step_fq);
         }
 
-        // Fetch fused opened claims (14 committed witness polynomials).
+        // Fetch opened claims (14 committed witness polynomials).
         let mut claims = Vec::with_capacity(14);
         for vp in [
             VirtualPolynomial::g2_scalar_mul_xa_c0_fused(),
@@ -921,7 +921,7 @@ pub struct FusedShiftG2ScalarMulProver {
     eq_minus_one_step_poly: MultilinearPolynomial<Fq>,
     not_last_poly: MultilinearPolynomial<Fq>,
     eq_c_poly: MultilinearPolynomial<Fq>,
-    // fused witness polys (step,c)
+    // witness polys (step,c)
     x_a_c0: MultilinearPolynomial<Fq>,
     x_a_c1: MultilinearPolynomial<Fq>,
     y_a_c0: MultilinearPolynomial<Fq>,

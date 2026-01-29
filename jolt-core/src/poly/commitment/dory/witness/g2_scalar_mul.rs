@@ -3,8 +3,8 @@
 //!
 //! G2 points live over Fq2, so we split each Fq2 coordinate into its (c0, c1) components in Fq.
 
-use ark_bn254::{Fq, Fq2, Fr, G2Affine, G2Projective};
-use ark_ec::AffineRepr;
+use ark_bn254::{Fq, Fr, G2Affine, G2Projective};
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::ops::Add;
@@ -22,17 +22,6 @@ fn build_mle_from_steps(step_values: &[Fq], num_vars: usize) -> Vec<Fq> {
     }
 
     mle
-}
-
-#[inline]
-fn split_fq2_steps(step_values: &[Fq2]) -> (Vec<Fq>, Vec<Fq>) {
-    let mut c0 = Vec::with_capacity(step_values.len());
-    let mut c1 = Vec::with_capacity(step_values.len());
-    for v in step_values {
-        c0.push(v.c0);
-        c1.push(v.c1);
-    }
-    (c0, c1)
 }
 
 /// G2 scalar multiplication witness generation.
@@ -80,32 +69,23 @@ impl G2ScalarMultiplicationSteps {
         let num_vars = 8;
 
         let n = bits_msb.len();
-        let mut x_a_values: Vec<Fq2> = Vec::with_capacity(n + 1); // A_0..A_n
-        let mut y_a_values: Vec<Fq2> = Vec::with_capacity(n + 1);
-        let mut x_t_values: Vec<Fq2> = Vec::with_capacity(n); // T_0..T_{n-1}
-        let mut y_t_values: Vec<Fq2> = Vec::with_capacity(n);
         let mut t_is_infinity_values: Vec<Fq> = Vec::with_capacity(n);
         let mut a_is_infinity_values: Vec<Fq> = Vec::with_capacity(n);
         let mut bit_values: Vec<Fq> = Vec::with_capacity(n);
 
+        // Collect projective points and batch-normalize once (avoids 256+ inversions per op).
+        let mut a_proj: Vec<G2Projective> = Vec::with_capacity(n + 1); // A_0..A_256
+        let mut t_proj: Vec<G2Projective> = Vec::with_capacity(n); // T_0..T_255
+
         // Initialize accumulator with point at infinity (identity)
         let mut accumulator = G2Projective::zero();
-
-        // Store A_0 = O
-        let a_0: G2Affine = accumulator.into();
-        let (x_a_0, y_a_0) = if a_0.is_zero() {
-            (Fq2::zero(), Fq2::zero())
-        } else {
-            (a_0.x, a_0.y)
-        };
-        x_a_values.push(x_a_0);
-        y_a_values.push(y_a_0);
+        a_proj.push(accumulator);
+        let base_proj = point.into_group();
 
         // Double-and-add over MSB-first bits
         for &bit in bits_msb.iter() {
             // Record if A_i is infinity (before doubling)
-            let a_affine: G2Affine = accumulator.into();
-            let a_is_inf = if a_affine.is_zero() {
+            let a_is_inf = if accumulator.is_zero() {
                 Fq::one()
             } else {
                 Fq::zero()
@@ -117,17 +97,10 @@ impl G2ScalarMultiplicationSteps {
 
             // Double: T_i = [2]A_i
             let doubled = accumulator + accumulator;
-            let t_affine: G2Affine = doubled.into();
-            let (x_t, y_t) = if t_affine.is_zero() {
-                (Fq2::zero(), Fq2::zero())
-            } else {
-                (t_affine.x, t_affine.y)
-            };
-            x_t_values.push(x_t);
-            y_t_values.push(y_t);
+            t_proj.push(doubled);
 
             // Indicator for T_i = O
-            let t_is_inf = if t_affine.is_zero() {
+            let t_is_inf = if doubled.is_zero() {
                 Fq::one()
             } else {
                 Fq::zero()
@@ -136,27 +109,74 @@ impl G2ScalarMultiplicationSteps {
 
             // Conditional add: A_{i+1} = T_i + b_i * P
             accumulator = if bit {
-                doubled.add(&point.into_group())
+                doubled.add(&base_proj)
             } else {
                 doubled
             };
 
             // Store A_{i+1}
-            let a_next: G2Affine = accumulator.into();
-            let (x_a_next, y_a_next) = if a_next.is_zero() {
-                (Fq2::zero(), Fq2::zero())
-            } else {
-                (a_next.x, a_next.y)
-            };
-            x_a_values.push(x_a_next);
-            y_a_values.push(y_a_next);
+            a_proj.push(accumulator);
         }
 
-        // Split Fq2 coords into c0/c1 over Fq
-        let (x_a_c0_vals, x_a_c1_vals) = split_fq2_steps(&x_a_values[..256]);
-        let (y_a_c0_vals, y_a_c1_vals) = split_fq2_steps(&y_a_values[..256]);
-        let (x_t_c0_vals, x_t_c1_vals) = split_fq2_steps(&x_t_values);
-        let (y_t_c0_vals, y_t_c1_vals) = split_fq2_steps(&y_t_values);
+        // Batch-normalize, then split Fq2 coords into c0/c1 over Fq.
+        let a_affines: Vec<G2Affine> = G2Projective::normalize_batch(&a_proj);
+        let t_affines: Vec<G2Affine> = G2Projective::normalize_batch(&t_proj);
+
+        let mut x_a_c0_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut x_a_c1_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut y_a_c0_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut y_a_c1_vals: Vec<Fq> = Vec::with_capacity(256);
+
+        let mut x_t_c0_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut x_t_c1_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut y_t_c0_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut y_t_c1_vals: Vec<Fq> = Vec::with_capacity(256);
+
+        let mut x_a_next_c0_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut x_a_next_c1_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut y_a_next_c0_vals: Vec<Fq> = Vec::with_capacity(256);
+        let mut y_a_next_c1_vals: Vec<Fq> = Vec::with_capacity(256);
+
+        for i in 0..256 {
+            let a_i = a_affines[i];
+            if a_i.is_zero() {
+                x_a_c0_vals.push(Fq::zero());
+                x_a_c1_vals.push(Fq::zero());
+                y_a_c0_vals.push(Fq::zero());
+                y_a_c1_vals.push(Fq::zero());
+            } else {
+                x_a_c0_vals.push(a_i.x.c0);
+                x_a_c1_vals.push(a_i.x.c1);
+                y_a_c0_vals.push(a_i.y.c0);
+                y_a_c1_vals.push(a_i.y.c1);
+            }
+
+            let t_i = t_affines[i];
+            if t_i.is_zero() {
+                x_t_c0_vals.push(Fq::zero());
+                x_t_c1_vals.push(Fq::zero());
+                y_t_c0_vals.push(Fq::zero());
+                y_t_c1_vals.push(Fq::zero());
+            } else {
+                x_t_c0_vals.push(t_i.x.c0);
+                x_t_c1_vals.push(t_i.x.c1);
+                y_t_c0_vals.push(t_i.y.c0);
+                y_t_c1_vals.push(t_i.y.c1);
+            }
+
+            let a_next = a_affines[i + 1];
+            if a_next.is_zero() {
+                x_a_next_c0_vals.push(Fq::zero());
+                x_a_next_c1_vals.push(Fq::zero());
+                y_a_next_c0_vals.push(Fq::zero());
+                y_a_next_c1_vals.push(Fq::zero());
+            } else {
+                x_a_next_c0_vals.push(a_next.x.c0);
+                x_a_next_c1_vals.push(a_next.x.c1);
+                y_a_next_c0_vals.push(a_next.y.c0);
+                y_a_next_c1_vals.push(a_next.y.c1);
+            }
+        }
 
         let x_a_mle_c0 = build_mle_from_steps(&x_a_c0_vals, num_vars);
         let x_a_mle_c1 = build_mle_from_steps(&x_a_c1_vals, num_vars);
@@ -172,18 +192,12 @@ impl G2ScalarMultiplicationSteps {
         let a_is_infinity_mle = build_mle_from_steps(&a_is_infinity_values, num_vars);
         let bit_mle = build_mle_from_steps(&bit_values, num_vars);
 
-        // Shifted A_{i+1} MLEs: A_1..A_256
-        let x_a_next_values = x_a_values[1..257].to_vec();
-        let y_a_next_values = y_a_values[1..257].to_vec();
-        let (x_a_next_c0_vals, x_a_next_c1_vals) = split_fq2_steps(&x_a_next_values);
-        let (y_a_next_c0_vals, y_a_next_c1_vals) = split_fq2_steps(&y_a_next_values);
-
         let x_a_next_mle_c0 = build_mle_from_steps(&x_a_next_c0_vals, num_vars);
         let x_a_next_mle_c1 = build_mle_from_steps(&x_a_next_c1_vals, num_vars);
         let y_a_next_mle_c0 = build_mle_from_steps(&y_a_next_c0_vals, num_vars);
         let y_a_next_mle_c1 = build_mle_from_steps(&y_a_next_c1_vals, num_vars);
 
-        let result: G2Affine = accumulator.into();
+        let result: G2Affine = a_affines[256];
 
         Self {
             point_base: point,

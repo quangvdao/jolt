@@ -1,6 +1,6 @@
-//! Fused GT multiplication sumcheck (over GT-local constraint index + u variables).
+//! GT multiplication sumcheck (over GT-local constraint index + u variables).
 //!
-//! End-to-end GT fusion packs GT mul witness polynomials as fused MLEs over `(u, c_gt)`,
+//! GT mul witness polynomials are packed as MLEs over `(u, c_gt)`,
 //! where `c_gt` ranges over only `{GtExp,GtMul}` constraints (in global order), and `u` is
 //! the native 4-var GT element domain (NO replication over step bits).
 //!
@@ -46,7 +46,7 @@ pub struct FusedGtMulParams {
     ///
     /// This is the shared suffix length used for GT in Stage 2 batching.
     pub num_constraint_index_vars_common: usize,
-    /// Number of c-index variables actually used by the committed GTMul fused rows (k_mul).
+    /// Number of c-index variables actually used by the committed GTMul rows (k_mul).
     pub num_constraint_index_vars_family: usize,
     pub num_constraint_vars: usize, // 4 (u-vars)
     /// Number of GTMul constraints (family-local).
@@ -104,7 +104,7 @@ impl SumcheckInstanceParams<Fq> for FusedGtMulParams {
         &self,
         challenges: &[<Fq as JoltField>::Challenge],
     ) -> OpeningPoint<BIG_ENDIAN, Fq> {
-        // Opening point must match committed fused row arity: (u, c_mul_tail).
+        // Opening point must match committed row arity: (u, c_mul_tail).
         debug_assert_eq!(challenges.len(), self.num_rounds());
         let u_vars = self.num_constraint_vars; // 4
         let mut r = Vec::with_capacity(u_vars + self.num_constraint_index_vars_family);
@@ -141,7 +141,7 @@ impl FusedGtMulProver {
         let num_rounds = params.num_rounds();
         let row_size = 1usize << params.num_constraint_vars; // 16
 
-        // Sample eq_point for the fused (u, c_gt) domain.
+        // Sample eq_point for the (u, c_gt) domain.
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -178,7 +178,7 @@ impl FusedGtMulProver {
         }
         let g_poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(g_uc));
 
-        // Helper to build a fused GTMul term table (native 4 vars).
+        // Helper to build a GTMul term table (native 4 vars).
         let build_term = |get_term4: fn(&GtMulConstraintPolynomials<Fq>) -> &Vec<Fq>| {
             let mut term_uc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
             for c in 0..params.num_gt_constraints_padded {
@@ -231,7 +231,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedGtMulProver {
         let num_remaining = self.eq_poly.get_num_vars();
         debug_assert!(
             num_remaining > 0,
-            "fused gtmul should have at least one round"
+            "gtmul should have at least one round"
         );
         let half = 1usize << (num_remaining - 1);
 
@@ -445,7 +445,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtMulVerifier {
             .collect();
         let g_eval = self.eval_g_at_u(&r_u);
 
-        // Fetch fused opened claims.
+        // Fetch opened claims.
         let (_, lhs) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_mul_lhs_fused(),
             SumcheckId::GtMul,

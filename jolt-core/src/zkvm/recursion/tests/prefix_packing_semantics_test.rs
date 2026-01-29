@@ -133,72 +133,48 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
 
     // For every packed entry, verify the block matches bit-reversal of the native table.
     for entry in &layout.entries {
-        // In end-to-end fused modes, some families are emitted as fused blocks that are not tied to
-        // a single `(constraint_idx, poly_type)` row. This legacy test checks per-instance blocks.
-        if entry.is_gt_fused
-            || entry.is_g1_scalar_mul_fused
-            || entry.is_g1_add_fused
-            || entry.is_g2_scalar_mul_fused
-            || entry.is_g2_add_fused
-        {
-            continue;
-        }
         let native_size = 1usize << entry.num_vars;
         let block = &evals[entry.offset..entry.offset + native_size];
-
-        let loc = cs.locator_by_constraint[entry.constraint_idx];
         match entry.poly_type {
             PolyType::RhoPrev => {
-                let ConstraintLocator::GtExp { local } = loc else {
-                    panic!("unexpected locator for RhoPrev: {loc:?}");
-                };
-                let src = &cs.gt_exp_witnesses[local].rho_packed;
+                assert!(entry.is_gt_fused);
+                let src = &cs.gt_exp_witnesses[0].rho_packed;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::Quotient => {
-                let ConstraintLocator::GtExp { local } = loc else {
-                    panic!("unexpected locator for Quotient: {loc:?}");
-                };
-                let src = &cs.gt_exp_witnesses[local].quotient_packed;
+                assert!(entry.is_gt_fused);
+                let src = &cs.gt_exp_witnesses[0].quotient_packed;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
 
             PolyType::MulLhs => {
-                let ConstraintLocator::GtMul { local } = loc else {
-                    panic!("unexpected locator for MulLhs: {loc:?}");
-                };
-                let src = &cs.gt_mul_rows[local].lhs;
+                assert!(entry.is_gt_fused);
+                let src = &cs.gt_mul_rows[0].lhs;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::MulRhs => {
-                let ConstraintLocator::GtMul { local } = loc else {
-                    panic!("unexpected locator for MulRhs: {loc:?}");
-                };
-                let src = &cs.gt_mul_rows[local].rhs;
+                assert!(entry.is_gt_fused);
+                let src = &cs.gt_mul_rows[0].rhs;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::MulResult => {
-                let ConstraintLocator::GtMul { local } = loc else {
-                    panic!("unexpected locator for MulResult: {loc:?}");
-                };
-                let src = &cs.gt_mul_rows[local].result;
+                assert!(entry.is_gt_fused);
+                let src = &cs.gt_mul_rows[0].result;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::MulQuotient => {
-                let ConstraintLocator::GtMul { local } = loc else {
-                    panic!("unexpected locator for MulQuotient: {loc:?}");
-                };
-                let src = &cs.gt_mul_rows[local].quotient;
+                assert!(entry.is_gt_fused);
+                let src = &cs.gt_mul_rows[0].quotient;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
@@ -206,19 +182,15 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
 
             // Spot-check a couple of scalar-mul committed polys.
             PolyType::G1ScalarMulXA => {
-                let ConstraintLocator::G1ScalarMul { local } = loc else {
-                    panic!("unexpected locator for G1ScalarMulXA: {loc:?}");
-                };
-                let src = &cs.g1_scalar_mul_rows[local].x_a;
+                assert!(entry.is_g1_scalar_mul_fused);
+                let src = &cs.g1_scalar_mul_rows[0].x_a;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::G1ScalarMulXANext => {
-                let ConstraintLocator::G1ScalarMul { local } = loc else {
-                    panic!("unexpected locator for G1ScalarMulXANext: {loc:?}");
-                };
-                let src = &cs.g1_scalar_mul_rows[local].x_a_next;
+                assert!(entry.is_g1_scalar_mul_fused);
+                let src = &cs.g1_scalar_mul_rows[0].x_a_next;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
@@ -226,11 +198,9 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
 
             // 0-var: no bit reversal effect; entry.num_vars == 0 and native_size == 1.
             PolyType::G1AddXP => {
-                let ConstraintLocator::G1Add { local } = loc else {
-                    panic!("unexpected locator for G1AddXP: {loc:?}");
-                };
+                assert!(entry.is_g1_add_fused);
                 assert_eq!(native_size, 1);
-                assert_eq!(block[0], cs.g1_add_rows[local].x_p);
+                assert_eq!(block[0], cs.g1_add_rows[0].x_p);
             }
 
             // Other committed entries are exercised by the loop implicitly; we don't need

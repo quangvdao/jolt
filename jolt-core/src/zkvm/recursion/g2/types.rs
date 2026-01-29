@@ -79,7 +79,7 @@ impl G2ScalarMulPublicInputs {
     }
 }
 
-/// Values for G2 addition (used during fused addition).
+/// Values for G2 addition.
 #[derive(Clone, Debug, Default)]
 pub struct G2AddValues<F> {
     pub x_p_c0: F,

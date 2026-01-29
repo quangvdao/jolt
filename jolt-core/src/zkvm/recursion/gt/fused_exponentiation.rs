@@ -1,14 +1,16 @@
-//! Fused packed GT exponentiation sumcheck (over GT-local constraint index + packed (s,x) vars).
+//! Packed GT exponentiation sumcheck (over GT-local constraint index + packed (s,x) vars).
 //!
-//! Goal (end-to-end GT fusion): eliminate per-instance GTExp virtual openings from the recursion
-//! proof payload by treating packed GTExp as a single fused polynomial over:
+//! Goal: eliminate per-instance GTExp virtual openings from the recursion proof payload by treating
+//! packed GTExp as a single polynomial over:
 //! - `c_gt` : GT-local constraint index (only `{GtExp,GtMul}` in global order)
 //! - `x11`  : packed GT exp domain (7 step bits + 4 element bits), layout `idx = x * 128 + s`
 //!
-//! The fused witness polynomials are formed by stacking per-instance packed tables into the
+//! The witness polynomials are formed by stacking per-instance packed tables into the
 //! `c_gt` dimension, with zeros on non-GtExp `c_gt` and on padding rows.
 //!
-//! This mirrors the existing (per-instance) `GtExp` protocol but changes:\n//! - number of rounds: `k_gt + 11`\n//! - openings emitted: only `gt_exp_{rho,rho_next,quotient}_fused()` under `SumcheckId::GtExp`.
+//! This mirrors the existing (per-instance) `GtExp` protocol but changes:
+//! - number of rounds: `k_gt + 11`
+//! - openings emitted: `gt_exp_{rho,rho_next,quotient}_fused()` under `SumcheckId::GtExp`
 
 use crate::{
     field::JoltField,
@@ -48,7 +50,7 @@ const DEGREE: usize = 8; // Was 7, but eq*C has degree 1+7=8
 pub struct FusedGtExpParams {
     /// Number of c-index variables for Stage 1 (k_gt).
     ///
-    /// Stage 1 uses the GT-local c domain so that Stage-2 subprotocols (fused shift + wiring)
+    /// Stage 1 uses the GT-local c domain so that Stage-2 subprotocols (shift + wiring)
     /// can consume Stage-1 openings at a point whose `(s,u)` challenges align with Stage 2.
     pub num_c_vars: usize,
     /// Family-local GTExp suffix length (k_exp).
@@ -134,7 +136,7 @@ impl FusedGtExpProver {
         let num_rounds = params.num_rounds();
         let row_size = 1usize << params.num_x_vars;
 
-        // Sample eq_point for fused (c_gt, x11) domain (same convention as fused G1Add).
+        // Sample eq_point for (c_gt, x11) domain (same convention as G1Add).
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..num_rounds)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -341,7 +343,7 @@ impl FusedGtExpVerifier {
         public_inputs: Vec<GtExpPublicInputs>,
         transcript: &mut T,
     ) -> Self {
-        // Sample the eq point for the fused domain (must match prover).
+        // Sample the eq point for the domain (must match prover).
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..params.num_rounds())
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -383,7 +385,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
     ) -> Fq {
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
 
-        // Eq polynomial convention (same as fused G1Add): reverse challenges to match the
+        // Eq polynomial convention (same as G1Add): reverse challenges to match the
         // big-endian ordering used by `EqPolynomial::evals`.
         let eval_point: Vec<Fq> = sumcheck_challenges
             .iter()
@@ -422,7 +424,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
             .map(|c| (*c).into())
             .collect();
 
-        // Fetch fused opened claims at the sumcheck point.
+        // Fetch opened claims at the sumcheck point.
         let (_, rho) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho_fused(),
             SumcheckId::GtExp,

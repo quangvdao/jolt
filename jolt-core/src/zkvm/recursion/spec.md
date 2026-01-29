@@ -138,47 +138,37 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.4.1 End-to-end fused modes (GT / G1 / G2)
+### 1.4.1 Execution (GT / G1 / G2)
 
-The recursion system supports **end-to-end fused** execution paths for GT, G1, and G2. These modes change:
+Recursion runs in a single mode for GT, G1, and G2:
 
-- the **Stage 2 instance set** (which sumcheck instances run),
-- the **Stage 2 challenge layout** (some instances use extra “constraint-index” variables `c`), and
-- the **Stage 3 prefix-packing layout** (fused virtual openings are consumed instead of per-instance ones).
-
-These modes are controlled by boolean flags carried in `RecursionVerifierInput` (not just environment variables), because the guest verifier
-cannot safely rely on host environment variables.
-
-#### High-level intent
-
-- **Legacy (non-fused)**: each operation instance contributes **per-instance** virtual openings at the Stage-2 point `r_x` (or a suffix thereof).
-- **Fused**: a whole family contributes **one set of fused openings**, indexed by an additional constraint-index variable segment `c`.
-  Fused wiring/shift instances **reuse** those cached openings and therefore do **not** add new PCS openings.
+- **Stage 2**: each family contributes cached openings (indexed by additional family-local index variables where applicable).
+  Shift/wiring instances reuse those cached openings and therefore do not add new PCS openings.
+- **Stage 3**: prefix packing consumes only these cached openings.
 
 #### Stage 2 ordering constraints (soundness-critical)
 
 Stage 2 is a single `BatchedSumcheck`, but the *order of instances inside it matters* because later instances may read cached openings
 produced by earlier ones.
 
-- **GT fused end-to-end** (`enable_gt_fused_end_to_end`):
-  - `FusedGtExpStage2Openings*` must run **before** `FusedGtShift*` and any fused GT wiring that consumes `gt_exp_rho_fused()` /
-    `gt_exp_quotient_fused()` at the Stage-2 point.
-  - This is enforced by instance ordering in `RecursionProver::prove_stage2` / `RecursionVerifier::verify_stage2`.
+- `FusedGtExpStage2Openings*` must run **before** `FusedGtShift*` and any GT wiring that consumes
+  `gt_exp_rho_fused()` / `gt_exp_quotient_fused()` at the Stage-2 point.
+  This is enforced by instance ordering in `RecursionProver::prove_stage2` / `RecursionVerifier::verify_stage2`.
 
-- **G1 fused scalar-mul / shift**:
+- **G1 scalar-mul / shift**:
   - `FusedG1ScalarMul*` must run **before** `FusedShiftG1ScalarMul*`, because the shift check intentionally caches **no new openings**
     and instead reuses the scalar-mul cached openings under `SumcheckId::G1ScalarMul`.
 
-- **G2 fused scalar-mul / shift**:
+- **G2 scalar-mul / shift**:
   - `FusedG2ScalarMul*` must run **before** `FusedShiftG2ScalarMul*` for the same reason (`SumcheckId::G2ScalarMul`).
 
-- **Fused wiring backends** (`gt/fused_wiring.rs`, `g1/fused_wiring.rs`, `g2/fused_wiring.rs`) are appended **last** in Stage 2.
+- **Wiring backends** (`gt/fused_wiring.rs`, `g1/fused_wiring.rs`, `g2/fused_wiring.rs`) are appended **last** in Stage 2.
   They are “openings consumers”: they read cached openings but do not create new ones.
 
-#### Split-\(k\) / dummy-bit convention (shared across fused families)
+#### Split-\(k\) / dummy-bit convention (shared across families)
 
-Fused wiring uses a **common** constraint-index arity \(k_{\text{common}}\) (e.g. \(k_{GT}\), \(k_{G1}\), \(k_{G2}\)) that is the max
-over the relevant families (e.g. scalar-mul vs add). Each family’s committed fused polynomials remain **family-local** (smaller \(k\)),
+Wiring uses a **common** constraint-index arity \(k_{\text{common}}\) (e.g. \(k_{GT}\), \(k_{G1}\), \(k_{G2}\)) that is the max
+over the relevant families (e.g. scalar-mul vs add). Each family’s committed polynomials remain **family-local** (smaller \(k\)),
 and are embedded into the common domain by replicating across **dummy low bits**:
 
 - **dummy bits are low bits** of `c_common`
@@ -191,15 +181,15 @@ This convention is implemented for:
 - G1: `g1/fused_scalar_multiplication.rs`, `g1/fused_wiring.rs`, `g1/indexing.rs`
 - G2: `g2/fused_scalar_multiplication.rs`, `g2/fused_wiring.rs`, `g2/indexing.rs`
 
-#### Opening-point normalization for fused scalar-mul
+#### Opening-point normalization for scalar-mul
 
-In fused G1/G2 scalar-mul, the sumcheck runs over `(step, c_common)` (to align with wiring), but the committed fused witness tables are
+In G1/G2 scalar-mul, the sumcheck runs over `(step, c_common)` (to align with wiring), but the committed witness tables are
 family-local over `(step, c_smul)`. Therefore the opening point used for caching openings under `SumcheckId::{G1ScalarMul,G2ScalarMul}`
 is formed by **dropping the dummy low c-bits** and keeping only the `c` tail:
 
 - opening point = `(step_vars, c_tail)` (in big-endian point order for the PCS accumulator)
 
-This is why the fused shift instances can safely reuse openings: they see the same Stage-2 challenges and normalize to the same opening point.
+This is why the shift instances can safely reuse openings: they see the same Stage-2 challenges and normalize to the same opening point.
 
 #### External step (outside this SNARK): final Dory multi-pairing check
 
@@ -1032,8 +1022,8 @@ so the outside verifier can perform the final pairing check.
 ## 3. Stage 2: Wiring / Boundary Constraints (Copy Constraints)
 
 > **Implementation status**: AST-derived wiring/boundary constraints are **implemented** and enabled by default.
-> They run as sumcheck instances appended at the end of the Stage 2 batched sumcheck (see `jolt-core/src/zkvm/recursion/{gt,g1,g2}/wiring.rs`
-> and, in fully fused mode, `.../{gt,g1,g2}/fused_wiring.rs`).
+> They run as sumcheck instances appended at the end of the Stage 2 batched sumcheck
+> (see `jolt-core/src/zkvm/recursion/{gt,g1,g2}/fused_wiring.rs`).
 > The design doc is `WIRING_SUMCHECK_PLAN.md` (repo root), plus this Section 3.
 
 After Stage 2, we have many virtual polynomial claims $(v_0, v_1, \ldots, v_{n-1})$ at a shared point $r_x$.
@@ -1107,9 +1097,9 @@ At a high level, for edges \(e\) we check:
 \]
 where \(\lambda_e\) are transcript challenges (Fiat–Shamir) to prevent cancellation.
 
-### 3.5 Fully fused wiring (GT/G1/G2)
+### 3.5 Wiring backends (GT/G1/G2)
 
-When fully fused mode is enabled for a family, Stage 2 uses fused wiring backends:
+Stage 2 uses wiring backends:
 
 - GT: `gt/fused_wiring.rs`
 - G1: `g1/fused_wiring.rs`
@@ -1119,19 +1109,19 @@ These backends are designed to:
 
 - run over a shared Stage-2 challenge point that includes an additional constraint-index segment `c_common`,
 - implement split-\(k\) dummy handling via the shared convention in Section 1.4.1, and
-- **consume cached fused openings** (verifier-side) instead of requesting per-edge/per-instance PCS openings.
+- consume cached openings (verifier-side) instead of requesting per-edge/per-instance PCS openings.
 
-In fully fused mode:
+Concretely:
 
-- `G1ScalarMul` caches fused port openings under `SumcheckId::G1ScalarMul` (see `g1/fused_scalar_multiplication.rs`).
-- `G2ScalarMul` caches fused port openings under `SumcheckId::G2ScalarMul` (see `g2/fused_scalar_multiplication.rs`).
-- `G1Add` caches fused port/aux openings under `SumcheckId::G1Add` (see `g1/fused_addition.rs`).
-- `G2Add` caches fused port/aux openings under `SumcheckId::G2Add` (see `g2/fused_addition.rs`).
-- Fused wiring instances cache **no openings**; they only add a Stage-2 sumcheck equation that binds those openings to the verifier-derived wiring plan.
+- `G1ScalarMul` caches port openings under `SumcheckId::G1ScalarMul` (see `g1/fused_scalar_multiplication.rs`).
+- `G2ScalarMul` caches port openings under `SumcheckId::G2ScalarMul` (see `g2/fused_scalar_multiplication.rs`).
+- `G1Add` caches port/aux openings under `SumcheckId::G1Add` (see `g1/fused_addition.rs`).
+- `G2Add` caches port/aux openings under `SumcheckId::G2Add` (see `g2/fused_addition.rs`).
+- Wiring instances cache **no openings**; they only add a Stage-2 sumcheck equation that binds those openings to the verifier-derived wiring plan.
 
-### 3.6 Soundness audit checklist (wiring + fused split-\(k\))
+### 3.6 Soundness audit checklist (wiring + split-\(k\))
 
-This checklist is intended for “red-team” review of the fused protocols.
+This checklist is intended for “red-team” review of the protocols.
 
 - **Wiring-plan edge coverage** (`wiring_plan.rs`):
   - Ensure every AST value that flows into an op port is either:
@@ -1144,13 +1134,13 @@ This checklist is intended for “red-team” review of the fused protocols.
   - Any selector replicated across dummy bits must be paired with \(\beta(\text{dummy}) = 2^{-\text{dummy}}\) normalization.
   - Verify both endpoints of each edge use the correct family’s `k_*` and the correct \(\beta\).
 
-- **Opening-point normalization** (fused scalar-mul):
-  - Fused scalar-mul openings must be cached at `(step, c_tail)` (dropping dummy low bits), and any consumer (shift/wiring)
+- **Opening-point normalization** (scalar-mul):
+  - Scalar-mul openings must be cached at `(step, c_tail)` (dropping dummy low bits), and any consumer (shift/wiring)
     must use the same normalized point.
 
 - **Ordering / cache dependencies** (Stage 2 instance list):
-  - `FusedGtExpStage2Openings*` must run before `FusedGtShift*` and fused GT wiring.
-  - Fused scalar-mul must run before fused shift (G1/G2).
+  - `FusedGtExpStage2Openings*` must run before `FusedGtShift*` and GT wiring.
+  - Scalar-mul must run before shift (G1/G2).
   - Wiring instances must run last.
 
 - **Boundary bindings**:
@@ -1191,15 +1181,13 @@ serialized proof/encoding. Any future modifications must be versioned (and artif
 proof incompatibility.
 
 This is implemented by `PrefixPackingLayout::from_constraint_types` in `jolt-core/src/zkvm/recursion/prefix_packing.rs`.
-When any end-to-end fused mode is enabled (GT and/or G1 and/or G2), the code uses
-`PrefixPackingLayout::from_constraint_types_fused(...)` instead.
 
 ### 4.2 Stage 3 protocol
 
 **Inputs**:
 - Stage-2 batched point `r_stage2` (in sumcheck round order; shorter Stage-2 instances are suffix-aligned in the batched sumcheck)
-- Stage-2 virtual opening claims \(v_e\) cached in the opening accumulator (for legacy families these are per-instance claims at `r_x`;
-  for fused families these are fused claims at a normalized opening point, e.g. `(step, c_tail)` for scalar-mul fusion)
+- Stage-2 virtual opening claims \(v_e\) cached in the opening accumulator (for per-instance families these are claims at `r_x`;
+  for indexed families these are claims at a normalized opening point, e.g. `(step, c_tail)` for scalar-mul)
 
 **Protocol**:
 1. **Sample**: fresh packing challenges `r_pack` from the transcript (Fiat–Shamir).
@@ -1377,7 +1365,7 @@ The Stage-2 proof size is \(O(\text{max\_num\_rounds} \cdot \text{max\_degree})\
 **Stage 3** (prefix packing reduction):
 $$|P_3| = 1 \text{ element} \quad (\mathrm{stage3\_packed\_eval})$$
 
-**Legacy (removed)**: Stage 4/5 jagged transform + assist are no longer part of the proof.
+**Removed**: Stage 4/5 jagged transform + assist are no longer part of the proof.
 
 **PCS opening proof** (Hyrax over Grumpkin):
 $$|P_{\text{pcs}}| = O(\sqrt{\text{dense\_size}}) \text{ group elements}$$
@@ -1428,7 +1416,7 @@ This example isolates just the Stage 1 representation cost for a single 256-bit 
 
 ### 7.9 Comparison: Sparse vs Dense
 
-> **Legacy note**: The discussion below compares the removed jagged pipeline to a sparse, padded matrix representation.
+> **Note**: The discussion below compares the removed jagged pipeline to a sparse, padded matrix representation.
 > With prefix packing, we commit directly to the packed polynomial of size `dense_size` (no padding) and do not run Stage 4/5.
 
 Without jagged transform (sparse):
@@ -1503,7 +1491,6 @@ jolt-core/src/zkvm/recursion/
 ├── prover.rs                  # orchestrates stages
 ├── verifier.rs
 ├── prefix_packing.rs          # Stage 3 (prefix packing reduction)
-├── virtualization.rs          # helper utilities for virtual claims
 ├── constraints/               # constraint-system + matrix layout
 │   ├── config.rs
 │   ├── sumcheck.rs
@@ -1523,7 +1510,7 @@ jolt-core/src/zkvm/recursion/
 ```
 
 **Note on stage naming**: The “Stage 1..3” names refer to protocol phases (see Section 1.4 and the prover/verifier in `prover.rs` / `verifier.rs`).
-The code is organized by gadget family (`gt/`, `g1/`, `g2/`) plus the shared back-end (`constraints/`, `prefix_packing.rs`, `virtualization.rs`).
+The code is organized by gadget family (`gt/`, `g1/`, `g2/`) plus the shared back-end (`constraints/`, `prefix_packing.rs`).
 
 ### 8.2 The Offloading Pattern
 
@@ -1781,7 +1768,7 @@ let (witness_collection, ast) = PCS::witness_gen_with_ast(
     &joint_claim,
     &joint_commitment,
 )?;
-let prover = RecursionProver::new_from_witnesses(&witness_collection, Some(combine_witness))?;
+let prover = RecursionProver::new_from_witnesses(witness_collection, Some(combine_witness))?;
 ```
 
 **Verifier-side topology**: the recursion verifier must not trust a prover-supplied AST. In the current verifier, Stage 8 recursion verification
@@ -1880,22 +1867,10 @@ Prefix packing (Stage 3) reduces GPU memory pressure by avoiding padded sparse r
 
 ### 8.13 Environment Flags and Feature Gates
 
-The recursion implementation includes several feature toggles (primarily for benchmarking/debugging):
+Recursion runs in a single mode (GT/G1/G2).
 
-- **Important (guest soundness)**: recursion is **fused-only** (GT/G1/G2). The verifier must not
-  rely on environment variables to select between legacy vs fused paths; there is only one path now.
-
-- **Stage 2 verifier toggles** (see `jolt-core/src/zkvm/recursion/verifier.rs`):
-  - `JOLT_RECURSION_ENABLE_SHIFT_RHO` (default `true`)
-  - `JOLT_RECURSION_ENABLE_SHIFT_G1_SCALAR_MUL` (default `true`)
-  - `JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL` (default `true`)
-  - `JOLT_RECURSION_ENABLE_PGX_REDUCTION` (default `true`)
-  - `JOLT_RECURSION_ENABLE_WIRING`, `JOLT_RECURSION_ENABLE_WIRING_GT`, `..._G1`, `..._G2` (defaults `true`)
-  - (Removed) `JOLT_RECURSION_ENABLE_*_FUSED_END_TO_END`: fused is always enabled.
-  - `JOLT_RECURSION_STOP_AFTER_STAGE2` (tests only): early-exit hook to isolate Stage 2 failures.
-
-- **Witness-generation toggles** (see `jolt-core/src/zkvm/recursion/witness_generation.rs`): enable/disable inclusion of specific constraint families
-  (GT mul, G1/G2 scalar mul, G1/G2 add).
+- **Stage 2 subprotocols**: shift checks, claim reduction, and wiring/boundary constraints are always enabled (when the corresponding family is present).
+- **Tests only**: `JOLT_RECURSION_STOP_AFTER_STAGE2` is an early-exit hook to isolate Stage 2 failures.
 
 ---
 

@@ -1,6 +1,6 @@
-//! Fused GT wiring (copy/boundary) sumcheck (sound, split-k aware).
+//! GT wiring (copy/boundary) sumcheck (sound, split-k aware).
 //!
-//! This is the GT wiring backend used in fused-only recursion.
+//! This is the GT wiring backend used by recursion.
 //! It enforces that GT producer outputs match GT consumer inputs (plus boundary constants)
 //! according to the verifier-derived `WiringPlan` edge list.
 //!
@@ -28,8 +28,8 @@
 //!   - `Eq(s, 0)` if the edge source is `GtMulResult` (u-only values).
 //!
 //! Importantly, the *port polynomials* for GTExp/GTmul are treated as **multilinear in `c`**
-//! (fused over the instance index). This allows the verifier to consume the already-cached
-//! fused openings (e.g. `gt_exp_rho_fused()`), rather than per-instance openings.
+//! (over the instance index). This allows the verifier to consume already-cached
+//! openings (e.g. `gt_exp_rho_fused()`), rather than per-instance openings.
 //!
 //! ## Variable order (Stage 2)
 //! This instance uses the same Stage-2 GT ordering as the packed GT gadgets:
@@ -41,7 +41,7 @@
 //!
 //! ## Soundness note
 //! This backend does **not** rely on prover-emitted auxiliary wiring sums (`gt_wiring_src_sum/dst_sum`).
-//! It is therefore safe to use in fully fused mode without a separate “binding safety net”.
+//! It is therefore safe to use without a separate “binding safety net”.
 
 use ark_bn254::{Fq, Fq12};
 use ark_ff::{Field, One, Zero};
@@ -156,9 +156,9 @@ struct CPhaseState {
     pairing_rhs_at_r: Fq,
     /// Per-edge eq_s evaluated at bound `r_step` (scalar).
     edge_eq_s_at_r: Vec<Fq>,
-    /// Fused GTExp rho values as an MLE over the **common** c domain (k vars), replicated across dummy bits.
+    /// GTExp rho values as an MLE over the **common** c domain (k vars), replicated across dummy bits.
     rho_c: MultilinearPolynomial<Fq>,
-    /// Fused GTMul ports as MLEs over the **common** c domain (k vars), replicated across dummy bits.
+    /// GTMul ports as MLEs over the **common** c domain (k vars), replicated across dummy bits.
     mul_lhs_c: MultilinearPolynomial<Fq>,
     mul_rhs_c: MultilinearPolynomial<Fq>,
     mul_result_c: MultilinearPolynomial<Fq>,
@@ -251,9 +251,9 @@ impl<T: Transcript> FusedWiringGtProver<T> {
         let eq_s0_7 = eq_lsb_evals::<Fq>(&s0);
         let eq_s_default = MultilinearPolynomial::from(pad_7var_to_11var_replicated(&eq_s0_7));
 
-        // IMPORTANT: in the fully fused wiring backend, the verifier consumes fused openings
-        // like `gt_mul_lhs_fused()` / `gt_exp_rho_fused()`. Those are evaluations of *fully fused*
-        // (c-batched) polynomials at the Stage-2 point, which in general depend on **all**
+        // IMPORTANT: the verifier consumes openings like `gt_mul_lhs_fused()` /
+        // `gt_exp_rho_fused()`. Those are evaluations of (c-batched) polynomials at the
+        // Stage-2 point, which in general depend on **all**
         // instances in the family (even if a particular instance is not referenced by any edge).
         //
         // Therefore, we must materialize the full family tables here (no "need_*" filtering),
@@ -798,7 +798,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        // No new openings: this instance consumes fused openings cached by earlier GT instances.
+        // No new openings: this instance consumes openings cached by earlier GT instances.
     }
 }
 
@@ -921,7 +921,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringGtVerifier {
         let beta_exp = beta(dummy_exp);
         let beta_mul = beta(dummy_mul);
 
-        // Fused port openings (already cached by earlier GT instances in Stage 2).
+        // Port openings (already cached by earlier GT instances in Stage 2).
         let (_rho_point, rho_fused) = acc.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho_fused(),
             SumcheckId::GtExpClaimReduction,

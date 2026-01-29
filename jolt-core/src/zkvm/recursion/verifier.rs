@@ -50,7 +50,6 @@ use super::{
         types::GtExpPublicInputs,
     },
     prover::RecursionProof,
-    virtualization::extract_virtual_claims_from_accumulator,
     WiringPlan,
 };
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
@@ -91,7 +90,7 @@ pub struct RecursionVerifierInput {
     pub num_vars: usize,
     /// Number of constraint variables (x variables) in the matrix
     pub num_constraint_vars: usize,
-    /// Number of s-variables for virtualization
+    /// Number of s-variables (log2 of matrix row domain)
     pub num_s_vars: usize,
     /// Total number of constraints
     pub num_constraints: usize,
@@ -302,8 +301,9 @@ impl RecursionVerifier<Fq> {
         drop(_cycle_stage2);
 
         // Stage 2 challenges layout:
-        // - legacy: r_stage2 = r_x (length = num_constraint_vars)
-        // - fused:  r_stage2 includes extra index variables `r_c` (length >= num_constraint_vars + k)
+        // - `r_stage2` ends with `r_x` (length = num_constraint_vars)
+        // - the prefix may include family-index variables (e.g. `c_gt`) depending on which
+        //   constraint families are present
         //
         // NOTE: Recursion constraint sumchecks are **suffix-aligned** in the batched sumcheck
         // (`round_offset = max_num_rounds - num_rounds`), so shorter points are suffixes of longer
@@ -322,7 +322,7 @@ impl RecursionVerifier<Fq> {
         let r_x_start = r_stage2.len() - num_constraint_vars;
         let _r_x = &r_stage2[r_x_start..];
         // If the Stage-2 point contains the GT-local `c_gt` suffix (length k_gt), it is the slice
-        // immediately before `r_x`. Other fused-family suffixes may exist, but are not interpreted here.
+        // immediately before `r_x`. Other family suffixes may exist, but are not interpreted here.
         let k = k_gt(&self.input.constraint_types);
         let _r_c_gt = if r_x_start >= k {
             &r_stage2[r_x_start - k..r_x_start]
@@ -380,7 +380,7 @@ impl RecursionVerifier<Fq> {
             return Err("No GtExp constraints to verify in Stage 1".into());
         }
 
-        // Always use fused GT exp path
+        // Use packed GT exp path
         let params = FusedGtExpParams::from_constraint_types(&self.input.constraint_types);
         let verifier = FusedGtExpVerifier::new(
             params,
@@ -400,23 +400,6 @@ impl RecursionVerifier<Fq> {
         transcript: &mut T,
         accumulator: &mut VerifierOpeningAccumulator<Fq>,
     ) -> Result<Vec<<Fq as JoltField>::Challenge>, Box<dyn std::error::Error>> {
-        let env_flag_default = |name: &str, default: bool| -> bool {
-            std::env::var(name)
-                .ok()
-                .map(|v| v != "0" && v.to_lowercase() != "false")
-                .unwrap_or(default)
-        };
-        let enable_shift_rho = env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_RHO", true);
-        let enable_shift_g1_scalar_mul =
-            env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G1_SCALAR_MUL", true);
-        let enable_shift_g2_scalar_mul =
-            env_flag_default("JOLT_RECURSION_ENABLE_SHIFT_G2_SCALAR_MUL", true);
-        let enable_claim_reduction = env_flag_default("JOLT_RECURSION_ENABLE_PGX_REDUCTION", true);
-        let enable_wiring = env_flag_default("JOLT_RECURSION_ENABLE_WIRING", true);
-        let enable_wiring_gt = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_GT", true);
-        let enable_wiring_g1 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G1", true);
-        let enable_wiring_g2 = env_flag_default("JOLT_RECURSION_ENABLE_WIRING_G2", true);
-
         let mut verifiers: Vec<Box<dyn SumcheckInstanceVerifier<Fq, T>>> = Vec::new();
 
         // Count constraints by type and collect per-type sequential indices (matching the extractor).
@@ -465,21 +448,16 @@ impl RecursionVerifier<Fq> {
             }
         }
 
-        // Packed GT exp auxiliary subprotocols (shift rho + claim reduction) - always fused.
+        // Packed GT exp auxiliary subprotocols (shift rho + claim reduction).
         if num_gt_exp > 0 {
-            // Ordering matters: fused shift expects fused GTExp rho to already exist at the
-            // Stage-2 point (emitted by the fused claim-reduction/openings instance).
-            if enable_claim_reduction {
-                verifiers.push(Box::new(FusedGtExpStage2OpeningsVerifier::new(
-                    &self.input.constraint_types,
-                )));
-            }
+            // Ordering matters: shift expects the GTExp rho to already exist at the Stage-2 point
+            // (emitted by the claim-reduction/openings instance).
+            verifiers.push(Box::new(FusedGtExpStage2OpeningsVerifier::new(
+                &self.input.constraint_types,
+            )));
 
-            if enable_shift_rho {
-                let params =
-                    FusedGtShiftParams::from_constraint_types(&self.input.constraint_types);
-                verifiers.push(Box::new(FusedGtShiftVerifier::new(params)));
-            }
+            let params = FusedGtShiftParams::from_constraint_types(&self.input.constraint_types);
+            verifiers.push(Box::new(FusedGtShiftVerifier::new(params)));
         }
 
         // GT mul
@@ -499,7 +477,7 @@ impl RecursionVerifier<Fq> {
             verifiers.push(Box::new(verifier));
         }
 
-        // G1 scalar mul - always fused
+        // G1 scalar mul
         if num_g1_scalar_mul > 0 {
             let k_common = k_g1(&self.input.constraint_types);
             debug_assert_eq!(
@@ -515,14 +493,12 @@ impl RecursionVerifier<Fq> {
                 transcript,
             )));
 
-            // Fused shift check (no additional openings; reuses scalar-mul cached openings).
-            if enable_shift_g1_scalar_mul {
-                verifiers.push(Box::new(FusedShiftG1ScalarMulVerifier::new_with_k_common(
-                    num_g1_scalar_mul,
-                    k_common,
-                    transcript,
-                )));
-            }
+            // Shift check (no additional openings; reuses scalar-mul cached openings).
+            verifiers.push(Box::new(FusedShiftG1ScalarMulVerifier::new_with_k_common(
+                num_g1_scalar_mul,
+                k_common,
+                transcript,
+            )));
         }
 
         // G2 scalar mul
@@ -542,17 +518,15 @@ impl RecursionVerifier<Fq> {
                 transcript,
             )));
 
-            // Fused shift check (no additional openings; reuses scalar-mul cached openings).
-            if enable_shift_g2_scalar_mul {
-                verifiers.push(Box::new(FusedShiftG2ScalarMulVerifier::new_with_k_common(
-                    num_g2_scalar_mul,
-                    k_common,
-                    transcript,
-                )));
-            }
+            // Shift check (no additional openings; reuses scalar-mul cached openings).
+            verifiers.push(Box::new(FusedShiftG2ScalarMulVerifier::new_with_k_common(
+                num_g2_scalar_mul,
+                k_common,
+                transcript,
+            )));
         }
 
-        // G1 add - always fused
+        // G1 add
         if num_g1_add > 0 {
             let params = FusedG1AddParams::new(num_g1_add);
             let verifier = FusedG1AddVerifier::new(params, transcript);
@@ -567,25 +541,23 @@ impl RecursionVerifier<Fq> {
         }
 
         // Wiring/boundary constraints (AST-driven), appended LAST in Stage 2
-        if enable_wiring {
-            if enable_wiring_gt && !self.input.wiring.gt.is_empty() {
-                verifiers.push(Box::new(FusedWiringGtVerifier::new(
-                    &self.input,
-                    transcript,
-                )));
-            }
-            if enable_wiring_g1 && !self.input.wiring.g1.is_empty() {
-                verifiers.push(Box::new(FusedWiringG1Verifier::new(
-                    &self.input,
-                    transcript,
-                )));
-            }
-            if enable_wiring_g2 && !self.input.wiring.g2.is_empty() {
-                verifiers.push(Box::new(FusedWiringG2Verifier::new(
-                    &self.input,
-                    transcript,
-                )));
-            }
+        if !self.input.wiring.gt.is_empty() {
+            verifiers.push(Box::new(FusedWiringGtVerifier::new(
+                &self.input,
+                transcript,
+            )));
+        }
+        if !self.input.wiring.g1.is_empty() {
+            verifiers.push(Box::new(FusedWiringG1Verifier::new(
+                &self.input,
+                transcript,
+            )));
+        }
+        if !self.input.wiring.g2.is_empty() {
+            verifiers.push(Box::new(FusedWiringG2Verifier::new(
+                &self.input,
+                transcript,
+            )));
         }
 
         if verifiers.is_empty() {
@@ -609,15 +581,8 @@ impl RecursionVerifier<Fq> {
         r_stage2: &[<Fq as JoltField>::Challenge],
         stage3_packed_eval: Fq,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Derive the public packing layout (fused for all families).
-        let layout = PrefixPackingLayout::from_constraint_types_fused(
-            &self.input.constraint_types,
-            true, // enable_gt_fused
-            true, // enable_g1_scalar_mul_fused
-            true, // enable_g1_add_fused
-            true, // enable_g2_scalar_mul_fused
-            true, // enable_g2_add_fused
-        );
+        // Derive the public packing layout.
+        let layout = PrefixPackingLayout::from_constraint_types(&self.input.constraint_types);
         let max_native_vars = layout.entries.iter().map(|e| e.num_vars).max().unwrap_or(0);
         if r_stage2.len() < max_native_vars {
             return Err(format!(
@@ -647,19 +612,6 @@ impl RecursionVerifier<Fq> {
         let mut r_full_lsb: Vec<Fq> = Vec::with_capacity(layout.num_dense_vars);
         r_full_lsb.extend_from_slice(&r_native_fq);
         r_full_lsb.extend_from_slice(&r_pack);
-
-        // Extract Stage 2 virtual claims in the standard [constraint-major, poly-type-minor] layout.
-        let virtual_claims = extract_virtual_claims_from_accumulator(
-            accumulator,
-            &self.input.constraint_types,
-            &self.input.gt_exp_public_inputs,
-            true, // enable_gt_fused
-            true, // enable_g1_scalar_mul_fused
-            true, // enable_g1_add_fused
-            true, // enable_g2_scalar_mul_fused
-            true, // enable_g2_add_fused
-        );
-        let num_poly_types = PolyType::NUM_TYPES;
 
         // Compute the expected packed evaluation.
         let expected = packed_eval_from_claims(&layout, &r_full_lsb, |entry| {
@@ -801,11 +753,7 @@ impl RecursionVerifier<Fq> {
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2Add);
                 claim
             } else {
-                let claim_idx = entry.constraint_idx * num_poly_types + (entry.poly_type as usize);
-                virtual_claims
-                    .get(claim_idx)
-                    .copied()
-                    .unwrap_or_else(Fq::zero)
+                panic!("unexpected prefix-packing entry without a family tag: {:?}", entry)
             }
         });
 

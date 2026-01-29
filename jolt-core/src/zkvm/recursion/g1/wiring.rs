@@ -106,7 +106,7 @@ impl CPhaseState {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusedWiringG1Prover<T: Transcript> {
+pub struct WiringG1Prover<T: Transcript> {
     edges: Vec<G1WiringEdge>,
     lambdas: Vec<Fq>,
     mu: Fq,
@@ -139,7 +139,7 @@ pub struct FusedWiringG1Prover<T: Transcript> {
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<T: Transcript> FusedWiringG1Prover<T> {
+impl<T: Transcript> WiringG1Prover<T> {
     pub fn new(
         cs: &ConstraintSystem,
         edges: Vec<G1WiringEdge>,
@@ -429,7 +429,7 @@ impl<T: Transcript> FusedWiringG1Prover<T> {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringG1Prover<T> {
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -725,7 +725,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringG1Prover<T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusedWiringG1Verifier {
+pub struct WiringG1Verifier {
     edges: Vec<G1WiringEdge>,
     lambdas: Vec<Fq>,
     mu: Fq,
@@ -737,7 +737,7 @@ pub struct FusedWiringG1Verifier {
     smul_bases: Vec<(Fq, Fq, Fq)>,
 }
 
-impl FusedWiringG1Verifier {
+impl WiringG1Verifier {
     pub fn new<T: Transcript>(input: &RecursionVerifierInput, transcript: &mut T) -> Self {
         let mu: Fq = transcript.challenge_scalar();
         let mu2 = mu * mu;
@@ -780,7 +780,7 @@ impl FusedWiringG1Verifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG1Verifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -820,15 +820,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG1Verifier {
 
         // Fetch scalar-mul port openings.
         let (_, xa_next) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
+            VirtualPolynomial::g1_scalar_mul_xa_next(),
             SumcheckId::G1ScalarMul,
         );
         let (_, ya_next) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_ya_next_fused(),
+            VirtualPolynomial::g1_scalar_mul_ya_next(),
             SumcheckId::G1ScalarMul,
         );
         let (_, a_ind) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_a_indicator_fused(),
+            VirtualPolynomial::g1_scalar_mul_a_indicator(),
             SumcheckId::G1ScalarMul,
         );
         let smul_out_fused = xa_next + self.mu * ya_next + self.mu2 * a_ind;
@@ -837,15 +837,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG1Verifier {
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G1Add).1
         };
-        let add_p_fused = get_add(VirtualPolynomial::g1_add_xp_fused())
-            + self.mu * get_add(VirtualPolynomial::g1_add_yp_fused())
-            + self.mu2 * get_add(VirtualPolynomial::g1_add_p_indicator_fused());
-        let add_q_fused = get_add(VirtualPolynomial::g1_add_xq_fused())
-            + self.mu * get_add(VirtualPolynomial::g1_add_yq_fused())
-            + self.mu2 * get_add(VirtualPolynomial::g1_add_q_indicator_fused());
-        let add_r_fused = get_add(VirtualPolynomial::g1_add_xr_fused())
-            + self.mu * get_add(VirtualPolynomial::g1_add_yr_fused())
-            + self.mu2 * get_add(VirtualPolynomial::g1_add_r_indicator_fused());
+        let add_p_fused = get_add(VirtualPolynomial::g1_add_xp())
+            + self.mu * get_add(VirtualPolynomial::g1_add_yp())
+            + self.mu2 * get_add(VirtualPolynomial::g1_add_p_indicator());
+        let add_q_fused = get_add(VirtualPolynomial::g1_add_xq())
+            + self.mu * get_add(VirtualPolynomial::g1_add_yq())
+            + self.mu2 * get_add(VirtualPolynomial::g1_add_q_indicator());
+        let add_r_fused = get_add(VirtualPolynomial::g1_add_xr())
+            + self.mu * get_add(VirtualPolynomial::g1_add_yr())
+            + self.mu2 * get_add(VirtualPolynomial::g1_add_r_indicator());
 
         let pb1 = g1_const_from_affine(&self.pairing_boundary.p1_g1);
         let pb2 = g1_const_from_affine(&self.pairing_boundary.p2_g1);

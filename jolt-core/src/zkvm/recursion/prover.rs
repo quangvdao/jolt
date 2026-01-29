@@ -43,27 +43,27 @@ use super::witness::GTCombineWitness;
 use super::{
     constraints::system::{ConstraintSystem, PolyType},
     g1::{
-        fused_addition::FusedG1AddProver,
-        fused_scalar_multiplication::{FusedG1ScalarMulProver, FusedShiftG1ScalarMulProver},
-        fused_wiring::FusedWiringG1Prover,
+        addition::G1AddProver,
         indexing::k_g1,
+        scalar_multiplication::{G1ScalarMulProver, ShiftG1ScalarMulProver},
+        wiring::WiringG1Prover,
     },
     g2::{
-        fused_addition::FusedG2AddProver,
-        fused_scalar_multiplication::{FusedG2ScalarMulProver, FusedShiftG2ScalarMulProver},
-        fused_wiring::FusedWiringG2Prover,
+        addition::G2AddProver,
         indexing::k_g2,
+        scalar_multiplication::{G2ScalarMulProver, ShiftG2ScalarMulProver},
+        wiring::WiringG2Prover,
     },
     gt::{
-        fused_exponentiation::{FusedGtExpParams, FusedGtExpProver},
-        fused_multiplication::{FusedGtMulParams, FusedGtMulProver},
-        fused_shift::{FusedGtShiftParams, FusedGtShiftProver},
-        fused_stage2_openings::FusedGtExpStage2OpeningsProver,
-        fused_wiring::FusedWiringGtProver,
+        exponentiation::{GtExpParams, GtExpProver},
         indexing::{
             k_gt, num_gt_constraints, num_gt_constraints_padded, num_gt_mul_constraints_padded,
         },
+        multiplication::{GtMulParams, GtMulProver},
+        shift::{GtShiftParams, GtShiftProver},
+        stage2_openings::GtExpStage2OpeningsProver,
         types::GtMulConstraintPolynomials,
+        wiring::WiringGtProver,
     },
     wiring_plan::derive_wiring_plan,
     witness_generation,
@@ -831,13 +831,13 @@ impl RecursionProver<Fq> {
         let g_poly_replicated_f = DensePolynomial::new(g_replicated);
 
         let params =
-            FusedGtExpParams::from_constraint_types(&self.constraint_system.constraint_types);
+            GtExpParams::from_constraint_types(&self.constraint_system.constraint_types);
         tracing::info!(
-            "[Stage 1] Creating FusedGtExpProver with {} GTExp witnesses",
+            "[Stage 1] Creating GtExpProver with {} GTExp witnesses",
             packed_witnesses.len()
         );
         let mut packed_gt_exp_prover: Box<dyn SumcheckInstanceProver<Fq, T>> =
-            Box::new(FusedGtExpProver::new(
+            Box::new(GtExpProver::new(
                 params,
                 &self.constraint_system.constraint_types,
                 &self.constraint_system.locator_by_constraint,
@@ -878,7 +878,7 @@ impl RecursionProver<Fq> {
         if num_gt_exp > 0 {
             // GTExp claim-reduction/openings must be available before the shift
             // verifier runs (ordering matters in `BatchedSumcheck::verify`).
-            let prover = FusedGtExpStage2OpeningsProver::<T>::new(
+            let prover = GtExpStage2OpeningsProver::<T>::new(
                 &self.constraint_system.constraint_types,
                 &self.constraint_system.locator_by_constraint,
                 &self.constraint_system.gt_exp_witnesses,
@@ -886,8 +886,8 @@ impl RecursionProver<Fq> {
             provers.push(Box::new(prover));
 
             let params =
-                FusedGtShiftParams::from_constraint_types(&self.constraint_system.constraint_types);
-            let prover = FusedGtShiftProver::new(
+                GtShiftParams::from_constraint_types(&self.constraint_system.constraint_types);
+            let prover = GtShiftProver::new(
                 params,
                 &self.constraint_system.constraint_types,
                 &self.constraint_system.locator_by_constraint,
@@ -922,8 +922,8 @@ impl RecursionProver<Fq> {
             let num_gt_constraints_padded =
                 num_gt_mul_constraints_padded(&self.constraint_system.constraint_types);
             let params =
-                FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
-            let prover = FusedGtMulProver::new(
+                GtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
+            let prover = GtMulProver::new(
                 params,
                 &self.constraint_system.constraint_types,
                 &gt_mul_constraints_fq,
@@ -943,7 +943,7 @@ impl RecursionProver<Fq> {
             );
 
             let k_common = k_g1(&self.constraint_system.constraint_types);
-            let prover = FusedG1ScalarMulProver::new_with_k_common(
+            let prover = G1ScalarMulProver::new_with_k_common(
                 g1_rows,
                 &self.constraint_system.g1_scalar_mul_public_inputs,
                 k_common,
@@ -953,7 +953,7 @@ impl RecursionProver<Fq> {
 
             // Always run the shift check (it reuses scalar-mul cached openings).
             let prover =
-                FusedShiftG1ScalarMulProver::new_with_k_common(g1_rows, k_common, transcript);
+                ShiftG1ScalarMulProver::new_with_k_common(g1_rows, k_common, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -967,7 +967,7 @@ impl RecursionProver<Fq> {
             );
 
             let k_common = k_g2(&self.constraint_system.constraint_types);
-            let prover = FusedG2ScalarMulProver::new_with_k_common(
+            let prover = G2ScalarMulProver::new_with_k_common(
                 g2_rows,
                 &self.constraint_system.g2_scalar_mul_public_inputs,
                 k_common,
@@ -977,21 +977,21 @@ impl RecursionProver<Fq> {
 
             // Always run the shift check (it reuses scalar-mul cached openings).
             let prover =
-                FusedShiftG2ScalarMulProver::new_with_k_common(g2_rows, k_common, transcript);
+                ShiftG2ScalarMulProver::new_with_k_common(g2_rows, k_common, transcript);
             provers.push(Box::new(prover));
         }
 
         // G1 add
         let g1_add_rows = &self.constraint_system.g1_add_rows;
         if !g1_add_rows.is_empty() {
-            let prover = FusedG1AddProver::new(g1_add_rows, transcript);
+            let prover = G1AddProver::new(g1_add_rows, transcript);
             provers.push(Box::new(prover));
         }
 
         // G2 add
         let g2_add_rows = &self.constraint_system.g2_add_rows;
         if !g2_add_rows.is_empty() {
-            let prover = FusedG2AddProver::new(g2_add_rows, transcript);
+            let prover = G2AddProver::new(g2_add_rows, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -1005,7 +1005,7 @@ impl RecursionProver<Fq> {
                 .map_err(|_e| "AST->wiring-plan derivation failed")?;
 
             if !wiring.gt.is_empty() {
-                let wiring_gt = FusedWiringGtProver::<T>::new(
+                let wiring_gt = WiringGtProver::<T>::new(
                     &self.constraint_system,
                     wiring.gt.clone(),
                     pairing_boundary,
@@ -1015,7 +1015,7 @@ impl RecursionProver<Fq> {
                 provers.push(Box::new(wiring_gt));
             }
             if !wiring.g1.is_empty() {
-                provers.push(Box::new(FusedWiringG1Prover::<T>::new(
+                provers.push(Box::new(WiringG1Prover::<T>::new(
                     &self.constraint_system,
                     wiring.g1.clone(),
                     pairing_boundary,
@@ -1023,7 +1023,7 @@ impl RecursionProver<Fq> {
                 )));
             }
             if !wiring.g2.is_empty() {
-                provers.push(Box::new(FusedWiringG2Prover::<T>::new(
+                provers.push(Box::new(WiringG2Prover::<T>::new(
                     &self.constraint_system,
                     wiring.g2.clone(),
                     pairing_boundary,
@@ -1106,20 +1106,20 @@ impl RecursionProver<Fq> {
                 let (sumcheck, vp) = match entry.poly_type {
                     PolyType::RhoPrev => (
                         SumcheckId::GtExpClaimReduction,
-                        VirtualPolynomial::gt_exp_rho_fused(),
+                        VirtualPolynomial::gt_exp_rho(),
                     ),
                     PolyType::Quotient => (
                         SumcheckId::GtExpClaimReduction,
-                        VirtualPolynomial::gt_exp_quotient_fused(),
+                        VirtualPolynomial::gt_exp_quotient(),
                     ),
-                    PolyType::MulLhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_lhs_fused()),
-                    PolyType::MulRhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_rhs_fused()),
+                    PolyType::MulLhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_lhs()),
+                    PolyType::MulRhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_rhs()),
                     PolyType::MulResult => {
-                        (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result_fused())
+                        (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result())
                     }
                     PolyType::MulQuotient => (
                         SumcheckId::GtMul,
-                        VirtualPolynomial::gt_mul_quotient_fused(),
+                        VirtualPolynomial::gt_mul_quotient(),
                     ),
                     _ => return Fq::zero(),
                 };
@@ -1127,17 +1127,17 @@ impl RecursionProver<Fq> {
                 claim
             } else if entry.is_g1_scalar_mul_fused {
                 let vp = match entry.poly_type {
-                    PolyType::G1ScalarMulXA => VirtualPolynomial::g1_scalar_mul_xa_fused(),
-                    PolyType::G1ScalarMulYA => VirtualPolynomial::g1_scalar_mul_ya_fused(),
-                    PolyType::G1ScalarMulXT => VirtualPolynomial::g1_scalar_mul_xt_fused(),
-                    PolyType::G1ScalarMulYT => VirtualPolynomial::g1_scalar_mul_yt_fused(),
-                    PolyType::G1ScalarMulXANext => VirtualPolynomial::g1_scalar_mul_xa_next_fused(),
-                    PolyType::G1ScalarMulYANext => VirtualPolynomial::g1_scalar_mul_ya_next_fused(),
+                    PolyType::G1ScalarMulXA => VirtualPolynomial::g1_scalar_mul_xa(),
+                    PolyType::G1ScalarMulYA => VirtualPolynomial::g1_scalar_mul_ya(),
+                    PolyType::G1ScalarMulXT => VirtualPolynomial::g1_scalar_mul_xt(),
+                    PolyType::G1ScalarMulYT => VirtualPolynomial::g1_scalar_mul_yt(),
+                    PolyType::G1ScalarMulXANext => VirtualPolynomial::g1_scalar_mul_xa_next(),
+                    PolyType::G1ScalarMulYANext => VirtualPolynomial::g1_scalar_mul_ya_next(),
                     PolyType::G1ScalarMulTIndicator => {
-                        VirtualPolynomial::g1_scalar_mul_t_indicator_fused()
+                        VirtualPolynomial::g1_scalar_mul_t_indicator()
                     }
                     PolyType::G1ScalarMulAIndicator => {
-                        VirtualPolynomial::g1_scalar_mul_a_indicator_fused()
+                        VirtualPolynomial::g1_scalar_mul_a_indicator()
                     }
                     _ => return Fq::zero(),
                 };
@@ -1146,15 +1146,15 @@ impl RecursionProver<Fq> {
                 claim
             } else if entry.is_g1_add_fused {
                 let vp = match entry.poly_type {
-                    PolyType::G1AddXP => VirtualPolynomial::g1_add_xp_fused(),
-                    PolyType::G1AddYP => VirtualPolynomial::g1_add_yp_fused(),
-                    PolyType::G1AddPIndicator => VirtualPolynomial::g1_add_p_indicator_fused(),
-                    PolyType::G1AddXQ => VirtualPolynomial::g1_add_xq_fused(),
-                    PolyType::G1AddYQ => VirtualPolynomial::g1_add_yq_fused(),
-                    PolyType::G1AddQIndicator => VirtualPolynomial::g1_add_q_indicator_fused(),
-                    PolyType::G1AddXR => VirtualPolynomial::g1_add_xr_fused(),
-                    PolyType::G1AddYR => VirtualPolynomial::g1_add_yr_fused(),
-                    PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator_fused(),
+                    PolyType::G1AddXP => VirtualPolynomial::g1_add_xp(),
+                    PolyType::G1AddYP => VirtualPolynomial::g1_add_yp(),
+                    PolyType::G1AddPIndicator => VirtualPolynomial::g1_add_p_indicator(),
+                    PolyType::G1AddXQ => VirtualPolynomial::g1_add_xq(),
+                    PolyType::G1AddYQ => VirtualPolynomial::g1_add_yq(),
+                    PolyType::G1AddQIndicator => VirtualPolynomial::g1_add_q_indicator(),
+                    PolyType::G1AddXR => VirtualPolynomial::g1_add_xr(),
+                    PolyType::G1AddYR => VirtualPolynomial::g1_add_yr(),
+                    PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator(),
                     // Non-port terms are still packed for G1.
                     PolyType::G1AddLambda => VirtualPolynomial::g1_add_fused(G1AddTerm::Lambda),
                     PolyType::G1AddInvDeltaX => {
@@ -1170,31 +1170,31 @@ impl RecursionProver<Fq> {
                 claim
             } else if entry.is_g2_scalar_mul_fused {
                 let vp = match entry.poly_type {
-                    PolyType::G2ScalarMulXAC0 => VirtualPolynomial::g2_scalar_mul_xa_c0_fused(),
-                    PolyType::G2ScalarMulXAC1 => VirtualPolynomial::g2_scalar_mul_xa_c1_fused(),
-                    PolyType::G2ScalarMulYAC0 => VirtualPolynomial::g2_scalar_mul_ya_c0_fused(),
-                    PolyType::G2ScalarMulYAC1 => VirtualPolynomial::g2_scalar_mul_ya_c1_fused(),
-                    PolyType::G2ScalarMulXTC0 => VirtualPolynomial::g2_scalar_mul_xt_c0_fused(),
-                    PolyType::G2ScalarMulXTC1 => VirtualPolynomial::g2_scalar_mul_xt_c1_fused(),
-                    PolyType::G2ScalarMulYTC0 => VirtualPolynomial::g2_scalar_mul_yt_c0_fused(),
-                    PolyType::G2ScalarMulYTC1 => VirtualPolynomial::g2_scalar_mul_yt_c1_fused(),
+                    PolyType::G2ScalarMulXAC0 => VirtualPolynomial::g2_scalar_mul_xa_c0(),
+                    PolyType::G2ScalarMulXAC1 => VirtualPolynomial::g2_scalar_mul_xa_c1(),
+                    PolyType::G2ScalarMulYAC0 => VirtualPolynomial::g2_scalar_mul_ya_c0(),
+                    PolyType::G2ScalarMulYAC1 => VirtualPolynomial::g2_scalar_mul_ya_c1(),
+                    PolyType::G2ScalarMulXTC0 => VirtualPolynomial::g2_scalar_mul_xt_c0(),
+                    PolyType::G2ScalarMulXTC1 => VirtualPolynomial::g2_scalar_mul_xt_c1(),
+                    PolyType::G2ScalarMulYTC0 => VirtualPolynomial::g2_scalar_mul_yt_c0(),
+                    PolyType::G2ScalarMulYTC1 => VirtualPolynomial::g2_scalar_mul_yt_c1(),
                     PolyType::G2ScalarMulXANextC0 => {
-                        VirtualPolynomial::g2_scalar_mul_xa_next_c0_fused()
+                        VirtualPolynomial::g2_scalar_mul_xa_next_c0()
                     }
                     PolyType::G2ScalarMulXANextC1 => {
-                        VirtualPolynomial::g2_scalar_mul_xa_next_c1_fused()
+                        VirtualPolynomial::g2_scalar_mul_xa_next_c1()
                     }
                     PolyType::G2ScalarMulYANextC0 => {
-                        VirtualPolynomial::g2_scalar_mul_ya_next_c0_fused()
+                        VirtualPolynomial::g2_scalar_mul_ya_next_c0()
                     }
                     PolyType::G2ScalarMulYANextC1 => {
-                        VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused()
+                        VirtualPolynomial::g2_scalar_mul_ya_next_c1()
                     }
                     PolyType::G2ScalarMulTIndicator => {
-                        VirtualPolynomial::g2_scalar_mul_t_indicator_fused()
+                        VirtualPolynomial::g2_scalar_mul_t_indicator()
                     }
                     PolyType::G2ScalarMulAIndicator => {
-                        VirtualPolynomial::g2_scalar_mul_a_indicator_fused()
+                        VirtualPolynomial::g2_scalar_mul_a_indicator()
                     }
                     _ => return Fq::zero(),
                 };

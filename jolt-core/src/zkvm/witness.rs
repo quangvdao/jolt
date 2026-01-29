@@ -1335,81 +1335,39 @@ pub enum VirtualPolynomial {
 
 impl VirtualPolynomial {
     // --- GT multiplication ---
-    pub fn gt_mul_lhs(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Lhs,
-            instance: i,
-        })
-    }
-    pub fn gt_mul_lhs_fused() -> Self {
+    pub fn gt_mul_lhs() -> Self {
         Self::Recursion(RecursionPoly::GtMulFused {
             term: GtMulTerm::Lhs,
         })
     }
-    pub fn gt_mul_rhs(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Rhs,
-            instance: i,
-        })
-    }
-    pub fn gt_mul_rhs_fused() -> Self {
+    pub fn gt_mul_rhs() -> Self {
         Self::Recursion(RecursionPoly::GtMulFused {
             term: GtMulTerm::Rhs,
         })
     }
-    pub fn gt_mul_result(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Result,
-            instance: i,
-        })
-    }
-    pub fn gt_mul_result_fused() -> Self {
+    pub fn gt_mul_result() -> Self {
         Self::Recursion(RecursionPoly::GtMulFused {
             term: GtMulTerm::Result,
         })
     }
-    pub fn gt_mul_quotient(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Quotient,
-            instance: i,
-        })
-    }
-    pub fn gt_mul_quotient_fused() -> Self {
+    pub fn gt_mul_quotient() -> Self {
         Self::Recursion(RecursionPoly::GtMulFused {
             term: GtMulTerm::Quotient,
         })
     }
 
     // --- GT exponentiation (packed) ---
-    pub fn gt_exp_rho(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::GtExp {
-            term: GtExpTerm::Rho,
-            instance: i,
-        })
-    }
-    pub fn gt_exp_rho_fused() -> Self {
+    pub fn gt_exp_rho() -> Self {
         Self::Recursion(RecursionPoly::GtExpFused {
             term: GtExpTerm::Rho,
         })
     }
-    pub fn gt_exp_rho_next(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::GtExp {
-            term: GtExpTerm::RhoNext,
-            instance: i,
-        })
-    }
-    pub fn gt_exp_rho_next_fused() -> Self {
+    pub fn gt_exp_rho_next() -> Self {
         Self::Recursion(RecursionPoly::GtExpFused {
             term: GtExpTerm::RhoNext,
         })
     }
-    pub fn gt_exp_quotient(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::GtExp {
-            term: GtExpTerm::Quotient,
-            instance: i,
-        })
-    }
-    pub fn gt_exp_quotient_fused() -> Self {
+    pub fn gt_exp_quotient() -> Self {
         Self::Recursion(RecursionPoly::GtExpFused {
             term: GtExpTerm::Quotient,
         })
@@ -1428,496 +1386,176 @@ impl VirtualPolynomial {
     }
 
     // --- G1 addition ---
-    pub fn g1_add_fused(term: G1AddTerm) -> Self {
+    pub fn g1_add(term: G1AddTerm) -> Self {
         Self::Recursion(RecursionPoly::G1AddFused { term })
     }
-    pub fn g1_add_xp_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::XP)
+    pub fn g1_add_xp() -> Self {
+        Self::g1_add(G1AddTerm::XP)
     }
-    pub fn g1_add_yp_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::YP)
+    pub fn g1_add_yp() -> Self {
+        Self::g1_add(G1AddTerm::YP)
     }
-    pub fn g1_add_p_indicator_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::PIndicator)
+    pub fn g1_add_p_indicator() -> Self {
+        Self::g1_add(G1AddTerm::PIndicator)
     }
-    pub fn g1_add_xq_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::XQ)
+    pub fn g1_add_xq() -> Self {
+        Self::g1_add(G1AddTerm::XQ)
     }
-    pub fn g1_add_yq_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::YQ)
+    pub fn g1_add_yq() -> Self {
+        Self::g1_add(G1AddTerm::YQ)
     }
-    pub fn g1_add_q_indicator_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::QIndicator)
+    pub fn g1_add_q_indicator() -> Self {
+        Self::g1_add(G1AddTerm::QIndicator)
     }
-    pub fn g1_add_xr_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::XR)
+    pub fn g1_add_xr() -> Self {
+        Self::g1_add(G1AddTerm::XR)
     }
-    pub fn g1_add_yr_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::YR)
+    pub fn g1_add_yr() -> Self {
+        Self::g1_add(G1AddTerm::YR)
     }
-    pub fn g1_add_r_indicator_fused() -> Self {
-        Self::g1_add_fused(G1AddTerm::RIndicator)
-    }
-
-    // --- G2 addition (fused) ---
-    pub fn g2_add_fused(term: G2AddTerm) -> Self {
-        Self::Recursion(RecursionPoly::G2AddFused { term })
-    }
-    pub fn g2_add_xp_c0_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::XPC0)
-    }
-    pub fn g2_add_xp_c1_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::XPC1)
-    }
-    pub fn g2_add_yp_c0_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::YPC0)
-    }
-    pub fn g2_add_yp_c1_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::YPC1)
-    }
-    pub fn g2_add_p_indicator_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::PIndicator)
-    }
-    pub fn g2_add_xq_c0_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::XQC0)
-    }
-    pub fn g2_add_xq_c1_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::XQC1)
-    }
-    pub fn g2_add_yq_c0_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::YQC0)
-    }
-    pub fn g2_add_yq_c1_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::YQC1)
-    }
-    pub fn g2_add_q_indicator_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::QIndicator)
-    }
-    pub fn g2_add_xr_c0_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::XRC0)
-    }
-    pub fn g2_add_xr_c1_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::XRC1)
-    }
-    pub fn g2_add_yr_c0_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::YRC0)
-    }
-    pub fn g2_add_yr_c1_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::YRC1)
-    }
-    pub fn g2_add_r_indicator_fused() -> Self {
-        Self::g2_add_fused(G2AddTerm::RIndicator)
-    }
-    pub fn g1_add_xp(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::XP,
-            instance: i,
-        })
-    }
-    pub fn g1_add_yp(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::YP,
-            instance: i,
-        })
-    }
-    pub fn g1_add_p_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::PIndicator,
-            instance: i,
-        })
-    }
-    pub fn g1_add_xq(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::XQ,
-            instance: i,
-        })
-    }
-    pub fn g1_add_yq(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::YQ,
-            instance: i,
-        })
-    }
-    pub fn g1_add_q_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::QIndicator,
-            instance: i,
-        })
-    }
-    pub fn g1_add_xr(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::XR,
-            instance: i,
-        })
-    }
-    pub fn g1_add_yr(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::YR,
-            instance: i,
-        })
-    }
-    pub fn g1_add_r_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::RIndicator,
-            instance: i,
-        })
-    }
-    pub fn g1_add_lambda(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::Lambda,
-            instance: i,
-        })
-    }
-    pub fn g1_add_inv_delta_x(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::InvDeltaX,
-            instance: i,
-        })
-    }
-    pub fn g1_add_is_double(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::IsDouble,
-            instance: i,
-        })
-    }
-    pub fn g1_add_is_inverse(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1Add {
-            term: G1AddTerm::IsInverse,
-            instance: i,
-        })
-    }
-
-    // --- G1 scalar multiplication ---
-    pub fn g1_scalar_mul_xa(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::XA,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_xa_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::XA,
-        })
-    }
-    pub fn g1_scalar_mul_ya(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::YA,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_ya_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::YA,
-        })
-    }
-    pub fn g1_scalar_mul_xt(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::XT,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_xt_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::XT,
-        })
-    }
-    pub fn g1_scalar_mul_yt(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::YT,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_yt_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::YT,
-        })
-    }
-    pub fn g1_scalar_mul_xa_next(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::XANext,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_xa_next_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::XANext,
-        })
-    }
-    pub fn g1_scalar_mul_ya_next(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::YANext,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_ya_next_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::YANext,
-        })
-    }
-    pub fn g1_scalar_mul_t_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::TIndicator,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_t_indicator_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::TIndicator,
-        })
-    }
-    pub fn g1_scalar_mul_a_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::AIndicator,
-            instance: i,
-        })
-    }
-    pub fn g1_scalar_mul_a_indicator_fused() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMulFused {
-            term: G1ScalarMulTerm::AIndicator,
-        })
-    }
-    pub fn g1_scalar_mul_bit(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::Bit,
-            instance: i,
-        })
+    pub fn g1_add_r_indicator() -> Self {
+        Self::g1_add(G1AddTerm::RIndicator)
     }
 
     // --- G2 addition ---
-    pub fn g2_add_xp_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::XPC0,
-            instance: i,
+    pub fn g2_add(term: G2AddTerm) -> Self {
+        Self::Recursion(RecursionPoly::G2AddFused { term })
+    }
+    pub fn g2_add_xp_c0() -> Self {
+        Self::g2_add(G2AddTerm::XPC0)
+    }
+    pub fn g2_add_xp_c1() -> Self {
+        Self::g2_add(G2AddTerm::XPC1)
+    }
+    pub fn g2_add_yp_c0() -> Self {
+        Self::g2_add(G2AddTerm::YPC0)
+    }
+    pub fn g2_add_yp_c1() -> Self {
+        Self::g2_add(G2AddTerm::YPC1)
+    }
+    pub fn g2_add_p_indicator() -> Self {
+        Self::g2_add(G2AddTerm::PIndicator)
+    }
+    pub fn g2_add_xq_c0() -> Self {
+        Self::g2_add(G2AddTerm::XQC0)
+    }
+    pub fn g2_add_xq_c1() -> Self {
+        Self::g2_add(G2AddTerm::XQC1)
+    }
+    pub fn g2_add_yq_c0() -> Self {
+        Self::g2_add(G2AddTerm::YQC0)
+    }
+    pub fn g2_add_yq_c1() -> Self {
+        Self::g2_add(G2AddTerm::YQC1)
+    }
+    pub fn g2_add_q_indicator() -> Self {
+        Self::g2_add(G2AddTerm::QIndicator)
+    }
+    pub fn g2_add_xr_c0() -> Self {
+        Self::g2_add(G2AddTerm::XRC0)
+    }
+    pub fn g2_add_xr_c1() -> Self {
+        Self::g2_add(G2AddTerm::XRC1)
+    }
+    pub fn g2_add_yr_c0() -> Self {
+        Self::g2_add(G2AddTerm::YRC0)
+    }
+    pub fn g2_add_yr_c1() -> Self {
+        Self::g2_add(G2AddTerm::YRC1)
+    }
+    pub fn g2_add_r_indicator() -> Self {
+        Self::g2_add(G2AddTerm::RIndicator)
+    }
+
+    // --- G1 scalar multiplication ---
+    pub fn g1_scalar_mul_xa() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::XA,
         })
     }
-    pub fn g2_add_xp_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::XPC1,
-            instance: i,
+    pub fn g1_scalar_mul_ya() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::YA,
         })
     }
-    pub fn g2_add_yp_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::YPC0,
-            instance: i,
+    pub fn g1_scalar_mul_xt() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::XT,
         })
     }
-    pub fn g2_add_yp_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::YPC1,
-            instance: i,
+    pub fn g1_scalar_mul_yt() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::YT,
         })
     }
-    pub fn g2_add_p_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::PIndicator,
-            instance: i,
+    pub fn g1_scalar_mul_xa_next() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::XANext,
         })
     }
-    pub fn g2_add_xq_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::XQC0,
-            instance: i,
+    pub fn g1_scalar_mul_ya_next() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::YANext,
         })
     }
-    pub fn g2_add_xq_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::XQC1,
-            instance: i,
+    pub fn g1_scalar_mul_t_indicator() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::TIndicator,
         })
     }
-    pub fn g2_add_yq_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::YQC0,
-            instance: i,
-        })
-    }
-    pub fn g2_add_yq_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::YQC1,
-            instance: i,
-        })
-    }
-    pub fn g2_add_q_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::QIndicator,
-            instance: i,
-        })
-    }
-    pub fn g2_add_xr_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::XRC0,
-            instance: i,
-        })
-    }
-    pub fn g2_add_xr_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::XRC1,
-            instance: i,
-        })
-    }
-    pub fn g2_add_yr_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::YRC0,
-            instance: i,
-        })
-    }
-    pub fn g2_add_yr_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::YRC1,
-            instance: i,
-        })
-    }
-    pub fn g2_add_r_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::RIndicator,
-            instance: i,
-        })
-    }
-    pub fn g2_add_lambda_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::LambdaC0,
-            instance: i,
-        })
-    }
-    pub fn g2_add_lambda_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::LambdaC1,
-            instance: i,
-        })
-    }
-    pub fn g2_add_inv_delta_x_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::InvDeltaXC0,
-            instance: i,
-        })
-    }
-    pub fn g2_add_inv_delta_x_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::InvDeltaXC1,
-            instance: i,
-        })
-    }
-    pub fn g2_add_is_double(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::IsDouble,
-            instance: i,
-        })
-    }
-    pub fn g2_add_is_inverse(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2Add {
-            term: G2AddTerm::IsInverse,
-            instance: i,
+    pub fn g1_scalar_mul_a_indicator() -> Self {
+        Self::Recursion(RecursionPoly::G1ScalarMulFused {
+            term: G1ScalarMulTerm::AIndicator,
         })
     }
 
     // --- G2 scalar multiplication ---
-    pub fn g2_scalar_mul_xa_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XAC0,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_xa_c0_fused() -> Self {
+    pub fn g2_scalar_mul_xa_c0() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::XAC0,
         })
     }
-    pub fn g2_scalar_mul_xa_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XAC1,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_xa_c1_fused() -> Self {
+    pub fn g2_scalar_mul_xa_c1() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::XAC1,
         })
     }
-    pub fn g2_scalar_mul_ya_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YAC0,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_ya_c0_fused() -> Self {
+    pub fn g2_scalar_mul_ya_c0() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::YAC0,
         })
     }
-    pub fn g2_scalar_mul_ya_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YAC1,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_ya_c1_fused() -> Self {
+    pub fn g2_scalar_mul_ya_c1() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::YAC1,
         })
     }
-    pub fn g2_scalar_mul_xt_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XTC0,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_xt_c0_fused() -> Self {
+    pub fn g2_scalar_mul_xt_c0() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::XTC0,
         })
     }
-    pub fn g2_scalar_mul_xt_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XTC1,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_xt_c1_fused() -> Self {
+    pub fn g2_scalar_mul_xt_c1() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::XTC1,
         })
     }
-    pub fn g2_scalar_mul_yt_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YTC0,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_yt_c0_fused() -> Self {
+    pub fn g2_scalar_mul_yt_c0() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::YTC0,
         })
     }
-    pub fn g2_scalar_mul_yt_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YTC1,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_yt_c1_fused() -> Self {
+    pub fn g2_scalar_mul_yt_c1() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::YTC1,
         })
     }
-    pub fn g2_scalar_mul_xa_next_c0(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XANextC0,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_xa_next_c0_fused() -> Self {
+    pub fn g2_scalar_mul_xa_next_c0() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::XANextC0,
         })
     }
-    pub fn g2_scalar_mul_xa_next_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XANextC1,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_xa_next_c1_fused() -> Self {
+    pub fn g2_scalar_mul_xa_next_c1() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::XANextC1,
         })
@@ -1933,43 +1571,19 @@ impl VirtualPolynomial {
             term: G2ScalarMulTerm::YANextC0,
         })
     }
-    pub fn g2_scalar_mul_ya_next_c1(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YANextC1,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_ya_next_c1_fused() -> Self {
+    pub fn g2_scalar_mul_ya_next_c1() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::YANextC1,
         })
     }
-    pub fn g2_scalar_mul_t_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::TIndicator,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_t_indicator_fused() -> Self {
+    pub fn g2_scalar_mul_t_indicator() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::TIndicator,
         })
     }
-    pub fn g2_scalar_mul_a_indicator(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::AIndicator,
-            instance: i,
-        })
-    }
-    pub fn g2_scalar_mul_a_indicator_fused() -> Self {
+    pub fn g2_scalar_mul_a_indicator() -> Self {
         Self::Recursion(RecursionPoly::G2ScalarMulFused {
             term: G2ScalarMulTerm::AIndicator,
-        })
-    }
-    pub fn g2_scalar_mul_bit(i: usize) -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::Bit,
-            instance: i,
         })
     }
 }

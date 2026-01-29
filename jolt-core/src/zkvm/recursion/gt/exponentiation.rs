@@ -10,7 +10,7 @@
 //!
 //! This mirrors the existing (per-instance) `GtExp` protocol but changes:
 //! - number of rounds: `k_gt + 11`
-//! - openings emitted: `gt_exp_{rho,rho_next,quotient}_fused()` under `SumcheckId::GtExp`
+//! - openings emitted: `gt_exp_{rho,rho_next,quotient}()` under `SumcheckId::GtExp`
 
 use crate::{
     field::JoltField,
@@ -47,7 +47,7 @@ use rayon::prelude::*;
 const DEGREE: usize = 8; // Was 7, but eq*C has degree 1+7=8
 
 #[derive(Clone, Allocative)]
-pub struct FusedGtExpParams {
+pub struct GtExpParams {
     /// Number of c-index variables for Stage 1 (k_gt).
     ///
     /// Stage 1 uses the GT-local c domain so that Stage-2 subprotocols (shift + wiring)
@@ -62,7 +62,7 @@ pub struct FusedGtExpParams {
     pub num_gt_constraints_padded: usize,
 }
 
-impl FusedGtExpParams {
+impl GtExpParams {
     pub fn from_constraint_types(constraint_types: &[ConstraintType]) -> Self {
         let num_gt_constraints_padded = num_gt_constraints_padded(constraint_types);
         let num_c_vars = k_gt(constraint_types);
@@ -87,7 +87,7 @@ impl FusedGtExpParams {
     }
 }
 
-impl SumcheckInstanceParams<Fq> for FusedGtExpParams {
+impl SumcheckInstanceParams<Fq> for GtExpParams {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -109,8 +109,8 @@ impl SumcheckInstanceParams<Fq> for FusedGtExpParams {
 }
 
 #[derive(Allocative)]
-pub struct FusedGtExpProver {
-    params: FusedGtExpParams,
+pub struct GtExpProver {
+    params: GtExpParams,
     /// Eq polynomial evaluations for the sampled point over (c_gt,x11) domain.
     eq_poly: MultilinearPolynomial<Fq>,
     rho: MultilinearPolynomial<Fq>,
@@ -124,9 +124,9 @@ pub struct FusedGtExpProver {
     g: MultilinearPolynomial<Fq>,
 }
 
-impl FusedGtExpProver {
+impl GtExpProver {
     pub fn new<T: Transcript>(
-        params: FusedGtExpParams,
+        params: GtExpParams,
         constraint_types: &[ConstraintType],
         locator_by_constraint: &[ConstraintLocator],
         witnesses: &[GtExpWitness<Fq>],
@@ -197,7 +197,7 @@ impl FusedGtExpProver {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpProver {
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtExpProver {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
@@ -211,7 +211,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpProver {
         let evals = (0..half)
             .into_par_iter()
             .map(|i| {
-                // Use sumcheck_evals_array like FusedG1Add does
+                // Use sumcheck_evals_array like G1Add does
                 let eq = self
                     .eq_poly
                     .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
@@ -301,21 +301,21 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpProver {
 
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_rho_fused(),
+            VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExp,
             opening_point.clone(),
             rho_val,
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_rho_next_fused(),
+            VirtualPolynomial::gt_exp_rho_next(),
             SumcheckId::GtExp,
             opening_point.clone(),
             rho_next_val,
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_quotient_fused(),
+            VirtualPolynomial::gt_exp_quotient(),
             SumcheckId::GtExp,
             opening_point,
             quotient_val,
@@ -323,8 +323,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpProver {
     }
 }
 
-pub struct FusedGtExpVerifier {
-    params: FusedGtExpParams,
+pub struct GtExpVerifier {
+    params: GtExpParams,
     eq_point: Vec<<Fq as JoltField>::Challenge>,
     /// Map GTExp local witness index -> GT-local c index.
     gtexp_c_indices: Vec<usize>,
@@ -332,13 +332,13 @@ pub struct FusedGtExpVerifier {
 }
 
 #[cfg(feature = "allocative")]
-impl allocative::Allocative for FusedGtExpVerifier {
+impl allocative::Allocative for GtExpVerifier {
     fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
-impl FusedGtExpVerifier {
+impl GtExpVerifier {
     pub fn new<T: Transcript>(
-        params: FusedGtExpParams,
+        params: GtExpParams,
         constraint_types: &[ConstraintType],
         public_inputs: Vec<GtExpPublicInputs>,
         transcript: &mut T,
@@ -373,7 +373,7 @@ impl FusedGtExpVerifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
@@ -426,15 +426,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
 
         // Fetch opened claims at the sumcheck point.
         let (_, rho) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_fused(),
+            VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExp,
         );
         let (_, rho_next) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_next_fused(),
+            VirtualPolynomial::gt_exp_rho_next(),
             SumcheckId::GtExp,
         );
         let (_, quotient) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_quotient_fused(),
+            VirtualPolynomial::gt_exp_quotient(),
             SumcheckId::GtExp,
         );
 
@@ -494,9 +494,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpVerifier {
     ) {
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
         for vp in [
-            VirtualPolynomial::gt_exp_rho_fused(),
-            VirtualPolynomial::gt_exp_rho_next_fused(),
-            VirtualPolynomial::gt_exp_quotient_fused(),
+            VirtualPolynomial::gt_exp_rho(),
+            VirtualPolynomial::gt_exp_rho_next(),
+            VirtualPolynomial::gt_exp_quotient(),
         ] {
             accumulator.append_virtual(transcript, vp, SumcheckId::GtExp, opening_point.clone());
         }
@@ -520,7 +520,7 @@ mod tests {
         constraint_types.extend(std::iter::repeat_n(ConstraintType::GtExp, 3));
         constraint_types.extend(std::iter::repeat_n(ConstraintType::GtMul, 16));
 
-        let params = FusedGtExpParams::from_constraint_types(&constraint_types);
+        let params = GtExpParams::from_constraint_types(&constraint_types);
         assert_eq!(params.num_c_vars, k_gt(&constraint_types));
         assert_eq!(params.k_exp, k_exp(&constraint_types));
         let dummy = params.num_c_vars - params.k_exp;
@@ -565,7 +565,7 @@ mod tests {
 
         let g_poly_11var = DensePolynomial::new(vec![Fq::one(); row_size]);
         let mut transcript = Blake2bTranscript::new(b"test_fused_gtexp_replication");
-        let prover = FusedGtExpProver::new(
+        let prover = GtExpProver::new(
             params.clone(),
             &constraint_types,
             &locator_by_constraint,

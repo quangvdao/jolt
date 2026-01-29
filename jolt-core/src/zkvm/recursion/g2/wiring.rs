@@ -103,7 +103,7 @@ impl CPhaseState {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusedWiringG2Prover<T: Transcript> {
+pub struct WiringG2Prover<T: Transcript> {
     edges: Vec<G2WiringEdge>,
     lambdas: Vec<Fq>,
     // batching coefficients for (x.c0, x.c1, y.c0, y.c1, ind)
@@ -142,7 +142,7 @@ pub struct FusedWiringG2Prover<T: Transcript> {
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<T: Transcript> FusedWiringG2Prover<T> {
+impl<T: Transcript> WiringG2Prover<T> {
     pub fn new(
         cs: &ConstraintSystem,
         edges: Vec<G2WiringEdge>,
@@ -494,7 +494,7 @@ impl<T: Transcript> FusedWiringG2Prover<T> {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringG2Prover<T> {
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG2Prover<T> {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -826,7 +826,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringG2Prover<T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusedWiringG2Verifier {
+pub struct WiringG2Verifier {
     edges: Vec<G2WiringEdge>,
     lambdas: Vec<Fq>,
     mu: Fq,
@@ -840,7 +840,7 @@ pub struct FusedWiringG2Verifier {
     smul_bases: Vec<(Fq, Fq, Fq, Fq, Fq)>,
 }
 
-impl FusedWiringG2Verifier {
+impl WiringG2Verifier {
     pub fn new<T: Transcript>(input: &RecursionVerifierInput, transcript: &mut T) -> Self {
         let mu: Fq = transcript.challenge_scalar();
         let mu2 = mu * mu;
@@ -891,7 +891,7 @@ impl FusedWiringG2Verifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG2Verifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -934,31 +934,31 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringG2Verifier {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul)
                 .1
         };
-        let smul_out_fused = get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c0_fused())
-            + self.mu * get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c1_fused())
-            + self.mu2 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c0_fused())
-            + self.mu3 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c1_fused())
-            + self.mu4 * get_smul(VirtualPolynomial::g2_scalar_mul_a_indicator_fused());
+        let smul_out_fused = get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c0())
+            + self.mu * get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c1())
+            + self.mu2 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c0())
+            + self.mu3 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c1())
+            + self.mu4 * get_smul(VirtualPolynomial::g2_scalar_mul_a_indicator());
 
         // Fetch add port openings.
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G2Add).1
         };
-        let add_p_fused = get_add(VirtualPolynomial::g2_add_xp_c0_fused())
-            + self.mu * get_add(VirtualPolynomial::g2_add_xp_c1_fused())
-            + self.mu2 * get_add(VirtualPolynomial::g2_add_yp_c0_fused())
-            + self.mu3 * get_add(VirtualPolynomial::g2_add_yp_c1_fused())
-            + self.mu4 * get_add(VirtualPolynomial::g2_add_p_indicator_fused());
-        let add_q_fused = get_add(VirtualPolynomial::g2_add_xq_c0_fused())
-            + self.mu * get_add(VirtualPolynomial::g2_add_xq_c1_fused())
-            + self.mu2 * get_add(VirtualPolynomial::g2_add_yq_c0_fused())
-            + self.mu3 * get_add(VirtualPolynomial::g2_add_yq_c1_fused())
-            + self.mu4 * get_add(VirtualPolynomial::g2_add_q_indicator_fused());
-        let add_r_fused = get_add(VirtualPolynomial::g2_add_xr_c0_fused())
-            + self.mu * get_add(VirtualPolynomial::g2_add_xr_c1_fused())
-            + self.mu2 * get_add(VirtualPolynomial::g2_add_yr_c0_fused())
-            + self.mu3 * get_add(VirtualPolynomial::g2_add_yr_c1_fused())
-            + self.mu4 * get_add(VirtualPolynomial::g2_add_r_indicator_fused());
+        let add_p_fused = get_add(VirtualPolynomial::g2_add_xp_c0())
+            + self.mu * get_add(VirtualPolynomial::g2_add_xp_c1())
+            + self.mu2 * get_add(VirtualPolynomial::g2_add_yp_c0())
+            + self.mu3 * get_add(VirtualPolynomial::g2_add_yp_c1())
+            + self.mu4 * get_add(VirtualPolynomial::g2_add_p_indicator());
+        let add_q_fused = get_add(VirtualPolynomial::g2_add_xq_c0())
+            + self.mu * get_add(VirtualPolynomial::g2_add_xq_c1())
+            + self.mu2 * get_add(VirtualPolynomial::g2_add_yq_c0())
+            + self.mu3 * get_add(VirtualPolynomial::g2_add_yq_c1())
+            + self.mu4 * get_add(VirtualPolynomial::g2_add_q_indicator());
+        let add_r_fused = get_add(VirtualPolynomial::g2_add_xr_c0())
+            + self.mu * get_add(VirtualPolynomial::g2_add_xr_c1())
+            + self.mu2 * get_add(VirtualPolynomial::g2_add_yr_c0())
+            + self.mu3 * get_add(VirtualPolynomial::g2_add_yr_c1())
+            + self.mu4 * get_add(VirtualPolynomial::g2_add_r_indicator());
 
         let pb1 = g2_const_from_affine(&self.pairing_boundary.p1_g2);
         let pb2 = g2_const_from_affine(&self.pairing_boundary.p2_g2);

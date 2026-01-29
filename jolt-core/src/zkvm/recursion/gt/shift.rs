@@ -1,7 +1,7 @@
 //! Shift sumcheck for verifying `rho_next` consistency.
 //!
 //! Analogue of `gt/shift.rs`:
-//! - Stage 1 (GTExp) emits `gt_exp_rho_next_fused()` at point `r1 = (r_s, r_u, r_c_exp)`.
+//! - Stage 1 (GTExp) emits `gt_exp_rho_next()` at point `r1 = (r_s, r_u, r_c_exp)`.
 //! - This sumcheck proves that `rho_next(r1)` is consistent with the committed `rho`
 //!   table via a one-step shift on the step variables.
 //!
@@ -62,7 +62,7 @@ fn evals_skip_one<const D: usize>(a0: Fq, a1: Fq) -> [Fq; D] {
 }
 
 #[derive(Clone, Allocative)]
-pub struct FusedGtShiftParams {
+pub struct GtShiftParams {
     pub num_c_vars: usize,
     pub num_step_vars: usize,
     pub num_elem_vars: usize,
@@ -70,7 +70,7 @@ pub struct FusedGtShiftParams {
     pub num_gt_constraints_padded: usize,
 }
 
-impl FusedGtShiftParams {
+impl GtShiftParams {
     pub fn from_constraint_types(constraint_types: &[ConstraintType]) -> Self {
         let num_gt_constraints_padded = num_gt_constraints_padded(constraint_types);
         Self {
@@ -88,7 +88,7 @@ impl FusedGtShiftParams {
     }
 }
 
-impl SumcheckInstanceParams<Fq> for FusedGtShiftParams {
+impl SumcheckInstanceParams<Fq> for GtShiftParams {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -111,8 +111,8 @@ impl SumcheckInstanceParams<Fq> for FusedGtShiftParams {
 }
 
 #[derive(Allocative)]
-pub struct FusedGtShiftProver {
-    params: FusedGtShiftParams,
+pub struct GtShiftProver {
+    params: GtShiftParams,
     /// P(y) = Eq(r_c, c) * EqPlusOne(r_s, s) * Eq(r_u, u)  (as a (s,u,c) table)
     eq_prod: MultilinearPolynomial<Fq>,
     /// rho(c,s,x) table.
@@ -121,9 +121,9 @@ pub struct FusedGtShiftProver {
     input_claim: Fq,
 }
 
-impl FusedGtShiftProver {
+impl GtShiftProver {
     pub fn new(
-        params: FusedGtShiftParams,
+        params: GtShiftParams,
         constraint_types: &[ConstraintType],
         locator_by_constraint: &[ConstraintLocator],
         gt_exp_witnesses: &[GtExpWitness<Fq>],
@@ -131,7 +131,7 @@ impl FusedGtShiftProver {
     ) -> Self {
         // Read Stage-1 rho_next claim and its opening point r1.
         let (r1_point, input_claim) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_next_fused(),
+            VirtualPolynomial::gt_exp_rho_next(),
             SumcheckId::GtExp,
         );
         let r1 = r1_point.r;
@@ -196,7 +196,7 @@ impl FusedGtShiftProver {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtShiftProver {
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtShiftProver {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
@@ -257,24 +257,24 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtShiftProver {
 }
 
 #[derive(Allocative)]
-pub struct FusedGtShiftVerifier {
-    params: FusedGtShiftParams,
+pub struct GtShiftVerifier {
+    params: GtShiftParams,
 }
 
-impl FusedGtShiftVerifier {
-    pub fn new(params: FusedGtShiftParams) -> Self {
+impl GtShiftVerifier {
+    pub fn new(params: GtShiftParams) -> Self {
         Self { params }
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtShiftVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
 
     fn input_claim(&self, acc: &VerifierOpeningAccumulator<Fq>) -> Fq {
         let (_pt, claim) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_next_fused(),
+            VirtualPolynomial::gt_exp_rho_next(),
             SumcheckId::GtExp,
         );
         claim
@@ -289,7 +289,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtShiftVerifier {
 
         // Stage-1 point r1 comes from the rho_next opening under SumcheckId::GtExp.
         let (rho_next_point, _rho_next_claim) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_next_fused(),
+            VirtualPolynomial::gt_exp_rho_next(),
             SumcheckId::GtExp,
         );
         let r1 = rho_next_point.r;
@@ -314,7 +314,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtShiftVerifier {
 
         // Consume the rho opening at the Stage-2 point (emitted elsewhere).
         let (_pt, rho_eval) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_fused(),
+            VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExpClaimReduction,
         );
 

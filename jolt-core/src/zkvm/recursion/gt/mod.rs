@@ -4,19 +4,19 @@
 //! - Exponentiation: Packed GT exponentiation with 2-phase protocol (base-4 digits)
 //! - Multiplication: GT multiplication constraints
 
-pub mod fused_exponentiation;
-pub mod fused_multiplication;
-pub mod fused_shift;
-pub mod fused_stage2_openings;
-pub mod fused_wiring;
+pub mod exponentiation;
 pub mod indexing;
+pub mod multiplication;
+pub mod shift;
+pub mod stage2_openings;
 pub mod types;
+pub mod wiring;
 
-pub use fused_exponentiation::{FusedGtExpParams, FusedGtExpProver, FusedGtExpVerifier};
-pub use fused_multiplication::{FusedGtMulParams, FusedGtMulProver, FusedGtMulVerifier};
-pub use fused_shift::{FusedGtShiftParams, FusedGtShiftProver, FusedGtShiftVerifier};
-pub use fused_stage2_openings::{FusedGtExpStage2OpeningsProver, FusedGtExpStage2OpeningsVerifier};
-pub use fused_wiring::{FusedWiringGtProver, FusedWiringGtVerifier};
+pub use exponentiation::{GtExpParams, GtExpProver, GtExpVerifier};
+pub use multiplication::{GtMulParams, GtMulProver, GtMulVerifier};
+pub use shift::{GtShiftParams, GtShiftProver, GtShiftVerifier};
+pub use stage2_openings::{GtExpStage2OpeningsProver, GtExpStage2OpeningsVerifier};
+pub use wiring::{WiringGtProver, WiringGtVerifier};
 pub use indexing::{gt_constraint_indices, k_gt, num_gt_constraints, num_gt_constraints_padded};
 pub use types::{
     eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle, GtExpPublicInputs,

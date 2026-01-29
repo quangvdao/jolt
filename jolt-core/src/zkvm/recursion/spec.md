@@ -151,16 +151,16 @@ Recursion runs in a single mode for GT, G1, and G2:
 Stage 2 is a single `BatchedSumcheck`, but the *order of instances inside it matters* because later instances may read cached openings
 produced by earlier ones.
 
-- `FusedGtExpStage2Openings*` must run **before** `FusedGtShift*` and any GT wiring that consumes
-  `gt_exp_rho_fused()` / `gt_exp_quotient_fused()` at the Stage-2 point.
+- `GtExpStage2Openings*` must run **before** `GtShift*` and any GT wiring that consumes
+  `gt_exp_rho()` / `gt_exp_quotient()` at the Stage-2 point.
   This is enforced by instance ordering in `RecursionProver::prove_stage2` / `RecursionVerifier::verify_stage2`.
 
 - **G1 scalar-mul / shift**:
-  - `FusedG1ScalarMul*` must run **before** `FusedShiftG1ScalarMul*`, because the shift check intentionally caches **no new openings**
+  - `G1ScalarMul*` must run **before** `ShiftG1ScalarMul*`, because the shift check intentionally caches **no new openings**
     and instead reuses the scalar-mul cached openings under `SumcheckId::G1ScalarMul`.
 
 - **G2 scalar-mul / shift**:
-  - `FusedG2ScalarMul*` must run **before** `FusedShiftG2ScalarMul*` for the same reason (`SumcheckId::G2ScalarMul`).
+  - `G2ScalarMul*` must run **before** `ShiftG2ScalarMul*` for the same reason (`SumcheckId::G2ScalarMul`).
 
 - **Wiring backends** (`gt/fused_wiring.rs`, `g1/fused_wiring.rs`, `g2/fused_wiring.rs`) are appended **last** in Stage 2.
   They are “openings consumers”: they read cached openings but do not create new ones.
@@ -1139,7 +1139,7 @@ This checklist is intended for “red-team” review of the protocols.
     must use the same normalized point.
 
 - **Ordering / cache dependencies** (Stage 2 instance list):
-  - `FusedGtExpStage2Openings*` must run before `FusedGtShift*` and GT wiring.
+  - `GtExpStage2Openings*` must run before `GtShift*` and GT wiring.
   - Scalar-mul must run before shift (G1/G2).
   - Wiring instances must run last.
 

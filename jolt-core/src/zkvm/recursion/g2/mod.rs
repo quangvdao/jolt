@@ -13,18 +13,18 @@
 //! The [`Fq2Components`] struct provides component-wise Fq2 arithmetic with
 //! zero-overhead methods for when only one component is needed.
 
-pub mod fused_addition;
-pub mod fused_scalar_multiplication;
-pub mod fused_wiring;
+pub mod addition;
 pub mod indexing;
+pub mod scalar_multiplication;
 pub mod types;
+pub mod wiring;
 
-pub use fused_addition::{FusedG2AddParams, FusedG2AddProver, FusedG2AddVerifier};
-pub use fused_scalar_multiplication::{
-    FusedG2ScalarMulProver, FusedG2ScalarMulVerifier, FusedShiftG2ScalarMulProver,
-    FusedShiftG2ScalarMulVerifier,
+pub use addition::{G2AddParams, G2AddProver, G2AddVerifier};
+pub use scalar_multiplication::{
+    G2ScalarMulProver, G2ScalarMulVerifier, ShiftG2ScalarMulProver, ShiftG2ScalarMulVerifier,
 };
 pub use types::G2ScalarMulPublicInputs;
+pub use wiring::{WiringG2Prover, WiringG2Verifier};
 
 use crate::field::JoltField;
 

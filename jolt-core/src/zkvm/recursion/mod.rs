@@ -64,16 +64,15 @@ pub use verifier::{RecursionVerifier, RecursionVerifierInput};
 pub use wiring_plan::WiringPlan;
 
 // G1 exports
-pub use g1::{FusedG1ScalarMulProver, FusedG1ScalarMulVerifier, G1ScalarMulPublicInputs};
+pub use g1::{G1ScalarMulProver, G1ScalarMulVerifier, G1ScalarMulPublicInputs};
 
 // G2 exports
-pub use g2::{FusedG2ScalarMulProver, FusedG2ScalarMulVerifier, G2ScalarMulPublicInputs};
+pub use g2::{G2ScalarMulProver, G2ScalarMulVerifier, G2ScalarMulPublicInputs};
 
 // GT exports
 pub use gt::{
-    FusedGtExpParams, FusedGtExpProver, FusedGtExpVerifier, FusedGtMulParams, FusedGtMulProver,
-    FusedGtMulVerifier, FusedGtShiftParams, FusedGtShiftProver, FusedGtShiftVerifier,
-    GtExpPublicInputs,
+    GtExpParams, GtExpProver, GtExpVerifier, GtExpPublicInputs, GtMulParams, GtMulProver,
+    GtMulVerifier, GtShiftParams, GtShiftProver, GtShiftVerifier,
 };
 
 pub use witness::{

@@ -41,7 +41,7 @@ use rayon::prelude::*;
 const DEGREE: usize = 4;
 
 #[derive(Clone, Allocative)]
-pub struct FusedGtMulParams {
+pub struct GtMulParams {
     /// Number of c-index variables in Stage 2 (k_common).
     ///
     /// This is the shared suffix length used for GT in Stage 2 batching.
@@ -54,7 +54,7 @@ pub struct FusedGtMulParams {
     pub num_gt_constraints_padded: usize,
 }
 
-impl FusedGtMulParams {
+impl GtMulParams {
     pub fn new(
         num_gt_constraints: usize,
         num_gt_constraints_padded: usize,
@@ -86,7 +86,7 @@ impl FusedGtMulParams {
     }
 }
 
-impl SumcheckInstanceParams<Fq> for FusedGtMulParams {
+impl SumcheckInstanceParams<Fq> for GtMulParams {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -119,8 +119,8 @@ impl SumcheckInstanceParams<Fq> for FusedGtMulParams {
 }
 
 #[derive(Allocative)]
-pub struct FusedGtMulProver {
-    params: FusedGtMulParams,
+pub struct GtMulProver {
+    params: GtMulParams,
     eq_poly: MultilinearPolynomial<Fq>,
     indicator_poly: MultilinearPolynomial<Fq>,
     lhs: MultilinearPolynomial<Fq>,
@@ -130,9 +130,9 @@ pub struct FusedGtMulProver {
     g_poly: MultilinearPolynomial<Fq>,
 }
 
-impl FusedGtMulProver {
+impl GtMulProver {
     pub fn new<T: Transcript>(
-        params: FusedGtMulParams,
+        params: GtMulParams,
         constraint_types: &[ConstraintType],
         gt_mul_rows: &[GtMulConstraintPolynomials<Fq>],
         g_poly_4var: &DensePolynomial<Fq>,
@@ -153,7 +153,7 @@ impl FusedGtMulProver {
         debug_assert_eq!(
             params.num_gt_constraints,
             gt_mul_rows.len(),
-            "FusedGtMulParams.num_gt_constraints must match gt_mul_rows.len()"
+            "GtMulParams.num_gt_constraints must match gt_mul_rows.len()"
         );
 
         // Indicator table in [u_low, c_high] layout (c is the high bits).
@@ -212,7 +212,7 @@ impl FusedGtMulProver {
     }
 }
 
-impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedGtMulProver {
+impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for GtMulProver {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
@@ -311,28 +311,28 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedGtMulProver {
 
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_lhs_fused(),
+            VirtualPolynomial::gt_mul_lhs(),
             SumcheckId::GtMul,
             opening_point.clone(),
             self.lhs.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_rhs_fused(),
+            VirtualPolynomial::gt_mul_rhs(),
             SumcheckId::GtMul,
             opening_point.clone(),
             self.rhs.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_result_fused(),
+            VirtualPolynomial::gt_mul_result(),
             SumcheckId::GtMul,
             opening_point.clone(),
             self.result.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_quotient_fused(),
+            VirtualPolynomial::gt_mul_quotient(),
             SumcheckId::GtMul,
             opening_point,
             self.quotient.get_bound_coeff(0),
@@ -341,17 +341,17 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for FusedGtMulProver {
 }
 
 #[derive(Allocative)]
-pub struct FusedGtMulVerifier {
-    params: FusedGtMulParams,
+pub struct GtMulVerifier {
+    params: GtMulParams,
     eq_point: Vec<<Fq as JoltField>::Challenge>,
     /// GT-local indices `c_gt` where the constraint is `GtMul`.
     gtmul_c_indices: Vec<usize>,
     g_mle_4var: Vec<Fq>,
 }
 
-impl FusedGtMulVerifier {
+impl GtMulVerifier {
     pub fn new<T: Transcript>(
-        params: FusedGtMulParams,
+        params: GtMulParams,
         constraint_types: &[ConstraintType],
         g_mle_4var: Vec<Fq>,
         transcript: &mut T,
@@ -393,7 +393,7 @@ impl FusedGtMulVerifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtMulVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }
@@ -447,19 +447,19 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtMulVerifier {
 
         // Fetch opened claims.
         let (_, lhs) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_lhs_fused(),
+            VirtualPolynomial::gt_mul_lhs(),
             SumcheckId::GtMul,
         );
         let (_, rhs) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_rhs_fused(),
+            VirtualPolynomial::gt_mul_rhs(),
             SumcheckId::GtMul,
         );
         let (_, result) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_result_fused(),
+            VirtualPolynomial::gt_mul_result(),
             SumcheckId::GtMul,
         );
         let (_, quotient) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_quotient_fused(),
+            VirtualPolynomial::gt_mul_quotient(),
             SumcheckId::GtMul,
         );
 
@@ -475,10 +475,10 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtMulVerifier {
     ) {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for vp in [
-            VirtualPolynomial::gt_mul_lhs_fused(),
-            VirtualPolynomial::gt_mul_rhs_fused(),
-            VirtualPolynomial::gt_mul_result_fused(),
-            VirtualPolynomial::gt_mul_quotient_fused(),
+            VirtualPolynomial::gt_mul_lhs(),
+            VirtualPolynomial::gt_mul_rhs(),
+            VirtualPolynomial::gt_mul_result(),
+            VirtualPolynomial::gt_mul_quotient(),
         ] {
             accumulator.append_virtual(transcript, vp, SumcheckId::GtMul, opening_point.clone());
         }
@@ -495,7 +495,7 @@ mod tests {
         let k_common = 5usize;
         let num_gt_constraints = 3usize;
         let num_gt_constraints_padded = 1usize << 3; // k_mul = 3
-        let params = FusedGtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
+        let params = GtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
 
         // challenges = [u0,u1,u2,u3, c0,c1, c2,c3,c4] where c0,c1 are dummy
         let challenges: Vec<<Fq as JoltField>::Challenge> = (0..(4 + k_common))
@@ -513,3 +513,4 @@ mod tests {
         assert_eq!(p.r[6], challenges[8]);
     }
 }
+compile_error!("test");

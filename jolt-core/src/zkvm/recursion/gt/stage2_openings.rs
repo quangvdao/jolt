@@ -1,6 +1,6 @@
 //! Cache-only Stage-2 GTExp openings at the Stage-2 point.
 //!
-//! This ensures `gt_exp_{rho,quotient}_fused()` is available at the full Stage-2 point
+//! This ensures `gt_exp_{rho,quotient}()` is available at the full Stage-2 point
 //! `r_stage2 = (r_c_gt, r_x)` so that:
 //! - Stage 3 prefix packing can consume GT claims, and
 //! - GT shift / wiring can consume GT values without per-instance openings.
@@ -38,13 +38,13 @@ use ark_bn254::Fq;
 use ark_ff::Zero;
 
 #[derive(Clone, Debug, Allocative)]
-pub struct FusedGtExpStage2OpeningsParams {
+pub struct GtExpStage2OpeningsParams {
     /// Stage-2 GT-local suffix length used for batching (k_common = k_gt).
     pub k_common: usize,
     pub k_exp: usize,
 }
 
-impl FusedGtExpStage2OpeningsParams {
+impl GtExpStage2OpeningsParams {
     pub fn from_constraint_types(constraint_types: &[ConstraintType]) -> Self {
         let k_common = k_gt(constraint_types);
         let k_exp = k_exp(constraint_types);
@@ -52,25 +52,25 @@ impl FusedGtExpStage2OpeningsParams {
     }
 }
 
-pub struct FusedGtExpStage2OpeningsProver<T: Transcript> {
-    params: FusedGtExpStage2OpeningsParams,
+pub struct GtExpStage2OpeningsProver<T: Transcript> {
+    params: GtExpStage2OpeningsParams,
     rho: MultilinearPolynomial<Fq>,
     quotient: MultilinearPolynomial<Fq>,
     _marker: core::marker::PhantomData<T>,
 }
 
 #[cfg(feature = "allocative")]
-impl<T: Transcript> allocative::Allocative for FusedGtExpStage2OpeningsProver<T> {
+impl<T: Transcript> allocative::Allocative for GtExpStage2OpeningsProver<T> {
     fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
-impl<T: Transcript> FusedGtExpStage2OpeningsProver<T> {
+impl<T: Transcript> GtExpStage2OpeningsProver<T> {
     pub fn new(
         constraint_types: &[ConstraintType],
         locator_by_constraint: &[ConstraintLocator],
         gt_exp_witnesses: &[GtExpWitness<Fq>],
     ) -> Self {
-        let params = FusedGtExpStage2OpeningsParams::from_constraint_types(constraint_types);
+        let params = GtExpStage2OpeningsParams::from_constraint_types(constraint_types);
 
         let row_size = 1usize << CONFIG.packed_vars;
         let num_gt_constraints_padded = num_gt_exp_constraints_padded(constraint_types);
@@ -100,7 +100,7 @@ impl<T: Transcript> FusedGtExpStage2OpeningsProver<T> {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsProver<T> {
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtExpStage2OpeningsProver<T> {
     fn degree(&self) -> usize {
         1
     }
@@ -153,14 +153,14 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsPr
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_rho_fused(),
+            VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExpClaimReduction,
             opening_point.clone(),
             self.rho.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_quotient_fused(),
+            VirtualPolynomial::gt_exp_quotient(),
             SumcheckId::GtExpClaimReduction,
             opening_point,
             self.quotient.get_bound_coeff(0),
@@ -169,19 +169,19 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedGtExpStage2OpeningsPr
 }
 
 #[derive(Allocative)]
-pub struct FusedGtExpStage2OpeningsVerifier {
-    params: FusedGtExpStage2OpeningsParams,
+pub struct GtExpStage2OpeningsVerifier {
+    params: GtExpStage2OpeningsParams,
 }
 
-impl FusedGtExpStage2OpeningsVerifier {
+impl GtExpStage2OpeningsVerifier {
     pub fn new(constraint_types: &[ConstraintType]) -> Self {
         Self {
-            params: FusedGtExpStage2OpeningsParams::from_constraint_types(constraint_types),
+            params: GtExpStage2OpeningsParams::from_constraint_types(constraint_types),
         }
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpStage2OpeningsVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpStage2OpeningsVerifier {
     fn degree(&self) -> usize {
         1
     }
@@ -217,8 +217,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedGtExpStage2Openings
         r.extend_from_slice(&sumcheck_challenges[tail]);
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);
         for vp in [
-            VirtualPolynomial::gt_exp_rho_fused(),
-            VirtualPolynomial::gt_exp_quotient_fused(),
+            VirtualPolynomial::gt_exp_rho(),
+            VirtualPolynomial::gt_exp_quotient(),
         ] {
             accumulator.append_virtual(
                 transcript,
@@ -246,7 +246,7 @@ mod tests {
         constraint_types.extend(std::iter::repeat_n(ConstraintType::GtExp, 3));
         constraint_types.extend(std::iter::repeat_n(ConstraintType::GtMul, 16));
 
-        let params = FusedGtExpStage2OpeningsParams::from_constraint_types(&constraint_types);
+        let params = GtExpStage2OpeningsParams::from_constraint_types(&constraint_types);
         assert_eq!(params.k_common, k_gt(&constraint_types));
         assert_eq!(params.k_common, 4);
         assert_eq!(params.k_exp, 2);
@@ -284,7 +284,7 @@ mod tests {
             3
         ];
 
-        let prover = FusedGtExpStage2OpeningsProver::<crate::transcripts::Blake2bTranscript>::new(
+        let prover = GtExpStage2OpeningsProver::<crate::transcripts::Blake2bTranscript>::new(
             &constraint_types,
             &locator_by_constraint,
             &witnesses,

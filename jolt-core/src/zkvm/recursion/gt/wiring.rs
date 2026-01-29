@@ -29,14 +29,14 @@
 //!
 //! Importantly, the *port polynomials* for GTExp/GTmul are treated as **multilinear in `c`**
 //! (over the instance index). This allows the verifier to consume already-cached
-//! openings (e.g. `gt_exp_rho_fused()`), rather than per-instance openings.
+//! openings (e.g. `gt_exp_rho()`), rather than per-instance openings.
 //!
 //! ## Variable order (Stage 2)
 //! This instance uses the same Stage-2 GT ordering as the packed GT gadgets:
 //! - first bind `x = (s,u)` (11 rounds, `BindingOrder::LowToHigh` with `s` in the low bits),
 //! - then bind the GT-local `c` suffix (k rounds).
 //!
-//! This matches how `FusedGtExpStage2Openings*` and `FusedGtMul*` interpret the Stage-2
+//! This matches how `GtExpStage2Openings*` and `GtMul*` interpret the Stage-2
 //! challenge vector.
 //!
 //! ## Soundness note
@@ -183,7 +183,7 @@ impl CPhaseState {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusedWiringGtProver<T: Transcript> {
+pub struct WiringGtProver<T: Transcript> {
     edges: Vec<GtWiringEdge>,
     lambdas: Vec<Fq>,
     /// Common GT-local c domain size (k = k_gt).
@@ -221,11 +221,11 @@ pub struct FusedWiringGtProver<T: Transcript> {
 }
 
 #[cfg(feature = "allocative")]
-impl<T: Transcript> allocative::Allocative for FusedWiringGtProver<T> {
+impl<T: Transcript> allocative::Allocative for WiringGtProver<T> {
     fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
-impl<T: Transcript> FusedWiringGtProver<T> {
+impl<T: Transcript> WiringGtProver<T> {
     pub fn new(
         cs: &ConstraintSystem,
         edges: Vec<GtWiringEdge>,
@@ -251,8 +251,8 @@ impl<T: Transcript> FusedWiringGtProver<T> {
         let eq_s0_7 = eq_lsb_evals::<Fq>(&s0);
         let eq_s_default = MultilinearPolynomial::from(pad_7var_to_11var_replicated(&eq_s0_7));
 
-        // IMPORTANT: the verifier consumes openings like `gt_mul_lhs_fused()` /
-        // `gt_exp_rho_fused()`. Those are evaluations of (c-batched) polynomials at the
+        // IMPORTANT: the verifier consumes openings like `gt_mul_lhs()` /
+        // `gt_exp_rho()`. Those are evaluations of (c-batched) polynomials at the
         // Stage-2 point, which in general depend on **all**
         // instances in the family (even if a particular instance is not referenced by any edge).
         //
@@ -557,7 +557,7 @@ impl<T: Transcript> FusedWiringGtProver<T> {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -803,7 +803,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FusedWiringGtProver<T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct FusedWiringGtVerifier {
+pub struct WiringGtVerifier {
     edges: Vec<GtWiringEdge>,
     lambdas: Vec<Fq>,
     tau: Vec<<Fq as JoltField>::Challenge>,
@@ -817,7 +817,7 @@ pub struct FusedWiringGtVerifier {
     k_mul: usize,
 }
 
-impl FusedWiringGtVerifier {
+impl WiringGtVerifier {
     pub fn new<T: Transcript>(input: &RecursionVerifierInput, transcript: &mut T) -> Self {
         // Must mirror prover sampling order: τ, then λ.
         let tau: Vec<<Fq as JoltField>::Challenge> =
@@ -889,7 +889,7 @@ impl FusedWiringGtVerifier {
     }
 }
 
-impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringGtVerifier {
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
     fn degree(&self) -> usize {
         DEGREE
     }
@@ -923,19 +923,19 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FusedWiringGtVerifier {
 
         // Port openings (already cached by earlier GT instances in Stage 2).
         let (_rho_point, rho_fused) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_fused(),
+            VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExpClaimReduction,
         );
         let (_mul_lhs_point, mul_lhs_fused) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_lhs_fused(),
+            VirtualPolynomial::gt_mul_lhs(),
             SumcheckId::GtMul,
         );
         let (_mul_rhs_point, mul_rhs_fused) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_rhs_fused(),
+            VirtualPolynomial::gt_mul_rhs(),
             SumcheckId::GtMul,
         );
         let (_mul_out_point, mul_out_fused) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_result_fused(),
+            VirtualPolynomial::gt_mul_result(),
             SumcheckId::GtMul,
         );
 

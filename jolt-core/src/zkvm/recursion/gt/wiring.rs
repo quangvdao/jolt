@@ -855,37 +855,17 @@ impl WiringGtVerifier {
     }
 
     #[inline]
-    fn eq_s_for_src(&self, r_step: &[<Fq as JoltField>::Challenge], src: GtProducer) -> Fq {
-        match src {
-            GtProducer::GtExpRho { instance } => {
-                let s_out = self.gt_exp_out_step[instance];
-                r_step
-                    .iter()
-                    .enumerate()
-                    .map(|(b, c)| {
-                        let r_b: Fq = (*c).into();
-                        if ((s_out >> b) & 1) == 1 {
-                            r_b
-                        } else {
-                            Fq::one() - r_b
-                        }
-                    })
-                    .product()
-            }
-            GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => r_step
-                .iter()
-                .map(|c| {
-                    let r_b: Fq = (*c).into();
-                    Fq::one() - r_b
-                })
-                .product(),
-        }
-    }
-
-    #[inline]
     fn eq_c_tail(&self, r_c_tail: &[Fq], idx: usize, k_family: usize) -> Fq {
-        let bits = index_to_binary::<Fq>(idx, k_family);
-        EqPolynomial::mle(r_c_tail, &bits)
+        debug_assert_eq!(r_c_tail.len(), k_family);
+        let mut out = Fq::one();
+        for (i, &r_i) in r_c_tail.iter().enumerate() {
+            if ((idx >> i) & 1) == 1 {
+                out *= r_i;
+            } else {
+                out *= Fq::one() - r_i;
+            }
+        }
+        out
     }
 }
 
@@ -922,16 +902,16 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let beta_mul = beta(dummy_mul);
 
         // Port openings (already cached by earlier GT instances in Stage 2).
-        let (_rho_point, rho_val) = acc.get_virtual_polynomial_opening(
+        let rho_val = acc.get_virtual_polynomial_claim(
             VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExpClaimReduction,
         );
-        let (_mul_lhs_point, mul_lhs_val) =
-            acc.get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
-        let (_mul_rhs_point, mul_rhs_val) =
-            acc.get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
-        let (_mul_out_point, mul_out_val) = acc
-            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
+        let mul_lhs_val =
+            acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
+        let mul_rhs_val =
+            acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
+        let mul_out_val =
+            acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
 
         // Boundary constants at r_elem.
         let r_elem: Vec<Fq> = r_elem_chal.iter().map(|c| (*c).into()).collect();
@@ -942,9 +922,27 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let r_c_exp_tail = &r_c_fq[dummy_exp..];
         let r_c_mul_tail = &r_c_fq[dummy_mul..];
 
+        // Precompute eq(s, s_out) values once per GTExp instance; these are reused across edges.
+        let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
+        let eq_s_zero: Fq = r_step_fq.iter().map(|&r_b| Fq::one() - r_b).product();
+        let eq_s_exp: Vec<Fq> = self
+            .gt_exp_out_step
+            .iter()
+            .map(|&s_out| {
+                r_step_fq
+                    .iter()
+                    .enumerate()
+                    .map(|(b, &r_b)| if ((s_out >> b) & 1) == 1 { r_b } else { Fq::one() - r_b })
+                    .product()
+            })
+            .collect();
+
         let mut sum = Fq::zero();
         for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
-            let eq_s = self.eq_s_for_src(r_step, edge.src);
+            let eq_s = match edge.src {
+                GtProducer::GtExpRho { instance } => eq_s_exp[instance],
+                GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => eq_s_zero,
+            };
 
             let (eq_c_src, src_val, beta_src) = match edge.src {
                 GtProducer::GtExpRho { instance } => (

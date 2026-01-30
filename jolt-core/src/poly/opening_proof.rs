@@ -335,6 +335,28 @@ pub trait OpeningAccumulator<F: JoltField> {
         kind: AdviceKind,
         sumcheck: SumcheckId,
     ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)>;
+
+    /// Claim-only accessor for virtual polynomial openings (avoids cloning the opening point).
+    #[inline]
+    fn get_virtual_polynomial_claim(&self, polynomial: VirtualPolynomial, sumcheck: SumcheckId) -> F {
+        self.get_virtual_polynomial_opening(polynomial, sumcheck).1
+    }
+
+    /// Claim-only accessor for committed polynomial openings (avoids cloning the opening point).
+    #[inline]
+    fn get_committed_polynomial_claim(
+        &self,
+        polynomial: CommittedPolynomial,
+        sumcheck: SumcheckId,
+    ) -> F {
+        self.get_committed_polynomial_opening(polynomial, sumcheck).1
+    }
+
+    /// Claim-only accessor for advice openings (avoids cloning the opening point).
+    #[inline]
+    fn get_advice_claim(&self, kind: AdviceKind, sumcheck: SumcheckId) -> Option<F> {
+        self.get_advice_opening(kind, sumcheck).map(|(_pt, claim)| claim)
+    }
 }
 
 /// State for Dory batch opening (Stage 8).
@@ -453,6 +475,43 @@ impl<F: JoltField> OpeningAccumulator<F> for ProverOpeningAccumulator<F> {
         let (point, claim) = self.openings.get(&opening_id)?;
         Some((point.clone(), *claim))
     }
+
+    #[inline]
+    fn get_virtual_polynomial_claim(&self, polynomial: VirtualPolynomial, sumcheck: SumcheckId) -> F {
+        let (_point, claim) = self
+            .openings
+            .get(&OpeningId::Polynomial(
+                PolynomialId::Virtual(polynomial),
+                sumcheck,
+            ))
+            .unwrap_or_else(|| panic!("opening for {sumcheck:?} {polynomial:?} not found"));
+        *claim
+    }
+
+    #[inline]
+    fn get_committed_polynomial_claim(
+        &self,
+        polynomial: CommittedPolynomial,
+        sumcheck: SumcheckId,
+    ) -> F {
+        let (_point, claim) = self
+            .openings
+            .get(&OpeningId::Polynomial(
+                PolynomialId::Committed(polynomial),
+                sumcheck,
+            ))
+            .unwrap_or_else(|| panic!("opening for {sumcheck:?} {polynomial:?} not found"));
+        *claim
+    }
+
+    #[inline]
+    fn get_advice_claim(&self, kind: AdviceKind, sumcheck_id: SumcheckId) -> Option<F> {
+        let opening_id = match kind {
+            AdviceKind::Trusted => OpeningId::TrustedAdvice(sumcheck_id),
+            AdviceKind::Untrusted => OpeningId::UntrustedAdvice(sumcheck_id),
+        };
+        self.openings.get(&opening_id).map(|(_pt, claim)| *claim)
+    }
 }
 
 impl<F> ProverOpeningAccumulator<F>
@@ -496,7 +555,7 @@ where
         self.openings.insert(
             key,
             (
-                OpeningPoint::<BIG_ENDIAN, F>::new(opening_point.clone()),
+                OpeningPoint::<BIG_ENDIAN, F>::new(opening_point),
                 claim,
             ),
         );
@@ -674,6 +733,43 @@ impl<F: JoltField> OpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
         let (point, claim) = self.openings.get(&opening_id)?;
         Some((point.clone(), *claim))
     }
+
+    #[inline]
+    fn get_virtual_polynomial_claim(&self, polynomial: VirtualPolynomial, sumcheck: SumcheckId) -> F {
+        let (_point, claim) = self
+            .openings
+            .get(&OpeningId::Polynomial(
+                PolynomialId::Virtual(polynomial),
+                sumcheck,
+            ))
+            .unwrap_or_else(|| panic!("No opening found for {sumcheck:?} {polynomial:?}"));
+        *claim
+    }
+
+    #[inline]
+    fn get_committed_polynomial_claim(
+        &self,
+        polynomial: CommittedPolynomial,
+        sumcheck: SumcheckId,
+    ) -> F {
+        let (_point, claim) = self
+            .openings
+            .get(&OpeningId::Polynomial(
+                PolynomialId::Committed(polynomial),
+                sumcheck,
+            ))
+            .unwrap_or_else(|| panic!("No opening found for {sumcheck:?} {polynomial:?}"));
+        *claim
+    }
+
+    #[inline]
+    fn get_advice_claim(&self, kind: AdviceKind, sumcheck_id: SumcheckId) -> Option<F> {
+        let opening_id = match kind {
+            AdviceKind::Trusted => OpeningId::TrustedAdvice(sumcheck_id),
+            AdviceKind::Untrusted => OpeningId::UntrustedAdvice(sumcheck_id),
+        };
+        self.openings.get(&opening_id).map(|(_pt, claim)| *claim)
+    }
 }
 
 impl<F> VerifierOpeningAccumulator<F>
@@ -713,7 +809,7 @@ where
         self.openings.insert(
             key,
             (
-                OpeningPoint::<BIG_ENDIAN, F>::new(opening_point.clone()),
+                OpeningPoint::<BIG_ENDIAN, F>::new(opening_point),
                 claim,
             ),
         );

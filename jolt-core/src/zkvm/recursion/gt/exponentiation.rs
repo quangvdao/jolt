@@ -28,9 +28,9 @@ use crate::{
         sumcheck_prover::SumcheckInstanceProver,
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
-    transcripts::{Blake2bTranscript, Transcript},
+    transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
-    zkvm::recursion::constraints::system::{index_to_binary, ConstraintLocator, ConstraintType},
+    zkvm::recursion::constraints::system::{eq_lsb_index, index_to_binary, ConstraintLocator, ConstraintType},
     zkvm::recursion::curve::{Bn254Recursion, RecursionCurve},
     zkvm::recursion::gt::indexing::{k_exp, k_gt, num_gt_constraints_padded},
     zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness},
@@ -425,13 +425,12 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             .collect();
 
         // Fetch opened claims at the sumcheck point.
-        let (_, rho) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::gt_exp_rho(), SumcheckId::GtExp);
-        let (_, rho_next) = accumulator.get_virtual_polynomial_opening(
+        let rho = accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_exp_rho(), SumcheckId::GtExp);
+        let rho_next = accumulator.get_virtual_polynomial_claim(
             VirtualPolynomial::gt_exp_rho_next(),
             SumcheckId::GtExp,
         );
-        let (_, quotient) = accumulator.get_virtual_polynomial_opening(
+        let quotient = accumulator.get_virtual_polynomial_claim(
             VirtualPolynomial::gt_exp_quotient(),
             SumcheckId::GtExp,
         );
@@ -456,8 +455,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
 
         for (w, &c_idx) in self.gtexp_c_indices.iter().enumerate() {
             // Eq(r_c, c_idx) using little-endian bits for indices (round order is LSB-first).
-            let bits = index_to_binary::<Fq>(c_idx, k_exp);
-            let w_c = EqPolynomial::mle(&r_c_tail_lsb, &bits);
+            let w_c = eq_lsb_index(&r_c_tail_lsb, c_idx);
 
             let (u, v) = self.public_inputs[w].evaluate_digit_mles(&eq_evals_s);
             let (b1, b2, b3v) = self.public_inputs[w].evaluate_base_powers_mle(&eq_evals_x);

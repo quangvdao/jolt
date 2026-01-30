@@ -1119,8 +1119,7 @@ impl RecursionProver<Fq> {
                     }
                     _ => return Fq::zero(),
                 };
-                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, sumcheck);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, sumcheck)
             } else if entry.is_g1_scalar_mul {
                 let vp = match entry.poly_type {
                     PolyType::G1ScalarMulXA => VirtualPolynomial::g1_scalar_mul_xa(),
@@ -1137,9 +1136,7 @@ impl RecursionProver<Fq> {
                     }
                     _ => return Fq::zero(),
                 };
-                let (_, claim) =
-                    accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1ScalarMul)
             } else if entry.is_g1_add {
                 let vp = match entry.poly_type {
                     PolyType::G1AddXP => VirtualPolynomial::g1_add_xp(),
@@ -1158,8 +1155,7 @@ impl RecursionProver<Fq> {
                     PolyType::G1AddIsInverse => VirtualPolynomial::g1_add(G1AddTerm::IsInverse),
                     _ => return Fq::zero(),
                 };
-                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1Add);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1Add)
             } else if entry.is_g2_scalar_mul {
                 let vp = match entry.poly_type {
                     PolyType::G2ScalarMulXAC0 => VirtualPolynomial::g2_scalar_mul_xa_c0(),
@@ -1182,9 +1178,7 @@ impl RecursionProver<Fq> {
                     }
                     _ => return Fq::zero(),
                 };
-                let (_, claim) =
-                    accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2ScalarMul)
             } else if entry.is_g2_add {
                 let vp = match entry.poly_type {
                     PolyType::G2AddXPC0 => VirtualPolynomial::g2_add(G2AddTerm::XPC0),
@@ -1210,8 +1204,7 @@ impl RecursionProver<Fq> {
                     PolyType::G2AddIsInverse => VirtualPolynomial::g2_add(G2AddTerm::IsInverse),
                     _ => return Fq::zero(),
                 };
-                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2Add);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
             } else {
                 panic!(
                     "unexpected prefix-packing entry without a family tag: {:?}",

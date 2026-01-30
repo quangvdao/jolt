@@ -482,8 +482,7 @@ where
             let mut claims = Vec::with_capacity(opening_specs.len());
             for spec in opening_specs {
                 let poly_id = self.spec.build_virtual_poly(spec.term_index, global_idx);
-                let (_, claim) = accumulator.get_virtual_polynomial_opening(poly_id, sumcheck_id);
-                claims.push(claim);
+                claims.push(accumulator.get_virtual_polynomial_claim(poly_id, sumcheck_id));
             }
 
             let constraint_value = self.spec.eval_constraint_at_point(

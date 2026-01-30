@@ -23,7 +23,7 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
-    zkvm::recursion::constraints::system::{index_to_binary, G1ScalarMulNative},
+    zkvm::recursion::constraints::system::{eq_lsb_index, index_to_binary, G1ScalarMulNative},
     zkvm::recursion::g1::types::G1ScalarMulPublicInputs,
     zkvm::recursion::gt::types::{
         eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
@@ -665,47 +665,59 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1ScalarMulVerifier {
 
         let r_c: Vec<Fq> = r_c_tail.iter().map(|c| (*c).into()).collect();
 
-        // Indicator I(c): sum_{c < num_constraints} Eq(r_c, c).
-        let mut ind_eval = Fq::zero();
-        for c in 0..self.num_constraints {
-            let bits = index_to_binary::<Fq>(c, k);
-            ind_eval += EqPolynomial::mle(&r_c, &bits);
-        }
-
         // Public inputs at this point:
         // - base points are c-only (replicated across step)
         // - bit is step-only per instance, then batched across c by Eq(r_c,c)
         let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
+        // Combine indicator + public input batching in one pass (avoid recomputing Eq(r_c, c)).
+        let mut ind_eval = Fq::zero();
         let mut x_p = Fq::zero();
         let mut y_p = Fq::zero();
         let mut bit = Fq::zero();
         for c in 0..self.num_constraints {
-            let bits_c = index_to_binary::<Fq>(c, k);
-            let w_c = EqPolynomial::mle(&r_c, &bits_c);
+            let w_c = eq_lsb_index(&r_c, c);
+            ind_eval += w_c;
             let (xp_i, yp_i) = self.base_points[c];
             x_p += w_c * xp_i;
             y_p += w_c * yp_i;
             bit += w_c * self.public_inputs[c].evaluate_bit_mle(&r_step_fq);
         }
 
-        // Fetch opened claims (8 committed witness polynomials).
-        let mut claims = Vec::with_capacity(8);
-        for vp in [
-            VirtualPolynomial::g1_scalar_mul_xa(),
-            VirtualPolynomial::g1_scalar_mul_ya(),
-            VirtualPolynomial::g1_scalar_mul_xt(),
-            VirtualPolynomial::g1_scalar_mul_yt(),
-            VirtualPolynomial::g1_scalar_mul_xa_next(),
-            VirtualPolynomial::g1_scalar_mul_ya_next(),
-            VirtualPolynomial::g1_scalar_mul_t_indicator(),
-            VirtualPolynomial::g1_scalar_mul_a_indicator(),
-        ] {
-            let (_, claim) =
-                accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
-            claims.push(claim);
-        }
-
-        let vals = G1ScalarMulValues::from_claims(&claims);
+        // Fetch opened claims (8 committed witness polynomials), without heap allocation.
+        let vals = G1ScalarMulValues {
+            x_a: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_xa(),
+                SumcheckId::G1ScalarMul,
+            ),
+            y_a: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_ya(),
+                SumcheckId::G1ScalarMul,
+            ),
+            x_t: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_xt(),
+                SumcheckId::G1ScalarMul,
+            ),
+            y_t: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_yt(),
+                SumcheckId::G1ScalarMul,
+            ),
+            x_a_next: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_xa_next(),
+                SumcheckId::G1ScalarMul,
+            ),
+            y_a_next: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_ya_next(),
+                SumcheckId::G1ScalarMul,
+            ),
+            t_indicator: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_t_indicator(),
+                SumcheckId::G1ScalarMul,
+            ),
+            a_indicator: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_scalar_mul_a_indicator(),
+                SumcheckId::G1ScalarMul,
+            ),
+        };
         let constraint_value = vals.eval_constraint(bit, x_p, y_p, self.term_batch_coeff);
 
         eq_eval * ind_eval * constraint_value
@@ -1084,19 +1096,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for ShiftG1ScalarMulVerifier
 
         let eqc = eq_lsb_mle::<Fq>(&self.c_ref, y_c);
 
-        let (_, xa) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_xa(),
-            SumcheckId::G1ScalarMul,
-        );
-        let (_, xan) = accumulator.get_virtual_polynomial_opening(
+        let xa =
+            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::g1_scalar_mul_xa(), SumcheckId::G1ScalarMul);
+        let xan = accumulator.get_virtual_polynomial_claim(
             VirtualPolynomial::g1_scalar_mul_xa_next(),
             SumcheckId::G1ScalarMul,
         );
-        let (_, ya) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::g1_scalar_mul_ya(),
-            SumcheckId::G1ScalarMul,
-        );
-        let (_, yan) = accumulator.get_virtual_polynomial_opening(
+        let ya =
+            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::g1_scalar_mul_ya(), SumcheckId::G1ScalarMul);
+        let yan = accumulator.get_virtual_polynomial_claim(
             VirtualPolynomial::g1_scalar_mul_ya_next(),
             SumcheckId::G1ScalarMul,
         );

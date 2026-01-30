@@ -55,10 +55,7 @@ pub fn get_virtual_claims<F: JoltField>(
 ) -> Vec<F> {
     polynomials
         .iter()
-        .map(|poly| {
-            let (_, claim) = accumulator.get_virtual_polynomial_opening(*poly, sumcheck_id);
-            claim
-        })
+        .map(|poly| accumulator.get_virtual_polynomial_claim(*poly, sumcheck_id))
         .collect()
 }
 

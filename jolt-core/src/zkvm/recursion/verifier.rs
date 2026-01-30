@@ -407,13 +407,8 @@ impl RecursionVerifier<Fq> {
         let mut num_g1_add = 0usize;
         let mut num_g2_add = 0usize;
 
-        let mut gt_mul_indices = Vec::new();
         let mut g1_scalar_mul_base_points = Vec::new();
-        let mut g1_scalar_mul_indices = Vec::new();
         let mut g2_scalar_mul_base_points = Vec::new();
-        let mut g2_scalar_mul_indices = Vec::new();
-        let mut g1_add_indices = Vec::new();
-        let mut g2_add_indices = Vec::new();
 
         for constraint in self.input.constraint_types.iter() {
             match constraint {
@@ -421,25 +416,20 @@ impl RecursionVerifier<Fq> {
                     num_gt_exp += 1;
                 }
                 ConstraintType::GtMul => {
-                    gt_mul_indices.push(num_gt_mul);
                     num_gt_mul += 1;
                 }
                 ConstraintType::G1ScalarMul { base_point } => {
                     g1_scalar_mul_base_points.push(*base_point);
-                    g1_scalar_mul_indices.push(num_g1_scalar_mul);
                     num_g1_scalar_mul += 1;
                 }
                 ConstraintType::G2ScalarMul { base_point } => {
                     g2_scalar_mul_base_points.push(*base_point);
-                    g2_scalar_mul_indices.push(num_g2_scalar_mul);
                     num_g2_scalar_mul += 1;
                 }
                 ConstraintType::G1Add => {
-                    g1_add_indices.push(num_g1_add);
                     num_g1_add += 1;
                 }
                 ConstraintType::G2Add => {
-                    g2_add_indices.push(num_g2_add);
                     num_g2_add += 1;
                 }
             }
@@ -620,8 +610,7 @@ impl RecursionVerifier<Fq> {
                     }
                     _ => return Fq::zero(),
                 };
-                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, sumcheck);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, sumcheck)
             } else if entry.is_g1_scalar_mul {
                 let vp = match entry.poly_type {
                     PolyType::G1ScalarMulXA => VirtualPolynomial::g1_scalar_mul_xa(),
@@ -638,9 +627,7 @@ impl RecursionVerifier<Fq> {
                     }
                     _ => return Fq::zero(),
                 };
-                let (_, claim) =
-                    accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1ScalarMul)
             } else if entry.is_g1_add {
                 let vp = match entry.poly_type {
                     PolyType::G1AddXP => VirtualPolynomial::g1_add_xp(),
@@ -658,8 +645,7 @@ impl RecursionVerifier<Fq> {
                     PolyType::G1AddIsInverse => VirtualPolynomial::g1_add(G1AddTerm::IsInverse),
                     _ => return Fq::zero(),
                 };
-                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1Add);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1Add)
             } else if entry.is_g2_scalar_mul {
                 let vp = match entry.poly_type {
                     PolyType::G2ScalarMulXAC0 => VirtualPolynomial::g2_scalar_mul_xa_c0(),
@@ -682,9 +668,7 @@ impl RecursionVerifier<Fq> {
                     }
                     _ => return Fq::zero(),
                 };
-                let (_, claim) =
-                    accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2ScalarMul)
             } else if entry.is_g2_add {
                 let vp = match entry.poly_type {
                     PolyType::G2AddXPC0 => VirtualPolynomial::g2_add(G2AddTerm::XPC0),
@@ -710,8 +694,7 @@ impl RecursionVerifier<Fq> {
                     PolyType::G2AddIsInverse => VirtualPolynomial::g2_add(G2AddTerm::IsInverse),
                     _ => return Fq::zero(),
                 };
-                let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2Add);
-                claim
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
             } else {
                 panic!(
                     "unexpected prefix-packing entry without a family tag: {:?}",

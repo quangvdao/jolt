@@ -273,11 +273,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
     }
 
     fn input_claim(&self, acc: &VerifierOpeningAccumulator<Fq>) -> Fq {
-        let (_pt, claim) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_next(),
-            SumcheckId::GtExp,
-        );
-        claim
+        acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_exp_rho_next(), SumcheckId::GtExp)
     }
 
     fn expected_output_claim(
@@ -313,7 +309,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
         let eq_prod = eq_c * eq_plus_one * eq_x;
 
         // Consume the rho opening at the Stage-2 point (emitted elsewhere).
-        let (_pt, rho_eval) = acc.get_virtual_polynomial_opening(
+        let rho_eval = acc.get_virtual_polynomial_claim(
             VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExpClaimReduction,
         );

@@ -886,8 +886,16 @@ impl WiringG2Verifier {
 
     #[inline]
     fn eq_c_tail(&self, r_c_tail: &[Fq], idx: usize, k_family: usize) -> Fq {
-        let bits = index_to_binary::<Fq>(idx, k_family);
-        EqPolynomial::mle(r_c_tail, &bits)
+        debug_assert_eq!(r_c_tail.len(), k_family);
+        let mut out = Fq::one();
+        for (i, &r_i) in r_c_tail.iter().enumerate() {
+            if ((idx >> i) & 1) == 1 {
+                out *= r_i;
+            } else {
+                out *= Fq::one() - r_i;
+            }
+        }
+        out
     }
 }
 
@@ -931,8 +939,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
 
         // Fetch scalar-mul port openings.
         let get_smul = |vp: VirtualPolynomial| -> Fq {
-            acc.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul)
-                .1
+            acc.get_virtual_polynomial_claim(vp, SumcheckId::G2ScalarMul)
         };
         let smul_out_val = get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c0())
             + self.mu * get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c1())
@@ -942,7 +949,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
 
         // Fetch add port openings.
         let get_add = |vp: VirtualPolynomial| -> Fq {
-            acc.get_virtual_polynomial_opening(vp, SumcheckId::G2Add).1
+            acc.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
         };
         let add_p_val = get_add(VirtualPolynomial::g2_add_xp_c0())
             + self.mu * get_add(VirtualPolynomial::g2_add_xp_c1())

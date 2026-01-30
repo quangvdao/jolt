@@ -25,7 +25,7 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
-    zkvm::recursion::constraints::system::{index_to_binary, ConstraintType},
+    zkvm::recursion::constraints::system::{eq_lsb_index, index_to_binary, ConstraintType},
     zkvm::recursion::gt::indexing::gt_mul_c_tail_range,
     zkvm::recursion::gt::types::GtMulConstraintPolynomials,
     zkvm::witness::VirtualPolynomial,
@@ -431,8 +431,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
             .collect();
         let mut ind_eval = Fq::zero();
         for &c in &self.gtmul_c_indices {
-            let bits = index_to_binary::<Fq>(c, k_mul);
-            ind_eval += EqPolynomial::mle(&r_c, &bits);
+            ind_eval += eq_lsb_index(&r_c, c);
         }
 
         // Extract u (first 4 bits) and evaluate g(u).
@@ -443,13 +442,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
         let g_eval = self.eval_g_at_u(&r_u);
 
         // Fetch opened claims.
-        let (_, lhs) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
-        let (_, rhs) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
-        let (_, result) = accumulator
-            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
-        let (_, quotient) = accumulator.get_virtual_polynomial_opening(
+        let lhs =
+            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
+        let rhs =
+            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
+        let result =
+            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
+        let quotient = accumulator.get_virtual_polynomial_claim(
             VirtualPolynomial::gt_mul_quotient(),
             SumcheckId::GtMul,
         );

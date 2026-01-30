@@ -27,10 +27,18 @@ impl<F: JoltField> EqPolynomial<F> {
         X: Mul<Y, Output = F>,
     {
         assert_eq!(x.len(), y.len());
-        x.par_iter()
-            .zip(y.par_iter())
-            .map(|(x_i, y_i)| *x_i * *y_i + (F::one() - *x_i) * (F::one() - *y_i))
-            .product()
+        // Avoid rayon overhead for small arities (common in recursion gadgets / wiring).
+        if x.len() <= PARALLEL_THRESHOLD {
+            x.iter()
+                .zip(y.iter())
+                .map(|(x_i, y_i)| *x_i * *y_i + (F::one() - *x_i) * (F::one() - *y_i))
+                .product()
+        } else {
+            x.par_iter()
+                .zip(y.par_iter())
+                .map(|(x_i, y_i)| *x_i * *y_i + (F::one() - *x_i) * (F::one() - *y_i))
+                .product()
+        }
     }
 
     /// Computes `eq(x, y)` for [`OpeningPoint`]s, handling endianness automatically.
@@ -42,7 +50,21 @@ impl<F: JoltField> EqPolynomial<F> {
         y: &OpeningPoint<E2, F>,
     ) -> F {
         assert_eq!(x.len(), y.len());
-        if E1 == E2 {
+        // Avoid rayon overhead for small arities.
+        let n = x.len();
+        if n <= PARALLEL_THRESHOLD {
+            if E1 == E2 {
+                x.r.iter()
+                    .zip(y.r.iter())
+                    .map(|(x_i, y_i)| *x_i * *y_i + (F::one() - *x_i) * (F::one() - *y_i))
+                    .product()
+            } else {
+                x.r.iter()
+                    .zip(y.r.iter().rev())
+                    .map(|(x_i, y_i)| *x_i * *y_i + (F::one() - *x_i) * (F::one() - *y_i))
+                    .product()
+            }
+        } else if E1 == E2 {
             x.r.par_iter()
                 .zip(y.r.par_iter())
                 .map(|(x_i, y_i)| *x_i * y_i + (F::one() - x_i) * (F::one() - y_i))

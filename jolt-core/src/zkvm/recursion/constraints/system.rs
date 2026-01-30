@@ -24,6 +24,23 @@ pub fn index_to_binary<F: JoltField>(index: usize, num_vars: usize) -> Vec<F> {
     binary
 }
 
+/// Evaluate the equality polynomial `eq(r, index)` without allocating an index bit-vector.
+///
+/// This matches `EqPolynomial::mle(r, index_to_binary(index, r.len()))` using the **little-endian**
+/// convention of [`index_to_binary`] (bit 0 is the least-significant bit).
+#[inline]
+pub fn eq_lsb_index<F: JoltField>(r: &[F], index: usize) -> F {
+    let mut out = F::one();
+    for (i, &r_i) in r.iter().enumerate() {
+        if ((index >> i) & 1) == 1 {
+            out *= r_i;
+        } else {
+            out *= F::one() - r_i;
+        }
+    }
+    out
+}
+
 /// Polynomial types (virtual claim rows) in the recursion system.
 ///
 /// The discriminant ordering is part of the proof format: Stage 2 virtual claims are laid out

@@ -20,7 +20,7 @@ use ark_serialize::{
 use dory::recursion::ast::{AstConstraint, AstGraph, AstOp, ValueId};
 use dory::recursion::OpId;
 use std::io::{Read, Write};
-use BN254;
+use dory::backends::BN254;
 
 /// Canonical wiring plan (verifier-derived, and mirrored by the prover).
 #[derive(Clone, Debug, Default)]

@@ -28,7 +28,7 @@ use crate::{
     transcripts::Transcript,
     zkvm::{
         recursion::{
-            constraints::system::{index_to_binary, G1AddNative},
+            constraints::system::{eq_lsb_index, G1AddNative},
             g1::types::G1AddValues,
         },
         witness::{G1AddTerm, TermEnum, VirtualPolynomial},
@@ -301,20 +301,64 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1AddVerifier {
             .collect();
         let mut ind_eval = Fq::zero();
         for c in 0..self.num_constraints {
-            let bits = index_to_binary::<Fq>(c, k);
-            ind_eval += EqPolynomial::mle(&r_c, &bits);
+            ind_eval += eq_lsb_index(&r_c, c);
         }
 
-        // Fetch opened claims (one per term).
-        let mut claims = Vec::with_capacity(G1AddTerm::COUNT);
-        for term_idx in 0..G1AddTerm::COUNT {
-            let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");
-            let (_, claim) = accumulator
-                .get_virtual_polynomial_opening(VirtualPolynomial::g1_add(term), SumcheckId::G1Add);
-            claims.push(claim);
-        }
-
-        let vals = G1AddValues::from_claims(&claims);
+        // Fetch opened claims (one per term), without heap allocation.
+        let vals = G1AddValues {
+            x_p: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::XP),
+                SumcheckId::G1Add,
+            ),
+            y_p: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::YP),
+                SumcheckId::G1Add,
+            ),
+            ind_p: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::PIndicator),
+                SumcheckId::G1Add,
+            ),
+            x_q: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::XQ),
+                SumcheckId::G1Add,
+            ),
+            y_q: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::YQ),
+                SumcheckId::G1Add,
+            ),
+            ind_q: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::QIndicator),
+                SumcheckId::G1Add,
+            ),
+            x_r: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::XR),
+                SumcheckId::G1Add,
+            ),
+            y_r: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::YR),
+                SumcheckId::G1Add,
+            ),
+            ind_r: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::RIndicator),
+                SumcheckId::G1Add,
+            ),
+            lambda: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::Lambda),
+                SumcheckId::G1Add,
+            ),
+            inv_delta_x: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::InvDeltaX),
+                SumcheckId::G1Add,
+            ),
+            is_double: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::IsDouble),
+                SumcheckId::G1Add,
+            ),
+            is_inverse: accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::g1_add(G1AddTerm::IsInverse),
+                SumcheckId::G1Add,
+            ),
+        };
         let constraint_value = vals.eval_constraint(self.term_batch_coeff);
 
         eq_eval * ind_eval * constraint_value

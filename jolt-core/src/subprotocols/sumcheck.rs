@@ -33,11 +33,16 @@ impl BatchedSumcheck {
             .max()
             .unwrap();
 
+        // Compute input claims once (used for transcript binding and batching).
+        let input_claims: Vec<F> = sumcheck_instances
+            .iter()
+            .map(|sumcheck| sumcheck.input_claim(opening_accumulator))
+            .collect();
+
         // Append input claims to transcript
-        sumcheck_instances.iter().for_each(|sumcheck| {
-            let input_claim = sumcheck.input_claim(opening_accumulator);
-            transcript.append_scalar(&input_claim);
-        });
+        input_claims
+            .iter()
+            .for_each(|input_claim| transcript.append_scalar(input_claim));
 
         let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
 
@@ -52,9 +57,9 @@ impl BatchedSumcheck {
         //   = A * 2^N * claim_a + B * claim_b
         let mut individual_claims: Vec<F> = sumcheck_instances
             .iter()
-            .map(|sumcheck| {
+            .zip(input_claims.iter())
+            .map(|(sumcheck, input_claim)| {
                 let num_rounds = sumcheck.num_rounds();
-                let input_claim = sumcheck.input_claim(opening_accumulator);
                 input_claim.mul_pow_2(max_num_rounds - num_rounds)
             })
             .collect();
@@ -185,11 +190,16 @@ impl BatchedSumcheck {
             .max()
             .unwrap();
 
+        // Compute input claims once (used for transcript binding and batching).
+        let input_claims: Vec<F> = sumcheck_instances
+            .iter()
+            .map(|sumcheck| sumcheck.input_claim(opening_accumulator))
+            .collect();
+
         // Append input claims to transcript
-        sumcheck_instances.iter().for_each(|sumcheck| {
-            let input_claim = sumcheck.input_claim(opening_accumulator);
-            transcript.append_scalar(&input_claim);
-        });
+        input_claims
+            .iter()
+            .for_each(|input_claim| transcript.append_scalar(input_claim));
 
         let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
 
@@ -205,9 +215,9 @@ impl BatchedSumcheck {
         let claim: F = sumcheck_instances
             .iter()
             .zip(batching_coeffs.iter())
-            .map(|(sumcheck, coeff)| {
+            .zip(input_claims.iter())
+            .map(|((sumcheck, coeff), input_claim)| {
                 let num_rounds = sumcheck.num_rounds();
-                let input_claim = sumcheck.input_claim(opening_accumulator);
                 input_claim.mul_pow_2(max_num_rounds - num_rounds) * coeff
             })
             .sum();

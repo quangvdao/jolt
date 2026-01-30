@@ -1,4 +1,4 @@
-//! G2 wiring (copy/boundary) sumcheck (GT-style split-k aware).
+//! G2 wiring (copy/boundary) sumcheck
 //!
 //! This mirrors:
 //! - `gt/wiring.rs` (split-k + β(dummy) normalization), and
@@ -14,6 +14,39 @@
 //! - For a family with `k_family` bits:
 //!   - `dummy = k_common - k_family`
 //!   - selectors use `beta(dummy) * Eq(c_tail, idx)` where `c_tail = c_common[dummy..]`.
+//!
+//! ## Sumcheck relation
+//!
+//! **Input claim:** `0`.
+//!
+//! Let:
+//! - `s ∈ {0,1}^8` be the step variables,
+//! - `c_common ∈ {0,1}^{k_g2}` be the Stage-2-aligned common constraint-index domain,
+//! - `dummy_f = k_g2 - k_f` for a family with `k_f` index bits,
+//! - `c_tail^f = c_common[dummy_f..]` be the corresponding family-local suffix,
+//! - `β_f = 2^{-dummy_f}` be the normalization factor.
+//!
+//! Define the μ-batched scalar value for a G2 point with components `(x.c0,x.c1,y.c0,y.c1,ind)` as:
+//!
+//! ```text
+//! V = x.c0 + μ·x.c1 + μ^2·y.c0 + μ^3·y.c1 + μ^4·ind
+//! ```
+//!
+//! This sumcheck proves the copy/boundary wiring identity:
+//!
+//! ```text
+//! Σ_{s,c_common} Eq(s, 255) · Σ_{e∈E_G2} λ_e · (
+//!     β_src(e) · Eq(c_tail^{src(e)}, idx_src(e)) · V_src(e; s)
+//!   - β_dst(e) · Eq(c_tail^{dst(e)}, idx_dst(e)) · V_dst(e; s)
+//! ) = 0
+//! ```
+//!
+//! where each endpoint `(src/dst)` selects one of:
+//! - a G2ScalarMul port value (opened under `SumcheckId::G2ScalarMul`),
+//! - a G2Add port value (opened under `SumcheckId::G2Add`),
+//! - or a pairing-boundary constant (anchored to the other endpoint’s selector, GT-style).
+//!
+//! `Eq(s,255)` selects the final step, and `λ_e` are transcript-sampled edge-batching coefficients.
 
 use ark_bn254::{Fq, G2Affine};
 use ark_ec::AffineRepr;

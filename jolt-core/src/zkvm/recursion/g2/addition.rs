@@ -1,4 +1,4 @@
-//! G2 addition sumcheck (family-local).
+//! G2 addition sumcheck
 //!
 //! Mirrors `g1/addition.rs`, but for G2 points over Fq2 split into (c0,c1) components over Fq.
 //!
@@ -10,6 +10,25 @@
 //! Variable order (round order, `BindingOrder::LowToHigh`):
 //! - `k = log2(next_pow2(num_g2add).max(1))` rounds bind the family-local constraint index `c_g2add`
 //!   (LSB first).
+//!
+//! ## Sumcheck relation
+//!
+//! **Input claim:** `0`.
+//!
+//! Let `r_c ∈ Fq^k` be the verifier-sampled `eq_point`, and let `eq(r_c, c)` denote the multilinear
+//! equality polynomial over `c ∈ {0,1}^k` (LSB-first indexing).
+//!
+//! This sumcheck proves the following identity over `c ∈ {0,1}^k`:
+//!
+//! ```text
+//! Σ_c eq(r_c, c) · I_g2add(c) · C_g2add(c; δ) = 0
+//! ```
+//!
+//! where:
+//! - `I_g2add(c) ∈ {0,1}` is the public indicator polynomial (1 on real constraints, 0 on padding),
+//! - `δ` is the transcript-sampled term-batching coefficient (`term_batch_coeff`),
+//! - `C_g2add(c; δ)` is the (batched) G2 addition constraint polynomial (over Fq, with Fq2 split into
+//!   (c0,c1) components), evaluated in `G2AddValues::eval_constraint(...)`.
 
 use crate::{
     field::JoltField,

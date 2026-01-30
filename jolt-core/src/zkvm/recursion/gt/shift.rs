@@ -1,4 +1,4 @@
-//! Shift sumcheck for verifying `rho_next` consistency.
+//! Shift sumcheck for verifying `rho_next` consistency of GT Exp
 //!
 //! Analogue of `gt/shift.rs`:
 //! - Stage 1 (GTExp) emits `gt_exp_rho_next()` at point `r1 = (r_s, r_u, r_c_exp)`.
@@ -14,6 +14,23 @@
 //! - first 7 rounds: step variables `s` (LSB first)
 //! - next 4 rounds: element variables `u` (LSB first)
 //! - last `k_gt` rounds: GT-local constraint index `c_gt` (LSB first, as a suffix)
+//!
+//! ## Sumcheck relation
+//!
+//! **Input claim:** the Stage-1 opening claim `rho_next(r1)` for
+//! `r1 = (r_s, r_u, r_c_exp) ∈ Fq^{7+4+k_gt}`.
+//!
+//! Let `EqPlusOne(r_s, s)` be the “one-step shift” equality selector on the 7 step variables
+//! (as produced by `eq_plus_one_lsb_evals`), and let `eq(r_u,u)`, `eq(r_c,c)` be the usual
+//! multilinear equality selectors (LSB-first).
+//!
+//! This sumcheck proves:
+//!
+//! ```text
+//! Σ_{s,u,c_gt} EqPlusOne(r_s, s) · eq(r_u, u) · eq(r_c_exp, c_gt) · rho(s,u,c_gt) = rho_next(r1)
+//! ```
+//!
+//! i.e. `rho_next` is consistent with `rho` under a one-step shift in the step variable.
 use crate::{
     field::JoltField,
     poly::{

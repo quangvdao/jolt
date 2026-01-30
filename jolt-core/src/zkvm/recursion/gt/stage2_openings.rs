@@ -9,6 +9,20 @@
 //! - participates in Stage-2 batching only to obtain the Stage-2 point,
 //! - binds the committed polynomials along the Stage-2 challenges,
 //! - appends resulting claims as virtual openings under `SumcheckId::GtExpClaimReduction`.
+//!
+//! ## Sumcheck relation
+//!
+//! **Input claim:** `0`.
+//!
+//! This “sumcheck” is intentionally a no-op whose round polynomials are identically zero. Formally,
+//! over the Stage-2 GT variable order `(x11, c_common)` it proves:
+//!
+//! ```text
+//! Σ_{x11,c_common} 0 = 0
+//! ```
+//!
+//! Its only purpose is to *learn the Stage-2 evaluation point* from batching and to cache the
+//! resulting openings of `rho` and `quotient` at that point under `SumcheckId::GtExpClaimReduction`.
 use crate::{
     field::JoltField,
     poly::{

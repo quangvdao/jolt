@@ -1,4 +1,4 @@
-//! GT multiplication sumcheck (over GT-local constraint index + u variables).
+//! GT multiplication sumcheck
 //!
 //! GT mul witness polynomials are packed as MLEs over `(u, c_gt)`,
 //! where `c_gt` ranges over only `{GtExp,GtMul}` constraints (in global order), and `u` is
@@ -7,6 +7,29 @@
 //! Variable order for this sumcheck instance (round order, `BindingOrder::LowToHigh`):
 //! - first 4 rounds bind the element variables `u` (LSB first)
 //! - last `k_gt` rounds bind the GT-local constraint index `c_gt` (LSB first, as a suffix in Stage 2)
+//!
+//! ## Sumcheck relation
+//!
+//! **Input claim:** `0`.
+//!
+//! Let:
+//! - `u ∈ {0,1}^4` be the GT element variables (LSB-first),
+//! - `c_common ∈ {0,1}^{k_common}` be the Stage-2 GT-local common suffix domain,
+//! - `dummy = k_common - k_mul` (dummy **low** bits),
+//! - `c_tail = c_common[dummy..] ∈ {0,1}^{k_mul}` be the GTMul family-local suffix,
+//! - `r = (r_u, r_c_common)` be the verifier-sampled `eq_point`.
+//!
+//! This sumcheck proves the following identity over `(u,c_common) ∈ {0,1}^{4+k_common}`:
+//!
+//! ```text
+//! Σ_{u,c_common} eq(r, (u,c_common)) · I_gtmul(c_common) · (lhs·rhs - result - quotient·g)(u, c_tail) = 0
+//! ```
+//!
+//! where:
+//! - `I_gtmul(c_common) ∈ {0,1}` gates padding rows,
+//! - `g(u)` is the public 4-var `g` polynomial (verifier-computed),
+//! - `(lhs, rhs, result, quotient)` are committed witness polynomials opened at the family-local point
+//!   `(r_u, r_{c_tail})` via `normalize_opening_point(...)`.
 
 use crate::{
     field::JoltField,

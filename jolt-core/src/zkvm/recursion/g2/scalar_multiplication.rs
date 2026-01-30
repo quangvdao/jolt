@@ -1,4 +1,4 @@
-//! G2 scalar multiplication sumchecks (family-local).
+//! G2 scalar multiplication sumcheck
 //!
 //! This mirrors `g1/scalar_multiplication.rs`, but for G2 points over Fq2 (split into
 //! (c0,c1) components over Fq).
@@ -9,6 +9,53 @@
 //! - For Stage-2 alignment we optionally run over `k_common >= k_smul` c-bits by replicating
 //!   across dummy **low** bits (dummy-low-bits convention).
 //! - The committed witness polynomials are MLEs over `(step, c_g2smul)` (step low bits, c suffix).
+//!
+//! ## Sumcheck relation: `G2ScalarMul`
+//!
+//! **Input claim:** `0`.
+//!
+//! Let:
+//! - `s ∈ {0,1}^8` be the step variables (LSB-first),
+//! - `c_common ∈ {0,1}^{k_common}` be the Stage-2-aligned common constraint-index domain,
+//! - `dummy = k_common - k_smul` (dummy **low** bits),
+//! - `c_tail = c_common[dummy..] ∈ {0,1}^{k_smul}` (family-local suffix),
+//! - `r = (r_s, r_c_common)` be the verifier-sampled `eq_point`,
+//! - `eq(r, (s,c_common)) = eq(r_s, s) · eq(r_c_common, c_common)` be the multilinear equality
+//!   polynomial (LSB-first indexing).
+//!
+//! This sumcheck proves the following identity over `(s,c_common) ∈ {0,1}^{8+k_common}`:
+//!
+//! ```text
+//! Σ_{s,c_common} eq(r, (s,c_common)) · I_g2smul(c_common) · C_g2smul(s, c_tail; δ, public_inputs) = 0
+//! ```
+//!
+//! where:
+//! - `I_g2smul(c_common) ∈ {0,1}` gates padding rows,
+//! - `δ` is the transcript-sampled term-batching coefficient (`term_batch_coeff`),
+//! - `C_g2smul(...)` is the (batched) G2 scalar-mul constraint polynomial (over Fq, with Fq2 split into
+//!   (c0,c1) components), evaluated in `G2ScalarMulValues::eval_constraint(...)`.
+//!
+//! **Dummy-bit convention:** when `k_common > k_smul`, witness polynomials are replicated across the
+//! `dummy` low bits of `c_common`, but openings are cached at the family-local point
+//! `(r_s, r_c_tail)` via `normalize_opening_point(...)`.
+//!
+//! ## Sumcheck relation: `ShiftG2ScalarMul`
+//!
+//! **Input claim:** `0`.
+//!
+//! This is a shift-consistency check (no new openings) analogous to `ShiftG1ScalarMul`, but batching
+//! the Fq2 components with powers of `γ`:
+//!
+//! ```text
+//! Σ_{s,c_common} Eq(c_ref, c_common) · (
+//!     (Eq(step_ref, s) · not_last(s) · x_a_next_c0 - EqPlusOne(step_ref, s) · x_a_c0)
+//!   + γ   · (Eq(step_ref, s) · not_last(s) · x_a_next_c1 - EqPlusOne(step_ref, s) · x_a_c1)
+//!   + γ^2 · (Eq(step_ref, s) · not_last(s) · y_a_next_c0 - EqPlusOne(step_ref, s) · y_a_c0)
+//!   + γ^3 · (Eq(step_ref, s) · not_last(s) · y_a_next_c1 - EqPlusOne(step_ref, s) · y_a_c1)
+//! ) = 0
+//! ```
+//!
+//! with the same definitions of `Eq`, `EqPlusOne`, and `not_last` as in the G1 case.
 
 use crate::{
     field::JoltField,

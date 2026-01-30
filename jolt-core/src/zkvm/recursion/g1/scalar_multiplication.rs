@@ -1,10 +1,63 @@
-//! G1 scalar multiplication sumchecks (family-local).
+//! G1 scalar multiplication sumcheck
 //!
 //! - We batch over a **family-local** constraint index `c_g1smul`.
 //! - The native step trace domain remains 8 variables (256 steps).
 //! - All committed witness polynomials are treated as MLEs over `(step, c_g1smul)` with
 //!   `step` in the low bits and `c` as a suffix (LSB-first binding order).
 //! - Padding rows are gated by a public indicator `I_g1smul(c)`.
+//!
+//! ## Sumcheck relation: `G1ScalarMul`
+//!
+//! **Input claim:** `0`.
+//!
+//! Let:
+//! - `s ∈ {0,1}^8` be the step variables (LSB-first),
+//! - `c_common ∈ {0,1}^{k_common}` be the Stage-2-aligned common constraint-index domain,
+//! - `dummy = k_common - k_smul` (dummy **low** bits),
+//! - `c_tail = c_common[dummy..] ∈ {0,1}^{k_smul}` (family-local suffix),
+//! - `r = (r_s, r_c_common)` be the verifier-sampled `eq_point`,
+//! - `eq(r, (s,c_common)) = eq(r_s, s) · eq(r_c_common, c_common)` be the multilinear equality
+//!   polynomial (LSB-first indexing).
+//!
+//! This sumcheck proves the following identity over `(s,c_common) ∈ {0,1}^{8+k_common}`:
+//!
+//! ```text
+//! Σ_{s,c_common} eq(r, (s,c_common)) · I_g1smul(c_common) · C_g1smul(s, c_tail; δ, public_inputs) = 0
+//! ```
+//!
+//! where:
+//! - `I_g1smul(c_common) ∈ {0,1}` gates padding rows,
+//! - `δ` is the transcript-sampled term-batching coefficient (`term_batch_coeff`),
+//! - `C_g1smul(...)` is the (batched) G1 scalar-mul constraint polynomial evaluated in
+//!   `G1ScalarMulValues::eval_constraint(...)`, using public scalar bits/basepoints.
+//!
+//! **Dummy-bit convention:** when `k_common > k_smul`, witness polynomials are replicated across the
+//! `dummy` low bits of `c_common`, but openings are cached at the family-local point
+//! `(r_s, r_c_tail)` via `normalize_opening_point(...)`.
+//!
+//! ## Sumcheck relation: `ShiftG1ScalarMul`
+//!
+//! **Input claim:** `0`.
+//!
+//! This is a *shift-consistency* check (no new openings) that enforces, at a random reference point,
+//! that the committed “next” columns correspond to a one-step shift in the step variable.
+//!
+//! Let `step_ref ∈ Fq^8`, `c_ref ∈ Fq^{k_common}` and `γ ∈ Fq` be transcript-sampled, and define:
+//! - `Eq(step_ref, s)` as `eq_lsb_evals(step_ref)[s]`,
+//! - `EqPlusOne(step_ref, s)` as `eq_plus_one_lsb_evals(step_ref)[s]` (i.e. `Eq(step_ref+1, s)`),
+//! - `not_last(s) ∈ {0,1}` as 1 except at the final step (`s = 255`), where it is 0.
+//!
+//! The sumcheck proves:
+//!
+//! ```text
+//! Σ_{s,c_common} Eq(c_ref, c_common) · (
+//!     (Eq(step_ref, s) · not_last(s) · x_a_next(s,c_common) - EqPlusOne(step_ref, s) · x_a(s,c_common))
+//!   + γ · (Eq(step_ref, s) · not_last(s) · y_a_next(s,c_common) - EqPlusOne(step_ref, s) · y_a(s,c_common))
+//! ) = 0
+//! ```
+//!
+//! which implies (informally) `x_a_next(s,·)=x_a(s+1,·)` and `y_a_next(s,·)=y_a(s+1,·)` for non-last
+//! steps, at the randomly sampled point.
 
 use crate::{
     field::JoltField,

@@ -1,4 +1,4 @@
-//! Packed GT exponentiation sumcheck (over GT-local constraint index + packed (s,x) vars).
+//! GT exponentiation sumcheck
 //!
 //! Goal: eliminate per-instance GTExp virtual openings from the recursion proof payload by treating
 //! packed GTExp as a single polynomial over:
@@ -11,6 +11,32 @@
 //! This mirrors the existing (per-instance) `GtExp` protocol but changes:
 //! - number of rounds: `k_gt + 11`
 //! - openings emitted: `gt_exp_{rho,rho_next,quotient}()` under `SumcheckId::GtExp`
+//!
+//! ## Sumcheck relation
+//!
+//! **Input claim:** `0`.
+//!
+//! Let:
+//! - `c_gt ∈ {0,1}^{k_gt}` be the GT-local constraint index domain (Stage 1),
+//! - `x11 = (s,u) ∈ {0,1}^7 × {0,1}^4` be the packed GT exp domain (LSB-first in each component),
+//! - `r = (r_c, r_x) ∈ Fq^{k_gt+11}` be the verifier-sampled `eq_point`,
+//! - `eq(r,(c_gt,x11))` be the multilinear equality polynomial.
+//!
+//! This sumcheck proves:
+//!
+//! ```text
+//! Σ_{c_gt,x11} eq(r, (c_gt,x11)) · C_gtexp(c_gt, x11) = 0
+//! ```
+//!
+//! where `C_gtexp(c_gt, x11)` is the packed GT exponentiation constraint
+//!
+//! ```text
+//! rho_next(c_gt,x11) - rho(c_gt,x11)^4 · base_power(x11) - quotient(c_gt,x11) · g(x11)
+//! ```
+//!
+//! and `base_power(x11)` is derived from the public base/digit polynomials (`GtExpPublicInputs`).
+//! (All witness polynomials are stacked into the `c_gt` dimension with zeros outside `GtExp` rows,
+//! so the relation is implicitly gated off-family and on padding.)
 
 use crate::{
     field::JoltField,

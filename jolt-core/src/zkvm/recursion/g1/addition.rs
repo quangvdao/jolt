@@ -1,4 +1,4 @@
-//! G1 addition sumcheck (family-local).
+//! G1 addition sumcheck
 //!
 //! - We batch the family over a **family-local** constraint index `c_g1add`.
 //! - Each committed G1Add term (XP, YP, ..., IsInverse) is treated as an MLE over `c_g1add`.
@@ -8,6 +8,25 @@
 //! Variable order (round order, `BindingOrder::LowToHigh`):
 //! - `k = log2(next_pow2(num_g1add).max(1))` rounds bind the family-local constraint index `c_g1add`
 //!   (LSB first).
+//!
+//! ## Sumcheck relation
+//!
+//! **Input claim:** `0`.
+//!
+//! Let `r_c ∈ Fq^k` be the verifier-sampled `eq_point`, and let `eq(r_c, c)` denote the multilinear
+//! equality polynomial over `c ∈ {0,1}^k` (LSB-first indexing).
+//!
+//! This sumcheck proves the following identity over `c ∈ {0,1}^k`:
+//!
+//! ```text
+//! Σ_c eq(r_c, c) · I_g1add(c) · C_g1add(c; δ) = 0
+//! ```
+//!
+//! where:
+//! - `I_g1add(c) ∈ {0,1}` is the public indicator polynomial (1 on real constraints, 0 on padding),
+//! - `δ` is the transcript-sampled term-batching coefficient (`term_batch_coeff`),
+//! - `C_g1add(c; δ)` is the (batched) G1 addition constraint polynomial, evaluated in
+//!   `G1AddValues::eval_constraint(...)`.
 
 use crate::{
     field::JoltField,

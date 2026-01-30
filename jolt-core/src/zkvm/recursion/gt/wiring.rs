@@ -1,31 +1,8 @@
-//! GT wiring (copy/boundary) sumcheck (sound, split-k aware).
+//! GT wiring (copy/boundary) sumcheck
 //!
 //! This is the GT wiring backend used by recursion.
 //! It enforces that GT producer outputs match GT consumer inputs (plus boundary constants)
 //! according to the verifier-derived `WiringPlan` edge list.
-//!
-//! ## Statement (high level)
-//! We prove:
-//! \[
-//!   0 \;=\;
-//!   \sum_{(s,u,c)\in\{0,1\}^{7}\times\{0,1\}^{4}\times\{0,1\}^{k}}
-//!     \mathrm{Eq}(u,\tau)\cdot
-//!     \sum_{e\in E_{GT}} \lambda_e \cdot \mathrm{Eq}_s(e;s)\cdot
-//!       \Big(
-//!         \mathrm{Eq}(c, \mathrm{embed}(\mathrm{src}(e))) \cdot \mathrm{SrcPort}(e;c,s,u)
-//!         \;-\;
-//!         \mathrm{Eq}(c, \mathrm{embed}(\mathrm{dst}(e))) \cdot \mathrm{DstPort}(e;c,s,u)
-//!       \Big),
-//! \]
-//! where:
-//! - `s` are the packed GTExp step variables (7),
-//! - `u` are the GT element variables (4),
-//! - `c` is a GT-local **common** constraint-index domain of size `2^k` (`k = k_gt`),
-//! - `embed(idx)` places a family-local index into the common domain by shifting left by
-//!   `dummy = k - k_family` dummy low bits (so dummy bits are zero).
-//! - `Eq_s(e;s)` is:
-//!   - `Eq(s, s_out(exp_instance))` if the edge source is `GtExpRho`,
-//!   - `Eq(s, 0)` if the edge source is `GtMulResult` (u-only values).
 //!
 //! Importantly, the *port polynomials* for GTExp/GTmul are treated as **multilinear in `c`**
 //! (over the instance index). This allows the verifier to consume already-cached
@@ -39,9 +16,29 @@
 //! This matches how `GtExpStage2Openings*` and `GtMul*` interpret the Stage-2
 //! challenge vector.
 //!
-//! ## Soundness note
-//! This backend does **not** rely on prover-emitted auxiliary wiring sums (`gt_wiring_src_sum/dst_sum`).
-//! It is therefore safe to use without a separate “binding safety net”.
+//! ## Sumcheck relation
+//!
+//! **Input claim:** `0`.
+//!
+//! The polynomial sumchecked by this instance uses the “dummy-low-bits” split-k convention with
+//! explicit normalization:
+//!
+//! ```text
+//! Σ_{x=(s,u), c_common} Eq(u, τ) · Σ_{e∈E_GT} λ_e · Eq_s(e; s) · (
+//!     β_src(e) · Eq(c_tail^{src(e)}, idx_src(e)) · V_src(e; x)
+//!   - β_dst(e) · Eq(c_tail^{dst(e)}, idx_dst(e)) · V_dst(e; x)
+//! ) = 0
+//! ```
+//!
+//! where:
+//! - `c_common ∈ {0,1}^{k_gt}` is the Stage-2 GT-local common suffix domain,
+//! - for a family with `k_f` index bits: `dummy_f = k_gt - k_f`,
+//!   `c_tail^f = c_common[dummy_f..]`, and `β_f = 2^{-dummy_f}`,
+//! - `V_src/V_dst` are the relevant port polynomials (consumed via cached openings from
+//!   `GtExp*`, `GtMul*`, and `GtExpStage2Openings*`), with u-only values padded to 11 vars by
+//!   replication over the 7 step bits,
+//! - boundary constants are anchored to the opposite endpoint’s selector (GT-style),
+//! - `λ_e` are transcript-sampled edge-batching coefficients.
 
 use ark_bn254::{Fq, Fq12};
 use ark_ff::{Field, One, Zero};

@@ -162,7 +162,7 @@ produced by earlier ones.
 - **G2 scalar-mul / shift**:
   - `G2ScalarMul*` must run **before** `ShiftG2ScalarMul*` for the same reason (`SumcheckId::G2ScalarMul`).
 
-- **Wiring backends** (`gt/fused_wiring.rs`, `g1/fused_wiring.rs`, `g2/fused_wiring.rs`) are appended **last** in Stage 2.
+- **Wiring backends** (`gt/wiring.rs`, `g1/wiring.rs`, `g2/wiring.rs`) are appended **last** in Stage 2.
   They are “openings consumers”: they read cached openings but do not create new ones.
 
 #### Split-\(k\) / dummy-bit convention (shared across families)
@@ -177,9 +177,9 @@ and are embedded into the common domain by replicating across **dummy low bits**
 
 This convention is implemented for:
 
-- GT: `gt/fused_stage2_openings.rs`, `gt/fused_wiring.rs`
-- G1: `g1/fused_scalar_multiplication.rs`, `g1/fused_wiring.rs`, `g1/indexing.rs`
-- G2: `g2/fused_scalar_multiplication.rs`, `g2/fused_wiring.rs`, `g2/indexing.rs`
+- GT: `gt/stage2_openings.rs`, `gt/wiring.rs`
+- G1: `g1/scalar_multiplication.rs`, `g1/wiring.rs`, `g1/indexing.rs`
+- G2: `g2/scalar_multiplication.rs`, `g2/wiring.rs`, `g2/indexing.rs`
 
 #### Opening-point normalization for scalar-mul
 
@@ -1023,7 +1023,7 @@ so the outside verifier can perform the final pairing check.
 
 > **Implementation status**: AST-derived wiring/boundary constraints are **implemented** and enabled by default.
 > They run as sumcheck instances appended at the end of the Stage 2 batched sumcheck
-> (see `jolt-core/src/zkvm/recursion/{gt,g1,g2}/fused_wiring.rs`).
+> (see `jolt-core/src/zkvm/recursion/{gt,g1,g2}/wiring.rs`).
 > The design doc is `WIRING_SUMCHECK_PLAN.md` (repo root), plus this Section 3.
 
 After Stage 2, we have many virtual polynomial claims $(v_0, v_1, \ldots, v_{n-1})$ at a shared point $r_x$.
@@ -1101,9 +1101,9 @@ where \(\lambda_e\) are transcript challenges (Fiat–Shamir) to prevent cancell
 
 Stage 2 uses wiring backends:
 
-- GT: `gt/fused_wiring.rs`
-- G1: `g1/fused_wiring.rs`
-- G2: `g2/fused_wiring.rs`
+- GT: `gt/wiring.rs`
+- G1: `g1/wiring.rs`
+- G2: `g2/wiring.rs`
 
 These backends are designed to:
 
@@ -1113,10 +1113,10 @@ These backends are designed to:
 
 Concretely:
 
-- `G1ScalarMul` caches port openings under `SumcheckId::G1ScalarMul` (see `g1/fused_scalar_multiplication.rs`).
-- `G2ScalarMul` caches port openings under `SumcheckId::G2ScalarMul` (see `g2/fused_scalar_multiplication.rs`).
-- `G1Add` caches port/aux openings under `SumcheckId::G1Add` (see `g1/fused_addition.rs`).
-- `G2Add` caches port/aux openings under `SumcheckId::G2Add` (see `g2/fused_addition.rs`).
+- `G1ScalarMul` caches port openings under `SumcheckId::G1ScalarMul` (see `g1/scalar_multiplication.rs`).
+- `G2ScalarMul` caches port openings under `SumcheckId::G2ScalarMul` (see `g2/scalar_multiplication.rs`).
+- `G1Add` caches port/aux openings under `SumcheckId::G1Add` (see `g1/addition.rs`).
+- `G2Add` caches port/aux openings under `SumcheckId::G2Add` (see `g2/addition.rs`).
 - Wiring instances cache **no openings**; they only add a Stage-2 sumcheck equation that binds those openings to the verifier-derived wiring plan.
 
 ### 3.6 Soundness audit checklist (wiring + split-\(k\))

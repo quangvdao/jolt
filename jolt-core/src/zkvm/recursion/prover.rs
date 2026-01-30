@@ -625,7 +625,7 @@ impl RecursionProver<Fq> {
                 padded_len,
                 "prefix packing stats"
             );
-            for e in prefix_layout.entries.iter().filter(|e| e.is_gt_fused) {
+            for e in prefix_layout.entries.iter().filter(|e| e.is_gt) {
                 tracing::info!(
                     ?e.poly_type,
                     e.num_vars,
@@ -830,8 +830,7 @@ impl RecursionProver<Fq> {
         let g_replicated = pad_4var_to_11var_replicated(&g_4var);
         let g_poly_replicated_f = DensePolynomial::new(g_replicated);
 
-        let params =
-            GtExpParams::from_constraint_types(&self.constraint_system.constraint_types);
+        let params = GtExpParams::from_constraint_types(&self.constraint_system.constraint_types);
         tracing::info!(
             "[Stage 1] Creating GtExpProver with {} GTExp witnesses",
             packed_witnesses.len()
@@ -921,8 +920,7 @@ impl RecursionProver<Fq> {
             let k_common = k_gt(&self.constraint_system.constraint_types);
             let num_gt_constraints_padded =
                 num_gt_mul_constraints_padded(&self.constraint_system.constraint_types);
-            let params =
-                GtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
+            let params = GtMulParams::new(num_gt_constraints, num_gt_constraints_padded, k_common);
             let prover = GtMulProver::new(
                 params,
                 &self.constraint_system.constraint_types,
@@ -952,8 +950,7 @@ impl RecursionProver<Fq> {
             provers.push(Box::new(prover));
 
             // Always run the shift check (it reuses scalar-mul cached openings).
-            let prover =
-                ShiftG1ScalarMulProver::new_with_k_common(g1_rows, k_common, transcript);
+            let prover = ShiftG1ScalarMulProver::new_with_k_common(g1_rows, k_common, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -976,8 +973,7 @@ impl RecursionProver<Fq> {
             provers.push(Box::new(prover));
 
             // Always run the shift check (it reuses scalar-mul cached openings).
-            let prover =
-                ShiftG2ScalarMulProver::new_with_k_common(g2_rows, k_common, transcript);
+            let prover = ShiftG2ScalarMulProver::new_with_k_common(g2_rows, k_common, transcript);
             provers.push(Box::new(prover));
         }
 
@@ -1102,7 +1098,7 @@ impl RecursionProver<Fq> {
 
         // Compute packed evaluation claim: F(r) = Σ_i eq(prefix_i, codeword_i) · f_i(r_x_prefix).
         let packed_eval = packed_eval_from_claims(&layout, &r_full_lsb, |entry| {
-            if entry.is_gt_fused {
+            if entry.is_gt {
                 let (sumcheck, vp) = match entry.poly_type {
                     PolyType::RhoPrev => (
                         SumcheckId::GtExpClaimReduction,
@@ -1114,18 +1110,15 @@ impl RecursionProver<Fq> {
                     ),
                     PolyType::MulLhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_lhs()),
                     PolyType::MulRhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_rhs()),
-                    PolyType::MulResult => {
-                        (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result())
+                    PolyType::MulResult => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result()),
+                    PolyType::MulQuotient => {
+                        (SumcheckId::GtMul, VirtualPolynomial::gt_mul_quotient())
                     }
-                    PolyType::MulQuotient => (
-                        SumcheckId::GtMul,
-                        VirtualPolynomial::gt_mul_quotient(),
-                    ),
                     _ => return Fq::zero(),
                 };
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, sumcheck);
                 claim
-            } else if entry.is_g1_scalar_mul_fused {
+            } else if entry.is_g1_scalar_mul {
                 let vp = match entry.poly_type {
                     PolyType::G1ScalarMulXA => VirtualPolynomial::g1_scalar_mul_xa(),
                     PolyType::G1ScalarMulYA => VirtualPolynomial::g1_scalar_mul_ya(),
@@ -1144,7 +1137,7 @@ impl RecursionProver<Fq> {
                 let (_, claim) =
                     accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1ScalarMul);
                 claim
-            } else if entry.is_g1_add_fused {
+            } else if entry.is_g1_add {
                 let vp = match entry.poly_type {
                     PolyType::G1AddXP => VirtualPolynomial::g1_add_xp(),
                     PolyType::G1AddYP => VirtualPolynomial::g1_add_yp(),
@@ -1156,19 +1149,15 @@ impl RecursionProver<Fq> {
                     PolyType::G1AddYR => VirtualPolynomial::g1_add_yr(),
                     PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator(),
                     // Non-port terms are still packed for G1.
-                    PolyType::G1AddLambda => VirtualPolynomial::g1_add_fused(G1AddTerm::Lambda),
-                    PolyType::G1AddInvDeltaX => {
-                        VirtualPolynomial::g1_add_fused(G1AddTerm::InvDeltaX)
-                    }
-                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add_fused(G1AddTerm::IsDouble),
-                    PolyType::G1AddIsInverse => {
-                        VirtualPolynomial::g1_add_fused(G1AddTerm::IsInverse)
-                    }
+                    PolyType::G1AddLambda => VirtualPolynomial::g1_add(G1AddTerm::Lambda),
+                    PolyType::G1AddInvDeltaX => VirtualPolynomial::g1_add(G1AddTerm::InvDeltaX),
+                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add(G1AddTerm::IsDouble),
+                    PolyType::G1AddIsInverse => VirtualPolynomial::g1_add(G1AddTerm::IsInverse),
                     _ => return Fq::zero(),
                 };
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G1Add);
                 claim
-            } else if entry.is_g2_scalar_mul_fused {
+            } else if entry.is_g2_scalar_mul {
                 let vp = match entry.poly_type {
                     PolyType::G2ScalarMulXAC0 => VirtualPolynomial::g2_scalar_mul_xa_c0(),
                     PolyType::G2ScalarMulXAC1 => VirtualPolynomial::g2_scalar_mul_xa_c1(),
@@ -1178,18 +1167,10 @@ impl RecursionProver<Fq> {
                     PolyType::G2ScalarMulXTC1 => VirtualPolynomial::g2_scalar_mul_xt_c1(),
                     PolyType::G2ScalarMulYTC0 => VirtualPolynomial::g2_scalar_mul_yt_c0(),
                     PolyType::G2ScalarMulYTC1 => VirtualPolynomial::g2_scalar_mul_yt_c1(),
-                    PolyType::G2ScalarMulXANextC0 => {
-                        VirtualPolynomial::g2_scalar_mul_xa_next_c0()
-                    }
-                    PolyType::G2ScalarMulXANextC1 => {
-                        VirtualPolynomial::g2_scalar_mul_xa_next_c1()
-                    }
-                    PolyType::G2ScalarMulYANextC0 => {
-                        VirtualPolynomial::g2_scalar_mul_ya_next_c0()
-                    }
-                    PolyType::G2ScalarMulYANextC1 => {
-                        VirtualPolynomial::g2_scalar_mul_ya_next_c1()
-                    }
+                    PolyType::G2ScalarMulXANextC0 => VirtualPolynomial::g2_scalar_mul_xa_next_c0(),
+                    PolyType::G2ScalarMulXANextC1 => VirtualPolynomial::g2_scalar_mul_xa_next_c1(),
+                    PolyType::G2ScalarMulYANextC0 => VirtualPolynomial::g2_scalar_mul_ya_next_c0(),
+                    PolyType::G2ScalarMulYANextC1 => VirtualPolynomial::g2_scalar_mul_ya_next_c1(),
                     PolyType::G2ScalarMulTIndicator => {
                         VirtualPolynomial::g2_scalar_mul_t_indicator()
                     }
@@ -1201,47 +1182,38 @@ impl RecursionProver<Fq> {
                 let (_, claim) =
                     accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul);
                 claim
-            } else if entry.is_g2_add_fused {
+            } else if entry.is_g2_add {
                 let vp = match entry.poly_type {
-                    PolyType::G2AddXPC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::XPC0),
-                    PolyType::G2AddXPC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::XPC1),
-                    PolyType::G2AddYPC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::YPC0),
-                    PolyType::G2AddYPC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::YPC1),
-                    PolyType::G2AddPIndicator => {
-                        VirtualPolynomial::g2_add_fused(G2AddTerm::PIndicator)
-                    }
-                    PolyType::G2AddXQC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::XQC0),
-                    PolyType::G2AddXQC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::XQC1),
-                    PolyType::G2AddYQC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::YQC0),
-                    PolyType::G2AddYQC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::YQC1),
-                    PolyType::G2AddQIndicator => {
-                        VirtualPolynomial::g2_add_fused(G2AddTerm::QIndicator)
-                    }
-                    PolyType::G2AddXRC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::XRC0),
-                    PolyType::G2AddXRC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::XRC1),
-                    PolyType::G2AddYRC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::YRC0),
-                    PolyType::G2AddYRC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::YRC1),
-                    PolyType::G2AddRIndicator => {
-                        VirtualPolynomial::g2_add_fused(G2AddTerm::RIndicator)
-                    }
-                    PolyType::G2AddLambdaC0 => VirtualPolynomial::g2_add_fused(G2AddTerm::LambdaC0),
-                    PolyType::G2AddLambdaC1 => VirtualPolynomial::g2_add_fused(G2AddTerm::LambdaC1),
-                    PolyType::G2AddInvDeltaXC0 => {
-                        VirtualPolynomial::g2_add_fused(G2AddTerm::InvDeltaXC0)
-                    }
-                    PolyType::G2AddInvDeltaXC1 => {
-                        VirtualPolynomial::g2_add_fused(G2AddTerm::InvDeltaXC1)
-                    }
-                    PolyType::G2AddIsDouble => VirtualPolynomial::g2_add_fused(G2AddTerm::IsDouble),
-                    PolyType::G2AddIsInverse => {
-                        VirtualPolynomial::g2_add_fused(G2AddTerm::IsInverse)
-                    }
+                    PolyType::G2AddXPC0 => VirtualPolynomial::g2_add(G2AddTerm::XPC0),
+                    PolyType::G2AddXPC1 => VirtualPolynomial::g2_add(G2AddTerm::XPC1),
+                    PolyType::G2AddYPC0 => VirtualPolynomial::g2_add(G2AddTerm::YPC0),
+                    PolyType::G2AddYPC1 => VirtualPolynomial::g2_add(G2AddTerm::YPC1),
+                    PolyType::G2AddPIndicator => VirtualPolynomial::g2_add(G2AddTerm::PIndicator),
+                    PolyType::G2AddXQC0 => VirtualPolynomial::g2_add(G2AddTerm::XQC0),
+                    PolyType::G2AddXQC1 => VirtualPolynomial::g2_add(G2AddTerm::XQC1),
+                    PolyType::G2AddYQC0 => VirtualPolynomial::g2_add(G2AddTerm::YQC0),
+                    PolyType::G2AddYQC1 => VirtualPolynomial::g2_add(G2AddTerm::YQC1),
+                    PolyType::G2AddQIndicator => VirtualPolynomial::g2_add(G2AddTerm::QIndicator),
+                    PolyType::G2AddXRC0 => VirtualPolynomial::g2_add(G2AddTerm::XRC0),
+                    PolyType::G2AddXRC1 => VirtualPolynomial::g2_add(G2AddTerm::XRC1),
+                    PolyType::G2AddYRC0 => VirtualPolynomial::g2_add(G2AddTerm::YRC0),
+                    PolyType::G2AddYRC1 => VirtualPolynomial::g2_add(G2AddTerm::YRC1),
+                    PolyType::G2AddRIndicator => VirtualPolynomial::g2_add(G2AddTerm::RIndicator),
+                    PolyType::G2AddLambdaC0 => VirtualPolynomial::g2_add(G2AddTerm::LambdaC0),
+                    PolyType::G2AddLambdaC1 => VirtualPolynomial::g2_add(G2AddTerm::LambdaC1),
+                    PolyType::G2AddInvDeltaXC0 => VirtualPolynomial::g2_add(G2AddTerm::InvDeltaXC0),
+                    PolyType::G2AddInvDeltaXC1 => VirtualPolynomial::g2_add(G2AddTerm::InvDeltaXC1),
+                    PolyType::G2AddIsDouble => VirtualPolynomial::g2_add(G2AddTerm::IsDouble),
+                    PolyType::G2AddIsInverse => VirtualPolynomial::g2_add(G2AddTerm::IsInverse),
                     _ => return Fq::zero(),
                 };
                 let (_, claim) = accumulator.get_virtual_polynomial_opening(vp, SumcheckId::G2Add);
                 claim
             } else {
-                panic!("unexpected prefix-packing entry without a family tag: {:?}", entry)
+                panic!(
+                    "unexpected prefix-packing entry without a family tag: {:?}",
+                    entry
+                )
             }
         });
 

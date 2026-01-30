@@ -117,7 +117,7 @@ pub struct GtShiftProver {
     eq_prod: MultilinearPolynomial<Fq>,
     /// rho(c,s,x) table.
     rho: MultilinearPolynomial<Fq>,
-    /// Input claim = rho_next_fused(r1).
+    /// Input claim = rho_next(r1).
     input_claim: Fq,
 }
 

@@ -1,6 +1,6 @@
 //! G1 wiring (copy/boundary) sumcheck (GT-style split-k aware).
 //!
-//! This is the G1 analogue of `gt/fused_wiring.rs`.
+//! This is the G1 analogue of `gt/wiring.rs`.
 //!
 //! ## Goal
 //! Replace per-instance wiring openings with a wiring
@@ -831,19 +831,19 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
             VirtualPolynomial::g1_scalar_mul_a_indicator(),
             SumcheckId::G1ScalarMul,
         );
-        let smul_out_fused = xa_next + self.mu * ya_next + self.mu2 * a_ind;
+        let smul_out_val = xa_next + self.mu * ya_next + self.mu2 * a_ind;
 
         // Fetch add port openings.
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G1Add).1
         };
-        let add_p_fused = get_add(VirtualPolynomial::g1_add_xp())
+        let add_p_val = get_add(VirtualPolynomial::g1_add_xp())
             + self.mu * get_add(VirtualPolynomial::g1_add_yp())
             + self.mu2 * get_add(VirtualPolynomial::g1_add_p_indicator());
-        let add_q_fused = get_add(VirtualPolynomial::g1_add_xq())
+        let add_q_val = get_add(VirtualPolynomial::g1_add_xq())
             + self.mu * get_add(VirtualPolynomial::g1_add_yq())
             + self.mu2 * get_add(VirtualPolynomial::g1_add_q_indicator());
-        let add_r_fused = get_add(VirtualPolynomial::g1_add_xr())
+        let add_r_val = get_add(VirtualPolynomial::g1_add_xr())
             + self.mu * get_add(VirtualPolynomial::g1_add_yr())
             + self.mu2 * get_add(VirtualPolynomial::g1_add_r_indicator());
 
@@ -862,7 +862,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
                     G1ValueRef::G1ScalarMulOut { instance } => (
                         beta_smul,
                         self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
-                        smul_out_fused,
+                        smul_out_val,
                     ),
                     G1ValueRef::G1ScalarMulBase { instance } => {
                         let (x, y, ind) = self.smul_bases[instance];
@@ -876,17 +876,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
                     G1ValueRef::G1AddOut { instance } => (
                         beta_add,
                         self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_r_fused,
+                        add_r_val,
                     ),
                     G1ValueRef::G1AddInP { instance } => (
                         beta_add,
                         self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_p_fused,
+                        add_p_val,
                     ),
                     G1ValueRef::G1AddInQ { instance } => (
                         beta_add,
                         self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_q_fused,
+                        add_q_val,
                     ),
                     // Boundary constants are anchored to the other endpoint's selector in the caller.
                     G1ValueRef::PairingBoundaryP1 => (Fq::zero(), Fq::zero(), pb_batched(pb1)),

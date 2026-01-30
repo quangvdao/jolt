@@ -1,8 +1,8 @@
 //! G2 wiring (copy/boundary) sumcheck (GT-style split-k aware).
 //!
 //! This mirrors:
-//! - `gt/fused_wiring.rs` (split-k + β(dummy) normalization), and
-//! - `g1/fused_wiring.rs` (step-then-c phase split for performance),
+//! - `gt/wiring.rs` (split-k + β(dummy) normalization), and
+//! - `g1/wiring.rs` (step-then-c phase split for performance),
 //!   but for G2 points over Fq2 (batched into a single Fq scalar using μ powers).
 //!
 //! Variable order (Stage 2):
@@ -934,7 +934,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G2ScalarMul)
                 .1
         };
-        let smul_out_fused = get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c0())
+        let smul_out_val = get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c0())
             + self.mu * get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c1())
             + self.mu2 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c0())
             + self.mu3 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c1())
@@ -944,17 +944,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_opening(vp, SumcheckId::G2Add).1
         };
-        let add_p_fused = get_add(VirtualPolynomial::g2_add_xp_c0())
+        let add_p_val = get_add(VirtualPolynomial::g2_add_xp_c0())
             + self.mu * get_add(VirtualPolynomial::g2_add_xp_c1())
             + self.mu2 * get_add(VirtualPolynomial::g2_add_yp_c0())
             + self.mu3 * get_add(VirtualPolynomial::g2_add_yp_c1())
             + self.mu4 * get_add(VirtualPolynomial::g2_add_p_indicator());
-        let add_q_fused = get_add(VirtualPolynomial::g2_add_xq_c0())
+        let add_q_val = get_add(VirtualPolynomial::g2_add_xq_c0())
             + self.mu * get_add(VirtualPolynomial::g2_add_xq_c1())
             + self.mu2 * get_add(VirtualPolynomial::g2_add_yq_c0())
             + self.mu3 * get_add(VirtualPolynomial::g2_add_yq_c1())
             + self.mu4 * get_add(VirtualPolynomial::g2_add_q_indicator());
-        let add_r_fused = get_add(VirtualPolynomial::g2_add_xr_c0())
+        let add_r_val = get_add(VirtualPolynomial::g2_add_xr_c0())
             + self.mu * get_add(VirtualPolynomial::g2_add_xr_c1())
             + self.mu2 * get_add(VirtualPolynomial::g2_add_yr_c0())
             + self.mu3 * get_add(VirtualPolynomial::g2_add_yr_c1())
@@ -976,7 +976,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
                     G2ValueRef::G2ScalarMulOut { instance } => (
                         beta_smul,
                         self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
-                        smul_out_fused,
+                        smul_out_val,
                     ),
                     G2ValueRef::G2ScalarMulBase { instance } => {
                         let (x0, x1, y0, y1, ind) = self.smul_bases[instance];
@@ -990,17 +990,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
                     G2ValueRef::G2AddOut { instance } => (
                         beta_add,
                         self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_r_fused,
+                        add_r_val,
                     ),
                     G2ValueRef::G2AddInP { instance } => (
                         beta_add,
                         self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_p_fused,
+                        add_p_val,
                     ),
                     G2ValueRef::G2AddInQ { instance } => (
                         beta_add,
                         self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_q_fused,
+                        add_q_val,
                     ),
                     // Boundary constants are anchored to the other endpoint's selector in the caller.
                     G2ValueRef::PairingBoundaryP1 => (Fq::zero(), Fq::zero(), pb_batched(pb1)),

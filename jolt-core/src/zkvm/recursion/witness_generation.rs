@@ -539,7 +539,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
     }
 
     #[inline]
-    fn fill_fused_block_bit_reversed(
+    fn fill_block_bit_reversed(
         dst: &mut [Fq],
         src: &[Fq],
         num_vars: usize,
@@ -557,13 +557,13 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
     }
 
     #[inline]
-    fn fill_fused_scalar_bit_reversed(dst: &mut [Fq], num_vars: usize, c: usize, v: Fq) {
+    fn fill_scalar_bit_reversed(dst: &mut [Fq], num_vars: usize, c: usize, v: Fq) {
         debug_assert_eq!(dst.len(), 1usize << num_vars);
         dst[bit_reverse(c, num_vars)] = v;
     }
 
     fn fill_entry(dst: &mut [Fq], cs: &ConstraintSystem, entry: &PrefixPackedEntry) {
-        if entry.is_gt_fused {
+        if entry.is_gt {
             // Commit exp/mul rows at family-local padded sizes.
             let num_vars_gt_exp = 11usize + k_exp(&cs.constraint_types);
             let num_vars_gt_mul = 4usize + k_mul(&cs.constraint_types);
@@ -587,7 +587,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                             PolyType::Quotient => &cs.gt_exp_witnesses[c_exp].quotient_packed,
                             _ => unreachable!(),
                         };
-                        fill_fused_block_bit_reversed(dst, src, entry.num_vars, c_exp, 11);
+                        fill_block_bit_reversed(dst, src, entry.num_vars, c_exp, 11);
                     }
                 }
                 PolyType::MulLhs
@@ -608,7 +608,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                             PolyType::MulQuotient => &cs.gt_mul_rows[c_mul].quotient,
                             _ => unreachable!(),
                         };
-                        fill_fused_block_bit_reversed(dst, src4, entry.num_vars, c_mul, 4);
+                        fill_block_bit_reversed(dst, src4, entry.num_vars, c_mul, 4);
                     }
                 }
                 _ => {
@@ -618,7 +618,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             return;
         }
 
-        if entry.is_g1_scalar_mul_fused {
+        if entry.is_g1_scalar_mul {
             // G1 scalar-mul rows are native 8-var step traces plus a family-local padded `c`.
             let num_g1 = cs.g1_scalar_mul_rows.len();
             let padded = num_g1.max(1).next_power_of_two();
@@ -642,12 +642,12 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     PolyType::G1ScalarMulAIndicator => &cs.g1_scalar_mul_rows[c].a_indicator,
                     _ => continue,
                 };
-                fill_fused_block_bit_reversed(dst, src8, entry.num_vars, c, 8);
+                fill_block_bit_reversed(dst, src8, entry.num_vars, c, 8);
             }
             return;
         }
 
-        if entry.is_g1_add_fused {
+        if entry.is_g1_add {
             // G1 add rows are c-only over a family-local padded `c_add`.
             let num_g1 = cs.g1_add_rows.len();
             let padded = num_g1.max(1).next_power_of_two();
@@ -677,12 +677,12 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     PolyType::G1AddIsInverse => cs.g1_add_rows[c].is_inverse,
                     _ => continue,
                 };
-                fill_fused_scalar_bit_reversed(dst, entry.num_vars, c, v);
+                fill_scalar_bit_reversed(dst, entry.num_vars, c, v);
             }
             return;
         }
 
-        if entry.is_g2_scalar_mul_fused {
+        if entry.is_g2_scalar_mul {
             // G2 scalar-mul rows are native 8-var step traces plus a family-local padded `c`.
             let num_g2 = cs.g2_scalar_mul_rows.len();
             let padded = num_g2.max(1).next_power_of_two();
@@ -713,12 +713,12 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     PolyType::G2ScalarMulAIndicator => &cs.g2_scalar_mul_rows[c].a_indicator,
                     _ => continue,
                 };
-                fill_fused_block_bit_reversed(dst, src8, entry.num_vars, c, 8);
+                fill_block_bit_reversed(dst, src8, entry.num_vars, c, 8);
             }
             return;
         }
 
-        if entry.is_g2_add_fused {
+        if entry.is_g2_add {
             // G2 add rows are c-only over a family-local padded `c_add`.
             let num_g2 = cs.g2_add_rows.len();
             let padded = num_g2.max(1).next_power_of_two();
@@ -756,7 +756,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     PolyType::G2AddIsInverse => cs.g2_add_rows[c].is_inverse,
                     _ => continue,
                 };
-                fill_fused_scalar_bit_reversed(dst, entry.num_vars, c, v);
+                fill_scalar_bit_reversed(dst, entry.num_vars, c, v);
             }
             return;
         }

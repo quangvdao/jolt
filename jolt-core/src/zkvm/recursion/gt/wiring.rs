@@ -922,22 +922,16 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let beta_mul = beta(dummy_mul);
 
         // Port openings (already cached by earlier GT instances in Stage 2).
-        let (_rho_point, rho_fused) = acc.get_virtual_polynomial_opening(
+        let (_rho_point, rho_val) = acc.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho(),
             SumcheckId::GtExpClaimReduction,
         );
-        let (_mul_lhs_point, mul_lhs_fused) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_lhs(),
-            SumcheckId::GtMul,
-        );
-        let (_mul_rhs_point, mul_rhs_fused) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_rhs(),
-            SumcheckId::GtMul,
-        );
-        let (_mul_out_point, mul_out_fused) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_result(),
-            SumcheckId::GtMul,
-        );
+        let (_mul_lhs_point, mul_lhs_val) =
+            acc.get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
+        let (_mul_rhs_point, mul_rhs_val) =
+            acc.get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
+        let (_mul_out_point, mul_out_val) = acc
+            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
 
         // Boundary constants at r_elem.
         let r_elem: Vec<Fq> = r_elem_chal.iter().map(|c| (*c).into()).collect();
@@ -955,7 +949,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             let (eq_c_src, src_val, beta_src) = match edge.src {
                 GtProducer::GtExpRho { instance } => (
                     self.eq_c_tail(r_c_exp_tail, instance, self.k_exp),
-                    rho_fused,
+                    rho_val,
                     beta_exp,
                 ),
                 GtProducer::GtExpBase { instance } => {
@@ -968,7 +962,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 }
                 GtProducer::GtMulResult { instance } => (
                     self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                    mul_out_fused,
+                    mul_out_val,
                     beta_mul,
                 ),
             };
@@ -976,12 +970,12 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             let (eq_c_dst, dst_val, beta_dst) = match edge.dst {
                 GtConsumer::GtMulLhs { instance } => (
                     self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                    mul_lhs_fused,
+                    mul_lhs_val,
                     beta_mul,
                 ),
                 GtConsumer::GtMulRhs { instance } => (
                     self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                    mul_rhs_fused,
+                    mul_rhs_val,
                     beta_mul,
                 ),
                 GtConsumer::GtExpBase { instance } => {

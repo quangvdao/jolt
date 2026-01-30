@@ -425,10 +425,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             .collect();
 
         // Fetch opened claims at the sumcheck point.
-        let (_, rho) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho(),
-            SumcheckId::GtExp,
-        );
+        let (_, rho) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::gt_exp_rho(), SumcheckId::GtExp);
         let (_, rho_next) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_exp_rho_next(),
             SumcheckId::GtExp,
@@ -511,7 +509,7 @@ mod tests {
     use crate::zkvm::recursion::constraints::system::ConstraintLocator;
 
     #[test]
-    fn stage1_fused_gtexp_replicates_across_dummy_c_bits() {
+    fn stage1_gtexp_replicates_across_dummy_c_bits() {
         // Split-k scenario:
         // - 3 GTExp => padded 4 => k_exp = 2
         // - 16 GTMul => padded 16 => k_mul = 4
@@ -564,7 +562,7 @@ mod tests {
             .collect();
 
         let g_poly_11var = DensePolynomial::new(vec![Fq::one(); row_size]);
-        let mut transcript = Blake2bTranscript::new(b"test_fused_gtexp_replication");
+        let mut transcript = Blake2bTranscript::new(b"test_gtexp_replication");
         let prover = GtExpProver::new(
             params.clone(),
             &constraint_types,

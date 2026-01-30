@@ -229,10 +229,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for GtMulProver {
         }
 
         let num_remaining = self.eq_poly.get_num_vars();
-        debug_assert!(
-            num_remaining > 0,
-            "gtmul should have at least one round"
-        );
+        debug_assert!(num_remaining > 0, "gtmul should have at least one round");
         let half = 1usize << (num_remaining - 1);
 
         let total_evals: [Fq; DEGREE] = (0..half)
@@ -446,18 +443,12 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
         let g_eval = self.eval_g_at_u(&r_u);
 
         // Fetch opened claims.
-        let (_, lhs) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_lhs(),
-            SumcheckId::GtMul,
-        );
-        let (_, rhs) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_rhs(),
-            SumcheckId::GtMul,
-        );
-        let (_, result) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_mul_result(),
-            SumcheckId::GtMul,
-        );
+        let (_, lhs) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
+        let (_, rhs) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
+        let (_, result) = accumulator
+            .get_virtual_polynomial_opening(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
         let (_, quotient) = accumulator.get_virtual_polynomial_opening(
             VirtualPolynomial::gt_mul_quotient(),
             SumcheckId::GtMul,
@@ -513,4 +504,3 @@ mod tests {
         assert_eq!(p.r[6], challenges[8]);
     }
 }
-compile_error!("test");

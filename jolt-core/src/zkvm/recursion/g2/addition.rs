@@ -1,6 +1,6 @@
 //! G2 addition sumcheck (family-local).
 //!
-//! Mirrors `g1/fused_addition.rs`, but for G2 points over Fq2 split into (c0,c1) components over Fq.
+//! Mirrors `g1/addition.rs`, but for G2 points over Fq2 split into (c0,c1) components over Fq.
 //!
 //! - We batch the family over a **family-local** constraint index `c_g2add`.
 //! - Each committed G2Add term is treated as an MLE over `c_g2add`.
@@ -172,10 +172,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G2AddProver {
 
     fn compute_message(&mut self, _round: usize, previous_claim: Fq) -> UniPoly<Fq> {
         let num_remaining = self.eq_poly.get_num_vars();
-        debug_assert!(
-            num_remaining > 0,
-            "g2add should have at least one round"
-        );
+        debug_assert!(num_remaining > 0, "g2add should have at least one round");
         let half = 1usize << (num_remaining - 1);
 
         let term_batch_coeff = self.term_batch_coeff;
@@ -238,7 +235,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G2AddProver {
             let claim = self.term_polys[term_idx].get_bound_coeff(0);
             accumulator.append_virtual(
                 transcript,
-                VirtualPolynomial::g2_add_fused(term),
+                VirtualPolynomial::g2_add(term),
                 SumcheckId::G2Add,
                 opening_point.clone(),
                 claim,
@@ -305,10 +302,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
         let mut claims = Vec::with_capacity(G2AddTerm::COUNT);
         for term_idx in 0..G2AddTerm::COUNT {
             let term = G2AddTerm::from_index(term_idx).expect("invalid G2AddTerm index");
-            let (_, claim) = accumulator.get_virtual_polynomial_opening(
-                VirtualPolynomial::g2_add_fused(term),
-                SumcheckId::G2Add,
-            );
+            let (_, claim) = accumulator
+                .get_virtual_polynomial_opening(VirtualPolynomial::g2_add(term), SumcheckId::G2Add);
             claims.push(claim);
         }
 
@@ -329,7 +324,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
             let term = G2AddTerm::from_index(term_idx).expect("invalid G2AddTerm index");
             accumulator.append_virtual(
                 transcript,
-                VirtualPolynomial::g2_add_fused(term),
+                VirtualPolynomial::g2_add(term),
                 SumcheckId::G2Add,
                 opening_point.clone(),
             );

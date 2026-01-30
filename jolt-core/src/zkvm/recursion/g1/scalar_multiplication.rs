@@ -1032,10 +1032,7 @@ impl ShiftG1ScalarMulVerifier {
         Self::new_with_params(params, transcript)
     }
 
-    fn new_with_params<T: Transcript>(
-        params: ShiftG1ScalarMulParams,
-        transcript: &mut T,
-    ) -> Self {
+    fn new_with_params<T: Transcript>(params: ShiftG1ScalarMulParams, transcript: &mut T) -> Self {
         let step_ref: Vec<<Fq as JoltField>::Challenge> = (0..STEP_VARS)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
@@ -1124,7 +1121,7 @@ mod tests {
     use crate::transcripts::Blake2bTranscript;
 
     #[test]
-    fn fused_g1_scalar_mul_params_has_expected_rounds() {
+    fn g1_scalar_mul_params_has_expected_rounds() {
         let p = G1ScalarMulParams::new(3);
         assert_eq!(p.num_step_vars, 8);
         assert_eq!(p.k_smul, 2); // padded to 4
@@ -1133,13 +1130,13 @@ mod tests {
     }
 
     #[test]
-    fn fused_shift_params_has_expected_rounds() {
+    fn shift_params_has_expected_rounds() {
         let p = ShiftG1ScalarMulParams::new(3);
         assert_eq!(p.num_rounds(), 10);
     }
 
     #[test]
-    fn fused_g1_scalar_mul_builds_tables_with_step_low_c_high_layout() {
+    fn g1_scalar_mul_builds_tables_with_step_low_c_high_layout() {
         let rs = row_size();
         let rows = vec![
             G1ScalarMulNative {
@@ -1169,7 +1166,7 @@ mod tests {
             G1ScalarMulPublicInputs::new(ark_bn254::Fr::from(0u64)),
             G1ScalarMulPublicInputs::new(ark_bn254::Fr::from(1u64)),
         ];
-        let mut transcript = Blake2bTranscript::new(b"test_fused_g1_scalar_mul_layout");
+        let mut transcript = Blake2bTranscript::new(b"test_g1_scalar_mul_layout");
         let prover = G1ScalarMulProver::new(&rows, &public_inputs, &mut transcript);
         let MultilinearPolynomial::LargeScalars(xa) = &prover.x_a else {
             panic!("expected LargeScalars");

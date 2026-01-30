@@ -137,14 +137,14 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
         let block = &evals[entry.offset..entry.offset + native_size];
         match entry.poly_type {
             PolyType::RhoPrev => {
-                assert!(entry.is_gt_fused);
+                assert!(entry.is_gt);
                 let src = &cs.gt_exp_witnesses[0].rho_packed;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::Quotient => {
-                assert!(entry.is_gt_fused);
+                assert!(entry.is_gt);
                 let src = &cs.gt_exp_witnesses[0].quotient_packed;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
@@ -152,28 +152,28 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
             }
 
             PolyType::MulLhs => {
-                assert!(entry.is_gt_fused);
+                assert!(entry.is_gt);
                 let src = &cs.gt_mul_rows[0].lhs;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::MulRhs => {
-                assert!(entry.is_gt_fused);
+                assert!(entry.is_gt);
                 let src = &cs.gt_mul_rows[0].rhs;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::MulResult => {
-                assert!(entry.is_gt_fused);
+                assert!(entry.is_gt);
                 let src = &cs.gt_mul_rows[0].result;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::MulQuotient => {
-                assert!(entry.is_gt_fused);
+                assert!(entry.is_gt);
                 let src = &cs.gt_mul_rows[0].quotient;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
@@ -182,14 +182,14 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
 
             // Spot-check a couple of scalar-mul committed polys.
             PolyType::G1ScalarMulXA => {
-                assert!(entry.is_g1_scalar_mul_fused);
+                assert!(entry.is_g1_scalar_mul);
                 let src = &cs.g1_scalar_mul_rows[0].x_a;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
                 }
             }
             PolyType::G1ScalarMulXANext => {
-                assert!(entry.is_g1_scalar_mul_fused);
+                assert!(entry.is_g1_scalar_mul);
                 let src = &cs.g1_scalar_mul_rows[0].x_a_next;
                 for t in 0..native_size {
                     assert_eq!(block[t], src[bit_reverse(t, entry.num_vars)]);
@@ -198,7 +198,7 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
 
             // 0-var: no bit reversal effect; entry.num_vars == 0 and native_size == 1.
             PolyType::G1AddXP => {
-                assert!(entry.is_g1_add_fused);
+                assert!(entry.is_g1_add);
                 assert_eq!(native_size, 1);
                 assert_eq!(block[0], cs.g1_add_rows[0].x_p);
             }

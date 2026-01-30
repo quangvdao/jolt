@@ -32,29 +32,29 @@ pub struct PrefixPackedEntry {
     ///
     /// GT rows are packed as blocks over a GT-local `c` domain.
     /// Such entries are keyed only by `poly_type`; `constraint_idx` is ignored.
-    pub is_gt_fused: bool,
+    pub is_gt: bool,
     /// If true, this entry is a G1-scalar-mul row (not tied to a single `constraint_idx`).
     ///
     /// G1 scalar-mul rows are packed as blocks over a
     /// family-local `c` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is
     /// ignored.
-    pub is_g1_scalar_mul_fused: bool,
+    pub is_g1_scalar_mul: bool,
     /// If true, this entry is a G1-add row (not tied to a single `constraint_idx`).
     ///
     /// G1 add rows are packed as blocks over a family-local
     /// `c_add` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is ignored.
-    pub is_g1_add_fused: bool,
+    pub is_g1_add: bool,
     /// If true, this entry is a G2-scalar-mul row (not tied to a single `constraint_idx`).
     ///
     /// G2 scalar-mul rows are packed as blocks over a
     /// family-local `c` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is
     /// ignored.
-    pub is_g2_scalar_mul_fused: bool,
+    pub is_g2_scalar_mul: bool,
     /// If true, this entry is a G2-add row (not tied to a single `constraint_idx`).
     ///
     /// G2 add rows are packed as blocks over a family-local
     /// `c_add` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is ignored.
-    pub is_g2_add_fused: bool,
+    pub is_g2_add: bool,
     /// Native variable count `m` (native size = 2^m)
     pub num_vars: usize,
     /// Starting offset in the packed evaluation table (must be aligned to `2^num_vars`)
@@ -145,7 +145,16 @@ impl PrefixPackingLayout {
             // IMPORTANT (no-padding GTMul): GTExp rows are 11-var (s,x) plus k vars, but GTMul rows
             // are natively 4-var (x) plus the same k vars.
             for poly_type in [PolyType::RhoPrev, PolyType::Quotient] {
-                polys.push((0usize, poly_type, true, false, false, false, false, num_vars_gt_exp));
+                polys.push((
+                    0usize,
+                    poly_type,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    num_vars_gt_exp,
+                ));
             }
             for poly_type in [
                 PolyType::MulLhs,
@@ -153,7 +162,16 @@ impl PrefixPackingLayout {
                 PolyType::MulResult,
                 PolyType::MulQuotient,
             ] {
-                polys.push((0usize, poly_type, true, false, false, false, false, num_vars_gt_mul));
+                polys.push((
+                    0usize,
+                    poly_type,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    num_vars_gt_mul,
+                ));
             }
         }
 
@@ -283,21 +301,21 @@ impl PrefixPackingLayout {
             |(
                 constraint_idx,
                 poly_type,
-                is_gt_fused,
-                is_g1_scalar_mul_fused,
-                is_g1_add_fused,
-                is_g2_scalar_mul_fused,
-                is_g2_add_fused,
+                is_gt,
+                is_g1_scalar_mul,
+                is_g1_add,
+                is_g2_scalar_mul,
+                is_g2_add,
                 num_vars,
             )| {
                 (
                     std::cmp::Reverse(*num_vars),
                     *poly_type as usize,
-                    *is_gt_fused as usize,
-                    *is_g1_scalar_mul_fused as usize,
-                    *is_g1_add_fused as usize,
-                    *is_g2_scalar_mul_fused as usize,
-                    *is_g2_add_fused as usize,
+                    *is_gt as usize,
+                    *is_g1_scalar_mul as usize,
+                    *is_g1_add as usize,
+                    *is_g2_scalar_mul as usize,
+                    *is_g2_add as usize,
                     *constraint_idx,
                 )
             },
@@ -309,11 +327,11 @@ impl PrefixPackingLayout {
         for (
             constraint_idx,
             poly_type,
-            is_gt_fused,
-            is_g1_scalar_mul_fused,
-            is_g1_add_fused,
-            is_g2_scalar_mul_fused,
-            is_g2_add_fused,
+            is_gt,
+            is_g1_scalar_mul,
+            is_g1_add,
+            is_g2_scalar_mul,
+            is_g2_add,
             num_vars,
         ) in polys
         {
@@ -326,11 +344,11 @@ impl PrefixPackingLayout {
             entries.push(PrefixPackedEntry {
                 constraint_idx,
                 poly_type,
-                is_gt_fused,
-                is_g1_scalar_mul_fused,
-                is_g1_add_fused,
-                is_g2_scalar_mul_fused,
-                is_g2_add_fused,
+                is_gt,
+                is_g1_scalar_mul,
+                is_g1_add,
+                is_g2_scalar_mul,
+                is_g2_add,
                 num_vars,
                 offset,
             });

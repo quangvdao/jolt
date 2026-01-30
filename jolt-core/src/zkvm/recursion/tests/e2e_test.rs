@@ -95,7 +95,8 @@ fn test_recursion_snark_e2e_with_dory() {
     let constraint_types: Vec<ConstraintType> = prover.constraint_system.constraint_types.clone();
 
     // Determine dense_num_vars for Hyrax setup without extracting dense evals.
-    let dense_num_vars = PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
+    let dense_num_vars =
+        PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
 
     let num_g1_add = constraint_types
         .iter()

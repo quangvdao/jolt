@@ -1,6 +1,6 @@
 //! G2 scalar multiplication sumchecks (family-local).
 //!
-//! This mirrors `g1/fused_scalar_multiplication.rs`, but for G2 points over Fq2 (split into
+//! This mirrors `g1/scalar_multiplication.rs`, but for G2 points over Fq2 (split into
 //! (c0,c1) components over Fq).
 //!
 //! Key conventions:
@@ -1185,10 +1185,7 @@ impl ShiftG2ScalarMulVerifier {
         Self::new_with_params(params, transcript)
     }
 
-    fn new_with_params<T: Transcript>(
-        params: ShiftG2ScalarMulParams,
-        transcript: &mut T,
-    ) -> Self {
+    fn new_with_params<T: Transcript>(params: ShiftG2ScalarMulParams, transcript: &mut T) -> Self {
         let step_ref: Vec<<Fq as JoltField>::Challenge> = (0..STEP_VARS)
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();

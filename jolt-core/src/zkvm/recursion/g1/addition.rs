@@ -171,10 +171,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G1AddProver {
 
     fn compute_message(&mut self, _round: usize, previous_claim: Fq) -> UniPoly<Fq> {
         let num_remaining = self.eq_poly.get_num_vars();
-        debug_assert!(
-            num_remaining > 0,
-            "g1add should have at least one round"
-        );
+        debug_assert!(num_remaining > 0, "g1add should have at least one round");
         let half = 1usize << (num_remaining - 1);
 
         let term_batch_coeff = self.term_batch_coeff;
@@ -239,7 +236,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G1AddProver {
             let claim = self.term_polys[term_idx].get_bound_coeff(0);
             accumulator.append_virtual(
                 transcript,
-                VirtualPolynomial::g1_add_fused(term),
+                VirtualPolynomial::g1_add(term),
                 SumcheckId::G1Add,
                 opening_point.clone(),
                 claim,
@@ -312,10 +309,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1AddVerifier {
         let mut claims = Vec::with_capacity(G1AddTerm::COUNT);
         for term_idx in 0..G1AddTerm::COUNT {
             let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");
-            let (_, claim) = accumulator.get_virtual_polynomial_opening(
-                VirtualPolynomial::g1_add_fused(term),
-                SumcheckId::G1Add,
-            );
+            let (_, claim) = accumulator
+                .get_virtual_polynomial_opening(VirtualPolynomial::g1_add(term), SumcheckId::G1Add);
             claims.push(claim);
         }
 
@@ -336,7 +331,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1AddVerifier {
             let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");
             accumulator.append_virtual(
                 transcript,
-                VirtualPolynomial::g1_add_fused(term),
+                VirtualPolynomial::g1_add(term),
                 SumcheckId::G1Add,
                 opening_point.clone(),
             );
@@ -350,7 +345,7 @@ mod tests {
     use crate::transcripts::Blake2bTranscript;
 
     #[test]
-    fn fused_g1add_is_family_local_over_c_only() {
+    fn g1add_is_family_local_over_c_only() {
         let rows = vec![
             G1AddNative {
                 x_p: Fq::from_u64(1),
@@ -399,7 +394,7 @@ mod tests {
             },
         ];
 
-        let mut transcript = Blake2bTranscript::new(b"test_fused_g1add_family_local");
+        let mut transcript = Blake2bTranscript::new(b"test_g1add_family_local");
         let prover = G1AddProver::new(&rows, &mut transcript);
         assert_eq!(prover.params.num_constraints, 3);
         assert_eq!(prover.params.num_constraints_padded, 4);

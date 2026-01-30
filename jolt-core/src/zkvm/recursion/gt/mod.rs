@@ -13,12 +13,12 @@ pub mod types;
 pub mod wiring;
 
 pub use exponentiation::{GtExpParams, GtExpProver, GtExpVerifier};
+pub use indexing::{gt_constraint_indices, k_gt, num_gt_constraints, num_gt_constraints_padded};
 pub use multiplication::{GtMulParams, GtMulProver, GtMulVerifier};
 pub use shift::{GtShiftParams, GtShiftProver, GtShiftVerifier};
 pub use stage2_openings::{GtExpStage2OpeningsProver, GtExpStage2OpeningsVerifier};
-pub use wiring::{WiringGtProver, WiringGtVerifier};
-pub use indexing::{gt_constraint_indices, k_gt, num_gt_constraints, num_gt_constraints_padded};
 pub use types::{
     eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle, GtExpPublicInputs,
     GtExpWitness, GtMulConstraintPolynomials,
 };
+pub use wiring::{WiringGtProver, WiringGtVerifier};

@@ -28,7 +28,7 @@ use crate::{
         sumcheck_prover::SumcheckInstanceProver,
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
-    transcripts::Transcript,
+    transcripts::{Blake2bTranscript, Transcript},
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{index_to_binary, ConstraintLocator, ConstraintType},
     zkvm::recursion::curve::{Bn254Recursion, RecursionCurve},
@@ -504,9 +504,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::poly::dense_mlpoly::DensePolynomial;
-    use crate::transcripts::Blake2bTranscript;
-    use crate::zkvm::recursion::constraints::system::ConstraintLocator;
 
     #[test]
     fn stage1_gtexp_replicates_across_dummy_c_bits() {

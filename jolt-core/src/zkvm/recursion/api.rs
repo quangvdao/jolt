@@ -28,14 +28,16 @@ use super::prover::{
 use super::verifier::RecursionVerifier;
 use super::MAX_RECURSION_DENSE_NUM_VARS;
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
-use crate::poly::commitment::dory::{ArkG1, ArkG2, ArkGT, DoryContext, DoryGlobals, BN254};
+use crate::poly::commitment::dory::{
+    ArkG1, ArkG2, ArkGT, DoryCommitmentScheme, DoryContext, DoryGlobals, BN254,
+};
 use crate::poly::rlc_utils::compute_rlc_coefficients;
 use crate::zkvm::witness::CommittedPolynomial;
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 use ark_bn254::{Fq, Fq12, Fr};
 
-type DoryPCS = crate::poly::commitment::dory::DoryCommitmentScheme;
+type DoryPCS = DoryCommitmentScheme;
 
 /// Standalone recursion artifact for a base Jolt proof.
 ///

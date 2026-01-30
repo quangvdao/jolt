@@ -171,7 +171,6 @@ pub fn global_to_c_mul(constraint_types: &[ConstraintType]) -> Vec<Option<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zkvm::recursion::constraints::system::ConstraintType;
 
     #[test]
     fn split_k_values_are_family_local_and_k_gt_is_max() {

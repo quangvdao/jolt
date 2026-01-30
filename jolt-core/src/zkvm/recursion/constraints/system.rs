@@ -7,6 +7,7 @@ use crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs;
 use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
+use crate::zkvm::recursion::RecursionConstraintMetadata;
 use ark_bn254::{Fq, Fq2};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
@@ -558,11 +559,11 @@ impl RecursionMetadataBuilder {
         Self { constraint_system }
     }
 
-    pub fn build(self) -> crate::zkvm::recursion::RecursionConstraintMetadata {
+    pub fn build(self) -> RecursionConstraintMetadata {
         let constraint_types = self.constraint_system.constraint_types.clone();
         let layout = PrefixPackingLayout::from_constraint_types(&constraint_types);
         let dense_num_vars = layout.num_dense_vars;
-        crate::zkvm::recursion::RecursionConstraintMetadata {
+        RecursionConstraintMetadata {
             constraint_types,
             dense_num_vars,
             gt_exp_public_inputs: self.constraint_system.gt_exp_public_inputs.clone(),

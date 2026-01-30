@@ -188,12 +188,11 @@ impl CanonicalDeserialize for RecursionVerifierInput {
                 validate,
             )?,
             wiring: WiringPlan::deserialize_with_mode(&mut reader, compress, validate)?,
-            pairing_boundary:
-                crate::zkvm::proof_serialization::PairingBoundary::deserialize_with_mode(
-                    &mut reader,
-                    compress,
-                    validate,
-                )?,
+            pairing_boundary: PairingBoundary::deserialize_with_mode(
+                &mut reader,
+                compress,
+                validate,
+            )?,
             joint_commitment: Fq12::deserialize_with_mode(&mut reader, compress, validate)?,
         })
     }
@@ -230,9 +229,7 @@ impl GuestDeserialize for RecursionVerifierInput {
             g1_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
             g2_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
             wiring: WiringPlan::guest_deserialize(r)?,
-            pairing_boundary: crate::zkvm::proof_serialization::PairingBoundary::guest_deserialize(
-                r,
-            )?,
+            pairing_boundary: PairingBoundary::guest_deserialize(r)?,
             joint_commitment: Fq12::guest_deserialize(r)?,
         })
     }

@@ -34,6 +34,7 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
+use core::cmp::max;
 use rayon::prelude::*;
 
 const STEP_VARS: usize = 8; // 256 steps
@@ -93,7 +94,7 @@ impl G1ScalarMulParams {
     pub fn new_with_k_common(num_constraints: usize, k_common: usize) -> Self {
         let num_constraints_padded = num_constraints.max(1).next_power_of_two();
         let k_smul = num_constraints_padded.trailing_zeros() as usize;
-        let k_common = core::cmp::max(k_common, k_smul);
+        let k_common = max(k_common, k_smul);
         let num_constraints_padded_common = 1usize << k_common;
         Self {
             num_step_vars: STEP_VARS,
@@ -755,7 +756,7 @@ impl ShiftG1ScalarMulParams {
         Self {
             num_step_vars: STEP_VARS,
             k_smul,
-            k_common: core::cmp::max(k_common, k_smul),
+            k_common: max(k_common, k_smul),
         }
     }
 

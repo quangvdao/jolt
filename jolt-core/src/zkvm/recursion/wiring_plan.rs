@@ -20,6 +20,7 @@ use ark_serialize::{
 use dory::recursion::ast::{AstConstraint, AstGraph, AstOp, ValueId};
 use dory::recursion::OpId;
 use std::io::{Read, Write};
+use BN254;
 
 /// Canonical wiring plan (verifier-derived, and mirrored by the prover).
 #[derive(Clone, Debug, Default)]
@@ -973,7 +974,7 @@ struct OpIdOrder {
     g2_add: Vec<OpId>,
 }
 
-fn collect_op_ids(ast: &AstGraph<dory::backends::arkworks::BN254>) -> OpIdOrder {
+fn collect_op_ids(ast: &AstGraph<BN254>) -> OpIdOrder {
     let mut out = OpIdOrder {
         gt_exp: Vec::new(),
         gt_mul: Vec::new(),
@@ -1024,7 +1025,7 @@ fn index_map(op_ids: &[OpId]) -> std::collections::BTreeMap<OpId, usize> {
 }
 
 fn gt_producer_from_value(
-    ast: &AstGraph<dory::backends::arkworks::BN254>,
+    ast: &AstGraph<BN254>,
     gt_exp_index: &std::collections::BTreeMap<OpId, usize>,
     gt_mul_index: &std::collections::BTreeMap<OpId, usize>,
     gt_exp_base_by_value: &std::collections::BTreeMap<ValueId, usize>,
@@ -1055,7 +1056,7 @@ fn gt_producer_from_value(
     }
 }
 
-fn is_ast_input(ast: &AstGraph<dory::backends::arkworks::BN254>, value: ValueId) -> bool {
+fn is_ast_input(ast: &AstGraph<BN254>, value: ValueId) -> bool {
     let idx = value.0 as usize;
     if idx >= ast.nodes.len() {
         return false;
@@ -1064,7 +1065,7 @@ fn is_ast_input(ast: &AstGraph<dory::backends::arkworks::BN254>, value: ValueId)
 }
 
 fn g1_value_from_output(
-    ast: &AstGraph<dory::backends::arkworks::BN254>,
+    ast: &AstGraph<BN254>,
     g1_smul_index: &std::collections::BTreeMap<OpId, usize>,
     g1_add_index: &std::collections::BTreeMap<OpId, usize>,
     value: ValueId,
@@ -1091,7 +1092,7 @@ fn g1_value_from_output(
 }
 
 fn g2_value_from_output(
-    ast: &AstGraph<dory::backends::arkworks::BN254>,
+    ast: &AstGraph<BN254>,
     g2_smul_index: &std::collections::BTreeMap<OpId, usize>,
     g2_add_index: &std::collections::BTreeMap<OpId, usize>,
     value: ValueId,
@@ -1126,7 +1127,7 @@ fn g2_value_from_output(
 ///
 /// Returns: canonical edge lists (GT/G1/G2).
 pub fn derive_wiring_plan(
-    ast: &AstGraph<dory::backends::arkworks::BN254>,
+    ast: &AstGraph<BN254>,
     combine_leaves: usize,
     _pairing_boundary: &PairingBoundary,
 ) -> Result<WiringPlan, ProofVerifyError> {

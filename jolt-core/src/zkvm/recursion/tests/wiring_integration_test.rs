@@ -11,6 +11,7 @@ use crate::{
         },
         dense_mlpoly::DensePolynomial,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
+        rlc_utils::compute_rlc_coefficients,
     },
     transcripts::{Blake2bTranscript, Transcript},
     zkvm::{
@@ -146,8 +147,7 @@ fn build_fixture() -> RecursionFixture {
     );
 
     // Deterministic combine ordering (BTreeMap order).
-    let rlc_map =
-        crate::poly::rlc_utils::compute_rlc_coefficients(&gamma_powers, polynomial_claims);
+    let rlc_map = compute_rlc_coefficients(&gamma_powers, polynomial_claims);
     let mut combine_coeffs = Vec::with_capacity(rlc_map.len());
     let mut combine_commitments = Vec::with_capacity(rlc_map.len());
     for (poly_id, coeff) in rlc_map.into_iter() {

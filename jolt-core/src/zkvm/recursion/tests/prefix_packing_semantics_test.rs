@@ -5,6 +5,7 @@ use crate::zkvm::recursion::constraints::system::{
     ConstraintLocator, ConstraintSystem, ConstraintType, G1AddNative, G1ScalarMulNative,
     GtMulNativeRows, PolyType, RecursionMatrixShape,
 };
+use crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::witness_generation::emit_dense;
 use ark_bn254::{Fq, Fq12, Fr};
@@ -122,9 +123,7 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
         g2_scalar_mul_rows: vec![],
         g1_add_rows: vec![g1_add],
         g2_add_rows: vec![],
-        g1_scalar_mul_public_inputs: vec![
-            crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs::new(Fr::from(0u64)),
-        ],
+        g1_scalar_mul_public_inputs: vec![G1ScalarMulPublicInputs::new(Fr::from(0u64))],
         g2_scalar_mul_public_inputs: vec![],
     };
 

@@ -233,8 +233,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpStage2OpeningsVerif
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zkvm::recursion::constraints::system::ConstraintLocator;
-    use crate::zkvm::recursion::gt::indexing::{gt_exp_c_tail_range, k_gt};
 
     #[test]
     fn stage2_openings_uses_k_gt_rounds_but_drops_dummy_c_bits_in_opening_point() {

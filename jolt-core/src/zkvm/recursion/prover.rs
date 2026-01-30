@@ -35,7 +35,10 @@ use dory::backends::arkworks::ArkGT;
 use std::collections::HashMap;
 
 use dory::backends::arkworks::BN254;
-use dory::recursion::{ast::AstGraph, ast::AstOp, OpId, WitnessCollection};
+use dory::recursion::{
+    ast::{AstGraph, AstOp, ValueId},
+    OpId, WitnessCollection,
+};
 use jolt_optimizations::get_g_mle;
 
 use super::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
@@ -132,7 +135,7 @@ where
             stage2_proof: SumcheckInstanceProof::<F, T>::guest_deserialize(r)?,
             stage3_packed_eval: F::guest_deserialize(r)?,
             opening_proof: PCS::Proof::guest_deserialize(r)?,
-            opening_claims: crate::poly::opening_proof::Openings::<F>::guest_deserialize(r)?,
+            opening_claims: Openings::<F>::guest_deserialize(r)?,
             dense_commitment: PCS::Commitment::guest_deserialize(r)?,
         })
     }
@@ -326,9 +329,9 @@ impl RecursionProver<Fq> {
         let non_input_base_hints =
             tracing::info_span!("derive_non_input_base_hints").in_scope(|| {
                 // Collect op lists in OpId order (must match verifier derivation).
-                let mut gt_exp: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
-                let mut g1_smul: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
-                let mut g2_smul: Vec<(OpId, dory::recursion::ast::ValueId)> = Vec::new();
+                let mut gt_exp: Vec<(OpId, ValueId)> = Vec::new();
+                let mut g1_smul: Vec<(OpId, ValueId)> = Vec::new();
+                let mut g2_smul: Vec<(OpId, ValueId)> = Vec::new();
                 for node in &ast.nodes {
                     match &node.op {
                         AstOp::GTExp {
@@ -353,7 +356,7 @@ impl RecursionProver<Fq> {
                 g1_smul.sort_by_key(|(id, _)| *id);
                 g2_smul.sort_by_key(|(id, _)| *id);
 
-                let is_input = |vid: dory::recursion::ast::ValueId| -> bool {
+                let is_input = |vid: ValueId| -> bool {
                     let idx = vid.0 as usize;
                     idx < ast.nodes.len() && matches!(ast.nodes[idx].op, AstOp::Input { .. })
                 };

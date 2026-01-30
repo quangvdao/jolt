@@ -338,7 +338,11 @@ pub trait OpeningAccumulator<F: JoltField> {
 
     /// Claim-only accessor for virtual polynomial openings (avoids cloning the opening point).
     #[inline]
-    fn get_virtual_polynomial_claim(&self, polynomial: VirtualPolynomial, sumcheck: SumcheckId) -> F {
+    fn get_virtual_polynomial_claim(
+        &self,
+        polynomial: VirtualPolynomial,
+        sumcheck: SumcheckId,
+    ) -> F {
         self.get_virtual_polynomial_opening(polynomial, sumcheck).1
     }
 
@@ -349,13 +353,15 @@ pub trait OpeningAccumulator<F: JoltField> {
         polynomial: CommittedPolynomial,
         sumcheck: SumcheckId,
     ) -> F {
-        self.get_committed_polynomial_opening(polynomial, sumcheck).1
+        self.get_committed_polynomial_opening(polynomial, sumcheck)
+            .1
     }
 
     /// Claim-only accessor for advice openings (avoids cloning the opening point).
     #[inline]
     fn get_advice_claim(&self, kind: AdviceKind, sumcheck: SumcheckId) -> Option<F> {
-        self.get_advice_opening(kind, sumcheck).map(|(_pt, claim)| claim)
+        self.get_advice_opening(kind, sumcheck)
+            .map(|(_pt, claim)| claim)
     }
 }
 
@@ -477,7 +483,11 @@ impl<F: JoltField> OpeningAccumulator<F> for ProverOpeningAccumulator<F> {
     }
 
     #[inline]
-    fn get_virtual_polynomial_claim(&self, polynomial: VirtualPolynomial, sumcheck: SumcheckId) -> F {
+    fn get_virtual_polynomial_claim(
+        &self,
+        polynomial: VirtualPolynomial,
+        sumcheck: SumcheckId,
+    ) -> F {
         let (_point, claim) = self
             .openings
             .get(&OpeningId::Polynomial(
@@ -554,10 +564,7 @@ where
         let key = OpeningId::Polynomial(PolynomialId::Committed(polynomial), sumcheck);
         self.openings.insert(
             key,
-            (
-                OpeningPoint::<BIG_ENDIAN, F>::new(opening_point),
-                claim,
-            ),
+            (OpeningPoint::<BIG_ENDIAN, F>::new(opening_point), claim),
         );
     }
 
@@ -735,7 +742,11 @@ impl<F: JoltField> OpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
     }
 
     #[inline]
-    fn get_virtual_polynomial_claim(&self, polynomial: VirtualPolynomial, sumcheck: SumcheckId) -> F {
+    fn get_virtual_polynomial_claim(
+        &self,
+        polynomial: VirtualPolynomial,
+        sumcheck: SumcheckId,
+    ) -> F {
         let (_point, claim) = self
             .openings
             .get(&OpeningId::Polynomial(
@@ -808,10 +819,7 @@ where
         // Update the opening point in self.openings (it was initialized with default empty point)
         self.openings.insert(
             key,
-            (
-                OpeningPoint::<BIG_ENDIAN, F>::new(opening_point),
-                claim,
-            ),
+            (OpeningPoint::<BIG_ENDIAN, F>::new(opening_point), claim),
         );
     }
 

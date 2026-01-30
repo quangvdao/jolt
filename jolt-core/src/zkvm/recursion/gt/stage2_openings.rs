@@ -30,7 +30,7 @@ use crate::{
         indexing::{gt_exp_c_tail_range, k_exp, k_gt, num_gt_exp_constraints_padded},
         types::GtExpWitness,
     },
-    zkvm::witness::VirtualPolynomial,
+    zkvm::witness::{GtExpTerm, RecursionPoly, VirtualPolynomial},
 };
 
 use allocative::Allocative;
@@ -153,14 +153,18 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtExpStage2OpeningsProver<
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_rho(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Rho,
+            }),
             SumcheckId::GtExpClaimReduction,
             opening_point.clone(),
             self.rho.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Quotient,
+            }),
             SumcheckId::GtExpClaimReduction,
             opening_point,
             self.quotient.get_bound_coeff(0),
@@ -217,8 +221,12 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpStage2OpeningsVerif
         r.extend_from_slice(&sumcheck_challenges[tail]);
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);
         for vp in [
-            VirtualPolynomial::gt_exp_rho(),
-            VirtualPolynomial::gt_exp_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Rho,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Quotient,
+            }),
         ] {
             accumulator.append_virtual(
                 transcript,

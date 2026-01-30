@@ -14,7 +14,10 @@ use crate::{
         opening_proof::{OpeningAccumulator, SumcheckId, VerifierOpeningAccumulator},
     },
     transcripts::Transcript,
-    zkvm::witness::{CommittedPolynomial, G1AddTerm, G2AddTerm, VirtualPolynomial},
+    zkvm::witness::{
+        CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,
+        GtMulTerm, RecursionPoly, VirtualPolynomial,
+    },
 };
 use ark_bn254::{Fq, Fq12};
 use ark_serialize::{
@@ -596,102 +599,294 @@ impl RecursionVerifier<Fq> {
                 let (sumcheck, vp) = match entry.poly_type {
                     PolyType::RhoPrev => (
                         SumcheckId::GtExpClaimReduction,
-                        VirtualPolynomial::gt_exp_rho(),
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Rho,
+                        }),
                     ),
                     PolyType::Quotient => (
                         SumcheckId::GtExpClaimReduction,
-                        VirtualPolynomial::gt_exp_quotient(),
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Quotient,
+                        }),
                     ),
-                    PolyType::MulLhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_lhs()),
-                    PolyType::MulRhs => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_rhs()),
-                    PolyType::MulResult => (SumcheckId::GtMul, VirtualPolynomial::gt_mul_result()),
-                    PolyType::MulQuotient => {
-                        (SumcheckId::GtMul, VirtualPolynomial::gt_mul_quotient())
-                    }
+                    PolyType::MulLhs => (
+                        SumcheckId::GtMul,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                            term: GtMulTerm::Lhs,
+                        }),
+                    ),
+                    PolyType::MulRhs => (
+                        SumcheckId::GtMul,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                            term: GtMulTerm::Rhs,
+                        }),
+                    ),
+                    PolyType::MulResult => (
+                        SumcheckId::GtMul,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                            term: GtMulTerm::Result,
+                        }),
+                    ),
+                    PolyType::MulQuotient => (
+                        SumcheckId::GtMul,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                            term: GtMulTerm::Quotient,
+                        }),
+                    ),
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, sumcheck)
             } else if entry.is_g1_scalar_mul {
                 let vp = match entry.poly_type {
-                    PolyType::G1ScalarMulXA => VirtualPolynomial::g1_scalar_mul_xa(),
-                    PolyType::G1ScalarMulYA => VirtualPolynomial::g1_scalar_mul_ya(),
-                    PolyType::G1ScalarMulXT => VirtualPolynomial::g1_scalar_mul_xt(),
-                    PolyType::G1ScalarMulYT => VirtualPolynomial::g1_scalar_mul_yt(),
-                    PolyType::G1ScalarMulXANext => VirtualPolynomial::g1_scalar_mul_xa_next(),
-                    PolyType::G1ScalarMulYANext => VirtualPolynomial::g1_scalar_mul_ya_next(),
+                    PolyType::G1ScalarMulXA => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::XA,
+                        })
+                    }
+                    PolyType::G1ScalarMulYA => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::YA,
+                        })
+                    }
+                    PolyType::G1ScalarMulXT => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::XT,
+                        })
+                    }
+                    PolyType::G1ScalarMulYT => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::YT,
+                        })
+                    }
+                    PolyType::G1ScalarMulXANext => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::XANext,
+                        })
+                    }
+                    PolyType::G1ScalarMulYANext => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::YANext,
+                        })
+                    }
                     PolyType::G1ScalarMulTIndicator => {
-                        VirtualPolynomial::g1_scalar_mul_t_indicator()
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::TIndicator,
+                        })
                     }
                     PolyType::G1ScalarMulAIndicator => {
-                        VirtualPolynomial::g1_scalar_mul_a_indicator()
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::AIndicator,
+                        })
                     }
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1ScalarMul)
             } else if entry.is_g1_add {
                 let vp = match entry.poly_type {
-                    PolyType::G1AddXP => VirtualPolynomial::g1_add_xp(),
-                    PolyType::G1AddYP => VirtualPolynomial::g1_add_yp(),
-                    PolyType::G1AddPIndicator => VirtualPolynomial::g1_add_p_indicator(),
-                    PolyType::G1AddXQ => VirtualPolynomial::g1_add_xq(),
-                    PolyType::G1AddYQ => VirtualPolynomial::g1_add_yq(),
-                    PolyType::G1AddQIndicator => VirtualPolynomial::g1_add_q_indicator(),
-                    PolyType::G1AddXR => VirtualPolynomial::g1_add_xr(),
-                    PolyType::G1AddYR => VirtualPolynomial::g1_add_yr(),
-                    PolyType::G1AddRIndicator => VirtualPolynomial::g1_add_r_indicator(),
-                    PolyType::G1AddLambda => VirtualPolynomial::g1_add(G1AddTerm::Lambda),
-                    PolyType::G1AddInvDeltaX => VirtualPolynomial::g1_add(G1AddTerm::InvDeltaX),
-                    PolyType::G1AddIsDouble => VirtualPolynomial::g1_add(G1AddTerm::IsDouble),
-                    PolyType::G1AddIsInverse => VirtualPolynomial::g1_add(G1AddTerm::IsInverse),
+                    PolyType::G1AddXP => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::XP,
+                    }),
+                    PolyType::G1AddYP => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::YP,
+                    }),
+                    PolyType::G1AddPIndicator => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                            term: G1AddTerm::PIndicator,
+                        })
+                    }
+                    PolyType::G1AddXQ => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::XQ,
+                    }),
+                    PolyType::G1AddYQ => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::YQ,
+                    }),
+                    PolyType::G1AddQIndicator => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                            term: G1AddTerm::QIndicator,
+                        })
+                    }
+                    PolyType::G1AddXR => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::XR,
+                    }),
+                    PolyType::G1AddYR => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::YR,
+                    }),
+                    PolyType::G1AddRIndicator => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                            term: G1AddTerm::RIndicator,
+                        })
+                    }
+                    PolyType::G1AddLambda => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::Lambda,
+                    }),
+                    PolyType::G1AddInvDeltaX => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                            term: G1AddTerm::InvDeltaX,
+                        })
+                    }
+                    PolyType::G1AddIsDouble => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                        term: G1AddTerm::IsDouble,
+                    }),
+                    PolyType::G1AddIsInverse => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                            term: G1AddTerm::IsInverse,
+                        })
+                    }
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1Add)
             } else if entry.is_g2_scalar_mul {
                 let vp = match entry.poly_type {
-                    PolyType::G2ScalarMulXAC0 => VirtualPolynomial::g2_scalar_mul_xa_c0(),
-                    PolyType::G2ScalarMulXAC1 => VirtualPolynomial::g2_scalar_mul_xa_c1(),
-                    PolyType::G2ScalarMulYAC0 => VirtualPolynomial::g2_scalar_mul_ya_c0(),
-                    PolyType::G2ScalarMulYAC1 => VirtualPolynomial::g2_scalar_mul_ya_c1(),
-                    PolyType::G2ScalarMulXTC0 => VirtualPolynomial::g2_scalar_mul_xt_c0(),
-                    PolyType::G2ScalarMulXTC1 => VirtualPolynomial::g2_scalar_mul_xt_c1(),
-                    PolyType::G2ScalarMulYTC0 => VirtualPolynomial::g2_scalar_mul_yt_c0(),
-                    PolyType::G2ScalarMulYTC1 => VirtualPolynomial::g2_scalar_mul_yt_c1(),
-                    PolyType::G2ScalarMulXANextC0 => VirtualPolynomial::g2_scalar_mul_xa_next_c0(),
-                    PolyType::G2ScalarMulXANextC1 => VirtualPolynomial::g2_scalar_mul_xa_next_c1(),
-                    PolyType::G2ScalarMulYANextC0 => VirtualPolynomial::g2_scalar_mul_ya_next_c0(),
-                    PolyType::G2ScalarMulYANextC1 => VirtualPolynomial::g2_scalar_mul_ya_next_c1(),
+                    PolyType::G2ScalarMulXAC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XAC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulXAC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XAC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulYAC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YAC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulYAC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YAC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulXTC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XTC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulXTC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XTC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulYTC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YTC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulYTC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YTC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulXANextC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XANextC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulXANextC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XANextC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulYANextC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YANextC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulYANextC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YANextC1,
+                        })
+                    }
                     PolyType::G2ScalarMulTIndicator => {
-                        VirtualPolynomial::g2_scalar_mul_t_indicator()
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::TIndicator,
+                        })
                     }
                     PolyType::G2ScalarMulAIndicator => {
-                        VirtualPolynomial::g2_scalar_mul_a_indicator()
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::AIndicator,
+                        })
                     }
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2ScalarMul)
             } else if entry.is_g2_add {
                 let vp = match entry.poly_type {
-                    PolyType::G2AddXPC0 => VirtualPolynomial::g2_add(G2AddTerm::XPC0),
-                    PolyType::G2AddXPC1 => VirtualPolynomial::g2_add(G2AddTerm::XPC1),
-                    PolyType::G2AddYPC0 => VirtualPolynomial::g2_add(G2AddTerm::YPC0),
-                    PolyType::G2AddYPC1 => VirtualPolynomial::g2_add(G2AddTerm::YPC1),
-                    PolyType::G2AddPIndicator => VirtualPolynomial::g2_add(G2AddTerm::PIndicator),
-                    PolyType::G2AddXQC0 => VirtualPolynomial::g2_add(G2AddTerm::XQC0),
-                    PolyType::G2AddXQC1 => VirtualPolynomial::g2_add(G2AddTerm::XQC1),
-                    PolyType::G2AddYQC0 => VirtualPolynomial::g2_add(G2AddTerm::YQC0),
-                    PolyType::G2AddYQC1 => VirtualPolynomial::g2_add(G2AddTerm::YQC1),
-                    PolyType::G2AddQIndicator => VirtualPolynomial::g2_add(G2AddTerm::QIndicator),
-                    PolyType::G2AddXRC0 => VirtualPolynomial::g2_add(G2AddTerm::XRC0),
-                    PolyType::G2AddXRC1 => VirtualPolynomial::g2_add(G2AddTerm::XRC1),
-                    PolyType::G2AddYRC0 => VirtualPolynomial::g2_add(G2AddTerm::YRC0),
-                    PolyType::G2AddYRC1 => VirtualPolynomial::g2_add(G2AddTerm::YRC1),
-                    PolyType::G2AddRIndicator => VirtualPolynomial::g2_add(G2AddTerm::RIndicator),
-                    PolyType::G2AddLambdaC0 => VirtualPolynomial::g2_add(G2AddTerm::LambdaC0),
-                    PolyType::G2AddLambdaC1 => VirtualPolynomial::g2_add(G2AddTerm::LambdaC1),
-                    PolyType::G2AddInvDeltaXC0 => VirtualPolynomial::g2_add(G2AddTerm::InvDeltaXC0),
-                    PolyType::G2AddInvDeltaXC1 => VirtualPolynomial::g2_add(G2AddTerm::InvDeltaXC1),
-                    PolyType::G2AddIsDouble => VirtualPolynomial::g2_add(G2AddTerm::IsDouble),
-                    PolyType::G2AddIsInverse => VirtualPolynomial::g2_add(G2AddTerm::IsInverse),
+                    PolyType::G2AddXPC0 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::XPC0,
+                    }),
+                    PolyType::G2AddXPC1 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::XPC1,
+                    }),
+                    PolyType::G2AddYPC0 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::YPC0,
+                    }),
+                    PolyType::G2AddYPC1 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::YPC1,
+                    }),
+                    PolyType::G2AddPIndicator => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                            term: G2AddTerm::PIndicator,
+                        })
+                    }
+                    PolyType::G2AddXQC0 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::XQC0,
+                    }),
+                    PolyType::G2AddXQC1 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::XQC1,
+                    }),
+                    PolyType::G2AddYQC0 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::YQC0,
+                    }),
+                    PolyType::G2AddYQC1 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::YQC1,
+                    }),
+                    PolyType::G2AddQIndicator => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                            term: G2AddTerm::QIndicator,
+                        })
+                    }
+                    PolyType::G2AddXRC0 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::XRC0,
+                    }),
+                    PolyType::G2AddXRC1 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::XRC1,
+                    }),
+                    PolyType::G2AddYRC0 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::YRC0,
+                    }),
+                    PolyType::G2AddYRC1 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::YRC1,
+                    }),
+                    PolyType::G2AddRIndicator => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                            term: G2AddTerm::RIndicator,
+                        })
+                    }
+                    PolyType::G2AddLambdaC0 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::LambdaC0,
+                    }),
+                    PolyType::G2AddLambdaC1 => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::LambdaC1,
+                    }),
+                    PolyType::G2AddInvDeltaXC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                            term: G2AddTerm::InvDeltaXC0,
+                        })
+                    }
+                    PolyType::G2AddInvDeltaXC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                            term: G2AddTerm::InvDeltaXC1,
+                        })
+                    }
+                    PolyType::G2AddIsDouble => VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                        term: G2AddTerm::IsDouble,
+                    }),
+                    PolyType::G2AddIsInverse => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                            term: G2AddTerm::IsInverse,
+                        })
+                    }
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)

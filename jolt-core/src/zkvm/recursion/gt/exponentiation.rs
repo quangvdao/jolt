@@ -30,11 +30,11 @@ use crate::{
     },
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
-    zkvm::recursion::constraints::system::{eq_lsb_index, index_to_binary, ConstraintLocator, ConstraintType},
+    zkvm::recursion::constraints::system::{eq_lsb_index, ConstraintLocator, ConstraintType},
     zkvm::recursion::curve::{Bn254Recursion, RecursionCurve},
     zkvm::recursion::gt::indexing::{k_exp, k_gt, num_gt_constraints_padded},
     zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness},
-    zkvm::witness::VirtualPolynomial,
+    zkvm::witness::{GtExpTerm, RecursionPoly, VirtualPolynomial},
 };
 
 use allocative::Allocative;
@@ -301,21 +301,27 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtExpProver {
 
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_rho(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Rho,
+            }),
             SumcheckId::GtExp,
             opening_point.clone(),
             rho_val,
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_rho_next(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::RhoNext,
+            }),
             SumcheckId::GtExp,
             opening_point.clone(),
             rho_next_val,
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_exp_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Quotient,
+            }),
             SumcheckId::GtExp,
             opening_point,
             quotient_val,
@@ -425,13 +431,22 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             .collect();
 
         // Fetch opened claims at the sumcheck point.
-        let rho = accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_exp_rho(), SumcheckId::GtExp);
+        let rho = accumulator.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Rho,
+            }),
+            SumcheckId::GtExp,
+        );
         let rho_next = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::gt_exp_rho_next(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::RhoNext,
+            }),
             SumcheckId::GtExp,
         );
         let quotient = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::gt_exp_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Quotient,
+            }),
             SumcheckId::GtExp,
         );
 
@@ -490,9 +505,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
     ) {
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
         for vp in [
-            VirtualPolynomial::gt_exp_rho(),
-            VirtualPolynomial::gt_exp_rho_next(),
-            VirtualPolynomial::gt_exp_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Rho,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::RhoNext,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Quotient,
+            }),
         ] {
             accumulator.append_virtual(transcript, vp, SumcheckId::GtExp, opening_point.clone());
         }
@@ -557,7 +578,7 @@ mod tests {
             .collect();
 
         let g_poly_11var = DensePolynomial::new(vec![Fq::one(); row_size]);
-        let mut transcript = Blake2bTranscript::new(b"test_gtexp_replication");
+        let mut transcript = crate::transcripts::Blake2bTranscript::new(b"test_gtexp_replication");
         let prover = GtExpProver::new(
             params.clone(),
             &constraint_types,

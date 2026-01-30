@@ -27,12 +27,12 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
-    zkvm::recursion::constraints::system::{eq_lsb_index, index_to_binary, G2ScalarMulNative},
+    zkvm::recursion::constraints::system::{eq_lsb_index, G2ScalarMulNative},
     zkvm::recursion::g2::types::G2ScalarMulPublicInputs,
     zkvm::recursion::gt::types::{
         eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
     },
-    zkvm::witness::VirtualPolynomial,
+    zkvm::witness::{G2ScalarMulTerm, RecursionPoly, VirtualPolynomial},
 };
 
 use allocative::Allocative;
@@ -175,26 +175,6 @@ struct G2ScalarMulValues {
 }
 
 impl G2ScalarMulValues {
-    #[inline]
-    fn from_claims(claims: &[Fq]) -> Self {
-        Self {
-            x_a_c0: claims[0],
-            x_a_c1: claims[1],
-            y_a_c0: claims[2],
-            y_a_c1: claims[3],
-            x_t_c0: claims[4],
-            x_t_c1: claims[5],
-            y_t_c0: claims[6],
-            y_t_c1: claims[7],
-            x_a_next_c0: claims[8],
-            x_a_next_c1: claims[9],
-            y_a_next_c0: claims[10],
-            y_a_next_c1: claims[11],
-            t_indicator: claims[12],
-            a_indicator: claims[13],
-        }
-    }
-
     #[inline]
     fn from_poly_evals<const D: usize>(poly_evals: &[[Fq; D]], idx: usize) -> Self {
         Self {
@@ -597,59 +577,87 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G2ScalarMulProver {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for (vp, claim) in [
             (
-                VirtualPolynomial::g2_scalar_mul_xa_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XAC0,
+                }),
                 self.x_a_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_xa_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XAC1,
+                }),
                 self.x_a_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_ya_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YAC0,
+                }),
                 self.y_a_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_ya_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YAC1,
+                }),
                 self.y_a_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_xt_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XTC0,
+                }),
                 self.x_t_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_xt_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XTC1,
+                }),
                 self.x_t_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_yt_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YTC0,
+                }),
                 self.y_t_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_yt_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YTC1,
+                }),
                 self.y_t_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_xa_next_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XANextC0,
+                }),
                 self.x_a_next_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_xa_next_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XANextC1,
+                }),
                 self.x_a_next_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_ya_next_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YANextC0,
+                }),
                 self.y_a_next_c0.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_ya_next_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YANextC1,
+                }),
                 self.y_a_next_c1.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_t_indicator(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::TIndicator,
+                }),
                 self.t_indicator.get_bound_coeff(0),
             ),
             (
-                VirtualPolynomial::g2_scalar_mul_a_indicator(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::AIndicator,
+                }),
                 self.a_indicator.get_bound_coeff(0),
             ),
         ] {
@@ -793,59 +801,87 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
         // Fetch opened claims (14 committed witness polynomials), without heap allocation.
         let vals = G2ScalarMulValues {
             x_a_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_xa_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XAC0,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             x_a_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_xa_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XAC1,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             y_a_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_ya_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YAC0,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             y_a_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_ya_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YAC1,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             x_t_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_xt_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XTC0,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             x_t_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_xt_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XTC1,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             y_t_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_yt_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YTC0,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             y_t_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_yt_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YTC1,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             x_a_next_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_xa_next_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XANextC0,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             x_a_next_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_xa_next_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XANextC1,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             y_a_next_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_ya_next_c0(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YANextC0,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             y_a_next_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_ya_next_c1(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YANextC1,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             t_indicator: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_t_indicator(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::TIndicator,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
             a_indicator: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_scalar_mul_a_indicator(),
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::AIndicator,
+                }),
                 SumcheckId::G2ScalarMul,
             ),
         };
@@ -862,20 +898,48 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
     ) {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for vp in [
-            VirtualPolynomial::g2_scalar_mul_xa_c0(),
-            VirtualPolynomial::g2_scalar_mul_xa_c1(),
-            VirtualPolynomial::g2_scalar_mul_ya_c0(),
-            VirtualPolynomial::g2_scalar_mul_ya_c1(),
-            VirtualPolynomial::g2_scalar_mul_xt_c0(),
-            VirtualPolynomial::g2_scalar_mul_xt_c1(),
-            VirtualPolynomial::g2_scalar_mul_yt_c0(),
-            VirtualPolynomial::g2_scalar_mul_yt_c1(),
-            VirtualPolynomial::g2_scalar_mul_xa_next_c0(),
-            VirtualPolynomial::g2_scalar_mul_xa_next_c1(),
-            VirtualPolynomial::g2_scalar_mul_ya_next_c0(),
-            VirtualPolynomial::g2_scalar_mul_ya_next_c1(),
-            VirtualPolynomial::g2_scalar_mul_t_indicator(),
-            VirtualPolynomial::g2_scalar_mul_a_indicator(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XAC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XAC1,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YAC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YAC1,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XTC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XTC1,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YTC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YTC1,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XANextC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XANextC1,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YANextC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YANextC1,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::TIndicator,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::AIndicator,
+            }),
         ] {
             accumulator.append_virtual(
                 transcript,
@@ -1267,35 +1331,51 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for ShiftG2ScalarMulVerifier
         let eqc = eq_lsb_mle::<Fq>(&self.c_ref, y_c);
 
         let xa0 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_xa_c0(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XAC0,
+            }),
             SumcheckId::G2ScalarMul,
         );
         let xa1 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_xa_c1(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XAC1,
+            }),
             SumcheckId::G2ScalarMul,
         );
         let ya0 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_ya_c0(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YAC0,
+            }),
             SumcheckId::G2ScalarMul,
         );
         let ya1 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_ya_c1(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YAC1,
+            }),
             SumcheckId::G2ScalarMul,
         );
         let xan0 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_xa_next_c0(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XANextC0,
+            }),
             SumcheckId::G2ScalarMul,
         );
         let xan1 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_xa_next_c1(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XANextC1,
+            }),
             SumcheckId::G2ScalarMul,
         );
         let yan0 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_ya_next_c0(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YANextC0,
+            }),
             SumcheckId::G2ScalarMul,
         );
         let yan1 = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::g2_scalar_mul_ya_next_c1(),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YANextC1,
+            }),
             SumcheckId::G2ScalarMul,
         );
 

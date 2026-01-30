@@ -25,10 +25,10 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
-    zkvm::recursion::constraints::system::{eq_lsb_index, index_to_binary, ConstraintType},
+    zkvm::recursion::constraints::system::{eq_lsb_index, ConstraintType},
     zkvm::recursion::gt::indexing::gt_mul_c_tail_range,
     zkvm::recursion::gt::types::GtMulConstraintPolynomials,
-    zkvm::witness::VirtualPolynomial,
+    zkvm::witness::{GtMulTerm, RecursionPoly, VirtualPolynomial},
 };
 
 use allocative::Allocative;
@@ -308,28 +308,36 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for GtMulProver {
 
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_lhs(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Lhs,
+            }),
             SumcheckId::GtMul,
             opening_point.clone(),
             self.lhs.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_rhs(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Rhs,
+            }),
             SumcheckId::GtMul,
             opening_point.clone(),
             self.rhs.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_result(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Result,
+            }),
             SumcheckId::GtMul,
             opening_point.clone(),
             self.result.get_bound_coeff(0),
         );
         accumulator.append_virtual(
             transcript,
-            VirtualPolynomial::gt_mul_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Quotient,
+            }),
             SumcheckId::GtMul,
             opening_point,
             self.quotient.get_bound_coeff(0),
@@ -442,14 +450,28 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
         let g_eval = self.eval_g_at_u(&r_u);
 
         // Fetch opened claims.
-        let lhs =
-            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
-        let rhs =
-            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
-        let result =
-            accumulator.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
+        let lhs = accumulator.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Lhs,
+            }),
+            SumcheckId::GtMul,
+        );
+        let rhs = accumulator.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Rhs,
+            }),
+            SumcheckId::GtMul,
+        );
+        let result = accumulator.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Result,
+            }),
+            SumcheckId::GtMul,
+        );
         let quotient = accumulator.get_virtual_polynomial_claim(
-            VirtualPolynomial::gt_mul_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Quotient,
+            }),
             SumcheckId::GtMul,
         );
 
@@ -465,10 +487,18 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
     ) {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for vp in [
-            VirtualPolynomial::gt_mul_lhs(),
-            VirtualPolynomial::gt_mul_rhs(),
-            VirtualPolynomial::gt_mul_result(),
-            VirtualPolynomial::gt_mul_quotient(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Lhs,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Rhs,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Result,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Quotient,
+            }),
         ] {
             accumulator.append_virtual(transcript, vp, SumcheckId::GtMul, opening_point.clone());
         }

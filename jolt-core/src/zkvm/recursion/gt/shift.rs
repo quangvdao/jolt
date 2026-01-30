@@ -38,7 +38,7 @@ use crate::{
             eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle, GtExpWitness,
         },
     },
-    zkvm::witness::VirtualPolynomial,
+    zkvm::witness::{GtExpTerm, RecursionPoly, VirtualPolynomial},
 };
 
 use allocative::Allocative;
@@ -131,7 +131,9 @@ impl GtShiftProver {
     ) -> Self {
         // Read Stage-1 rho_next claim and its opening point r1.
         let (r1_point, input_claim) = accumulator.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_next(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::RhoNext,
+            }),
             SumcheckId::GtExp,
         );
         let r1 = r1_point.r;
@@ -273,7 +275,12 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
     }
 
     fn input_claim(&self, acc: &VerifierOpeningAccumulator<Fq>) -> Fq {
-        acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_exp_rho_next(), SumcheckId::GtExp)
+        acc.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::RhoNext,
+            }),
+            SumcheckId::GtExp,
+        )
     }
 
     fn expected_output_claim(
@@ -285,7 +292,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
 
         // Stage-1 point r1 comes from the rho_next opening under SumcheckId::GtExp.
         let (rho_next_point, _rho_next_claim) = acc.get_virtual_polynomial_opening(
-            VirtualPolynomial::gt_exp_rho_next(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::RhoNext,
+            }),
             SumcheckId::GtExp,
         );
         let r1 = rho_next_point.r;
@@ -310,7 +319,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
 
         // Consume the rho opening at the Stage-2 point (emitted elsewhere).
         let rho_eval = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::gt_exp_rho(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Rho,
+            }),
             SumcheckId::GtExpClaimReduction,
         );
 

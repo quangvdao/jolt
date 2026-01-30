@@ -33,7 +33,7 @@ use crate::{
             constraints::system::{eq_lsb_index, G2AddNative},
             g2::types::G2AddValues,
         },
-        witness::{G2AddTerm, TermEnum, VirtualPolynomial},
+        witness::{G2AddTerm, RecursionPoly, TermEnum, VirtualPolynomial},
     },
 };
 
@@ -235,7 +235,7 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G2AddProver {
             let claim = self.term_polys[term_idx].get_bound_coeff(0);
             accumulator.append_virtual(
                 transcript,
-                VirtualPolynomial::g2_add(term),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add { term }),
                 SumcheckId::G2Add,
                 opening_point.clone(),
                 claim,
@@ -301,87 +301,129 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
         // Fetch opened claims (one per term), without heap allocation.
         let vals = G2AddValues {
             x_p_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::XPC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::XPC0,
+                }),
                 SumcheckId::G2Add,
             ),
             x_p_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::XPC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::XPC1,
+                }),
                 SumcheckId::G2Add,
             ),
             y_p_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::YPC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YPC0,
+                }),
                 SumcheckId::G2Add,
             ),
             y_p_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::YPC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YPC1,
+                }),
                 SumcheckId::G2Add,
             ),
             ind_p: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::PIndicator),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::PIndicator,
+                }),
                 SumcheckId::G2Add,
             ),
             x_q_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::XQC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::XQC0,
+                }),
                 SumcheckId::G2Add,
             ),
             x_q_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::XQC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::XQC1,
+                }),
                 SumcheckId::G2Add,
             ),
             y_q_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::YQC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YQC0,
+                }),
                 SumcheckId::G2Add,
             ),
             y_q_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::YQC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YQC1,
+                }),
                 SumcheckId::G2Add,
             ),
             ind_q: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::QIndicator),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::QIndicator,
+                }),
                 SumcheckId::G2Add,
             ),
             x_r_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::XRC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::XRC0,
+                }),
                 SumcheckId::G2Add,
             ),
             x_r_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::XRC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::XRC1,
+                }),
                 SumcheckId::G2Add,
             ),
             y_r_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::YRC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YRC0,
+                }),
                 SumcheckId::G2Add,
             ),
             y_r_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::YRC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YRC1,
+                }),
                 SumcheckId::G2Add,
             ),
             ind_r: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::RIndicator),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::RIndicator,
+                }),
                 SumcheckId::G2Add,
             ),
             lambda_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::LambdaC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::LambdaC0,
+                }),
                 SumcheckId::G2Add,
             ),
             lambda_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::LambdaC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::LambdaC1,
+                }),
                 SumcheckId::G2Add,
             ),
             inv_delta_x_c0: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::InvDeltaXC0),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::InvDeltaXC0,
+                }),
                 SumcheckId::G2Add,
             ),
             inv_delta_x_c1: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::InvDeltaXC1),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::InvDeltaXC1,
+                }),
                 SumcheckId::G2Add,
             ),
             is_double: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::IsDouble),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::IsDouble,
+                }),
                 SumcheckId::G2Add,
             ),
             is_inverse: accumulator.get_virtual_polynomial_claim(
-                VirtualPolynomial::g2_add(G2AddTerm::IsInverse),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::IsInverse,
+                }),
                 SumcheckId::G2Add,
             ),
         };
@@ -401,7 +443,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
             let term = G2AddTerm::from_index(term_idx).expect("invalid G2AddTerm index");
             accumulator.append_virtual(
                 transcript,
-                VirtualPolynomial::g2_add(term),
+                VirtualPolynomial::Recursion(RecursionPoly::G2Add { term }),
                 SumcheckId::G2Add,
                 opening_point.clone(),
             );

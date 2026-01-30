@@ -736,7 +736,7 @@ impl CanonicalSerialize for VirtualPolynomial {
             Self::ShouldBranch => 13u8.serialize_with_mode(&mut writer, compress),
             Self::WritePCtoRD => 14u8.serialize_with_mode(&mut writer, compress),
             Self::WriteLookupOutputToRD => 15u8.serialize_with_mode(&mut writer, compress),
-            Self::Rd => 16u8.serialize_with_mode(&mut writer, compress),
+            // NOTE: Tag values are part of the wire format; preserve historical numbering (gaps ok).
             Self::Imm => 17u8.serialize_with_mode(&mut writer, compress),
             Self::Rs1Value => 18u8.serialize_with_mode(&mut writer, compress),
             Self::Rs2Value => 19u8.serialize_with_mode(&mut writer, compress),
@@ -745,7 +745,6 @@ impl CanonicalSerialize for VirtualPolynomial {
             Self::Rs2Ra => 22u8.serialize_with_mode(&mut writer, compress),
             Self::RdWa => 23u8.serialize_with_mode(&mut writer, compress),
             Self::LookupOutput => 24u8.serialize_with_mode(&mut writer, compress),
-            Self::InstructionRaf => 25u8.serialize_with_mode(&mut writer, compress),
             Self::InstructionRafFlag => 26u8.serialize_with_mode(&mut writer, compress),
             Self::InstructionRa(i) => {
                 27u8.serialize_with_mode(&mut writer, compress)?;
@@ -791,7 +790,6 @@ impl CanonicalSerialize for VirtualPolynomial {
                 47u8.serialize_with_mode(&mut writer, compress)?;
                 poly.serialize_with_mode(&mut writer, compress)
             }
-            Self::DorySparseConstraintMatrix => 48u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -813,7 +811,6 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::ShouldBranch
             | Self::WritePCtoRD
             | Self::WriteLookupOutputToRD
-            | Self::Rd
             | Self::Imm
             | Self::Rs1Value
             | Self::Rs2Value
@@ -822,7 +819,6 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::Rs2Ra
             | Self::RdWa
             | Self::LookupOutput
-            | Self::InstructionRaf
             | Self::InstructionRafFlag
             | Self::RegistersVal
             | Self::RamAddress
@@ -845,7 +841,6 @@ impl CanonicalSerialize for VirtualPolynomial {
             | Self::LookupTableFlag(_)
             | Self::BytecodeValStage(_) => 2,
             Self::Recursion(poly) => 1 + poly.serialized_size(compress),
-            Self::DorySparseConstraintMatrix => 1,
         }
     }
 }
@@ -880,7 +875,6 @@ impl CanonicalDeserialize for VirtualPolynomial {
                 13 => Self::ShouldBranch,
                 14 => Self::WritePCtoRD,
                 15 => Self::WriteLookupOutputToRD,
-                16 => Self::Rd,
                 17 => Self::Imm,
                 18 => Self::Rs1Value,
                 19 => Self::Rs2Value,
@@ -889,7 +883,6 @@ impl CanonicalDeserialize for VirtualPolynomial {
                 22 => Self::Rs2Ra,
                 23 => Self::RdWa,
                 24 => Self::LookupOutput,
-                25 => Self::InstructionRaf,
                 26 => Self::InstructionRafFlag,
                 27 => {
                     let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
@@ -939,7 +932,6 @@ impl CanonicalDeserialize for VirtualPolynomial {
                     )?;
                     Self::Recursion(poly)
                 }
-                48 => Self::DorySparseConstraintMatrix,
                 _ => return Err(SerializationError::InvalidData),
             },
         )

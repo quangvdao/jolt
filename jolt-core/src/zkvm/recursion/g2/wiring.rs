@@ -24,7 +24,6 @@ use crate::{
     field::JoltField,
     poly::{
         dense_mlpoly::DensePolynomial,
-        eq_poly::EqPolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
             OpeningAccumulator, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
@@ -38,14 +37,14 @@ use crate::{
     zkvm::{
         proof_serialization::PairingBoundary,
         recursion::{
-            constraints::system::{index_to_binary, ConstraintSystem, G2AddNative},
+            constraints::system::{ConstraintSystem, G2AddNative},
             g2::indexing::{k_add, k_g2, k_smul},
             gt::types::eq_lsb_evals,
             verifier::RecursionVerifierInput,
             wiring_plan::{G2ValueRef, G2WiringEdge},
             ConstraintType,
         },
-        witness::VirtualPolynomial,
+        witness::{G2AddTerm, G2ScalarMulTerm, RecursionPoly, VirtualPolynomial},
     },
 };
 
@@ -941,31 +940,83 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
         let get_smul = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_claim(vp, SumcheckId::G2ScalarMul)
         };
-        let smul_out_val = get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c0())
-            + self.mu * get_smul(VirtualPolynomial::g2_scalar_mul_xa_next_c1())
-            + self.mu2 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c0())
-            + self.mu3 * get_smul(VirtualPolynomial::g2_scalar_mul_ya_next_c1())
-            + self.mu4 * get_smul(VirtualPolynomial::g2_scalar_mul_a_indicator());
+        let smul_out_val = get_smul(VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+            term: G2ScalarMulTerm::XANextC0,
+        })) + self.mu
+            * get_smul(VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XANextC1,
+            }))
+            + self.mu2
+                * get_smul(VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YANextC0,
+                }))
+            + self.mu3
+                * get_smul(VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YANextC1,
+                }))
+            + self.mu4
+                * get_smul(VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::AIndicator,
+                }));
 
         // Fetch add port openings.
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
         };
-        let add_p_val = get_add(VirtualPolynomial::g2_add_xp_c0())
-            + self.mu * get_add(VirtualPolynomial::g2_add_xp_c1())
-            + self.mu2 * get_add(VirtualPolynomial::g2_add_yp_c0())
-            + self.mu3 * get_add(VirtualPolynomial::g2_add_yp_c1())
-            + self.mu4 * get_add(VirtualPolynomial::g2_add_p_indicator());
-        let add_q_val = get_add(VirtualPolynomial::g2_add_xq_c0())
-            + self.mu * get_add(VirtualPolynomial::g2_add_xq_c1())
-            + self.mu2 * get_add(VirtualPolynomial::g2_add_yq_c0())
-            + self.mu3 * get_add(VirtualPolynomial::g2_add_yq_c1())
-            + self.mu4 * get_add(VirtualPolynomial::g2_add_q_indicator());
-        let add_r_val = get_add(VirtualPolynomial::g2_add_xr_c0())
-            + self.mu * get_add(VirtualPolynomial::g2_add_xr_c1())
-            + self.mu2 * get_add(VirtualPolynomial::g2_add_yr_c0())
-            + self.mu3 * get_add(VirtualPolynomial::g2_add_yr_c1())
-            + self.mu4 * get_add(VirtualPolynomial::g2_add_r_indicator());
+        let add_p_val = get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+            term: G2AddTerm::XPC0,
+        })) + self.mu
+            * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                term: G2AddTerm::XPC1,
+            }))
+            + self.mu2
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YPC0,
+                }))
+            + self.mu3
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YPC1,
+                }))
+            + self.mu4
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::PIndicator,
+                }));
+        let add_q_val = get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+            term: G2AddTerm::XQC0,
+        })) + self.mu
+            * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                term: G2AddTerm::XQC1,
+            }))
+            + self.mu2
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YQC0,
+                }))
+            + self.mu3
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YQC1,
+                }))
+            + self.mu4
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::QIndicator,
+                }));
+        let add_r_val = get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+            term: G2AddTerm::XRC0,
+        })) + self.mu
+            * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                term: G2AddTerm::XRC1,
+            }))
+            + self.mu2
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YRC0,
+                }))
+            + self.mu3
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::YRC1,
+                }))
+            + self.mu4
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G2Add {
+                    term: G2AddTerm::RIndicator,
+                }));
 
         let pb1 = g2_const_from_affine(&self.pairing_boundary.p1_g2);
         let pb2 = g2_const_from_affine(&self.pairing_boundary.p2_g2);

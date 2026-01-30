@@ -596,38 +596,6 @@ pub enum GtExpTerm {
     Quotient,
 }
 
-/// GT wiring auxiliary terms (scalars at the Stage-2 point).
-#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]
-pub enum GtWiringTerm {
-    /// Σ_e λ_e · Eq(r_c, c_src(e)) · Eq_s(e) · src_val(e)
-    SrcSum,
-    /// Σ_e λ_e · Eq(r_c, c_dst(e)) · Eq_s(e) · dst_val(e)
-    DstSum,
-}
-
-impl TermEnum for GtWiringTerm {
-    const COUNT: usize = 2;
-
-    fn from_index(i: usize) -> Option<Self> {
-        match i {
-            0 => Some(Self::SrcSum),
-            1 => Some(Self::DstSum),
-            _ => None,
-        }
-    }
-
-    fn to_index(self) -> usize {
-        self as usize
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::SrcSum => "src_sum",
-            Self::DstSum => "dst_sum",
-        }
-    }
-}
-
 impl TermEnum for GtExpTerm {
     const COUNT: usize = 3;
 
@@ -694,8 +662,6 @@ pub enum RecursionPoly {
     /// GT-exp witnesses are reduced to a shared Stage-2 point by `GtExpClaimReduction`,
     /// and wiring reads those reduced openings.
     GtExp { term: GtExpTerm },
-    /// Auxiliary GT wiring scalar claims (at the Stage-2 point).
-    GtWiring { term: GtWiringTerm },
 }
 
 impl RecursionPoly {
@@ -707,7 +673,6 @@ impl RecursionPoly {
             Self::G2ScalarMul { term } => term.to_index(),
             Self::GtMul { term } => term.to_index(),
             Self::GtExp { term } => term.to_index(),
-            Self::GtWiring { term } => term.to_index(),
         }
     }
 }
@@ -724,7 +689,6 @@ const RECURSION_POLY_TAG_G2_ADD: u8 = 13; // was G2_ADD_FUSED
 const RECURSION_POLY_TAG_G2_SCALAR_MUL: u8 = 14; // was G2_SCALAR_MUL_FUSED
 const RECURSION_POLY_TAG_GT_MUL: u8 = 9; // was GT_MUL_FUSED
 const RECURSION_POLY_TAG_GT_EXP: u8 = 10; // was GT_EXP_FUSED
-const RECURSION_POLY_TAG_GT_WIRING: u8 = 11; // was GT_WIRING_FUSED
 
 impl CanonicalSerialize for RecursionPoly {
     fn serialize_with_mode<W: Write>(
@@ -743,7 +707,6 @@ impl CanonicalSerialize for RecursionPoly {
             }
             RecursionPoly::GtMul { term } => (RECURSION_POLY_TAG_GT_MUL, term.to_index()),
             RecursionPoly::GtExp { term } => (RECURSION_POLY_TAG_GT_EXP, term.to_index()),
-            RecursionPoly::GtWiring { term } => (RECURSION_POLY_TAG_GT_WIRING, term.to_index()),
         };
 
         tag.serialize_with_mode(&mut writer, compress)?;
@@ -796,10 +759,6 @@ impl CanonicalDeserialize for RecursionPoly {
             RECURSION_POLY_TAG_GT_EXP => Self::GtExp {
                 term: GtExpTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
             },
-            RECURSION_POLY_TAG_GT_WIRING => Self::GtWiring {
-                term: GtWiringTerm::from_index(term_index)
-                    .ok_or(SerializationError::InvalidData)?,
-            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -819,7 +778,6 @@ impl GuestSerialize for RecursionPoly {
             }
             RecursionPoly::GtMul { term } => (RECURSION_POLY_TAG_GT_MUL, term.to_index()),
             RecursionPoly::GtExp { term } => (RECURSION_POLY_TAG_GT_EXP, term.to_index()),
-            RecursionPoly::GtWiring { term } => (RECURSION_POLY_TAG_GT_WIRING, term.to_index()),
         };
         tag.guest_serialize(w)?;
         let term_index_u32 = u32::try_from(term_index).map_err(|_| {
@@ -876,14 +834,6 @@ impl GuestDeserialize for RecursionPoly {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid GtExpTerm index")
                 })?,
             },
-            RECURSION_POLY_TAG_GT_WIRING => Self::GtWiring {
-                term: GtWiringTerm::from_index(term_index).ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "invalid GtWiringTerm index",
-                    )
-                })?,
-            },
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -914,19 +864,17 @@ impl GuestSerialize for VirtualPolynomial {
             VirtualPolynomial::ShouldBranch => 13u8.guest_serialize(w),
             VirtualPolynomial::WritePCtoRD => 14u8.guest_serialize(w),
             VirtualPolynomial::WriteLookupOutputToRD => 15u8.guest_serialize(w),
-            VirtualPolynomial::Rd => 16u8.guest_serialize(w),
-            VirtualPolynomial::Imm => 17u8.guest_serialize(w),
-            VirtualPolynomial::Rs1Value => 18u8.guest_serialize(w),
-            VirtualPolynomial::Rs2Value => 19u8.guest_serialize(w),
-            VirtualPolynomial::RdWriteValue => 20u8.guest_serialize(w),
-            VirtualPolynomial::Rs1Ra => 21u8.guest_serialize(w),
-            VirtualPolynomial::Rs2Ra => 22u8.guest_serialize(w),
-            VirtualPolynomial::RdWa => 23u8.guest_serialize(w),
-            VirtualPolynomial::LookupOutput => 24u8.guest_serialize(w),
-            VirtualPolynomial::InstructionRaf => 25u8.guest_serialize(w),
-            VirtualPolynomial::InstructionRafFlag => 26u8.guest_serialize(w),
+            VirtualPolynomial::Imm => 16u8.guest_serialize(w),
+            VirtualPolynomial::Rs1Value => 17u8.guest_serialize(w),
+            VirtualPolynomial::Rs2Value => 18u8.guest_serialize(w),
+            VirtualPolynomial::RdWriteValue => 19u8.guest_serialize(w),
+            VirtualPolynomial::Rs1Ra => 20u8.guest_serialize(w),
+            VirtualPolynomial::Rs2Ra => 21u8.guest_serialize(w),
+            VirtualPolynomial::RdWa => 22u8.guest_serialize(w),
+            VirtualPolynomial::LookupOutput => 23u8.guest_serialize(w),
+            VirtualPolynomial::InstructionRafFlag => 24u8.guest_serialize(w),
             VirtualPolynomial::InstructionRa(i) => {
-                27u8.guest_serialize(w)?;
+                25u8.guest_serialize(w)?;
                 let i_u32 = u32::try_from(i).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -935,26 +883,26 @@ impl GuestSerialize for VirtualPolynomial {
                 })?;
                 i_u32.guest_serialize(w)
             }
-            VirtualPolynomial::RegistersVal => 28u8.guest_serialize(w),
-            VirtualPolynomial::RamAddress => 29u8.guest_serialize(w),
-            VirtualPolynomial::RamRa => 30u8.guest_serialize(w),
-            VirtualPolynomial::RamReadValue => 31u8.guest_serialize(w),
-            VirtualPolynomial::RamWriteValue => 32u8.guest_serialize(w),
-            VirtualPolynomial::RamVal => 33u8.guest_serialize(w),
-            VirtualPolynomial::RamValInit => 34u8.guest_serialize(w),
-            VirtualPolynomial::RamValFinal => 35u8.guest_serialize(w),
-            VirtualPolynomial::RamHammingWeight => 36u8.guest_serialize(w),
-            VirtualPolynomial::UnivariateSkip => 37u8.guest_serialize(w),
+            VirtualPolynomial::RegistersVal => 26u8.guest_serialize(w),
+            VirtualPolynomial::RamAddress => 27u8.guest_serialize(w),
+            VirtualPolynomial::RamRa => 28u8.guest_serialize(w),
+            VirtualPolynomial::RamReadValue => 29u8.guest_serialize(w),
+            VirtualPolynomial::RamWriteValue => 30u8.guest_serialize(w),
+            VirtualPolynomial::RamVal => 31u8.guest_serialize(w),
+            VirtualPolynomial::RamValInit => 32u8.guest_serialize(w),
+            VirtualPolynomial::RamValFinal => 33u8.guest_serialize(w),
+            VirtualPolynomial::RamHammingWeight => 34u8.guest_serialize(w),
+            VirtualPolynomial::UnivariateSkip => 35u8.guest_serialize(w),
             VirtualPolynomial::OpFlags(flags) => {
-                38u8.guest_serialize(w)?;
+                36u8.guest_serialize(w)?;
                 (flags as u8).guest_serialize(w)
             }
             VirtualPolynomial::InstructionFlags(flags) => {
-                39u8.guest_serialize(w)?;
+                37u8.guest_serialize(w)?;
                 (flags as u8).guest_serialize(w)
             }
             VirtualPolynomial::LookupTableFlag(flag) => {
-                40u8.guest_serialize(w)?;
+                38u8.guest_serialize(w)?;
                 let b = u8::try_from(flag).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -964,7 +912,7 @@ impl GuestSerialize for VirtualPolynomial {
                 b.guest_serialize(w)
             }
             VirtualPolynomial::BytecodeValStage(stage) => {
-                41u8.guest_serialize(w)?;
+                39u8.guest_serialize(w)?;
                 let b = u8::try_from(stage).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -973,16 +921,15 @@ impl GuestSerialize for VirtualPolynomial {
                 })?;
                 b.guest_serialize(w)
             }
-            VirtualPolynomial::BytecodeReadRafAddrClaim => 42u8.guest_serialize(w),
-            VirtualPolynomial::BooleanityAddrClaim => 43u8.guest_serialize(w),
-            VirtualPolynomial::BytecodeClaimReductionIntermediate => 44u8.guest_serialize(w),
-            VirtualPolynomial::ProgramImageInitContributionRw => 45u8.guest_serialize(w),
-            VirtualPolynomial::ProgramImageInitContributionRaf => 46u8.guest_serialize(w),
+            VirtualPolynomial::BytecodeReadRafAddrClaim => 40u8.guest_serialize(w),
+            VirtualPolynomial::BooleanityAddrClaim => 41u8.guest_serialize(w),
+            VirtualPolynomial::BytecodeClaimReductionIntermediate => 42u8.guest_serialize(w),
+            VirtualPolynomial::ProgramImageInitContributionRw => 43u8.guest_serialize(w),
+            VirtualPolynomial::ProgramImageInitContributionRaf => 44u8.guest_serialize(w),
             VirtualPolynomial::Recursion(poly) => {
-                47u8.guest_serialize(w)?;
+                45u8.guest_serialize(w)?;
                 poly.guest_serialize(w)
             }
-            VirtualPolynomial::DorySparseConstraintMatrix => 48u8.guest_serialize(w),
         }
     }
 }
@@ -1007,60 +954,57 @@ impl GuestDeserialize for VirtualPolynomial {
             13 => Self::ShouldBranch,
             14 => Self::WritePCtoRD,
             15 => Self::WriteLookupOutputToRD,
-            16 => Self::Rd,
-            17 => Self::Imm,
-            18 => Self::Rs1Value,
-            19 => Self::Rs2Value,
-            20 => Self::RdWriteValue,
-            21 => Self::Rs1Ra,
-            22 => Self::Rs2Ra,
-            23 => Self::RdWa,
-            24 => Self::LookupOutput,
-            25 => Self::InstructionRaf,
-            26 => Self::InstructionRafFlag,
-            27 => {
+            16 => Self::Imm,
+            17 => Self::Rs1Value,
+            18 => Self::Rs2Value,
+            19 => Self::RdWriteValue,
+            20 => Self::Rs1Ra,
+            21 => Self::Rs2Ra,
+            22 => Self::RdWa,
+            23 => Self::LookupOutput,
+            24 => Self::InstructionRafFlag,
+            25 => {
                 let i = u32::guest_deserialize(r)? as usize;
                 Self::InstructionRa(i)
             }
-            28 => Self::RegistersVal,
-            29 => Self::RamAddress,
-            30 => Self::RamRa,
-            31 => Self::RamReadValue,
-            32 => Self::RamWriteValue,
-            33 => Self::RamVal,
-            34 => Self::RamValInit,
-            35 => Self::RamValFinal,
-            36 => Self::RamHammingWeight,
-            37 => Self::UnivariateSkip,
-            38 => {
+            26 => Self::RegistersVal,
+            27 => Self::RamAddress,
+            28 => Self::RamRa,
+            29 => Self::RamReadValue,
+            30 => Self::RamWriteValue,
+            31 => Self::RamVal,
+            32 => Self::RamValInit,
+            33 => Self::RamValFinal,
+            34 => Self::RamHammingWeight,
+            35 => Self::UnivariateSkip,
+            36 => {
                 let d = u8::guest_deserialize(r)?;
                 let flags = CircuitFlags::from_repr(d).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid CircuitFlags")
                 })?;
                 Self::OpFlags(flags)
             }
-            39 => {
+            37 => {
                 let d = u8::guest_deserialize(r)?;
                 let flags = InstructionFlags::from_repr(d).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid InstructionFlags")
                 })?;
                 Self::InstructionFlags(flags)
             }
-            40 => {
+            38 => {
                 let d = u8::guest_deserialize(r)? as usize;
                 Self::LookupTableFlag(d)
             }
-            41 => {
+            39 => {
                 let d = u8::guest_deserialize(r)? as usize;
                 Self::BytecodeValStage(d)
             }
-            42 => Self::BytecodeReadRafAddrClaim,
-            43 => Self::BooleanityAddrClaim,
-            44 => Self::BytecodeClaimReductionIntermediate,
-            45 => Self::ProgramImageInitContributionRw,
-            46 => Self::ProgramImageInitContributionRaf,
-            47 => Self::Recursion(RecursionPoly::guest_deserialize(r)?),
-            48 => Self::DorySparseConstraintMatrix,
+            40 => Self::BytecodeReadRafAddrClaim,
+            41 => Self::BooleanityAddrClaim,
+            42 => Self::BytecodeClaimReductionIntermediate,
+            43 => Self::ProgramImageInitContributionRw,
+            44 => Self::ProgramImageInitContributionRaf,
+            45 => Self::Recursion(RecursionPoly::guest_deserialize(r)?),
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -1093,7 +1037,6 @@ pub enum VirtualPolynomial {
     ShouldBranch,
     WritePCtoRD,
     WriteLookupOutputToRD,
-    Rd,
     Imm,
     Rs1Value,
     Rs2Value,
@@ -1102,7 +1045,6 @@ pub enum VirtualPolynomial {
     Rs2Ra,
     RdWa,
     LookupOutput,
-    InstructionRaf,
     InstructionRafFlag,
     InstructionRa(usize),
     RegistersVal,
@@ -1127,259 +1069,4 @@ pub enum VirtualPolynomial {
     ProgramImageInitContributionRaf,
     // Recursion protocol virtual polynomials - hierarchical structure
     Recursion(RecursionPoly),
-    // Dory sparse constraint matrix - virtualized in Stage 2, dense version committed in Stage 3
-    DorySparseConstraintMatrix,
-}
-
-// =============================================================================
-// VirtualPolynomial convenience constructors for backward compatibility
-// =============================================================================
-
-impl VirtualPolynomial {
-    // --- GT multiplication ---
-    pub fn gt_mul_lhs() -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Lhs,
-        })
-    }
-    pub fn gt_mul_rhs() -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Rhs,
-        })
-    }
-    pub fn gt_mul_result() -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Result,
-        })
-    }
-    pub fn gt_mul_quotient() -> Self {
-        Self::Recursion(RecursionPoly::GtMul {
-            term: GtMulTerm::Quotient,
-        })
-    }
-
-    // --- GT exponentiation (packed) ---
-    pub fn gt_exp_rho() -> Self {
-        Self::Recursion(RecursionPoly::GtExp {
-            term: GtExpTerm::Rho,
-        })
-    }
-    pub fn gt_exp_rho_next() -> Self {
-        Self::Recursion(RecursionPoly::GtExp {
-            term: GtExpTerm::RhoNext,
-        })
-    }
-    pub fn gt_exp_quotient() -> Self {
-        Self::Recursion(RecursionPoly::GtExp {
-            term: GtExpTerm::Quotient,
-        })
-    }
-
-    // --- GT wiring (auxiliary sums) ---
-    pub fn gt_wiring_src_sum() -> Self {
-        Self::Recursion(RecursionPoly::GtWiring {
-            term: GtWiringTerm::SrcSum,
-        })
-    }
-    pub fn gt_wiring_dst_sum() -> Self {
-        Self::Recursion(RecursionPoly::GtWiring {
-            term: GtWiringTerm::DstSum,
-        })
-    }
-
-    // --- G1 addition ---
-    pub fn g1_add(term: G1AddTerm) -> Self {
-        Self::Recursion(RecursionPoly::G1Add { term })
-    }
-    pub fn g1_add_xp() -> Self {
-        Self::g1_add(G1AddTerm::XP)
-    }
-    pub fn g1_add_yp() -> Self {
-        Self::g1_add(G1AddTerm::YP)
-    }
-    pub fn g1_add_p_indicator() -> Self {
-        Self::g1_add(G1AddTerm::PIndicator)
-    }
-    pub fn g1_add_xq() -> Self {
-        Self::g1_add(G1AddTerm::XQ)
-    }
-    pub fn g1_add_yq() -> Self {
-        Self::g1_add(G1AddTerm::YQ)
-    }
-    pub fn g1_add_q_indicator() -> Self {
-        Self::g1_add(G1AddTerm::QIndicator)
-    }
-    pub fn g1_add_xr() -> Self {
-        Self::g1_add(G1AddTerm::XR)
-    }
-    pub fn g1_add_yr() -> Self {
-        Self::g1_add(G1AddTerm::YR)
-    }
-    pub fn g1_add_r_indicator() -> Self {
-        Self::g1_add(G1AddTerm::RIndicator)
-    }
-
-    // --- G2 addition ---
-    pub fn g2_add(term: G2AddTerm) -> Self {
-        Self::Recursion(RecursionPoly::G2Add { term })
-    }
-    pub fn g2_add_xp_c0() -> Self {
-        Self::g2_add(G2AddTerm::XPC0)
-    }
-    pub fn g2_add_xp_c1() -> Self {
-        Self::g2_add(G2AddTerm::XPC1)
-    }
-    pub fn g2_add_yp_c0() -> Self {
-        Self::g2_add(G2AddTerm::YPC0)
-    }
-    pub fn g2_add_yp_c1() -> Self {
-        Self::g2_add(G2AddTerm::YPC1)
-    }
-    pub fn g2_add_p_indicator() -> Self {
-        Self::g2_add(G2AddTerm::PIndicator)
-    }
-    pub fn g2_add_xq_c0() -> Self {
-        Self::g2_add(G2AddTerm::XQC0)
-    }
-    pub fn g2_add_xq_c1() -> Self {
-        Self::g2_add(G2AddTerm::XQC1)
-    }
-    pub fn g2_add_yq_c0() -> Self {
-        Self::g2_add(G2AddTerm::YQC0)
-    }
-    pub fn g2_add_yq_c1() -> Self {
-        Self::g2_add(G2AddTerm::YQC1)
-    }
-    pub fn g2_add_q_indicator() -> Self {
-        Self::g2_add(G2AddTerm::QIndicator)
-    }
-    pub fn g2_add_xr_c0() -> Self {
-        Self::g2_add(G2AddTerm::XRC0)
-    }
-    pub fn g2_add_xr_c1() -> Self {
-        Self::g2_add(G2AddTerm::XRC1)
-    }
-    pub fn g2_add_yr_c0() -> Self {
-        Self::g2_add(G2AddTerm::YRC0)
-    }
-    pub fn g2_add_yr_c1() -> Self {
-        Self::g2_add(G2AddTerm::YRC1)
-    }
-    pub fn g2_add_r_indicator() -> Self {
-        Self::g2_add(G2AddTerm::RIndicator)
-    }
-
-    // --- G1 scalar multiplication ---
-    pub fn g1_scalar_mul_xa() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::XA,
-        })
-    }
-    pub fn g1_scalar_mul_ya() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::YA,
-        })
-    }
-    pub fn g1_scalar_mul_xt() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::XT,
-        })
-    }
-    pub fn g1_scalar_mul_yt() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::YT,
-        })
-    }
-    pub fn g1_scalar_mul_xa_next() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::XANext,
-        })
-    }
-    pub fn g1_scalar_mul_ya_next() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::YANext,
-        })
-    }
-    pub fn g1_scalar_mul_t_indicator() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::TIndicator,
-        })
-    }
-    pub fn g1_scalar_mul_a_indicator() -> Self {
-        Self::Recursion(RecursionPoly::G1ScalarMul {
-            term: G1ScalarMulTerm::AIndicator,
-        })
-    }
-
-    // --- G2 scalar multiplication ---
-    pub fn g2_scalar_mul_xa_c0() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XAC0,
-        })
-    }
-    pub fn g2_scalar_mul_xa_c1() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XAC1,
-        })
-    }
-    pub fn g2_scalar_mul_ya_c0() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YAC0,
-        })
-    }
-    pub fn g2_scalar_mul_ya_c1() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YAC1,
-        })
-    }
-    pub fn g2_scalar_mul_xt_c0() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XTC0,
-        })
-    }
-    pub fn g2_scalar_mul_xt_c1() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XTC1,
-        })
-    }
-    pub fn g2_scalar_mul_yt_c0() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YTC0,
-        })
-    }
-    pub fn g2_scalar_mul_yt_c1() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YTC1,
-        })
-    }
-    pub fn g2_scalar_mul_xa_next_c0() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XANextC0,
-        })
-    }
-    pub fn g2_scalar_mul_xa_next_c1() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::XANextC1,
-        })
-    }
-    pub fn g2_scalar_mul_ya_next_c0() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YANextC0,
-        })
-    }
-    pub fn g2_scalar_mul_ya_next_c1() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::YANextC1,
-        })
-    }
-    pub fn g2_scalar_mul_t_indicator() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::TIndicator,
-        })
-    }
-    pub fn g2_scalar_mul_a_indicator() -> Self {
-        Self::Recursion(RecursionPoly::G2ScalarMul {
-            term: G2ScalarMulTerm::AIndicator,
-        })
-    }
 }

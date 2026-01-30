@@ -402,9 +402,9 @@ $$0 = \sum_{s \in \{0,1\}^7} \sum_{x \in \{0,1\}^4} \text{eq}(r_s, s) \cdot \tex
 #### Output Claims
 
 After final challenges $(r_s^*, r_x^*)$:
-- `VirtualPolynomial::gt_exp_rho(i)`: $\rho(r_s^*, r_x^*)$
-- `VirtualPolynomial::gt_exp_rho_next(i)`: $\rho_{\text{next}}(r_s^*, r_x^*)$
-- `VirtualPolynomial::gt_exp_quotient(i)`: $Q(r_s^*, r_x^*)$
+- `VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho })`: $\rho(r_s^*, r_x^*)$
+- `VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::RhoNext })`: $\rho_{\text{next}}(r_s^*, r_x^*)$
+- `VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Quotient })`: $Q(r_s^*, r_x^*)$
 
 The verifier computes \(\text{digit\_lo}(r_s^*)\), \(\text{digit\_hi}(r_s^*)\), and \(\text{base}(r_x^*)\), \(\text{base}^2(r_x^*)\), \(\text{base}^3(r_x^*)\)
 directly from public inputs (scalar bits and base), so these are **not** emitted as openings/claims.
@@ -511,8 +511,8 @@ Stage 3: Prefix packing reduction + PCS opening
 #### Accumulator communication (as implemented)
 
 In the implementation:
-- `GtExp` caches the virtual claim `VirtualPolynomial::gt_exp_rho_next(i)` at the `GtExp` opening point (under `SumcheckId::GtExp`).
-- `GtShift` caches the corresponding `rho` opening `VirtualPolynomial::gt_exp_rho(i)` at the *GtShift* opening point (under `SumcheckId::GtShift`).
+- `GtExp` caches the virtual claim `VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::RhoNext })` at the `GtExp` opening point (under `SumcheckId::GtExp`).
+- `GtShift` caches the corresponding `rho` opening `VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho })` at the *GtShift* opening point (under `SumcheckId::GtShift`).
 
 The verifier checks consistency by combining these cached openings with the appropriate Eq/EqPlusOne selector evaluations (see `jolt-core/src/zkvm/recursion/gt/shift.rs`).
 
@@ -586,10 +586,10 @@ $$0 = \sum_{x \in \{0,1\}^4} \text{eq}(r_x, x) \cdot \sum_{i=0}^{m-1} \gamma^i \
 
 #### Output Claims
 
-- `VirtualPolynomial::gt_mul_lhs(i)`: $\tilde{a}_i(r_x')$
-- `VirtualPolynomial::gt_mul_rhs(i)`: $\tilde{b}_i(r_x')$
-- `VirtualPolynomial::gt_mul_result(i)`: $\tilde{c}_i(r_x')$
-- `VirtualPolynomial::gt_mul_quotient(i)`: $\tilde{Q}_i(r_x')$
+- `VirtualPolynomial::Recursion(RecursionPoly::GtMul { term: GtMulTerm::Lhs })`: $\tilde{a}_i(r_x')$
+- `VirtualPolynomial::Recursion(RecursionPoly::GtMul { term: GtMulTerm::Rhs })`: $\tilde{b}_i(r_x')$
+- `VirtualPolynomial::Recursion(RecursionPoly::GtMul { term: GtMulTerm::Result })`: $\tilde{c}_i(r_x')$
+- `VirtualPolynomial::Recursion(RecursionPoly::GtMul { term: GtMulTerm::Quotient })`: $\tilde{Q}_i(r_x')$
 
 ---
 
@@ -684,11 +684,14 @@ $$
 
 #### Output Claims
 
-- `VirtualPolynomial::g1_scalar_mul_xa(i)`, `VirtualPolynomial::g1_scalar_mul_ya(i)` - accumulator coordinates
-- `VirtualPolynomial::g1_scalar_mul_xt(i)`, `VirtualPolynomial::g1_scalar_mul_yt(i)` - doubled point coordinates
-- `VirtualPolynomial::g1_scalar_mul_xa_next(i)`, `VirtualPolynomial::g1_scalar_mul_ya_next(i)` - next accumulator
-- `VirtualPolynomial::g1_scalar_mul_t_indicator(i)` - 1 if T = O (infinity), 0 otherwise
-- `VirtualPolynomial::g1_scalar_mul_a_indicator(i)` - 1 if A = O (infinity), 0 otherwise
+- `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::XA })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::YA })` - accumulator coordinates
+- `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::XT })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::YT })` - doubled point coordinates
+- `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::XANext })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::YANext })` - next accumulator
+- `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::TIndicator })` - 1 if T = O (infinity), 0 otherwise
+- `VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul { term: G1ScalarMulTerm::AIndicator })` - 1 if A = O (infinity), 0 otherwise
 
 ---
 
@@ -779,13 +782,20 @@ $$
 
 All opened values are over $\mathbb{F}_q$ (components of $\mathbb{F}_{q^2}$):
 
-- `VirtualPolynomial::g2_scalar_mul_xa_c0(i)`, `VirtualPolynomial::g2_scalar_mul_xa_c1(i)`
-- `VirtualPolynomial::g2_scalar_mul_ya_c0(i)`, `VirtualPolynomial::g2_scalar_mul_ya_c1(i)`
-- `VirtualPolynomial::g2_scalar_mul_xt_c0(i)`, `VirtualPolynomial::g2_scalar_mul_xt_c1(i)`
-- `VirtualPolynomial::g2_scalar_mul_yt_c0(i)`, `VirtualPolynomial::g2_scalar_mul_yt_c1(i)`
-- `VirtualPolynomial::g2_scalar_mul_xa_next_c0(i)`, `VirtualPolynomial::g2_scalar_mul_xa_next_c1(i)`
-- `VirtualPolynomial::g2_scalar_mul_ya_next_c0(i)`, `VirtualPolynomial::g2_scalar_mul_ya_next_c1(i)`
-- `VirtualPolynomial::g2_scalar_mul_t_indicator(i)`, `VirtualPolynomial::g2_scalar_mul_a_indicator(i)`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::XAC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::XAC1 })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::YAC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::YAC1 })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::XTC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::XTC1 })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::YTC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::YTC1 })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::XANextC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::XANextC1 })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::YANextC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::YANextC1 })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::TIndicator })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul { term: G2ScalarMulTerm::AIndicator })`
 
 ---
 
@@ -1000,13 +1010,21 @@ Across instances, we batch with \(\gamma\). The sumcheck proves:
 
 #### Output claims (ports)
 
-At the (empty) evaluation point, Stage 2 caches virtual openings for the add ports/auxiliaries using `VirtualPolynomial::g1_add_*` helpers:
+At the (empty) evaluation point, Stage 2 caches virtual openings for the add ports/auxiliaries using the `VirtualPolynomial::Recursion(RecursionPoly::G1Add { ... })` form:
 
-- `VirtualPolynomial::g1_add_xp(i)`, `VirtualPolynomial::g1_add_yp(i)`, `VirtualPolynomial::g1_add_p_indicator(i)`
-- `VirtualPolynomial::g1_add_xq(i)`, `VirtualPolynomial::g1_add_yq(i)`, `VirtualPolynomial::g1_add_q_indicator(i)`
-- `VirtualPolynomial::g1_add_xr(i)`, `VirtualPolynomial::g1_add_yr(i)`, `VirtualPolynomial::g1_add_r_indicator(i)`
-- `VirtualPolynomial::g1_add_lambda(i)`, `VirtualPolynomial::g1_add_inv_delta_x(i)`
-- `VirtualPolynomial::g1_add_is_double(i)`, `VirtualPolynomial::g1_add_is_inverse(i)`
+- `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::XP })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::YP })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::PIndicator })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::XQ })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::YQ })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::QIndicator })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::XR })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::YR })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::RIndicator })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::Lambda })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::InvDeltaX })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::IsDouble })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G1Add { term: G1AddTerm::IsInverse })`
 
 These are the values Stage 2 wiring uses to connect add nodes to the rest of the AST DAG.
 
@@ -1055,13 +1073,29 @@ Concretely, the implementation in `g2/addition.rs` enforces the following \(\mat
      \(x_R=\lambda^2-x_P-x_Q\), \(y_R=\lambda(x_P-x_R)-y_P\) hold component-wise.
 
 The sumcheck batching/round structure matches G1Add (`num_vars = 0`, degree bound 6). Stage 2 caches the corresponding virtual openings for
-wiring using `VirtualPolynomial::g2_add_*` helpers:
+wiring using the `VirtualPolynomial::Recursion(RecursionPoly::G2Add { ... })` form:
 
-- `VirtualPolynomial::g2_add_xp_c0(i)`, `VirtualPolynomial::g2_add_xp_c1(i)`, `VirtualPolynomial::g2_add_yp_c0(i)`, `VirtualPolynomial::g2_add_yp_c1(i)`, `VirtualPolynomial::g2_add_p_indicator(i)`
-- `VirtualPolynomial::g2_add_xq_c0(i)`, `VirtualPolynomial::g2_add_xq_c1(i)`, `VirtualPolynomial::g2_add_yq_c0(i)`, `VirtualPolynomial::g2_add_yq_c1(i)`, `VirtualPolynomial::g2_add_q_indicator(i)`
-- `VirtualPolynomial::g2_add_xr_c0(i)`, `VirtualPolynomial::g2_add_xr_c1(i)`, `VirtualPolynomial::g2_add_yr_c0(i)`, `VirtualPolynomial::g2_add_yr_c1(i)`, `VirtualPolynomial::g2_add_r_indicator(i)`
-- `VirtualPolynomial::g2_add_lambda_c0(i)`, `VirtualPolynomial::g2_add_lambda_c1(i)`, `VirtualPolynomial::g2_add_inv_delta_x_c0(i)`, `VirtualPolynomial::g2_add_inv_delta_x_c1(i)`
-- `VirtualPolynomial::g2_add_is_double(i)`, `VirtualPolynomial::g2_add_is_inverse(i)`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::XPC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::XPC1 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::YPC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::YPC1 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::PIndicator })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::XQC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::XQC1 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::YQC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::YQC1 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::QIndicator })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::XRC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::XRC1 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::YRC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::YRC1 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::RIndicator })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::LambdaC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::LambdaC1 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::InvDeltaXC0 })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::InvDeltaXC1 })`
+- `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::IsDouble })`,
+  `VirtualPolynomial::Recursion(RecursionPoly::G2Add { term: G2AddTerm::IsInverse })`
 
 ---
 
@@ -1895,7 +1929,9 @@ append_virtual_claims(
     transcript,
     SumcheckId::GtExpClaimReduction,
     &opening_point,
-    &virtual_claims![VirtualPolynomial::gt_exp_rho(i) => rho_eval],
+    &virtual_claims![
+        VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Rho }) => rho_eval
+    ],
 );
 
 // Stage 3 registers the single committed opening on the prefix-packed dense polynomial.

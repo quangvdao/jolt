@@ -50,7 +50,6 @@ use rayon::prelude::*;
 use crate::{
     field::JoltField,
     poly::{
-        eq_poly::EqPolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
             OpeningAccumulator, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
@@ -64,14 +63,14 @@ use crate::{
     zkvm::{
         proof_serialization::PairingBoundary,
         recursion::{
-            constraints::system::{index_to_binary, ConstraintSystem},
+            constraints::system::ConstraintSystem,
             curve::{Bn254Recursion, RecursionCurve},
             gt::indexing::{k_exp, k_gt, k_mul},
             gt::types::{eq_lsb_evals, eq_lsb_mle},
             verifier::RecursionVerifierInput,
             wiring_plan::{GtConsumer, GtProducer, GtWiringEdge},
         },
-        witness::VirtualPolynomial,
+        witness::{GtExpTerm, GtMulTerm, RecursionPoly, VirtualPolynomial},
     },
 };
 
@@ -903,15 +902,29 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
 
         // Port openings (already cached by earlier GT instances in Stage 2).
         let rho_val = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::gt_exp_rho(),
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Rho,
+            }),
             SumcheckId::GtExpClaimReduction,
         );
-        let mul_lhs_val =
-            acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_lhs(), SumcheckId::GtMul);
-        let mul_rhs_val =
-            acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_rhs(), SumcheckId::GtMul);
-        let mul_out_val =
-            acc.get_virtual_polynomial_claim(VirtualPolynomial::gt_mul_result(), SumcheckId::GtMul);
+        let mul_lhs_val = acc.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Lhs,
+            }),
+            SumcheckId::GtMul,
+        );
+        let mul_rhs_val = acc.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Rhs,
+            }),
+            SumcheckId::GtMul,
+        );
+        let mul_out_val = acc.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                term: GtMulTerm::Result,
+            }),
+            SumcheckId::GtMul,
+        );
 
         // Boundary constants at r_elem.
         let r_elem: Vec<Fq> = r_elem_chal.iter().map(|c| (*c).into()).collect();
@@ -932,7 +945,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 r_step_fq
                     .iter()
                     .enumerate()
-                    .map(|(b, &r_b)| if ((s_out >> b) & 1) == 1 { r_b } else { Fq::one() - r_b })
+                    .map(|(b, &r_b)| {
+                        if ((s_out >> b) & 1) == 1 {
+                            r_b
+                        } else {
+                            Fq::one() - r_b
+                        }
+                    })
                     .product()
             })
             .collect();

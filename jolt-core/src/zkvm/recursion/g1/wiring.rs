@@ -29,7 +29,6 @@ use crate::{
     field::JoltField,
     poly::{
         dense_mlpoly::DensePolynomial,
-        eq_poly::EqPolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
             OpeningAccumulator, ProverOpeningAccumulator, SumcheckId, VerifierOpeningAccumulator,
@@ -43,14 +42,14 @@ use crate::{
     zkvm::{
         proof_serialization::PairingBoundary,
         recursion::{
-            constraints::system::{index_to_binary, ConstraintSystem, G1AddNative},
+            constraints::system::{ConstraintSystem, G1AddNative},
             g1::indexing::{k_add, k_g1, k_smul},
             gt::types::eq_lsb_evals,
             verifier::RecursionVerifierInput,
             wiring_plan::{G1ValueRef, G1WiringEdge},
             ConstraintType,
         },
-        witness::VirtualPolynomial,
+        witness::{G1AddTerm, G1ScalarMulTerm, RecursionPoly, VirtualPolynomial},
     },
 };
 
@@ -828,15 +827,21 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
 
         // Fetch scalar-mul port openings.
         let xa_next = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::g1_scalar_mul_xa_next(),
+            VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                term: G1ScalarMulTerm::XANext,
+            }),
             SumcheckId::G1ScalarMul,
         );
         let ya_next = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::g1_scalar_mul_ya_next(),
+            VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                term: G1ScalarMulTerm::YANext,
+            }),
             SumcheckId::G1ScalarMul,
         );
         let a_ind = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::g1_scalar_mul_a_indicator(),
+            VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                term: G1ScalarMulTerm::AIndicator,
+            }),
             SumcheckId::G1ScalarMul,
         );
         let smul_out_val = xa_next + self.mu * ya_next + self.mu2 * a_ind;
@@ -845,15 +850,36 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_claim(vp, SumcheckId::G1Add)
         };
-        let add_p_val = get_add(VirtualPolynomial::g1_add_xp())
-            + self.mu * get_add(VirtualPolynomial::g1_add_yp())
-            + self.mu2 * get_add(VirtualPolynomial::g1_add_p_indicator());
-        let add_q_val = get_add(VirtualPolynomial::g1_add_xq())
-            + self.mu * get_add(VirtualPolynomial::g1_add_yq())
-            + self.mu2 * get_add(VirtualPolynomial::g1_add_q_indicator());
-        let add_r_val = get_add(VirtualPolynomial::g1_add_xr())
-            + self.mu * get_add(VirtualPolynomial::g1_add_yr())
-            + self.mu2 * get_add(VirtualPolynomial::g1_add_r_indicator());
+        let add_p_val = get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+            term: G1AddTerm::XP,
+        })) + self.mu
+            * get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                term: G1AddTerm::YP,
+            }))
+            + self.mu2
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                    term: G1AddTerm::PIndicator,
+                }));
+        let add_q_val = get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+            term: G1AddTerm::XQ,
+        })) + self.mu
+            * get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                term: G1AddTerm::YQ,
+            }))
+            + self.mu2
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                    term: G1AddTerm::QIndicator,
+                }));
+        let add_r_val = get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+            term: G1AddTerm::XR,
+        })) + self.mu
+            * get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                term: G1AddTerm::YR,
+            }))
+            + self.mu2
+                * get_add(VirtualPolynomial::Recursion(RecursionPoly::G1Add {
+                    term: G1AddTerm::RIndicator,
+                }));
 
         let pb1 = g1_const_from_affine(&self.pairing_boundary.p1_g1);
         let pb2 = g1_const_from_affine(&self.pairing_boundary.p2_g1);

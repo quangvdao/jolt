@@ -8,12 +8,13 @@ use common::constants::XLEN;
 use common::jolt_device::MemoryLayout;
 use rayon::prelude::*;
 use std::io::{Read, Write};
-use tracer::instruction::Cycle;
+use tracer::instruction::{Cycle, RAMAccess};
 
 use crate::poly::commitment::commitment_scheme::StreamingCommitmentScheme;
 use crate::zkvm::config::OneHotParams;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::zkvm::instruction::InstructionFlags;
+use crate::zkvm::program::ProgramPreprocessing;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::{
     field::JoltField,
@@ -79,8 +80,8 @@ impl CommittedPolynomial {
         &self,
         setup: &PCS::ProverSetup,
         preprocessing: &JoltSharedPreprocessing,
-        program: &crate::zkvm::program::ProgramPreprocessing,
-        row_cycles: &[tracer::instruction::Cycle],
+        program: &ProgramPreprocessing,
+        row_cycles: &[Cycle],
         one_hot_params: &OneHotParams,
     ) -> <PCS as StreamingCommitmentScheme>::ChunkState
     where
@@ -102,7 +103,7 @@ impl CommittedPolynomial {
                 let row: Vec<i128> = row_cycles
                     .iter()
                     .map(|cycle| match cycle.ram_access() {
-                        tracer::instruction::RAMAccess::Write(write) => {
+                        RAMAccess::Write(write) => {
                             write.post_value as i128 - write.pre_value as i128
                         }
                         _ => 0,
@@ -160,7 +161,7 @@ impl CommittedPolynomial {
     #[tracing::instrument(skip_all, name = "CommittedPolynomial::generate_witness")]
     pub fn generate_witness<F>(
         &self,
-        program: &crate::zkvm::program::ProgramPreprocessing,
+        program: &ProgramPreprocessing,
         memory_layout: &MemoryLayout,
         trace: &[Cycle],
         one_hot_params: Option<&OneHotParams>,
@@ -216,7 +217,7 @@ impl CommittedPolynomial {
                     .map(|cycle| {
                         let ram_op = cycle.ram_access();
                         match ram_op {
-                            tracer::instruction::RAMAccess::Write(write) => {
+                            RAMAccess::Write(write) => {
                                 write.post_value as i128 - write.pre_value as i128
                             }
                             _ => 0,
@@ -1174,7 +1175,7 @@ impl VirtualPolynomial {
         })
     }
 
-    // --- GT wiring (auxiliary fused sums) ---
+    // --- GT wiring (auxiliary sums) ---
     pub fn gt_wiring_src_sum() -> Self {
         Self::Recursion(RecursionPoly::GtWiring {
             term: GtWiringTerm::SrcSum,

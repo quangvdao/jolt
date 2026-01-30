@@ -736,58 +736,57 @@ impl CanonicalSerialize for VirtualPolynomial {
             Self::ShouldBranch => 13u8.serialize_with_mode(&mut writer, compress),
             Self::WritePCtoRD => 14u8.serialize_with_mode(&mut writer, compress),
             Self::WriteLookupOutputToRD => 15u8.serialize_with_mode(&mut writer, compress),
-            // NOTE: Tag values are part of the wire format; preserve historical numbering (gaps ok).
-            Self::Imm => 17u8.serialize_with_mode(&mut writer, compress),
-            Self::Rs1Value => 18u8.serialize_with_mode(&mut writer, compress),
-            Self::Rs2Value => 19u8.serialize_with_mode(&mut writer, compress),
-            Self::RdWriteValue => 20u8.serialize_with_mode(&mut writer, compress),
-            Self::Rs1Ra => 21u8.serialize_with_mode(&mut writer, compress),
-            Self::Rs2Ra => 22u8.serialize_with_mode(&mut writer, compress),
-            Self::RdWa => 23u8.serialize_with_mode(&mut writer, compress),
-            Self::LookupOutput => 24u8.serialize_with_mode(&mut writer, compress),
-            Self::InstructionRafFlag => 26u8.serialize_with_mode(&mut writer, compress),
+            Self::Imm => 16u8.serialize_with_mode(&mut writer, compress),
+            Self::Rs1Value => 17u8.serialize_with_mode(&mut writer, compress),
+            Self::Rs2Value => 18u8.serialize_with_mode(&mut writer, compress),
+            Self::RdWriteValue => 19u8.serialize_with_mode(&mut writer, compress),
+            Self::Rs1Ra => 20u8.serialize_with_mode(&mut writer, compress),
+            Self::Rs2Ra => 21u8.serialize_with_mode(&mut writer, compress),
+            Self::RdWa => 22u8.serialize_with_mode(&mut writer, compress),
+            Self::LookupOutput => 23u8.serialize_with_mode(&mut writer, compress),
+            Self::InstructionRafFlag => 24u8.serialize_with_mode(&mut writer, compress),
             Self::InstructionRa(i) => {
-                27u8.serialize_with_mode(&mut writer, compress)?;
+                25u8.serialize_with_mode(&mut writer, compress)?;
                 (*i as u32).serialize_with_mode(&mut writer, compress)
             }
-            Self::RegistersVal => 28u8.serialize_with_mode(&mut writer, compress),
-            Self::RamAddress => 29u8.serialize_with_mode(&mut writer, compress),
-            Self::RamRa => 30u8.serialize_with_mode(&mut writer, compress),
-            Self::RamReadValue => 31u8.serialize_with_mode(&mut writer, compress),
-            Self::RamWriteValue => 32u8.serialize_with_mode(&mut writer, compress),
-            Self::RamVal => 33u8.serialize_with_mode(&mut writer, compress),
-            Self::RamValInit => 34u8.serialize_with_mode(&mut writer, compress),
-            Self::RamValFinal => 35u8.serialize_with_mode(&mut writer, compress),
-            Self::RamHammingWeight => 36u8.serialize_with_mode(&mut writer, compress),
-            Self::UnivariateSkip => 37u8.serialize_with_mode(&mut writer, compress),
+            Self::RegistersVal => 26u8.serialize_with_mode(&mut writer, compress),
+            Self::RamAddress => 27u8.serialize_with_mode(&mut writer, compress),
+            Self::RamRa => 28u8.serialize_with_mode(&mut writer, compress),
+            Self::RamReadValue => 29u8.serialize_with_mode(&mut writer, compress),
+            Self::RamWriteValue => 30u8.serialize_with_mode(&mut writer, compress),
+            Self::RamVal => 31u8.serialize_with_mode(&mut writer, compress),
+            Self::RamValInit => 32u8.serialize_with_mode(&mut writer, compress),
+            Self::RamValFinal => 33u8.serialize_with_mode(&mut writer, compress),
+            Self::RamHammingWeight => 34u8.serialize_with_mode(&mut writer, compress),
+            Self::UnivariateSkip => 35u8.serialize_with_mode(&mut writer, compress),
             Self::OpFlags(flags) => {
-                38u8.serialize_with_mode(&mut writer, compress)?;
+                36u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*flags as usize).unwrap()).serialize_with_mode(&mut writer, compress)
             }
             Self::InstructionFlags(flags) => {
-                39u8.serialize_with_mode(&mut writer, compress)?;
+                37u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*flags as usize).unwrap()).serialize_with_mode(&mut writer, compress)
             }
             Self::LookupTableFlag(flag) => {
-                40u8.serialize_with_mode(&mut writer, compress)?;
+                38u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*flag).unwrap()).serialize_with_mode(&mut writer, compress)
             }
             // Program-image commitment variants
             Self::BytecodeValStage(stage) => {
-                41u8.serialize_with_mode(&mut writer, compress)?;
+                39u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*stage).unwrap()).serialize_with_mode(&mut writer, compress)
             }
-            Self::BytecodeReadRafAddrClaim => 42u8.serialize_with_mode(&mut writer, compress),
-            Self::BooleanityAddrClaim => 43u8.serialize_with_mode(&mut writer, compress),
+            Self::BytecodeReadRafAddrClaim => 40u8.serialize_with_mode(&mut writer, compress),
+            Self::BooleanityAddrClaim => 41u8.serialize_with_mode(&mut writer, compress),
             Self::BytecodeClaimReductionIntermediate => {
+                42u8.serialize_with_mode(&mut writer, compress)
+            }
+            Self::ProgramImageInitContributionRw => 43u8.serialize_with_mode(&mut writer, compress),
+            Self::ProgramImageInitContributionRaf => {
                 44u8.serialize_with_mode(&mut writer, compress)
             }
-            Self::ProgramImageInitContributionRw => 45u8.serialize_with_mode(&mut writer, compress),
-            Self::ProgramImageInitContributionRaf => {
-                46u8.serialize_with_mode(&mut writer, compress)
-            }
             Self::Recursion(poly) => {
-                47u8.serialize_with_mode(&mut writer, compress)?;
+                45u8.serialize_with_mode(&mut writer, compress)?;
                 poly.serialize_with_mode(&mut writer, compress)
             }
         }
@@ -875,56 +874,56 @@ impl CanonicalDeserialize for VirtualPolynomial {
                 13 => Self::ShouldBranch,
                 14 => Self::WritePCtoRD,
                 15 => Self::WriteLookupOutputToRD,
-                17 => Self::Imm,
-                18 => Self::Rs1Value,
-                19 => Self::Rs2Value,
-                20 => Self::RdWriteValue,
-                21 => Self::Rs1Ra,
-                22 => Self::Rs2Ra,
-                23 => Self::RdWa,
-                24 => Self::LookupOutput,
-                26 => Self::InstructionRafFlag,
-                27 => {
+                16 => Self::Imm,
+                17 => Self::Rs1Value,
+                18 => Self::Rs2Value,
+                19 => Self::RdWriteValue,
+                20 => Self::Rs1Ra,
+                21 => Self::Rs2Ra,
+                22 => Self::RdWa,
+                23 => Self::LookupOutput,
+                24 => Self::InstructionRafFlag,
+                25 => {
                     let i = u32::deserialize_with_mode(&mut reader, compress, validate)?;
                     Self::InstructionRa(i as usize)
                 }
-                28 => Self::RegistersVal,
-                29 => Self::RamAddress,
-                30 => Self::RamRa,
-                31 => Self::RamReadValue,
-                32 => Self::RamWriteValue,
-                33 => Self::RamVal,
-                34 => Self::RamValInit,
-                35 => Self::RamValFinal,
-                36 => Self::RamHammingWeight,
-                37 => Self::UnivariateSkip,
-                38 => {
+                26 => Self::RegistersVal,
+                27 => Self::RamAddress,
+                28 => Self::RamRa,
+                29 => Self::RamReadValue,
+                30 => Self::RamWriteValue,
+                31 => Self::RamVal,
+                32 => Self::RamValInit,
+                33 => Self::RamValFinal,
+                34 => Self::RamHammingWeight,
+                35 => Self::UnivariateSkip,
+                36 => {
                     let discriminant = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     let flags = CircuitFlags::from_repr(discriminant)
                         .ok_or(SerializationError::InvalidData)?;
                     Self::OpFlags(flags)
                 }
-                39 => {
+                37 => {
                     let discriminant = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     let flags = InstructionFlags::from_repr(discriminant)
                         .ok_or(SerializationError::InvalidData)?;
                     Self::InstructionFlags(flags)
                 }
-                40 => {
+                38 => {
                     let flag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     Self::LookupTableFlag(flag as usize)
                 }
                 // Program-image commitment variants
-                41 => {
+                39 => {
                     let stage = u8::deserialize_with_mode(&mut reader, compress, validate)?;
                     Self::BytecodeValStage(stage as usize)
                 }
-                42 => Self::BytecodeReadRafAddrClaim,
-                43 => Self::BooleanityAddrClaim,
-                44 => Self::BytecodeClaimReductionIntermediate,
-                45 => Self::ProgramImageInitContributionRw,
-                46 => Self::ProgramImageInitContributionRaf,
-                47 => {
+                40 => Self::BytecodeReadRafAddrClaim,
+                41 => Self::BooleanityAddrClaim,
+                42 => Self::BytecodeClaimReductionIntermediate,
+                43 => Self::ProgramImageInitContributionRw,
+                44 => Self::ProgramImageInitContributionRaf,
+                45 => {
                     let poly = crate::zkvm::witness::RecursionPoly::deserialize_with_mode(
                         &mut reader,
                         compress,

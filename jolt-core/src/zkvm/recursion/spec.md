@@ -177,9 +177,19 @@ and are embedded into the common domain by replicating across **dummy low bits**
 
 This convention is implemented for:
 
-- GT: `gt/stage2_openings.rs`, `gt/wiring.rs`
+- GT: `gt/stage2_openings.rs`, `gt/wiring.rs`, `gt/indexing.rs`
 - G1: `g1/scalar_multiplication.rs`, `g1/wiring.rs`, `g1/indexing.rs`
 - G2: `g2/scalar_multiplication.rs`, `g2/wiring.rs`, `g2/indexing.rs`
+
+**Indexing helpers** (in `*/indexing.rs`):
+
+| Function | Purpose |
+|----------|---------|
+| `k_exp()`, `k_mul()`, `k_gt()` | GT family-local and common index sizes |
+| `k_smul()`, `k_add()`, `k_g1()`, `k_g2()` | G1/G2 family-local and common index sizes |
+| `dummy_bits(k_common, k_family)` | Number of low dummy bits: `k_common - k_family` |
+| `embed_index(idx, k_common, k_family)` | Embed family-local index: `idx << dummy_bits` |
+| `num_*_constraints_padded()` | Padded constraint count (power of two) |
 
 #### Opening-point normalization for scalar-mul
 
@@ -275,6 +285,31 @@ $$a(x) \cdot b(x) - c(x) - Q(x) \cdot g(x) = 0$$
 where $g(x)$ is the MLE of $p$ on the hypercube.
 
 This transforms high-degree $\mathbb{F}_{q^{12}}$ operations into low-degree constraints over $\mathbb{F}_q$ by introducing the quotient as auxiliary witness.
+
+#### The `RecursionCurve` Trait
+
+The recursion SNARK is *field-generic* in many places, but Stage 1 constraints perform arithmetic over a concrete pairing tower
+(\( \mathbb{F}_q \subset \mathbb{F}_{q^2} \subset \mathbb{F}_{q^{12}} \)).
+
+The `RecursionCurve` trait (`curve.rs`) centralizes curve/tower specifics:
+
+```rust
+pub trait RecursionCurve: Send + Sync + 'static {
+    type Fq: JoltField;           // Base field (SNARK native field)
+    type Fr: PrimeField;          // Scalar field (public inputs)
+    type Fq2: Field;              // Quadratic extension (G2 coordinates)
+    type Fq12: Field;             // Dodecic extension (GT elements)
+
+    const TOWER_MLE_NUM_VARS: usize = 4;  // 16 evaluations for g(x) and GT→MLE
+
+    fn g_mle() -> Vec<Self::Fq>;          // Tower reduction polynomial g(x)
+    fn fq12_to_mle(gt: &Self::Fq12) -> Vec<Self::Fq>;  // GT → 16-eval MLE
+    fn fq2_to_components(x: &Self::Fq2) -> (Self::Fq, Self::Fq);
+    fn fq2_from_components(c0: Self::Fq, c1: Self::Fq) -> Self::Fq2;
+}
+```
+
+The default implementation `Bn254Recursion` instantiates this for BN254, delegating to optimized helpers from `jolt-optimizations`.
 
 ### 2.2 GT Exponentiation (Stage 1)
 
@@ -499,6 +534,27 @@ witness column and uses `GtShift` to enforce its consistency with `rho`.
 - Additional proof elements (+11 field elements)
 
 **Security**: Maintains the standard sumcheck soundness bound \(O(\text{rounds}/|\mathbb{F}|)\) (here, rounds = 11).
+
+---
+
+### 2.2.2 GtExpClaimReduction: Stage 2 Openings (Stage 2)
+
+The `GtExpStage2Openings` instance (`gt/stage2_openings.rs`) serves as a **claim reduction** step that moves GT exp openings from the Stage-1 point to the shared Stage-2 evaluation point.
+
+#### Purpose
+
+After Stage 1, the verifier has claims for `rho`, `rho_next`, and `quotient` at the Stage-1 challenge point \((r_s^*, r_x^*)\). However, Stage 2 batches all constraints at a **shared** point. The `GtExpClaimReduction` instance:
+
+1. Participates in the Stage-2 batched sumcheck (with 0 additional rounds, since it operates at a fixed point)
+2. Caches the GT exp openings under `SumcheckId::GtExpClaimReduction` for consumption by:
+   - `GtShift` (for shift consistency)
+   - GT wiring (for copy constraints)
+
+#### Implementation
+
+The instance is a "zero-degree" sumcheck that simply evaluates the cached Stage-1 claims at the Stage-2 point using appropriate Eq selectors. It handles split-\(k\) dummy-bit normalization per Section 1.4.1.
+
+**Ordering constraint**: `GtExpStage2Openings*` must run **before** `GtShift*` and GT wiring in the Stage-2 instance list.
 
 ---
 
@@ -768,7 +824,7 @@ linear identity that enforces the one-step shift over all indices \(0..254\), wh
 This shift sumcheck is defined over the **native 8-var** scalar-mul trace polynomials. In the Stage-2 batched sumcheck, it is suffix-aligned
 via `round_offset` so it can be batched with other instances that have more rounds.
 
-### 2.5.1 G1/G2 Addition (NEW)
+### 2.7 G1/G2 Addition
 
 Dory verification performs many explicit group additions in G1 and G2 (e.g., updates like
 \(e1 \leftarrow e1 + \alpha \cdot X\), \(e2 \leftarrow e2 + \beta^{-1}\cdot Y\)).
@@ -1031,7 +1087,7 @@ After Stage 2, we have many virtual polynomial claims $(v_0, v_1, \ldots, v_{n-1
 Stage 2 enforces that all operation instances form **one coherent computation DAG** (copy constraints),
 rather than a multiset of unrelated valid operations.
 
-#### Topology source: Dory’s `AstGraph`
+### 3.1 Topology source: Dory’s `AstGraph`
 
 Dory can record the full verification computation as an AST/DAG (`AstGraph`) where each node:
 - produces a typed `ValueId` (G1/G2/GT),
@@ -1119,7 +1175,72 @@ Concretely:
 - `G2Add` caches port/aux openings under `SumcheckId::G2Add` (see `g2/addition.rs`).
 - Wiring instances cache **no openings**; they only add a Stage-2 sumcheck equation that binds those openings to the verifier-derived wiring plan.
 
-### 3.6 Soundness audit checklist (wiring + split-\(k\))
+### 3.6 WiringPlan Structure
+
+The `WiringPlan` (`wiring_plan.rs`) is the canonical representation of all copy-constraint edges derived from the Dory AST.
+
+```rust
+pub struct WiringPlan {
+    pub gt: Vec<GtWiringEdge>,  // GT copy constraints
+    pub g1: Vec<G1WiringEdge>,  // G1 copy constraints
+    pub g2: Vec<G2WiringEdge>,  // G2 copy constraints
+}
+```
+
+Each edge connects a **producer** to a **consumer**:
+
+| Type | Producers | Consumers |
+|------|-----------|-----------|
+| GT | `GtExpRho { instance }`, `GtMulResult { instance }`, `GtExpBase { instance }` | `GtMulLhs { instance }`, `GtMulRhs { instance }`, `GtExpBase { instance }`, `JointCommitment`, `PairingBoundaryRhs` |
+| G1 | `G1ScalarMulOutput { instance }`, `G1AddOutput { instance }` | `G1AddInputP { instance }`, `G1AddInputQ { instance }`, `PairingBoundary*` |
+| G2 | `G2ScalarMulOutput { instance }`, `G2AddOutput { instance }` | `G2AddInputP { instance }`, `G2AddInputQ { instance }`, `PairingBoundary*` |
+
+The `derive_wiring_plan()` function traverses the Dory `AstGraph` and generates edges for each data-flow dependency:
+1. For each AST op, resolve the producer of each input `ValueId`
+2. Create a wiring edge from producer output to consumer input
+3. Handle combine-commitments DAG edges (see below)
+4. Handle boundary bindings (pairing boundary, joint commitment)
+
+**Edge ordering**: edges are sorted by (dst, src) to ensure deterministic constraint evaluation.
+
+### 3.7 CombineDag: Balanced GT Commitment Combination
+
+The `CombineDag` (`combine_dag.rs`) describes the deterministic balanced binary-tree used for homomorphic GT commitment combination in Dory's Stage 8.
+
+When Dory combines multiple commitment pieces, it builds a tree of GT multiplications:
+- **Leaves**: outputs of `GTExp` instances (the individual commitment pieces)
+- **Internal nodes**: GT multiplications pairing adjacent elements
+- **Root**: the final combined commitment
+
+```rust
+pub struct CombineDag {
+    pub num_leaves: usize,
+    pub layers: Vec<CombineLayer>,
+}
+
+pub struct CombineLayer {
+    pub muls: Vec<CombineMul>,        // GT multiplications at this level
+    pub next_nodes: Vec<usize>,        // Node IDs for next level's input
+}
+
+pub struct CombineMul {
+    pub lhs: usize,  // Left input node ID
+    pub rhs: usize,  // Right input node ID
+    pub out: usize,  // Output node ID
+}
+```
+
+**Example**: For 5 leaves, the DAG produces:
+- Level 0: `(0,1)->5`, `(2,3)->6`, carry `4` → next `[5,6,4]`
+- Level 1: `(5,6)->7`, carry `4` → next `[7,4]`
+- Level 2: `(7,4)->8` → root = 8
+
+The `CombineDag` structure ensures:
+- **Determinism**: The tree shape is fully determined by `num_leaves`
+- **Prover/verifier agreement**: Both sides derive the same topology
+- **Minimal multiplications**: Exactly `num_leaves - 1` GT multiplications
+
+### 3.8 Soundness audit checklist (wiring + split-\(k\))
 
 This checklist is intended for “red-team” review of the protocols.
 
@@ -1268,6 +1389,15 @@ The verifier accepts iff all checks pass:
 ## 7. Parameters & Cost Analysis
 
 This section provides analytical formulas for proof sizes, constraint counts, and computational costs.
+
+### 7.0 Key Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_RECURSION_DENSE_NUM_VARS` | 21 | Maximum number of variables in the prefix-packed dense polynomial. Bounds Hyrax generator size. Supports up to \(2^{21}\) packed evaluations. |
+| `TOWER_MLE_NUM_VARS` | 4 | Number of variables in GT tower MLE representations (16 evaluations for BN254). |
+
+These constants are defined in `mod.rs` and `curve.rs` respectively.
 
 ### 7.1 Sumcheck Degrees and Rounds
 
@@ -1438,8 +1568,8 @@ This compression directly reduces:
 |--------|---------|----------------|
 | Constraints | $t$ (bit-length) | 256 |
 | Stage 1 rounds | 11 (packed GT) | 11 |
-| Stage 3 rounds | $\lceil \log_2(15c) \rceil$ | 12 |
-| Stage 4 rounds | $\lceil \log_2(4tc \cdot 16) \rceil$ | 14 |
+| Stage 2 rounds | max of batched instances | depends on constraint mix |
+| Stage 3 | 0 rounds (reduction only) | 1 field element |
 | Proof elements | $O(c + \log c)$ | ~1,100 |
 | Prover time | $O(c \cdot 2^{11})$ | ~4,000 ops |
 | Verifier time | $O(c + \text{polys} \cdot \text{bits})$ | ~15,000 ops |
@@ -1466,8 +1596,8 @@ The packed GT exponentiation optimization dramatically reduces system costs:
 
 **Impact on Later Stages**:
 - Stage 3 processes fewer polynomials (3 vs 1,024)
-- Stage 5 benefits from reduced $K$ in batch verification
 - Hyrax commitment is more efficient with fewer polynomials
+- PCS opening proof size is reduced
 
 **Trade-offs**:
 - Packed approach uses 11-round sumcheck vs 4-round
@@ -1485,32 +1615,75 @@ This section describes the code architecture and data flow for the recursion imp
 
 ```
 jolt-core/src/zkvm/recursion/
-├── mod.rs
-├── spec.md
-├── witness.rs
-├── prover.rs                  # orchestrates stages
-├── verifier.rs
-├── prefix_packing.rs          # Stage 3 (prefix packing reduction)
+├── mod.rs                     # module root + re-exports + MAX_RECURSION_DENSE_NUM_VARS
+├── api.rs                     # public API: prove_recursion, verify_recursion, RecursionArtifact
+├── spec.md                    # this specification document
+├── prover.rs                  # orchestrates all stages (witness gen → commit → sumchecks → PCS)
+├── verifier.rs                # verifies all stages + external pairing check boundary
+├── witness.rs                 # witness type definitions (GTExpWitness, GTMulWitness, etc.)
+├── witness_generation.rs      # plan constraint system from WitnessCollection
+├── prefix_packing.rs          # Stage 3: prefix packing layout + reduction
+├── metadata.rs                # RecursionConstraintMetadata (verifier-side metadata)
+├── curve.rs                   # RecursionCurve trait (curve-specific tower abstractions)
+├── combine_dag.rs             # CombineDag: balanced binary-tree DAG for GT commitment combination
+├── wiring_plan.rs             # WiringPlan: copy-constraint edge derivation from AST
 ├── constraints/               # constraint-system + matrix layout
-│   ├── config.rs
-│   ├── sumcheck.rs
-│   └── system.rs
+│   ├── mod.rs
+│   ├── config.rs              # ConstraintSystemConfig
+│   ├── sumcheck.rs            # sumcheck instance batching
+│   └── system.rs              # ConstraintSystem, ConstraintType, PolyType
 ├── gt/                        # GT gadgets + auxiliary subprotocols
-│   ├── exponentiation.rs      # Stage 1 (`GtExp`)
-│   ├── shift.rs               # Stage 2 (`GtShift`)
-│   ├── claim_reduction.rs     # Stage 2 (`GtExpClaimReduction`)
-│   └── multiplication.rs      # Stage 2 (`GtMul`)
+│   ├── mod.rs
+│   ├── types.rs               # GtExpPublicInputs, GtAddValues
+│   ├── exponentiation.rs      # Stage 1: packed GT exp (`GtExp`)
+│   ├── shift.rs               # Stage 2: shift check (`GtShift`)
+│   ├── stage2_openings.rs     # Stage 2: claim reduction (`GtExpClaimReduction`)
+│   ├── multiplication.rs      # Stage 2: GT mul (`GtMul`)
+│   ├── indexing.rs            # family-local indexing: k_exp, k_mul, k_gt
+│   └── wiring.rs              # GT wiring sumcheck backend
 ├── g1/
-│   ├── scalar_multiplication.rs
-│   ├── addition.rs
-│   └── shift.rs               # Stage 2 (`ShiftG1ScalarMul` / `ShiftG2ScalarMul`)
+│   ├── mod.rs
+│   ├── types.rs               # G1ScalarMulPublicInputs, G1AddValues
+│   ├── scalar_multiplication.rs # Stage 2: G1 scalar mul
+│   ├── addition.rs            # Stage 2: G1 add
+│   ├── indexing.rs            # family-local indexing: k_smul, k_add, k_g1
+│   └── wiring.rs              # G1 wiring sumcheck backend
 ├── g2/
-│   ├── scalar_multiplication.rs
-│   └── addition.rs
+│   ├── mod.rs
+│   ├── types.rs               # G2ScalarMulPublicInputs, G2AddValues
+│   ├── scalar_multiplication.rs # Stage 2: G2 scalar mul
+│   ├── addition.rs            # Stage 2: G2 add
+│   ├── indexing.rs            # family-local indexing: k_smul, k_add, k_g2
+│   └── wiring.rs              # G2 wiring sumcheck backend
+├── utils/
+│   ├── mod.rs
+│   └── virtual_polynomial_utils.rs # virtual claim helpers + macros
+└── tests/                     # integration tests
+    ├── mod.rs
+    ├── e2e_test.rs            # end-to-end recursion SNARK test
+    ├── pipeline_invariants_test.rs
+    ├── prefix_packing_semantics_test.rs
+    └── wiring_integration_test.rs
 ```
 
 **Note on stage naming**: The “Stage 1..3” names refer to protocol phases (see Section 1.4 and the prover/verifier in `prover.rs` / `verifier.rs`).
 The code is organized by gadget family (`gt/`, `g1/`, `g2/`) plus the shared back-end (`constraints/`, `prefix_packing.rs`).
+
+#### Key module responsibilities
+
+| Module | Purpose |
+|--------|---------|
+| `api.rs` | Public entrypoints: `prove_recursion`, `verify_recursion`, `RecursionArtifact` |
+| `prover.rs` | Orchestrates witness gen → commit → sumchecks → PCS opening |
+| `verifier.rs` | Verifies all stages + checks external pairing boundary |
+| `metadata.rs` | `RecursionConstraintMetadata`: constraint types, dense num vars, public inputs |
+| `curve.rs` | `RecursionCurve` trait: curve-specific tower polynomial g(x) and Fq12→MLE conversion |
+| `combine_dag.rs` | `CombineDag`: deterministic balanced binary-tree for homomorphic GT commitment combination |
+| `wiring_plan.rs` | `WiringPlan`: derives copy-constraint edges from Dory AST (`GtWiringEdge`, `G1WiringEdge`, `G2WiringEdge`) |
+| `prefix_packing.rs` | `PrefixPackingLayout`: canonical prefix packing layout for Stage 3 reduction |
+| `*/indexing.rs` | Family-local constraint indexing: split-k logic, dummy-bit embedding |
+| `*/types.rs` | Public input types: `GtExpPublicInputs`, `G1ScalarMulPublicInputs`, etc. |
+| `*/wiring.rs` | Per-family wiring sumcheck backends (consume cached openings, no new PCS claims) |
 
 ### 8.2 The Offloading Pattern
 
@@ -1558,7 +1731,7 @@ At a high level:
 
 ### 8.3 Witness Types
 
-Each expensive operation has a corresponding witness structure:
+Each expensive operation has a corresponding witness structure. The structures shown below are **conceptual**; the actual implementation in `witness.rs` uses aggregated layouts (e.g., `*_mles: Vec<Vec<Fq>>` for batched operations) and may include additional fields. See `witness.rs` for the authoritative definitions.
 
 **GT Exponentiation** (`GTExpWitness`):
 ```rust
@@ -1741,14 +1914,14 @@ Stage 3 uses a deterministic **prefix packing** layout to place each committed w
 
 The canonical ordering, offsets, and the packed-variable mapping are implemented by `PrefixPackingLayout` in `jolt-core/src/zkvm/recursion/prefix_packing.rs`.
 
-### 8.10 Polynomial Type Enumeration
+### 8.9 Polynomial Type Enumeration
 
 The recursion matrix row layout is an encoding detail of the constraint system and evolves as we add new op types (e.g., G1/G2 add)
 and refine packed protocols (e.g., packed GT exp). The authoritative definition is the `PolyType` enum in:
 
 - `jolt-core/src/zkvm/recursion/constraints/system.rs`
 
-### 8.11 Dory Integration: Witness + AST Extraction (No HintMap)
+### 8.10 Dory Integration: Witness + AST Extraction (No HintMap)
 
 We run Stage 8/9 recursion witness generation (prover-side) in a way that records:
 
@@ -1775,7 +1948,7 @@ let prover = RecursionProver::new_from_witnesses(witness_collection, Some(combin
 already reconstructs a symbolic AST deterministically from public inputs (`jolt-core/src/zkvm/verifier.rs::verify_stage8_with_recursion`).
 Wiring/copy constraints (when implemented) should use that verifier-derived AST.
 
-### 8.12 GPU Considerations
+### 8.11 GPU Considerations
 
 The recursion prover has a clear separation between orchestration logic (Rust) and compute-intensive kernels (GPU).
 
@@ -1865,12 +2038,26 @@ trait HyraxGpuKernel {
 
 Prefix packing (Stage 3) reduces GPU memory pressure by avoiding padded sparse representations.
 
-### 8.13 Environment Flags and Feature Gates
+### 8.12 Environment Flags and Feature Gates
 
 Recursion runs in a single mode (GT/G1/G2).
 
 - **Stage 2 subprotocols**: shift checks, claim reduction, and wiring/boundary constraints are always enabled (when the corresponding family is present).
 - **Tests only**: `JOLT_RECURSION_STOP_AFTER_STAGE2` is an early-exit hook to isolate Stage 2 failures.
+- **Cargo feature `allocative`**: Enables memory profiling annotations on witness types (e.g., in `gt/exponentiation.rs`, `g1/scalar_multiplication.rs`).
+
+### 8.13 Test Coverage
+
+Integration tests are located in `tests/`:
+
+| Test File | Purpose |
+|-----------|---------|
+| `e2e_test.rs` | End-to-end recursion SNARK with full Dory integration |
+| `wiring_integration_test.rs` | Wiring plan derivation, combine-commitments edges, boundary bindings |
+| `prefix_packing_semantics_test.rs` | Canonical polynomial ordering, bit-reversal, layout determinism |
+| `pipeline_invariants_test.rs` | Prover/verifier consistency invariants |
+
+Run tests with: `cargo test -p jolt-core --lib -- recursion::tests`
 
 ---
 

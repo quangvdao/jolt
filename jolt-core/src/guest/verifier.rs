@@ -60,7 +60,6 @@ pub fn verify<F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, FS: Trans
         None,
     )?;
     if let Err(_e) = verifier.verify() {
-        #[cfg(debug_assertions)]
         eprintln!("Jolt verifier failed: {_e:?}");
         return Err(ProofVerifyError::InternalError);
     }

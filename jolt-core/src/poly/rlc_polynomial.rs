@@ -65,11 +65,16 @@ pub fn compute_bytecode_vmp_contribution<F: JoltField>(
     let col_shift = bytecode_cols.trailing_zeros();
     let col_mask = bytecode_cols - 1;
 
-    // Use the passed bytecode_T for coefficient indexing.
+    // Use layout-conditional T value for coefficient indexing.
     // This is the T value used when the bytecode was committed:
-    // - CycleMajor: max_trace_len (main-matrix dimensions)
-    // - AddressMajor: bytecode_len (bytecode dimensions)
-    let index_T = bytecode_T;
+    // - CycleMajor: max_trace_len (main-matrix dimensions) - use bytecode_T
+    // - AddressMajor: bytecode_len (bytecode dimensions) - ALWAYS use bytecode_len
+    //   Note: For AddressMajor, index_T is not used in the global_index calculation,
+    //   but we set it correctly for consistency and to catch bugs if bytecode_T is wrong.
+    let index_T = match layout {
+        DoryLayout::CycleMajor => bytecode_T,
+        DoryLayout::AddressMajor => bytecode_len,
+    };
 
     debug_assert!(
         k_chunk * bytecode_len >= bytecode_cols,
@@ -89,6 +94,81 @@ pub fn compute_bytecode_vmp_contribution<F: JoltField>(
         }
     }
     if !any_nonzero {
+        return;
+    }
+
+    // Fast path for AddressMajor: exploit k_chunk-aligned column blocks.
+    //
+    // When k_chunk is a power-of-two and k_chunk <= num_columns (true for our committed-bytecode
+    // settings), AddressMajor indexing has a strong structure:
+    //
+    //   global_index = cycle * k_chunk + lane
+    //   col_index    = global_index % num_columns
+    //              == (cycle % (num_columns / k_chunk)) * k_chunk + lane
+    //
+    // So each cycle contributes only within one contiguous block of k_chunk columns.
+    // We can compute per-block (block_idx = cycle % num_blocks) and write directly into the
+    // corresponding `result[block_idx*k_chunk ..]` slice.
+    //
+    // This avoids allocating and reducing huge `num_columns`-sized accumulators per thread,
+    // which is the dominant cost for large traces (e.g. 2^29, num_columns=2^19).
+    if layout == DoryLayout::AddressMajor
+        && k_chunk.is_power_of_two()
+        && k_chunk <= bytecode_cols
+        && (bytecode_cols % k_chunk == 0)
+    {
+        let num_blocks = bytecode_cols / k_chunk;
+        debug_assert!(
+            bytecode_len % num_blocks == 0,
+            "expected bytecode_len divisible by num_blocks for AddressMajor fast path"
+        );
+        let num_rows_used = bytecode_len / num_blocks;
+
+        // Each `block` owns a disjoint `[k_chunk]` slice in `result`, so we can parallelize safely.
+        result
+            .par_chunks_mut(k_chunk)
+            .enumerate()
+            .for_each(|(block_idx, result_block)| {
+                // Each row contributes exactly one instruction to this block:
+                // cycle = row * num_blocks + block_idx.
+                //
+                // The AddressMajor row index is `row`, independent of lane, as long as
+                // k_chunk divides num_columns (true here).
+                let max_row = num_rows_used.min(left_vec.len());
+                for row in 0..max_row {
+                    let left = left_vec[row];
+                    if left.is_zero() {
+                        continue;
+                    }
+
+                    let cycle = row * num_blocks + block_idx;
+                    debug_assert!(cycle < bytecode_len);
+                    let instr = &program.instructions[cycle];
+
+                    // For each active lane, update one entry in this block.
+                    for_each_active_lane_value::<F>(instr, |global_lane, lane_val| {
+                        let chunk_idx = global_lane / k_chunk;
+                        if chunk_idx >= num_chunks {
+                            return;
+                        }
+                        let coeff = coeff_by_chunk[chunk_idx];
+                        if coeff.is_zero() {
+                            return;
+                        }
+                        let lane = global_lane % k_chunk;
+
+                        let base = left * coeff;
+                        match lane_val {
+                            ActiveLaneValue::One => {
+                                result_block[lane] += base;
+                            }
+                            ActiveLaneValue::Scalar(v) => {
+                                result_block[lane] += base * v;
+                            }
+                        }
+                    });
+                }
+            });
         return;
     }
 

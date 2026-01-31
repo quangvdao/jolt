@@ -357,10 +357,12 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtExpProver {
 
 pub struct GtExpVerifier {
     params: GtExpParams,
-    eq_point: Vec<<Fq as JoltField>::Challenge>,
+    eq_point_fq: Vec<Fq>,
     /// Map GTExp local witness index -> GT-local c index.
     gtexp_c_indices: Vec<usize>,
     public_inputs: Vec<GtExpPublicInputs>,
+    /// Cached 4-var g MLE evaluations (len 16).
+    g_mle_4var: Vec<Fq>,
 }
 
 #[cfg(feature = "allocative")]
@@ -379,6 +381,7 @@ impl GtExpVerifier {
         let eq_point: Vec<<Fq as JoltField>::Challenge> = (0..params.num_rounds())
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
+        let eq_point_fq: Vec<Fq> = eq_point.iter().map(|c| (*c).into()).collect();
 
         // Build GTExp -> c index mapping (family-local: 0..num_gt_exp in global order).
         let mut gtexp_c_indices = Vec::new();
@@ -398,9 +401,10 @@ impl GtExpVerifier {
 
         Self {
             params,
-            eq_point,
+            eq_point_fq,
             gtexp_c_indices,
             public_inputs,
+            g_mle_4var: <Bn254Recursion as RecursionCurve>::g_mle(),
         }
     }
 }
@@ -424,8 +428,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             .rev()
             .map(|c| (*c).into())
             .collect();
-        let eq_point_f: Vec<Fq> = self.eq_point.iter().map(|c| (*c).into()).collect();
-        let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
+        let eq_eval = EqPolynomial::mle(&self.eq_point_fq, &eval_point);
 
         // Parse (s,u,c) portions from the sumcheck point.
         //
@@ -476,17 +479,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             SumcheckId::GtExp,
         );
 
-        // Compute g(r_x_star) using the public 4-var g MLE.
-        let g_eval: Fq = {
-            let g_mle_4var = <Bn254Recursion as RecursionCurve>::g_mle();
-            let g_poly =
-                MultilinearPolynomial::<Fq>::LargeScalars(DensePolynomial::new(g_mle_4var));
-            g_poly.evaluate_dot_product::<Fq>(&r_x_star)
-        };
-
         // Compute mixed digit/base values at this c-point.
         let eq_evals_s = EqPolynomial::<Fq>::evals(&r_s_star);
         let eq_evals_x = EqPolynomial::<Fq>::evals(&r_x_star);
+        // Compute g(r_x_star) cheaply from eq weights (no polynomial construction).
+        debug_assert_eq!(self.g_mle_4var.len(), eq_evals_x.len());
+        let g_eval: Fq = self
+            .g_mle_4var
+            .iter()
+            .zip(eq_evals_x.iter())
+            .map(|(g, w)| *g * *w)
+            .fold(Fq::zero(), |acc, x| acc + x);
 
         let mut digit_lo = Fq::zero();
         let mut digit_hi = Fq::zero();

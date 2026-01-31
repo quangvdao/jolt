@@ -927,6 +927,11 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let r_elem: Vec<Fq> = r_elem_chal.iter().map(|c| (*c).into()).collect();
         let joint_eval = eval_fq12_packed_at(&self.joint_commitment, &r_elem);
         let pairing_rhs_eval = eval_fq12_packed_at(&self.pairing_boundary.rhs, &r_elem);
+        let exp_base_evals: Vec<Fq> = self
+            .gt_exp_bases
+            .iter()
+            .map(|b| eval_fq12_packed_at(b, &r_elem))
+            .collect();
 
         let r_c_fq: Vec<Fq> = r_c.iter().map(|c| (*c).into()).collect();
         let r_c_exp_tail = &r_c_fq[dummy_exp..];
@@ -953,59 +958,101 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             })
             .collect();
 
-        let mut sum = Fq::zero();
+        // Precompute eq(c, idx) once per referenced instance, then accumulate coefficients so we
+        // only touch expensive values (Fq12 bases) once.
+        let num_exp = self.gt_exp_out_step.len();
+
+        let mut max_mul = None::<usize>;
+        for edge in &self.edges {
+            match edge.src {
+                GtProducer::GtMulResult { instance } => {
+                    max_mul = Some(max_mul.map_or(instance, |m| m.max(instance)));
+                }
+                GtProducer::GtExpRho { .. } | GtProducer::GtExpBase { .. } => {}
+            }
+            match edge.dst {
+                GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                    max_mul = Some(max_mul.map_or(instance, |m| m.max(instance)));
+                }
+                GtConsumer::GtExpBase { .. }
+                | GtConsumer::JointCommitment
+                | GtConsumer::PairingBoundaryRhs => {}
+            }
+        }
+        let num_mul = max_mul.map_or(0, |m| m + 1);
+
+        let eq_c_exp: Vec<Fq> = (0..num_exp)
+            .map(|i| self.eq_c_tail(r_c_exp_tail, i, self.k_exp))
+            .collect();
+        let eq_c_mul: Vec<Fq> = (0..num_mul)
+            .map(|i| self.eq_c_tail(r_c_mul_tail, i, self.k_mul))
+            .collect();
+
+        let mut coeff_rho = Fq::zero();
+        let mut coeff_mul_out = Fq::zero();
+        let mut coeff_mul_lhs = Fq::zero();
+        let mut coeff_mul_rhs = Fq::zero();
+        let mut coeff_joint = Fq::zero();
+        let mut coeff_pairing = Fq::zero();
+        let mut coeff_base: Vec<Fq> = vec![Fq::zero(); num_exp];
+
         for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
+            // Eq(s, s_out) depends on the *source* family: only GTExp rho carries the step selector.
             let eq_s = match edge.src {
                 GtProducer::GtExpRho { instance } => eq_s_exp[instance],
                 GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => eq_s_zero,
             };
+            let scale = *lambda * eq_s;
 
-            let (eq_c_src, src_val, beta_src) = match edge.src {
-                GtProducer::GtExpRho { instance } => (
-                    self.eq_c_tail(r_c_exp_tail, instance, self.k_exp),
-                    rho_val,
-                    beta_exp,
-                ),
-                GtProducer::GtExpBase { instance } => {
-                    let base_eval = eval_fq12_packed_at(&self.gt_exp_bases[instance], &r_elem);
-                    (
-                        self.eq_c_tail(r_c_exp_tail, instance, self.k_exp),
-                        base_eval,
-                        beta_exp,
-                    )
+            // Source contribution.
+            let src_weight = match edge.src {
+                GtProducer::GtExpRho { instance } => {
+                    let w = beta_exp * eq_c_exp[instance];
+                    coeff_rho += scale * w;
+                    w
                 }
-                GtProducer::GtMulResult { instance } => (
-                    self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                    mul_out_val,
-                    beta_mul,
-                ),
+                GtProducer::GtExpBase { instance } => {
+                    let w = beta_exp * eq_c_exp[instance];
+                    coeff_base[instance] += scale * w;
+                    w
+                }
+                GtProducer::GtMulResult { instance } => {
+                    let w = beta_mul * eq_c_mul[instance];
+                    coeff_mul_out += scale * w;
+                    w
+                }
             };
 
-            let (eq_c_dst, dst_val, beta_dst) = match edge.dst {
-                GtConsumer::GtMulLhs { instance } => (
-                    self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                    mul_lhs_val,
-                    beta_mul,
-                ),
-                GtConsumer::GtMulRhs { instance } => (
-                    self.eq_c_tail(r_c_mul_tail, instance, self.k_mul),
-                    mul_rhs_val,
-                    beta_mul,
-                ),
+            // Destination contribution.
+            match edge.dst {
+                GtConsumer::GtMulLhs { instance } => {
+                    coeff_mul_lhs += scale * (beta_mul * eq_c_mul[instance]);
+                }
+                GtConsumer::GtMulRhs { instance } => {
+                    coeff_mul_rhs += scale * (beta_mul * eq_c_mul[instance]);
+                }
                 GtConsumer::GtExpBase { instance } => {
-                    let base_eval = eval_fq12_packed_at(&self.gt_exp_bases[instance], &r_elem);
-                    (
-                        self.eq_c_tail(r_c_exp_tail, instance, self.k_exp),
-                        base_eval,
-                        beta_exp,
-                    )
+                    coeff_base[instance] -= scale * (beta_exp * eq_c_exp[instance]);
                 }
                 // Anchor globals to src.
-                GtConsumer::JointCommitment => (eq_c_src, joint_eval, beta_src),
-                GtConsumer::PairingBoundaryRhs => (eq_c_src, pairing_rhs_eval, beta_src),
-            };
+                GtConsumer::JointCommitment => {
+                    coeff_joint -= scale * src_weight;
+                }
+                GtConsumer::PairingBoundaryRhs => {
+                    coeff_pairing -= scale * src_weight;
+                }
+            }
+        }
 
-            sum += *lambda * eq_s * (beta_src * eq_c_src * src_val - beta_dst * eq_c_dst * dst_val);
+        let mut sum = Fq::zero();
+        sum += coeff_rho * rho_val;
+        sum += coeff_mul_out * mul_out_val;
+        sum -= coeff_mul_lhs * mul_lhs_val;
+        sum -= coeff_mul_rhs * mul_rhs_val;
+        sum += coeff_joint * joint_eval;
+        sum += coeff_pairing * pairing_rhs_eval;
+        for (c, base_eval) in coeff_base.iter().zip(exp_base_evals.iter()) {
+            sum += *c * *base_eval;
         }
 
         eq_u * sum

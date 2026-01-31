@@ -3,11 +3,10 @@
 use crate::field::JoltField;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::zkvm::recursion::constraints::config::CONFIG;
-use crate::zkvm::recursion::curve::{Bn254Recursion, RecursionCurve};
 use ark_bn254::{Fq, Fq12};
-use ark_ff::Zero;
+use ark_ff::{One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use jolt_optimizations::get_g_mle;
+use jolt_optimizations::{fq12_to_poly12_coeffs, get_g_mle};
 
 /// Number of step variables (7 for 128 base-4 steps)
 pub const NUM_STEP_VARS: usize = CONFIG.step_vars;
@@ -53,19 +52,38 @@ impl GtExpPublicInputs {
     /// Evaluate both digit MLEs using pre-computed eq_evals.
     pub fn evaluate_digit_mles<F: JoltField>(&self, eq_evals: &[F]) -> (F, F) {
         debug_assert_eq!(eq_evals.len(), 1 << NUM_STEP_VARS);
-        let digits = digits_from_bits_msb(&self.scalar_bits);
-
         let mut digit_lo = F::zero();
         let mut digit_hi = F::zero();
 
-        for (s, eq) in eq_evals.iter().enumerate() {
-            if s < digits.len() {
-                if digits[s].1 {
-                    digit_lo += *eq;
-                }
-                if digits[s].0 {
-                    digit_hi += *eq;
-                }
+        // Avoid allocating `digits_from_bits_msb(self.scalar_bits)` (hot in guest verifier).
+        //
+        // `digits_from_bits_msb` semantics:
+        // - If bit-length is odd, pad a leading 0 bit.
+        // - Then group into 2-bit digits (MSB-first): (hi, lo).
+        let n = self.scalar_bits.len();
+        if n == 0 {
+            return (digit_lo, digit_hi);
+        }
+        let odd = (n & 1) == 1;
+        let digits_len = (n + 1) / 2;
+        let limit = digits_len.min(eq_evals.len());
+        for s in 0..limit {
+            let (hi, lo) = if !odd {
+                // Exact pairs.
+                (self.scalar_bits[2 * s], self.scalar_bits[2 * s + 1])
+            } else if s == 0 {
+                // Leading pad bit.
+                (false, self.scalar_bits[0])
+            } else {
+                // Shifted by one due to pad.
+                (self.scalar_bits[2 * s - 1], self.scalar_bits[2 * s])
+            };
+            let eq = eq_evals[s];
+            if lo {
+                digit_lo += eq;
+            }
+            if hi {
+                digit_hi += eq;
             }
         }
 
@@ -76,23 +94,92 @@ impl GtExpPublicInputs {
     pub fn evaluate_base_powers_mle(&self, eq_evals: &[Fq]) -> (Fq, Fq, Fq) {
         debug_assert_eq!(eq_evals.len(), 1 << NUM_ELEMENT_VARS);
 
-        let base_eval = self.evaluate_fq12_mle(&self.base, eq_evals);
-        let base2 = self.base * self.base;
-        let base2_eval = self.evaluate_fq12_mle(&base2, eq_evals);
-        let base3 = base2 * self.base;
-        let base3_eval = self.evaluate_fq12_mle(&base3, eq_evals);
+        // Fast path: avoid materializing the 16-point "MLE" table for the Fq12 element, and avoid
+        // doing Fq12 multiplication in the verifier.
+        //
+        // In `jolt-optimizations`, `fq12_to_multilinear_evals(gt)` is defined as:
+        // - map gt -> degree-11 polynomial coeffs in a tower basis (`fq12_to_poly12_coeffs`), then
+        // - evaluate that polynomial at x = 0..15, producing 16 values (interpreted as a 4-var MLE).
+        //
+        // Evaluating the 4-var MLE at `r_elem` is therefore:
+        //   Σ_{i=0}^{15} eq_evals[i] * poly(i).
+        // We can compute this as:
+        //   Σ_{k=0}^{11} coeff[k] * (Σ_{i=0}^{15} eq_evals[i] * i^k),
+        // using a single precomputed power-sum vector per `r_elem`.
+        //
+        // For base^2/base^3 we compute polynomial multiplication in Fq[w]/(g(w)) where
+        // g(w) = w^12 - 18 w^6 + 82, which matches the tower representation in `fq12_to_poly12_coeffs`.
+        let power_sums = poly12_power_sums_at_eq(eq_evals);
+
+        let base_coeffs = fq12_to_poly12_coeffs(&self.base);
+        let base2_coeffs = poly12_mul_mod_g(&base_coeffs, &base_coeffs);
+        let base3_coeffs = poly12_mul_mod_g(&base2_coeffs, &base_coeffs);
+
+        let base_eval = poly12_eval_with_power_sums(&base_coeffs, &power_sums);
+        let base2_eval = poly12_eval_with_power_sums(&base2_coeffs, &power_sums);
+        let base3_eval = poly12_eval_with_power_sums(&base3_coeffs, &power_sums);
         (base_eval, base2_eval, base3_eval)
     }
+}
 
-    /// Evaluate an Fq12 element as an MLE using pre-computed eq_evals.
-    fn evaluate_fq12_mle(&self, fq12: &Fq12, eq_evals: &[Fq]) -> Fq {
-        let mle_coeffs = <Bn254Recursion as RecursionCurve>::fq12_to_mle(fq12);
-        mle_coeffs
-            .iter()
-            .zip(eq_evals.iter())
-            .map(|(c, eq)| *c * *eq)
-            .fold(Fq::zero(), |acc, x| acc + x)
+/// Compute \(S_k = \sum_{i=0}^{15} eq[i] \cdot i^k\) for k=0..11 (degree-11 poly coefficients).
+#[inline]
+fn poly12_power_sums_at_eq(eq_evals: &[Fq]) -> [Fq; 12] {
+    debug_assert_eq!(eq_evals.len(), 16);
+    let mut s = [Fq::zero(); 12];
+    for (i, &w) in eq_evals.iter().enumerate() {
+        let x = Fq::from(i as u64);
+        let mut pow = Fq::one();
+        for k in 0..12 {
+            s[k] += w * pow;
+            pow *= x;
+        }
     }
+    s
+}
+
+#[inline]
+fn poly12_eval_with_power_sums(coeffs: &[Fq; 12], power_sums: &[Fq; 12]) -> Fq {
+    let mut acc = Fq::zero();
+    for k in 0..12 {
+        acc += coeffs[k] * power_sums[k];
+    }
+    acc
+}
+
+/// Multiply two degree-11 polynomials modulo \(g(w) = w^{12} - 18 w^6 + 82\).
+#[inline]
+fn poly12_mul_mod_g(a: &[Fq; 12], b: &[Fq; 12]) -> [Fq; 12] {
+    // Schoolbook multiply: degree <= 22.
+    let mut tmp = [Fq::zero(); 23];
+    for i in 0..12 {
+        for j in 0..12 {
+            tmp[i + j] += a[i] * b[j];
+        }
+    }
+
+    // Reduce high-degree terms using:
+    //   w^12 = 18 w^6 - 82
+    // derived from g(w) = w^12 - 18 w^6 + 82 = 0.
+    let c18 = Fq::from(18u64);
+    let c82 = Fq::from(82u64);
+
+    // Iterate descending so reductions that produce degree >= 12 are handled later in the loop.
+    for t in (12..=22).rev() {
+        let c = tmp[t];
+        if c.is_zero() {
+            continue;
+        }
+        tmp[t] = Fq::zero();
+
+        // c * w^t = c * w^{t-12} * w^12 = c * w^{t-12} * (18 w^6 - 82)
+        tmp[t - 6] += c18 * c;
+        tmp[t - 12] -= c82 * c;
+    }
+
+    let mut out = [Fq::zero(); 12];
+    out.copy_from_slice(&tmp[..12]);
+    out
 }
 
 /// Packed witness for GT exponentiation
@@ -271,6 +358,56 @@ pub fn digits_from_bits_msb(bits: &[bool]) -> Vec<(bool, bool)> {
         padded.insert(0, false);
     }
     padded.chunks(2).map(|c| (c[0], c[1])).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::zkvm::recursion::curve::{Bn254Recursion, RecursionCurve};
+    use ark_ff::UniformRand;
+
+    #[test]
+    fn poly12_mul_mod_g_matches_fq12_square_and_cube_under_coeff_map() {
+        let mut rng = ark_std::test_rng();
+        // Spot-check several random bases.
+        for _ in 0..50 {
+            let base = Fq12::rand(&mut rng);
+            let base_coeffs = fq12_to_poly12_coeffs(&base);
+
+            let sq_coeffs = poly12_mul_mod_g(&base_coeffs, &base_coeffs);
+            let cube_coeffs = poly12_mul_mod_g(&sq_coeffs, &base_coeffs);
+
+            let sq_native = base * base;
+            let cube_native = sq_native * base;
+            assert_eq!(sq_coeffs, fq12_to_poly12_coeffs(&sq_native));
+            assert_eq!(cube_coeffs, fq12_to_poly12_coeffs(&cube_native));
+        }
+    }
+
+    #[test]
+    fn poly12_eval_with_power_sums_matches_materialized_mle_dot_product() {
+        let mut rng = ark_std::test_rng();
+        for _ in 0..20 {
+            let base = Fq12::rand(&mut rng);
+            let coeffs = fq12_to_poly12_coeffs(&base);
+            // Random eq weights (not necessarily eq polynomial outputs, but the identity holds for any weights).
+            let mut eq = vec![Fq::zero(); 16];
+            for e in &mut eq {
+                *e = Fq::rand(&mut rng);
+            }
+            let ps = poly12_power_sums_at_eq(&eq);
+            let fast = poly12_eval_with_power_sums(&coeffs, &ps);
+
+            let evals = <Bn254Recursion as RecursionCurve>::fq12_to_mle(&base);
+            let slow: Fq = evals
+                .iter()
+                .zip(eq.iter())
+                .map(|(v, w)| *v * *w)
+                .fold(Fq::zero(), |acc, x| acc + x);
+
+            assert_eq!(fast, slow);
+        }
+    }
 }
 
 // ============================================================================

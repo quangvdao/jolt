@@ -233,6 +233,7 @@ impl G2ScalarMultiplicationSteps {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_bn254::Fq2;
     use ark_std::UniformRand;
 
     #[test]

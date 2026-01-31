@@ -2116,6 +2116,41 @@ cargo run --release -p recursion -- trace --example muldiv --embed --committed -
 cargo run --release -p recursion -- trace --example fibonacci --embed --committed --cycle-tracking --disk
 ```
 
+### 9.1.1 Default recursion cycle-tracking workflow (recommended)
+
+The default workflow we use for recursion cycle tracking is:
+
+- **Generate** an *inner* proof bundle for the chosen example (e.g. Fibonacci), in:
+  - committed program mode (`--committed`)
+  - **address-major** Dory layout (`--layout address-major`)
+  - with **recursion enabled** (`--recursion`) so the bundle includes a `RecursionArtifact`
+- Then **trace** the *outer recursion guest* (which runs the **extended verifier**: base stages 1–7 replay + recursion SNARK verification + external pairing check),
+  with cycle tracking enabled.
+
+Example for Fibonacci with a \(2^{24}\) inner trace, committed program mode, address-major layout, and recursion enabled:
+
+```bash
+# 1) Generate the inner proof + recursion artifact bundle
+cargo run --release -p recursion -- generate \
+  --example fibonacci \
+  --scale 24 \
+  --committed \
+  --layout address-major \
+  --recursion \
+  --workdir output/fib_committed_addrmajor_recursion_scale24
+
+# 2) Trace the recursion guest and print cycle spans (both RV64IMAC and virtual cycles)
+# NOTE: the per-span cycle lines are logged at INFO, so set RUST_LOG=info.
+RUST_LOG=info cargo run --release -p recursion -- trace \
+  --example fibonacci \
+  --workdir output/fib_committed_addrmajor_recursion_scale24 \
+  --embed \
+  --committed \
+  --layout address-major \
+  --cycle-tracking \
+  --disk
+```
+
 ### 9.2 Understanding the Output
 
 The tracer outputs cycle counts for each instrumented section:

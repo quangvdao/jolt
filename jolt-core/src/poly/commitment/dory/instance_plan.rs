@@ -16,6 +16,7 @@ use crate::zkvm::recursion::gt::types::GtExpPublicInputs;
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::verifier::RecursionVerifierInput;
 use crate::zkvm::recursion::wiring_plan::derive_wiring_plan;
+use crate::zkvm::recursion::wiring_plan::{G1ValueRef, G2ValueRef, GtProducer};
 use crate::zkvm::recursion::CombineDag;
 use crate::zkvm::recursion::PolyType;
 
@@ -77,7 +78,7 @@ pub fn bits_from_exponent_msb_no_leading_zeros(exponent: Fr) -> Vec<bool> {
     bits
 }
 
-fn resolve_input_g1(
+pub(crate) fn resolve_input_g1(
     proof: &ArkDoryProof,
     setup: &VerifierSetup<BN254>,
     src: &InputSource,
@@ -122,7 +123,7 @@ fn resolve_input_g1(
     }
 }
 
-fn resolve_input_g2(
+pub(crate) fn resolve_input_g2(
     proof: &ArkDoryProof,
     setup: &VerifierSetup<BN254>,
     src: &InputSource,
@@ -165,7 +166,7 @@ fn resolve_input_g2(
     }
 }
 
-fn resolve_input_gt(
+pub(crate) fn resolve_input_gt(
     proof: &ArkDoryProof,
     setup: &VerifierSetup<BN254>,
     commitment: ArkGT,
@@ -417,6 +418,14 @@ pub fn derive_plan_with_hints(
     pairing_boundary: PairingBoundary,
     joint_commitment_fq12: Fq12,
 ) -> Result<DerivedRecursionPlan, ProofVerifyError> {
+    if combine_commitments.len() != combine_coeffs.len() {
+        return Err(ProofVerifyError::DoryError(format!(
+            "combine_commitments length {} must match combine_coeffs length {}",
+            combine_commitments.len(),
+            combine_coeffs.len(),
+        )));
+    }
+
     let dory_setup: VerifierSetup<BN254> = setup.clone().into();
 
     // Collect ops by type (sorted by OpId for Dory-traced operations).
@@ -562,6 +571,84 @@ pub fn derive_plan_with_hints(
     let num_vars = num_s_vars + num_constraint_vars;
 
     let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
+    let mut gt_input_ids: Vec<u32> = wiring
+        .gt
+        .iter()
+        .filter_map(|e| match e.src {
+            GtProducer::GtInput { value_id } => Some(value_id),
+            _ => None,
+        })
+        .collect();
+    gt_input_ids.sort();
+    gt_input_ids.dedup();
+    let mut gt_inputs: Vec<(u32, Fq12)> = Vec::with_capacity(gt_input_ids.len());
+    for value_id in gt_input_ids {
+        let idx = value_id as usize;
+        let node = ast.nodes.get(idx).ok_or_else(|| {
+            ProofVerifyError::DoryError(format!("gt_input value_id {value_id} out of bounds"))
+        })?;
+        let AstOp::Input { source } = &node.op else {
+            return Err(ProofVerifyError::DoryError(format!(
+                "gt_input value_id {value_id} is not an AstOp::Input"
+            )));
+        };
+        let v = resolve_input_gt(proof, &dory_setup, joint_commitment, source)?.0;
+        gt_inputs.push((value_id, v));
+    }
+    let mut g1_input_ids: Vec<u32> = wiring
+        .g1
+        .iter()
+        .flat_map(|e| [e.src, e.dst])
+        .filter_map(|v| match v {
+            G1ValueRef::G1Input { value_id } => Some(value_id),
+            _ => None,
+        })
+        .collect();
+    g1_input_ids.sort();
+    g1_input_ids.dedup();
+    let mut g1_inputs: Vec<(u32, G1Affine)> = Vec::with_capacity(g1_input_ids.len());
+    for value_id in g1_input_ids {
+        let idx = value_id as usize;
+        let node = ast.nodes.get(idx).ok_or_else(|| {
+            ProofVerifyError::DoryError(format!("g1_input value_id {value_id} out of bounds"))
+        })?;
+        let AstOp::Input { source } = &node.op else {
+            return Err(ProofVerifyError::DoryError(format!(
+                "g1_input value_id {value_id} is not an AstOp::Input"
+            )));
+        };
+        let p = resolve_input_g1(proof, &dory_setup, source)?
+            .0
+            .into_affine();
+        g1_inputs.push((value_id, p));
+    }
+    let mut g2_input_ids: Vec<u32> = wiring
+        .g2
+        .iter()
+        .flat_map(|e| [e.src, e.dst])
+        .filter_map(|v| match v {
+            G2ValueRef::G2Input { value_id } => Some(value_id),
+            _ => None,
+        })
+        .collect();
+    g2_input_ids.sort();
+    g2_input_ids.dedup();
+    let mut g2_inputs: Vec<(u32, G2Affine)> = Vec::with_capacity(g2_input_ids.len());
+    for value_id in g2_input_ids {
+        let idx = value_id as usize;
+        let node = ast.nodes.get(idx).ok_or_else(|| {
+            ProofVerifyError::DoryError(format!("g2_input value_id {value_id} out of bounds"))
+        })?;
+        let AstOp::Input { source } = &node.op else {
+            return Err(ProofVerifyError::DoryError(format!(
+                "g2_input value_id {value_id} is not an AstOp::Input"
+            )));
+        };
+        let p = resolve_input_g2(proof, &dory_setup, source)?
+            .0
+            .into_affine();
+        g2_inputs.push((value_id, p));
+    }
 
     Ok(DerivedRecursionPlan {
         verifier_input: RecursionVerifierInput {
@@ -573,6 +660,9 @@ pub fn derive_plan_with_hints(
             num_constraints_padded,
             gt_exp_public_inputs,
             gt_exp_base_inputs,
+            gt_inputs,
+            g1_inputs,
+            g2_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
             wiring,
@@ -825,6 +915,68 @@ pub fn derive_from_dory_ast(
         rhs: rhs_val,
     };
     let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
+    let mut gt_input_ids: Vec<u32> = wiring
+        .gt
+        .iter()
+        .filter_map(|e| match e.src {
+            GtProducer::GtInput { value_id } => Some(value_id),
+            _ => None,
+        })
+        .collect();
+    gt_input_ids.sort();
+    gt_input_ids.dedup();
+    let mut gt_inputs: Vec<(u32, Fq12)> = Vec::with_capacity(gt_input_ids.len());
+    for value_id in gt_input_ids {
+        let idx = value_id as usize;
+        debug_assert!(idx < values.len(), "gt_input value_id {idx} out of bounds");
+        let v = match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
+            Value::GT(v) => v.0,
+            _ => return Err(ProofVerifyError::default()),
+        };
+        gt_inputs.push((value_id, v));
+    }
+    let mut g1_input_ids: Vec<u32> = wiring
+        .g1
+        .iter()
+        .flat_map(|e| [e.src, e.dst])
+        .filter_map(|v| match v {
+            G1ValueRef::G1Input { value_id } => Some(value_id),
+            _ => None,
+        })
+        .collect();
+    g1_input_ids.sort();
+    g1_input_ids.dedup();
+    let mut g1_inputs: Vec<(u32, G1Affine)> = Vec::with_capacity(g1_input_ids.len());
+    for value_id in g1_input_ids {
+        let idx = value_id as usize;
+        debug_assert!(idx < values.len(), "g1_input value_id {idx} out of bounds");
+        let p = match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
+            Value::G1(v) => v.0.into_affine(),
+            _ => return Err(ProofVerifyError::default()),
+        };
+        g1_inputs.push((value_id, p));
+    }
+    let mut g2_input_ids: Vec<u32> = wiring
+        .g2
+        .iter()
+        .flat_map(|e| [e.src, e.dst])
+        .filter_map(|v| match v {
+            G2ValueRef::G2Input { value_id } => Some(value_id),
+            _ => None,
+        })
+        .collect();
+    g2_input_ids.sort();
+    g2_input_ids.dedup();
+    let mut g2_inputs: Vec<(u32, G2Affine)> = Vec::with_capacity(g2_input_ids.len());
+    for value_id in g2_input_ids {
+        let idx = value_id as usize;
+        debug_assert!(idx < values.len(), "g2_input value_id {idx} out of bounds");
+        let p = match values[idx].as_ref().ok_or(ProofVerifyError::default())? {
+            Value::G2(v) => v.0.into_affine(),
+            _ => return Err(ProofVerifyError::default()),
+        };
+        g2_inputs.push((value_id, p));
+    }
 
     Ok(DerivedRecursionInput {
         verifier_input: RecursionVerifierInput {
@@ -836,6 +988,9 @@ pub fn derive_from_dory_ast(
             num_constraints_padded,
             gt_exp_public_inputs,
             gt_exp_base_inputs,
+            gt_inputs,
+            g1_inputs,
+            g2_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
             wiring,

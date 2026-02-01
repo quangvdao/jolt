@@ -48,6 +48,9 @@
 //!
 //! `Eq(s,255)` selects the final step, and `λ_e` are transcript-sampled edge-batching coefficients.
 
+use std::collections::{BTreeMap, HashMap};
+use std::marker::PhantomData;
+
 use ark_bn254::{Fq, G2Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{Field, One, Zero};
@@ -116,7 +119,7 @@ struct CPhaseState {
     add_in_q_batched_c: MultilinearPolynomial<Fq>,
     add_out_batched_c: MultilinearPolynomial<Fq>,
     /// Selector polynomials `Eq(c_tail, idx)` replicated across dummy bits.
-    selectors: std::collections::HashMap<u64, MultilinearPolynomial<Fq>>,
+    selectors: HashMap<u64, MultilinearPolynomial<Fq>>,
 }
 
 impl CPhaseState {
@@ -171,9 +174,11 @@ pub struct WiringG2Prover<T: Transcript> {
     pairing_p1: G2Point5,
     pairing_p2: G2Point5,
     pairing_p3: G2Point5,
+    // GT-derived / proof-derived G2 inputs, batched as V = x.c0 + μ·x.c1 + μ^2·y.c0 + μ^3·y.c1 + μ^4·ind.
+    g2_inputs_batched: BTreeMap<u32, Fq>,
 
     c_state: Option<CPhaseState>,
-    _marker: std::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T: Transcript> WiringG2Prover<T> {
@@ -181,6 +186,7 @@ impl<T: Transcript> WiringG2Prover<T> {
         cs: &ConstraintSystem,
         edges: Vec<G2WiringEdge>,
         pairing_boundary: &PairingBoundary,
+        g2_inputs: &[(u32, G2Affine)],
         transcript: &mut T,
     ) -> Self {
         // Selector point a_G2 = 255 = [1,1,...,1] (LSB-first order).
@@ -297,6 +303,14 @@ impl<T: Transcript> WiringG2Prover<T> {
         let pairing_p1 = g2_const_from_affine(&pairing_boundary.p1_g2);
         let pairing_p2 = g2_const_from_affine(&pairing_boundary.p2_g2);
         let pairing_p3 = g2_const_from_affine(&pairing_boundary.p3_g2);
+        let g2_inputs_batched: BTreeMap<u32, Fq> = g2_inputs
+            .iter()
+            .map(|(value_id, p)| {
+                let (x0, x1, y0, y1, ind) = g2_const_from_affine(p);
+                let v = x0 + mu * x1 + mu2 * y0 + mu3 * y1 + mu4 * ind;
+                (*value_id, v)
+            })
+            .collect();
 
         let num_c_vars = k_g2(&cs.constraint_types);
         let k_smul = k_smul(&cs.constraint_types);
@@ -323,8 +337,9 @@ impl<T: Transcript> WiringG2Prover<T> {
             pairing_p1,
             pairing_p2,
             pairing_p3,
+            g2_inputs_batched,
             c_state: None,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -412,6 +427,13 @@ impl<T: Transcript> WiringG2Prover<T> {
             G2ValueRef::PairingBoundaryP3 => {
                 let (x0, x1, y0, y1, ind) = self.pairing_p3;
                 let v = x0 + self.mu * x1 + self.mu2 * y0 + self.mu3 * y1 + self.mu4 * ind;
+                [v; DEGREE]
+            }
+            G2ValueRef::G2Input { value_id } => {
+                let v = *self
+                    .g2_inputs_batched
+                    .get(&value_id)
+                    .expect("missing g2_inputs_batched entry for G2Input");
                 [v; DEGREE]
             }
         }
@@ -503,7 +525,7 @@ impl<T: Transcript> WiringG2Prover<T> {
         let add_out_batched_c = MultilinearPolynomial::LargeScalars(DensePolynomial::new(add_r));
 
         // Build selectors lazily for all referenced indices.
-        let mut selectors = std::collections::HashMap::<u64, MultilinearPolynomial<Fq>>::new();
+        let mut selectors = HashMap::<u64, MultilinearPolynomial<Fq>>::new();
         for e in &self.edges {
             for v in [e.src, e.dst] {
                 match v {
@@ -537,7 +559,8 @@ impl<T: Transcript> WiringG2Prover<T> {
                     }
                     G2ValueRef::PairingBoundaryP1
                     | G2ValueRef::PairingBoundaryP2
-                    | G2ValueRef::PairingBoundaryP3 => {}
+                    | G2ValueRef::PairingBoundaryP3
+                    | G2ValueRef::G2Input { .. } => {}
                 }
             }
         }
@@ -710,7 +733,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG2Prover<T> {
                             // Boundary constants are anchored to the *dst* selector (GT-style).
                             G2ValueRef::PairingBoundaryP1
                             | G2ValueRef::PairingBoundaryP2
-                            | G2ValueRef::PairingBoundaryP3 => {
+                            | G2ValueRef::PairingBoundaryP3
+                            | G2ValueRef::G2Input { .. } => {
                                 (Fq::zero(), [Fq::zero(); DEGREE], [Fq::zero(); DEGREE])
                             }
                         };
@@ -778,7 +802,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG2Prover<T> {
                             }
                             G2ValueRef::PairingBoundaryP1
                             | G2ValueRef::PairingBoundaryP2
-                            | G2ValueRef::PairingBoundaryP3 => {
+                            | G2ValueRef::PairingBoundaryP3
+                            | G2ValueRef::G2Input { .. } => {
                                 (Fq::zero(), [Fq::zero(); DEGREE], [Fq::zero(); DEGREE])
                             }
                         };
@@ -812,6 +837,13 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG2Prover<T> {
                                     + self.mu4 * ind;
                                 (beta_dst, sel_dst_e, [v; DEGREE])
                             }
+                            G2ValueRef::G2Input { value_id } => {
+                                let v = *self
+                                    .g2_inputs_batched
+                                    .get(&value_id)
+                                    .expect("missing g2_inputs_batched entry for G2Input");
+                                (beta_dst, sel_dst_e, [v; DEGREE])
+                            }
                             _ => (beta_src, sel_src_e, src_e),
                         };
                         let (beta_dst, sel_dst_e, dst_e) = match edge.dst {
@@ -840,6 +872,13 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG2Prover<T> {
                                     + self.mu2 * y0
                                     + self.mu3 * y1
                                     + self.mu4 * ind;
+                                (beta_src, sel_src_e, [v; DEGREE])
+                            }
+                            G2ValueRef::G2Input { value_id } => {
+                                let v = *self
+                                    .g2_inputs_batched
+                                    .get(&value_id)
+                                    .expect("missing g2_inputs_batched entry for G2Input");
                                 (beta_src, sel_src_e, [v; DEGREE])
                             }
                             _ => (beta_dst, sel_dst_e, dst_e),
@@ -922,6 +961,8 @@ pub struct WiringG2Verifier {
     ///
     /// Used only for `G2ValueRef::G2ScalarMulBaseBoundary { instance }` edges (AST input points).
     smul_base_boundary: Vec<(Fq, Fq, Fq, Fq, Fq)>,
+    /// Boundary G2 inputs (AST `ValueId.0` -> V = x.c0 + μ·x.c1 + μ^2·y.c0 + μ^3·y.c1 + μ^4·ind).
+    g2_inputs_batched: BTreeMap<u32, Fq>,
 }
 
 impl WiringG2Verifier {
@@ -950,6 +991,15 @@ impl WiringG2Verifier {
                 _ => None,
             })
             .collect();
+        let g2_inputs_batched: BTreeMap<u32, Fq> = input
+            .g2_inputs
+            .iter()
+            .map(|(value_id, p)| {
+                let (x0, x1, y0, y1, ind) = g2_const_from_affine(p);
+                let v = x0 + mu * x1 + mu2 * y0 + mu3 * y1 + mu4 * ind;
+                (*value_id, v)
+            })
+            .collect();
 
         let k_common = k_g2(&input.constraint_types);
         let k_smul = k_smul(&input.constraint_types);
@@ -967,6 +1017,7 @@ impl WiringG2Verifier {
             k_add,
             pairing_boundary: input.pairing_boundary.clone(),
             smul_base_boundary,
+            g2_inputs_batched,
         }
     }
 
@@ -1168,6 +1219,14 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
                     G2ValueRef::PairingBoundaryP1 => (Fq::zero(), Fq::zero(), pb_batched(pb1)),
                     G2ValueRef::PairingBoundaryP2 => (Fq::zero(), Fq::zero(), pb_batched(pb2)),
                     G2ValueRef::PairingBoundaryP3 => (Fq::zero(), Fq::zero(), pb_batched(pb3)),
+                    G2ValueRef::G2Input { value_id } => (
+                        Fq::zero(),
+                        Fq::zero(),
+                        *self
+                            .g2_inputs_batched
+                            .get(&value_id)
+                            .expect("missing g2_inputs_batched entry for G2Input"),
+                    ),
                 }
             };
 
@@ -1178,13 +1237,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
             let (b_src, eqc_src, v_src) = match edge.src {
                 G2ValueRef::PairingBoundaryP1
                 | G2ValueRef::PairingBoundaryP2
-                | G2ValueRef::PairingBoundaryP3 => (b_dst, eqc_dst, v_src),
+                | G2ValueRef::PairingBoundaryP3
+                | G2ValueRef::G2Input { .. } => (b_dst, eqc_dst, v_src),
                 _ => (b_src, eqc_src, v_src),
             };
             let (b_dst, eqc_dst, v_dst) = match edge.dst {
                 G2ValueRef::PairingBoundaryP1
                 | G2ValueRef::PairingBoundaryP2
-                | G2ValueRef::PairingBoundaryP3 => (b_src, eqc_src, v_dst),
+                | G2ValueRef::PairingBoundaryP3
+                | G2ValueRef::G2Input { .. } => (b_src, eqc_src, v_dst),
                 _ => (b_dst, eqc_dst, v_dst),
             };
 

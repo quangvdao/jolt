@@ -54,6 +54,9 @@
 //! `Eq(s,255)` selects the final step (all-ones in LSB-first order), and `λ_e` are transcript-sampled
 //! edge-batching coefficients.
 
+use std::collections::{BTreeMap, HashMap};
+use std::marker::PhantomData;
+
 use ark_bn254::{Fq, G1Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{Field, One, Zero};
@@ -125,7 +128,7 @@ struct CPhaseState {
     add_in_q_batched_c: MultilinearPolynomial<Fq>,
     add_out_batched_c: MultilinearPolynomial<Fq>,
     /// Selector polynomials `Eq(c_tail, idx)` replicated across dummy bits.
-    selectors: std::collections::HashMap<u64, MultilinearPolynomial<Fq>>,
+    selectors: HashMap<u64, MultilinearPolynomial<Fq>>,
 }
 
 impl CPhaseState {
@@ -174,9 +177,11 @@ pub struct WiringG1Prover<T: Transcript> {
     pairing_p1: (Fq, Fq, Fq),
     pairing_p2: (Fq, Fq, Fq),
     pairing_p3: (Fq, Fq, Fq),
+    // GT-derived / proof-derived G1 inputs, batched as V = x + μ·y + μ^2·ind.
+    g1_inputs_batched: BTreeMap<u32, Fq>,
 
     c_state: Option<CPhaseState>,
-    _marker: std::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 impl<T: Transcript> WiringG1Prover<T> {
@@ -184,6 +189,7 @@ impl<T: Transcript> WiringG1Prover<T> {
         cs: &ConstraintSystem,
         edges: Vec<G1WiringEdge>,
         pairing_boundary: &PairingBoundary,
+        g1_inputs: &[(u32, G1Affine)],
         transcript: &mut T,
     ) -> Self {
         // Selector point a_G1 = 255 = [1,1,...,1] (LSB-first order).
@@ -226,6 +232,7 @@ impl<T: Transcript> WiringG1Prover<T> {
                     G1ValueRef::PairingBoundaryP1
                     | G1ValueRef::PairingBoundaryP2
                     | G1ValueRef::PairingBoundaryP3 => {}
+                    G1ValueRef::G1Input { .. } => {}
                 }
             }
         }
@@ -277,6 +284,14 @@ impl<T: Transcript> WiringG1Prover<T> {
         let pairing_p1 = g1_const_from_affine(&pairing_boundary.p1_g1);
         let pairing_p2 = g1_const_from_affine(&pairing_boundary.p2_g1);
         let pairing_p3 = g1_const_from_affine(&pairing_boundary.p3_g1);
+        let g1_inputs_batched: BTreeMap<u32, Fq> = g1_inputs
+            .iter()
+            .map(|(value_id, p)| {
+                let (x, y, ind) = g1_const_from_affine(p);
+                let v = x + mu * y + mu2 * ind;
+                (*value_id, v)
+            })
+            .collect();
 
         let num_c_vars = k_g1(&cs.constraint_types);
         let k_smul = k_smul(&cs.constraint_types);
@@ -299,8 +314,9 @@ impl<T: Transcript> WiringG1Prover<T> {
             pairing_p1,
             pairing_p2,
             pairing_p3,
+            g1_inputs_batched,
             c_state: None,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -360,6 +376,13 @@ impl<T: Transcript> WiringG1Prover<T> {
             G1ValueRef::PairingBoundaryP3 => {
                 let (x, y, ind) = self.pairing_p3;
                 let v = x + self.mu * y + self.mu2 * ind;
+                [v; DEGREE]
+            }
+            G1ValueRef::G1Input { value_id } => {
+                let v = *self
+                    .g1_inputs_batched
+                    .get(&value_id)
+                    .expect("missing g1_inputs_batched entry for G1Input");
                 [v; DEGREE]
             }
         }
@@ -439,7 +462,7 @@ impl<T: Transcript> WiringG1Prover<T> {
         let add_out_batched_c = MultilinearPolynomial::LargeScalars(DensePolynomial::new(add_r));
 
         // Build selectors lazily for all referenced indices.
-        let mut selectors = std::collections::HashMap::<u64, MultilinearPolynomial<Fq>>::new();
+        let mut selectors = HashMap::<u64, MultilinearPolynomial<Fq>>::new();
         for e in &self.edges {
             for v in [e.src, e.dst] {
                 match v {
@@ -473,7 +496,8 @@ impl<T: Transcript> WiringG1Prover<T> {
                     }
                     G1ValueRef::PairingBoundaryP1
                     | G1ValueRef::PairingBoundaryP2
-                    | G1ValueRef::PairingBoundaryP3 => {}
+                    | G1ValueRef::PairingBoundaryP3
+                    | G1ValueRef::G1Input { .. } => {}
                 }
             }
         }
@@ -643,7 +667,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
                             // Boundary constants are anchored to the *dst* selector (GT-style).
                             G1ValueRef::PairingBoundaryP1
                             | G1ValueRef::PairingBoundaryP2
-                            | G1ValueRef::PairingBoundaryP3 => {
+                            | G1ValueRef::PairingBoundaryP3
+                            | G1ValueRef::G1Input { .. } => {
                                 // Defer: handled below after dst selection.
                                 (Fq::zero(), [Fq::zero(); DEGREE], [Fq::zero(); DEGREE])
                             }
@@ -708,7 +733,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
                             }
                             G1ValueRef::PairingBoundaryP1
                             | G1ValueRef::PairingBoundaryP2
-                            | G1ValueRef::PairingBoundaryP3 => {
+                            | G1ValueRef::PairingBoundaryP3
+                            | G1ValueRef::G1Input { .. } => {
                                 (Fq::zero(), [Fq::zero(); DEGREE], [Fq::zero(); DEGREE])
                             }
                         };
@@ -730,6 +756,13 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
                                 let v = x + self.mu * y + self.mu2 * ind;
                                 (beta_dst, sel_dst_e, [v; DEGREE])
                             }
+                            G1ValueRef::G1Input { value_id } => {
+                                let v = *self
+                                    .g1_inputs_batched
+                                    .get(&value_id)
+                                    .expect("missing g1_inputs_batched entry for G1Input");
+                                (beta_dst, sel_dst_e, [v; DEGREE])
+                            }
                             _ => (beta_src, sel_src_e, src_e),
                         };
                         let (beta_dst, sel_dst_e, dst_e) = match edge.dst {
@@ -746,6 +779,13 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
                             G1ValueRef::PairingBoundaryP3 => {
                                 let (x, y, ind) = self.pairing_p3;
                                 let v = x + self.mu * y + self.mu2 * ind;
+                                (beta_src, sel_src_e, [v; DEGREE])
+                            }
+                            G1ValueRef::G1Input { value_id } => {
+                                let v = *self
+                                    .g1_inputs_batched
+                                    .get(&value_id)
+                                    .expect("missing g1_inputs_batched entry for G1Input");
                                 (beta_src, sel_src_e, [v; DEGREE])
                             }
                             _ => (beta_dst, sel_dst_e, dst_e),
@@ -818,6 +858,8 @@ pub struct WiringG1Verifier {
     pairing_boundary: PairingBoundary,
     /// Boundary base points for `AstOp::Input` scalar-mul bases, in local scalar-mul instance order.
     smul_base_boundary: Vec<(Fq, Fq, Fq)>,
+    /// Boundary G1 inputs (AST `ValueId.0` -> V = x + μ·y + μ^2·ind).
+    g1_inputs_batched: BTreeMap<u32, Fq>,
 }
 
 impl WiringG1Verifier {
@@ -839,6 +881,15 @@ impl WiringG1Verifier {
                 _ => None,
             })
             .collect();
+        let g1_inputs_batched: BTreeMap<u32, Fq> = input
+            .g1_inputs
+            .iter()
+            .map(|(value_id, p)| {
+                let (x, y, ind) = g1_const_from_affine(p);
+                let v = x + mu * y + mu2 * ind;
+                (*value_id, v)
+            })
+            .collect();
 
         let k_common = k_g1(&input.constraint_types);
         let k_smul = k_smul(&input.constraint_types);
@@ -854,6 +905,7 @@ impl WiringG1Verifier {
             k_add,
             pairing_boundary: input.pairing_boundary.clone(),
             smul_base_boundary,
+            g1_inputs_batched,
         }
     }
 
@@ -1026,6 +1078,14 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
                     G1ValueRef::PairingBoundaryP1 => (Fq::zero(), Fq::zero(), pb_batched(pb1)),
                     G1ValueRef::PairingBoundaryP2 => (Fq::zero(), Fq::zero(), pb_batched(pb2)),
                     G1ValueRef::PairingBoundaryP3 => (Fq::zero(), Fq::zero(), pb_batched(pb3)),
+                    G1ValueRef::G1Input { value_id } => (
+                        Fq::zero(),
+                        Fq::zero(),
+                        *self
+                            .g1_inputs_batched
+                            .get(&value_id)
+                            .expect("missing g1_inputs_batched entry for G1Input"),
+                    ),
                 }
             };
 
@@ -1036,13 +1096,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
             let (b_src, eqc_src, v_src) = match edge.src {
                 G1ValueRef::PairingBoundaryP1
                 | G1ValueRef::PairingBoundaryP2
-                | G1ValueRef::PairingBoundaryP3 => (b_dst, eqc_dst, v_src),
+                | G1ValueRef::PairingBoundaryP3
+                | G1ValueRef::G1Input { .. } => (b_dst, eqc_dst, v_src),
                 _ => (b_src, eqc_src, v_src),
             };
             let (b_dst, eqc_dst, v_dst) = match edge.dst {
                 G1ValueRef::PairingBoundaryP1
                 | G1ValueRef::PairingBoundaryP2
-                | G1ValueRef::PairingBoundaryP3 => (b_src, eqc_src, v_dst),
+                | G1ValueRef::PairingBoundaryP3
+                | G1ValueRef::G1Input { .. } => (b_src, eqc_src, v_dst),
                 _ => (b_dst, eqc_dst, v_dst),
             };
 

@@ -40,6 +40,11 @@
 //! - boundary constants are anchored to the opposite endpoint’s selector (GT-style),
 //! - `λ_e` are transcript-sampled edge-batching coefficients.
 
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    marker::PhantomData,
+};
+
 use ark_bn254::{Fq, Fq12, Fq2, Fq6};
 use ark_ff::{Field, One, Zero};
 use rayon::prelude::*;
@@ -232,9 +237,11 @@ struct CPhaseState {
     base_port_c: MultilinearPolynomial<Fq>,
     /// Selector polynomials Eq(c, idx_embed) as basis vectors in the common c domain.
     /// Key is `(dummy_bits, k_family, idx)` packed into a u64.
-    selectors: std::collections::HashMap<u64, MultilinearPolynomial<Fq>>,
+    selectors: HashMap<u64, MultilinearPolynomial<Fq>>,
     /// Bound GTExp base *inputs* as scalars per GTExp instance (only for `GtProducer::GtExpBase`).
     exp_base_inputs_at_r: Vec<Fq>,
+    /// Bound GT-valued AST inputs as scalars, keyed by `ValueId.0` (only for `GtProducer::GtInput`).
+    gt_inputs_at_r: HashMap<u32, Fq>,
 }
 
 impl CPhaseState {
@@ -288,11 +295,13 @@ pub struct WiringGtProver<T: Transcript> {
     /// Boundary constants, padded to 11 vars.
     joint_commitment: Option<MultilinearPolynomial<Fq>>,
     pairing_rhs: Option<MultilinearPolynomial<Fq>>,
+    /// Boundary GT inputs (u-only constants), keyed by AST `ValueId.0`.
+    gt_inputs: BTreeMap<u32, MultilinearPolynomial<Fq>>,
 
     /// Lazily built when the sumcheck enters the c rounds.
     c_state: Option<CPhaseState>,
 
-    _marker: std::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 #[cfg(feature = "allocative")]
@@ -306,6 +315,7 @@ impl<T: Transcript> WiringGtProver<T> {
         edges: Vec<GtWiringEdge>,
         pairing_boundary: &PairingBoundary,
         joint_commitment: Fq12,
+        gt_inputs: &[(u32, Fq12)],
         transcript: &mut T,
     ) -> Self {
         let num_c_vars = k_gt(&cs.constraint_types);
@@ -343,6 +353,26 @@ impl<T: Transcript> WiringGtProver<T> {
         let need_pairing_rhs = edges
             .iter()
             .any(|e| matches!(e.dst, GtConsumer::PairingBoundaryRhs));
+
+        // Boundary GT inputs (e.g. proof/setup GT values) keyed by AST `ValueId.0`.
+        let gt_inputs_by_id: BTreeMap<u32, Fq12> = gt_inputs.iter().copied().collect();
+        let mut needed_gt_inputs: BTreeSet<u32> = BTreeSet::new();
+        for e in &edges {
+            if let GtProducer::GtInput { value_id } = e.src {
+                needed_gt_inputs.insert(value_id);
+            }
+        }
+        let gt_inputs: BTreeMap<u32, MultilinearPolynomial<Fq>> = needed_gt_inputs
+            .into_iter()
+            .map(|value_id| {
+                let fq12 = gt_inputs_by_id
+                    .get(&value_id)
+                    .unwrap_or_else(|| panic!("missing gt_inputs entry for value_id {value_id}"));
+                let mle_4 = Bn254Recursion::fq12_to_mle(fq12);
+                let poly = MultilinearPolynomial::from(pad_4var_to_11var_replicated(&mle_4));
+                (value_id, poly)
+            })
+            .collect();
 
         let rho_polys: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
             .map(|i| {
@@ -443,8 +473,9 @@ impl<T: Transcript> WiringGtProver<T> {
             exp_base_port,
             joint_commitment,
             pairing_rhs,
+            gt_inputs,
             c_state: None,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -453,7 +484,8 @@ impl<T: Transcript> WiringGtProver<T> {
             GtProducer::GtExpRho { instance } => self.eq_s_by_exp[instance].as_ref().unwrap(),
             GtProducer::GtMulResult { .. }
             | GtProducer::GtExpBase { .. }
-            | GtProducer::JointCommitment => &self.eq_s_default,
+            | GtProducer::JointCommitment
+            | GtProducer::GtInput { .. } => &self.eq_s_default,
         }
     }
 
@@ -463,6 +495,10 @@ impl<T: Transcript> WiringGtProver<T> {
             GtProducer::GtMulResult { instance } => self.mul_result[instance].as_ref().unwrap(),
             GtProducer::GtExpBase { instance } => self.exp_base_inputs[instance].as_ref().unwrap(),
             GtProducer::JointCommitment => self.joint_commitment.as_ref().unwrap(),
+            GtProducer::GtInput { value_id } => self
+                .gt_inputs
+                .get(&value_id)
+                .expect("missing gt_inputs entry for GtProducer::GtInput"),
         }
     }
 
@@ -493,6 +529,11 @@ impl<T: Transcript> WiringGtProver<T> {
             .as_ref()
             .map(|p| p.get_bound_coeff(0))
             .unwrap_or_else(Fq::zero);
+        let gt_inputs_at_r: HashMap<u32, Fq> = self
+            .gt_inputs
+            .iter()
+            .map(|(id, p)| (*id, p.get_bound_coeff(0)))
+            .collect();
 
         let num_gt_exp = self.rho_polys.len();
         let num_gt_mul = self.mul_result.len();
@@ -602,15 +643,15 @@ impl<T: Transcript> WiringGtProver<T> {
                     .get_bound_coeff(0),
                 GtProducer::GtMulResult { .. }
                 | GtProducer::GtExpBase { .. }
-                | GtProducer::JointCommitment => eq_s_default_at_r,
+                | GtProducer::JointCommitment
+                | GtProducer::GtInput { .. } => eq_s_default_at_r,
             })
             .collect();
 
         // Build selector polynomials that depend only on the family tail bits:
         // sel(c) = 1 if (c_tail == idx), 0 otherwise. This is replicated across the dummy
         // low bits, and requires the Option-B normalization factors (beta) in evaluation.
-        let mut selectors: std::collections::HashMap<u64, MultilinearPolynomial<Fq>> =
-            std::collections::HashMap::new();
+        let mut selectors: HashMap<u64, MultilinearPolynomial<Fq>> = HashMap::new();
         let mut ensure_selector = |dummy: usize, k_family: usize, idx: usize| {
             let key = ((dummy as u64) << 48) | ((k_family as u64) << 32) | (idx as u64);
             selectors.entry(key).or_insert_with(|| {
@@ -641,7 +682,7 @@ impl<T: Transcript> WiringGtProver<T> {
                 GtProducer::GtExpBase { instance } => {
                     let _ = ensure_selector(dummy_exp, self.k_exp, instance);
                 }
-                GtProducer::JointCommitment => {
+                GtProducer::JointCommitment | GtProducer::GtInput { .. } => {
                     // Anchor to destination family: ensure the destination selector exists.
                     match edge.dst {
                         GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
@@ -681,6 +722,7 @@ impl<T: Transcript> WiringGtProver<T> {
             base_port_c: MultilinearPolynomial::from(base_port_c),
             selectors,
             exp_base_inputs_at_r,
+            gt_inputs_at_r,
         });
     }
 }
@@ -805,7 +847,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                                 rho_e,
                                 beta_exp,
                             ),
-                            GtProducer::JointCommitment => {
+                            GtProducer::JointCommitment | GtProducer::GtInput { .. } => {
                                 // Anchor to destination family (this is a global constant source).
                                 match edge.dst {
                                     GtConsumer::GtMulLhs { instance }
@@ -867,6 +909,12 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                                 Some(state.exp_base_inputs_at_r[instance])
                             }
                             GtProducer::JointCommitment => Some(state.joint_at_r),
+                            GtProducer::GtInput { value_id } => Some(
+                                *state
+                                    .gt_inputs_at_r
+                                    .get(&value_id)
+                                    .expect("missing gt_inputs_at_r entry for GtProducer::GtInput"),
+                            ),
                             _ => None,
                         };
                         for t in 0..DEGREE {
@@ -942,6 +990,9 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
             if let Some(poly) = self.pairing_rhs.as_mut() {
                 poly.bind_parallel(r_j, BindingOrder::LowToHigh);
             }
+            for poly in self.gt_inputs.values_mut() {
+                poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+            }
         } else {
             // Bind the c-phase polynomials (must already be initialized).
             self.ensure_c_state();
@@ -970,6 +1021,7 @@ pub struct WiringGtVerifier {
     pairing_boundary: PairingBoundary,
     joint_commitment: Fq12,
     gt_exp_base_inputs: Vec<Option<Fq12>>,
+    gt_inputs: BTreeMap<u32, Fq12>,
     gt_exp_out_step: Vec<usize>,
     /// k_common
     num_c_vars: usize,
@@ -1003,6 +1055,7 @@ impl WiringGtVerifier {
             })
             .collect();
         let gt_exp_base_inputs = input.gt_exp_base_inputs.clone();
+        let gt_inputs: BTreeMap<u32, Fq12> = input.gt_inputs.iter().copied().collect();
 
         // Cache #mul instances referenced by the edge list (avoid re-scanning each verify).
         let mut max_mul = None::<usize>;
@@ -1013,7 +1066,8 @@ impl WiringGtVerifier {
                 }
                 GtProducer::GtExpRho { .. }
                 | GtProducer::GtExpBase { .. }
-                | GtProducer::JointCommitment => {}
+                | GtProducer::JointCommitment
+                | GtProducer::GtInput { .. } => {}
             }
             match edge.dst {
                 GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
@@ -1033,6 +1087,7 @@ impl WiringGtVerifier {
             pairing_boundary: input.pairing_boundary.clone(),
             joint_commitment: input.joint_commitment,
             gt_exp_base_inputs,
+            gt_inputs,
             gt_exp_out_step,
             num_c_vars,
             k_exp,
@@ -1180,6 +1235,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let mut coeff_mul_rhs = Fq::zero();
         let mut coeff_joint = Fq::zero();
         let mut coeff_pairing = Fq::zero();
+        let mut coeff_gt_inputs: BTreeMap<u32, Fq> = BTreeMap::new();
         let mut coeff_base_input: Vec<Fq> = vec![Fq::zero(); num_exp];
         let mut coeff_base_port = Fq::zero();
 
@@ -1189,43 +1245,58 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 GtProducer::GtExpRho { instance } => eq_s_exp[instance],
                 GtProducer::GtMulResult { .. }
                 | GtProducer::GtExpBase { .. }
-                | GtProducer::JointCommitment => eq_s_zero,
+                | GtProducer::JointCommitment
+                | GtProducer::GtInput { .. } => eq_s_zero,
             };
             let scale = *lambda * eq_s;
 
             // Source contribution.
-            let src_weight = match edge.src {
-                GtProducer::GtExpRho { instance } => {
-                    let w = beta_exp * eq_c_exp[instance];
-                    coeff_rho += scale * w;
-                    w
-                }
-                GtProducer::GtExpBase { instance } => {
-                    let w = beta_exp * eq_c_exp[instance];
-                    coeff_base_input[instance] += scale * w;
-                    w
-                }
-                GtProducer::GtMulResult { instance } => {
-                    let w = beta_mul * eq_c_mul[instance];
-                    coeff_mul_out += scale * w;
-                    w
-                }
-                GtProducer::JointCommitment => {
-                    // Anchor this global constant source to the destination family selector.
-                    let w = match edge.dst {
-                        GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
-                            beta_mul * eq_c_mul[instance]
-                        }
-                        GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
-                        GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
-                            // Should not happen in well-formed plans; fall back to 1.
-                            Fq::one()
-                        }
-                    };
-                    coeff_joint += scale * w;
-                    w
-                }
-            };
+            let src_weight =
+                match edge.src {
+                    GtProducer::GtExpRho { instance } => {
+                        let w = beta_exp * eq_c_exp[instance];
+                        coeff_rho += scale * w;
+                        w
+                    }
+                    GtProducer::GtExpBase { instance } => {
+                        let w = beta_exp * eq_c_exp[instance];
+                        coeff_base_input[instance] += scale * w;
+                        w
+                    }
+                    GtProducer::GtMulResult { instance } => {
+                        let w = beta_mul * eq_c_mul[instance];
+                        coeff_mul_out += scale * w;
+                        w
+                    }
+                    GtProducer::JointCommitment => {
+                        // Anchor this global constant source to the destination family selector.
+                        let w = match edge.dst {
+                            GtConsumer::GtMulLhs { instance }
+                            | GtConsumer::GtMulRhs { instance } => beta_mul * eq_c_mul[instance],
+                            GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
+                            GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
+                                // Should not happen in well-formed plans; fall back to 1.
+                                Fq::one()
+                            }
+                        };
+                        coeff_joint += scale * w;
+                        w
+                    }
+                    GtProducer::GtInput { value_id } => {
+                        // Anchor this global constant source to the destination family selector.
+                        let w = match edge.dst {
+                            GtConsumer::GtMulLhs { instance }
+                            | GtConsumer::GtMulRhs { instance } => beta_mul * eq_c_mul[instance],
+                            GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
+                            GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
+                                // Should not happen in well-formed plans; fall back to 1.
+                                Fq::one()
+                            }
+                        };
+                        *coeff_gt_inputs.entry(value_id).or_insert(Fq::zero()) += scale * w;
+                        w
+                    }
+                };
 
             // Destination contribution.
             match edge.dst {
@@ -1258,6 +1329,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         sum += coeff_base_port * base_port_val;
 
         let alpha = fq12_eval_linear_coeffs(&elem_weights);
+        for (value_id, c) in coeff_gt_inputs.iter() {
+            if c.is_zero() {
+                continue;
+            }
+            let fq12 = self
+                .gt_inputs
+                .get(value_id)
+                .expect("missing gt_inputs entry for GtProducer::GtInput");
+            let eval = eval_fq12_packed_at_via_linear_coeffs(fq12, &alpha);
+            sum += *c * eval;
+        }
         for (i, c) in coeff_base_input.iter().enumerate() {
             if c.is_zero() {
                 continue;

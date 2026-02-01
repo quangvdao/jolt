@@ -15,11 +15,12 @@
 //! Both prover and verifier can derive the exact same packing layout from public data
 //! (`constraint_types`), and the leftover region (if any) is implicitly zero.
 
-use super::constraints::system::{ConstraintType, PolyType};
-use super::gt::indexing::{k_exp, k_mul};
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+use super::constraints::system::{ConstraintType, PolyType};
+use super::gt::indexing::{k_exp, k_mul};
 
 /// One packed polynomial entry: identifies the source row and where it lives in the packed table.
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]

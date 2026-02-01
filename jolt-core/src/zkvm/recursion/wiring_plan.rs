@@ -10,17 +10,21 @@
 //! - `g1/wiring.rs`
 //! - `g2/wiring.rs`
 
-use super::CombineDag;
-use crate::utils::errors::ProofVerifyError;
-use crate::zkvm::proof_serialization::PairingBoundary;
-use crate::zkvm::{guest_serde::GuestDeserialize, guest_serde::GuestSerialize};
+use std::collections::BTreeMap;
+use std::io::{ErrorKind, Read, Write};
+
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use dory::backends::BN254;
-use dory::recursion::ast::{AstConstraint, AstGraph, AstOp, ValueId};
+use dory::recursion::ast::{AstConstraint, AstGraph, AstOp, InputSource, ValueId};
 use dory::recursion::OpId;
-use std::io::{Read, Write};
+
+use crate::utils::errors::ProofVerifyError;
+use crate::zkvm::proof_serialization::PairingBoundary;
+use crate::zkvm::{guest_serde::GuestDeserialize, guest_serde::GuestSerialize};
+
+use super::CombineDag;
 
 /// Canonical wiring plan (verifier-derived, and mirrored by the prover).
 #[derive(Clone, Debug, Default)]
@@ -70,7 +74,7 @@ impl CanonicalDeserialize for WiringPlan {
 }
 
 impl GuestSerialize for WiringPlan {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.gt.guest_serialize(w)?;
         self.g1.guest_serialize(w)?;
         self.g2.guest_serialize(w)?;
@@ -79,7 +83,7 @@ impl GuestSerialize for WiringPlan {
 }
 
 impl GuestDeserialize for WiringPlan {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             gt: Vec::<GtWiringEdge>::guest_deserialize(r)?,
             g1: Vec::<G1WiringEdge>::guest_deserialize(r)?,
@@ -108,6 +112,12 @@ pub enum GtProducer {
     /// This appears as an `AstOp::Input` with `InputSource::Proof { name: "commitment" }` and can
     /// be wired directly into GTMul ports in small Dory ASTs.
     JointCommitment,
+    /// Boundary constant: a GT-valued `AstOp::Input` that is consumed directly by a GT port
+    /// (e.g. GTMul lhs/rhs) but is **not** represented as a GTExp base boundary.
+    ///
+    /// The value is resolved deterministically from the Dory proof / setup on both prover and
+    /// verifier sides, keyed by the AST node `ValueId` index.
+    GtInput { value_id: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -171,7 +181,7 @@ impl CanonicalDeserialize for GtWiringEdge {
 }
 
 impl GuestSerialize for GtWiringEdge {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.src.guest_serialize(w)?;
         self.dst.guest_serialize(w)?;
         Ok(())
@@ -179,7 +189,7 @@ impl GuestSerialize for GtWiringEdge {
 }
 
 impl GuestDeserialize for GtWiringEdge {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             src: GtProducer::guest_deserialize(r)?,
             dst: GtConsumer::guest_deserialize(r)?,
@@ -210,6 +220,10 @@ impl CanonicalSerialize for GtProducer {
                 // Keep encoding size uniform: tag + dummy u32.
                 3u8.serialize_with_mode(&mut writer, compress)?;
                 0u32.serialize_with_mode(&mut writer, compress)
+            }
+            GtProducer::GtInput { value_id } => {
+                4u8.serialize_with_mode(&mut writer, compress)?;
+                value_id.serialize_with_mode(&mut writer, compress)
             }
         }
     }
@@ -248,41 +262,35 @@ impl CanonicalDeserialize for GtProducer {
                 let _ = u32::deserialize_with_mode(&mut reader, compress, validate)?;
                 Self::JointCommitment
             }
+            4 => Self::GtInput {
+                value_id: u32::deserialize_with_mode(&mut reader, compress, validate)?,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
 }
 
 impl GuestSerialize for GtProducer {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         match self {
             GtProducer::GtExpRho { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "GtProducer instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "GtProducer instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             GtProducer::GtMulResult { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "GtProducer instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "GtProducer instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             GtProducer::GtExpBase { instance } => {
                 2u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "GtProducer instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "GtProducer instance overflow")
                 })?)
                 .guest_serialize(w)
             }
@@ -290,12 +298,16 @@ impl GuestSerialize for GtProducer {
                 3u8.guest_serialize(w)?;
                 0u32.guest_serialize(w)
             }
+            GtProducer::GtInput { value_id } => {
+                4u8.guest_serialize(w)?;
+                value_id.guest_serialize(w)
+            }
         }
     }
 }
 
 impl GuestDeserialize for GtProducer {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let tag = u8::guest_deserialize(r)?;
         Ok(match tag {
             0 => Self::GtExpRho {
@@ -311,9 +323,12 @@ impl GuestDeserialize for GtProducer {
                 let _ = u32::guest_deserialize(r)?;
                 Self::JointCommitment
             }
+            4 => Self::GtInput {
+                value_id: u32::guest_deserialize(r)?,
+            },
             _ => {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                    ErrorKind::InvalidData,
                     "invalid GtProducer tag",
                 ))
             }
@@ -387,35 +402,26 @@ impl CanonicalDeserialize for GtConsumer {
 }
 
 impl GuestSerialize for GtConsumer {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         match self {
             GtConsumer::GtMulLhs { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "GtConsumer instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "GtConsumer instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             GtConsumer::GtMulRhs { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "GtConsumer instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "GtConsumer instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             GtConsumer::GtExpBase { instance } => {
                 2u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "GtConsumer instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "GtConsumer instance overflow")
                 })?)
                 .guest_serialize(w)
             }
@@ -426,7 +432,7 @@ impl GuestSerialize for GtConsumer {
 }
 
 impl GuestDeserialize for GtConsumer {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let tag = u8::guest_deserialize(r)?;
         Ok(match tag {
             0 => Self::GtMulLhs {
@@ -442,7 +448,7 @@ impl GuestDeserialize for GtConsumer {
             4 => Self::PairingBoundaryRhs,
             _ => {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                    ErrorKind::InvalidData,
                     "invalid GtConsumer tag",
                 ))
             }
@@ -485,6 +491,15 @@ pub enum G1ValueRef {
     /// public Dory input value.
     G1ScalarMulBaseBoundary {
         instance: usize,
+    },
+
+    /// Boundary constant: a G1-valued `AstOp::Input` that feeds directly into a G1 port
+    /// (e.g. G1Add inputs).
+    ///
+    /// The value is resolved deterministically from the Dory proof / setup, keyed by the AST node
+    /// `ValueId` index.
+    G1Input {
+        value_id: u32,
     },
 
     /// Boundary constant: external pairing check point (p1/p2/p3).
@@ -535,7 +550,7 @@ impl CanonicalDeserialize for G1WiringEdge {
 }
 
 impl GuestSerialize for G1WiringEdge {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.src.guest_serialize(w)?;
         self.dst.guest_serialize(w)?;
         Ok(())
@@ -543,7 +558,7 @@ impl GuestSerialize for G1WiringEdge {
 }
 
 impl GuestDeserialize for G1WiringEdge {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             src: G1ValueRef::guest_deserialize(r)?,
             dst: G1ValueRef::guest_deserialize(r)?,
@@ -585,6 +600,10 @@ impl CanonicalSerialize for G1ValueRef {
                 8u8.serialize_with_mode(&mut writer, compress)?;
                 (*instance as u32).serialize_with_mode(&mut writer, compress)
             }
+            G1ValueRef::G1Input { value_id } => {
+                9u8.serialize_with_mode(&mut writer, compress)?;
+                value_id.serialize_with_mode(&mut writer, compress)
+            }
         }
     }
 
@@ -596,7 +615,8 @@ impl CanonicalSerialize for G1ValueRef {
             | G1ValueRef::G1AddInP { .. }
             | G1ValueRef::G1AddInQ { .. }
             | G1ValueRef::G1ScalarMulBase { .. }
-            | G1ValueRef::G1ScalarMulBaseBoundary { .. } => 1 + 4,
+            | G1ValueRef::G1ScalarMulBaseBoundary { .. }
+            | G1ValueRef::G1Input { .. } => 1 + 4,
             G1ValueRef::PairingBoundaryP1
             | G1ValueRef::PairingBoundaryP2
             | G1ValueRef::PairingBoundaryP3 => 1,
@@ -639,61 +659,49 @@ impl CanonicalDeserialize for G1ValueRef {
             8 => Self::G1ScalarMulBaseBoundary {
                 instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
             },
+            9 => Self::G1Input {
+                value_id: u32::deserialize_with_mode(&mut reader, compress, validate)?,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
 }
 
 impl GuestSerialize for G1ValueRef {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         match self {
             G1ValueRef::G1ScalarMulOut { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G1ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G1ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1AddOut { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G1ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G1ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1AddInP { instance } => {
                 2u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G1ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G1ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1AddInQ { instance } => {
                 3u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G1ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G1ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G1ValueRef::G1ScalarMulBase { instance } => {
                 4u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G1ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G1ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
@@ -703,19 +711,20 @@ impl GuestSerialize for G1ValueRef {
             G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
                 8u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G1ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G1ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
+            }
+            G1ValueRef::G1Input { value_id } => {
+                9u8.guest_serialize(w)?;
+                value_id.guest_serialize(w)
             }
         }
     }
 }
 
 impl GuestDeserialize for G1ValueRef {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let tag = u8::guest_deserialize(r)?;
         Ok(match tag {
             0 => Self::G1ScalarMulOut {
@@ -739,9 +748,12 @@ impl GuestDeserialize for G1ValueRef {
             8 => Self::G1ScalarMulBaseBoundary {
                 instance: u32::guest_deserialize(r)? as usize,
             },
+            9 => Self::G1Input {
+                value_id: u32::guest_deserialize(r)?,
+            },
             _ => {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                    ErrorKind::InvalidData,
                     "invalid G1ValueRef tag",
                 ))
             }
@@ -784,6 +796,15 @@ pub enum G2ValueRef {
     /// public Dory input value.
     G2ScalarMulBaseBoundary {
         instance: usize,
+    },
+
+    /// Boundary constant: a G2-valued `AstOp::Input` that feeds directly into a G2 port
+    /// (e.g. G2Add inputs).
+    ///
+    /// The value is resolved deterministically from the Dory proof / setup, keyed by the AST node
+    /// `ValueId` index.
+    G2Input {
+        value_id: u32,
     },
 
     /// Boundary constant: external pairing check point (p1/p2/p3).
@@ -834,7 +855,7 @@ impl CanonicalDeserialize for G2WiringEdge {
 }
 
 impl GuestSerialize for G2WiringEdge {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.src.guest_serialize(w)?;
         self.dst.guest_serialize(w)?;
         Ok(())
@@ -842,7 +863,7 @@ impl GuestSerialize for G2WiringEdge {
 }
 
 impl GuestDeserialize for G2WiringEdge {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
             src: G2ValueRef::guest_deserialize(r)?,
             dst: G2ValueRef::guest_deserialize(r)?,
@@ -881,6 +902,10 @@ impl CanonicalSerialize for G2ValueRef {
                 5u8.serialize_with_mode(&mut writer, compress)?;
                 (*instance as u32).serialize_with_mode(&mut writer, compress)
             }
+            G2ValueRef::G2Input { value_id } => {
+                9u8.serialize_with_mode(&mut writer, compress)?;
+                value_id.serialize_with_mode(&mut writer, compress)
+            }
             G2ValueRef::PairingBoundaryP1 => 6u8.serialize_with_mode(&mut writer, compress),
             G2ValueRef::PairingBoundaryP2 => 7u8.serialize_with_mode(&mut writer, compress),
             G2ValueRef::PairingBoundaryP3 => 8u8.serialize_with_mode(&mut writer, compress),
@@ -895,7 +920,8 @@ impl CanonicalSerialize for G2ValueRef {
             | G2ValueRef::G2AddInP { .. }
             | G2ValueRef::G2AddInQ { .. }
             | G2ValueRef::G2ScalarMulBase { .. }
-            | G2ValueRef::G2ScalarMulBaseBoundary { .. } => 1 + 4,
+            | G2ValueRef::G2ScalarMulBaseBoundary { .. }
+            | G2ValueRef::G2Input { .. } => 1 + 4,
             G2ValueRef::PairingBoundaryP1
             | G2ValueRef::PairingBoundaryP2
             | G2ValueRef::PairingBoundaryP3 => 1,
@@ -938,73 +964,62 @@ impl CanonicalDeserialize for G2ValueRef {
             6 => Self::PairingBoundaryP1,
             7 => Self::PairingBoundaryP2,
             8 => Self::PairingBoundaryP3,
+            9 => Self::G2Input {
+                value_id: u32::deserialize_with_mode(&mut reader, compress, validate)?,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
 }
 
 impl GuestSerialize for G2ValueRef {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+    fn guest_serialize<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         match self {
             G2ValueRef::G2ScalarMulOut { instance } => {
                 0u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G2ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G2ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2AddOut { instance } => {
                 1u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G2ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G2ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2AddInP { instance } => {
                 2u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G2ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G2ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2AddInQ { instance } => {
                 3u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G2ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G2ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2ScalarMulBase { instance } => {
                 4u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G2ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G2ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
             }
             G2ValueRef::G2ScalarMulBaseBoundary { instance } => {
                 5u8.guest_serialize(w)?;
                 (u32::try_from(*instance).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "G2ValueRef instance overflow",
-                    )
+                    std::io::Error::new(ErrorKind::InvalidData, "G2ValueRef instance overflow")
                 })?)
                 .guest_serialize(w)
+            }
+            G2ValueRef::G2Input { value_id } => {
+                9u8.guest_serialize(w)?;
+                value_id.guest_serialize(w)
             }
             G2ValueRef::PairingBoundaryP1 => 6u8.guest_serialize(w),
             G2ValueRef::PairingBoundaryP2 => 7u8.guest_serialize(w),
@@ -1014,7 +1029,7 @@ impl GuestSerialize for G2ValueRef {
 }
 
 impl GuestDeserialize for G2ValueRef {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+    fn guest_deserialize<R: Read>(r: &mut R) -> std::io::Result<Self> {
         let tag = u8::guest_deserialize(r)?;
         Ok(match tag {
             0 => Self::G2ScalarMulOut {
@@ -1038,9 +1053,12 @@ impl GuestDeserialize for G2ValueRef {
             6 => Self::PairingBoundaryP1,
             7 => Self::PairingBoundaryP2,
             8 => Self::PairingBoundaryP3,
+            9 => Self::G2Input {
+                value_id: u32::guest_deserialize(r)?,
+            },
             _ => {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
+                    ErrorKind::InvalidData,
                     "invalid G2ValueRef tag",
                 ))
             }
@@ -1099,7 +1117,7 @@ fn collect_op_ids(ast: &AstGraph<BN254>) -> OpIdOrder {
     out
 }
 
-fn index_map(op_ids: &[OpId]) -> std::collections::BTreeMap<OpId, usize> {
+fn index_map(op_ids: &[OpId]) -> BTreeMap<OpId, usize> {
     op_ids
         .iter()
         .copied()
@@ -1110,9 +1128,9 @@ fn index_map(op_ids: &[OpId]) -> std::collections::BTreeMap<OpId, usize> {
 
 fn gt_producer_from_value(
     ast: &AstGraph<BN254>,
-    gt_exp_index: &std::collections::BTreeMap<OpId, usize>,
-    gt_mul_index: &std::collections::BTreeMap<OpId, usize>,
-    gt_exp_base_by_value: &std::collections::BTreeMap<ValueId, usize>,
+    gt_exp_index: &BTreeMap<OpId, usize>,
+    gt_mul_index: &BTreeMap<OpId, usize>,
+    gt_exp_base_by_value: &BTreeMap<ValueId, usize>,
     value: ValueId,
 ) -> Option<GtProducer> {
     let idx = value.0 as usize;
@@ -1136,8 +1154,12 @@ fn gt_producer_from_value(
             if let Some(instance) = gt_exp_base_by_value.get(&value).copied() {
                 Some(GtProducer::GtExpBase { instance })
             } else {
-                let _ = source;
-                None
+                match source {
+                    InputSource::Proof { name } if *name == "commitment" => {
+                        Some(GtProducer::JointCommitment)
+                    }
+                    _ => Some(GtProducer::GtInput { value_id: value.0 }),
+                }
             }
         }
         _ => None,
@@ -1154,8 +1176,8 @@ fn is_ast_input(ast: &AstGraph<BN254>, value: ValueId) -> bool {
 
 fn g1_value_from_output(
     ast: &AstGraph<BN254>,
-    g1_smul_index: &std::collections::BTreeMap<OpId, usize>,
-    g1_add_index: &std::collections::BTreeMap<OpId, usize>,
+    g1_smul_index: &BTreeMap<OpId, usize>,
+    g1_add_index: &BTreeMap<OpId, usize>,
     value: ValueId,
 ) -> Option<G1ValueRef> {
     let idx = value.0 as usize;
@@ -1181,8 +1203,8 @@ fn g1_value_from_output(
 
 fn g2_value_from_output(
     ast: &AstGraph<BN254>,
-    g2_smul_index: &std::collections::BTreeMap<OpId, usize>,
-    g2_add_index: &std::collections::BTreeMap<OpId, usize>,
+    g2_smul_index: &BTreeMap<OpId, usize>,
+    g2_add_index: &BTreeMap<OpId, usize>,
     value: ValueId,
 ) -> Option<G2ValueRef> {
     let idx = value.0 as usize;
@@ -1230,8 +1252,7 @@ pub fn derive_wiring_plan(
     let mut plan = WiringPlan::default();
     // Map ValueId(Input GT value) -> GTExp instance index whose base is that ValueId.
     // This lets us treat GT inputs as the corresponding GTExp base constant in wiring.
-    let mut gt_exp_base_by_value: std::collections::BTreeMap<ValueId, usize> =
-        std::collections::BTreeMap::new();
+    let mut gt_exp_base_by_value: BTreeMap<ValueId, usize> = BTreeMap::new();
     for node in &ast.nodes {
         if let AstOp::GTExp {
             op_id: Some(id),
@@ -1270,9 +1291,14 @@ pub fn derive_wiring_plan(
                             instance: mul_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *lhs) {
+                } else {
+                    let src = match ast.nodes.get(lhs.0 as usize).map(|n| &n.op) {
+                        Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                        Some(op) => format!("AST op {op:?}"),
+                        None => "out of bounds".to_string(),
+                    };
                     return Err(ProofVerifyError::DoryError(format!(
-                        "unwired GTMul lhs value {lhs:?}"
+                        "unwired GTMul lhs value {lhs:?} ({src})"
                     )));
                 }
 
@@ -1289,9 +1315,14 @@ pub fn derive_wiring_plan(
                             instance: mul_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *rhs) {
+                } else {
+                    let src = match ast.nodes.get(rhs.0 as usize).map(|n| &n.op) {
+                        Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                        Some(op) => format!("AST op {op:?}"),
+                        None => "out of bounds".to_string(),
+                    };
                     return Err(ProofVerifyError::DoryError(format!(
-                        "unwired GTMul rhs value {rhs:?}"
+                        "unwired GTMul rhs value {rhs:?} ({src})"
                     )));
                 }
             }
@@ -1304,28 +1335,54 @@ pub fn derive_wiring_plan(
                 let Some(&add_instance) = g1_add_index.get(id) else {
                     continue;
                 };
-                if let Some(src) = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *a) {
+                let a_src =
+                    g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *a).or_else(|| {
+                        matches!(
+                            ast.nodes.get(a.0 as usize).map(|n| &n.op),
+                            Some(AstOp::Input { .. })
+                        )
+                        .then_some(G1ValueRef::G1Input { value_id: a.0 })
+                    });
+                if let Some(src) = a_src {
                     plan.g1.push(G1WiringEdge {
                         src,
                         dst: G1ValueRef::G1AddInP {
                             instance: add_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *a) {
+                } else {
+                    let src = match ast.nodes.get(a.0 as usize).map(|n| &n.op) {
+                        Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                        Some(op) => format!("AST op {op:?}"),
+                        None => "out of bounds".to_string(),
+                    };
                     return Err(ProofVerifyError::DoryError(format!(
-                        "unwired G1Add input a value {a:?}"
+                        "unwired G1Add input a value {a:?} ({src})"
                     )));
                 }
-                if let Some(src) = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *b) {
+                let b_src =
+                    g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *b).or_else(|| {
+                        matches!(
+                            ast.nodes.get(b.0 as usize).map(|n| &n.op),
+                            Some(AstOp::Input { .. })
+                        )
+                        .then_some(G1ValueRef::G1Input { value_id: b.0 })
+                    });
+                if let Some(src) = b_src {
                     plan.g1.push(G1WiringEdge {
                         src,
                         dst: G1ValueRef::G1AddInQ {
                             instance: add_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *b) {
+                } else {
+                    let src = match ast.nodes.get(b.0 as usize).map(|n| &n.op) {
+                        Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                        Some(op) => format!("AST op {op:?}"),
+                        None => "out of bounds".to_string(),
+                    };
                     return Err(ProofVerifyError::DoryError(format!(
-                        "unwired G1Add input b value {b:?}"
+                        "unwired G1Add input b value {b:?} ({src})"
                     )));
                 }
             }
@@ -1338,28 +1395,54 @@ pub fn derive_wiring_plan(
                 let Some(&add_instance) = g2_add_index.get(id) else {
                     continue;
                 };
-                if let Some(src) = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *a) {
+                let a_src =
+                    g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *a).or_else(|| {
+                        matches!(
+                            ast.nodes.get(a.0 as usize).map(|n| &n.op),
+                            Some(AstOp::Input { .. })
+                        )
+                        .then_some(G2ValueRef::G2Input { value_id: a.0 })
+                    });
+                if let Some(src) = a_src {
                     plan.g2.push(G2WiringEdge {
                         src,
                         dst: G2ValueRef::G2AddInP {
                             instance: add_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *a) {
+                } else {
+                    let src = match ast.nodes.get(a.0 as usize).map(|n| &n.op) {
+                        Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                        Some(op) => format!("AST op {op:?}"),
+                        None => "out of bounds".to_string(),
+                    };
                     return Err(ProofVerifyError::DoryError(format!(
-                        "unwired G2Add input a value {a:?}"
+                        "unwired G2Add input a value {a:?} ({src})"
                     )));
                 }
-                if let Some(src) = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *b) {
+                let b_src =
+                    g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *b).or_else(|| {
+                        matches!(
+                            ast.nodes.get(b.0 as usize).map(|n| &n.op),
+                            Some(AstOp::Input { .. })
+                        )
+                        .then_some(G2ValueRef::G2Input { value_id: b.0 })
+                    });
+                if let Some(src) = b_src {
                     plan.g2.push(G2WiringEdge {
                         src,
                         dst: G2ValueRef::G2AddInQ {
                             instance: add_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *b) {
+                } else {
+                    let src = match ast.nodes.get(b.0 as usize).map(|n| &n.op) {
+                        Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                        Some(op) => format!("AST op {op:?}"),
+                        None => "out of bounds".to_string(),
+                    };
                     return Err(ProofVerifyError::DoryError(format!(
-                        "unwired G2Add input b value {b:?}"
+                        "unwired G2Add input b value {b:?} ({src})"
                     )));
                 }
             }
@@ -1508,8 +1591,22 @@ pub fn derive_wiring_plan(
 
     // Bind G1 pairing inputs.
     for (i, vid) in g1s.iter().enumerate() {
-        let Some(src) = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *vid) else {
-            continue;
+        let src = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *vid).or_else(|| {
+            matches!(
+                ast.nodes.get(vid.0 as usize).map(|n| &n.op),
+                Some(AstOp::Input { .. })
+            )
+            .then_some(G1ValueRef::G1Input { value_id: vid.0 })
+        });
+        let Some(src) = src else {
+            let src = match ast.nodes.get(vid.0 as usize).map(|n| &n.op) {
+                Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                Some(op) => format!("AST op {op:?}"),
+                None => "out of bounds".to_string(),
+            };
+            return Err(ProofVerifyError::DoryError(format!(
+                "unwired pairing boundary G1 input {i} value {vid:?} ({src})"
+            )));
         };
         let dst = match i {
             0 => G1ValueRef::PairingBoundaryP1,
@@ -1522,8 +1619,22 @@ pub fn derive_wiring_plan(
 
     // Bind G2 pairing inputs.
     for (i, vid) in g2s.iter().enumerate() {
-        let Some(src) = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *vid) else {
-            continue;
+        let src = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *vid).or_else(|| {
+            matches!(
+                ast.nodes.get(vid.0 as usize).map(|n| &n.op),
+                Some(AstOp::Input { .. })
+            )
+            .then_some(G2ValueRef::G2Input { value_id: vid.0 })
+        });
+        let Some(src) = src else {
+            let src = match ast.nodes.get(vid.0 as usize).map(|n| &n.op) {
+                Some(AstOp::Input { source }) => format!("AST input source {source:?}"),
+                Some(op) => format!("AST op {op:?}"),
+                None => "out of bounds".to_string(),
+            };
+            return Err(ProofVerifyError::DoryError(format!(
+                "unwired pairing boundary G2 input {i} value {vid:?} ({src})"
+            )));
         };
         let dst = match i {
             0 => G2ValueRef::PairingBoundaryP1,

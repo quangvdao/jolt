@@ -18,13 +18,13 @@ use crate::{
         recursion::{
             prover::{DoryOpeningSnapshot, RecursionInput, RecursionProof, RecursionProver},
             verifier::RecursionVerifier,
-            MAX_RECURSION_DENSE_NUM_VARS,
+            RecursionVerifierInput, MAX_RECURSION_DENSE_NUM_VARS,
         },
         witness::CommittedPolynomial,
     },
 };
 
-use ark_bn254::{Fq, Fq12, Fr};
+use ark_bn254::{Fq, Fq12, Fr, G1Affine, G2Affine};
 use ark_ff::{One, UniformRand};
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_std::test_rng;
@@ -165,10 +165,7 @@ fn build_fixture() -> RecursionFixture {
     }
 }
 
-fn verify_with_input(
-    fixture: &RecursionFixture,
-    verifier_input: crate::zkvm::recursion::RecursionVerifierInput,
-) -> bool {
+fn verify_with_input(fixture: &RecursionFixture, verifier_input: RecursionVerifierInput) -> bool {
     let verifier = RecursionVerifier::<Fq>::new(verifier_input);
     let mut transcript: Blake2bTranscript = Transcript::new(b"recursion");
     let hyrax_verifier_setup =
@@ -234,6 +231,70 @@ fn wiring_rejects_tampered_pairing_boundary_rhs() {
     assert!(
         !verify_with_input(&fixture, bad_input),
         "wiring/boundary constraints must bind pairing boundary RHS"
+    );
+}
+
+#[test]
+#[serial]
+fn wiring_rejects_tampered_pairing_boundary_points() {
+    let fixture = build_fixture();
+
+    // Build symbolic AST (verifier side).
+    let mut sym_transcript = fixture.stage8_pre_transcript.clone();
+    let ast = <DoryCommitmentScheme as RecursionExt<Fr>>::build_symbolic_ast(
+        &fixture.dory_proof,
+        &fixture.verifier_setup,
+        &mut sym_transcript,
+        &fixture.opening_point,
+        &fixture.joint_claim,
+        &fixture.joint_commitment,
+    )
+    .expect("symbolic AST reconstruction must succeed");
+
+    let derived = derive_plan_with_hints(
+        &ast,
+        &fixture.ark_dory_proof,
+        &fixture.verifier_setup,
+        fixture.joint_commitment,
+        &fixture.combine_commitments,
+        &fixture.combine_coeffs,
+        fixture.pairing_boundary.clone(),
+        fixture.joint_commitment_fq12,
+    )
+    .expect("instance plan derivation must succeed");
+
+    // Tamper with pairing boundary points (must be rejected by wiring/boundary constraints).
+    let mut bad_input = derived.verifier_input;
+    {
+        let orig = bad_input.pairing_boundary.p1_g1;
+        let id = G1Affine::identity();
+        bad_input.pairing_boundary.p1_g1 = if orig == id {
+            bad_input.pairing_boundary.p2_g1
+        } else {
+            id
+        };
+        assert_ne!(
+            bad_input.pairing_boundary.p1_g1, orig,
+            "test must change pairing_boundary.p1_g1"
+        );
+    }
+    {
+        let orig = bad_input.pairing_boundary.p1_g2;
+        let id = G2Affine::identity();
+        bad_input.pairing_boundary.p1_g2 = if orig == id {
+            bad_input.pairing_boundary.p2_g2
+        } else {
+            id
+        };
+        assert_ne!(
+            bad_input.pairing_boundary.p1_g2, orig,
+            "test must change pairing_boundary.p1_g2"
+        );
+    }
+
+    assert!(
+        !verify_with_input(&fixture, bad_input),
+        "tampered pairing boundary points must not verify"
     );
 }
 

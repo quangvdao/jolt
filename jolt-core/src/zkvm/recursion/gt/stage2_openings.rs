@@ -47,6 +47,8 @@ use crate::{
     zkvm::witness::{GtExpTerm, RecursionPoly, VirtualPolynomial},
 };
 
+use core::marker::PhantomData;
+
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::Zero;
@@ -70,7 +72,7 @@ pub struct GtExpStage2OpeningsProver<T: Transcript> {
     params: GtExpStage2OpeningsParams,
     rho: MultilinearPolynomial<Fq>,
     quotient: MultilinearPolynomial<Fq>,
-    _marker: core::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
 }
 
 #[cfg(feature = "allocative")]
@@ -109,7 +111,7 @@ impl<T: Transcript> GtExpStage2OpeningsProver<T> {
             // Store in [x11 low bits, c_gt high bits] order so `c_gt` is a suffix in Stage 2.
             rho: MultilinearPolynomial::LargeScalars(DensePolynomial::new(rho_xc)),
             quotient: MultilinearPolynomial::LargeScalars(DensePolynomial::new(quotient_xc)),
-            _marker: core::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 }

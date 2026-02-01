@@ -10,32 +10,30 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
+use ark_bn254::{Fq, Fq12, Fr};
 use ark_ec::AffineRepr;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use dory::primitives::arithmetic::PairingCurve;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
+use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
 use crate::poly::commitment::dory::instance_plan::derive_plan_with_hints;
+use crate::poly::commitment::dory::{
+    ArkG1, ArkG2, ArkGT, DoryCommitmentScheme, DoryContext, DoryGlobals, BN254,
+};
+use crate::poly::rlc_utils::compute_rlc_coefficients;
 use crate::transcripts::Transcript;
 use crate::zkvm::config::ProgramMode;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 use crate::zkvm::proof_serialization::{JoltProof, PairingBoundary};
 use crate::zkvm::verifier::{JoltVerifier, JoltVerifierPreprocessing};
-use crate::zkvm::witness::all_committed_polynomials;
+use crate::zkvm::witness::{all_committed_polynomials, CommittedPolynomial};
 
 use super::prover::{
     DoryOpeningSnapshot, HyraxPCS, RecursionInput, RecursionProof, RecursionProver,
 };
 use super::verifier::RecursionVerifier;
 use super::MAX_RECURSION_DENSE_NUM_VARS;
-use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
-use crate::poly::commitment::dory::{
-    ArkG1, ArkG2, ArkGT, DoryCommitmentScheme, DoryContext, DoryGlobals, BN254,
-};
-use crate::poly::rlc_utils::compute_rlc_coefficients;
-use crate::zkvm::witness::CommittedPolynomial;
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
-
-use ark_bn254::{Fq, Fq12, Fr};
 
 type DoryPCS = DoryCommitmentScheme;
 

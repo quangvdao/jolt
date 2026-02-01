@@ -441,8 +441,10 @@ These rows are opened via cache-only “claim reduction” instances in Stage 1 
 
 - `GtExpPublicInputs` contains **only** `scalar_bits` (see `jolt-core/src/zkvm/recursion/gt/types.rs`).
 - Bases are no longer serialized as “non-public-input base hints”. Non-input bases are bound via wiring, and the only remaining
-  boundary materialization is for true AST-input bases via `RecursionVerifierInput.gt_exp_base_inputs: Vec<Option<Fq12>>`
-  (see `jolt-core/src/zkvm/recursion/verifier.rs`).
+  boundary materialization is for:
+  - true AST-input GTExp bases via `RecursionVerifierInput.gt_exp_base_inputs: Vec<Option<Fq12>>`, and
+  - direct AST-input GT/G1/G2 values that flow into ports (e.g. `GTMul`/`G1Add`/`G2Add`/pairing boundary) via
+    `RecursionVerifierInput.{gt_inputs,g1_inputs,g2_inputs}` (keyed by AST `ValueId.0`).
 
 **Why x4 helps**: committing base powers on x4 avoids redundant replication across the 7 step variables while eliminating
 expensive per-instance tower multiplications in the guest verifier (`GtExpVerifier::expected_output_claim`).
@@ -1219,8 +1221,11 @@ The wiring plan (`wiring_plan::derive_wiring_plan`) only creates copy-constraint
 or being represented as a boundary constant/public input for that op family, then the corresponding port could be left **unbound** by wiring.
 
 In other words, for soundness we require:
-- any GT value consumed by `GTMul` must be produced by `GTExp`/`GTMul` (or be handled as a boundary constant via the GT wiring plan),
-- any G1/G2 value consumed by `G1Add`/`G2Add` must be produced by `G1ScalarMul`/`G1Add` or `G2ScalarMul`/`G2Add` respectively (or be a pairing-boundary constant),
+- any GT value consumed by `GTMul` must be produced by `GTExp`/`GTMul` **or** be explicitly represented as a boundary constant via
+  `GtProducer::GtInput { value_id }` and `RecursionVerifierInput.gt_inputs: Vec<(u32, Fq12)>` (keyed by `ValueId.0`),
+- any G1/G2 value consumed by `G1Add`/`G2Add` must be produced by `G1ScalarMul`/`G1Add` or `G2ScalarMul`/`G2Add` respectively **or**
+  be explicitly represented as a boundary constant via `G1ValueRef::G1Input { value_id }` / `G2ValueRef::G2Input { value_id }` and
+  `RecursionVerifierInput.g1_inputs/g2_inputs` (keyed by `ValueId.0`), or be one of the pairing-boundary constants (`PairingBoundaryP*`),
 - any “non-input base” used by `GTExp` / `G{1,2}ScalarMul` must be bound via base-binding edges (when the base itself is produced by a proven op).
 
 #### Base binding (implemented)
@@ -1236,7 +1241,14 @@ coordinates on a c-only domain). Soundness requires these bases/points be tied t
   - GTExp: `RecursionVerifierInput.gt_exp_base_inputs: Vec<Option<Fq12>>` provides `Some(base)` only for true
     AST-input bases; non-input bases must be `None` so the verifier never recomputes them (see
     `jolt-core/src/zkvm/recursion/verifier.rs`).
+  - GT wiring also supports **direct AST-input GT values** (e.g. `vmv.c`) that flow into `GTMul`/pairing-RHS ports
+    via `GtProducer::GtInput { value_id }` and `RecursionVerifierInput.gt_inputs: Vec<(u32,Fq12)>`
+    (see `jolt-core/src/zkvm/recursion/wiring_plan.rs` and `jolt-core/src/zkvm/recursion/gt/wiring.rs`).
   - G1/G2 scalar-mul: base coordinates are committed and bound via wiring boundary refs
+    (see `jolt-core/src/zkvm/recursion/wiring_plan.rs` and `jolt-core/src/zkvm/recursion/{g1,g2}/wiring.rs`).
+  - G1/G2 wiring also supports **direct AST-input points** that flow into `G1Add`/`G2Add`/pairing-boundary ports
+    via `G1ValueRef::G1Input { value_id }` / `G2ValueRef::G2Input { value_id }` and
+    `RecursionVerifierInput.g1_inputs/g2_inputs`
     (see `jolt-core/src/zkvm/recursion/wiring_plan.rs` and `jolt-core/src/zkvm/recursion/{g1,g2}/wiring.rs`).
 
 **Fail-fast invariant**: if a GTExp / scalar-mul base point cannot be wired (and is not a supported boundary input),
@@ -1315,11 +1327,11 @@ pub struct WiringPlan {
 
 Each edge connects a **producer** to a **consumer**:
 
-| Type | Producers | Consumers |
-|------|-----------|-----------|
-| GT | `GtExpRho { instance }`, `GtMulResult { instance }`, `GtExpBase { instance }` | `GtMulLhs { instance }`, `GtMulRhs { instance }`, `GtExpBase { instance }`, `JointCommitment`, `PairingBoundaryRhs` |
-| G1 | `G1ScalarMulOutput { instance }`, `G1AddOutput { instance }` | `G1AddInputP { instance }`, `G1AddInputQ { instance }`, `PairingBoundary*` |
-| G2 | `G2ScalarMulOutput { instance }`, `G2AddOutput { instance }` | `G2AddInputP { instance }`, `G2AddInputQ { instance }`, `PairingBoundary*` |
+| Type | Producers / endpoints | Consumers / endpoints |
+|------|------------------------|------------------------|
+| GT | `GtProducer::{GtExpRho { instance }, GtMulResult { instance }, GtExpBase { instance }, JointCommitment, GtInput { value_id }}` | `GtConsumer::{GtMulLhs { instance }, GtMulRhs { instance }, GtExpBase { instance }, JointCommitment, PairingBoundaryRhs}` |
+| G1 | `G1ValueRef::{G1ScalarMulOut { instance }, G1ScalarMulBase { instance }, G1ScalarMulBaseBoundary { instance }, G1AddOut { instance }, G1AddInP { instance }, G1AddInQ { instance }, PairingBoundaryP*, G1Input { value_id }}` | (same `G1ValueRef` enum; edges are `G1WiringEdge { src, dst }`) |
+| G2 | `G2ValueRef::{G2ScalarMulOut { instance }, G2ScalarMulBase { instance }, G2ScalarMulBaseBoundary { instance }, G2AddOut { instance }, G2AddInP { instance }, G2AddInQ { instance }, PairingBoundaryP*, G2Input { value_id }}` | (same `G2ValueRef` enum; edges are `G2WiringEdge { src, dst }`) |
 
 The `derive_wiring_plan()` function traverses the Dory `AstGraph` and generates edges for each data-flow dependency:
 1. For each AST op, resolve the producer of each input `ValueId`
@@ -1374,7 +1386,9 @@ This checklist is intended for “red-team” review of the protocols.
   - Ensure every AST value that flows into an op port is either:
     - produced by a proven op (and therefore gets a wiring edge), or
     - explicitly represented as a boundary constant / public input for that family.
-  - Pay special attention to *direct AST inputs* feeding `GTMul` / `G1Add` / `G2Add` ports. If they exist, wiring must be extended.
+  - Pay special attention to *direct AST inputs* feeding `GTMul` / `G1Add` / `G2Add` ports:
+    these are handled today via `GtInput` / `G1Input` / `G2Input` boundary endpoints; if Dory introduces additional such edges,
+    `wiring_plan.rs` must be extended accordingly.
 
 - **Split-\(k\) correctness** (dummy-bit convention):
   - Dummy bits must be **low bits** of `c_common`, and family bits must be the suffix.

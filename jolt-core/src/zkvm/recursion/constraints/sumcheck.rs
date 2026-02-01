@@ -14,6 +14,9 @@
 //! `accumulator.append_virtual(transcript, ...)` calls in `cache_openings` must match the
 //! existing per-op implementations.
 
+use allocative::Allocative;
+use rayon::prelude::*;
+
 use crate::{
     field::JoltField,
     poly::{
@@ -31,8 +34,6 @@ use crate::{
     transcripts::Transcript,
     zkvm::witness::VirtualPolynomial,
 };
-use allocative::Allocative;
-use rayon::prelude::*;
 
 /// Specifies one virtual opening to emit per instance.
 ///

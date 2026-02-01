@@ -61,7 +61,7 @@ impl GtExpPublicInputs {
             return (digit_lo, digit_hi);
         }
         let odd = (n & 1) == 1;
-        let digits_len = (n + 1) / 2;
+        let digits_len = n.div_ceil(2);
         let limit = digits_len.min(eq_evals.len());
         for s in 0..limit {
             let (hi, lo) = if !odd {
@@ -264,10 +264,6 @@ pub fn digits_from_bits_msb(bits: &[bool]) -> Vec<(bool, bool)> {
     }
     padded.chunks(2).map(|c| (c[0], c[1])).collect()
 }
-
-// ============================================================================
-// Eq polynomial utilities (LSB-first order)
-// ============================================================================
 
 /// Compute Eq evaluations in LSB-first order
 pub fn eq_lsb_evals<F: JoltField>(r: &[F::Challenge]) -> Vec<F> {

@@ -7,64 +7,51 @@
 //!
 //! The verifier returns an opening accumulator for PCS verification.
 
-use crate::{
-    field::JoltField,
-    poly::{
-        commitment::commitment_scheme::CommitmentScheme,
-        opening_proof::{OpeningAccumulator, SumcheckId, VerifierOpeningAccumulator},
-    },
-    transcripts::Transcript,
-    zkvm::witness::{
-        CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,
-        GtMulTerm, RecursionPoly, VirtualPolynomial,
-    },
-};
-use ark_bn254::{Fq, Fq12};
+use ark_bn254::{Fq, Fq12, G1Affine, G2Affine};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use ark_std::Zero;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use std::io::{Read, Write};
 
-use super::{
-    constraints::system::{ConstraintType, PolyType},
-    curve::{Bn254Recursion, RecursionCurve},
-    g1::{
-        addition::{G1AddParams, G1AddVerifier},
-        indexing::k_g1,
-        scalar_multiplication::{G1ScalarMulVerifier, ShiftG1ScalarMulVerifier},
-        types::G1ScalarMulPublicInputs,
-        wiring::WiringG1Verifier,
-    },
-    g2::{
-        addition::{G2AddParams, G2AddVerifier},
-        indexing::k_g2,
-        scalar_multiplication::{G2ScalarMulVerifier, ShiftG2ScalarMulVerifier},
-        types::G2ScalarMulPublicInputs,
-        wiring::WiringG2Verifier,
-    },
-    gt::{
-        base_power::GtExpBasePowVerifier,
-        exponentiation::{GtExpParams, GtExpVerifier},
-        indexing::{k_gt, num_gt_mul_constraints_padded},
-        multiplication::{GtMulParams, GtMulVerifier},
-        shift::{GtShiftParams, GtShiftVerifier},
-        stage1_base_openings::GtExpBaseStage1OpeningsVerifier,
-        stage2_base_openings::GtExpBaseStage2OpeningsVerifier,
-        stage2_openings::GtExpStage2OpeningsVerifier,
-        types::GtExpPublicInputs,
-        wiring::WiringGtVerifier,
-    },
-    prover::RecursionProof,
-    WiringPlan,
-};
+use crate::field::JoltField;
+use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::opening_proof::{OpeningAccumulator, SumcheckId, VerifierOpeningAccumulator};
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
-use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
-use crate::zkvm::recursion::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
-
+use crate::transcripts::Transcript;
 use crate::zkvm::proof_serialization::PairingBoundary;
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
+use crate::zkvm::witness::{
+    CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,
+    GtMulTerm, RecursionPoly, VirtualPolynomial,
+};
+
+use super::constraints::system::{ConstraintType, PolyType};
+use super::curve::{Bn254Recursion, RecursionCurve};
+use super::g1::addition::{G1AddParams, G1AddVerifier};
+use super::g1::indexing::k_g1;
+use super::g1::scalar_multiplication::{G1ScalarMulVerifier, ShiftG1ScalarMulVerifier};
+use super::g1::types::G1ScalarMulPublicInputs;
+use super::g1::wiring::WiringG1Verifier;
+use super::g2::addition::{G2AddParams, G2AddVerifier};
+use super::g2::indexing::k_g2;
+use super::g2::scalar_multiplication::{G2ScalarMulVerifier, ShiftG2ScalarMulVerifier};
+use super::g2::types::G2ScalarMulPublicInputs;
+use super::g2::wiring::WiringG2Verifier;
+use super::gt::base_power::GtExpBasePowVerifier;
+use super::gt::exponentiation::{GtExpParams, GtExpVerifier};
+use super::gt::indexing::{k_gt, num_gt_mul_constraints_padded};
+use super::gt::multiplication::{GtMulParams, GtMulVerifier};
+use super::gt::shift::{GtShiftParams, GtShiftVerifier};
+use super::gt::stage1_base_openings::GtExpBaseStage1OpeningsVerifier;
+use super::gt::stage2_base_openings::GtExpBaseStage2OpeningsVerifier;
+use super::gt::stage2_openings::GtExpStage2OpeningsVerifier;
+use super::gt::types::GtExpPublicInputs;
+use super::gt::wiring::WiringGtVerifier;
+use super::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
+use super::prover::RecursionProof;
+use super::WiringPlan;
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_RECURSION_STAGE1: &str = "jolt_recursion_stage1";
@@ -110,6 +97,23 @@ pub struct RecursionVerifierInput {
     /// - For non-input bases (bound via wiring), this entry should be `None` so the verifier does
     ///   not need to materialize the base value.
     pub gt_exp_base_inputs: Vec<Option<Fq12>>,
+    /// Boundary GT inputs keyed by AST `ValueId` index.
+    ///
+    /// These are GT-valued `AstOp::Input`s that feed directly into GT ports (e.g. GTMul lhs/rhs)
+    /// but are not represented as GTExp base boundaries.
+    ///
+    /// Each entry is `(value_id, value)`, where `value_id` is the underlying `ValueId.0`.
+    pub gt_inputs: Vec<(u32, Fq12)>,
+    /// Boundary G1 inputs keyed by AST `ValueId` index.
+    ///
+    /// These are G1-valued `AstOp::Input`s that feed directly into G1 ports (e.g. G1Add inputs)
+    /// and must be treated as verifier-derived boundary constants.
+    pub g1_inputs: Vec<(u32, G1Affine)>,
+    /// Boundary G2 inputs keyed by AST `ValueId` index.
+    ///
+    /// These are G2-valued `AstOp::Input`s that feed directly into G2 ports (e.g. G2Add inputs)
+    /// and must be treated as verifier-derived boundary constants.
+    pub g2_inputs: Vec<(u32, G2Affine)>,
     /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
@@ -143,6 +147,9 @@ impl CanonicalSerialize for RecursionVerifierInput {
             .serialize_with_mode(&mut writer, compress)?;
         self.gt_exp_base_inputs
             .serialize_with_mode(&mut writer, compress)?;
+        self.gt_inputs.serialize_with_mode(&mut writer, compress)?;
+        self.g1_inputs.serialize_with_mode(&mut writer, compress)?;
+        self.g2_inputs.serialize_with_mode(&mut writer, compress)?;
         self.g1_scalar_mul_public_inputs
             .serialize_with_mode(&mut writer, compress)?;
         self.g2_scalar_mul_public_inputs
@@ -164,6 +171,9 @@ impl CanonicalSerialize for RecursionVerifierInput {
             + self.num_constraints_padded.serialized_size(compress)
             + self.gt_exp_public_inputs.serialized_size(compress)
             + self.gt_exp_base_inputs.serialized_size(compress)
+            + self.gt_inputs.serialized_size(compress)
+            + self.g1_inputs.serialized_size(compress)
+            + self.g2_inputs.serialized_size(compress)
             + self.g1_scalar_mul_public_inputs.serialized_size(compress)
             + self.g2_scalar_mul_public_inputs.serialized_size(compress)
             + self.wiring.serialized_size(compress)
@@ -193,6 +203,9 @@ impl CanonicalDeserialize for RecursionVerifierInput {
             num_constraints_padded: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             gt_exp_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
             gt_exp_base_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            gt_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            g1_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            g2_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
             g1_scalar_mul_public_inputs: Vec::deserialize_with_mode(
                 &mut reader,
                 compress,
@@ -210,45 +223,6 @@ impl CanonicalDeserialize for RecursionVerifierInput {
                 validate,
             )?,
             joint_commitment: Fq12::deserialize_with_mode(&mut reader, compress, validate)?,
-        })
-    }
-}
-
-impl GuestSerialize for RecursionVerifierInput {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.constraint_types.guest_serialize(w)?;
-        self.num_vars.guest_serialize(w)?;
-        self.num_constraint_vars.guest_serialize(w)?;
-        self.num_s_vars.guest_serialize(w)?;
-        self.num_constraints.guest_serialize(w)?;
-        self.num_constraints_padded.guest_serialize(w)?;
-        self.gt_exp_public_inputs.guest_serialize(w)?;
-        self.gt_exp_base_inputs.guest_serialize(w)?;
-        self.g1_scalar_mul_public_inputs.guest_serialize(w)?;
-        self.g2_scalar_mul_public_inputs.guest_serialize(w)?;
-        self.wiring.guest_serialize(w)?;
-        self.pairing_boundary.guest_serialize(w)?;
-        self.joint_commitment.guest_serialize(w)?;
-        Ok(())
-    }
-}
-
-impl GuestDeserialize for RecursionVerifierInput {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(Self {
-            constraint_types: Vec::guest_deserialize(r)?,
-            num_vars: usize::guest_deserialize(r)?,
-            num_constraint_vars: usize::guest_deserialize(r)?,
-            num_s_vars: usize::guest_deserialize(r)?,
-            num_constraints: usize::guest_deserialize(r)?,
-            num_constraints_padded: usize::guest_deserialize(r)?,
-            gt_exp_public_inputs: Vec::guest_deserialize(r)?,
-            gt_exp_base_inputs: Vec::guest_deserialize(r)?,
-            g1_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
-            g2_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
-            wiring: WiringPlan::guest_deserialize(r)?,
-            pairing_boundary: PairingBoundary::guest_deserialize(r)?,
-            joint_commitment: Fq12::guest_deserialize(r)?,
         })
     }
 }
@@ -279,6 +253,15 @@ impl RecursionVerifier<Fq> {
         matrix_commitment: &PCS::Commitment,
         verifier_setup: &PCS::VerifierSetup,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.input.gt_exp_base_inputs.len() != self.input.gt_exp_public_inputs.len() {
+            return Err(format!(
+                "RecursionVerifierInput.gt_exp_base_inputs length {} must match gt_exp_public_inputs length {}",
+                self.input.gt_exp_base_inputs.len(),
+                self.input.gt_exp_public_inputs.len(),
+            )
+            .into());
+        }
+
         // Bind the Hyrax dense commitment into the transcript.
         //
         // Prover order: commit dense polynomial (Hyrax) → append commitment → run recursion sumchecks.
@@ -494,11 +477,14 @@ impl RecursionVerifier<Fq> {
         // G1 scalar mul
         if num_g1_scalar_mul > 0 {
             let k_common = k_g1(&self.input.constraint_types);
-            debug_assert_eq!(
-                self.input.g1_scalar_mul_public_inputs.len(),
-                num_g1_scalar_mul,
-                "RecursionVerifierInput.g1_scalar_mul_public_inputs must match number of G1ScalarMul constraints"
-            );
+            if self.input.g1_scalar_mul_public_inputs.len() != num_g1_scalar_mul {
+                return Err(format!(
+                    "RecursionVerifierInput.g1_scalar_mul_public_inputs length {} must match number of G1ScalarMul constraints {}",
+                    self.input.g1_scalar_mul_public_inputs.len(),
+                    num_g1_scalar_mul,
+                )
+                .into());
+            }
             verifiers.push(Box::new(G1ScalarMulVerifier::new_with_k_common(
                 num_g1_scalar_mul,
                 k_common,
@@ -518,11 +504,14 @@ impl RecursionVerifier<Fq> {
         if num_g2_scalar_mul > 0 {
             let k_common = k_g2(&self.input.constraint_types);
 
-            debug_assert_eq!(
-                self.input.g2_scalar_mul_public_inputs.len(),
-                num_g2_scalar_mul,
-                "RecursionVerifierInput.g2_scalar_mul_public_inputs must match number of G2ScalarMul constraints"
-            );
+            if self.input.g2_scalar_mul_public_inputs.len() != num_g2_scalar_mul {
+                return Err(format!(
+                    "RecursionVerifierInput.g2_scalar_mul_public_inputs length {} must match number of G2ScalarMul constraints {}",
+                    self.input.g2_scalar_mul_public_inputs.len(),
+                    num_g2_scalar_mul,
+                )
+                .into());
+            }
             verifiers.push(Box::new(G2ScalarMulVerifier::new_with_k_common(
                 num_g2_scalar_mul,
                 k_common,
@@ -1004,10 +993,7 @@ impl RecursionVerifier<Fq> {
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
             } else {
-                panic!(
-                    "unexpected prefix-packing entry without a family tag: {:?}",
-                    entry
-                )
+                panic!("unexpected prefix-packing entry without a family tag: {entry:?}")
             }
         });
 

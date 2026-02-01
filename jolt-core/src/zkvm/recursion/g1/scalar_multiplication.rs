@@ -59,6 +59,12 @@
 //! which implies (informally) `x_a_next(s,·)=x_a(s+1,·)` and `y_a_next(s,·)=y_a(s+1,·)` for non-last
 //! steps, at the randomly sampled point.
 
+use allocative::Allocative;
+use ark_bn254::Fq;
+use ark_ff::{One, PrimeField, Zero};
+use core::cmp::max;
+use rayon::prelude::*;
+
 use crate::{
     field::JoltField,
     poly::{
@@ -83,12 +89,6 @@ use crate::{
     },
     zkvm::witness::{G1ScalarMulTerm, RecursionPoly, VirtualPolynomial},
 };
-
-use allocative::Allocative;
-use ark_bn254::Fq;
-use ark_ff::{One, PrimeField, Zero};
-use core::cmp::max;
-use rayon::prelude::*;
 
 const STEP_VARS: usize = 8; // 256 steps
                             // Degree bound:
@@ -1310,24 +1310,24 @@ mod tests {
         let rs = row_size();
         let rows = vec![
             G1ScalarMulNative {
-                base_point: (Fq::from_u64(5), Fq::from_u64(7)),
-                x_a: vec![Fq::from_u64(1); rs],
-                y_a: vec![Fq::from_u64(2); rs],
-                x_t: vec![Fq::from_u64(3); rs],
-                y_t: vec![Fq::from_u64(4); rs],
-                x_a_next: vec![Fq::from_u64(6); rs],
-                y_a_next: vec![Fq::from_u64(8); rs],
+                base_point: (Fq::from(5u64), Fq::from(7u64)),
+                x_a: vec![Fq::from(1u64); rs],
+                y_a: vec![Fq::from(2u64); rs],
+                x_t: vec![Fq::from(3u64); rs],
+                y_t: vec![Fq::from(4u64); rs],
+                x_a_next: vec![Fq::from(6u64); rs],
+                y_a_next: vec![Fq::from(8u64); rs],
                 t_indicator: vec![Fq::zero(); rs],
                 a_indicator: vec![Fq::zero(); rs],
             },
             G1ScalarMulNative {
-                base_point: (Fq::from_u64(9), Fq::from_u64(11)),
-                x_a: vec![Fq::from_u64(10); rs],
-                y_a: vec![Fq::from_u64(20); rs],
-                x_t: vec![Fq::from_u64(30); rs],
-                y_t: vec![Fq::from_u64(40); rs],
-                x_a_next: vec![Fq::from_u64(60); rs],
-                y_a_next: vec![Fq::from_u64(80); rs],
+                base_point: (Fq::from(9u64), Fq::from(11u64)),
+                x_a: vec![Fq::from(10u64); rs],
+                y_a: vec![Fq::from(20u64); rs],
+                x_t: vec![Fq::from(30u64); rs],
+                y_t: vec![Fq::from(40u64); rs],
+                x_a_next: vec![Fq::from(60u64); rs],
+                y_a_next: vec![Fq::from(80u64); rs],
                 t_indicator: vec![Fq::zero(); rs],
                 a_indicator: vec![Fq::zero(); rs],
             },
@@ -1344,7 +1344,7 @@ mod tests {
         // total_len = padded(2)->2 * 256
         assert_eq!(xa.Z.len(), 2 * rs);
         // c=0 block then c=1 block
-        assert_eq!(xa.Z[0], Fq::from_u64(1));
-        assert_eq!(xa.Z[rs], Fq::from_u64(10));
+        assert_eq!(xa.Z[0], Fq::from(1u64));
+        assert_eq!(xa.Z[rs], Fq::from(10u64));
     }
 }

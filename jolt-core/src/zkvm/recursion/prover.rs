@@ -7,77 +7,71 @@
 //!
 //! The prover returns a proof and opening accumulator for PCS verification.
 
-use super::RecursionConstraintMetadata;
-use crate::{
-    field::JoltField,
-    poly::{
-        commitment::{
-            commitment_scheme::{CommitmentScheme, RecursionExt},
-            dory::{wrappers::ArkDoryProof, ArkworksVerifierSetup, DoryCommitmentScheme},
-            hyrax::{matrix_dimensions, Hyrax, HyraxCommitment, PedersenGenerators},
-        },
-        dense_mlpoly::DensePolynomial,
-        multilinear_polynomial::MultilinearPolynomial,
-        opening_proof::{OpeningAccumulator, Openings, ProverOpeningAccumulator, SumcheckId},
-    },
-    transcripts::Transcript,
-    zkvm::{
-        proof_serialization::PairingBoundary,
-        witness::{
-            CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,
-            GtMulTerm, RecursionPoly, VirtualPolynomial,
-        },
-    },
-};
 use ark_bn254::{Fq, Fr};
+use ark_ec::CurveGroup;
 use ark_ff::Zero;
 use ark_grumpkin::Projective as GrumpkinProjective;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use dory::backends::arkworks::ArkGT;
+use dory::backends::arkworks::{ArkGT, BN254};
+use dory::recursion::ast::{AstGraph, AstOp};
+use dory::recursion::WitnessCollection;
+use jolt_optimizations::get_g_mle;
 use std::collections::HashMap;
 
-use dory::backends::arkworks::BN254;
-use dory::recursion::{ast::AstGraph, WitnessCollection};
-use jolt_optimizations::get_g_mle;
-
-use super::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
-use super::witness::GTCombineWitness;
-use super::{
-    constraints::system::{ConstraintSystem, PolyType},
-    g1::{
-        addition::G1AddProver,
-        indexing::k_g1,
-        scalar_multiplication::{G1ScalarMulProver, ShiftG1ScalarMulProver},
-        wiring::WiringG1Prover,
-    },
-    g2::{
-        addition::G2AddProver,
-        indexing::k_g2,
-        scalar_multiplication::{G2ScalarMulProver, ShiftG2ScalarMulProver},
-        wiring::WiringG2Prover,
-    },
-    gt::{
-        base_power::GtExpBasePowProver,
-        exponentiation::{GtExpParams, GtExpProver},
-        indexing::{
-            k_gt, num_gt_constraints, num_gt_constraints_padded, num_gt_mul_constraints_padded,
-        },
-        multiplication::{GtMulParams, GtMulProver},
-        shift::{GtShiftParams, GtShiftProver},
-        stage1_base_openings::GtExpBaseStage1OpeningsProver,
-        stage2_base_openings::GtExpBaseStage2OpeningsProver,
-        stage2_openings::GtExpStage2OpeningsProver,
-        types::GtMulConstraintPolynomials,
-        wiring::WiringGtProver,
-    },
-    wiring_plan::derive_wiring_plan,
-    witness_generation,
+use crate::field::JoltField;
+use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
+use crate::poly::commitment::dory::instance_plan::{
+    resolve_input_g1, resolve_input_g2, resolve_input_gt,
 };
 use crate::poly::commitment::dory::recursion::JoltWitness;
+use crate::poly::commitment::dory::{
+    wrappers::ArkDoryProof, ArkworksVerifierSetup, DoryCommitmentScheme,
+};
+use crate::poly::commitment::hyrax::{
+    matrix_dimensions, Hyrax, HyraxCommitment, PedersenGenerators,
+};
+use crate::poly::dense_mlpoly::DensePolynomial;
+use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+use crate::poly::opening_proof::{
+    OpeningAccumulator, Openings, ProverOpeningAccumulator, SumcheckId,
+};
 use crate::poly::rlc_utils::compute_rlc_coefficients;
 use crate::subprotocols::sumcheck::{BatchedSumcheck, SumcheckInstanceProof};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
+use crate::transcripts::Transcript;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
+use crate::zkvm::proof_serialization::PairingBoundary;
+use crate::zkvm::witness::{
+    CommittedPolynomial, G1AddTerm, G1ScalarMulTerm, G2AddTerm, G2ScalarMulTerm, GtExpTerm,
+    GtMulTerm, RecursionPoly, VirtualPolynomial,
+};
+
+use super::constraints::system::{ConstraintSystem, PolyType};
+use super::g1::addition::G1AddProver;
+use super::g1::indexing::k_g1;
+use super::g1::scalar_multiplication::{G1ScalarMulProver, ShiftG1ScalarMulProver};
+use super::g1::wiring::WiringG1Prover;
+use super::g2::addition::G2AddProver;
+use super::g2::indexing::k_g2;
+use super::g2::scalar_multiplication::{G2ScalarMulProver, ShiftG2ScalarMulProver};
+use super::g2::wiring::WiringG2Prover;
+use super::gt::base_power::GtExpBasePowProver;
+use super::gt::exponentiation::{GtExpParams, GtExpProver};
+use super::gt::indexing::{
+    k_gt, num_gt_constraints, num_gt_constraints_padded, num_gt_mul_constraints_padded,
+};
+use super::gt::multiplication::{GtMulParams, GtMulProver};
+use super::gt::shift::{GtShiftParams, GtShiftProver};
+use super::gt::stage1_base_openings::GtExpBaseStage1OpeningsProver;
+use super::gt::stage2_base_openings::GtExpBaseStage2OpeningsProver;
+use super::gt::stage2_openings::GtExpStage2OpeningsProver;
+use super::gt::types::GtMulConstraintPolynomials;
+use super::gt::wiring::WiringGtProver;
+use super::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
+use super::wiring_plan::{derive_wiring_plan, G1ValueRef, G2ValueRef, GtProducer};
+use super::witness::GTCombineWitness;
+use super::witness_generation;
+use super::RecursionConstraintMetadata;
 /// Proof generated by the recursion SNARK
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct RecursionProof<F: JoltField, T: Transcript, PCS: CommitmentScheme<Field = F>> {
@@ -177,6 +171,12 @@ pub struct RecursionProver<F: JoltField = Fq> {
     pub pairing_boundary: Option<PairingBoundary>,
     /// Stage-8 joint commitment value (Fq12), bound to combine-commitments GT ops once wiring is enabled.
     pub joint_commitment: Option<ark_bn254::Fq12>,
+    /// Boundary GT inputs (u32 `ValueId.0` -> Fq12) used by GT wiring constraints.
+    pub gt_inputs: Option<Vec<(u32, ark_bn254::Fq12)>>,
+    /// Boundary G1 inputs (u32 `ValueId.0` -> G1Affine) used by G1 wiring constraints.
+    pub g1_inputs: Option<Vec<(u32, ark_bn254::G1Affine)>>,
+    /// Boundary G2 inputs (u32 `ValueId.0` -> G2Affine) used by G2 wiring constraints.
+    pub g2_inputs: Option<Vec<(u32, ark_bn254::G2Affine)>>,
     /// Number of leaf commitments in the Stage-8 combine DAG.
     pub combine_leaves: usize,
     /// Phantom for field type
@@ -232,7 +232,13 @@ impl RecursionProver<Fq> {
     ) -> Result<(Self, ark_bn254::Fq12, PCS::Ast, PairingBoundary), Box<dyn std::error::Error>>
     where
         F: JoltField,
-        PCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>,
+        PCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>
+            + CommitmentScheme<
+                Field = F,
+                Proof = ArkDoryProof,
+                VerifierSetup = ArkworksVerifierSetup,
+                Commitment = ArkGT,
+            >,
         ProofTranscript: Transcript,
         PCS::CombineHint: Send,
     {
@@ -258,7 +264,7 @@ impl RecursionProver<Fq> {
                 .get(&poly)
                 .ok_or_else(|| format!("Missing commitment for Stage 8 polynomial {poly:?}"))?;
             coeffs.push(coeff);
-            comms.push(commitment.clone());
+            comms.push(*commitment);
         }
 
         let joint_commitment = PCS::combine_commitments(&comms, &coeffs);
@@ -316,10 +322,133 @@ impl RecursionProver<Fq> {
             )
         })?;
 
+        // Resolve any GT-valued AST inputs that feed directly into GT ports (e.g. GTMul lhs/rhs).
+        //
+        // These are used by the GT wiring sumcheck as verifier-derived boundary constants.
+        let wiring_for_inputs =
+            derive_wiring_plan(&ast, comms.len(), &pairing_boundary).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("AST->wiring-plan derivation failed: {e}"),
+                )
+            })?;
+        let dory_setup: dory::setup::VerifierSetup<BN254> = verifier_setup.clone().into();
+        let mut gt_input_ids: Vec<u32> = wiring_for_inputs
+            .gt
+            .iter()
+            .filter_map(|e| match e.src {
+                GtProducer::GtInput { value_id } => Some(value_id),
+                _ => None,
+            })
+            .collect();
+        gt_input_ids.sort();
+        gt_input_ids.dedup();
+        let mut gt_inputs: Vec<(u32, ark_bn254::Fq12)> = Vec::with_capacity(gt_input_ids.len());
+        for value_id in gt_input_ids {
+            let idx = value_id as usize;
+            let node = ast.nodes.get(idx).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("gt_input value_id {value_id} out of bounds"),
+                )
+            })?;
+            let AstOp::Input { source } = &node.op else {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("gt_input value_id {value_id} is not an AstOp::Input"),
+                )));
+            };
+            let v = resolve_input_gt(joint_opening_proof, &dory_setup, joint_commitment, source)
+                .map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("gt_input resolve failed for value_id {value_id}: {e}"),
+                    )) as Box<dyn std::error::Error>
+                })?;
+            gt_inputs.push((value_id, v.0));
+        }
+        let mut g1_input_ids: Vec<u32> = wiring_for_inputs
+            .g1
+            .iter()
+            .flat_map(|e| [e.src, e.dst])
+            .filter_map(|v| match v {
+                G1ValueRef::G1Input { value_id } => Some(value_id),
+                _ => None,
+            })
+            .collect();
+        g1_input_ids.sort();
+        g1_input_ids.dedup();
+        let mut g1_inputs: Vec<(u32, ark_bn254::G1Affine)> = Vec::with_capacity(g1_input_ids.len());
+        for value_id in g1_input_ids {
+            let idx = value_id as usize;
+            let node = ast.nodes.get(idx).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("g1_input value_id {value_id} out of bounds"),
+                )
+            })?;
+            let AstOp::Input { source } = &node.op else {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("g1_input value_id {value_id} is not an AstOp::Input"),
+                )));
+            };
+            let p = resolve_input_g1(joint_opening_proof, &dory_setup, source)
+                .map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("g1_input resolve failed for value_id {value_id}: {e}"),
+                    )) as Box<dyn std::error::Error>
+                })?
+                .0
+                .into_affine();
+            g1_inputs.push((value_id, p));
+        }
+        let mut g2_input_ids: Vec<u32> = wiring_for_inputs
+            .g2
+            .iter()
+            .flat_map(|e| [e.src, e.dst])
+            .filter_map(|v| match v {
+                G2ValueRef::G2Input { value_id } => Some(value_id),
+                _ => None,
+            })
+            .collect();
+        g2_input_ids.sort();
+        g2_input_ids.dedup();
+        let mut g2_inputs: Vec<(u32, ark_bn254::G2Affine)> = Vec::with_capacity(g2_input_ids.len());
+        for value_id in g2_input_ids {
+            let idx = value_id as usize;
+            let node = ast.nodes.get(idx).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("g2_input value_id {value_id} out of bounds"),
+                )
+            })?;
+            let AstOp::Input { source } = &node.op else {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("g2_input value_id {value_id} is not an AstOp::Input"),
+                )));
+            };
+            let p = resolve_input_g2(joint_opening_proof, &dory_setup, source)
+                .map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("g2_input resolve failed for value_id {value_id}: {e}"),
+                    )) as Box<dyn std::error::Error>
+                })?
+                .0
+                .into_affine();
+            g2_inputs.push((value_id, p));
+        }
+
         // Build constraint system from generated witnesses and include combine witness constraints.
         let mut prover = Self::new_from_witnesses(witness_collection, Some(combine_witness))?;
         prover.pairing_boundary = Some(pairing_boundary.clone());
         prover.joint_commitment = Some(stage8_combine_hint_fq12);
+        prover.gt_inputs = Some(gt_inputs);
+        prover.g1_inputs = Some(g1_inputs);
+        prover.g2_inputs = Some(g2_inputs);
 
         Ok((prover, stage8_combine_hint_fq12, ast, pairing_boundary))
     }
@@ -349,7 +478,13 @@ impl RecursionProver<Fq> {
     >
     where
         F: JoltField,
-        DoryPCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>,
+        DoryPCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>
+            + CommitmentScheme<
+                Field = F,
+                Proof = ArkDoryProof,
+                VerifierSetup = ArkworksVerifierSetup,
+                Commitment = ArkGT,
+            >,
         DoryPCS::CombineHint: Send,
         ProofTranscript: Transcript,
     {
@@ -427,6 +562,9 @@ impl RecursionProver<Fq> {
             ast: None,
             pairing_boundary: None,
             joint_commitment: None,
+            gt_inputs: None,
+            g1_inputs: None,
+            g2_inputs: None,
             combine_leaves,
             _marker: std::marker::PhantomData,
         })
@@ -924,28 +1062,34 @@ impl RecursionProver<Fq> {
                 .map_err(|_e| "AST->wiring-plan derivation failed")?;
 
             if !wiring.gt.is_empty() {
+                let gt_inputs = self.gt_inputs.as_deref().unwrap_or(&[]);
                 let wiring_gt = WiringGtProver::<T>::new(
                     &self.constraint_system,
                     wiring.gt.clone(),
                     pairing_boundary,
                     *joint_commitment,
+                    gt_inputs,
                     transcript,
                 );
                 provers.push(Box::new(wiring_gt));
             }
             if !wiring.g1.is_empty() {
+                let g1_inputs = self.g1_inputs.as_deref().unwrap_or(&[]);
                 provers.push(Box::new(WiringG1Prover::<T>::new(
                     &self.constraint_system,
                     wiring.g1.clone(),
                     pairing_boundary,
+                    g1_inputs,
                     transcript,
                 )));
             }
             if !wiring.g2.is_empty() {
+                let g2_inputs = self.g2_inputs.as_deref().unwrap_or(&[]);
                 provers.push(Box::new(WiringG2Prover::<T>::new(
                     &self.constraint_system,
                     wiring.g2.clone(),
                     pairing_boundary,
+                    g2_inputs,
                     transcript,
                 )));
             }
@@ -1408,10 +1552,7 @@ impl RecursionProver<Fq> {
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
             } else {
-                panic!(
-                    "unexpected prefix-packing entry without a family tag: {:?}",
-                    entry
-                )
+                panic!("unexpected prefix-packing entry without a family tag: {entry:?}")
             }
         });
 

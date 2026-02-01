@@ -75,10 +75,6 @@ impl<F: JoltField> Fq2Components<F> {
         }
     }
 
-    // =========================================================================
-    // Full arithmetic operations (return Fq2Components)
-    // =========================================================================
-
     /// Add two Fq2 elements: (a0,a1) + (b0,b1) = (a0+b0, a1+b1)
     #[inline(always)]
     pub fn add(&self, other: &Self) -> Self {
@@ -133,10 +129,6 @@ impl<F: JoltField> Fq2Components<F> {
             c1: self.c1 * scalar,
         }
     }
-
-    // =========================================================================
-    // Single-component operations (return F, avoid computing unused component)
-    // =========================================================================
 
     /// Compute only c0 of multiplication: a0*b0 - a1*b1
     #[inline(always)]

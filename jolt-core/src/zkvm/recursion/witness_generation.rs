@@ -4,6 +4,13 @@
 //! - **PlanPass**: derive the public constraint ordering + build native witness stores.
 //! - **EmitPass**: derive the prefix-packing layout and emit the packed dense evaluation table.
 
+use ark_bn254::{Fq, Fq12};
+use ark_ff::{Field, Zero};
+use dory::recursion::{OpId, WitnessCollection};
+use jolt_optimizations::fq12_to_multilinear_evals;
+use rayon::prelude::*;
+
+use crate::poly::commitment::dory::recursion::{JoltGtExpWitness, JoltGtMulWitness, JoltWitness};
 use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::zkvm::recursion::constraints::system::{
     ConstraintLocator, ConstraintSystem, ConstraintType, G1AddNative, G1ScalarMulNative,
@@ -15,15 +22,6 @@ use crate::zkvm::recursion::gt::indexing::{k_exp, k_mul};
 use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::{PrefixPackedEntry, PrefixPackingLayout};
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};
-
-use ark_bn254::{Fq, Fq12};
-use ark_ff::{Field, Zero};
-use dory::recursion::OpId;
-use dory::recursion::WitnessCollection;
-use jolt_optimizations::fq12_to_multilinear_evals;
-use rayon::prelude::*;
-
-use crate::poly::commitment::dory::recursion::{JoltGtExpWitness, JoltGtMulWitness, JoltWitness};
 
 #[tracing::instrument(skip_all, fields(num_constraints))]
 fn compute_shape(num_constraints: usize) -> RecursionMatrixShape {

@@ -9,11 +9,11 @@
 //! - Lets Stage 1 constraint code be generic over `C: RecursionCurve` instead of relying on
 //!   `unsafe` transmutes between `F` and `Fq`.
 
-use crate::field::JoltField;
 use ark_ff::{Field, PrimeField};
+use jolt_optimizations::{fq12_to_multilinear_evals, get_g_mle};
 use num_traits::Zero;
 
-use jolt_optimizations::{fq12_to_multilinear_evals, get_g_mle};
+use crate::field::JoltField;
 
 /// A trait defining the curve-specific types and operations needed for the recursion SNARK.
 ///

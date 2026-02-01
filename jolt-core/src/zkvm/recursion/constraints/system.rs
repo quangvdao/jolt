@@ -1,5 +1,11 @@
 //! Recursion constraint-system types (streaming plan output).
 
+use ark_bn254::{Fq, Fq12, Fq2};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, Read as ArkRead, SerializationError, Valid,
+    Validate, Write as ArkWrite,
+};
+
 use crate::field::JoltField;
 use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
@@ -8,10 +14,6 @@ use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::RecursionConstraintMetadata;
-use ark_bn254::{Fq, Fq12, Fq2};
-use ark_serialize::{
-    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
-};
 
 /// Convert index to binary representation as field elements (little-endian).
 pub fn index_to_binary<F: JoltField>(index: usize, num_vars: usize) -> Vec<F> {
@@ -159,7 +161,7 @@ impl PolyType {
 }
 
 impl CanonicalSerialize for PolyType {
-    fn serialize_with_mode<W: ark_serialize::Write>(
+    fn serialize_with_mode<W: ArkWrite>(
         &self,
         mut writer: W,
         compress: Compress,
@@ -174,10 +176,10 @@ impl CanonicalSerialize for PolyType {
 }
 
 impl CanonicalDeserialize for PolyType {
-    fn deserialize_with_mode<R: ark_serialize::Read>(
+    fn deserialize_with_mode<R: ArkRead>(
         mut reader: R,
         compress: Compress,
-        validate: ark_serialize::Validate,
+        validate: Validate,
     ) -> Result<Self, SerializationError> {
         let v = u8::deserialize_with_mode(&mut reader, compress, validate)?;
         let ty = match v {
@@ -317,7 +319,7 @@ const GT_MUL_SPECS: [(PolyType, usize); 4] = [
     (PolyType::MulQuotient, 4),
 ];
 
-const G1_SCALAR_MUL_POLYS: [PolyType; 8] = [
+const G1_SCALAR_MUL_POLYS: [PolyType; 10] = [
     PolyType::G1ScalarMulXA,
     PolyType::G1ScalarMulYA,
     PolyType::G1ScalarMulXT,
@@ -326,8 +328,10 @@ const G1_SCALAR_MUL_POLYS: [PolyType; 8] = [
     PolyType::G1ScalarMulYANext,
     PolyType::G1ScalarMulTIndicator,
     PolyType::G1ScalarMulAIndicator,
+    PolyType::G1ScalarMulXP,
+    PolyType::G1ScalarMulYP,
 ];
-const G1_SCALAR_MUL_SPECS: [(PolyType, usize); 8] = [
+const G1_SCALAR_MUL_SPECS: [(PolyType, usize); 10] = [
     (PolyType::G1ScalarMulXA, 8),
     (PolyType::G1ScalarMulYA, 8),
     (PolyType::G1ScalarMulXT, 8),
@@ -336,6 +340,9 @@ const G1_SCALAR_MUL_SPECS: [(PolyType, usize); 8] = [
     (PolyType::G1ScalarMulYANext, 8),
     (PolyType::G1ScalarMulTIndicator, 8),
     (PolyType::G1ScalarMulAIndicator, 8),
+    // Base-point coordinates are **c-only** (no step vars); the `c` suffix is handled by packing.
+    (PolyType::G1ScalarMulXP, 0),
+    (PolyType::G1ScalarMulYP, 0),
 ];
 
 const G2_SCALAR_MUL_POLYS: [PolyType; 18] = [
@@ -660,7 +667,7 @@ impl RecursionMetadataBuilder {
 }
 
 impl CanonicalSerialize for ConstraintType {
-    fn serialize_with_mode<W: ark_serialize::Write>(
+    fn serialize_with_mode<W: ArkWrite>(
         &self,
         mut writer: W,
         compress: Compress,
@@ -702,10 +709,10 @@ impl CanonicalSerialize for ConstraintType {
 }
 
 impl CanonicalDeserialize for ConstraintType {
-    fn deserialize_with_mode<R: ark_serialize::Read>(
+    fn deserialize_with_mode<R: ArkRead>(
         mut reader: R,
         compress: Compress,
-        validate: ark_serialize::Validate,
+        validate: Validate,
     ) -> Result<Self, SerializationError> {
         let variant = u8::deserialize_with_mode(&mut reader, compress, validate)?;
         match variant {

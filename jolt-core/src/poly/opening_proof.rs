@@ -215,6 +215,16 @@ pub enum SumcheckId {
     ///
     /// Used to namespace auxiliary virtual openings emitted by wiring checks.
     GtWiring,
+    /// Cache-only Stage-2 openings for GTExp committed base rows (x4 domain).
+    ///
+    /// This namespaces the virtual openings for `GtExpTerm::{Base,Base2,Base3}` when those are
+    /// committed as part of the recursion dense matrix.
+    GtExpBaseClaimReduction,
+    /// Cache-only Stage-1 openings for GTExp committed base rows at the Stage-1 point.
+    ///
+    /// This allows `GtExpVerifier::expected_output_claim` to consume `B/B2/B3` at the Stage-1
+    /// evaluation point without per-instance recomputation.
+    GtExpBaseStage1Openings,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]

@@ -153,6 +153,8 @@ fn test_recursion_snark_e2e_with_dory() {
 
     // Create verifier input
     // Prefer the metadata produced by `poly_commit`, to ensure perfect alignment.
+    let gt_exp_base_inputs: Vec<Option<Fq12>> =
+        vec![None; recursion_constraint_metadata.gt_exp_public_inputs.len()];
     let verifier_input = RecursionVerifierInput {
         constraint_types: recursion_constraint_metadata.constraint_types,
         num_vars,
@@ -161,6 +163,7 @@ fn test_recursion_snark_e2e_with_dory() {
         num_constraints,
         num_constraints_padded,
         gt_exp_public_inputs: recursion_constraint_metadata.gt_exp_public_inputs,
+        gt_exp_base_inputs,
         g1_scalar_mul_public_inputs: recursion_constraint_metadata.g1_scalar_mul_public_inputs,
         g2_scalar_mul_public_inputs: recursion_constraint_metadata.g2_scalar_mul_public_inputs,
         wiring: WiringPlan::default(),

@@ -16,8 +16,8 @@ use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::{PrefixPackedEntry, PrefixPackingLayout};
 use crate::zkvm::recursion::witness::{GTCombineWitness, GTExpOpWitness, GTMulOpWitness};
 
-use ark_bn254::Fq;
-use ark_ff::Zero;
+use ark_bn254::{Fq, Fq12};
+use ark_ff::{Field, Zero};
 use dory::recursion::OpId;
 use dory::recursion::WitnessCollection;
 use jolt_optimizations::fq12_to_multilinear_evals;
@@ -41,7 +41,7 @@ fn compute_shape(num_constraints: usize) -> RecursionMatrixShape {
     }
 }
 
-fn pack_gt_exp_op_witness(exp_wit: GTExpOpWitness) -> (GtExpWitness<Fq>, GtExpPublicInputs) {
+fn pack_gt_exp_op_witness(exp_wit: GTExpOpWitness) -> (GtExpWitness<Fq>, GtExpPublicInputs, Fq12) {
     // Matches the `DoryMatrixBuilder::add_combine_witness` packing logic.
     let GTExpOpWitness {
         base,
@@ -53,12 +53,12 @@ fn pack_gt_exp_op_witness(exp_wit: GTExpOpWitness) -> (GtExpWitness<Fq>, GtExpPu
     } = exp_wit;
 
     // Move scalar bits exactly once: keep them in the public inputs, and borrow for witness packing.
-    let public_input = GtExpPublicInputs::new(base, bits);
+    let public_input = GtExpPublicInputs::new(bits);
 
-    let base_mle = fq12_to_multilinear_evals(&public_input.base);
-    let base2 = public_input.base * public_input.base;
+    let base_mle = fq12_to_multilinear_evals(&base);
+    let base2 = base * base;
     let base2_mle = fq12_to_multilinear_evals(&base2);
-    let base3 = base2 * public_input.base;
+    let base3 = base2 * base;
     let base3_mle = fq12_to_multilinear_evals(&base3);
 
     let num_steps = public_input.scalar_bits.len().div_ceil(2);
@@ -77,7 +77,7 @@ fn pack_gt_exp_op_witness(exp_wit: GTExpOpWitness) -> (GtExpWitness<Fq>, GtExpPu
             &base2_mle,
             &base3_mle,
         );
-        return (packed, public_input);
+        return (packed, public_input, base);
     }
 
     let mut fixed_quotients = quotient_mles;
@@ -101,7 +101,7 @@ fn pack_gt_exp_op_witness(exp_wit: GTExpOpWitness) -> (GtExpWitness<Fq>, GtExpPu
         &base2_mle,
         &base3_mle,
     );
-    (packed, public_input)
+    (packed, public_input, base)
 }
 
 fn gt_mul_rows_from_op_witness(w: GTMulOpWitness) -> Option<GtMulNativeRows> {
@@ -132,7 +132,7 @@ fn gt_mul_rows_from_op_witness(w: GTMulOpWitness) -> Option<GtMulNativeRows> {
 )]
 fn plan_gt_exp(
     mut gt_exp_items: Vec<(OpId, JoltGtExpWitness)>,
-) -> Vec<(GtExpWitness<Fq>, GtExpPublicInputs)> {
+) -> Vec<(GtExpWitness<Fq>, GtExpPublicInputs, Fq12)> {
     gt_exp_items.sort_by_key(|(op_id, _)| *op_id);
 
     gt_exp_items
@@ -146,12 +146,12 @@ fn plan_gt_exp(
                 ..
             } = witness;
 
-            let public_input = GtExpPublicInputs::new(base, bits);
+            let public_input = GtExpPublicInputs::new(bits);
 
-            let base_mle = fq12_to_multilinear_evals(&public_input.base);
-            let base2 = public_input.base * public_input.base;
+            let base_mle = fq12_to_multilinear_evals(&base);
+            let base2 = base * base;
             let base2_mle = fq12_to_multilinear_evals(&base2);
-            let base3 = base2 * public_input.base;
+            let base3 = base2 * base;
             let base3_mle = fq12_to_multilinear_evals(&base3);
 
             let packed = GtExpWitness::from_steps(
@@ -162,7 +162,7 @@ fn plan_gt_exp(
                 &base2_mle,
                 &base3_mle,
             );
-            (packed, public_input)
+            (packed, public_input, base)
         })
         .collect()
 }
@@ -207,14 +207,16 @@ fn plan_combine_witness(
     locator_by_constraint: &mut Vec<ConstraintLocator>,
     gt_exp_witnesses: &mut Vec<GtExpWitness<Fq>>,
     gt_exp_public_inputs: &mut Vec<GtExpPublicInputs>,
+    gt_exp_base_inputs: &mut Vec<Fq12>,
     gt_mul_rows: &mut Vec<GtMulNativeRows>,
 ) {
     // Append GT exp constraints for combine terms.
     for exp_wit in cw.exp_witnesses {
-        let (packed, public_input) = pack_gt_exp_op_witness(exp_wit);
+        let (packed, public_input, base) = pack_gt_exp_op_witness(exp_wit);
         let local = gt_exp_witnesses.len();
         gt_exp_witnesses.push(packed);
         gt_exp_public_inputs.push(public_input);
+        gt_exp_base_inputs.push(base);
         constraint_types.push(ConstraintType::GtExp);
         locator_by_constraint.push(ConstraintLocator::GtExp { local });
     }
@@ -260,6 +262,7 @@ pub fn plan_constraint_system(
 
     let mut gt_exp_witnesses: Vec<GtExpWitness<Fq>> = Vec::new();
     let mut gt_exp_public_inputs: Vec<GtExpPublicInputs> = Vec::new();
+    let mut gt_exp_base_inputs: Vec<Fq12> = Vec::new();
 
     let mut gt_mul_rows: Vec<GtMulNativeRows> = Vec::new();
     let mut g1_scalar_mul_rows: Vec<G1ScalarMulNative> = Vec::new();
@@ -285,10 +288,11 @@ pub fn plan_constraint_system(
     // ---- GT exp ----
     let prepared_gt_exp = plan_gt_exp(gt_exp.into_iter().collect());
 
-    for (packed, public_input) in prepared_gt_exp {
+    for (packed, public_input, base) in prepared_gt_exp {
         let local = gt_exp_witnesses.len();
         gt_exp_witnesses.push(packed);
         gt_exp_public_inputs.push(public_input);
+        gt_exp_base_inputs.push(base);
         constraint_types.push(ConstraintType::GtExp);
         locator_by_constraint.push(ConstraintLocator::GtExp { local });
     }
@@ -480,6 +484,7 @@ pub fn plan_constraint_system(
             &mut locator_by_constraint,
             &mut gt_exp_witnesses,
             &mut gt_exp_public_inputs,
+            &mut gt_exp_base_inputs,
             &mut gt_mul_rows,
         );
     }
@@ -499,6 +504,7 @@ pub fn plan_constraint_system(
         g_poly: g_poly_4var,
         gt_exp_witnesses,
         gt_exp_public_inputs,
+        gt_exp_base_inputs,
         gt_mul_rows,
         g1_scalar_mul_rows,
         g2_scalar_mul_rows,
@@ -566,6 +572,7 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
         if entry.is_gt {
             // Commit exp/mul rows at family-local padded sizes.
             let num_vars_gt_exp = 11usize + k_exp(&cs.constraint_types);
+            let num_vars_gt_exp_base = 4usize + k_exp(&cs.constraint_types);
             let num_vars_gt_mul = 4usize + k_mul(&cs.constraint_types);
 
             // IMPORTANT (no-padding GTMul + c-suffix):
@@ -588,6 +595,80 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                             _ => unreachable!(),
                         };
                         fill_block_bit_reversed(dst, src, entry.num_vars, c_exp, 11);
+                    }
+                }
+                PolyType::GtExpBase
+                | PolyType::GtExpBase2
+                | PolyType::GtExpBase3
+                | PolyType::GtExpBaseSquareQuotient
+                | PolyType::GtExpBaseCubeQuotient => {
+                    if entry.num_vars != num_vars_gt_exp_base {
+                        panic!(
+                            "GTExp base entry has num_vars={}, expected {} (4 + k_exp)",
+                            entry.num_vars, num_vars_gt_exp_base
+                        );
+                    }
+                    // Extract the native 4-var table from the 11-var packed witness by
+                    // taking the s=0 slice (base is replicated across s).
+                    const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
+                    debug_assert_eq!(
+                        cs.g_poly.Z.len(),
+                        16,
+                        "expected GT g polynomial to have 16 evaluations"
+                    );
+                    for c_exp in 0..cs.gt_exp_witnesses.len() {
+                        // Always extract base/base2/base3 on the native 4-var u-domain.
+                        let b11 = &cs.gt_exp_witnesses[c_exp].base_packed;
+                        let b211 = &cs.gt_exp_witnesses[c_exp].base2_packed;
+                        let b311 = &cs.gt_exp_witnesses[c_exp].base3_packed;
+                        debug_assert_eq!(b11.len(), 1usize << 11);
+                        debug_assert_eq!(b211.len(), 1usize << 11);
+                        debug_assert_eq!(b311.len(), 1usize << 11);
+
+                        let mut base4 = [Fq::zero(); 16];
+                        let mut base24 = [Fq::zero(); 16];
+                        let mut base34 = [Fq::zero(); 16];
+                        for u in 0..16 {
+                            base4[u] = b11[u * STEP_STRIDE];
+                            base24[u] = b211[u * STEP_STRIDE];
+                            base34[u] = b311[u * STEP_STRIDE];
+                        }
+
+                        let src4: [Fq; 16] = match entry.poly_type {
+                            PolyType::GtExpBase => base4,
+                            PolyType::GtExpBase2 => base24,
+                            PolyType::GtExpBase3 => base34,
+                            PolyType::GtExpBaseSquareQuotient => {
+                                let mut q2 = [Fq::zero(); 16];
+                                for u in 0..16 {
+                                    let g = cs.g_poly.Z[u];
+                                    if g.is_zero() {
+                                        // At roots of g we require base^2 == base2; quotient is irrelevant.
+                                        debug_assert!((base4[u] * base4[u] - base24[u]).is_zero());
+                                        q2[u] = Fq::zero();
+                                    } else {
+                                        q2[u] = (base4[u] * base4[u] - base24[u]) * g.inverse().unwrap();
+                                    }
+                                }
+                                q2
+                            }
+                            PolyType::GtExpBaseCubeQuotient => {
+                                let mut q3 = [Fq::zero(); 16];
+                                for u in 0..16 {
+                                    let g = cs.g_poly.Z[u];
+                                    if g.is_zero() {
+                                        debug_assert!((base24[u] * base4[u] - base34[u]).is_zero());
+                                        q3[u] = Fq::zero();
+                                    } else {
+                                        q3[u] = (base24[u] * base4[u] - base34[u]) * g.inverse().unwrap();
+                                    }
+                                }
+                                q3
+                            }
+                            _ => unreachable!(),
+                        };
+
+                        fill_block_bit_reversed(dst, &src4, entry.num_vars, c_exp, 4);
                     }
                 }
                 PolyType::MulLhs

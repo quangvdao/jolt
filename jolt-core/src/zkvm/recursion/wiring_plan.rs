@@ -1182,7 +1182,7 @@ pub fn derive_wiring_plan(
                             instance: mul_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *lhs) {
+                } else {
                     return Err(ProofVerifyError::DoryError(format!(
                         "unwired GTMul lhs value {lhs:?}"
                     )));
@@ -1201,7 +1201,7 @@ pub fn derive_wiring_plan(
                             instance: mul_instance,
                         },
                     });
-                } else if !is_ast_input(ast, *rhs) {
+                } else {
                     return Err(ProofVerifyError::DoryError(format!(
                         "unwired GTMul rhs value {rhs:?}"
                     )));
@@ -1303,6 +1303,12 @@ pub fn derive_wiring_plan(
                             instance: exp_instance,
                         },
                     });
+                } else {
+                    // CRITICAL: if we don't wire a GTExp base, the committed Base row can become
+                    // unconstrained once Stage-2 `B-\\hat B` binding is removed.
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired GTExp base value {base:?} (GTExp instance {exp_instance})"
+                    )));
                 }
             }
             AstOp::G1ScalarMul {
@@ -1418,6 +1424,10 @@ pub fn derive_wiring_plan(
             src,
             dst: GtConsumer::PairingBoundaryRhs,
         });
+    } else {
+        return Err(ProofVerifyError::DoryError(format!(
+            "unwired pairing RHS value {rhs_id:?}"
+        )));
     }
 
     // --- Combine-commitments wiring (GT) + binding to joint commitment ---
@@ -1431,6 +1441,17 @@ pub fn derive_wiring_plan(
         let combine_exp_start = dory_gt_exp;
         let combine_mul_start = dory_gt_mul;
         let expected_mul_count = CombineDag::new(combine_leaves).num_muls_total();
+        // Bind each combine-leaf GTExp base to its boundary constant.
+        //
+        // NOTE: after Stage-2 `B-\\hat B` is removed, these bases must be explicitly anchored,
+        // otherwise the committed `Base` rows for combine GTExp instances can become unconstrained.
+        for i in 0..combine_leaves {
+            let inst = combine_exp_start + i;
+            plan.gt.push(GtWiringEdge {
+                src: GtProducer::GtExpBase { instance: inst },
+                dst: GtConsumer::GtExpBase { instance: inst },
+            });
+        }
 
         let mut nodes: Vec<GtProducer> = (0..combine_leaves)
             .map(|i| GtProducer::GtExpRho {

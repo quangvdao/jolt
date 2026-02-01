@@ -479,6 +479,26 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             SumcheckId::GtExp,
         );
 
+        // Committed base openings at the Stage-1 point (cached by `GtExpBaseStage1Openings*`).
+        let base = accumulator.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Base,
+            }),
+            SumcheckId::GtExpBaseStage1Openings,
+        );
+        let base2 = accumulator.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Base2,
+            }),
+            SumcheckId::GtExpBaseStage1Openings,
+        );
+        let base3 = accumulator.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Base3,
+            }),
+            SumcheckId::GtExpBaseStage1Openings,
+        );
+
         // Compute mixed digit/base values at this c-point.
         let eq_evals_s = EqPolynomial::<Fq>::evals(&r_s_star);
         let eq_evals_x = EqPolynomial::<Fq>::evals(&r_x_star);
@@ -493,22 +513,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
 
         let mut digit_lo = Fq::zero();
         let mut digit_hi = Fq::zero();
-        let mut base = Fq::zero();
-        let mut base2 = Fq::zero();
-        let mut base3 = Fq::zero();
 
         for (w, &c_idx) in self.gtexp_c_indices.iter().enumerate() {
             // Eq(r_c, c_idx) using little-endian bits for indices (round order is LSB-first).
             let w_c = eq_lsb_index(&r_c_tail_lsb, c_idx);
 
             let (u, v) = self.public_inputs[w].evaluate_digit_mles(&eq_evals_s);
-            let (b1, b2, b3v) = self.public_inputs[w].evaluate_base_powers_mle(&eq_evals_x);
 
             digit_lo += w_c * u;
             digit_hi += w_c * v;
-            base += w_c * b1;
-            base2 += w_c * b2;
-            base3 += w_c * b3v;
         }
 
         let u = digit_lo;

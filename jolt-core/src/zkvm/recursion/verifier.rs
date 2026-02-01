@@ -44,10 +44,13 @@ use super::{
         wiring::WiringG2Verifier,
     },
     gt::{
+        base_power::GtExpBasePowVerifier,
         exponentiation::{GtExpParams, GtExpVerifier},
+        stage1_base_openings::GtExpBaseStage1OpeningsVerifier,
         indexing::{k_gt, num_gt_mul_constraints_padded},
         multiplication::{GtMulParams, GtMulVerifier},
         shift::{GtShiftParams, GtShiftVerifier},
+        stage2_base_openings::GtExpBaseStage2OpeningsVerifier,
         stage2_openings::GtExpStage2OpeningsVerifier,
         types::GtExpPublicInputs,
         wiring::WiringGtVerifier,
@@ -99,8 +102,14 @@ pub struct RecursionVerifierInput {
     pub num_constraints: usize,
     /// Padded number of constraints
     pub num_constraints_padded: usize,
-    /// Public inputs for packed GT exp (base Fq12 and scalar bits)
+    /// Public inputs for packed GT exp (scalar bits).
     pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
+    /// Boundary GT bases for GTExp instances whose base is an AST input (or a combine-leaf input).
+    ///
+    /// - Length must match `gt_exp_public_inputs.len()`.
+    /// - For non-input bases (bound via wiring), this entry should be `None` so the verifier does
+    ///   not need to materialize the base value.
+    pub gt_exp_base_inputs: Vec<Option<Fq12>>,
     /// Public inputs for G1 scalar multiplication (scalar per G1ScalarMul constraint)
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
     /// Public inputs for G2 scalar multiplication (scalar per G2ScalarMul constraint)
@@ -132,6 +141,8 @@ impl CanonicalSerialize for RecursionVerifierInput {
             .serialize_with_mode(&mut writer, compress)?;
         self.gt_exp_public_inputs
             .serialize_with_mode(&mut writer, compress)?;
+        self.gt_exp_base_inputs
+            .serialize_with_mode(&mut writer, compress)?;
         self.g1_scalar_mul_public_inputs
             .serialize_with_mode(&mut writer, compress)?;
         self.g2_scalar_mul_public_inputs
@@ -152,6 +163,7 @@ impl CanonicalSerialize for RecursionVerifierInput {
             + self.num_constraints.serialized_size(compress)
             + self.num_constraints_padded.serialized_size(compress)
             + self.gt_exp_public_inputs.serialized_size(compress)
+            + self.gt_exp_base_inputs.serialized_size(compress)
             + self.g1_scalar_mul_public_inputs.serialized_size(compress)
             + self.g2_scalar_mul_public_inputs.serialized_size(compress)
             + self.wiring.serialized_size(compress)
@@ -180,6 +192,7 @@ impl CanonicalDeserialize for RecursionVerifierInput {
             num_constraints: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             num_constraints_padded: usize::deserialize_with_mode(&mut reader, compress, validate)?,
             gt_exp_public_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
+            gt_exp_base_inputs: Vec::deserialize_with_mode(&mut reader, compress, validate)?,
             g1_scalar_mul_public_inputs: Vec::deserialize_with_mode(
                 &mut reader,
                 compress,
@@ -210,6 +223,7 @@ impl GuestSerialize for RecursionVerifierInput {
         self.num_constraints.guest_serialize(w)?;
         self.num_constraints_padded.guest_serialize(w)?;
         self.gt_exp_public_inputs.guest_serialize(w)?;
+        self.gt_exp_base_inputs.guest_serialize(w)?;
         self.g1_scalar_mul_public_inputs.guest_serialize(w)?;
         self.g2_scalar_mul_public_inputs.guest_serialize(w)?;
         self.wiring.guest_serialize(w)?;
@@ -229,6 +243,7 @@ impl GuestDeserialize for RecursionVerifierInput {
             num_constraints: usize::guest_deserialize(r)?,
             num_constraints_padded: usize::guest_deserialize(r)?,
             gt_exp_public_inputs: Vec::guest_deserialize(r)?,
+            gt_exp_base_inputs: Vec::guest_deserialize(r)?,
             g1_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
             g2_scalar_mul_public_inputs: Vec::guest_deserialize(r)?,
             wiring: WiringPlan::guest_deserialize(r)?,
@@ -382,13 +397,20 @@ impl RecursionVerifier<Fq> {
 
         // Use packed GT exp path
         let params = GtExpParams::from_constraint_types(&self.input.constraint_types);
+        let base_verifier =
+            GtExpBaseStage1OpeningsVerifier::new(&self.input.constraint_types);
         let verifier = GtExpVerifier::new(
             params,
             &self.input.constraint_types,
             self.input.gt_exp_public_inputs.clone(),
             transcript,
         );
-        let r_stage1 = BatchedSumcheck::verify(proof, vec![&verifier], accumulator, transcript)?;
+        let r_stage1 = BatchedSumcheck::verify(
+            proof,
+            vec![&base_verifier, &verifier],
+            accumulator,
+            transcript,
+        )?;
         Ok(r_stage1)
     }
 
@@ -444,6 +466,15 @@ impl RecursionVerifier<Fq> {
             // (emitted by the claim-reduction/openings instance).
             verifiers.push(Box::new(GtExpStage2OpeningsVerifier::new(
                 &self.input.constraint_types,
+            )));
+            verifiers.push(Box::new(GtExpBaseStage2OpeningsVerifier::new(
+                &self.input.constraint_types,
+            )));
+
+            verifiers.push(Box::new(GtExpBasePowVerifier::new(
+                &self.input.constraint_types,
+                <Bn254Recursion as RecursionCurve>::g_mle(),
+                transcript,
             )));
 
             let params = GtShiftParams::from_constraint_types(&self.input.constraint_types);
@@ -607,6 +638,36 @@ impl RecursionVerifier<Fq> {
                         SumcheckId::GtExpClaimReduction,
                         VirtualPolynomial::Recursion(RecursionPoly::GtExp {
                             term: GtExpTerm::Quotient,
+                        }),
+                    ),
+                    PolyType::GtExpBase => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Base,
+                        }),
+                    ),
+                    PolyType::GtExpBase2 => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Base2,
+                        }),
+                    ),
+                    PolyType::GtExpBase3 => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Base3,
+                        }),
+                    ),
+                    PolyType::GtExpBaseSquareQuotient => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::BaseSquareQuotient,
+                        }),
+                    ),
+                    PolyType::GtExpBaseCubeQuotient => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::BaseCubeQuotient,
                         }),
                     ),
                     PolyType::MulLhs => (

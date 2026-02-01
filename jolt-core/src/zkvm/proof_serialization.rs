@@ -89,9 +89,6 @@ impl GuestDeserialize for PairingBoundary {
 #[cfg(feature = "recursion")]
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct NonInputBaseHints {
-    /// One entry per Dory-traced `GTExp` op, in OpId-sorted order.
-    /// `None` means the base was an `AstOp::Input` and can be resolved by the verifier.
-    pub gt_exp_base_hints: Vec<Option<Fq12>>,
     /// One entry per Dory-traced `G1ScalarMul` op, in OpId-sorted order.
     pub g1_scalar_mul_base_hints: Vec<Option<G1Affine>>,
     /// One entry per Dory-traced `G2ScalarMul` op, in OpId-sorted order.
@@ -101,7 +98,6 @@ pub struct NonInputBaseHints {
 #[cfg(feature = "recursion")]
 impl GuestSerialize for NonInputBaseHints {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.gt_exp_base_hints.guest_serialize(w)?;
         self.g1_scalar_mul_base_hints.guest_serialize(w)?;
         self.g2_scalar_mul_base_hints.guest_serialize(w)?;
         Ok(())
@@ -112,7 +108,6 @@ impl GuestSerialize for NonInputBaseHints {
 impl GuestDeserialize for NonInputBaseHints {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         Ok(Self {
-            gt_exp_base_hints: Vec::<Option<Fq12>>::guest_deserialize(r)?,
             g1_scalar_mul_base_hints: Vec::<Option<G1Affine>>::guest_deserialize(r)?,
             g2_scalar_mul_base_hints: Vec::<Option<G2Affine>>::guest_deserialize(r)?,
         })

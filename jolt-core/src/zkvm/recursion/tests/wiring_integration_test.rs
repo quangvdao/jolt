@@ -248,23 +248,12 @@ fn wiring_rejects_tampered_pairing_boundary_rhs() {
 
 #[test]
 #[serial]
-fn wiring_rejects_tampered_non_input_base_hint() {
+fn wiring_rejects_tampered_gt_exp_base_input() {
     let fixture = build_fixture();
 
-    // Ensure we have at least one non-input GTExp base hint to tamper.
-    let mut bad_hints = fixture.non_input_base_hints.clone();
-    let mut tampered = false;
-    for h in bad_hints.gt_exp_base_hints.iter_mut() {
-        if let Some(v) = h.as_mut() {
-            *v += Fq12::one();
-            tampered = true;
-            break;
-        }
-    }
-    assert!(
-        tampered,
-        "test requires at least one non-input GTExp base hint (otherwise it does not exercise the wiring path)"
-    );
+    // NonInputBaseHints no longer carries GTExp bases; GTExp bases are bound via wiring and
+    // boundary base inputs in the verifier input.
+    let bad_hints = fixture.non_input_base_hints.clone();
 
     // Build symbolic AST (verifier side).
     let mut sym_transcript = fixture.stage8_pre_transcript.clone();
@@ -291,8 +280,23 @@ fn wiring_rejects_tampered_non_input_base_hint() {
     )
     .expect("instance plan derivation must succeed");
 
+    // Tamper with a GTExp base boundary input (must be rejected by wiring/base binding).
+    let mut bad_input = derived.verifier_input;
+    let mut tampered = false;
+    for b in bad_input.gt_exp_base_inputs.iter_mut() {
+        if let Some(v) = b.as_mut() {
+            *v += Fq12::one();
+            tampered = true;
+            break;
+        }
+    }
     assert!(
-        !verify_with_input(&fixture, derived.verifier_input),
-        "tampered non-input base hints must not verify"
+        tampered,
+        "test requires at least one GTExp base boundary input (e.g., combine commitments)"
+    );
+
+    assert!(
+        !verify_with_input(&fixture, bad_input),
+        "tampered GTExp base inputs must not verify"
     );
 }

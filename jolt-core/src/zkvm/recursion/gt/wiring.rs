@@ -158,11 +158,16 @@ struct CPhaseState {
     mul_lhs_c: MultilinearPolynomial<Fq>,
     mul_rhs_c: MultilinearPolynomial<Fq>,
     mul_result_c: MultilinearPolynomial<Fq>,
+    /// GTExp base ports as an MLE over the **common** c domain (k vars), replicated across dummy bits.
+    ///
+    /// This represents the committed `GtExpTerm::Base` row values evaluated at the bound `r_u`,
+    /// stacked over the GTExp family index.
+    base_port_c: MultilinearPolynomial<Fq>,
     /// Selector polynomials Eq(c, idx_embed) as basis vectors in the common c domain.
     /// Key is `(dummy_bits, k_family, idx)` packed into a u64.
     selectors: std::collections::HashMap<u64, MultilinearPolynomial<Fq>>,
-    /// Bound GTExp base constants as scalars per GTExp instance (base_i(r_u)).
-    exp_base_at_r: Vec<Fq>,
+    /// Bound GTExp base *inputs* as scalars per GTExp instance (only for `GtProducer::GtExpBase`).
+    exp_base_inputs_at_r: Vec<Fq>,
 }
 
 impl CPhaseState {
@@ -171,6 +176,8 @@ impl CPhaseState {
         self.mul_lhs_c.bind_parallel(r_j, BindingOrder::LowToHigh);
         self.mul_rhs_c.bind_parallel(r_j, BindingOrder::LowToHigh);
         self.mul_result_c
+            .bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.base_port_c
             .bind_parallel(r_j, BindingOrder::LowToHigh);
         for sel in self.selectors.values_mut() {
             sel.bind_parallel(r_j, BindingOrder::LowToHigh);
@@ -203,8 +210,14 @@ pub struct WiringGtProver<T: Transcript> {
     mul_rhs: Vec<Option<MultilinearPolynomial<Fq>>>,
     mul_result: Vec<Option<MultilinearPolynomial<Fq>>>,
 
-    /// GTExp base constants, padded to 11 vars, indexed by GTExp instance.
-    exp_base: Vec<Option<MultilinearPolynomial<Fq>>>,
+    /// GTExp base *inputs* as boundary constants (only used when the wiring plan references
+    /// `GtProducer::GtExpBase { instance }`), padded to 11 vars.
+    exp_base_inputs: Vec<Option<MultilinearPolynomial<Fq>>>,
+
+    /// GTExp base *ports* (the committed `GtExpTerm::Base` row), padded to 11 vars.
+    ///
+    /// This is used for `GtConsumer::GtExpBase { instance }` edges.
+    exp_base_port: Vec<Option<MultilinearPolynomial<Fq>>>,
 
     /// Boundary constants, padded to 11 vars.
     joint_commitment: Option<MultilinearPolynomial<Fq>>,
@@ -294,13 +307,20 @@ impl<T: Transcript> WiringGtProver<T> {
             })
             .collect();
 
-        let exp_base: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
+        // Boundary base inputs (used only when `GtProducer::GtExpBase { instance }` appears).
+        let exp_base_inputs: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
             .map(|i| {
-                let mle_4 = Bn254Recursion::fq12_to_mle(&cs.gt_exp_public_inputs[i].base);
+                let mle_4 = Bn254Recursion::fq12_to_mle(&cs.gt_exp_base_inputs[i]);
                 Some(MultilinearPolynomial::from(pad_4var_to_11var_replicated(
                     &mle_4,
                 )))
             })
+            .collect();
+
+        // Base ports (committed row) are taken from the packed witness base table, which is
+        // replicated across step bits. This matches the padding convention used elsewhere.
+        let exp_base_port: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
+            .map(|i| Some(MultilinearPolynomial::from(cs.gt_exp_witnesses[i].base_packed.clone())))
             .collect();
 
         let joint_commitment = need_joint.then(|| {
@@ -348,7 +368,8 @@ impl<T: Transcript> WiringGtProver<T> {
             mul_lhs,
             mul_rhs,
             mul_result,
-            exp_base,
+            exp_base_inputs,
+            exp_base_port,
             joint_commitment,
             pairing_rhs,
             c_state: None,
@@ -367,7 +388,7 @@ impl<T: Transcript> WiringGtProver<T> {
         match src {
             GtProducer::GtExpRho { instance } => self.rho_polys[instance].as_ref().unwrap(),
             GtProducer::GtMulResult { instance } => self.mul_result[instance].as_ref().unwrap(),
-            GtProducer::GtExpBase { instance } => self.exp_base[instance].as_ref().unwrap(),
+            GtProducer::GtExpBase { instance } => self.exp_base_inputs[instance].as_ref().unwrap(),
         }
     }
 
@@ -375,7 +396,7 @@ impl<T: Transcript> WiringGtProver<T> {
         match dst {
             GtConsumer::GtMulLhs { instance } => self.mul_lhs[instance].as_ref().unwrap(),
             GtConsumer::GtMulRhs { instance } => self.mul_rhs[instance].as_ref().unwrap(),
-            GtConsumer::GtExpBase { instance } => self.exp_base[instance].as_ref().unwrap(),
+            GtConsumer::GtExpBase { instance } => self.exp_base_port[instance].as_ref().unwrap(),
             GtConsumer::JointCommitment => self.joint_commitment.as_ref().unwrap(),
             GtConsumer::PairingBoundaryRhs => self.pairing_rhs.as_ref().unwrap(),
         }
@@ -402,9 +423,20 @@ impl<T: Transcript> WiringGtProver<T> {
         let num_gt_exp = self.rho_polys.len();
         let num_gt_mul = self.mul_result.len();
 
-        let exp_base_at_r: Vec<Fq> = (0..num_gt_exp)
+        // Scalar base inputs at r_x (only used when `GtProducer::GtExpBase` is present).
+        let exp_base_inputs_at_r: Vec<Fq> = (0..num_gt_exp)
             .map(|i| {
-                self.exp_base[i]
+                self.exp_base_inputs[i]
+                    .as_ref()
+                    .map(|p| p.get_bound_coeff(0))
+                    .unwrap_or(Fq::zero())
+            })
+            .collect();
+
+        // Scalar base ports at r_x (these represent the committed Base row, padded to x11).
+        let exp_base_port_at_r: Vec<Fq> = (0..num_gt_exp)
+            .map(|i| {
+                self.exp_base_port[i]
                     .as_ref()
                     .map(|p| p.get_bound_coeff(0))
                     .unwrap_or(Fq::zero())
@@ -472,6 +504,15 @@ impl<T: Transcript> WiringGtProver<T> {
                 mul_lhs_c[c] = mul_lhs_at_r[family_idx];
                 mul_rhs_c[c] = mul_rhs_at_r[family_idx];
                 mul_result_c[c] = mul_result_at_r[family_idx];
+            }
+        }
+
+        // Base ports in the common c domain (replicate across dummy bits).
+        let mut base_port_c = vec![Fq::zero(); n];
+        for c in 0..n {
+            let family_idx = c >> dummy_exp;
+            if family_idx < exp_base_port_at_r.len() {
+                base_port_c[c] = exp_base_port_at_r[family_idx];
             }
         }
 
@@ -547,8 +588,9 @@ impl<T: Transcript> WiringGtProver<T> {
             mul_lhs_c: MultilinearPolynomial::from(mul_lhs_c),
             mul_rhs_c: MultilinearPolynomial::from(mul_rhs_c),
             mul_result_c: MultilinearPolynomial::from(mul_result_c),
+            base_port_c: MultilinearPolynomial::from(base_port_c),
             selectors,
-            exp_base_at_r,
+            exp_base_inputs_at_r,
         });
     }
 }
@@ -644,6 +686,9 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                     let mul_out_e = state
                         .mul_result_c
                         .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                    let base_port_e = state
+                        .base_port_c
+                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
 
                     let mut out = [Fq::zero(); DEGREE];
 
@@ -666,7 +711,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                             ),
                             GtProducer::GtExpBase { instance } => (
                                 selector_key(dummy_exp, self.k_exp, instance),
-                                // Constant source; we ignore `src_port_e` and use `exp_base_at_r` below.
+                                // Constant source; we ignore `src_port_e` and use `exp_base_inputs_at_r` below.
                                 rho_e,
                                 beta_exp,
                             ),
@@ -700,10 +745,11 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
 
                         let dst_is_mul_lhs = matches!(edge.dst, GtConsumer::GtMulLhs { .. });
                         let dst_is_mul_rhs = matches!(edge.dst, GtConsumer::GtMulRhs { .. });
+                        let dst_is_exp_base = matches!(edge.dst, GtConsumer::GtExpBase { .. });
 
                         let src_const = match edge.src {
                             GtProducer::GtExpBase { instance } => {
-                                Some(state.exp_base_at_r[instance])
+                                Some(state.exp_base_inputs_at_r[instance])
                             }
                             _ => None,
                         };
@@ -715,12 +761,11 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                                 sel_dst_e[t] * mul_lhs_e[t]
                             } else if dst_is_mul_rhs {
                                 sel_dst_e[t] * mul_rhs_e[t]
+                            } else if dst_is_exp_base {
+                                sel_dst_e[t] * base_port_e[t]
                             } else {
                                 // Boundary constants.
                                 let const_val = match edge.dst {
-                                    GtConsumer::GtExpBase { instance } => {
-                                        state.exp_base_at_r[instance]
-                                    }
                                     GtConsumer::JointCommitment => state.joint_at_r,
                                     GtConsumer::PairingBoundaryRhs => state.pairing_rhs_at_r,
                                     _ => unreachable!("handled above"),
@@ -769,7 +814,10 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
             for poly in self.mul_result.iter_mut().flatten() {
                 poly.bind_parallel(r_j, BindingOrder::LowToHigh);
             }
-            for poly in self.exp_base.iter_mut().flatten() {
+            for poly in self.exp_base_inputs.iter_mut().flatten() {
+                poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+            }
+            for poly in self.exp_base_port.iter_mut().flatten() {
                 poly.bind_parallel(r_j, BindingOrder::LowToHigh);
             }
             if let Some(poly) = self.joint_commitment.as_mut() {
@@ -805,7 +853,7 @@ pub struct WiringGtVerifier {
     tau: Vec<<Fq as JoltField>::Challenge>,
     pairing_boundary: PairingBoundary,
     joint_commitment: Fq12,
-    gt_exp_bases: Vec<Fq12>,
+    gt_exp_base_inputs: Vec<Option<Fq12>>,
     gt_exp_out_step: Vec<usize>,
     /// k_common
     num_c_vars: usize,
@@ -834,7 +882,7 @@ impl WiringGtVerifier {
                 digits_len.min(max_s)
             })
             .collect();
-        let gt_exp_bases = input.gt_exp_public_inputs.iter().map(|p| p.base).collect();
+        let gt_exp_base_inputs = input.gt_exp_base_inputs.clone();
 
         Self {
             edges,
@@ -842,7 +890,7 @@ impl WiringGtVerifier {
             tau,
             pairing_boundary: input.pairing_boundary.clone(),
             joint_commitment: input.joint_commitment,
-            gt_exp_bases,
+            gt_exp_base_inputs,
             gt_exp_out_step,
             num_c_vars,
             k_exp,
@@ -922,16 +970,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             }),
             SumcheckId::GtMul,
         );
+        let base_port_val = acc.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                term: GtExpTerm::Base,
+            }),
+            SumcheckId::GtExpBaseClaimReduction,
+        );
 
         // Boundary constants at r_elem.
         let r_elem: Vec<Fq> = r_elem_chal.iter().map(|c| (*c).into()).collect();
         let joint_eval = eval_fq12_packed_at(&self.joint_commitment, &r_elem);
         let pairing_rhs_eval = eval_fq12_packed_at(&self.pairing_boundary.rhs, &r_elem);
-        let exp_base_evals: Vec<Fq> = self
-            .gt_exp_bases
-            .iter()
-            .map(|b| eval_fq12_packed_at(b, &r_elem))
-            .collect();
 
         let r_c_fq: Vec<Fq> = r_c.iter().map(|c| (*c).into()).collect();
         let r_c_exp_tail = &r_c_fq[dummy_exp..];
@@ -994,7 +1043,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let mut coeff_mul_rhs = Fq::zero();
         let mut coeff_joint = Fq::zero();
         let mut coeff_pairing = Fq::zero();
-        let mut coeff_base: Vec<Fq> = vec![Fq::zero(); num_exp];
+        let mut coeff_base_input: Vec<Fq> = vec![Fq::zero(); num_exp];
+        let mut coeff_base_port = Fq::zero();
 
         for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
             // Eq(s, s_out) depends on the *source* family: only GTExp rho carries the step selector.
@@ -1013,7 +1063,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 }
                 GtProducer::GtExpBase { instance } => {
                     let w = beta_exp * eq_c_exp[instance];
-                    coeff_base[instance] += scale * w;
+                    coeff_base_input[instance] += scale * w;
                     w
                 }
                 GtProducer::GtMulResult { instance } => {
@@ -1032,7 +1082,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                     coeff_mul_rhs += scale * (beta_mul * eq_c_mul[instance]);
                 }
                 GtConsumer::GtExpBase { instance } => {
-                    coeff_base[instance] -= scale * (beta_exp * eq_c_exp[instance]);
+                    coeff_base_port -= scale * (beta_exp * eq_c_exp[instance]);
                 }
                 // Anchor globals to src.
                 GtConsumer::JointCommitment => {
@@ -1051,8 +1101,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         sum -= coeff_mul_rhs * mul_rhs_val;
         sum += coeff_joint * joint_eval;
         sum += coeff_pairing * pairing_rhs_eval;
-        for (c, base_eval) in coeff_base.iter().zip(exp_base_evals.iter()) {
-            sum += *c * *base_eval;
+        sum += coeff_base_port * base_port_val;
+        for (i, c) in coeff_base_input.iter().enumerate() {
+            if c.is_zero() {
+                continue;
+            }
+            let base_fq12 = self.gt_exp_base_inputs[i]
+                .expect("missing gt_exp_base_inputs entry for GTExp base input producer");
+            let base_eval = eval_fq12_packed_at(&base_fq12, &r_elem);
+            sum += *c * base_eval;
         }
 
         eq_u * sum

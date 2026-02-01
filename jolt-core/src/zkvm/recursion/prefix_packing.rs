@@ -96,6 +96,10 @@ impl PrefixPackingLayout {
             .iter()
             .filter(|ct| matches!(ct, ConstraintType::GtExp | ConstraintType::GtMul))
             .count();
+        let num_gt_exp = constraint_types
+            .iter()
+            .filter(|ct| matches!(ct, ConstraintType::GtExp))
+            .count();
         let num_g1_smul = constraint_types
             .iter()
             .filter(|ct| matches!(ct, ConstraintType::G1ScalarMul { .. }))
@@ -115,6 +119,7 @@ impl PrefixPackingLayout {
 
         // GT rows are committed at their family-local padded sizes.
         let num_vars_gt_exp = 11usize + k_exp(constraint_types);
+        let num_vars_gt_exp_base = 4usize + k_exp(constraint_types);
         let num_vars_gt_mul = 4usize + k_mul(constraint_types);
 
         // Scalar-mul rows: native 8-var step traces plus a family-local padded `c` suffix.
@@ -155,6 +160,27 @@ impl PrefixPackingLayout {
                     false,
                     num_vars_gt_exp,
                 ));
+            }
+            // GTExp base rows (native 4-var u-domain) plus k_exp vars.
+            if num_gt_exp > 0 {
+                for poly_type in [
+                    PolyType::GtExpBase,
+                    PolyType::GtExpBase2,
+                    PolyType::GtExpBase3,
+                    PolyType::GtExpBaseSquareQuotient,
+                    PolyType::GtExpBaseCubeQuotient,
+                ] {
+                    polys.push((
+                        0usize,
+                        poly_type,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        num_vars_gt_exp_base,
+                    ));
+                }
             }
             for poly_type in [
                 PolyType::MulLhs,

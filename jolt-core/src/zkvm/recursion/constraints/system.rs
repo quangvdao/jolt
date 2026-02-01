@@ -8,7 +8,7 @@ use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::RecursionConstraintMetadata;
-use ark_bn254::{Fq, Fq2};
+use ark_bn254::{Fq, Fq2, Fq12};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
 };
@@ -123,10 +123,22 @@ pub enum PolyType {
     G2AddInvDeltaXC1 = 61,
     G2AddIsDouble = 62,
     G2AddIsInverse = 63,
+
+    // GT exponentiation base polynomials committed on the native 4-var GT element domain (u).
+    //
+    // These rows are intended to be packed over `(u, c_exp)` (like GTMul), avoiding 4→11
+    // replication over step bits. The corresponding c-suffix is family-local (k_exp).
+    GtExpBase = 64,
+    GtExpBase2 = 65,
+    GtExpBase3 = 66,
+    /// Quotient for the pointwise base-square check: base(u)^2 - base2(u) = q2(u) * g(u).
+    GtExpBaseSquareQuotient = 67,
+    /// Quotient for the pointwise base-cube check: base2(u)*base(u) - base3(u) = q3(u) * g(u).
+    GtExpBaseCubeQuotient = 68,
 }
 
 impl PolyType {
-    pub const NUM_TYPES: usize = 64;
+    pub const NUM_TYPES: usize = 69;
 }
 
 impl CanonicalSerialize for PolyType {
@@ -216,6 +228,11 @@ impl CanonicalDeserialize for PolyType {
             61 => PolyType::G2AddInvDeltaXC1,
             62 => PolyType::G2AddIsDouble,
             63 => PolyType::G2AddIsInverse,
+            64 => PolyType::GtExpBase,
+            65 => PolyType::GtExpBase2,
+            66 => PolyType::GtExpBase3,
+            67 => PolyType::GtExpBaseSquareQuotient,
+            68 => PolyType::GtExpBaseCubeQuotient,
             _ => return Err(SerializationError::InvalidData),
         };
         Ok(ty)
@@ -245,8 +262,24 @@ pub enum ConstraintType {
     G2Add,
 }
 
-const GT_EXP_POLYS: [PolyType; 2] = [PolyType::RhoPrev, PolyType::Quotient];
-const GT_EXP_SPECS: [(PolyType, usize); 2] = [(PolyType::RhoPrev, 11), (PolyType::Quotient, 11)];
+const GT_EXP_POLYS: [PolyType; 7] = [
+    PolyType::RhoPrev,
+    PolyType::Quotient,
+    PolyType::GtExpBase,
+    PolyType::GtExpBase2,
+    PolyType::GtExpBase3,
+    PolyType::GtExpBaseSquareQuotient,
+    PolyType::GtExpBaseCubeQuotient,
+];
+const GT_EXP_SPECS: [(PolyType, usize); 7] = [
+    (PolyType::RhoPrev, 11),
+    (PolyType::Quotient, 11),
+    (PolyType::GtExpBase, 4),
+    (PolyType::GtExpBase2, 4),
+    (PolyType::GtExpBase3, 4),
+    (PolyType::GtExpBaseSquareQuotient, 4),
+    (PolyType::GtExpBaseCubeQuotient, 4),
+];
 
 const GT_MUL_POLYS: [PolyType; 4] = [
     PolyType::MulLhs,
@@ -529,6 +562,10 @@ pub struct ConstraintSystem {
     // Stage 1
     pub gt_exp_witnesses: Vec<GtExpWitness<Fq>>,
     pub gt_exp_public_inputs: Vec<GtExpPublicInputs>,
+    /// GTExp base values (Fq12), indexed by GTExp instance.
+    ///
+    /// This is used for GT wiring boundary sources (AST-input bases, combine-leaf bases, etc).
+    pub gt_exp_base_inputs: Vec<Fq12>,
 
     // Stage 2 native stores
     pub gt_mul_rows: Vec<GtMulNativeRows>, // each field len 16

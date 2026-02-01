@@ -588,22 +588,33 @@ impl TermEnum for GtMulTerm {
 }
 
 /// GT exponentiation (packed, base-4): ρ_next = ρ^4 × base^digit + Q·g
-/// Note: digit/base are public inputs, not committed
+/// Note: digit bits are public inputs. The base may be treated as a boundary constant or as a
+/// committed row, depending on the recursion protocol variant.
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]
 pub enum GtExpTerm {
     Rho,
     RhoNext,
     Quotient,
+    Base,
+    Base2,
+    Base3,
+    BaseSquareQuotient,
+    BaseCubeQuotient,
 }
 
 impl TermEnum for GtExpTerm {
-    const COUNT: usize = 3;
+    const COUNT: usize = 8;
 
     fn from_index(i: usize) -> Option<Self> {
         match i {
             0 => Some(Self::Rho),
             1 => Some(Self::RhoNext),
             2 => Some(Self::Quotient),
+            3 => Some(Self::Base),
+            4 => Some(Self::Base2),
+            5 => Some(Self::Base3),
+            6 => Some(Self::BaseSquareQuotient),
+            7 => Some(Self::BaseCubeQuotient),
             _ => None,
         }
     }
@@ -617,6 +628,11 @@ impl TermEnum for GtExpTerm {
             Self::Rho => "rho",
             Self::RhoNext => "rho_next",
             Self::Quotient => "quotient",
+            Self::Base => "base",
+            Self::Base2 => "base2",
+            Self::Base3 => "base3",
+            Self::BaseSquareQuotient => "base_square_quotient",
+            Self::BaseCubeQuotient => "base_cube_quotient",
         }
     }
 }

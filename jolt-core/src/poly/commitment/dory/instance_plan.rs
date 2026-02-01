@@ -406,22 +406,6 @@ pub struct DerivedRecursionPlan {
     pub dense_num_vars: usize,
 }
 
-fn resolve_gt_input_or_hint(
-    ast: &AstGraph<BN254>,
-    proof: &ArkDoryProof,
-    setup: &VerifierSetup<BN254>,
-    joint_commitment: ArkGT,
-    value_id: ValueId,
-    hint: &Option<Fq12>,
-) -> Result<Fq12, ProofVerifyError> {
-    let idx = value_id.0 as usize;
-    debug_assert!(idx < ast.nodes.len(), "ValueId out of bounds");
-    match &ast.nodes[idx].op {
-        AstOp::Input { source } => Ok(resolve_input_gt(proof, setup, joint_commitment, source)?.0),
-        _ => hint.ok_or(ProofVerifyError::default()),
-    }
-}
-
 fn resolve_g1_input_or_hint(
     ast: &AstGraph<BN254>,
     proof: &ArkDoryProof,
@@ -512,8 +496,7 @@ pub fn derive_plan_with_hints(
     g1_add_ops.sort();
     g2_add_ops.sort();
 
-    if non_input_hints.gt_exp_base_hints.len() != gt_exp_ops.len()
-        || non_input_hints.g1_scalar_mul_base_hints.len() != g1_scalar_mul_ops.len()
+    if non_input_hints.g1_scalar_mul_base_hints.len() != g1_scalar_mul_ops.len()
         || non_input_hints.g2_scalar_mul_base_hints.len() != g2_scalar_mul_ops.len()
     {
         return Err(ProofVerifyError::default());
@@ -521,26 +504,22 @@ pub fn derive_plan_with_hints(
 
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
     let mut gt_exp_public_inputs: Vec<GtExpPublicInputs> = Vec::new();
+    let mut gt_exp_base_inputs: Vec<Option<Fq12>> = Vec::new();
     let mut g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs> = Vec::new();
     let mut g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs> = Vec::new();
 
     // Dory GTExp
-    for ((_, base_id, scalar), base_hint) in gt_exp_ops
-        .iter()
-        .zip(non_input_hints.gt_exp_base_hints.iter())
-    {
-        let base = resolve_gt_input_or_hint(
-            ast,
-            proof,
-            &dory_setup,
-            joint_commitment,
-            *base_id,
-            base_hint,
-        )?;
+    for (_, base_id, scalar) in gt_exp_ops.iter() {
+        // Only materialize base values for true AST inputs; non-input bases are bound via wiring.
+        let base_opt = match &ast.nodes[base_id.0 as usize].op {
+            AstOp::Input { source } => Some(resolve_input_gt(proof, &dory_setup, joint_commitment, source)?.0),
+            _ => None,
+        };
         let exponent: Fr = ark_to_jolt(scalar);
         let bits = bits_from_exponent_msb_no_leading_zeros(exponent);
         constraint_types.push(ConstraintType::GtExp);
-        gt_exp_public_inputs.push(GtExpPublicInputs::new(base, bits));
+        gt_exp_public_inputs.push(GtExpPublicInputs::new(bits));
+        gt_exp_base_inputs.push(base_opt);
     }
 
     // Dory GTMul
@@ -586,7 +565,8 @@ pub fn derive_plan_with_hints(
     for (commitment, coeff) in combine_commitments.iter().zip(combine_coeffs.iter()) {
         let bits = bits_from_exponent_msb_no_leading_zeros(*coeff);
         constraint_types.push(ConstraintType::GtExp);
-        gt_exp_public_inputs.push(GtExpPublicInputs::new(commitment.0, bits));
+        gt_exp_public_inputs.push(GtExpPublicInputs::new(bits));
+        gt_exp_base_inputs.push(Some(commitment.0));
     }
     let combine_mul_count = CombineDag::new(combine_commitments.len()).num_muls_total();
     for _ in 0..combine_mul_count {
@@ -614,6 +594,7 @@ pub fn derive_plan_with_hints(
             num_constraints,
             num_constraints_padded,
             gt_exp_public_inputs,
+            gt_exp_base_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
             wiring,
@@ -688,6 +669,7 @@ pub fn derive_from_dory_ast(
 
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
     let mut gt_exp_public_inputs: Vec<GtExpPublicInputs> = Vec::new();
+    let mut gt_exp_base_inputs: Vec<Option<Fq12>> = Vec::new();
     let mut g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs> = Vec::new();
     let mut g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs> = Vec::new();
 
@@ -699,10 +681,16 @@ pub fn derive_from_dory_ast(
             Value::GT(v) => v.0,
             _ => return Err(ProofVerifyError::default()),
         };
+        // Only keep a boundary base when the base is an AST input; otherwise it is bound via wiring.
+        let base_opt = match &ast.nodes[base_id.0 as usize].op {
+            AstOp::Input { .. } => Some(base),
+            _ => None,
+        };
         let exponent: Fr = ark_to_jolt(scalar);
         let bits = bits_from_exponent_msb_no_leading_zeros(exponent);
         constraint_types.push(ConstraintType::GtExp);
-        gt_exp_public_inputs.push(GtExpPublicInputs::new(base, bits));
+        gt_exp_public_inputs.push(GtExpPublicInputs::new(bits));
+        gt_exp_base_inputs.push(base_opt);
     }
 
     // Dory GTMul
@@ -753,7 +741,8 @@ pub fn derive_from_dory_ast(
     for (commitment, coeff) in combine_commitments.iter().zip(combine_coeffs.iter()) {
         let bits = bits_from_exponent_msb_no_leading_zeros(*coeff);
         constraint_types.push(ConstraintType::GtExp);
-        gt_exp_public_inputs.push(GtExpPublicInputs::new(commitment.0, bits));
+        gt_exp_public_inputs.push(GtExpPublicInputs::new(bits));
+        gt_exp_base_inputs.push(Some(commitment.0));
     }
     // Then: GTMul constraints for the reduction tree.
     let combine_mul_count = CombineDag::new(combine_commitments.len()).num_muls_total();
@@ -868,6 +857,7 @@ pub fn derive_from_dory_ast(
             num_constraints,
             num_constraints_padded,
             gt_exp_public_inputs,
+            gt_exp_base_inputs,
             g1_scalar_mul_public_inputs,
             g2_scalar_mul_public_inputs,
             wiring,

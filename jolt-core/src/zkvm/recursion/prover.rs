@@ -61,12 +61,15 @@ use super::{
         wiring::WiringG2Prover,
     },
     gt::{
+        base_power::GtExpBasePowProver,
         exponentiation::{GtExpParams, GtExpProver},
+        stage1_base_openings::GtExpBaseStage1OpeningsProver,
         indexing::{
             k_gt, num_gt_constraints, num_gt_constraints_padded, num_gt_mul_constraints_padded,
         },
         multiplication::{GtMulParams, GtMulProver},
         shift::{GtShiftParams, GtShiftProver},
+        stage2_base_openings::GtExpBaseStage2OpeningsProver,
         stage2_openings::GtExpStage2OpeningsProver,
         types::GtMulConstraintPolynomials,
         wiring::WiringGtProver,
@@ -330,16 +333,10 @@ impl RecursionProver<Fq> {
         let non_input_base_hints =
             tracing::info_span!("derive_non_input_base_hints").in_scope(|| {
                 // Collect op lists in OpId order (must match verifier derivation).
-                let mut gt_exp: Vec<(OpId, ValueId)> = Vec::new();
                 let mut g1_smul: Vec<(OpId, ValueId)> = Vec::new();
                 let mut g2_smul: Vec<(OpId, ValueId)> = Vec::new();
                 for node in &ast.nodes {
                     match &node.op {
-                        AstOp::GTExp {
-                            op_id: Some(id),
-                            base,
-                            ..
-                        } => gt_exp.push((*id, *base)),
                         AstOp::G1ScalarMul {
                             op_id: Some(id),
                             point,
@@ -353,7 +350,6 @@ impl RecursionProver<Fq> {
                         _ => {}
                     }
                 }
-                gt_exp.sort_by_key(|(id, _)| *id);
                 g1_smul.sort_by_key(|(id, _)| *id);
                 g2_smul.sort_by_key(|(id, _)| *id);
 
@@ -362,22 +358,6 @@ impl RecursionProver<Fq> {
                     idx < ast.nodes.len() && matches!(ast.nodes[idx].op, AstOp::Input { .. })
                 };
 
-                let gt_exp_base_hints = gt_exp
-                    .iter()
-                    .map(|(op_id, base_id)| {
-                        if is_input(*base_id) {
-                            None
-                        } else {
-                            Some(
-                                witness_collection
-                                    .gt_exp
-                                    .get(op_id)
-                                    .expect("missing GTExp witness for op_id")
-                                    .base,
-                            )
-                        }
-                    })
-                    .collect();
                 let g1_scalar_mul_base_hints = g1_smul
                     .iter()
                     .map(|(op_id, point_id)| {
@@ -412,7 +392,6 @@ impl RecursionProver<Fq> {
                     .collect();
 
                 NonInputBaseHints {
-                    gt_exp_base_hints,
                     g1_scalar_mul_base_hints,
                     g2_scalar_mul_base_hints,
                 }
@@ -849,9 +828,19 @@ impl RecursionProver<Fq> {
                 transcript,
             ));
 
-        // Run the (single-instance) sumcheck.
-        let (proof, r_stage1) =
-            BatchedSumcheck::prove(vec![&mut *packed_gt_exp_prover], accumulator, transcript);
+        let mut base_openings: Box<dyn SumcheckInstanceProver<Fq, T>> =
+            Box::new(GtExpBaseStage1OpeningsProver::<T>::new(
+                &self.constraint_system.constraint_types,
+                &self.constraint_system.locator_by_constraint,
+                packed_witnesses,
+            ));
+
+        // Run the batched sumcheck (ordering matters for cached openings).
+        let (proof, r_stage1) = BatchedSumcheck::prove(
+            vec![&mut *base_openings, &mut *packed_gt_exp_prover],
+            accumulator,
+            transcript,
+        );
 
         Ok((proof, r_stage1))
     }
@@ -885,6 +874,25 @@ impl RecursionProver<Fq> {
                 &self.constraint_system.constraint_types,
                 &self.constraint_system.locator_by_constraint,
                 &self.constraint_system.gt_exp_witnesses,
+            );
+            provers.push(Box::new(prover));
+
+            // Cache-only openings for committed GTExp base rows on the native u-domain.
+            let prover = GtExpBaseStage2OpeningsProver::<T>::new(
+                &self.constraint_system.constraint_types,
+                &self.constraint_system.locator_by_constraint,
+                &self.constraint_system.gt_exp_witnesses,
+                transcript,
+            );
+            provers.push(Box::new(prover));
+
+            // Enforce base2/base3 correctness without verifier recomputation.
+            let prover = GtExpBasePowProver::new(
+                &self.constraint_system.constraint_types,
+                &self.constraint_system.locator_by_constraint,
+                &self.constraint_system.gt_exp_witnesses,
+                &self.constraint_system.g_poly,
+                transcript,
             );
             provers.push(Box::new(prover));
 
@@ -1114,6 +1122,36 @@ impl RecursionProver<Fq> {
                         SumcheckId::GtExpClaimReduction,
                         VirtualPolynomial::Recursion(RecursionPoly::GtExp {
                             term: GtExpTerm::Quotient,
+                        }),
+                    ),
+                    PolyType::GtExpBase => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Base,
+                        }),
+                    ),
+                    PolyType::GtExpBase2 => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Base2,
+                        }),
+                    ),
+                    PolyType::GtExpBase3 => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::Base3,
+                        }),
+                    ),
+                    PolyType::GtExpBaseSquareQuotient => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::BaseSquareQuotient,
+                        }),
+                    ),
+                    PolyType::GtExpBaseCubeQuotient => (
+                        SumcheckId::GtExpBaseClaimReduction,
+                        VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                            term: GtExpTerm::BaseCubeQuotient,
                         }),
                     ),
                     PolyType::MulLhs => (

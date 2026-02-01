@@ -40,13 +40,21 @@
 //! - boundary constants are anchored to the opposite endpoint’s selector (GT-style),
 //! - `λ_e` are transcript-sampled edge-batching coefficients.
 
-use ark_bn254::{Fq, Fq12};
+use ark_bn254::{Fq, Fq12, Fq2, Fq6};
 use ark_ff::{Field, One, Zero};
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_WIRING_GT_EXPECTED: &str = "recursion_wiring_gt_expected_output_claim";
+const CYCLE_WIRING_GT_EXPECTED_EQ_U: &str = "recursion_wiring_gt_expected_eq_u";
+const CYCLE_WIRING_GT_EXPECTED_PORT_CLAIMS: &str = "recursion_wiring_gt_expected_port_claims";
+const CYCLE_WIRING_GT_EXPECTED_BOUNDARY_EVALS: &str = "recursion_wiring_gt_expected_boundary_evals";
+const CYCLE_WIRING_GT_EXPECTED_EQ_S: &str = "recursion_wiring_gt_expected_eq_s";
+const CYCLE_WIRING_GT_EXPECTED_EQ_C: &str = "recursion_wiring_gt_expected_eq_c";
+const CYCLE_WIRING_GT_EXPECTED_EDGE_LOOP: &str = "recursion_wiring_gt_expected_edge_loop";
+const CYCLE_WIRING_GT_EXPECTED_FINALIZE: &str = "recursion_wiring_gt_expected_finalize";
+const CYCLE_WIRING_GT_EXPECTED_BASE_INPUT_EVALS: &str = "recursion_wiring_gt_expected_base_input_evals";
 const CYCLE_WIRING_GT_CACHE: &str = "recursion_wiring_gt_cache_openings";
 
 struct CycleMarkerGuard(&'static str);
@@ -131,25 +139,102 @@ fn pad_7var_to_11var_replicated(mle_7var: &[Fq]) -> Vec<Fq> {
     mle_11var
 }
 
-fn eval_mle_lsb_first(mut evals: Vec<Fq>, r: &[Fq]) -> Fq {
-    debug_assert_eq!(evals.len(), 1usize << r.len());
-    let mut len = evals.len();
-    for r_i in r {
-        let half = len / 2;
-        let one_minus = Fq::one() - *r_i;
-        for j in 0..half {
-            let a = evals[2 * j];
-            let b = evals[2 * j + 1];
-            evals[j] = a * one_minus + b * *r_i;
+fn elem_weights_4var_lsb_first(r_elem: [Fq; ELEM_VARS]) -> [Fq; 1 << ELEM_VARS] {
+    // Returns weights w[idx] = Eq(r_elem, idx) in the same LSB-first indexing convention used by
+    // `eq_lsb_evals` / `eval_mle_lsb_first`.
+    //
+    // For ELEM_VARS=4 this is just 16 weights, and (crucially) can be computed once then reused for
+    // all Fq12 evaluations at this `r_elem`.
+    let mut w = [Fq::zero(); 1 << ELEM_VARS];
+    w[0] = Fq::one();
+    let mut len = 1usize;
+    for r_i in r_elem {
+        let one_minus = Fq::one() - r_i;
+        for j in 0..len {
+            let prev = w[j];
+            w[j] = prev * one_minus;
+            w[j + len] = prev * r_i;
         }
-        len = half;
+        len *= 2;
     }
-    evals[0]
+    debug_assert_eq!(len, 1 << ELEM_VARS);
+    w
 }
 
-fn eval_fq12_packed_at(fq12: &Fq12, r_elem: &[Fq]) -> Fq {
-    debug_assert_eq!(r_elem.len(), ELEM_VARS);
-    eval_mle_lsb_first(Bn254Recursion::fq12_to_mle(fq12), r_elem)
+#[inline(always)]
+fn eval_fq12_packed_at_with_weights(fq12: &Fq12, elem_weights: &[Fq; 1 << ELEM_VARS]) -> Fq {
+    // Evaluate a 4-var MLE at `r_elem` using precomputed Eq weights:
+    //   f(r_elem) = Σ_x f(x) * Eq(r_elem, x)
+    //
+    // This is ~2× fewer field multiplications than folding the MLE per-evaluation, and it avoids
+    // recomputing Eq weights for every base input.
+    let evals = Bn254Recursion::fq12_to_mle(fq12);
+    debug_assert_eq!(evals.len(), 1 << ELEM_VARS);
+    let mut out = Fq::zero();
+    for (v, w) in evals.iter().zip(elem_weights.iter()) {
+        out += *v * *w;
+    }
+    out
+}
+
+#[inline(always)]
+fn fq12_coeffs(x: &Fq12) -> [Fq; 12] {
+    [
+        x.c0.c0.c0,
+        x.c0.c0.c1,
+        x.c0.c1.c0,
+        x.c0.c1.c1,
+        x.c0.c2.c0,
+        x.c0.c2.c1,
+        x.c1.c0.c0,
+        x.c1.c0.c1,
+        x.c1.c1.c0,
+        x.c1.c1.c1,
+        x.c1.c2.c0,
+        x.c1.c2.c1,
+    ]
+}
+
+#[inline(always)]
+fn fq12_from_coeffs(c: [Fq; 12]) -> Fq12 {
+    let c0 = Fq6::new(
+        Fq2::new(c[0], c[1]),
+        Fq2::new(c[2], c[3]),
+        Fq2::new(c[4], c[5]),
+    );
+    let c1 = Fq6::new(
+        Fq2::new(c[6], c[7]),
+        Fq2::new(c[8], c[9]),
+        Fq2::new(c[10], c[11]),
+    );
+    Fq12::new(c0, c1)
+}
+
+/// Precompute a linear functional `α` such that for any `x ∈ Fq12`:
+/// `eval_fq12_packed_at_with_weights(x, w) == Σ_j α[j] * coeffs(x)[j]`.
+///
+/// This avoids calling `fq12_to_mle()` per GTExp base input. Instead, we pay 12 basis conversions
+/// once per Stage-2 wiring check.
+#[inline]
+fn fq12_eval_linear_coeffs(elem_weights: &[Fq; 1 << ELEM_VARS]) -> [Fq; 12] {
+    let mut alpha = [Fq::zero(); 12];
+    for j in 0..12 {
+        let mut c = [Fq::zero(); 12];
+        c[j] = Fq::one();
+        let basis = fq12_from_coeffs(c);
+        alpha[j] = eval_fq12_packed_at_with_weights(&basis, elem_weights);
+    }
+    alpha
+}
+
+#[inline(always)]
+fn eval_fq12_packed_at_via_linear_coeffs(fq12: &Fq12, alpha: &[Fq; 12]) -> Fq {
+    let c = fq12_coeffs(fq12);
+    let mut out = Fq::zero();
+    for j in 0..12 {
+        out += c[j] * alpha[j];
+    }
+    out
 }
 
 #[inline]
@@ -1035,7 +1120,10 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let r_c = &sumcheck_challenges[X_VARS..];
         debug_assert_eq!(r_c.len(), self.num_c_vars);
 
-        let eq_u = eq_lsb_mle::<Fq>(&self.tau, r_elem_chal);
+        let eq_u = {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_EQ_U);
+            eq_lsb_mle::<Fq>(&self.tau, r_elem_chal)
+        };
 
         let dummy_exp = self.num_c_vars.saturating_sub(self.k_exp);
         let dummy_mul = self.num_c_vars.saturating_sub(self.k_mul);
@@ -1043,72 +1131,85 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let beta_mul = beta(dummy_mul);
 
         // Port openings (already cached by earlier GT instances in Stage 2).
-        let rho_val = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
-                term: GtExpTerm::Rho,
-            }),
-            SumcheckId::GtExpClaimReduction,
-        );
-        let mul_lhs_val = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
-                term: GtMulTerm::Lhs,
-            }),
-            SumcheckId::GtMul,
-        );
-        let mul_rhs_val = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
-                term: GtMulTerm::Rhs,
-            }),
-            SumcheckId::GtMul,
-        );
-        let mul_out_val = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::Recursion(RecursionPoly::GtMul {
-                term: GtMulTerm::Result,
-            }),
-            SumcheckId::GtMul,
-        );
-        let base_port_val = acc.get_virtual_polynomial_claim(
-            VirtualPolynomial::Recursion(RecursionPoly::GtExp {
-                term: GtExpTerm::Base,
-            }),
-            SumcheckId::GtExpBaseClaimReduction,
-        );
+        let (rho_val, mul_lhs_val, mul_rhs_val, mul_out_val, base_port_val) = {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_PORT_CLAIMS);
+            let rho_val = acc.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                    term: GtExpTerm::Rho,
+                }),
+                SumcheckId::GtExpClaimReduction,
+            );
+            let mul_lhs_val = acc.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                    term: GtMulTerm::Lhs,
+                }),
+                SumcheckId::GtMul,
+            );
+            let mul_rhs_val = acc.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                    term: GtMulTerm::Rhs,
+                }),
+                SumcheckId::GtMul,
+            );
+            let mul_out_val = acc.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::GtMul {
+                    term: GtMulTerm::Result,
+                }),
+                SumcheckId::GtMul,
+            );
+            let base_port_val = acc.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::GtExp {
+                    term: GtExpTerm::Base,
+                }),
+                SumcheckId::GtExpBaseClaimReduction,
+            );
+            (rho_val, mul_lhs_val, mul_rhs_val, mul_out_val, base_port_val)
+        };
 
         // Boundary constants at r_elem.
-        let r_elem: Vec<Fq> = r_elem_chal.iter().map(|c| (*c).into()).collect();
-        let joint_eval = eval_fq12_packed_at(&self.joint_commitment, &r_elem);
-        let pairing_rhs_eval = eval_fq12_packed_at(&self.pairing_boundary.rhs, &r_elem);
-
-        let r_c_fq: Vec<Fq> = r_c.iter().map(|c| (*c).into()).collect();
-        let r_c_exp_tail = &r_c_fq[dummy_exp..];
-        let r_c_mul_tail = &r_c_fq[dummy_mul..];
+        let (elem_weights, joint_eval, pairing_rhs_eval) = {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_BOUNDARY_EVALS);
+            let mut r_elem = [Fq::zero(); ELEM_VARS];
+            for (i, &c) in r_elem_chal.iter().enumerate() {
+                r_elem[i] = c.into();
+            }
+            let elem_weights = elem_weights_4var_lsb_first(r_elem);
+            let joint_eval = eval_fq12_packed_at_with_weights(&self.joint_commitment, &elem_weights);
+            let pairing_rhs_eval =
+                eval_fq12_packed_at_with_weights(&self.pairing_boundary.rhs, &elem_weights);
+            (elem_weights, joint_eval, pairing_rhs_eval)
+        };
 
         // Precompute eq(s, s_out) values once per GTExp instance; these are reused across edges.
-        //
-        // NOTE: `STEP_VARS = 7`, so this is a tiny fixed-size computation; for small `num_exp`
-        // it is cheaper than building the full 2^7 table.
-        let mut r_step_fq = [Fq::zero(); STEP_VARS];
-        for (i, &c) in r_step.iter().enumerate() {
-            r_step_fq[i] = c.into();
-        }
-        let eq_s_zero: Fq = r_step_fq.iter().map(|&r_b| Fq::one() - r_b).product();
-        let eq_s_exp: Vec<Fq> = self
-            .gt_exp_out_step
-            .iter()
-            .map(|&s_out| {
-                r_step_fq
-                    .iter()
-                    .enumerate()
-                    .map(|(b, &r_b)| {
-                        if ((s_out >> b) & 1) == 1 {
-                            r_b
-                        } else {
-                            Fq::one() - r_b
-                        }
-                    })
-                    .product()
-            })
-            .collect();
+        let (eq_s_zero, eq_s_exp) = {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_EQ_S);
+            //
+            // NOTE: `STEP_VARS = 7`, so this is a tiny fixed-size computation; for small `num_exp`
+            // it is cheaper than building the full 2^7 table.
+            let mut r_step_fq = [Fq::zero(); STEP_VARS];
+            for (i, &c) in r_step.iter().enumerate() {
+                r_step_fq[i] = c.into();
+            }
+            let eq_s_zero: Fq = r_step_fq.iter().map(|&r_b| Fq::one() - r_b).product();
+            let eq_s_exp: Vec<Fq> = self
+                .gt_exp_out_step
+                .iter()
+                .map(|&s_out| {
+                    r_step_fq
+                        .iter()
+                        .enumerate()
+                        .map(|(b, &r_b)| {
+                            if ((s_out >> b) & 1) == 1 {
+                                r_b
+                            } else {
+                                Fq::one() - r_b
+                            }
+                        })
+                        .product()
+                })
+                .collect();
+            (eq_s_zero, eq_s_exp)
+        };
 
         // Precompute eq(c, idx) once per referenced instance, then accumulate coefficients so we
         // only touch expensive values (Fq12 bases) once.
@@ -1116,12 +1217,20 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
 
         let num_mul = self.num_mul_instances;
 
-        let eq_c_exp: Vec<Fq> = (0..num_exp)
-            .map(|i| self.eq_c_tail(r_c_exp_tail, i, self.k_exp))
-            .collect();
-        let eq_c_mul: Vec<Fq> = (0..num_mul)
-            .map(|i| self.eq_c_tail(r_c_mul_tail, i, self.k_mul))
-            .collect();
+        let (eq_c_exp, eq_c_mul) = {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_EQ_C);
+            let r_c_fq: Vec<Fq> = r_c.iter().map(|c| (*c).into()).collect();
+            let r_c_exp_tail = &r_c_fq[dummy_exp..];
+            let r_c_mul_tail = &r_c_fq[dummy_mul..];
+
+            let eq_c_exp: Vec<Fq> = (0..num_exp)
+                .map(|i| self.eq_c_tail(r_c_exp_tail, i, self.k_exp))
+                .collect();
+            let eq_c_mul: Vec<Fq> = (0..num_mul)
+                .map(|i| self.eq_c_tail(r_c_mul_tail, i, self.k_mul))
+                .collect();
+            (eq_c_exp, eq_c_mul)
+        };
 
         let mut coeff_rho = Fq::zero();
         let mut coeff_mul_out = Fq::zero();
@@ -1132,87 +1241,97 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let mut coeff_base_input: Vec<Fq> = vec![Fq::zero(); num_exp];
         let mut coeff_base_port = Fq::zero();
 
-        for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
-            // Eq(s, s_out) depends on the *source* family: only GTExp rho carries the step selector.
-            let eq_s = match edge.src {
-                GtProducer::GtExpRho { instance } => eq_s_exp[instance],
-                GtProducer::GtMulResult { .. }
-                | GtProducer::GtExpBase { .. }
-                | GtProducer::JointCommitment => eq_s_zero,
-            };
-            let scale = *lambda * eq_s;
+        {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_EDGE_LOOP);
+            for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
+                // Eq(s, s_out) depends on the *source* family: only GTExp rho carries the step selector.
+                let eq_s = match edge.src {
+                    GtProducer::GtExpRho { instance } => eq_s_exp[instance],
+                    GtProducer::GtMulResult { .. }
+                    | GtProducer::GtExpBase { .. }
+                    | GtProducer::JointCommitment => eq_s_zero,
+                };
+                let scale = *lambda * eq_s;
 
-            // Source contribution.
-            let src_weight = match edge.src {
-                GtProducer::GtExpRho { instance } => {
-                    let w = beta_exp * eq_c_exp[instance];
-                    coeff_rho += scale * w;
-                    w
-                }
-                GtProducer::GtExpBase { instance } => {
-                    let w = beta_exp * eq_c_exp[instance];
-                    coeff_base_input[instance] += scale * w;
-                    w
-                }
-                GtProducer::GtMulResult { instance } => {
-                    let w = beta_mul * eq_c_mul[instance];
-                    coeff_mul_out += scale * w;
-                    w
-                }
-                GtProducer::JointCommitment => {
-                    // Anchor this global constant source to the destination family selector.
-                    let w = match edge.dst {
-                        GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
-                            beta_mul * eq_c_mul[instance]
-                        }
-                        GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
-                        GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
-                            // Should not happen in well-formed plans; fall back to 1.
-                            Fq::one()
-                        }
-                    };
-                    coeff_joint += scale * w;
-                    w
-                }
-            };
+                // Source contribution.
+                let src_weight = match edge.src {
+                    GtProducer::GtExpRho { instance } => {
+                        let w = beta_exp * eq_c_exp[instance];
+                        coeff_rho += scale * w;
+                        w
+                    }
+                    GtProducer::GtExpBase { instance } => {
+                        let w = beta_exp * eq_c_exp[instance];
+                        coeff_base_input[instance] += scale * w;
+                        w
+                    }
+                    GtProducer::GtMulResult { instance } => {
+                        let w = beta_mul * eq_c_mul[instance];
+                        coeff_mul_out += scale * w;
+                        w
+                    }
+                    GtProducer::JointCommitment => {
+                        // Anchor this global constant source to the destination family selector.
+                        let w = match edge.dst {
+                            GtConsumer::GtMulLhs { instance }
+                            | GtConsumer::GtMulRhs { instance } => beta_mul * eq_c_mul[instance],
+                            GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
+                            GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
+                                // Should not happen in well-formed plans; fall back to 1.
+                                Fq::one()
+                            }
+                        };
+                        coeff_joint += scale * w;
+                        w
+                    }
+                };
 
-            // Destination contribution.
-            match edge.dst {
-                GtConsumer::GtMulLhs { instance } => {
-                    coeff_mul_lhs += scale * (beta_mul * eq_c_mul[instance]);
-                }
-                GtConsumer::GtMulRhs { instance } => {
-                    coeff_mul_rhs += scale * (beta_mul * eq_c_mul[instance]);
-                }
-                GtConsumer::GtExpBase { instance } => {
-                    coeff_base_port -= scale * (beta_exp * eq_c_exp[instance]);
-                }
-                // Anchor globals to src.
-                GtConsumer::JointCommitment => {
-                    coeff_joint -= scale * src_weight;
-                }
-                GtConsumer::PairingBoundaryRhs => {
-                    coeff_pairing -= scale * src_weight;
+                // Destination contribution.
+                match edge.dst {
+                    GtConsumer::GtMulLhs { instance } => {
+                        coeff_mul_lhs += scale * (beta_mul * eq_c_mul[instance]);
+                    }
+                    GtConsumer::GtMulRhs { instance } => {
+                        coeff_mul_rhs += scale * (beta_mul * eq_c_mul[instance]);
+                    }
+                    GtConsumer::GtExpBase { instance } => {
+                        coeff_base_port -= scale * (beta_exp * eq_c_exp[instance]);
+                    }
+                    // Anchor globals to src.
+                    GtConsumer::JointCommitment => {
+                        coeff_joint -= scale * src_weight;
+                    }
+                    GtConsumer::PairingBoundaryRhs => {
+                        coeff_pairing -= scale * src_weight;
+                    }
                 }
             }
         }
 
-        let mut sum = Fq::zero();
-        sum += coeff_rho * rho_val;
-        sum += coeff_mul_out * mul_out_val;
-        sum -= coeff_mul_lhs * mul_lhs_val;
-        sum -= coeff_mul_rhs * mul_rhs_val;
-        sum += coeff_joint * joint_eval;
-        sum += coeff_pairing * pairing_rhs_eval;
-        sum += coeff_base_port * base_port_val;
-        for (i, c) in coeff_base_input.iter().enumerate() {
-            if c.is_zero() {
-                continue;
+        let mut sum = {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_FINALIZE);
+            let mut sum = Fq::zero();
+            sum += coeff_rho * rho_val;
+            sum += coeff_mul_out * mul_out_val;
+            sum -= coeff_mul_lhs * mul_lhs_val;
+            sum -= coeff_mul_rhs * mul_rhs_val;
+            sum += coeff_joint * joint_eval;
+            sum += coeff_pairing * pairing_rhs_eval;
+            sum += coeff_base_port * base_port_val;
+            sum
+        };
+        {
+            let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED_BASE_INPUT_EVALS);
+            let alpha = fq12_eval_linear_coeffs(&elem_weights);
+            for (i, c) in coeff_base_input.iter().enumerate() {
+                if c.is_zero() {
+                    continue;
+                }
+                let base_fq12 = self.gt_exp_base_inputs[i]
+                    .expect("missing gt_exp_base_inputs entry for GTExp base input producer");
+                let base_eval = eval_fq12_packed_at_via_linear_coeffs(&base_fq12, &alpha);
+                sum += *c * base_eval;
             }
-            let base_fq12 = self.gt_exp_base_inputs[i]
-                .expect("missing gt_exp_base_inputs entry for GTExp base input producer");
-            let base_eval = eval_fq12_packed_at(&base_fq12, &r_elem);
-            sum += *c * base_eval;
         }
 
         eq_u * sum

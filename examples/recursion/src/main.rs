@@ -1204,6 +1204,17 @@ fn main() {
             cycle_tracking,
             layout,
         }) => {
+            // IMPORTANT (tracing only):
+            // `recursion trace` runs the host-side tracer, which must know how to expand custom
+            // grumpkin inline instructions (opcode 0x0B, funct7=0x06, etc.) into virtual sequences.
+            //
+            // We initialize the grumpkin inline registry here so tracing remains deterministic
+            // even if the linker would otherwise drop unused host-inline crates.
+            #[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32")))]
+            {
+                let _ = jolt_inlines_grumpkin::init_inlines();
+            }
+
             let guest = match GuestProgram::from_str(example) {
                 Some(guest) => guest,
                 None => {

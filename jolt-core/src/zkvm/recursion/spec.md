@@ -103,7 +103,9 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │  Stage 1: Packed GT Exp Sumcheck                                    │
 │  ─────────────────────────────                                      │
 │  Prove packed GT exponentiation constraints                           │
-│  Output: openings at `r*` (rho, rho_next, quotient); shift checked in Stage 2 │
+│  (Batched with a cache-only GTExp-base-openings instance.)            │
+│  Output: openings at `r*` (rho, rho_next, quotient, base/base2/base3) │
+│  Shift checked in Stage 2                                             │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -113,6 +115,8 @@ The verifier only knows $A, B, C, D, m, n, p$ and the circuit topology. The sumc
 │  - Shift sumchecks for redundant “next” columns                       │
 │    (`GtShift`, `ShiftG1ScalarMul`, `ShiftG2ScalarMul`) │
 │  - Packed GT exp claim reduction to a shared `r_x` (`GtExpClaimReduction`)     │
+│  - Packed GT exp base openings on the native u-domain (`GtExpBaseClaimReduction`) │
+│  - Packed GT exp base-power consistency (`GtExpBasePow`)              │
 │  - All other op constraints (GT mul, G1/G2 scalar mul, G1/G2 add, ...)│
 │  - Wiring/boundary constraints (implemented; appended last)           │
 │  Output: all virtual openings at a shared point `r_x`                │
@@ -154,6 +158,10 @@ produced by earlier ones.
 - `GtExpStage2Openings*` must run **before** `GtShift*` and any GT wiring that consumes
   `gt_exp_rho()` / `gt_exp_quotient()` at the Stage-2 point.
   This is enforced by instance ordering in `RecursionProver::prove_stage2` / `RecursionVerifier::verify_stage2`.
+
+- `GtExpBaseStage2Openings*` must run **before** `GtExpBasePow*` and any GT wiring that consumes
+  the committed `GtExpTerm::Base` port at the Stage-2 point (see `gt/stage2_base_openings.rs`,
+  `gt/base_power.rs`, and `gt/wiring.rs`).
 
 - **G1 scalar-mul / shift**:
   - `G1ScalarMul*` must run **before** `ShiftG1ScalarMul*`, because the shift check intentionally caches **no new openings**
@@ -403,26 +411,48 @@ After final challenges $(r_s^*, r_x^*)$:
 - `VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::RhoNext })`: $\rho_{\text{next}}(r_s^*, r_x^*)$
 - `VirtualPolynomial::Recursion(RecursionPoly::GtExp { term: GtExpTerm::Quotient })`: $Q(r_s^*, r_x^*)$
 
-The verifier computes \(\text{digit\_lo}(r_s^*)\), \(\text{digit\_hi}(r_s^*)\), and \(\text{base}(r_x^*)\), \(\text{base}^2(r_x^*)\), \(\text{base}^3(r_x^*)\)
-directly from public inputs (scalar bits and base), so these are **not** emitted as openings/claims.
+The verifier computes \(\text{digit\_lo}(r_s^*)\) and \(\text{digit\_hi}(r_s^*)\) directly from **public inputs**
+(`GtExpPublicInputs::scalar_bits`, see `jolt-core/src/zkvm/recursion/gt/types.rs`).
 
-#### Public Polynomial Optimization
+The GTExp base powers are **not** verifier-computed anymore. Instead, the verifier consumes **committed openings**
+for `Base/Base2/Base3` cached at the normalized point \((r_u^*, r_{c,\mathrm{exp}})\) by the cache-only Stage-1
+instance `GtExpBaseStage1Openings` (see `jolt-core/src/zkvm/recursion/gt/stage1_base_openings.rs` and
+`jolt-core/src/zkvm/recursion/gt/exponentiation.rs`).
 
-The `bit` (digit) and `base` polynomials are derived entirely from **public inputs** (the scalar exponent and base element), so the prover does not commit to them:
+#### Committed base powers (x4 domain) and removal of non-public-input bases (implemented)
 
-| Polynomial | Source | Verifier Action |
-|------------|--------|-----------------|
-| `digit_lo(s)`, `digit_hi(s)` | Scalar $k$ bits | Evaluate 7-variable MLE at $r_s^*$ |
-| `base(x)`, `base²(x)`, `base³(x)` | Base $a \in \mathbb{G}_T$ | Evaluate 4-variable MLEs at $r_x^*$ |
-| `g(x)` | Irreducible polynomial (constant) | Evaluate 4-variable MLE at $r_x^*$ |
+In the current implementation, only the **digit bits** remain public-input-derived.
 
-This follows the same pattern as the irreducible polynomial `g(x)`, which is a known constant that the verifier evaluates directly. By recognizing these as public inputs:
+The base powers are committed as additional witness rows on the **native 4-variable GT element domain**
+(`u ∈ {0,1}^4`), i.e. the bases are **constant in the 7 step variables** `s`. Concretely, we commit:
 
-- **5 → 3 polynomials** committed per GT exponentiation
-- **40% reduction** in virtual claims for GT exp
-- **No security impact** — verifier computes identical values from public data
+- `PolyType::{GtExpBase,GtExpBase2,GtExpBase3}` (the base powers), and
+- `PolyType::{GtExpBaseSquareQuotient,GtExpBaseCubeQuotient}` (quotients used to prove base-power correctness).
 
-The prover still uses these polynomials internally during sumcheck computation, but does not include them in the commitment.
+These rows are opened via cache-only “claim reduction” instances in Stage 1 and Stage 2:
+
+- **Stage 1**: `SumcheckId::GtExpBaseStage1Openings` caches `GtExpTerm::{Base,Base2,Base3}` at the Stage-1 point
+  normalized to \((u, c_{\mathrm{exp}})\) (see `jolt-core/src/zkvm/recursion/gt/stage1_base_openings.rs`).
+- **Stage 2**: `SumcheckId::GtExpBaseClaimReduction` caches `GtExpTerm::{Base,Base2,Base3,BaseSquareQuotient,BaseCubeQuotient}`
+  at the Stage-2 point \((u, c_{\mathrm{exp}})\) for prefix packing and wiring consumption
+  (see `jolt-core/src/zkvm/recursion/gt/stage2_base_openings.rs`).
+
+**Public inputs**:
+
+- `GtExpPublicInputs` contains **only** `scalar_bits` (see `jolt-core/src/zkvm/recursion/gt/types.rs`).
+- Bases are no longer serialized as “non-public-input base hints”. Non-input bases are bound via wiring, and the only remaining
+  boundary materialization is for true AST-input bases via `RecursionVerifierInput.gt_exp_base_inputs: Vec<Option<Fq12>>`
+  (see `jolt-core/src/zkvm/recursion/verifier.rs`).
+
+**Why x4 helps**: committing base powers on x4 avoids redundant replication across the 7 step variables while eliminating
+expensive per-instance tower multiplications in the guest verifier (`GtExpVerifier::expected_output_claim`).
+
+**Soundness requirements (enforced)**:
+
+1. **Base binding**: the committed `Base` row must be bound to the verifier-derived AST value for each GTExp instance
+   (enforced by GT wiring in Stage 2; see Section 3).
+2. **Power correctness**: `Base2/Base3` must be consistent with `Base` in the tower representation
+   (enforced by `GtExpBasePow` in Stage 2; see Section 2.2.4).
 
 #### Mathematical Correctness
 
@@ -446,9 +476,8 @@ and constraint satisfaction is preserved. □
 
 | Metric | Before | After | Improvement |
 |--------|--------|-------|-------------|
-| Polynomials per GT exp | 1,024 | 3 | 341.3× |
-| Virtual claims | 1,024 | 3 | 341.3× |
-| Proof size contribution | ~32KB | ~96B | ~333× |
+| Committed polynomials per GT exp | 1,024 | 8 | 128× |
+| Verifier per-instance base-power work | high (tower mults) | low (openings + linear comb) | large |
 
 ---
 
@@ -540,18 +569,65 @@ The `GtExpStage2Openings` instance (`gt/stage2_openings.rs`) serves as a **claim
 
 #### Purpose
 
-After Stage 1, the verifier has claims for `rho`, `rho_next`, and `quotient` at the Stage-1 challenge point \((r_s^*, r_x^*)\). However, Stage 2 batches all constraints at a **shared** point. The `GtExpClaimReduction` instance:
+After Stage 1, the verifier has claims for `rho_next` under `SumcheckId::GtExp` at the Stage-1 challenge point \((r_s^*, r_x^*)\). However, Stage 2 batches all constraints at a **shared** point. The `GtExpClaimReduction` instance caches **the committed GTExp rows that Stage 2 consumers need** at the Stage-2 point:
 
-1. Participates in the Stage-2 batched sumcheck (with 0 additional rounds, since it operates at a fixed point)
-2. Caches the GT exp openings under `SumcheckId::GtExpClaimReduction` for consumption by:
-   - `GtShift` (for shift consistency)
-   - GT wiring (for copy constraints)
+1. Participates in the Stage-2 batched sumcheck only to share the Stage-2 point (it is a cache-only / no-op sumcheck).
+2. Caches `GtExpTerm::{Rho,Quotient}` under `SumcheckId::GtExpClaimReduction` at the Stage-2 point (see
+   `jolt-core/src/zkvm/recursion/gt/stage2_openings.rs`).
 
 #### Implementation
 
-The instance is a "zero-degree" sumcheck that simply evaluates the cached Stage-1 claims at the Stage-2 point using appropriate Eq selectors. It handles split-\(k\) dummy-bit normalization per Section 1.4.1.
+The instance is a cache-only (zero) sumcheck that binds the committed `rho` / `quotient` rows along the Stage-2
+challenges and appends the resulting openings under `SumcheckId::GtExpClaimReduction`. It handles split-\(k\)
+dummy-bit normalization per Section 1.4.1.
 
 **Ordering constraint**: `GtExpStage2Openings*` must run **before** `GtShift*` and GT wiring in the Stage-2 instance list.
+
+---
+
+### 2.2.3 GtExpBaseClaimReduction: Stage 2 Base Openings (Stage 2)
+
+The `GtExpBaseStage2Openings` instance (`gt/stage2_base_openings.rs`) is a cache-only Stage-2 openings instance
+for committed GTExp base rows on the **native u-domain**.
+
+#### Purpose
+
+GTExp base powers are committed over \((u, c_{\mathrm{exp}})\) (4 tower variables plus the family-local constraint-index suffix).
+Stage 2 consumers (prefix packing and wiring) need these values at the shared Stage-2 point. This instance:
+
+- participates in the Stage-2 batched sumcheck to obtain the Stage-2 point, and
+- caches `GtExpTerm::{Base,Base2,Base3,BaseSquareQuotient,BaseCubeQuotient}` under
+  `SumcheckId::GtExpBaseClaimReduction` at the normalized point \((u, c_{\mathrm{exp}})\).
+
+#### Notes
+
+- It is cache-only: `expected_output_claim = 0` (see `jolt-core/src/zkvm/recursion/gt/stage2_base_openings.rs`).
+- Binding of the committed `Base` row to the Dory AST is enforced by GT wiring (Section 3), not by verifier recomputation.
+
+---
+
+### 2.2.4 GtExpBasePow: Base-Power Consistency (Stage 2)
+
+The `GtExpBasePow` instance (`gt/base_power.rs`) proves algebraic consistency of the committed base powers.
+
+#### Constraint (pointwise on the u-domain)
+
+Let `g(u)` be the fixed irreducible polynomial MLE used for tower reduction. We introduce committed quotient rows
+`Q2/Q3` and enforce:
+
+- \(B(u)^2 - B2(u) = Q2(u)\cdot g(u)\)
+- \(B2(u)\cdot B(u) - B3(u) = Q3(u)\cdot g(u)\)
+
+The sumcheck batches both relations with a transcript scalar \(\beta\) (sampled in the verifier):
+
+\[
+(B\cdot B - B2 - Q2\cdot g) + \beta\cdot (B2\cdot B - B3 - Q3\cdot g) = 0.
+\]
+
+#### Inputs / outputs
+
+- Consumes cached openings from `SumcheckId::GtExpBaseClaimReduction` (Section 2.2.3).
+- Caches no additional openings (it reuses the base openings).
 
 ---
 
@@ -598,7 +674,7 @@ Proves $Q = [k]P$ using double-and-add.
 
 | Role | Symbol | Description |
 |------|--------|-------------|
-| Witness/Public | $P \in \mathbb{G}_1$ | Base point $(x_P, y_P)$ |
+| Witness (Input) | $P \in \mathbb{G}_1$ | Base point (committed base rows; wiring/boundary-bound) |
 | Public Input | $k \in \mathbb{F}_r$ | Scalar with bits $(b_0, \ldots, b_{n-1})$ |
 | Witness (Output) | $Q \in \mathbb{G}_1$ | Result $Q = [k]P$ |
 
@@ -712,7 +788,7 @@ constraints component-wise.
 
 | Role | Symbol | Description |
 |------|--------|-------------|
-| Witness/Public | $Q \in \mathbb{G}_2$ | Base point $(x_Q, y_Q) \in \mathbb{F}_{q^2}^2$ |
+| Witness (Input) | $Q \in \mathbb{G}_2$ | Base point (committed base rows; wiring/boundary-bound) |
 | Public Input | $k \in \mathbb{F}_r$ | Scalar (256-bit, MSB-first bits $b_0,\ldots,b_{255}$) |
 | Witness (Output) | $R \in \mathbb{G}_2$ | Result $R = [k]Q$ |
 
@@ -1146,6 +1222,25 @@ In other words, for soundness we require:
 - any GT value consumed by `GTMul` must be produced by `GTExp`/`GTMul` (or be handled as a boundary constant via the GT wiring plan),
 - any G1/G2 value consumed by `G1Add`/`G2Add` must be produced by `G1ScalarMul`/`G1Add` or `G2ScalarMul`/`G2Add` respectively (or be a pairing-boundary constant),
 - any “non-input base” used by `GTExp` / `G{1,2}ScalarMul` must be bound via base-binding edges (when the base itself is produced by a proven op).
+
+#### Base binding (implemented)
+
+GTExp and scalar-mul constraints use **committed base rows** (GTExp base powers on the u-domain; scalar-mul base
+coordinates on a c-only domain). Soundness requires these bases/points be tied to the verifier-derived AST:
+
+- For **non-input bases/points** (i.e. the base is produced by a proven op), `wiring_plan::derive_wiring_plan`
+  adds an explicit base-binding edge to the appropriate consumer port (see the “Base/point binding edges”
+  block in `jolt-core/src/zkvm/recursion/wiring_plan.rs`).
+- For **AST input bases/points**, the wiring plan uses an explicit boundary producer/consumer endpoint and the
+  verifier materializes only the boundary value:
+  - GTExp: `RecursionVerifierInput.gt_exp_base_inputs: Vec<Option<Fq12>>` provides `Some(base)` only for true
+    AST-input bases; non-input bases must be `None` so the verifier never recomputes them (see
+    `jolt-core/src/zkvm/recursion/verifier.rs`).
+  - G1/G2 scalar-mul: base coordinates are committed and bound via wiring boundary refs
+    (see `jolt-core/src/zkvm/recursion/wiring_plan.rs` and `jolt-core/src/zkvm/recursion/{g1,g2}/wiring.rs`).
+
+**Fail-fast invariant**: if a GTExp / scalar-mul base point cannot be wired (and is not a supported boundary input),
+plan derivation fails rather than allowing an unconstrained committed base row (see `jolt-core/src/zkvm/recursion/wiring_plan.rs`).
 
 If Dory’s AST semantics change to allow additional direct-input edges, `wiring_plan.rs` must be extended with new explicit boundary endpoints.
 
@@ -1895,8 +1990,8 @@ and produces a `ConstraintSystem` containing:
    - commits via Hyrax and appends the commitment to the transcript
 
 3. **Sumchecks**: `RecursionProver::prove_sumchecks`
-   - Stage 1: packed GT exp (`GtExp`) only
-   - Stage 2: batched constraint sumchecks (shift + claim reduction + GT mul + G1/G2 scalar mul + G1/G2 add + wiring/boundary constraints)
+   - Stage 1: packed GT exp batched with cache-only GTExp base openings (`GtExpBaseStage1Openings`, then `GtExp`)
+   - Stage 2: batched constraint sumchecks (GTExp claim reduction + GTExp base openings + GTExp base-power consistency + shift + GT mul + G1/G2 scalar mul + G1/G2 add + wiring/boundary constraints)
    - Stage 3: prefix packing reduction (no sumcheck; registers a single committed opening claim)
 
 4. **PCS opening**: `RecursionProver::poly_opening`
@@ -1913,7 +2008,7 @@ and finally performs the external 3-way pairing check against `recursion.pairing
 - Bind the dense commitment into the transcript (must match prover ordering).
 - Initialize the opening accumulator from `proof.opening_claims`.
 - Verify:
-  - Stage 1 packed GT exp sumcheck,
+  - Stage 1 packed GT exp sumcheck (batched with cache-only GTExp base openings),
   - Stage 2 batched constraint sumchecks (including wiring/boundary constraints),
   - Stage 3 prefix-packing reduction (recompute `stage3_packed_eval`, then register the committed opening),
   - Hyrax opening proof verification.
@@ -2155,21 +2250,23 @@ RUST_LOG=info cargo run --release -p recursion -- trace \
 
 Run on 2026-02-01 with the commands above.
 
-Key totals:
+Concise per-stage summary (virtual cycles):
 
-```text
-"verify_recursion_total": 214474969 RV64IMAC cycles, 260529771 virtual cycles
-"guest_verify_total": 217736669 RV64IMAC cycles, 267586049 virtual cycles
-trace length: 267586155 cycles
-```
+| Phase | Cycles | % of Total |
+|-------|--------|------------|
+| Base Stages 1–7 | 22.7M | 9.3% |
+| Stage 8 Prep | 15.7M | 6.5% |
+| Recursion Stage 1 | 4.2M | 1.7% |
+| Recursion Stage 2 | 24.0M | 9.9% |
+| Recursion Stage 3 | 0.5M | 0.2% |
+| Recursion PCS Opening | 149.3M | 61.5% |
+| External Pairing Check | 17.2M | 7.1% |
+| Other overhead | ~9.1M | 3.8% |
+| **Total (`verify_recursion_total`)** | **242.7M** | **100%** |
 
-Recursion SNARK breakdown:
-
-```text
-"verify_recursion_snark_verify_total": 169322397 RV64IMAC cycles, 201882194 virtual cycles
-"jolt_recursion_stage2": 38082812 RV64IMAC cycles, 41875103 virtual cycles
-"jolt_recursion_pcs_opening": 124498985 RV64IMAC cycles, 149295571 virtual cycles
-```
+This reflects the latest recursion sumcheck implementation where GTExp bases are committed on the native u-domain,
+non-public-input base hints are removed, and GTExp verifier work is reduced by consuming cached committed base
+openings (Sections 2.2.3–2.2.4).
 
 ### 9.2 Understanding the Output
 

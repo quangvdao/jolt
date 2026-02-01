@@ -57,10 +57,30 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 /// Degree bound for the G1Add constraint polynomial (see `g1/addition.rs`).
 const DEGREE_BOUND: usize = 6;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_G1_ADD_EXPECTED: &str = "recursion_g1_add_expected_output_claim";
+const CYCLE_G1_ADD_CACHE: &str = "recursion_g1_add_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 #[derive(Clone, Allocative)]
 pub struct G1AddParams {
@@ -299,6 +319,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1AddVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_G1_ADD_EXPECTED);
         // Follow the common convention used by existing constraint-list verifier:
         // reverse challenges to form the evaluation point used by EqPolynomial::mle.
         let eval_point: Vec<Fq> = sumcheck_challenges
@@ -415,6 +436,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1AddVerifier {
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_G1_ADD_CACHE);
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for term_idx in 0..G1AddTerm::COUNT {
             let term = G1AddTerm::from_index(term_idx).expect("invalid G1AddTerm index");

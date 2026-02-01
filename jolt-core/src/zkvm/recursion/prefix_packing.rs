@@ -169,7 +169,18 @@ impl PrefixPackingLayout {
         //  is_g1_scalar_mul, is_g1_scalar_mul_base, is_g1_add,
         //  is_g2_scalar_mul, is_g2_scalar_mul_base, is_g2_add,
         //  num_vars)
-        type PolySpec = (usize, PolyType, bool, bool, bool, bool, bool, bool, bool, usize);
+        type PolySpec = (
+            usize,
+            PolyType,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            usize,
+        );
         let mut polys: Vec<PolySpec> = Vec::new();
 
         if num_gt > 0 {

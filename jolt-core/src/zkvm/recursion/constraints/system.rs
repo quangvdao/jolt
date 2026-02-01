@@ -8,7 +8,7 @@ use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
 use crate::zkvm::recursion::gt::types::{GtExpPublicInputs, GtExpWitness};
 use crate::zkvm::recursion::prefix_packing::PrefixPackingLayout;
 use crate::zkvm::recursion::RecursionConstraintMetadata;
-use ark_bn254::{Fq, Fq2, Fq12};
+use ark_bn254::{Fq, Fq12, Fq2};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid,
 };

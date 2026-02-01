@@ -203,16 +203,16 @@ pub fn prove_recursion<FS: Transcript>(
 
     let (recursion_snark_proof, _constraint_metadata, pairing_boundary, stage8_combine_hint) =
         RecursionProver::<Fq>::prove::<F, DoryPCS, FS>(
-        &mut v.transcript,
-        hyrax_prover_setup,
-        RecursionInput {
-            joint_opening_proof: &v.proof.joint_opening_proof,
-            stage8_snapshot,
-            verifier_setup: &v.preprocessing.generators,
-            commitments: &commitments_map,
-        },
-    )
-    .map_err(|e| anyhow!("failed to generate recursion proof: {e:?}"))?;
+            &mut v.transcript,
+            hyrax_prover_setup,
+            RecursionInput {
+                joint_opening_proof: &v.proof.joint_opening_proof,
+                stage8_snapshot,
+                verifier_setup: &v.preprocessing.generators,
+                commitments: &commitments_map,
+            },
+        )
+        .map_err(|e| anyhow!("failed to generate recursion proof: {e:?}"))?;
 
     if stage8_combine_hint.is_none() {
         return Err(anyhow!(

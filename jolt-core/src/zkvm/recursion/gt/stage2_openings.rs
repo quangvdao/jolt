@@ -50,6 +50,27 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::Zero;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_GTEXP_STAGE2_OPENINGS_EXPECTED: &str =
+    "recursion_gtexp_stage2_openings_expected_output_claim";
+const CYCLE_GTEXP_STAGE2_OPENINGS_CACHE: &str = "recursion_gtexp_stage2_openings_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 #[derive(Clone, Debug, Allocative)]
 pub struct GtExpStage2OpeningsParams {
@@ -214,6 +235,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpStage2OpeningsVerif
         _acc: &VerifierOpeningAccumulator<Fq>,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_STAGE2_OPENINGS_EXPECTED);
         Fq::zero()
     }
 
@@ -223,6 +245,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpStage2OpeningsVerif
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_STAGE2_OPENINGS_CACHE);
         // Opening point must match the committed row arity: (s,u,c_exp_tail).
         debug_assert_eq!(
             sumcheck_challenges.len(),

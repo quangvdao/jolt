@@ -4,13 +4,13 @@
 //! - Exponentiation: Packed GT exponentiation with 2-phase protocol (base-4 digits)
 //! - Multiplication: GT multiplication constraints
 
-pub mod exponentiation;
 pub mod base_power;
+pub mod exponentiation;
 pub mod indexing;
 pub mod multiplication;
 pub mod shift;
-pub mod stage2_base_openings;
 pub mod stage1_base_openings;
+pub mod stage2_base_openings;
 pub mod stage2_openings;
 pub mod types;
 pub mod wiring;

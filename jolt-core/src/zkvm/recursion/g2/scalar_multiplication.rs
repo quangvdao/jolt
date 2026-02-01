@@ -74,7 +74,7 @@ use crate::{
         sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier},
     },
     transcripts::Transcript,
-    zkvm::recursion::constraints::system::{eq_lsb_index, G2ScalarMulNative},
+    zkvm::recursion::constraints::system::G2ScalarMulNative,
     zkvm::recursion::g2::types::G2ScalarMulPublicInputs,
     zkvm::recursion::gt::types::{
         eq_lsb_evals, eq_lsb_mle, eq_plus_one_lsb_evals, eq_plus_one_lsb_mle,
@@ -84,7 +84,8 @@ use crate::{
 
 use allocative::Allocative;
 use ark_bn254::{Fq, Fq2};
-use ark_ff::{One, Zero};
+use ark_ff::{One, PrimeField, Zero};
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 const STEP_VARS: usize = 8; // 256 steps
@@ -94,6 +95,27 @@ const STEP_VARS: usize = 8; // 256 steps
 // - we multiply by Eq(step,c) (deg 1) and I(c) (deg 1),
 // so we use 8.
 const DEGREE: usize = 8;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_G2_SMUL_EXPECTED: &str = "recursion_g2_scalar_mul_expected_output_claim";
+const CYCLE_G2_SMUL_CACHE: &str = "recursion_g2_scalar_mul_cache_openings";
+const CYCLE_SHIFT_G2_SMUL_EXPECTED: &str = "recursion_shift_g2_scalar_mul_expected_output_claim";
+const CYCLE_SHIFT_G2_SMUL_CACHE: &str = "recursion_shift_g2_scalar_mul_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 #[inline]
 fn k_from_num_constraints(num_constraints: usize) -> usize {
@@ -761,7 +783,9 @@ pub struct G2ScalarMulVerifier {
     eq_point: Vec<<Fq as JoltField>::Challenge>,
     term_batch_coeff: Fq,
     num_constraints: usize,
-    public_inputs: Vec<G2ScalarMulPublicInputs>,
+    /// For each scalar, the step indices `s ∈ [0,256)` where bit(s) = 1, where
+    /// `bit(s)` corresponds to the MSB-first scalar bit at position `255 - s`.
+    scalar_set_bits: Vec<Vec<u16>>,
 }
 
 #[cfg(feature = "allocative")]
@@ -777,12 +801,7 @@ impl G2ScalarMulVerifier {
     ) -> Self {
         debug_assert_eq!(public_inputs.len(), num_constraints);
         let params = G2ScalarMulParams::new(num_constraints);
-        Self::new_with_params(
-            params,
-            num_constraints,
-            public_inputs,
-            transcript,
-        )
+        Self::new_with_params(params, num_constraints, public_inputs, transcript)
     }
 
     pub fn new_with_k_common<T: Transcript>(
@@ -793,12 +812,7 @@ impl G2ScalarMulVerifier {
     ) -> Self {
         debug_assert_eq!(public_inputs.len(), num_constraints);
         let params = G2ScalarMulParams::new_with_k_common(num_constraints, k_common);
-        Self::new_with_params(
-            params,
-            num_constraints,
-            public_inputs,
-            transcript,
-        )
+        Self::new_with_params(params, num_constraints, public_inputs, transcript)
     }
 
     fn new_with_params<T: Transcript>(
@@ -812,12 +826,32 @@ impl G2ScalarMulVerifier {
             .map(|_| transcript.challenge_scalar_optimized::<Fq>())
             .collect();
         let term_batch_coeff: Fq = transcript.challenge_scalar_optimized::<Fq>().into();
+
+        // Precompute set-bit indices for each scalar (not counted in `expected_output_claim`).
+        let scalar_set_bits: Vec<Vec<u16>> = public_inputs
+            .iter()
+            .map(|pi| {
+                let bigint = pi.scalar.into_bigint();
+                let limbs = bigint.as_ref();
+                let mut out = Vec::new();
+                for s in 0..256usize {
+                    let bit_pos = 255usize - s;
+                    let limb = limbs[bit_pos / 64];
+                    let bit = ((limb >> (bit_pos % 64)) & 1) == 1;
+                    if bit {
+                        out.push(s as u16);
+                    }
+                }
+                out
+            })
+            .collect();
+
         Self {
             params,
             eq_point,
             term_batch_coeff,
             num_constraints,
-            public_inputs,
+            scalar_set_bits,
         }
     }
 }
@@ -832,6 +866,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_G2_SMUL_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
 
         // Eq polynomial convention: reverse challenges to match big-endian ordering in EqPolynomial::evals.
@@ -852,19 +887,26 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
         let r_c_tail = &r_c_chal[dummy..];
         debug_assert_eq!(r_c_tail.len(), k);
 
-        let r_c: Vec<Fq> = r_c_tail.iter().map(|c| (*c).into()).collect();
+        // Precompute Eq(r_step, s) once for all instances, and Eq(r_c, c) once for all constraints.
+        let eq_step = eq_lsb_evals::<Fq>(r_step);
+        debug_assert_eq!(eq_step.len(), 1 << STEP_VARS);
+        let eq_c = eq_lsb_evals::<Fq>(r_c_tail);
 
         // Public inputs at this point:
         // - base point is committed as (x_p_c0, x_p_c1, y_p_c0, y_p_c1) over (step,c)
         // - bit is step-only per instance, then batched across c by Eq(r_c,c)
-        let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
         // Combine indicator + public input batching in one pass (avoid recomputing Eq(r_c, c)).
         let mut ind_eval = Fq::zero();
         let mut bit = Fq::zero();
         for c in 0..self.num_constraints {
-            let w_c = eq_lsb_index(&r_c, c);
+            let w_c = eq_c[c];
             ind_eval += w_c;
-            bit += w_c * self.public_inputs[c].evaluate_bit_mle(&r_step_fq);
+            // bit_c(r_step) = Σ_{s ∈ set_bits_c} Eq(r_step, s)
+            let mut bit_c = Fq::zero();
+            for &s in &self.scalar_set_bits[c] {
+                bit_c += eq_step[s as usize];
+            }
+            bit += w_c * bit_c;
         }
 
         // Committed base point at this point (already batched over c by MLE evaluation).
@@ -995,6 +1037,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_G2_SMUL_CACHE);
         // Default opening point for step-trace polynomials: (r_step, r_c_tail).
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         // Base point polynomials are **c-only** (no 8-var step domain): open them at r_c_tail only.
@@ -1439,6 +1482,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for ShiftG2ScalarMulVerifier
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_SHIFT_G2_SMUL_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
         let y_step = &sumcheck_challenges[..STEP_VARS];
         let y_c = &sumcheck_challenges[STEP_VARS..];
@@ -1521,6 +1565,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for ShiftG2ScalarMulVerifier
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_SHIFT_G2_SMUL_CACHE);
         // No-op: reuse openings cached by `G2ScalarMul*` (same polynomials, same point).
     }
 }

@@ -13,7 +13,31 @@ use crate::utils::profiling::print_current_memory_usage;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 
 use ark_serialize::*;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use std::marker::PhantomData;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_BATCHED_SUMCHECK_VERIFY_TOTAL: &str = "batched_sumcheck_verify_total";
+const CYCLE_BATCHED_SUMCHECK_VERIFY_PROOF_VERIFY: &str = "batched_sumcheck_verify_proof_verify";
+const CYCLE_BATCHED_SUMCHECK_VERIFY_INPUT_CLAIMS: &str = "batched_sumcheck_verify_input_claims";
+const CYCLE_BATCHED_SUMCHECK_VERIFY_CACHE_OPENINGS: &str = "batched_sumcheck_verify_cache_openings";
+const CYCLE_BATCHED_SUMCHECK_VERIFY_EXPECTED_OUTPUT: &str =
+    "batched_sumcheck_verify_expected_output_claim";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 /// Implements the standard technique for batching parallel sumchecks to reduce
 /// verifier cost and proof size.
@@ -179,6 +203,7 @@ impl BatchedSumcheck {
         opening_accumulator: &mut VerifierOpeningAccumulator<F>,
         transcript: &mut ProofTranscript,
     ) -> Result<Vec<F::Challenge>, ProofVerifyError> {
+        let _verify_total = CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_TOTAL);
         let max_degree = sumcheck_instances
             .iter()
             .map(|sumcheck| sumcheck.degree())
@@ -191,10 +216,13 @@ impl BatchedSumcheck {
             .unwrap();
 
         // Compute input claims once (used for transcript binding and batching).
-        let input_claims: Vec<F> = sumcheck_instances
-            .iter()
-            .map(|sumcheck| sumcheck.input_claim(opening_accumulator))
-            .collect();
+        let input_claims: Vec<F> = {
+            let _input_claims = CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_INPUT_CLAIMS);
+            sumcheck_instances
+                .iter()
+                .map(|sumcheck| sumcheck.input_claim(opening_accumulator))
+                .collect()
+        };
 
         // Append input claims to transcript
         input_claims
@@ -222,8 +250,10 @@ impl BatchedSumcheck {
             })
             .sum();
 
-        let (output_claim, r_sumcheck) =
-            proof.verify(claim, max_num_rounds, max_degree, transcript)?;
+        let (output_claim, r_sumcheck) = {
+            let _proof_verify = CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_PROOF_VERIFY);
+            proof.verify(claim, max_num_rounds, max_degree, transcript)?
+        };
 
         let expected_output_claim = sumcheck_instances
             .iter()
@@ -234,8 +264,16 @@ impl BatchedSumcheck {
 
                 // Cache polynomial opening claims, to be proven using either an
                 // opening proof or sumcheck (in the case of virtual polynomials).
-                sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
-                let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
+                {
+                    let _cache =
+                        CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_CACHE_OPENINGS);
+                    sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
+                }
+                let claim = {
+                    let _expected =
+                        CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_EXPECTED_OUTPUT);
+                    sumcheck.expected_output_claim(opening_accumulator, r_slice)
+                };
                 claim * coeff
             })
             .sum();

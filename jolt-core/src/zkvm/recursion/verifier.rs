@@ -46,10 +46,10 @@ use super::{
     gt::{
         base_power::GtExpBasePowVerifier,
         exponentiation::{GtExpParams, GtExpVerifier},
-        stage1_base_openings::GtExpBaseStage1OpeningsVerifier,
         indexing::{k_gt, num_gt_mul_constraints_padded},
         multiplication::{GtMulParams, GtMulVerifier},
         shift::{GtShiftParams, GtShiftVerifier},
+        stage1_base_openings::GtExpBaseStage1OpeningsVerifier,
         stage2_base_openings::GtExpBaseStage2OpeningsVerifier,
         stage2_openings::GtExpStage2OpeningsVerifier,
         types::GtExpPublicInputs,
@@ -397,8 +397,7 @@ impl RecursionVerifier<Fq> {
 
         // Use packed GT exp path
         let params = GtExpParams::from_constraint_types(&self.input.constraint_types);
-        let base_verifier =
-            GtExpBaseStage1OpeningsVerifier::new(&self.input.constraint_types);
+        let base_verifier = GtExpBaseStage1OpeningsVerifier::new(&self.input.constraint_types);
         let verifier = GtExpVerifier::new(
             params,
             &self.input.constraint_types,

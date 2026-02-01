@@ -51,7 +51,27 @@
 use ark_bn254::{Fq, G2Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{Field, One, Zero};
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_WIRING_G2_EXPECTED: &str = "recursion_wiring_g2_expected_output_claim";
+const CYCLE_WIRING_G2_CACHE: &str = "recursion_wiring_g2_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 use crate::{
     field::JoltField,
@@ -1003,6 +1023,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
         acc: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_WIRING_G2_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), STEP_VARS + self.k_common);
         let r_step = &sumcheck_challenges[..STEP_VARS];
         let r_c = &sumcheck_challenges[STEP_VARS..];
@@ -1200,6 +1221,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG2Verifier {
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_WIRING_G2_CACHE);
         // No-op.
     }
 }

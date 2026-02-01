@@ -647,7 +647,8 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                                         debug_assert!((base4[u] * base4[u] - base24[u]).is_zero());
                                         q2[u] = Fq::zero();
                                     } else {
-                                        q2[u] = (base4[u] * base4[u] - base24[u]) * g.inverse().unwrap();
+                                        q2[u] = (base4[u] * base4[u] - base24[u])
+                                            * g.inverse().unwrap();
                                     }
                                 }
                                 q2
@@ -660,7 +661,8 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                                         debug_assert!((base24[u] * base4[u] - base34[u]).is_zero());
                                         q3[u] = Fq::zero();
                                     } else {
-                                        q3[u] = (base24[u] * base4[u] - base34[u]) * g.inverse().unwrap();
+                                        q3[u] = (base24[u] * base4[u] - base34[u])
+                                            * g.inverse().unwrap();
                                     }
                                 }
                                 q3
@@ -802,48 +804,104 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
 
             for c in 0..cs.g2_scalar_mul_rows.len() {
                 match entry.poly_type {
-                    PolyType::G2ScalarMulXAC0 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_c0, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulXAC1 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_c1, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulYAC0 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_c0, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulYAC1 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_c1, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulXTC0 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_t_c0, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulXTC1 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_t_c1, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulYTC0 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_t_c0, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulYTC1 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_t_c1, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulXANextC0 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_next_c0, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulXANextC1 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_next_c1, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulYANextC0 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_next_c0, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulYANextC1 => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_next_c1, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulTIndicator => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].t_indicator, entry.num_vars, c, 8)
-                    }
-                    PolyType::G2ScalarMulAIndicator => {
-                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].a_indicator, entry.num_vars, c, 8)
-                    }
+                    PolyType::G2ScalarMulXAC0 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].x_a_c0,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulXAC1 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].x_a_c1,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulYAC0 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].y_a_c0,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulYAC1 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].y_a_c1,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulXTC0 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].x_t_c0,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulXTC1 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].x_t_c1,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulYTC0 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].y_t_c0,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulYTC1 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].y_t_c1,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulXANextC0 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].x_a_next_c0,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulXANextC1 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].x_a_next_c1,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulYANextC0 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].y_a_next_c0,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulYANextC1 => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].y_a_next_c1,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulTIndicator => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].t_indicator,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
+                    PolyType::G2ScalarMulAIndicator => fill_block_bit_reversed(
+                        dst,
+                        &cs.g2_scalar_mul_rows[c].a_indicator,
+                        entry.num_vars,
+                        c,
+                        8,
+                    ),
                     _ => continue,
                 };
             }

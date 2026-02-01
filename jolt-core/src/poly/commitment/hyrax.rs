@@ -338,141 +338,145 @@ impl<const RATIO: usize, F: JoltField, G: CurveGroup<ScalarField = F>> HyraxOpen
         let msm_eq = {
             #[cfg(any(target_arch = "riscv64", target_arch = "riscv32"))]
             {
-            use ark_ec::AffineRepr;
-            use core::any::TypeId;
-            use jolt_inlines_grumpkin::msm::{msm_glv_with_scratch_const, DEFAULT_GLV_WINDOW_BITS};
-            use jolt_inlines_grumpkin::{GrumpkinFq, GrumpkinFr, GrumpkinPoint};
+                use ark_ec::AffineRepr;
+                use core::any::TypeId;
+                use jolt_inlines_grumpkin::msm::{
+                    msm_glv_with_scratch_const, DEFAULT_GLV_WINDOW_BITS,
+                };
+                use jolt_inlines_grumpkin::{GrumpkinFq, GrumpkinFr, GrumpkinPoint};
 
-            // IMPORTANT: this branch uses `unsafe` casts below. Keep a runtime assertion
-            // even in release builds to avoid UB if this code is ever instantiated with
-            // a non-grumpkin `G` in the guest.
-            assert_eq!(
-                TypeId::of::<G>(),
-                TypeId::of::<ark_grumpkin::Projective>(),
-                "grumpkin MSM backend only supported for G = ark_grumpkin::Projective"
-            );
-
-            let to_grumpkin_point = |p: &G::Affine| -> GrumpkinPoint {
-                // SAFETY: guarded by the TypeId check above in debug builds; this code path is only
-                // intended for the recursion verifier where Hyrax uses Grumpkin.
-                let p: &ark_grumpkin::Affine =
-                    unsafe { &*(p as *const G::Affine as *const ark_grumpkin::Affine) };
-                if p.is_zero() {
-                    GrumpkinPoint::infinity()
-                } else {
-                    GrumpkinPoint::new_unchecked(GrumpkinFq::new(p.x), GrumpkinFq::new(p.y))
-                }
-            };
-
-            let to_grumpkin_scalar = |s: &G::ScalarField| -> GrumpkinFr {
-                // SAFETY: same as above.
-                let s: &ark_grumpkin::Fr =
-                    unsafe { &*(s as *const G::ScalarField as *const ark_grumpkin::Fr) };
-                GrumpkinFr::new(*s)
-            };
-
-            // Convert bases/scalars for MSM #1 (row commitments).
-            let mut bases_1: Vec<GrumpkinPoint> = Vec::with_capacity(normalized_commitments.len());
-            for p in normalized_commitments.iter() {
-                bases_1.push(to_grumpkin_point(p));
-            }
-            let mut scalars_1: Vec<GrumpkinFr> = Vec::with_capacity(L.len());
-            for s in L.iter() {
-                scalars_1.push(to_grumpkin_scalar(s));
-            }
-
-            // Convert scalars for MSM #2 (opening proof vector); bases are cached (below).
-            let mut scalars_2: Vec<GrumpkinFr> = Vec::with_capacity(self.vector_matrix_product.len());
-            for s in self.vector_matrix_product.iter() {
-                scalars_2.push(to_grumpkin_scalar(s));
-            }
-
-            // Reuse scratch buffers across both MSMs to avoid per-call heap allocation inside
-            // `msm_glv_const`. The scratch variant is functionally identical but takes
-            // caller-provided buffers.
-            let max_n = std::cmp::max(bases_1.len(), R_size);
-            let mut expanded_scalars: Vec<u128> = Vec::with_capacity(2 * max_n);
-            expanded_scalars.resize_with(2 * max_n, Default::default);
-            let mut expanded_points: Vec<GrumpkinPoint> = Vec::with_capacity(2 * max_n);
-            expanded_points.resize_with(2 * max_n, GrumpkinPoint::infinity);
-
-            let _msm1_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM1);
-            let homomorphically_derived_commitment: GrumpkinPoint =
-                msm_glv_with_scratch_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(
-                    &scalars_1,
-                    &bases_1,
-                    &mut expanded_scalars,
-                    &mut expanded_points,
+                // IMPORTANT: this branch uses `unsafe` casts below. Keep a runtime assertion
+                // even in release builds to avoid UB if this code is ever instantiated with
+                // a non-grumpkin `G` in the guest.
+                assert_eq!(
+                    TypeId::of::<G>(),
+                    TypeId::of::<ark_grumpkin::Projective>(),
+                    "grumpkin MSM backend only supported for G = ark_grumpkin::Projective"
                 );
-            drop(_msm1_cycle);
-            tracing::debug!(
-                num_bases = bases_1.len(),
-                "MSM #1: homomorphically derived commitment (grumpkin GLV MSM)"
-            );
 
-            // MSM #2 uses fixed Pedersen generators from the verifier setup. Convert them once
-            // per (in-memory) setup instance and reuse across verify calls.
-            let product_commitment: GrumpkinPoint = HYRAX_PEDERSEN_BASES_CACHE.with(|cell| {
-                let mut cache = cell.borrow_mut();
-                let ptr = pedersen_generators.generators.as_ptr() as usize;
-
-                if cache.generators_ptr != ptr || cache.len < R_size {
-                    cache.generators_ptr = ptr;
-                    cache.points.clear();
-                    cache.points.reserve(R_size);
-                    for p in pedersen_generators.generators[..R_size].iter() {
-                        cache.points.push(to_grumpkin_point(p));
+                let to_grumpkin_point = |p: &G::Affine| -> GrumpkinPoint {
+                    // SAFETY: guarded by the TypeId check above in debug builds; this code path is only
+                    // intended for the recursion verifier where Hyrax uses Grumpkin.
+                    let p: &ark_grumpkin::Affine =
+                        unsafe { &*(p as *const G::Affine as *const ark_grumpkin::Affine) };
+                    if p.is_zero() {
+                        GrumpkinPoint::infinity()
+                    } else {
+                        GrumpkinPoint::new_unchecked(GrumpkinFq::new(p.x), GrumpkinFq::new(p.y))
                     }
-                    cache.len = cache.points.len();
+                };
+
+                let to_grumpkin_scalar = |s: &G::ScalarField| -> GrumpkinFr {
+                    // SAFETY: same as above.
+                    let s: &ark_grumpkin::Fr =
+                        unsafe { &*(s as *const G::ScalarField as *const ark_grumpkin::Fr) };
+                    GrumpkinFr::new(*s)
+                };
+
+                // Convert bases/scalars for MSM #1 (row commitments).
+                let mut bases_1: Vec<GrumpkinPoint> =
+                    Vec::with_capacity(normalized_commitments.len());
+                for p in normalized_commitments.iter() {
+                    bases_1.push(to_grumpkin_point(p));
+                }
+                let mut scalars_1: Vec<GrumpkinFr> = Vec::with_capacity(L.len());
+                for s in L.iter() {
+                    scalars_1.push(to_grumpkin_scalar(s));
                 }
 
-                let bases_2 = &cache.points[..R_size];
-                let _msm2_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM2);
-                let product_commitment: GrumpkinPoint =
+                // Convert scalars for MSM #2 (opening proof vector); bases are cached (below).
+                let mut scalars_2: Vec<GrumpkinFr> =
+                    Vec::with_capacity(self.vector_matrix_product.len());
+                for s in self.vector_matrix_product.iter() {
+                    scalars_2.push(to_grumpkin_scalar(s));
+                }
+
+                // Reuse scratch buffers across both MSMs to avoid per-call heap allocation inside
+                // `msm_glv_const`. The scratch variant is functionally identical but takes
+                // caller-provided buffers.
+                let max_n = std::cmp::max(bases_1.len(), R_size);
+                let mut expanded_scalars: Vec<u128> = Vec::with_capacity(2 * max_n);
+                expanded_scalars.resize_with(2 * max_n, Default::default);
+                let mut expanded_points: Vec<GrumpkinPoint> = Vec::with_capacity(2 * max_n);
+                expanded_points.resize_with(2 * max_n, GrumpkinPoint::infinity);
+
+                let _msm1_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM1);
+                let homomorphically_derived_commitment: GrumpkinPoint =
                     msm_glv_with_scratch_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(
-                        &scalars_2,
-                        bases_2,
+                        &scalars_1,
+                        &bases_1,
                         &mut expanded_scalars,
                         &mut expanded_points,
                     );
-                drop(_msm2_cycle);
-                product_commitment
-            });
-            tracing::debug!(
-                num_bases = R_size,
-                vector_matrix_product_len = self.vector_matrix_product.len(),
-                "MSM #2: product commitment (grumpkin GLV MSM)"
-            );
+                drop(_msm1_cycle);
+                tracing::debug!(
+                    num_bases = bases_1.len(),
+                    "MSM #1: homomorphically derived commitment (grumpkin GLV MSM)"
+                );
 
-            homomorphically_derived_commitment == product_commitment
+                // MSM #2 uses fixed Pedersen generators from the verifier setup. Convert them once
+                // per (in-memory) setup instance and reuse across verify calls.
+                let product_commitment: GrumpkinPoint = HYRAX_PEDERSEN_BASES_CACHE.with(|cell| {
+                    let mut cache = cell.borrow_mut();
+                    let ptr = pedersen_generators.generators.as_ptr() as usize;
+
+                    if cache.generators_ptr != ptr || cache.len < R_size {
+                        cache.generators_ptr = ptr;
+                        cache.points.clear();
+                        cache.points.reserve(R_size);
+                        for p in pedersen_generators.generators[..R_size].iter() {
+                            cache.points.push(to_grumpkin_point(p));
+                        }
+                        cache.len = cache.points.len();
+                    }
+
+                    let bases_2 = &cache.points[..R_size];
+                    let _msm2_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM2);
+                    let product_commitment: GrumpkinPoint =
+                        msm_glv_with_scratch_const::<GrumpkinPoint, { DEFAULT_GLV_WINDOW_BITS }>(
+                            &scalars_2,
+                            bases_2,
+                            &mut expanded_scalars,
+                            &mut expanded_points,
+                        );
+                    drop(_msm2_cycle);
+                    product_commitment
+                });
+                tracing::debug!(
+                    num_bases = R_size,
+                    vector_matrix_product_len = self.vector_matrix_product.len(),
+                    "MSM #2: product commitment (grumpkin GLV MSM)"
+                );
+
+                homomorphically_derived_commitment == product_commitment
             }
 
             #[cfg(not(any(target_arch = "riscv64", target_arch = "riscv32")))]
             {
-            let _msm1_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM1);
-            let homomorphically_derived_commitment: G =
-                VariableBaseMSM::msm(&normalized_commitments, &MultilinearPolynomial::from(L))
-                    .unwrap();
-            drop(_msm1_cycle);
-            tracing::debug!(
-                num_bases = normalized_commitments.len(),
-                "MSM #1: homomorphically derived commitment"
-            );
+                let _msm1_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM1);
+                let homomorphically_derived_commitment: G =
+                    VariableBaseMSM::msm(&normalized_commitments, &MultilinearPolynomial::from(L))
+                        .unwrap();
+                drop(_msm1_cycle);
+                tracing::debug!(
+                    num_bases = normalized_commitments.len(),
+                    "MSM #1: homomorphically derived commitment"
+                );
 
-            let _msm2_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM2);
-            let product_commitment = VariableBaseMSM::msm_field_elements(
-                &pedersen_generators.generators[..R_size],
-                &self.vector_matrix_product,
-            )
-            .unwrap();
-            drop(_msm2_cycle);
-            tracing::debug!(
-                num_bases = R_size,
-                vector_matrix_product_len = self.vector_matrix_product.len(),
-                "MSM #2: product commitment"
-            );
+                let _msm2_cycle = CycleMarkerGuard::new(CYCLE_HYRAX_MSM2);
+                let product_commitment = VariableBaseMSM::msm_field_elements(
+                    &pedersen_generators.generators[..R_size],
+                    &self.vector_matrix_product,
+                )
+                .unwrap();
+                drop(_msm2_cycle);
+                tracing::debug!(
+                    num_bases = R_size,
+                    vector_matrix_product_len = self.vector_matrix_product.len(),
+                    "MSM #2: product commitment"
+                );
 
-            homomorphically_derived_commitment == product_commitment
+                homomorphically_derived_commitment == product_commitment
             }
         };
 

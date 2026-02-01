@@ -59,12 +59,12 @@ use super::{
     gt::{
         base_power::GtExpBasePowProver,
         exponentiation::{GtExpParams, GtExpProver},
-        stage1_base_openings::GtExpBaseStage1OpeningsProver,
         indexing::{
             k_gt, num_gt_constraints, num_gt_constraints_padded, num_gt_mul_constraints_padded,
         },
         multiplication::{GtMulParams, GtMulProver},
         shift::{GtShiftParams, GtShiftProver},
+        stage1_base_openings::GtExpBaseStage1OpeningsProver,
         stage2_base_openings::GtExpBaseStage2OpeningsProver,
         stage2_openings::GtExpStage2OpeningsProver,
         types::GtMulConstraintPolynomials,
@@ -229,15 +229,7 @@ impl RecursionProver<Fq> {
     #[tracing::instrument(skip_all, name = "RecursionProver::witness_generation")]
     fn witness_generation<F, PCS, ProofTranscript>(
         input: RecursionInput<'_, F, PCS, ProofTranscript>,
-    ) -> Result<
-        (
-            Self,
-            ark_bn254::Fq12,
-            PCS::Ast,
-            PairingBoundary,
-        ),
-        Box<dyn std::error::Error>,
-    >
+    ) -> Result<(Self, ark_bn254::Fq12, PCS::Ast, PairingBoundary), Box<dyn std::error::Error>>
     where
         F: JoltField,
         PCS: RecursionExt<F, Witness = WitnessCollection<JoltWitness>, Ast = AstGraph<BN254>>,
@@ -329,12 +321,7 @@ impl RecursionProver<Fq> {
         prover.pairing_boundary = Some(pairing_boundary.clone());
         prover.joint_commitment = Some(stage8_combine_hint_fq12);
 
-        Ok((
-            prover,
-            stage8_combine_hint_fq12,
-            ast,
-            pairing_boundary,
-        ))
+        Ok((prover, stage8_combine_hint_fq12, ast, pairing_boundary))
     }
 
     /// Full Stage8→recursion pipeline entrypoint.

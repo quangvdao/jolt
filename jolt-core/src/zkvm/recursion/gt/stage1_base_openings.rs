@@ -26,7 +26,9 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::config::CONFIG,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
-    zkvm::recursion::gt::indexing::{gt_exp_c_tail_range, k_exp, k_gt, num_gt_exp_constraints_padded},
+    zkvm::recursion::gt::indexing::{
+        gt_exp_c_tail_range, k_exp, k_gt, num_gt_exp_constraints_padded,
+    },
     zkvm::recursion::gt::types::GtExpWitness,
     zkvm::witness::{GtExpTerm, RecursionPoly, VirtualPolynomial},
 };
@@ -34,9 +36,31 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::Zero;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 const U_VARS: usize = 4;
 const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_GTEXP_BASE_STAGE1_OPENINGS_EXPECTED: &str =
+    "recursion_gtexp_base_stage1_openings_expected_output_claim";
+const CYCLE_GTEXP_BASE_STAGE1_OPENINGS_CACHE: &str =
+    "recursion_gtexp_base_stage1_openings_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 #[derive(Clone, Debug, Allocative)]
 pub struct GtExpBaseStage1OpeningsParams {
@@ -224,6 +248,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBaseStage1OpeningsV
         _acc: &VerifierOpeningAccumulator<Fq>,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_BASE_STAGE1_OPENINGS_EXPECTED);
         Fq::zero()
     }
 
@@ -233,6 +258,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBaseStage1OpeningsV
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_BASE_STAGE1_OPENINGS_CACHE);
         debug_assert_eq!(
             sumcheck_challenges.len(),
             CONFIG.packed_vars + self.params.k_common
@@ -263,4 +289,3 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBaseStage1OpeningsV
         }
     }
 }
-

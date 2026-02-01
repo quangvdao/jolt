@@ -125,17 +125,13 @@ fn build_fixture() -> RecursionFixture {
         commitments: &commitments,
     };
 
-    let (
-        recursion_proof,
-        _metadata,
-        pairing_boundary,
-        stage8_combine_hint_fq12_opt,
-    ) = RecursionProver::<Fq>::prove::<Fr, DoryCommitmentScheme, Blake2bTranscript>(
-        &mut recursion_transcript,
-        &hyrax_prover_setup,
-        input,
-    )
-    .expect("recursion proving must succeed");
+    let (recursion_proof, _metadata, pairing_boundary, stage8_combine_hint_fq12_opt) =
+        RecursionProver::<Fq>::prove::<Fr, DoryCommitmentScheme, Blake2bTranscript>(
+            &mut recursion_transcript,
+            &hyrax_prover_setup,
+            input,
+        )
+        .expect("recursion proving must succeed");
 
     let stage8_combine_hint_fq12 =
         stage8_combine_hint_fq12_opt.expect("recursion prover should emit stage8 combine hint");

@@ -474,7 +474,9 @@ pub fn derive_plan_with_hints(
     for (_, base_id, scalar) in gt_exp_ops.iter() {
         // Only materialize base values for true AST inputs; non-input bases are bound via wiring.
         let base_opt = match &ast.nodes[base_id.0 as usize].op {
-            AstOp::Input { source } => Some(resolve_input_gt(proof, &dory_setup, joint_commitment, source)?.0),
+            AstOp::Input { source } => {
+                Some(resolve_input_gt(proof, &dory_setup, joint_commitment, source)?.0)
+            }
             _ => None,
         };
         let exponent: Fr = ark_to_jolt(scalar);
@@ -497,7 +499,9 @@ pub fn derive_plan_with_hints(
         debug_assert!(idx < ast.nodes.len(), "point_id out of bounds");
         let base_point = match &ast.nodes[idx].op {
             AstOp::Input { source } => {
-                let p = resolve_input_g1(proof, &dory_setup, source)?.0.into_affine();
+                let p = resolve_input_g1(proof, &dory_setup, source)?
+                    .0
+                    .into_affine();
                 (p.x, p.y)
             }
             _ => (ark_bn254::Fq::zero(), ark_bn254::Fq::zero()),
@@ -515,15 +519,15 @@ pub fn derive_plan_with_hints(
         debug_assert!(idx < ast.nodes.len(), "point_id out of bounds");
         let base_point = match &ast.nodes[idx].op {
             AstOp::Input { source } => {
-                let p = resolve_input_g2(proof, &dory_setup, source)?.0.into_affine();
+                let p = resolve_input_g2(proof, &dory_setup, source)?
+                    .0
+                    .into_affine();
                 (p.x, p.y)
             }
             _ => (ark_bn254::Fq2::zero(), ark_bn254::Fq2::zero()),
         };
         let scalar_fr: Fr = ark_to_jolt(scalar);
-        constraint_types.push(ConstraintType::G2ScalarMul {
-            base_point,
-        });
+        constraint_types.push(ConstraintType::G2ScalarMul { base_point });
         g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(scalar_fr));
     }
 

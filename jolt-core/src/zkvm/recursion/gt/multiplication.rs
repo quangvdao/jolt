@@ -57,11 +57,31 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 /// Degree bound for GTMul constraint polynomial: eq * ind * (lhs*rhs - result - quotient*g)
 /// Each term: eq (deg 1) * ind (deg 1) * constraint (deg 2) = deg 4.
 const DEGREE: usize = 4;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_GTMUL_EXPECTED: &str = "recursion_gt_mul_expected_output_claim";
+const CYCLE_GTMUL_CACHE: &str = "recursion_gt_mul_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 #[derive(Clone, Allocative)]
 pub struct GtMulParams {
@@ -431,6 +451,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTMUL_EXPECTED);
         let k_common = self.params.num_constraint_index_vars_common;
         let k_mul = self.params.num_constraint_index_vars_family;
         debug_assert_eq!(sumcheck_challenges.len(), 4 + k_common);
@@ -508,6 +529,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTMUL_CACHE);
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for vp in [
             VirtualPolynomial::Recursion(RecursionPoly::GtMul {

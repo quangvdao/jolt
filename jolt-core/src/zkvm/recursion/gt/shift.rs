@@ -61,10 +61,30 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::Zero;
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 /// Degree bound: we take a conservative bound (EqPlusOne * Eq * Eq * rho).
 const DEGREE: usize = 4;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_GTSHIFT_EXPECTED: &str = "recursion_gt_shift_expected_output_claim";
+const CYCLE_GTSHIFT_CACHE: &str = "recursion_gt_shift_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 #[inline]
 fn evals_skip_one<const D: usize>(a0: Fq, a1: Fq) -> [Fq; D] {
@@ -305,6 +325,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
         acc: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTSHIFT_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
 
         // Stage-1 point r1 comes from the rho_next opening under SumcheckId::GtExp.
@@ -351,6 +372,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTSHIFT_CACHE);
         // No-op.
     }
 }

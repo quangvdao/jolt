@@ -42,7 +42,27 @@
 
 use ark_bn254::{Fq, Fq12};
 use ark_ff::{Field, One, Zero};
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_WIRING_GT_EXPECTED: &str = "recursion_wiring_gt_expected_output_claim";
+const CYCLE_WIRING_GT_CACHE: &str = "recursion_wiring_gt_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 use crate::{
     field::JoltField,
@@ -177,8 +197,7 @@ impl CPhaseState {
         self.mul_rhs_c.bind_parallel(r_j, BindingOrder::LowToHigh);
         self.mul_result_c
             .bind_parallel(r_j, BindingOrder::LowToHigh);
-        self.base_port_c
-            .bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.base_port_c.bind_parallel(r_j, BindingOrder::LowToHigh);
         for sel in self.selectors.values_mut() {
             sel.bind_parallel(r_j, BindingOrder::LowToHigh);
         }
@@ -271,7 +290,8 @@ impl<T: Transcript> WiringGtProver<T> {
         let num_gt_exp = cs.gt_exp_witnesses.len();
         let num_gt_mul = cs.gt_mul_rows.len();
         let need_joint = edges.iter().any(|e| {
-            matches!(e.dst, GtConsumer::JointCommitment) || matches!(e.src, GtProducer::JointCommitment)
+            matches!(e.dst, GtConsumer::JointCommitment)
+                || matches!(e.src, GtProducer::JointCommitment)
         });
         let need_pairing_rhs = edges
             .iter()
@@ -320,7 +340,11 @@ impl<T: Transcript> WiringGtProver<T> {
         // Base ports (committed row) are taken from the packed witness base table, which is
         // replicated across step bits. This matches the padding convention used elsewhere.
         let exp_base_port: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
-            .map(|i| Some(MultilinearPolynomial::from(cs.gt_exp_witnesses[i].base_packed.clone())))
+            .map(|i| {
+                Some(MultilinearPolynomial::from(
+                    cs.gt_exp_witnesses[i].base_packed.clone(),
+                ))
+            })
             .collect();
 
         let joint_commitment = need_joint.then(|| {
@@ -748,9 +772,14 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                                         rho_e,
                                         beta_exp,
                                     ),
-                                    GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
+                                    GtConsumer::JointCommitment
+                                    | GtConsumer::PairingBoundaryRhs => {
                                         // Should not happen in well-formed plans; pick a default.
-                                        (selector_key(dummy_mul, self.k_mul, 0), mul_out_e, beta_mul)
+                                        (
+                                            selector_key(dummy_mul, self.k_mul, 0),
+                                            mul_out_e,
+                                            beta_mul,
+                                        )
                                     }
                                 }
                             }
@@ -899,6 +928,10 @@ pub struct WiringGtVerifier {
     num_c_vars: usize,
     k_exp: usize,
     k_mul: usize,
+    /// Number of GTMul instances referenced by the wiring plan.
+    ///
+    /// Cached so `expected_output_claim` does not scan `edges` just to size `eq_c_mul`.
+    num_mul_instances: usize,
 }
 
 impl WiringGtVerifier {
@@ -924,6 +957,28 @@ impl WiringGtVerifier {
             .collect();
         let gt_exp_base_inputs = input.gt_exp_base_inputs.clone();
 
+        // Cache #mul instances referenced by the edge list (avoid re-scanning each verify).
+        let mut max_mul = None::<usize>;
+        for edge in &edges {
+            match edge.src {
+                GtProducer::GtMulResult { instance } => {
+                    max_mul = Some(max_mul.map_or(instance, |m| m.max(instance)));
+                }
+                GtProducer::GtExpRho { .. }
+                | GtProducer::GtExpBase { .. }
+                | GtProducer::JointCommitment => {}
+            }
+            match edge.dst {
+                GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                    max_mul = Some(max_mul.map_or(instance, |m| m.max(instance)));
+                }
+                GtConsumer::GtExpBase { .. }
+                | GtConsumer::JointCommitment
+                | GtConsumer::PairingBoundaryRhs => {}
+            }
+        }
+        let num_mul_instances = max_mul.map_or(0, |m| m + 1);
+
         Self {
             edges,
             lambdas,
@@ -935,6 +990,7 @@ impl WiringGtVerifier {
             num_c_vars,
             k_exp,
             k_mul,
+            num_mul_instances,
         }
     }
 
@@ -971,6 +1027,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         acc: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), X_VARS + self.num_c_vars);
 
         let r_step = &sumcheck_challenges[..STEP_VARS];
@@ -1027,7 +1084,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         let r_c_mul_tail = &r_c_fq[dummy_mul..];
 
         // Precompute eq(s, s_out) values once per GTExp instance; these are reused across edges.
-        let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
+        //
+        // NOTE: `STEP_VARS = 7`, so this is a tiny fixed-size computation; for small `num_exp`
+        // it is cheaper than building the full 2^7 table.
+        let mut r_step_fq = [Fq::zero(); STEP_VARS];
+        for (i, &c) in r_step.iter().enumerate() {
+            r_step_fq[i] = c.into();
+        }
         let eq_s_zero: Fq = r_step_fq.iter().map(|&r_b| Fq::one() - r_b).product();
         let eq_s_exp: Vec<Fq> = self
             .gt_exp_out_step
@@ -1051,24 +1114,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         // only touch expensive values (Fq12 bases) once.
         let num_exp = self.gt_exp_out_step.len();
 
-        let mut max_mul = None::<usize>;
-        for edge in &self.edges {
-            match edge.src {
-                GtProducer::GtMulResult { instance } => {
-                    max_mul = Some(max_mul.map_or(instance, |m| m.max(instance)));
-                }
-                GtProducer::GtExpRho { .. } | GtProducer::GtExpBase { .. } | GtProducer::JointCommitment => {}
-            }
-            match edge.dst {
-                GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
-                    max_mul = Some(max_mul.map_or(instance, |m| m.max(instance)));
-                }
-                GtConsumer::GtExpBase { .. }
-                | GtConsumer::JointCommitment
-                | GtConsumer::PairingBoundaryRhs => {}
-            }
-        }
-        let num_mul = max_mul.map_or(0, |m| m + 1);
+        let num_mul = self.num_mul_instances;
 
         let eq_c_exp: Vec<Fq> = (0..num_exp)
             .map(|i| self.eq_c_tail(r_c_exp_tail, i, self.k_exp))
@@ -1178,6 +1224,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_WIRING_GT_CACHE);
         // No-op.
     }
 }

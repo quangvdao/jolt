@@ -39,7 +39,9 @@ use crate::{
     transcripts::Transcript,
     zkvm::recursion::constraints::system::eq_lsb_index,
     zkvm::recursion::constraints::system::{ConstraintLocator, ConstraintType},
-    zkvm::recursion::gt::indexing::{gt_mul_c_tail_range, k_exp, k_gt, num_gt_exp_constraints, num_gt_exp_constraints_padded},
+    zkvm::recursion::gt::indexing::{
+        gt_mul_c_tail_range, k_exp, k_gt, num_gt_exp_constraints, num_gt_exp_constraints_padded,
+    },
     zkvm::recursion::gt::types::GtExpWitness,
     zkvm::witness::{GtExpTerm, RecursionPoly, VirtualPolynomial},
 };
@@ -47,11 +49,31 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
+use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 const U_VARS: usize = 4;
 const DEGREE: usize = 4;
 const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_GTEXP_BASE_POW_EXPECTED: &str = "recursion_gtexp_base_pow_expected_output_claim";
+const CYCLE_GTEXP_BASE_POW_CACHE: &str = "recursion_gtexp_base_pow_cache_openings";
+
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 #[derive(Clone, Allocative)]
 pub struct GtExpBasePowParams {
@@ -400,6 +422,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBasePowVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_BASE_POW_EXPECTED);
         let k_common = self.params.k_common;
         let k_exp = self.params.k_exp;
         debug_assert_eq!(sumcheck_challenges.len(), U_VARS + k_common);
@@ -411,7 +434,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBasePowVerifier {
         eff.extend_from_slice(&sumcheck_challenges[U_VARS + dummy..]);
 
         let eval_point: Vec<Fq> = eff.iter().rev().map(|c| (*c).into()).collect();
-        let mut eq_point_eff: Vec<<Fq as JoltField>::Challenge> = Vec::with_capacity(U_VARS + k_exp);
+        let mut eq_point_eff: Vec<<Fq as JoltField>::Challenge> =
+            Vec::with_capacity(U_VARS + k_exp);
         eq_point_eff.extend_from_slice(&self.eq_point[..U_VARS]);
         eq_point_eff.extend_from_slice(&self.eq_point[U_VARS + dummy..]);
         let eq_point_f: Vec<Fq> = eq_point_eff.iter().map(|c| (*c).into()).collect();
@@ -460,7 +484,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBasePowVerifier {
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_BASE_POW_CACHE);
         // No new openings: we reuse cached base/base2/base3/q2/q3 from `GtExpBaseStage2Openings`.
     }
 }
-

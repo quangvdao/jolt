@@ -253,17 +253,14 @@ pub struct RecursionArtifact<FS: Transcript> {
     pub stage8_combine_hint: Option<Fq12>,
     /// External pairing boundary (3 pairing input pairs + expected GT rhs).
     pub pairing_boundary: PairingBoundary,
-    /// Hints used for verifier-side plan derivation (guest recomputes without trusting).
-    pub non_input_base_hints: NonInputBaseHints,
     /// The recursion SNARK proof (sumchecks + Hyrax opening).
     pub proof: RecursionProof<Fq, FS, HyraxPCS>,
 }
 ```
 
 **Trust model**:
-- The verifier must treat `pairing_boundary` and `non_input_base_hints` as *hints* (untrusted data). With wiring/boundary constraints enabled
-  (default), Stage 2 binds these values to the verifier-derived AST. The outside verifier then performs the final pairing check against
-  `pairing_boundary.rhs`.
+- The verifier must treat `pairing_boundary` as *untrusted* data. With wiring/boundary constraints enabled (default), Stage 2 binds the pairing
+  boundary ports to the verifier-derived AST. The outside verifier then performs the final pairing check against `pairing_boundary.rhs`.
 - `stage8_combine_hint` is also a hint, but is currently **required** for verification (it is `Option` for serialization compatibility).
 
 ---
@@ -1729,8 +1726,8 @@ The offloading boundary is:
 - **Inside the recursion SNARK**: all non-pairing group/GT computation implied by Dory verification (scalar mul, add, GT exp/mul, wiring).
 - **Outside the recursion SNARK**: transcript hashing / Fiat–Shamir challenge derivation, scalar-field arithmetic (inverses/products), and the
   **final 3-way multi-pairing check**.
-  The verifier also derives the recursion verifier input using hint-based plan derivation (no expensive group operations); with wiring enabled,
-  Stage 2 binds the pairing boundary and non-input bases/points to the verifier-derived AST.
+  The verifier also derives the recursion verifier input without expensive group operations; with wiring enabled, Stage 2 binds the pairing
+  boundary and committed bases/points to the verifier-derived AST.
 
 At a high level:
 
@@ -1793,7 +1790,7 @@ struct GTMulWitness {
 ```rust
 struct G1ScalarMulWitness {
     constraint_index: usize,
-    base_point: (Fq, Fq),          // P = (x_P, y_P) (public/wired input)
+    base_point: (Fq, Fq),          // P = (x_P, y_P) (committed base rows, wiring-bound)
     // 11-var MLE eval vectors (size 2^11) for the 256-step trace (8 step bits, padded to 11 vars)
     x_a: Vec<Fq>,                  // x_A(s)
     y_a: Vec<Fq>,                  // y_A(s)
@@ -1814,7 +1811,7 @@ SNARK does not require a committed bit polynomial.
 ```rust
 struct G2ScalarMulWitness {
     constraint_index: usize,
-    base_point: (Fq2, Fq2),        // Q = (x_Q, y_Q) (public/wired input)
+    base_point: (Fq2, Fq2),        // Q = (x_Q, y_Q) (committed base rows, wiring-bound)
     // Fq2 coordinates are split into c0/c1 components in Fq
     x_a_c0: Vec<Fq>, x_a_c1: Vec<Fq>,
     y_a_c0: Vec<Fq>, y_a_c1: Vec<Fq>,
@@ -1848,6 +1845,9 @@ struct GtExpWitness {
     // Public-input-derived tables (replicated across the other dimension)
     digit_lo_packed: Vec<Fq>,  // digit_lo(s)
     digit_hi_packed: Vec<Fq>,  // digit_hi(s)
+    // Note: bases are now also committed on the native x4 domain (and consumed via cached openings
+    // to reduce verifier work), but we still keep these packed tables in the witness because they
+    // are convenient to derive/pack from Dory step witnesses.
     base_packed: Vec<Fq>,      // base(x)
     base2_packed: Vec<Fq>,     // base^2(x)
     base3_packed: Vec<Fq>,     // base^3(x)
@@ -1907,7 +1907,7 @@ and produces a `ConstraintSystem` containing:
 **Current code path**: `RecursionVerifier::verify` (`jolt-core/src/zkvm/recursion/verifier.rs`) mirrors the prover:
 
 **Outer wrapper**: `verify_recursion` (`jolt-core/src/zkvm/recursion/api.rs`) replays base stages 1–7 to reconstruct transcript state, builds a
-symbolic AST, derives a `RecursionVerifierInput` via hint-based plan derivation, verifies the recursion SNARK via `RecursionVerifier::verify`,
+symbolic AST, derives a `RecursionVerifierInput` via plan derivation, verifies the recursion SNARK via `RecursionVerifier::verify`,
 and finally performs the external 3-way pairing check against `recursion.pairing_boundary.rhs`.
 
 - Bind the dense commitment into the transcript (must match prover ordering).
@@ -2151,6 +2151,26 @@ RUST_LOG=info cargo run --release -p recursion -- trace \
   --disk
 ```
 
+### 9.1.2 Example results (scale 24, fibonacci, committed, address-major, recursion)
+
+Run on 2026-02-01 with the commands above.
+
+Key totals:
+
+```text
+"verify_recursion_total": 214474969 RV64IMAC cycles, 260529771 virtual cycles
+"guest_verify_total": 217736669 RV64IMAC cycles, 267586049 virtual cycles
+trace length: 267586155 cycles
+```
+
+Recursion SNARK breakdown:
+
+```text
+"verify_recursion_snark_verify_total": 169322397 RV64IMAC cycles, 201882194 virtual cycles
+"jolt_recursion_stage2": 38082812 RV64IMAC cycles, 41875103 virtual cycles
+"jolt_recursion_pcs_opening": 124498985 RV64IMAC cycles, 149295571 virtual cycles
+```
+
 ### 9.2 Understanding the Output
 
 The tracer outputs cycle counts for each instrumented section:
@@ -2168,7 +2188,7 @@ The tracer outputs cycle counts for each instrumented section:
 | `jolt_verify_stage8_dory_pcs` | Dory PCS verification (native) |
 | `verify_recursion_total` | Recursion verification wrapper (replay base stages 1–7, derive recursion input, verify recursion SNARK, external pairing check) |
 | `verify_recursion_base_stages_1_to_7_total` | Base verifier stages 1–7, replayed inside recursion verification |
-| `verify_recursion_stage8_prep_total` | Stage 8 recursion prep (symbolic AST build + transcript replay + hint-based plan derivation) |
+| `verify_recursion_stage8_prep_total` | Stage 8 recursion prep (symbolic AST build + transcript replay + plan derivation) |
 | `verify_recursion_snark_verify_total` | Recursion SNARK verification (stages 1–3 + PCS opening) |
 | `jolt_external_pairing_check` | Final external pairing check (boundary value bound by wiring constraints) |
 | `jolt_recursion_stage1` - `stage3` | Recursion SNARK stages (sumchecks + reductions) |

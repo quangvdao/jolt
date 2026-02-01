@@ -8,7 +8,6 @@
 //! The prover returns a proof and opening accumulator for PCS verification.
 
 use super::RecursionConstraintMetadata;
-use crate::zkvm::proof_serialization::NonInputBaseHints;
 use crate::{
     field::JoltField,
     poly::{
@@ -38,10 +37,7 @@ use dory::backends::arkworks::ArkGT;
 use std::collections::HashMap;
 
 use dory::backends::arkworks::BN254;
-use dory::recursion::{
-    ast::{AstGraph, AstOp, ValueId},
-    OpId, WitnessCollection,
-};
+use dory::recursion::{ast::AstGraph, WitnessCollection};
 use jolt_optimizations::get_g_mle;
 
 use super::prefix_packing::{packed_eval_from_claims, PrefixPackingLayout};
@@ -239,7 +235,6 @@ impl RecursionProver<Fq> {
             ark_bn254::Fq12,
             PCS::Ast,
             PairingBoundary,
-            NonInputBaseHints,
         ),
         Box<dyn std::error::Error>,
     >
@@ -329,74 +324,6 @@ impl RecursionProver<Fq> {
             )
         })?;
 
-        // Non-input base/point hints for verifier-side instance-plan derivation (perf-only until wiring is added).
-        let non_input_base_hints =
-            tracing::info_span!("derive_non_input_base_hints").in_scope(|| {
-                // Collect op lists in OpId order (must match verifier derivation).
-                let mut g1_smul: Vec<(OpId, ValueId)> = Vec::new();
-                let mut g2_smul: Vec<(OpId, ValueId)> = Vec::new();
-                for node in &ast.nodes {
-                    match &node.op {
-                        AstOp::G1ScalarMul {
-                            op_id: Some(id),
-                            point,
-                            ..
-                        } => g1_smul.push((*id, *point)),
-                        AstOp::G2ScalarMul {
-                            op_id: Some(id),
-                            point,
-                            ..
-                        } => g2_smul.push((*id, *point)),
-                        _ => {}
-                    }
-                }
-                g1_smul.sort_by_key(|(id, _)| *id);
-                g2_smul.sort_by_key(|(id, _)| *id);
-
-                let is_input = |vid: ValueId| -> bool {
-                    let idx = vid.0 as usize;
-                    idx < ast.nodes.len() && matches!(ast.nodes[idx].op, AstOp::Input { .. })
-                };
-
-                let g1_scalar_mul_base_hints = g1_smul
-                    .iter()
-                    .map(|(op_id, point_id)| {
-                        if is_input(*point_id) {
-                            None
-                        } else {
-                            Some(
-                                witness_collection
-                                    .g1_scalar_mul
-                                    .get(op_id)
-                                    .expect("missing G1ScalarMul witness for op_id")
-                                    .point_base,
-                            )
-                        }
-                    })
-                    .collect();
-                let g2_scalar_mul_base_hints = g2_smul
-                    .iter()
-                    .map(|(op_id, point_id)| {
-                        if is_input(*point_id) {
-                            None
-                        } else {
-                            Some(
-                                witness_collection
-                                    .g2_scalar_mul
-                                    .get(op_id)
-                                    .expect("missing G2ScalarMul witness for op_id")
-                                    .point_base,
-                            )
-                        }
-                    })
-                    .collect();
-
-                NonInputBaseHints {
-                    g1_scalar_mul_base_hints,
-                    g2_scalar_mul_base_hints,
-                }
-            });
-
         // Build constraint system from generated witnesses and include combine witness constraints.
         let mut prover = Self::new_from_witnesses(witness_collection, Some(combine_witness))?;
         prover.pairing_boundary = Some(pairing_boundary.clone());
@@ -407,7 +334,6 @@ impl RecursionProver<Fq> {
             stage8_combine_hint_fq12,
             ast,
             pairing_boundary,
-            non_input_base_hints,
         ))
     }
 
@@ -431,7 +357,6 @@ impl RecursionProver<Fq> {
             RecursionConstraintMetadata,
             PairingBoundary,
             Option<ark_bn254::Fq12>,
-            NonInputBaseHints,
         ),
         Box<dyn std::error::Error>,
     >
@@ -442,7 +367,7 @@ impl RecursionProver<Fq> {
         ProofTranscript: Transcript,
     {
         // Phase 1: witness generation
-        let (mut prover, stage8_combine_hint_fq12, ast, pairing_boundary, non_input_base_hints) =
+        let (mut prover, stage8_combine_hint_fq12, ast, pairing_boundary) =
             Self::witness_generation::<F, DoryPCS, ProofTranscript>(input)?;
         prover.ast = Some(ast);
 
@@ -475,7 +400,6 @@ impl RecursionProver<Fq> {
             poly_commit.metadata,
             pairing_boundary,
             Some(stage8_combine_hint_fq12),
-            non_input_base_hints,
         ))
     }
 
@@ -1226,6 +1150,21 @@ impl RecursionProver<Fq> {
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1ScalarMul)
+            } else if entry.is_g1_scalar_mul_base {
+                let vp = match entry.poly_type {
+                    PolyType::G1ScalarMulXP => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::XP,
+                        })
+                    }
+                    PolyType::G1ScalarMulYP => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::YP,
+                        })
+                    }
+                    _ => return Fq::zero(),
+                };
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1ScalarMul)
             } else if entry.is_g1_add {
                 let vp = match entry.poly_type {
                     PolyType::G1AddXP => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
@@ -1351,6 +1290,51 @@ impl RecursionProver<Fq> {
                     PolyType::G2ScalarMulAIndicator => {
                         VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
                             term: G2ScalarMulTerm::AIndicator,
+                        })
+                    }
+                    PolyType::G2ScalarMulXPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulXPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC1,
+                        })
+                    }
+                    _ => return Fq::zero(),
+                };
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2ScalarMul)
+            } else if entry.is_g2_scalar_mul_base {
+                let vp = match entry.poly_type {
+                    PolyType::G2ScalarMulXPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulXPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC1,
                         })
                     }
                     _ => return Fq::zero(),

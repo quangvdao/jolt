@@ -270,9 +270,9 @@ impl<T: Transcript> WiringGtProver<T> {
         // verification fails.
         let num_gt_exp = cs.gt_exp_witnesses.len();
         let num_gt_mul = cs.gt_mul_rows.len();
-        let need_joint = edges
-            .iter()
-            .any(|e| matches!(e.dst, GtConsumer::JointCommitment));
+        let need_joint = edges.iter().any(|e| {
+            matches!(e.dst, GtConsumer::JointCommitment) || matches!(e.src, GtProducer::JointCommitment)
+        });
         let need_pairing_rhs = edges
             .iter()
             .any(|e| matches!(e.dst, GtConsumer::PairingBoundaryRhs));
@@ -380,7 +380,9 @@ impl<T: Transcript> WiringGtProver<T> {
     fn eq_s_poly_for_src(&self, src: GtProducer) -> &MultilinearPolynomial<Fq> {
         match src {
             GtProducer::GtExpRho { instance } => self.eq_s_by_exp[instance].as_ref().unwrap(),
-            GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => &self.eq_s_default,
+            GtProducer::GtMulResult { .. }
+            | GtProducer::GtExpBase { .. }
+            | GtProducer::JointCommitment => &self.eq_s_default,
         }
     }
 
@@ -389,6 +391,7 @@ impl<T: Transcript> WiringGtProver<T> {
             GtProducer::GtExpRho { instance } => self.rho_polys[instance].as_ref().unwrap(),
             GtProducer::GtMulResult { instance } => self.mul_result[instance].as_ref().unwrap(),
             GtProducer::GtExpBase { instance } => self.exp_base_inputs[instance].as_ref().unwrap(),
+            GtProducer::JointCommitment => self.joint_commitment.as_ref().unwrap(),
         }
     }
 
@@ -526,7 +529,9 @@ impl<T: Transcript> WiringGtProver<T> {
                     .as_ref()
                     .unwrap()
                     .get_bound_coeff(0),
-                GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => eq_s_default_at_r,
+                GtProducer::GtMulResult { .. }
+                | GtProducer::GtExpBase { .. }
+                | GtProducer::JointCommitment => eq_s_default_at_r,
             })
             .collect();
 
@@ -564,6 +569,20 @@ impl<T: Transcript> WiringGtProver<T> {
                 }
                 GtProducer::GtExpBase { instance } => {
                     let _ = ensure_selector(dummy_exp, self.k_exp, instance);
+                }
+                GtProducer::JointCommitment => {
+                    // Anchor to destination family: ensure the destination selector exists.
+                    match edge.dst {
+                        GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                            let _ = ensure_selector(dummy_mul, self.k_mul, instance);
+                        }
+                        GtConsumer::GtExpBase { instance } => {
+                            let _ = ensure_selector(dummy_exp, self.k_exp, instance);
+                        }
+                        GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
+                            // Should not happen in well-formed plans.
+                        }
+                    }
                 }
             }
             match edge.dst {
@@ -715,6 +734,26 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                                 rho_e,
                                 beta_exp,
                             ),
+                            GtProducer::JointCommitment => {
+                                // Anchor to destination family (this is a global constant source).
+                                match edge.dst {
+                                    GtConsumer::GtMulLhs { instance }
+                                    | GtConsumer::GtMulRhs { instance } => (
+                                        selector_key(dummy_mul, self.k_mul, instance),
+                                        mul_out_e,
+                                        beta_mul,
+                                    ),
+                                    GtConsumer::GtExpBase { instance } => (
+                                        selector_key(dummy_exp, self.k_exp, instance),
+                                        rho_e,
+                                        beta_exp,
+                                    ),
+                                    GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
+                                        // Should not happen in well-formed plans; pick a default.
+                                        (selector_key(dummy_mul, self.k_mul, 0), mul_out_e, beta_mul)
+                                    }
+                                }
+                            }
                         };
                         let sel_src = state
                             .selectors
@@ -751,6 +790,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                             GtProducer::GtExpBase { instance } => {
                                 Some(state.exp_base_inputs_at_r[instance])
                             }
+                            GtProducer::JointCommitment => Some(state.joint_at_r),
                             _ => None,
                         };
                         for t in 0..DEGREE {
@@ -1017,7 +1057,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 GtProducer::GtMulResult { instance } => {
                     max_mul = Some(max_mul.map_or(instance, |m| m.max(instance)));
                 }
-                GtProducer::GtExpRho { .. } | GtProducer::GtExpBase { .. } => {}
+                GtProducer::GtExpRho { .. } | GtProducer::GtExpBase { .. } | GtProducer::JointCommitment => {}
             }
             match edge.dst {
                 GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
@@ -1050,7 +1090,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             // Eq(s, s_out) depends on the *source* family: only GTExp rho carries the step selector.
             let eq_s = match edge.src {
                 GtProducer::GtExpRho { instance } => eq_s_exp[instance],
-                GtProducer::GtMulResult { .. } | GtProducer::GtExpBase { .. } => eq_s_zero,
+                GtProducer::GtMulResult { .. }
+                | GtProducer::GtExpBase { .. }
+                | GtProducer::JointCommitment => eq_s_zero,
             };
             let scale = *lambda * eq_s;
 
@@ -1069,6 +1111,21 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 GtProducer::GtMulResult { instance } => {
                     let w = beta_mul * eq_c_mul[instance];
                     coeff_mul_out += scale * w;
+                    w
+                }
+                GtProducer::JointCommitment => {
+                    // Anchor this global constant source to the destination family selector.
+                    let w = match edge.dst {
+                        GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                            beta_mul * eq_c_mul[instance]
+                        }
+                        GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
+                        GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => {
+                            // Should not happen in well-formed plans; fall back to 1.
+                            Fq::one()
+                        }
+                    };
+                    coeff_joint += scale * w;
                     w
                 }
             };

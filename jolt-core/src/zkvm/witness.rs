@@ -352,10 +352,12 @@ pub enum G1ScalarMulTerm {
     TIndicator,
     AIndicator,
     Bit,
+    XP,
+    YP,
 }
 
 impl TermEnum for G1ScalarMulTerm {
-    const COUNT: usize = 9;
+    const COUNT: usize = 11;
 
     fn from_index(i: usize) -> Option<Self> {
         match i {
@@ -368,6 +370,8 @@ impl TermEnum for G1ScalarMulTerm {
             6 => Some(Self::TIndicator),
             7 => Some(Self::AIndicator),
             8 => Some(Self::Bit),
+            9 => Some(Self::XP),
+            10 => Some(Self::YP),
             _ => None,
         }
     }
@@ -387,6 +391,8 @@ impl TermEnum for G1ScalarMulTerm {
             Self::TIndicator => "t_indicator",
             Self::AIndicator => "a_indicator",
             Self::Bit => "bit",
+            Self::XP => "x_p",
+            Self::YP => "y_p",
         }
     }
 }
@@ -497,11 +503,15 @@ pub enum G2ScalarMulTerm {
     YANextC1,
     TIndicator,
     AIndicator,
+    XPC0,
+    XPC1,
+    YPC0,
+    YPC1,
     Bit,
 }
 
 impl TermEnum for G2ScalarMulTerm {
-    const COUNT: usize = 15;
+    const COUNT: usize = 19;
 
     fn from_index(i: usize) -> Option<Self> {
         match i {
@@ -519,7 +529,11 @@ impl TermEnum for G2ScalarMulTerm {
             11 => Some(Self::YANextC1),
             12 => Some(Self::TIndicator),
             13 => Some(Self::AIndicator),
-            14 => Some(Self::Bit),
+            14 => Some(Self::XPC0),
+            15 => Some(Self::XPC1),
+            16 => Some(Self::YPC0),
+            17 => Some(Self::YPC1),
+            18 => Some(Self::Bit),
             _ => None,
         }
     }
@@ -544,6 +558,10 @@ impl TermEnum for G2ScalarMulTerm {
             Self::YANextC1 => "y_a_next_c1",
             Self::TIndicator => "t_indicator",
             Self::AIndicator => "a_indicator",
+            Self::XPC0 => "x_p_c0",
+            Self::XPC1 => "x_p_c1",
+            Self::YPC0 => "y_p_c0",
+            Self::YPC1 => "y_p_c1",
             Self::Bit => "bit",
         }
     }

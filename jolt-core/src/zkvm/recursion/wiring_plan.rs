@@ -103,6 +103,11 @@ pub enum GtProducer {
     GtExpBase { instance: usize },
     /// Output of a GT multiplication: result(x) (4-var).
     GtMulResult { instance: usize },
+    /// Boundary constant: Stage-8 joint commitment (GT).
+    ///
+    /// This appears as an `AstOp::Input` with `InputSource::Proof { name: "commitment" }` and can
+    /// be wired directly into GTMul ports in small Dory ASTs.
+    JointCommitment,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -201,6 +206,11 @@ impl CanonicalSerialize for GtProducer {
                 2u8.serialize_with_mode(&mut writer, compress)?;
                 (*instance as u32).serialize_with_mode(&mut writer, compress)
             }
+            GtProducer::JointCommitment => {
+                // Keep encoding size uniform: tag + dummy u32.
+                3u8.serialize_with_mode(&mut writer, compress)?;
+                0u32.serialize_with_mode(&mut writer, compress)
+            }
         }
     }
 
@@ -234,6 +244,10 @@ impl CanonicalDeserialize for GtProducer {
             2 => Self::GtExpBase {
                 instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
             },
+            3 => {
+                let _ = u32::deserialize_with_mode(&mut reader, compress, validate)?;
+                Self::JointCommitment
+            }
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -272,6 +286,10 @@ impl GuestSerialize for GtProducer {
                 })?)
                 .guest_serialize(w)
             }
+            GtProducer::JointCommitment => {
+                3u8.guest_serialize(w)?;
+                0u32.guest_serialize(w)
+            }
         }
     }
 }
@@ -289,6 +307,10 @@ impl GuestDeserialize for GtProducer {
             2 => Self::GtExpBase {
                 instance: u32::guest_deserialize(r)? as usize,
             },
+            3 => {
+                let _ = u32::guest_deserialize(r)?;
+                Self::JointCommitment
+            }
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -450,8 +472,18 @@ pub enum G1ValueRef {
 
     /// Boundary constant: base point for the given G1 scalar mul constraint.
     ///
-    /// The constant value is taken from `ConstraintType::G1ScalarMul { base_point }` (local index).
+    /// This value is committed as part of the G1 scalar-mul witness rows (as c-only base
+    /// polynomials). Wiring constraints bind it to the AST producer of the scalar-mul point input.
     G1ScalarMulBase {
+        instance: usize,
+    },
+
+    /// Boundary constant for a G1 scalar-mul base when the point is an `AstOp::Input`.
+    ///
+    /// The constant value is taken from `ConstraintType::G1ScalarMul { base_point }` in local
+    /// scalar-mul instance order (OpId-sorted), and is used to bind the committed base rows to the
+    /// public Dory input value.
+    G1ScalarMulBaseBoundary {
         instance: usize,
     },
 
@@ -549,6 +581,10 @@ impl CanonicalSerialize for G1ValueRef {
             G1ValueRef::PairingBoundaryP1 => 5u8.serialize_with_mode(&mut writer, compress),
             G1ValueRef::PairingBoundaryP2 => 6u8.serialize_with_mode(&mut writer, compress),
             G1ValueRef::PairingBoundaryP3 => 7u8.serialize_with_mode(&mut writer, compress),
+            G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
+                8u8.serialize_with_mode(&mut writer, compress)?;
+                (*instance as u32).serialize_with_mode(&mut writer, compress)
+            }
         }
     }
 
@@ -559,7 +595,8 @@ impl CanonicalSerialize for G1ValueRef {
             | G1ValueRef::G1AddOut { .. }
             | G1ValueRef::G1AddInP { .. }
             | G1ValueRef::G1AddInQ { .. }
-            | G1ValueRef::G1ScalarMulBase { .. } => 1 + 4,
+            | G1ValueRef::G1ScalarMulBase { .. }
+            | G1ValueRef::G1ScalarMulBaseBoundary { .. } => 1 + 4,
             G1ValueRef::PairingBoundaryP1
             | G1ValueRef::PairingBoundaryP2
             | G1ValueRef::PairingBoundaryP3 => 1,
@@ -599,6 +636,9 @@ impl CanonicalDeserialize for G1ValueRef {
             5 => Self::PairingBoundaryP1,
             6 => Self::PairingBoundaryP2,
             7 => Self::PairingBoundaryP3,
+            8 => Self::G1ScalarMulBaseBoundary {
+                instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -660,6 +700,16 @@ impl GuestSerialize for G1ValueRef {
             G1ValueRef::PairingBoundaryP1 => 5u8.guest_serialize(w),
             G1ValueRef::PairingBoundaryP2 => 6u8.guest_serialize(w),
             G1ValueRef::PairingBoundaryP3 => 7u8.guest_serialize(w),
+            G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
+                8u8.guest_serialize(w)?;
+                (u32::try_from(*instance).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G1ValueRef instance overflow",
+                    )
+                })?)
+                .guest_serialize(w)
+            }
         }
     }
 }
@@ -686,6 +736,9 @@ impl GuestDeserialize for G1ValueRef {
             5 => Self::PairingBoundaryP1,
             6 => Self::PairingBoundaryP2,
             7 => Self::PairingBoundaryP3,
+            8 => Self::G1ScalarMulBaseBoundary {
+                instance: u32::guest_deserialize(r)? as usize,
+            },
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -718,8 +771,18 @@ pub enum G2ValueRef {
 
     /// Boundary constant: base point for the given G2 scalar mul constraint.
     ///
-    /// The constant value is taken from `ConstraintType::G2ScalarMul { base_point }` (local index).
+    /// This value is committed as part of the G2 scalar-mul witness rows (as step-constant base
+    /// polynomials). Wiring constraints bind it to the AST producer of the scalar-mul point input.
     G2ScalarMulBase {
+        instance: usize,
+    },
+
+    /// Boundary constant for a G2 scalar-mul base when the point is an `AstOp::Input`.
+    ///
+    /// The constant value is taken from `ConstraintType::G2ScalarMul { base_point }` in local
+    /// scalar-mul instance order (OpId-sorted), and is used to bind the committed base rows to the
+    /// public Dory input value.
+    G2ScalarMulBaseBoundary {
         instance: usize,
     },
 
@@ -814,9 +877,13 @@ impl CanonicalSerialize for G2ValueRef {
                 4u8.serialize_with_mode(&mut writer, compress)?;
                 (*instance as u32).serialize_with_mode(&mut writer, compress)
             }
-            G2ValueRef::PairingBoundaryP1 => 5u8.serialize_with_mode(&mut writer, compress),
-            G2ValueRef::PairingBoundaryP2 => 6u8.serialize_with_mode(&mut writer, compress),
-            G2ValueRef::PairingBoundaryP3 => 7u8.serialize_with_mode(&mut writer, compress),
+            G2ValueRef::G2ScalarMulBaseBoundary { instance } => {
+                5u8.serialize_with_mode(&mut writer, compress)?;
+                (*instance as u32).serialize_with_mode(&mut writer, compress)
+            }
+            G2ValueRef::PairingBoundaryP1 => 6u8.serialize_with_mode(&mut writer, compress),
+            G2ValueRef::PairingBoundaryP2 => 7u8.serialize_with_mode(&mut writer, compress),
+            G2ValueRef::PairingBoundaryP3 => 8u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -827,7 +894,8 @@ impl CanonicalSerialize for G2ValueRef {
             | G2ValueRef::G2AddOut { .. }
             | G2ValueRef::G2AddInP { .. }
             | G2ValueRef::G2AddInQ { .. }
-            | G2ValueRef::G2ScalarMulBase { .. } => 1 + 4,
+            | G2ValueRef::G2ScalarMulBase { .. }
+            | G2ValueRef::G2ScalarMulBaseBoundary { .. } => 1 + 4,
             G2ValueRef::PairingBoundaryP1
             | G2ValueRef::PairingBoundaryP2
             | G2ValueRef::PairingBoundaryP3 => 1,
@@ -864,9 +932,12 @@ impl CanonicalDeserialize for G2ValueRef {
             4 => Self::G2ScalarMulBase {
                 instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
             },
-            5 => Self::PairingBoundaryP1,
-            6 => Self::PairingBoundaryP2,
-            7 => Self::PairingBoundaryP3,
+            5 => Self::G2ScalarMulBaseBoundary {
+                instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
+            },
+            6 => Self::PairingBoundaryP1,
+            7 => Self::PairingBoundaryP2,
+            8 => Self::PairingBoundaryP3,
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -925,9 +996,19 @@ impl GuestSerialize for G2ValueRef {
                 })?)
                 .guest_serialize(w)
             }
-            G2ValueRef::PairingBoundaryP1 => 5u8.guest_serialize(w),
-            G2ValueRef::PairingBoundaryP2 => 6u8.guest_serialize(w),
-            G2ValueRef::PairingBoundaryP3 => 7u8.guest_serialize(w),
+            G2ValueRef::G2ScalarMulBaseBoundary { instance } => {
+                5u8.guest_serialize(w)?;
+                (u32::try_from(*instance).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "G2ValueRef instance overflow",
+                    )
+                })?)
+                .guest_serialize(w)
+            }
+            G2ValueRef::PairingBoundaryP1 => 6u8.guest_serialize(w),
+            G2ValueRef::PairingBoundaryP2 => 7u8.guest_serialize(w),
+            G2ValueRef::PairingBoundaryP3 => 8u8.guest_serialize(w),
         }
     }
 }
@@ -951,9 +1032,12 @@ impl GuestDeserialize for G2ValueRef {
             4 => Self::G2ScalarMulBase {
                 instance: u32::guest_deserialize(r)? as usize,
             },
-            5 => Self::PairingBoundaryP1,
-            6 => Self::PairingBoundaryP2,
-            7 => Self::PairingBoundaryP3,
+            5 => Self::G2ScalarMulBaseBoundary {
+                instance: u32::guest_deserialize(r)? as usize,
+            },
+            6 => Self::PairingBoundaryP1,
+            7 => Self::PairingBoundaryP2,
+            8 => Self::PairingBoundaryP3,
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -1048,10 +1132,14 @@ fn gt_producer_from_value(
             .get(id)
             .copied()
             .map(|instance| GtProducer::GtMulResult { instance }),
-        AstOp::Input { .. } => gt_exp_base_by_value
-            .get(&value)
-            .copied()
-            .map(|instance| GtProducer::GtExpBase { instance }),
+        AstOp::Input { source } => {
+            if let Some(instance) = gt_exp_base_by_value.get(&value).copied() {
+                Some(GtProducer::GtExpBase { instance })
+            } else {
+                let _ = source;
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -1182,7 +1270,7 @@ pub fn derive_wiring_plan(
                             instance: mul_instance,
                         },
                     });
-                } else {
+                } else if !is_ast_input(ast, *lhs) {
                     return Err(ProofVerifyError::DoryError(format!(
                         "unwired GTMul lhs value {lhs:?}"
                     )));
@@ -1201,7 +1289,7 @@ pub fn derive_wiring_plan(
                             instance: mul_instance,
                         },
                     });
-                } else {
+                } else if !is_ast_input(ast, *rhs) {
                     return Err(ProofVerifyError::DoryError(format!(
                         "unwired GTMul rhs value {rhs:?}"
                     )));
@@ -1327,6 +1415,23 @@ pub fn derive_wiring_plan(
                             instance: smul_instance,
                         },
                     });
+                } else if is_ast_input(ast, *point) {
+                    // Bind committed G1 scalar-mul base rows to the public Dory input value.
+                    plan.g1.push(G1WiringEdge {
+                        src: G1ValueRef::G1ScalarMulBaseBoundary {
+                            instance: smul_instance,
+                        },
+                        dst: G1ValueRef::G1ScalarMulBase {
+                            instance: smul_instance,
+                        },
+                    });
+                } else {
+                    // CRITICAL: without a base binding edge, a prover can pick an arbitrary committed
+                    // base point for this scalar-mul constraint, which is then unconstrained w.r.t.
+                    // the Dory AST value graph.
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired G1ScalarMul base value {point:?} (G1ScalarMul instance {smul_instance})"
+                    )));
                 }
             }
             AstOp::G2ScalarMul {
@@ -1345,6 +1450,23 @@ pub fn derive_wiring_plan(
                             instance: smul_instance,
                         },
                     });
+                } else if is_ast_input(ast, *point) {
+                    // Bind committed G2 scalar-mul base rows to the public Dory input value.
+                    plan.g2.push(G2WiringEdge {
+                        src: G2ValueRef::G2ScalarMulBaseBoundary {
+                            instance: smul_instance,
+                        },
+                        dst: G2ValueRef::G2ScalarMulBase {
+                            instance: smul_instance,
+                        },
+                    });
+                } else {
+                    // CRITICAL: without a base binding edge, a prover can pick an arbitrary committed
+                    // base point for this scalar-mul constraint, which is then unconstrained w.r.t.
+                    // the Dory AST value graph.
+                    return Err(ProofVerifyError::DoryError(format!(
+                        "unwired G2ScalarMul base value {point:?} (G2ScalarMul instance {smul_instance})"
+                    )));
                 }
             }
             _ => {}

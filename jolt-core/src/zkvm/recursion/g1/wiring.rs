@@ -115,6 +115,12 @@ struct CPhaseState {
     eq_step_at_r: Fq,
     /// Batched port polynomials over the **common** c domain (k vars), replicated across dummy bits.
     smul_out_batched_c: MultilinearPolynomial<Fq>,
+    /// Batched scalar-mul base polynomial over the **common** c domain (k vars),
+    /// replicated across dummy bits.
+    ///
+    /// This must depend on `c` (not be per-edge constant), since the verifier binds scalar-mul
+    /// bases via committed base rows opened at the random `r_c` point.
+    smul_base_batched_c: MultilinearPolynomial<Fq>,
     add_in_p_batched_c: MultilinearPolynomial<Fq>,
     add_in_q_batched_c: MultilinearPolynomial<Fq>,
     add_out_batched_c: MultilinearPolynomial<Fq>,
@@ -126,6 +132,7 @@ impl CPhaseState {
     fn bind(&mut self, r_j: <Fq as JoltField>::Challenge) {
         for p in [
             &mut self.smul_out_batched_c,
+            &mut self.smul_base_batched_c,
             &mut self.add_in_p_batched_c,
             &mut self.add_in_q_batched_c,
             &mut self.add_out_batched_c,
@@ -203,7 +210,8 @@ impl<T: Transcript> WiringG1Prover<T> {
                             need_smul_out[instance] = true;
                         }
                     }
-                    G1ValueRef::G1ScalarMulBase { instance } => {
+                    G1ValueRef::G1ScalarMulBase { instance }
+                    | G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
                         if instance < num_smul {
                             need_smul_base[instance] = true;
                         }
@@ -318,7 +326,8 @@ impl<T: Transcript> WiringG1Prover<T> {
                 }
                 out
             }
-            G1ValueRef::G1ScalarMulBase { instance } => {
+            G1ValueRef::G1ScalarMulBase { instance }
+            | G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
                 let (x, y, ind) = self.smul_base[instance].unwrap();
                 let v = x + self.mu * y + self.mu2 * ind;
                 [v; DEGREE]
@@ -391,6 +400,21 @@ impl<T: Transcript> WiringG1Prover<T> {
             }
         }
 
+        // Scalar-mul base batched over c (per instance), replicated across dummy bits.
+        //
+        // IMPORTANT: for `G1ValueRef::G1ScalarMulBase`, we must use a c-dependent polynomial here
+        // (not a per-edge constant), to match the verifier which only has access to the committed
+        // base rows via openings at the random `r_c` point.
+        let mut smul_base = vec![Fq::zero(); blocks];
+        for c_common in 0..blocks {
+            let c_smul = c_common >> dummy_smul;
+            if c_smul < self.smul_base.len() {
+                if let Some((x, y, ind)) = self.smul_base[c_smul] {
+                    smul_base[c_common] = x + self.mu * y + self.mu2 * ind;
+                }
+            }
+        }
+
         // Add ports batched, replicated across dummy bits.
         let mut add_p = vec![Fq::zero(); blocks];
         let mut add_q = vec![Fq::zero(); blocks];
@@ -408,6 +432,8 @@ impl<T: Transcript> WiringG1Prover<T> {
 
         let smul_out_batched_c =
             MultilinearPolynomial::LargeScalars(DensePolynomial::new(smul_out));
+        let smul_base_batched_c =
+            MultilinearPolynomial::LargeScalars(DensePolynomial::new(smul_base));
         let add_in_p_batched_c = MultilinearPolynomial::LargeScalars(DensePolynomial::new(add_p));
         let add_in_q_batched_c = MultilinearPolynomial::LargeScalars(DensePolynomial::new(add_q));
         let add_out_batched_c = MultilinearPolynomial::LargeScalars(DensePolynomial::new(add_r));
@@ -418,7 +444,8 @@ impl<T: Transcript> WiringG1Prover<T> {
             for v in [e.src, e.dst] {
                 match v {
                     G1ValueRef::G1ScalarMulOut { instance }
-                    | G1ValueRef::G1ScalarMulBase { instance } => {
+                    | G1ValueRef::G1ScalarMulBase { instance }
+                    | G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
                         let key = Self::selector_key(dummy_smul, self.k_smul, instance);
                         selectors.entry(key).or_insert_with(|| {
                             let mut evals = vec![Fq::zero(); blocks];
@@ -454,6 +481,7 @@ impl<T: Transcript> WiringG1Prover<T> {
         self.c_state = Some(CPhaseState {
             eq_step_at_r,
             smul_out_batched_c,
+            smul_base_batched_c,
             add_in_p_batched_c,
             add_in_q_batched_c,
             add_out_batched_c,
@@ -535,6 +563,9 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
                     let smul_out_e = state
                         .smul_out_batched_c
                         .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
+                    let smul_base_e = state
+                        .smul_base_batched_c
+                        .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
                     let add_p_e = state
                         .add_in_p_batched_c
                         .sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh);
@@ -563,6 +594,15 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
                                 )
                             }
                             G1ValueRef::G1ScalarMulBase { instance } => {
+                                let key = Self::selector_key(dummy_smul, self.k_smul, instance);
+                                let sel = state.selectors.get(&key).expect("missing smul selector");
+                                (
+                                    beta_smul,
+                                    sel.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh),
+                                    smul_base_e,
+                                )
+                            }
+                            G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
                                 let key = Self::selector_key(dummy_smul, self.k_smul, instance);
                                 let sel = state.selectors.get(&key).expect("missing smul selector");
                                 let (x, y, ind) = self.smul_base[instance].unwrap();
@@ -620,6 +660,15 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringG1Prover<T> {
                                 )
                             }
                             G1ValueRef::G1ScalarMulBase { instance } => {
+                                let key = Self::selector_key(dummy_smul, self.k_smul, instance);
+                                let sel = state.selectors.get(&key).expect("missing smul selector");
+                                (
+                                    beta_smul,
+                                    sel.sumcheck_evals_array::<DEGREE>(i, BindingOrder::LowToHigh),
+                                    smul_base_e,
+                                )
+                            }
+                            G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
                                 let key = Self::selector_key(dummy_smul, self.k_smul, instance);
                                 let sel = state.selectors.get(&key).expect("missing smul selector");
                                 let (x, y, ind) = self.smul_base[instance].unwrap();
@@ -767,7 +816,8 @@ pub struct WiringG1Verifier {
     k_smul: usize,
     k_add: usize,
     pairing_boundary: PairingBoundary,
-    smul_bases: Vec<(Fq, Fq, Fq)>,
+    /// Boundary base points for `AstOp::Input` scalar-mul bases, in local scalar-mul instance order.
+    smul_base_boundary: Vec<(Fq, Fq, Fq)>,
 }
 
 impl WiringG1Verifier {
@@ -777,8 +827,9 @@ impl WiringG1Verifier {
         let edges = input.wiring.g1.clone();
         let lambdas: Vec<Fq> = transcript.challenge_vector(edges.len());
 
-        // Base points, in local scalar-mul instance order.
-        let smul_bases = input
+        // Boundary base points (filled with real values only for `AstOp::Input` bases).
+        // Kept in local scalar-mul instance order.
+        let smul_base_boundary = input
             .constraint_types
             .iter()
             .filter_map(|ct| match ct {
@@ -802,7 +853,7 @@ impl WiringG1Verifier {
             k_smul,
             k_add,
             pairing_boundary: input.pairing_boundary.clone(),
-            smul_bases,
+            smul_base_boundary,
         }
     }
 
@@ -880,6 +931,20 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
         );
         let smul_out_val = xa_next + self.mu * ya_next + self.mu2 * a_ind;
 
+        // Committed scalar-mul base point at this point (opened as **c-only**, already batched over c).
+        let smul_base_val = acc.get_virtual_polynomial_claim(
+            VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                term: G1ScalarMulTerm::XP,
+            }),
+            SumcheckId::G1ScalarMul,
+        ) + self.mu
+            * acc.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                    term: G1ScalarMulTerm::YP,
+                }),
+                SumcheckId::G1ScalarMul,
+            );
+
         // Fetch add port openings.
         let get_add = |vp: VirtualPolynomial| -> Fq {
             acc.get_virtual_polynomial_claim(vp, SumcheckId::G1Add)
@@ -932,15 +997,16 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
                         self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
                         smul_out_val,
                     ),
-                    G1ValueRef::G1ScalarMulBase { instance } => {
-                        let (x, y, ind) = self.smul_bases[instance];
-                        let v = x + self.mu * y + self.mu2 * ind;
-                        (
-                            beta_smul,
-                            self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
-                            v,
-                        )
-                    }
+                    G1ValueRef::G1ScalarMulBase { instance } => (
+                        beta_smul,
+                        self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
+                        smul_base_val,
+                    ),
+                    G1ValueRef::G1ScalarMulBaseBoundary { instance } => (
+                        beta_smul,
+                        self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
+                        pb_batched(self.smul_base_boundary[instance]),
+                    ),
                     G1ValueRef::G1AddOut { instance } => (
                         beta_add,
                         self.eq_c_tail(r_c_add_tail, instance, self.k_add),

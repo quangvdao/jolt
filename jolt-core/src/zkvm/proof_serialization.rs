@@ -79,41 +79,6 @@ impl GuestDeserialize for PairingBoundary {
     }
 }
 
-/// Hints for recursion instance-plan derivation when an op's base/point is not an `AstOp::Input`.
-///
-/// These are used to avoid requiring the verifier to evaluate the full Dory verification DAG just
-/// to recover bases/points for public inputs in the recursion verifier input.
-///
-/// **Security note**: without wiring/boundary constraints, these hints are not bound to the Dory
-/// verification computation. They are intended for performance/profiling until wiring is added.
-#[cfg(feature = "recursion")]
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct NonInputBaseHints {
-    /// One entry per Dory-traced `G1ScalarMul` op, in OpId-sorted order.
-    pub g1_scalar_mul_base_hints: Vec<Option<G1Affine>>,
-    /// One entry per Dory-traced `G2ScalarMul` op, in OpId-sorted order.
-    pub g2_scalar_mul_base_hints: Vec<Option<G2Affine>>,
-}
-
-#[cfg(feature = "recursion")]
-impl GuestSerialize for NonInputBaseHints {
-    fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        self.g1_scalar_mul_base_hints.guest_serialize(w)?;
-        self.g2_scalar_mul_base_hints.guest_serialize(w)?;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "recursion")]
-impl GuestDeserialize for NonInputBaseHints {
-    fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
-        Ok(Self {
-            g1_scalar_mul_base_hints: Vec::<Option<G1Affine>>::guest_deserialize(r)?,
-            g2_scalar_mul_base_hints: Vec::<Option<G2Affine>>::guest_deserialize(r)?,
-        })
-    }
-}
-
 /// Jolt proof structure organized by verification stages.
 #[derive(Clone)]
 pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> {

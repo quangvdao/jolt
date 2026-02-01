@@ -8,7 +8,6 @@ use super::wrappers::{
     ark_to_jolt, ArkDoryProof, ArkFr, ArkG1, ArkG2, ArkGT, ArkworksVerifierSetup, BN254,
 };
 use crate::utils::errors::ProofVerifyError;
-use crate::zkvm::proof_serialization::NonInputBaseHints;
 use crate::zkvm::proof_serialization::PairingBoundary;
 use crate::zkvm::recursion::constraints::system::ConstraintType;
 use crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs;
@@ -406,36 +405,6 @@ pub struct DerivedRecursionPlan {
     pub dense_num_vars: usize,
 }
 
-fn resolve_g1_input_or_hint(
-    ast: &AstGraph<BN254>,
-    proof: &ArkDoryProof,
-    setup: &VerifierSetup<BN254>,
-    value_id: ValueId,
-    hint: &Option<G1Affine>,
-) -> Result<G1Affine, ProofVerifyError> {
-    let idx = value_id.0 as usize;
-    debug_assert!(idx < ast.nodes.len(), "ValueId out of bounds");
-    match &ast.nodes[idx].op {
-        AstOp::Input { source } => Ok(resolve_input_g1(proof, setup, source)?.0.into_affine()),
-        _ => hint.ok_or(ProofVerifyError::default()),
-    }
-}
-
-fn resolve_g2_input_or_hint(
-    ast: &AstGraph<BN254>,
-    proof: &ArkDoryProof,
-    setup: &VerifierSetup<BN254>,
-    value_id: ValueId,
-    hint: &Option<G2Affine>,
-) -> Result<G2Affine, ProofVerifyError> {
-    let idx = value_id.0 as usize;
-    debug_assert!(idx < ast.nodes.len(), "ValueId out of bounds");
-    match &ast.nodes[idx].op {
-        AstOp::Input { source } => Ok(resolve_input_g2(proof, setup, source)?.0.into_affine()),
-        _ => hint.ok_or(ProofVerifyError::default()),
-    }
-}
-
 /// Derive the recursion verifier input from a Dory AST, using hints when a base/point is not an input.
 #[allow(clippy::too_many_arguments)]
 pub fn derive_plan_with_hints(
@@ -445,7 +414,6 @@ pub fn derive_plan_with_hints(
     joint_commitment: ArkGT,
     combine_commitments: &[ArkGT],
     combine_coeffs: &[Fr],
-    non_input_hints: &NonInputBaseHints,
     pairing_boundary: PairingBoundary,
     joint_commitment_fq12: Fq12,
 ) -> Result<DerivedRecursionPlan, ProofVerifyError> {
@@ -496,12 +464,6 @@ pub fn derive_plan_with_hints(
     g1_add_ops.sort();
     g2_add_ops.sort();
 
-    if non_input_hints.g1_scalar_mul_base_hints.len() != g1_scalar_mul_ops.len()
-        || non_input_hints.g2_scalar_mul_base_hints.len() != g2_scalar_mul_ops.len()
-    {
-        return Err(ProofVerifyError::default());
-    }
-
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
     let mut gt_exp_public_inputs: Vec<GtExpPublicInputs> = Vec::new();
     let mut gt_exp_base_inputs: Vec<Option<Fq12>> = Vec::new();
@@ -528,27 +490,39 @@ pub fn derive_plan_with_hints(
     }
 
     // Dory G1 scalar mul
-    for ((_, point_id, scalar), point_hint) in g1_scalar_mul_ops
-        .iter()
-        .zip(non_input_hints.g1_scalar_mul_base_hints.iter())
-    {
-        let p = resolve_g1_input_or_hint(ast, proof, &dory_setup, *point_id, point_hint)?;
+    for (_op_id, point_id, scalar) in g1_scalar_mul_ops.iter() {
+        // Only materialize the base point as a boundary constant when the point is an AST input.
+        // Non-input bases are bound via G1 wiring edges against committed base rows.
+        let idx = point_id.0 as usize;
+        debug_assert!(idx < ast.nodes.len(), "point_id out of bounds");
+        let base_point = match &ast.nodes[idx].op {
+            AstOp::Input { source } => {
+                let p = resolve_input_g1(proof, &dory_setup, source)?.0.into_affine();
+                (p.x, p.y)
+            }
+            _ => (ark_bn254::Fq::zero(), ark_bn254::Fq::zero()),
+        };
         let scalar_fr: Fr = ark_to_jolt(scalar);
-        constraint_types.push(ConstraintType::G1ScalarMul {
-            base_point: (p.x, p.y),
-        });
+        constraint_types.push(ConstraintType::G1ScalarMul { base_point });
         g1_scalar_mul_public_inputs.push(G1ScalarMulPublicInputs::new(scalar_fr));
     }
 
     // Dory G2 scalar mul
-    for ((_, point_id, scalar), point_hint) in g2_scalar_mul_ops
-        .iter()
-        .zip(non_input_hints.g2_scalar_mul_base_hints.iter())
-    {
-        let p = resolve_g2_input_or_hint(ast, proof, &dory_setup, *point_id, point_hint)?;
+    for (_op_id, point_id, scalar) in g2_scalar_mul_ops.iter() {
+        // Only materialize the base point as a boundary constant when the point is an AST input.
+        // Non-input bases are bound via G2 wiring edges against committed base rows.
+        let idx = point_id.0 as usize;
+        debug_assert!(idx < ast.nodes.len(), "point_id out of bounds");
+        let base_point = match &ast.nodes[idx].op {
+            AstOp::Input { source } => {
+                let p = resolve_input_g2(proof, &dory_setup, source)?.0.into_affine();
+                (p.x, p.y)
+            }
+            _ => (ark_bn254::Fq2::zero(), ark_bn254::Fq2::zero()),
+        };
         let scalar_fr: Fr = ark_to_jolt(scalar);
         constraint_types.push(ConstraintType::G2ScalarMul {
-            base_point: (p.x, p.y),
+            base_point,
         });
         g2_scalar_mul_public_inputs.push(G2ScalarMulPublicInputs::new(scalar_fr));
     }

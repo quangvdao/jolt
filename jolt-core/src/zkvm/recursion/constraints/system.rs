@@ -135,10 +135,27 @@ pub enum PolyType {
     GtExpBaseSquareQuotient = 67,
     /// Quotient for the pointwise base-cube check: base2(u)*base(u) - base3(u) = q3(u) * g(u).
     GtExpBaseCubeQuotient = 68,
+
+    // G2 scalar multiplication base point polynomials (Fq2 coords split into c0/c1; 8-var)
+    //
+    // These are constant over the native 8-var step domain, but vary per scalar-mul instance (c).
+    // They are committed so the verifier can consume the base without per-instance hint vectors,
+    // and wiring constraints can bind them to AST producers.
+    G2ScalarMulXPC0 = 69,
+    G2ScalarMulXPC1 = 70,
+    G2ScalarMulYPC0 = 71,
+    G2ScalarMulYPC1 = 72,
+
+    // G1 scalar multiplication base point polynomials (Fq coords; c-only)
+    //
+    // These are constant over the native 8-var step domain, and committed over the family-local
+    // `c` domain only (no step padding).
+    G1ScalarMulXP = 73,
+    G1ScalarMulYP = 74,
 }
 
 impl PolyType {
-    pub const NUM_TYPES: usize = 69;
+    pub const NUM_TYPES: usize = 75;
 }
 
 impl CanonicalSerialize for PolyType {
@@ -233,6 +250,12 @@ impl CanonicalDeserialize for PolyType {
             66 => PolyType::GtExpBase3,
             67 => PolyType::GtExpBaseSquareQuotient,
             68 => PolyType::GtExpBaseCubeQuotient,
+            69 => PolyType::G2ScalarMulXPC0,
+            70 => PolyType::G2ScalarMulXPC1,
+            71 => PolyType::G2ScalarMulYPC0,
+            72 => PolyType::G2ScalarMulYPC1,
+            73 => PolyType::G1ScalarMulXP,
+            74 => PolyType::G1ScalarMulYP,
             _ => return Err(SerializationError::InvalidData),
         };
         Ok(ty)
@@ -315,7 +338,7 @@ const G1_SCALAR_MUL_SPECS: [(PolyType, usize); 8] = [
     (PolyType::G1ScalarMulAIndicator, 8),
 ];
 
-const G2_SCALAR_MUL_POLYS: [PolyType; 14] = [
+const G2_SCALAR_MUL_POLYS: [PolyType; 18] = [
     PolyType::G2ScalarMulXAC0,
     PolyType::G2ScalarMulXAC1,
     PolyType::G2ScalarMulYAC0,
@@ -330,8 +353,12 @@ const G2_SCALAR_MUL_POLYS: [PolyType; 14] = [
     PolyType::G2ScalarMulYANextC1,
     PolyType::G2ScalarMulTIndicator,
     PolyType::G2ScalarMulAIndicator,
+    PolyType::G2ScalarMulXPC0,
+    PolyType::G2ScalarMulXPC1,
+    PolyType::G2ScalarMulYPC0,
+    PolyType::G2ScalarMulYPC1,
 ];
-const G2_SCALAR_MUL_SPECS: [(PolyType, usize); 14] = [
+const G2_SCALAR_MUL_SPECS: [(PolyType, usize); 18] = [
     (PolyType::G2ScalarMulXAC0, 8),
     (PolyType::G2ScalarMulXAC1, 8),
     (PolyType::G2ScalarMulYAC0, 8),
@@ -346,6 +373,11 @@ const G2_SCALAR_MUL_SPECS: [(PolyType, usize); 14] = [
     (PolyType::G2ScalarMulYANextC1, 8),
     (PolyType::G2ScalarMulTIndicator, 8),
     (PolyType::G2ScalarMulAIndicator, 8),
+    // Base-point coordinates are **c-only** (no step vars); the `c` suffix is handled by packing.
+    (PolyType::G2ScalarMulXPC0, 0),
+    (PolyType::G2ScalarMulXPC1, 0),
+    (PolyType::G2ScalarMulYPC0, 0),
+    (PolyType::G2ScalarMulYPC1, 0),
 ];
 
 const G1_ADD_POLYS: [PolyType; 13] = [

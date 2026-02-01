@@ -80,7 +80,6 @@ mod recursion_sizes {
         println!("--- RecursionArtifact size breakdown (ark_serialize canonical) ---");
         log_sizes("stage8_combine_hint", &artifact.stage8_combine_hint);
         log_sizes("pairing_boundary", &artifact.pairing_boundary);
-        log_sizes("non_input_base_hints", &artifact.non_input_base_hints);
 
         println!("--- recursion SNARK proof (inner) ---");
         log_sizes("proof.stage1_proof", &artifact.proof.stage1_proof);

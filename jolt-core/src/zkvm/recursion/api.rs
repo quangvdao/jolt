@@ -18,7 +18,7 @@ use crate::poly::commitment::dory::instance_plan::derive_plan_with_hints;
 use crate::transcripts::Transcript;
 use crate::zkvm::config::ProgramMode;
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
-use crate::zkvm::proof_serialization::{JoltProof, NonInputBaseHints, PairingBoundary};
+use crate::zkvm::proof_serialization::{JoltProof, PairingBoundary};
 use crate::zkvm::verifier::{JoltVerifier, JoltVerifierPreprocessing};
 use crate::zkvm::witness::all_committed_polynomials;
 
@@ -51,8 +51,6 @@ pub struct RecursionArtifact<FS: Transcript> {
     pub stage8_combine_hint: Option<Fq12>,
     /// Boundary outputs for the external pairing check (treated as a hint; guest recomputes).
     pub pairing_boundary: PairingBoundary,
-    /// Minimal hints for Dory instance-plan derivation (guest recomputes without trusting).
-    pub non_input_base_hints: NonInputBaseHints,
     /// The recursion SNARK proof itself (Hyrax + sumchecks).
     pub proof: RecursionProof<Fq, FS, HyraxPCS>,
 }
@@ -61,7 +59,6 @@ impl<FS: Transcript> GuestSerialize for RecursionArtifact<FS> {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         self.stage8_combine_hint.guest_serialize(w)?;
         self.pairing_boundary.guest_serialize(w)?;
-        self.non_input_base_hints.guest_serialize(w)?;
         self.proof.guest_serialize(w)?;
         Ok(())
     }
@@ -72,7 +69,6 @@ impl<FS: Transcript> GuestDeserialize for RecursionArtifact<FS> {
         Ok(Self {
             stage8_combine_hint: Option::<Fq12>::guest_deserialize(r)?,
             pairing_boundary: PairingBoundary::guest_deserialize(r)?,
-            non_input_base_hints: NonInputBaseHints::guest_deserialize(r)?,
             proof: RecursionProof::<Fq, FS, HyraxPCS>::guest_deserialize(r)?,
         })
     }
@@ -205,13 +201,8 @@ pub fn prove_recursion<FS: Transcript>(
     // preprocessing already includes a cached recursion-sized setup.
     let hyrax_prover_setup = &preprocessing.hyrax_recursion_setup;
 
-    let (
-        recursion_snark_proof,
-        _constraint_metadata,
-        pairing_boundary,
-        stage8_combine_hint,
-        non_input_base_hints,
-    ) = RecursionProver::<Fq>::prove::<F, DoryPCS, FS>(
+    let (recursion_snark_proof, _constraint_metadata, pairing_boundary, stage8_combine_hint) =
+        RecursionProver::<Fq>::prove::<F, DoryPCS, FS>(
         &mut v.transcript,
         hyrax_prover_setup,
         RecursionInput {
@@ -232,7 +223,6 @@ pub fn prove_recursion<FS: Transcript>(
     Ok(RecursionArtifact {
         stage8_combine_hint,
         pairing_boundary,
-        non_input_base_hints,
         proof: recursion_snark_proof,
     })
 }
@@ -379,7 +369,7 @@ pub fn verify_recursion<FS: Transcript>(
     )
     .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
 
-    // Derive recursion verifier input using hint-based plan derivation (NO expensive group ops).
+    // Derive recursion verifier input (NO expensive group ops).
     //
     // Rationale: the recursion SNARK now enforces AST-driven wiring/boundary constraints (Stage 2),
     // including binding non-input bases/points and the pairing boundary. Re-evaluating the Dory AST
@@ -395,11 +385,10 @@ pub fn verify_recursion<FS: Transcript>(
         joint_commitment_dory,
         &combine_commitments_dory,
         &combine_coeffs_fr,
-        &recursion.non_input_base_hints,
         recursion.pairing_boundary.clone(),
         *hint_fq12,
     )
-    .map_err(|e| anyhow!("AST->recursion-plan derivation (with hints) failed: {e:?}"))?;
+    .map_err(|e| anyhow!("AST->recursion-plan derivation failed: {e:?}"))?;
     end_cycle_tracking("verify_recursion_stage8_prep_total");
 
     if plan.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {

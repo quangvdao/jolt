@@ -39,6 +39,11 @@ pub struct PrefixPackedEntry {
     /// family-local `c` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is
     /// ignored.
     pub is_g1_scalar_mul: bool,
+    /// If true, this entry is a **G1 scalar-mul base** row (not tied to a single `constraint_idx`).
+    ///
+    /// These rows are **c-only** (no 8-var step domain): they are committed over the family-local
+    /// `c` domain only, so the base point is not padded/replicated across steps.
+    pub is_g1_scalar_mul_base: bool,
     /// If true, this entry is a G1-add row (not tied to a single `constraint_idx`).
     ///
     /// G1 add rows are packed as blocks over a family-local
@@ -50,6 +55,11 @@ pub struct PrefixPackedEntry {
     /// family-local `c` domain. Such entries are keyed only by `poly_type`; `constraint_idx` is
     /// ignored.
     pub is_g2_scalar_mul: bool,
+    /// If true, this entry is a **G2 scalar-mul base** row (not tied to a single `constraint_idx`).
+    ///
+    /// These rows are **c-only** (no 8-var step domain): they are committed over the family-local
+    /// `c` domain only, so the base point is not padded/replicated across steps.
+    pub is_g2_scalar_mul_base: bool,
     /// If true, this entry is a G2-add row (not tied to a single `constraint_idx`).
     ///
     /// G2 add rows are packed as blocks over a family-local
@@ -127,9 +137,19 @@ impl PrefixPackingLayout {
             let padded = num_g1_smul.max(1).next_power_of_two();
             8usize + (padded.trailing_zeros() as usize)
         };
+        // Scalar-mul base rows: **c-only** over the same family-local padded `c` suffix.
+        let num_vars_g1_smul_base = {
+            let padded = num_g1_smul.max(1).next_power_of_two();
+            padded.trailing_zeros() as usize
+        };
         let num_vars_g2_smul = {
             let padded = num_g2_smul.max(1).next_power_of_two();
             8usize + (padded.trailing_zeros() as usize)
+        };
+        // Scalar-mul base rows: **c-only** over the same family-local padded `c` suffix.
+        let num_vars_g2_smul_base = {
+            let padded = num_g2_smul.max(1).next_power_of_two();
+            padded.trailing_zeros() as usize
         };
 
         // Add rows: family-local padded `c_add` suffix only.
@@ -143,7 +163,13 @@ impl PrefixPackingLayout {
         };
 
         // Collect committed polynomial rows. For family-packed entries, `constraint_idx` is ignored.
-        type PolySpec = (usize, PolyType, bool, bool, bool, bool, bool, usize);
+        //
+        // (constraint_idx, poly_type,
+        //  is_gt,
+        //  is_g1_scalar_mul, is_g1_scalar_mul_base, is_g1_add,
+        //  is_g2_scalar_mul, is_g2_scalar_mul_base, is_g2_add,
+        //  num_vars)
+        type PolySpec = (usize, PolyType, bool, bool, bool, bool, bool, bool, bool, usize);
         let mut polys: Vec<PolySpec> = Vec::new();
 
         if num_gt > 0 {
@@ -154,6 +180,8 @@ impl PrefixPackingLayout {
                     0usize,
                     poly_type,
                     true,
+                    false,
+                    false,
                     false,
                     false,
                     false,
@@ -178,6 +206,8 @@ impl PrefixPackingLayout {
                         false,
                         false,
                         false,
+                        false,
+                        false,
                         num_vars_gt_exp_base,
                     ));
                 }
@@ -192,6 +222,8 @@ impl PrefixPackingLayout {
                     0usize,
                     poly_type,
                     true,
+                    false,
+                    false,
                     false,
                     false,
                     false,
@@ -220,7 +252,24 @@ impl PrefixPackingLayout {
                     false,
                     false,
                     false,
+                    false,
+                    false,
                     num_vars_g1_smul,
+                ));
+            }
+            // Base point rows (c-only: k vars).
+            for poly_type in [PolyType::G1ScalarMulXP, PolyType::G1ScalarMulYP] {
+                polys.push((
+                    0usize,
+                    poly_type,
+                    false,
+                    false,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    num_vars_g1_smul_base,
                 ));
             }
         }
@@ -246,7 +295,9 @@ impl PrefixPackingLayout {
                     poly_type,
                     false,
                     false,
+                    false,
                     true,
+                    false,
                     false,
                     false,
                     num_vars_g1_add,
@@ -255,6 +306,7 @@ impl PrefixPackingLayout {
         }
 
         if num_g2_smul > 0 {
+            // Step-trace rows (8 + k vars).
             for poly_type in [
                 PolyType::G2ScalarMulXAC0,
                 PolyType::G2ScalarMulXAC1,
@@ -277,9 +329,31 @@ impl PrefixPackingLayout {
                     false,
                     false,
                     false,
+                    false,
                     true,
                     false,
+                    false,
                     num_vars_g2_smul,
+                ));
+            }
+            // Base point rows (c-only: k vars).
+            for poly_type in [
+                PolyType::G2ScalarMulXPC0,
+                PolyType::G2ScalarMulXPC1,
+                PolyType::G2ScalarMulYPC0,
+                PolyType::G2ScalarMulYPC1,
+            ] {
+                polys.push((
+                    0usize,
+                    poly_type,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                    false,
+                    num_vars_g2_smul_base,
                 ));
             }
         }
@@ -315,6 +389,8 @@ impl PrefixPackingLayout {
                     false,
                     false,
                     false,
+                    false,
+                    false,
                     true,
                     num_vars_g2_add,
                 ));
@@ -329,8 +405,10 @@ impl PrefixPackingLayout {
                 poly_type,
                 is_gt,
                 is_g1_scalar_mul,
+                is_g1_scalar_mul_base,
                 is_g1_add,
                 is_g2_scalar_mul,
+                is_g2_scalar_mul_base,
                 is_g2_add,
                 num_vars,
             )| {
@@ -339,8 +417,10 @@ impl PrefixPackingLayout {
                     *poly_type as usize,
                     *is_gt as usize,
                     *is_g1_scalar_mul as usize,
+                    *is_g1_scalar_mul_base as usize,
                     *is_g1_add as usize,
                     *is_g2_scalar_mul as usize,
+                    *is_g2_scalar_mul_base as usize,
                     *is_g2_add as usize,
                     *constraint_idx,
                 )
@@ -355,8 +435,10 @@ impl PrefixPackingLayout {
             poly_type,
             is_gt,
             is_g1_scalar_mul,
+            is_g1_scalar_mul_base,
             is_g1_add,
             is_g2_scalar_mul,
+            is_g2_scalar_mul_base,
             is_g2_add,
             num_vars,
         ) in polys
@@ -372,8 +454,10 @@ impl PrefixPackingLayout {
                 poly_type,
                 is_gt,
                 is_g1_scalar_mul,
+                is_g1_scalar_mul_base,
                 is_g1_add,
                 is_g2_scalar_mul,
+                is_g2_scalar_mul_base,
                 is_g2_add,
                 num_vars,
                 offset,

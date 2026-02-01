@@ -15,7 +15,6 @@ use crate::{
     },
     transcripts::{Blake2bTranscript, Transcript},
     zkvm::{
-        proof_serialization::NonInputBaseHints,
         recursion::{
             prover::{DoryOpeningSnapshot, RecursionInput, RecursionProof, RecursionProver},
             verifier::RecursionVerifier,
@@ -51,7 +50,6 @@ struct RecursionFixture {
     joint_commitment_fq12: Fq12,
     // Recursion outputs
     recursion_proof: RecursionProof<Fq, Blake2bTranscript, HyraxPCS>,
-    non_input_base_hints: NonInputBaseHints,
     pairing_boundary: PairingBoundary,
     hyrax_prover_setup: <HyraxPCS as CommitmentScheme>::ProverSetup,
 }
@@ -132,7 +130,6 @@ fn build_fixture() -> RecursionFixture {
         _metadata,
         pairing_boundary,
         stage8_combine_hint_fq12_opt,
-        non_input_base_hints,
     ) = RecursionProver::<Fq>::prove::<Fr, DoryCommitmentScheme, Blake2bTranscript>(
         &mut recursion_transcript,
         &hyrax_prover_setup,
@@ -167,7 +164,6 @@ fn build_fixture() -> RecursionFixture {
         joint_commitment,
         joint_commitment_fq12: stage8_combine_hint_fq12,
         recursion_proof,
-        non_input_base_hints,
         pairing_boundary,
         hyrax_prover_setup,
     }
@@ -215,7 +211,6 @@ fn wiring_rejects_tampered_pairing_boundary_rhs() {
         fixture.joint_commitment,
         &fixture.combine_commitments,
         &fixture.combine_coeffs,
-        &fixture.non_input_base_hints,
         fixture.pairing_boundary.clone(),
         fixture.joint_commitment_fq12,
     )
@@ -251,10 +246,6 @@ fn wiring_rejects_tampered_pairing_boundary_rhs() {
 fn wiring_rejects_tampered_gt_exp_base_input() {
     let fixture = build_fixture();
 
-    // NonInputBaseHints no longer carries GTExp bases; GTExp bases are bound via wiring and
-    // boundary base inputs in the verifier input.
-    let bad_hints = fixture.non_input_base_hints.clone();
-
     // Build symbolic AST (verifier side).
     let mut sym_transcript = fixture.stage8_pre_transcript.clone();
     let ast = <DoryCommitmentScheme as RecursionExt<Fr>>::build_symbolic_ast(
@@ -274,7 +265,6 @@ fn wiring_rejects_tampered_gt_exp_base_input() {
         fixture.joint_commitment,
         &fixture.combine_commitments,
         &fixture.combine_coeffs,
-        &bad_hints,
         fixture.pairing_boundary.clone(),
         fixture.joint_commitment_fq12,
     )

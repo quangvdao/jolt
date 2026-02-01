@@ -432,9 +432,6 @@ impl RecursionVerifier<Fq> {
         let mut num_g1_add = 0usize;
         let mut num_g2_add = 0usize;
 
-        let mut g1_scalar_mul_base_points = Vec::new();
-        let mut g2_scalar_mul_base_points = Vec::new();
-
         for constraint in self.input.constraint_types.iter() {
             match constraint {
                 ConstraintType::GtExp => {
@@ -443,12 +440,10 @@ impl RecursionVerifier<Fq> {
                 ConstraintType::GtMul => {
                     num_gt_mul += 1;
                 }
-                ConstraintType::G1ScalarMul { base_point } => {
-                    g1_scalar_mul_base_points.push(*base_point);
+                ConstraintType::G1ScalarMul { base_point: _ } => {
                     num_g1_scalar_mul += 1;
                 }
-                ConstraintType::G2ScalarMul { base_point } => {
-                    g2_scalar_mul_base_points.push(*base_point);
+                ConstraintType::G2ScalarMul { base_point: _ } => {
                     num_g2_scalar_mul += 1;
                 }
                 ConstraintType::G1Add => {
@@ -509,7 +504,6 @@ impl RecursionVerifier<Fq> {
                 num_g1_scalar_mul,
                 k_common,
                 self.input.g1_scalar_mul_public_inputs.clone(),
-                g1_scalar_mul_base_points,
                 transcript,
             )));
 
@@ -534,7 +528,6 @@ impl RecursionVerifier<Fq> {
                 num_g2_scalar_mul,
                 k_common,
                 self.input.g2_scalar_mul_public_inputs.clone(),
-                g2_scalar_mul_base_points,
                 transcript,
             )));
 
@@ -742,6 +735,21 @@ impl RecursionVerifier<Fq> {
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1ScalarMul)
+            } else if entry.is_g1_scalar_mul_base {
+                let vp = match entry.poly_type {
+                    PolyType::G1ScalarMulXP => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::XP,
+                        })
+                    }
+                    PolyType::G1ScalarMulYP => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G1ScalarMul {
+                            term: G1ScalarMulTerm::YP,
+                        })
+                    }
+                    _ => return Fq::zero(),
+                };
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G1ScalarMul)
             } else if entry.is_g1_add {
                 let vp = match entry.poly_type {
                     PolyType::G1AddXP => VirtualPolynomial::Recursion(RecursionPoly::G1Add {
@@ -866,6 +874,51 @@ impl RecursionVerifier<Fq> {
                     PolyType::G2ScalarMulAIndicator => {
                         VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
                             term: G2ScalarMulTerm::AIndicator,
+                        })
+                    }
+                    PolyType::G2ScalarMulXPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulXPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC1,
+                        })
+                    }
+                    _ => return Fq::zero(),
+                };
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2ScalarMul)
+            } else if entry.is_g2_scalar_mul_base {
+                let vp = match entry.poly_type {
+                    PolyType::G2ScalarMulXPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulXPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::XPC1,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC0 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC0,
+                        })
+                    }
+                    PolyType::G2ScalarMulYPC1 => {
+                        VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                            term: G2ScalarMulTerm::YPC1,
                         })
                     }
                     _ => return Fq::zero(),

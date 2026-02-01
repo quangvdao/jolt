@@ -728,6 +728,30 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             return;
         }
 
+        if entry.is_g1_scalar_mul_base {
+            // G1 scalar-mul base rows are **c-only** over a family-local padded `c`.
+            let num_g1 = cs.g1_scalar_mul_rows.len();
+            let padded = num_g1.max(1).next_power_of_two();
+            let k = padded.trailing_zeros() as usize;
+            let expected_num_vars = k;
+            if entry.num_vars != expected_num_vars {
+                panic!(
+                    "G1 scalar-mul base entry has num_vars={}, expected {} (k_g1)",
+                    entry.num_vars, expected_num_vars
+                );
+            }
+            for c in 0..cs.g1_scalar_mul_rows.len() {
+                let (x, y) = cs.g1_scalar_mul_rows[c].base_point;
+                let v = match entry.poly_type {
+                    PolyType::G1ScalarMulXP => x,
+                    PolyType::G1ScalarMulYP => y,
+                    _ => continue,
+                };
+                fill_scalar_bit_reversed(dst, entry.num_vars, c, v);
+            }
+            return;
+        }
+
         if entry.is_g1_add {
             // G1 add rows are c-only over a family-local padded `c_add`.
             let num_g1 = cs.g1_add_rows.len();
@@ -777,24 +801,78 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
             }
 
             for c in 0..cs.g2_scalar_mul_rows.len() {
-                let src8 = match entry.poly_type {
-                    PolyType::G2ScalarMulXAC0 => &cs.g2_scalar_mul_rows[c].x_a_c0,
-                    PolyType::G2ScalarMulXAC1 => &cs.g2_scalar_mul_rows[c].x_a_c1,
-                    PolyType::G2ScalarMulYAC0 => &cs.g2_scalar_mul_rows[c].y_a_c0,
-                    PolyType::G2ScalarMulYAC1 => &cs.g2_scalar_mul_rows[c].y_a_c1,
-                    PolyType::G2ScalarMulXTC0 => &cs.g2_scalar_mul_rows[c].x_t_c0,
-                    PolyType::G2ScalarMulXTC1 => &cs.g2_scalar_mul_rows[c].x_t_c1,
-                    PolyType::G2ScalarMulYTC0 => &cs.g2_scalar_mul_rows[c].y_t_c0,
-                    PolyType::G2ScalarMulYTC1 => &cs.g2_scalar_mul_rows[c].y_t_c1,
-                    PolyType::G2ScalarMulXANextC0 => &cs.g2_scalar_mul_rows[c].x_a_next_c0,
-                    PolyType::G2ScalarMulXANextC1 => &cs.g2_scalar_mul_rows[c].x_a_next_c1,
-                    PolyType::G2ScalarMulYANextC0 => &cs.g2_scalar_mul_rows[c].y_a_next_c0,
-                    PolyType::G2ScalarMulYANextC1 => &cs.g2_scalar_mul_rows[c].y_a_next_c1,
-                    PolyType::G2ScalarMulTIndicator => &cs.g2_scalar_mul_rows[c].t_indicator,
-                    PolyType::G2ScalarMulAIndicator => &cs.g2_scalar_mul_rows[c].a_indicator,
+                match entry.poly_type {
+                    PolyType::G2ScalarMulXAC0 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_c0, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulXAC1 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_c1, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulYAC0 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_c0, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulYAC1 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_c1, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulXTC0 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_t_c0, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulXTC1 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_t_c1, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulYTC0 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_t_c0, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulYTC1 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_t_c1, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulXANextC0 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_next_c0, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulXANextC1 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].x_a_next_c1, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulYANextC0 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_next_c0, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulYANextC1 => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].y_a_next_c1, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulTIndicator => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].t_indicator, entry.num_vars, c, 8)
+                    }
+                    PolyType::G2ScalarMulAIndicator => {
+                        fill_block_bit_reversed(dst, &cs.g2_scalar_mul_rows[c].a_indicator, entry.num_vars, c, 8)
+                    }
                     _ => continue,
                 };
-                fill_block_bit_reversed(dst, src8, entry.num_vars, c, 8);
+            }
+            return;
+        }
+
+        if entry.is_g2_scalar_mul_base {
+            // G2 scalar-mul base rows are **c-only** over a family-local padded `c`.
+            let num_g2 = cs.g2_scalar_mul_rows.len();
+            let padded = num_g2.max(1).next_power_of_two();
+            let k = padded.trailing_zeros() as usize;
+            let expected_num_vars = k;
+            if entry.num_vars != expected_num_vars {
+                panic!(
+                    "G2 scalar-mul base entry has num_vars={}, expected {} (k_g2)",
+                    entry.num_vars, expected_num_vars
+                );
+            }
+
+            for c in 0..cs.g2_scalar_mul_rows.len() {
+                let (x, y) = cs.g2_scalar_mul_rows[c].base_point;
+                let v = match entry.poly_type {
+                    PolyType::G2ScalarMulXPC0 => x.c0,
+                    PolyType::G2ScalarMulXPC1 => x.c1,
+                    PolyType::G2ScalarMulYPC0 => y.c0,
+                    PolyType::G2ScalarMulYPC1 => y.c1,
+                    _ => continue,
+                };
+                fill_scalar_bit_reversed(dst, entry.num_vars, c, v);
             }
             return;
         }

@@ -621,7 +621,13 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G2ScalarMulProver {
         transcript: &mut FqT,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        // Default opening point for step-trace polynomials: (r_step, r_c_tail).
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
+        // Base point polynomials are **c-only** (no 8-var step domain): open them at r_c_tail only.
+        let r_c_chal = &sumcheck_challenges[STEP_VARS..];
+        let dummy = self.params.dummy_bits();
+        let r_c_tail: Vec<<Fq as JoltField>::Challenge> = r_c_chal[dummy..].to_vec();
+        let base_opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r_c_tail);
         for (vp, claim) in [
             (
                 VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
@@ -707,14 +713,45 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for G2ScalarMulProver {
                 }),
                 self.a_indicator.get_bound_coeff(0),
             ),
+            (
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XPC0,
+                }),
+                self.x_p_c0.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XPC1,
+                }),
+                self.x_p_c1.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YPC0,
+                }),
+                self.y_p_c0.get_bound_coeff(0),
+            ),
+            (
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YPC1,
+                }),
+                self.y_p_c1.get_bound_coeff(0),
+            ),
         ] {
-            accumulator.append_virtual(
-                transcript,
+            let op = if matches!(
                 vp,
-                SumcheckId::G2ScalarMul,
-                opening_point.clone(),
-                claim,
-            );
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XPC0
+                        | G2ScalarMulTerm::XPC1
+                        | G2ScalarMulTerm::YPC0
+                        | G2ScalarMulTerm::YPC1
+                })
+            ) {
+                base_opening_point.clone()
+            } else {
+                opening_point.clone()
+            };
+            accumulator.append_virtual(transcript, vp, SumcheckId::G2ScalarMul, op, claim);
         }
     }
 }
@@ -725,7 +762,6 @@ pub struct G2ScalarMulVerifier {
     term_batch_coeff: Fq,
     num_constraints: usize,
     public_inputs: Vec<G2ScalarMulPublicInputs>,
-    base_points: Vec<(Fq2, Fq2)>,
 }
 
 #[cfg(feature = "allocative")]
@@ -737,17 +773,14 @@ impl G2ScalarMulVerifier {
     pub fn new<T: Transcript>(
         num_constraints: usize,
         public_inputs: Vec<G2ScalarMulPublicInputs>,
-        base_points: Vec<(Fq2, Fq2)>,
         transcript: &mut T,
     ) -> Self {
         debug_assert_eq!(public_inputs.len(), num_constraints);
-        debug_assert_eq!(base_points.len(), num_constraints);
         let params = G2ScalarMulParams::new(num_constraints);
         Self::new_with_params(
             params,
             num_constraints,
             public_inputs,
-            base_points,
             transcript,
         )
     }
@@ -756,17 +789,14 @@ impl G2ScalarMulVerifier {
         num_constraints: usize,
         k_common: usize,
         public_inputs: Vec<G2ScalarMulPublicInputs>,
-        base_points: Vec<(Fq2, Fq2)>,
         transcript: &mut T,
     ) -> Self {
         debug_assert_eq!(public_inputs.len(), num_constraints);
-        debug_assert_eq!(base_points.len(), num_constraints);
         let params = G2ScalarMulParams::new_with_k_common(num_constraints, k_common);
         Self::new_with_params(
             params,
             num_constraints,
             public_inputs,
-            base_points,
             transcript,
         )
     }
@@ -775,7 +805,6 @@ impl G2ScalarMulVerifier {
         params: G2ScalarMulParams,
         num_constraints: usize,
         public_inputs: Vec<G2ScalarMulPublicInputs>,
-        base_points: Vec<(Fq2, Fq2)>,
         transcript: &mut T,
     ) -> Self {
         let num_rounds = params.num_rounds();
@@ -789,7 +818,6 @@ impl G2ScalarMulVerifier {
             term_batch_coeff,
             num_constraints,
             public_inputs,
-            base_points,
         }
     }
 }
@@ -827,23 +855,47 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
         let r_c: Vec<Fq> = r_c_tail.iter().map(|c| (*c).into()).collect();
 
         // Public inputs at this point:
-        // - base points are c-only (replicated across step)
+        // - base point is committed as (x_p_c0, x_p_c1, y_p_c0, y_p_c1) over (step,c)
         // - bit is step-only per instance, then batched across c by Eq(r_c,c)
         let r_step_fq: Vec<Fq> = r_step.iter().map(|c| (*c).into()).collect();
         // Combine indicator + public input batching in one pass (avoid recomputing Eq(r_c, c)).
         let mut ind_eval = Fq::zero();
-        let mut x_p = Fq2::zero();
-        let mut y_p = Fq2::zero();
         let mut bit = Fq::zero();
         for c in 0..self.num_constraints {
             let w_c = eq_lsb_index(&r_c, c);
             ind_eval += w_c;
-            let (xp_i, yp_i) = self.base_points[c];
-            let w_c_fq2 = Fq2::new(w_c, Fq::zero());
-            x_p += xp_i * w_c_fq2;
-            y_p += yp_i * w_c_fq2;
             bit += w_c * self.public_inputs[c].evaluate_bit_mle(&r_step_fq);
         }
+
+        // Committed base point at this point (already batched over c by MLE evaluation).
+        let x_p = Fq2::new(
+            accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XPC0,
+                }),
+                SumcheckId::G2ScalarMul,
+            ),
+            accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XPC1,
+                }),
+                SumcheckId::G2ScalarMul,
+            ),
+        );
+        let y_p = Fq2::new(
+            accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YPC0,
+                }),
+                SumcheckId::G2ScalarMul,
+            ),
+            accumulator.get_virtual_polynomial_claim(
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::YPC1,
+                }),
+                SumcheckId::G2ScalarMul,
+            ),
+        );
 
         // Fetch opened claims (14 committed witness polynomials), without heap allocation.
         let vals = G2ScalarMulValues {
@@ -943,7 +995,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
+        // Default opening point for step-trace polynomials: (r_step, r_c_tail).
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
+        // Base point polynomials are **c-only** (no 8-var step domain): open them at r_c_tail only.
+        let r_c_chal = &sumcheck_challenges[STEP_VARS..];
+        let dummy = self.params.dummy_bits();
+        let r_c_tail: Vec<<Fq as JoltField>::Challenge> = r_c_chal[dummy..].to_vec();
+        let base_opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r_c_tail);
         for vp in [
             VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
                 term: G2ScalarMulTerm::XAC0,
@@ -987,13 +1045,33 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2ScalarMulVerifier {
             VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
                 term: G2ScalarMulTerm::AIndicator,
             }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XPC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::XPC1,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YPC0,
+            }),
+            VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                term: G2ScalarMulTerm::YPC1,
+            }),
         ] {
-            accumulator.append_virtual(
-                transcript,
+            let op = if matches!(
                 vp,
-                SumcheckId::G2ScalarMul,
-                opening_point.clone(),
-            );
+                VirtualPolynomial::Recursion(RecursionPoly::G2ScalarMul {
+                    term: G2ScalarMulTerm::XPC0
+                        | G2ScalarMulTerm::XPC1
+                        | G2ScalarMulTerm::YPC0
+                        | G2ScalarMulTerm::YPC1
+                })
+            ) {
+                base_opening_point.clone()
+            } else {
+                opening_point.clone()
+            };
+            accumulator.append_virtual(transcript, vp, SumcheckId::G2ScalarMul, op);
         }
     }
 }

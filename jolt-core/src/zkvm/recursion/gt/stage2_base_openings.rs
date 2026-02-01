@@ -34,31 +34,9 @@ use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::Zero;
 use jolt_optimizations::get_g_mle;
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 const U_VARS: usize = 4;
 const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
-
-// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
-const CYCLE_GTEXP_BASE_STAGE2_OPENINGS_EXPECTED: &str =
-    "recursion_gtexp_base_stage2_openings_expected_output_claim";
-const CYCLE_GTEXP_BASE_STAGE2_OPENINGS_CACHE: &str =
-    "recursion_gtexp_base_stage2_openings_cache_openings";
-
-struct CycleMarkerGuard(&'static str);
-impl CycleMarkerGuard {
-    #[inline(always)]
-    fn new(label: &'static str) -> Self {
-        start_cycle_tracking(label);
-        Self(label)
-    }
-}
-impl Drop for CycleMarkerGuard {
-    #[inline(always)]
-    fn drop(&mut self) {
-        end_cycle_tracking(self.0);
-    }
-}
 
 #[derive(Clone, Debug, Allocative)]
 pub struct GtExpBaseStage2OpeningsParams {
@@ -303,7 +281,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBaseStage2OpeningsV
         _acc: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_BASE_STAGE2_OPENINGS_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), U_VARS + self.params.k_common);
         // Cache-only: binding of the committed `Base` row is enforced by GT wiring (Stage 2).
         Fq::zero()
@@ -315,7 +292,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBaseStage2OpeningsV
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_BASE_STAGE2_OPENINGS_CACHE);
         debug_assert_eq!(sumcheck_challenges.len(), U_VARS + self.params.k_common);
         let mut r = Vec::with_capacity(U_VARS + self.params.k_exp);
         r.extend_from_slice(&sumcheck_challenges[..U_VARS]);

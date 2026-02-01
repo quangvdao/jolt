@@ -88,7 +88,6 @@ use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::{One, PrimeField, Zero};
 use core::cmp::max;
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 const STEP_VARS: usize = 8; // 256 steps
@@ -97,27 +96,6 @@ const STEP_VARS: usize = 8; // 256 steps
                             // - we multiply by Eq(step,c) (deg 1) and I(c) (deg 1),
                             // so total per-variable degree is 7.
 const DEGREE: usize = 7;
-
-// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
-const CYCLE_G1_SMUL_EXPECTED: &str = "recursion_g1_scalar_mul_expected_output_claim";
-const CYCLE_G1_SMUL_CACHE: &str = "recursion_g1_scalar_mul_cache_openings";
-const CYCLE_SHIFT_G1_SMUL_EXPECTED: &str = "recursion_shift_g1_scalar_mul_expected_output_claim";
-const CYCLE_SHIFT_G1_SMUL_CACHE: &str = "recursion_shift_g1_scalar_mul_cache_openings";
-
-struct CycleMarkerGuard(&'static str);
-impl CycleMarkerGuard {
-    #[inline(always)]
-    fn new(label: &'static str) -> Self {
-        start_cycle_tracking(label);
-        Self(label)
-    }
-}
-impl Drop for CycleMarkerGuard {
-    #[inline(always)]
-    fn drop(&mut self) {
-        end_cycle_tracking(self.0);
-    }
-}
 
 #[inline]
 fn k_from_num_constraints(num_constraints: usize) -> usize {
@@ -749,7 +727,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1ScalarMulVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        let _guard = CycleMarkerGuard::new(CYCLE_G1_SMUL_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
 
         // Eq polynomial convention: reverse challenges to match big-endian ordering in EqPolynomial::evals.
@@ -868,7 +845,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1ScalarMulVerifier {
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let _guard = CycleMarkerGuard::new(CYCLE_G1_SMUL_CACHE);
         // Default opening point for step-trace polynomials: (r_step, r_c_tail).
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         // Base point polynomials are **c-only** (no 8-var step domain): open them at r_c_tail only.
@@ -1253,7 +1229,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for ShiftG1ScalarMulVerifier
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        let _guard = CycleMarkerGuard::new(CYCLE_SHIFT_G1_SMUL_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
         let y_step = &sumcheck_challenges[..STEP_VARS];
         let y_c = &sumcheck_challenges[STEP_VARS..];
@@ -1306,7 +1281,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for ShiftG1ScalarMulVerifier
         _transcript: &mut T,
         _sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let _guard = CycleMarkerGuard::new(CYCLE_SHIFT_G1_SMUL_CACHE);
         // No-op: reuse openings cached by `G1ScalarMul*` (same polynomials, same point).
     }
 }

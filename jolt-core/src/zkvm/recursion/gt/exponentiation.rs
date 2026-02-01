@@ -66,31 +66,11 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 /// Degree bound matches existing packed GT exp (see `gt/exponentiation.rs`).
 /// This bound is used by the batching sumcheck interface and by UniPoly compression.
 const DEGREE: usize = 8; // Was 7, but eq*C has degree 1+7=8
-
-// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
-const CYCLE_GTEXP_EXPECTED: &str = "recursion_gtexp_expected_output_claim";
-const CYCLE_GTEXP_CACHE: &str = "recursion_gtexp_cache_openings";
-
-struct CycleMarkerGuard(&'static str);
-impl CycleMarkerGuard {
-    #[inline(always)]
-    fn new(label: &'static str) -> Self {
-        start_cycle_tracking(label);
-        Self(label)
-    }
-}
-impl Drop for CycleMarkerGuard {
-    #[inline(always)]
-    fn drop(&mut self) {
-        end_cycle_tracking(self.0);
-    }
-}
 
 #[derive(Clone, Allocative)]
 pub struct GtExpParams {
@@ -439,7 +419,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_EXPECTED);
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
 
         // Eq polynomial convention (same as G1Add): reverse challenges to match the
@@ -566,7 +545,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let _guard = CycleMarkerGuard::new(CYCLE_GTEXP_CACHE);
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(sumcheck_challenges.to_vec());
         for vp in [
             VirtualPolynomial::Recursion(RecursionPoly::GtExp {

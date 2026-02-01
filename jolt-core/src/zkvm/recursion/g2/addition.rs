@@ -59,30 +59,10 @@ use crate::{
 use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::{One, Zero};
-use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 use rayon::prelude::*;
 
 /// Degree bound for the G2Add constraint polynomial (see `g2/addition.rs`).
 const DEGREE_BOUND: usize = 6;
-
-// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
-const CYCLE_G2_ADD_EXPECTED: &str = "recursion_g2_add_expected_output_claim";
-const CYCLE_G2_ADD_CACHE: &str = "recursion_g2_add_cache_openings";
-
-struct CycleMarkerGuard(&'static str);
-impl CycleMarkerGuard {
-    #[inline(always)]
-    fn new(label: &'static str) -> Self {
-        start_cycle_tracking(label);
-        Self(label)
-    }
-}
-impl Drop for CycleMarkerGuard {
-    #[inline(always)]
-    fn drop(&mut self) {
-        end_cycle_tracking(self.0);
-    }
-}
 
 #[derive(Clone, Allocative)]
 pub struct G2AddParams {
@@ -317,7 +297,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        let _guard = CycleMarkerGuard::new(CYCLE_G2_ADD_EXPECTED);
         let eval_point: Vec<Fq> = sumcheck_challenges
             .iter()
             .rev()
@@ -478,7 +457,6 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        let _guard = CycleMarkerGuard::new(CYCLE_G2_ADD_CACHE);
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         for term_idx in 0..G2AddTerm::COUNT {
             let term = G2AddTerm::from_index(term_idx).expect("invalid G2AddTerm index");

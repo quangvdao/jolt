@@ -265,19 +265,29 @@ pub fn digits_from_bits_msb(bits: &[bool]) -> Vec<(bool, bool)> {
     padded.chunks(2).map(|c| (c[0], c[1])).collect()
 }
 
-/// Compute Eq evaluations in LSB-first order
+/// Compute Eq evaluations in LSB-first order.
+///
+/// Uses O(2^n) streaming algorithm instead of naive O(2^n × n).
+/// For n=8 (256 steps), this is 256 vs 2048 field muls — an 8× speedup.
 pub fn eq_lsb_evals<F: JoltField>(r: &[F::Challenge]) -> Vec<F> {
     let n = r.len();
-    let mut evals = vec![F::zero(); 1 << n];
-    for idx in 0..(1 << n) {
-        let mut prod = F::one();
-        for i in 0..n {
-            let bit = ((idx >> i) & 1) == 1;
-            let r_i: F = r[i].into();
-            let y_i = if bit { F::one() } else { F::zero() };
-            prod *= r_i * y_i + (F::one() - r_i) * (F::one() - y_i);
+    if n == 0 {
+        return vec![F::one()];
+    }
+    // Streaming construction: evals[j] holds partial product over first i variables.
+    // After i rounds, evals[0..2^i] contain final values for those indices.
+    let mut evals = vec![F::one(); 1 << n];
+    let mut len = 1usize;
+    for &r_chal in r {
+        let r_i: F = r_chal.into();
+        let one_minus = F::one() - r_i;
+        // Expand: evals[j] *= (1 - r_i), evals[j + len] = prev * r_i
+        for j in 0..len {
+            let prev = evals[j];
+            evals[j] = prev * one_minus;
+            evals[j + len] = prev * r_i;
         }
-        evals[idx] = prod;
+        len *= 2;
     }
     evals
 }
@@ -322,18 +332,76 @@ pub fn eq_plus_one_lsb_mle<F: JoltField>(r: &[F::Challenge], y: &[F::Challenge])
     sum
 }
 
-/// Compute EqPlusOne evaluations in LSB-first order
+/// Compute EqPlusOne evaluations in LSB-first order.
+///
+/// Uses O(2^n × n) algorithm with prefix caching instead of naive O(2^n × n²).
+/// For n=8, this is ~2k vs ~16k field ops.
 pub fn eq_plus_one_lsb_evals<F: JoltField>(r: &[F::Challenge]) -> Vec<F> {
     let n = r.len();
-    let mut evals = vec![F::zero(); 1 << n];
-    for idx in 0..(1 << n) {
-        let mut y = vec![F::Challenge::from(0u128); n];
-        for i in 0..n {
-            if ((idx >> i) & 1) == 1 {
-                y[i] = F::Challenge::from(1u128);
-            }
-        }
-        evals[idx] = eq_plus_one_lsb_mle::<F>(r, &y);
+    if n == 0 {
+        // eq_plus_one([], []) = 0 by convention (no valid increment)
+        return vec![F::zero()];
     }
-    evals
+
+    // First compute eq_evals using the streaming O(2^n) algorithm.
+    let eq_evals = eq_lsb_evals::<F>(r);
+
+    // Precompute prefix products: prefix[k] = r[0] * r[1] * ... * r[k-1]
+    // (empty product for k=0 is 1)
+    let mut prefix = vec![F::one(); n + 1];
+    for k in 0..n {
+        let r_k: F = r[k].into();
+        prefix[k + 1] = prefix[k] * r_k;
+    }
+
+    let mut eq_plus_one_evals = vec![F::zero(); 1 << n];
+
+    // For each k in 0..n, the contribution comes from indices y where:
+    //   - bits 0..k-1 are all 0 (contributing r[i] factors from prefix)
+    //   - bit k is 1 (contributing (1 - r[k]) factor)
+    //   - bits k+1..n-1 can be anything (contributing eq factors)
+    //
+    // Index pattern: y = 0...0 1 (bits_{k+1}..bits_{n-1})
+    //                     ^^^^ ^   ^^^^^^^^^^^^^^^^^^
+    //                   k zeros  k  n-k-1 free bits
+    for k in 0..n {
+        let r_k: F = r[k].into();
+        let kth_factor = F::one() - r_k;
+        let lower_contrib = prefix[k] * kth_factor;
+
+        let base_idx = 1usize << k; // bit k = 1, bits 0..k-1 = 0
+        let num_higher_bits = n - k - 1;
+        let num_higher = 1usize << num_higher_bits;
+
+        for higher_idx in 0..num_higher {
+            // higher_idx has bits for positions k+1..n-1
+            // Full index: base_idx | (higher_idx << (k + 1))
+            let y_idx = base_idx | (higher_idx << (k + 1));
+
+            // eq(r[k+1..n-1], higher_idx) can be extracted from eq_evals
+            // eq_evals[j] = eq(r, j) = product over all bits
+            // We need eq(r[k+1..n-1], higher_idx)
+            //
+            // Construct an index that has:
+            // - bits 0..k matching r[0..k] (so those eq factors are 1)
+            // - bits k+1..n-1 = higher_idx
+            //
+            // This would require knowing r as Boolean, which we don't.
+            // Instead, compute directly using r values.
+            let mut higher_eq = F::one();
+            for i in (k + 1)..n {
+                let r_i: F = r[i].into();
+                let y_bit = ((higher_idx >> (i - k - 1)) & 1) == 1;
+                if y_bit {
+                    higher_eq *= r_i;
+                } else {
+                    higher_eq *= F::one() - r_i;
+                }
+            }
+
+            eq_plus_one_evals[y_idx] = lower_contrib * higher_eq;
+        }
+    }
+
+    eq_plus_one_evals
 }

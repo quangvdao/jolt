@@ -8,7 +8,6 @@ use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use num::FromPrimitive;
-use strum::EnumCount;
 
 use crate::zkvm::guest_serde::{GuestDeserialize, GuestSerialize};
 
@@ -480,17 +479,28 @@ where
     }
 }
 
-// Compact encoding for OpeningId:
-// Each variant uses a fused byte = BASE + sumcheck_id (1 byte total for advice, 2 bytes for committed/virtual)
-// - [0, NUM_SUMCHECKS) = UntrustedAdvice(sumcheck_id)
-// - [NUM_SUMCHECKS, 2*NUM_SUMCHECKS) = TrustedAdvice(sumcheck_id)
-// - [2*NUM_SUMCHECKS, 3*NUM_SUMCHECKS) + poly_index = Committed(poly, sumcheck_id)
-// - [3*NUM_SUMCHECKS, 4*NUM_SUMCHECKS) + poly_index = Virtual(poly, sumcheck_id)
-const OPENING_ID_UNTRUSTED_ADVICE_BASE: u8 = 0;
-const OPENING_ID_TRUSTED_ADVICE_BASE: u8 =
-    OPENING_ID_UNTRUSTED_ADVICE_BASE + SumcheckId::COUNT as u8;
-const OPENING_ID_COMMITTED_BASE: u8 = OPENING_ID_TRUSTED_ADVICE_BASE + SumcheckId::COUNT as u8;
-const OPENING_ID_VIRTUAL_BASE: u8 = OPENING_ID_COMMITTED_BASE + SumcheckId::COUNT as u8;
+// OpeningId wire encoding (v2):
+//
+// The legacy encoding (v1) used a single "fused" byte whose interpretation depended on
+// `SumcheckId::COUNT` (range boundaries). Adding new `SumcheckId` variants changes those
+// boundaries, which makes new code unable to reliably deserialize old proofs.
+//
+// To fix this, v2 is self-describing:
+//   [0] = 0xFF (v2 marker)
+//   [1] = tag (0..=3)
+//   [2] = sumcheck_id (u8)
+//   [3..] = optional polynomial id (CommittedPolynomial / VirtualPolynomial), depending on tag
+//
+// Backwards-compat: v2 readers also accept v1 proofs produced by commit `e62c93a90` where
+// `SumcheckId::COUNT == 50` by decoding v1 with fixed legacy boundaries.
+const OPENING_ID_V2_PREFIX: u8 = 0xFF;
+const OPENING_ID_V2_TAG_UNTRUSTED_ADVICE: u8 = 0;
+const OPENING_ID_V2_TAG_TRUSTED_ADVICE: u8 = 1;
+const OPENING_ID_V2_TAG_COMMITTED: u8 = 2;
+const OPENING_ID_V2_TAG_VIRTUAL: u8 = 3;
+
+// Legacy v1 boundaries used by `e62c93a90`.
+const OPENING_ID_V1_LEGACY_NUM_SUMCHECKS: u8 = 50;
 
 impl CanonicalSerialize for OpeningId {
     fn serialize_with_mode<W: Write>(
@@ -500,21 +510,25 @@ impl CanonicalSerialize for OpeningId {
     ) -> Result<(), SerializationError> {
         match self {
             OpeningId::UntrustedAdvice(sumcheck_id) => {
-                let fused = OPENING_ID_UNTRUSTED_ADVICE_BASE + (*sumcheck_id as u8);
-                fused.serialize_with_mode(&mut writer, compress)
+                OPENING_ID_V2_PREFIX.serialize_with_mode(&mut writer, compress)?;
+                OPENING_ID_V2_TAG_UNTRUSTED_ADVICE.serialize_with_mode(&mut writer, compress)?;
+                (*sumcheck_id as u8).serialize_with_mode(&mut writer, compress)
             }
             OpeningId::TrustedAdvice(sumcheck_id) => {
-                let fused = OPENING_ID_TRUSTED_ADVICE_BASE + (*sumcheck_id as u8);
-                fused.serialize_with_mode(&mut writer, compress)
+                OPENING_ID_V2_PREFIX.serialize_with_mode(&mut writer, compress)?;
+                OPENING_ID_V2_TAG_TRUSTED_ADVICE.serialize_with_mode(&mut writer, compress)?;
+                (*sumcheck_id as u8).serialize_with_mode(&mut writer, compress)
             }
             OpeningId::Polynomial(PolynomialId::Committed(committed_polynomial), sumcheck_id) => {
-                let fused = OPENING_ID_COMMITTED_BASE + (*sumcheck_id as u8);
-                fused.serialize_with_mode(&mut writer, compress)?;
+                OPENING_ID_V2_PREFIX.serialize_with_mode(&mut writer, compress)?;
+                OPENING_ID_V2_TAG_COMMITTED.serialize_with_mode(&mut writer, compress)?;
+                (*sumcheck_id as u8).serialize_with_mode(&mut writer, compress)?;
                 committed_polynomial.serialize_with_mode(&mut writer, compress)
             }
             OpeningId::Polynomial(PolynomialId::Virtual(virtual_polynomial), sumcheck_id) => {
-                let fused = OPENING_ID_VIRTUAL_BASE + (*sumcheck_id as u8);
-                fused.serialize_with_mode(&mut writer, compress)?;
+                OPENING_ID_V2_PREFIX.serialize_with_mode(&mut writer, compress)?;
+                OPENING_ID_V2_TAG_VIRTUAL.serialize_with_mode(&mut writer, compress)?;
+                (*sumcheck_id as u8).serialize_with_mode(&mut writer, compress)?;
                 virtual_polynomial.serialize_with_mode(&mut writer, compress)
             }
         }
@@ -522,14 +536,14 @@ impl CanonicalSerialize for OpeningId {
 
     fn serialized_size(&self, compress: Compress) -> usize {
         match self {
-            OpeningId::UntrustedAdvice(_) | OpeningId::TrustedAdvice(_) => 1,
+            // v2: prefix + tag + sumcheck_id
+            OpeningId::UntrustedAdvice(_) | OpeningId::TrustedAdvice(_) => 3,
+            // v2: prefix + tag + sumcheck_id + poly id
             OpeningId::Polynomial(PolynomialId::Committed(committed_polynomial), _) => {
-                // 1 byte fused (variant + sumcheck_id) + poly index
-                1 + committed_polynomial.serialized_size(compress)
+                3 + committed_polynomial.serialized_size(compress)
             }
             OpeningId::Polynomial(PolynomialId::Virtual(virtual_polynomial), _) => {
-                // 1 byte fused (variant + sumcheck_id) + poly index
-                1 + virtual_polynomial.serialized_size(compress)
+                3 + virtual_polynomial.serialized_size(compress)
             }
         }
     }
@@ -547,38 +561,157 @@ impl CanonicalDeserialize for OpeningId {
         compress: Compress,
         validate: Validate,
     ) -> Result<Self, SerializationError> {
-        let fused = u8::deserialize_with_mode(&mut reader, compress, validate)?;
-        match fused {
-            _ if fused < OPENING_ID_TRUSTED_ADVICE_BASE => {
-                let sumcheck_id = fused - OPENING_ID_UNTRUSTED_ADVICE_BASE;
-                Ok(OpeningId::UntrustedAdvice(
-                    SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
-                ))
+        let first = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+
+        // v2: self-describing
+        if first == OPENING_ID_V2_PREFIX {
+            let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+            let sumcheck_id_u8 = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+            let sumcheck_id =
+                SumcheckId::from_u8(sumcheck_id_u8).ok_or(SerializationError::InvalidData)?;
+
+            return match tag {
+                OPENING_ID_V2_TAG_UNTRUSTED_ADVICE => Ok(OpeningId::UntrustedAdvice(sumcheck_id)),
+                OPENING_ID_V2_TAG_TRUSTED_ADVICE => Ok(OpeningId::TrustedAdvice(sumcheck_id)),
+                OPENING_ID_V2_TAG_COMMITTED => {
+                    let polynomial = CommittedPolynomial::deserialize_with_mode(
+                        &mut reader,
+                        compress,
+                        validate,
+                    )?;
+                    Ok(OpeningId::Polynomial(
+                        PolynomialId::Committed(polynomial),
+                        sumcheck_id,
+                    ))
+                }
+                OPENING_ID_V2_TAG_VIRTUAL => {
+                    let polynomial =
+                        VirtualPolynomial::deserialize_with_mode(&mut reader, compress, validate)?;
+                    Ok(OpeningId::Polynomial(
+                        PolynomialId::Virtual(polynomial),
+                        sumcheck_id,
+                    ))
+                }
+                _ => Err(SerializationError::InvalidData),
+            };
+        }
+
+        // v1 legacy (fixed boundaries, `SumcheckId::COUNT == 50`).
+        // Note: this is only intended to decode proofs produced by the older commit
+        // `e62c93a90a420066120ac89df1bad889a5b922bc`.
+        let fused = first;
+        let trusted_base = OPENING_ID_V1_LEGACY_NUM_SUMCHECKS;
+        let committed_base = trusted_base.saturating_add(OPENING_ID_V1_LEGACY_NUM_SUMCHECKS); // 100
+        let virtual_base = committed_base.saturating_add(OPENING_ID_V1_LEGACY_NUM_SUMCHECKS); // 150
+        let max_legacy_fused = virtual_base
+            .saturating_add(OPENING_ID_V1_LEGACY_NUM_SUMCHECKS)
+            .saturating_sub(1); // 199
+
+        if fused > max_legacy_fused {
+            return Err(SerializationError::InvalidData);
+        }
+
+        if fused < trusted_base {
+            let sumcheck_id = fused;
+            return Ok(OpeningId::UntrustedAdvice(
+                SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
+            ));
+        }
+
+        if fused < committed_base {
+            let sumcheck_id = fused - trusted_base;
+            return Ok(OpeningId::TrustedAdvice(
+                SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
+            ));
+        }
+
+        if fused < virtual_base {
+            let sumcheck_id = fused - committed_base;
+            let polynomial =
+                CommittedPolynomial::deserialize_with_mode(&mut reader, compress, validate)?;
+            return Ok(OpeningId::Polynomial(
+                PolynomialId::Committed(polynomial),
+                SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
+            ));
+        }
+
+        let sumcheck_id = fused - virtual_base;
+        let polynomial = VirtualPolynomial::deserialize_with_mode(&mut reader, compress, validate)?;
+        Ok(OpeningId::Polynomial(
+            PolynomialId::Virtual(polynomial),
+            SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod opening_id_wire_compat_tests {
+    use super::*;
+    use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+    fn legacy_v1_encode(id: &OpeningId) -> Vec<u8> {
+        let mut out = Vec::new();
+        let num = OPENING_ID_V1_LEGACY_NUM_SUMCHECKS;
+        let trusted_base = num;
+        let committed_base = trusted_base + num; // 100
+        let virtual_base = committed_base + num; // 150
+
+        match id {
+            OpeningId::UntrustedAdvice(sumcheck_id) => {
+                let fused = *sumcheck_id as u8;
+                out.push(fused);
             }
-            _ if fused < OPENING_ID_COMMITTED_BASE => {
-                let sumcheck_id = fused - OPENING_ID_TRUSTED_ADVICE_BASE;
-                Ok(OpeningId::TrustedAdvice(
-                    SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
-                ))
+            OpeningId::TrustedAdvice(sumcheck_id) => {
+                let fused = trusted_base + (*sumcheck_id as u8);
+                out.push(fused);
             }
-            _ if fused < OPENING_ID_VIRTUAL_BASE => {
-                let sumcheck_id = fused - OPENING_ID_COMMITTED_BASE;
-                let polynomial =
-                    CommittedPolynomial::deserialize_with_mode(&mut reader, compress, validate)?;
-                Ok(OpeningId::Polynomial(
-                    PolynomialId::Committed(polynomial),
-                    SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
-                ))
+            OpeningId::Polynomial(PolynomialId::Committed(poly), sumcheck_id) => {
+                let fused = committed_base + (*sumcheck_id as u8);
+                out.push(fused);
+                poly.serialize_compressed(&mut out).unwrap();
             }
-            _ => {
-                let sumcheck_id = fused - OPENING_ID_VIRTUAL_BASE;
-                let polynomial =
-                    VirtualPolynomial::deserialize_with_mode(&mut reader, compress, validate)?;
-                Ok(OpeningId::Polynomial(
-                    PolynomialId::Virtual(polynomial),
-                    SumcheckId::from_u8(sumcheck_id).ok_or(SerializationError::InvalidData)?,
-                ))
+            OpeningId::Polynomial(PolynomialId::Virtual(poly), sumcheck_id) => {
+                let fused = virtual_base + (*sumcheck_id as u8);
+                out.push(fused);
+                poly.serialize_compressed(&mut out).unwrap();
             }
+        }
+
+        out
+    }
+
+    #[test]
+    fn v2_roundtrips_and_is_prefixed() {
+        let cases = [
+            OpeningId::UntrustedAdvice(SumcheckId::SpartanOuter),
+            OpeningId::TrustedAdvice(SumcheckId::RamOutputCheck),
+            OpeningId::committed(CommittedPolynomial::RdInc, SumcheckId::SpartanOuter),
+            OpeningId::virtual_poly(VirtualPolynomial::PC, SumcheckId::SpartanOuter),
+        ];
+
+        for id in cases {
+            let mut bytes = Vec::new();
+            id.serialize_compressed(&mut bytes).unwrap();
+            assert_eq!(bytes[0], OPENING_ID_V2_PREFIX);
+            let decoded = OpeningId::deserialize_compressed(bytes.as_slice()).unwrap();
+            assert_eq!(decoded, id);
+        }
+    }
+
+    #[test]
+    fn v1_legacy_decodes_advice_and_polynomials() {
+        let cases = [
+            OpeningId::UntrustedAdvice(SumcheckId::SpartanOuter),
+            OpeningId::TrustedAdvice(SumcheckId::SpartanOuter),
+            OpeningId::committed(CommittedPolynomial::RdInc, SumcheckId::SpartanOuter),
+            OpeningId::virtual_poly(VirtualPolynomial::PC, SumcheckId::SpartanOuter),
+        ];
+
+        for id in cases {
+            let bytes = legacy_v1_encode(&id);
+            assert_ne!(bytes[0], OPENING_ID_V2_PREFIX);
+            let decoded = OpeningId::deserialize_compressed(bytes.as_slice()).unwrap();
+            assert_eq!(decoded, id);
         }
     }
 }

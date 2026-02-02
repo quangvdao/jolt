@@ -729,14 +729,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G1ScalarMulVerifier {
     ) -> Fq {
         debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
 
-        // Eq polynomial convention: reverse challenges to match big-endian ordering in EqPolynomial::evals.
-        let eval_point: Vec<Fq> = sumcheck_challenges
-            .iter()
-            .rev()
-            .map(|c| (*c).into())
-            .collect();
-        let eq_point_f: Vec<Fq> = self.eq_point.iter().map(|c| (*c).into()).collect();
-        let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
+        // Eq polynomial convention: reverse challenges (big-endian) for EqPolynomial::mle.
+        // Avoid heap allocations by doing the product directly.
+        let n = sumcheck_challenges.len();
+        let mut eq_eval = Fq::one();
+        for i in 0..n {
+            let x: Fq = self.eq_point[i].into();
+            let y: Fq = sumcheck_challenges[n - 1 - i].into();
+            eq_eval *= x * y + (Fq::one() - x) * (Fq::one() - y);
+        }
 
         // Split step/c portions from the sumcheck point (round order is LSB-first).
         let r_step = &sumcheck_challenges[..STEP_VARS];

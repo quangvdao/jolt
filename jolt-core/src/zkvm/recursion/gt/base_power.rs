@@ -374,21 +374,28 @@ impl GtExpBasePowVerifier {
         }
     }
 
-    fn eval_g_at_u(&self, r_u: &[Fq]) -> Fq {
-        debug_assert_eq!(r_u.len(), U_VARS);
-        let mut evals = self.g_mle_4var.clone();
-        let mut len = evals.len();
-        for &r_i in r_u {
-            let half = len / 2;
-            for j in 0..half {
-                let a = evals[2 * j];
-                let b = evals[2 * j + 1];
-                evals[j] = a + r_i * (b - a);
+    #[inline]
+    fn eval_g_at_u_lsb_first(&self, r_u: [Fq; U_VARS]) -> Fq {
+        // Evaluate the fixed 4-var MLE `g(u)` at `r_u` (LSB-first variable order).
+        debug_assert_eq!(self.g_mle_4var.len(), 1 << U_VARS);
+        let mut weights = [Fq::zero(); 1 << U_VARS];
+        weights[0] = Fq::one();
+        let mut len = 1usize;
+        for r_i in r_u {
+            let one_minus = Fq::one() - r_i;
+            for j in 0..len {
+                let prev = weights[j];
+                weights[j] = prev * one_minus;
+                weights[j + len] = prev * r_i;
             }
-            len = half;
+            len *= 2;
         }
-        debug_assert_eq!(len, 1);
-        evals[0]
+        debug_assert_eq!(len, 1 << U_VARS);
+        let mut out = Fq::zero();
+        for (g, w) in self.g_mle_4var.iter().zip(weights.iter()) {
+            out += *g * *w;
+        }
+        out
     }
 }
 
@@ -408,17 +415,27 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBasePowVerifier {
 
         // Effective (u, c_tail) slice for eq evaluation (drop dummy c bits).
         let dummy = k_common - k_exp;
-        let mut eff: Vec<<Fq as JoltField>::Challenge> = Vec::with_capacity(U_VARS + k_exp);
-        eff.extend_from_slice(&sumcheck_challenges[..U_VARS]);
-        eff.extend_from_slice(&sumcheck_challenges[U_VARS + dummy..]);
-
-        let eval_point: Vec<Fq> = eff.iter().rev().map(|c| (*c).into()).collect();
-        let mut eq_point_eff: Vec<<Fq as JoltField>::Challenge> =
-            Vec::with_capacity(U_VARS + k_exp);
-        eq_point_eff.extend_from_slice(&self.eq_point[..U_VARS]);
-        eq_point_eff.extend_from_slice(&self.eq_point[U_VARS + dummy..]);
-        let eq_point_f: Vec<Fq> = eq_point_eff.iter().map(|c| (*c).into()).collect();
-        let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
+        let eff_len = U_VARS + k_exp;
+        // Match prior convention: EqPolynomial::mle(eq_point_eff, eff.rev()) with
+        // eff = (u, c_tail) in LSB-first round order. Avoid heap allocations by doing the
+        // product directly.
+        let mut eq_eval = Fq::one();
+        for i in 0..eff_len {
+            let x_chal = if i < U_VARS {
+                self.eq_point[i]
+            } else {
+                self.eq_point[U_VARS + dummy + (i - U_VARS)]
+            };
+            let eff_idx = eff_len - 1 - i;
+            let y_chal = if eff_idx < U_VARS {
+                sumcheck_challenges[eff_idx]
+            } else {
+                sumcheck_challenges[U_VARS + dummy + (eff_idx - U_VARS)]
+            };
+            let x: Fq = x_chal.into();
+            let y: Fq = y_chal.into();
+            eq_eval *= x * y + (Fq::one() - x) * (Fq::one() - y);
+        }
 
         // Indicator I_gtexp(r_c) as Σ_{c in [0..num_gt_exp)} Eq(r_c, c) (over c_tail bits).
         let r_c: Vec<Fq> = sumcheck_challenges[U_VARS + dummy..]
@@ -431,11 +448,13 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBasePowVerifier {
         }
 
         // Evaluate g(u) at r_u.
-        let r_u: Vec<Fq> = sumcheck_challenges[..U_VARS]
-            .iter()
-            .map(|c| (*c).into())
-            .collect();
-        let g_eval = self.eval_g_at_u(&r_u);
+        let r_u = [
+            sumcheck_challenges[0].into(),
+            sumcheck_challenges[1].into(),
+            sumcheck_challenges[2].into(),
+            sumcheck_challenges[3].into(),
+        ];
+        let g_eval = self.eval_g_at_u_lsb_first(r_u);
 
         // Fetch opened claims for base polynomials (cached by `GtExpBaseStage2Openings`).
         let get = |term: GtExpTerm| {

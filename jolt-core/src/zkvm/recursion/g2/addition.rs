@@ -297,13 +297,16 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
         accumulator: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        let eval_point: Vec<Fq> = sumcheck_challenges
-            .iter()
-            .rev()
-            .map(|c| (*c).into())
-            .collect();
-        let eq_point_f: Vec<Fq> = self.eq_point.iter().map(|c| (*c).into()).collect();
-        let eq_eval = EqPolynomial::mle(&eq_point_f, &eval_point);
+        // Same convention as other Stage-2 verifiers: reverse challenges (big-endian) for EqPolynomial::mle.
+        // Avoid heap allocations by doing the product directly.
+        debug_assert_eq!(sumcheck_challenges.len(), self.params.num_rounds());
+        let n = sumcheck_challenges.len();
+        let mut eq_eval = Fq::one();
+        for i in 0..n {
+            let x: Fq = self.eq_point[i].into();
+            let y: Fq = sumcheck_challenges[n - 1 - i].into();
+            eq_eval *= x * y + (Fq::one() - x) * (Fq::one() - y);
+        }
 
         // I_g2add(r_c) = Σ_{c < num_constraints} Eq(r_c, c).
         let k = self.params.num_constraint_index_vars;

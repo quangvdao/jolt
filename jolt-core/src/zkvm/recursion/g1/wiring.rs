@@ -855,6 +855,16 @@ pub struct WiringG1Verifier {
     k_common: usize,
     k_smul: usize,
     k_add: usize,
+    dummy_smul: usize,
+    dummy_add: usize,
+    beta_smul: Fq,
+    beta_add: Fq,
+    /// Number of scalar-mul instances referenced by the wiring plan.
+    ///
+    /// Cached so `expected_output_claim` can precompute `Eq(c_tail, idx)` once per instance.
+    num_smul_instances: usize,
+    /// Number of G1Add instances referenced by the wiring plan.
+    num_add_instances: usize,
     pairing_boundary: PairingBoundary,
     /// Boundary base points for `AstOp::Input` scalar-mul bases, in local scalar-mul instance order.
     smul_base_boundary: Vec<(Fq, Fq, Fq)>,
@@ -895,6 +905,38 @@ impl WiringG1Verifier {
         let k_smul = k_smul(&input.constraint_types);
         let k_add = k_add(&input.constraint_types);
 
+        let dummy_smul = k_common.saturating_sub(k_smul);
+        let dummy_add = k_common.saturating_sub(k_add);
+        let beta_smul = beta(dummy_smul);
+        let beta_add = beta(dummy_add);
+
+        // Cache how many family instances are referenced by the edge list (avoid re-scanning or
+        // recomputing Eq(c_tail, idx) per edge).
+        let mut max_smul = None::<usize>;
+        let mut max_add = None::<usize>;
+        for edge in &edges {
+            for v in [edge.src, edge.dst] {
+                match v {
+                    G1ValueRef::G1ScalarMulOut { instance }
+                    | G1ValueRef::G1ScalarMulBase { instance }
+                    | G1ValueRef::G1ScalarMulBaseBoundary { instance } => {
+                        max_smul = Some(max_smul.map_or(instance, |m| m.max(instance)));
+                    }
+                    G1ValueRef::G1AddOut { instance }
+                    | G1ValueRef::G1AddInP { instance }
+                    | G1ValueRef::G1AddInQ { instance } => {
+                        max_add = Some(max_add.map_or(instance, |m| m.max(instance)));
+                    }
+                    G1ValueRef::PairingBoundaryP1
+                    | G1ValueRef::PairingBoundaryP2
+                    | G1ValueRef::PairingBoundaryP3
+                    | G1ValueRef::G1Input { .. } => {}
+                }
+            }
+        }
+        let num_smul_instances = max_smul.map_or(0, |m| m + 1);
+        let num_add_instances = max_add.map_or(0, |m| m + 1);
+
         Self {
             edges,
             lambdas,
@@ -903,6 +945,12 @@ impl WiringG1Verifier {
             k_common,
             k_smul,
             k_add,
+            dummy_smul,
+            dummy_add,
+            beta_smul,
+            beta_add,
+            num_smul_instances,
+            num_add_instances,
             pairing_boundary: input.pairing_boundary.clone(),
             smul_base_boundary,
             g1_inputs_batched,
@@ -953,14 +1001,19 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
             eq_step *= r_b;
         }
 
-        let dummy_smul = self.k_common.saturating_sub(self.k_smul);
-        let dummy_add = self.k_common.saturating_sub(self.k_add);
-        let beta_smul = beta(dummy_smul);
-        let beta_add = beta(dummy_add);
-
         let r_c_fq: Vec<Fq> = r_c.iter().map(|c| (*c).into()).collect();
-        let r_c_smul_tail = &r_c_fq[dummy_smul..];
-        let r_c_add_tail = &r_c_fq[dummy_add..];
+        let r_c_smul_tail = &r_c_fq[self.dummy_smul..];
+        let r_c_add_tail = &r_c_fq[self.dummy_add..];
+
+        // Precompute Eq(c_tail, idx) once per referenced instance (avoid O(edges · k)).
+        let mut eq_c_smul: Vec<Fq> = vec![Fq::zero(); self.num_smul_instances];
+        for i in 0..self.num_smul_instances {
+            eq_c_smul[i] = self.eq_c_tail(r_c_smul_tail, i, self.k_smul);
+        }
+        let mut eq_c_add: Vec<Fq> = vec![Fq::zero(); self.num_add_instances];
+        for i in 0..self.num_add_instances {
+            eq_c_add[i] = self.eq_c_tail(r_c_add_tail, i, self.k_add);
+        }
 
         // Fetch scalar-mul port openings.
         let xa_next = acc.get_virtual_polynomial_claim(
@@ -1044,36 +1097,26 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
             // Helper to produce (beta, eq_c, value) for an endpoint.
             let endpoint = |v: G1ValueRef| -> (Fq, Fq, Fq) {
                 match v {
-                    G1ValueRef::G1ScalarMulOut { instance } => (
-                        beta_smul,
-                        self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
-                        smul_out_val,
-                    ),
-                    G1ValueRef::G1ScalarMulBase { instance } => (
-                        beta_smul,
-                        self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
-                        smul_base_val,
-                    ),
+                    G1ValueRef::G1ScalarMulOut { instance } => {
+                        (self.beta_smul, eq_c_smul[instance], smul_out_val)
+                    }
+                    G1ValueRef::G1ScalarMulBase { instance } => {
+                        (self.beta_smul, eq_c_smul[instance], smul_base_val)
+                    }
                     G1ValueRef::G1ScalarMulBaseBoundary { instance } => (
-                        beta_smul,
-                        self.eq_c_tail(r_c_smul_tail, instance, self.k_smul),
+                        self.beta_smul,
+                        eq_c_smul[instance],
                         pb_batched(self.smul_base_boundary[instance]),
                     ),
-                    G1ValueRef::G1AddOut { instance } => (
-                        beta_add,
-                        self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_r_val,
-                    ),
-                    G1ValueRef::G1AddInP { instance } => (
-                        beta_add,
-                        self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_p_val,
-                    ),
-                    G1ValueRef::G1AddInQ { instance } => (
-                        beta_add,
-                        self.eq_c_tail(r_c_add_tail, instance, self.k_add),
-                        add_q_val,
-                    ),
+                    G1ValueRef::G1AddOut { instance } => {
+                        (self.beta_add, eq_c_add[instance], add_r_val)
+                    }
+                    G1ValueRef::G1AddInP { instance } => {
+                        (self.beta_add, eq_c_add[instance], add_p_val)
+                    }
+                    G1ValueRef::G1AddInQ { instance } => {
+                        (self.beta_add, eq_c_add[instance], add_q_val)
+                    }
                     // Boundary constants are anchored to the other endpoint's selector in the caller.
                     G1ValueRef::PairingBoundaryP1 => (Fq::zero(), Fq::zero(), pb_batched(pb1)),
                     G1ValueRef::PairingBoundaryP2 => (Fq::zero(), Fq::zero(), pb_batched(pb2)),

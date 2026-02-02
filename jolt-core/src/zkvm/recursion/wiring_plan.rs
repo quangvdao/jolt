@@ -10,7 +10,6 @@
 //! - `g1/wiring.rs`
 //! - `g2/wiring.rs`
 
-use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
 
 use ark_serialize::{
@@ -1066,71 +1065,11 @@ impl GuestDeserialize for G2ValueRef {
     }
 }
 
-#[derive(Clone, Debug)]
-struct OpIdOrder {
-    gt_exp: Vec<OpId>,
-    gt_mul: Vec<OpId>,
-    g1_smul: Vec<OpId>,
-    g2_smul: Vec<OpId>,
-    g1_add: Vec<OpId>,
-    g2_add: Vec<OpId>,
-}
-
-fn collect_op_ids(ast: &AstGraph<BN254>) -> OpIdOrder {
-    let mut out = OpIdOrder {
-        gt_exp: Vec::new(),
-        gt_mul: Vec::new(),
-        g1_smul: Vec::new(),
-        g2_smul: Vec::new(),
-        g1_add: Vec::new(),
-        g2_add: Vec::new(),
-    };
-    for node in &ast.nodes {
-        match &node.op {
-            AstOp::GTExp {
-                op_id: Some(id), ..
-            } => out.gt_exp.push(*id),
-            AstOp::GTMul {
-                op_id: Some(id), ..
-            } => out.gt_mul.push(*id),
-            AstOp::G1ScalarMul {
-                op_id: Some(id), ..
-            } => out.g1_smul.push(*id),
-            AstOp::G2ScalarMul {
-                op_id: Some(id), ..
-            } => out.g2_smul.push(*id),
-            AstOp::G1Add {
-                op_id: Some(id), ..
-            } => out.g1_add.push(*id),
-            AstOp::G2Add {
-                op_id: Some(id), ..
-            } => out.g2_add.push(*id),
-            _ => {}
-        }
-    }
-    out.gt_exp.sort();
-    out.gt_mul.sort();
-    out.g1_smul.sort();
-    out.g2_smul.sort();
-    out.g1_add.sort();
-    out.g2_add.sort();
-    out
-}
-
-fn index_map(op_ids: &[OpId]) -> BTreeMap<OpId, usize> {
-    op_ids
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(i, id)| (id, i))
-        .collect()
-}
-
 fn gt_producer_from_value(
     ast: &AstGraph<BN254>,
-    gt_exp_index: &BTreeMap<OpId, usize>,
-    gt_mul_index: &BTreeMap<OpId, usize>,
-    gt_exp_base_by_value: &BTreeMap<ValueId, usize>,
+    gt_exp_out_instance_by_value: &[Option<usize>],
+    gt_mul_out_instance_by_value: &[Option<usize>],
+    gt_exp_base_instance_by_value: &[Option<usize>],
     value: ValueId,
 ) -> Option<GtProducer> {
     let idx = value.0 as usize;
@@ -1138,20 +1077,18 @@ fn gt_producer_from_value(
         return None;
     }
     match &ast.nodes[idx].op {
-        AstOp::GTExp {
-            op_id: Some(id), ..
-        } => gt_exp_index
-            .get(id)
+        AstOp::GTExp { .. } => gt_exp_out_instance_by_value
+            .get(idx)
             .copied()
+            .flatten()
             .map(|instance| GtProducer::GtExpRho { instance }),
-        AstOp::GTMul {
-            op_id: Some(id), ..
-        } => gt_mul_index
-            .get(id)
+        AstOp::GTMul { .. } => gt_mul_out_instance_by_value
+            .get(idx)
             .copied()
+            .flatten()
             .map(|instance| GtProducer::GtMulResult { instance }),
         AstOp::Input { source } => {
-            if let Some(instance) = gt_exp_base_by_value.get(&value).copied() {
+            if let Some(instance) = gt_exp_base_instance_by_value.get(idx).copied().flatten() {
                 Some(GtProducer::GtExpBase { instance })
             } else {
                 match source {
@@ -1176,8 +1113,8 @@ fn is_ast_input(ast: &AstGraph<BN254>, value: ValueId) -> bool {
 
 fn g1_value_from_output(
     ast: &AstGraph<BN254>,
-    g1_smul_index: &BTreeMap<OpId, usize>,
-    g1_add_index: &BTreeMap<OpId, usize>,
+    g1_smul_out_instance_by_value: &[Option<usize>],
+    g1_add_out_instance_by_value: &[Option<usize>],
     value: ValueId,
 ) -> Option<G1ValueRef> {
     let idx = value.0 as usize;
@@ -1185,17 +1122,15 @@ fn g1_value_from_output(
         return None;
     }
     match &ast.nodes[idx].op {
-        AstOp::G1ScalarMul {
-            op_id: Some(id), ..
-        } => g1_smul_index
-            .get(id)
+        AstOp::G1ScalarMul { .. } => g1_smul_out_instance_by_value
+            .get(idx)
             .copied()
+            .flatten()
             .map(|instance| G1ValueRef::G1ScalarMulOut { instance }),
-        AstOp::G1Add {
-            op_id: Some(id), ..
-        } => g1_add_index
-            .get(id)
+        AstOp::G1Add { .. } => g1_add_out_instance_by_value
+            .get(idx)
             .copied()
+            .flatten()
             .map(|instance| G1ValueRef::G1AddOut { instance }),
         _ => None,
     }
@@ -1203,8 +1138,8 @@ fn g1_value_from_output(
 
 fn g2_value_from_output(
     ast: &AstGraph<BN254>,
-    g2_smul_index: &BTreeMap<OpId, usize>,
-    g2_add_index: &BTreeMap<OpId, usize>,
+    g2_smul_out_instance_by_value: &[Option<usize>],
+    g2_add_out_instance_by_value: &[Option<usize>],
     value: ValueId,
 ) -> Option<G2ValueRef> {
     let idx = value.0 as usize;
@@ -1212,17 +1147,15 @@ fn g2_value_from_output(
         return None;
     }
     match &ast.nodes[idx].op {
-        AstOp::G2ScalarMul {
-            op_id: Some(id), ..
-        } => g2_smul_index
-            .get(id)
+        AstOp::G2ScalarMul { .. } => g2_smul_out_instance_by_value
+            .get(idx)
             .copied()
+            .flatten()
             .map(|instance| G2ValueRef::G2ScalarMulOut { instance }),
-        AstOp::G2Add {
-            op_id: Some(id), ..
-        } => g2_add_index
-            .get(id)
+        AstOp::G2Add { .. } => g2_add_out_instance_by_value
+            .get(idx)
             .copied()
+            .flatten()
             .map(|instance| G2ValueRef::G2AddOut { instance }),
         _ => None,
     }
@@ -1241,48 +1174,132 @@ pub fn derive_wiring_plan(
     combine_leaves: usize,
     _pairing_boundary: &PairingBoundary,
 ) -> Result<WiringPlan, ProofVerifyError> {
-    let order = collect_op_ids(ast);
-    let gt_exp_index = index_map(&order.gt_exp);
-    let gt_mul_index = index_map(&order.gt_mul);
-    let g1_smul_index = index_map(&order.g1_smul);
-    let g2_smul_index = index_map(&order.g2_smul);
-    let g1_add_index = index_map(&order.g1_add);
-    let g2_add_index = index_map(&order.g2_add);
-
-    let mut plan = WiringPlan::default();
+    let n = ast.nodes.len();
+    let mut gt_exp_out_instance_by_value: Vec<Option<usize>> = vec![None; n];
+    let mut gt_mul_out_instance_by_value: Vec<Option<usize>> = vec![None; n];
+    let mut g1_smul_out_instance_by_value: Vec<Option<usize>> = vec![None; n];
+    let mut g2_smul_out_instance_by_value: Vec<Option<usize>> = vec![None; n];
+    let mut g1_add_out_instance_by_value: Vec<Option<usize>> = vec![None; n];
+    let mut g2_add_out_instance_by_value: Vec<Option<usize>> = vec![None; n];
     // Map ValueId(Input GT value) -> GTExp instance index whose base is that ValueId.
     // This lets us treat GT inputs as the corresponding GTExp base constant in wiring.
-    let mut gt_exp_base_by_value: BTreeMap<ValueId, usize> = BTreeMap::new();
+    let mut gt_exp_base_instance_by_value: Vec<Option<usize>> = vec![None; n];
+
+    // Pass 1: assign per-type instance indices and populate lookup tables.
+    //
+    // IMPORTANT: We rely on Dory's `OpIdBuilder` monotonicity to ensure the encounter order in
+    // `ast.nodes` matches the implicit instance ordering used by the recursion extractor/prover.
+    // Keep debug-only assertions as a safety net.
+    let mut dory_gt_exp = 0usize;
+    let mut dory_gt_mul = 0usize;
+    let mut dory_g1_smul = 0usize;
+    let mut dory_g2_smul = 0usize;
+    let mut dory_g1_add = 0usize;
+    let mut dory_g2_add = 0usize;
+
+    let mut last_gt_exp: Option<OpId> = None;
+    let mut last_gt_mul: Option<OpId> = None;
+    let mut last_g1_smul: Option<OpId> = None;
+    let mut last_g2_smul: Option<OpId> = None;
+    let mut last_g1_add: Option<OpId> = None;
+    let mut last_g2_add: Option<OpId> = None;
+
     for node in &ast.nodes {
-        if let AstOp::GTExp {
-            op_id: Some(id),
-            base,
-            ..
-        } = &node.op
-        {
-            if let Some(&instance) = gt_exp_index.get(id) {
-                gt_exp_base_by_value.entry(*base).or_insert(instance);
+        let out_idx = node.out.0 as usize;
+        debug_assert!(out_idx < n, "AstGraph invariant violated: out out of bounds");
+        match &node.op {
+            AstOp::GTExp {
+                op_id: Some(id),
+                base,
+                ..
+            } => {
+                debug_assert!(
+                    last_gt_exp.map_or(true, |prev| prev <= *id),
+                    "non-monotone GTExp OpId encountered: prev={last_gt_exp:?}, cur={id:?}"
+                );
+                last_gt_exp = Some(*id);
+                let inst = dory_gt_exp;
+                dory_gt_exp += 1;
+                gt_exp_out_instance_by_value[out_idx] = Some(inst);
+                let base_idx = base.0 as usize;
+                if base_idx < n && gt_exp_base_instance_by_value[base_idx].is_none() {
+                    gt_exp_base_instance_by_value[base_idx] = Some(inst);
+                }
             }
+            AstOp::GTMul { op_id: Some(id), .. } => {
+                debug_assert!(
+                    last_gt_mul.map_or(true, |prev| prev <= *id),
+                    "non-monotone GTMul OpId encountered: prev={last_gt_mul:?}, cur={id:?}"
+                );
+                last_gt_mul = Some(*id);
+                let inst = dory_gt_mul;
+                dory_gt_mul += 1;
+                gt_mul_out_instance_by_value[out_idx] = Some(inst);
+            }
+            AstOp::G1ScalarMul { op_id: Some(id), .. } => {
+                debug_assert!(
+                    last_g1_smul.map_or(true, |prev| prev <= *id),
+                    "non-monotone G1ScalarMul OpId encountered: prev={last_g1_smul:?}, cur={id:?}"
+                );
+                last_g1_smul = Some(*id);
+                let inst = dory_g1_smul;
+                dory_g1_smul += 1;
+                g1_smul_out_instance_by_value[out_idx] = Some(inst);
+            }
+            AstOp::G2ScalarMul { op_id: Some(id), .. } => {
+                debug_assert!(
+                    last_g2_smul.map_or(true, |prev| prev <= *id),
+                    "non-monotone G2ScalarMul OpId encountered: prev={last_g2_smul:?}, cur={id:?}"
+                );
+                last_g2_smul = Some(*id);
+                let inst = dory_g2_smul;
+                dory_g2_smul += 1;
+                g2_smul_out_instance_by_value[out_idx] = Some(inst);
+            }
+            AstOp::G1Add { op_id: Some(id), .. } => {
+                debug_assert!(
+                    last_g1_add.map_or(true, |prev| prev <= *id),
+                    "non-monotone G1Add OpId encountered: prev={last_g1_add:?}, cur={id:?}"
+                );
+                last_g1_add = Some(*id);
+                let inst = dory_g1_add;
+                dory_g1_add += 1;
+                g1_add_out_instance_by_value[out_idx] = Some(inst);
+            }
+            AstOp::G2Add { op_id: Some(id), .. } => {
+                debug_assert!(
+                    last_g2_add.map_or(true, |prev| prev <= *id),
+                    "non-monotone G2Add OpId encountered: prev={last_g2_add:?}, cur={id:?}"
+                );
+                last_g2_add = Some(*id);
+                let inst = dory_g2_add;
+                dory_g2_add += 1;
+                g2_add_out_instance_by_value[out_idx] = Some(inst);
+            }
+            _ => {}
         }
     }
+
+    let mut plan = WiringPlan::default();
 
     // --- AST internal dataflow edges (copy constraints) ---
     for node in &ast.nodes {
         match &node.op {
             AstOp::GTMul {
-                op_id: Some(id),
+                op_id: Some(_),
                 lhs,
                 rhs,
                 ..
             } => {
-                let Some(&mul_instance) = gt_mul_index.get(id) else {
+                let out_idx = node.out.0 as usize;
+                let Some(mul_instance) = gt_mul_out_instance_by_value[out_idx] else {
                     continue;
                 };
                 if let Some(src) = gt_producer_from_value(
                     ast,
-                    &gt_exp_index,
-                    &gt_mul_index,
-                    &gt_exp_base_by_value,
+                    &gt_exp_out_instance_by_value,
+                    &gt_mul_out_instance_by_value,
+                    &gt_exp_base_instance_by_value,
                     *lhs,
                 ) {
                     plan.gt.push(GtWiringEdge {
@@ -1304,9 +1321,9 @@ pub fn derive_wiring_plan(
 
                 if let Some(src) = gt_producer_from_value(
                     ast,
-                    &gt_exp_index,
-                    &gt_mul_index,
-                    &gt_exp_base_by_value,
+                    &gt_exp_out_instance_by_value,
+                    &gt_mul_out_instance_by_value,
+                    &gt_exp_base_instance_by_value,
                     *rhs,
                 ) {
                     plan.gt.push(GtWiringEdge {
@@ -1327,16 +1344,23 @@ pub fn derive_wiring_plan(
                 }
             }
             AstOp::G1Add {
-                op_id: Some(id),
+                op_id: Some(_),
                 a,
                 b,
                 ..
             } => {
-                let Some(&add_instance) = g1_add_index.get(id) else {
+                let out_idx = node.out.0 as usize;
+                let Some(add_instance) = g1_add_out_instance_by_value[out_idx] else {
                     continue;
                 };
                 let a_src =
-                    g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *a).or_else(|| {
+                    g1_value_from_output(
+                        ast,
+                        &g1_smul_out_instance_by_value,
+                        &g1_add_out_instance_by_value,
+                        *a,
+                    )
+                    .or_else(|| {
                         matches!(
                             ast.nodes.get(a.0 as usize).map(|n| &n.op),
                             Some(AstOp::Input { .. })
@@ -1361,7 +1385,13 @@ pub fn derive_wiring_plan(
                     )));
                 }
                 let b_src =
-                    g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *b).or_else(|| {
+                    g1_value_from_output(
+                        ast,
+                        &g1_smul_out_instance_by_value,
+                        &g1_add_out_instance_by_value,
+                        *b,
+                    )
+                    .or_else(|| {
                         matches!(
                             ast.nodes.get(b.0 as usize).map(|n| &n.op),
                             Some(AstOp::Input { .. })
@@ -1387,16 +1417,23 @@ pub fn derive_wiring_plan(
                 }
             }
             AstOp::G2Add {
-                op_id: Some(id),
+                op_id: Some(_),
                 a,
                 b,
                 ..
             } => {
-                let Some(&add_instance) = g2_add_index.get(id) else {
+                let out_idx = node.out.0 as usize;
+                let Some(add_instance) = g2_add_out_instance_by_value[out_idx] else {
                     continue;
                 };
                 let a_src =
-                    g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *a).or_else(|| {
+                    g2_value_from_output(
+                        ast,
+                        &g2_smul_out_instance_by_value,
+                        &g2_add_out_instance_by_value,
+                        *a,
+                    )
+                    .or_else(|| {
                         matches!(
                             ast.nodes.get(a.0 as usize).map(|n| &n.op),
                             Some(AstOp::Input { .. })
@@ -1421,7 +1458,13 @@ pub fn derive_wiring_plan(
                     )));
                 }
                 let b_src =
-                    g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *b).or_else(|| {
+                    g2_value_from_output(
+                        ast,
+                        &g2_smul_out_instance_by_value,
+                        &g2_add_out_instance_by_value,
+                        *b,
+                    )
+                    .or_else(|| {
                         matches!(
                             ast.nodes.get(b.0 as usize).map(|n| &n.op),
                             Some(AstOp::Input { .. })
@@ -1454,18 +1497,19 @@ pub fn derive_wiring_plan(
     for node in &ast.nodes {
         match &node.op {
             AstOp::GTExp {
-                op_id: Some(id),
+                op_id: Some(_),
                 base,
                 ..
             } => {
-                let Some(&exp_instance) = gt_exp_index.get(id) else {
+                let out_idx = node.out.0 as usize;
+                let Some(exp_instance) = gt_exp_out_instance_by_value[out_idx] else {
                     continue;
                 };
                 if let Some(src) = gt_producer_from_value(
                     ast,
-                    &gt_exp_index,
-                    &gt_mul_index,
-                    &gt_exp_base_by_value,
+                    &gt_exp_out_instance_by_value,
+                    &gt_mul_out_instance_by_value,
+                    &gt_exp_base_instance_by_value,
                     *base,
                 ) {
                     plan.gt.push(GtWiringEdge {
@@ -1483,15 +1527,20 @@ pub fn derive_wiring_plan(
                 }
             }
             AstOp::G1ScalarMul {
-                op_id: Some(id),
+                op_id: Some(_),
                 point,
                 ..
             } => {
-                let Some(&smul_instance) = g1_smul_index.get(id) else {
+                let out_idx = node.out.0 as usize;
+                let Some(smul_instance) = g1_smul_out_instance_by_value[out_idx] else {
                     continue;
                 };
-                if let Some(src) = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *point)
-                {
+                if let Some(src) = g1_value_from_output(
+                    ast,
+                    &g1_smul_out_instance_by_value,
+                    &g1_add_out_instance_by_value,
+                    *point,
+                ) {
                     plan.g1.push(G1WiringEdge {
                         src,
                         dst: G1ValueRef::G1ScalarMulBase {
@@ -1518,15 +1567,20 @@ pub fn derive_wiring_plan(
                 }
             }
             AstOp::G2ScalarMul {
-                op_id: Some(id),
+                op_id: Some(_),
                 point,
                 ..
             } => {
-                let Some(&smul_instance) = g2_smul_index.get(id) else {
+                let out_idx = node.out.0 as usize;
+                let Some(smul_instance) = g2_smul_out_instance_by_value[out_idx] else {
                     continue;
                 };
-                if let Some(src) = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *point)
-                {
+                if let Some(src) = g2_value_from_output(
+                    ast,
+                    &g2_smul_out_instance_by_value,
+                    &g2_add_out_instance_by_value,
+                    *point,
+                ) {
                     plan.g2.push(G2WiringEdge {
                         src,
                         dst: G2ValueRef::G2ScalarMulBase {
@@ -1591,7 +1645,13 @@ pub fn derive_wiring_plan(
 
     // Bind G1 pairing inputs.
     for (i, vid) in g1s.iter().enumerate() {
-        let src = g1_value_from_output(ast, &g1_smul_index, &g1_add_index, *vid).or_else(|| {
+        let src = g1_value_from_output(
+            ast,
+            &g1_smul_out_instance_by_value,
+            &g1_add_out_instance_by_value,
+            *vid,
+        )
+        .or_else(|| {
             matches!(
                 ast.nodes.get(vid.0 as usize).map(|n| &n.op),
                 Some(AstOp::Input { .. })
@@ -1619,7 +1679,13 @@ pub fn derive_wiring_plan(
 
     // Bind G2 pairing inputs.
     for (i, vid) in g2s.iter().enumerate() {
-        let src = g2_value_from_output(ast, &g2_smul_index, &g2_add_index, *vid).or_else(|| {
+        let src = g2_value_from_output(
+            ast,
+            &g2_smul_out_instance_by_value,
+            &g2_add_out_instance_by_value,
+            *vid,
+        )
+        .or_else(|| {
             matches!(
                 ast.nodes.get(vid.0 as usize).map(|n| &n.op),
                 Some(AstOp::Input { .. })
@@ -1648,9 +1714,9 @@ pub fn derive_wiring_plan(
     // Bind pairing RHS (GT).
     if let Some(src) = gt_producer_from_value(
         ast,
-        &gt_exp_index,
-        &gt_mul_index,
-        &gt_exp_base_by_value,
+        &gt_exp_out_instance_by_value,
+        &gt_mul_out_instance_by_value,
+        &gt_exp_base_instance_by_value,
         rhs_id,
     ) {
         plan.gt.push(GtWiringEdge {
@@ -1669,8 +1735,6 @@ pub fn derive_wiring_plan(
     // - first: `combine_leaves` GTExp instances
     // - then:  `combine_leaves-1` GTMul instances in deterministic balanced-fold order.
     if combine_leaves > 0 {
-        let dory_gt_exp = order.gt_exp.len();
-        let dory_gt_mul = order.gt_mul.len();
         let combine_exp_start = dory_gt_exp;
         let combine_mul_start = dory_gt_mul;
         let expected_mul_count = CombineDag::new(combine_leaves).num_muls_total();

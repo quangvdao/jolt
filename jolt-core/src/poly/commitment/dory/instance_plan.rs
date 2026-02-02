@@ -428,7 +428,15 @@ pub fn derive_plan_with_hints(
 
     let dory_setup: VerifierSetup<BN254> = setup.clone().into();
 
-    // Collect ops by type (sorted by OpId for Dory-traced operations).
+    // Collect ops by type.
+    //
+    // NOTE: We intentionally do *not* sort these vectors. In Dory tracing, `OpId` is generated as
+    // (round, op_type, index) with a per-type monotone `index` counter that only increments
+    // forward and resets on round transitions. Therefore, the encounter order in `ast.nodes`
+    // should already be monotone in `OpId` within each op type.
+    //
+    // We keep debug-only monotonicity assertions to catch any unexpected behavior changes in the
+    // upstream Dory verifier that would break this assumption.
     let mut gt_exp_ops: Vec<(OpId, ValueId, ArkFr)> = Vec::new();
     let mut gt_mul_ops: Vec<OpId> = Vec::new();
     let mut g1_scalar_mul_ops: Vec<(OpId, ValueId, ArkFr)> = Vec::new();
@@ -436,42 +444,84 @@ pub fn derive_plan_with_hints(
     let mut g1_add_ops: Vec<OpId> = Vec::new();
     let mut g2_add_ops: Vec<OpId> = Vec::new();
 
+    let mut last_gt_exp: Option<OpId> = None;
+    let mut last_gt_mul: Option<OpId> = None;
+    let mut last_g1_smul: Option<OpId> = None;
+    let mut last_g2_smul: Option<OpId> = None;
+    let mut last_g1_add: Option<OpId> = None;
+    let mut last_g2_add: Option<OpId> = None;
+
     for node in &ast.nodes {
         match &node.op {
             AstOp::GTExp {
                 op_id: Some(id),
                 base,
                 scalar,
-            } => gt_exp_ops.push((*id, *base, scalar.value)),
+            } => {
+                debug_assert!(
+                    last_gt_exp.map_or(true, |prev| prev <= *id),
+                    "non-monotone GTExp OpId encountered: prev={last_gt_exp:?}, cur={id:?}"
+                );
+                last_gt_exp = Some(*id);
+                gt_exp_ops.push((*id, *base, scalar.value));
+            }
             AstOp::GTMul {
                 op_id: Some(id), ..
-            } => gt_mul_ops.push(*id),
+            } => {
+                debug_assert!(
+                    last_gt_mul.map_or(true, |prev| prev <= *id),
+                    "non-monotone GTMul OpId encountered: prev={last_gt_mul:?}, cur={id:?}"
+                );
+                last_gt_mul = Some(*id);
+                gt_mul_ops.push(*id);
+            }
             AstOp::G1ScalarMul {
                 op_id: Some(id),
                 point,
                 scalar,
-            } => g1_scalar_mul_ops.push((*id, *point, scalar.value)),
+            } => {
+                debug_assert!(
+                    last_g1_smul.map_or(true, |prev| prev <= *id),
+                    "non-monotone G1ScalarMul OpId encountered: prev={last_g1_smul:?}, cur={id:?}"
+                );
+                last_g1_smul = Some(*id);
+                g1_scalar_mul_ops.push((*id, *point, scalar.value));
+            }
             AstOp::G2ScalarMul {
                 op_id: Some(id),
                 point,
                 scalar,
-            } => g2_scalar_mul_ops.push((*id, *point, scalar.value)),
+            } => {
+                debug_assert!(
+                    last_g2_smul.map_or(true, |prev| prev <= *id),
+                    "non-monotone G2ScalarMul OpId encountered: prev={last_g2_smul:?}, cur={id:?}"
+                );
+                last_g2_smul = Some(*id);
+                g2_scalar_mul_ops.push((*id, *point, scalar.value));
+            }
             AstOp::G1Add {
                 op_id: Some(id), ..
-            } => g1_add_ops.push(*id),
+            } => {
+                debug_assert!(
+                    last_g1_add.map_or(true, |prev| prev <= *id),
+                    "non-monotone G1Add OpId encountered: prev={last_g1_add:?}, cur={id:?}"
+                );
+                last_g1_add = Some(*id);
+                g1_add_ops.push(*id);
+            }
             AstOp::G2Add {
                 op_id: Some(id), ..
-            } => g2_add_ops.push(*id),
+            } => {
+                debug_assert!(
+                    last_g2_add.map_or(true, |prev| prev <= *id),
+                    "non-monotone G2Add OpId encountered: prev={last_g2_add:?}, cur={id:?}"
+                );
+                last_g2_add = Some(*id);
+                g2_add_ops.push(*id);
+            }
             _ => {}
         }
     }
-
-    gt_exp_ops.sort_by_key(|(id, _, _)| *id);
-    gt_mul_ops.sort();
-    g1_scalar_mul_ops.sort_by_key(|(id, _, _)| *id);
-    g2_scalar_mul_ops.sort_by_key(|(id, _, _)| *id);
-    g1_add_ops.sort();
-    g2_add_ops.sort();
 
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
     let mut gt_exp_public_inputs: Vec<GtExpPublicInputs> = Vec::new();
@@ -690,7 +740,7 @@ pub fn derive_from_dory_ast(
 
     let values = eval_ast(ast, proof, &dory_setup, joint_commitment)?;
 
-    // Collect ops by type (sorted by OpId for Dory-traced operations).
+    // Collect ops by type (see comment in the non-eval path above).
     let mut gt_exp_ops: Vec<(OpId, ValueId, ArkFr)> = Vec::new();
     let mut gt_mul_ops: Vec<OpId> = Vec::new();
     let mut g1_scalar_mul_ops: Vec<(OpId, ValueId, ArkFr)> = Vec::new();
@@ -698,42 +748,84 @@ pub fn derive_from_dory_ast(
     let mut g1_add_ops: Vec<OpId> = Vec::new();
     let mut g2_add_ops: Vec<OpId> = Vec::new();
 
+    let mut last_gt_exp: Option<OpId> = None;
+    let mut last_gt_mul: Option<OpId> = None;
+    let mut last_g1_smul: Option<OpId> = None;
+    let mut last_g2_smul: Option<OpId> = None;
+    let mut last_g1_add: Option<OpId> = None;
+    let mut last_g2_add: Option<OpId> = None;
+
     for node in &ast.nodes {
         match &node.op {
             AstOp::GTExp {
                 op_id: Some(id),
                 base,
                 scalar,
-            } => gt_exp_ops.push((*id, *base, scalar.value)),
+            } => {
+                debug_assert!(
+                    last_gt_exp.map_or(true, |prev| prev <= *id),
+                    "non-monotone GTExp OpId encountered: prev={last_gt_exp:?}, cur={id:?}"
+                );
+                last_gt_exp = Some(*id);
+                gt_exp_ops.push((*id, *base, scalar.value));
+            }
             AstOp::GTMul {
                 op_id: Some(id), ..
-            } => gt_mul_ops.push(*id),
+            } => {
+                debug_assert!(
+                    last_gt_mul.map_or(true, |prev| prev <= *id),
+                    "non-monotone GTMul OpId encountered: prev={last_gt_mul:?}, cur={id:?}"
+                );
+                last_gt_mul = Some(*id);
+                gt_mul_ops.push(*id);
+            }
             AstOp::G1ScalarMul {
                 op_id: Some(id),
                 point,
                 scalar,
-            } => g1_scalar_mul_ops.push((*id, *point, scalar.value)),
+            } => {
+                debug_assert!(
+                    last_g1_smul.map_or(true, |prev| prev <= *id),
+                    "non-monotone G1ScalarMul OpId encountered: prev={last_g1_smul:?}, cur={id:?}"
+                );
+                last_g1_smul = Some(*id);
+                g1_scalar_mul_ops.push((*id, *point, scalar.value));
+            }
             AstOp::G2ScalarMul {
                 op_id: Some(id),
                 point,
                 scalar,
-            } => g2_scalar_mul_ops.push((*id, *point, scalar.value)),
+            } => {
+                debug_assert!(
+                    last_g2_smul.map_or(true, |prev| prev <= *id),
+                    "non-monotone G2ScalarMul OpId encountered: prev={last_g2_smul:?}, cur={id:?}"
+                );
+                last_g2_smul = Some(*id);
+                g2_scalar_mul_ops.push((*id, *point, scalar.value));
+            }
             AstOp::G1Add {
                 op_id: Some(id), ..
-            } => g1_add_ops.push(*id),
+            } => {
+                debug_assert!(
+                    last_g1_add.map_or(true, |prev| prev <= *id),
+                    "non-monotone G1Add OpId encountered: prev={last_g1_add:?}, cur={id:?}"
+                );
+                last_g1_add = Some(*id);
+                g1_add_ops.push(*id);
+            }
             AstOp::G2Add {
                 op_id: Some(id), ..
-            } => g2_add_ops.push(*id),
+            } => {
+                debug_assert!(
+                    last_g2_add.map_or(true, |prev| prev <= *id),
+                    "non-monotone G2Add OpId encountered: prev={last_g2_add:?}, cur={id:?}"
+                );
+                last_g2_add = Some(*id);
+                g2_add_ops.push(*id);
+            }
             _ => {}
         }
     }
-
-    gt_exp_ops.sort_by_key(|(id, _, _)| *id);
-    gt_mul_ops.sort();
-    g1_scalar_mul_ops.sort_by_key(|(id, _, _)| *id);
-    g2_scalar_mul_ops.sort_by_key(|(id, _, _)| *id);
-    g1_add_ops.sort();
-    g2_add_ops.sort();
 
     let mut constraint_types: Vec<ConstraintType> = Vec::new();
     let mut gt_exp_public_inputs: Vec<GtExpPublicInputs> = Vec::new();

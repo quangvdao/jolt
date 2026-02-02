@@ -18,9 +18,7 @@ use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
 use crate::poly::commitment::dory::instance_plan::derive_plan_with_hints;
-use crate::poly::commitment::dory::{
-    ArkG1, ArkG2, ArkGT, DoryCommitmentScheme, DoryContext, DoryGlobals, BN254,
-};
+use crate::poly::commitment::dory::{ArkG1, ArkG2, DoryCommitmentScheme, DoryContext, DoryGlobals, BN254};
 use crate::poly::rlc_utils::compute_rlc_coefficients;
 use crate::transcripts::Transcript;
 use crate::zkvm::config::ProgramMode;
@@ -277,8 +275,26 @@ pub fn verify_recursion<FS: Transcript>(
         v.build_stage8_recursion_prep()?;
 
     // Build commitments map (must match Stage 8 native verifier path).
-    let mut commitments_map =
-        HashMap::<CommittedPolynomial, <DoryPCS as CommitmentScheme>::Commitment>::new();
+    let _stage8_prep_commitments_cycle = "verify_recursion_stage8_prep_commitments_map_total";
+    start_cycle_tracking(_stage8_prep_commitments_cycle);
+
+    // Single scan over polynomial_claims for optional commitments.
+    let mut needs_trusted_advice = false;
+    let mut needs_untrusted_advice = false;
+    let mut needs_program_image_init = false;
+    for (p, _claim) in dory_snap.polynomial_claims.iter() {
+        match *p {
+            CommittedPolynomial::TrustedAdvice => needs_trusted_advice = true,
+            CommittedPolynomial::UntrustedAdvice => needs_untrusted_advice = true,
+            CommittedPolynomial::ProgramImageInit => needs_program_image_init = true,
+            _ => {}
+        }
+    }
+
+    let mut commitments_map = HashMap::<
+        CommittedPolynomial,
+        <DoryPCS as CommitmentScheme>::Commitment,
+    >::with_capacity(v.proof.commitments.len() + 8);
     for (poly, commitment) in all_committed_polynomials(&v.one_hot_params)
         .into_iter()
         .zip(v.proof.commitments.iter())
@@ -286,20 +302,12 @@ pub fn verify_recursion<FS: Transcript>(
         commitments_map.insert(poly, *commitment);
     }
     if let Some(ref commitment) = v.trusted_advice_commitment {
-        if dory_snap
-            .polynomial_claims
-            .iter()
-            .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
-        {
+        if needs_trusted_advice {
             commitments_map.insert(CommittedPolynomial::TrustedAdvice, *commitment);
         }
     }
     if let Some(ref commitment) = v.proof.untrusted_advice_commitment {
-        if dory_snap
-            .polynomial_claims
-            .iter()
-            .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
-        {
+        if needs_untrusted_advice {
             commitments_map.insert(CommittedPolynomial::UntrustedAdvice, *commitment);
         }
     }
@@ -310,20 +318,19 @@ pub fn verify_recursion<FS: Transcript>(
                 .entry(CommittedPolynomial::BytecodeChunk(idx))
                 .or_insert(*commitment);
         }
-        if dory_snap
-            .polynomial_claims
-            .iter()
-            .any(|(p, _)| *p == CommittedPolynomial::ProgramImageInit)
-        {
+        if needs_program_image_init {
             commitments_map.insert(
                 CommittedPolynomial::ProgramImageInit,
                 committed.program_image_commitment,
             );
         }
     }
+    end_cycle_tracking(_stage8_prep_commitments_cycle);
 
     // Deterministic combine plan (must match the prover's ordering).
-    let rlc_map = compute_rlc_coefficients(&gamma_powers, dory_snap.polynomial_claims.clone());
+    let _stage8_prep_rlc_cycle = "verify_recursion_stage8_prep_rlc_total";
+    start_cycle_tracking(_stage8_prep_rlc_cycle);
+    let rlc_map = compute_rlc_coefficients(&gamma_powers, dory_snap.polynomial_claims.iter().copied());
     let (combine_coeffs, combine_commitments): (
         Vec<F>,
         Vec<<DoryPCS as CommitmentScheme>::Commitment>,
@@ -338,6 +345,7 @@ pub fn verify_recursion<FS: Transcript>(
             )
         })
         .unzip();
+    end_cycle_tracking(_stage8_prep_rlc_cycle);
 
     // Get Stage 8 combine hint
     let hint_fq12 = recursion
@@ -347,8 +355,17 @@ pub fn verify_recursion<FS: Transcript>(
     let joint_commitment: <DoryPCS as CommitmentScheme>::Commitment =
         <DoryPCS as RecursionExt<F>>::combine_with_hint_fq12(hint_fq12);
 
-    // Build symbolic AST on a transcript clone at the pre-Stage8-proof state.
-    let mut ast_transcript = pre_opening_proof_transcript.clone();
+    // Build symbolic AST at the pre-Stage8-proof transcript state.
+    //
+    // Important: `build_symbolic_ast()` runs the Dory verifier in symbolic mode and therefore
+    // mutates the transcript to the same post-Stage8 state expected by the recursion SNARK.
+    // We can reuse that transcript directly and skip the (cheaper but still nontrivial)
+    // `replay_opening_proof_transcript()` pass.
+    let _stage8_prep_ast_cycle = "verify_recursion_stage8_prep_symbolic_ast_total";
+    start_cycle_tracking(_stage8_prep_ast_cycle);
+    #[cfg(debug_assertions)]
+    let pre_opening_proof_transcript_dbg = pre_opening_proof_transcript.clone();
+    let mut ast_transcript = pre_opening_proof_transcript;
     let ast = <DoryPCS as RecursionExt<F>>::build_symbolic_ast(
         &v.proof.joint_opening_proof,
         &v.preprocessing.generators,
@@ -358,14 +375,32 @@ pub fn verify_recursion<FS: Transcript>(
         &joint_commitment,
     )
     .map_err(|e| anyhow!("Stage 8 symbolic AST build failed: {e:?}"))?;
+    end_cycle_tracking(_stage8_prep_ast_cycle);
 
-    // Advance the main transcript to the post-Stage8 state expected by recursion SNARK.
-    v.transcript = pre_opening_proof_transcript;
-    <DoryPCS as RecursionExt<F>>::replay_opening_proof_transcript(
-        &v.proof.joint_opening_proof,
-        &mut v.transcript,
-    )
-    .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
+    // Use the post-Stage8 transcript state expected by recursion SNARK.
+    //
+    // - In release builds (including guest cycle-tracking), we reuse the transcript advanced by
+    //   `build_symbolic_ast()` and skip the additional replay pass for performance.
+    // - In debug builds, we conservatively run the replay pass and use that transcript.
+    //   (We also have a dedicated regression test that checks symbolic-vs-replay equality for
+    //   the concrete transcript used in recursion benchmarking.)
+    #[cfg(debug_assertions)]
+    {
+        let _stage8_prep_replay_cycle = "verify_recursion_stage8_prep_replay_total";
+        start_cycle_tracking(_stage8_prep_replay_cycle);
+        let mut replay_transcript = pre_opening_proof_transcript_dbg;
+        <DoryPCS as RecursionExt<F>>::replay_opening_proof_transcript(
+            &v.proof.joint_opening_proof,
+            &mut replay_transcript,
+        )
+        .map_err(|e| anyhow!("Stage 8 PCS FS replay failed: {e:?}"))?;
+        end_cycle_tracking(_stage8_prep_replay_cycle);
+        v.transcript = replay_transcript;
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        v.transcript = ast_transcript;
+    }
 
     // Derive recursion verifier input (NO expensive group ops).
     //
@@ -373,20 +408,20 @@ pub fn verify_recursion<FS: Transcript>(
     // including binding non-input bases/points and the pairing boundary. Re-evaluating the Dory AST
     // (pairings / scalar muls / GT exp) inside the verifier is therefore unnecessary and extremely
     // expensive in the zkVM / cycle-tracking path.
-    let combine_coeffs_fr: Vec<Fr> = combine_coeffs;
-    let joint_commitment_dory: ArkGT = joint_commitment;
-    let combine_commitments_dory: Vec<ArkGT> = combine_commitments;
+    let _stage8_prep_plan_cycle = "verify_recursion_stage8_prep_plan_total";
+    start_cycle_tracking(_stage8_prep_plan_cycle);
     let plan = derive_plan_with_hints(
         &ast,
         &v.proof.joint_opening_proof,
         &v.preprocessing.generators,
-        joint_commitment_dory,
-        &combine_commitments_dory,
-        &combine_coeffs_fr,
+        joint_commitment,
+        &combine_commitments,
+        &combine_coeffs,
         recursion.pairing_boundary.clone(),
         *hint_fq12,
     )
     .map_err(|e| anyhow!("AST->recursion-plan derivation failed: {e:?}"))?;
+    end_cycle_tracking(_stage8_prep_plan_cycle);
     end_cycle_tracking("verify_recursion_stage8_prep_total");
 
     if plan.dense_num_vars > MAX_RECURSION_DENSE_NUM_VARS {

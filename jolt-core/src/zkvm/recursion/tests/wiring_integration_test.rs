@@ -197,6 +197,23 @@ fn wiring_rejects_tampered_pairing_boundary_rhs() {
     )
     .expect("symbolic AST reconstruction must succeed");
 
+    // Regression check: symbolic verification transcript must match replay transcript.
+    //
+    // This ensures the recursion verifier can reuse the symbolic transcript state and skip
+    // `replay_opening_proof_transcript()` in release builds.
+    {
+        let mut replay = fixture.stage8_pre_transcript.clone();
+        <DoryCommitmentScheme as RecursionExt<Fr>>::replay_opening_proof_transcript(
+            &fixture.dory_proof,
+            &mut replay,
+        )
+        .expect("Stage 8 transcript replay must succeed");
+        assert_eq!(
+            sym_transcript.state, replay.state,
+            "symbolic transcript state must match replay transcript state"
+        );
+    }
+
     let derived = derive_plan_with_hints(
         &ast,
         &fixture.ark_dory_proof,

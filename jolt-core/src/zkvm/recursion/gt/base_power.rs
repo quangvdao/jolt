@@ -53,7 +53,7 @@ use rayon::prelude::*;
 
 const U_VARS: usize = 4;
 const DEGREE: usize = 4;
-const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
+// x11 layout: idx = s * 16 + u, so the s=0 slice is contiguous.
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_VERIFY_RECURSION_STAGE2_GTEXP_BASE_POW_TOTAL: &str =
@@ -181,7 +181,7 @@ impl GtExpBasePowProver {
                     debug_assert_eq!(src11.len(), 1usize << 11);
                     let off = local * row_size;
                     for u in 0..row_size {
-                        term_uc[off + u] = src11[u * STEP_STRIDE];
+                        term_uc[off + u] = src11[u];
                     }
                 }
             }

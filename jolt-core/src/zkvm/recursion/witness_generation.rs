@@ -611,7 +611,6 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     }
                     // Extract the native 4-var table from the 11-var packed witness by
                     // taking the s=0 slice (base is replicated across s).
-                    const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
                     debug_assert_eq!(
                         cs.g_poly.Z.len(),
                         16,
@@ -630,9 +629,10 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                         let mut base24 = [Fq::zero(); 16];
                         let mut base34 = [Fq::zero(); 16];
                         for u in 0..16 {
-                            base4[u] = b11[u * STEP_STRIDE];
-                            base24[u] = b211[u * STEP_STRIDE];
-                            base34[u] = b311[u * STEP_STRIDE];
+                            // x11 layout: idx = s * 16 + u, so the s=0 slice is contiguous.
+                            base4[u] = b11[u];
+                            base24[u] = b211[u];
+                            base34[u] = b311[u];
                         }
 
                         let src4: [Fq; 16] = match entry.poly_type {

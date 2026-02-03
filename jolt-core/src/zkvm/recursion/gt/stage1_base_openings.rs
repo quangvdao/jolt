@@ -1,6 +1,6 @@
 //! Cache-only Stage-1 GTExp base openings at the Stage-1 point.
 //!
-//! Stage 1 runs the packed GTExp sumcheck over `(s,u,c_gt)` (11 + k_gt rounds).
+//! Stage 1 runs the packed GTExp sumcheck over `(u,s,c_gt)` (11 + k_gt rounds).
 //! The committed base rows live over the native `(u, c_exp)` domain (4 + k_exp vars), so this
 //! instance:
 //! - participates in Stage 1 with **11 + k_gt rounds** (to share the same batched point),
@@ -40,7 +40,6 @@ use ark_bn254::Fq;
 use ark_ff::Zero;
 
 const U_VARS: usize = 4;
-const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
 
 #[derive(Clone, Debug, Allocative)]
 pub struct GtExpBaseStage1OpeningsParams {
@@ -95,9 +94,9 @@ impl<T: Transcript> GtExpBaseStage1OpeningsProver<T> {
                 let off = local * row_size;
                 for u in 0..row_size {
                     // Extract s=0 slice (base is replicated across s in the packed witness).
-                    base_uc[off + u] = base11[u * STEP_STRIDE];
-                    base2_uc[off + u] = base211[u * STEP_STRIDE];
-                    base3_uc[off + u] = base311[u * STEP_STRIDE];
+                    base_uc[off + u] = base11[u];
+                    base2_uc[off + u] = base211[u];
+                    base3_uc[off + u] = base311[u];
                 }
             }
         }
@@ -130,8 +129,8 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtExpBaseStage1OpeningsPro
 
     fn ingest_challenge(&mut self, r_j: <Fq as JoltField>::Challenge, round: usize) {
         // Bind only u rounds and the tail k_exp c rounds.
-        let u_start = CONFIG.step_vars; // 7
-        let u_end = CONFIG.packed_vars; // 11
+        let u_start = 0usize;
+        let u_end = U_VARS;
         if (u_start..u_end).contains(&round) {
             self.base.bind_parallel(r_j, BindingOrder::LowToHigh);
             self.base2.bind_parallel(r_j, BindingOrder::LowToHigh);
@@ -165,7 +164,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for GtExpBaseStage1OpeningsPro
         );
         // Opening point must match committed row arity: (u, c_exp_tail).
         let mut r = Vec::with_capacity(U_VARS + self.params.k_exp);
-        r.extend_from_slice(&sumcheck_challenges[CONFIG.step_vars..CONFIG.packed_vars]);
+        r.extend_from_slice(&sumcheck_challenges[..U_VARS]);
         let tail = gt_exp_c_tail_range(self.params.k_common, self.params.k_exp);
         r.extend_from_slice(&sumcheck_challenges[tail]);
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);
@@ -242,7 +241,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBaseStage1OpeningsV
             CONFIG.packed_vars + self.params.k_common
         );
         let mut r = Vec::with_capacity(U_VARS + self.params.k_exp);
-        r.extend_from_slice(&sumcheck_challenges[CONFIG.step_vars..CONFIG.packed_vars]);
+        r.extend_from_slice(&sumcheck_challenges[..U_VARS]);
         let tail = gt_exp_c_tail_range(self.params.k_common, self.params.k_exp);
         r.extend_from_slice(&sumcheck_challenges[tail]);
         let opening_point = OpeningPoint::<BIG_ENDIAN, Fq>::new(r);

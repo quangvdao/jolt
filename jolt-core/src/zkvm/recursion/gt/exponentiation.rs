@@ -3,7 +3,7 @@
 //! Goal: eliminate per-instance GTExp virtual openings from the recursion proof payload by treating
 //! packed GTExp as a single polynomial over:
 //! - `c_gt` : GT-local constraint index (only `{GtExp,GtMul}` in global order)
-//! - `x11`  : packed GT exp domain (7 step bits + 4 element bits), layout `idx = x * 128 + s`
+//! - `x11`  : packed GT exp domain (4 element bits + 7 step bits), layout `idx = s * 16 + x`
 //!
 //! The witness polynomials are formed by stacking per-instance packed tables into the
 //! `c_gt` dimension, with zeros on non-GtExp `c_gt` and on padding rows.
@@ -18,7 +18,7 @@
 //!
 //! Let:
 //! - `c_gt ∈ {0,1}^{k_gt}` be the GT-local constraint index domain (Stage 1),
-//! - `x11 = (s,u) ∈ {0,1}^7 × {0,1}^4` be the packed GT exp domain (LSB-first in each component),
+//! - `x11 = (u,s) ∈ {0,1}^4 × {0,1}^7` be the packed GT exp domain (LSB-first in each component),
 //! - `r = (r_c, r_x) ∈ Fq^{k_gt+11}` be the verifier-sampled `eq_point`,
 //! - `eq(r,(c_gt,x11))` be the multilinear equality polynomial.
 //!
@@ -430,15 +430,16 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
             .collect();
         let eq_eval = EqPolynomial::mle(&self.eq_point_fq, &eval_point);
 
-        // Parse (s,u,c) portions from the sumcheck point.
+        // Parse (u,s,c) portions from the sumcheck point.
         //
         // Variable order (LSB-first rounds) is:
-        // - step bits s (7), then elem bits u (4), then c_gt bits (k) as a suffix.
+        // - elem bits u (4), then step bits s (7), then c_gt bits (k) as a suffix.
         let k_gt = self.params.num_c_vars;
         let k_exp = self.params.k_exp;
         let dummy = k_gt.saturating_sub(k_exp);
-        let s0 = 0usize;
-        let x0 = self.params.num_step_vars; // 7
+        let u0 = 0usize;
+        let s0 = self.params.num_elem_vars; // 4
+        let x0 = s0 + self.params.num_step_vars; // 11
                                             // Split-k convention: dummy bits are the first `dummy` *low* bits of the c suffix.
                                             // The GTExp family index lives in the remaining `k_exp` high bits.
         let r_c_tail_lsb: Vec<Fq> = sumcheck_challenges[CONFIG.packed_vars + dummy..]
@@ -448,16 +449,17 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpVerifier {
 
         // For digit/base evaluation helpers, match the existing packed GT exp verifier convention:
         // reverse within each chunk (big-endian).
+        let r_u_star: Vec<Fq> = sumcheck_challenges[u0..s0]
+            .iter()
+            .rev()
+            .map(|c| (*c).into())
+            .collect();
         let r_s_star: Vec<Fq> = sumcheck_challenges[s0..x0]
             .iter()
             .rev()
             .map(|c| (*c).into())
             .collect();
-        let r_x_star: Vec<Fq> = sumcheck_challenges[x0..CONFIG.packed_vars]
-            .iter()
-            .rev()
-            .map(|c| (*c).into())
-            .collect();
+        let r_x_star: Vec<Fq> = r_u_star.clone();
 
         // Fetch opened claims at the sumcheck point.
         let rho = accumulator.get_virtual_polynomial_claim(

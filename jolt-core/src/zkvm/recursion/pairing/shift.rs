@@ -5,9 +5,9 @@
 //! - `f_next(s,x) = f(s+1,x)` for all `s != last` and all `x`,
 //! - `T_next(s) = T(s+1)` component-wise for all `s != last`,
 //!
-//! where the packed layout is `idx = x * 128 + s` with:
-//! - step vars `s ∈ {0,1}^7` (low bits),
-//! - element vars `x ∈ {0,1}^4` (high bits),
+//! where the packed layout is `idx = s * 16 + x` with:
+//! - element vars `x ∈ {0,1}^4` (low bits),
+//! - step vars `s ∈ {0,1}^7` (high bits),
 //!   giving an 11-var MLE overall.
 //!
 //! We prove a randomized identity using Eq/EqPlusOne over the **step** variables and Eq over the
@@ -57,9 +57,11 @@ struct ShiftPair<F: JoltField> {
 fn expand_step_7_to_11<F: JoltField>(evals_7: &[F]) -> Vec<F> {
     debug_assert_eq!(evals_7.len(), STEP_SIZE);
     let mut evals_11 = vec![F::zero(); 1 << NUM_VARS];
-    for x in 0..ELEM_SIZE {
-        let base = x * STEP_SIZE;
-        evals_11[base..base + STEP_SIZE].copy_from_slice(evals_7);
+    // idx = s * 16 + x: replicate each step value across all elements.
+    for s in 0..STEP_SIZE {
+        let v = evals_7[s];
+        let off = s * ELEM_SIZE;
+        evals_11[off..off + ELEM_SIZE].fill(v);
     }
     evals_11
 }
@@ -67,12 +69,10 @@ fn expand_step_7_to_11<F: JoltField>(evals_7: &[F]) -> Vec<F> {
 fn expand_elem_4_to_11<F: JoltField>(evals_4: &[F]) -> Vec<F> {
     debug_assert_eq!(evals_4.len(), ELEM_SIZE);
     let mut evals_11 = vec![F::zero(); 1 << NUM_VARS];
-    for x in 0..ELEM_SIZE {
-        let base = x * STEP_SIZE;
-        let v = evals_4[x];
-        for s in 0..STEP_SIZE {
-            evals_11[base + s] = v;
-        }
+    // idx = s * 16 + x: replicate the 16-element row across all steps.
+    for s in 0..STEP_SIZE {
+        let off = s * ELEM_SIZE;
+        evals_11[off..off + ELEM_SIZE].copy_from_slice(evals_4);
     }
     evals_11
 }
@@ -140,7 +140,7 @@ impl<F: JoltField, T: Transcript> ShiftMultiMillerLoopProver<F, T> {
             .collect();
         let gamma: F = transcript.challenge_scalar_optimized::<F>().into();
 
-        // Build weight polynomials on the full 11-var domain (layout idx = x*128 + s).
+        // Build weight polynomials on the full 11-var domain (layout idx = s*16 + x).
         let eq_step_7 = eq_lsb_evals::<F>(&step_ref);
         let eq_minus_one_7 = eq_plus_one_lsb_evals::<F>(&step_ref);
         let eq_elem_4 = eq_lsb_evals::<F>(&elem_ref);
@@ -357,8 +357,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
         accumulator: &VerifierOpeningAccumulator<F>,
         sumcheck_challenges: &[F::Challenge],
     ) -> F {
-        let y_step = &sumcheck_challenges[..STEP_VARS];
-        let y_elem = &sumcheck_challenges[STEP_VARS..];
+        // x11 convention: element vars are the low 4 rounds (prefix), step vars are the high 7.
+        let y_elem = &sumcheck_challenges[..ELEM_VARS];
+        let y_step = &sumcheck_challenges[ELEM_VARS..];
 
         let eqs = eq_lsb_mle::<F>(&self.step_ref, y_step);
         let eqm1 = eq_plus_one_lsb_mle::<F>(&self.step_ref, y_step);

@@ -162,9 +162,9 @@ impl GtShiftProver {
         let k = params.num_c_vars;
         let s_len = params.num_step_vars;
         let u_len = params.num_elem_vars;
-        let r1_s = &r1[..s_len];
-        let r1_x = &r1[s_len..s_len + u_len];
-        let r1_c = &r1[s_len + u_len..];
+        let r1_u = &r1[..u_len];
+        let r1_s = &r1[u_len..u_len + s_len];
+        let r1_c = &r1[u_len + s_len..];
         debug_assert_eq!(r1_c.len(), k);
 
         // Build rho(c_gt,x11) from GTExp witnesses (zero elsewhere).
@@ -191,18 +191,19 @@ impl GtShiftProver {
         // Store in [x11 low bits, c_gt high bits] order so `c_gt` is a suffix in Stage 2.
         let rho = MultilinearPolynomial::LargeScalars(DensePolynomial::new(rho_xc));
 
-        // Build eq product table over (s,u,c) with LSB-first indexing for each component.
+        // Build eq product table over (u,s,c) with LSB-first indexing for each component.
         let eq_c = eq_lsb_evals::<Fq>(r1_c);
         let eq_plus_one = eq_plus_one_lsb_evals::<Fq>(r1_s);
-        let eq_x = eq_lsb_evals::<Fq>(r1_x);
+        let eq_x = eq_lsb_evals::<Fq>(r1_u);
 
         let mut eq_xc = vec![Fq::zero(); params.num_gt_constraints_padded * row_size];
         for c in 0..params.num_gt_constraints_padded {
             let eqc = eq_c.get(c).copied().unwrap_or_else(Fq::zero);
             let off = c * row_size;
             for x11 in 0..row_size {
-                let s_idx = x11 & ((1usize << params.num_step_vars) - 1);
-                let x_idx = x11 >> params.num_step_vars;
+                // x11 layout: idx = s * 16 + x (x in low bits).
+                let x_idx = x11 & ((1usize << params.num_elem_vars) - 1);
+                let s_idx = x11 >> params.num_elem_vars;
                 let w = eqc * eq_plus_one[s_idx] * eq_x[x_idx];
                 eq_xc[off + x11] = w;
             }
@@ -327,18 +328,18 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
         let k = self.params.num_c_vars;
         let s_len = self.params.num_step_vars;
         let u_len = self.params.num_elem_vars;
-        let r1_s = &r1[..s_len];
-        let r1_x = &r1[s_len..s_len + u_len];
-        let r1_c = &r1[s_len + u_len..];
+        let r1_u = &r1[..u_len];
+        let r1_s = &r1[u_len..u_len + s_len];
+        let r1_c = &r1[u_len + s_len..];
         debug_assert_eq!(r1_c.len(), k);
 
-        let r2_s = &sumcheck_challenges[..s_len];
-        let r2_x = &sumcheck_challenges[s_len..s_len + u_len];
-        let r2_c = &sumcheck_challenges[s_len + u_len..];
+        let r2_u = &sumcheck_challenges[..u_len];
+        let r2_s = &sumcheck_challenges[u_len..u_len + s_len];
+        let r2_c = &sumcheck_challenges[u_len + s_len..];
 
         let eq_c = eq_lsb_mle::<Fq>(r1_c, r2_c);
         let eq_plus_one = eq_plus_one_lsb_mle::<Fq>(r1_s, r2_s);
-        let eq_x = eq_lsb_mle::<Fq>(r1_x, r2_x);
+        let eq_x = eq_lsb_mle::<Fq>(r1_u, r2_u);
         let eq_prod = eq_c * eq_plus_one * eq_x;
 
         // Consume the rho opening at the Stage-2 point (emitted elsewhere).

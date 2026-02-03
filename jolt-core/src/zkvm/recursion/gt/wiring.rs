@@ -85,7 +85,12 @@ const CYCLE_VERIFY_RECURSION_STAGE2_GT_WIRING_TOTAL: &str =
     "verify_recursion_stage2_gt_wiring_total";
 
 /// Max degree per variable is 2 (product of multilinears).
-const DEGREE: usize = 2;
+// Degree bound for GT wiring sumcheck:
+// - In x-phase we multiply three multilinear factors: eq_u(u), eq_s(s), and (src(x)-dst(x)),
+//   giving per-round univariates of degree ≤ 3.
+// - In c-phase we multiply at most two multilinear factors (selector * port), degree ≤ 2.
+// So the overall bound is 3.
+const DEGREE: usize = 3;
 
 fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
     debug_assert_eq!(
@@ -94,12 +99,10 @@ fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
         "expected 4-var MLE (len 16)"
     );
     let mut mle_11var = vec![Fq::zero(); 1 << X_VARS];
-    // Layout matches packed GT exp: index = x * 128 + s (s in low 7 bits).
-    for x in 0..(1 << ELEM_VARS) {
-        let v = mle_4var[x];
-        for s in 0..(1 << STEP_VARS) {
-            mle_11var[x * (1 << STEP_VARS) + s] = v;
-        }
+    // Layout matches packed x11: index = s * 16 + x (x in low 4 bits).
+    for s in 0..(1 << STEP_VARS) {
+        let off = s * (1 << ELEM_VARS);
+        mle_11var[off..off + (1 << ELEM_VARS)].copy_from_slice(mle_4var);
     }
     mle_11var
 }
@@ -111,11 +114,11 @@ fn pad_7var_to_11var_replicated(mle_7var: &[Fq]) -> Vec<Fq> {
         "expected 7-var MLE (len 128)"
     );
     let mut mle_11var = vec![Fq::zero(); 1 << X_VARS];
-    // Layout matches packed GT exp: index = x * 128 + s (s in low 7 bits).
-    for x in 0..(1 << ELEM_VARS) {
-        for s in 0..(1 << STEP_VARS) {
-            mle_11var[x * (1 << STEP_VARS) + s] = mle_7var[s];
-        }
+    // Layout matches packed x11: index = s * 16 + x (x in low 4 bits).
+    for s in 0..(1 << STEP_VARS) {
+        let v = mle_7var[s];
+        let off = s * (1 << ELEM_VARS);
+        mle_11var[off..off + (1 << ELEM_VARS)].fill(v);
     }
     mle_11var
 }
@@ -230,6 +233,14 @@ struct CPhaseState {
     pairing_miller_rhs_at_r: Fq,
     /// Per-edge eq_s evaluated at bound `r_step` (scalar).
     edge_eq_s_at_r: Vec<Fq>,
+    /// Scalars per GTExp instance at the bound x-point `r_x` (used for debugging phase split).
+    rho_at_r: Vec<Fq>,
+    /// Scalars per GTMul instance at the bound x-point `r_x` (used for debugging phase split).
+    mul_lhs_at_r: Vec<Fq>,
+    mul_rhs_at_r: Vec<Fq>,
+    mul_result_at_r: Vec<Fq>,
+    /// Scalars per GTExp base port at the bound x-point `r_x` (used for debugging phase split).
+    exp_base_port_at_r: Vec<Fq>,
     /// GTExp rho values as an MLE over the **common** c domain (k vars), replicated across dummy bits.
     rho_c: MultilinearPolynomial<Fq>,
     /// GTMul ports as MLEs over the **common** c domain (k vars), replicated across dummy bits.
@@ -270,6 +281,14 @@ impl CPhaseState {
 pub struct WiringGtProver<T: Transcript> {
     edges: Vec<GtWiringEdge>,
     lambdas: Vec<Fq>,
+    /// Element selector point τ (4 challenges, LSB-first), used by Eq(u,τ).
+    ///
+    /// Kept for debugging/validation of the wiring input claim.
+    tau: Vec<<Fq as JoltField>::Challenge>,
+    /// Output step index for each GTExp instance in the packed GTExp trace.
+    ///
+    /// Must match the verifier convention: `s_out = min(127, ceil(bits_len/2))`.
+    gt_exp_out_step: Vec<usize>,
     /// Common GT-local c domain size (k = k_gt).
     num_c_vars: usize,
     k_exp: usize,
@@ -340,6 +359,52 @@ impl<T: Transcript> WiringGtProver<T> {
         let tau: Vec<<Fq as JoltField>::Challenge> =
             transcript.challenge_vector_optimized::<Fq>(ELEM_VARS);
         let lambdas: Vec<Fq> = transcript.challenge_vector(edges.len());
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_CHALLENGES").is_some() {
+            let mut edge_fp: u64 = 0;
+            for e in edges.iter() {
+                let src_tag: u64 = match e.src {
+                    GtProducer::GtExpRho { .. } => 1,
+                    GtProducer::GtMulResult { .. } => 2,
+                    GtProducer::GtExpBase { .. } => 3,
+                    GtProducer::JointCommitment => 4,
+                    GtProducer::GtInput { .. } => 5,
+                    GtProducer::MultiMillerLoopOut { .. } => 6,
+                };
+                let src_idx: u64 = match e.src {
+                    GtProducer::GtExpRho { instance }
+                    | GtProducer::GtMulResult { instance }
+                    | GtProducer::GtExpBase { instance }
+                    | GtProducer::MultiMillerLoopOut { instance } => instance as u64,
+                    GtProducer::GtInput { value_id } => value_id as u64,
+                    GtProducer::JointCommitment => 0,
+                };
+                let dst_tag: u64 = match e.dst {
+                    GtConsumer::GtMulLhs { .. } => 11,
+                    GtConsumer::GtMulRhs { .. } => 12,
+                    GtConsumer::GtExpBase { .. } => 13,
+                    GtConsumer::JointCommitment => 14,
+                    GtConsumer::PairingBoundaryRhs => 15,
+                    GtConsumer::PairingBoundaryMillerRhs => 16,
+                };
+                let dst_idx: u64 = match e.dst {
+                    GtConsumer::GtMulLhs { instance }
+                    | GtConsumer::GtMulRhs { instance }
+                    | GtConsumer::GtExpBase { instance } => instance as u64,
+                    _ => 0,
+                };
+                let v = (src_tag << 56) ^ (dst_tag << 48) ^ (src_idx << 16) ^ dst_idx;
+                edge_fp = edge_fp.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(v);
+            }
+            tracing::info!(
+                tau0 = ?tau.get(0),
+                lambda0 = ?lambdas.get(0),
+                edges = edges.len(),
+                edge0 = ?edges.get(0),
+                edge_last = ?edges.last(),
+                edge_fp = edge_fp,
+                "gt_wiring: prover sampled challenges"
+            );
+        }
 
         let eq_u_4 = eq_lsb_evals::<Fq>(&tau);
         let eq_u_poly = MultilinearPolynomial::from(pad_4var_to_11var_replicated(&eq_u_4));
@@ -485,16 +550,17 @@ impl<T: Transcript> WiringGtProver<T> {
             MultilinearPolynomial::from(pad_4var_to_11var_replicated(&mle_4))
         });
 
-        let eq_s_by_exp: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
+        let gt_exp_out_step: Vec<usize> = (0..num_gt_exp)
             .map(|i| {
-                // Output step index for this GTExp instance (packed trace):
-                // rho[s_out] is the final result.
-                //
-                // We derive `s_out` from public inputs to match the verifier:
-                // s_out = min(127, ceil(bits_len/2)).
                 let max_s = (1 << STEP_VARS) - 1;
                 let digits_len = cs.gt_exp_public_inputs[i].scalar_bits.len().div_ceil(2);
-                let s_out = digits_len.min(max_s);
+                digits_len.min(max_s)
+            })
+            .collect();
+        let eq_s_by_exp: Vec<Option<MultilinearPolynomial<Fq>>> = (0..num_gt_exp)
+            .map(|i| {
+                // Output step index for this GTExp instance (packed trace): rho[s_out] is final.
+                let s_out = gt_exp_out_step[i];
                 let s_bits: Vec<<Fq as JoltField>::Challenge> = (0..STEP_VARS)
                     .map(|b| {
                         let bit = ((s_out >> b) & 1) == 1;
@@ -511,6 +577,8 @@ impl<T: Transcript> WiringGtProver<T> {
         Self {
             edges,
             lambdas,
+            tau,
+            gt_exp_out_step,
             num_c_vars,
             k_exp,
             k_mul,
@@ -580,6 +648,22 @@ impl<T: Transcript> WiringGtProver<T> {
 
         // x has been fully bound (all 11 rounds), so x-polynomials are scalars now.
         let eq_u_at_r = self.eq_u_poly.get_bound_coeff(0);
+
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_EQS").is_some() {
+            let eq_s_zero_at_r = self.eq_s_default.get_bound_coeff(0);
+            let eq_s_miller_at_r = self.eq_s_miller_out.get_bound_coeff(0);
+            let eq_s_exp0_at_r = self
+                .eq_s_by_exp
+                .get(0)
+                .and_then(|x| x.as_ref())
+                .map(|p| p.get_bound_coeff(0));
+            tracing::info!(
+                ?eq_s_zero_at_r,
+                ?eq_s_miller_at_r,
+                ?eq_s_exp0_at_r,
+                "gt_wiring: prover eq_s samples at r_step (from bound polynomials)"
+            );
+        }
         let joint_at_r = self
             .joint_commitment
             .as_ref()
@@ -628,6 +712,20 @@ impl<T: Transcript> WiringGtProver<T> {
                     .unwrap_or(Fq::zero())
             })
             .collect();
+
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_EXPECTED_SAMPLES").is_some() {
+            let gt_input2_at_r = gt_inputs_at_r.get(&2).copied();
+            let exp_base_input0_at_r = exp_base_inputs_at_r.get(0).copied();
+            tracing::info!(
+                ?eq_u_at_r,
+                ?joint_at_r,
+                ?pairing_rhs_at_r,
+                ?pairing_miller_rhs_at_r,
+                ?gt_input2_at_r,
+                ?exp_base_input0_at_r,
+                "gt_wiring: prover boundary/input eval samples at r_u"
+            );
+        }
 
         // Scalars per instance at r_x.
         let rho_at_r: Vec<Fq> = (0..num_gt_exp)
@@ -794,6 +892,11 @@ impl<T: Transcript> WiringGtProver<T> {
             pairing_rhs_at_r,
             pairing_miller_rhs_at_r,
             edge_eq_s_at_r,
+            rho_at_r: rho_at_r.clone(),
+            mul_lhs_at_r: mul_lhs_at_r.clone(),
+            mul_rhs_at_r: mul_rhs_at_r.clone(),
+            mul_result_at_r: mul_result_at_r.clone(),
+            exp_base_port_at_r: exp_base_port_at_r.clone(),
             rho_c: MultilinearPolynomial::from(rho_c),
             mul_lhs_c: MultilinearPolynomial::from(mul_lhs_c),
             mul_rhs_c: MultilinearPolynomial::from(mul_rhs_c),
@@ -817,6 +920,107 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
     }
 
     fn input_claim(&self, _acc: &ProverOpeningAccumulator<Fq>) -> Fq {
+        // Debug-only: compute the *true* sum over the Boolean cube for this wiring polynomial.
+        //
+        // For a well-formed wiring plan and consistent witnesses, this should be 0.
+        //
+        // This is very useful to distinguish:
+        // - a bug in sumcheck message computation, vs
+        // - a bug in the wiring constraints/witnesses (ports are not actually equal).
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_TRUE_INPUT_CLAIM").is_some() {
+            use crate::zkvm::recursion::gt::types::eq_lsb_evals;
+            use crate::zkvm::recursion::wiring_plan::{GtConsumer, GtProducer};
+
+            // Eq weights for evaluating 4-var MLEs at τ.
+            let w_u: Vec<Fq> = eq_lsb_evals::<Fq>(&self.tau);
+            debug_assert_eq!(w_u.len(), 1 << ELEM_VARS);
+
+            #[inline(always)]
+            fn eval_row_at_tau(poly: &MultilinearPolynomial<Fq>, step: usize, w_u: &[Fq]) -> Fq {
+                let off = step * (1 << ELEM_VARS);
+                let mut out = Fq::zero();
+                for x in 0..(1 << ELEM_VARS) {
+                    out += poly.get_coeff(off + x) * w_u[x];
+                }
+                out
+            }
+
+            // NOTE: We keep this debug computation simple: it will still be informative even if
+            // the wiring is mis-specified (it will surface as a non-zero claim).
+            let mut sum = Fq::zero();
+            for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
+                let src_eval = match edge.src {
+                    GtProducer::GtExpRho { instance } => {
+                        let poly = self.rho_polys[instance].as_ref().expect("missing rho poly");
+                        let s_out = self.gt_exp_out_step[instance];
+                        eval_row_at_tau(poly, s_out, &w_u)
+                    }
+                    GtProducer::MultiMillerLoopOut { instance } => {
+                        let poly = self
+                            .miller_out
+                            .get(&instance)
+                            .expect("missing miller_out poly");
+                        eval_row_at_tau(poly, (1 << STEP_VARS) - 1, &w_u)
+                    }
+                    GtProducer::GtMulResult { instance } => {
+                        let poly = self.mul_result[instance].as_ref().expect("missing mul_result");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtProducer::GtExpBase { instance } => {
+                        let poly = self
+                            .exp_base_inputs[instance]
+                            .as_ref()
+                            .expect("missing exp_base_input");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtProducer::JointCommitment => {
+                        let poly = self.joint_commitment.as_ref().expect("missing joint");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtProducer::GtInput { value_id } => {
+                        let poly = self
+                            .gt_inputs
+                            .get(&value_id)
+                            .expect("missing gt_inputs poly");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                };
+                let dst_eval = match edge.dst {
+                    GtConsumer::GtMulLhs { instance } => {
+                        let poly = self.mul_lhs[instance].as_ref().expect("missing mul_lhs");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtConsumer::GtMulRhs { instance } => {
+                        let poly = self.mul_rhs[instance].as_ref().expect("missing mul_rhs");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtConsumer::GtExpBase { instance } => {
+                        let poly = self
+                            .exp_base_port[instance]
+                            .as_ref()
+                            .expect("missing exp_base_port");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtConsumer::JointCommitment => {
+                        let poly = self.joint_commitment.as_ref().expect("missing joint");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtConsumer::PairingBoundaryRhs => {
+                        let poly = self.pairing_rhs.as_ref().expect("missing pairing_rhs");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                    GtConsumer::PairingBoundaryMillerRhs => {
+                        let poly = self
+                            .pairing_miller_rhs
+                            .as_ref()
+                            .expect("missing pairing_miller_rhs");
+                        eval_row_at_tau(poly, 0, &w_u)
+                    }
+                };
+                sum += *lambda * (src_eval - dst_eval);
+            }
+            tracing::info!(?sum, "gt_wiring: TRUE input claim (debug)");
+        }
         Fq::zero()
     }
 
@@ -870,6 +1074,49 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
             // Phase 2: bind c (k rounds), after x has been fully bound.
             self.ensure_c_state();
             let state = self.c_state.as_ref().expect("c_state must be initialized");
+
+            // Debug aid: check that the claim entering c-phase matches the direct evaluation
+            // of Σ_c P(r_x, c), computed from the per-instance endpoint scalars.
+            if round == X_VARS && std::env::var_os("JOLT_DEBUG_GT_WIRING_PHASE_SPLIT").is_some() {
+                use crate::zkvm::recursion::wiring_plan::{GtConsumer, GtProducer};
+                let mut direct = Fq::zero();
+                for (edge_idx, edge) in self.edges.iter().enumerate() {
+                    let lambda = self.lambdas[edge_idx];
+                    let eq_s_at_r = state.edge_eq_s_at_r[edge_idx];
+                    let edge_coeff = state.eq_u_at_r * lambda * eq_s_at_r;
+
+                    let src = match edge.src {
+                        GtProducer::GtExpRho { instance } => state.rho_at_r[instance],
+                        GtProducer::GtMulResult { instance } => state.mul_result_at_r[instance],
+                        GtProducer::GtExpBase { instance } => state.exp_base_inputs_at_r[instance],
+                        GtProducer::JointCommitment => state.joint_at_r,
+                        GtProducer::GtInput { value_id } => *state
+                            .gt_inputs_at_r
+                            .get(&value_id)
+                            .expect("missing gt_inputs_at_r entry for GtProducer::GtInput"),
+                        GtProducer::MultiMillerLoopOut { instance } => *state
+                            .miller_out_at_r
+                            .get(&instance)
+                            .expect("missing miller_out_at_r entry for MultiMillerLoopOut"),
+                    };
+
+                    let dst = match edge.dst {
+                        GtConsumer::GtMulLhs { instance } => state.mul_lhs_at_r[instance],
+                        GtConsumer::GtMulRhs { instance } => state.mul_rhs_at_r[instance],
+                        GtConsumer::GtExpBase { instance } => state.exp_base_port_at_r[instance],
+                        GtConsumer::JointCommitment => state.joint_at_r,
+                        GtConsumer::PairingBoundaryRhs => state.pairing_rhs_at_r,
+                        GtConsumer::PairingBoundaryMillerRhs => state.pairing_miller_rhs_at_r,
+                    };
+
+                    direct += edge_coeff * (src - dst);
+                }
+                tracing::info!(
+                    ?previous_claim,
+                    ?direct,
+                    "gt_wiring: phase split check (claim entering c-phase)"
+                );
+            }
 
             let num_remaining = state.rho_c.get_num_vars();
             debug_assert!(num_remaining > 0);
@@ -1099,6 +1346,233 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for WiringGtProver<T> {
                 .as_mut()
                 .expect("c_state must be initialized")
                 .bind(r_j);
+
+            // Debug aid: after binding the final c variable, compute the wiring polynomial value
+            // at the full random point r = (r_x, r_c) using the *actual* selector polynomials.
+            //
+            // This lets us distinguish:
+            // - selector/indexing mismatches (eq_c vs selector MLE), vs
+            // - sumcheck message computation bugs.
+            if round + 1 == self.num_rounds()
+                && std::env::var_os("JOLT_DEBUG_GT_WIRING_FINAL_EVAL").is_some()
+            {
+                use crate::zkvm::recursion::wiring_plan::{GtConsumer, GtProducer};
+                let state = self.c_state.as_ref().expect("c_state must be initialized");
+
+                let dummy_exp = self.num_c_vars.saturating_sub(self.k_exp);
+                let dummy_mul = self.num_c_vars.saturating_sub(self.k_mul);
+                let beta_exp = beta(dummy_exp);
+                let beta_mul = beta(dummy_mul);
+                let selector_key = |dummy: usize, k_family: usize, idx: usize| -> u64 {
+                    ((dummy as u64) << 48) | ((k_family as u64) << 32) | (idx as u64)
+                };
+                let sel_eval = |key: u64| -> Fq {
+                    state
+                        .selectors
+                        .get(&key)
+                        .expect("missing selector")
+                        .get_bound_coeff(0)
+                };
+
+                // Family-oracle evaluations at r_c.
+                let rho_val = state.rho_c.get_bound_coeff(0);
+                let mul_lhs_val = state.mul_lhs_c.get_bound_coeff(0);
+                let mul_rhs_val = state.mul_rhs_c.get_bound_coeff(0);
+                let mul_out_val = state.mul_result_c.get_bound_coeff(0);
+                let base_port_val = state.base_port_c.get_bound_coeff(0);
+
+                // Quick sanity samples: selector evals for instance 0 (if present).
+                let sel_exp0 = state
+                    .selectors
+                    .get(&selector_key(dummy_exp, self.k_exp, 0))
+                    .map(|p| p.get_bound_coeff(0));
+                let sel_mul0 = state
+                    .selectors
+                    .get(&selector_key(dummy_mul, self.k_mul, 0))
+                    .map(|p| p.get_bound_coeff(0));
+                let sel_exp1 = state
+                    .selectors
+                    .get(&selector_key(dummy_exp, self.k_exp, 1))
+                    .map(|p| p.get_bound_coeff(0));
+                let sel_mul1 = state
+                    .selectors
+                    .get(&selector_key(dummy_mul, self.k_mul, 1))
+                    .map(|p| p.get_bound_coeff(0));
+                tracing::info!(
+                    ?rho_val,
+                    ?mul_lhs_val,
+                    ?mul_rhs_val,
+                    ?mul_out_val,
+                    ?base_port_val,
+                    ?sel_exp0,
+                    ?sel_mul0,
+                    ?sel_exp1,
+                    ?sel_mul1,
+                    "gt_wiring: debug samples at r_c"
+                );
+
+                let mut g_at_r = Fq::zero();
+                let mut bucket_rho = Fq::zero();
+                let mut bucket_mul = Fq::zero();
+                let mut bucket_exp_base = Fq::zero();
+                let mut bucket_joint = Fq::zero();
+                let mut bucket_gt_input = Fq::zero();
+                let mut bucket_mml = Fq::zero();
+                for (edge_idx, edge) in self.edges.iter().enumerate() {
+                    let lambda = self.lambdas[edge_idx];
+                    let eq_s_at_r = state.edge_eq_s_at_r[edge_idx];
+                    let edge_coeff = state.eq_u_at_r * lambda * eq_s_at_r;
+
+                    // Source selector + beta + value at r.
+                    let (sel_src_key, beta_src, src_val) = match edge.src {
+                        GtProducer::GtExpRho { instance } => (
+                            selector_key(dummy_exp, self.k_exp, instance),
+                            beta_exp,
+                            rho_val,
+                        ),
+                        GtProducer::GtMulResult { instance } => (
+                            selector_key(dummy_mul, self.k_mul, instance),
+                            beta_mul,
+                            mul_out_val,
+                        ),
+                        GtProducer::GtExpBase { instance } => (
+                            selector_key(dummy_exp, self.k_exp, instance),
+                            beta_exp,
+                            state.exp_base_inputs_at_r[instance],
+                        ),
+                        GtProducer::JointCommitment => {
+                            // Anchor to destination family selector.
+                            match edge.dst {
+                                GtConsumer::GtMulLhs { instance }
+                                | GtConsumer::GtMulRhs { instance } => (
+                                    selector_key(dummy_mul, self.k_mul, instance),
+                                    beta_mul,
+                                    state.joint_at_r,
+                                ),
+                                GtConsumer::GtExpBase { instance } => (
+                                    selector_key(dummy_exp, self.k_exp, instance),
+                                    beta_exp,
+                                    state.joint_at_r,
+                                ),
+                                GtConsumer::JointCommitment
+                                | GtConsumer::PairingBoundaryRhs
+                                | GtConsumer::PairingBoundaryMillerRhs => (
+                                    selector_key(dummy_mul, self.k_mul, 0),
+                                    beta_mul,
+                                    state.joint_at_r,
+                                ),
+                            }
+                        }
+                        GtProducer::GtInput { value_id } => {
+                            let v = *state.gt_inputs_at_r.get(&value_id).expect("missing gt input");
+                            match edge.dst {
+                                GtConsumer::GtMulLhs { instance }
+                                | GtConsumer::GtMulRhs { instance } => (
+                                    selector_key(dummy_mul, self.k_mul, instance),
+                                    beta_mul,
+                                    v,
+                                ),
+                                GtConsumer::GtExpBase { instance } => (
+                                    selector_key(dummy_exp, self.k_exp, instance),
+                                    beta_exp,
+                                    v,
+                                ),
+                                GtConsumer::JointCommitment
+                                | GtConsumer::PairingBoundaryRhs
+                                | GtConsumer::PairingBoundaryMillerRhs => (
+                                    selector_key(dummy_mul, self.k_mul, 0),
+                                    beta_mul,
+                                    v,
+                                ),
+                            }
+                        }
+                        GtProducer::MultiMillerLoopOut { instance } => {
+                            let v = *state
+                                .miller_out_at_r
+                                .get(&instance)
+                                .expect("missing mml out");
+                            match edge.dst {
+                                GtConsumer::GtMulLhs { instance }
+                                | GtConsumer::GtMulRhs { instance } => (
+                                    selector_key(dummy_mul, self.k_mul, instance),
+                                    beta_mul,
+                                    v,
+                                ),
+                                GtConsumer::GtExpBase { instance } => (
+                                    selector_key(dummy_exp, self.k_exp, instance),
+                                    beta_exp,
+                                    v,
+                                ),
+                                GtConsumer::JointCommitment
+                                | GtConsumer::PairingBoundaryRhs
+                                | GtConsumer::PairingBoundaryMillerRhs => (
+                                    selector_key(dummy_mul, self.k_mul, 0),
+                                    beta_mul,
+                                    v,
+                                ),
+                            }
+                        }
+                    };
+
+                    // Destination selector + beta + value at r.
+                    let (sel_dst_key, beta_dst, dst_val) = match edge.dst {
+                        GtConsumer::GtMulLhs { instance } => (
+                            selector_key(dummy_mul, self.k_mul, instance),
+                            beta_mul,
+                            mul_lhs_val,
+                        ),
+                        GtConsumer::GtMulRhs { instance } => (
+                            selector_key(dummy_mul, self.k_mul, instance),
+                            beta_mul,
+                            mul_rhs_val,
+                        ),
+                        GtConsumer::GtExpBase { instance } => (
+                            selector_key(dummy_exp, self.k_exp, instance),
+                            beta_exp,
+                            base_port_val,
+                        ),
+                        // Anchor boundary constants to src family selector.
+                        GtConsumer::JointCommitment => (sel_src_key, beta_src, state.joint_at_r),
+                        GtConsumer::PairingBoundaryRhs => {
+                            (sel_src_key, beta_src, state.pairing_rhs_at_r)
+                        }
+                        GtConsumer::PairingBoundaryMillerRhs => (
+                            sel_src_key,
+                            beta_src,
+                            state.pairing_miller_rhs_at_r,
+                        ),
+                    };
+
+                    let sel_src = sel_eval(sel_src_key);
+                    let sel_dst = sel_eval(sel_dst_key);
+                    let contrib =
+                        edge_coeff * (beta_src * sel_src * src_val - beta_dst * sel_dst * dst_val);
+                    g_at_r += contrib;
+                    if std::env::var_os("JOLT_DEBUG_GT_WIRING_BUCKETS").is_some() {
+                        match edge.src {
+                            GtProducer::GtExpRho { .. } => bucket_rho += contrib,
+                            GtProducer::GtMulResult { .. } => bucket_mul += contrib,
+                            GtProducer::GtExpBase { .. } => bucket_exp_base += contrib,
+                            GtProducer::JointCommitment => bucket_joint += contrib,
+                            GtProducer::GtInput { .. } => bucket_gt_input += contrib,
+                            GtProducer::MultiMillerLoopOut { .. } => bucket_mml += contrib,
+                        }
+                    }
+                }
+
+                tracing::info!(?g_at_r, "gt_wiring: g(r) computed from bound c-polys (debug)");
+                if std::env::var_os("JOLT_DEBUG_GT_WIRING_BUCKETS").is_some() {
+                    tracing::info!(
+                        ?bucket_rho,
+                        ?bucket_mul,
+                        ?bucket_exp_base,
+                        ?bucket_joint,
+                        ?bucket_gt_input,
+                        ?bucket_mml,
+                        "gt_wiring: prover per-src bucket sums (debug)"
+                    );
+                }
+            }
         }
     }
 
@@ -1149,6 +1623,52 @@ impl WiringGtVerifier {
             transcript.challenge_vector_optimized::<Fq>(ELEM_VARS);
         let edges = input.wiring.gt.clone();
         let lambdas = transcript.challenge_vector(edges.len());
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_CHALLENGES").is_some() {
+            let mut edge_fp: u64 = 0;
+            for e in edges.iter() {
+                let src_tag: u64 = match e.src {
+                    GtProducer::GtExpRho { .. } => 1,
+                    GtProducer::GtMulResult { .. } => 2,
+                    GtProducer::GtExpBase { .. } => 3,
+                    GtProducer::JointCommitment => 4,
+                    GtProducer::GtInput { .. } => 5,
+                    GtProducer::MultiMillerLoopOut { .. } => 6,
+                };
+                let src_idx: u64 = match e.src {
+                    GtProducer::GtExpRho { instance }
+                    | GtProducer::GtMulResult { instance }
+                    | GtProducer::GtExpBase { instance }
+                    | GtProducer::MultiMillerLoopOut { instance } => instance as u64,
+                    GtProducer::GtInput { value_id } => value_id as u64,
+                    GtProducer::JointCommitment => 0,
+                };
+                let dst_tag: u64 = match e.dst {
+                    GtConsumer::GtMulLhs { .. } => 11,
+                    GtConsumer::GtMulRhs { .. } => 12,
+                    GtConsumer::GtExpBase { .. } => 13,
+                    GtConsumer::JointCommitment => 14,
+                    GtConsumer::PairingBoundaryRhs => 15,
+                    GtConsumer::PairingBoundaryMillerRhs => 16,
+                };
+                let dst_idx: u64 = match e.dst {
+                    GtConsumer::GtMulLhs { instance }
+                    | GtConsumer::GtMulRhs { instance }
+                    | GtConsumer::GtExpBase { instance } => instance as u64,
+                    _ => 0,
+                };
+                let v = (src_tag << 56) ^ (dst_tag << 48) ^ (src_idx << 16) ^ dst_idx;
+                edge_fp = edge_fp.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(v);
+            }
+            tracing::info!(
+                tau0 = ?tau.get(0),
+                lambda0 = ?lambdas.get(0),
+                edges = edges.len(),
+                edge0 = ?edges.get(0),
+                edge_last = ?edges.last(),
+                edge_fp = edge_fp,
+                "gt_wiring: verifier sampled challenges"
+            );
+        }
 
         let num_c_vars = k_gt(&input.constraint_types);
         let k_exp = k_exp(&input.constraint_types);
@@ -1295,8 +1815,9 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
     ) -> Fq {
         debug_assert_eq!(sumcheck_challenges.len(), X_VARS + self.num_c_vars);
 
-        let r_step = &sumcheck_challenges[..STEP_VARS];
-        let r_elem_chal = &sumcheck_challenges[STEP_VARS..STEP_VARS + ELEM_VARS];
+        // x11 convention: (x, s) where x are the low 4 bits (elem/u) and s are the high 7 bits (step).
+        let r_elem_chal = &sumcheck_challenges[..ELEM_VARS];
+        let r_step = &sumcheck_challenges[ELEM_VARS..ELEM_VARS + STEP_VARS];
         let r_c = &sumcheck_challenges[X_VARS..];
         debug_assert_eq!(r_c.len(), self.num_c_vars);
 
@@ -1351,7 +1872,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 step_rounds = STEP_VARS,
                 elem_rounds = ELEM_VARS,
                 c_rounds = self.num_c_vars,
-                "gt_wiring: sumcheck_challenges partitioned as (step, elem, c)"
+                "gt_wiring: sumcheck_challenges partitioned as (elem, step, c)"
             );
             tracing::info!(?r_step, ?r_elem_chal, "gt_wiring: r_step/r_elem (challenge order)");
             tracing::info!(r_c_len = r_c.len(), "gt_wiring: r_c len");
@@ -1390,8 +1911,8 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                     "gt_wiring: MultiMillerLoop::F opening point len"
                 );
                 if mml_pt.r.len() >= STEP_VARS + ELEM_VARS {
-                    let mml_step = &mml_pt.r[..STEP_VARS];
-                    let mml_elem = &mml_pt.r[STEP_VARS..STEP_VARS + ELEM_VARS];
+                    let mml_elem = &mml_pt.r[..ELEM_VARS];
+                    let mml_step = &mml_pt.r[ELEM_VARS..ELEM_VARS + STEP_VARS];
                     tracing::info!(?mml_step, ?mml_elem, "gt_wiring: MML opening step/elem");
                 }
             }
@@ -1438,6 +1959,15 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             })
             .collect();
 
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_EQS").is_some() {
+            tracing::info!(
+                ?eq_s_zero,
+                ?eq_s_miller,
+                eq_s_exp0 = ?eq_s_exp.get(0).copied(),
+                "gt_wiring: verifier eq_s samples at r_step (direct)"
+            );
+        }
+
         // Precompute eq(c, idx) once per referenced instance, then accumulate coefficients so we
         // only touch expensive values (Fq12 bases) once.
         let num_exp = self.gt_exp_out_step.len();
@@ -1455,20 +1985,68 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
             .map(|i| self.eq_c_tail(r_c_mul_tail, i, self.k_mul))
             .collect();
 
-        let mut coeff_rho = Fq::zero();
-        let mut coeff_mul_out = Fq::zero();
-        let mut coeff_mul_lhs = Fq::zero();
-        let mut coeff_mul_rhs = Fq::zero();
-        let mut coeff_joint = Fq::zero();
-        let mut coeff_pairing = Fq::zero();
-        let mut coeff_pairing_miller = Fq::zero();
-        let mut coeff_miller_out: Vec<Fq> = vec![Fq::zero(); self.miller_instance_ids.len()];
-        let mut coeff_gt_inputs: Vec<Fq> = vec![Fq::zero(); self.gt_input_values.len()];
-        let mut coeff_base_input: Vec<Fq> = vec![Fq::zero(); num_exp];
-        let mut coeff_base_port = Fq::zero();
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_EXPECTED_SAMPLES").is_some() {
+            let eq_c_exp0 = eq_c_exp.get(0).copied();
+            let eq_c_mul0 = eq_c_mul.get(0).copied();
+            let eq_c_exp1 = eq_c_exp.get(1).copied();
+            let eq_c_mul1 = eq_c_mul.get(1).copied();
+            tracing::info!(
+                ?rho_val,
+                ?mul_lhs_val,
+                ?mul_rhs_val,
+                ?mul_out_val,
+                ?base_port_val,
+                ?eq_c_exp0,
+                ?eq_c_mul0,
+                ?eq_c_exp1,
+                ?eq_c_mul1,
+                "gt_wiring: verifier samples at r (claims + eq_c[0])"
+            );
+        }
+        // Evaluate the wiring polynomial directly per edge (mirrors prover logic more closely).
+        //
+        // This avoids subtle bugs in coefficient aggregation, at the cost of O(|edges|) work.
+        let alpha = fq12_eval_linear_coeffs(&elem_weights);
 
+        // Precompute evals for boundary GT inputs (value_id -> eval at r_elem).
+        let gt_input_eval_by_value_id: Vec<Option<Fq>> = self
+            .gt_input_index_by_value_id
+            .iter()
+            .map(|opt_idx| {
+                opt_idx.map(|idx| eval_fq12_packed_at_via_linear_coeffs(&self.gt_input_values[idx], &alpha))
+            })
+            .collect();
+
+        // Precompute GTExp base input evals (indexed by GTExp instance).
+        let mut base_input_eval: Vec<Option<Fq>> = Vec::with_capacity(num_exp);
+        for i in 0..num_exp {
+            let fq12 = self.gt_exp_base_inputs[i];
+            base_input_eval.push(fq12.map(|b| eval_fq12_packed_at_via_linear_coeffs(&b, &alpha)));
+        }
+
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_EXPECTED_SAMPLES").is_some() {
+            let gt_input2_eval = gt_input_eval_by_value_id.get(2).copied().flatten();
+            let base_input0_eval = base_input_eval.get(0).copied().flatten();
+            tracing::info!(
+                ?eq_u,
+                ?joint_eval,
+                ?pairing_rhs_eval,
+                ?pairing_miller_rhs_eval,
+                ?gt_input2_eval,
+                ?base_input0_eval,
+                "gt_wiring: verifier boundary/input eval samples at r_u"
+            );
+        }
+
+        let mut sum = Fq::zero();
+        let mut bucket_rho = Fq::zero();
+        let mut bucket_mul = Fq::zero();
+        let mut bucket_exp_base = Fq::zero();
+        let mut bucket_joint = Fq::zero();
+        let mut bucket_gt_input = Fq::zero();
+        let mut bucket_mml = Fq::zero();
         for (lambda, edge) in self.lambdas.iter().zip(self.edges.iter()) {
-            // Eq(s, s_out) depends on the *source* family: only GTExp rho carries the step selector.
+            // Eq(s, s_out) depends on the *source* family.
             let eq_s = match edge.src {
                 GtProducer::GtExpRho { instance } => eq_s_exp[instance],
                 GtProducer::MultiMillerLoopOut { .. } => eq_s_miller,
@@ -1477,153 +2055,121 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringGtVerifier {
                 | GtProducer::JointCommitment
                 | GtProducer::GtInput { .. } => eq_s_zero,
             };
-            let scale = *lambda * eq_s;
+            let lambda_fq: Fq = (*lambda).into();
+            let scale = lambda_fq * eq_s;
 
-            // Source contribution.
-            let src_weight =
-                match edge.src {
-                    GtProducer::GtExpRho { instance } => {
-                        let w = beta_exp * eq_c_exp[instance];
-                        coeff_rho += scale * w;
-                        w
-                    }
-                    GtProducer::GtExpBase { instance } => {
-                        let w = beta_exp * eq_c_exp[instance];
-                        coeff_base_input[instance] += scale * w;
-                        w
-                    }
-                    GtProducer::GtMulResult { instance } => {
-                        let w = beta_mul * eq_c_mul[instance];
-                        coeff_mul_out += scale * w;
-                        w
-                    }
-                    GtProducer::JointCommitment => {
-                        // Anchor this global constant source to the destination family selector.
-                        let w = match edge.dst {
-                            GtConsumer::GtMulLhs { instance }
-                            | GtConsumer::GtMulRhs { instance } => beta_mul * eq_c_mul[instance],
-                            GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
-                            GtConsumer::JointCommitment
-                            | GtConsumer::PairingBoundaryRhs
-                            | GtConsumer::PairingBoundaryMillerRhs => {
-                                // Should not happen in well-formed plans; fall back to 1.
-                                Fq::one()
-                            }
-                        };
-                        coeff_joint += scale * w;
-                        w
-                    }
-                    GtProducer::GtInput { value_id } => {
-                        // Anchor this global constant source to the destination family selector.
-                        let w = match edge.dst {
-                            GtConsumer::GtMulLhs { instance }
-                            | GtConsumer::GtMulRhs { instance } => beta_mul * eq_c_mul[instance],
-                            GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
-                            GtConsumer::JointCommitment
-                            | GtConsumer::PairingBoundaryRhs
-                            | GtConsumer::PairingBoundaryMillerRhs => {
-                                // Should not happen in well-formed plans; fall back to 1.
-                                Fq::one()
-                            }
-                        };
-                        let vidx = value_id as usize;
-                        let idx = self
-                            .gt_input_index_by_value_id
-                            .get(vidx)
-                            .and_then(|x| *x)
-                            .expect("missing gt_inputs index for GtProducer::GtInput");
-                        coeff_gt_inputs[idx] += scale * w;
-                        w
-                    }
-                    GtProducer::MultiMillerLoopOut { instance } => {
-                        // Anchor this (proved) source to the destination family selector.
-                        let w = match edge.dst {
-                            GtConsumer::GtMulLhs { instance }
-                            | GtConsumer::GtMulRhs { instance } => beta_mul * eq_c_mul[instance],
-                            GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
-                            GtConsumer::JointCommitment
-                            | GtConsumer::PairingBoundaryRhs
-                            | GtConsumer::PairingBoundaryMillerRhs => {
-                                // Should not happen in well-formed plans; fall back to 1.
-                                Fq::one()
-                            }
-                        };
-                        let idx = self
-                            .miller_index_by_constraint
-                            .get(instance)
-                            .and_then(|x| *x)
-                            .expect("missing miller index for MultiMillerLoopOut");
-                        coeff_miller_out[idx] += scale * w;
-                        w
-                    }
-                };
+            // Source weight and value at r.
+            let (src_w, src_v): (Fq, Fq) = match edge.src {
+                GtProducer::GtExpRho { instance } => (beta_exp * eq_c_exp[instance], rho_val),
+                GtProducer::GtMulResult { instance } => (beta_mul * eq_c_mul[instance], mul_out_val),
+                GtProducer::GtExpBase { instance } => (
+                    beta_exp * eq_c_exp[instance],
+                    base_input_eval[instance]
+                        .expect("missing gt_exp_base_inputs entry for GTExp base input producer"),
+                ),
+                GtProducer::JointCommitment => {
+                    // Anchor this global constant source to the destination family selector.
+                    let w = match edge.dst {
+                        GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                            beta_mul * eq_c_mul[instance]
+                        }
+                        GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
+                        GtConsumer::JointCommitment
+                        | GtConsumer::PairingBoundaryRhs
+                        | GtConsumer::PairingBoundaryMillerRhs => {
+                            // Should not happen in well-formed plans; fall back to 1.
+                            Fq::one()
+                        }
+                    };
+                    (w, joint_eval)
+                }
+                GtProducer::GtInput { value_id } => {
+                    let w = match edge.dst {
+                        GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                            beta_mul * eq_c_mul[instance]
+                        }
+                        GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
+                        GtConsumer::JointCommitment
+                        | GtConsumer::PairingBoundaryRhs
+                        | GtConsumer::PairingBoundaryMillerRhs => {
+                            // Should not happen in well-formed plans; fall back to 1.
+                            Fq::one()
+                        }
+                    };
+                    let vidx = value_id as usize;
+                    let v = gt_input_eval_by_value_id
+                        .get(vidx)
+                        .and_then(|x| *x)
+                        .expect("missing gt_inputs entry for GtProducer::GtInput");
+                    (w, v)
+                }
+                GtProducer::MultiMillerLoopOut { instance } => {
+                    // Anchor this proved x-only value to the destination family selector.
+                    let w = match edge.dst {
+                        GtConsumer::GtMulLhs { instance } | GtConsumer::GtMulRhs { instance } => {
+                            beta_mul * eq_c_mul[instance]
+                        }
+                        GtConsumer::GtExpBase { instance } => beta_exp * eq_c_exp[instance],
+                        GtConsumer::JointCommitment
+                        | GtConsumer::PairingBoundaryRhs
+                        | GtConsumer::PairingBoundaryMillerRhs => {
+                            // Should not happen in well-formed plans; fall back to 1.
+                            Fq::one()
+                        }
+                    };
+                    let idx = self
+                        .miller_index_by_constraint
+                        .get(instance)
+                        .and_then(|x| *x)
+                        .expect("missing miller index for MultiMillerLoopOut");
+                    let global_idx = self.miller_instance_ids[idx];
+                    let v = acc.get_virtual_polynomial_claim(
+                        VirtualPolynomial::multi_miller_loop_f(global_idx),
+                        SumcheckId::MultiMillerLoop,
+                    );
+                    (w, v)
+                }
+            };
 
-            // Destination contribution.
-            match edge.dst {
-                GtConsumer::GtMulLhs { instance } => {
-                    coeff_mul_lhs += scale * (beta_mul * eq_c_mul[instance]);
-                }
-                GtConsumer::GtMulRhs { instance } => {
-                    coeff_mul_rhs += scale * (beta_mul * eq_c_mul[instance]);
-                }
-                GtConsumer::GtExpBase { instance } => {
-                    coeff_base_port -= scale * (beta_exp * eq_c_exp[instance]);
-                }
+            // Destination weight and value at r.
+            let (dst_w, dst_v): (Fq, Fq) = match edge.dst {
+                GtConsumer::GtMulLhs { instance } => (beta_mul * eq_c_mul[instance], mul_lhs_val),
+                GtConsumer::GtMulRhs { instance } => (beta_mul * eq_c_mul[instance], mul_rhs_val),
+                GtConsumer::GtExpBase { instance } => (beta_exp * eq_c_exp[instance], base_port_val),
                 // Anchor globals to src.
-                GtConsumer::JointCommitment => {
-                    coeff_joint -= scale * src_weight;
-                }
-                GtConsumer::PairingBoundaryRhs => {
-                    coeff_pairing -= scale * src_weight;
-                }
-                GtConsumer::PairingBoundaryMillerRhs => {
-                    coeff_pairing_miller -= scale * src_weight;
+                GtConsumer::JointCommitment => (src_w, joint_eval),
+                GtConsumer::PairingBoundaryRhs => (src_w, pairing_rhs_eval),
+                GtConsumer::PairingBoundaryMillerRhs => (src_w, pairing_miller_rhs_eval),
+            };
+
+            let contrib = (eq_u * scale) * (src_w * src_v - dst_w * dst_v);
+            sum += contrib;
+            if std::env::var_os("JOLT_DEBUG_GT_WIRING_BUCKETS").is_some() {
+                match edge.src {
+                    GtProducer::GtExpRho { .. } => bucket_rho += contrib,
+                    GtProducer::GtMulResult { .. } => bucket_mul += contrib,
+                    GtProducer::GtExpBase { .. } => bucket_exp_base += contrib,
+                    GtProducer::JointCommitment => bucket_joint += contrib,
+                    GtProducer::GtInput { .. } => bucket_gt_input += contrib,
+                    GtProducer::MultiMillerLoopOut { .. } => bucket_mml += contrib,
                 }
             }
         }
 
-        let mut sum = Fq::zero();
-        sum += coeff_rho * rho_val;
-        sum += coeff_mul_out * mul_out_val;
-        sum -= coeff_mul_lhs * mul_lhs_val;
-        sum -= coeff_mul_rhs * mul_rhs_val;
-        sum += coeff_joint * joint_eval;
-        sum += coeff_pairing * pairing_rhs_eval;
-        sum += coeff_pairing_miller * pairing_miller_rhs_eval;
-        sum += coeff_base_port * base_port_val;
-
-        for (i, coeff) in coeff_miller_out.iter().enumerate() {
-            if coeff.is_zero() {
-                continue;
-            }
-            let global_idx = self.miller_instance_ids[i];
-            let val = acc.get_virtual_polynomial_claim(
-                VirtualPolynomial::multi_miller_loop_f(global_idx),
-                SumcheckId::MultiMillerLoop,
+        if std::env::var_os("JOLT_DEBUG_GT_WIRING_BUCKETS").is_some() {
+            tracing::info!(
+                ?bucket_rho,
+                ?bucket_mul,
+                ?bucket_exp_base,
+                ?bucket_joint,
+                ?bucket_gt_input,
+                ?bucket_mml,
+                ?sum,
+                "gt_wiring: verifier per-src bucket sums (debug)"
             );
-            sum += *coeff * val;
         }
 
-        let alpha = fq12_eval_linear_coeffs(&elem_weights);
-        for (idx, c) in coeff_gt_inputs.iter().enumerate() {
-            if (*c).is_zero() {
-                continue;
-            }
-            let fq12 = &self.gt_input_values[idx];
-            let eval = eval_fq12_packed_at_via_linear_coeffs(fq12, &alpha);
-            sum += (*c) * eval;
-        }
-        for (i, c) in coeff_base_input.iter().enumerate() {
-            if c.is_zero() {
-                continue;
-            }
-            let base_fq12 = self.gt_exp_base_inputs[i]
-                .expect("missing gt_exp_base_inputs entry for GTExp base input producer");
-            let base_eval = eval_fq12_packed_at_via_linear_coeffs(&base_fq12, &alpha);
-            sum += *c * base_eval;
-        }
-
-        eq_u * sum
+        sum
     }
 
     fn cache_openings(

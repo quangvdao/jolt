@@ -154,12 +154,10 @@ fn fq12_sparse_034(c0: Fq2, c3: Fq2, c4: Fq2) -> Fq12 {
 fn expand_elem_4_to_11(evals_4: &[Fq]) -> Vec<Fq> {
     debug_assert_eq!(evals_4.len(), ELEM_SIZE);
     let mut evals_11 = vec![Fq::zero(); 1 << NUM_VARS];
-    for x in 0..ELEM_SIZE {
-        let base = x * STEP_SIZE;
-        let v = evals_4[x];
-        for s in 0..STEP_SIZE {
-            evals_11[base + s] = v;
-        }
+    // x11 layout: idx = s * 16 + x (x in low bits). Replicate across step.
+    for s in 0..STEP_SIZE {
+        let off = s * ELEM_SIZE;
+        evals_11[off..off + ELEM_SIZE].copy_from_slice(evals_4);
     }
     evals_11
 }
@@ -213,7 +211,7 @@ fn eval_mle_lsb_first_in_place(mut evals: Vec<Fq>, r: &[Fq]) -> Fq {
 
 fn compute_shared_scalars(eval_point: &[Fq]) -> SharedScalars<Fq> {
     debug_assert_eq!(eval_point.len(), NUM_VARS);
-    let r_elem = &eval_point[STEP_VARS..];
+    let r_elem = &eval_point[..ELEM_VARS];
     debug_assert_eq!(r_elem.len(), ELEM_VARS);
 
     let g = eval_mle_lsb_first_in_place(get_g_mle(), r_elem);
@@ -578,9 +576,10 @@ fn expected_ops_for_q(q: ark_bn254::G2Affine) -> Vec<(bool, Option<ark_bn254::G2
 fn step_vals_to_11var(step_vals_128: &[Fq]) -> Vec<Fq> {
     debug_assert_eq!(step_vals_128.len(), STEP_SIZE);
     let mut out = vec![Fq::zero(); STEP_SIZE * ELEM_SIZE];
-    for u in 0..ELEM_SIZE {
-        let off = u * STEP_SIZE;
-        out[off..off + STEP_SIZE].copy_from_slice(step_vals_128);
+    // x11 layout: idx = s * 16 + u (u in low 4 bits). Replicate each step value across u.
+    for s in 0..STEP_SIZE {
+        let off = s * ELEM_SIZE;
+        out[off..off + ELEM_SIZE].fill(step_vals_128[s]);
     }
     out
 }
@@ -955,7 +954,7 @@ impl ConstraintListVerifierSpec<Fq, DEGREE> for MultiMillerLoopVerifierSpec<Fq> 
         };
 
         // Evaluate expected schedule/operand polynomials at r_step.
-        let r_step = &eval_point[..STEP_VARS];
+        let r_step = &eval_point[ELEM_VARS..];
         debug_assert_eq!(r_step.len(), STEP_VARS);
 
         let q = self.g2_points[instance];
@@ -1015,65 +1014,68 @@ pub type MultiMillerLoopProver<F> = ConstraintListProver<F, MultiMillerLoopProve
 pub type MultiMillerLoopVerifier<F> =
     ConstraintListVerifier<F, MultiMillerLoopVerifierSpec<F>, DEGREE>;
 
-/// A Stage-2 helper that makes an 11-round MultiMillerLoop instance **front-aligned** (offset=0)
-/// in a longer batched sumcheck, without modifying `BatchedSumcheck`.
+/// Front-aligned wrapper for MultiMillerLoop (MML) inside the Stage-2 batched sumcheck.
 ///
-/// Why this is needed:
-/// - `BatchedSumcheck`’s batching/scaling assumes “dummy rounds” come **before** the active rounds
-///   for each shorter instance.
-/// - If we front-align an 11-round instance inside a 19-round batch, then there are 8 dummy rounds
-///   **after** it. To make the batched polynomial consistent, the instance’s per-round univariates
-///   must be scaled by \(2^{\text{dummy_after}}\) during the active rounds; the built-in dummy
-///   rounds then divide by 2 each time, cancelling the scale and yielding the correct final value.
+/// Stage-2 batching is suffix-aligned by default, so an 11-round MML instance would otherwise be
+/// opened at the suffix-11 slice of the global Stage-2 point. GT wiring, however, assumes MML
+/// outputs are evaluated at the **prefix-11** x11 point (same as other GT producers).
+///
+/// We therefore force `round_offset() = 0` so MML consumes the prefix-11 challenges.
+/// `BatchedSumcheck` already implements dummy-after compensation, so we do **not** manually scale
+/// messages here.
 pub struct FrontAlignedMultiMillerLoopProver {
     inner: MultiMillerLoopProver<Fq>,
-    scale: Fq,
-    inv_scale: Fq,
 }
 
 impl FrontAlignedMultiMillerLoopProver {
-    /// `dummy_after_rounds` should be `max_num_rounds - 11`.
-    pub fn new(inner: MultiMillerLoopProver<Fq>, dummy_after_rounds: usize) -> Self {
-        let scale = Fq::one().mul_pow_2(dummy_after_rounds);
-        let inv_scale =
-            ark_ff::Field::inverse(&scale).expect("2^dummy_after has an inverse in the field");
-        Self {
-            inner,
-            scale,
-            inv_scale,
-        }
+    pub fn new(inner: MultiMillerLoopProver<Fq>) -> Self {
+        Self { inner }
     }
+}
+
+#[cfg(feature = "allocative")]
+impl allocative::Allocative for FrontAlignedMultiMillerLoopProver {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
 
 impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FrontAlignedMultiMillerLoopProver {
     fn degree(&self) -> usize {
-        SumcheckInstanceProver::<Fq, T>::degree(&self.inner)
+        <MultiMillerLoopProver<Fq> as SumcheckInstanceProver<Fq, T>>::degree(&self.inner)
     }
 
     fn num_rounds(&self) -> usize {
-        SumcheckInstanceProver::<Fq, T>::num_rounds(&self.inner)
+        <MultiMillerLoopProver<Fq> as SumcheckInstanceProver<Fq, T>>::num_rounds(&self.inner)
     }
 
     fn round_offset(&self, _max_num_rounds: usize) -> usize {
-        // Force this instance to be active in the **first** 11 global rounds.
         0
     }
 
     fn input_claim(&self, accumulator: &ProverOpeningAccumulator<Fq>) -> Fq {
-        SumcheckInstanceProver::<Fq, T>::input_claim(&self.inner, accumulator)
+        <MultiMillerLoopProver<Fq> as SumcheckInstanceProver<Fq, T>>::input_claim(
+            &self.inner,
+            accumulator,
+        )
     }
 
     fn compute_message(&mut self, round: usize, previous_claim: Fq) -> UniPoly<Fq> {
-        // Maintain invariant: `previous_claim` seen by `inner` is unscaled, while the outer
-        // batched sumcheck carries the scaled claim (so that dummy rounds after can cancel it).
-        let prev_unscaled = previous_claim * self.inv_scale;
-        let poly_unscaled =
-            SumcheckInstanceProver::<Fq, T>::compute_message(&mut self.inner, round, prev_unscaled);
-        poly_unscaled * self.scale
+        <MultiMillerLoopProver<Fq> as SumcheckInstanceProver<Fq, T>>::compute_message(
+            &mut self.inner,
+            round,
+            previous_claim,
+        )
     }
 
     fn ingest_challenge(&mut self, r_j: <Fq as JoltField>::Challenge, round: usize) {
-        SumcheckInstanceProver::<Fq, T>::ingest_challenge(&mut self.inner, r_j, round)
+        <MultiMillerLoopProver<Fq> as SumcheckInstanceProver<Fq, T>>::ingest_challenge(
+            &mut self.inner,
+            r_j,
+            round,
+        )
+    }
+
+    fn finalize(&mut self) {
+        <MultiMillerLoopProver<Fq> as SumcheckInstanceProver<Fq, T>>::finalize(&mut self.inner)
     }
 
     fn cache_openings(
@@ -1082,7 +1084,7 @@ impl<T: Transcript> SumcheckInstanceProver<Fq, T> for FrontAlignedMultiMillerLoo
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        SumcheckInstanceProver::<Fq, T>::cache_openings(
+        <MultiMillerLoopProver<Fq> as SumcheckInstanceProver<Fq, T>>::cache_openings(
             &self.inner,
             accumulator,
             transcript,
@@ -1101,33 +1103,42 @@ impl FrontAlignedMultiMillerLoopVerifier {
     }
 }
 
+#[cfg(feature = "allocative")]
+impl allocative::Allocative for FrontAlignedMultiMillerLoopVerifier {
+    fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
+}
+
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FrontAlignedMultiMillerLoopVerifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        <MultiMillerLoopVerifier<Fq> as SumcheckInstanceVerifier<Fq, T>>::cycle_tracking_label(
+            &self.inner,
+        )
+    }
+
     fn degree(&self) -> usize {
-        SumcheckInstanceVerifier::<Fq, T>::degree(&self.inner)
+        <MultiMillerLoopVerifier<Fq> as SumcheckInstanceVerifier<Fq, T>>::degree(&self.inner)
     }
 
     fn num_rounds(&self) -> usize {
-        SumcheckInstanceVerifier::<Fq, T>::num_rounds(&self.inner)
+        <MultiMillerLoopVerifier<Fq> as SumcheckInstanceVerifier<Fq, T>>::num_rounds(&self.inner)
     }
 
     fn round_offset(&self, _max_num_rounds: usize) -> usize {
         0
     }
 
-    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<Fq>) -> Fq {
-        SumcheckInstanceVerifier::<Fq, T>::input_claim(&self.inner, accumulator)
+    fn input_claim(&self, acc: &VerifierOpeningAccumulator<Fq>) -> Fq {
+        <MultiMillerLoopVerifier<Fq> as SumcheckInstanceVerifier<Fq, T>>::input_claim(&self.inner, acc)
     }
 
     fn expected_output_claim(
         &self,
-        accumulator: &VerifierOpeningAccumulator<Fq>,
+        acc: &VerifierOpeningAccumulator<Fq>,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) -> Fq {
-        // NOTE: no scaling here; the dummy rounds after this instance (handled by BatchedSumcheck)
-        // cancel the prover-side scaling and the final output claim matches the unscaled value.
-        SumcheckInstanceVerifier::<Fq, T>::expected_output_claim(
+        <MultiMillerLoopVerifier<Fq> as SumcheckInstanceVerifier<Fq, T>>::expected_output_claim(
             &self.inner,
-            accumulator,
+            acc,
             sumcheck_challenges,
         )
     }
@@ -1138,7 +1149,7 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for FrontAlignedMultiMillerL
         transcript: &mut T,
         sumcheck_challenges: &[<Fq as JoltField>::Challenge],
     ) {
-        SumcheckInstanceVerifier::<Fq, T>::cache_openings(
+        <MultiMillerLoopVerifier<Fq> as SumcheckInstanceVerifier<Fq, T>>::cache_openings(
             &self.inner,
             accumulator,
             transcript,
@@ -1236,7 +1247,7 @@ mod tests {
 
         for s in 0..step_size {
             for x in 0..elem_size {
-                let idx = x * step_size + s;
+                let idx = s * elem_size + x;
 
                 let vals = MultiMillerLoopValues::<Fq> {
                     f: f[idx],

@@ -4,7 +4,7 @@
 //! - step vars `s ∈ {0,1}^7` (up to 128 steps)
 //! - element vars `x ∈ {0,1}^4` (16 evaluations for the Fq12 MLE representation)
 //!
-//! Layout: `idx = x * 128 + s` (step index in the low bits), matching the packed GT exp layout.
+//! Layout: `idx = s * 16 + x` (element index in the low bits), matching the packed GT x11 layout.
 //!
 //! Important: This witness currently implements a **per-pair Miller loop trace** (one trace per
 //! (G1,G2) pair), suitable for decomposing a multi-pairing into multiple Miller loops plus GT muls.
@@ -39,9 +39,8 @@ fn pack_step_and_elem(step_mles: &[Vec<Fq>], num_steps: usize) -> Vec<Fq> {
     for s in 0..num_steps.min(STEP_SIZE) {
         let row = &step_mles[s];
         debug_assert_eq!(row.len(), ELEM_SIZE, "expected 16 evals per Fq12 MLE row");
-        for x in 0..ELEM_SIZE {
-            packed[x * STEP_SIZE + s] = row[x];
-        }
+        let off = s * ELEM_SIZE;
+        packed[off..off + ELEM_SIZE].copy_from_slice(row);
     }
     packed
 }
@@ -51,9 +50,8 @@ fn pack_step_only(step_vals: &[Fq], num_steps: usize) -> Vec<Fq> {
     let mut packed = vec![Fq::zero(); PACKED_SIZE];
     for s in 0..num_steps.min(STEP_SIZE) {
         let v = step_vals[s];
-        for x in 0..ELEM_SIZE {
-            packed[x * STEP_SIZE + s] = v;
-        }
+        let off = s * ELEM_SIZE;
+        packed[off..off + ELEM_SIZE].fill(v);
     }
     packed
 }

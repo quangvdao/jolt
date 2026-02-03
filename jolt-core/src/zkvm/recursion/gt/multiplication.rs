@@ -62,6 +62,8 @@ use rayon::prelude::*;
 /// Degree bound for GTMul constraint polynomial: eq * ind * (lhs*rhs - result - quotient*g)
 /// Each term: eq (deg 1) * ind (deg 1) * constraint (deg 2) = deg 4.
 const DEGREE: usize = 4;
+const X_VARS: usize = 11; // packed x11 = (u4, s7)
+const STEP_VARS: usize = 7;
 
 // Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
 const CYCLE_VERIFY_RECURSION_STAGE2_GT_MUL_TOTAL: &str = "verify_recursion_stage2_gt_mul_total";
@@ -371,6 +373,98 @@ impl<FqT: Transcript> SumcheckInstanceProver<Fq, FqT> for GtMulProver {
     }
 }
 
+/// A Stage-2 helper that embeds a 12-round GTMul instance (u4 + c_common) into the 19-round
+/// recursion Stage-2 point (x11 + c_common) by treating the 7 step variables `s` as dummy rounds.
+///
+/// This ensures GT wiring sees GTMul openings at the same effective `u` as packed-GT instances
+/// (whose x11 layout is `idx = s * 16 + u`, i.e. `u` are the low 4 rounds).
+pub struct SplicedGtMulProver {
+    inner: GtMulProver,
+}
+
+impl SplicedGtMulProver {
+    pub fn new(inner: GtMulProver) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T: Transcript> SumcheckInstanceProver<Fq, T> for SplicedGtMulProver {
+    fn degree(&self) -> usize {
+        DEGREE
+    }
+
+    fn num_rounds(&self) -> usize {
+        X_VARS + self.inner.params.num_constraint_index_vars_common
+    }
+
+    fn input_claim(&self, accumulator: &ProverOpeningAccumulator<Fq>) -> Fq {
+        let _ = accumulator;
+        // Prove the (Eq-weighted) sum is 0 (same as inner).
+        Fq::zero()
+    }
+
+    fn compute_message(&mut self, round: usize, previous_claim: Fq) -> UniPoly<Fq> {
+        // Dummy step rounds: H(0)=H(1)=previous_claim/2.
+        if (self.inner.params.num_constraint_vars..X_VARS).contains(&round) {
+            let two_inv = Fq::from_u64(2).inverse().unwrap();
+            return UniPoly::from_coeff(vec![previous_claim * two_inv]);
+        }
+        // Map global round -> inner round (skip the 7 step rounds).
+        let inner_round = if round < self.inner.params.num_constraint_vars {
+            round
+        } else {
+            // c rounds begin at global round X_VARS, so subtract STEP_VARS to close the gap.
+            round - STEP_VARS
+        };
+        <GtMulProver as SumcheckInstanceProver<Fq, T>>::compute_message(
+            &mut self.inner,
+            inner_round,
+            previous_claim,
+        )
+    }
+
+    fn ingest_challenge(&mut self, r_j: <Fq as JoltField>::Challenge, round: usize) {
+        // Skip step rounds entirely.
+        if (self.inner.params.num_constraint_vars..X_VARS).contains(&round) {
+            return;
+        }
+        let inner_round = if round < self.inner.params.num_constraint_vars {
+            round
+        } else {
+            round - STEP_VARS
+        };
+        <GtMulProver as SumcheckInstanceProver<Fq, T>>::ingest_challenge(
+            &mut self.inner,
+            r_j,
+            inner_round,
+        )
+    }
+
+    fn cache_openings(
+        &self,
+        accumulator: &mut ProverOpeningAccumulator<Fq>,
+        transcript: &mut T,
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
+    ) {
+        debug_assert_eq!(
+            sumcheck_challenges.len(),
+            X_VARS + self.inner.params.num_constraint_index_vars_common
+        );
+        // Inner expects (u4, c_common). Pull u from the x11 prefix and c from the stage2 suffix.
+        let u_vars = self.inner.params.num_constraint_vars;
+        let k_common = self.inner.params.num_constraint_index_vars_common;
+        let mut inner_chals = Vec::with_capacity(u_vars + k_common);
+        inner_chals.extend_from_slice(&sumcheck_challenges[..u_vars]);
+        inner_chals.extend_from_slice(&sumcheck_challenges[X_VARS..X_VARS + k_common]);
+        <GtMulProver as SumcheckInstanceProver<Fq, T>>::cache_openings(
+            &self.inner,
+            accumulator,
+            transcript,
+            &inner_chals,
+        );
+    }
+}
+
 #[derive(Allocative)]
 pub struct GtMulVerifier {
     params: GtMulParams,
@@ -554,6 +648,80 @@ impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
         ] {
             accumulator.append_virtual(transcript, vp, SumcheckId::GtMul, opening_point.clone());
         }
+    }
+}
+
+/// Verifier-side wrapper matching [`SplicedGtMulProver`].
+pub struct SplicedGtMulVerifier {
+    inner: GtMulVerifier,
+}
+
+impl SplicedGtMulVerifier {
+    pub fn new(inner: GtMulVerifier) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for SplicedGtMulVerifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        Some(CYCLE_VERIFY_RECURSION_STAGE2_GT_MUL_TOTAL)
+    }
+
+    fn degree(&self) -> usize {
+        DEGREE
+    }
+
+    fn num_rounds(&self) -> usize {
+        X_VARS + self.inner.params.num_constraint_index_vars_common
+    }
+
+    fn input_claim(&self, accumulator: &VerifierOpeningAccumulator<Fq>) -> Fq {
+        let _ = accumulator;
+        Fq::zero()
+    }
+
+    fn expected_output_claim(
+        &self,
+        accumulator: &VerifierOpeningAccumulator<Fq>,
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
+    ) -> Fq {
+        debug_assert_eq!(
+            sumcheck_challenges.len(),
+            X_VARS + self.inner.params.num_constraint_index_vars_common
+        );
+        let u_vars = self.inner.params.num_constraint_vars;
+        let k_common = self.inner.params.num_constraint_index_vars_common;
+        let mut inner_chals = Vec::with_capacity(u_vars + k_common);
+        inner_chals.extend_from_slice(&sumcheck_challenges[..u_vars]);
+        inner_chals.extend_from_slice(&sumcheck_challenges[X_VARS..X_VARS + k_common]);
+        <GtMulVerifier as SumcheckInstanceVerifier<Fq, T>>::expected_output_claim(
+            &self.inner,
+            accumulator,
+            &inner_chals,
+        )
+    }
+
+    fn cache_openings(
+        &self,
+        accumulator: &mut VerifierOpeningAccumulator<Fq>,
+        transcript: &mut T,
+        sumcheck_challenges: &[<Fq as JoltField>::Challenge],
+    ) {
+        debug_assert_eq!(
+            sumcheck_challenges.len(),
+            X_VARS + self.inner.params.num_constraint_index_vars_common
+        );
+        let u_vars = self.inner.params.num_constraint_vars;
+        let k_common = self.inner.params.num_constraint_index_vars_common;
+        let mut inner_chals = Vec::with_capacity(u_vars + k_common);
+        inner_chals.extend_from_slice(&sumcheck_challenges[..u_vars]);
+        inner_chals.extend_from_slice(&sumcheck_challenges[X_VARS..X_VARS + k_common]);
+        <GtMulVerifier as SumcheckInstanceVerifier<Fq, T>>::cache_openings(
+            &self.inner,
+            accumulator,
+            transcript,
+            &inner_chals,
+        )
     }
 }
 

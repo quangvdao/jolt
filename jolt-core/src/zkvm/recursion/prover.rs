@@ -60,7 +60,7 @@ use super::gt::exponentiation::{GtExpParams, GtExpProver};
 use super::gt::indexing::{
     k_gt, num_gt_constraints, num_gt_constraints_padded, num_gt_mul_constraints_padded,
 };
-use super::gt::multiplication::{GtMulParams, GtMulProver};
+use super::gt::multiplication::{GtMulParams, GtMulProver, SplicedGtMulProver};
 use super::gt::shift::{GtShiftParams, GtShiftProver};
 use super::gt::stage1_base_openings::GtExpBaseStage1OpeningsProver;
 use super::gt::stage2_base_openings::GtExpBaseStage2OpeningsProver;
@@ -971,17 +971,15 @@ impl RecursionProver<Fq> {
             return Err("No GtExp constraints to prove in Stage 1".into());
         }
 
-        // Packed GT exp uses layout x * 128 + s (s in low bits), so g needs replication
-        // across the step variables.
+        // Packed GT exp uses x11 layout idx = s * 16 + x (x in low bits),
+        // so g needs replication across the step variables.
         fn pad_4var_to_11var_replicated(mle_4var: &[Fq]) -> Vec<Fq> {
             debug_assert_eq!(mle_4var.len(), 16, "Input must be a 4-variable MLE");
             let mut mle_11var = vec![Fq::zero(); 2048];
-            // index = x * 128 + s (x in high 4 bits, s in low 7 bits)
-            for x in 0..16 {
-                let g_x = mle_4var[x];
-                for s in 0..128 {
-                    mle_11var[x * 128 + s] = g_x;
-                }
+            // idx = s * 16 + x
+            for s in 0..128 {
+                let off = s * 16;
+                mle_11var[off..off + 16].copy_from_slice(mle_4var);
             }
             mle_11var
         }
@@ -1120,7 +1118,8 @@ impl RecursionProver<Fq> {
                 &g_poly_f,
                 transcript,
             );
-            provers.push(Box::new(prover));
+            // Splice step rounds as dummy so u+c align with packed-GT wiring (x11+c).
+            provers.push(Box::new(SplicedGtMulProver::new(prover)));
         }
 
         // G1 scalar mul
@@ -1186,7 +1185,7 @@ impl RecursionProver<Fq> {
         // Pairing recursion: Multi-Miller loop + shift check (Stage 2; x-only, suffix-aligned).
         if !self.constraint_system.multi_miller_loop_rows.is_empty() {
             use crate::zkvm::recursion::pairing::multi_miller_loop::{
-                FrontAlignedMultiMillerLoopProver, MultiMillerLoopParams, MultiMillerLoopProverSpec,
+                MultiMillerLoopParams, MultiMillerLoopProverSpec,
             };
             use crate::zkvm::recursion::pairing::shift::{
                 ShiftMultiMillerLoopParams, ShiftMultiMillerLoopProver,
@@ -1289,11 +1288,10 @@ impl RecursionProver<Fq> {
                 _,
                 7,
             >::from_spec(spec, constraint_indices, transcript);
-            let dummy_after_rounds = k_gt(&self.constraint_system.constraint_types);
-            provers.push(Box::new(FrontAlignedMultiMillerLoopProver::new(
-                inner,
-                dummy_after_rounds,
-            )));
+            // Front-align MML so its openings use the prefix-11 x11 slice (required by GT wiring).
+            provers.push(Box::new(
+                crate::zkvm::recursion::pairing::multi_miller_loop::FrontAlignedMultiMillerLoopProver::new(inner),
+            ));
 
             // Shift check for f and T coordinates (plus `*_next` columns).
             //

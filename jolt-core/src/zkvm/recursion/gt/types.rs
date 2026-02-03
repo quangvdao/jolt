@@ -113,10 +113,10 @@ pub struct GtExpWitness<F: JoltField> {
 impl GtExpWitness<Fq> {
     /// Create packed witness from individual step data.
     ///
-    /// Data layout: index = x * 128 + s (s in low 7 bits, x in high 4 bits).
+    /// Data layout: index = s * 16 + x (x in low 4 bits, s in high 7 bits).
     /// This allows LowToHigh binding to naturally give us:
-    /// - Phase 1 (rounds 0-6): bind step variables s (low bits)
-    /// - Phase 2 (rounds 7-10): bind element variables x (high bits)
+    /// - Phase 1 (rounds 0-3): bind element variables x (low bits)
+    /// - Phase 2 (rounds 4-10): bind step variables s (high bits)
     pub fn from_steps(
         rho_mles: &[Vec<Fq>],      // rho_mles[step][x] for step in 0..=num_steps
         quotient_mles: &[Vec<Fq>], // quotient_mles[step][x] for step in 0..num_steps
@@ -162,34 +162,36 @@ impl GtExpWitness<Fq> {
             digits.push((false, false));
         }
 
-        // Pack rho: rho_packed[x * 128 + s] = rho_mles[s][x]
-        // s in low 7 bits, x in high 4 bits
+        // Pack rho: rho_packed[s * 16 + x] = rho_mles[s][x]
         let mut rho_packed = vec![Fq::zero(); total_size];
         // NOTE: Populate through num_steps_padded so rho_next is a pure shift of rho.
         for s in 0..num_steps_padded.min(step_size) {
+            let off = s * elem_size;
             for x in 0..elem_size {
                 if s < rho_mles.len() && x < rho_mles[s].len() {
-                    rho_packed[x * step_size + s] = rho_mles[s][x];
+                    rho_packed[off + x] = rho_mles[s][x];
                 }
             }
         }
 
-        // Pack rho_next: rho_next_packed[x * 128 + s] = rho_mles[s+1][x]
+        // Pack rho_next: rho_next_packed[s * 16 + x] = rho_mles[s+1][x]
         let mut rho_next_packed = vec![Fq::zero(); total_size];
         for s in 0..num_steps_padded.min(step_size) {
+            let off = s * elem_size;
             for x in 0..elem_size {
                 if s + 1 < rho_mles.len() && x < rho_mles[s + 1].len() {
-                    rho_next_packed[x * step_size + s] = rho_mles[s + 1][x];
+                    rho_next_packed[off + x] = rho_mles[s + 1][x];
                 }
             }
         }
 
-        // Pack quotient: quotient_packed[x * 128 + s] = quotient_mles[s][x]
+        // Pack quotient: quotient_packed[s * 16 + x] = quotient_mles[s][x]
         let mut quotient_packed = vec![Fq::zero(); total_size];
         for s in 0..num_steps_padded.min(step_size) {
+            let off = s * elem_size;
             for x in 0..elem_size {
                 if s < quotient_mles_padded.len() && x < quotient_mles_padded[s].len() {
-                    quotient_packed[x * step_size + s] = quotient_mles_padded[s][x];
+                    quotient_packed[off + x] = quotient_mles_padded[s][x];
                 }
             }
         }
@@ -201,35 +203,30 @@ impl GtExpWitness<Fq> {
             let (digit_hi, digit_lo) = digits[s];
             let lo_val = if digit_lo { Fq::from(1u64) } else { Fq::zero() };
             let hi_val = if digit_hi { Fq::from(1u64) } else { Fq::zero() };
-            for x in 0..elem_size {
-                digit_lo_packed[x * step_size + s] = lo_val;
-                digit_hi_packed[x * step_size + s] = hi_val;
-            }
+            let off = s * elem_size;
+            digit_lo_packed[off..off + elem_size].fill(lo_val);
+            digit_hi_packed[off..off + elem_size].fill(hi_val);
         }
 
-        // Pack base: base_packed[x * 128 + s] = base_mle[x] (replicated across s)
-        // base only depends on x, so same value for all s with same x
+        // Pack base: base_packed[s * 16 + x] = base_mle[x] (replicated across s)
         let mut base_packed = vec![Fq::zero(); total_size];
-        for x in 0..elem_size {
-            for s in 0..step_size {
-                base_packed[x * step_size + s] = base_mle[x];
-            }
+        for s in 0..step_size {
+            let off = s * elem_size;
+            base_packed[off..off + elem_size].copy_from_slice(base_mle);
         }
 
-        // Pack base2: base2_packed[x * 128 + s] = base2_mle[x] (replicated across s)
+        // Pack base2: base2_packed[s * 16 + x] = base2_mle[x] (replicated across s)
         let mut base2_packed = vec![Fq::zero(); total_size];
-        for x in 0..elem_size {
-            for s in 0..step_size {
-                base2_packed[x * step_size + s] = base2_mle[x];
-            }
+        for s in 0..step_size {
+            let off = s * elem_size;
+            base2_packed[off..off + elem_size].copy_from_slice(base2_mle);
         }
 
-        // Pack base3: base3_packed[x * 128 + s] = base3_mle[x] (replicated across s)
+        // Pack base3: base3_packed[s * 16 + x] = base3_mle[x] (replicated across s)
         let mut base3_packed = vec![Fq::zero(); total_size];
-        for x in 0..elem_size {
-            for s in 0..step_size {
-                base3_packed[x * step_size + s] = base3_mle[x];
-            }
+        for s in 0..step_size {
+            let off = s * elem_size;
+            base3_packed[off..off + elem_size].copy_from_slice(base3_mle);
         }
 
         Self {

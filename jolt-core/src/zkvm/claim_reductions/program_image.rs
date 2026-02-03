@@ -5,7 +5,6 @@
 //! This sumcheck binds those scalars to a trusted commitment to the program-image words polynomial.
 
 use allocative::Allocative;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
@@ -136,8 +135,6 @@ pub struct ProgramImageClaimReductionProver<F: JoltField> {
     pub params: ProgramImageClaimReductionParams<F>,
     program_word: MultilinearPolynomial<F>,
     eq_slice: MultilinearPolynomial<F>,
-    /// Number of trailing dummy rounds in a batched Stage 6b sumcheck.
-    batch_dummy_rounds: AtomicUsize,
 }
 
 fn build_eq_slice_table<F: JoltField>(
@@ -193,7 +190,6 @@ impl<F: JoltField> ProgramImageClaimReductionProver<F> {
             params,
             program_word,
             eq_slice,
-            batch_dummy_rounds: AtomicUsize::new(0),
         }
     }
 }
@@ -209,9 +205,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         // Align to the *start* of the Stage 6b challenge vector so that the resulting
         // big-endian opening point is the suffix (LSB side) of the full log_T cycle point.
         // This is required for Stage 8 embedding when log_T > m.
-        let dummy_rounds = max_num_rounds.saturating_sub(self.params.num_rounds());
-        self.batch_dummy_rounds
-            .store(dummy_rounds, Ordering::Relaxed);
+        let _ = max_num_rounds;
         0
     }
 
@@ -220,7 +214,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         let half = self.program_word.len() / 2;
         let program_word = &self.program_word;
         let eq_slice = &self.eq_slice;
-        let mut evals: [F; DEGREE_BOUND] = (0..half)
+        let evals: [F; DEGREE_BOUND] = (0..half)
             .into_par_iter()
             .map(|j| {
                 let pw =
@@ -239,16 +233,6 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
                     acc
                 },
             );
-        // If this instance has trailing dummy rounds, `previous_claim` is scaled by 2^{dummy_rounds}
-        // in the batched sumcheck. Scale the per-round univariate evaluations accordingly so the
-        // sumcheck consistency checks pass (mirrors BytecodeClaimReduction).
-        let dummy_rounds = self.batch_dummy_rounds.load(Ordering::Relaxed);
-        if dummy_rounds != 0 {
-            let scale = F::one().mul_pow_2(dummy_rounds);
-            for e in evals.iter_mut() {
-                *e *= scale;
-            }
-        }
         UniPoly::from_evals_and_hint(previous_claim, &evals)
     }
 

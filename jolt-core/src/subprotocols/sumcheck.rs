@@ -136,6 +136,43 @@ impl BatchedSumcheck {
             })
             .collect();
 
+        // For a shorter instance inside a longer batched sumcheck, there are `max_num_rounds - num_rounds`
+        // dummy variables total, but they may be split between "dummy-before" and "dummy-after" depending
+        // on the instance's `round_offset`.
+        //
+        // The initial scaling above accounts for *all* dummy variables, but if a shorter instance has
+        // dummy-after rounds, the built-in dummy-round behavior (constant H with H(0)=H(1)=claim/2)
+        // would divide out those dummy-after dimensions unless we compensate.
+        //
+        // We do this by keeping each such instance's claim scaled by 2^{dummy_after} throughout its
+        // active window:
+        // - feed the inner instance an unscaled `previous_claim / 2^{dummy_after}`
+        // - scale the returned univariate by 2^{dummy_after}
+        //
+        // The subsequent dummy-after rounds then divide by 2 each time, cancelling the scale and
+        // yielding the correct final claim at the end of the batched protocol.
+        let batching_info: Vec<(usize, usize, usize, F, F)> = sumcheck_instances
+            .iter()
+            .map(|sumcheck| {
+                let num_rounds = sumcheck.num_rounds();
+                let offset = sumcheck.round_offset(max_num_rounds);
+                let end = offset + num_rounds;
+                assert!(
+                    end <= max_num_rounds,
+                    "sumcheck instance has invalid round_offset: offset({offset}) + num_rounds({num_rounds}) > max_num_rounds({max_num_rounds})"
+                );
+                let dummy_after = max_num_rounds - end;
+                if dummy_after == 0 {
+                    return (offset, num_rounds, dummy_after, F::one(), F::one());
+                }
+                let scale = F::one().mul_pow_2(dummy_after);
+                let inv_scale = scale
+                    .inverse()
+                    .expect("2^dummy_after has an inverse in the field");
+                (offset, num_rounds, dummy_after, scale, inv_scale)
+            })
+            .collect();
+
         #[cfg(test)]
         let mut batched_claim: F = individual_claims
             .iter()
@@ -157,17 +194,23 @@ impl BatchedSumcheck {
             let univariate_polys: Vec<UniPoly<F>> = sumcheck_instances
                 .iter_mut()
                 .zip(individual_claims.iter())
-                .map(|(sumcheck, previous_claim)| {
-                    let num_rounds = sumcheck.num_rounds();
-                    let offset = sumcheck.round_offset(max_num_rounds);
+                .enumerate()
+                .map(|(i, (sumcheck, previous_claim))| {
+                    let (offset, num_rounds, dummy_after, scale, inv_scale) = batching_info[i];
                     let active = round >= offset && round < offset + num_rounds;
                     if active {
-                        sumcheck.compute_message(round - offset, *previous_claim)
-                    } else {
-                        // Variable is "dummy" for this instance: polynomial is independent of it,
-                        // so the round univariate is constant with H(0)=H(1)=previous_claim/2.
-                        UniPoly::from_coeff(vec![*previous_claim * two_inv])
+                        if dummy_after == 0 {
+                            return sumcheck.compute_message(round - offset, *previous_claim);
+                        }
+                        // Keep the batched claim scaled by 2^{dummy_after}, while feeding the
+                        // inner instance an unscaled claim and returning a scaled univariate.
+                        let prev_unscaled = *previous_claim * inv_scale;
+                        let poly_unscaled = sumcheck.compute_message(round - offset, prev_unscaled);
+                        return poly_unscaled * scale;
                     }
+                    // Variable is "dummy" for this instance: polynomial is independent of it,
+                    // so the round univariate is constant with H(0)=H(1)=previous_claim/2.
+                    UniPoly::from_coeff(vec![*previous_claim * two_inv])
                 })
                 .collect();
 
@@ -473,5 +516,207 @@ impl<F: JoltField, ProofTranscript: Transcript> SumcheckInstanceProof<F, ProofTr
         }
 
         Ok((e, r))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcripts::Blake2bTranscript;
+    use ark_bn254::Fr;
+    use ark_ff::{One, Zero};
+
+    #[derive(Clone)]
+    struct ToyMlSumcheck {
+        /// Number of variables in the multilinear polynomial.
+        num_rounds: usize,
+        /// Global offset inside a batched sumcheck of length `max_num_rounds`.
+        offset: usize,
+        /// Full evaluation table on {0,1}^n, LSB-first variable indexing.
+        evals: Vec<Fr>,
+        /// Current evaluation table after binding the first `round` variables.
+        cur: Vec<Fr>,
+        /// How many local rounds have been bound so far.
+        round: usize,
+    }
+
+    impl ToyMlSumcheck {
+        fn new_affine(num_rounds: usize, offset: usize, constant: Fr, coeffs: &[Fr]) -> Self {
+            assert_eq!(coeffs.len(), num_rounds);
+            let size = 1usize << num_rounds;
+            let mut evals = vec![Fr::zero(); size];
+            for idx in 0..size {
+                let mut v = constant;
+                for j in 0..num_rounds {
+                    let bit = ((idx >> j) & 1) as u64;
+                    if bit == 1 {
+                        v += coeffs[j];
+                    }
+                }
+                evals[idx] = v;
+            }
+            Self {
+                num_rounds,
+                offset,
+                cur: evals.clone(),
+                evals,
+                round: 0,
+            }
+        }
+
+        fn expected_eval_at(&self, r: &[<Fr as JoltField>::Challenge]) -> Fr {
+            assert_eq!(r.len(), self.num_rounds);
+            let mut cur = self.evals.clone();
+            for (j, &r_j) in r.iter().enumerate() {
+                let rj: Fr = r_j.into();
+                let one_minus = Fr::one() - rj;
+                let mut next = vec![Fr::zero(); cur.len() / 2];
+                for i in 0..next.len() {
+                    next[i] = cur[2 * i] * one_minus + cur[2 * i + 1] * rj;
+                }
+                cur = next;
+                assert_eq!(cur.len(), 1usize << (self.num_rounds - (j + 1)));
+            }
+            assert_eq!(cur.len(), 1);
+            cur[0]
+        }
+    }
+
+    impl SumcheckInstanceProver<Fr, Blake2bTranscript> for ToyMlSumcheck {
+        fn degree(&self) -> usize {
+            1
+        }
+
+        fn num_rounds(&self) -> usize {
+            self.num_rounds
+        }
+
+        fn round_offset(&self, _max_num_rounds: usize) -> usize {
+            self.offset
+        }
+
+        fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<Fr>) -> Fr {
+            self.evals.iter().copied().sum()
+        }
+
+        fn compute_message(&mut self, round: usize, previous_claim: Fr) -> UniPoly<Fr> {
+            assert_eq!(round, self.round);
+            let claim_from_state: Fr = self.cur.iter().copied().sum();
+            assert_eq!(
+                previous_claim, claim_from_state,
+                "previous_claim mismatch at local round {} (offset={}, num_rounds={})",
+                round, self.offset, self.num_rounds
+            );
+
+            let mut h0 = Fr::zero();
+            let mut h1 = Fr::zero();
+            for i in 0..(self.cur.len() / 2) {
+                h0 += self.cur[2 * i];
+                h1 += self.cur[2 * i + 1];
+            }
+            assert_eq!(h0 + h1, previous_claim);
+            UniPoly::from_coeff(vec![h0, h1 - h0])
+        }
+
+        fn ingest_challenge(&mut self, r_j: <Fr as JoltField>::Challenge, round: usize) {
+            assert_eq!(round, self.round);
+            let rj: Fr = r_j.into();
+            let one_minus = Fr::one() - rj;
+            let mut next = vec![Fr::zero(); self.cur.len() / 2];
+            for i in 0..next.len() {
+                next[i] = self.cur[2 * i] * one_minus + self.cur[2 * i + 1] * rj;
+            }
+            self.cur = next;
+            self.round += 1;
+        }
+
+        fn cache_openings(
+            &self,
+            _accumulator: &mut ProverOpeningAccumulator<Fr>,
+            _transcript: &mut Blake2bTranscript,
+            _sumcheck_challenges: &[<Fr as JoltField>::Challenge],
+        ) {
+        }
+    }
+
+    impl SumcheckInstanceVerifier<Fr, Blake2bTranscript> for ToyMlSumcheck {
+        fn degree(&self) -> usize {
+            1
+        }
+
+        fn num_rounds(&self) -> usize {
+            self.num_rounds
+        }
+
+        fn round_offset(&self, _max_num_rounds: usize) -> usize {
+            self.offset
+        }
+
+        fn input_claim(&self, _accumulator: &VerifierOpeningAccumulator<Fr>) -> Fr {
+            self.evals.iter().copied().sum()
+        }
+
+        fn expected_output_claim(
+            &self,
+            _accumulator: &VerifierOpeningAccumulator<Fr>,
+            sumcheck_challenges: &[<Fr as JoltField>::Challenge],
+        ) -> Fr {
+            self.expected_eval_at(sumcheck_challenges)
+        }
+
+        fn cache_openings(
+            &self,
+            _accumulator: &mut VerifierOpeningAccumulator<Fr>,
+            _transcript: &mut Blake2bTranscript,
+            _sumcheck_challenges: &[<Fr as JoltField>::Challenge],
+        ) {
+        }
+    }
+
+    #[test]
+    fn batched_sumcheck_supports_dummy_after_offset_0() {
+        let mut prover_transcript = Blake2bTranscript::new(b"batched_sumcheck_dummy_after");
+        let mut acc_p = ProverOpeningAccumulator::<Fr>::new(0);
+
+        // Two instances: max rounds = 5, plus a shorter 3-round instance that is prefix-aligned (offset=0),
+        // which introduces dummy-after rounds.
+        let constant = Fr::from(7u64);
+        let coeffs5 = [
+            Fr::from(3u64),
+            Fr::from(5u64),
+            Fr::from(11u64),
+            Fr::from(13u64),
+            Fr::from(17u64),
+        ];
+        let coeffs3 = [Fr::from(19u64), Fr::from(23u64), Fr::from(29u64)];
+
+        let mut inst_max = ToyMlSumcheck::new_affine(5, /*offset=*/ 0, constant, &coeffs5);
+        let mut inst_short_prefix = ToyMlSumcheck::new_affine(3, /*offset=*/ 0, constant, &coeffs3);
+
+        let mut provers: Vec<&mut dyn SumcheckInstanceProver<Fr, Blake2bTranscript>> = Vec::new();
+        provers.push(&mut inst_max);
+        provers.push(&mut inst_short_prefix);
+        let (proof, r_sumcheck) =
+            BatchedSumcheck::prove::<Fr, Blake2bTranscript>(provers, &mut acc_p, &mut prover_transcript);
+
+        // Verify with transcript synchronization.
+        let mut verifier_transcript = Blake2bTranscript::new(b"batched_sumcheck_dummy_after");
+        verifier_transcript.compare_to(prover_transcript.clone());
+
+        let mut acc_v = VerifierOpeningAccumulator::<Fr>::new(0);
+        let inst_max_v = inst_max.clone();
+        let inst_short_prefix_v = inst_short_prefix.clone();
+        let mut verifiers: Vec<&dyn SumcheckInstanceVerifier<Fr, Blake2bTranscript>> = Vec::new();
+        verifiers.push(&inst_max_v);
+        verifiers.push(&inst_short_prefix_v);
+        let r2 = BatchedSumcheck::verify::<Fr, Blake2bTranscript>(
+            &proof,
+            verifiers,
+            &mut acc_v,
+            &mut verifier_transcript,
+        )
+        .expect("batched sumcheck verify should succeed");
+
+        assert_eq!(r2, r_sumcheck);
     }
 }

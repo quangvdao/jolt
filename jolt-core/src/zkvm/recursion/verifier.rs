@@ -42,7 +42,7 @@ use super::g2::wiring::WiringG2Verifier;
 use super::gt::base_power::GtExpBasePowVerifier;
 use super::gt::exponentiation::{GtExpParams, GtExpVerifier};
 use super::gt::indexing::{k_gt, num_gt_mul_constraints_padded};
-use super::gt::multiplication::{GtMulParams, GtMulVerifier};
+use super::gt::multiplication::{GtMulParams, GtMulVerifier, SplicedGtMulVerifier};
 use super::gt::shift::{GtShiftParams, GtShiftVerifier};
 use super::gt::stage1_base_openings::GtExpBaseStage1OpeningsVerifier;
 use super::gt::stage2_base_openings::GtExpBaseStage2OpeningsVerifier;
@@ -476,7 +476,8 @@ impl RecursionVerifier<Fq> {
                 <Bn254Recursion as RecursionCurve>::g_mle(),
                 transcript,
             );
-            verifiers.push(Box::new(verifier));
+            // Splice step rounds as dummy so u+c align with packed-GT wiring (x11+c).
+            verifiers.push(Box::new(SplicedGtMulVerifier::new(verifier)));
         }
 
         // G1 scalar mul
@@ -549,8 +550,7 @@ impl RecursionVerifier<Fq> {
         // Pairing recursion: Multi-Miller loop + shift check (Stage 2; x-only, suffix-aligned).
         {
             use crate::zkvm::recursion::pairing::multi_miller_loop::{
-                FrontAlignedMultiMillerLoopVerifier, MultiMillerLoopParams,
-                MultiMillerLoopVerifierSpec,
+                MultiMillerLoopParams, MultiMillerLoopVerifierSpec,
             };
             use crate::zkvm::recursion::pairing::shift::{
                 ShiftMultiMillerLoopParams, ShiftMultiMillerLoopVerifier,
@@ -583,7 +583,10 @@ impl RecursionVerifier<Fq> {
                     _,
                     7,
                 >::from_spec(spec, miller_constraint_indices.clone(), transcript);
-                verifiers.push(Box::new(FrontAlignedMultiMillerLoopVerifier::new(inner)));
+                // Front-align MML so its openings use the prefix-11 x11 slice (required by GT wiring).
+                verifiers.push(Box::new(
+                    crate::zkvm::recursion::pairing::multi_miller_loop::FrontAlignedMultiMillerLoopVerifier::new(inner),
+                ));
 
                 // Shift verifier: check f_next(s) = f(s+1) and T_next(s) = T(s+1) (masked at s=127).
                 //

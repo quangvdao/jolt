@@ -66,6 +66,9 @@ use rayon::prelude::*;
 /// Degree bound: we take a conservative bound (EqPlusOne * Eq * Eq * rho).
 const DEGREE: usize = 4;
 
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_RECURSION_STAGE2_GT_SHIFT_TOTAL: &str = "verify_recursion_stage2_gt_shift_total";
+
 #[inline]
 fn evals_skip_one<const D: usize>(a0: Fq, a1: Fq) -> [Fq; D] {
     let m = a1 - a0;
@@ -287,6 +290,10 @@ impl GtShiftVerifier {
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtShiftVerifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        Some(CYCLE_VERIFY_RECURSION_STAGE2_GT_SHIFT_TOTAL)
+    }
+
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }

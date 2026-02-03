@@ -11,14 +11,13 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use ark_bn254::{Fq, Fq12, Fr};
-use ark_ec::AffineRepr;
+use ark_ec::pairing::Pairing;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use dory::primitives::arithmetic::PairingCurve;
 use jolt_platform::{end_cycle_tracking, start_cycle_tracking};
 
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, RecursionExt};
 use crate::poly::commitment::dory::instance_plan::derive_plan_with_hints;
-use crate::poly::commitment::dory::{ArkG1, ArkG2, DoryCommitmentScheme, DoryContext, DoryGlobals, BN254};
+use crate::poly::commitment::dory::{DoryCommitmentScheme, DoryContext, DoryGlobals};
 use crate::poly::rlc_utils::compute_rlc_coefficients;
 use crate::transcripts::Transcript;
 use crate::zkvm::config::ProgramMode;
@@ -30,10 +29,27 @@ use crate::zkvm::witness::{all_committed_polynomials, CommittedPolynomial};
 use super::prover::{
     DoryOpeningSnapshot, HyraxPCS, RecursionInput, RecursionProof, RecursionProver,
 };
+use super::constraints::system::ConstraintType;
 use super::verifier::RecursionVerifier;
 use super::MAX_RECURSION_DENSE_NUM_VARS;
 
 type DoryPCS = DoryCommitmentScheme;
+
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+struct CycleMarkerGuard(&'static str);
+impl CycleMarkerGuard {
+    #[inline(always)]
+    fn new(label: &'static str) -> Self {
+        start_cycle_tracking(label);
+        Self(label)
+    }
+}
+impl Drop for CycleMarkerGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        end_cycle_tracking(self.0);
+    }
+}
 
 /// Standalone recursion artifact for a base Jolt proof.
 ///
@@ -233,7 +249,7 @@ pub fn verify_recursion<FS: Transcript>(
 ) -> Result<()> {
     type F = Fr;
 
-    start_cycle_tracking("verify_recursion_total");
+    let _verify_total = CycleMarkerGuard::new("verify_recursion_total");
     // We need an owned proof to build a `JoltVerifier`. A plain clone is much cheaper than the
     // previous serialize→deserialize roundtrip and is equivalent for verification.
     let base_proof = base_proof.clone();
@@ -330,7 +346,8 @@ pub fn verify_recursion<FS: Transcript>(
     // Deterministic combine plan (must match the prover's ordering).
     let _stage8_prep_rlc_cycle = "verify_recursion_stage8_prep_rlc_total";
     start_cycle_tracking(_stage8_prep_rlc_cycle);
-    let rlc_map = compute_rlc_coefficients(&gamma_powers, dory_snap.polynomial_claims.iter().copied());
+    let rlc_map =
+        compute_rlc_coefficients(&gamma_powers, dory_snap.polynomial_claims.iter().copied());
     let (combine_coeffs, combine_commitments): (
         Vec<F>,
         Vec<<DoryPCS as CommitmentScheme>::Commitment>,
@@ -421,6 +438,16 @@ pub fn verify_recursion<FS: Transcript>(
         *hint_fq12,
     )
     .map_err(|e| anyhow!("AST->recursion-plan derivation failed: {e:?}"))?;
+    if std::env::var_os("JOLT_DEBUG_RECURSION_PLAN_COUNTS").is_some() {
+        let total = plan.verifier_input.constraint_types.len();
+        let mml = plan
+            .verifier_input
+            .constraint_types
+            .iter()
+            .filter(|ct| matches!(ct, ConstraintType::MultiMillerLoop))
+            .count();
+        tracing::info!(total, mml, "derived recursion plan constraint_types counts");
+    }
     end_cycle_tracking(_stage8_prep_plan_cycle);
     end_cycle_tracking("verify_recursion_stage8_prep_total");
 
@@ -436,7 +463,7 @@ pub fn verify_recursion<FS: Transcript>(
     let hyrax_verifier_setup = &preprocessing.hyrax_recursion_setup;
 
     let recursion_verifier = RecursionVerifier::<Fq>::new(plan.verifier_input);
-    start_cycle_tracking("verify_recursion_snark_verify_total");
+    let _snark_verify_total = CycleMarkerGuard::new("verify_recursion_snark_verify_total");
     let ok = recursion_verifier
         .verify::<FS, HyraxPCS>(
             &recursion.proof,
@@ -445,32 +472,22 @@ pub fn verify_recursion<FS: Transcript>(
             hyrax_verifier_setup,
         )
         .map_err(|e| anyhow!("Recursion verification failed: {e:?}"))?;
-    end_cycle_tracking("verify_recursion_snark_verify_total");
     if !ok {
         return Err(anyhow!("Recursion proof verification failed"));
     }
 
     // External pairing check using the boundary value that is bound by wiring constraints.
     let got = &recursion.pairing_boundary;
-    start_cycle_tracking("jolt_external_pairing_check");
-    let lhs = {
-        let g1s = [
-            ArkG1(got.p1_g1.into_group()),
-            ArkG1(got.p2_g1.into_group()),
-            ArkG1(got.p3_g1.into_group()),
-        ];
-        let g2s = [
-            ArkG2(got.p1_g2.into_group()),
-            ArkG2(got.p2_g2.into_group()),
-            ArkG2(got.p3_g2.into_group()),
-        ];
-        BN254::multi_pair(&g1s, &g2s)
-    };
-    end_cycle_tracking("jolt_external_pairing_check");
+    let _pairing_check = CycleMarkerGuard::new("jolt_external_pairing_check");
+    // With pairing recursion enabled, we only do the **final exponentiation** here.
+    // The recursion SNARK proves the Miller loop computation + GT multiplications that produce
+    // `got.miller_rhs`, and the wiring constraints bind it.
+    let lhs =
+        ark_bn254::Bn254::final_exponentiation(ark_ec::pairing::MillerLoopOutput(got.miller_rhs))
+            .ok_or_else(|| anyhow!("final exponentiation failed"))?;
     if lhs.0 != got.rhs {
         return Err(anyhow!("external pairing check failed"));
     }
 
-    end_cycle_tracking("verify_recursion_total");
     Ok(())
 }

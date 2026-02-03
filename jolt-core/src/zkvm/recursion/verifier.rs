@@ -329,8 +329,7 @@ impl RecursionVerifier<Fq> {
         };
 
         // Debug hook: allow stopping after Stage 2 to isolate failures.
-        #[cfg(test)]
-        if std::env::var("JOLT_RECURSION_STOP_AFTER_STAGE2").is_ok() {
+        if std::env::var_os("JOLT_DEBUG_STOP_AFTER_RECURSION_STAGE2").is_some() {
             return Ok(true);
         }
 
@@ -434,6 +433,9 @@ impl RecursionVerifier<Fq> {
                 ConstraintType::G2Add => {
                     num_g2_add += 1;
                 }
+                ConstraintType::MultiMillerLoop => {
+                    // Counted/handled separately below (pairing recursion).
+                }
             }
         }
 
@@ -459,7 +461,10 @@ impl RecursionVerifier<Fq> {
         }
 
         // GT mul
-        if num_gt_mul > 0 {
+        //
+        // NOTE (debugging): setting `JOLT_DEBUG_SKIP_GT_MUL=1` skips the GTMul sumcheck instance
+        // (useful to isolate Stage-2 sumcheck failures).
+        if std::env::var_os("JOLT_DEBUG_SKIP_GT_MUL").is_none() && num_gt_mul > 0 {
             let num_gt_constraints = num_gt_mul;
             let k_common = k_gt(&self.input.constraint_types);
             let num_gt_constraints_padded =
@@ -541,15 +546,101 @@ impl RecursionVerifier<Fq> {
             verifiers.push(Box::new(verifier));
         }
 
-        // Wiring/boundary constraints (AST-driven), appended LAST in Stage 2
-        if !self.input.wiring.gt.is_empty() {
-            verifiers.push(Box::new(WiringGtVerifier::new(&self.input, transcript)));
+        // Pairing recursion: Multi-Miller loop + shift check (Stage 2; x-only, suffix-aligned).
+        {
+            use crate::zkvm::recursion::pairing::multi_miller_loop::{
+                FrontAlignedMultiMillerLoopVerifier, MultiMillerLoopParams,
+                MultiMillerLoopVerifierSpec,
+            };
+            use crate::zkvm::recursion::pairing::shift::{
+                ShiftMultiMillerLoopParams, ShiftMultiMillerLoopVerifier,
+            };
+            use crate::zkvm::witness::MultiMillerLoopTerm;
+
+            let miller_constraint_indices: Vec<usize> = self
+                .input
+                .constraint_types
+                .iter()
+                .enumerate()
+                .filter_map(|(i, ct)| matches!(ct, ConstraintType::MultiMillerLoop).then_some(i))
+                .collect();
+            if !miller_constraint_indices.is_empty() {
+                if miller_constraint_indices.len() != 3 {
+                    return Err(format!(
+                        "expected exactly 3 MultiMillerLoop constraints, got {}",
+                        miller_constraint_indices.len()
+                    )
+                    .into());
+                }
+                let pb = &self.input.pairing_boundary;
+                let g1_points = vec![pb.p1_g1, pb.p2_g1, pb.p3_g1];
+                let g2_points = vec![pb.p1_g2, pb.p2_g2, pb.p3_g2];
+
+                let params = MultiMillerLoopParams::new(miller_constraint_indices.len());
+                let spec = MultiMillerLoopVerifierSpec::new(params, g1_points, g2_points);
+                let inner: crate::zkvm::recursion::pairing::MultiMillerLoopVerifier<Fq> = crate::zkvm::recursion::constraints::sumcheck::ConstraintListVerifier::<
+                    Fq,
+                    _,
+                    7,
+                >::from_spec(spec, miller_constraint_indices.clone(), transcript);
+                verifiers.push(Box::new(FrontAlignedMultiMillerLoopVerifier::new(inner)));
+
+                // Shift verifier: check f_next(s) = f(s+1) and T_next(s) = T(s+1) (masked at s=127).
+                //
+                // NOTE (debugging): setting `JOLT_DEBUG_SKIP_MML_SHIFT=1` skips this shift gadget to
+                // isolate Stage-2 sumcheck failures to the core MultiMillerLoop constraint.
+                if std::env::var_os("JOLT_DEBUG_SKIP_MML_SHIFT").is_none() {
+                    let mut pairs: Vec<(
+                        crate::zkvm::witness::VirtualPolynomial,
+                        crate::zkvm::witness::VirtualPolynomial,
+                    )> = Vec::new();
+                    for global_idx in &miller_constraint_indices {
+                        let mk = |term: MultiMillerLoopTerm| {
+                            crate::zkvm::witness::VirtualPolynomial::multi_miller_loop(
+                                term,
+                                *global_idx,
+                            )
+                        };
+                        pairs.push((mk(MultiMillerLoopTerm::F), mk(MultiMillerLoopTerm::FNext)));
+                        pairs.push((
+                            mk(MultiMillerLoopTerm::TXC0),
+                            mk(MultiMillerLoopTerm::TXC0Next),
+                        ));
+                        pairs.push((
+                            mk(MultiMillerLoopTerm::TXC1),
+                            mk(MultiMillerLoopTerm::TXC1Next),
+                        ));
+                        pairs.push((
+                            mk(MultiMillerLoopTerm::TYC0),
+                            mk(MultiMillerLoopTerm::TYC0Next),
+                        ));
+                        pairs.push((
+                            mk(MultiMillerLoopTerm::TYC1),
+                            mk(MultiMillerLoopTerm::TYC1Next),
+                        ));
+                    }
+                    let params = ShiftMultiMillerLoopParams::new(pairs.len());
+                    verifiers.push(Box::new(ShiftMultiMillerLoopVerifier::<Fq>::new(
+                        params, pairs, transcript,
+                    )));
+                }
+            }
         }
-        if !self.input.wiring.g1.is_empty() {
-            verifiers.push(Box::new(WiringG1Verifier::new(&self.input, transcript)));
-        }
-        if !self.input.wiring.g2.is_empty() {
-            verifiers.push(Box::new(WiringG2Verifier::new(&self.input, transcript)));
+
+        // Wiring/boundary constraints (AST-driven), appended LAST in Stage 2.
+        //
+        // NOTE (debugging): setting `JOLT_DEBUG_SKIP_RECURSION_WIRING=1` skips these constraints to
+        // isolate Stage-2 sumcheck failures to the (non-wiring) constraint families.
+        if std::env::var_os("JOLT_DEBUG_SKIP_RECURSION_WIRING").is_none() {
+            if !self.input.wiring.gt.is_empty() {
+                verifiers.push(Box::new(WiringGtVerifier::new(&self.input, transcript)));
+            }
+            if !self.input.wiring.g1.is_empty() {
+                verifiers.push(Box::new(WiringG1Verifier::new(&self.input, transcript)));
+            }
+            if !self.input.wiring.g2.is_empty() {
+                verifiers.push(Box::new(WiringG2Verifier::new(&self.input, transcript)));
+            }
         }
 
         if verifiers.is_empty() {
@@ -992,6 +1083,70 @@ impl RecursionVerifier<Fq> {
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
+            } else if matches!(
+                entry.poly_type,
+                PolyType::MultiMillerLoopF
+                    | PolyType::MultiMillerLoopFNext
+                    | PolyType::MultiMillerLoopQuotient
+                    | PolyType::MultiMillerLoopTXC0
+                    | PolyType::MultiMillerLoopTXC1
+                    | PolyType::MultiMillerLoopTYC0
+                    | PolyType::MultiMillerLoopTYC1
+                    | PolyType::MultiMillerLoopTXC0Next
+                    | PolyType::MultiMillerLoopTXC1Next
+                    | PolyType::MultiMillerLoopTYC0Next
+                    | PolyType::MultiMillerLoopTYC1Next
+                    | PolyType::MultiMillerLoopLambdaC0
+                    | PolyType::MultiMillerLoopLambdaC1
+                    | PolyType::MultiMillerLoopInvDeltaXC0
+                    | PolyType::MultiMillerLoopInvDeltaXC1
+                    | PolyType::MultiMillerLoopInvTwoYC0
+                    | PolyType::MultiMillerLoopInvTwoYC1
+                    | PolyType::MultiMillerLoopXP
+                    | PolyType::MultiMillerLoopYP
+                    | PolyType::MultiMillerLoopXQC0
+                    | PolyType::MultiMillerLoopXQC1
+                    | PolyType::MultiMillerLoopYQC0
+                    | PolyType::MultiMillerLoopYQC1
+                    | PolyType::MultiMillerLoopIsDouble
+                    | PolyType::MultiMillerLoopIsAdd
+                    | PolyType::MultiMillerLoopLVal
+            ) {
+                use crate::zkvm::witness::MultiMillerLoopTerm;
+                let term = match entry.poly_type {
+                    PolyType::MultiMillerLoopF => MultiMillerLoopTerm::F,
+                    PolyType::MultiMillerLoopFNext => MultiMillerLoopTerm::FNext,
+                    PolyType::MultiMillerLoopQuotient => MultiMillerLoopTerm::Quotient,
+                    PolyType::MultiMillerLoopTXC0 => MultiMillerLoopTerm::TXC0,
+                    PolyType::MultiMillerLoopTXC1 => MultiMillerLoopTerm::TXC1,
+                    PolyType::MultiMillerLoopTYC0 => MultiMillerLoopTerm::TYC0,
+                    PolyType::MultiMillerLoopTYC1 => MultiMillerLoopTerm::TYC1,
+                    PolyType::MultiMillerLoopTXC0Next => MultiMillerLoopTerm::TXC0Next,
+                    PolyType::MultiMillerLoopTXC1Next => MultiMillerLoopTerm::TXC1Next,
+                    PolyType::MultiMillerLoopTYC0Next => MultiMillerLoopTerm::TYC0Next,
+                    PolyType::MultiMillerLoopTYC1Next => MultiMillerLoopTerm::TYC1Next,
+                    PolyType::MultiMillerLoopLambdaC0 => MultiMillerLoopTerm::LambdaC0,
+                    PolyType::MultiMillerLoopLambdaC1 => MultiMillerLoopTerm::LambdaC1,
+                    PolyType::MultiMillerLoopInvDeltaXC0 => MultiMillerLoopTerm::InvDeltaXC0,
+                    PolyType::MultiMillerLoopInvDeltaXC1 => MultiMillerLoopTerm::InvDeltaXC1,
+                    PolyType::MultiMillerLoopInvTwoYC0 => MultiMillerLoopTerm::InvTwoYC0,
+                    PolyType::MultiMillerLoopInvTwoYC1 => MultiMillerLoopTerm::InvTwoYC1,
+                    PolyType::MultiMillerLoopXP => MultiMillerLoopTerm::XP,
+                    PolyType::MultiMillerLoopYP => MultiMillerLoopTerm::YP,
+                    PolyType::MultiMillerLoopXQC0 => MultiMillerLoopTerm::XQC0,
+                    PolyType::MultiMillerLoopXQC1 => MultiMillerLoopTerm::XQC1,
+                    PolyType::MultiMillerLoopYQC0 => MultiMillerLoopTerm::YQC0,
+                    PolyType::MultiMillerLoopYQC1 => MultiMillerLoopTerm::YQC1,
+                    PolyType::MultiMillerLoopIsDouble => MultiMillerLoopTerm::IsDouble,
+                    PolyType::MultiMillerLoopIsAdd => MultiMillerLoopTerm::IsAdd,
+                    PolyType::MultiMillerLoopLVal => MultiMillerLoopTerm::LVal,
+                    _ => return Fq::zero(),
+                };
+                let vp = VirtualPolynomial::Recursion(RecursionPoly::MultiMillerLoop {
+                    term,
+                    instance: entry.constraint_idx,
+                });
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::MultiMillerLoop)
             } else {
                 panic!("unexpected prefix-packing entry without a family tag: {entry:?}")
             }

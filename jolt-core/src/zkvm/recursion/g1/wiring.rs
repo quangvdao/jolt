@@ -93,6 +93,10 @@ use crate::{
 pub(crate) const STEP_VARS: usize = 8;
 const DEGREE: usize = 2;
 
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_RECURSION_STAGE2_G1_WIRING_TOTAL: &str =
+    "verify_recursion_stage2_g1_wiring_total";
+
 #[inline]
 fn g1_const_from_affine(p: &G1Affine) -> (Fq, Fq, Fq) {
     if p.is_zero() {
@@ -973,6 +977,10 @@ impl WiringG1Verifier {
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for WiringG1Verifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        Some(CYCLE_VERIFY_RECURSION_STAGE2_G1_WIRING_TOTAL)
+    }
+
     fn degree(&self) -> usize {
         DEGREE
     }

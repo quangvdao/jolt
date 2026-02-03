@@ -23,6 +23,7 @@ use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::proof_serialization::PairingBoundary;
 use crate::zkvm::{guest_serde::GuestDeserialize, guest_serde::GuestSerialize};
 
+use super::constraints::system::ConstraintType;
 use super::CombineDag;
 
 /// Canonical wiring plan (verifier-derived, and mirrored by the prover).
@@ -106,6 +107,11 @@ pub enum GtProducer {
     GtExpBase { instance: usize },
     /// Output of a GT multiplication: result(x) (4-var).
     GtMulResult { instance: usize },
+    /// Output of a BN254 Miller loop (pre-final-exponentiation) for a specific pairing instance.
+    ///
+    /// The `instance` is the **global constraint index** of the `ConstraintType::MultiMillerLoop`
+    /// constraint. This matches the `ConstraintListProver` virtual polynomial identifiers.
+    MultiMillerLoopOut { instance: usize },
     /// Boundary constant: Stage-8 joint commitment (GT).
     ///
     /// This appears as an `AstOp::Input` with `InputSource::Proof { name: "commitment" }` and can
@@ -136,6 +142,8 @@ pub enum GtConsumer {
 
     /// Boundary constant: external pairing check RHS.
     PairingBoundaryRhs,
+    /// Boundary constant: pairing Miller loop RHS (pre-final-exponentiation).
+    PairingBoundaryMillerRhs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -215,6 +223,10 @@ impl CanonicalSerialize for GtProducer {
                 2u8.serialize_with_mode(&mut writer, compress)?;
                 (*instance as u32).serialize_with_mode(&mut writer, compress)
             }
+            GtProducer::MultiMillerLoopOut { instance } => {
+                5u8.serialize_with_mode(&mut writer, compress)?;
+                (*instance as u32).serialize_with_mode(&mut writer, compress)
+            }
             GtProducer::JointCommitment => {
                 // Keep encoding size uniform: tag + dummy u32.
                 3u8.serialize_with_mode(&mut writer, compress)?;
@@ -264,6 +276,9 @@ impl CanonicalDeserialize for GtProducer {
             4 => Self::GtInput {
                 value_id: u32::deserialize_with_mode(&mut reader, compress, validate)?,
             },
+            5 => Self::MultiMillerLoopOut {
+                instance: u32::deserialize_with_mode(&mut reader, compress, validate)? as usize,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -301,6 +316,13 @@ impl GuestSerialize for GtProducer {
                 4u8.guest_serialize(w)?;
                 value_id.guest_serialize(w)
             }
+            GtProducer::MultiMillerLoopOut { instance } => {
+                5u8.guest_serialize(w)?;
+                (u32::try_from(*instance).map_err(|_| {
+                    std::io::Error::new(ErrorKind::InvalidData, "GtProducer instance overflow")
+                })?)
+                .guest_serialize(w)
+            }
         }
     }
 }
@@ -324,6 +346,9 @@ impl GuestDeserialize for GtProducer {
             }
             4 => Self::GtInput {
                 value_id: u32::guest_deserialize(r)?,
+            },
+            5 => Self::MultiMillerLoopOut {
+                instance: u32::guest_deserialize(r)? as usize,
             },
             _ => {
                 return Err(std::io::Error::new(
@@ -356,6 +381,7 @@ impl CanonicalSerialize for GtConsumer {
             }
             GtConsumer::JointCommitment => 3u8.serialize_with_mode(&mut writer, compress),
             GtConsumer::PairingBoundaryRhs => 4u8.serialize_with_mode(&mut writer, compress),
+            GtConsumer::PairingBoundaryMillerRhs => 5u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -365,7 +391,9 @@ impl CanonicalSerialize for GtConsumer {
             GtConsumer::GtMulLhs { .. }
             | GtConsumer::GtMulRhs { .. }
             | GtConsumer::GtExpBase { .. } => 1 + 4,
-            GtConsumer::JointCommitment | GtConsumer::PairingBoundaryRhs => 1,
+            GtConsumer::JointCommitment
+            | GtConsumer::PairingBoundaryRhs
+            | GtConsumer::PairingBoundaryMillerRhs => 1,
         }
     }
 }
@@ -395,6 +423,7 @@ impl CanonicalDeserialize for GtConsumer {
             },
             3 => Self::JointCommitment,
             4 => Self::PairingBoundaryRhs,
+            5 => Self::PairingBoundaryMillerRhs,
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -426,6 +455,7 @@ impl GuestSerialize for GtConsumer {
             }
             GtConsumer::JointCommitment => 3u8.guest_serialize(w),
             GtConsumer::PairingBoundaryRhs => 4u8.guest_serialize(w),
+            GtConsumer::PairingBoundaryMillerRhs => 5u8.guest_serialize(w),
         }
     }
 }
@@ -445,6 +475,7 @@ impl GuestDeserialize for GtConsumer {
             },
             3 => Self::JointCommitment,
             4 => Self::PairingBoundaryRhs,
+            5 => Self::PairingBoundaryMillerRhs,
             _ => {
                 return Err(std::io::Error::new(
                     ErrorKind::InvalidData,
@@ -1173,6 +1204,7 @@ pub fn derive_wiring_plan(
     ast: &AstGraph<BN254>,
     combine_leaves: usize,
     _pairing_boundary: &PairingBoundary,
+    constraint_types: &[ConstraintType],
 ) -> Result<WiringPlan, ProofVerifyError> {
     let n = ast.nodes.len();
     let mut gt_exp_out_instance_by_value: Vec<Option<usize>> = vec![None; n];
@@ -1206,7 +1238,10 @@ pub fn derive_wiring_plan(
 
     for node in &ast.nodes {
         let out_idx = node.out.0 as usize;
-        debug_assert!(out_idx < n, "AstGraph invariant violated: out out of bounds");
+        debug_assert!(
+            out_idx < n,
+            "AstGraph invariant violated: out out of bounds"
+        );
         match &node.op {
             AstOp::GTExp {
                 op_id: Some(id),
@@ -1214,7 +1249,7 @@ pub fn derive_wiring_plan(
                 ..
             } => {
                 debug_assert!(
-                    last_gt_exp.map_or(true, |prev| prev <= *id),
+                    last_gt_exp.is_none_or(|prev| prev <= *id),
                     "non-monotone GTExp OpId encountered: prev={last_gt_exp:?}, cur={id:?}"
                 );
                 last_gt_exp = Some(*id);
@@ -1226,9 +1261,11 @@ pub fn derive_wiring_plan(
                     gt_exp_base_instance_by_value[base_idx] = Some(inst);
                 }
             }
-            AstOp::GTMul { op_id: Some(id), .. } => {
+            AstOp::GTMul {
+                op_id: Some(id), ..
+            } => {
                 debug_assert!(
-                    last_gt_mul.map_or(true, |prev| prev <= *id),
+                    last_gt_mul.is_none_or(|prev| prev <= *id),
                     "non-monotone GTMul OpId encountered: prev={last_gt_mul:?}, cur={id:?}"
                 );
                 last_gt_mul = Some(*id);
@@ -1236,9 +1273,11 @@ pub fn derive_wiring_plan(
                 dory_gt_mul += 1;
                 gt_mul_out_instance_by_value[out_idx] = Some(inst);
             }
-            AstOp::G1ScalarMul { op_id: Some(id), .. } => {
+            AstOp::G1ScalarMul {
+                op_id: Some(id), ..
+            } => {
                 debug_assert!(
-                    last_g1_smul.map_or(true, |prev| prev <= *id),
+                    last_g1_smul.is_none_or(|prev| prev <= *id),
                     "non-monotone G1ScalarMul OpId encountered: prev={last_g1_smul:?}, cur={id:?}"
                 );
                 last_g1_smul = Some(*id);
@@ -1246,9 +1285,11 @@ pub fn derive_wiring_plan(
                 dory_g1_smul += 1;
                 g1_smul_out_instance_by_value[out_idx] = Some(inst);
             }
-            AstOp::G2ScalarMul { op_id: Some(id), .. } => {
+            AstOp::G2ScalarMul {
+                op_id: Some(id), ..
+            } => {
                 debug_assert!(
-                    last_g2_smul.map_or(true, |prev| prev <= *id),
+                    last_g2_smul.is_none_or(|prev| prev <= *id),
                     "non-monotone G2ScalarMul OpId encountered: prev={last_g2_smul:?}, cur={id:?}"
                 );
                 last_g2_smul = Some(*id);
@@ -1256,9 +1297,11 @@ pub fn derive_wiring_plan(
                 dory_g2_smul += 1;
                 g2_smul_out_instance_by_value[out_idx] = Some(inst);
             }
-            AstOp::G1Add { op_id: Some(id), .. } => {
+            AstOp::G1Add {
+                op_id: Some(id), ..
+            } => {
                 debug_assert!(
-                    last_g1_add.map_or(true, |prev| prev <= *id),
+                    last_g1_add.is_none_or(|prev| prev <= *id),
                     "non-monotone G1Add OpId encountered: prev={last_g1_add:?}, cur={id:?}"
                 );
                 last_g1_add = Some(*id);
@@ -1266,9 +1309,11 @@ pub fn derive_wiring_plan(
                 dory_g1_add += 1;
                 g1_add_out_instance_by_value[out_idx] = Some(inst);
             }
-            AstOp::G2Add { op_id: Some(id), .. } => {
+            AstOp::G2Add {
+                op_id: Some(id), ..
+            } => {
                 debug_assert!(
-                    last_g2_add.map_or(true, |prev| prev <= *id),
+                    last_g2_add.is_none_or(|prev| prev <= *id),
                     "non-monotone G2Add OpId encountered: prev={last_g2_add:?}, cur={id:?}"
                 );
                 last_g2_add = Some(*id);
@@ -1353,20 +1398,19 @@ pub fn derive_wiring_plan(
                 let Some(add_instance) = g1_add_out_instance_by_value[out_idx] else {
                     continue;
                 };
-                let a_src =
-                    g1_value_from_output(
-                        ast,
-                        &g1_smul_out_instance_by_value,
-                        &g1_add_out_instance_by_value,
-                        *a,
+                let a_src = g1_value_from_output(
+                    ast,
+                    &g1_smul_out_instance_by_value,
+                    &g1_add_out_instance_by_value,
+                    *a,
+                )
+                .or_else(|| {
+                    matches!(
+                        ast.nodes.get(a.0 as usize).map(|n| &n.op),
+                        Some(AstOp::Input { .. })
                     )
-                    .or_else(|| {
-                        matches!(
-                            ast.nodes.get(a.0 as usize).map(|n| &n.op),
-                            Some(AstOp::Input { .. })
-                        )
-                        .then_some(G1ValueRef::G1Input { value_id: a.0 })
-                    });
+                    .then_some(G1ValueRef::G1Input { value_id: a.0 })
+                });
                 if let Some(src) = a_src {
                     plan.g1.push(G1WiringEdge {
                         src,
@@ -1384,20 +1428,19 @@ pub fn derive_wiring_plan(
                         "unwired G1Add input a value {a:?} ({src})"
                     )));
                 }
-                let b_src =
-                    g1_value_from_output(
-                        ast,
-                        &g1_smul_out_instance_by_value,
-                        &g1_add_out_instance_by_value,
-                        *b,
+                let b_src = g1_value_from_output(
+                    ast,
+                    &g1_smul_out_instance_by_value,
+                    &g1_add_out_instance_by_value,
+                    *b,
+                )
+                .or_else(|| {
+                    matches!(
+                        ast.nodes.get(b.0 as usize).map(|n| &n.op),
+                        Some(AstOp::Input { .. })
                     )
-                    .or_else(|| {
-                        matches!(
-                            ast.nodes.get(b.0 as usize).map(|n| &n.op),
-                            Some(AstOp::Input { .. })
-                        )
-                        .then_some(G1ValueRef::G1Input { value_id: b.0 })
-                    });
+                    .then_some(G1ValueRef::G1Input { value_id: b.0 })
+                });
                 if let Some(src) = b_src {
                     plan.g1.push(G1WiringEdge {
                         src,
@@ -1426,20 +1469,19 @@ pub fn derive_wiring_plan(
                 let Some(add_instance) = g2_add_out_instance_by_value[out_idx] else {
                     continue;
                 };
-                let a_src =
-                    g2_value_from_output(
-                        ast,
-                        &g2_smul_out_instance_by_value,
-                        &g2_add_out_instance_by_value,
-                        *a,
+                let a_src = g2_value_from_output(
+                    ast,
+                    &g2_smul_out_instance_by_value,
+                    &g2_add_out_instance_by_value,
+                    *a,
+                )
+                .or_else(|| {
+                    matches!(
+                        ast.nodes.get(a.0 as usize).map(|n| &n.op),
+                        Some(AstOp::Input { .. })
                     )
-                    .or_else(|| {
-                        matches!(
-                            ast.nodes.get(a.0 as usize).map(|n| &n.op),
-                            Some(AstOp::Input { .. })
-                        )
-                        .then_some(G2ValueRef::G2Input { value_id: a.0 })
-                    });
+                    .then_some(G2ValueRef::G2Input { value_id: a.0 })
+                });
                 if let Some(src) = a_src {
                     plan.g2.push(G2WiringEdge {
                         src,
@@ -1457,20 +1499,19 @@ pub fn derive_wiring_plan(
                         "unwired G2Add input a value {a:?} ({src})"
                     )));
                 }
-                let b_src =
-                    g2_value_from_output(
-                        ast,
-                        &g2_smul_out_instance_by_value,
-                        &g2_add_out_instance_by_value,
-                        *b,
+                let b_src = g2_value_from_output(
+                    ast,
+                    &g2_smul_out_instance_by_value,
+                    &g2_add_out_instance_by_value,
+                    *b,
+                )
+                .or_else(|| {
+                    matches!(
+                        ast.nodes.get(b.0 as usize).map(|n| &n.op),
+                        Some(AstOp::Input { .. })
                     )
-                    .or_else(|| {
-                        matches!(
-                            ast.nodes.get(b.0 as usize).map(|n| &n.op),
-                            Some(AstOp::Input { .. })
-                        )
-                        .then_some(G2ValueRef::G2Input { value_id: b.0 })
-                    });
+                    .then_some(G2ValueRef::G2Input { value_id: b.0 })
+                });
                 if let Some(src) = b_src {
                     plan.g2.push(G2WiringEdge {
                         src,
@@ -1791,6 +1832,65 @@ pub fn derive_wiring_plan(
             src: root,
             dst: GtConsumer::JointCommitment,
         });
+    }
+
+    // --- Pairing recursion wiring (Multi-Miller loop -> GTMul chain -> pairing Miller rhs) ---
+    {
+        // When pairing recursion is enabled, the constraint list includes:
+        // - 3 `ConstraintType::MultiMillerLoop` instances (one per pairing pair)
+        // - 2 trailing `ConstraintType::GtMul` instances to multiply the 3 Miller outputs.
+        //
+        // We wire:
+        //   out0 -> mul0.lhs
+        //   out1 -> mul0.rhs
+        //   mul0.result -> mul1.lhs
+        //   out2 -> mul1.rhs
+        //   mul1.result -> PairingBoundaryMillerRhs
+        let miller_constraint_indices: Vec<usize> = constraint_types
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ct)| matches!(ct, ConstraintType::MultiMillerLoop).then_some(i))
+            .collect();
+        if miller_constraint_indices.len() == 3 {
+            let num_gt_mul_total = constraint_types
+                .iter()
+                .filter(|ct| matches!(ct, ConstraintType::GtMul))
+                .count();
+            if num_gt_mul_total >= 2 {
+                let mul0 = num_gt_mul_total - 2;
+                let mul1 = num_gt_mul_total - 1;
+                let out0 = GtProducer::MultiMillerLoopOut {
+                    instance: miller_constraint_indices[0],
+                };
+                let out1 = GtProducer::MultiMillerLoopOut {
+                    instance: miller_constraint_indices[1],
+                };
+                let out2 = GtProducer::MultiMillerLoopOut {
+                    instance: miller_constraint_indices[2],
+                };
+
+                plan.gt.push(GtWiringEdge {
+                    src: out0,
+                    dst: GtConsumer::GtMulLhs { instance: mul0 },
+                });
+                plan.gt.push(GtWiringEdge {
+                    src: out1,
+                    dst: GtConsumer::GtMulRhs { instance: mul0 },
+                });
+                plan.gt.push(GtWiringEdge {
+                    src: GtProducer::GtMulResult { instance: mul0 },
+                    dst: GtConsumer::GtMulLhs { instance: mul1 },
+                });
+                plan.gt.push(GtWiringEdge {
+                    src: out2,
+                    dst: GtConsumer::GtMulRhs { instance: mul1 },
+                });
+                plan.gt.push(GtWiringEdge {
+                    src: GtProducer::GtMulResult { instance: mul1 },
+                    dst: GtConsumer::PairingBoundaryMillerRhs,
+                });
+            }
+        }
     }
 
     // Canonical edge ordering (must match prover and verifier): stable sort by dst then src.

@@ -7,6 +7,7 @@
 use super::wrappers::{
     ark_to_jolt, ArkDoryProof, ArkFr, ArkG1, ArkG2, ArkGT, ArkworksVerifierSetup, BN254,
 };
+use crate::poly::commitment::dory::witness::MultiMillerLoopSteps;
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::proof_serialization::PairingBoundary;
 use crate::zkvm::recursion::constraints::system::ConstraintType;
@@ -459,7 +460,7 @@ pub fn derive_plan_with_hints(
                 scalar,
             } => {
                 debug_assert!(
-                    last_gt_exp.map_or(true, |prev| prev <= *id),
+                    last_gt_exp.is_none_or(|prev| prev <= *id),
                     "non-monotone GTExp OpId encountered: prev={last_gt_exp:?}, cur={id:?}"
                 );
                 last_gt_exp = Some(*id);
@@ -469,7 +470,7 @@ pub fn derive_plan_with_hints(
                 op_id: Some(id), ..
             } => {
                 debug_assert!(
-                    last_gt_mul.map_or(true, |prev| prev <= *id),
+                    last_gt_mul.is_none_or(|prev| prev <= *id),
                     "non-monotone GTMul OpId encountered: prev={last_gt_mul:?}, cur={id:?}"
                 );
                 last_gt_mul = Some(*id);
@@ -481,7 +482,7 @@ pub fn derive_plan_with_hints(
                 scalar,
             } => {
                 debug_assert!(
-                    last_g1_smul.map_or(true, |prev| prev <= *id),
+                    last_g1_smul.is_none_or(|prev| prev <= *id),
                     "non-monotone G1ScalarMul OpId encountered: prev={last_g1_smul:?}, cur={id:?}"
                 );
                 last_g1_smul = Some(*id);
@@ -493,7 +494,7 @@ pub fn derive_plan_with_hints(
                 scalar,
             } => {
                 debug_assert!(
-                    last_g2_smul.map_or(true, |prev| prev <= *id),
+                    last_g2_smul.is_none_or(|prev| prev <= *id),
                     "non-monotone G2ScalarMul OpId encountered: prev={last_g2_smul:?}, cur={id:?}"
                 );
                 last_g2_smul = Some(*id);
@@ -503,7 +504,7 @@ pub fn derive_plan_with_hints(
                 op_id: Some(id), ..
             } => {
                 debug_assert!(
-                    last_g1_add.map_or(true, |prev| prev <= *id),
+                    last_g1_add.is_none_or(|prev| prev <= *id),
                     "non-monotone G1Add OpId encountered: prev={last_g1_add:?}, cur={id:?}"
                 );
                 last_g1_add = Some(*id);
@@ -513,7 +514,7 @@ pub fn derive_plan_with_hints(
                 op_id: Some(id), ..
             } => {
                 debug_assert!(
-                    last_g2_add.map_or(true, |prev| prev <= *id),
+                    last_g2_add.is_none_or(|prev| prev <= *id),
                     "non-monotone G2Add OpId encountered: prev={last_g2_add:?}, cur={id:?}"
                 );
                 last_g2_add = Some(*id);
@@ -610,6 +611,15 @@ pub fn derive_plan_with_hints(
         constraint_types.push(ConstraintType::GtMul);
     }
 
+    // Pairing recursion constraints (appended after combine, matching the prover).
+    // 3 Miller loops (one per pairing pair) and 2 trailing GT muls to multiply their outputs.
+    for _ in 0..3 {
+        constraint_types.push(ConstraintType::MultiMillerLoop);
+    }
+    for _ in 0..2 {
+        constraint_types.push(ConstraintType::GtMul);
+    }
+
     let dense_num_vars =
         PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
 
@@ -620,7 +630,12 @@ pub fn derive_plan_with_hints(
     let num_constraint_vars = 11usize;
     let num_vars = num_s_vars + num_constraint_vars;
 
-    let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
+    let wiring = derive_wiring_plan(
+        ast,
+        combine_commitments.len(),
+        &pairing_boundary,
+        &constraint_types,
+    )?;
     let mut gt_input_ids: Vec<u32> = wiring
         .gt
         .iter()
@@ -763,7 +778,7 @@ pub fn derive_from_dory_ast(
                 scalar,
             } => {
                 debug_assert!(
-                    last_gt_exp.map_or(true, |prev| prev <= *id),
+                    last_gt_exp.is_none_or(|prev| prev <= *id),
                     "non-monotone GTExp OpId encountered: prev={last_gt_exp:?}, cur={id:?}"
                 );
                 last_gt_exp = Some(*id);
@@ -773,7 +788,7 @@ pub fn derive_from_dory_ast(
                 op_id: Some(id), ..
             } => {
                 debug_assert!(
-                    last_gt_mul.map_or(true, |prev| prev <= *id),
+                    last_gt_mul.is_none_or(|prev| prev <= *id),
                     "non-monotone GTMul OpId encountered: prev={last_gt_mul:?}, cur={id:?}"
                 );
                 last_gt_mul = Some(*id);
@@ -785,7 +800,7 @@ pub fn derive_from_dory_ast(
                 scalar,
             } => {
                 debug_assert!(
-                    last_g1_smul.map_or(true, |prev| prev <= *id),
+                    last_g1_smul.is_none_or(|prev| prev <= *id),
                     "non-monotone G1ScalarMul OpId encountered: prev={last_g1_smul:?}, cur={id:?}"
                 );
                 last_g1_smul = Some(*id);
@@ -797,7 +812,7 @@ pub fn derive_from_dory_ast(
                 scalar,
             } => {
                 debug_assert!(
-                    last_g2_smul.map_or(true, |prev| prev <= *id),
+                    last_g2_smul.is_none_or(|prev| prev <= *id),
                     "non-monotone G2ScalarMul OpId encountered: prev={last_g2_smul:?}, cur={id:?}"
                 );
                 last_g2_smul = Some(*id);
@@ -807,7 +822,7 @@ pub fn derive_from_dory_ast(
                 op_id: Some(id), ..
             } => {
                 debug_assert!(
-                    last_g1_add.map_or(true, |prev| prev <= *id),
+                    last_g1_add.is_none_or(|prev| prev <= *id),
                     "non-monotone G1Add OpId encountered: prev={last_g1_add:?}, cur={id:?}"
                 );
                 last_g1_add = Some(*id);
@@ -817,7 +832,7 @@ pub fn derive_from_dory_ast(
                 op_id: Some(id), ..
             } => {
                 debug_assert!(
-                    last_g2_add.map_or(true, |prev| prev <= *id),
+                    last_g2_add.is_none_or(|prev| prev <= *id),
                     "non-monotone G2Add OpId encountered: prev={last_g2_add:?}, cur={id:?}"
                 );
                 last_g2_add = Some(*id);
@@ -910,6 +925,15 @@ pub fn derive_from_dory_ast(
         constraint_types.push(ConstraintType::GtMul);
     }
 
+    // Pairing recursion constraints (appended after combine, matching the prover).
+    // 3 Miller loops (one per pairing pair) and 2 trailing GT muls to multiply their outputs.
+    for _ in 0..3 {
+        constraint_types.push(ConstraintType::MultiMillerLoop);
+    }
+    for _ in 0..2 {
+        constraint_types.push(ConstraintType::GtMul);
+    }
+
     // Dense polynomial var count (needed for Hyrax setup bounds).
     let dense_num_vars =
         PrefixPackingLayout::from_constraint_types(&constraint_types).num_dense_vars;
@@ -997,16 +1021,41 @@ pub fn derive_from_dory_ast(
         _ => return Err(ProofVerifyError::default()),
     };
 
+    let p1_g1 = eval_g1(g1s[0])?;
+    let p1_g2 = eval_g2(g2s[0])?;
+    let p2_g1 = eval_g1(g1s[1])?;
+    let p2_g2 = eval_g2(g2s[1])?;
+    let p3_g1 = eval_g1(g1s[2])?;
+    let p3_g2 = eval_g2(g2s[2])?;
+
+    // Pre-final-exponentiation Miller product for the pairing boundary.
+    let miller_rhs = {
+        // IMPORTANT: this must match the *recursion SNARK's* internal Miller loop witness
+        // representation (the packed MultiMillerLoop trace), since the GT wiring constraints bind
+        // the chain output to `PairingBoundary.miller_rhs`.
+        //
+        // Final exponentiation is not injective, so different Miller-loop representatives can map
+        // to the same pairing value; we therefore derive the representative via the same witness
+        // generator used by recursion proving.
+        MultiMillerLoopSteps::new(&[p1_g1, p2_g1, p3_g1], &[p1_g2, p2_g2, p3_g2]).result
+    };
+
     let pairing_boundary = PairingBoundary {
-        p1_g1: eval_g1(g1s[0])?,
-        p1_g2: eval_g2(g2s[0])?,
-        p2_g1: eval_g1(g1s[1])?,
-        p2_g2: eval_g2(g2s[1])?,
-        p3_g1: eval_g1(g1s[2])?,
-        p3_g2: eval_g2(g2s[2])?,
+        p1_g1,
+        p1_g2,
+        p2_g1,
+        p2_g2,
+        p3_g1,
+        p3_g2,
+        miller_rhs,
         rhs: rhs_val,
     };
-    let wiring = derive_wiring_plan(ast, combine_commitments.len(), &pairing_boundary)?;
+    let wiring = derive_wiring_plan(
+        ast,
+        combine_commitments.len(),
+        &pairing_boundary,
+        &constraint_types,
+    )?;
     let mut gt_input_ids: Vec<u32> = wiring
         .gt
         .iter()

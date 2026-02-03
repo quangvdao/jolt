@@ -64,6 +64,9 @@ use rayon::prelude::*;
 /// Degree bound for the G2Add constraint polynomial (see `g2/addition.rs`).
 const DEGREE_BOUND: usize = 6;
 
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_RECURSION_STAGE2_G2_ADD_TOTAL: &str = "verify_recursion_stage2_g2_add_total";
+
 #[derive(Clone, Allocative)]
 pub struct G2AddParams {
     pub num_constraint_index_vars: usize, // k
@@ -288,6 +291,10 @@ impl G2AddVerifier {
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for G2AddVerifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        Some(CYCLE_VERIFY_RECURSION_STAGE2_G2_ADD_TOTAL)
+    }
+
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }

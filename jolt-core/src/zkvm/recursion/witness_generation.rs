@@ -14,7 +14,8 @@ use crate::poly::commitment::dory::recursion::{JoltGtExpWitness, JoltGtMulWitnes
 use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::zkvm::recursion::constraints::system::{
     ConstraintLocator, ConstraintSystem, ConstraintType, G1AddNative, G1ScalarMulNative,
-    G2AddNative, G2ScalarMulNative, GtMulNativeRows, PolyType, RecursionMatrixShape,
+    G2AddNative, G2ScalarMulNative, GtMulNativeRows, MultiMillerLoopNativeRows, PolyType,
+    RecursionMatrixShape,
 };
 use crate::zkvm::recursion::g1::types::G1ScalarMulPublicInputs;
 use crate::zkvm::recursion::g2::types::G2ScalarMulPublicInputs;
@@ -267,6 +268,7 @@ pub fn plan_constraint_system(
     let mut g2_scalar_mul_rows: Vec<G2ScalarMulNative> = Vec::new();
     let mut g1_add_rows: Vec<G1AddNative> = Vec::new();
     let mut g2_add_rows: Vec<G2AddNative> = Vec::new();
+    let multi_miller_loop_rows: Vec<MultiMillerLoopNativeRows> = Vec::new();
 
     let mut g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs> = Vec::new();
     let mut g2_scalar_mul_public_inputs: Vec<G2ScalarMulPublicInputs> = Vec::new();
@@ -508,6 +510,7 @@ pub fn plan_constraint_system(
         g2_scalar_mul_rows,
         g1_add_rows,
         g2_add_rows,
+        multi_miller_loop_rows,
         g1_scalar_mul_public_inputs,
         g2_scalar_mul_public_inputs,
     })
@@ -1020,6 +1023,276 @@ pub fn emit_dense(cs: &ConstraintSystem) -> (DensePolynomial<Fq>, PrefixPackingL
                     panic!("MulQuotient entry with non-GtMul locator: {loc:?}");
                 };
                 fill_block(dst, &cs.gt_mul_rows[local].quotient, entry.num_vars);
+            }
+
+            // Multi-Miller loop (11-var, per instance)
+            PolyType::MultiMillerLoopF => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopF entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(dst, &cs.multi_miller_loop_rows[local].f, entry.num_vars);
+            }
+            PolyType::MultiMillerLoopFNext => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopFNext entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].f_next,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopQuotient => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopQuotient entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].quotient,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTXC0 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopTXC0 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_x_c0,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTXC1 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopTXC1 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_x_c1,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTYC0 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopTYC0 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_y_c0,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTYC1 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopTYC1 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_y_c1,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTXC0Next => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopTXC0Next entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_x_c0_next,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTXC1Next => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopTXC1Next entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_x_c1_next,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTYC0Next => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopTYC0Next entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_y_c0_next,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopTYC1Next => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopTYC1Next entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].t_y_c1_next,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopLambdaC0 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopLambdaC0 entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].lambda_c0,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopLambdaC1 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopLambdaC1 entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].lambda_c1,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopInvDeltaXC0 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopInvDeltaXC0 entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].inv_delta_x_c0,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopInvDeltaXC1 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopInvDeltaXC1 entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].inv_delta_x_c1,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopInvTwoYC0 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopInvTwoYC0 entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].inv_two_y_c0,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopInvTwoYC1 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopInvTwoYC1 entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].inv_two_y_c1,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopXP => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopXP entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(dst, &cs.multi_miller_loop_rows[local].x_p, entry.num_vars);
+            }
+            PolyType::MultiMillerLoopYP => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopYP entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(dst, &cs.multi_miller_loop_rows[local].y_p, entry.num_vars);
+            }
+            PolyType::MultiMillerLoopXQC0 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopXQC0 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].x_q_c0,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopXQC1 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopXQC1 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].x_q_c1,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopYQC0 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopYQC0 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].y_q_c0,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopYQC1 => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopYQC1 entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].y_q_c1,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopIsDouble => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!(
+                        "MultiMillerLoopIsDouble entry with non-MultiMillerLoop locator: {loc:?}"
+                    );
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].is_double,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopIsAdd => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopIsAdd entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(
+                    dst,
+                    &cs.multi_miller_loop_rows[local].is_add,
+                    entry.num_vars,
+                );
+            }
+            PolyType::MultiMillerLoopLVal => {
+                let ConstraintLocator::MultiMillerLoop { local } = loc else {
+                    panic!("MultiMillerLoopLVal entry with non-MultiMillerLoop locator: {loc:?}");
+                };
+                fill_block(dst, &cs.multi_miller_loop_rows[local].l_val, entry.num_vars);
             }
 
             // G1 scalar mul (8-var)

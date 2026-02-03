@@ -46,6 +46,7 @@ pub struct PairingBoundary {
     pub p2_g2: G2Affine,
     pub p3_g1: G1Affine,
     pub p3_g2: G2Affine,
+    pub miller_rhs: Fq12,
     pub rhs: Fq12,
 }
 
@@ -58,6 +59,7 @@ impl GuestSerialize for PairingBoundary {
         self.p2_g2.guest_serialize(w)?;
         self.p3_g1.guest_serialize(w)?;
         self.p3_g2.guest_serialize(w)?;
+        self.miller_rhs.guest_serialize(w)?;
         self.rhs.guest_serialize(w)?;
         Ok(())
     }
@@ -73,6 +75,7 @@ impl GuestDeserialize for PairingBoundary {
             p2_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
             p3_g1: ark_bn254::g1::G1Affine::guest_deserialize(r)?,
             p3_g2: ark_bn254::g2::G2Affine::guest_deserialize(r)?,
+            miller_rhs: Fq12::guest_deserialize(r)?,
             rhs: Fq12::guest_deserialize(r)?,
         })
     }

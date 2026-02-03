@@ -655,6 +655,113 @@ impl TermEnum for GtExpTerm {
     }
 }
 
+// --- Pairing operations (BN254) ---
+
+/// Multi-Miller loop trace terms (packed 11-var MLE per pair).
+///
+/// These are scalar-valued columns used to prove the BN254 Miller loop computation inside
+/// recursion (over the base field \( \mathbb{F}_q \)).
+#[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]
+pub enum MultiMillerLoopTerm {
+    F,
+    FNext,
+    Quotient,
+    TXC0,
+    TXC1,
+    TYC0,
+    TYC1,
+    TXC0Next,
+    TXC1Next,
+    TYC0Next,
+    TYC1Next,
+    LambdaC0,
+    LambdaC1,
+    InvDeltaXC0,
+    InvDeltaXC1,
+    InvTwoYC0,
+    InvTwoYC1,
+    XP,
+    YP,
+    XQC0,
+    XQC1,
+    YQC0,
+    YQC1,
+    IsDouble,
+    IsAdd,
+    LVal,
+}
+
+impl TermEnum for MultiMillerLoopTerm {
+    const COUNT: usize = 26;
+
+    fn from_index(i: usize) -> Option<Self> {
+        match i {
+            0 => Some(Self::F),
+            1 => Some(Self::FNext),
+            2 => Some(Self::Quotient),
+            3 => Some(Self::TXC0),
+            4 => Some(Self::TXC1),
+            5 => Some(Self::TYC0),
+            6 => Some(Self::TYC1),
+            7 => Some(Self::TXC0Next),
+            8 => Some(Self::TXC1Next),
+            9 => Some(Self::TYC0Next),
+            10 => Some(Self::TYC1Next),
+            11 => Some(Self::LambdaC0),
+            12 => Some(Self::LambdaC1),
+            13 => Some(Self::InvDeltaXC0),
+            14 => Some(Self::InvDeltaXC1),
+            15 => Some(Self::InvTwoYC0),
+            16 => Some(Self::InvTwoYC1),
+            17 => Some(Self::XP),
+            18 => Some(Self::YP),
+            19 => Some(Self::XQC0),
+            20 => Some(Self::XQC1),
+            21 => Some(Self::YQC0),
+            22 => Some(Self::YQC1),
+            23 => Some(Self::IsDouble),
+            24 => Some(Self::IsAdd),
+            25 => Some(Self::LVal),
+            _ => None,
+        }
+    }
+
+    fn to_index(self) -> usize {
+        self as usize
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::F => "f",
+            Self::FNext => "f_next",
+            Self::Quotient => "quotient",
+            Self::TXC0 => "t_x_c0",
+            Self::TXC1 => "t_x_c1",
+            Self::TYC0 => "t_y_c0",
+            Self::TYC1 => "t_y_c1",
+            Self::TXC0Next => "t_x_c0_next",
+            Self::TXC1Next => "t_x_c1_next",
+            Self::TYC0Next => "t_y_c0_next",
+            Self::TYC1Next => "t_y_c1_next",
+            Self::LambdaC0 => "lambda_c0",
+            Self::LambdaC1 => "lambda_c1",
+            Self::InvDeltaXC0 => "inv_delta_x_c0",
+            Self::InvDeltaXC1 => "inv_delta_x_c1",
+            Self::InvTwoYC0 => "inv_two_y_c0",
+            Self::InvTwoYC1 => "inv_two_y_c1",
+            Self::XP => "x_p",
+            Self::YP => "y_p",
+            Self::XQC0 => "x_q_c0",
+            Self::XQC1 => "x_q_c1",
+            Self::YQC0 => "y_q_c0",
+            Self::YQC1 => "y_q_c1",
+            Self::IsDouble => "is_double",
+            Self::IsAdd => "is_add",
+            Self::LVal => "l_val",
+        }
+    }
+}
+
 // =============================================================================
 // RecursionPoly - the main hierarchy enum
 // =============================================================================
@@ -696,6 +803,13 @@ pub enum RecursionPoly {
     /// GT-exp witnesses are reduced to a shared Stage-2 point by `GtExpClaimReduction`,
     /// and wiring reads those reduced openings.
     GtExp { term: GtExpTerm },
+    /// Multi-Miller loop term polynomial for a specific constraint instance (global constraint idx).
+    ///
+    /// This is used to prove BN254 pairing Miller loop computation inside recursion.
+    MultiMillerLoop {
+        term: MultiMillerLoopTerm,
+        instance: usize,
+    },
 }
 
 impl RecursionPoly {
@@ -707,6 +821,7 @@ impl RecursionPoly {
             Self::G2ScalarMul { term } => term.to_index(),
             Self::GtMul { term } => term.to_index(),
             Self::GtExp { term } => term.to_index(),
+            Self::MultiMillerLoop { term, .. } => term.to_index(),
         }
     }
 }
@@ -723,6 +838,7 @@ const RECURSION_POLY_TAG_G2_ADD: u8 = 13; // was G2_ADD_FUSED
 const RECURSION_POLY_TAG_G2_SCALAR_MUL: u8 = 14; // was G2_SCALAR_MUL_FUSED
 const RECURSION_POLY_TAG_GT_MUL: u8 = 9; // was GT_MUL_FUSED
 const RECURSION_POLY_TAG_GT_EXP: u8 = 10; // was GT_EXP_FUSED
+const RECURSION_POLY_TAG_MULTI_MILLER_LOOP: u8 = 15;
 
 impl CanonicalSerialize for RecursionPoly {
     fn serialize_with_mode<W: Write>(
@@ -730,22 +846,27 @@ impl CanonicalSerialize for RecursionPoly {
         mut writer: W,
         compress: Compress,
     ) -> Result<(), SerializationError> {
-        let (tag, term_index) = match *self {
-            RecursionPoly::G1Add { term } => (RECURSION_POLY_TAG_G1_ADD, term.to_index()),
+        let (tag, term_index, instance) = match *self {
+            RecursionPoly::G1Add { term } => (RECURSION_POLY_TAG_G1_ADD, term.to_index(), 0usize),
             RecursionPoly::G1ScalarMul { term } => {
-                (RECURSION_POLY_TAG_G1_SCALAR_MUL, term.to_index())
+                (RECURSION_POLY_TAG_G1_SCALAR_MUL, term.to_index(), 0usize)
             }
-            RecursionPoly::G2Add { term } => (RECURSION_POLY_TAG_G2_ADD, term.to_index()),
+            RecursionPoly::G2Add { term } => (RECURSION_POLY_TAG_G2_ADD, term.to_index(), 0usize),
             RecursionPoly::G2ScalarMul { term } => {
-                (RECURSION_POLY_TAG_G2_SCALAR_MUL, term.to_index())
+                (RECURSION_POLY_TAG_G2_SCALAR_MUL, term.to_index(), 0usize)
             }
-            RecursionPoly::GtMul { term } => (RECURSION_POLY_TAG_GT_MUL, term.to_index()),
-            RecursionPoly::GtExp { term } => (RECURSION_POLY_TAG_GT_EXP, term.to_index()),
+            RecursionPoly::GtMul { term } => (RECURSION_POLY_TAG_GT_MUL, term.to_index(), 0usize),
+            RecursionPoly::GtExp { term } => (RECURSION_POLY_TAG_GT_EXP, term.to_index(), 0usize),
+            RecursionPoly::MultiMillerLoop { term, instance } => (
+                RECURSION_POLY_TAG_MULTI_MILLER_LOOP,
+                term.to_index(),
+                instance,
+            ),
         };
 
         tag.serialize_with_mode(&mut writer, compress)?;
         (term_index as u32).serialize_with_mode(&mut writer, compress)?;
-        0u32.serialize_with_mode(&mut writer, compress)?; // instance field for compatibility
+        (instance as u32).serialize_with_mode(&mut writer, compress)?;
         Ok(())
     }
 
@@ -770,7 +891,11 @@ impl CanonicalDeserialize for RecursionPoly {
     ) -> Result<Self, SerializationError> {
         let tag = u8::deserialize_with_mode(&mut reader, compress, validate)?;
         let term_index = u32::deserialize_with_mode(&mut reader, compress, validate)? as usize;
-        let _instance = u32::deserialize_with_mode(&mut reader, compress, validate)?; // unused
+        let instance_u32 = u32::deserialize_with_mode(&mut reader, compress, validate)?;
+        let instance = instance_u32 as usize;
+        if instance as u32 != instance_u32 {
+            return Err(SerializationError::InvalidData);
+        }
 
         Ok(match tag {
             RECURSION_POLY_TAG_G1_ADD => Self::G1Add {
@@ -793,6 +918,11 @@ impl CanonicalDeserialize for RecursionPoly {
             RECURSION_POLY_TAG_GT_EXP => Self::GtExp {
                 term: GtExpTerm::from_index(term_index).ok_or(SerializationError::InvalidData)?,
             },
+            RECURSION_POLY_TAG_MULTI_MILLER_LOOP => Self::MultiMillerLoop {
+                term: MultiMillerLoopTerm::from_index(term_index)
+                    .ok_or(SerializationError::InvalidData)?,
+                instance,
+            },
             _ => return Err(SerializationError::InvalidData),
         })
     }
@@ -800,18 +930,23 @@ impl CanonicalDeserialize for RecursionPoly {
 
 impl GuestSerialize for RecursionPoly {
     fn guest_serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        // Match the canonical shape: tag + term_index + instance (instance always 0).
-        let (tag, term_index) = match *self {
-            RecursionPoly::G1Add { term } => (RECURSION_POLY_TAG_G1_ADD, term.to_index()),
+        // Match the canonical shape: tag + term_index + instance.
+        let (tag, term_index, instance) = match *self {
+            RecursionPoly::G1Add { term } => (RECURSION_POLY_TAG_G1_ADD, term.to_index(), 0usize),
             RecursionPoly::G1ScalarMul { term } => {
-                (RECURSION_POLY_TAG_G1_SCALAR_MUL, term.to_index())
+                (RECURSION_POLY_TAG_G1_SCALAR_MUL, term.to_index(), 0usize)
             }
-            RecursionPoly::G2Add { term } => (RECURSION_POLY_TAG_G2_ADD, term.to_index()),
+            RecursionPoly::G2Add { term } => (RECURSION_POLY_TAG_G2_ADD, term.to_index(), 0usize),
             RecursionPoly::G2ScalarMul { term } => {
-                (RECURSION_POLY_TAG_G2_SCALAR_MUL, term.to_index())
+                (RECURSION_POLY_TAG_G2_SCALAR_MUL, term.to_index(), 0usize)
             }
-            RecursionPoly::GtMul { term } => (RECURSION_POLY_TAG_GT_MUL, term.to_index()),
-            RecursionPoly::GtExp { term } => (RECURSION_POLY_TAG_GT_EXP, term.to_index()),
+            RecursionPoly::GtMul { term } => (RECURSION_POLY_TAG_GT_MUL, term.to_index(), 0usize),
+            RecursionPoly::GtExp { term } => (RECURSION_POLY_TAG_GT_EXP, term.to_index(), 0usize),
+            RecursionPoly::MultiMillerLoop { term, instance } => (
+                RECURSION_POLY_TAG_MULTI_MILLER_LOOP,
+                term.to_index(),
+                instance,
+            ),
         };
         tag.guest_serialize(w)?;
         let term_index_u32 = u32::try_from(term_index).map_err(|_| {
@@ -821,7 +956,13 @@ impl GuestSerialize for RecursionPoly {
             )
         })?;
         term_index_u32.guest_serialize(w)?;
-        0u32.guest_serialize(w)?; // instance field for compatibility
+        let instance_u32 = u32::try_from(instance).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RecursionPoly instance overflow",
+            )
+        })?;
+        instance_u32.guest_serialize(w)?;
         Ok(())
     }
 }
@@ -830,7 +971,14 @@ impl GuestDeserialize for RecursionPoly {
     fn guest_deserialize<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
         let tag = u8::guest_deserialize(r)?;
         let term_index = u32::guest_deserialize(r)? as usize;
-        let _instance = u32::guest_deserialize(r)?; // unused
+        let instance_u32 = u32::guest_deserialize(r)?;
+        let instance = instance_u32 as usize;
+        if instance as u32 != instance_u32 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RecursionPoly instance overflow",
+            ));
+        }
         Ok(match tag {
             RECURSION_POLY_TAG_G1_ADD => Self::G1Add {
                 term: G1AddTerm::from_index(term_index).ok_or_else(|| {
@@ -867,6 +1015,15 @@ impl GuestDeserialize for RecursionPoly {
                 term: GtExpTerm::from_index(term_index).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid GtExpTerm index")
                 })?,
+            },
+            RECURSION_POLY_TAG_MULTI_MILLER_LOOP => Self::MultiMillerLoop {
+                term: MultiMillerLoopTerm::from_index(term_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid MultiMillerLoopTerm index",
+                    )
+                })?,
+                instance,
             },
             _ => {
                 return Err(std::io::Error::new(
@@ -1103,4 +1260,56 @@ pub enum VirtualPolynomial {
     ProgramImageInitContributionRaf,
     // Recursion protocol virtual polynomials - hierarchical structure
     Recursion(RecursionPoly),
+}
+
+impl VirtualPolynomial {
+    /// Construct a Multi-Miller loop virtual polynomial (identified by global `constraint_idx`).
+    #[inline]
+    pub fn multi_miller_loop(term: MultiMillerLoopTerm, constraint_idx: usize) -> Self {
+        VirtualPolynomial::Recursion(RecursionPoly::MultiMillerLoop {
+            term,
+            instance: constraint_idx,
+        })
+    }
+
+    #[inline]
+    pub fn multi_miller_loop_f(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::F, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_f_next(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::FNext, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_x_c0(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TXC0, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_x_c0_next(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TXC0Next, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_x_c1(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TXC1, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_x_c1_next(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TXC1Next, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_y_c0(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TYC0, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_y_c0_next(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TYC0Next, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_y_c1(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TYC1, constraint_idx)
+    }
+    #[inline]
+    pub fn multi_miller_loop_t_y_c1_next(constraint_idx: usize) -> Self {
+        Self::multi_miller_loop(MultiMillerLoopTerm::TYC1Next, constraint_idx)
+    }
 }

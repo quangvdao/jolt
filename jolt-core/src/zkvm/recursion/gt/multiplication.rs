@@ -63,6 +63,9 @@ use rayon::prelude::*;
 /// Each term: eq (deg 1) * ind (deg 1) * constraint (deg 2) = deg 4.
 const DEGREE: usize = 4;
 
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_RECURSION_STAGE2_GT_MUL_TOTAL: &str = "verify_recursion_stage2_gt_mul_total";
+
 #[derive(Clone, Allocative)]
 pub struct GtMulParams {
     /// Number of c-index variables in Stage 2 (k_common).
@@ -429,6 +432,10 @@ impl GtMulVerifier {
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtMulVerifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        Some(CYCLE_VERIFY_RECURSION_STAGE2_GT_MUL_TOTAL)
+    }
+
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }

@@ -325,8 +325,8 @@ impl RecursionProver<Fq> {
         // Resolve any GT-valued AST inputs that feed directly into GT ports (e.g. GTMul lhs/rhs).
         //
         // These are used by the GT wiring sumcheck as verifier-derived boundary constants.
-        let wiring_for_inputs =
-            derive_wiring_plan(&ast, comms.len(), &pairing_boundary).map_err(|e| {
+        let wiring_for_inputs = derive_wiring_plan(&ast, comms.len(), &pairing_boundary, &[])
+            .map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("AST->wiring-plan derivation failed: {e}"),
@@ -493,6 +493,9 @@ impl RecursionProver<Fq> {
             Self::witness_generation::<F, DoryPCS, ProofTranscript>(input)?;
         prover.ast = Some(ast);
 
+        // Pairing recursion: add MultiMillerLoop + GTMul chain constraints once the pairing boundary is known.
+        prover.append_pairing_recursion_constraints()?;
+
         // Phase 2: polynomial commitment (Hyrax)
         let poly_commit = prover.poly_commit::<ProofTranscript>(transcript, hyrax_prover_setup)?;
 
@@ -607,6 +610,131 @@ impl RecursionProver<Fq> {
 }
 
 impl RecursionProver<Fq> {
+    fn append_pairing_recursion_constraints(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::poly::commitment::dory::witness::{
+            gt_mul::MultiplicationSteps, multi_miller_loop::MultiMillerLoopSteps,
+        };
+        use crate::zkvm::recursion::constraints::system::{
+            ConstraintLocator, ConstraintType, GtMulNativeRows, MultiMillerLoopNativeRows,
+        };
+        use jolt_optimizations::fq12_to_multilinear_evals;
+
+        // Require pairing boundary (derived from AST) to be present.
+        let pairing = self
+            .pairing_boundary
+            .as_ref()
+            .ok_or("pairing_boundary missing when adding pairing recursion constraints")?;
+
+        let g1s = [pairing.p1_g1, pairing.p2_g1, pairing.p3_g1];
+        let g2s = [pairing.p1_g2, pairing.p2_g2, pairing.p3_g2];
+
+        // Build the per-pair Miller loop traces (packed 11-var MLEs).
+        let steps = MultiMillerLoopSteps::new(&g1s, &g2s);
+        if steps.pair_results.len() != 3 {
+            return Err("expected exactly 3 Miller loop pairs in PairingBoundary".into());
+        }
+        if std::env::var_os("JOLT_DEBUG_CHECK_MILLER_RHS").is_some() {
+            // Sanity check: the pairing boundary's pre-final-exponentiation Miller product must
+            // match the product of the per-pair traces we are about to commit/wire.
+            if pairing.miller_rhs != steps.result {
+                return Err(format!(
+                    "pairing_boundary.miller_rhs mismatch: boundary != product(trace outputs)"
+                )
+                .into());
+            }
+        }
+
+        // Append 3 MultiMillerLoop constraints (one per pairing pair).
+        for i in 0..3 {
+            let local = self.constraint_system.multi_miller_loop_rows.len();
+            self.constraint_system
+                .constraint_types
+                .push(ConstraintType::MultiMillerLoop);
+            self.constraint_system
+                .locator_by_constraint
+                .push(ConstraintLocator::MultiMillerLoop { local });
+
+            self.constraint_system
+                .multi_miller_loop_rows
+                .push(MultiMillerLoopNativeRows {
+                    f: steps.f_packed_mles[i].clone(),
+                    f_next: steps.f_next_packed_mles[i].clone(),
+                    quotient: steps.quotient_packed_mles[i].clone(),
+                    t_x_c0: steps.t_x_c0_packed_mles[i].clone(),
+                    t_x_c1: steps.t_x_c1_packed_mles[i].clone(),
+                    t_y_c0: steps.t_y_c0_packed_mles[i].clone(),
+                    t_y_c1: steps.t_y_c1_packed_mles[i].clone(),
+                    t_x_c0_next: steps.t_x_c0_next_packed_mles[i].clone(),
+                    t_x_c1_next: steps.t_x_c1_next_packed_mles[i].clone(),
+                    t_y_c0_next: steps.t_y_c0_next_packed_mles[i].clone(),
+                    t_y_c1_next: steps.t_y_c1_next_packed_mles[i].clone(),
+                    lambda_c0: steps.lambda_c0_packed_mles[i].clone(),
+                    lambda_c1: steps.lambda_c1_packed_mles[i].clone(),
+                    inv_delta_x_c0: steps.inv_dx_c0_packed_mles[i].clone(),
+                    inv_delta_x_c1: steps.inv_dx_c1_packed_mles[i].clone(),
+                    inv_two_y_c0: steps.inv_two_y_c0_packed_mles[i].clone(),
+                    inv_two_y_c1: steps.inv_two_y_c1_packed_mles[i].clone(),
+                    x_p: steps.x_p_packed_mles[i].clone(),
+                    y_p: steps.y_p_packed_mles[i].clone(),
+                    x_q_c0: steps.x_q_c0_packed_mles[i].clone(),
+                    x_q_c1: steps.x_q_c1_packed_mles[i].clone(),
+                    y_q_c0: steps.y_q_c0_packed_mles[i].clone(),
+                    y_q_c1: steps.y_q_c1_packed_mles[i].clone(),
+                    is_double: steps.is_double_packed_mles[i].clone(),
+                    is_add: steps.is_add_packed_mles[i].clone(),
+                    l_val: steps.l_val_packed_mles[i].clone(),
+                });
+        }
+
+        // Append GTMul constraints to multiply the 3 Miller outputs into one Fq12.
+        //
+        // mul0 = out0 * out1
+        // mul1 = mul0 * out2
+        let out0 = steps.pair_results[0];
+        let out1 = steps.pair_results[1];
+        let out2 = steps.pair_results[2];
+
+        let mul0 = MultiplicationSteps::new(out0, out1);
+        let mul1 = MultiplicationSteps::new(mul0.result, out2);
+
+        if std::env::var_os("JOLT_DEBUG_CHECK_MML_WIRING_VALUES").is_some() {
+            // These should match exactly: the GT mul constraints we append are meant to be wired
+            // directly from the per-pair Miller outputs.
+            if mul0.lhs != out0 || mul0.rhs != out1 {
+                return Err("pairing recursion mul0 inputs mismatch".into());
+            }
+            if mul1.lhs != mul0.result || mul1.rhs != out2 {
+                return Err("pairing recursion mul1 inputs mismatch".into());
+            }
+            // And the product must match the (verifier-visible) pairing boundary miller_rhs.
+            if mul1.result != pairing.miller_rhs {
+                return Err("pairing recursion miller_rhs != mul1.result".into());
+            }
+        }
+
+        for mul in [mul0, mul1] {
+            let local = self.constraint_system.gt_mul_rows.len();
+            self.constraint_system
+                .constraint_types
+                .push(ConstraintType::GtMul);
+            self.constraint_system
+                .locator_by_constraint
+                .push(ConstraintLocator::GtMul { local });
+            self.constraint_system.gt_mul_rows.push(GtMulNativeRows {
+                lhs: fq12_to_multilinear_evals(&mul.lhs),
+                rhs: fq12_to_multilinear_evals(&mul.rhs),
+                result: fq12_to_multilinear_evals(&mul.result),
+                quotient: mul.quotient_mle,
+            });
+        }
+
+        // Update the public shape (used by verifier metadata) and invalidate cached commitments.
+        self.constraint_system.recompute_shape();
+        self.dense_poly_cache = None;
+        self.prefix_layout_cache = None;
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, name = "RecursionProver::poly_commit")]
     pub(crate) fn poly_commit<T: Transcript>(
         &mut self,
@@ -964,8 +1092,11 @@ impl RecursionProver<Fq> {
         let g_poly_f = self.constraint_system.g_poly.clone();
 
         // GT mul
+        //
+        // NOTE (debugging): setting `JOLT_DEBUG_SKIP_GT_MUL=1` skips the GTMul sumcheck instance
+        // (useful to isolate Stage-2 sumcheck failures).
         let gt_mul_rows = &self.constraint_system.gt_mul_rows;
-        if !gt_mul_rows.is_empty() {
+        if std::env::var_os("JOLT_DEBUG_SKIP_GT_MUL").is_none() && !gt_mul_rows.is_empty() {
             let gt_mul_constraints_fq: Vec<GtMulConstraintPolynomials<Fq>> = gt_mul_rows
                 .iter()
                 .enumerate()
@@ -1052,46 +1183,226 @@ impl RecursionProver<Fq> {
             provers.push(Box::new(prover));
         }
 
-        // Wiring/boundary constraints (AST-driven), appended LAST in Stage 2
-        if let (Some(ast), Some(pairing_boundary), Some(joint_commitment)) = (
-            self.ast.as_ref(),
-            self.pairing_boundary.as_ref(),
-            self.joint_commitment.as_ref(),
-        ) {
-            let wiring = derive_wiring_plan(ast, self.combine_leaves, pairing_boundary)
+        // Pairing recursion: Multi-Miller loop + shift check (Stage 2; x-only, suffix-aligned).
+        if !self.constraint_system.multi_miller_loop_rows.is_empty() {
+            use crate::zkvm::recursion::pairing::multi_miller_loop::{
+                FrontAlignedMultiMillerLoopProver, MultiMillerLoopParams, MultiMillerLoopProverSpec,
+            };
+            use crate::zkvm::recursion::pairing::shift::{
+                ShiftMultiMillerLoopParams, ShiftMultiMillerLoopProver,
+            };
+            use crate::zkvm::witness::MultiMillerLoopTerm;
+
+            let Some(pairing_boundary) = self.pairing_boundary.as_ref() else {
+                return Err("pairing_boundary missing for pairing stage2".into());
+            };
+            if self.constraint_system.multi_miller_loop_rows.len() != 3 {
+                return Err(format!(
+                    "expected exactly 3 MultiMillerLoop rows, got {}",
+                    self.constraint_system.multi_miller_loop_rows.len()
+                )
+                .into());
+            }
+
+            // Map MultiMillerLoop local -> global constraint index for VirtualPolynomial IDs.
+            let mut global_idx_by_local =
+                vec![None; self.constraint_system.multi_miller_loop_rows.len()];
+            for (global_idx, loc) in self
+                .constraint_system
+                .locator_by_constraint
+                .iter()
+                .enumerate()
+            {
+                if let crate::zkvm::recursion::ConstraintLocator::MultiMillerLoop { local } = *loc {
+                    global_idx_by_local[local] = Some(global_idx);
+                }
+            }
+            let mut witnesses =
+                Vec::with_capacity(self.constraint_system.multi_miller_loop_rows.len());
+            let mut g1_points =
+                Vec::with_capacity(self.constraint_system.multi_miller_loop_rows.len());
+            let mut g2_points =
+                Vec::with_capacity(self.constraint_system.multi_miller_loop_rows.len());
+            for (local, rows) in self
+                .constraint_system
+                .multi_miller_loop_rows
+                .iter()
+                .enumerate()
+            {
+                let global_idx =
+                    global_idx_by_local[local].ok_or("missing global idx for MultiMillerLoop")?;
+                witnesses.push(
+                    crate::zkvm::recursion::pairing::multi_miller_loop::MultiMillerLoopWitness::<
+                        Fq,
+                    > {
+                        f: rows.f.clone(),
+                        f_next: rows.f_next.clone(),
+                        quotient: rows.quotient.clone(),
+                        t_x_c0: rows.t_x_c0.clone(),
+                        t_x_c1: rows.t_x_c1.clone(),
+                        t_y_c0: rows.t_y_c0.clone(),
+                        t_y_c1: rows.t_y_c1.clone(),
+                        t_x_c0_next: rows.t_x_c0_next.clone(),
+                        t_x_c1_next: rows.t_x_c1_next.clone(),
+                        t_y_c0_next: rows.t_y_c0_next.clone(),
+                        t_y_c1_next: rows.t_y_c1_next.clone(),
+                        lambda_c0: rows.lambda_c0.clone(),
+                        lambda_c1: rows.lambda_c1.clone(),
+                        inv_delta_x_c0: rows.inv_delta_x_c0.clone(),
+                        inv_delta_x_c1: rows.inv_delta_x_c1.clone(),
+                        inv_two_y_c0: rows.inv_two_y_c0.clone(),
+                        inv_two_y_c1: rows.inv_two_y_c1.clone(),
+                        x_p: rows.x_p.clone(),
+                        y_p: rows.y_p.clone(),
+                        x_q_c0: rows.x_q_c0.clone(),
+                        x_q_c1: rows.x_q_c1.clone(),
+                        y_q_c0: rows.y_q_c0.clone(),
+                        y_q_c1: rows.y_q_c1.clone(),
+                        is_double: rows.is_double.clone(),
+                        is_add: rows.is_add.clone(),
+                        l_val: rows.l_val.clone(),
+                        constraint_index: global_idx,
+                    },
+                );
+                // Pairing boundary order is p1/p2/p3.
+                g1_points.push(
+                    [
+                        pairing_boundary.p1_g1,
+                        pairing_boundary.p2_g1,
+                        pairing_boundary.p3_g1,
+                    ][local],
+                );
+                g2_points.push(
+                    [
+                        pairing_boundary.p1_g2,
+                        pairing_boundary.p2_g2,
+                        pairing_boundary.p3_g2,
+                    ][local],
+                );
+            }
+
+            let params = MultiMillerLoopParams::new(witnesses.len());
+            let (spec, constraint_indices) =
+                MultiMillerLoopProverSpec::new(params, witnesses, g1_points, g2_points);
+            let inner: crate::zkvm::recursion::pairing::MultiMillerLoopProver<Fq> = crate::zkvm::recursion::constraints::sumcheck::ConstraintListProver::<
+                Fq,
+                _,
+                7,
+            >::from_spec(spec, constraint_indices, transcript);
+            let dummy_after_rounds = k_gt(&self.constraint_system.constraint_types);
+            provers.push(Box::new(FrontAlignedMultiMillerLoopProver::new(
+                inner,
+                dummy_after_rounds,
+            )));
+
+            // Shift check for f and T coordinates (plus `*_next` columns).
+            //
+            // NOTE (debugging): setting `JOLT_DEBUG_SKIP_MML_SHIFT=1` skips this shift gadget to
+            // isolate Stage-2 sumcheck failures to the core MultiMillerLoop constraint.
+            if std::env::var_os("JOLT_DEBUG_SKIP_MML_SHIFT").is_none() {
+                let mut pairs: Vec<(
+                    crate::zkvm::witness::VirtualPolynomial,
+                    Vec<Fq>,
+                    crate::zkvm::witness::VirtualPolynomial,
+                    Vec<Fq>,
+                )> = Vec::new();
+                for (local, rows) in self
+                    .constraint_system
+                    .multi_miller_loop_rows
+                    .iter()
+                    .enumerate()
+                {
+                    let global_idx = global_idx_by_local[local].expect("global idx must exist");
+                    let mk = |term: MultiMillerLoopTerm| {
+                        crate::zkvm::witness::VirtualPolynomial::multi_miller_loop(term, global_idx)
+                    };
+                    pairs.push((
+                        mk(MultiMillerLoopTerm::F),
+                        rows.f.clone(),
+                        mk(MultiMillerLoopTerm::FNext),
+                        rows.f_next.clone(),
+                    ));
+                    pairs.push((
+                        mk(MultiMillerLoopTerm::TXC0),
+                        rows.t_x_c0.clone(),
+                        mk(MultiMillerLoopTerm::TXC0Next),
+                        rows.t_x_c0_next.clone(),
+                    ));
+                    pairs.push((
+                        mk(MultiMillerLoopTerm::TXC1),
+                        rows.t_x_c1.clone(),
+                        mk(MultiMillerLoopTerm::TXC1Next),
+                        rows.t_x_c1_next.clone(),
+                    ));
+                    pairs.push((
+                        mk(MultiMillerLoopTerm::TYC0),
+                        rows.t_y_c0.clone(),
+                        mk(MultiMillerLoopTerm::TYC0Next),
+                        rows.t_y_c0_next.clone(),
+                    ));
+                    pairs.push((
+                        mk(MultiMillerLoopTerm::TYC1),
+                        rows.t_y_c1.clone(),
+                        mk(MultiMillerLoopTerm::TYC1Next),
+                        rows.t_y_c1_next.clone(),
+                    ));
+                }
+                let params = ShiftMultiMillerLoopParams::new(pairs.len());
+                let shift = ShiftMultiMillerLoopProver::<Fq, T>::new(params, pairs, transcript);
+                provers.push(Box::new(shift));
+            }
+        }
+
+        // Wiring/boundary constraints (AST-driven), appended LAST in Stage 2.
+        //
+        // NOTE (debugging): setting `JOLT_DEBUG_SKIP_RECURSION_WIRING=1` skips these constraints to
+        // isolate Stage-2 sumcheck failures to the (non-wiring) constraint families.
+        if std::env::var_os("JOLT_DEBUG_SKIP_RECURSION_WIRING").is_none() {
+            if let (Some(ast), Some(pairing_boundary), Some(joint_commitment)) = (
+                self.ast.as_ref(),
+                self.pairing_boundary.as_ref(),
+                self.joint_commitment.as_ref(),
+            ) {
+                let wiring = derive_wiring_plan(
+                    ast,
+                    self.combine_leaves,
+                    pairing_boundary,
+                    &self.constraint_system.constraint_types,
+                )
                 .map_err(|_e| "AST->wiring-plan derivation failed")?;
 
-            if !wiring.gt.is_empty() {
-                let gt_inputs = self.gt_inputs.as_deref().unwrap_or(&[]);
-                let wiring_gt = WiringGtProver::<T>::new(
-                    &self.constraint_system,
-                    wiring.gt.clone(),
-                    pairing_boundary,
-                    *joint_commitment,
-                    gt_inputs,
-                    transcript,
-                );
-                provers.push(Box::new(wiring_gt));
-            }
-            if !wiring.g1.is_empty() {
-                let g1_inputs = self.g1_inputs.as_deref().unwrap_or(&[]);
-                provers.push(Box::new(WiringG1Prover::<T>::new(
-                    &self.constraint_system,
-                    wiring.g1.clone(),
-                    pairing_boundary,
-                    g1_inputs,
-                    transcript,
-                )));
-            }
-            if !wiring.g2.is_empty() {
-                let g2_inputs = self.g2_inputs.as_deref().unwrap_or(&[]);
-                provers.push(Box::new(WiringG2Prover::<T>::new(
-                    &self.constraint_system,
-                    wiring.g2.clone(),
-                    pairing_boundary,
-                    g2_inputs,
-                    transcript,
-                )));
+                if !wiring.gt.is_empty() {
+                    let gt_inputs = self.gt_inputs.as_deref().unwrap_or(&[]);
+                    let wiring_gt = WiringGtProver::<T>::new(
+                        &self.constraint_system,
+                        wiring.gt.clone(),
+                        pairing_boundary,
+                        *joint_commitment,
+                        gt_inputs,
+                        transcript,
+                    );
+                    provers.push(Box::new(wiring_gt));
+                }
+                if !wiring.g1.is_empty() {
+                    let g1_inputs = self.g1_inputs.as_deref().unwrap_or(&[]);
+                    provers.push(Box::new(WiringG1Prover::<T>::new(
+                        &self.constraint_system,
+                        wiring.g1.clone(),
+                        pairing_boundary,
+                        g1_inputs,
+                        transcript,
+                    )));
+                }
+                if !wiring.g2.is_empty() {
+                    let g2_inputs = self.g2_inputs.as_deref().unwrap_or(&[]);
+                    provers.push(Box::new(WiringG2Prover::<T>::new(
+                        &self.constraint_system,
+                        wiring.g2.clone(),
+                        pairing_boundary,
+                        g2_inputs,
+                        transcript,
+                    )));
+                }
             }
         }
 
@@ -1551,6 +1862,70 @@ impl RecursionProver<Fq> {
                     _ => return Fq::zero(),
                 };
                 accumulator.get_virtual_polynomial_claim(vp, SumcheckId::G2Add)
+            } else if matches!(
+                entry.poly_type,
+                PolyType::MultiMillerLoopF
+                    | PolyType::MultiMillerLoopFNext
+                    | PolyType::MultiMillerLoopQuotient
+                    | PolyType::MultiMillerLoopTXC0
+                    | PolyType::MultiMillerLoopTXC1
+                    | PolyType::MultiMillerLoopTYC0
+                    | PolyType::MultiMillerLoopTYC1
+                    | PolyType::MultiMillerLoopTXC0Next
+                    | PolyType::MultiMillerLoopTXC1Next
+                    | PolyType::MultiMillerLoopTYC0Next
+                    | PolyType::MultiMillerLoopTYC1Next
+                    | PolyType::MultiMillerLoopLambdaC0
+                    | PolyType::MultiMillerLoopLambdaC1
+                    | PolyType::MultiMillerLoopInvDeltaXC0
+                    | PolyType::MultiMillerLoopInvDeltaXC1
+                    | PolyType::MultiMillerLoopInvTwoYC0
+                    | PolyType::MultiMillerLoopInvTwoYC1
+                    | PolyType::MultiMillerLoopXP
+                    | PolyType::MultiMillerLoopYP
+                    | PolyType::MultiMillerLoopXQC0
+                    | PolyType::MultiMillerLoopXQC1
+                    | PolyType::MultiMillerLoopYQC0
+                    | PolyType::MultiMillerLoopYQC1
+                    | PolyType::MultiMillerLoopIsDouble
+                    | PolyType::MultiMillerLoopIsAdd
+                    | PolyType::MultiMillerLoopLVal
+            ) {
+                use crate::zkvm::witness::MultiMillerLoopTerm;
+                let term = match entry.poly_type {
+                    PolyType::MultiMillerLoopF => MultiMillerLoopTerm::F,
+                    PolyType::MultiMillerLoopFNext => MultiMillerLoopTerm::FNext,
+                    PolyType::MultiMillerLoopQuotient => MultiMillerLoopTerm::Quotient,
+                    PolyType::MultiMillerLoopTXC0 => MultiMillerLoopTerm::TXC0,
+                    PolyType::MultiMillerLoopTXC1 => MultiMillerLoopTerm::TXC1,
+                    PolyType::MultiMillerLoopTYC0 => MultiMillerLoopTerm::TYC0,
+                    PolyType::MultiMillerLoopTYC1 => MultiMillerLoopTerm::TYC1,
+                    PolyType::MultiMillerLoopTXC0Next => MultiMillerLoopTerm::TXC0Next,
+                    PolyType::MultiMillerLoopTXC1Next => MultiMillerLoopTerm::TXC1Next,
+                    PolyType::MultiMillerLoopTYC0Next => MultiMillerLoopTerm::TYC0Next,
+                    PolyType::MultiMillerLoopTYC1Next => MultiMillerLoopTerm::TYC1Next,
+                    PolyType::MultiMillerLoopLambdaC0 => MultiMillerLoopTerm::LambdaC0,
+                    PolyType::MultiMillerLoopLambdaC1 => MultiMillerLoopTerm::LambdaC1,
+                    PolyType::MultiMillerLoopInvDeltaXC0 => MultiMillerLoopTerm::InvDeltaXC0,
+                    PolyType::MultiMillerLoopInvDeltaXC1 => MultiMillerLoopTerm::InvDeltaXC1,
+                    PolyType::MultiMillerLoopInvTwoYC0 => MultiMillerLoopTerm::InvTwoYC0,
+                    PolyType::MultiMillerLoopInvTwoYC1 => MultiMillerLoopTerm::InvTwoYC1,
+                    PolyType::MultiMillerLoopXP => MultiMillerLoopTerm::XP,
+                    PolyType::MultiMillerLoopYP => MultiMillerLoopTerm::YP,
+                    PolyType::MultiMillerLoopXQC0 => MultiMillerLoopTerm::XQC0,
+                    PolyType::MultiMillerLoopXQC1 => MultiMillerLoopTerm::XQC1,
+                    PolyType::MultiMillerLoopYQC0 => MultiMillerLoopTerm::YQC0,
+                    PolyType::MultiMillerLoopYQC1 => MultiMillerLoopTerm::YQC1,
+                    PolyType::MultiMillerLoopIsDouble => MultiMillerLoopTerm::IsDouble,
+                    PolyType::MultiMillerLoopIsAdd => MultiMillerLoopTerm::IsAdd,
+                    PolyType::MultiMillerLoopLVal => MultiMillerLoopTerm::LVal,
+                    _ => return Fq::zero(),
+                };
+                let vp = VirtualPolynomial::Recursion(RecursionPoly::MultiMillerLoop {
+                    term,
+                    instance: entry.constraint_idx,
+                });
+                accumulator.get_virtual_polynomial_claim(vp, SumcheckId::MultiMillerLoop)
             } else {
                 panic!("unexpected prefix-packing entry without a family tag: {entry:?}")
             }

@@ -55,6 +55,10 @@ const U_VARS: usize = 4;
 const DEGREE: usize = 4;
 const STEP_STRIDE: usize = 1usize << 7; // 2^STEP_VARS (STEP_VARS = 7)
 
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_RECURSION_STAGE2_GTEXP_BASE_POW_TOTAL: &str =
+    "verify_recursion_stage2_gt_exp_base_pow_total";
+
 #[derive(Clone, Allocative)]
 pub struct GtExpBasePowParams {
     pub k_common: usize,
@@ -400,6 +404,10 @@ impl GtExpBasePowVerifier {
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpBasePowVerifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        Some(CYCLE_VERIFY_RECURSION_STAGE2_GTEXP_BASE_POW_TOTAL)
+    }
+
     fn get_params(&self) -> &dyn SumcheckInstanceParams<Fq> {
         &self.params
     }

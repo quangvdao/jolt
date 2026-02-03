@@ -53,6 +53,10 @@ use allocative::Allocative;
 use ark_bn254::Fq;
 use ark_ff::Zero;
 
+// Cycle-marker labels must be static strings: the tracer keys markers by the guest string pointer.
+const CYCLE_VERIFY_RECURSION_STAGE2_GTEXP_CLAIM_REDUCTION_TOTAL: &str =
+    "verify_recursion_stage2_gt_exp_claim_reduction_total";
+
 #[derive(Clone, Debug, Allocative)]
 pub struct GtExpStage2OpeningsParams {
     /// Stage-2 GT-local suffix length used for batching (k_common = k_gt).
@@ -202,6 +206,10 @@ impl GtExpStage2OpeningsVerifier {
 }
 
 impl<T: Transcript> SumcheckInstanceVerifier<Fq, T> for GtExpStage2OpeningsVerifier {
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        Some(CYCLE_VERIFY_RECURSION_STAGE2_GTEXP_CLAIM_REDUCTION_TOTAL)
+    }
+
     fn degree(&self) -> usize {
         1
     }

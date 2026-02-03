@@ -343,9 +343,6 @@ pub fn eq_plus_one_lsb_evals<F: JoltField>(r: &[F::Challenge]) -> Vec<F> {
         return vec![F::zero()];
     }
 
-    // First compute eq_evals using the streaming O(2^n) algorithm.
-    let eq_evals = eq_lsb_evals::<F>(r);
-
     // Precompute prefix products: prefix[k] = r[0] * r[1] * ... * r[k-1]
     // (empty product for k=0 is 1)
     let mut prefix = vec![F::one(); n + 1];

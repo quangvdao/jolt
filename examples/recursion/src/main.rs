@@ -647,15 +647,19 @@ fn collect_guest_proofs(
 
         info!("  Verifying...");
         if let Some(ref recursion_artifact) = recursion_artifact {
-            let is_valid = jolt_core::zkvm::recursion::verify_recursion::<jolt_sdk::FS>(
+            match jolt_core::zkvm::recursion::verify_recursion::<jolt_sdk::FS>(
                 &guest_verifier_preprocessing,
                 io_device,
                 None,
                 &proof,
                 recursion_artifact,
-            )
-            .is_ok();
-            info!("  Recursion verification result: {is_valid}");
+            ) {
+                Ok(()) => info!("  Recursion verification result: true"),
+                Err(e) => {
+                    info!("  Recursion verification result: false");
+                    info!("  Recursion verification error: {e:?}");
+                }
+            }
         } else {
             // Standard verification (no recursion)
             let is_valid = verifier::verify(

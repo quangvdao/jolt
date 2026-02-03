@@ -4,6 +4,18 @@ use crate::transcripts::Transcript;
 use crate::{field::JoltField, poly::opening_proof::VerifierOpeningAccumulator};
 
 pub trait SumcheckInstanceVerifier<F: JoltField, T: Transcript> {
+    /// Optional cycle-tracking label for this sumcheck instance when used inside
+    /// `BatchedSumcheck::verify()`.
+    ///
+    /// If `Some(label)`, the verifier will wrap this instance's `cache_openings` +
+    /// `expected_output_claim` work in a cycle marker named `label`.
+    ///
+    /// Labels must be `&'static str` because the tracer keys markers by the guest string pointer.
+    #[inline(always)]
+    fn cycle_tracking_label(&self) -> Option<&'static str> {
+        None
+    }
+
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
         unimplemented!(
             "If get_params is unimplemented, degree, num_rounds, and \

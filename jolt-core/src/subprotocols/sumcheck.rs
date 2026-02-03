@@ -39,6 +39,37 @@ impl Drop for CycleMarkerGuard {
     }
 }
 
+#[inline]
+fn maybe_override_batching_coeffs_for_recursion_stage2<F: JoltField>(
+    batching_coeffs: &mut [F],
+    max_num_rounds: usize,
+) {
+    // Debug helper: isolate which recursion Stage-2 sumcheck instance is inconsistent.
+    //
+    // We intentionally scope this override very narrowly to avoid perturbing other
+    // batched sumchecks in the system.
+    //
+    // Current recursion Stage-2 shapes (depending on whether MML is included):
+    // - instances == 14 or 16
+    // - max_num_rounds == 19
+    if (batching_coeffs.len() != 14 && batching_coeffs.len() != 16) || max_num_rounds != 19 {
+        return;
+    }
+    let Ok(s) = std::env::var("JOLT_DEBUG_RECURSION_STAGE2_SINGLE_INDEX") else {
+        return;
+    };
+    let Ok(idx) = s.parse::<usize>() else {
+        return;
+    };
+    if idx >= batching_coeffs.len() {
+        return;
+    }
+    for c in batching_coeffs.iter_mut() {
+        *c = F::zero();
+    }
+    batching_coeffs[idx] = F::one();
+}
+
 /// Implements the standard technique for batching parallel sumchecks to reduce
 /// verifier cost and proof size.
 ///
@@ -68,7 +99,24 @@ impl BatchedSumcheck {
             .iter()
             .for_each(|input_claim| transcript.append_scalar(input_claim));
 
-        let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
+        let mut batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
+        maybe_override_batching_coeffs_for_recursion_stage2(&mut batching_coeffs, max_num_rounds);
+        if std::env::var_os("JOLT_DEBUG_SUMCHECK_INPUTS").is_some() {
+            tracing::info!(
+                "BatchedSumcheck::prove inputs: instances={} max_num_rounds={}",
+                sumcheck_instances.len(),
+                max_num_rounds
+            );
+            for (i, (sumcheck, input_claim)) in sumcheck_instances.iter().zip(input_claims.iter()).enumerate() {
+                let num_rounds = sumcheck.num_rounds();
+                let offset = sumcheck.round_offset(max_num_rounds);
+                let scaled = input_claim.mul_pow_2(max_num_rounds - num_rounds);
+                tracing::info!(
+                    "  inst[{i}] rounds={num_rounds} offset={offset} degree={} input_claim={input_claim:?} scaled_input_claim={scaled:?}",
+                    sumcheck.degree(),
+                );
+            }
+        }
 
         // To see why we may need to scale by a power of two, consider a batch of
         // two sumchecks:
@@ -229,7 +277,24 @@ impl BatchedSumcheck {
             .iter()
             .for_each(|input_claim| transcript.append_scalar(input_claim));
 
-        let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
+        let mut batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
+        maybe_override_batching_coeffs_for_recursion_stage2(&mut batching_coeffs, max_num_rounds);
+        if std::env::var_os("JOLT_DEBUG_SUMCHECK_INPUTS").is_some() {
+            tracing::info!(
+                "BatchedSumcheck::verify inputs: instances={} max_num_rounds={}",
+                sumcheck_instances.len(),
+                max_num_rounds
+            );
+            for (i, (sumcheck, input_claim)) in sumcheck_instances.iter().zip(input_claims.iter()).enumerate() {
+                let num_rounds = sumcheck.num_rounds();
+                let offset = sumcheck.round_offset(max_num_rounds);
+                let scaled = input_claim.mul_pow_2(max_num_rounds - num_rounds);
+                tracing::info!(
+                    "  inst[{i}] rounds={num_rounds} offset={offset} degree={} input_claim={input_claim:?} scaled_input_claim={scaled:?}",
+                    sumcheck.degree(),
+                );
+            }
+        }
 
         // To see why we may need to scale by a power of two, consider a batch of
         // two sumchecks:
@@ -255,13 +320,13 @@ impl BatchedSumcheck {
             proof.verify(claim, max_num_rounds, max_degree, transcript)?
         };
 
-        let expected_output_claim = sumcheck_instances
-            .iter()
-            .zip(batching_coeffs.iter())
-            .map(|(sumcheck, coeff)| {
-                let offset = sumcheck.round_offset(max_num_rounds);
-                let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
+        let mut expected_output_claim = F::zero();
+        for (sumcheck, coeff) in sumcheck_instances.iter().zip(batching_coeffs.iter()) {
+            let offset = sumcheck.round_offset(max_num_rounds);
+            let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
 
+            if let Some(label) = sumcheck.cycle_tracking_label() {
+                let _instance_cycle = CycleMarkerGuard::new(label);
                 // Cache polynomial opening claims, to be proven using either an
                 // opening proof or sumcheck (in the case of virtual polynomials).
                 {
@@ -274,11 +339,48 @@ impl BatchedSumcheck {
                         CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_EXPECTED_OUTPUT);
                     sumcheck.expected_output_claim(opening_accumulator, r_slice)
                 };
-                claim * coeff
-            })
-            .sum();
+                expected_output_claim += claim * coeff;
+            } else {
+                // Cache polynomial opening claims, to be proven using either an
+                // opening proof or sumcheck (in the case of virtual polynomials).
+                {
+                    let _cache =
+                        CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_CACHE_OPENINGS);
+                    sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
+                }
+                let claim = {
+                    let _expected =
+                        CycleMarkerGuard::new(CYCLE_BATCHED_SUMCHECK_VERIFY_EXPECTED_OUTPUT);
+                    sumcheck.expected_output_claim(opening_accumulator, r_slice)
+                };
+                expected_output_claim += claim * coeff;
+            }
+        }
 
         if output_claim != expected_output_claim {
+            // Debug aid: when requested, emit per-instance contributions to help localize which
+            // sumcheck instance has an inconsistent `expected_output_claim` implementation.
+            if std::env::var_os("JOLT_DEBUG_SUMCHECK_VERBOSE").is_some() {
+                tracing::error!(
+                    "Batched sumcheck mismatch: output_claim={output_claim:?} expected_output_claim={expected_output_claim:?} (instances={}, max_num_rounds={}, max_degree={})",
+                    sumcheck_instances.len(),
+                    max_num_rounds,
+                    max_degree
+                );
+                for (i, (sumcheck, coeff)) in
+                    sumcheck_instances.iter().zip(batching_coeffs.iter()).enumerate()
+                {
+                    let offset = sumcheck.round_offset(max_num_rounds);
+                    let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
+                    let label = sumcheck.cycle_tracking_label().unwrap_or("<no label>");
+                    let inst_expected = sumcheck.expected_output_claim(opening_accumulator, r_slice);
+                    tracing::error!(
+                        "  inst[{i}] label={label} rounds={} degree={} coeff={coeff:?} inst_expected={inst_expected:?}",
+                        sumcheck.num_rounds(),
+                        sumcheck.degree(),
+                    );
+                }
+            }
             return Err(ProofVerifyError::SumcheckVerificationError);
         }
 

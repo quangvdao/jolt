@@ -2262,25 +2262,39 @@ RUST_LOG=info cargo run --release -p recursion -- trace \
 
 ### 9.1.2 Example results (scale 24, fibonacci, committed, address-major, recursion)
 
-Run on 2026-02-01 with the commands above.
+Run on 2026-02-02 with the commands above.
 
 Concise per-stage summary (virtual cycles):
 
 | Phase | Cycles | % of Total |
 |-------|--------|------------|
-| Base Stages 1–7 | 22.7M | 9.3% |
-| Stage 8 Prep | 15.7M | 6.5% |
-| Recursion Stage 1 | 4.2M | 1.7% |
-| Recursion Stage 2 | 24.0M | 9.9% |
-| Recursion Stage 3 | 0.5M | 0.2% |
-| Recursion PCS Opening | 149.3M | 61.5% |
-| External Pairing Check | 17.2M | 7.1% |
-| Other overhead | ~9.1M | 3.8% |
-| **Total (`verify_recursion_total`)** | **242.7M** | **100%** |
+| Base Stages 1–7 | 22.7M | 9.7% |
+| Stage 8 Prep | 12.0M | 5.1% |
+| Recursion Stage 1 | 4.2M | 1.8% |
+| Recursion Stage 2 | 19.5M | 8.3% |
+| Recursion Stage 3 | 0.4M | 0.2% |
+| Recursion PCS Opening | 149.3M | 63.7% |
+| External Pairing Check | 17.2M | 7.3% |
+| Other overhead | ~9.2M | 3.9% |
+| **Total (`verify_recursion_total`)** | **234.5M** | **100%** |
+
+**Note on deserialization**: The table above shows `verify_recursion_total`, which excludes deserialization.
+The full guest verification (`guest_verify_total`) adds ~7.0M virtual cycles for deserializing the proof bundle:
+
+| Deserialization | Cycles |
+|-----------------|--------|
+| Preprocessing | 2.9M |
+| Proof | 1.6M |
+| Recursion artifact | 2.4M |
+| Device + count | ~3K |
+| **Total deserialization** | **~7.0M** |
+| **`guest_verify_total`** | **~241.5M** |
 
 This reflects the latest recursion sumcheck implementation where GTExp bases are committed on the native u-domain,
-non-public-input base hints are removed, and GTExp verifier work is reduced by consuming cached committed base
-openings (Sections 2.2.3–2.2.4).
+non-public-input base hints are removed, GTExp verifier work is reduced by consuming cached committed base
+openings (Sections 2.2.3–2.2.4), and Stage 2 sumchecks are optimized to eliminate hot-path heap allocations
+(Eq-kernel products computed inline, `eval_g_at_u_lsb_first` using stack-allocated weights, hoisted per-edge
+selector work in wiring verifiers).
 
 ### 9.2 Understanding the Output
 

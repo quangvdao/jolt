@@ -120,6 +120,7 @@ fn test_emit_dense_matches_bit_reversal_semantics() {
         gt_exp_public_inputs: vec![GtExpPublicInputs::new(vec![true])],
         gt_exp_base_inputs: vec![Fq12::one()],
         gt_mul_rows: vec![gt_mul_rows],
+        multi_miller_loop_rows: vec![],
         g1_scalar_mul_rows: vec![g1_rows],
         g2_scalar_mul_rows: vec![],
         g1_add_rows: vec![g1_add],

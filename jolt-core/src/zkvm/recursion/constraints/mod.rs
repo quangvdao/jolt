@@ -16,6 +16,6 @@ pub use sumcheck::{
 };
 pub use system::{
     ConstraintLocator, ConstraintSystem, ConstraintType, G1AddNative, G1ScalarMulNative,
-    G2AddNative, G2ScalarMulNative, GtMulNativeRows, PolyType, RecursionMatrixShape,
-    RecursionMetadataBuilder,
+    G2AddNative, G2ScalarMulNative, GtMulNativeRows, MultiMillerLoopNativeRows, PolyType,
+    RecursionMatrixShape, RecursionMetadataBuilder,
 };

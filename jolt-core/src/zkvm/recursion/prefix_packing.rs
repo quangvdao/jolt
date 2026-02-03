@@ -409,6 +409,55 @@ impl PrefixPackingLayout {
             }
         }
 
+        // Multi-Miller loop rows are NOT family-packed: each pairing instance has its own 11-var
+        // committed trace polynomials.
+        for (constraint_idx, ct) in constraint_types.iter().enumerate() {
+            if !matches!(ct, ConstraintType::MultiMillerLoop) {
+                continue;
+            }
+            for poly_type in [
+                PolyType::MultiMillerLoopF,
+                PolyType::MultiMillerLoopFNext,
+                PolyType::MultiMillerLoopQuotient,
+                PolyType::MultiMillerLoopTXC0,
+                PolyType::MultiMillerLoopTXC1,
+                PolyType::MultiMillerLoopTYC0,
+                PolyType::MultiMillerLoopTYC1,
+                PolyType::MultiMillerLoopTXC0Next,
+                PolyType::MultiMillerLoopTXC1Next,
+                PolyType::MultiMillerLoopTYC0Next,
+                PolyType::MultiMillerLoopTYC1Next,
+                PolyType::MultiMillerLoopLambdaC0,
+                PolyType::MultiMillerLoopLambdaC1,
+                PolyType::MultiMillerLoopInvDeltaXC0,
+                PolyType::MultiMillerLoopInvDeltaXC1,
+                PolyType::MultiMillerLoopInvTwoYC0,
+                PolyType::MultiMillerLoopInvTwoYC1,
+                PolyType::MultiMillerLoopXP,
+                PolyType::MultiMillerLoopYP,
+                PolyType::MultiMillerLoopXQC0,
+                PolyType::MultiMillerLoopXQC1,
+                PolyType::MultiMillerLoopYQC0,
+                PolyType::MultiMillerLoopYQC1,
+                PolyType::MultiMillerLoopIsDouble,
+                PolyType::MultiMillerLoopIsAdd,
+                PolyType::MultiMillerLoopLVal,
+            ] {
+                polys.push((
+                    constraint_idx,
+                    poly_type,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    11usize,
+                ));
+            }
+        }
+
         // Canonical ordering: decreasing size (num_vars), then PolyType-major, then family flags,
         // then constraint index.
         polys.sort_by_key(

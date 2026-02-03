@@ -177,6 +177,7 @@ fn test_recursion_snark_e2e_with_dory() {
             p2_g2: G2Affine::identity(),
             p3_g1: G1Affine::identity(),
             p3_g2: G2Affine::identity(),
+            miller_rhs: Fq12::zero(),
             rhs: Fq12::zero(),
         },
         joint_commitment: Fq12::zero(),

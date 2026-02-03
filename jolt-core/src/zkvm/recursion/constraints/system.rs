@@ -154,10 +154,38 @@ pub enum PolyType {
     // `c` domain only (no step padding).
     G1ScalarMulXP = 73,
     G1ScalarMulYP = 74,
+
+    // Multi-Miller loop polynomials (packed 11-var traces; per pairing instance).
+    MultiMillerLoopF = 75,
+    MultiMillerLoopFNext = 76,
+    MultiMillerLoopQuotient = 77,
+    MultiMillerLoopTXC0 = 78,
+    MultiMillerLoopTXC1 = 79,
+    MultiMillerLoopTYC0 = 80,
+    MultiMillerLoopTYC1 = 81,
+    MultiMillerLoopTXC0Next = 82,
+    MultiMillerLoopTXC1Next = 83,
+    MultiMillerLoopTYC0Next = 84,
+    MultiMillerLoopTYC1Next = 85,
+    MultiMillerLoopLambdaC0 = 86,
+    MultiMillerLoopLambdaC1 = 87,
+    MultiMillerLoopInvDeltaXC0 = 88,
+    MultiMillerLoopInvDeltaXC1 = 89,
+    MultiMillerLoopInvTwoYC0 = 90,
+    MultiMillerLoopInvTwoYC1 = 91,
+    MultiMillerLoopXP = 92,
+    MultiMillerLoopYP = 93,
+    MultiMillerLoopXQC0 = 94,
+    MultiMillerLoopXQC1 = 95,
+    MultiMillerLoopYQC0 = 96,
+    MultiMillerLoopYQC1 = 97,
+    MultiMillerLoopIsDouble = 98,
+    MultiMillerLoopIsAdd = 99,
+    MultiMillerLoopLVal = 100,
 }
 
 impl PolyType {
-    pub const NUM_TYPES: usize = 75;
+    pub const NUM_TYPES: usize = 101;
 }
 
 impl CanonicalSerialize for PolyType {
@@ -258,6 +286,32 @@ impl CanonicalDeserialize for PolyType {
             72 => PolyType::G2ScalarMulYPC1,
             73 => PolyType::G1ScalarMulXP,
             74 => PolyType::G1ScalarMulYP,
+            75 => PolyType::MultiMillerLoopF,
+            76 => PolyType::MultiMillerLoopFNext,
+            77 => PolyType::MultiMillerLoopQuotient,
+            78 => PolyType::MultiMillerLoopTXC0,
+            79 => PolyType::MultiMillerLoopTXC1,
+            80 => PolyType::MultiMillerLoopTYC0,
+            81 => PolyType::MultiMillerLoopTYC1,
+            82 => PolyType::MultiMillerLoopTXC0Next,
+            83 => PolyType::MultiMillerLoopTXC1Next,
+            84 => PolyType::MultiMillerLoopTYC0Next,
+            85 => PolyType::MultiMillerLoopTYC1Next,
+            86 => PolyType::MultiMillerLoopLambdaC0,
+            87 => PolyType::MultiMillerLoopLambdaC1,
+            88 => PolyType::MultiMillerLoopInvDeltaXC0,
+            89 => PolyType::MultiMillerLoopInvDeltaXC1,
+            90 => PolyType::MultiMillerLoopInvTwoYC0,
+            91 => PolyType::MultiMillerLoopInvTwoYC1,
+            92 => PolyType::MultiMillerLoopXP,
+            93 => PolyType::MultiMillerLoopYP,
+            94 => PolyType::MultiMillerLoopXQC0,
+            95 => PolyType::MultiMillerLoopXQC1,
+            96 => PolyType::MultiMillerLoopYQC0,
+            97 => PolyType::MultiMillerLoopYQC1,
+            98 => PolyType::MultiMillerLoopIsDouble,
+            99 => PolyType::MultiMillerLoopIsAdd,
+            100 => PolyType::MultiMillerLoopLVal,
             _ => return Err(SerializationError::InvalidData),
         };
         Ok(ty)
@@ -285,6 +339,8 @@ pub enum ConstraintType {
     G1Add,
     /// G2 addition constraint
     G2Add,
+    /// Multi-Miller loop constraint (pairing recursion; one per pairing pair)
+    MultiMillerLoop,
 }
 
 const GT_EXP_POLYS: [PolyType; 7] = [
@@ -465,6 +521,63 @@ const G2_ADD_SPECS: [(PolyType, usize); 21] = [
     (PolyType::G2AddIsInverse, 0),
 ];
 
+const MULTI_MILLER_LOOP_POLYS: [PolyType; 26] = [
+    PolyType::MultiMillerLoopF,
+    PolyType::MultiMillerLoopFNext,
+    PolyType::MultiMillerLoopQuotient,
+    PolyType::MultiMillerLoopTXC0,
+    PolyType::MultiMillerLoopTXC1,
+    PolyType::MultiMillerLoopTYC0,
+    PolyType::MultiMillerLoopTYC1,
+    PolyType::MultiMillerLoopTXC0Next,
+    PolyType::MultiMillerLoopTXC1Next,
+    PolyType::MultiMillerLoopTYC0Next,
+    PolyType::MultiMillerLoopTYC1Next,
+    PolyType::MultiMillerLoopLambdaC0,
+    PolyType::MultiMillerLoopLambdaC1,
+    PolyType::MultiMillerLoopInvDeltaXC0,
+    PolyType::MultiMillerLoopInvDeltaXC1,
+    PolyType::MultiMillerLoopInvTwoYC0,
+    PolyType::MultiMillerLoopInvTwoYC1,
+    PolyType::MultiMillerLoopXP,
+    PolyType::MultiMillerLoopYP,
+    PolyType::MultiMillerLoopXQC0,
+    PolyType::MultiMillerLoopXQC1,
+    PolyType::MultiMillerLoopYQC0,
+    PolyType::MultiMillerLoopYQC1,
+    PolyType::MultiMillerLoopIsDouble,
+    PolyType::MultiMillerLoopIsAdd,
+    PolyType::MultiMillerLoopLVal,
+];
+const MULTI_MILLER_LOOP_SPECS: [(PolyType, usize); 26] = [
+    (PolyType::MultiMillerLoopF, 11),
+    (PolyType::MultiMillerLoopFNext, 11),
+    (PolyType::MultiMillerLoopQuotient, 11),
+    (PolyType::MultiMillerLoopTXC0, 11),
+    (PolyType::MultiMillerLoopTXC1, 11),
+    (PolyType::MultiMillerLoopTYC0, 11),
+    (PolyType::MultiMillerLoopTYC1, 11),
+    (PolyType::MultiMillerLoopTXC0Next, 11),
+    (PolyType::MultiMillerLoopTXC1Next, 11),
+    (PolyType::MultiMillerLoopTYC0Next, 11),
+    (PolyType::MultiMillerLoopTYC1Next, 11),
+    (PolyType::MultiMillerLoopLambdaC0, 11),
+    (PolyType::MultiMillerLoopLambdaC1, 11),
+    (PolyType::MultiMillerLoopInvDeltaXC0, 11),
+    (PolyType::MultiMillerLoopInvDeltaXC1, 11),
+    (PolyType::MultiMillerLoopInvTwoYC0, 11),
+    (PolyType::MultiMillerLoopInvTwoYC1, 11),
+    (PolyType::MultiMillerLoopXP, 11),
+    (PolyType::MultiMillerLoopYP, 11),
+    (PolyType::MultiMillerLoopXQC0, 11),
+    (PolyType::MultiMillerLoopXQC1, 11),
+    (PolyType::MultiMillerLoopYQC0, 11),
+    (PolyType::MultiMillerLoopYQC1, 11),
+    (PolyType::MultiMillerLoopIsDouble, 11),
+    (PolyType::MultiMillerLoopIsAdd, 11),
+    (PolyType::MultiMillerLoopLVal, 11),
+];
+
 impl ConstraintType {
     pub fn committed_poly_types(&self) -> &'static [PolyType] {
         match self {
@@ -474,6 +587,7 @@ impl ConstraintType {
             ConstraintType::G2ScalarMul { .. } => &G2_SCALAR_MUL_POLYS,
             ConstraintType::G1Add => &G1_ADD_POLYS,
             ConstraintType::G2Add => &G2_ADD_POLYS,
+            ConstraintType::MultiMillerLoop => &MULTI_MILLER_LOOP_POLYS,
         }
     }
 
@@ -485,6 +599,7 @@ impl ConstraintType {
             ConstraintType::G2ScalarMul { .. } => &G2_SCALAR_MUL_SPECS,
             ConstraintType::G1Add => &G1_ADD_SPECS,
             ConstraintType::G2Add => &G2_ADD_SPECS,
+            ConstraintType::MultiMillerLoop => &MULTI_MILLER_LOOP_SPECS,
         }
     }
 }
@@ -498,6 +613,23 @@ pub struct RecursionMatrixShape {
     pub num_vars: usize,
 }
 
+impl RecursionMatrixShape {
+    pub fn from_num_constraints(num_constraints: usize) -> Self {
+        let num_constraints_padded = num_constraints.next_power_of_two();
+        let num_rows_unpadded = PolyType::NUM_TYPES * num_constraints_padded;
+        let num_s_vars = (num_rows_unpadded as f64).log2().ceil() as usize;
+        let num_constraint_vars = 11usize;
+        let num_vars = num_s_vars + num_constraint_vars;
+        Self {
+            num_constraints,
+            num_constraints_padded,
+            num_constraint_vars,
+            num_s_vars,
+            num_vars,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum ConstraintLocator {
     GtExp { local: usize },
@@ -506,6 +638,7 @@ pub enum ConstraintLocator {
     G2ScalarMul { local: usize },
     G1Add { local: usize },
     G2Add { local: usize },
+    MultiMillerLoop { local: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -590,6 +723,41 @@ pub struct G2AddNative {
     pub is_inverse: Fq,
 }
 
+#[derive(Clone, Debug)]
+pub struct MultiMillerLoopNativeRows {
+    pub f: Vec<Fq>,
+    pub f_next: Vec<Fq>,
+    pub quotient: Vec<Fq>,
+
+    pub t_x_c0: Vec<Fq>,
+    pub t_x_c1: Vec<Fq>,
+    pub t_y_c0: Vec<Fq>,
+    pub t_y_c1: Vec<Fq>,
+    pub t_x_c0_next: Vec<Fq>,
+    pub t_x_c1_next: Vec<Fq>,
+    pub t_y_c0_next: Vec<Fq>,
+    pub t_y_c1_next: Vec<Fq>,
+
+    pub lambda_c0: Vec<Fq>,
+    pub lambda_c1: Vec<Fq>,
+    pub inv_delta_x_c0: Vec<Fq>,
+    pub inv_delta_x_c1: Vec<Fq>,
+    pub inv_two_y_c0: Vec<Fq>,
+    pub inv_two_y_c1: Vec<Fq>,
+
+    pub x_p: Vec<Fq>,
+    pub y_p: Vec<Fq>,
+    pub x_q_c0: Vec<Fq>,
+    pub x_q_c1: Vec<Fq>,
+    pub y_q_c0: Vec<Fq>,
+    pub y_q_c1: Vec<Fq>,
+
+    pub is_double: Vec<Fq>,
+    pub is_add: Vec<Fq>,
+
+    pub l_val: Vec<Fq>,
+}
+
 #[derive(Clone)]
 pub struct ConstraintSystem {
     pub shape: RecursionMatrixShape,
@@ -612,6 +780,7 @@ pub struct ConstraintSystem {
     pub g2_scalar_mul_rows: Vec<G2ScalarMulNative>, // each field len 256
     pub g1_add_rows: Vec<G1AddNative>,     // scalars
     pub g2_add_rows: Vec<G2AddNative>,     // scalars
+    pub multi_miller_loop_rows: Vec<MultiMillerLoopNativeRows>, // each field len 2048 (packed 11-var)
 
     // Public inputs
     pub g1_scalar_mul_public_inputs: Vec<G1ScalarMulPublicInputs>,
@@ -619,6 +788,10 @@ pub struct ConstraintSystem {
 }
 
 impl ConstraintSystem {
+    pub fn recompute_shape(&mut self) {
+        self.shape = RecursionMatrixShape::from_num_constraints(self.constraint_types.len());
+    }
+
     #[inline]
     pub fn num_constraints(&self) -> usize {
         self.shape.num_constraints
@@ -689,6 +862,7 @@ impl CanonicalSerialize for ConstraintType {
             }
             ConstraintType::G1Add => 4u8.serialize_with_mode(&mut writer, compress),
             ConstraintType::G2Add => 5u8.serialize_with_mode(&mut writer, compress),
+            ConstraintType::MultiMillerLoop => 6u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -704,6 +878,7 @@ impl CanonicalSerialize for ConstraintType {
             }
             ConstraintType::G1Add => 1,
             ConstraintType::G2Add => 1,
+            ConstraintType::MultiMillerLoop => 1,
         }
     }
 }
@@ -730,6 +905,7 @@ impl CanonicalDeserialize for ConstraintType {
             }
             4 => Ok(ConstraintType::G1Add),
             5 => Ok(ConstraintType::G2Add),
+            6 => Ok(ConstraintType::MultiMillerLoop),
             _ => Err(SerializationError::InvalidData),
         }
     }
@@ -754,6 +930,7 @@ impl GuestSerialize for ConstraintType {
             }
             ConstraintType::G1Add => 4u8.guest_serialize(w),
             ConstraintType::G2Add => 5u8.guest_serialize(w),
+            ConstraintType::MultiMillerLoop => 6u8.guest_serialize(w),
         }
     }
 }
@@ -771,6 +948,7 @@ impl GuestDeserialize for ConstraintType {
             }),
             4 => Ok(ConstraintType::G1Add),
             5 => Ok(ConstraintType::G2Add),
+            6 => Ok(ConstraintType::MultiMillerLoop),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid ConstraintType",

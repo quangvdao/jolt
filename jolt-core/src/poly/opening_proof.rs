@@ -225,6 +225,10 @@ pub enum SumcheckId {
     /// This allows `GtExpVerifier::expected_output_claim` to consume `B/B2/B3` at the Stage-1
     /// evaluation point without per-instance recomputation.
     GtExpBaseStage1Openings,
+    /// Multi-Miller loop sumcheck (pairing recursion): proves Miller loop constraints per pair.
+    MultiMillerLoop,
+    /// Shift-check for Multi-Miller loop packed traces.
+    ShiftMultiMillerLoop,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Allocative)]

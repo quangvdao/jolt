@@ -37,6 +37,7 @@ pub mod g1;
 pub mod g2;
 pub mod gt;
 pub mod metadata;
+pub mod pairing;
 pub mod prefix_packing;
 pub mod prover;
 pub mod utils;
@@ -51,8 +52,8 @@ mod tests;
 // Re-export constraint types
 pub use constraints::{
     ConstraintLocator, ConstraintSystem, ConstraintSystemConfig, ConstraintType, G1AddNative,
-    G1ScalarMulNative, G2AddNative, G2ScalarMulNative, GtMulNativeRows, PolyType,
-    RecursionMatrixShape, RecursionMetadataBuilder, CONFIG,
+    G1ScalarMulNative, G2AddNative, G2ScalarMulNative, GtMulNativeRows, MultiMillerLoopNativeRows,
+    PolyType, RecursionMatrixShape, RecursionMetadataBuilder, CONFIG,
 };
 
 // Re-export prover/verifier

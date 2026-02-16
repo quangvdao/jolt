@@ -1,8 +1,7 @@
 //! RAM RA claim reduction sumcheck.
 //!
 //! Consolidates the four RAM RA claims (from RafEvaluation, ReadWriteChecking, ValEvaluation,
-//! ValFinal) into a single claim for the RA virtualization sumcheck. See `mod.rs` for claim
-//! coincidence constraints.
+//! ValFinal) into a single claim for the RA virtualization sumcheck.
 //!
 //! ## Sumcheck Identity
 //!
@@ -60,10 +59,6 @@ use crate::{
 /// Degree bound of the sumcheck round polynomials.
 /// Degree 2: one from eq polynomial, one from ra (which is 0 or 1).
 const DEGREE_BOUND: usize = 2;
-
-// ============================================================================
-// Main Prover Enum
-// ============================================================================
 
 /// RAM RA reduction sumcheck prover.
 ///
@@ -195,10 +190,6 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         flamegraph.visit_root(self);
     }
 }
-
-// ============================================================================
-// Phase Address State
-// ============================================================================
 
 /// State for address rounds (first log_K rounds).
 ///
@@ -502,10 +493,6 @@ impl<F: JoltField> PhaseAddressState<F> {
     }
 }
 
-// ============================================================================
-// Phase Cycle 1 State (Prefix-Suffix)
-// ============================================================================
-
 /// State for first half of cycle rounds using prefix-suffix optimization.
 ///
 /// Uses P/Q buffer structure where:
@@ -731,10 +718,6 @@ impl<F: JoltField> PhaseCycle1State<F> {
     }
 }
 
-// ============================================================================
-// Phase Cycle 2 State (Dense Suffix)
-// ============================================================================
-
 /// State for second half of cycle rounds using dense sumcheck.
 ///
 /// After prefix rounds, we have:
@@ -907,10 +890,6 @@ impl<F: JoltField> PhaseCycle2State<F> {
     }
 }
 
-// ============================================================================
-// Shared Parameters
-// ============================================================================
-
 /// Shared parameters between prover and verifier.
 #[derive(Clone, Allocative)]
 pub struct RaReductionParams<F: JoltField> {
@@ -1037,10 +1016,6 @@ impl<F: JoltField> SumcheckInstanceParams<F> for RaReductionParams<F> {
         OpeningPoint::<BIG_ENDIAN, F>::new([r_address_be, r_cycle_be].concat())
     }
 }
-
-// ============================================================================
-// Verifier
-// ============================================================================
 
 /// RAM RA reduction sumcheck verifier.
 pub struct RamRaClaimReductionSumcheckVerifier<F: JoltField> {

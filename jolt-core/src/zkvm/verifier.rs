@@ -5,8 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::dory::{DoryContext, DoryGlobals};
 use crate::subprotocols::sumcheck::BatchedSumcheck;
 use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::zkvm::claim_reductions::advice::ReductionPhase;
 use crate::zkvm::claim_reductions::RegistersClaimReductionSumcheckVerifier;
 use crate::zkvm::config::OneHotParams;
 #[cfg(feature = "prover")]
@@ -18,9 +20,9 @@ use crate::zkvm::Serializable;
 use crate::zkvm::{
     bytecode::read_raf_checking::BytecodeReadRafSumcheckVerifier,
     claim_reductions::{
-        AdviceClaimReductionPhase1Verifier, AdviceClaimReductionPhase2Verifier, AdviceKind,
-        HammingWeightClaimReductionVerifier, IncClaimReductionSumcheckVerifier,
-        InstructionLookupsClaimReductionSumcheckVerifier, RamRaClaimReductionSumcheckVerifier,
+        AdviceClaimReductionVerifier, AdviceKind, HammingWeightClaimReductionVerifier,
+        IncClaimReductionSumcheckVerifier, InstructionLookupsClaimReductionSumcheckVerifier,
+        RamRaClaimReductionSumcheckVerifier,
     },
     fiat_shamir_preamble,
     instruction_lookups::{
@@ -31,7 +33,7 @@ use crate::zkvm::{
     r1cs::constraints::R1CS_CONSTRAINTS,
     r1cs::key::UniformSpartanKey,
     ram::{
-        self, hamming_booleanity::HammingBooleanitySumcheckVerifier,
+        hamming_booleanity::HammingBooleanitySumcheckVerifier,
         output_check::OutputSumcheckVerifier, ra_virtual::RamRaVirtualSumcheckVerifier,
         raf_evaluation::RafEvaluationSumcheckVerifier as RamRafEvaluationSumcheckVerifier,
         read_write_checking::RamReadWriteCheckingVerifier,
@@ -85,9 +87,12 @@ pub struct JoltVerifier<
     pub preprocessing: &'a JoltVerifierPreprocessing<F, PCS>,
     pub transcript: ProofTranscript,
     pub opening_accumulator: VerifierOpeningAccumulator<F>,
-    /// Phase-bridge randomness for two-phase advice claim reduction.
-    advice_reduction_gamma_trusted: Option<F>,
-    advice_reduction_gamma_untrusted: Option<F>,
+    /// The advice claim reduction sumcheck effectively spans two stages (6 and 7).
+    /// Cache the verifier state here between stages.
+    advice_reduction_verifier_trusted: Option<AdviceClaimReductionVerifier<F>>,
+    /// The advice claim reduction sumcheck effectively spans two stages (6 and 7).
+    /// Cache the verifier state here between stages.
+    advice_reduction_verifier_untrusted: Option<AdviceClaimReductionVerifier<F>>,
     pub spartan_key: UniformSpartanKey<F>,
     pub one_hot_params: OneHotParams,
 }
@@ -167,8 +172,8 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             preprocessing,
             transcript,
             opening_accumulator,
-            advice_reduction_gamma_trusted: None,
-            advice_reduction_gamma_untrusted: None,
+            advice_reduction_verifier_trusted: None,
+            advice_reduction_verifier_untrusted: None,
             spartan_key,
             one_hot_params,
         })
@@ -177,7 +182,6 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     #[tracing::instrument(skip_all)]
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
-        // Parameters are computed from trace length as needed
 
         fiat_shamir_preamble(
             &self.program_io,
@@ -188,17 +192,18 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
         // Append commitments to transcript
         for commitment in &self.proof.commitments {
-            self.transcript.append_serializable(commitment);
+            self.transcript
+                .append_serializable(b"commitment", commitment);
         }
         // Append untrusted advice commitment to transcript
         if let Some(ref untrusted_advice_commitment) = self.proof.untrusted_advice_commitment {
             self.transcript
-                .append_serializable(untrusted_advice_commitment);
+                .append_serializable(b"untrusted_advice", untrusted_advice_commitment);
         }
         // Append trusted advice commitment to transcript
         if let Some(ref trusted_advice_commitment) = self.trusted_advice_commitment {
             self.transcript
-                .append_serializable(trusted_advice_commitment);
+                .append_serializable(b"trusted_advice", trusted_advice_commitment);
         }
 
         self.verify_stage1()?;
@@ -340,16 +345,6 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         )
         .context("Stage 2 univariate skip first round")?;
 
-        let spartan_product_virtual_remainder = ProductVirtualRemainderVerifier::new(
-            self.proof.trace_length,
-            uni_skip_params,
-            &self.opening_accumulator,
-        );
-        let ram_raf_evaluation = RamRafEvaluationSumcheckVerifier::new(
-            &self.program_io.memory_layout,
-            &self.one_hot_params,
-            &self.opening_accumulator,
-        );
         let ram_read_write_checking = RamReadWriteCheckingVerifier::new(
             &self.opening_accumulator,
             &mut self.transcript,
@@ -357,22 +352,36 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             self.proof.trace_length,
             &self.proof.rw_config,
         );
-        let ram_output_check =
-            OutputSumcheckVerifier::new(self.proof.ram_K, &self.program_io, &mut self.transcript);
+
+        let spartan_product_virtual_remainder = ProductVirtualRemainderVerifier::new(
+            self.proof.trace_length,
+            uni_skip_params,
+            &self.opening_accumulator,
+        );
+
         let instruction_claim_reduction = InstructionLookupsClaimReductionSumcheckVerifier::new(
             self.proof.trace_length,
             &self.opening_accumulator,
             &mut self.transcript,
         );
 
+        let ram_raf_evaluation = RamRafEvaluationSumcheckVerifier::new(
+            &self.program_io.memory_layout,
+            &self.one_hot_params,
+            &self.opening_accumulator,
+        );
+
+        let ram_output_check =
+            OutputSumcheckVerifier::new(self.proof.ram_K, &self.program_io, &mut self.transcript);
+
         let _r_stage2 = BatchedSumcheck::verify(
             &self.proof.stage2_sumcheck_proof,
             vec![
-                &spartan_product_virtual_remainder,
-                &ram_raf_evaluation,
                 &ram_read_write_checking,
-                &ram_output_check,
+                &spartan_product_virtual_remainder,
                 &instruction_claim_reduction,
+                &ram_raf_evaluation,
+                &ram_output_check,
             ],
             &mut self.opening_accumulator,
             &mut self.transcript,
@@ -399,7 +408,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         let _r_stage3 = BatchedSumcheck::verify(
             &self.proof.stage3_sumcheck_proof,
             vec![
-                &spartan_shift as &dyn SumcheckInstanceVerifier<F, ProofTranscript>,
+                &spartan_shift,
                 &spartan_instruction_input,
                 &spartan_registers_claim_reduction,
             ],
@@ -412,12 +421,6 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     }
 
     fn verify_stage4(&mut self) -> Result<(), anyhow::Error> {
-        let registers_read_write_checking = RegistersReadWriteCheckingVerifier::new(
-            self.proof.trace_length,
-            &self.opening_accumulator,
-            &mut self.transcript,
-            &self.proof.rw_config,
-        );
         verifier_accumulate_advice::<F>(
             self.proof.ram_K,
             &self.program_io,
@@ -429,30 +432,32 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                 .rw_config
                 .needs_single_advice_opening(self.proof.trace_length.log_2()),
         );
-        let initial_ram_state = ram::gen_ram_initial_memory_state::<F>(
-            self.proof.ram_K,
-            &self.preprocessing.shared.ram,
-            &self.program_io,
+        let registers_read_write_checking = RegistersReadWriteCheckingVerifier::new(
+            self.proof.trace_length,
+            &self.opening_accumulator,
+            &mut self.transcript,
+            &self.proof.rw_config,
         );
         let ram_val_evaluation = RamValEvaluationSumcheckVerifier::new(
-            &initial_ram_state,
+            &self.preprocessing.shared.ram,
             &self.program_io,
             self.proof.trace_length,
             self.proof.ram_K,
             &self.opening_accumulator,
         );
         let ram_val_final = ValFinalSumcheckVerifier::new(
-            &initial_ram_state,
+            &self.preprocessing.shared.ram,
             &self.program_io,
             self.proof.trace_length,
             self.proof.ram_K,
             &self.opening_accumulator,
+            &self.proof.rw_config,
         );
 
         let _r_stage4 = BatchedSumcheck::verify(
             &self.proof.stage4_sumcheck_proof,
             vec![
-                &registers_read_write_checking as &dyn SumcheckInstanceVerifier<F, ProofTranscript>,
+                &registers_read_write_checking,
                 &ram_val_evaluation,
                 &ram_val_final,
             ],
@@ -466,27 +471,28 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
     fn verify_stage5(&mut self) -> Result<(), anyhow::Error> {
         let n_cycle_vars = self.proof.trace_length.log_2();
-        let registers_val_evaluation =
-            RegistersValEvaluationSumcheckVerifier::new(&self.opening_accumulator);
-        let ram_ra_reduction = RamRaClaimReductionSumcheckVerifier::new(
-            self.proof.trace_length,
-            &self.one_hot_params,
-            &self.opening_accumulator,
-            &mut self.transcript,
-        );
+
         let lookups_read_raf = InstructionReadRafSumcheckVerifier::new(
             n_cycle_vars,
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
+        let ram_ra_reduction = RamRaClaimReductionSumcheckVerifier::new(
+            self.proof.trace_length,
+            &self.one_hot_params,
+            &self.opening_accumulator,
+            &mut self.transcript,
+        );
+        let registers_val_evaluation =
+            RegistersValEvaluationSumcheckVerifier::new(&self.opening_accumulator);
 
         let _r_stage5 = BatchedSumcheck::verify(
             &self.proof.stage5_sumcheck_proof,
             vec![
-                &registers_val_evaluation as &dyn SumcheckInstanceVerifier<F, ProofTranscript>,
-                &ram_ra_reduction,
                 &lookups_read_raf,
+                &ram_ra_reduction,
+                &registers_val_evaluation,
             ],
             &mut self.opening_accumulator,
             &mut self.transcript,
@@ -534,45 +540,43 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         );
 
         // Advice claim reduction (Phase 1 in Stage 6): trusted and untrusted are separate instances.
-        let trusted_advice_phase1 = AdviceClaimReductionPhase1Verifier::new(
-            AdviceKind::Trusted,
-            &self.program_io.memory_layout,
-            self.proof.trace_length,
-            &self.opening_accumulator,
-            &mut self.transcript,
-            self.proof
-                .rw_config
-                .needs_single_advice_opening(self.proof.trace_length.log_2()),
-        );
-        if let Some(ref v) = trusted_advice_phase1 {
-            self.advice_reduction_gamma_trusted = Some(v.gamma());
+        if self.trusted_advice_commitment.is_some() {
+            self.advice_reduction_verifier_trusted = Some(AdviceClaimReductionVerifier::new(
+                AdviceKind::Trusted,
+                &self.program_io.memory_layout,
+                self.proof.trace_length,
+                &self.opening_accumulator,
+                &mut self.transcript,
+                self.proof
+                    .rw_config
+                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
+            ));
         }
-        let untrusted_advice_phase1 = AdviceClaimReductionPhase1Verifier::new(
-            AdviceKind::Untrusted,
-            &self.program_io.memory_layout,
-            self.proof.trace_length,
-            &self.opening_accumulator,
-            &mut self.transcript,
-            self.proof
-                .rw_config
-                .needs_single_advice_opening(self.proof.trace_length.log_2()),
-        );
-        if let Some(ref v) = untrusted_advice_phase1 {
-            self.advice_reduction_gamma_untrusted = Some(v.gamma());
+        if self.proof.untrusted_advice_commitment.is_some() {
+            self.advice_reduction_verifier_untrusted = Some(AdviceClaimReductionVerifier::new(
+                AdviceKind::Untrusted,
+                &self.program_io.memory_layout,
+                self.proof.trace_length,
+                &self.opening_accumulator,
+                &mut self.transcript,
+                self.proof
+                    .rw_config
+                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
+            ));
         }
 
         let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> = vec![
             &bytecode_read_raf,
-            &ram_hamming_booleanity,
             &booleanity,
+            &ram_hamming_booleanity,
             &ram_ra_virtual,
             &lookups_ra_virtual,
             &inc_reduction,
         ];
-        if let Some(ref advice) = trusted_advice_phase1 {
+        if let Some(ref advice) = self.advice_reduction_verifier_trusted {
             instances.push(advice);
         }
-        if let Some(ref advice) = untrusted_advice_phase1 {
+        if let Some(ref advice) = self.advice_reduction_verifier_untrusted {
             instances.push(advice);
         }
 
@@ -597,41 +601,29 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             &mut self.transcript,
         );
 
-        // 3. Verify Stage 7 batched sumcheck (address rounds only).
-        // Includes HammingWeightClaimReduction plus Phase 2 advice reduction instances (if needed).
-        let trusted_advice_phase2 = self.advice_reduction_gamma_trusted.and_then(|gamma| {
-            AdviceClaimReductionPhase2Verifier::new(
-                AdviceKind::Trusted,
-                &self.program_io.memory_layout,
-                self.proof.trace_length,
-                gamma,
-                &self.opening_accumulator,
-                self.proof
-                    .rw_config
-                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
-            )
-        });
-        let untrusted_advice_phase2 = self.advice_reduction_gamma_untrusted.and_then(|gamma| {
-            AdviceClaimReductionPhase2Verifier::new(
-                AdviceKind::Untrusted,
-                &self.program_io.memory_layout,
-                self.proof.trace_length,
-                gamma,
-                &self.opening_accumulator,
-                self.proof
-                    .rw_config
-                    .needs_single_advice_opening(self.proof.trace_length.log_2()),
-            )
-        });
-
         let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> =
             vec![&hw_verifier];
-        if let Some(ref v) = trusted_advice_phase2 {
-            instances.push(v);
+        if let Some(advice_reduction_verifier_trusted) =
+            self.advice_reduction_verifier_trusted.as_mut()
+        {
+            let mut params = advice_reduction_verifier_trusted.params.borrow_mut();
+            if params.num_address_phase_rounds() > 0 {
+                // Transition phase
+                params.phase = ReductionPhase::AddressVariables;
+                instances.push(advice_reduction_verifier_trusted);
+            }
         }
-        if let Some(ref v) = untrusted_advice_phase2 {
-            instances.push(v);
+        if let Some(advice_reduction_verifier_untrusted) =
+            self.advice_reduction_verifier_untrusted.as_mut()
+        {
+            let mut params = advice_reduction_verifier_untrusted.params.borrow_mut();
+            if params.num_address_phase_rounds() > 0 {
+                // Transition phase
+                params.phase = ReductionPhase::AddressVariables;
+                instances.push(advice_reduction_verifier_untrusted);
+            }
         }
+
         let _r_address_stage7 = BatchedSumcheck::verify(
             &self.proof.stage7_sumcheck_proof,
             instances,
@@ -645,6 +637,15 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
     /// Stage 8: Dory batch opening verification.
     fn verify_stage8(&mut self) -> Result<(), anyhow::Error> {
+        // Initialize DoryGlobals with the layout from the proof
+        // This ensures the verifier uses the same layout as the prover
+        let _guard = DoryGlobals::initialize_context(
+            1 << self.one_hot_params.log_k_chunk,
+            self.proof.trace_length.next_power_of_two(),
+            DoryContext::Main,
+            Some(self.proof.dory_layout),
+        );
+
         // Get the unified opening point from HammingWeightClaimReduction
         // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
         let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
@@ -702,22 +703,22 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         // them in the top-left block of the main Dory matrix.
         if let Some((advice_point, advice_claim)) = self
             .opening_accumulator
-            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReductionPhase2)
+            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
         {
             let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, advice_point.len());
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
             polynomial_claims.push((
                 CommittedPolynomial::TrustedAdvice,
                 advice_claim * lagrange_factor,
             ));
         }
 
-        if let Some((advice_point, advice_claim)) = self.opening_accumulator.get_advice_opening(
-            AdviceKind::Untrusted,
-            SumcheckId::AdviceClaimReductionPhase2,
-        ) {
+        if let Some((advice_point, advice_claim)) = self
+            .opening_accumulator
+            .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
+        {
             let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, advice_point.len());
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
             polynomial_claims.push((
                 CommittedPolynomial::UntrustedAdvice,
                 advice_claim * lagrange_factor,
@@ -726,7 +727,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
         // 2. Sample gamma and compute powers for RLC
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
-        self.transcript.append_scalars(&claims);
+        self.transcript.append_scalars(b"rlc_claims", &claims);
         let gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
 
         // Build state for computing joint commitment/claim

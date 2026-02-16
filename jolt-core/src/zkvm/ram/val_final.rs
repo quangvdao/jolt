@@ -4,9 +4,7 @@ use crate::{
     field::JoltField,
     poly::{
         eq_poly::EqPolynomial,
-        multilinear_polynomial::{
-            BindingOrder, MultilinearPolynomial, PolynomialBinding, PolynomialEvaluation,
-        },
+        multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
@@ -22,6 +20,7 @@ use crate::{
     zkvm::{
         bytecode::BytecodePreprocessing,
         claim_reductions::AdviceKind,
+        config::ReadWriteConfig,
         ram::remap_address,
         witness::{CommittedPolynomial, VirtualPolynomial},
     },
@@ -61,11 +60,12 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
     }
 
     pub fn new_from_verifier(
-        initial_ram_state: &[u64],
+        ram_preprocessing: &super::RAMPreprocessing,
         program_io: &JoltDevice,
         trace_len: usize,
         ram_K: usize,
         opening_accumulator: &VerifierOpeningAccumulator<F>,
+        rw_config: &ReadWriteConfig,
     ) -> Self {
         let r_address = opening_accumulator
             .get_virtual_polynomial_opening(
@@ -80,7 +80,6 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
         // When needs_single_advice_opening is true, advice is only opened at RamValEvaluation
         // (the two points are identical). Otherwise, we use RamValFinalEvaluation.
         let log_T = trace_len.log_2();
-        let rw_config = crate::zkvm::config::ReadWriteConfig::new(log_T, ram_K.log_2());
         let advice_sumcheck_id = if rw_config.needs_single_advice_opening(log_T) {
             SumcheckId::RamValEvaluation
         } else {
@@ -109,14 +108,14 @@ impl<F: JoltField> ValFinalSumcheckParams<F> {
             n_memory_vars,
         );
 
-        // Compute the public part of val_init evaluation
-        let val_init_public: MultilinearPolynomial<F> =
-            MultilinearPolynomial::from(initial_ram_state.to_vec());
+        // Compute the public part of val_init evaluation (bytecode + inputs) without
+        // materializing the full length-K initial RAM state.
+        let val_init_public_eval =
+            super::eval_initial_ram_mle::<F>(ram_preprocessing, program_io, &r_address);
 
         // Combine all contributions: untrusted + trusted + public
-        let val_init_eval = untrusted_advice_contribution
-            + trusted_advice_contribution
-            + val_init_public.evaluate(&r_address);
+        let val_init_eval =
+            untrusted_advice_contribution + trusted_advice_contribution + val_init_public_eval;
 
         ValFinalSumcheckParams {
             T: trace_len,
@@ -305,18 +304,20 @@ pub struct ValFinalSumcheckVerifier<F: JoltField> {
 
 impl<F: JoltField> ValFinalSumcheckVerifier<F> {
     pub fn new(
-        initial_ram_state: &[u64],
+        ram_preprocessing: &super::RAMPreprocessing,
         program_io: &JoltDevice,
         trace_len: usize,
         ram_K: usize,
         opening_accumulator: &VerifierOpeningAccumulator<F>,
+        rw_config: &ReadWriteConfig,
     ) -> Self {
         let params = ValFinalSumcheckParams::new_from_verifier(
-            initial_ram_state,
+            ram_preprocessing,
             program_io,
             trace_len,
             ram_K,
             opening_accumulator,
+            rw_config,
         );
         Self { params }
     }

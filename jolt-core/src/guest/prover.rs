@@ -117,6 +117,7 @@ pub fn prove<F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, FS: Transc
         trusted_advice_bytes,
         trusted_advice_commitment,
         trusted_advice_hint,
+        None,
     )
     .with_spartan_outer_stage1_kind(spartan_outer_stage1_kind_from_env());
     let io_device = prover.program_io.clone();

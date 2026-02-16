@@ -53,13 +53,13 @@ bin/act
 *.joltinline
 
 # Benchmark runs and profiling
-benchmark-runs/traces/
-benchmark-runs/perfetto_traces/
-benchmark-runs/results/
+benchmark-runs/
+/perfetto_traces/
+*.pb
+*benchmark_results.json
 
 # verifier test fixtures
 jolt-sdk/tests/fixtures
 jolt-sdk/tests/fib_io_device_bytes.rs
 jolt-sdk/tests/fib_proof_bytes.rs
 jolt-sdk/tests/jolt_verifier_preprocessing_bytes.rs
-

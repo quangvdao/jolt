@@ -789,11 +789,34 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                                     _,
                                     _,
                                 > = OuterRemainingStreamingSumcheck::new(shared, schedule);
-                                BatchedSumcheck::prove(
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_start_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::LinearOnly,
+                                        )
+                                    ),
+                                );
+                                let output = BatchedSumcheck::prove(
                                     vec![&mut spartan_outer_remaining],
                                     &mut self.opening_accumulator,
                                     &mut self.transcript,
-                                )
+                                );
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_end_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::LinearOnly,
+                                        )
+                                    ),
+                                );
+                                output
                             }
                             OuterStreamingScheduleKind::HalfSplit => {
                                 // Degree bound for this outer remainder sumcheck is 3.
@@ -802,11 +825,34 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                                     _,
                                     _,
                                 > = OuterRemainingStreamingSumcheck::new(shared, schedule);
-                                BatchedSumcheck::prove(
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_start_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::HalfSplit,
+                                        )
+                                    ),
+                                );
+                                let output = BatchedSumcheck::prove(
                                     vec![&mut spartan_outer_remaining],
                                     &mut self.opening_accumulator,
                                     &mut self.transcript,
-                                )
+                                );
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_end_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::HalfSplit,
+                                        )
+                                    ),
+                                );
+                                output
                             }
                         }
                     }
@@ -827,11 +873,34 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                                     _,
                                     _,
                                 > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
-                                BatchedSumcheck::prove(
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_start_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::LinearOnly,
+                                        )
+                                    ),
+                                );
+                                let output = BatchedSumcheck::prove(
                                     vec![&mut spartan_outer_remaining],
                                     &mut self.opening_accumulator,
                                     &mut self.transcript,
-                                )
+                                );
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_end_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::LinearOnly,
+                                        )
+                                    ),
+                                );
+                                output
                             }
                             OuterStreamingScheduleKind::HalfSplit => {
                                 let schedule = HalfSplitSchedule::new(num_rounds, 2);
@@ -839,11 +908,34 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                                     _,
                                     _,
                                 > = OuterRemainingStreamingSumcheckMTable::new(shared, schedule);
-                                BatchedSumcheck::prove(
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_start_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::HalfSplit,
+                                        )
+                                    ),
+                                );
+                                let output = BatchedSumcheck::prove(
                                     vec![&mut spartan_outer_remaining],
                                     &mut self.opening_accumulator,
                                     &mut self.transcript,
-                                )
+                                );
+                                #[cfg(feature = "allocative")]
+                                write_instance_flamegraph_svg::<F, ProofTranscript>(
+                                    &[&mut spartan_outer_remaining],
+                                    format!(
+                                        "{}_end_flamechart.svg",
+                                        stage1_remainder_flamegraph_prefix(
+                                            remainder_impl,
+                                            OuterStreamingScheduleKind::HalfSplit,
+                                        )
+                                    ),
+                                );
+                                output
                             }
                         }
                     }
@@ -858,11 +950,31 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                                 &self.opening_accumulator,
                             );
 
-                        BatchedSumcheck::prove(
+                        #[cfg(feature = "allocative")]
+                        write_instance_flamegraph_svg::<F, ProofTranscript>(
+                            &[&mut spartan_outer_remaining],
+                            format!(
+                                "{}_start_flamechart.svg",
+                                stage1_remainder_flamegraph_prefix(remainder_impl, schedule)
+                            ),
+                        );
+
+                        let output = BatchedSumcheck::prove(
                             vec![&mut spartan_outer_remaining],
                             &mut self.opening_accumulator,
                             &mut self.transcript,
-                        )
+                        );
+
+                        #[cfg(feature = "allocative")]
+                        write_instance_flamegraph_svg::<F, ProofTranscript>(
+                            &[&mut spartan_outer_remaining],
+                            format!(
+                                "{}_end_flamechart.svg",
+                                stage1_remainder_flamegraph_prefix(remainder_impl, schedule)
+                            ),
+                        );
+
+                        output
                     }
                 };
 
@@ -1731,8 +1843,37 @@ pub struct JoltAdvice<F: JoltField, PCS: CommitmentScheme<Field = F>> {
 }
 
 #[cfg(feature = "allocative")]
-fn write_boxed_instance_flamegraph_svg(
-    instances: &[Box<dyn SumcheckInstanceProver<impl JoltField, impl Transcript>>],
+fn stage1_remainder_flamegraph_prefix(
+    remainder_impl: OuterStage1RemainderImpl,
+    schedule: OuterStreamingScheduleKind,
+) -> &'static str {
+    match (remainder_impl, schedule) {
+        (OuterStage1RemainderImpl::Streaming, OuterStreamingScheduleKind::LinearOnly) => {
+            "stage1_remainder_streaming_linear_only"
+        }
+        (OuterStage1RemainderImpl::Streaming, OuterStreamingScheduleKind::HalfSplit) => {
+            "stage1_remainder_streaming_half_split"
+        }
+        (OuterStage1RemainderImpl::StreamingMTable, OuterStreamingScheduleKind::LinearOnly) => {
+            "stage1_remainder_streaming_mtable_linear_only"
+        }
+        (OuterStage1RemainderImpl::StreamingMTable, OuterStreamingScheduleKind::HalfSplit) => {
+            "stage1_remainder_streaming_mtable_half_split"
+        }
+        (
+            OuterStage1RemainderImpl::NonStreamingCheckpoint,
+            OuterStreamingScheduleKind::LinearOnly,
+        ) => "stage1_remainder_checkpoint_linear_only",
+        (
+            OuterStage1RemainderImpl::NonStreamingCheckpoint,
+            OuterStreamingScheduleKind::HalfSplit,
+        ) => "stage1_remainder_checkpoint_half_split",
+    }
+}
+
+#[cfg(feature = "allocative")]
+fn write_boxed_instance_flamegraph_svg<F: JoltField, T: Transcript>(
+    instances: &[Box<dyn SumcheckInstanceProver<F, T>>],
     path: impl AsRef<Path>,
 ) {
     let mut flamegraph = FlameGraphBuilder::default();
@@ -1743,8 +1884,8 @@ fn write_boxed_instance_flamegraph_svg(
 }
 
 #[cfg(feature = "allocative")]
-fn write_instance_flamegraph_svg(
-    instances: &[&mut dyn SumcheckInstanceProver<impl JoltField, impl Transcript>],
+fn write_instance_flamegraph_svg<F: JoltField, T: Transcript>(
+    instances: &[&mut dyn SumcheckInstanceProver<F, T>],
     path: impl AsRef<Path>,
 ) {
     let mut flamegraph = FlameGraphBuilder::default();

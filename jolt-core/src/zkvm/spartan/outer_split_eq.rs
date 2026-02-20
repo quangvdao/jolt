@@ -798,6 +798,9 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterSplitEqS
             );
         }
     }
+
+    #[cfg(feature = "allocative")]
+    fn update_flamegraph(&self, _flamegraph: &mut allocative::FlameGraphBuilder) {}
 }
 
 impl<F: JoltField> OuterSplitEqSumcheckProver<F> {

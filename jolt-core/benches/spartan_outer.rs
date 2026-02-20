@@ -101,7 +101,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
     group.sample_size(10);
 
     // powers of 2
-    let num_iters = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+    let num_iters = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
 
     for num_iterations in num_iters {
         let bench_name = format!("sha2-chain-{num_iterations}");

@@ -1,7 +1,9 @@
 use ark_serialize::CanonicalSerialize;
 use jolt_core::host;
 use jolt_core::zkvm::prover::JoltProverPreprocessing;
+use jolt_core::zkvm::proof_serialization::SpartanOuterStage1Kind;
 use jolt_core::zkvm::verifier::{JoltSharedPreprocessing, JoltVerifierPreprocessing};
+use jolt_core::zkvm::{config::OuterStage1RemainderImpl, config::OuterStreamingScheduleKind};
 use jolt_core::zkvm::{RV64IMACProver, RV64IMACVerifier};
 use std::fs;
 use std::io::Write;
@@ -13,6 +15,72 @@ const CYCLES_PER_SHA3: f64 = 4330.0;
 const CYCLES_PER_BTREEMAP_OP: f64 = 1550.0;
 const CYCLES_PER_FIBONACCI_UNIT: f64 = 12.0;
 const SAFETY_MARGIN: f64 = 0.9; // Use 90% of max trace capacity
+
+fn spartan_outer_stage1_kind_from_env() -> SpartanOuterStage1Kind {
+    let kind = std::env::var("SPARTAN_OUTER_STAGE1_KIND")
+        .unwrap_or_else(|_| "uniskip".to_string())
+        .to_lowercase();
+
+    match kind.as_str() {
+        "uniskip" => {
+            let remainder_impl = std::env::var("OUTER_STAGE1_REMAINDER_IMPL")
+                .unwrap_or_else(|_| "streaming".to_string())
+                .to_lowercase();
+            let schedule = std::env::var("OUTER_STAGE1_SCHEDULE")
+                .unwrap_or_else(|_| "linear-only".to_string())
+                .to_lowercase();
+
+            let remainder_impl = match remainder_impl.as_str() {
+                "streaming" => OuterStage1RemainderImpl::Streaming,
+                "streaming-mtable" | "streaming_mtable" | "mtable" => {
+                    OuterStage1RemainderImpl::StreamingMTable
+                }
+                "checkpoint" | "nonstreaming-checkpoint" | "non_streaming_checkpoint" => {
+                    OuterStage1RemainderImpl::NonStreamingCheckpoint
+                }
+                other => {
+                    tracing::warn!(
+                        "Unknown OUTER_STAGE1_REMAINDER_IMPL={other}, defaulting to streaming"
+                    );
+                    OuterStage1RemainderImpl::Streaming
+                }
+            };
+
+            let schedule = match schedule.as_str() {
+                "linear-only" | "linear_only" => OuterStreamingScheduleKind::LinearOnly,
+                "half-split" | "half_split" => OuterStreamingScheduleKind::HalfSplit,
+                other => {
+                    tracing::warn!(
+                        "Unknown OUTER_STAGE1_SCHEDULE={other}, defaulting to linear-only"
+                    );
+                    OuterStreamingScheduleKind::LinearOnly
+                }
+            };
+
+            SpartanOuterStage1Kind::UniSkipPlusRemainder {
+                remainder_impl,
+                schedule,
+            }
+        }
+        "full-baseline" | "full_baseline" | "full-naive" | "full_naive" => {
+            SpartanOuterStage1Kind::FullBaseline
+        }
+        "full-split-eq" | "full_split_eq" => SpartanOuterStage1Kind::FullSplitEq,
+        "full-delayed-reduction" | "full_delayed_reduction" => {
+            SpartanOuterStage1Kind::FullDelayedReduction
+        }
+        "full-round-batched" | "full_round_batched" | "full-roundbatched" => {
+            SpartanOuterStage1Kind::FullRoundBatched
+        }
+        other => {
+            tracing::warn!("Unknown SPARTAN_OUTER_STAGE1_KIND={other}, defaulting to uniskip");
+            SpartanOuterStage1Kind::UniSkipPlusRemainder {
+                remainder_impl: OuterStage1RemainderImpl::Streaming,
+                schedule: OuterStreamingScheduleKind::LinearOnly,
+            }
+        }
+    }
+}
 
 /// Calculate number of operations to target a specific cycle count
 fn scale_to_target_ops(target_cycles: usize, cycles_per_op: f64) -> u32 {
@@ -226,7 +294,8 @@ fn prove_example(
             None,
             None,
             None,
-        );
+        )
+        .with_spartan_outer_stage1_kind(spartan_outer_stage1_kind_from_env());
         let program_io = prover.program_io.clone();
         let (jolt_proof, _) = prover.prove();
 
@@ -285,7 +354,8 @@ fn prove_example_with_trace(
         None,
         None,
         None,
-    );
+    )
+    .with_spartan_outer_stage1_kind(spartan_outer_stage1_kind_from_env());
     let now = Instant::now();
     let (jolt_proof, _) = prover.prove();
     let prove_duration = now.elapsed();

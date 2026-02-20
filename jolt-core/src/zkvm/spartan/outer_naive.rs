@@ -351,4 +351,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
             );
         }
     }
+
+    #[cfg(feature = "allocative")]
+    fn update_flamegraph(&self, _flamegraph: &mut allocative::FlameGraphBuilder) {}
 }

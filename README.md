@@ -1,5 +1,7 @@
 # Jolt
 
+> **Benchmarking branch note:** This branch contains benchmarking harnesses used for the paper **"Speeding Up Sum-Check Proving"**. See [`BENCHMARKING.md`](./BENCHMARKING.md) for experiment setup and rerun commands corresponding to the paper evaluation.
+
 ![imgs/jolt_alpha.png](imgs/jolt_alpha.png)
 
 Just One Lookup Table.

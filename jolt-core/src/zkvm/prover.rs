@@ -124,8 +124,9 @@ use crate::{
                 OuterRemainingStreamingSumcheck, OuterRemainingStreamingSumcheckMTable,
                 OuterSharedState,
             },
-            outer_baseline::OuterBaselineSumcheckProver,
-            outer_naive::OuterNaiveSumcheckProver,
+            outer_split_eq::OuterSplitEqSumcheckProver,
+            outer_delayed_reduction::OuterDelayedReductionSumcheckProver,
+            outer_naive::OuterBaselineSumcheckProver,
             outer_round_batched::OuterRoundBatchedSumcheckProver,
             product::ProductVirtualRemainderProver,
             shift::ShiftSumcheckProver,
@@ -901,11 +902,11 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                     },
                 )
             }
-            SpartanOuterStage1Kind::FullNaive => {
+            SpartanOuterStage1Kind::FullSplitEq => {
                 let uniform_constraints: Vec<_> = R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
                 let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
 
-                let mut spartan_outer_full = OuterNaiveSumcheckProver::gen(
+                let mut spartan_outer_full = OuterSplitEqSumcheckProver::gen(
                     &self.preprocessing.shared.bytecode,
                     Arc::clone(&self.trace),
                     &uniform_constraints,
@@ -920,7 +921,32 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 );
 
                 (
-                    SpartanOuterStage1Kind::FullNaive,
+                    SpartanOuterStage1Kind::FullSplitEq,
+                    Stage1Proof::FullOuter {
+                        sumcheck: sumcheck_proof,
+                    },
+                )
+            }
+            SpartanOuterStage1Kind::FullDelayedReduction => {
+                let uniform_constraints: Vec<_> = R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+
+                let mut spartan_outer_full = OuterDelayedReductionSumcheckProver::gen(
+                    &self.preprocessing.shared.bytecode,
+                    Arc::clone(&self.trace),
+                    &uniform_constraints,
+                    padded_num_constraints,
+                    &mut self.transcript,
+                );
+
+                let (sumcheck_proof, _r_stage1) = BatchedSumcheck::prove(
+                    vec![&mut spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                );
+
+                (
+                    SpartanOuterStage1Kind::FullDelayedReduction,
                     Stage1Proof::FullOuter {
                         sumcheck: sumcheck_proof,
                     },

@@ -86,9 +86,8 @@ fn compute_mles_product_sum_naive<F: JoltField>(
     finish_mles_product_sum_from_evals(&sum_evals, claim, eq_poly)
 }
 
-fn bench_mles_product_sum(c: &mut Criterion, n_mle: usize) {
+fn bench_mles_product_sum(c: &mut Criterion, n_mle: usize, mle_n_vars: usize) {
     let rng = &mut test_rng();
-    let mle_n_vars = 14;
     let random_mle: MultilinearPolynomial<Fr> =
         vec![<Fr as JoltField>::random(rng); 1 << mle_n_vars].into();
     let mles = vec![RaPolynomial::RoundN(random_mle); n_mle];
@@ -96,7 +95,7 @@ fn bench_mles_product_sum(c: &mut Criterion, n_mle: usize) {
     let claim = <Fr as JoltField>::random(rng);
     let eq_poly = GruenSplitEqPolynomial::new(&r, BindingOrder::LowToHigh);
 
-    let mut group = c.benchmark_group(format!("Product of {n_mle} MLEs sum"));
+    let mut group = c.benchmark_group(format!("d={n_mle} v={mle_n_vars}"));
     group.bench_function("optimized", |b| {
         b.iter(|| compute_mles_product_sum(&mles, claim, &eq_poly))
     });
@@ -107,12 +106,11 @@ fn bench_mles_product_sum(c: &mut Criterion, n_mle: usize) {
 }
 
 fn mles_product_sum_benches(c: &mut Criterion) {
-    bench_mles_product_sum(c, 2);
-    bench_mles_product_sum(c, 3);
-    bench_mles_product_sum(c, 4);
-    bench_mles_product_sum(c, 8);
-    bench_mles_product_sum(c, 16);
-    bench_mles_product_sum(c, 32);
+    for &n_vars in &[12, 14, 16, 18, 20] {
+        for &d in &[2, 4, 8, 16, 32] {
+            bench_mles_product_sum(c, d, n_vars);
+        }
+    }
 }
 
 criterion_group!(benches, mles_product_sum_benches);

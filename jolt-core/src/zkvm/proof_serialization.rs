@@ -43,7 +43,8 @@ pub enum SpartanOuterStage1Kind {
 
     /// Full-outer protocols (no uni-skip split).
     FullBaseline,
-    FullNaive,
+    FullSplitEq,
+    FullDelayedReduction,
     FullRoundBatched,
 }
 
@@ -73,9 +74,10 @@ impl CanonicalSerialize for SpartanOuterStage1Kind {
                 remainder_impl.serialize_with_mode(&mut writer, compress)?;
                 schedule.serialize_with_mode(&mut writer, compress)
             }
-            Self::FullBaseline => 1u8.serialize_with_mode(&mut writer, compress),
-            Self::FullNaive => 2u8.serialize_with_mode(&mut writer, compress),
+            Self::FullSplitEq => 1u8.serialize_with_mode(&mut writer, compress),
+            Self::FullBaseline => 2u8.serialize_with_mode(&mut writer, compress),
             Self::FullRoundBatched => 3u8.serialize_with_mode(&mut writer, compress),
+            Self::FullDelayedReduction => 4u8.serialize_with_mode(&mut writer, compress),
         }
     }
 
@@ -89,7 +91,7 @@ impl CanonicalSerialize for SpartanOuterStage1Kind {
                     + remainder_impl.serialized_size(compress)
                     + schedule.serialized_size(compress)
             }
-            Self::FullBaseline | Self::FullNaive | Self::FullRoundBatched => {
+            Self::FullBaseline | Self::FullSplitEq | Self::FullDelayedReduction | Self::FullRoundBatched => {
                 0u8.serialized_size(compress)
             }
         }
@@ -126,9 +128,10 @@ impl CanonicalDeserialize for SpartanOuterStage1Kind {
                     schedule,
                 })
             }
-            1 => Ok(Self::FullBaseline),
-            2 => Ok(Self::FullNaive),
+            1 => Ok(Self::FullSplitEq),
+            2 => Ok(Self::FullBaseline),
             3 => Ok(Self::FullRoundBatched),
+            4 => Ok(Self::FullDelayedReduction),
             _ => Err(SerializationError::InvalidData),
         }
     }

@@ -46,7 +46,7 @@ use crate::zkvm::{
     },
     spartan::{
         instruction_input::InstructionInputSumcheckVerifier, outer::OuterRemainingSumcheckVerifier,
-        outer_baseline::OuterBaselineSumcheckVerifier, outer_naive::OuterNaiveSumcheckVerifier,
+        outer_split_eq::OuterSplitEqSumcheckVerifier, outer_naive::OuterBaselineSumcheckVerifier,
         outer_round_batched::OuterRoundBatchedSumcheckVerifier,
         product::ProductVirtualRemainderVerifier, shift::ShiftSumcheckVerifier,
         verify_stage1_uni_skip, verify_stage2_uni_skip,
@@ -278,7 +278,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
                 Ok(())
             }
-            (SpartanOuterStage1Kind::FullNaive, Stage1Proof::FullOuter { sumcheck }) => {
+            (SpartanOuterStage1Kind::FullSplitEq, Stage1Proof::FullOuter { sumcheck }) => {
                 let num_step_bits = self.proof.trace_length.log_2();
                 let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                 let num_constraint_bits = padded_num_constraints.log_2();
@@ -287,7 +287,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                     .transcript
                     .challenge_vector_optimized::<F>(total_num_vars);
 
-                let spartan_outer_full = OuterNaiveSumcheckVerifier::new(
+                let spartan_outer_full = OuterSplitEqSumcheckVerifier::new(
                     num_step_bits,
                     num_constraint_bits,
                     tau,
@@ -300,7 +300,33 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                     &mut self.opening_accumulator,
                     &mut self.transcript,
                 )
-                .context("Stage 1 (full-naive)")?;
+                .context("Stage 1 (full-split-eq)")?;
+
+                Ok(())
+            }
+            (SpartanOuterStage1Kind::FullDelayedReduction, Stage1Proof::FullOuter { sumcheck }) => {
+                let num_step_bits = self.proof.trace_length.log_2();
+                let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                let num_constraint_bits = padded_num_constraints.log_2();
+                let total_num_vars = num_step_bits + num_constraint_bits;
+                let tau: Vec<F::Challenge> = self
+                    .transcript
+                    .challenge_vector_optimized::<F>(total_num_vars);
+
+                let spartan_outer_full = OuterSplitEqSumcheckVerifier::new(
+                    num_step_bits,
+                    num_constraint_bits,
+                    tau,
+                    self.spartan_key,
+                );
+
+                let _r_stage1 = BatchedSumcheck::verify(
+                    sumcheck,
+                    vec![&spartan_outer_full],
+                    &mut self.opening_accumulator,
+                    &mut self.transcript,
+                )
+                .context("Stage 1 (full-delayed-reduction)")?;
 
                 Ok(())
             }

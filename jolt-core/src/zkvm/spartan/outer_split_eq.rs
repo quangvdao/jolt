@@ -36,7 +36,7 @@ pub struct SparseCoefficient<T> {
 // =======================o
 // SumcheckInstance (Verifier) for baseline outer (no uni-skip)
 // =======================
-pub struct OuterBaselineSumcheckVerifier<F: JoltField> {
+pub struct OuterSplitEqSumcheckVerifier<F: JoltField> {
     num_step_bits: usize,
     total_rounds: usize,
     tau: Vec<F::Challenge>,
@@ -44,7 +44,7 @@ pub struct OuterBaselineSumcheckVerifier<F: JoltField> {
     _phantom: core::marker::PhantomData<F>,
 }
 
-impl<F: JoltField> OuterBaselineSumcheckVerifier<F> {
+impl<F: JoltField> OuterSplitEqSumcheckVerifier<F> {
     pub fn new(
         num_step_bits: usize,
         num_constraint_bits: usize,
@@ -62,7 +62,7 @@ impl<F: JoltField> OuterBaselineSumcheckVerifier<F> {
 }
 
 impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
-    for OuterBaselineSumcheckVerifier<F>
+    for OuterSplitEqSumcheckVerifier<F>
 {
     fn degree(&self) -> usize {
         3
@@ -607,7 +607,7 @@ impl<F: JoltField> BaselineSpartanInterleavedPolynomial<F> {
 // =======================
 
 #[derive(Allocative)]
-pub struct OuterBaselineSumcheckProver<F: JoltField> {
+pub struct OuterSplitEqSumcheckProver<F: JoltField> {
     #[allocative(skip)]
     bytecode_preprocessing: BytecodePreprocessing,
     #[allocative(skip)]
@@ -628,8 +628,8 @@ pub struct OuterBaselineSumcheckProver<F: JoltField> {
     padded_num_constraints: usize,
 }
 
-impl<F: JoltField> OuterBaselineSumcheckProver<F> {
-    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::gen")]
+impl<F: JoltField> OuterSplitEqSumcheckProver<F> {
+    #[tracing::instrument(skip_all, name = "OuterSplitEqSumcheckProver::gen")]
     pub fn gen<ProofTranscript: Transcript>(
         bytecode_preprocessing: &BytecodePreprocessing,
         trace: Arc<Vec<Cycle>>,
@@ -742,7 +742,7 @@ impl<F: JoltField> OuterBaselineSumcheckProver<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaselineSumcheckProver<F> {
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterSplitEqSumcheckProver<F> {
     fn degree(&self) -> usize {
         3
     }
@@ -753,14 +753,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
         F::zero()
     }
 
-    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::compute_message")]
+    #[tracing::instrument(skip_all, name = "OuterSplitEqSumcheckProver::compute_message")]
     fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
         let (t0, tinf) = self.compute_endpoints();
         // Use the same Gruen helper as the canonical outer to build the cubic round polynomial.
         self.eq_poly.gruen_poly_deg_3(t0, tinf, previous_claim)
     }
 
-    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::ingest_challenge")]
+    #[tracing::instrument(skip_all, name = "OuterSplitEqSumcheckProver::ingest_challenge")]
     fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         // Bind Az, Bz and the split-eq helper in lockstep (standard dense-poly binding).
         rayon::join(
@@ -800,7 +800,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaseline
     }
 }
 
-impl<F: JoltField> OuterBaselineSumcheckProver<F> {
+impl<F: JoltField> OuterSplitEqSumcheckProver<F> {
     /// Compute (t0, t_inf) endpoints for current round from dense Az/Bz polynomials.
     ///
     /// This mirrors `OuterRemainingSumcheckProver::remaining_quadratic_evals`, but

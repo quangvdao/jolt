@@ -18,12 +18,13 @@ use jolt_core::{
         r1cs::key::UniformSpartanKey,
         spartan::{
             outer::{
-                OuterRemainingStreamingSumcheck, OuterRemainingStreamingSumcheckCoeffMul,
+                OuterRemainingStreamingSumcheck,
                 OuterRemainingStreamingSumcheckMTable, OuterSharedState, OuterUniSkipParams,
                 OuterUniSkipProver,
             },
-            outer_baseline::OuterBaselineSumcheckProver as OuterBaselineStreamingSumcheckProver,
-            outer_naive::OuterNaiveSumcheckProver,
+            outer_split_eq::OuterSplitEqSumcheckProver,
+            outer_delayed_reduction::OuterDelayedReductionSumcheckProver,
+            outer_naive::OuterBaselineSumcheckProver,
             outer_round_batched::OuterRoundBatchedSumcheckProver,
             outer_uni_skip_linear::{
                 OuterRemainingSumcheckProverNonStreaming, OuterUniSkipInstanceProver,
@@ -201,57 +202,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(format!("outer-streaming-coeffmul/{bench_name}"), |b| {
-            b.iter_batched(
-                || setup_for_spartan("sha2-chain-guest", num_iterations),
-                |(
-                    trace,
-                    bytecode_pp,
-                    padded_trace_length,
-                    mut opening_accumulator,
-                    mut transcript,
-                )| {
-                    // Uni-skip first round
-                    let key = UniformSpartanKey::<F>::new(padded_trace_length);
-                    let uni_skip_params = OuterUniSkipParams::<F>::new(&key, &mut transcript);
-                    let mut uni_skip = OuterUniSkipProver::<F>::initialize(
-                        uni_skip_params.clone(),
-                        trace.as_ref(),
-                        &bytecode_pp,
-                    );
-                    let _ = prove_uniskip_round(
-                        &mut uni_skip,
-                        &mut opening_accumulator,
-                        &mut transcript,
-                    );
-
-                    // Remaining outer rounds: same schedule (degree-2), but coeff-based window multiplication.
-                    let num_rounds = uni_skip_params.tau.len() - 1;
-                    let schedule = HalfSplitSchedule::new(num_rounds, 2);
-                    let shared = OuterSharedState::<F>::new(
-                        Arc::clone(&trace),
-                        &bytecode_pp,
-                        &uni_skip_params,
-                        &opening_accumulator,
-                    );
-                    let mut instance: OuterRemainingStreamingSumcheckCoeffMul<
-                        F,
-                        HalfSplitSchedule,
-                    > = OuterRemainingStreamingSumcheckCoeffMul::new(shared, schedule);
-                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
-                        vec![&mut instance];
-
-                    black_box(BatchedSumcheck::prove(
-                        instance_refs,
-                        &mut opening_accumulator,
-                        &mut transcript,
-                    ));
-                },
-                BatchSize::SmallInput,
-            );
-        });
-
-        group.bench_function(format!("outer-streaming-mtable/{bench_name}"), |b| {
+        group.bench_function(format!("outer-streaming-coeff-basis/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -372,7 +323,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(format!("outer-baseline/{bench_name}"), |b| {
+        group.bench_function(format!("outer-split-eq/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -386,7 +337,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                     let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                     let constraints_vec: Vec<R1CSConstraint> =
                         R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
-                    let mut instance = OuterBaselineStreamingSumcheckProver::<F>::gen(
+                    let mut instance = OuterSplitEqSumcheckProver::<F>::gen(
                         &bytecode_pp,
                         Arc::clone(&trace),
                         &constraints_vec,
@@ -406,7 +357,7 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
             );
         });
 
-        group.bench_function(format!("outer-naive/{bench_name}"), |b| {
+        group.bench_function(format!("outer-delayed-reduction/{bench_name}"), |b| {
             b.iter_batched(
                 || setup_for_spartan("sha2-chain-guest", num_iterations),
                 |(
@@ -419,7 +370,40 @@ fn bench_spartan_sumcheck(c: &mut Criterion) {
                     let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
                     let constraints_vec: Vec<R1CSConstraint> =
                         R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
-                    let mut instance = OuterNaiveSumcheckProver::<F>::gen(
+                    let mut instance = OuterDelayedReductionSumcheckProver::<F>::gen(
+                        &bytecode_pp,
+                        Arc::clone(&trace),
+                        &constraints_vec,
+                        padded_num_constraints,
+                        &mut transcript,
+                    );
+                    let instance_refs: Vec<&mut dyn SumcheckInstanceProver<F, ProofTranscript>> =
+                        vec![&mut instance];
+
+                    black_box(BatchedSumcheck::prove(
+                        instance_refs,
+                        &mut opening_accumulator,
+                        &mut transcript,
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        group.bench_function(format!("outer-baseline/{bench_name}"), |b| {
+            b.iter_batched(
+                || setup_for_spartan("sha2-chain-guest", num_iterations),
+                |(
+                    trace,
+                    bytecode_pp,
+                    _padded_trace_length,
+                    mut opening_accumulator,
+                    mut transcript,
+                )| {
+                    let padded_num_constraints = R1CS_CONSTRAINTS.len().next_power_of_two();
+                    let constraints_vec: Vec<R1CSConstraint> =
+                        R1CS_CONSTRAINTS.iter().map(|c| c.cons).collect();
+                    let mut instance = OuterBaselineSumcheckProver::<F>::gen(
                         &bytecode_pp,
                         Arc::clone(&trace),
                         &constraints_vec,

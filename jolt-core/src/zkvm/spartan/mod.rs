@@ -16,7 +16,9 @@ pub mod outer;
 pub mod outer_uni_skip_linear;
 // Benchmarking-only outer prover variants (require prover feature; kept for benches/regressions).
 #[cfg(feature = "prover")]
-pub mod outer_baseline;
+pub mod outer_split_eq;
+#[cfg(feature = "prover")]
+pub mod outer_delayed_reduction;
 #[cfg(feature = "prover")]
 pub mod outer_naive;
 #[cfg(feature = "prover")]

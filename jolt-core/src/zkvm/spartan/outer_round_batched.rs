@@ -17,10 +17,11 @@ use crate::{
     field::JoltField,
     transcripts::Transcript,
     utils::small_value::accum::{SignedUnreducedAccum, UnreducedProduct},
-    utils::{math::Math, small_value::svo_helpers},
+    utils::{math::Math, small_value::svo_helpers, thread::unsafe_allocate_zero_vec},
     zkvm::bytecode::BytecodePreprocessing,
     zkvm::r1cs::{
-        constraints::R1CS_CONSTRAINTS, evaluation::eval_az_bz_batch_from_row,
+        constraints::{NUM_R1CS_CONSTRAINTS, R1CS_CONSTRAINTS},
+        evaluation::eval_az_bz_all_uniform_constraints_typed,
         inputs::R1CSCycleInputs,
     },
 };
@@ -148,18 +149,23 @@ pub fn svo_precompute<F: JoltField>(
                     let step_idx = (x_out_val << iter_num_x_in_step_vars) | x_in_step_val;
                     let mut constraint_val = 0;
                     let row = R1CSCycleInputs::from_trace::<F>(preprocess, trace, step_idx);
+                    let (az_all, bz_all) = eval_az_bz_all_uniform_constraints_typed::<F>(&row);
 
                     let mut az_block = [I8OrI96::zero(); Y_SVO_SPACE_SIZE];
                     let mut bz_block = [S160::zero(); Y_SVO_SPACE_SIZE];
 
                     for chunk in R1CS_CONSTRAINTS.chunks(Y_SVO_SPACE_SIZE) {
                         let sz = chunk.len();
-                        eval_az_bz_batch_from_row::<F>(
-                            chunk,
-                            &row,
-                            &mut az_block[..sz],
-                            &mut bz_block[..sz],
-                        );
+                        let start = constraint_val * Y_SVO_SPACE_SIZE;
+                        let end = start + sz;
+                        az_block[..sz].copy_from_slice(&az_all[start..end]);
+                        bz_block[..sz].copy_from_slice(&bz_all[start..end]);
+                        // `compute_and_update_tA_inplace` reads all `Y_SVO_SPACE_SIZE` binary points.
+                        // For the final (partial) chunk we must ensure the tail is zero.
+                        if sz < Y_SVO_SPACE_SIZE {
+                            az_block[sz..].fill(I8OrI96::zero());
+                            bz_block[sz..].fill(S160::zero());
+                        }
 
                         if chunk.len() == Y_SVO_SPACE_SIZE {
                             let x_in =
@@ -172,8 +178,6 @@ pub fn svo_precompute<F: JoltField>(
                                 &mut tA_neg,
                             );
                             constraint_val += 1;
-                            az_block = [I8OrI96::zero(); Y_SVO_SPACE_SIZE];
-                            bz_block = [S160::zero(); Y_SVO_SPACE_SIZE];
                         }
                     }
 
@@ -255,22 +259,6 @@ pub fn compute_streaming_round_dense<F: JoltField>(
     r_rev.reverse();
     let eq_r_evals = EqPolynomial::<F>::evals_with_scaling(&r_rev, Some(F::MONTGOMERY_R_SQUARE));
 
-    let num_x_out_vals = eq_poly.E_out_current_len();
-    let iter_num_x_out_vars = if num_x_out_vals > 0 {
-        num_x_out_vals.log_2()
-    } else {
-        0
-    };
-    let num_steps = trace.len();
-    let num_step_vars = if num_steps > 0 { num_steps.log_2() } else { 0 };
-    debug_assert!(iter_num_x_out_vars <= num_step_vars);
-    let iter_num_x_in_step_vars = num_step_vars - iter_num_x_out_vars;
-    let num_x_in_step_vals = if iter_num_x_in_step_vars > 0 {
-        1usize << iter_num_x_in_step_vars
-    } else {
-        1
-    };
-
     let num_uniform_r1cs_constraints = R1CS_CONSTRAINTS.len();
     let y_blocks_in_constraints = if num_uniform_r1cs_constraints > 0 {
         num_uniform_r1cs_constraints.div_ceil(Y_SVO_SPACE_SIZE)
@@ -279,108 +267,117 @@ pub fn compute_streaming_round_dense<F: JoltField>(
     };
     let num_block_pairs_per_step =
         (R1CS_CONSTRAINTS.len().next_power_of_two()) >> (NUM_SVO_ROUNDS + 1);
+    debug_assert!(num_block_pairs_per_step.is_power_of_two());
+    let log_block_pairs = if num_block_pairs_per_step > 1 {
+        num_block_pairs_per_step.log_2()
+    } else {
+        0
+    };
+    let block_pair_mask = num_block_pairs_per_step - 1;
 
-    let total_blocks = num_steps * num_block_pairs_per_step;
-    let dense_len = 2 * total_blocks;
-    let mut az_vals = vec![F::zero(); dense_len];
-    let mut bz_vals = vec![F::zero(); dense_len];
+    let num_x_out_vals = eq_poly.E_out_current_len();
+    let num_x_in_vals = eq_poly.E_in_current_len();
+    let iter_num_x_in_vars = num_x_in_vals.log_2();
+    let groups_exact = num_x_out_vals
+        .checked_mul(num_x_in_vals)
+        .expect("overflow computing groups_exact");
+    debug_assert!(groups_exact.is_power_of_two());
 
-    let mut sum0 = F::zero();
-    let mut sumInf = F::zero();
+    // Allocate full dense arrays (all entries overwritten below).
+    let mut az_vals: Vec<F> = unsafe_allocate_zero_vec(2 * groups_exact);
+    let mut bz_vals: Vec<F> = unsafe_allocate_zero_vec(2 * groups_exact);
 
-    for x_out_val in 0..num_x_out_vals {
-        let mut inner_sum0 = F::Unreduced::<9>::zero();
-        let mut inner_sumInf = F::Unreduced::<9>::zero();
-        for x_in_step_val in 0..num_x_in_step_vals {
-            let current_step_idx = (x_out_val << iter_num_x_in_step_vars) | x_in_step_val;
-            let row_inputs = R1CSCycleInputs::from_trace::<F>(preprocess, trace, current_step_idx);
+    // Fused pass (matches the pattern in `outer_uni_skip_linear`):
+    // - materialize [az0,az1] and [bz0,bz1] for each g into dense buffers
+    // - compute (t0,t∞) with delayed reduction in the same traversal
+    let (t0_acc_unr, t_inf_acc_unr) = az_vals
+        .par_chunks_exact_mut(2 * num_x_in_vals)
+        .zip(bz_vals.par_chunks_exact_mut(2 * num_x_in_vals))
+        .enumerate()
+        .fold(
+            || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
+            |(mut acc0, mut acci), (x_out_val, (az_chunk, bz_chunk))| {
+                let mut inner_sum0 = F::Unreduced::<9>::zero();
+                let mut inner_sum_inf = F::Unreduced::<9>::zero();
 
-            for block_pair_idx in 0..num_block_pairs_per_step {
-                let mut az_acc = [
-                    SignedUnreducedAccum::<F>::new(),
-                    SignedUnreducedAccum::<F>::new(),
-                ];
-                let mut bz_acc = [
-                    SignedUnreducedAccum::<F>::new(),
-                    SignedUnreducedAccum::<F>::new(),
-                ];
+                let mut step_idx_cached = usize::MAX;
+                let mut az_all = [I8OrI96::zero(); NUM_R1CS_CONSTRAINTS];
+                let mut bz_all = [S160::zero(); NUM_R1CS_CONSTRAINTS];
 
-                for k in 0..2 {
-                    let chunk_index = (block_pair_idx << 1) | k;
-                    if chunk_index >= y_blocks_in_constraints {
-                        continue;
+                for x_in_val in 0..num_x_in_vals {
+                    let g = (x_out_val << iter_num_x_in_vars) | x_in_val;
+                    let step_idx = g >> log_block_pairs;
+                    if step_idx != step_idx_cached {
+                        let row_inputs =
+                            R1CSCycleInputs::from_trace::<F>(preprocess, trace, step_idx);
+                        (az_all, bz_all) =
+                            eval_az_bz_all_uniform_constraints_typed::<F>(&row_inputs);
+                        step_idx_cached = step_idx;
                     }
-                    let start = chunk_index * Y_SVO_SPACE_SIZE;
-                    let end =
-                        core::cmp::min(start + Y_SVO_SPACE_SIZE, num_uniform_r1cs_constraints);
-                    let uniform_svo_chunk = &R1CS_CONSTRAINTS[start..end];
-                    let chunk_size = uniform_svo_chunk.len();
+                    let block_pair_idx = g & block_pair_mask;
 
-                    let mut binary_az_block = [I8OrI96::zero(); Y_SVO_SPACE_SIZE];
-                    let mut binary_bz_block = [S160::zero(); Y_SVO_SPACE_SIZE];
-                    eval_az_bz_batch_from_row::<F>(
-                        uniform_svo_chunk,
-                        &row_inputs,
-                        &mut binary_az_block[..chunk_size],
-                        &mut binary_bz_block[..chunk_size],
-                    );
+                    let mut az_acc = [
+                        SignedUnreducedAccum::<F>::new(),
+                        SignedUnreducedAccum::<F>::new(),
+                    ];
+                    let mut bz_acc = [
+                        SignedUnreducedAccum::<F>::new(),
+                        SignedUnreducedAccum::<F>::new(),
+                    ];
 
-                    let x_next_val = k;
-                    for idx in 0..chunk_size {
-                        let eq = eq_r_evals[idx];
-                        az_acc[x_next_val].fmadd_az(&eq, binary_az_block[idx]);
-                        bz_acc[x_next_val].fmadd_bz(&eq, binary_bz_block[idx]);
+                    for k in 0..2 {
+                        let chunk_index = (block_pair_idx << 1) | k;
+                        if chunk_index >= y_blocks_in_constraints {
+                            continue;
+                        }
+                        let start = chunk_index * Y_SVO_SPACE_SIZE;
+                        let end =
+                            core::cmp::min(start + Y_SVO_SPACE_SIZE, num_uniform_r1cs_constraints);
+                        let chunk_size = end - start;
+
+                        for idx in 0..chunk_size {
+                            let eq = eq_r_evals[idx];
+                            az_acc[k].fmadd_az(&eq, az_all[start + idx]);
+                            bz_acc[k].fmadd_bz(&eq, bz_all[start + idx]);
+                        }
                     }
+
+                    let az0 = az_acc[0].reduce_to_field();
+                    let bz0 = bz_acc[0].reduce_to_field();
+                    let az1 = az_acc[1].reduce_to_field();
+                    let bz1 = bz_acc[1].reduce_to_field();
+
+                    let p0 = az0 * bz0;
+                    let slope = (az1 - az0) * (bz1 - bz0);
+                    let e_in = eq_poly.E_in_current()[x_in_val];
+                    inner_sum0 += e_in.mul_unreduced::<9>(p0);
+                    inner_sum_inf += e_in.mul_unreduced::<9>(slope);
+
+                    let off = 2 * x_in_val;
+                    az_chunk[off] = az0;
+                    az_chunk[off + 1] = az1;
+                    bz_chunk[off] = bz0;
+                    bz_chunk[off + 1] = bz1;
                 }
 
-                let az0 = az_acc[0].reduce_to_field();
-                let bz0 = bz_acc[0].reduce_to_field();
-                let az1 = az_acc[1].reduce_to_field();
-                let bz1 = bz_acc[1].reduce_to_field();
-
-                let p0 = az0 * bz0;
-                let slope = (az1 - az0) * (bz1 - bz0);
-
-                let block_id = current_step_idx * num_block_pairs_per_step + block_pair_idx;
-                let num_streaming_x_in_vars = eq_poly.E_in_current_len().log_2();
-                let x_out_idx = block_id >> num_streaming_x_in_vars;
-                let x_in_idx = block_id & ((1 << num_streaming_x_in_vars) - 1);
-
-                let e_out = if x_out_idx < eq_poly.E_out_current_len() {
-                    eq_poly.E_out_current()[x_out_idx]
-                } else {
-                    F::zero()
-                };
-                let e_in = if eq_poly.E_in_current_len() == 0 {
-                    F::one()
-                } else if eq_poly.E_in_current_len() == 1 {
-                    eq_poly.E_in_current()[0]
-                } else if x_in_idx < eq_poly.E_in_current_len() {
-                    eq_poly.E_in_current()[x_in_idx]
-                } else {
-                    F::zero()
-                };
-
-                inner_sum0 += e_in.mul_unreduced::<9>(p0);
-                inner_sumInf += e_in.mul_unreduced::<9>(slope);
-
-                az_vals[2 * block_id] = az0;
-                az_vals[2 * block_id + 1] = az1;
-                bz_vals[2 * block_id] = bz0;
-                bz_vals[2 * block_id + 1] = bz1;
-
-                let red0 = F::from_montgomery_reduce::<9>(inner_sum0);
-                let redi = F::from_montgomery_reduce::<9>(inner_sumInf);
-                sum0 += e_out * red0;
-                sumInf += e_out * redi;
-                inner_sum0 = F::Unreduced::zero();
-                inner_sumInf = F::Unreduced::zero();
-            }
-        }
-    }
+                let e_out = eq_poly.E_out_current()[x_out_val];
+                let reduced0 = F::from_montgomery_reduce::<9>(inner_sum0);
+                let reduced_inf = F::from_montgomery_reduce::<9>(inner_sum_inf);
+                acc0 += e_out.mul_unreduced::<9>(reduced0);
+                acci += e_out.mul_unreduced::<9>(reduced_inf);
+                (acc0, acci)
+            },
+        )
+        .reduce(
+            || (F::Unreduced::<9>::zero(), F::Unreduced::<9>::zero()),
+            |a, b| (a.0 + b.0, a.1 + b.1),
+        );
 
     (
-        (sum0, sumInf),
+        (
+            F::from_montgomery_reduce::<9>(t0_acc_unr),
+            F::from_montgomery_reduce::<9>(t_inf_acc_unr),
+        ),
         DensePolynomial::new(az_vals),
         DensePolynomial::new(bz_vals),
     )
@@ -440,6 +437,125 @@ fn dense_compute_endpoints<F: JoltField>(
     }
 }
 
+/// Bind the current low-to-high variable in `az` and `bz` with challenge `r`,
+/// and (if there is at least one variable remaining) compute the dense endpoints
+/// for the *next* sumcheck round in the same pass.
+///
+/// This is used to avoid a separate full scan in `compute_message` for dense rounds.
+#[inline]
+fn bind_dense_pair_and_compute_next_endpoints<F: JoltField>(
+    eq_poly_after_bind: &GruenSplitEqPolynomial<F>,
+    az: &mut DensePolynomial<F>,
+    bz: &mut DensePolynomial<F>,
+    r: F::Challenge,
+) -> Option<(F, F)> {
+    debug_assert_eq!(az.len(), bz.len());
+    debug_assert_eq!(az.len(), az.Z.len());
+    debug_assert_eq!(bz.len(), bz.Z.len());
+
+    let old_len = az.len();
+    debug_assert!(old_len.is_power_of_two());
+    debug_assert!(old_len >= 2);
+    let new_len = old_len / 2;
+
+    let az_in = &az.Z;
+    let bz_in = &bz.Z;
+
+    let mut az_new = Vec::with_capacity(new_len);
+    let mut bz_new = Vec::with_capacity(new_len);
+
+    // If no variables remain after binding, there is no "next round" to cache endpoints for.
+    if new_len == 1 {
+        let az0 = az_in[0];
+        let az1 = az_in[1];
+        let bz0 = bz_in[0];
+        let bz1 = bz_in[1];
+        let az_out = az_new.spare_capacity_mut();
+        let bz_out = bz_new.spare_capacity_mut();
+        az_out[0].write(az0 + r * (az1 - az0));
+        bz_out[0].write(bz0 + r * (bz1 - bz0));
+        unsafe {
+            az_new.set_len(1);
+            bz_new.set_len(1);
+        }
+        az.Z = az_new;
+        bz.Z = bz_new;
+        az.num_vars -= 1;
+        bz.num_vars -= 1;
+        az.len = 1;
+        bz.len = 1;
+        return None;
+    }
+
+    // Next-round endpoints are computed on the *bound* polynomials, where the next variable is
+    // the new LSB. That means we need adjacent pairs in the output, i.e. 2 outputs at a time.
+    debug_assert!(new_len.is_power_of_two());
+    let groups = new_len / 2;
+    debug_assert_eq!(old_len, 4 * groups);
+
+    let E_in = eq_poly_after_bind.E_in_current();
+    let E_out = eq_poly_after_bind.E_out_current();
+    debug_assert!(E_in.len().is_power_of_two());
+    let num_x1_bits = E_in.len().log_2();
+    let x1_mask = E_in.len() - 1;
+
+    let az_out = az_new.spare_capacity_mut();
+    let bz_out = bz_new.spare_capacity_mut();
+
+    let (t0, tinf) = az_out
+        .par_chunks_exact_mut(2)
+        .zip(bz_out.par_chunks_exact_mut(2))
+        .zip(az_in.par_chunks_exact(4))
+        .zip(bz_in.par_chunks_exact(4))
+        .enumerate()
+        .map(|(g, (((az_out2, bz_out2), az_in4), bz_in4))| {
+            let az00 = az_in4[0];
+            let az01 = az_in4[1];
+            let az10 = az_in4[2];
+            let az11 = az_in4[3];
+            let bz00 = bz_in4[0];
+            let bz01 = bz_in4[1];
+            let bz10 = bz_in4[2];
+            let bz11 = bz_in4[3];
+
+            let az_new0 = az00 + r * (az01 - az00);
+            let az_new1 = az10 + r * (az11 - az10);
+            let bz_new0 = bz00 + r * (bz01 - bz00);
+            let bz_new1 = bz10 + r * (bz11 - bz10);
+
+            az_out2[0].write(az_new0);
+            az_out2[1].write(az_new1);
+            bz_out2[0].write(bz_new0);
+            bz_out2[1].write(bz_new1);
+
+            let p0 = az_new0 * bz_new0;
+            let slope = (az_new1 - az_new0) * (bz_new1 - bz_new0);
+
+            let x2 = g >> num_x1_bits;
+            if x2 >= E_out.len() {
+                return (F::zero(), F::zero());
+            }
+            let x1 = g & x1_mask;
+            let e_in = if E_in.len() == 1 { F::one() } else { E_in[x1] };
+            let weight = E_out[x2] * e_in;
+            (weight * p0, weight * slope)
+        })
+        .reduce(|| (F::zero(), F::zero()), |a, b| (a.0 + b.0, a.1 + b.1));
+
+    unsafe {
+        az_new.set_len(new_len);
+        bz_new.set_len(new_len);
+    }
+    az.Z = az_new;
+    bz.Z = bz_new;
+    az.num_vars -= 1;
+    bz.num_vars -= 1;
+    az.len = new_len;
+    bz.len = new_len;
+
+    Some((t0, tinf))
+}
+
 #[derive(Allocative)]
 pub struct OuterRoundBatchedSumcheckProver<F: JoltField> {
     #[allocative(skip)]
@@ -457,6 +573,8 @@ pub struct OuterRoundBatchedSumcheckProver<F: JoltField> {
     az: Option<DensePolynomial<F>>,
     /// Dense Bz polynomial, populated at the streaming round and bound thereafter.
     bz: Option<DensePolynomial<F>>,
+    /// Cached (t(0), t(∞)) for the next dense round, computed during binding.
+    dense_endpoints_cache: Option<(F, F)>,
     total_rounds: usize,
     num_cycle_bits: usize,
 }
@@ -507,6 +625,7 @@ impl<F: JoltField> OuterRoundBatchedSumcheckProver<F> {
             lagrange_coeffs: vec![F::one()],
             az: None,
             bz: None,
+            dense_endpoints_cache: None,
             total_rounds: total_num_vars,
             num_cycle_bits: num_step_vars,
         }
@@ -584,11 +703,13 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             self.bz = Some(bz);
             (t0, tinf)
         } else {
-            dense_compute_endpoints(
-                &self.eq_poly,
-                self.az.as_ref().expect("Az not yet populated"),
-                self.bz.as_ref().expect("Bz not yet populated"),
-            )
+            self.dense_endpoints_cache.take().unwrap_or_else(|| {
+                dense_compute_endpoints(
+                    &self.eq_poly,
+                    self.az.as_ref().expect("Az not yet populated"),
+                    self.bz.as_ref().expect("Bz not yet populated"),
+                )
+            })
         };
 
         self.eq_poly.gruen_poly_deg_3(t0, tinf, previous_claim)
@@ -616,11 +737,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         // Streaming round and all remaining rounds: bind the dense Az/Bz and eq_poly
         let az = self.az.as_mut().expect("Az not yet populated");
         let bz = self.bz.as_mut().expect("Bz not yet populated");
-        rayon::join(
-            || az.bind_parallel(r_j, BindingOrder::LowToHigh),
-            || bz.bind_parallel(r_j, BindingOrder::LowToHigh),
-        );
+        // Bind eq first so `E_in/E_out` reflect the next round when computing endpoints.
         self.eq_poly.bind(r_j);
+        self.dense_endpoints_cache =
+            bind_dense_pair_and_compute_next_endpoints(&self.eq_poly, az, bz, r_j);
     }
 
     fn cache_openings(

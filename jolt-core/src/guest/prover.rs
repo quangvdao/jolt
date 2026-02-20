@@ -58,8 +58,13 @@ fn spartan_outer_stage1_kind_from_env() -> SpartanOuterStage1Kind {
                 schedule,
             }
         }
-        "full-baseline" | "full_baseline" => SpartanOuterStage1Kind::FullBaseline,
-        "full-naive" | "full_naive" => SpartanOuterStage1Kind::FullNaive,
+        "full-baseline" | "full_baseline" | "full-naive" | "full_naive" => {
+            SpartanOuterStage1Kind::FullBaseline
+        }
+        "full-split-eq" | "full_split_eq" => SpartanOuterStage1Kind::FullSplitEq,
+        "full-delayed-reduction" | "full_delayed_reduction" => {
+            SpartanOuterStage1Kind::FullDelayedReduction
+        }
         "full-round-batched" | "full_round_batched" | "full-roundbatched" => {
             SpartanOuterStage1Kind::FullRoundBatched
         }

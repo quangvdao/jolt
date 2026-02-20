@@ -58,9 +58,9 @@ use crate::zkvm::instruction::{CircuitFlags, NUM_CIRCUIT_FLAGS};
 use crate::zkvm::r1cs::inputs::ProductCycleInputs;
 
 use super::constraints::{
-    NamedR1CSConstraint, R1CSConstraint, NUM_PRODUCT_VIRTUAL, OUTER_UNIVARIATE_SKIP_DEGREE,
-    OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE,
-    PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
+    NamedR1CSConstraint, R1CSConstraint, NUM_PRODUCT_VIRTUAL, NUM_R1CS_CONSTRAINTS,
+    OUTER_UNIVARIATE_SKIP_DEGREE, OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
+    PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE, PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
 };
 #[cfg(test)]
 use super::constraints::{R1CS_CONSTRAINTS_FIRST_GROUP, R1CS_CONSTRAINTS_SECOND_GROUP};
@@ -163,31 +163,174 @@ pub fn eval_az_bz_batch_from_row<F: JoltField>(
     out_az: &mut [I8OrI96],
     out_bz: &mut [S160],
 ) {
+    let cached_inputs = precompute_inputs_s160(row);
+    eval_az_bz_batch_from_cached_inputs::<F>(constraints, &cached_inputs, out_az, out_bz)
+}
+
+/// Compute Az/Bz evaluations for the full `R1CS_CONSTRAINTS` table using the typed
+/// `R1CSEval` evaluators (no generic LC evaluation).
+///
+/// This is significantly faster than evaluating `LC`s term-by-term because:
+/// - Az guards are booleans (0/1) in the intended semantics
+/// - Bz residuals are computed directly from the row using small integer ops
+///
+/// The output arrays are in the same order as `R1CS_CONSTRAINTS` / `R1CSConstraintLabel`.
+#[inline]
+pub fn eval_az_bz_all_uniform_constraints_typed<F: JoltField>(
+    row: &R1CSCycleInputs,
+) -> (
+    [I8OrI96; NUM_R1CS_CONSTRAINTS],
+    [S160; NUM_R1CS_CONSTRAINTS],
+) {
+    let eval = R1CSEval::<F>::from_cycle_inputs(row);
+    let az1 = eval.eval_az_first_group();
+    let bz1 = eval.eval_bz_first_group();
+    let az2 = eval.eval_az_second_group();
+    let bz2 = eval.eval_bz_second_group();
+
+    #[inline(always)]
+    fn az_bool(b: bool) -> I8OrI96 {
+        if b {
+            I8OrI96::one()
+        } else {
+            I8OrI96::zero()
+        }
+    }
+
+    let az = [
+        // 0: RamAddrEqRs1PlusImmIfLoadStore
+        az_bool(az2.load_or_store),
+        // 1: RamAddrEqZeroIfNotLoadStore
+        az_bool(az1.not_load_store),
+        // 2: RamReadEqRamWriteIfLoad
+        az_bool(az1.load_a),
+        // 3: RamReadEqRdWriteIfLoad
+        az_bool(az1.load_b),
+        // 4: Rs2EqRamWriteIfStore
+        az_bool(az1.store),
+        // 5: LeftLookupZeroUnlessAddSubMul
+        az_bool(az1.add_sub_mul),
+        // 6: LeftLookupEqLeftInputOtherwise
+        az_bool(az1.not_add_sub_mul),
+        // 7: RightLookupAdd
+        az_bool(az2.add),
+        // 8: RightLookupSub
+        az_bool(az2.sub),
+        // 9: RightLookupEqProductIfMul
+        az_bool(az2.mul),
+        // 10: RightLookupEqRightInputOtherwise
+        az_bool(az2.not_add_sub_mul_advice),
+        // 11: AssertLookupOne
+        az_bool(az1.assert_flag),
+        // 12: RdWriteEqLookupIfWriteLookupToRd
+        az_bool(az2.write_lookup_to_rd),
+        // 13: RdWriteEqPCPlusConstIfWritePCtoRD
+        az_bool(az2.write_pc_to_rd),
+        // 14: NextUnexpPCEqLookupIfShouldJump
+        az_bool(az1.should_jump),
+        // 15: NextUnexpPCEqPCPlusImmIfShouldBranch
+        az_bool(az2.should_branch),
+        // 16: NextUnexpPCUpdateOtherwise
+        az_bool(az2.not_jump_or_branch),
+        // 17: NextPCEqPCPlusOneIfInline
+        az_bool(az1.virtual_instr_not_last),
+        // 18: MustStartSequenceFromBeginning
+        az_bool(az1.must_start_sequence),
+    ];
+
+    let bz = [
+        // 0: RamAddrEqRs1PlusImmIfLoadStore
+        s160_from_i128(bz2.ram_addr_minus_rs1_plus_imm),
+        // 1: RamAddrEqZeroIfNotLoadStore
+        s160_from_u64(bz1.ram_addr),
+        // 2: RamReadEqRamWriteIfLoad
+        s160_from_s64(bz1.ram_read_minus_ram_write),
+        // 3: RamReadEqRdWriteIfLoad
+        s160_from_s64(bz1.ram_read_minus_rd_write),
+        // 4: Rs2EqRamWriteIfStore
+        s160_from_s64(bz1.rs2_minus_ram_write),
+        // 5: LeftLookupZeroUnlessAddSubMul
+        s160_from_u64(bz1.left_lookup),
+        // 6: LeftLookupEqLeftInputOtherwise
+        s160_from_s64(bz1.left_lookup_minus_left_input),
+        // 7: RightLookupAdd
+        bz2.right_lookup_minus_add_result,
+        // 8: RightLookupSub
+        bz2.right_lookup_minus_sub_result,
+        // 9: RightLookupEqProductIfMul
+        bz2.right_lookup_minus_product,
+        // 10: RightLookupEqRightInputOtherwise
+        bz2.right_lookup_minus_right_input,
+        // 11: AssertLookupOne
+        s160_from_s64(bz1.lookup_output_minus_one),
+        // 12: RdWriteEqLookupIfWriteLookupToRd
+        s160_from_s64(bz2.rd_write_minus_lookup_output),
+        // 13: RdWriteEqPCPlusConstIfWritePCtoRD
+        s160_from_s64(bz2.rd_write_minus_pc_plus_const),
+        // 14: NextUnexpPCEqLookupIfShouldJump
+        s160_from_s64(bz1.next_unexp_pc_minus_lookup_output),
+        // 15: NextUnexpPCEqPCPlusImmIfShouldBranch
+        s160_from_i128(bz2.next_unexp_pc_minus_pc_plus_imm),
+        // 16: NextUnexpPCUpdateOtherwise
+        s160_from_s64(bz2.next_unexp_pc_minus_expected),
+        // 17: NextPCEqPCPlusOneIfInline
+        s160_from_s64(bz1.next_pc_minus_pc_plus_one),
+        // 18: MustStartSequenceFromBeginning
+        s160_from_bool(bz1.one_minus_do_not_update_unexpanded_pc),
+    ];
+
+    (az, bz)
+}
+
+/// Precompute all R1CS input values for a single row in `S160` semantics, using the canonical
+/// `ALL_R1CS_INPUTS` ordering. This lets constraint evaluation avoid per-term enum matching.
+#[inline]
+pub fn precompute_inputs_s160(row: &R1CSCycleInputs) -> [S160; NUM_R1CS_INPUTS] {
+    let mut out = [S160::zero(); NUM_R1CS_INPUTS];
+    for (i, input) in ALL_R1CS_INPUTS.iter().enumerate() {
+        out[i] = input_to_s160(row, *input);
+    }
+    out
+}
+
+/// Cached-input variant of `eval_az_bz_batch_from_row`.
+#[inline]
+pub fn eval_az_bz_batch_from_cached_inputs<F: JoltField>(
+    constraints: &[NamedR1CSConstraint],
+    cached_inputs: &[S160; NUM_R1CS_INPUTS],
+    out_az: &mut [I8OrI96],
+    out_bz: &mut [S160],
+) {
     debug_assert_eq!(constraints.len(), out_az.len());
     debug_assert_eq!(constraints.len(), out_bz.len());
 
     for (i, named) in constraints.iter().enumerate() {
         // Evaluate LC in S160 semantics directly (avoid lossy i128 conversions:
         // some witnesses (e.g. `Product`) can exceed i128 range).
-        let az_s160 = eval_lc_s160(&named.cons.a, row);
-        let bz_s160 = eval_lc_s160(&named.cons.b, row);
+        let az_s160 = eval_lc_s160(&named.cons.a, cached_inputs);
+        let bz_s160 = eval_lc_s160(&named.cons.b, cached_inputs);
         out_az[i] = s96_from_s160(az_s160);
         out_bz[i] = bz_s160;
     }
 }
 
 #[inline]
-fn eval_lc_s160(lc: &super::ops::LC, row: &R1CSCycleInputs) -> S160 {
+fn eval_lc_s160(lc: &super::ops::LC, cached_inputs: &[S160; NUM_R1CS_INPUTS]) -> S160 {
     let mut acc = S160::zero();
 
-    for i in 0..lc.num_terms() {
-        if let Some(term) = lc.term(i) {
-            let input = JoltR1CSInputs::from_index(term.input_index);
-            let v = input_to_s160(row, input);
-            let c = s160_from_i128(term.coeff);
-            acc += mul_s160_checked(v, c);
+    lc.for_each_term(|input_index, c| {
+        if c == 0 {
+            return;
         }
-    }
+        let v = cached_inputs[input_index];
+        if c == 1 {
+            acc += v;
+        } else if c == -1 {
+            acc -= v;
+        } else {
+            acc += mul_s160_by_i128_checked(v, c);
+        }
+    });
 
     if let Some(c) = lc.const_term() {
         acc += s160_from_i128(c);
@@ -271,28 +414,83 @@ fn s96_from_s160(x: S160) -> I8OrI96 {
 }
 
 #[inline]
-fn mul_s160_checked(a: S160, b: S160) -> S160 {
-    use ark_ff::biginteger::BigInt;
+fn neg_s160(x: S160) -> S160 {
+    if x.is_zero() {
+        return x;
+    }
+    let lo = *x.magnitude_lo();
+    let hi = x.magnitude_hi();
+    S160::new(lo, hi, !x.is_positive())
+}
 
-    if a.is_zero() || b.is_zero() {
+/// Multiply an `S160` value by an `i128` coefficient with overflow checking.
+///
+/// This replaces the BigInt-based `mul_s160_checked` hot path for the common case where
+/// one operand is a small (≤128-bit) scalar coefficient.
+#[inline]
+fn mul_s160_by_i128_checked(a: S160, coeff: i128) -> S160 {
+    if a.is_zero() || coeff == 0 {
         return S160::zero();
     }
+    if coeff == 1 {
+        return a;
+    }
+    if coeff == -1 {
+        return neg_s160(a);
+    }
 
-    let sign = a.is_positive() == b.is_positive();
+    let sign = a.is_positive() == coeff.is_positive();
     let a_lo = *a.magnitude_lo();
-    let b_lo = *b.magnitude_lo();
-    let a_mag = BigInt::<3>([a_lo[0], a_lo[1], a.magnitude_hi() as u64]);
-    let b_mag = BigInt::<3>([b_lo[0], b_lo[1], b.magnitude_hi() as u64]);
-    let prod = a_mag.mul_trunc::<3, 3>(&b_mag);
+    let a2 = a.magnitude_hi();
+
+    let b: u128 = coeff.unsigned_abs();
+    let b0 = b as u64;
+    let b1 = (b >> 64) as u64;
+
+    // Common case: coeff fits in 64 bits (b1 == 0). This saves 3 multiplications per term.
+    if b1 == 0 {
+        let mut t = (a_lo[0] as u128) * (b0 as u128);
+        let out0 = t as u64;
+        let mut carry = t >> 64;
+
+        t = (a_lo[1] as u128) * (b0 as u128) + carry;
+        let out1 = t as u64;
+        carry = t >> 64;
+
+        t = (a2 as u128) * (b0 as u128) + carry;
+        let out2 = t as u64;
+        carry = t >> 64;
+
+        assert!(
+            carry == 0 && (out2 >> 32) == 0,
+            "S160 multiplication overflow (magnitude exceeds 160 bits)"
+        );
+        return S160::new([out0, out1], (out2 & 0xFFFF_FFFF) as u32, sign);
+    }
+
+    // General case: Schoolbook multiply (3 limbs) × (2 limbs), tracking full width and asserting it fits in 160 bits.
+    let mut t = (a_lo[0] as u128) * (b0 as u128);
+    let out0 = t as u64;
+    let mut carry = t >> 64;
+
+    t = (a_lo[0] as u128) * (b1 as u128) + (a_lo[1] as u128) * (b0 as u128) + carry;
+    let out1 = t as u64;
+    carry = t >> 64;
+
+    t = (a_lo[1] as u128) * (b1 as u128) + (a2 as u128) * (b0 as u128) + carry;
+    let out2 = t as u64;
+    carry = t >> 64;
+
+    t = (a2 as u128) * (b1 as u128) + carry;
+    let out3 = t as u64;
+    carry = t >> 64;
+
     assert!(
-        (prod.0[2] >> 32) == 0,
+        carry == 0 && out3 == 0 && (out2 >> 32) == 0,
         "S160 multiplication overflow (magnitude exceeds 160 bits)"
     );
-    S160::new(
-        [prod.0[0], prod.0[1]],
-        (prod.0[2] & 0xFFFF_FFFF) as u32,
-        sign,
-    )
+
+    S160::new([out0, out1], (out2 & 0xFFFF_FFFF) as u32, sign)
 }
 
 pub(crate) const COEFFS_PER_J: [[i32; OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE];

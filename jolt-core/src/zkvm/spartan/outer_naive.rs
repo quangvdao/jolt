@@ -25,7 +25,7 @@ use tracer::instruction::Cycle;
 // =======================
 
 #[derive(Allocative)]
-pub struct OuterNaiveSumcheckProver<F: JoltField> {
+pub struct OuterBaselineSumcheckProver<F: JoltField> {
     /// Bytecode preprocessing (for witness evaluation at r_cycle)
     #[allocative(skip)]
     bytecode_preprocessing: BytecodePreprocessing,
@@ -46,7 +46,7 @@ pub struct OuterNaiveSumcheckProver<F: JoltField> {
 // =======================
 // SumcheckInstance (Verifier) for naive outer (no uni-skip)
 // =======================
-pub struct OuterNaiveSumcheckVerifier<F: JoltField> {
+pub struct OuterBaselineSumcheckVerifier<F: JoltField> {
     num_step_bits: usize,
     total_rounds: usize,
     tau: Vec<F::Challenge>,
@@ -54,7 +54,7 @@ pub struct OuterNaiveSumcheckVerifier<F: JoltField> {
     _phantom: core::marker::PhantomData<F>,
 }
 
-impl<F: JoltField> OuterNaiveSumcheckVerifier<F> {
+impl<F: JoltField> OuterBaselineSumcheckVerifier<F> {
     pub fn new(
         num_step_bits: usize,
         num_constraint_bits: usize,
@@ -71,7 +71,7 @@ impl<F: JoltField> OuterNaiveSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OuterNaiveSumcheckVerifier<F> {
+impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OuterBaselineSumcheckVerifier<F> {
     fn degree(&self) -> usize {
         3
     }
@@ -129,8 +129,8 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OuterNaiveS
     }
 }
 
-impl<F: JoltField> OuterNaiveSumcheckProver<F> {
-    #[tracing::instrument(skip_all, name = "OuterNaiveSumcheckProver::gen")]
+impl<F: JoltField> OuterBaselineSumcheckProver<F> {
+    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::gen")]
     pub fn gen<ProofTranscript: Transcript>(
         bytecode_preprocessing: &BytecodePreprocessing,
         trace: Arc<Vec<Cycle>>,
@@ -246,7 +246,7 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
     ///   diff = high - low,
     ///   f(2) = f(1) + diff,
     ///   f(3) = f(2) + diff.
-    fn naive_round_evals(&self) -> [F; 4] {
+    fn baseline_round_evals(&self) -> [F; 3] {
         let len = self.eq.len();
         debug_assert_eq!(len, self.az.len());
         debug_assert_eq!(len, self.bz.len());
@@ -254,7 +254,7 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
 
         let num_pairs = len / 2;
 
-        let (g0, g1, g2, g3) = (0..num_pairs)
+        let (g0, g2, g3) = (0..num_pairs)
             .into_par_iter()
             .map(|j| {
                 let i0 = 2 * j;
@@ -271,35 +271,30 @@ impl<F: JoltField> OuterNaiveSumcheckProver<F> {
                 let az_diff = az1 - az0;
                 let bz_diff = bz1 - bz0;
 
-                // t = 0
                 let g0 = eq0 * az0 * bz0;
-                // t = 1
-                let g1 = eq1 * az1 * bz1;
 
-                // t = 2: f(2) = f(1) + diff
                 let eq2 = eq1 + eq_diff;
                 let az2 = az1 + az_diff;
                 let bz2 = bz1 + bz_diff;
                 let g2 = eq2 * az2 * bz2;
 
-                // t = 3: f(3) = f(2) + diff
                 let eq3 = eq2 + eq_diff;
                 let az3 = az2 + az_diff;
                 let bz3 = bz2 + bz_diff;
                 let g3 = eq3 * az3 * bz3;
 
-                (g0, g1, g2, g3)
+                (g0, g2, g3)
             })
             .reduce(
-                || (F::zero(), F::zero(), F::zero(), F::zero()),
-                |(a0, a1, a2, a3), (b0, b1, b2, b3)| (a0 + b0, a1 + b1, a2 + b2, a3 + b3),
+                || (F::zero(), F::zero(), F::zero()),
+                |(a0, a2, a3), (b0, b2, b3)| (a0 + b0, a2 + b2, a3 + b3),
             );
 
-        [g0, g1, g2, g3]
+        [g0, g2, g3]
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterNaiveSumcheckProver<F> {
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterBaselineSumcheckProver<F> {
     fn degree(&self) -> usize {
         3
     }
@@ -310,18 +305,14 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OuterNaiveSum
         F::zero()
     }
 
-    #[tracing::instrument(skip_all, name = "OuterNaiveSumcheckProver::compute_message")]
-    fn compute_message(&mut self, _round: usize, _previous_claim: F) -> UniPoly<F> {
-        // Naive version: directly evaluate g(t) at t = 0,1,2,3 using dense eq, Az, Bz,
-        // exploiting linearity in the current variable (no split-eq shortcuts).
-        let evals = self.naive_round_evals();
-        debug_assert_eq!(evals.len(), 4);
-        // Sanity: previous_claim should equal g(0) + g(1); we trust the caller and
-        // reconstruct the cubic from the four explicit evaluations.
-        UniPoly::from_evals(&evals)
+    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::compute_message")]
+    fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
+        let [g0, g2, g3] = self.baseline_round_evals();
+        let g1 = previous_claim - g0;
+        UniPoly::from_evals(&[g0, g1, g2, g3])
     }
 
-    #[tracing::instrument(skip_all, name = "OuterNaiveSumcheckProver::ingest_challenge")]
+    #[tracing::instrument(skip_all, name = "OuterBaselineSumcheckProver::ingest_challenge")]
     fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
         // Bind eq, Az, Bz in lockstep (standard dense-poly binding).
         self.eq.bind_parallel(r_j, BindingOrder::LowToHigh);

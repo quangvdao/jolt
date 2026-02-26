@@ -1,43 +1,44 @@
-use super::{FieldOps, JoltField, MulU64WithCarry};
+use super::{FieldOps, JoltField, UnreducedInteger};
 #[cfg(feature = "challenge-254-bit")]
 use crate::field::challenge::Mont254BitChallenge;
 #[cfg(not(feature = "challenge-254-bit"))]
 use crate::field::challenge::MontU128Challenge;
-use crate::field::MulTrunc;
 use crate::utils::thread::unsafe_allocate_zero_vec;
-use ark_ff::{prelude::*, BigInt, PrimeField, UniformRand};
+use ark_ff::{prelude::*, BigInt, BigInteger, PrimeField, UniformRand};
 use rayon::prelude::*;
 
 impl FieldOps for ark_bn254::Fr {}
 impl FieldOps<&ark_bn254::Fr, ark_bn254::Fr> for &ark_bn254::Fr {}
 impl FieldOps<&ark_bn254::Fr, ark_bn254::Fr> for ark_bn254::Fr {}
 
+impl<const N: usize> UnreducedInteger for BigInt<N> {}
+
 impl JoltField for ark_bn254::Fr {
     const NUM_BYTES: usize = 32;
+    const NUM_LIMBS: usize = 4;
 
-    fn montgomery_r() -> Self {
-        // SAFETY: Transmuting from the Montgomery R constant from arkworks,
-        // which is guaranteed to be a valid field element in Montgomery form.
-        unsafe {
-            use ark_ff::MontConfig;
-            std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R)
-        }
-    }
-    fn montgomery_r_square() -> Self {
-        // SAFETY: Transmuting from the Montgomery R^2 constant from arkworks.
-        unsafe {
-            use ark_ff::MontConfig;
-            std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R2)
-        }
-    }
-    type Unreduced<const N: usize> = BigInt<N>;
+    // SAFETY: Transmuting from the Montgomery R constants from arkworks,
+    // which are guaranteed to be valid field elements in Montgomery form.
+    const MONTGOMERY_R: Self = unsafe {
+        use ark_ff::MontConfig;
+        std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R)
+    };
+    const MONTGOMERY_R_SQUARE: Self = unsafe {
+        use ark_ff::MontConfig;
+        std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R2)
+    };
+
+    type UnreducedElem = BigInt<4>;
+    type UnreducedMulU64 = BigInt<5>;
+    type UnreducedMulU128 = BigInt<6>;
+    type UnreducedMulU128Accum = BigInt<7>;
+    type UnreducedProduct = BigInt<8>;
+    type UnreducedProductAccum = BigInt<9>;
+
     type SmallValueLookupTables = [Vec<Self>; 2];
 
-    // Default: Use optimized 125-bit MontChallenge
     #[cfg(not(feature = "challenge-254-bit"))]
     type Challenge = MontU128Challenge<ark_bn254::Fr>;
-
-    // Optional: Use full 254-bit field elements
     #[cfg(feature = "challenge-254-bit")]
     type Challenge = Mont254BitChallenge<ark_bn254::Fr>;
 
@@ -46,7 +47,6 @@ impl JoltField for ark_bn254::Fr {
     }
 
     fn compute_lookup_tables() -> Self::SmallValueLookupTables {
-        // These two lookup tables correspond to the two 16-bit limbs of a u64
         let mut lookup_tables = [
             unsafe_allocate_zero_vec(1 << 16),
             unsafe_allocate_zero_vec(1 << 16),
@@ -75,29 +75,27 @@ impl JoltField for ark_bn254::Fr {
 
     #[inline]
     fn from_u8(n: u8) -> Self {
-        <Self as ark_ff::PrimeField>::from_u64::<5>(n as u64).unwrap()
+        <Self as PrimeField>::from_u64::<5>(n as u64).unwrap()
     }
 
     #[inline]
     fn from_u16(n: u16) -> Self {
-        <Self as ark_ff::PrimeField>::from_u64::<5>(n as u64).unwrap()
+        <Self as PrimeField>::from_u64::<5>(n as u64).unwrap()
     }
 
     #[inline]
     fn from_u32(n: u32) -> Self {
-        <Self as ark_ff::PrimeField>::from_u64::<5>(n as u64).unwrap()
+        <Self as PrimeField>::from_u64::<5>(n as u64).unwrap()
     }
 
     #[inline]
     fn from_u64(n: u64) -> Self {
-        // The new `from_u64` is faster than doing 4 lookups & adding them together
-        // but it's slower than doing <=2 lookups & adding them together (if n fits in u16 or u32)
         if n <= u16::MAX as u64 {
             <Self as JoltField>::from_u16(n as u16)
         } else if n <= u32::MAX as u64 {
             <Self as JoltField>::from_u32(n as u32)
         } else {
-            <Self as ark_ff::PrimeField>::from_u64::<5>(n).unwrap()
+            <Self as PrimeField>::from_u64::<5>(n).unwrap()
         }
     }
 
@@ -136,7 +134,7 @@ impl JoltField for ark_bn254::Fr {
                 -<Self as JoltField>::from_u64(val as u64)
             } else {
                 let bigint = BigInt::new([val as u64, (val >> 64) as u64, 0, 0]);
-                -<Self as ark_ff::PrimeField>::from_bigint(bigint).unwrap()
+                -<Self as PrimeField>::from_bigint(bigint).unwrap()
             }
         } else {
             let val = val as u128;
@@ -148,7 +146,7 @@ impl JoltField for ark_bn254::Fr {
                 <Self as JoltField>::from_u64(val as u64)
             } else {
                 let bigint = BigInt::new([val as u64, (val >> 64) as u64, 0, 0]);
-                <Self as ark_ff::PrimeField>::from_bigint(bigint).unwrap()
+                <Self as PrimeField>::from_bigint(bigint).unwrap()
             }
         }
     }
@@ -163,13 +161,13 @@ impl JoltField for ark_bn254::Fr {
             <Self as JoltField>::from_u64(val as u64)
         } else {
             let bigint = BigInt::new([val as u64, (val >> 64) as u64, 0, 0]);
-            <Self as ark_ff::PrimeField>::from_bigint(bigint).unwrap()
+            <Self as PrimeField>::from_bigint(bigint).unwrap()
         }
     }
 
     #[inline]
     fn to_u64(&self) -> Option<u64> {
-        let bigint = <Self as ark_ff::PrimeField>::into_bigint(*self);
+        let bigint = <Self as PrimeField>::into_bigint(*self);
         let limbs: &[u64] = bigint.as_ref();
         let result = limbs[0];
 
@@ -197,13 +195,12 @@ impl JoltField for ark_bn254::Fr {
 
     #[inline]
     fn num_bits(&self) -> u32 {
-        <Self as ark_ff::PrimeField>::into_bigint(*self).num_bits()
+        <Self as PrimeField>::into_bigint(*self).num_bits()
     }
 
     #[inline(always)]
-    fn as_unreduced_ref(&self) -> &Self::Unreduced<4> {
-        // arkworks field elements are just wrappers around BigInt, so we can get a direct reference
-        &self.0
+    fn to_unreduced(&self) -> Self::UnreducedElem {
+        self.0
     }
 
     #[inline]
@@ -239,11 +236,6 @@ impl JoltField for ark_bn254::Fr {
     }
 
     #[inline]
-    fn mul_unreduced<const L: usize>(self, other: Self) -> BigInt<L> {
-        self.0.mul_trunc::<4, L>(&other.0)
-    }
-
-    #[inline]
     fn mul_u64_unreduced(self, other: u64) -> BigInt<5> {
         self.0.mul_trunc::<1, 5>(&BigInt::new([other]))
     }
@@ -255,30 +247,58 @@ impl JoltField for ark_bn254::Fr {
     }
 
     #[inline]
-    fn from_montgomery_reduce<const L: usize>(unreduced: BigInt<L>) -> Self {
-        ark_bn254::Fr::from_montgomery_reduce::<L, 5>(unreduced)
+    fn mul_to_product(self, other: Self) -> BigInt<8> {
+        self.0.mul_trunc::<4, 8>(&other.0)
     }
 
     #[inline]
-    fn from_barrett_reduce<const L: usize>(unreduced: BigInt<L>) -> Self {
-        ark_bn254::Fr::from_barrett_reduce::<L, 5>(unreduced)
+    fn mul_to_product_accum(self, other: Self) -> BigInt<9> {
+        self.0.mul_trunc::<4, 9>(&other.0)
     }
-}
 
-impl<const N: usize> MulTrunc for BigInt<N> {
-    type Other<const M: usize> = BigInt<M>;
-    type Output<const P: usize> = BigInt<P>;
-
-    fn mul_trunc<const M: usize, const P: usize>(&self, other: &Self::Other<M>) -> Self::Output<P> {
-        self.mul_trunc(other)
+    #[inline]
+    fn unreduced_mul_u64(a: &BigInt<4>, b: u64) -> BigInt<5> {
+        a.mul_u64_w_carry(b)
     }
-}
 
-impl<const N: usize> MulU64WithCarry for BigInt<N> {
-    type Output<const NPLUS1: usize> = BigInt<NPLUS1>;
+    #[inline]
+    fn unreduced_mul_to_product_accum(a: &BigInt<4>, b: &BigInt<4>) -> BigInt<9> {
+        a.mul_trunc::<4, 9>(b)
+    }
 
-    fn mul_u64_w_carry<const NPLUS1: usize>(&self, other: u64) -> Self::Output<NPLUS1> {
-        <BigInt<N> as BigInteger>::mul_u64_w_carry(self, other)
+    #[inline]
+    fn mul_to_accum_mag<const M: usize>(&self, mag: &BigInt<M>) -> BigInt<7> {
+        self.0.mul_trunc::<M, 7>(mag)
+    }
+
+    #[inline]
+    fn mul_to_product_mag<const M: usize>(&self, mag: &BigInt<M>) -> BigInt<8> {
+        self.0.mul_trunc::<M, 8>(mag)
+    }
+
+    #[inline]
+    fn reduce_mul_u64(x: BigInt<5>) -> Self {
+        ark_bn254::Fr::from_barrett_reduce::<5, 5>(x)
+    }
+
+    #[inline]
+    fn reduce_mul_u128(x: BigInt<6>) -> Self {
+        ark_bn254::Fr::from_barrett_reduce::<6, 5>(x)
+    }
+
+    #[inline]
+    fn reduce_mul_u128_accum(x: BigInt<7>) -> Self {
+        ark_bn254::Fr::from_barrett_reduce::<7, 5>(x)
+    }
+
+    #[inline]
+    fn reduce_product(x: BigInt<8>) -> Self {
+        ark_bn254::Fr::from_montgomery_reduce::<8, 5>(x)
+    }
+
+    #[inline]
+    fn reduce_product_accum(x: BigInt<9>) -> Self {
+        ark_bn254::Fr::from_montgomery_reduce::<9, 5>(x)
     }
 }
 

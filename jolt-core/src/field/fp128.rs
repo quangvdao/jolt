@@ -1,4 +1,4 @@
-use super::{FieldOps, JoltField, MulTrunc, MulU64WithCarry};
+use super::{FieldOps, JoltField, UnreducedInteger};
 use ark_ff::BigInt;
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
@@ -239,26 +239,10 @@ impl<const N: usize> From<BigInt<N>> for JoltFp128 {
     }
 }
 
-/// For Fp128 with trivial Montgomery (R=1), "unreduced" values are just field
-/// elements, so MulTrunc is ordinary field multiplication.
-impl MulTrunc for JoltFp128 {
-    type Other<const M: usize> = JoltFp128;
-    type Output<const P: usize> = JoltFp128;
-
-    #[inline]
-    fn mul_trunc<const M: usize, const P: usize>(&self, other: &JoltFp128) -> JoltFp128 {
-        *self * *other
-    }
-}
-
-impl MulU64WithCarry for JoltFp128 {
-    type Output<const NPLUS1: usize> = JoltFp128;
-
-    #[inline]
-    fn mul_u64_w_carry<const NPLUS1: usize>(&self, other: u64) -> JoltFp128 {
-        *self * JoltFp128::from_u64(other)
-    }
-}
+/// For Fp128 with trivial Montgomery (R=1), all unreduced types collapse to
+/// `JoltFp128` itself. Every widening/reduction operation is an identity or
+/// ordinary field arithmetic.
+impl UnreducedInteger for JoltFp128 {}
 
 // ---------------------------------------------------------------------------
 // Arkworks serialization (16 bytes, little-endian)
@@ -336,20 +320,24 @@ impl From<u128> for JoltFp128 {
 
 impl JoltField for JoltFp128 {
     const NUM_BYTES: usize = 16;
+    const NUM_LIMBS: usize = 2;
 
-    /// With trivial Montgomery (R=1), the "unreduced" representation is the field
-    /// element itself. All delayed-reduction machinery becomes a no-op.
-    type Unreduced<const N: usize> = JoltFp128;
+    // SAFETY: Prime128M8M4M1M0 is repr(transparent) over u128.
+    // With trivial Montgomery (R=1), these are the multiplicative identity.
+    const MONTGOMERY_R: Self = unsafe { std::mem::transmute(1u128) };
+    const MONTGOMERY_R_SQUARE: Self = unsafe { std::mem::transmute(1u128) };
+
+    /// All unreduced types collapse to `JoltFp128` — Solinas reduction is
+    /// eager, so there is no benefit to deferring it.
+    type UnreducedElem = JoltFp128;
+    type UnreducedMulU64 = JoltFp128;
+    type UnreducedMulU128 = JoltFp128;
+    type UnreducedMulU128Accum = JoltFp128;
+    type UnreducedProduct = JoltFp128;
+    type UnreducedProductAccum = JoltFp128;
+
     type SmallValueLookupTables = Vec<u8>;
     type Challenge = Self;
-
-    fn montgomery_r() -> Self {
-        Self::one()
-    }
-
-    fn montgomery_r_square() -> Self {
-        Self::one()
-    }
 
     fn random<R: rand_core::RngCore>(rng: &mut R) -> Self {
         Self(FieldSampling::sample(rng))
@@ -436,33 +424,76 @@ impl JoltField for JoltFp128 {
     }
 
     #[inline]
-    fn as_unreduced_ref(&self) -> &Self::Unreduced<4> {
-        self
+    fn to_unreduced(&self) -> Self::UnreducedElem {
+        *self
     }
 
     #[inline]
-    fn mul_unreduced<const N: usize>(self, other: Self) -> Self::Unreduced<N> {
-        self * other
-    }
-
-    #[inline]
-    fn mul_u64_unreduced(self, other: u64) -> Self::Unreduced<5> {
+    fn mul_u64_unreduced(self, other: u64) -> Self::UnreducedMulU64 {
         self * Self::from_u64(other)
     }
 
     #[inline]
-    fn mul_u128_unreduced(self, other: u128) -> Self::Unreduced<6> {
+    fn mul_u128_unreduced(self, other: u128) -> Self::UnreducedMulU128 {
         self * Self::from_u128(other)
     }
 
     #[inline]
-    fn from_montgomery_reduce<const N: usize>(unreduced: Self::Unreduced<N>) -> Self {
-        unreduced
+    fn mul_to_product(self, other: Self) -> Self::UnreducedProduct {
+        self * other
     }
 
     #[inline]
-    fn from_barrett_reduce<const N: usize>(unreduced: Self::Unreduced<N>) -> Self {
-        unreduced
+    fn mul_to_product_accum(self, other: Self) -> Self::UnreducedProductAccum {
+        self * other
+    }
+
+    #[inline]
+    fn unreduced_mul_u64(a: &Self::UnreducedElem, b: u64) -> Self::UnreducedMulU64 {
+        *a * Self::from_u64(b)
+    }
+
+    #[inline]
+    fn unreduced_mul_to_product_accum(
+        a: &Self::UnreducedElem,
+        b: &Self::UnreducedElem,
+    ) -> Self::UnreducedProductAccum {
+        *a * *b
+    }
+
+    #[inline]
+    fn mul_to_accum_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedMulU128Accum {
+        *self * JoltFp128::from(*mag)
+    }
+
+    #[inline]
+    fn mul_to_product_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedProduct {
+        *self * JoltFp128::from(*mag)
+    }
+
+    #[inline]
+    fn reduce_mul_u64(x: Self::UnreducedMulU64) -> Self {
+        x
+    }
+
+    #[inline]
+    fn reduce_mul_u128(x: Self::UnreducedMulU128) -> Self {
+        x
+    }
+
+    #[inline]
+    fn reduce_mul_u128_accum(x: Self::UnreducedMulU128Accum) -> Self {
+        x
+    }
+
+    #[inline]
+    fn reduce_product(x: Self::UnreducedProduct) -> Self {
+        x
+    }
+
+    #[inline]
+    fn reduce_product_accum(x: Self::UnreducedProductAccum) -> Self {
+        x
     }
 }
 

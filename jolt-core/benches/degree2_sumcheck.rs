@@ -16,6 +16,7 @@ use jolt_core::transcripts::{Blake2bTranscript, Transcript};
 const DEGREE_BOUND: usize = 2;
 
 #[derive(Clone)]
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
 struct Degree2ProductSumcheckProver<F: JoltField> {
     p: DensePolynomial<F>,
     q: DensePolynomial<F>,
@@ -23,10 +24,7 @@ struct Degree2ProductSumcheckProver<F: JoltField> {
 }
 
 #[inline(always)]
-fn sumcheck_evals_degree2<F: JoltField>(
-    poly: &DensePolynomial<F>,
-    index: usize,
-) -> [F; 2] {
+fn sumcheck_evals_degree2<F: JoltField>(poly: &DensePolynomial<F>, index: usize) -> [F; 2] {
     debug_assert!(index < poly.len() / 2);
     let eval_at_0 = poly[2 * index];
     let eval_at_1 = poly[2 * index + 1];
@@ -48,9 +46,7 @@ impl<F: JoltField> Degree2ProductSumcheckProver<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
-    for Degree2ProductSumcheckProver<F>
-{
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for Degree2ProductSumcheckProver<F> {
     fn degree(&self) -> usize {
         DEGREE_BOUND
     }
@@ -72,10 +68,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             .map(|i| {
                 let p_evals = sumcheck_evals_degree2::<F>(&self.p, i);
                 let q_evals = sumcheck_evals_degree2::<F>(&self.q, i);
-                [
-                    p_evals[0] * q_evals[0],
-                    p_evals[1] * q_evals[1],
-                ]
+                [p_evals[0] * q_evals[0], p_evals[1] * q_evals[1]]
             })
             .reduce(
                 || [F::zero(); DEGREE_BOUND],
@@ -103,6 +96,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
         _transcript: &mut T,
         _sumcheck_challenges: &[F::Challenge],
     ) {
+    }
+
+    #[cfg(feature = "allocative")]
+    fn update_flamegraph(&self, flamegraph: &mut allocative::FlameGraphBuilder) {
+        flamegraph.visit_root(self);
     }
 }
 

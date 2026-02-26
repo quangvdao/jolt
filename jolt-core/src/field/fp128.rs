@@ -512,8 +512,7 @@ mod tests {
 
     #[test]
     fn challenge_from_u128() {
-        let c = <JoltFp128 as JoltField>::Challenge::from(42u128);
-        let f: JoltFp128 = c.into();
+        let f = <JoltFp128 as JoltField>::Challenge::from(42u128);
         assert_eq!(f, JoltFp128::from_u64(42));
     }
 }

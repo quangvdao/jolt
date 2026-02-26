@@ -4,7 +4,7 @@ use crate::field::challenge::Mont254BitChallenge;
 #[cfg(not(feature = "challenge-254-bit"))]
 use crate::field::challenge::MontU128Challenge;
 use crate::utils::thread::unsafe_allocate_zero_vec;
-use ark_ff::{prelude::*, BigInt, BigInteger, PrimeField, UniformRand};
+use ark_ff::{prelude::*, BigInt, BigInteger, MontConfig, PrimeField, UniformRand};
 use rayon::prelude::*;
 
 impl FieldOps for ark_bn254::Fr {}
@@ -19,14 +19,10 @@ impl JoltField for ark_bn254::Fr {
 
     // SAFETY: Transmuting from the Montgomery R constants from arkworks,
     // which are guaranteed to be valid field elements in Montgomery form.
-    const MONTGOMERY_R: Self = unsafe {
-        use ark_ff::MontConfig;
-        std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R)
-    };
-    const MONTGOMERY_R_SQUARE: Self = unsafe {
-        use ark_ff::MontConfig;
-        std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R2)
-    };
+    const MONTGOMERY_R: Self =
+        unsafe { std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R) };
+    const MONTGOMERY_R_SQUARE: Self =
+        unsafe { std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R2) };
 
     type UnreducedElem = BigInt<4>;
     type UnreducedMulU64 = BigInt<5>;

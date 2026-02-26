@@ -7,6 +7,8 @@ use allocative::FlameGraphBuilder;
 use rayon::prelude::*;
 use tracer::instruction::Cycle;
 
+#[cfg(test)]
+use crate::subprotocols::sumcheck_claim::VerifierEvaluationParams;
 use crate::{
     field::JoltField,
     poly::{
@@ -375,8 +377,6 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
         #[cfg(test)]
         {
-            use crate::subprotocols::sumcheck_claim::VerifierEvaluationParams;
-
             let eval_params =
                 VerifierEvaluationParams::new(self.params.log_K, self.params.start_address);
             let reference_result = Self::input_output_claims()

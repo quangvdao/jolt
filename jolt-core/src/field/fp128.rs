@@ -1,16 +1,19 @@
 use super::{FieldOps, JoltField, UnreducedInteger};
-use ark_ff::BigInt;
+use ark_ff::{BigInt, UniformRand};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use hachi_pcs::algebra::Prime128M8M4M1M0;
 use hachi_pcs::{CanonicalField, FieldCore, FieldSampling};
 use num_traits::{One, Zero};
+use rand::Rng;
+use rand_core::RngCore;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::iter::{Product, Sum};
+use std::mem::transmute;
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// Jolt-compatible wrapper around hachi's 128-bit Solinas prime field.
@@ -36,10 +39,6 @@ impl fmt::Display for JoltFp128 {
 impl allocative::Allocative for JoltFp128 {
     fn visit<'a, 'b: 'a>(&self, _visitor: &'a mut allocative::Visitor<'b>) {}
 }
-
-// ---------------------------------------------------------------------------
-// Core arithmetic operators
-// ---------------------------------------------------------------------------
 
 impl Add for JoltFp128 {
     type Output = Self;
@@ -152,10 +151,6 @@ impl MulAssign for JoltFp128 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// num_traits
-// ---------------------------------------------------------------------------
-
 impl Zero for JoltFp128 {
     fn zero() -> Self {
         Self(FieldCore::zero())
@@ -197,10 +192,6 @@ impl<'a> Product<&'a Self> for JoltFp128 {
         iter.copied().fold(Self::one(), |a, b| a * b)
     }
 }
-
-// ---------------------------------------------------------------------------
-// FieldOps marker
-// ---------------------------------------------------------------------------
 
 impl FieldOps for JoltFp128 {}
 impl FieldOps<&JoltFp128, JoltFp128> for JoltFp128 {}
@@ -427,10 +418,6 @@ impl_cross_width_add!(5, 2);
 impl_cross_width_add!(5, 3);
 impl_cross_width_add!(5, 4);
 
-// ---------------------------------------------------------------------------
-// Arkworks serialization (16 bytes, little-endian)
-// ---------------------------------------------------------------------------
-
 impl Valid for JoltFp128 {
     fn check(&self) -> Result<(), SerializationError> {
         Ok(())
@@ -471,12 +458,8 @@ impl CanonicalDeserialize for JoltFp128 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// UniformRand (arkworks)
-// ---------------------------------------------------------------------------
-
-impl ark_ff::UniformRand for JoltFp128 {
-    fn rand<R: rand::Rng + ?Sized>(rng: &mut R) -> Self {
+impl UniformRand for JoltFp128 {
+    fn rand<R: Rng + ?Sized>(rng: &mut R) -> Self {
         // Can't forward to FieldSampling::sample because it requires R: Sized.
         // Inline the rejection-free reduction approach instead.
         let lo = rng.next_u64();
@@ -486,10 +469,6 @@ impl ark_ff::UniformRand for JoltFp128 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// From<u128> (needed for Challenge = Self)
-// ---------------------------------------------------------------------------
-
 impl From<u128> for JoltFp128 {
     #[inline]
     fn from(val: u128) -> Self {
@@ -497,18 +476,14 @@ impl From<u128> for JoltFp128 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// JoltField implementation
-// ---------------------------------------------------------------------------
-
 impl JoltField for JoltFp128 {
     const NUM_BYTES: usize = 16;
     const NUM_LIMBS: usize = 2;
 
     // SAFETY: Prime128M8M4M1M0 is repr(transparent) over u128.
     // With trivial Montgomery (R=1), these are the multiplicative identity.
-    const MONTGOMERY_R: Self = unsafe { std::mem::transmute(1u128) };
-    const MONTGOMERY_R_SQUARE: Self = unsafe { std::mem::transmute(1u128) };
+    const MONTGOMERY_R: Self = unsafe { transmute(1u128) };
+    const MONTGOMERY_R_SQUARE: Self = unsafe { transmute(1u128) };
 
     type UnreducedElem = UnreducedFp128<2>;
     type UnreducedMulU64 = UnreducedFp128<3>;
@@ -520,7 +495,7 @@ impl JoltField for JoltFp128 {
     type SmallValueLookupTables = Vec<u8>;
     type Challenge = Self;
 
-    fn random<R: rand_core::RngCore>(rng: &mut R) -> Self {
+    fn random<R: RngCore>(rng: &mut R) -> Self {
         Self(FieldSampling::sample(rng))
     }
 
@@ -647,6 +622,16 @@ impl JoltField for JoltFp128 {
         UnreducedFp128([w0, w1, w2, w3, 0])
     }
 
+    // TODO(perf): These eagerly reduce because hachi lacks a `mul_wide_limbs`
+    // method that multiplies a canonical Fp128 ([u64; 2]) by an arbitrary
+    // limb slice (&[u64]) to produce a wider unreduced result.
+    //
+    // Optimal path: add to hachi's Fp128:
+    //   pub fn mul_wide_limbs<const M: usize>(self, other: [u64; M]) -> [u64; M+2]
+    // Then these become:
+    //   mul_to_accum_mag:   self.0.mul_wide_limbs(mag.0) → UnreducedFp128<5>
+    //   mul_to_product_mag: self.0.mul_wide_limbs(mag.0) → UnreducedFp128<4>
+    // avoiding the redundant reduce-then-widen round-trip.
     #[inline]
     fn mul_to_accum_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedMulU128Accum {
         let reduced = *self * JoltFp128::from(*mag);

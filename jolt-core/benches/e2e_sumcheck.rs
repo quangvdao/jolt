@@ -54,7 +54,6 @@ fn main() {
         .join("benchmark-runs/perfetto_traces");
     std::fs::create_dir_all(&out_dir).expect("failed to create output dir");
 
-    // --- BN254 ---
     {
         let trace_file = out_dir.join("sumcheck_bn254.json");
         println!("BN254 trace → {}", trace_file.display());
@@ -72,7 +71,6 @@ fn main() {
         println!("BN254: {:.3}s", elapsed.as_secs_f64());
     }
 
-    // --- Fp128 ---
     {
         let trace_file = out_dir.join("sumcheck_fp128.json");
         println!("Fp128 trace → {}", trace_file.display());

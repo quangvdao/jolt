@@ -629,6 +629,7 @@ impl<F: JoltField> GruenSplitEqPolynomial<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::poly::eq_poly::EqPolynomial;
     use ark_bn254::Fr;
     use ark_std::{test_rng, One};
 
@@ -795,8 +796,6 @@ mod tests {
     /// Verify that evals_cached returns [1] at index 0 (eq over 0 vars).
     #[test]
     fn evals_cached_starts_with_one() {
-        use crate::poly::eq_poly::EqPolynomial;
-
         let mut rng = test_rng();
         for num_vars in 1..=10 {
             let w: Vec<<Fr as JoltField>::Challenge> =

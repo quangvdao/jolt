@@ -186,13 +186,13 @@ impl<F: JoltField> ReadWriteMatrixCycleMajor<F, RegistersCycleMajorEntry<F, Look
     /// for the registers read/write checking sumcheck.
     #[tracing::instrument(skip_all, name = "ReadWriteMatrixCycleMajor::new")]
     pub fn new(trace: &[Cycle], gamma: F) -> Self {
-        // ---- Pass 1: per-cycle entry counts (parallel) ----
+        // Pass 1: compute per-cycle entry counts in parallel.
         let counts: Vec<u8> = trace
             .par_iter()
             .map(|cycle| Self::entry_count_for_cycle(cycle))
             .collect();
 
-        // ---- Prefix sum: counts -> offsets (sequential, linear) ----
+        // Prefix-sum counts into row offsets (sequential linear pass).
         let mut offsets: Vec<usize> = Vec::with_capacity(counts.len() + 1);
         offsets.push(0);
         let mut total: usize = 0;
@@ -202,7 +202,7 @@ impl<F: JoltField> ReadWriteMatrixCycleMajor<F, RegistersCycleMajorEntry<F, Look
         }
         let total_entries = total;
 
-        // ---- Allocate entries and set_len unsafely; we'll fill everything in pass 2 ----
+        // Allocate output and set_len once; pass 2 writes every slot exactly once.
         let mut entries: Vec<RegistersCycleMajorEntry<F, LookupTableIndex>> =
             Vec::with_capacity(total_entries);
         unsafe {
@@ -210,7 +210,7 @@ impl<F: JoltField> ReadWriteMatrixCycleMajor<F, RegistersCycleMajorEntry<F, Look
         }
         let entries_ptr = entries.as_mut_ptr() as usize;
 
-        // ---- Pass 2: fill entries in parallel, disjoint slices per row ----
+        // Pass 2: fill entries in parallel with disjoint per-cycle slices.
         let gamma_squared = gamma.square();
         trace.par_iter().enumerate().for_each(|(j, cycle)| {
             let count = counts[j] as usize;

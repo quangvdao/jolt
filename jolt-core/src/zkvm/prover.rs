@@ -15,6 +15,7 @@ use std::{
 
 use crate::poly::commitment::dory::DoryContext;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
@@ -1549,7 +1550,6 @@ where
         shared: JoltSharedPreprocessing,
         // max_trace_length: usize,
     ) -> JoltProverPreprocessing<F, PCS> {
-        use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
         let max_T: usize = shared.max_padded_trace_length.next_power_of_two();
         let max_log_T = max_T.log_2();
         // Use the maximum possible log_k_chunk for generator setup
@@ -1609,6 +1609,10 @@ mod tests {
         verifier::{JoltVerifier, JoltVerifierPreprocessing},
         RV64IMACProver, RV64IMACVerifier,
     };
+    #[cfg(feature = "host")]
+    use jolt_inlines_keccak256 as _;
+    #[cfg(feature = "host")]
+    use jolt_inlines_sha2 as _;
 
     fn commit_trusted_advice_preprocessing_only(
         preprocessing: &JoltProverPreprocessing<Fr, DoryCommitmentScheme>,
@@ -1745,8 +1749,6 @@ mod tests {
     fn sha3_e2e_dory() {
         DoryGlobals::reset();
         // Ensure SHA3 inline library is linked and auto-registered
-        #[cfg(feature = "host")]
-        use jolt_inlines_keccak256 as _;
         // SHA3 inlines are automatically registered via #[ctor::ctor]
         // when the jolt-inlines-keccak256 crate is linked (see lib.rs)
 
@@ -1809,8 +1811,6 @@ mod tests {
     fn sha2_e2e_dory() {
         DoryGlobals::reset();
         // Ensure SHA2 inline library is linked and auto-registered
-        #[cfg(feature = "host")]
-        use jolt_inlines_sha2 as _;
         // SHA2 inlines are automatically registered via #[ctor::ctor]
         // when the jolt-inlines-sha2 crate is linked (see lib.rs)
         let mut program = host::Program::new("sha2-guest");

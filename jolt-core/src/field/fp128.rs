@@ -1,4 +1,4 @@
-use super::{FieldOps, JoltField};
+use super::{FieldOps, JoltField, MulTrunc, MulU64WithCarry};
 use ark_ff::BigInt;
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
@@ -6,6 +6,7 @@ use ark_serialize::{
 use hachi_pcs::algebra::Prime128M8M4M1M0;
 use hachi_pcs::{CanonicalField, FieldCore, FieldSampling};
 use num_traits::{One, Zero};
+use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -123,9 +124,23 @@ impl AddAssign for JoltFp128 {
     }
 }
 
+impl<'a> AddAssign<&'a JoltFp128> for JoltFp128 {
+    #[inline]
+    fn add_assign(&mut self, rhs: &'a JoltFp128) {
+        self.0 = self.0 + rhs.0;
+    }
+}
+
 impl SubAssign for JoltFp128 {
     #[inline]
     fn sub_assign(&mut self, rhs: Self) {
+        self.0 = self.0 - rhs.0;
+    }
+}
+
+impl<'a> SubAssign<&'a JoltFp128> for JoltFp128 {
+    #[inline]
+    fn sub_assign(&mut self, rhs: &'a JoltFp128) {
         self.0 = self.0 - rhs.0;
     }
 }
@@ -189,6 +204,61 @@ impl<'a> Product<&'a Self> for JoltFp128 {
 
 impl FieldOps for JoltFp128 {}
 impl FieldOps<&JoltFp128, JoltFp128> for JoltFp128 {}
+
+impl PartialOrd for JoltFp128 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JoltFp128 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.to_canonical_u128().cmp(&other.0.to_canonical_u128())
+    }
+}
+
+/// Reconstruct a field element from the low 128 bits of an arbitrary-width limb array.
+#[inline]
+fn from_limb_slice(limbs: &[u64]) -> JoltFp128 {
+    let lo = limbs.first().copied().unwrap_or(0);
+    let hi = limbs.get(1).copied().unwrap_or(0);
+    JoltFp128::from_u128((lo as u128) | ((hi as u128) << 64))
+}
+
+impl<const N: usize> From<[u64; N]> for JoltFp128 {
+    #[inline]
+    fn from(limbs: [u64; N]) -> Self {
+        from_limb_slice(&limbs)
+    }
+}
+
+impl<const N: usize> From<BigInt<N>> for JoltFp128 {
+    #[inline]
+    fn from(bigint: BigInt<N>) -> Self {
+        from_limb_slice(&bigint.0)
+    }
+}
+
+/// For Fp128 with trivial Montgomery (R=1), "unreduced" values are just field
+/// elements, so MulTrunc is ordinary field multiplication.
+impl MulTrunc for JoltFp128 {
+    type Other<const M: usize> = JoltFp128;
+    type Output<const P: usize> = JoltFp128;
+
+    #[inline]
+    fn mul_trunc<const M: usize, const P: usize>(&self, other: &JoltFp128) -> JoltFp128 {
+        *self * *other
+    }
+}
+
+impl MulU64WithCarry for JoltFp128 {
+    type Output<const NPLUS1: usize> = JoltFp128;
+
+    #[inline]
+    fn mul_u64_w_carry<const NPLUS1: usize>(&self, other: u64) -> JoltFp128 {
+        *self * JoltFp128::from_u64(other)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Arkworks serialization (16 bytes, little-endian)
@@ -267,9 +337,19 @@ impl From<u128> for JoltFp128 {
 impl JoltField for JoltFp128 {
     const NUM_BYTES: usize = 16;
 
-    type Unreduced<const N: usize> = BigInt<N>;
+    /// With trivial Montgomery (R=1), the "unreduced" representation is the field
+    /// element itself. All delayed-reduction machinery becomes a no-op.
+    type Unreduced<const N: usize> = JoltFp128;
     type SmallValueLookupTables = Vec<u8>;
     type Challenge = Self;
+
+    fn montgomery_r() -> Self {
+        Self::one()
+    }
+
+    fn montgomery_r_square() -> Self {
+        Self::one()
+    }
 
     fn random<R: rand_core::RngCore>(rng: &mut R) -> Self {
         Self(FieldSampling::sample(rng))
@@ -353,6 +433,36 @@ impl JoltField for JoltFp128 {
     fn num_bits(&self) -> u32 {
         let val = self.0.to_canonical_u128();
         128 - val.leading_zeros()
+    }
+
+    #[inline]
+    fn as_unreduced_ref(&self) -> &Self::Unreduced<4> {
+        self
+    }
+
+    #[inline]
+    fn mul_unreduced<const N: usize>(self, other: Self) -> Self::Unreduced<N> {
+        self * other
+    }
+
+    #[inline]
+    fn mul_u64_unreduced(self, other: u64) -> Self::Unreduced<5> {
+        self * Self::from_u64(other)
+    }
+
+    #[inline]
+    fn mul_u128_unreduced(self, other: u128) -> Self::Unreduced<6> {
+        self * Self::from_u128(other)
+    }
+
+    #[inline]
+    fn from_montgomery_reduce<const N: usize>(unreduced: Self::Unreduced<N>) -> Self {
+        unreduced
+    }
+
+    #[inline]
+    fn from_barrett_reduce<const N: usize>(unreduced: Self::Unreduced<N>) -> Self {
+        unreduced
     }
 }
 

@@ -225,6 +225,14 @@ fn from_limb_slice(limbs: &[u64]) -> JoltFp128 {
     JoltFp128::from_u128((lo as u128) | ((hi as u128) << 64))
 }
 
+/// Reconstruct `Prime128M8M4M1M0` from a canonical 2-limb representation.
+/// The input must already be a valid canonical field element (i.e. < p).
+#[inline(always)]
+fn limbs_to_fp128(limbs: [u64; 2]) -> Prime128M8M4M1M0 {
+    let val = limbs[0] as u128 | ((limbs[1] as u128) << 64);
+    Prime128M8M4M1M0::from_canonical_u128(val)
+}
+
 impl<const N: usize> From<[u64; N]> for JoltFp128 {
     #[inline]
     fn from(limbs: [u64; N]) -> Self {
@@ -239,10 +247,185 @@ impl<const N: usize> From<BigInt<N>> for JoltFp128 {
     }
 }
 
-/// For Fp128 with trivial Montgomery (R=1), all unreduced types collapse to
-/// `JoltFp128` itself. Every widening/reduction operation is an identity or
-/// ordinary field arithmetic.
-impl UnreducedInteger for JoltFp128 {}
+/// Fixed-width unreduced limb array for Fp128 delayed reduction.
+///
+/// Wraps `[u64; N]` in little-endian limb order. Supports limb-wise addition
+/// for accumulating widened products before a single Solinas fold at the end.
+///
+/// Width mapping (Fp128, NUM_LIMBS = 2):
+///   N=2 → UnreducedElem (field element identity)
+///   N=3 → UnreducedMulU64 (field × u64)
+///   N=4 → UnreducedMulU128 / UnreducedProduct (field × u128, field × field)
+///   N=5 → UnreducedMulU128Accum / UnreducedProductAccum (accumulator headroom)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnreducedFp128<const N: usize>(pub [u64; N]);
+
+impl<const N: usize> Default for UnreducedFp128<N> {
+    #[inline(always)]
+    fn default() -> Self {
+        Self([0u64; N])
+    }
+}
+
+impl<const N: usize> fmt::Display for UnreducedFp128<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UnreducedFp128({:?})", &self.0)
+    }
+}
+
+impl<const N: usize> Ord for UnreducedFp128<N> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        for i in (0..N).rev() {
+            match self.0[i].cmp(&other.0[i]) {
+                Ordering::Equal => continue,
+                ord => return ord,
+            }
+        }
+        Ordering::Equal
+    }
+}
+
+impl<const N: usize> PartialOrd for UnreducedFp128<N> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<const N: usize> Zero for UnreducedFp128<N> {
+    #[inline(always)]
+    fn zero() -> Self {
+        Self([0u64; N])
+    }
+    #[inline(always)]
+    fn is_zero(&self) -> bool {
+        self.0.iter().all(|&l| l == 0)
+    }
+}
+
+impl<const N: usize> From<u128> for UnreducedFp128<N> {
+    #[inline]
+    fn from(val: u128) -> Self {
+        let mut limbs = [0u64; N];
+        limbs[0] = val as u64;
+        if N > 1 {
+            limbs[1] = (val >> 64) as u64;
+        }
+        Self(limbs)
+    }
+}
+
+impl<const N: usize> Add for UnreducedFp128<N> {
+    type Output = Self;
+    #[inline(always)]
+    fn add(self, rhs: Self) -> Self {
+        let mut out = [0u64; N];
+        let mut carry: u128 = 0;
+        for i in 0..N {
+            let s = self.0[i] as u128 + rhs.0[i] as u128 + carry;
+            out[i] = s as u64;
+            carry = s >> 64;
+        }
+        Self(out)
+    }
+}
+
+impl<'a, const N: usize> Add<&'a Self> for UnreducedFp128<N> {
+    type Output = Self;
+    #[inline(always)]
+    fn add(self, rhs: &'a Self) -> Self {
+        self + *rhs
+    }
+}
+
+impl<const N: usize> Sub for UnreducedFp128<N> {
+    type Output = Self;
+    #[inline(always)]
+    fn sub(self, rhs: Self) -> Self {
+        let mut out = [0u64; N];
+        let mut borrow: i128 = 0;
+        for i in 0..N {
+            let d = self.0[i] as i128 - rhs.0[i] as i128 + borrow;
+            out[i] = d as u64;
+            borrow = d >> 64;
+        }
+        Self(out)
+    }
+}
+
+impl<'a, const N: usize> Sub<&'a Self> for UnreducedFp128<N> {
+    type Output = Self;
+    #[inline(always)]
+    fn sub(self, rhs: &'a Self) -> Self {
+        self - *rhs
+    }
+}
+
+impl<const N: usize> AddAssign for UnreducedFp128<N> {
+    #[inline(always)]
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl<'a, const N: usize> AddAssign<&'a Self> for UnreducedFp128<N> {
+    #[inline(always)]
+    fn add_assign(&mut self, rhs: &'a Self) {
+        *self = *self + *rhs;
+    }
+}
+
+impl<const N: usize> SubAssign for UnreducedFp128<N> {
+    #[inline(always)]
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs;
+    }
+}
+
+impl<'a, const N: usize> SubAssign<&'a Self> for UnreducedFp128<N> {
+    #[inline(always)]
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        *self = *self - *rhs;
+    }
+}
+
+impl<const N: usize> UnreducedInteger for UnreducedFp128<N> {}
+
+macro_rules! impl_cross_width_add {
+    ($wide:literal, $narrow:literal) => {
+        impl Add<UnreducedFp128<$narrow>> for UnreducedFp128<$wide> {
+            type Output = UnreducedFp128<$wide>;
+            #[inline(always)]
+            fn add(mut self, rhs: UnreducedFp128<$narrow>) -> Self::Output {
+                let mut carry: u128 = 0;
+                for i in 0..$narrow {
+                    let s = self.0[i] as u128 + rhs.0[i] as u128 + carry;
+                    self.0[i] = s as u64;
+                    carry = s >> 64;
+                }
+                for i in $narrow..$wide {
+                    let s = self.0[i] as u128 + carry;
+                    self.0[i] = s as u64;
+                    carry = s >> 64;
+                }
+                self
+            }
+        }
+
+        impl AddAssign<UnreducedFp128<$narrow>> for UnreducedFp128<$wide> {
+            #[inline(always)]
+            fn add_assign(&mut self, rhs: UnreducedFp128<$narrow>) {
+                *self = *self + rhs;
+            }
+        }
+    };
+}
+
+impl_cross_width_add!(3, 2);
+impl_cross_width_add!(4, 2);
+impl_cross_width_add!(4, 3);
+impl_cross_width_add!(5, 2);
+impl_cross_width_add!(5, 3);
+impl_cross_width_add!(5, 4);
 
 // ---------------------------------------------------------------------------
 // Arkworks serialization (16 bytes, little-endian)
@@ -327,14 +510,12 @@ impl JoltField for JoltFp128 {
     const MONTGOMERY_R: Self = unsafe { std::mem::transmute(1u128) };
     const MONTGOMERY_R_SQUARE: Self = unsafe { std::mem::transmute(1u128) };
 
-    /// All unreduced types collapse to `JoltFp128` — Solinas reduction is
-    /// eager, so there is no benefit to deferring it.
-    type UnreducedElem = JoltFp128;
-    type UnreducedMulU64 = JoltFp128;
-    type UnreducedMulU128 = JoltFp128;
-    type UnreducedMulU128Accum = JoltFp128;
-    type UnreducedProduct = JoltFp128;
-    type UnreducedProductAccum = JoltFp128;
+    type UnreducedElem = UnreducedFp128<2>;
+    type UnreducedMulU64 = UnreducedFp128<3>;
+    type UnreducedMulU128 = UnreducedFp128<4>;
+    type UnreducedMulU128Accum = UnreducedFp128<5>;
+    type UnreducedProduct = UnreducedFp128<4>;
+    type UnreducedProductAccum = UnreducedFp128<5>;
 
     type SmallValueLookupTables = Vec<u8>;
     type Challenge = Self;
@@ -425,32 +606,34 @@ impl JoltField for JoltFp128 {
 
     #[inline]
     fn to_unreduced(&self) -> Self::UnreducedElem {
-        *self
+        UnreducedFp128(self.0.to_limbs())
     }
 
     #[inline]
     fn mul_u64_unreduced(self, other: u64) -> Self::UnreducedMulU64 {
-        self * Self::from_u64(other)
+        UnreducedFp128(self.0.mul_wide_u64(other))
     }
 
     #[inline]
     fn mul_u128_unreduced(self, other: u128) -> Self::UnreducedMulU128 {
-        self * Self::from_u128(other)
+        UnreducedFp128(self.0.mul_wide_u128(other))
     }
 
     #[inline]
     fn mul_to_product(self, other: Self) -> Self::UnreducedProduct {
-        self * other
+        UnreducedFp128(self.0.mul_wide(other.0))
     }
 
     #[inline]
     fn mul_to_product_accum(self, other: Self) -> Self::UnreducedProductAccum {
-        self * other
+        let [a, b, c, d] = self.0.mul_wide(other.0);
+        UnreducedFp128([a, b, c, d, 0])
     }
 
     #[inline]
     fn unreduced_mul_u64(a: &Self::UnreducedElem, b: u64) -> Self::UnreducedMulU64 {
-        *a * Self::from_u64(b)
+        let elem = limbs_to_fp128(a.0);
+        UnreducedFp128(elem.mul_wide_u64(b))
     }
 
     #[inline]
@@ -458,42 +641,49 @@ impl JoltField for JoltFp128 {
         a: &Self::UnreducedElem,
         b: &Self::UnreducedElem,
     ) -> Self::UnreducedProductAccum {
-        *a * *b
+        let fa = limbs_to_fp128(a.0);
+        let fb = limbs_to_fp128(b.0);
+        let [w0, w1, w2, w3] = fa.mul_wide(fb);
+        UnreducedFp128([w0, w1, w2, w3, 0])
     }
 
     #[inline]
     fn mul_to_accum_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedMulU128Accum {
-        *self * JoltFp128::from(*mag)
+        let reduced = *self * JoltFp128::from(*mag);
+        let limbs = reduced.0.to_limbs();
+        UnreducedFp128([limbs[0], limbs[1], 0, 0, 0])
     }
 
     #[inline]
     fn mul_to_product_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedProduct {
-        *self * JoltFp128::from(*mag)
+        let reduced = *self * JoltFp128::from(*mag);
+        let limbs = reduced.0.to_limbs();
+        UnreducedFp128([limbs[0], limbs[1], 0, 0])
     }
 
     #[inline]
     fn reduce_mul_u64(x: Self::UnreducedMulU64) -> Self {
-        x
+        Self(Prime128M8M4M1M0::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_mul_u128(x: Self::UnreducedMulU128) -> Self {
-        x
+        Self(Prime128M8M4M1M0::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_mul_u128_accum(x: Self::UnreducedMulU128Accum) -> Self {
-        x
+        Self(Prime128M8M4M1M0::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_product(x: Self::UnreducedProduct) -> Self {
-        x
+        Self(Prime128M8M4M1M0::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_product_accum(x: Self::UnreducedProductAccum) -> Self {
-        x
+        Self(Prime128M8M4M1M0::solinas_reduce(&x.0))
     }
 }
 

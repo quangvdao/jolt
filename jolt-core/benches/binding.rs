@@ -2,6 +2,7 @@ use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_std::{rand::Rng, test_rng};
 use criterion::Criterion;
+use jolt_core::field::fp128::JoltFp128;
 use jolt_core::field::JoltField;
 use jolt_core::poly::compact_polynomial::CompactPolynomial;
 use jolt_core::poly::dense_mlpoly::DensePolynomial;
@@ -145,26 +146,41 @@ fn main() {
         .configure_from_args()
         .warm_up_time(std::time::Duration::from_secs(5));
 
+    // --- BN254 (Fr) benchmarks ---
     benchmark_dense::<Fr>(&mut criterion, 20);
     benchmark_dense::<Fr>(&mut criterion, 22);
     benchmark_dense::<Fr>(&mut criterion, 24);
 
+    // --- Fp128 benchmarks (same sizes for head-to-head comparison) ---
+    benchmark_dense::<JoltFp128>(&mut criterion, 20);
+    benchmark_dense::<JoltFp128>(&mut criterion, 22);
+    benchmark_dense::<JoltFp128>(&mut criterion, 24);
+
+    // --- Batch binding ---
     benchmark_dense_batch::<Fr>(&mut criterion, 20, 4);
     benchmark_dense_batch::<Fr>(&mut criterion, 20, 8);
     benchmark_dense_batch::<Fr>(&mut criterion, 20, 16);
     benchmark_dense_batch::<Fr>(&mut criterion, 20, 32);
 
+    // --- Parallel binding ---
     benchmark_dense_parallel::<Fr>(&mut criterion, 22, BindingOrder::LowToHigh);
     benchmark_dense_parallel::<Fr>(&mut criterion, 24, BindingOrder::LowToHigh);
-    benchmark_dense_parallel::<Fr>(&mut criterion, 26, BindingOrder::LowToHigh);
+
+    benchmark_dense_parallel::<JoltFp128>(&mut criterion, 22, BindingOrder::LowToHigh);
+    benchmark_dense_parallel::<JoltFp128>(&mut criterion, 24, BindingOrder::LowToHigh);
 
     benchmark_dense_parallel::<Fr>(&mut criterion, 22, BindingOrder::HighToLow);
     benchmark_dense_parallel::<Fr>(&mut criterion, 24, BindingOrder::HighToLow);
-    benchmark_dense_parallel::<Fr>(&mut criterion, 26, BindingOrder::HighToLow);
 
+    benchmark_dense_parallel::<JoltFp128>(&mut criterion, 22, BindingOrder::HighToLow);
+    benchmark_dense_parallel::<JoltFp128>(&mut criterion, 24, BindingOrder::HighToLow);
+
+    // --- Compact polynomial binding ---
     benchmark_compact::<Fr>(&mut criterion, 22, BindingOrder::LowToHigh);
     benchmark_compact::<Fr>(&mut criterion, 24, BindingOrder::LowToHigh);
-    benchmark_compact::<Fr>(&mut criterion, 26, BindingOrder::LowToHigh);
+
+    benchmark_compact::<JoltFp128>(&mut criterion, 22, BindingOrder::LowToHigh);
+    benchmark_compact::<JoltFp128>(&mut criterion, 24, BindingOrder::LowToHigh);
 
     criterion.final_summary();
 }

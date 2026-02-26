@@ -2229,6 +2229,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "hachi-derive"
+version = "0.1.0"
+source = "git+https://github.com/LayerZero-Labs/hachi?branch=dev#313213c0e6663792a2cc12a5738eb4f90a7b29af"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "hachi-pcs"
+version = "0.1.0"
+source = "git+https://github.com/LayerZero-Labs/hachi?branch=dev#313213c0e6663792a2cc12a5738eb4f90a7b29af"
+dependencies = [
+ "blake2",
+ "hachi-derive",
+ "rand_core 0.6.4",
+ "sha3",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2867,6 +2890,7 @@ dependencies = [
  "dory-pcs",
  "eyre",
  "fixedbitset 0.5.7",
+ "hachi-pcs",
  "iai-callgrind",
  "inferno 0.12.4",
  "itertools 0.10.5",

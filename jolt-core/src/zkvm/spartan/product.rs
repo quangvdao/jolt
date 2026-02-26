@@ -196,7 +196,7 @@ impl<F: JoltField> ProductVirtualUniSkipProver<F> {
         let split_eq = GruenSplitEqPolynomial::<F>::new_with_scaling(
             tau,
             BindingOrder::LowToHigh,
-            Some(F::MONTGOMERY_R_SQUARE),
+            Some(F::montgomery_r_square()),
         );
         let outer_scale = split_eq.get_current_scalar(); // = R^2
 

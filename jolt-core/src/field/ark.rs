@@ -14,18 +14,22 @@ impl FieldOps<&ark_bn254::Fr, ark_bn254::Fr> for ark_bn254::Fr {}
 
 impl JoltField for ark_bn254::Fr {
     const NUM_BYTES: usize = 32;
-    /// The Montgomery factor R = 2^(64*N) mod p
-    /// SAFETY: We're directly transmuting from the Montgomery R constant from arkworks,
-    /// which is guaranteed to be a valid field element in Montgomery form.
-    const MONTGOMERY_R: Self = unsafe {
-        use ark_ff::MontConfig;
-        std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R)
-    };
-    /// The squared Montgomery factor R^2 = 2^(128*N) mod p
-    const MONTGOMERY_R_SQUARE: Self = unsafe {
-        use ark_ff::MontConfig;
-        std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R2)
-    };
+
+    fn montgomery_r() -> Self {
+        // SAFETY: Transmuting from the Montgomery R constant from arkworks,
+        // which is guaranteed to be a valid field element in Montgomery form.
+        unsafe {
+            use ark_ff::MontConfig;
+            std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R)
+        }
+    }
+    fn montgomery_r_square() -> Self {
+        // SAFETY: Transmuting from the Montgomery R^2 constant from arkworks.
+        unsafe {
+            use ark_ff::MontConfig;
+            std::mem::transmute(<ark_bn254::FrConfig as MontConfig<4>>::R2)
+        }
+    }
     type Unreduced<const N: usize> = BigInt<N>;
     type SmallValueLookupTables = [Vec<Self>; 2];
 

@@ -106,10 +106,17 @@ pub trait JoltField:
 {
     /// Number of bytes occupied by a single field element.
     const NUM_BYTES: usize;
-    /// The Montgomery factor R = 2^(64*N) mod p
-    const MONTGOMERY_R: Self;
-    /// The squared Montgomery factor R^2 = 2^(128*N) mod p
-    const MONTGOMERY_R_SQUARE: Self;
+
+    /// The Montgomery factor R = 2^(64*N) mod p.
+    /// Only meaningful for Montgomery-form fields (e.g. BN254).
+    fn montgomery_r() -> Self {
+        unimplemented!("montgomery_r not supported for this field")
+    }
+    /// The squared Montgomery factor R^2 = 2^(128*N) mod p.
+    /// Only meaningful for Montgomery-form fields (e.g. BN254).
+    fn montgomery_r_square() -> Self {
+        unimplemented!("montgomery_r_square not supported for this field")
+    }
 
     /// Unreduced field element representation with N 64 bit limbs
     type Unreduced<const N: usize>: Clone
@@ -250,30 +257,43 @@ pub trait JoltField:
     }
 
     /// Get reference to the underlying Unreduced<4> representation without copying.
-    fn as_unreduced_ref(&self) -> &Self::Unreduced<4>;
+    /// Only meaningful for Montgomery-form fields backed by BigInt<4>.
+    fn as_unreduced_ref(&self) -> &Self::Unreduced<4> {
+        unimplemented!("as_unreduced_ref not supported for this field")
+    }
 
     /// Multiplication of two field elements without Montgomery reduction, returning a
     /// L-limb Unreduced (each limb is 64 bits).
     /// L = 8 or 9 depending on what the code needs.
-    fn mul_unreduced<const N: usize>(self, other: Self) -> Self::Unreduced<N>;
+    fn mul_unreduced<const N: usize>(self, _other: Self) -> Self::Unreduced<N> {
+        unimplemented!("mul_unreduced not supported for this field")
+    }
 
     /// Multiplication of a field element and a u64 without Barrett reduction, returning a
     /// 5-limb Unreduced (each limb is 64 bits)
-    fn mul_u64_unreduced(self, other: u64) -> Self::Unreduced<5>;
+    fn mul_u64_unreduced(self, _other: u64) -> Self::Unreduced<5> {
+        unimplemented!("mul_u64_unreduced not supported for this field")
+    }
 
     /// Multiplication of a field element and a u128 without Barrett reduction, returning a
     /// 6-limb Unreduced (each limb is 64 bits)
-    fn mul_u128_unreduced(self, other: u128) -> Self::Unreduced<6>;
+    fn mul_u128_unreduced(self, _other: u128) -> Self::Unreduced<6> {
+        unimplemented!("mul_u128_unreduced not supported for this field")
+    }
 
     /// Montgomery reduction of an Unreduced to a field element (compute a * R^{-1} mod p).
     ///
     /// Need to specify the number of limbs in the Unreduced (at least 8)
-    fn from_montgomery_reduce<const N: usize>(unreduced: Self::Unreduced<N>) -> Self;
+    fn from_montgomery_reduce<const N: usize>(_unreduced: Self::Unreduced<N>) -> Self {
+        unimplemented!("from_montgomery_reduce not supported for this field")
+    }
 
     /// Barrett reduction of an Unreduced to a field element (compute a mod p).
     ///
     /// Need to specify the number of limbs in the Unreduced (at least 5, usually up to 7)
-    fn from_barrett_reduce<const N: usize>(unreduced: Self::Unreduced<N>) -> Self;
+    fn from_barrett_reduce<const N: usize>(_unreduced: Self::Unreduced<N>) -> Self {
+        unimplemented!("from_barrett_reduce not supported for this field")
+    }
 }
 
 pub trait MulU64WithCarry {
@@ -357,4 +377,5 @@ where
 
 pub mod ark;
 pub mod challenge;
+pub mod fp128;
 pub mod tracked_ark;

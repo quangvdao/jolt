@@ -510,27 +510,34 @@ impl JoltField for JoltFp128 {
 
     #[inline]
     fn from_u8(n: u8) -> Self {
-        Self(<Prime128M8M4M1M0 as CanonicalField>::from_u64(n as u64))
+        Self::from_u64(n as u64)
     }
 
     #[inline]
     fn from_u16(n: u16) -> Self {
-        Self(<Prime128M8M4M1M0 as CanonicalField>::from_u64(n as u64))
+        Self::from_u64(n as u64)
     }
 
     #[inline]
     fn from_u32(n: u32) -> Self {
-        Self(<Prime128M8M4M1M0 as CanonicalField>::from_u64(n as u64))
+        Self::from_u64(n as u64)
     }
 
     #[inline]
     fn from_u64(n: u64) -> Self {
-        Self(<Prime128M8M4M1M0 as CanonicalField>::from_u64(n))
+        Self(
+            <Prime128M8M4M1M0 as CanonicalField>::from_canonical_u128_checked(n as u128)
+                .expect("u64 must be canonical for Fp128"),
+        )
     }
 
     #[inline]
     fn from_i64(val: i64) -> Self {
-        Self(<Prime128M8M4M1M0 as CanonicalField>::from_i64(val))
+        if val >= 0 {
+            Self::from_u64(val as u64)
+        } else {
+            -Self::from_u64(val.unsigned_abs())
+        }
     }
 
     #[inline]
@@ -556,8 +563,7 @@ impl JoltField for JoltFp128 {
         let mut buf = [0u8; 16];
         let len = bytes.len().min(16);
         buf[..len].copy_from_slice(&bytes[..len]);
-        let val = u128::from_le_bytes(buf);
-        Self(<Prime128M8M4M1M0 as CanonicalField>::from_canonical_u128_reduced(val))
+        Self::from_u128(u128::from_le_bytes(buf))
     }
 
     #[inline]
@@ -622,28 +628,14 @@ impl JoltField for JoltFp128 {
         UnreducedFp128([w0, w1, w2, w3, 0])
     }
 
-    // TODO(perf): These eagerly reduce because hachi lacks a `mul_wide_limbs`
-    // method that multiplies a canonical Fp128 ([u64; 2]) by an arbitrary
-    // limb slice (&[u64]) to produce a wider unreduced result.
-    //
-    // Optimal path: add to hachi's Fp128:
-    //   pub fn mul_wide_limbs<const M: usize>(self, other: [u64; M]) -> [u64; M+2]
-    // Then these become:
-    //   mul_to_accum_mag:   self.0.mul_wide_limbs(mag.0) → UnreducedFp128<5>
-    //   mul_to_product_mag: self.0.mul_wide_limbs(mag.0) → UnreducedFp128<4>
-    // avoiding the redundant reduce-then-widen round-trip.
     #[inline]
     fn mul_to_accum_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedMulU128Accum {
-        let reduced = *self * JoltFp128::from(*mag);
-        let limbs = reduced.0.to_limbs();
-        UnreducedFp128([limbs[0], limbs[1], 0, 0, 0])
+        UnreducedFp128(self.0.mul_wide_limbs::<M, 5>(mag.0))
     }
 
     #[inline]
     fn mul_to_product_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedProduct {
-        let reduced = *self * JoltFp128::from(*mag);
-        let limbs = reduced.0.to_limbs();
-        UnreducedFp128([limbs[0], limbs[1], 0, 0])
+        UnreducedFp128(self.0.mul_wide_limbs::<M, 4>(mag.0))
     }
 
     #[inline]

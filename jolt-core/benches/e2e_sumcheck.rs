@@ -13,9 +13,11 @@ use tracing_subscriber::prelude::*;
 
 fn build_prover<F: JoltField>(
     label: &str,
+    fib_input: u32,
+    max_trace_log2: usize,
 ) -> JoltCpuProver<'static, F, MockCommitScheme<F>, Blake2bTranscript> {
     let mut program = host::Program::new("fibonacci-guest");
-    let inputs = postcard::to_stdvec(&100000u32).unwrap();
+    let inputs = postcard::to_stdvec(&fib_input).unwrap();
     let (bytecode, init_memory_state, _) = program.decode();
     let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
@@ -23,7 +25,7 @@ fn build_prover<F: JoltField>(
         bytecode,
         io_device.memory_layout.clone(),
         init_memory_state,
-        1 << 22,
+        1 << max_trace_log2,
     );
 
     let preprocessing = JoltProverPreprocessing::<F, MockCommitScheme<F>>::new(shared);
@@ -47,7 +49,7 @@ fn build_prover<F: JoltField>(
     prover
 }
 
-fn main() {
+fn run_size(fib_input: u32, max_trace_log2: usize, size_label: &str) {
     let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -55,8 +57,8 @@ fn main() {
     std::fs::create_dir_all(&out_dir).expect("failed to create output dir");
 
     {
-        let trace_file = out_dir.join("sumcheck_bn254.json");
-        println!("BN254 trace → {}", trace_file.display());
+        let trace_file = out_dir.join(format!("sumcheck_bn254_{size_label}.json"));
+        println!("BN254 {size_label} trace → {}", trace_file.display());
         let (chrome_layer, _guard) = ChromeLayerBuilder::new()
             .include_args(true)
             .file(trace_file)
@@ -64,16 +66,16 @@ fn main() {
         let subscriber = tracing_subscriber::registry().with(chrome_layer);
         let _default = tracing::subscriber::set_default(subscriber);
 
-        let prover = build_prover::<Fr>("BN254");
+        let prover = build_prover::<Fr>(&format!("BN254 {size_label}"), fib_input, max_trace_log2);
         let start = Instant::now();
         prover.prove_sumchecks_only();
         let elapsed = start.elapsed();
-        println!("BN254: {:.3}s", elapsed.as_secs_f64());
+        println!("BN254 {size_label}: {:.3}s", elapsed.as_secs_f64());
     }
 
     {
-        let trace_file = out_dir.join("sumcheck_fp128.json");
-        println!("Fp128 trace → {}", trace_file.display());
+        let trace_file = out_dir.join(format!("sumcheck_fp128_{size_label}.json"));
+        println!("Fp128 {size_label} trace → {}", trace_file.display());
         let (chrome_layer, _guard) = ChromeLayerBuilder::new()
             .include_args(true)
             .file(trace_file)
@@ -81,10 +83,27 @@ fn main() {
         let subscriber = tracing_subscriber::registry().with(chrome_layer);
         let _default = tracing::subscriber::set_default(subscriber);
 
-        let prover = build_prover::<JoltFp128>("Fp128");
+        let prover =
+            build_prover::<JoltFp128>(&format!("Fp128 {size_label}"), fib_input, max_trace_log2);
         let start = Instant::now();
         prover.prove_sumchecks_only();
         let elapsed = start.elapsed();
-        println!("Fp128: {:.3}s", elapsed.as_secs_f64());
+        println!("Fp128 {size_label}: {:.3}s", elapsed.as_secs_f64());
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let size = args.get(1).map(|s| s.as_str()).unwrap_or("all");
+
+    match size {
+        "1x" => run_size(100_000, 22, "1x"),
+        "2x" => run_size(200_000, 23, "2x"),
+        "4x" => run_size(400_000, 24, "4x"),
+        _ => {
+            run_size(100_000, 22, "1x");
+            run_size(200_000, 23, "2x");
+            run_size(400_000, 24, "4x");
+        }
     }
 }

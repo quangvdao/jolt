@@ -47,6 +47,23 @@ pub trait SumcheckInstanceProver<F: JoltField, T: Transcript>:
     /// Ingest the verifier's challenge for a sumcheck round.
     fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize);
 
+    /// Fused bind+eval: bind polynomials with `r_prev` (the challenge from round `round - 1`)
+    /// while simultaneously computing the evaluation sums for the current `round`.
+    ///
+    /// Combines `ingest_challenge(r_prev, round - 1)` and `compute_message(round, previous_claim)`
+    /// into a single memory pass, halving bandwidth requirements.
+    ///
+    /// Default implementation falls back to sequential bind then eval.
+    fn fused_bind_eval(
+        &mut self,
+        r_prev: F::Challenge,
+        round: usize,
+        previous_claim: F,
+    ) -> UniPoly<F> {
+        self.ingest_challenge(r_prev, round - 1);
+        self.compute_message(round, previous_claim)
+    }
+
     /// Finalize prover state after the last challenge has been ingested, but before
     /// [`Self::cache_openings`] is called.
     ///

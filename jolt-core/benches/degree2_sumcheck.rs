@@ -339,5 +339,96 @@ fn degree2_eq_sumcheck_bench(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, degree2_sumcheck_bench, degree2_eq_sumcheck_bench);
+fn accum_microbench(c: &mut Criterion) {
+    use jolt_core::field::fp128::{FoldedAccum4, UnreducedFp128};
+    use num_traits::Zero;
+
+    let mut group = c.benchmark_group("accum_mul_add");
+    group.sample_size(20);
+
+    for &n in &[1024usize, 4096, 16384] {
+        let mut rng = StdRng::seed_from_u64(99);
+        let a_vals: Vec<JoltFp128> = (0..n).map(|_| JoltFp128::random(&mut rng)).collect();
+        let b_vals: Vec<JoltFp128> = (0..n).map(|_| JoltFp128::random(&mut rng)).collect();
+
+        group.bench_with_input(BenchmarkId::new("UnreducedFp128_5", n), &n, |bench, &_n| {
+            bench.iter(|| {
+                let mut acc = UnreducedFp128::<5>::zero();
+                for i in 0..a_vals.len() {
+                    let [r0, r1, r2, r3] = black_box(a_vals[i]).0.mul_wide(black_box(b_vals[i]).0);
+                    acc += UnreducedFp128([r0, r1, r2, r3, 0]);
+                }
+                let result =
+                    JoltFp128(hachi_pcs::algebra::Prime128M8M4M1M0::solinas_reduce(&acc.0));
+                black_box(result)
+            })
+        });
+
+        group.bench_with_input(BenchmarkId::new("FoldedAccum4", n), &n, |bench, &_n| {
+            bench.iter(|| {
+                let mut acc = FoldedAccum4::zero();
+                for i in 0..a_vals.len() {
+                    acc += FoldedAccum4::from_mul(black_box(a_vals[i]).0, black_box(b_vals[i]).0);
+                }
+                let result = JoltFp128(hachi_pcs::algebra::Prime128M8M4M1M0::solinas_reduce(
+                    &acc.normalize(),
+                ));
+                black_box(result)
+            })
+        });
+    }
+
+    group.finish();
+}
+
+fn bn254_accum_microbench(c: &mut Criterion) {
+    use ark_ff::BigInt;
+    use jolt_core::field::ark::FoldedBn254Accum;
+    use num_traits::Zero;
+
+    let mut group = c.benchmark_group("bn254_accum_mul_add");
+    group.sample_size(20);
+
+    for &n in &[1024usize, 4096, 16384] {
+        let mut rng = StdRng::seed_from_u64(99);
+        let a_vals: Vec<Fr> = (0..n).map(|_| Fr::random(&mut rng)).collect();
+        let b_vals: Vec<Fr> = (0..n).map(|_| Fr::random(&mut rng)).collect();
+
+        let a_unreduced: Vec<BigInt<4>> = a_vals.iter().map(|x| x.to_unreduced()).collect();
+        let b_unreduced: Vec<BigInt<4>> = b_vals.iter().map(|x| x.to_unreduced()).collect();
+
+        group.bench_with_input(BenchmarkId::new("BigInt9", n), &n, |bench, &_n| {
+            bench.iter(|| {
+                let mut acc = BigInt::<9>::zero();
+                for i in 0..a_unreduced.len() {
+                    acc += black_box(a_unreduced[i]).mul_trunc::<4, 9>(&black_box(b_unreduced[i]));
+                }
+                let result = Fr::from_montgomery_reduce::<9, 5>(acc);
+                black_box(result)
+            })
+        });
+
+        group.bench_with_input(BenchmarkId::new("FoldedBn254Accum", n), &n, |bench, &_n| {
+            bench.iter(|| {
+                let mut acc = FoldedBn254Accum::zero();
+                for i in 0..a_unreduced.len() {
+                    acc +=
+                        FoldedBn254Accum::from_mul(black_box(a_unreduced[i]), black_box(b_unreduced[i]));
+                }
+                let result = <Fr as JoltField>::reduce_product_accum(acc);
+                black_box(result)
+            })
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    degree2_sumcheck_bench,
+    degree2_eq_sumcheck_bench,
+    accum_microbench,
+    bn254_accum_microbench
+);
 criterion_main!(benches);

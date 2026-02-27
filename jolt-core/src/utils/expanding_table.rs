@@ -54,31 +54,44 @@ impl<F: JoltField> ExpandingTable<F> {
         self.values[..self.len].to_vec()
     }
 
-    /// Updates this table (expanding it by a factor of 2) to incorporate
-    /// the new random challenge `r_j`.
-    /// TODO: this is bad parallelisation.
     #[tracing::instrument(skip_all, name = "ExpandingTable::update")]
     pub fn update(&mut self, r_j: F::Challenge) {
+        const PAR_THRESHOLD: usize = 1024;
         match self.binding_order {
             BindingOrder::LowToHigh => {
                 let (values_left, values_right) = self.values.split_at_mut(self.len);
-                values_left
-                    .par_iter_mut()
-                    .zip(values_right.par_iter_mut())
-                    .for_each(|(x, y)| {
+                if self.len < PAR_THRESHOLD {
+                    for (x, y) in values_left.iter_mut().zip(values_right.iter_mut()) {
                         *y = *x * r_j;
                         *x -= *y;
-                    });
+                    }
+                } else {
+                    values_left
+                        .par_iter_mut()
+                        .zip(values_right.par_iter_mut())
+                        .for_each(|(x, y)| {
+                            *y = *x * r_j;
+                            *x -= *y;
+                        });
+                }
             }
             BindingOrder::HighToLow => {
-                self.values[..self.len]
-                    .par_iter()
-                    .zip(self.scratch_space.par_chunks_mut(2))
-                    .for_each(|(&v_i, dest)| {
+                if self.len < PAR_THRESHOLD {
+                    for (i, &v_i) in self.values[..self.len].iter().enumerate() {
                         let eval_1 = r_j * v_i;
-                        dest[0] = v_i - eval_1;
-                        dest[1] = eval_1;
-                    });
+                        self.scratch_space[2 * i] = v_i - eval_1;
+                        self.scratch_space[2 * i + 1] = eval_1;
+                    }
+                } else {
+                    self.values[..self.len]
+                        .par_iter()
+                        .zip(self.scratch_space.par_chunks_mut(2))
+                        .for_each(|(&v_i, dest)| {
+                            let eval_1 = r_j * v_i;
+                            dest[0] = v_i - eval_1;
+                            dest[1] = eval_1;
+                        });
+                }
                 std::mem::swap(&mut self.values, &mut self.scratch_space);
             }
         }

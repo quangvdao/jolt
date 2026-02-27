@@ -295,14 +295,56 @@ impl<I: Into<usize> + Copy + Default + Send + Sync + 'static, F: JoltField>
         let mut F_110: Vec<F> = self.F_11.clone();
         let mut F_111: Vec<F> = self.F_11;
 
-        F_000.par_iter_mut().for_each(|f| *f *= eq_0_r2);
-        F_010.par_iter_mut().for_each(|f| *f *= eq_0_r2);
-        F_100.par_iter_mut().for_each(|f| *f *= eq_0_r2);
-        F_110.par_iter_mut().for_each(|f| *f *= eq_0_r2);
-        F_001.par_iter_mut().for_each(|f| *f *= eq_1_r2);
-        F_011.par_iter_mut().for_each(|f| *f *= eq_1_r2);
-        F_101.par_iter_mut().for_each(|f| *f *= eq_1_r2);
-        F_111.par_iter_mut().for_each(|f| *f *= eq_1_r2);
+        rayon::scope(|s| {
+            s.spawn(|_| {
+                F_000
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_0_r2)
+            });
+            s.spawn(|_| {
+                F_010
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_0_r2)
+            });
+            s.spawn(|_| {
+                F_100
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_0_r2)
+            });
+            s.spawn(|_| {
+                F_110
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_0_r2)
+            });
+            s.spawn(|_| {
+                F_001
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_1_r2)
+            });
+            s.spawn(|_| {
+                F_011
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_1_r2)
+            });
+            s.spawn(|_| {
+                F_101
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_1_r2)
+            });
+            s.spawn(|_| {
+                F_111
+                    .par_iter_mut()
+                    .with_min_len(4096)
+                    .for_each(|f| *f *= eq_1_r2)
+            });
+        });
 
         let lookup_indices = &self.lookup_indices;
         let n = lookup_indices.len() / 8;

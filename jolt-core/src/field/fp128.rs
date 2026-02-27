@@ -393,6 +393,202 @@ impl<'a, const N: usize> SubAssign<&'a Self> for UnreducedFp128<N> {
 
 impl<const N: usize> UnreducedInteger for UnreducedFp128<N> {}
 
+/// Redundant product accumulator: 4 u128 slots at positions [0, 64, 128, 192].
+///
+/// Partial products from a 128x128 multiply are folded directly into these
+/// positional slots WITHOUT carry propagation between slots. Each slot uses
+/// u128 to provide headroom for accumulating many products (2^62 before
+/// overflow). Normalization to `[u64; 5]` happens only at reduction time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FoldedAccum4(pub [u128; 4]);
+
+impl fmt::Display for FoldedAccum4 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FoldedAccum4({:?})", &self.0)
+    }
+}
+
+impl Ord for FoldedAccum4 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        for i in (0..4).rev() {
+            match self.0[i].cmp(&other.0[i]) {
+                Ordering::Equal => continue,
+                ord => return ord,
+            }
+        }
+        Ordering::Equal
+    }
+}
+
+impl PartialOrd for FoldedAccum4 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Zero for FoldedAccum4 {
+    #[inline(always)]
+    fn zero() -> Self {
+        Self([0u128; 4])
+    }
+    #[inline(always)]
+    fn is_zero(&self) -> bool {
+        self.0.iter().all(|&l| l == 0)
+    }
+}
+
+impl From<u128> for FoldedAccum4 {
+    #[inline]
+    fn from(val: u128) -> Self {
+        Self([val, 0, 0, 0])
+    }
+}
+
+impl Add for FoldedAccum4 {
+    type Output = Self;
+    #[inline(always)]
+    fn add(self, rhs: Self) -> Self {
+        Self([
+            self.0[0] + rhs.0[0],
+            self.0[1] + rhs.0[1],
+            self.0[2] + rhs.0[2],
+            self.0[3] + rhs.0[3],
+        ])
+    }
+}
+
+impl<'a> Add<&'a Self> for FoldedAccum4 {
+    type Output = Self;
+    #[inline(always)]
+    fn add(self, rhs: &'a Self) -> Self {
+        self + *rhs
+    }
+}
+
+impl Sub for FoldedAccum4 {
+    type Output = Self;
+    #[inline(always)]
+    fn sub(self, rhs: Self) -> Self {
+        Self([
+            self.0[0].wrapping_sub(rhs.0[0]),
+            self.0[1].wrapping_sub(rhs.0[1]),
+            self.0[2].wrapping_sub(rhs.0[2]),
+            self.0[3].wrapping_sub(rhs.0[3]),
+        ])
+    }
+}
+
+impl<'a> Sub<&'a Self> for FoldedAccum4 {
+    type Output = Self;
+    #[inline(always)]
+    fn sub(self, rhs: &'a Self) -> Self {
+        self - *rhs
+    }
+}
+
+impl AddAssign for FoldedAccum4 {
+    #[inline(always)]
+    fn add_assign(&mut self, rhs: Self) {
+        self.0[0] += rhs.0[0];
+        self.0[1] += rhs.0[1];
+        self.0[2] += rhs.0[2];
+        self.0[3] += rhs.0[3];
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for FoldedAccum4 {
+    #[inline(always)]
+    fn add_assign(&mut self, rhs: &'a Self) {
+        *self += *rhs;
+    }
+}
+
+impl SubAssign for FoldedAccum4 {
+    #[inline(always)]
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0[0] = self.0[0].wrapping_sub(rhs.0[0]);
+        self.0[1] = self.0[1].wrapping_sub(rhs.0[1]);
+        self.0[2] = self.0[2].wrapping_sub(rhs.0[2]);
+        self.0[3] = self.0[3].wrapping_sub(rhs.0[3]);
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for FoldedAccum4 {
+    #[inline(always)]
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        *self -= *rhs;
+    }
+}
+
+impl UnreducedInteger for FoldedAccum4 {}
+
+impl AddAssign<UnreducedFp128<2>> for FoldedAccum4 {
+    #[inline(always)]
+    fn add_assign(&mut self, rhs: UnreducedFp128<2>) {
+        self.0[0] += rhs.0[0] as u128;
+        self.0[0] += (rhs.0[1] as u128) << 64;
+    }
+}
+
+impl AddAssign<UnreducedFp128<4>> for FoldedAccum4 {
+    #[inline(always)]
+    fn add_assign(&mut self, rhs: UnreducedFp128<4>) {
+        self.0[0] += rhs.0[0] as u128;
+        self.0[1] += rhs.0[1] as u128;
+        self.0[2] += rhs.0[2] as u128;
+        self.0[3] += rhs.0[3] as u128;
+    }
+}
+
+impl FoldedAccum4 {
+    /// Folded 128x128 multiply: produces partial products and folds them
+    /// directly into positional slots WITHOUT carry propagation.
+    ///
+    /// 4 `mul` + 4 `umulh` instructions, zero carry chain between positions.
+    #[inline(always)]
+    pub fn from_mul(a: Prime128M8M4M1M0, b: Prime128M8M4M1M0) -> Self {
+        // SAFETY: Prime128M8M4M1M0 is repr(transparent) over [u64; 2].
+        let a_limbs: [u64; 2] = unsafe { transmute(a) };
+        let b_limbs: [u64; 2] = unsafe { transmute(b) };
+        let (a0, a1) = (a_limbs[0], a_limbs[1]);
+        let (b0, b1) = (b_limbs[0], b_limbs[1]);
+
+        let p00 = (a0 as u128) * (b0 as u128);
+        let p01 = (a0 as u128) * (b1 as u128);
+        let p10 = (a1 as u128) * (b0 as u128);
+        let p11 = (a1 as u128) * (b1 as u128);
+
+        Self([
+            (p00 as u64) as u128,
+            (p00 >> 64) as u64 as u128 + (p01 as u64) as u128 + (p10 as u64) as u128,
+            (p01 >> 64) as u64 as u128 + (p10 >> 64) as u64 as u128 + (p11 as u64) as u128,
+            (p11 >> 64) as u64 as u128,
+        ])
+    }
+
+    /// Same as `from_mul` but takes raw `[u64; 2]` limbs (for unreduced elem inputs).
+    #[inline(always)]
+    pub fn from_mul_limbs(a: [u64; 2], b: [u64; 2]) -> Self {
+        Self::from_mul(limbs_to_fp128(a), limbs_to_fp128(b))
+    }
+
+    /// Normalize to `[u64; 5]` by carry-propagating the u128 hi-halves.
+    #[inline]
+    pub fn normalize(self) -> [u64; 5] {
+        let p0 = self.0[0];
+        let p1 = self.0[1] + (p0 >> 64);
+        let p2 = self.0[2] + (p1 >> 64);
+        let p3 = self.0[3] + (p2 >> 64);
+        [
+            p0 as u64,
+            p1 as u64,
+            p2 as u64,
+            p3 as u64,
+            (p3 >> 64) as u64,
+        ]
+    }
+}
+
 macro_rules! impl_cross_width_add {
     ($wide:literal, $narrow:literal) => {
         impl Add<UnreducedFp128<$narrow>> for UnreducedFp128<$wide> {
@@ -502,7 +698,7 @@ impl JoltField for JoltFp128 {
     type UnreducedMulU128 = UnreducedFp128<4>;
     type UnreducedMulU128Accum = UnreducedFp128<5>;
     type UnreducedProduct = UnreducedFp128<4>;
-    type UnreducedProductAccum = UnreducedFp128<5>;
+    type UnreducedProductAccum = FoldedAccum4;
 
     type SmallValueLookupTables = Vec<u8>;
     type Challenge = Self;
@@ -626,8 +822,7 @@ impl JoltField for JoltFp128 {
 
     #[inline]
     fn mul_to_product_accum(self, other: Self) -> Self::UnreducedProductAccum {
-        let [a, b, c, d] = self.0.mul_wide(other.0);
-        UnreducedFp128([a, b, c, d, 0])
+        FoldedAccum4::from_mul(self.0, other.0)
     }
 
     #[inline]
@@ -641,10 +836,7 @@ impl JoltField for JoltFp128 {
         a: &Self::UnreducedElem,
         b: &Self::UnreducedElem,
     ) -> Self::UnreducedProductAccum {
-        let fa = limbs_to_fp128(a.0);
-        let fb = limbs_to_fp128(b.0);
-        let [w0, w1, w2, w3] = fa.mul_wide(fb);
-        UnreducedFp128([w0, w1, w2, w3, 0])
+        FoldedAccum4::from_mul_limbs(a.0, b.0)
     }
 
     #[inline]
@@ -679,7 +871,7 @@ impl JoltField for JoltFp128 {
 
     #[inline]
     fn reduce_product_accum(x: Self::UnreducedProductAccum) -> Self {
-        Self(Prime128M8M4M1M0::solinas_reduce(&x.0))
+        Self(Prime128M8M4M1M0::solinas_reduce(&x.normalize()))
     }
 }
 

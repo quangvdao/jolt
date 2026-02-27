@@ -218,10 +218,12 @@ fn from_limb_slice(limbs: &[u64]) -> JoltFp128 {
 
 /// Reconstruct `Prime128M8M4M1M0` from a canonical 2-limb representation.
 /// The input must already be a valid canonical field element (i.e. < p).
+///
+/// SAFETY: `Prime128M8M4M1M0` is `repr(transparent)` over `[u64; 2]`.
+/// Callers must ensure limbs represent a canonical field element.
 #[inline(always)]
 fn limbs_to_fp128(limbs: [u64; 2]) -> Prime128M8M4M1M0 {
-    let val = limbs[0] as u128 | ((limbs[1] as u128) << 64);
-    Prime128M8M4M1M0::from_canonical_u128(val)
+    unsafe { transmute(limbs) }
 }
 
 impl<const N: usize> From<[u64; N]> for JoltFp128 {
@@ -354,28 +356,38 @@ impl<'a, const N: usize> Sub<&'a Self> for UnreducedFp128<N> {
 impl<const N: usize> AddAssign for UnreducedFp128<N> {
     #[inline(always)]
     fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
+        let mut carry: u128 = 0;
+        for i in 0..N {
+            let s = self.0[i] as u128 + rhs.0[i] as u128 + carry;
+            self.0[i] = s as u64;
+            carry = s >> 64;
+        }
     }
 }
 
 impl<'a, const N: usize> AddAssign<&'a Self> for UnreducedFp128<N> {
     #[inline(always)]
     fn add_assign(&mut self, rhs: &'a Self) {
-        *self = *self + *rhs;
+        *self += *rhs;
     }
 }
 
 impl<const N: usize> SubAssign for UnreducedFp128<N> {
     #[inline(always)]
     fn sub_assign(&mut self, rhs: Self) {
-        *self = *self - rhs;
+        let mut borrow: i128 = 0;
+        for i in 0..N {
+            let d = self.0[i] as i128 - rhs.0[i] as i128 + borrow;
+            self.0[i] = d as u64;
+            borrow = d >> 64;
+        }
     }
 }
 
 impl<'a, const N: usize> SubAssign<&'a Self> for UnreducedFp128<N> {
     #[inline(always)]
     fn sub_assign(&mut self, rhs: &'a Self) {
-        *self = *self - *rhs;
+        *self -= *rhs;
     }
 }
 
@@ -387,6 +399,14 @@ macro_rules! impl_cross_width_add {
             type Output = UnreducedFp128<$wide>;
             #[inline(always)]
             fn add(mut self, rhs: UnreducedFp128<$narrow>) -> Self::Output {
+                self += rhs;
+                self
+            }
+        }
+
+        impl AddAssign<UnreducedFp128<$narrow>> for UnreducedFp128<$wide> {
+            #[inline(always)]
+            fn add_assign(&mut self, rhs: UnreducedFp128<$narrow>) {
                 let mut carry: u128 = 0;
                 for i in 0..$narrow {
                     let s = self.0[i] as u128 + rhs.0[i] as u128 + carry;
@@ -398,14 +418,6 @@ macro_rules! impl_cross_width_add {
                     self.0[i] = s as u64;
                     carry = s >> 64;
                 }
-                self
-            }
-        }
-
-        impl AddAssign<UnreducedFp128<$narrow>> for UnreducedFp128<$wide> {
-            #[inline(always)]
-            fn add_assign(&mut self, rhs: UnreducedFp128<$narrow>) {
-                *self = *self + rhs;
             }
         }
     };
@@ -555,6 +567,11 @@ impl JoltField for JoltFp128 {
     }
 
     #[inline]
+    fn mul_u64(&self, n: u64) -> Self {
+        Self(Prime128M8M4M1M0::solinas_reduce(&self.0.mul_wide_u64(n)))
+    }
+
+    #[inline]
     fn square(&self) -> Self {
         Self(self.0.square())
     }
@@ -585,9 +602,11 @@ impl JoltField for JoltFp128 {
         128 - val.leading_zeros()
     }
 
-    #[inline]
+    #[inline(always)]
     fn to_unreduced(&self) -> Self::UnreducedElem {
-        UnreducedFp128(self.0.to_limbs())
+        // SAFETY: JoltFp128 is repr(transparent) over Prime128M8M4M1M0,
+        // which is a newtype over [u64; 2]. UnreducedFp128<2> wraps [u64; 2].
+        unsafe { transmute(*self) }
     }
 
     #[inline]

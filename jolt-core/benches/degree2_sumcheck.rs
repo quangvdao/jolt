@@ -8,6 +8,7 @@ use jolt_core::field::JoltField;
 use jolt_core::poly::dense_mlpoly::DensePolynomial;
 use jolt_core::poly::multilinear_polynomial::BindingOrder;
 use jolt_core::poly::opening_proof::ProverOpeningAccumulator;
+use jolt_core::poly::split_eq_poly::GruenSplitEqPolynomial;
 use jolt_core::poly::unipoly::UniPoly;
 use jolt_core::subprotocols::sumcheck::BatchedSumcheck;
 use jolt_core::subprotocols::sumcheck_prover::SumcheckInstanceProver;
@@ -126,7 +127,7 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("degree2_sumcheck");
     group.sample_size(10);
 
-    for &num_vars in &[14usize, 16, 18, 20, 22] {
+    for &num_vars in &[14usize, 16, 18, 20, 22, 24] {
         let mut rng_fr = StdRng::seed_from_u64(42 + num_vars as u64);
         let mut rng_fp = StdRng::seed_from_u64(42 + num_vars as u64);
 
@@ -156,5 +157,187 @@ fn degree2_sumcheck_bench(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, degree2_sumcheck_bench);
+/// Degree-2 sumcheck with split-eq (Gruen) optimization and unreduced accumulation.
+///
+/// Computes `sum_x eq(tau, x) * p(x) * q(x)` using `par_fold_out_in_unreduced`,
+/// which is the pattern used by the real Jolt sumcheck inner loops (outer.rs,
+/// product.rs, mles_product_sum.rs).
+#[derive(Clone)]
+#[cfg_attr(feature = "allocative", derive(allocative::Allocative))]
+struct Degree2EqProductSumcheckProver<F: JoltField> {
+    p: DensePolynomial<F>,
+    q: DensePolynomial<F>,
+    eq: GruenSplitEqPolynomial<F>,
+    claim: F,
+}
+
+fn initial_claim_eq<F: JoltField>(
+    p: &DensePolynomial<F>,
+    q: &DensePolynomial<F>,
+    eq: &GruenSplitEqPolynomial<F>,
+) -> F {
+    let vals: [F; 2] = eq.par_fold_out_in_unreduced(&|g| {
+        let p0 = p[2 * g];
+        let p1 = p[2 * g + 1];
+        let q0 = q[2 * g];
+        let q1 = q[2 * g + 1];
+        [p0 * q0, p1 * q1]
+    });
+    let r = eq.get_current_w();
+    let current_scalar = eq.get_current_scalar();
+    ((F::one() - r) * vals[0] + r * vals[1]) * current_scalar
+}
+
+impl<F: JoltField> Degree2EqProductSumcheckProver<F> {
+    fn new(p: DensePolynomial<F>, q: DensePolynomial<F>, tau: &[F::Challenge]) -> Self {
+        let eq = GruenSplitEqPolynomial::new(tau, BindingOrder::LowToHigh);
+        let claim = initial_claim_eq(&p, &q, &eq);
+        Self { p, q, eq, claim }
+    }
+}
+
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
+    for Degree2EqProductSumcheckProver<F>
+{
+    fn degree(&self) -> usize {
+        DEGREE_BOUND + 1
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.p.get_num_vars()
+    }
+
+    fn input_claim(&self, _accumulator: &ProverOpeningAccumulator<F>) -> F {
+        self.claim
+    }
+
+    fn compute_message(&mut self, _round: usize, previous_claim: F) -> UniPoly<F> {
+        let current_scalar = self.eq.get_current_scalar();
+        let r_round = self.eq.get_current_w();
+
+        // Use split-eq unreduced accumulation: eq * p * q → degree 3
+        // Evaluate g(X)/eq(X, r_round) at X=1 and X=∞ using par_fold_out_in_unreduced
+        let [eval_at_1, eval_at_inf]: [F; 2] = self.eq.par_fold_out_in_unreduced(&|g| {
+            let p0 = self.p[2 * g];
+            let p1 = self.p[2 * g + 1];
+            let q0 = self.q[2 * g];
+            let q1 = self.q[2 * g + 1];
+            [p1 * q1, (p1 - p0) * (q1 - q0)]
+        });
+
+        let eval_at_1 = eval_at_1 * current_scalar;
+        let eval_at_inf = eval_at_inf * current_scalar;
+
+        // Recover eval_at_0 from the claim
+        let eq_at_0 = F::one() - r_round;
+        let eq_at_1 = r_round;
+        let eval_at_0 = (previous_claim - eq_at_1 * eval_at_1) / eq_at_0;
+
+        // Interpolate quotient polynomial q(X) where g(X) = eq(X, r) * q(X)
+        // q(X) is degree 2, known at 0, 1, ∞
+        // q(0) = eval_at_0, q(1) = eval_at_1, leading coeff = eval_at_inf
+        let q_a = eval_at_inf;
+        let q_b = eval_at_1 - eval_at_0 - q_a;
+        let q_c = eval_at_0;
+
+        // g(X) = eq(X, r) * q(X) = ((1-r) + (2r-1)X) * (q_c + q_b*X + q_a*X^2)
+        let eq_const = F::one() - r_round;
+        let eq_x = r_round + r_round - F::one();
+
+        let c0 = eq_const * q_c;
+        let c1 = eq_x * q_c + eq_const * q_b;
+        let c2 = eq_x * q_b + eq_const * q_a;
+        let c3 = eq_x * q_a;
+
+        UniPoly::from_coeff(vec![c0, c1, c2, c3])
+    }
+
+    fn ingest_challenge(&mut self, r_j: F::Challenge, _round: usize) {
+        self.p.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.q.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.eq.bind(r_j);
+    }
+
+    fn cache_openings(
+        &self,
+        _accumulator: &mut ProverOpeningAccumulator<F>,
+        _transcript: &mut T,
+        _sumcheck_challenges: &[F::Challenge],
+    ) {
+    }
+
+    #[cfg(feature = "allocative")]
+    fn update_flamegraph(&self, flamegraph: &mut allocative::FlameGraphBuilder) {
+        flamegraph.visit_root(self);
+    }
+}
+
+fn run_degree2_eq_sumcheck<F: JoltField>(
+    num_vars: usize,
+    p: &DensePolynomial<F>,
+    q: &DensePolynomial<F>,
+    tau: &[F::Challenge],
+) {
+    let mut prover = Degree2EqProductSumcheckProver::new(p.clone(), q.clone(), tau);
+    let mut prover_acc = ProverOpeningAccumulator::<F>::new(num_vars);
+    let mut prover_tr = Blake2bTranscript::new(b"degree2_eq_sumcheck");
+    let instances: Vec<&mut dyn SumcheckInstanceProver<F, Blake2bTranscript>> = vec![&mut prover];
+    let _ = BatchedSumcheck::prove(instances, &mut prover_acc, &mut prover_tr);
+}
+
+fn degree2_eq_sumcheck_bench(c: &mut Criterion) {
+    let mut group = c.benchmark_group("degree2_eq_sumcheck");
+    group.sample_size(10);
+
+    for &num_vars in &[14usize, 16, 18, 20, 22, 24] {
+        let mut rng_fr = StdRng::seed_from_u64(42 + num_vars as u64);
+        let mut rng_fp = StdRng::seed_from_u64(42 + num_vars as u64);
+
+        let p_fr: DensePolynomial<Fr> = random_dense_polynomial(num_vars, &mut rng_fr);
+        let q_fr: DensePolynomial<Fr> = random_dense_polynomial(num_vars, &mut rng_fr);
+        let tau_fr: Vec<<Fr as JoltField>::Challenge> = (0..num_vars)
+            .map(|_| <Fr as JoltField>::Challenge::random(&mut rng_fr))
+            .collect();
+
+        let p_fp: DensePolynomial<JoltFp128> = random_dense_polynomial(num_vars, &mut rng_fp);
+        let q_fp: DensePolynomial<JoltFp128> = random_dense_polynomial(num_vars, &mut rng_fp);
+        let tau_fp: Vec<<JoltFp128 as JoltField>::Challenge> = (0..num_vars)
+            .map(|_| <JoltFp128 as JoltField>::Challenge::random(&mut rng_fp))
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("BN254", format!("vars={num_vars}")),
+            &num_vars,
+            |b, &n| {
+                b.iter(|| {
+                    run_degree2_eq_sumcheck(
+                        black_box(n),
+                        black_box(&p_fr),
+                        black_box(&q_fr),
+                        black_box(&tau_fr),
+                    )
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("Fp128", format!("vars={num_vars}")),
+            &num_vars,
+            |b, &n| {
+                b.iter(|| {
+                    run_degree2_eq_sumcheck(
+                        black_box(n),
+                        black_box(&p_fp),
+                        black_box(&q_fp),
+                        black_box(&tau_fp),
+                    )
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, degree2_sumcheck_bench, degree2_eq_sumcheck_bench);
 criterion_main!(benches);

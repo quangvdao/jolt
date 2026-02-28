@@ -593,7 +593,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                         &trace,
                         Some(&self.one_hot_params),
                     );
-                    PCS::commit(&witness, &self.preprocessing.generators)
+                    PCS::default().commit(&witness, &self.preprocessing.generators)
                 })
                 .unzip();
 
@@ -653,7 +653,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 .zip(&polys)
                 .map(|(tier1_commitments, poly)| {
                     let onehot_k = poly.get_onehot_k(&self.one_hot_params);
-                    PCS::aggregate_chunks(
+                    PCS::default().aggregate_chunks(
                         &self.preprocessing.generators,
                         onehot_k,
                         &tier1_commitments,
@@ -698,7 +698,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let _guard =
             DoryGlobals::initialize_context(1, advice_len, DoryContext::UntrustedAdvice, None);
         let _ctx = DoryGlobals::with_context(DoryContext::UntrustedAdvice);
-        let (commitment, hint) = PCS::commit(&poly, &self.preprocessing.generators);
+        let (commitment, hint) = PCS::default().commit(&poly, &self.preprocessing.generators);
         self.transcript
             .append_serializable(b"untrusted_advice", &commitment);
 
@@ -1503,7 +1503,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             poly_ids,
         };
 
-        PCS::batch_prove(
+        PCS::default().batch_prove(
             &self.preprocessing.generators,
             &poly_source,
             hints,
@@ -1653,7 +1653,7 @@ mod tests {
             DoryGlobals::initialize_context(1, advice_len, DoryContext::TrustedAdvice, None);
         let (commitment, hint) = {
             let _ctx = DoryGlobals::with_context(DoryContext::TrustedAdvice);
-            DoryCommitmentScheme::commit(&poly, &preprocessing.generators)
+            DoryCommitmentScheme::default().commit(&poly, &preprocessing.generators)
         };
         (commitment, hint)
     }

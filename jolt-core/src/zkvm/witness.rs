@@ -155,9 +155,11 @@ impl CommittedPolynomial {
                         Some(one_hot_params.bytecode_pc_chunk(pc, *i))
                     })
                     .collect();
+                let t = addresses.len();
                 MultilinearPolynomial::OneHot(OneHotPolynomial::from_indices(
                     addresses,
                     one_hot_params.k_chunk,
+                    t,
                 ))
             }
             CommittedPolynomial::RamRa(i) => {
@@ -169,9 +171,11 @@ impl CommittedPolynomial {
                             .map(|address| one_hot_params.ram_address_chunk(address, *i))
                     })
                     .collect();
+                let t = addresses.len();
                 MultilinearPolynomial::OneHot(OneHotPolynomial::from_indices(
                     addresses,
                     one_hot_params.k_chunk,
+                    t,
                 ))
             }
             CommittedPolynomial::RdInc => {
@@ -208,9 +212,11 @@ impl CommittedPolynomial {
                         Some(one_hot_params.lookup_index_chunk(lookup_index, *i))
                     })
                     .collect();
+                let t = addresses.len();
                 MultilinearPolynomial::OneHot(OneHotPolynomial::from_indices(
                     addresses,
                     one_hot_params.k_chunk,
+                    t,
                 ))
             }
             CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {

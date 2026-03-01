@@ -1,11 +1,7 @@
-//! This is an implementation of one-hot multilinear polynomials as
-//! necessary for Dory. In particular, this implementation is _not_ used
-//! in the Twist/Shout PIOP implementations in Jolt.
-
 use crate::field::JoltField;
 use crate::msm::VariableBaseMSM;
-use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
 use crate::poly::eq_poly::EqPolynomial;
+use crate::poly::matrix_layout::MatrixLayout;
 use crate::utils::math::Math;
 use allocative::Allocative;
 use ark_bn254::G1Affine;
@@ -30,7 +26,6 @@ pub struct OneHotPolynomial<F: JoltField> {
     /// ra/wa polynomial.
     /// If empty, this polynomial is 0 for all j.
     pub nonzero_indices: Arc<Vec<Option<u8>>>,
-    /// PhantomData to hold the field type parameter.
     _marker: PhantomData<F>,
 }
 
@@ -51,16 +46,10 @@ impl<F: JoltField> Default for OneHotPolynomial<F> {
 }
 
 impl<F: JoltField> OneHotPolynomial<F> {
-    /// The number of rows in the coefficient matrix used to
-    /// commit to this polynomial using Dory.
-    ///
-    /// Note: the Dory matrix may be square or almost-square depending on `log2(K*T)`.
-    pub fn num_rows(&self) -> usize {
+    /// The number of rows in the coefficient matrix used to commit to this polynomial.
+    pub fn num_rows(&self, layout: &MatrixLayout) -> usize {
         let t = self.nonzero_indices.len();
-        match DoryGlobals::get_layout() {
-            DoryLayout::AddressMajor => t.div_ceil(DoryGlobals::address_major_cycles_per_row()),
-            DoryLayout::CycleMajor => (t * self.K).div_ceil(DoryGlobals::get_num_columns()),
-        }
+        layout.one_hot_num_rows(self.K, t)
     }
 
     pub fn get_num_vars(&self) -> usize {
@@ -68,13 +57,11 @@ impl<F: JoltField> OneHotPolynomial<F> {
     }
 
     #[cfg(test)]
-    fn to_dense_poly(&self) -> DensePolynomial<F> {
-        let T = DoryGlobals::get_T();
+    fn to_dense_poly(&self, T: usize) -> DensePolynomial<F> {
         let mut dense_coeffs: Vec<F> = vec![F::zero(); self.K * T];
         for (t, k) in self.nonzero_indices.iter().enumerate() {
             if let Some(k) = k {
                 let log_K = self.K.log_2();
-                // NOTE: log_K variables are reversed for testing purposes of low to high
                 let k = (k & !((1 << log_K) - 1))
                     | ((k & ((1 << log_K) - 1)).reverse_bits() >> (u8::BITS as usize - log_K));
                 dense_coeffs[k as usize * T + t] = F::one();
@@ -103,8 +90,8 @@ impl<F: JoltField> OneHotPolynomial<F> {
             .sum()
     }
 
-    pub fn from_indices(nonzero_indices: Vec<Option<u8>>, K: usize) -> Self {
-        debug_assert_eq!(DoryGlobals::get_T(), nonzero_indices.len());
+    pub fn from_indices(nonzero_indices: Vec<Option<u8>>, K: usize, T: usize) -> Self {
+        debug_assert_eq!(T, nonzero_indices.len());
         assert!(K <= 1usize << u8::BITS, "K must be <= 256 for indices");
 
         Self {
@@ -118,23 +105,22 @@ impl<F: JoltField> OneHotPolynomial<F> {
     pub fn commit_rows<G: CurveGroup<ScalarField = F> + VariableBaseMSM>(
         &self,
         bases: &[G::Affine],
+        layout: &MatrixLayout,
     ) -> Vec<G> {
-        let layout = DoryGlobals::get_layout();
-        let num_rows = self.num_rows();
-        let row_len = DoryGlobals::get_num_columns();
+        let num_rows = self.num_rows(layout);
+        let row_len = layout.num_columns;
         let t = self.nonzero_indices.len();
 
         debug_assert!(
             bases.len() >= row_len,
-            "Expected at least row_len bases for Dory row commitments"
+            "Expected at least row_len bases for row commitments"
         );
 
-        // Safety: This function is only called with G1Affine
+        // SAFETY: This function is only called with G1Affine
         let g1_bases = unsafe { std::mem::transmute::<&[G::Affine], &[G1Affine]>(bases) };
 
-        // CycleMajor optimization for T >> K: process by cycle chunks, group by address
         let rows_per_k = t / row_len;
-        if layout == DoryLayout::CycleMajor && rows_per_k >= rayon::current_num_threads() {
+        if layout.cycle_major && rows_per_k >= rayon::current_num_threads() {
             let chunk_commitments: Vec<Vec<G>> = self
                 .nonzero_indices
                 .par_chunks(row_len)
@@ -170,7 +156,6 @@ impl<F: JoltField> OneHotPolynomial<F> {
             return result;
         }
 
-        // General path: collect column indices for each row based on layout
         let mut row_indices: Vec<Vec<usize>> = vec![Vec::new(); num_rows];
         for (cycle, k) in self.nonzero_indices.iter().enumerate() {
             if let Some(k) = k {
@@ -183,7 +168,6 @@ impl<F: JoltField> OneHotPolynomial<F> {
             }
         }
 
-        // Process rows using batch additions
         let num_chunks = rayon::current_num_threads().next_power_of_two();
         let chunk_size = num_rows.div_ceil(num_chunks).max(1);
         let mut result: Vec<G> = vec![G::zero(); num_rows];
@@ -208,14 +192,18 @@ impl<F: JoltField> OneHotPolynomial<F> {
     }
 
     #[tracing::instrument(skip_all, name = "OneHotPolynomial::vector_matrix_product")]
-    pub fn vector_matrix_product(&self, left_vec: &[F], coeff: F, result: &mut [F]) {
-        let layout = DoryGlobals::get_layout();
+    pub fn vector_matrix_product(
+        &self,
+        left_vec: &[F],
+        coeff: F,
+        result: &mut [F],
+        layout: &MatrixLayout,
+    ) {
         let t = self.nonzero_indices.len();
-        let num_columns = DoryGlobals::get_num_columns();
+        let num_columns = layout.num_columns;
         debug_assert_eq!(result.len(), num_columns);
 
-        // CycleMajor optimization for T >= row_len (typical case where T >= K)
-        if layout == DoryLayout::CycleMajor && t >= num_columns {
+        if layout.cycle_major && t >= num_columns {
             let rows_per_k = t / num_columns;
             result
                 .par_iter_mut()
@@ -233,7 +221,6 @@ impl<F: JoltField> OneHotPolynomial<F> {
             return;
         }
 
-        // General path: iterate through nonzero indices and compute contributions
         for (cycle, k) in self.nonzero_indices.iter().enumerate() {
             if let Some(k) = k {
                 let global_index = layout.address_cycle_to_index(*k as usize, cycle, self.K, t);
@@ -250,32 +237,42 @@ impl<F: JoltField> OneHotPolynomial<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::poly::commitment::dory::DoryContext;
+    use crate::poly::commitment::dory::{DoryContext, DoryGlobals, DoryLayout};
     use ark_bn254::Fr;
     use ark_std::test_rng;
     use rand_core::RngCore;
     use serial_test::serial;
+
+    fn layout_from_globals() -> MatrixLayout {
+        let (num_rows, num_columns) = DoryGlobals::matrix_shape();
+        MatrixLayout {
+            num_columns,
+            num_rows,
+            T: DoryGlobals::get_T(),
+            cycle_major: DoryGlobals::get_layout() == DoryLayout::CycleMajor,
+        }
+    }
 
     fn evaluate_test<const LOG_K: usize, const LOG_T: usize>() {
         let K: usize = 1 << LOG_K;
         let T: usize = 1 << LOG_T;
         DoryGlobals::reset();
         let _guard = DoryGlobals::initialize_context(K, T, DoryContext::Main, None);
+        let layout = layout_from_globals();
 
         let mut rng = test_rng();
 
         let nonzero_indices: Vec<_> = (0..T)
             .map(|_| Some((rng.next_u64() % K as u64) as u8))
             .collect();
-        let one_hot_poly = OneHotPolynomial::<Fr>::from_indices(nonzero_indices, K);
-        let dense_poly = one_hot_poly.to_dense_poly();
+        let one_hot_poly = OneHotPolynomial::<Fr>::from_indices(nonzero_indices, K, T);
+        let dense_poly = one_hot_poly.to_dense_poly(layout.T);
 
         let mut r: Vec<<Fr as JoltField>::Challenge> =
             std::iter::repeat_with(|| <Fr as JoltField>::Challenge::random(&mut rng))
                 .take(LOG_K + LOG_T)
                 .collect();
         let r_one_hot = r.clone();
-        // We reverse because `one_hot_poly.to_dense_poly()` has K variables reversed
         r[..LOG_K].reverse();
 
         assert_eq!(one_hot_poly.evaluate(&r_one_hot), dense_poly.evaluate(&r));

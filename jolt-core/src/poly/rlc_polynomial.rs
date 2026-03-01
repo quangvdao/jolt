@@ -320,11 +320,11 @@ impl<F: JoltField> RLCPolynomial<F> {
             dense_result
         };
 
-        // Compute the **linear space** vector-matrix product for one-hot polynomials
+        let layout = DoryGlobals::matrix_layout();
         for (coeff, poly) in self.one_hot_rlc.iter() {
             match poly.as_ref() {
                 MultilinearPolynomial::OneHot(one_hot) => {
-                    one_hot.vector_matrix_product(left_vec, *coeff, &mut result);
+                    one_hot.vector_matrix_product(left_vec, *coeff, &mut result, &layout);
                 }
                 _ => panic!("Expected OneHot polynomial in one_hot_rlc"),
             }

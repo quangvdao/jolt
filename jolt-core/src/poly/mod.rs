@@ -6,6 +6,7 @@ pub mod eq_poly;
 pub mod identity_poly;
 pub mod lagrange_poly;
 pub mod lt_poly;
+pub mod matrix_layout;
 pub mod multilinear_polynomial;
 pub mod multiquadratic_poly;
 pub mod one_hot_polynomial;

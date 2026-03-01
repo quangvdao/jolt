@@ -1,5 +1,6 @@
 //! Global state management for Dory parameters
 
+use crate::poly::matrix_layout::MatrixLayout;
 use crate::utils::math::Math;
 use allocative::Allocative;
 use dory::backends::arkworks::{init_cache, ArkG1, ArkG2};
@@ -290,6 +291,16 @@ impl DoryGlobals {
             "Expected T to be divisible by num_rows"
         );
         num_cols / k
+    }
+
+    pub fn matrix_layout() -> MatrixLayout {
+        let (num_rows, num_columns) = Self::matrix_shape();
+        MatrixLayout {
+            num_columns,
+            num_rows,
+            T: Self::get_T(),
+            cycle_major: Self::get_layout() == DoryLayout::CycleMajor,
+        }
     }
 
     fn set_max_num_rows_for_context(max_num_rows: usize, context: DoryContext) {

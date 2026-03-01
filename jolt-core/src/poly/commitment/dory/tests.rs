@@ -406,7 +406,7 @@ mod tests {
             })
             .collect();
 
-        let one_hot_poly = OneHotPolynomial::from_indices(nonzero_indices, K);
+        let one_hot_poly = OneHotPolynomial::from_indices(nonzero_indices, K, T);
         let num_vars = one_hot_poly.get_num_vars();
         let poly = MultilinearPolynomial::OneHot(one_hot_poly);
 
@@ -805,7 +805,7 @@ mod tests {
             })
             .collect();
 
-        let one_hot_poly = OneHotPolynomial::from_indices(nonzero_indices, K);
+        let one_hot_poly = OneHotPolynomial::from_indices(nonzero_indices, K, T);
         let num_vars = one_hot_poly.get_num_vars();
         let poly = MultilinearPolynomial::OneHot(one_hot_poly);
 
@@ -888,7 +888,7 @@ mod tests {
                 }
             })
             .collect();
-        let one_hot_poly = OneHotPolynomial::<Fr>::from_indices(nonzero_indices.clone(), K);
+        let one_hot_poly = OneHotPolynomial::<Fr>::from_indices(nonzero_indices.clone(), K, T);
 
         let dense_rlc_coeff: Fr = Fr::rand(&mut rng);
         let one_hot_rlc_coeff: Fr = Fr::rand(&mut rng);

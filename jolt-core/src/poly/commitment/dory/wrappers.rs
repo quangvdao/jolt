@@ -172,7 +172,8 @@ impl MultilinearLagrange<ArkFr> for MultilinearPolynomial<Fr> {
             }
             MultilinearPolynomial::OneHot(poly) => {
                 let mut result = vec![Fr::zero(); num_cols];
-                poly.vector_matrix_product(&wrapped_left_side, Fr::one(), &mut result);
+                let layout = DoryGlobals::matrix_layout();
+                poly.vector_matrix_product(&wrapped_left_side, Fr::one(), &mut result, &layout);
                 result.into_iter().map(|v| jolt_to_ark(&v)).collect()
             }
             // In Jolt, we always perform the Dory opening proof using an RLCPolynomial
@@ -314,7 +315,8 @@ where
                 .take(row_len)
                 .map(|g| g.0.into_affine())
                 .collect();
-            poly.commit_rows(&affine_bases)
+            let layout = DoryGlobals::matrix_layout();
+            poly.commit_rows(&affine_bases, &layout)
                 .into_iter()
                 .map(ArkG1)
                 .collect()

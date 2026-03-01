@@ -412,8 +412,10 @@ fn bn254_accum_microbench(c: &mut Criterion) {
             bench.iter(|| {
                 let mut acc = FoldedBn254Accum::zero();
                 for i in 0..a_unreduced.len() {
-                    acc +=
-                        FoldedBn254Accum::from_mul(black_box(a_unreduced[i]), black_box(b_unreduced[i]));
+                    acc += FoldedBn254Accum::from_mul(
+                        black_box(a_unreduced[i]),
+                        black_box(b_unreduced[i]),
+                    );
                 }
                 let result = <Fr as JoltField>::reduce_product_accum(acc);
                 black_box(result)

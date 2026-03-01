@@ -4,11 +4,12 @@ use std::marker::PhantomData;
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::opening_proof::BatchPolynomialSource;
 use crate::transcripts::Transcript;
 use crate::utils::errors::ProofVerifyError;
+use crate::utils::small_scalar::SmallScalar;
 use hachi_pcs::primitives::multilinear_evals::DenseMultilinearEvals;
 use hachi_pcs::protocol::commitment::CommitmentConfig;
 use hachi_pcs::protocol::commitment::RingCommitment;
@@ -183,6 +184,47 @@ where
 
     fn protocol_name() -> &'static [u8] {
         b"Hachi"
+    }
+}
+
+impl<const D: usize, Cfg> StreamingCommitmentScheme for JoltHachiCommitmentScheme<D, Cfg>
+where
+    Cfg: CommitmentConfig + Default,
+{
+    type ChunkState = ();
+
+    #[allow(non_snake_case)]
+    fn streaming_chunk_size(&self, _K: usize, _T: usize) -> Option<usize> {
+        // Hachi streaming requires chunk alignment between dense (T-element)
+        // and one-hot (K*T-element) polynomial layouts. Returning None forces
+        // the non-streaming path (materialize full polynomial, then commit).
+        None
+    }
+
+    fn process_chunk<T: SmallScalar>(
+        &self,
+        _setup: &Self::ProverSetup,
+        _chunk: &[T],
+    ) -> Self::ChunkState {
+        unreachable!("streaming_chunk_size returns None")
+    }
+
+    fn process_chunk_onehot(
+        &self,
+        _setup: &Self::ProverSetup,
+        _onehot_k: usize,
+        _chunk: &[Option<usize>],
+    ) -> Self::ChunkState {
+        unreachable!("streaming_chunk_size returns None")
+    }
+
+    fn aggregate_chunks(
+        &self,
+        _setup: &Self::ProverSetup,
+        _onehot_k: Option<usize>,
+        _tier1_commitments: &[Self::ChunkState],
+    ) -> (Self::Commitment, Self::OpeningProofHint) {
+        unreachable!("streaming_chunk_size returns None")
     }
 }
 

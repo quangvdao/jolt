@@ -329,6 +329,15 @@ impl DoryCommitmentScheme {
 impl StreamingCommitmentScheme for DoryCommitmentScheme {
     type ChunkState = Vec<ArkG1>;
 
+    #[allow(non_snake_case)]
+    fn streaming_chunk_size(&self, _K: usize, _T: usize) -> Option<usize> {
+        if DoryGlobals::get_layout() == DoryLayout::AddressMajor {
+            None
+        } else {
+            Some(DoryGlobals::get_num_columns())
+        }
+    }
+
     #[tracing::instrument(skip_all, name = "DoryCommitmentScheme::compute_tier1_commitment")]
     fn process_chunk<T: SmallScalar>(
         &self,

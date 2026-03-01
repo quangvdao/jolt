@@ -29,10 +29,7 @@ use crate::{
     field::JoltField,
     guest,
     poly::{
-        commitment::{
-            commitment_scheme::StreamingCommitmentScheme,
-            dory::{DoryGlobals, DoryLayout},
-        },
+        commitment::{commitment_scheme::StreamingCommitmentScheme, dory::DoryGlobals},
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{
             compute_advice_lagrange_factor, OpeningAccumulator, ProverOpeningAccumulator,
@@ -568,57 +565,27 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         let polys = all_committed_polynomials(&self.one_hot_params);
         let T = DoryGlobals::get_T();
+        let K = 1usize << self.one_hot_params.log_k_chunk;
+        let pcs = PCS::default();
 
-        // For AddressMajor, use non-streaming commit path since streaming assumes CycleMajor layout
-        let (commitments, hint_map) = if DoryGlobals::get_layout() == DoryLayout::AddressMajor {
-            tracing::debug!(
-                "Using non-streaming commit path for AddressMajor layout with {} polynomials",
-                polys.len()
-            );
-
-            // Materialize the trace for non-streaming commit
-            let trace: Vec<Cycle> = self
-                .lazy_trace
-                .clone()
-                .pad_using(T, |_| Cycle::NoOp)
-                .collect();
-
-            // Generate witnesses and commit using the regular (non-streaming) path
-            let (commitments, hints): (Vec<_>, Vec<_>) = polys
-                .par_iter()
-                .map(|poly_id| {
-                    let witness: MultilinearPolynomial<F> = poly_id.generate_witness(
-                        &self.preprocessing.shared.bytecode,
-                        &self.preprocessing.shared.memory_layout,
-                        &trace,
-                        Some(&self.one_hot_params),
-                    );
-                    PCS::default().commit(&witness, &self.preprocessing.generators)
-                })
-                .unzip();
-
-            let hint_map = HashMap::from_iter(zip_eq(polys, hints));
-            (commitments, hint_map)
-        } else {
-            // CycleMajor: use streaming
-            let row_len = DoryGlobals::get_num_columns();
-            let num_rows = T / DoryGlobals::get_max_num_rows();
+        let (commitments, hint_map) = if let Some(chunk_size) = pcs.streaming_chunk_size(K, T) {
+            let num_chunks = T / chunk_size;
 
             tracing::debug!(
-                "Generating and committing {} witness polynomials with T={}, row_len={}, num_rows={}",
+                "Streaming commit: {} polynomials, T={}, chunk_size={}, num_chunks={}",
                 polys.len(),
                 T,
-                row_len,
-                num_rows
+                chunk_size,
+                num_chunks,
             );
 
-            // Tier 1: Compute row commitments for each polynomial
-            let mut row_commitments: Vec<Vec<PCS::ChunkState>> = vec![vec![]; num_rows];
+            // Tier 1: Compute chunk commitments for each polynomial
+            let mut row_commitments: Vec<Vec<PCS::ChunkState>> = vec![vec![]; num_chunks];
 
             self.lazy_trace
                 .clone()
                 .pad_using(T, |_| Cycle::NoOp)
-                .iter_chunks(row_len)
+                .iter_chunks(chunk_size)
                 .zip(row_commitments.iter_mut())
                 .par_bridge()
                 .for_each(|(chunk, row_tier1_commitments)| {
@@ -636,7 +603,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                     *row_tier1_commitments = res;
                 });
 
-            // Transpose: row_commitments[row][poly] -> tier1_per_poly[poly][row]
+            // Transpose: row_commitments[chunk][poly] -> tier1_per_poly[poly][chunk]
             let tier1_per_poly: Vec<Vec<PCS::ChunkState>> = (0..polys.len())
                 .into_par_iter()
                 .map(|poly_idx| {
@@ -653,11 +620,35 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 .zip(&polys)
                 .map(|(tier1_commitments, poly)| {
                     let onehot_k = poly.get_onehot_k(&self.one_hot_params);
-                    PCS::default().aggregate_chunks(
+                    pcs.aggregate_chunks(
                         &self.preprocessing.generators,
                         onehot_k,
                         &tier1_commitments,
                     )
+                })
+                .unzip();
+
+            let hint_map = HashMap::from_iter(zip_eq(polys, hints));
+            (commitments, hint_map)
+        } else {
+            tracing::debug!("Non-streaming commit: {} polynomials, T={}", polys.len(), T,);
+
+            let trace: Vec<Cycle> = self
+                .lazy_trace
+                .clone()
+                .pad_using(T, |_| Cycle::NoOp)
+                .collect();
+
+            let (commitments, hints): (Vec<_>, Vec<_>) = polys
+                .par_iter()
+                .map(|poly_id| {
+                    let witness: MultilinearPolynomial<F> = poly_id.generate_witness(
+                        &self.preprocessing.shared.bytecode,
+                        &self.preprocessing.shared.memory_layout,
+                        &trace,
+                        Some(&self.one_hot_params),
+                    );
+                    pcs.commit(&witness, &self.preprocessing.generators)
                 })
                 .unzip();
 

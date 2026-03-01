@@ -107,6 +107,14 @@ pub trait StreamingCommitmentScheme: CommitmentScheme {
     /// The type representing chunk state (tier 1 commitments)
     type ChunkState: Send + Sync + Clone + PartialEq + Debug;
 
+    /// Chunk size in field elements for streaming commit.
+    ///
+    /// Returns `Some(size)` to use the streaming path where the trace is
+    /// split into chunks of `size` cycles, or `None` to use the non-streaming
+    /// path (materialize full polynomial, then commit).
+    #[allow(non_snake_case)]
+    fn streaming_chunk_size(&self, K: usize, T: usize) -> Option<usize>;
+
     fn process_chunk<T: SmallScalar>(
         &self,
         setup: &Self::ProverSetup,

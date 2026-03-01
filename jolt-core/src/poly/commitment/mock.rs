@@ -151,6 +151,11 @@ where
 {
     type ChunkState = ();
 
+    #[allow(non_snake_case)]
+    fn streaming_chunk_size(&self, _K: usize, _T: usize) -> Option<usize> {
+        None
+    }
+
     fn process_chunk<T: SmallScalar>(
         &self,
         _setup: &Self::ProverSetup,

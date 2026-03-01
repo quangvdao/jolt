@@ -5,8 +5,13 @@ use crate::field::JoltField;
 use crate::utils::math::Math;
 use crate::zkvm::instruction_lookups::LOG_K;
 use common::constants::{
-    INSTRUCTION_PHASES_THRESHOLD_LOG_T, ONEHOT_CHUNK_THRESHOLD_LOG_T, REGISTER_COUNT,
+    INSTRUCTION_PHASES_THRESHOLD_LOG_T, ONEHOT_CHUNK_THRESHOLD_LOG_T, REGISTER_COUNT, XLEN,
 };
+
+/// Bits needed to represent the unsigned offset increment.
+/// Increment range is `[-(2^XLEN - 1), 2^XLEN - 1]`; adding `2^XLEN` maps to `[1, 2^{XLEN+1} - 1]`,
+/// which requires XLEN+1 bits.
+const INC_BITS: usize = XLEN + 1;
 
 /// Returns the number of phases for instruction sumcheck based on trace length.
 ///
@@ -213,6 +218,9 @@ pub struct OneHotParams {
     pub instruction_d: usize,
     pub bytecode_d: usize,
     pub ram_d: usize,
+    /// Number of one-hot chunks per increment polynomial.
+    /// `d_inc = ceil(INC_BITS / log_k_chunk)` where INC_BITS = 65 (signed 64-bit range).
+    pub d_inc: usize,
 
     instruction_shifts: Vec<usize>,
     ram_shifts: Vec<usize>,
@@ -231,6 +239,7 @@ impl OneHotParams {
         let instruction_d = LOG_K.div_ceil(log_k_chunk);
         let bytecode_d = bytecode_k.log_2().div_ceil(log_k_chunk);
         let ram_d = ram_k.log_2().div_ceil(log_k_chunk);
+        let d_inc = INC_BITS.div_ceil(log_k_chunk);
 
         let instruction_shifts = (0..instruction_d)
             .map(|i| log_k_chunk * (instruction_d - 1 - i))
@@ -249,6 +258,7 @@ impl OneHotParams {
             instruction_d,
             bytecode_d,
             ram_d,
+            d_inc,
             instruction_shifts,
             ram_shifts,
             bytecode_shifts,
@@ -283,6 +293,16 @@ impl OneHotParams {
         ((index >> self.instruction_shifts[idx]) & (self.k_chunk - 1) as u128) as u8
     }
 
+    /// Extract the `idx`-th chunk from an unsigned-offset increment value.
+    ///
+    /// `unsigned_inc = (post_value as i128 - pre_value as i128) + (1 << XLEN)`,
+    /// which maps the signed range to `[1, 2^{XLEN+1} - 1]`.
+    /// Chunk 0 is the MOST significant chunk (big-endian, matching instruction/bytecode/ram ordering).
+    pub fn inc_chunk(&self, unsigned_inc: u128, idx: usize) -> u8 {
+        let shift = self.log_k_chunk * (self.d_inc - 1 - idx);
+        ((unsigned_inc >> shift) & (self.k_chunk - 1) as u128) as u8
+    }
+
     pub fn compute_r_address_chunks<F: JoltField>(
         &self,
         r_address: &[F::Challenge],
@@ -306,5 +326,70 @@ impl OneHotParams {
             .collect();
 
         r_address_chunks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inc_chunk_roundtrip() {
+        let params = OneHotParams::new(25, 256, 256);
+        assert_eq!(params.log_k_chunk, 8);
+        assert_eq!(params.d_inc, INC_BITS.div_ceil(8));
+        assert_eq!(params.d_inc, 9);
+
+        let test_cases: Vec<i128> = vec![
+            0,
+            1,
+            -1,
+            127,
+            -128,
+            255,
+            -256,
+            (1i128 << 63) - 1,
+            -(1i128 << 63),
+            (1i128 << 64) - 1,
+            -((1i128 << 64) - 1),
+        ];
+
+        for inc in test_cases {
+            let unsigned = (inc + (1i128 << XLEN)) as u128;
+            let mut reconstructed: u128 = 0;
+            for d in 0..params.d_inc {
+                let chunk = params.inc_chunk(unsigned, d) as u128;
+                assert!(chunk < params.k_chunk as u128);
+                let shift = params.log_k_chunk * (params.d_inc - 1 - d);
+                reconstructed |= chunk << shift;
+            }
+            assert_eq!(
+                reconstructed, unsigned,
+                "roundtrip failed for inc={inc}: unsigned={unsigned}, reconstructed={reconstructed}"
+            );
+            let recovered_inc = reconstructed as i128 - (1i128 << XLEN);
+            assert_eq!(recovered_inc, inc, "value recovery failed for inc={inc}");
+        }
+    }
+
+    #[test]
+    fn inc_chunk_roundtrip_k4() {
+        let params = OneHotParams::new(10, 16, 16);
+        assert_eq!(params.log_k_chunk, 4);
+        assert_eq!(params.d_inc, INC_BITS.div_ceil(4));
+        assert_eq!(params.d_inc, 17);
+
+        let test_cases: Vec<i128> = vec![0, 1, -1, (1i128 << 64) - 1, -((1i128 << 64) - 1)];
+        for inc in test_cases {
+            let unsigned = (inc + (1i128 << XLEN)) as u128;
+            let mut reconstructed: u128 = 0;
+            for d in 0..params.d_inc {
+                let chunk = params.inc_chunk(unsigned, d) as u128;
+                assert!(chunk < params.k_chunk as u128);
+                let shift = params.log_k_chunk * (params.d_inc - 1 - d);
+                reconstructed |= chunk << shift;
+            }
+            assert_eq!(reconstructed, unsigned);
+        }
     }
 }

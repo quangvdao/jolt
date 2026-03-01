@@ -204,7 +204,9 @@ impl<F: JoltField> RLCPolynomial<F> {
                 }
                 CommittedPolynomial::InstructionRa(_)
                 | CommittedPolynomial::BytecodeRa(_)
-                | CommittedPolynomial::RamRa(_) => {
+                | CommittedPolynomial::RamRa(_)
+                | CommittedPolynomial::RdIncRa(_)
+                | CommittedPolynomial::RamIncRa(_) => {
                     onehot_polys.push((*poly_id, *coeff));
                 }
                 CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {

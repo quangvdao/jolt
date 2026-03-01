@@ -61,6 +61,12 @@ pub fn all_committed_polynomials(one_hot_params: &OneHotParams) -> Vec<Committed
     for i in 0..one_hot_params.bytecode_d {
         polynomials.push(CommittedPolynomial::BytecodeRa(i));
     }
+    for i in 0..one_hot_params.d_inc {
+        polynomials.push(CommittedPolynomial::RdIncRa(i));
+    }
+    for i in 0..one_hot_params.d_inc {
+        polynomials.push(CommittedPolynomial::RamIncRa(i));
+    }
     polynomials
 }
 

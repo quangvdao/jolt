@@ -1,5 +1,6 @@
 use crate::field::{BarrettReduce, FMAdd, JoltField};
-use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
+use crate::poly::commitment::dory::balanced_sigma_nu;
+use crate::poly::matrix_layout::MatrixLayout;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::utils::accumulation::MedAccumS;
 use crate::utils::math::{s64_from_diff_u64s, Math};
@@ -81,6 +82,11 @@ pub struct RLCPolynomial<F: JoltField> {
     /// When present, dense_rlc and one_hot_rlc are not materialized.
     #[allocative(skip)]
     pub streaming_context: Option<Arc<StreamingRLCContext<F>>>,
+    /// Matrix layout for VMV computation. Required for Dory batch opening
+    /// (vector_matrix_product, len). None for non-Dory paths (e.g. HyperKZG)
+    /// that only use RLCPolynomial as an eager linear combination container.
+    #[allocative(skip)]
+    pub layout: Option<MatrixLayout>,
 }
 
 impl<F: JoltField> PartialEq for RLCPolynomial<F> {
@@ -91,16 +97,18 @@ impl<F: JoltField> PartialEq for RLCPolynomial<F> {
 }
 
 impl<F: JoltField> RLCPolynomial<F> {
-    /// Total number of coefficients in the Dory matrix for this RLC polynomial.
+    /// Total number of coefficients in the matrix for this RLC polynomial.
     pub fn len(&self) -> usize {
-        DoryGlobals::get_num_columns() * DoryGlobals::get_max_num_rows()
+        let layout = self.layout.expect("RLCPolynomial::len() requires a layout");
+        layout.num_columns * layout.num_rows
     }
 
-    pub fn new() -> Self {
+    pub fn new(layout: MatrixLayout) -> Self {
         Self {
-            dense_rlc: unsafe_allocate_zero_vec(DoryGlobals::get_T()),
+            dense_rlc: unsafe_allocate_zero_vec(layout.T),
             one_hot_rlc: vec![],
             streaming_context: None,
+            layout: Some(layout),
         }
     }
 
@@ -114,6 +122,7 @@ impl<F: JoltField> RLCPolynomial<F> {
         polynomials: Vec<Arc<MultilinearPolynomial<F>>>,
         coefficients: &[F],
         streaming_context: Option<Arc<StreamingRLCContext<F>>>,
+        layout: Option<MatrixLayout>,
     ) -> Self {
         debug_assert_eq!(polynomials.len(), coefficients.len());
         debug_assert_eq!(polynomials.len(), poly_ids.len());
@@ -158,6 +167,7 @@ impl<F: JoltField> RLCPolynomial<F> {
             dense_rlc,
             one_hot_rlc,
             streaming_context,
+            layout,
         }
     }
 
@@ -179,6 +189,7 @@ impl<F: JoltField> RLCPolynomial<F> {
         poly_ids: Vec<CommittedPolynomial>,
         coefficients: &[F],
         mut advice_poly_map: HashMap<CommittedPolynomial, MultilinearPolynomial<F>>,
+        layout: MatrixLayout,
     ) -> Self {
         debug_assert_eq!(poly_ids.len(), coefficients.len());
 
@@ -216,6 +227,7 @@ impl<F: JoltField> RLCPolynomial<F> {
                 preprocessing,
                 one_hot_params,
             })),
+            layout: Some(layout),
         }
     }
 
@@ -231,7 +243,8 @@ impl<F: JoltField> RLCPolynomial<F> {
             return self.clone();
         }
 
-        let mut result = RLCPolynomial::<F>::new();
+        let mut result =
+            RLCPolynomial::<F>::new(self.layout.expect("streaming RLC requires layout"));
         let dense_indices: Vec<usize> = polynomials
             .iter()
             .enumerate()
@@ -275,52 +288,48 @@ impl<F: JoltField> RLCPolynomial<F> {
     /// linear combination of the resulting products.
     #[tracing::instrument(skip_all, name = "RLCPolynomial::vector_matrix_product")]
     pub fn vector_matrix_product(&self, left_vec: &[F]) -> Vec<F> {
-        let num_columns = DoryGlobals::get_num_columns();
+        let layout = self.layout.expect("vector_matrix_product requires layout");
+        let num_columns = layout.num_columns;
 
         // Compute the vector-matrix product for dense submatrix
         let mut result: Vec<F> = if let Some(ctx) = &self.streaming_context {
-            // Streaming mode: generate rows on-demand from trace
-            self.streaming_vector_matrix_product(left_vec, num_columns, Arc::clone(ctx))
+            self.streaming_vector_matrix_product(left_vec, &layout, Arc::clone(ctx))
         } else {
             let mut dense_result = vec![F::zero(); num_columns];
-            match DoryGlobals::get_layout() {
-                DoryLayout::CycleMajor => {
-                    dense_result
-                        .par_iter_mut()
-                        .enumerate()
-                        .for_each(|(col_idx, dest)| {
-                            *dest = self
-                                .dense_rlc
-                                .iter()
-                                .skip(col_idx)
-                                .step_by(num_columns)
-                                .zip(left_vec.iter())
-                                .map(|(&a, &b)| a * b)
-                                .sum();
-                        });
-                }
-                DoryLayout::AddressMajor => {
-                    let cycles_per_row = DoryGlobals::address_major_cycles_per_row();
-                    dense_result
-                        .par_iter_mut()
-                        .step_by(num_columns / cycles_per_row)
-                        .enumerate()
-                        .for_each(|(offset, dot_product_result)| {
-                            *dot_product_result = self
-                                .dense_rlc
-                                .par_iter()
-                                .skip(offset)
-                                .step_by(cycles_per_row)
-                                .zip(left_vec.par_iter())
-                                .map(|(&a, &b)| -> F { a * b })
-                                .sum::<F>();
-                        });
-                }
+            if layout.cycle_major {
+                dense_result
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(col_idx, dest)| {
+                        *dest = self
+                            .dense_rlc
+                            .iter()
+                            .skip(col_idx)
+                            .step_by(num_columns)
+                            .zip(left_vec.iter())
+                            .map(|(&a, &b)| a * b)
+                            .sum();
+                    });
+            } else {
+                let cycles_per_row = layout.cycles_per_row();
+                dense_result
+                    .par_iter_mut()
+                    .step_by(num_columns / cycles_per_row)
+                    .enumerate()
+                    .for_each(|(offset, dot_product_result)| {
+                        *dot_product_result = self
+                            .dense_rlc
+                            .par_iter()
+                            .skip(offset)
+                            .step_by(cycles_per_row)
+                            .zip(left_vec.par_iter())
+                            .map(|(&a, &b)| -> F { a * b })
+                            .sum::<F>();
+                    });
             }
             dense_result
         };
 
-        let layout = DoryGlobals::matrix_layout();
         for (coeff, poly) in self.one_hot_rlc.iter() {
             match poly.as_ref() {
                 MultilinearPolynomial::OneHot(one_hot) => {
@@ -362,7 +371,7 @@ impl<F: JoltField> RLCPolynomial<F> {
             .for_each(|(coeff, advice_poly)| {
                 let advice_len = advice_poly.original_len();
                 let advice_vars = advice_len.log_2();
-                let (sigma_a, nu_a) = DoryGlobals::balanced_sigma_nu(advice_vars);
+                let (sigma_a, nu_a) = balanced_sigma_nu(advice_vars);
                 let advice_cols = 1usize << sigma_a;
                 let advice_rows = 1usize << nu_a;
 
@@ -412,15 +421,16 @@ guardrail in gen_from_trace should ensure sigma_main >= sigma_a."
     fn streaming_vector_matrix_product(
         &self,
         left_vec: &[F],
-        num_columns: usize,
+        layout: &MatrixLayout,
         ctx: Arc<StreamingRLCContext<F>>,
     ) -> Vec<F> {
-        // For AddressMajor layout, materialize and use regular VMP
-        if DoryGlobals::get_layout() == DoryLayout::AddressMajor {
+        let num_columns = layout.num_columns;
+
+        if !layout.cycle_major {
             return self.address_major_vector_matrix_product(left_vec, num_columns, &ctx);
         }
 
-        let T = DoryGlobals::get_T();
+        let T = layout.T;
         match &ctx.trace_source {
             TraceSource::Materialized(trace) => {
                 self.materialized_vector_matrix_product(left_vec, num_columns, trace, &ctx, T)
@@ -466,7 +476,10 @@ guardrail in gen_from_trace should ensure sigma_main >= sigma_a."
         ctx: &StreamingRLCContext<F>,
         trace: &[Cycle],
     ) -> RLCPolynomial<F> {
-        let T = DoryGlobals::get_T();
+        let layout = self
+            .layout
+            .expect("materialize_from_context requires layout");
+        let T = layout.T;
         let mut dense_rlc: Vec<F> = unsafe_allocate_zero_vec(T);
 
         // Materialize dense polynomials (RdInc, RamInc) into dense_rlc
@@ -505,6 +518,7 @@ guardrail in gen_from_trace should ensure sigma_main >= sigma_a."
             dense_rlc,
             one_hot_rlc,
             streaming_context: None,
+            layout: Some(layout),
         }
     }
 

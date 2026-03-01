@@ -901,6 +901,7 @@ mod tests {
                 std::sync::Arc::new(MultilinearPolynomial::OneHot(one_hot_poly.clone())),
             )],
             streaming_context: None,
+            layout: Some(DoryGlobals::matrix_layout()),
         };
 
         let left_vec: Vec<Fr> = (0..num_rows).map(|_| Fr::rand(&mut rng)).collect();

@@ -82,10 +82,6 @@ impl<T: JoltTranscript> HachiTranscript<Fp128> for JoltToHachiTranscript<T> {
         let jolt_challenge: JoltFp128 = self.inner().challenge_scalar();
         jolt_to_hachi(&jolt_challenge)
     }
-
-    fn reset(&mut self, _domain_label: &[u8]) {
-        panic!("reset not supported on JoltToHachiTranscript")
-    }
 }
 
 /// Newtype wrapper that provides arkworks `CanonicalSerialize`/`CanonicalDeserialize`

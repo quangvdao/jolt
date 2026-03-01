@@ -1492,6 +1492,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             streaming_data,
             advice_polys,
             poly_ids,
+            layout: DoryGlobals::matrix_layout(),
         };
 
         PCS::default().batch_prove(

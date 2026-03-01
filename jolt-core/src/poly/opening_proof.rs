@@ -6,7 +6,10 @@
 //! necessarily of the same size, each opened at a different point) into a single opening.
 
 use crate::{
-    poly::rlc_polynomial::{RLCPolynomial, RLCStreamingData, TraceSource},
+    poly::{
+        matrix_layout::MatrixLayout,
+        rlc_polynomial::{RLCPolynomial, RLCStreamingData, TraceSource},
+    },
     zkvm::{claim_reductions::AdviceKind, config::OneHotParams},
 };
 use allocative::Allocative;
@@ -43,6 +46,7 @@ pub struct StreamingBatchSource<F: JoltField> {
     pub streaming_data: Arc<RLCStreamingData>,
     pub advice_polys: HashMap<CommittedPolynomial, MultilinearPolynomial<F>>,
     pub poly_ids: Vec<CommittedPolynomial>,
+    pub layout: MatrixLayout,
 }
 
 impl<F: JoltField> BatchPolynomialSource<F> for StreamingBatchSource<F> {
@@ -54,6 +58,7 @@ impl<F: JoltField> BatchPolynomialSource<F> for StreamingBatchSource<F> {
             self.poly_ids.clone(),
             coeffs,
             self.advice_polys.clone(),
+            self.layout,
         ))
     }
 }

@@ -2202,7 +2202,7 @@ dependencies = [
 [[package]]
 name = "hachi-derive"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Labs/hachi?branch=dev#dba56b2ff2498cc33d960b001f338e980cbfc7c4"
+source = "git+https://github.com/LayerZero-Labs/hachi?branch=dev#c8565bbfa85069e4f7a4c5d886dff64bf650f51d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2212,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "hachi-pcs"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Labs/hachi?branch=dev#dba56b2ff2498cc33d960b001f338e980cbfc7c4"
+source = "git+https://github.com/LayerZero-Labs/hachi?branch=dev#c8565bbfa85069e4f7a4c5d886dff64bf650f51d"
 dependencies = [
  "blake2",
  "hachi-derive",

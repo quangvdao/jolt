@@ -36,7 +36,9 @@ use crate::{
             OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
             VerifierOpeningAccumulator, BIG_ENDIAN,
         },
-        shared_ra_polys::{compute_all_G_and_ra_indices, RaIndices, SharedRaPolynomials},
+        shared_ra_polys::{
+            assert_ra_bounds, compute_all_G_and_ra_indices, RaIndices, SharedRaPolynomials,
+        },
         split_eq_poly::GruenSplitEqPolynomial,
         unipoly::UniPoly,
     },
@@ -480,6 +482,546 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for BooleanitySum
     #[cfg(feature = "allocative")]
     fn update_flamegraph(&self, flamegraph: &mut FlameGraphBuilder) {
         flamegraph.visit_root(self);
+    }
+}
+
+/// Parameters for the cycle-first booleanity sumcheck.
+///
+/// Same data as `BooleanitySumcheckParams`, but `normalize_opening_point` accounts
+/// for the reversed binding order: cycle variables first, then address variables.
+#[derive(Allocative, Clone)]
+pub struct BooleanityCycleFirstParams<F: JoltField> {
+    pub inner: BooleanitySumcheckParams<F>,
+}
+
+impl<F: JoltField> SumcheckInstanceParams<F> for BooleanityCycleFirstParams<F> {
+    fn degree(&self) -> usize {
+        DEGREE_BOUND
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.inner.log_t + self.inner.log_k_chunk
+    }
+
+    fn input_claim(&self, _accumulator: &dyn OpeningAccumulator<F>) -> F {
+        F::zero()
+    }
+
+    fn normalize_opening_point(
+        &self,
+        sumcheck_challenges: &[F::Challenge],
+    ) -> OpeningPoint<BIG_ENDIAN, F> {
+        let log_t = self.inner.log_t;
+        let mut cycle_be = sumcheck_challenges[..log_t].to_vec();
+        let mut addr_be = sumcheck_challenges[log_t..].to_vec();
+        cycle_be.reverse();
+        addr_be.reverse();
+        let mut point = addr_be;
+        point.extend(cycle_be);
+        point.into()
+    }
+}
+
+/// Default number of sparse Phase 1 rounds for cycle-first booleanity.
+///
+/// Balances memory (dense allocation = T × K × N / 2^S) against compute
+/// (S extra sparse rounds at O(T·N) each). `log_K + 4` gives ~92 MB peak
+/// for typical parameters.
+pub fn default_sparse_rounds(log_t: usize, log_k_chunk: usize) -> usize {
+    (log_k_chunk + 4).min(log_t)
+}
+
+/// Cycle-first Booleanity Sumcheck Prover (3-Phase Design).
+///
+/// Phase 1 (sparse cycle, S rounds): Binds cycle variables using the sparse
+/// `ra_indices` + `eq_split` representation. Each round does O(T·N) work.
+///
+/// Transition: Materializes a dense table `H_dense` of size (T/2^S) × K × N.
+///
+/// Phase 2 (dense cycle, log_T - S rounds): Binds remaining cycle variables
+/// on the dense table. Total work O(T·K·N/2^S) (geometric decay).
+///
+/// Phase 3 (address, log_K rounds): Binds address variables on the K-vectors.
+/// Total work O(K·N·log_K), negligible.
+#[derive(Allocative)]
+pub struct BooleanitySumcheckProverCycleFirst<F: JoltField> {
+    gamma_powers_inv: Vec<F>,
+    /// Split-eq over cycle variables (Phase 1 and Phase 2, LowToHigh).
+    D: GruenSplitEqPolynomial<F>,
+    /// Split-eq over address variables (Phase 3, LowToHigh).
+    B: GruenSplitEqPolynomial<F>,
+    /// eq(r_address, k) for k ∈ [K_chunk]. Static weight for Phase 1 and Phase 2.
+    eq_addr: Vec<F>,
+    /// Sparse address data per cycle (size T). Phase 1 only, dropped at materialization.
+    ra_indices: Vec<RaIndices>,
+    /// Expanding table for bound cycle challenges. Grows from 1 to 2^S during Phase 1.
+    eq_split: ExpandingTable<F>,
+    /// Dense table: `H_dense[i]` has `dense_rows * K` entries, cycle-major layout.
+    /// `H_dense[i][g * K + k]` = weight at address k for merged row g.
+    /// Initialized at materialization, used in Phase 2 and Phase 3.
+    H_dense: Vec<Vec<F>>,
+    /// Current number of rows in `H_dense` (halves each Phase 2 round).
+    dense_rows: usize,
+    /// Accumulated eq(r_cycle, bound_cycles) scalar. Set when all cycle variables are bound.
+    eq_r_r: F,
+    /// Number of sparse Phase 1 rounds (S).
+    sparse_rounds: usize,
+    pub params: BooleanityCycleFirstParams<F>,
+}
+
+impl<F: JoltField> BooleanitySumcheckProverCycleFirst<F> {
+    #[tracing::instrument(skip_all, name = "BooleanitySumcheckProverCycleFirst::initialize")]
+    pub fn initialize(
+        params: BooleanitySumcheckParams<F>,
+        trace: &[Cycle],
+        bytecode: &BytecodePreprocessing,
+        memory_layout: &MemoryLayout,
+        sparse_rounds: usize,
+    ) -> Self {
+        assert_ra_bounds(&params.one_hot_params);
+        let sparse_rounds = sparse_rounds.max(1).min(params.log_t);
+
+        let ra_indices: Vec<RaIndices> = trace
+            .par_iter()
+            .map(|cycle| {
+                RaIndices::from_cycle(cycle, bytecode, memory_layout, &params.one_hot_params)
+            })
+            .collect();
+
+        let r_addr_rev: Vec<F::Challenge> = params.r_address.iter().copied().rev().collect();
+        let eq_addr = EqPolynomial::<F>::evals(&r_addr_rev);
+
+        let D = GruenSplitEqPolynomial::new(&params.r_cycle, BindingOrder::LowToHigh);
+        let B = GruenSplitEqPolynomial::new(&params.r_address, BindingOrder::LowToHigh);
+
+        let eq_split_capacity = 1usize << sparse_rounds;
+        let mut eq_split = ExpandingTable::new(eq_split_capacity, BindingOrder::LowToHigh);
+        eq_split.reset(F::one());
+
+        let num_polys = params.polynomial_types.len();
+        let gamma_f: F = params.gamma.into();
+        let mut gamma_powers_inv = Vec::with_capacity(num_polys);
+        let mut rho_i = F::one();
+        for _ in 0..num_polys {
+            gamma_powers_inv.push(
+                rho_i
+                    .inverse()
+                    .expect("gamma_powers[i] is nonzero (gamma != 0)"),
+            );
+            rho_i *= gamma_f;
+        }
+
+        Self {
+            gamma_powers_inv,
+            D,
+            B,
+            eq_addr,
+            ra_indices,
+            eq_split,
+            H_dense: Vec::new(),
+            dense_rows: 0,
+            eq_r_r: F::zero(),
+            sparse_rounds,
+            params: BooleanityCycleFirstParams { inner: params },
+        }
+    }
+
+    /// Phase 1: sparse cycle binding message.
+    fn compute_sparse_message(&self, round: usize, previous_claim: F) -> UniPoly<F> {
+        let D = &self.D;
+        let N = self.params.inner.polynomial_types.len();
+        let k_chunk = 1 << self.params.inner.log_k_chunk;
+
+        if round == 0 {
+            let quadratic_coeffs: [F; DEGREE_BOUND - 1] = D
+                .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
+                    let j0 = 2 * j_prime;
+                    let j1 = 2 * j_prime + 1;
+                    let idx0 = &self.ra_indices[j0];
+                    let idx1 = &self.ra_indices[j1];
+                    let one_hot = &self.params.inner.one_hot_params;
+
+                    let mut q_inf = F::zero();
+                    for i in 0..N {
+                        let k0 = idx0.get_index(i, one_hot);
+                        let k1 = idx1.get_index(i, one_hot);
+                        if k0 != k1 {
+                            let a0 = k0.map_or(F::zero(), |k| self.eq_addr[k as usize]);
+                            let a1 = k1.map_or(F::zero(), |k| self.eq_addr[k as usize]);
+                            q_inf += self.params.inner.gamma_powers_square[i] * (a0 + a1);
+                        }
+                    }
+                    [F::zero(), q_inf]
+                });
+
+            D.gruen_poly_deg_3(quadratic_coeffs[0], quadratic_coeffs[1], previous_claim)
+        } else {
+            let m = round;
+            let half_block = 1usize << m;
+            let block_size = half_block << 1;
+
+            let quadratic_coeffs: [F; DEGREE_BOUND - 1] = D
+                .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
+                    let base = j_prime * block_size;
+                    let one_hot = &self.params.inner.one_hot_params;
+
+                    let mut q0_total = F::zero();
+                    let mut qinf_total = F::zero();
+                    let mut even_w = vec![F::zero(); k_chunk];
+                    let mut odd_w = vec![F::zero(); k_chunk];
+                    let mut touched = Vec::with_capacity(k_chunk.min(block_size));
+                    let mut touched_mask = vec![0u8; k_chunk];
+
+                    for i in 0..N {
+                        // Coalescing skip: all indices identical → booleanity is zero
+                        let first_idx = self.ra_indices[base].get_index(i, one_hot);
+                        let all_same = (1..block_size)
+                            .all(|b| self.ra_indices[base + b].get_index(i, one_hot) == first_idx);
+                        if all_same {
+                            continue;
+                        }
+
+                        let mut q0_i = F::zero();
+                        let mut qinf_i = F::zero();
+
+                        for b in 0..half_block {
+                            let w = self.eq_split[b];
+                            let j_even = base + b;
+                            let j_odd = base + half_block + b;
+
+                            if let Some(k) = self.ra_indices[j_even].get_index(i, one_hot) {
+                                let k = k as usize;
+                                if touched_mask[k] == 0 {
+                                    touched.push(k);
+                                }
+                                touched_mask[k] |= 1;
+                                even_w[k] += w;
+                            }
+                            if let Some(k) = self.ra_indices[j_odd].get_index(i, one_hot) {
+                                let k = k as usize;
+                                if touched_mask[k] == 0 {
+                                    touched.push(k);
+                                }
+                                touched_mask[k] |= 2;
+                                odd_w[k] += w;
+                            }
+                        }
+
+                        for &k in touched.iter() {
+                            let eq_k = self.eq_addr[k];
+                            let ew = even_w[k];
+                            let ow = odd_w[k];
+                            let diff = ow - ew;
+                            q0_i += eq_k * ew * (ew - F::one());
+                            qinf_i += eq_k * diff * diff;
+                        }
+
+                        let gamma_2i = self.params.inner.gamma_powers_square[i];
+                        q0_total += gamma_2i * q0_i;
+                        qinf_total += gamma_2i * qinf_i;
+
+                        for &k in touched.iter() {
+                            even_w[k] = F::zero();
+                            odd_w[k] = F::zero();
+                            touched_mask[k] = 0;
+                        }
+                        touched.clear();
+                    }
+
+                    [q0_total, qinf_total]
+                });
+
+            D.gruen_poly_deg_3(quadratic_coeffs[0], quadratic_coeffs[1], previous_claim)
+        }
+    }
+
+    /// Phase 2: dense cycle binding message.
+    ///
+    /// For each row pair in `H_dense`, computes the booleanity quadratic weighted by
+    /// `eq_addr`, then uses D's Gruen polynomial for the eq_cycle factor.
+    fn compute_dense_cycle_message(&self, _round: usize, previous_claim: F) -> UniPoly<F> {
+        let D = &self.D;
+        let N = self.params.inner.polynomial_types.len();
+        let K = 1 << self.params.inner.log_k_chunk;
+
+        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = D
+            .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|j_prime| {
+                let mut q0 = F::zero();
+                let mut qinf = F::zero();
+
+                for i in 0..N {
+                    let gamma_2i = self.params.inner.gamma_powers_square[i];
+                    let H_i = &self.H_dense[i];
+                    for k in 0..K {
+                        let h_even = H_i[2 * j_prime * K + k];
+                        let h_odd = H_i[(2 * j_prime + 1) * K + k];
+                        let diff = h_odd - h_even;
+                        let w = gamma_2i * self.eq_addr[k];
+                        q0 += w * h_even * (h_even - F::one());
+                        qinf += w * diff * diff;
+                    }
+                }
+
+                [q0, qinf]
+            });
+
+        D.gruen_poly_deg_3(quadratic_coeffs[0], quadratic_coeffs[1], previous_claim)
+    }
+
+    /// Phase 3: address binding message.
+    ///
+    /// After all cycle variables are bound, each `H_dense[i]` is a shrinking address
+    /// vector. B's Gruen polynomial handles the eq_addr factor; the callback provides
+    /// the booleanity quadratic per address pair.
+    fn compute_address_message(&self, _round: usize, previous_claim: F) -> UniPoly<F> {
+        let B = &self.B;
+        let N = self.params.inner.polynomial_types.len();
+
+        let quadratic_coeffs: [F; DEGREE_BOUND - 1] = B
+            .par_fold_out_in_unreduced::<9, { DEGREE_BOUND - 1 }>(&|k_prime| {
+                let mut q0 = F::zero();
+                let mut qinf = F::zero();
+
+                for i in 0..N {
+                    let gamma_2i = self.params.inner.gamma_powers_square[i];
+                    let h_even = self.H_dense[i][2 * k_prime];
+                    let h_odd = self.H_dense[i][2 * k_prime + 1];
+                    let diff = h_odd - h_even;
+                    q0 += gamma_2i * h_even * (h_even - F::one());
+                    qinf += gamma_2i * diff * diff;
+                }
+
+                [q0, qinf]
+            });
+
+        let adjusted_claim = previous_claim * self.eq_r_r.inverse().unwrap();
+        let gruen_poly =
+            B.gruen_poly_deg_3(quadratic_coeffs[0], quadratic_coeffs[1], adjusted_claim);
+        gruen_poly * self.eq_r_r
+    }
+
+    /// Materialize sparse RA indices + eq_split into a dense table.
+    ///
+    /// Produces `H_dense[i]` with `(T/2^S) * K` entries per polynomial.
+    #[tracing::instrument(
+        skip_all,
+        name = "BooleanitySumcheckProverCycleFirst::materialize_dense"
+    )]
+    fn materialize_dense(&mut self) {
+        let K = 1 << self.params.inner.log_k_chunk;
+        let N = self.params.inner.polynomial_types.len();
+        let block_size = 1usize << self.sparse_rounds;
+        let num_groups = self.ra_indices.len() / block_size;
+        let one_hot = &self.params.inner.one_hot_params;
+
+        self.H_dense = (0..N)
+            .into_par_iter()
+            .map(|i| {
+                let mut h = vec![F::zero(); num_groups * K];
+                for g in 0..num_groups {
+                    for b in 0..block_size {
+                        let j = g * block_size + b;
+                        let w = self.eq_split[b];
+                        if let Some(k) = self.ra_indices[j].get_index(i, one_hot) {
+                            h[g * K + k as usize] += w;
+                        }
+                    }
+                }
+                h
+            })
+            .collect();
+
+        self.dense_rows = num_groups;
+
+        let ra = std::mem::take(&mut self.ra_indices);
+        let eq = std::mem::take(&mut self.eq_split);
+        drop_in_background_thread((ra, eq));
+    }
+
+    /// Bind `H_dense` over the cycle dimension (Phase 2).
+    fn bind_dense_cycle(&mut self, r_j: F::Challenge) {
+        let K = 1 << self.params.inner.log_k_chunk;
+        let new_rows = self.dense_rows / 2;
+        let r: F = r_j.into();
+
+        self.H_dense.par_iter_mut().for_each(|h| {
+            for g in 0..new_rows {
+                for k in 0..K {
+                    let even = h[2 * g * K + k];
+                    let odd = h[(2 * g + 1) * K + k];
+                    h[g * K + k] = even + r * (odd - even);
+                }
+            }
+            h.truncate(new_rows * K);
+        });
+
+        self.dense_rows = new_rows;
+    }
+
+    /// Bind `H_dense` over the address dimension (Phase 3).
+    fn bind_dense_address(&mut self, r_j: F::Challenge) {
+        let r: F = r_j.into();
+
+        self.H_dense.par_iter_mut().for_each(|h| {
+            let new_len = h.len() / 2;
+            for k in 0..new_len {
+                let even = h[2 * k];
+                let odd = h[2 * k + 1];
+                h[k] = even + r * (odd - even);
+            }
+            h.truncate(new_len);
+        });
+    }
+}
+
+impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
+    for BooleanitySumcheckProverCycleFirst<F>
+{
+    fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
+        &self.params
+    }
+
+    #[tracing::instrument(skip_all, name = "BooleanitySumcheckProverCycleFirst::compute_message")]
+    fn compute_message(&mut self, round: usize, previous_claim: F) -> UniPoly<F> {
+        let S = self.sparse_rounds;
+        let log_t = self.params.inner.log_t;
+
+        if round < S {
+            self.compute_sparse_message(round, previous_claim)
+        } else if round < log_t {
+            self.compute_dense_cycle_message(round, previous_claim)
+        } else {
+            self.compute_address_message(round, previous_claim)
+        }
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        name = "BooleanitySumcheckProverCycleFirst::ingest_challenge"
+    )]
+    fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize) {
+        let S = self.sparse_rounds;
+        let log_t = self.params.inner.log_t;
+
+        if round < S {
+            self.D.bind(r_j);
+            self.eq_split.update(r_j);
+
+            if round == S - 1 {
+                self.materialize_dense();
+            }
+        } else if round < log_t {
+            self.D.bind(r_j);
+            self.bind_dense_cycle(r_j);
+        } else {
+            self.B.bind(r_j);
+            self.bind_dense_address(r_j);
+        }
+
+        if round == log_t - 1 {
+            self.eq_r_r = self.D.get_current_scalar();
+        }
+    }
+
+    fn cache_openings(
+        &self,
+        accumulator: &mut ProverOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
+        let log_k = self.params.inner.log_k_chunk;
+        let num_polys = self.params.inner.polynomial_types.len();
+
+        let claims: Vec<F> = (0..num_polys)
+            .map(|i| {
+                debug_assert_eq!(self.H_dense[i].len(), 1);
+                self.H_dense[i][0]
+            })
+            .collect();
+
+        accumulator.append_sparse(
+            transcript,
+            self.params.inner.polynomial_types.clone(),
+            SumcheckId::Booleanity,
+            opening_point.r[..log_k].to_vec(),
+            opening_point.r[log_k..].to_vec(),
+            claims,
+        );
+    }
+
+    #[cfg(feature = "allocative")]
+    fn update_flamegraph(&self, flamegraph: &mut FlameGraphBuilder) {
+        flamegraph.visit_root(self);
+    }
+}
+
+/// Cycle-first Booleanity Sumcheck Verifier.
+pub struct BooleanitySumcheckCycleFirstVerifier<F: JoltField> {
+    params: BooleanityCycleFirstParams<F>,
+}
+
+impl<F: JoltField> BooleanitySumcheckCycleFirstVerifier<F> {
+    pub fn new(params: BooleanityCycleFirstParams<F>) -> Self {
+        Self { params }
+    }
+}
+
+impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
+    for BooleanitySumcheckCycleFirstVerifier<F>
+{
+    fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
+        &self.params
+    }
+
+    fn expected_output_claim(
+        &self,
+        accumulator: &VerifierOpeningAccumulator<F>,
+        sumcheck_challenges: &[F::Challenge],
+    ) -> F {
+        let ra_claims: Vec<F> = self
+            .params
+            .inner
+            .polynomial_types
+            .iter()
+            .map(|poly_type| {
+                accumulator
+                    .get_committed_polynomial_opening(*poly_type, SumcheckId::Booleanity)
+                    .1
+            })
+            .collect();
+
+        // Build combined r in cycle-first sumcheck order:
+        // challenges are [cycle(log_t), address(log_k)].
+        let combined_r: Vec<F::Challenge> = self
+            .params
+            .inner
+            .r_cycle
+            .iter()
+            .cloned()
+            .rev()
+            .chain(self.params.inner.r_address.iter().cloned().rev())
+            .collect();
+
+        EqPolynomial::<F>::mle(sumcheck_challenges, &combined_r)
+            * zip(&self.params.inner.gamma_powers_square, ra_claims)
+                .map(|(gamma_2i, ra)| (ra.square() - ra) * gamma_2i)
+                .sum::<F>()
+    }
+
+    fn cache_openings(
+        &self,
+        accumulator: &mut VerifierOpeningAccumulator<F>,
+        transcript: &mut T,
+        sumcheck_challenges: &[F::Challenge],
+    ) {
+        let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
+        accumulator.append_sparse(
+            transcript,
+            self.params.inner.polynomial_types.clone(),
+            SumcheckId::Booleanity,
+            opening_point.r,
+        );
     }
 }
 

@@ -644,18 +644,21 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 .pad_using(T, |_| Cycle::NoOp)
                 .collect();
 
-            let (commitments, hints): (Vec<_>, Vec<_>) = polys
+            // Generate all witnesses first, then batch commit.
+            let witnesses: Vec<MultilinearPolynomial<F>> = polys
                 .par_iter()
                 .map(|poly_id| {
-                    let witness: MultilinearPolynomial<F> = poly_id.generate_witness(
+                    poly_id.generate_witness(
                         &self.preprocessing.shared.bytecode,
                         &self.preprocessing.shared.memory_layout,
                         &trace,
                         Some(&self.one_hot_params),
-                    );
-                    pcs.commit(&witness, &self.preprocessing.generators)
+                    )
                 })
-                .unzip();
+                .collect();
+
+            let results = pcs.batch_commit(&witnesses, &self.preprocessing.generators);
+            let (commitments, hints): (Vec<_>, Vec<_>) = results.into_iter().unzip();
 
             let hint_map = HashMap::from_iter(zip_eq(polys, hints));
             (commitments, hint_map)
@@ -1605,11 +1608,12 @@ where
         let max_T: usize = shared.max_padded_trace_length.next_power_of_two();
         let max_log_T = max_T.log_2();
         // Use the maximum possible log_k_chunk for generator setup
-        let max_log_k_chunk = if max_log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
-            4
-        } else {
-            8
-        };
+        let max_log_k_chunk =
+            if PCS::uses_onehot_inc() || max_log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
+                8
+            } else {
+                4
+            };
         let generators = PCS::setup_prover(max_log_k_chunk + max_log_T);
         JoltProverPreprocessing { generators, shared }
     }
@@ -1640,10 +1644,16 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> Serializable
 #[cfg(test)]
 mod tests {
     use ark_bn254::Fr;
+    use hachi_pcs::protocol::{
+        commitment::CommitmentConfig,
+        ProductionFp128CommitmentConfig as HachiTestCommitmentConfig,
+    };
     use serial_test::serial;
 
+    use crate::field::fp128::JoltFp128;
     use crate::host;
     use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
+    use crate::poly::commitment::hachi::JoltHachiCommitmentScheme;
     use crate::poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
@@ -1652,7 +1662,9 @@ mod tests {
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{OpeningAccumulator, SumcheckId},
     };
+    use crate::transcripts::Blake2bTranscript;
     use crate::zkvm::claim_reductions::AdviceKind;
+    use crate::zkvm::prover::JoltCpuProver;
     use crate::zkvm::verifier::JoltSharedPreprocessing;
     use crate::zkvm::witness::CommittedPolynomial;
     use crate::zkvm::{
@@ -1665,6 +1677,11 @@ mod tests {
     use jolt_inlines_keccak256 as _;
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
+
+    type HachiPcs =
+        JoltHachiCommitmentScheme<{ HachiTestCommitmentConfig::D }, HachiTestCommitmentConfig>;
+    type RV64IMACHachiProver<'a> = JoltCpuProver<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
+    type RV64IMACHachiVerifier<'a> = JoltVerifier<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
 
     fn commit_trusted_advice_preprocessing_only(
         preprocessing: &JoltProverPreprocessing<Fr, DoryCommitmentScheme>,
@@ -2332,6 +2349,56 @@ mod tests {
             prover_preprocessing.generators.to_verifier_setup(),
         );
         let verifier = RV64IMACVerifier::new(
+            &verifier_preprocessing,
+            jolt_proof,
+            io_device,
+            None,
+            debug_info,
+        )
+        .expect("Failed to create verifier");
+        verifier.verify().expect("Failed to verify proof");
+    }
+
+    #[test]
+    #[serial]
+    fn muldiv_e2e_hachi() {
+        let mut program = host::Program::new("muldiv-guest");
+        let (bytecode, init_memory_state, _) = program.decode();
+        let inputs = postcard::to_stdvec(&[9u32, 5u32, 3u32]).unwrap();
+        let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
+
+        // Production D=512: each one-hot polynomial's hint uses ~512MB (inner_width=65536 ×
+        // 8KB/ring). Minimize num_blocks by using the tightest power-of-2 trace length; muldiv
+        // traces ~2600 cycles so 4096 gives num_blocks=1.
+        let shared_preprocessing = JoltSharedPreprocessing::new(
+            bytecode.clone(),
+            io_device.memory_layout.clone(),
+            init_memory_state,
+            1 << 12,
+        );
+
+        let prover_preprocessing =
+            JoltProverPreprocessing::<JoltFp128, HachiPcs>::new(shared_preprocessing.clone());
+        let elf_contents_opt = program.get_elf_contents();
+        let elf_contents = elf_contents_opt.as_deref().expect("elf contents is None");
+        let prover = RV64IMACHachiProver::gen_from_elf(
+            &prover_preprocessing,
+            elf_contents,
+            &inputs,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        );
+        let io_device = prover.program_io.clone();
+        let (jolt_proof, debug_info) = prover.prove();
+
+        let verifier_preprocessing = JoltVerifierPreprocessing::<JoltFp128, HachiPcs>::new(
+            prover_preprocessing.shared.clone(),
+            HachiPcs::setup_verifier(&prover_preprocessing.generators),
+        );
+        let verifier = RV64IMACHachiVerifier::new(
             &verifier_preprocessing,
             jolt_proof,
             io_device,

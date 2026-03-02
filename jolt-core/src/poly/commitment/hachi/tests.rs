@@ -67,7 +67,29 @@ fn commit_roundtrip() {
     assert_eq!(commitment1, commitment2, "deterministic commitment");
 }
 
-// NOTE: prove/verify tests are disabled because Hachi's `balanced_decompose_pow2` asserts
-// `levels * log_basis <= 128` in the ring-switch path, but `r_decomp_levels` returns 33
-// for Fp128 fields (33 * 4 = 132 > 128). This is a known Hachi limitation that needs to
-// be fixed upstream before end-to-end prove/verify works with 128-bit primes.
+#[test]
+fn hachi_mega_poly_batch_roundtrip() {
+    let layout = Cfg::commitment_layout(16).unwrap();
+    let alpha = Cfg::D.trailing_zeros() as usize;
+    let num_vars = layout.m_vars + layout.r_vars + alpha;
+    let len = 1usize << num_vars;
+
+    let poly1 = MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+        (0..len).map(|i| JoltFp128::from_u64(i as u64)).collect(),
+    ));
+    let poly2 = MultilinearPolynomial::LargeScalars(DensePolynomial::new(
+        (0..len)
+            .map(|i| JoltFp128::from_u64((i * 3 + 7) as u64))
+            .collect(),
+    ));
+
+    let setup = Scheme::setup_prover(num_vars);
+    let pcs = Scheme::default();
+
+    let results = pcs.batch_commit(&[&poly1, &poly2], &setup);
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results[0].0, results[1].0,
+        "mega-poly commitments must be identical"
+    );
+}

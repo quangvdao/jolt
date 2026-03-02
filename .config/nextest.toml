@@ -7,3 +7,9 @@ dory = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'test(dory)'
 test-group = 'dory'
+
+[[profile.default.overrides]]
+filter = 'test(hachi)'
+slow-timeout = { period = "120s", terminate-after = 100 }
+# 30-minute hard timeout for Hachi production-param tests
+timeout = "30m"

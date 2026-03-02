@@ -103,17 +103,26 @@ impl<T: Send + Sync> Valid for ArkBridge<T> {
     }
 }
 
-impl<T: Send + Sync> CanonicalSerialize for ArkBridge<T> {
+fn ark_to_hachi_compress(c: Compress) -> HachiCompress {
+    match c {
+        Compress::Yes => HachiCompress::Yes,
+        Compress::No => HachiCompress::No,
+    }
+}
+
+impl<T: Send + Sync + HachiSerialize> CanonicalSerialize for ArkBridge<T> {
     fn serialize_with_mode<W: Write>(
         &self,
-        _writer: W,
-        _compress: Compress,
+        writer: W,
+        compress: Compress,
     ) -> Result<(), SerializationError> {
-        unimplemented!("Hachi types use HachiSerialize, not CanonicalSerialize")
+        self.0
+            .serialize_with_mode(writer, ark_to_hachi_compress(compress))
+            .map_err(|e| SerializationError::IoError(std::io::Error::other(e.to_string())))
     }
 
-    fn serialized_size(&self, _compress: Compress) -> usize {
-        0
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.0.serialized_size(ark_to_hachi_compress(compress))
     }
 }
 

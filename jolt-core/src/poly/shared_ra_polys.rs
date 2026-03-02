@@ -215,24 +215,32 @@ impl RaIndices {
     }
 
     /// Extract the index for polynomial `poly_idx` in the unified ordering:
-    /// [instruction_0..d, bytecode_0..d, ram_0..d, rd_inc_0..rd_inc_d, ram_inc_0..ram_inc_d]
+    /// [instruction_0..d, bytecode_0..d, ram_0..d, rd_inc_0..d, rd_msb, ram_inc_0..d, ram_msb]
     #[inline]
     pub fn get_index(&self, poly_idx: usize, one_hot_params: &OneHotParams) -> Option<u8> {
         let instruction_d = one_hot_params.instruction_d;
         let bytecode_d = one_hot_params.bytecode_d;
         let ram_d = one_hot_params.ram_d;
         let inc_d = one_hot_params.inc_onehot_d();
+        let rd_start = instruction_d + bytecode_d + ram_d;
+        let rd_msb_idx = rd_start + inc_d;
+        let ram_start = rd_msb_idx + 1;
+        let ram_msb_idx = ram_start + inc_d;
 
         if poly_idx < instruction_d {
             Some(self.instruction[poly_idx])
         } else if poly_idx < instruction_d + bytecode_d {
             Some(self.bytecode[poly_idx - instruction_d])
-        } else if poly_idx < instruction_d + bytecode_d + ram_d {
+        } else if poly_idx < rd_start {
             self.ram[poly_idx - instruction_d - bytecode_d]
-        } else if poly_idx < instruction_d + bytecode_d + ram_d + inc_d {
-            Some(self.rd_inc[poly_idx - instruction_d - bytecode_d - ram_d])
+        } else if poly_idx < rd_msb_idx {
+            Some(self.rd_inc[poly_idx - rd_start])
+        } else if poly_idx == rd_msb_idx {
+            Some(self.rd_inc_msb)
+        } else if poly_idx < ram_msb_idx {
+            Some(self.ram_inc[poly_idx - ram_start])
         } else {
-            Some(self.ram_inc[poly_idx - instruction_d - bytecode_d - ram_d - inc_d])
+            Some(self.ram_inc_msb)
         }
     }
 }
@@ -248,7 +256,7 @@ impl RaIndices {
 /// then `eq(r_cycle, c) = E_hi[c_hi] * E_lo[c_lo]` where `c = (c_hi << lo_bits) | c_lo`.
 ///
 /// Returns G in order:
-/// [instruction_0..d, bytecode_0..d, ram_0..d, (rd_inc_0..rd_inc_d, ram_inc_0..ram_inc_d if onehot_inc)]
+/// [instruction_0..d, bytecode_0..d, ram_0..d, (rd_inc_0..d, rd_msb, ram_inc_0..d, ram_msb if onehot_inc)]
 /// Each inner Vec has length k_chunk.
 #[tracing::instrument(skip_all, name = "shared_ra_polys::compute_all_G")]
 pub fn compute_all_G<F: JoltField>(
@@ -329,7 +337,8 @@ fn compute_all_G_impl<F: JoltField>(
         0
     };
     let ram_inc_d = rd_inc_d;
-    let N = instruction_d + bytecode_d + ram_d + rd_inc_d + ram_inc_d;
+    let msb_d: usize = if onehot_inc { 1 } else { 0 };
+    let N = instruction_d + bytecode_d + ram_d + (rd_inc_d + msb_d) + (ram_inc_d + msb_d);
     let T = trace.len();
 
     // Two-table split-eq:
@@ -367,9 +376,13 @@ fn compute_all_G_impl<F: JoltField>(
                 (0..ram_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
             let mut partial_rd_inc: Vec<Vec<F>> =
                 (0..rd_inc_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
+            let mut partial_rd_msb: Vec<Vec<F>> =
+                (0..msb_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
             let mut partial_ram_inc: Vec<Vec<F>> = (0..ram_inc_d)
                 .map(|_| unsafe_allocate_zero_vec(K))
                 .collect();
+            let mut partial_ram_msb: Vec<Vec<F>> =
+                (0..msb_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
 
             let mut local_instruction: Vec<Vec<F::UnreducedMulU64>> = (0..instruction_d)
                 .map(|_| unsafe_allocate_zero_vec(K))
@@ -381,9 +394,13 @@ fn compute_all_G_impl<F: JoltField>(
                 (0..ram_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
             let mut local_rd_inc: Vec<Vec<F::UnreducedMulU64>> =
                 (0..rd_inc_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
+            let mut local_rd_msb: Vec<Vec<F::UnreducedMulU64>> =
+                (0..msb_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
             let mut local_ram_inc: Vec<Vec<F::UnreducedMulU64>> = (0..ram_inc_d)
                 .map(|_| unsafe_allocate_zero_vec(K))
                 .collect();
+            let mut local_ram_msb: Vec<Vec<F::UnreducedMulU64>> =
+                (0..msb_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
             let mut touched_instruction: Vec<FixedBitSet> =
                 vec![FixedBitSet::with_capacity(K); instruction_d];
             let mut touched_bytecode: Vec<FixedBitSet> =
@@ -391,8 +408,10 @@ fn compute_all_G_impl<F: JoltField>(
             let mut touched_ram: Vec<FixedBitSet> = vec![FixedBitSet::with_capacity(K); ram_d];
             let mut touched_rd_inc: Vec<FixedBitSet> =
                 vec![FixedBitSet::with_capacity(K); rd_inc_d];
+            let mut touched_rd_msb: Vec<FixedBitSet> = vec![FixedBitSet::with_capacity(K); msb_d];
             let mut touched_ram_inc: Vec<FixedBitSet> =
                 vec![FixedBitSet::with_capacity(K); ram_inc_d];
+            let mut touched_ram_msb: Vec<FixedBitSet> = vec![FixedBitSet::with_capacity(K); msb_d];
 
             let chunk_start = chunk_idx * chunk_size;
             for (local_idx, &e_hi) in chunk.iter().enumerate() {
@@ -423,11 +442,23 @@ fn compute_all_G_impl<F: JoltField>(
                     }
                     touched_rd_inc[i].clear();
                 }
+                for i in 0..msb_d {
+                    for k in touched_rd_msb[i].ones() {
+                        local_rd_msb[i][k] = Default::default();
+                    }
+                    touched_rd_msb[i].clear();
+                }
                 for i in 0..ram_inc_d {
                     for k in touched_ram_inc[i].ones() {
                         local_ram_inc[i][k] = Default::default();
                     }
                     touched_ram_inc[i].clear();
+                }
+                for i in 0..msb_d {
+                    for k in touched_ram_msb[i].ones() {
+                        local_ram_msb[i][k] = Default::default();
+                    }
+                    touched_ram_msb[i].clear();
                 }
 
                 // Sequential over c_lo (contiguous cycles for this c_hi)
@@ -491,6 +522,15 @@ fn compute_all_G_impl<F: JoltField>(
                         local_rd_inc[i][k] += add;
                     }
 
+                    // RdIncMsb contributions (unreduced accumulation)
+                    if msb_d > 0 {
+                        let k = ra_idx.rd_inc_msb as usize;
+                        if !touched_rd_msb[0].contains(k) {
+                            touched_rd_msb[0].insert(k);
+                        }
+                        local_rd_msb[0][k] += add;
+                    }
+
                     // RamIncRa contributions (unreduced accumulation)
                     for i in 0..ram_inc_d {
                         let k = ra_idx.ram_inc[i] as usize;
@@ -498,6 +538,15 @@ fn compute_all_G_impl<F: JoltField>(
                             touched_ram_inc[i].insert(k);
                         }
                         local_ram_inc[i][k] += add;
+                    }
+
+                    // RamIncMsb contributions (unreduced accumulation)
+                    if msb_d > 0 {
+                        let k = ra_idx.ram_inc_msb as usize;
+                        if !touched_ram_msb[0].contains(k) {
+                            touched_ram_msb[0].insert(k);
+                        }
+                        local_ram_msb[0][k] += add;
                     }
                 }
 
@@ -526,10 +575,22 @@ fn compute_all_G_impl<F: JoltField>(
                         partial_rd_inc[i][k] += e_hi * reduced;
                     }
                 }
+                for i in 0..msb_d {
+                    for k in touched_rd_msb[i].ones() {
+                        let reduced = F::reduce_mul_u64(local_rd_msb[i][k]);
+                        partial_rd_msb[i][k] += e_hi * reduced;
+                    }
+                }
                 for i in 0..ram_inc_d {
                     for k in touched_ram_inc[i].ones() {
                         let reduced = F::reduce_mul_u64(local_ram_inc[i][k]);
                         partial_ram_inc[i][k] += e_hi * reduced;
+                    }
+                }
+                for i in 0..msb_d {
+                    for k in touched_ram_msb[i].ones() {
+                        let reduced = F::reduce_mul_u64(local_ram_msb[i][k]);
+                        partial_ram_msb[i][k] += e_hi * reduced;
                     }
                 }
             }
@@ -539,7 +600,9 @@ fn compute_all_G_impl<F: JoltField>(
             result.extend(partial_bytecode);
             result.extend(partial_ram);
             result.extend(partial_rd_inc);
+            result.extend(partial_rd_msb);
             result.extend(partial_ram_inc);
+            result.extend(partial_ram_msb);
             result
         })
         .reduce(

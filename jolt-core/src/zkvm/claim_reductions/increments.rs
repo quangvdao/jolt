@@ -50,7 +50,6 @@ use std::sync::Arc;
 use allocative::Allocative;
 use ark_ff::biginteger::S64;
 use ark_std::Zero;
-use common::constants::XLEN;
 use rayon::prelude::*;
 use tracer::instruction::{Cycle, RAMAccess};
 
@@ -256,32 +255,6 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T>
             opening_point.r.clone(),
             rd_inc_claim,
         );
-        if self.params.onehot_inc {
-            let rd_inc_msb_claim = state
-                .rd_inc_msb
-                .as_ref()
-                .expect("rd_inc_msb should exist in onehot mode")
-                .final_sumcheck_claim();
-            let ram_inc_msb_claim = state
-                .ram_inc_msb
-                .as_ref()
-                .expect("ram_inc_msb should exist in onehot mode")
-                .final_sumcheck_claim();
-            accumulator.append_dense(
-                transcript,
-                CommittedPolynomial::RdIncMsb,
-                SumcheckId::IncClaimReduction,
-                opening_point.r.clone(),
-                rd_inc_msb_claim,
-            );
-            accumulator.append_dense(
-                transcript,
-                CommittedPolynomial::RamIncMsb,
-                SumcheckId::IncClaimReduction,
-                opening_point.r.clone(),
-                ram_inc_msb_claim,
-            );
-        }
     }
 
     #[cfg(feature = "allocative")]
@@ -483,9 +456,6 @@ impl<F: JoltField> IncClaimReductionPhase1State<F> {
 struct IncClaimReductionPhase2State<F: JoltField> {
     ram_inc: MultilinearPolynomial<F>,
     rd_inc: MultilinearPolynomial<F>,
-    rd_inc_msb: Option<MultilinearPolynomial<F>>,
-    ram_inc_msb: Option<MultilinearPolynomial<F>>,
-    // Combined eq polynomials
     eq_ram: MultilinearPolynomial<F>, // eq(r_stage2, ·) + γ·eq(r_stage4, ·)
     eq_rd: MultilinearPolynomial<F>,  // eq(s_stage4, ·) + γ·eq(s_stage5, ·)
 }
@@ -555,8 +525,6 @@ impl<F: JoltField> IncClaimReductionPhase2State<F> {
         let suffix_len = 1 << n_remaining_rounds;
         let mut ram_inc = unsafe_allocate_zero_vec(suffix_len);
         let mut rd_inc = unsafe_allocate_zero_vec(suffix_len);
-        let mut ram_inc_msb: Vec<F> = unsafe_allocate_zero_vec(suffix_len);
-        let mut rd_inc_msb: Vec<F> = unsafe_allocate_zero_vec(suffix_len);
 
         let num_threads = rayon::current_num_threads();
         let chunk_size = suffix_len.div_ceil(num_threads).max(1);
@@ -564,73 +532,38 @@ impl<F: JoltField> IncClaimReductionPhase2State<F> {
         (
             ram_inc.par_chunks_mut(chunk_size),
             rd_inc.par_chunks_mut(chunk_size),
-            ram_inc_msb.par_chunks_mut(chunk_size),
-            rd_inc_msb.par_chunks_mut(chunk_size),
         )
             .into_par_iter()
             .enumerate()
-            .for_each(
-                |(chunk_i, (ram_chunk, rd_chunk, ram_msb_chunk, rd_msb_chunk))| {
-                    for i in 0..ram_chunk.len() {
-                        let x_hi = chunk_i * chunk_size + i;
-                        let mut acc_ram: MedAccumS<F> = MedAccumS::zero();
-                        let mut acc_rd: MedAccumS<F> = MedAccumS::zero();
-                        let mut acc_ram_msb = F::zero();
-                        let mut acc_rd_msb = F::zero();
+            .for_each(|(chunk_i, (ram_chunk, rd_chunk))| {
+                for i in 0..ram_chunk.len() {
+                    let x_hi = chunk_i * chunk_size + i;
+                    let mut acc_ram: MedAccumS<F> = MedAccumS::zero();
+                    let mut acc_rd: MedAccumS<F> = MedAccumS::zero();
 
-                        for (x_lo, eq_val) in eq_prefix_evals.iter().enumerate() {
-                            let x = x_lo + (x_hi << prefix_len.log_2());
-                            let cycle = &trace[x];
+                    for (x_lo, eq_val) in eq_prefix_evals.iter().enumerate() {
+                        let x = x_lo + (x_hi << prefix_len.log_2());
+                        let cycle = &trace[x];
 
-                            let ram_inc_diff: i128 = match cycle.ram_access() {
-                                RAMAccess::Write(w) => w.post_value as i128 - w.pre_value as i128,
-                                _ => 0,
-                            };
-                            let ram_inc_val: S64 = match cycle.ram_access() {
-                                RAMAccess::Write(w) => {
-                                    s64_from_diff_u64s(w.post_value, w.pre_value)
-                                }
-                                _ => S64::from(0i64),
-                            };
-                            let (_, pre_rd, post_rd) = cycle.rd_write().unwrap_or_default();
-                            let rd_inc_diff = post_rd as i128 - pre_rd as i128;
-                            let rd_inc_val: S64 = s64_from_diff_u64s(post_rd, pre_rd);
+                        let ram_inc_val: S64 = match cycle.ram_access() {
+                            RAMAccess::Write(w) => s64_from_diff_u64s(w.post_value, w.pre_value),
+                            _ => S64::from(0i64),
+                        };
+                        let (_, pre_rd, post_rd) = cycle.rd_write().unwrap_or_default();
+                        let rd_inc_val: S64 = s64_from_diff_u64s(post_rd, pre_rd);
 
-                            acc_ram.fmadd(eq_val, &ram_inc_val);
-                            acc_rd.fmadd(eq_val, &rd_inc_val);
-                            if params.onehot_inc {
-                                let rd_msb =
-                                    (((rd_inc_diff + (1i128 << XLEN)) as u128 >> XLEN) & 1) as u64;
-                                let ram_msb =
-                                    (((ram_inc_diff + (1i128 << XLEN)) as u128 >> XLEN) & 1) as u64;
-                                acc_rd_msb += *eq_val * F::from_u64(rd_msb);
-                                acc_ram_msb += *eq_val * F::from_u64(ram_msb);
-                            }
-                        }
-
-                        ram_chunk[i] = acc_ram.barrett_reduce();
-                        rd_chunk[i] = acc_rd.barrett_reduce();
-                        if params.onehot_inc {
-                            ram_msb_chunk[i] = acc_ram_msb;
-                            rd_msb_chunk[i] = acc_rd_msb;
-                        }
+                        acc_ram.fmadd(eq_val, &ram_inc_val);
+                        acc_rd.fmadd(eq_val, &rd_inc_val);
                     }
-                },
-            );
+
+                    ram_chunk[i] = acc_ram.barrett_reduce();
+                    rd_chunk[i] = acc_rd.barrett_reduce();
+                }
+            });
 
         Self {
             ram_inc: ram_inc.into(),
             rd_inc: rd_inc.into(),
-            rd_inc_msb: if params.onehot_inc {
-                Some(rd_inc_msb.into())
-            } else {
-                None
-            },
-            ram_inc_msb: if params.onehot_inc {
-                Some(ram_inc_msb.into())
-            } else {
-                None
-            },
             eq_ram: eq_ram.into(),
             eq_rd: eq_rd.into(),
         }
@@ -684,12 +617,6 @@ impl<F: JoltField> IncClaimReductionPhase2State<F> {
     fn bind(&mut self, r_j: F::Challenge) {
         self.ram_inc.bind_parallel(r_j, BindingOrder::LowToHigh);
         self.rd_inc.bind_parallel(r_j, BindingOrder::LowToHigh);
-        if let Some(rd_inc_msb) = self.rd_inc_msb.as_mut() {
-            rd_inc_msb.bind_parallel(r_j, BindingOrder::LowToHigh);
-        }
-        if let Some(ram_inc_msb) = self.ram_inc_msb.as_mut() {
-            ram_inc_msb.bind_parallel(r_j, BindingOrder::LowToHigh);
-        }
         self.eq_ram.bind_parallel(r_j, BindingOrder::LowToHigh);
         self.eq_rd.bind_parallel(r_j, BindingOrder::LowToHigh);
     }
@@ -772,19 +699,5 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
             SumcheckId::IncClaimReduction,
             opening_point.r.clone(),
         );
-        if self.params.onehot_inc {
-            accumulator.append_dense(
-                transcript,
-                CommittedPolynomial::RdIncMsb,
-                SumcheckId::IncClaimReduction,
-                opening_point.r.clone(),
-            );
-            accumulator.append_dense(
-                transcript,
-                CommittedPolynomial::RamIncMsb,
-                SumcheckId::IncClaimReduction,
-                opening_point.r.clone(),
-            );
-        }
     }
 }

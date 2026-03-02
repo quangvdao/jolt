@@ -286,9 +286,9 @@ impl OneHotParams {
         }
     }
 
-    /// Number of one-hot increment chunks (the lower byte chunks, excluding the MSB).
-    /// `d_inc - 1` because chunk 0 (MSB) is committed as a dense boolean for each increment
-    /// family (`RdIncMsb`, `RamIncMsb`) in the one-hot increment path.
+    /// Number of one-hot byte chunks (the lower 64 bits, excluding the MSB).
+    /// `d_inc - 1` because the MSB is committed separately as `RdIncMsb`/`RamIncMsb`
+    /// (also OneHot(K=256) with indices 0 or 1).
     pub fn inc_onehot_d(&self) -> usize {
         self.d_inc - 1
     }

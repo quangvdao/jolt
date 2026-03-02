@@ -448,7 +448,10 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             self.preprocessing.shared.bytecode.code_size
         );
 
+        eprintln!("[PROVER] witness gen + commit...");
+        let t0 = Instant::now();
         let (commitments, mut opening_proof_hints) = self.generate_and_commit_witness_polynomials();
+        eprintln!("[PROVER] commit done ({:.1}s)", t0.elapsed().as_secs_f64());
         let untrusted_advice_commitment = self.generate_and_commit_untrusted_advice();
         self.generate_and_commit_trusted_advice();
 
@@ -472,15 +475,30 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             opening_proof_hints.insert(CommittedPolynomial::UntrustedAdvice, hint);
         }
 
-        let (stage1_uni_skip_first_round_proof, stage1_sumcheck_proof) = self.prove_stage1();
-        let (stage2_uni_skip_first_round_proof, stage2_sumcheck_proof) = self.prove_stage2();
-        let stage3_sumcheck_proof = self.prove_stage3();
-        let stage4_sumcheck_proof = self.prove_stage4();
-        let stage5_sumcheck_proof = self.prove_stage5();
-        let stage6_sumcheck_proof = self.prove_stage6();
-        let stage7_sumcheck_proof = self.prove_stage7();
+        macro_rules! timed_stage {
+            ($name:expr, $body:expr) => {{
+                eprintln!("[PROVER] {}...", $name);
+                let _t = Instant::now();
+                let r = $body;
+                eprintln!("[PROVER] {} done ({:.1}s)", $name, _t.elapsed().as_secs_f64());
+                r
+            }};
+        }
 
-        let joint_opening_proof = self.prove_stage8(opening_proof_hints, commitment_map);
+        let (stage1_uni_skip_first_round_proof, stage1_sumcheck_proof) =
+            timed_stage!("stage1 (Spartan)", self.prove_stage1());
+        let (stage2_uni_skip_first_round_proof, stage2_sumcheck_proof) =
+            timed_stage!("stage2 (RamRW)", self.prove_stage2());
+        let stage3_sumcheck_proof = timed_stage!("stage3 (RamVal)", self.prove_stage3());
+        let stage4_sumcheck_proof = timed_stage!("stage4 (RegRW+RamVal)", self.prove_stage4());
+        let stage5_sumcheck_proof = timed_stage!("stage5 (RegVal+ReadRaf)", self.prove_stage5());
+        let stage6_sumcheck_proof = timed_stage!("stage6 (Bool+HB+Virt+Inc)", self.prove_stage6());
+        let stage7_sumcheck_proof = timed_stage!("stage7 (HammingWeight)", self.prove_stage7());
+
+        let joint_opening_proof = timed_stage!(
+            "stage8 (BatchOpening)",
+            self.prove_stage8(opening_proof_hints, commitment_map)
+        );
 
         #[cfg(test)]
         assert!(
@@ -1366,8 +1384,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let mut polynomial_claims = Vec::new();
 
         if PCS::uses_onehot_inc() {
-            // Hachi path: RdIncRa/RamIncRa opened at (r_addr, r_cycle) from HammingWeight,
-            // RdIncMsb/RamIncMsb opened at r_cycle (cycle-only, with lagrange_factor).
             for i in 0..self.one_hot_params.inc_onehot_d() {
                 let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                     CommittedPolynomial::RdIncRa(i),
@@ -1375,6 +1391,11 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 );
                 polynomial_claims.push((CommittedPolynomial::RdIncRa(i), claim));
             }
+            let (_, rd_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdIncMsb,
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            polynomial_claims.push((CommittedPolynomial::RdIncMsb, rd_msb_claim));
             for i in 0..self.one_hot_params.inc_onehot_d() {
                 let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                     CommittedPolynomial::RamIncRa(i),
@@ -1382,23 +1403,11 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 );
                 polynomial_claims.push((CommittedPolynomial::RamIncRa(i), claim));
             }
-            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
-            let (_, rd_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RdIncMsb,
-                SumcheckId::IncClaimReduction,
-            );
-            polynomial_claims.push((
-                CommittedPolynomial::RdIncMsb,
-                rd_inc_msb_claim * lagrange_factor,
-            ));
-            let (_, ram_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            let (_, ram_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::RamIncMsb,
-                SumcheckId::IncClaimReduction,
+                SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((
-                CommittedPolynomial::RamIncMsb,
-                ram_inc_msb_claim * lagrange_factor,
-            ));
+            polynomial_claims.push((CommittedPolynomial::RamIncMsb, ram_msb_claim));
         } else {
             // Dory path: dense RdInc/RamInc with lagrange_factor
             let (_ram_inc_point, ram_inc_claim) =
@@ -1542,6 +1551,11 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             layout: DoryGlobals::matrix_layout(),
         };
 
+        eprintln!(
+            "[PROVER] stage8: entering PCS::batch_prove ({} polys, point len {})",
+            coeffs.len(),
+            opening_point.r.len()
+        );
         PCS::default().batch_prove(
             &self.preprocessing.generators,
             &poly_source,
@@ -1603,18 +1617,35 @@ where
     #[tracing::instrument(skip_all, name = "JoltProverPreprocessing::gen")]
     pub fn new(
         shared: JoltSharedPreprocessing,
-        // max_trace_length: usize,
     ) -> JoltProverPreprocessing<F, PCS> {
         let max_T: usize = shared.max_padded_trace_length.next_power_of_two();
         let max_log_T = max_T.log_2();
-        // Use the maximum possible log_k_chunk for generator setup
-        let max_log_k_chunk =
-            if PCS::uses_onehot_inc() || max_log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
-                8
-            } else {
-                4
-            };
-        let generators = PCS::setup_prover(max_log_k_chunk + max_log_T);
+        let max_log_k_chunk = if PCS::uses_onehot_inc() || max_log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T
+        {
+            8
+        } else {
+            4
+        };
+        let base_num_vars = max_log_k_chunk + max_log_T;
+
+        // For PCS schemes that use mega-poly batching (Hachi), size the setup
+        // matrices for the mega-polynomial (individual polys batched together).
+        let max_num_vars = if PCS::uses_onehot_inc() {
+            use crate::zkvm::instruction_lookups::LOG_K;
+            use common::constants::XLEN;
+            let inc_bits = XLEN + 1;
+            let max_instruction_d = LOG_K.div_ceil(max_log_k_chunk);
+            let max_d_inc = inc_bits.div_ceil(max_log_k_chunk);
+            let max_ram_d = XLEN.div_ceil(max_log_k_chunk);
+            let max_bytecode_d = XLEN.div_ceil(max_log_k_chunk);
+            let max_n_polys = max_instruction_d + 2 * max_d_inc + max_ram_d + max_bytecode_d;
+            let log_mega = max_n_polys.next_power_of_two().trailing_zeros() as usize;
+            base_num_vars + log_mega
+        } else {
+            base_num_vars
+        };
+
+        let generators = PCS::setup_prover(max_num_vars);
         JoltProverPreprocessing { generators, shared }
     }
 
@@ -1645,8 +1676,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> Serializable
 mod tests {
     use ark_bn254::Fr;
     use hachi_pcs::protocol::{
-        commitment::CommitmentConfig,
-        ProductionFp128CommitmentConfig as HachiTestCommitmentConfig,
+        commitment::CommitmentConfig, ProductionFp128CommitmentConfig as HachiTestCommitmentConfig,
     };
     use serial_test::serial;
 
@@ -2362,6 +2392,12 @@ mod tests {
     #[test]
     #[serial]
     fn muldiv_e2e_hachi() {
+        // D=512 CyclotomicRing elements are ~8KB each; deep call stacks overflow
+        // the default 8MB thread stack.
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(64 * 1024 * 1024)
+            .build_global()
+            .ok();
         let mut program = host::Program::new("muldiv-guest");
         let (bytecode, init_memory_state, _) = program.decode();
         let inputs = postcard::to_stdvec(&[9u32, 5u32, 3u32]).unwrap();

@@ -187,6 +187,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     #[tracing::instrument(skip_all)]
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
+        eprintln!("[VERIFIER] starting verify...");
 
         fiat_shamir_preamble(
             &self.program_io,
@@ -571,7 +572,6 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         let mut polynomial_claims = Vec::new();
 
         if PCS::uses_onehot_inc() {
-            // Hachi path: RdIncRa/RamIncRa from HammingWeight, RdIncMsb/RamIncMsb from IncClaimReduction
             for i in 0..self.one_hot_params.inc_onehot_d() {
                 let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                     CommittedPolynomial::RdIncRa(i),
@@ -579,6 +579,11 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                 );
                 polynomial_claims.push((CommittedPolynomial::RdIncRa(i), claim));
             }
+            let (_, rd_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdIncMsb,
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            polynomial_claims.push((CommittedPolynomial::RdIncMsb, rd_msb_claim));
             for i in 0..self.one_hot_params.inc_onehot_d() {
                 let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                     CommittedPolynomial::RamIncRa(i),
@@ -586,25 +591,12 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
                 );
                 polynomial_claims.push((CommittedPolynomial::RamIncRa(i), claim));
             }
-            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
-            let (_, rd_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RdIncMsb,
-                SumcheckId::IncClaimReduction,
-            );
-            polynomial_claims.push((
-                CommittedPolynomial::RdIncMsb,
-                rd_inc_msb_claim * lagrange_factor,
-            ));
-            let (_, ram_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            let (_, ram_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::RamIncMsb,
-                SumcheckId::IncClaimReduction,
+                SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((
-                CommittedPolynomial::RamIncMsb,
-                ram_inc_msb_claim * lagrange_factor,
-            ));
+            polynomial_claims.push((CommittedPolynomial::RamIncMsb, ram_msb_claim));
         } else {
-            // Dory path: dense RdInc/RamInc with lagrange_factor
             let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::RamInc,
                 SumcheckId::IncClaimReduction,

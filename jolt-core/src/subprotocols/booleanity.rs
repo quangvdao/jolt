@@ -124,7 +124,8 @@ impl<F: JoltField> BooleanitySumcheckParams<F> {
         } else {
             0
         };
-        let total_d = instruction_d + bytecode_d + ram_d + 2 * inc_d;
+        let msb_d: usize = if onehot_inc { 1 } else { 0 };
+        let total_d = instruction_d + bytecode_d + ram_d + 2 * (inc_d + msb_d);
         let log_k_instruction = one_hot_params.lookups_ra_virtual_log_k_chunk;
 
         // Get Stage 5 opening point: order is address (LOG_K_INSTRUCTION) => cycle (log_t)
@@ -182,8 +183,14 @@ impl<F: JoltField> BooleanitySumcheckParams<F> {
         for i in 0..inc_d {
             polynomial_types.push(CommittedPolynomial::RdIncRa(i));
         }
+        if onehot_inc {
+            polynomial_types.push(CommittedPolynomial::RdIncMsb);
+        }
         for i in 0..inc_d {
             polynomial_types.push(CommittedPolynomial::RamIncRa(i));
+        }
+        if onehot_inc {
+            polynomial_types.push(CommittedPolynomial::RamIncMsb);
         }
 
         // Sample a single batching challenge γ, and derive per-polynomial weights γ^{2i}.

@@ -206,11 +206,10 @@ impl<F: JoltField> RLCPolynomial<F> {
                 | CommittedPolynomial::BytecodeRa(_)
                 | CommittedPolynomial::RamRa(_)
                 | CommittedPolynomial::RdIncRa(_)
-                | CommittedPolynomial::RamIncRa(_) => {
+                | CommittedPolynomial::RamIncRa(_)
+                | CommittedPolynomial::RdIncMsb
+                | CommittedPolynomial::RamIncMsb => {
                     onehot_polys.push((*poly_id, *coeff));
-                }
-                CommittedPolynomial::RdIncMsb | CommittedPolynomial::RamIncMsb => {
-                    dense_polys.push((*poly_id, *coeff));
                 }
                 CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
                     // Advice polynomials are passed in directly (not streamed from trace)

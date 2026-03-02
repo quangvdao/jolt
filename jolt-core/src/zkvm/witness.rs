@@ -53,13 +53,15 @@ pub enum CommittedPolynomial {
     /// 8 polynomials `RdIncRa(0)..RdIncRa(7)` encoding the lower 64 bits of
     /// `unsigned_rd_inc = rd_inc + 2^XLEN` as byte chunks 1..8.
     RdIncRa(usize),
-    /// Dense boolean for bit 64 (MSB) of unsigned_rd_inc (Hachi path).
+    /// One-hot polynomial for bit 64 (MSB) of unsigned_rd_inc (Hachi path).
+    /// Committed as OneHot(K=256) with indices 0 or 1 for uniform treatment.
     RdIncMsb,
     /// One-hot ra polynomial for RAM increment (Hachi path).
     /// 8 polynomials `RamIncRa(0)..RamIncRa(7)` encoding the lower 64 bits of
     /// `unsigned_ram_inc = ram_inc + 2^XLEN` as byte chunks 1..8.
     RamIncRa(usize),
-    /// Dense boolean for bit 64 (MSB) of unsigned_ram_inc (Hachi path).
+    /// One-hot polynomial for bit 64 (MSB) of unsigned_ram_inc (Hachi path).
+    /// Committed as OneHot(K=256) with indices 0 or 1 for uniform treatment.
     RamIncMsb,
     /// Trusted advice polynomial.
     TrustedAdvice,
@@ -79,31 +81,32 @@ pub fn all_committed_polynomials(
 ) -> Vec<CommittedPolynomial> {
     let mut polynomials = Vec::new();
 
+    for i in 0..one_hot_params.instruction_d {
+        polynomials.push(CommittedPolynomial::InstructionRa(i));
+    }
+
     if onehot_inc {
-        // 8 one-hot byte chunks for the lower 64 bits of unsigned_rd_inc
         for i in 0..one_hot_params.inc_onehot_d() {
             polynomials.push(CommittedPolynomial::RdIncRa(i));
         }
-        polynomials.push(CommittedPolynomial::RdIncMsb);
-
-        // 8 one-hot byte chunks for the lower 64 bits of unsigned_ram_inc
         for i in 0..one_hot_params.inc_onehot_d() {
             polynomials.push(CommittedPolynomial::RamIncRa(i));
         }
-        polynomials.push(CommittedPolynomial::RamIncMsb);
     } else {
         polynomials.push(CommittedPolynomial::RdInc);
         polynomials.push(CommittedPolynomial::RamInc);
     }
 
-    for i in 0..one_hot_params.instruction_d {
-        polynomials.push(CommittedPolynomial::InstructionRa(i));
-    }
     for i in 0..one_hot_params.ram_d {
         polynomials.push(CommittedPolynomial::RamRa(i));
     }
     for i in 0..one_hot_params.bytecode_d {
         polynomials.push(CommittedPolynomial::BytecodeRa(i));
+    }
+
+    if onehot_inc {
+        polynomials.push(CommittedPolynomial::RdIncMsb);
+        polynomials.push(CommittedPolynomial::RamIncMsb);
     }
 
     polynomials
@@ -191,11 +194,11 @@ impl CommittedPolynomial {
                 pcs.process_chunk_onehot(setup, one_hot_params.k_chunk, &row)
             }
             CommittedPolynomial::RdIncMsb => {
-                let row: Vec<u8> = row_cycles
+                let row: Vec<Option<usize>> = row_cycles
                     .iter()
-                    .map(|cycle| (rd_unsigned_inc(cycle) >> XLEN) as u8)
+                    .map(|cycle| Some((rd_unsigned_inc(cycle) >> XLEN) as usize))
                     .collect();
-                pcs.process_chunk(setup, &row)
+                pcs.process_chunk_onehot(setup, one_hot_params.k_chunk, &row)
             }
             CommittedPolynomial::RamIncRa(idx) => {
                 let row: Vec<Option<usize>> = row_cycles
@@ -209,11 +212,11 @@ impl CommittedPolynomial {
                 pcs.process_chunk_onehot(setup, one_hot_params.k_chunk, &row)
             }
             CommittedPolynomial::RamIncMsb => {
-                let row: Vec<u8> = row_cycles
+                let row: Vec<Option<usize>> = row_cycles
                     .iter()
-                    .map(|cycle| (ram_unsigned_inc(cycle) >> XLEN) as u8)
+                    .map(|cycle| Some((ram_unsigned_inc(cycle) >> XLEN) as usize))
                     .collect();
-                pcs.process_chunk(setup, &row)
+                pcs.process_chunk_onehot(setup, one_hot_params.k_chunk, &row)
             }
             CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
                 panic!("Advice polynomials should not use streaming witness generation")
@@ -323,11 +326,17 @@ impl CommittedPolynomial {
                 ))
             }
             CommittedPolynomial::RdIncMsb => {
-                let coeffs: Vec<u8> = trace
+                let one_hot_params = one_hot_params.unwrap();
+                let indices: Vec<Option<u8>> = trace
                     .par_iter()
-                    .map(|cycle| (rd_unsigned_inc(cycle) >> XLEN) as u8)
+                    .map(|cycle| Some((rd_unsigned_inc(cycle) >> XLEN) as u8))
                     .collect();
-                coeffs.into()
+                let t = indices.len();
+                MultilinearPolynomial::OneHot(OneHotPolynomial::from_indices(
+                    indices,
+                    one_hot_params.k_chunk,
+                    t,
+                ))
             }
             CommittedPolynomial::RamIncRa(i) => {
                 let one_hot_params = one_hot_params.unwrap();
@@ -346,11 +355,17 @@ impl CommittedPolynomial {
                 ))
             }
             CommittedPolynomial::RamIncMsb => {
-                let coeffs: Vec<u8> = trace
+                let one_hot_params = one_hot_params.unwrap();
+                let indices: Vec<Option<u8>> = trace
                     .par_iter()
-                    .map(|cycle| (ram_unsigned_inc(cycle) >> XLEN) as u8)
+                    .map(|cycle| Some((ram_unsigned_inc(cycle) >> XLEN) as u8))
                     .collect();
-                coeffs.into()
+                let t = indices.len();
+                MultilinearPolynomial::OneHot(OneHotPolynomial::from_indices(
+                    indices,
+                    one_hot_params.k_chunk,
+                    t,
+                ))
             }
             CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
                 panic!("Advice polynomials should not use generate_witness")
@@ -364,7 +379,9 @@ impl CommittedPolynomial {
             | CommittedPolynomial::BytecodeRa(_)
             | CommittedPolynomial::RamRa(_)
             | CommittedPolynomial::RdIncRa(_)
-            | CommittedPolynomial::RamIncRa(_) => Some(one_hot_params.k_chunk),
+            | CommittedPolynomial::RamIncRa(_)
+            | CommittedPolynomial::RdIncMsb
+            | CommittedPolynomial::RamIncMsb => Some(one_hot_params.k_chunk),
             _ => None,
         }
     }

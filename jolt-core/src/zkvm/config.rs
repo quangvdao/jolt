@@ -136,17 +136,22 @@ pub struct OneHotConfig {
 
 impl OneHotConfig {
     /// Create a OneHotConfig with default values based on trace length.
-    pub fn new(log_T: usize) -> Self {
-        let log_k_chunk = if log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
-            4
-        } else {
+    ///
+    /// When `force_max_k_chunk` is true (Hachi), always uses `log_k_chunk=8`
+    /// regardless of trace length. This is because Hachi's lattice commitment
+    /// costs don't benefit from the smaller chunk size that Dory uses for short traces.
+    pub fn new(log_T: usize, force_max_k_chunk: bool) -> Self {
+        let log_k_chunk = if force_max_k_chunk || log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
             8
-        };
-        let lookups_ra_virtual_log_k_chunk = if log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
-            LOG_K / 8
         } else {
-            LOG_K / 4
+            4
         };
+        let lookups_ra_virtual_log_k_chunk =
+            if force_max_k_chunk || log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
+                LOG_K / 4
+            } else {
+                LOG_K / 8
+            };
 
         Self {
             log_k_chunk: log_k_chunk as u8,
@@ -267,9 +272,9 @@ impl OneHotParams {
 
     /// Create OneHotParams for the given trace parameters using default config.
     ///
-    /// This is a convenience constructor for the prover.
-    pub fn new(log_T: usize, bytecode_k: usize, ram_k: usize) -> Self {
-        let config = OneHotConfig::new(log_T);
+    /// When `force_max_k_chunk` is true (Hachi), always uses `log_k_chunk=8`.
+    pub fn new(log_T: usize, bytecode_k: usize, ram_k: usize, force_max_k_chunk: bool) -> Self {
+        let config = OneHotConfig::new(log_T, force_max_k_chunk);
         Self::from_config(&config, bytecode_k, ram_k)
     }
 
@@ -279,6 +284,13 @@ impl OneHotParams {
             log_k_chunk: self.log_k_chunk as u8,
             lookups_ra_virtual_log_k_chunk: self.lookups_ra_virtual_log_k_chunk as u8,
         }
+    }
+
+    /// Number of one-hot increment chunks (the lower byte chunks, excluding the MSB).
+    /// `d_inc - 1` because chunk 0 (MSB) is committed as a dense boolean for each increment
+    /// family (`RdIncMsb`, `RamIncMsb`) in the one-hot increment path.
+    pub fn inc_onehot_d(&self) -> usize {
+        self.d_inc - 1
     }
 
     pub fn ram_address_chunk(&self, address: u64, idx: usize) -> u8 {
@@ -335,7 +347,7 @@ mod tests {
 
     #[test]
     fn inc_chunk_roundtrip() {
-        let params = OneHotParams::new(25, 256, 256);
+        let params = OneHotParams::new(25, 256, 256, false);
         assert_eq!(params.log_k_chunk, 8);
         assert_eq!(params.d_inc, INC_BITS.div_ceil(8));
         assert_eq!(params.d_inc, 9);
@@ -374,7 +386,7 @@ mod tests {
 
     #[test]
     fn inc_chunk_roundtrip_k4() {
-        let params = OneHotParams::new(10, 16, 16);
+        let params = OneHotParams::new(10, 16, 16, false);
         assert_eq!(params.log_k_chunk, 4);
         assert_eq!(params.d_inc, INC_BITS.div_ceil(4));
         assert_eq!(params.d_inc, 17);

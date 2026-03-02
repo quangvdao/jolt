@@ -47,6 +47,9 @@ pub const MAX_INSTRUCTION_D: usize = 32;
 pub const MAX_BYTECODE_D: usize = 6;
 /// Maximum number of RAM RA chunks (address splits into at most 8 chunks)
 pub const MAX_RAM_D: usize = 8;
+/// Maximum number of one-hot increment chunks (lower 64 bits, byte chunks 1..8).
+/// d_inc = ceil(65/8) = 9, minus 1 for the MSB = 8.
+pub const MAX_INC_D: usize = 8;
 
 /// Asserts that the one_hot_params dimensions are within bounds.
 /// Call this once at the start of bulk operations to catch issues early.
@@ -82,6 +85,16 @@ pub struct RaIndices {
     pub bytecode: [u8; MAX_BYTECODE_D],
     /// RAM RA chunk indices (None for non-memory cycles)
     pub ram: [Option<u8>; MAX_RAM_D],
+    /// Register increment one-hot chunk indices (byte chunks 1..8 of unsigned_rd_inc).
+    /// Populated only when `onehot_inc` is true (Hachi path).
+    pub rd_inc: [u8; MAX_INC_D],
+    /// MSB (bit 64) of unsigned_rd_inc. Always 0 or 1.
+    pub rd_inc_msb: u8,
+    /// RAM increment one-hot chunk indices (byte chunks 1..8 of unsigned_ram_inc).
+    /// Populated only when `onehot_inc` is true (Hachi path).
+    pub ram_inc: [u8; MAX_INC_D],
+    /// MSB (bit 64) of unsigned_ram_inc. Always 0 or 1.
+    pub ram_inc_msb: u8,
 }
 
 impl std::ops::Add for RaIndices {
@@ -110,6 +123,10 @@ impl Zero for RaIndices {
         self.instruction.iter().all(|&x| x == 0)
             && self.bytecode.iter().all(|&x| x == 0)
             && self.ram.iter().all(|x| x.is_none())
+            && self.rd_inc.iter().all(|&x| x == 0)
+            && self.rd_inc_msb == 0
+            && self.ram_inc.iter().all(|&x| x == 0)
+            && self.ram_inc_msb == 0
     }
 }
 
@@ -164,26 +181,58 @@ impl RaIndices {
             ram[i] = remapped.map(|a| one_hot_params.ram_address_chunk(a, i));
         }
 
+        // Increment indices (always computed; only used when onehot_inc=true)
+        let (_, rd_pre, rd_post) = cycle.rd_write().unwrap_or_default();
+        let rd_inc = rd_post as i128 - rd_pre as i128;
+        let ram_inc = match cycle.ram_access() {
+            tracer::instruction::RAMAccess::Write(write) => {
+                write.post_value as i128 - write.pre_value as i128
+            }
+            _ => 0,
+        };
+        let unsigned_rd_inc = (rd_inc + (1i128 << XLEN)) as u128;
+        let rd_inc_msb = (unsigned_rd_inc >> XLEN) as u8;
+        let mut rd_inc_arr = [0u8; MAX_INC_D];
+        for i in 0..one_hot_params.inc_onehot_d().min(MAX_INC_D) {
+            rd_inc_arr[i] = one_hot_params.inc_chunk(unsigned_rd_inc, i + 1);
+        }
+        let unsigned_ram_inc = (ram_inc + (1i128 << XLEN)) as u128;
+        let ram_inc_msb = (unsigned_ram_inc >> XLEN) as u8;
+        let mut ram_inc_arr = [0u8; MAX_INC_D];
+        for i in 0..one_hot_params.inc_onehot_d().min(MAX_INC_D) {
+            ram_inc_arr[i] = one_hot_params.inc_chunk(unsigned_ram_inc, i + 1);
+        }
+
         Self {
             instruction,
             bytecode: bytecode_arr,
             ram,
+            rd_inc: rd_inc_arr,
+            rd_inc_msb,
+            ram_inc: ram_inc_arr,
+            ram_inc_msb,
         }
     }
 
     /// Extract the index for polynomial `poly_idx` in the unified ordering:
-    /// [instruction_0..d, bytecode_0..d, ram_0..d]
+    /// [instruction_0..d, bytecode_0..d, ram_0..d, rd_inc_0..rd_inc_d, ram_inc_0..ram_inc_d]
     #[inline]
     pub fn get_index(&self, poly_idx: usize, one_hot_params: &OneHotParams) -> Option<u8> {
         let instruction_d = one_hot_params.instruction_d;
         let bytecode_d = one_hot_params.bytecode_d;
+        let ram_d = one_hot_params.ram_d;
+        let inc_d = one_hot_params.inc_onehot_d();
 
         if poly_idx < instruction_d {
             Some(self.instruction[poly_idx])
         } else if poly_idx < instruction_d + bytecode_d {
             Some(self.bytecode[poly_idx - instruction_d])
-        } else {
+        } else if poly_idx < instruction_d + bytecode_d + ram_d {
             self.ram[poly_idx - instruction_d - bytecode_d]
+        } else if poly_idx < instruction_d + bytecode_d + ram_d + inc_d {
+            Some(self.rd_inc[poly_idx - instruction_d - bytecode_d - ram_d])
+        } else {
+            Some(self.ram_inc[poly_idx - instruction_d - bytecode_d - ram_d - inc_d])
         }
     }
 }
@@ -198,7 +247,8 @@ impl RaIndices {
 /// Uses a two-table split-eq: split `r_cycle` into MSB/LSB halves, compute `E_hi` and `E_lo`,
 /// then `eq(r_cycle, c) = E_hi[c_hi] * E_lo[c_lo]` where `c = (c_hi << lo_bits) | c_lo`.
 ///
-/// Returns G in order: [instruction_0..d, bytecode_0..d, ram_0..d]
+/// Returns G in order:
+/// [instruction_0..d, bytecode_0..d, ram_0..d, (rd_inc_0..rd_inc_d, ram_inc_0..ram_inc_d if onehot_inc)]
 /// Each inner Vec has length k_chunk.
 #[tracing::instrument(skip_all, name = "shared_ra_polys::compute_all_G")]
 pub fn compute_all_G<F: JoltField>(
@@ -207,6 +257,7 @@ pub fn compute_all_G<F: JoltField>(
     memory_layout: &MemoryLayout,
     one_hot_params: &OneHotParams,
     r_cycle: &[F::Challenge],
+    onehot_inc: bool,
 ) -> Vec<Vec<F>> {
     compute_all_G_impl::<F>(
         trace,
@@ -215,6 +266,7 @@ pub fn compute_all_G<F: JoltField>(
         one_hot_params,
         r_cycle,
         None,
+        onehot_inc,
     )
 }
 
@@ -232,9 +284,9 @@ pub fn compute_all_G_and_ra_indices<F: JoltField>(
     memory_layout: &MemoryLayout,
     one_hot_params: &OneHotParams,
     r_cycle: &[F::Challenge],
+    onehot_inc: bool,
 ) -> (Vec<Vec<F>>, Vec<RaIndices>) {
     let T = trace.len();
-    // Pre-allocate ra_indices
     let mut ra_indices: Vec<RaIndices> = unsafe_allocate_zero_vec(T);
 
     let G = compute_all_G_impl::<F>(
@@ -244,6 +296,7 @@ pub fn compute_all_G_and_ra_indices<F: JoltField>(
         one_hot_params,
         r_cycle,
         Some(&mut ra_indices),
+        onehot_inc,
     );
 
     (G, ra_indices)
@@ -261,17 +314,22 @@ fn compute_all_G_impl<F: JoltField>(
     one_hot_params: &OneHotParams,
     r_cycle: &[F::Challenge],
     ra_indices: Option<&mut [RaIndices]>,
+    onehot_inc: bool,
 ) -> Vec<Vec<F>> {
-    // Convert to usize for thread safety (usize is Send + Sync, raw pointers are not Sync)
     let ra_ptr_usize: usize = ra_indices.map(|s| s.as_mut_ptr() as usize).unwrap_or(0);
-    // Verify bounds once at the start
     assert_ra_bounds(one_hot_params);
 
     let K = one_hot_params.k_chunk;
     let instruction_d = one_hot_params.instruction_d;
     let bytecode_d = one_hot_params.bytecode_d;
     let ram_d = one_hot_params.ram_d;
-    let N = instruction_d + bytecode_d + ram_d;
+    let rd_inc_d = if onehot_inc {
+        one_hot_params.inc_onehot_d()
+    } else {
+        0
+    };
+    let ram_inc_d = rd_inc_d;
+    let N = instruction_d + bytecode_d + ram_d + rd_inc_d + ram_inc_d;
     let T = trace.len();
 
     // Two-table split-eq:
@@ -299,7 +357,6 @@ fn compute_all_G_impl<F: JoltField>(
     E_hi.par_chunks(chunk_size)
         .enumerate()
         .map(|(chunk_idx, chunk)| {
-            // Allocate separate arrays per polynomial type
             let mut partial_instruction: Vec<Vec<F>> = (0..instruction_d)
                 .map(|_| unsafe_allocate_zero_vec(K))
                 .collect();
@@ -308,8 +365,12 @@ fn compute_all_G_impl<F: JoltField>(
                 .collect();
             let mut partial_ram: Vec<Vec<F>> =
                 (0..ram_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
+            let mut partial_rd_inc: Vec<Vec<F>> =
+                (0..rd_inc_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
+            let mut partial_ram_inc: Vec<Vec<F>> = (0..ram_inc_d)
+                .map(|_| unsafe_allocate_zero_vec(K))
+                .collect();
 
-            // Reusable local unreduced accumulators (5-limb) and touched flags
             let mut local_instruction: Vec<Vec<F::UnreducedMulU64>> = (0..instruction_d)
                 .map(|_| unsafe_allocate_zero_vec(K))
                 .collect();
@@ -318,18 +379,26 @@ fn compute_all_G_impl<F: JoltField>(
                 .collect();
             let mut local_ram: Vec<Vec<F::UnreducedMulU64>> =
                 (0..ram_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
+            let mut local_rd_inc: Vec<Vec<F::UnreducedMulU64>> =
+                (0..rd_inc_d).map(|_| unsafe_allocate_zero_vec(K)).collect();
+            let mut local_ram_inc: Vec<Vec<F::UnreducedMulU64>> = (0..ram_inc_d)
+                .map(|_| unsafe_allocate_zero_vec(K))
+                .collect();
             let mut touched_instruction: Vec<FixedBitSet> =
                 vec![FixedBitSet::with_capacity(K); instruction_d];
             let mut touched_bytecode: Vec<FixedBitSet> =
                 vec![FixedBitSet::with_capacity(K); bytecode_d];
             let mut touched_ram: Vec<FixedBitSet> = vec![FixedBitSet::with_capacity(K); ram_d];
+            let mut touched_rd_inc: Vec<FixedBitSet> =
+                vec![FixedBitSet::with_capacity(K); rd_inc_d];
+            let mut touched_ram_inc: Vec<FixedBitSet> =
+                vec![FixedBitSet::with_capacity(K); ram_inc_d];
 
             let chunk_start = chunk_idx * chunk_size;
             for (local_idx, &e_hi) in chunk.iter().enumerate() {
                 let c_hi = chunk_start + local_idx;
                 let c_hi_base = c_hi * in_len;
 
-                // Clear touched flags and local accumulators for this c_hi
                 for i in 0..instruction_d {
                     for k in touched_instruction[i].ones() {
                         local_instruction[i][k] = Default::default();
@@ -347,6 +416,18 @@ fn compute_all_G_impl<F: JoltField>(
                         local_ram[i][k] = Default::default();
                     }
                     touched_ram[i].clear();
+                }
+                for i in 0..rd_inc_d {
+                    for k in touched_rd_inc[i].ones() {
+                        local_rd_inc[i][k] = Default::default();
+                    }
+                    touched_rd_inc[i].clear();
+                }
+                for i in 0..ram_inc_d {
+                    for k in touched_ram_inc[i].ones() {
+                        local_ram_inc[i][k] = Default::default();
+                    }
+                    touched_ram_inc[i].clear();
                 }
 
                 // Sequential over c_lo (contiguous cycles for this c_hi)
@@ -400,6 +481,24 @@ fn compute_all_G_impl<F: JoltField>(
                             local_ram[i][k] += add;
                         }
                     }
+
+                    // RdIncRa contributions (unreduced accumulation)
+                    for i in 0..rd_inc_d {
+                        let k = ra_idx.rd_inc[i] as usize;
+                        if !touched_rd_inc[i].contains(k) {
+                            touched_rd_inc[i].insert(k);
+                        }
+                        local_rd_inc[i][k] += add;
+                    }
+
+                    // RamIncRa contributions (unreduced accumulation)
+                    for i in 0..ram_inc_d {
+                        let k = ra_idx.ram_inc[i] as usize;
+                        if !touched_ram_inc[i].contains(k) {
+                            touched_ram_inc[i].insert(k);
+                        }
+                        local_ram_inc[i][k] += add;
+                    }
                 }
 
                 // Barrett reduce and scale by E_hi[c_hi], only for touched indices
@@ -421,13 +520,26 @@ fn compute_all_G_impl<F: JoltField>(
                         partial_ram[i][k] += e_hi * reduced;
                     }
                 }
+                for i in 0..rd_inc_d {
+                    for k in touched_rd_inc[i].ones() {
+                        let reduced = F::reduce_mul_u64(local_rd_inc[i][k]);
+                        partial_rd_inc[i][k] += e_hi * reduced;
+                    }
+                }
+                for i in 0..ram_inc_d {
+                    for k in touched_ram_inc[i].ones() {
+                        let reduced = F::reduce_mul_u64(local_ram_inc[i][k]);
+                        partial_ram_inc[i][k] += e_hi * reduced;
+                    }
+                }
             }
 
-            // Combine into single Vec<Vec<F>> in order: instruction, bytecode, ram
             let mut result: Vec<Vec<F>> = Vec::with_capacity(N);
             result.extend(partial_instruction);
             result.extend(partial_bytecode);
             result.extend(partial_ram);
+            result.extend(partial_rd_inc);
+            result.extend(partial_ram_inc);
             result
         })
         .reduce(
@@ -513,13 +625,13 @@ pub struct SharedRaRound3<F: JoltField> {
 impl<F: JoltField> SharedRaPolynomials<F> {
     /// Create new SharedRaPolynomials from eq table and indices.
     pub fn new(tables: Vec<Vec<F>>, indices: Vec<RaIndices>, one_hot_params: OneHotParams) -> Self {
-        let num_polys =
-            one_hot_params.instruction_d + one_hot_params.bytecode_d + one_hot_params.ram_d;
+        let num_polys = tables.len();
         debug_assert!(
-            tables.len() == num_polys,
-            "SharedRaPolynomials::new: tables.len() = {}, expected num_polys = {}",
-            tables.len(),
             num_polys
+                >= one_hot_params.instruction_d + one_hot_params.bytecode_d + one_hot_params.ram_d,
+            "SharedRaPolynomials::new: tables.len() = {} < min expected = {}",
+            num_polys,
+            one_hot_params.instruction_d + one_hot_params.bytecode_d + one_hot_params.ram_d
         );
         Self::Round1(SharedRaRound1 {
             tables,

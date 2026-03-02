@@ -31,7 +31,8 @@ use crate::zkvm::{
     proof_serialization::JoltProof,
     r1cs::key::UniformSpartanKey,
     ram::{
-        compute_min_ram_K, hamming_booleanity::HammingBooleanitySumcheckVerifier,
+        compute_min_ram_K, gen_ram_initial_memory_state,
+        hamming_booleanity::HammingBooleanitySumcheckVerifier,
         output_check::OutputSumcheckVerifier, ra_virtual::RamRaVirtualSumcheckVerifier,
         raf_evaluation::RafEvaluationSumcheckVerifier as RamRafEvaluationSumcheckVerifier,
         read_write_checking::RamReadWriteCheckingVerifier, val_check::RamValCheckSumcheckVerifier,
@@ -357,7 +358,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         // Domain-separate the batching challenge.
         self.transcript.append_bytes(b"ram_val_check_gamma", &[]);
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
-        let initial_ram_state = crate::zkvm::ram::gen_ram_initial_memory_state::<F>(
+        let initial_ram_state = gen_ram_initial_memory_state::<F>(
             self.proof.ram_K,
             &self.preprocessing.shared.ram,
             &self.program_io,
@@ -436,6 +437,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
+            PCS::uses_onehot_inc(),
         );
 
         let booleanity = BooleanitySumcheckVerifier::new(booleanity_params);
@@ -454,6 +456,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             self.proof.trace_length,
             &self.opening_accumulator,
             &mut self.transcript,
+            PCS::uses_onehot_inc(),
         );
 
         // Advice claim reduction (Phase 1 in Stage 6): trusted and untrusted are separate instances.
@@ -508,6 +511,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
+            PCS::uses_onehot_inc(),
         );
 
         let mut instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>> =
@@ -564,27 +568,56 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         let log_k_chunk = self.one_hot_params.log_k_chunk;
         let r_address_stage7 = &opening_point.r[..log_k_chunk];
 
-        // 1. Collect all (polynomial, claim) pairs
         let mut polynomial_claims = Vec::new();
 
-        // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
-        let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::RamInc,
-            SumcheckId::IncClaimReduction,
-        );
-        let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::RdInc,
-            SumcheckId::IncClaimReduction,
-        );
+        if PCS::uses_onehot_inc() {
+            // Hachi path: RdIncRa/RamIncRa from HammingWeight, RdIncMsb/RamIncMsb from IncClaimReduction
+            for i in 0..self.one_hot_params.inc_onehot_d() {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RdIncRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::RdIncRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.inc_onehot_d() {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RamIncRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::RamIncRa(i), claim));
+            }
+            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+            let (_, rd_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdIncMsb,
+                SumcheckId::IncClaimReduction,
+            );
+            polynomial_claims.push((
+                CommittedPolynomial::RdIncMsb,
+                rd_inc_msb_claim * lagrange_factor,
+            ));
+            let (_, ram_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamIncMsb,
+                SumcheckId::IncClaimReduction,
+            );
+            polynomial_claims.push((
+                CommittedPolynomial::RamIncMsb,
+                ram_inc_msb_claim * lagrange_factor,
+            ));
+        } else {
+            // Dory path: dense RdInc/RamInc with lagrange_factor
+            let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            );
+            let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdInc,
+                SumcheckId::IncClaimReduction,
+            );
+            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+            polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
+            polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
+        }
 
-        // Apply Lagrange factor for dense polys
-        // Note: r_address is in big-endian, Lagrange factor uses ∏(1 - r_i)
-        let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
-
-        polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
-        polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
-
-        // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
         for i in 0..self.one_hot_params.instruction_d {
             let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::InstructionRa(i),
@@ -653,9 +686,10 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
         // Build commitments map and collect in same order as poly_ids
         let mut commitments_map: HashMap<CommittedPolynomial, PCS::Commitment> = HashMap::new();
-        for (polynomial, commitment) in all_committed_polynomials(&self.one_hot_params)
-            .into_iter()
-            .zip_eq(&self.proof.commitments)
+        for (polynomial, commitment) in
+            all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc())
+                .into_iter()
+                .zip_eq(&self.proof.commitments)
         {
             commitments_map.insert(polynomial, commitment.clone());
         }

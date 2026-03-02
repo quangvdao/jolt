@@ -69,6 +69,7 @@ use crate::{
             ra_virtual::RamRaVirtualParams,
             raf_evaluation::RafEvaluationSumcheckParams,
             read_write_checking::RamReadWriteCheckingParams,
+            remap_address,
             val_check::{RamValCheckSumcheckParams, RamValCheckSumcheckProver},
         },
         registers::{
@@ -276,7 +277,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         // and nu_main by roughly 0.5 each iteration.
         while {
             let log_t = padded_trace_len.log_2();
-            let log_k_chunk = OneHotConfig::new(log_t).log_k_chunk as usize;
+            let log_k_chunk = OneHotConfig::new(log_t, false).log_k_chunk as usize;
             let (sigma_main, nu_main) = DoryGlobals::main_sigma_nu(log_k_chunk, log_t);
             sigma_main < max_sigma_a || nu_main < max_nu_a
         } {
@@ -285,7 +286,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 // max_padded_trace_length too small for the configured advice sizes.
                 // Cannot recover at runtime - user must fix their configuration.
                 let log_t = padded_trace_len.log_2();
-                let log_k_chunk = OneHotConfig::new(log_t).log_k_chunk as usize;
+                let log_k_chunk = OneHotConfig::new(log_t, false).log_k_chunk as usize;
                 let total_vars = log_k_chunk + log_t;
                 let (sigma_main, nu_main) = DoryGlobals::main_sigma_nu(log_k_chunk, log_t);
                 panic!(
@@ -358,7 +359,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let ram_K = trace
             .par_iter()
             .filter_map(|cycle| {
-                crate::zkvm::ram::remap_address(
+                remap_address(
                     cycle.ram_access().address() as u64,
                     &preprocessing.shared.memory_layout,
                 )
@@ -366,7 +367,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             .max()
             .unwrap_or(0)
             .max(
-                crate::zkvm::ram::remap_address(
+                remap_address(
                     preprocessing.shared.ram.min_bytecode_address,
                     &preprocessing.shared.memory_layout,
                 )
@@ -391,8 +392,12 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let log_T = trace.len().log_2();
         let ram_log_K = ram_K.log_2();
         let rw_config = ReadWriteConfig::new(log_T, ram_log_K);
-        let one_hot_params =
-            OneHotParams::new(log_T, preprocessing.shared.bytecode.code_size, ram_K);
+        let one_hot_params = OneHotParams::new(
+            log_T,
+            preprocessing.shared.bytecode.code_size,
+            ram_K,
+            PCS::uses_onehot_inc(),
+        );
 
         Self {
             preprocessing,
@@ -447,8 +452,8 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let untrusted_advice_commitment = self.generate_and_commit_untrusted_advice();
         self.generate_and_commit_trusted_advice();
 
-        // Build per-polynomial commitment map for Stage 8
-        let main_polys = all_committed_polynomials(&self.one_hot_params);
+        let onehot_inc = PCS::uses_onehot_inc();
+        let main_polys = all_committed_polynomials(&self.one_hot_params, onehot_inc);
         let mut commitment_map: HashMap<CommittedPolynomial, PCS::Commitment> = main_polys
             .into_iter()
             .zip(commitments.iter().cloned())
@@ -563,7 +568,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             Some(DoryGlobals::get_layout()),
         );
 
-        let polys = all_committed_polynomials(&self.one_hot_params);
+        let polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
         let T = DoryGlobals::get_T();
         let K = 1usize << self.one_hot_params.log_k_chunk;
         let pcs = PCS::default();
@@ -1118,6 +1123,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
+            PCS::uses_onehot_inc(),
         );
 
         let ram_ra_virtual_params = RamRaVirtualParams::new(
@@ -1134,6 +1140,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             self.trace.len(),
             &self.opening_accumulator,
             &mut self.transcript,
+            PCS::uses_onehot_inc(),
         );
 
         // Advice claim reduction (Phase 1 in Stage 6): trusted and untrusted are separate instances.
@@ -1270,6 +1277,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
+            PCS::uses_onehot_inc(),
         );
         let hw_prover = HammingWeightClaimReductionProver::initialize(
             hw_params,
@@ -1354,36 +1362,72 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         let mut polynomial_claims = Vec::new();
 
-        let (_ram_inc_point, ram_inc_claim) =
-            self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RamInc,
+        if PCS::uses_onehot_inc() {
+            // Hachi path: RdIncRa/RamIncRa opened at (r_addr, r_cycle) from HammingWeight,
+            // RdIncMsb/RamIncMsb opened at r_cycle (cycle-only, with lagrange_factor).
+            for i in 0..self.one_hot_params.inc_onehot_d() {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RdIncRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::RdIncRa(i), claim));
+            }
+            for i in 0..self.one_hot_params.inc_onehot_d() {
+                let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RamIncRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                );
+                polynomial_claims.push((CommittedPolynomial::RamIncRa(i), claim));
+            }
+            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+            let (_, rd_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdIncMsb,
                 SumcheckId::IncClaimReduction,
             );
-        let (_rd_inc_point, rd_inc_claim) =
-            self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RdInc,
+            polynomial_claims.push((
+                CommittedPolynomial::RdIncMsb,
+                rd_inc_msb_claim * lagrange_factor,
+            ));
+            let (_, ram_inc_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamIncMsb,
                 SumcheckId::IncClaimReduction,
             );
+            polynomial_claims.push((
+                CommittedPolynomial::RamIncMsb,
+                ram_inc_msb_claim * lagrange_factor,
+            ));
+        } else {
+            // Dory path: dense RdInc/RamInc with lagrange_factor
+            let (_ram_inc_point, ram_inc_claim) =
+                self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RamInc,
+                    SumcheckId::IncClaimReduction,
+                );
+            let (_rd_inc_point, rd_inc_claim) =
+                self.opening_accumulator.get_committed_polynomial_opening(
+                    CommittedPolynomial::RdInc,
+                    SumcheckId::IncClaimReduction,
+                );
 
-        #[cfg(test)]
-        {
-            let r_cycle_stage6 = &opening_point.r[log_k_chunk..];
-            debug_assert_eq!(
-                _ram_inc_point.r.as_slice(),
-                r_cycle_stage6,
-                "RamInc opening point should match r_cycle from HammingWeightClaimReduction"
-            );
-            debug_assert_eq!(
-                _rd_inc_point.r.as_slice(),
-                r_cycle_stage6,
-                "RdInc opening point should match r_cycle from HammingWeightClaimReduction"
-            );
+            #[cfg(test)]
+            {
+                let r_cycle_stage6 = &opening_point.r[log_k_chunk..];
+                debug_assert_eq!(
+                    _ram_inc_point.r.as_slice(),
+                    r_cycle_stage6,
+                    "RamInc opening point should match r_cycle from HammingWeightClaimReduction"
+                );
+                debug_assert_eq!(
+                    _rd_inc_point.r.as_slice(),
+                    r_cycle_stage6,
+                    "RdInc opening point should match r_cycle from HammingWeightClaimReduction"
+                );
+            }
+
+            let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
+            polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
+            polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
         }
-
-        let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
-
-        polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
-        polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
 
         for i in 0..self.one_hot_params.instruction_d {
             let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(

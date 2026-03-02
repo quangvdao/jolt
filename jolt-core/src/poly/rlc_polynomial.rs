@@ -209,6 +209,9 @@ impl<F: JoltField> RLCPolynomial<F> {
                 | CommittedPolynomial::RamIncRa(_) => {
                     onehot_polys.push((*poly_id, *coeff));
                 }
+                CommittedPolynomial::RdIncMsb | CommittedPolynomial::RamIncMsb => {
+                    dense_polys.push((*poly_id, *coeff));
+                }
                 CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
                     // Advice polynomials are passed in directly (not streamed from trace)
                     if advice_poly_map.contains_key(poly_id) {

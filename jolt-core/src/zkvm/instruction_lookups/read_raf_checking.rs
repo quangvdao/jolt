@@ -1462,7 +1462,7 @@ mod tests {
             rv_claim,
         );
 
-        let one_hot_params = OneHotParams::new(trace.len().log_2(), 100, 100);
+        let one_hot_params = OneHotParams::new(trace.len().log_2(), 100, 100, false);
 
         let params = InstructionReadRafSumcheckParams::new(
             trace.len().log_2(),

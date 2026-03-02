@@ -132,7 +132,7 @@ impl<F: JoltField> AdviceClaimReductionParams<F> {
         };
 
         let log_t = trace_len.log_2();
-        let log_k_chunk = OneHotConfig::new(log_t).log_k_chunk as usize;
+        let log_k_chunk = OneHotConfig::new(log_t, false).log_k_chunk as usize;
         let (main_col_vars, main_row_vars) = DoryGlobals::main_sigma_nu(log_k_chunk, log_t);
 
         let r_val = accumulator

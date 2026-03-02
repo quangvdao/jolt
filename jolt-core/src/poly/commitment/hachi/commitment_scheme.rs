@@ -185,6 +185,10 @@ where
     fn protocol_name() -> &'static [u8] {
         b"Hachi"
     }
+
+    fn uses_onehot_inc() -> bool {
+        true
+    }
 }
 
 impl<const D: usize, Cfg> StreamingCommitmentScheme for JoltHachiCommitmentScheme<D, Cfg>

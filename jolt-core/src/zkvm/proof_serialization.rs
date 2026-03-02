@@ -264,16 +264,23 @@ impl CanonicalSerialize for CommittedPolynomial {
                 7u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*i).unwrap()).serialize_with_mode(writer, compress)
             }
+            Self::RdIncMsb => 8u8.serialize_with_mode(writer, compress),
             Self::RamIncRa(i) => {
-                8u8.serialize_with_mode(&mut writer, compress)?;
+                9u8.serialize_with_mode(&mut writer, compress)?;
                 (u8::try_from(*i).unwrap()).serialize_with_mode(writer, compress)
             }
+            Self::RamIncMsb => 10u8.serialize_with_mode(writer, compress),
         }
     }
 
     fn serialized_size(&self, _compress: Compress) -> usize {
         match self {
-            Self::RdInc | Self::RamInc | Self::TrustedAdvice | Self::UntrustedAdvice => 1,
+            Self::RdInc
+            | Self::RamInc
+            | Self::TrustedAdvice
+            | Self::UntrustedAdvice
+            | Self::RdIncMsb
+            | Self::RamIncMsb => 1,
             Self::InstructionRa(_)
             | Self::BytecodeRa(_)
             | Self::RamRa(_)
@@ -317,10 +324,12 @@ impl CanonicalDeserialize for CommittedPolynomial {
                     let i = u8::deserialize_with_mode(reader, compress, validate)?;
                     Self::RdIncRa(i as usize)
                 }
-                8 => {
+                8 => Self::RdIncMsb,
+                9 => {
                     let i = u8::deserialize_with_mode(reader, compress, validate)?;
                     Self::RamIncRa(i as usize)
                 }
+                10 => Self::RamIncMsb,
                 _ => return Err(SerializationError::InvalidData),
             },
         )

@@ -101,6 +101,16 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
     ) -> Result<(), ProofVerifyError>;
 
     fn protocol_name() -> &'static [u8];
+
+    /// Whether this PCS uses one-hot decomposition for increment polynomials.
+    /// When true, increments are committed as:
+    /// - `RdIncRa` + `RdIncMsb`
+    /// - `RamIncRa` + `RamIncMsb`
+    ///
+    /// When false (default), increments use dense `RdInc` / `RamInc`.
+    fn uses_onehot_inc() -> bool {
+        false
+    }
 }
 
 pub trait StreamingCommitmentScheme: CommitmentScheme {

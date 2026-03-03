@@ -676,15 +676,20 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             rlc_map.into_iter().collect();
         let (coeffs, sorted_claims): (Vec<F>, Vec<F>) = coeffs_and_claims.into_iter().unzip();
 
-        // Build commitments map and collect in same order as poly_ids
-        let mut commitments_map: HashMap<CommittedPolynomial, PCS::Commitment> = HashMap::new();
-        for (polynomial, commitment) in
-            all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc())
-                .into_iter()
-                .zip_eq(&self.proof.commitments)
-        {
-            commitments_map.insert(polynomial, commitment.clone());
-        }
+        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
+        let mut commitments_map: HashMap<CommittedPolynomial, PCS::Commitment> =
+            if self.proof.commitments.len() == 1 {
+                main_polys
+                    .into_iter()
+                    .map(|p| (p, self.proof.commitments[0].clone()))
+                    .collect()
+            } else {
+                main_polys
+                    .into_iter()
+                    .zip_eq(&self.proof.commitments)
+                    .map(|(p, c)| (p, c.clone()))
+                    .collect()
+            };
         if let Some(ref commitment) = self.trusted_advice_commitment {
             commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
         }

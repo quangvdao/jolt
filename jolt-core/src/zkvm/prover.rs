@@ -124,7 +124,7 @@ use crate::{
 #[cfg(feature = "allocative")]
 use allocative::FlameGraphBuilder;
 use common::jolt_device::MemoryConfig;
-use itertools::{zip_eq, Itertools};
+use itertools::Itertools;
 use rayon::prelude::*;
 use tracer::{
     emulator::memory::Memory, instruction::Cycle, ChunksIterator, JoltDevice, LazyTraceIterator,
@@ -450,17 +450,25 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         eprintln!("[PROVER] witness gen + commit...");
         let t0 = Instant::now();
-        let (commitments, mut opening_proof_hints) = self.generate_and_commit_witness_polynomials();
+        let (commitments, batch_hint) = self.generate_and_commit_witness_polynomials();
         eprintln!("[PROVER] commit done ({:.1}s)", t0.elapsed().as_secs_f64());
         let untrusted_advice_commitment = self.generate_and_commit_untrusted_advice();
         self.generate_and_commit_trusted_advice();
 
         let onehot_inc = PCS::uses_onehot_inc();
         let main_polys = all_committed_polynomials(&self.one_hot_params, onehot_inc);
-        let mut commitment_map: HashMap<CommittedPolynomial, PCS::Commitment> = main_polys
-            .into_iter()
-            .zip(commitments.iter().cloned())
-            .collect();
+        let mut commitment_map: HashMap<CommittedPolynomial, PCS::Commitment> =
+            if commitments.len() == 1 {
+                main_polys
+                    .into_iter()
+                    .map(|p| (p, commitments[0].clone()))
+                    .collect()
+            } else {
+                main_polys
+                    .into_iter()
+                    .zip(commitments.iter().cloned())
+                    .collect()
+            };
         if let Some(ref c) = self.advice.trusted_advice_commitment {
             commitment_map.insert(CommittedPolynomial::TrustedAdvice, c.clone());
         }
@@ -468,11 +476,12 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             commitment_map.insert(CommittedPolynomial::UntrustedAdvice, c.clone());
         }
 
+        let mut advice_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint> = HashMap::new();
         if let Some(hint) = self.advice.trusted_advice_hint.take() {
-            opening_proof_hints.insert(CommittedPolynomial::TrustedAdvice, hint);
+            advice_hints.insert(CommittedPolynomial::TrustedAdvice, hint);
         }
         if let Some(hint) = self.advice.untrusted_advice_hint.take() {
-            opening_proof_hints.insert(CommittedPolynomial::UntrustedAdvice, hint);
+            advice_hints.insert(CommittedPolynomial::UntrustedAdvice, hint);
         }
 
         macro_rules! timed_stage {
@@ -480,7 +489,11 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 eprintln!("[PROVER] {}...", $name);
                 let _t = Instant::now();
                 let r = $body;
-                eprintln!("[PROVER] {} done ({:.1}s)", $name, _t.elapsed().as_secs_f64());
+                eprintln!(
+                    "[PROVER] {} done ({:.1}s)",
+                    $name,
+                    _t.elapsed().as_secs_f64()
+                );
                 r
             }};
         }
@@ -497,7 +510,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         let joint_opening_proof = timed_stage!(
             "stage8 (BatchOpening)",
-            self.prove_stage8(opening_proof_hints, commitment_map)
+            self.prove_stage8(batch_hint, advice_hints, commitment_map)
         );
 
         #[cfg(test)]
@@ -575,10 +588,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
     #[tracing::instrument(skip_all, name = "generate_and_commit_witness_polynomials")]
     fn generate_and_commit_witness_polynomials(
         &mut self,
-    ) -> (
-        Vec<PCS::Commitment>,
-        HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
-    ) {
+    ) -> (Vec<PCS::Commitment>, PCS::BatchOpeningHint) {
         let _guard = DoryGlobals::initialize_context(
             1 << self.one_hot_params.log_k_chunk,
             self.padded_trace_len,
@@ -651,8 +661,8 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 })
                 .unzip();
 
-            let hint_map = HashMap::from_iter(zip_eq(polys, hints));
-            (commitments, hint_map)
+            let batch_hint = PCS::streaming_batch_hint(hints);
+            (commitments, batch_hint)
         } else {
             tracing::debug!("Non-streaming commit: {} polynomials, T={}", polys.len(), T,);
 
@@ -675,11 +685,9 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 })
                 .collect();
 
-            let results = pcs.batch_commit(&witnesses, &self.preprocessing.generators);
-            let (commitments, hints): (Vec<_>, Vec<_>) = results.into_iter().unzip();
-
-            let hint_map = HashMap::from_iter(zip_eq(polys, hints));
-            (commitments, hint_map)
+            let (commitments, batch_hint) =
+                pcs.batch_commit(&witnesses, &self.preprocessing.generators);
+            (commitments, batch_hint)
         };
 
         // Append commitments to transcript
@@ -1362,7 +1370,8 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
     #[tracing::instrument(skip_all)]
     fn prove_stage8(
         &mut self,
-        opening_proof_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
+        batch_hint: PCS::BatchOpeningHint,
+        advice_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
         commitment_map: HashMap<CommittedPolynomial, PCS::Commitment>,
     ) -> PCS::BatchedProof {
         tracing::info!("Stage 8 proving (batch opening)");
@@ -1516,11 +1525,16 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             rlc_map.into_iter().collect();
         let (coeffs, sorted_claims): (Vec<F>, Vec<F>) = coeffs_and_claims.into_iter().unzip();
 
-        // Collect per-polynomial hints and commitments in the same order
-        let mut hint_map = opening_proof_hints;
-        let hints: Vec<PCS::OpeningProofHint> = poly_ids
+        // Reconstruct per-polynomial hints from batch_hint (for Dory: clones
+        // per-poly hints; for Hachi: returns empty Vec) and merge with advice hints.
+        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
+        let per_poly_hints = PCS::split_batch_hint(&batch_hint);
+        let mut all_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint> =
+            main_polys.into_iter().zip(per_poly_hints).collect();
+        all_hints.extend(advice_hints);
+        let individual_hints: Vec<PCS::OpeningProofHint> = poly_ids
             .iter()
-            .map(|id| hint_map.remove(id).unwrap())
+            .filter_map(|id| all_hints.remove(id))
             .collect();
         let mut commit_map = commitment_map;
         let commitment_refs: Vec<PCS::Commitment> = poly_ids
@@ -1559,7 +1573,8 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         PCS::default().batch_prove(
             &self.preprocessing.generators,
             &poly_source,
-            hints,
+            batch_hint,
+            individual_hints,
             &commitment_ref_slice,
             &opening_point.r,
             &sorted_claims,
@@ -1615,9 +1630,7 @@ where
     PCS: CommitmentScheme<Field = F>,
 {
     #[tracing::instrument(skip_all, name = "JoltProverPreprocessing::gen")]
-    pub fn new(
-        shared: JoltSharedPreprocessing,
-    ) -> JoltProverPreprocessing<F, PCS> {
+    pub fn new(shared: JoltSharedPreprocessing) -> JoltProverPreprocessing<F, PCS> {
         let max_T: usize = shared.max_padded_trace_length.next_power_of_two();
         let max_log_T = max_T.log_2();
         let max_log_k_chunk = if PCS::uses_onehot_inc() || max_log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T
@@ -1628,8 +1641,8 @@ where
         };
         let base_num_vars = max_log_k_chunk + max_log_T;
 
-        // For PCS schemes that use mega-poly batching (Hachi), size the setup
-        // matrices for the mega-polynomial (individual polys batched together).
+        // For PCS schemes that use packed polynomial batching (Hachi), size the
+        // setup matrices for the packed polynomial (individual polys batched together).
         let max_num_vars = if PCS::uses_onehot_inc() {
             use crate::zkvm::instruction_lookups::LOG_K;
             use common::constants::XLEN;
@@ -1639,8 +1652,8 @@ where
             let max_ram_d = XLEN.div_ceil(max_log_k_chunk);
             let max_bytecode_d = XLEN.div_ceil(max_log_k_chunk);
             let max_n_polys = max_instruction_d + 2 * max_d_inc + max_ram_d + max_bytecode_d;
-            let log_mega = max_n_polys.next_power_of_two().trailing_zeros() as usize;
-            base_num_vars + log_mega
+            let log_packed = max_n_polys.next_power_of_two().trailing_zeros() as usize;
+            base_num_vars + log_packed
         } else {
             base_num_vars
         };

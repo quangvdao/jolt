@@ -556,11 +556,9 @@ mod tests {
         let prover_setup = DoryCommitmentScheme::setup_prover(num_vars);
         let verifier_setup = DoryCommitmentScheme::setup_verifier(&prover_setup);
 
-        let commitments_and_hints =
+        let (commitments, batch_hint) =
             DoryCommitmentScheme::default().batch_commit(&polys, &prover_setup);
-
-        let commitments: Vec<_> = commitments_and_hints.iter().map(|(c, _)| *c).collect();
-        let hints: Vec<_> = commitments_and_hints.into_iter().map(|(_, h)| h).collect();
+        let hints = batch_hint;
 
         let coeffs: Vec<Fr> = (0..num_polys).map(|_| Fr::rand(&mut rng)).collect();
 

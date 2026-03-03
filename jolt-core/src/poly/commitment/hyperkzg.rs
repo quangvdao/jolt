@@ -433,6 +433,7 @@ where
     type Proof = HyperKZGProof<P>;
     type BatchedProof = HyperKZGProof<P>;
     type OpeningProofHint = ();
+    type BatchOpeningHint = ();
 
     fn setup_prover(max_num_vars: usize) -> Self::ProverSetup {
         HyperKZGSRS(Arc::new(SRS::setup(
@@ -480,15 +481,16 @@ where
         &self,
         polys: &[U],
         gens: &Self::ProverSetup,
-    ) -> Vec<(Self::Commitment, Self::OpeningProofHint)>
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
     where
         U: Borrow<MultilinearPolynomial<Self::Field>> + Sync,
     {
-        UnivariateKZG::commit_batch(&gens.kzg_pk, polys)
+        let commitments = UnivariateKZG::commit_batch(&gens.kzg_pk, polys)
             .unwrap()
             .into_par_iter()
-            .map(|c| (HyperKZGCommitment(c), ()))
-            .collect()
+            .map(|c| HyperKZGCommitment(c))
+            .collect();
+        (commitments, ())
     }
 
     fn prove<ProofTranscript: Transcript>(
@@ -520,7 +522,8 @@ where
         &self,
         setup: &Self::ProverSetup,
         poly_source: &S,
-        _hints: Vec<Self::OpeningProofHint>,
+        _batch_hint: Self::BatchOpeningHint,
+        _individual_hints: Vec<Self::OpeningProofHint>,
         commitments: &[&Self::Commitment],
         opening_point: &[<Self::Field as JoltField>::Challenge],
         _claims: &[Self::Field],
@@ -559,6 +562,10 @@ where
             proof,
             transcript,
         )
+    }
+
+    fn split_batch_hint(_batch_hint: &Self::BatchOpeningHint) -> Vec<Self::OpeningProofHint> {
+        vec![]
     }
 
     fn protocol_name() -> &'static [u8] {
@@ -617,6 +624,8 @@ where
     ) -> (Self::Commitment, Self::OpeningProofHint) {
         unimplemented!("HyperKZG does not support streaming commitment")
     }
+
+    fn streaming_batch_hint(_hints: Vec<Self::OpeningProofHint>) -> Self::BatchOpeningHint {}
 }
 
 #[cfg(test)]

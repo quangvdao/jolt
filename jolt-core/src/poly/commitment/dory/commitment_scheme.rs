@@ -58,6 +58,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
     type Proof = ArkDoryProof;
     type BatchedProof = DoryBatchedProof;
     type OpeningProofHint = Vec<ArkG1>;
+    type BatchOpeningHint = Vec<Self::OpeningProofHint>;
 
     fn setup_prover(max_num_vars: usize) -> Self::ProverSetup {
         let _span = trace_span!("DoryCommitmentScheme::setup_prover").entered();
@@ -117,16 +118,18 @@ impl CommitmentScheme for DoryCommitmentScheme {
         &self,
         polys: &[U],
         gens: &Self::ProverSetup,
-    ) -> Vec<(Self::Commitment, Self::OpeningProofHint)>
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
     where
         U: std::borrow::Borrow<MultilinearPolynomial<ark_bn254::Fr>> + Sync,
     {
         let _span = trace_span!("DoryCommitmentScheme::batch_commit").entered();
 
-        polys
+        let results: Vec<(Self::Commitment, Self::OpeningProofHint)> = polys
             .par_iter()
             .map(|poly| self.commit(poly.borrow(), gens))
-            .collect()
+            .collect();
+        let (commitments, hints): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+        (commitments, hints)
     }
 
     fn prove<ProofTranscript: Transcript>(
@@ -219,7 +222,8 @@ impl CommitmentScheme for DoryCommitmentScheme {
         &self,
         setup: &Self::ProverSetup,
         poly_source: &S,
-        hints: Vec<Self::OpeningProofHint>,
+        _batch_hint: Self::BatchOpeningHint,
+        individual_hints: Vec<Self::OpeningProofHint>,
         commitments: &[&Self::Commitment],
         opening_point: &[<Self::Field as JoltField>::Challenge],
         _claims: &[Self::Field],
@@ -230,7 +234,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
         let total_vars = joint_poly.len().log_2();
         let (_sigma, nu) = balanced_sigma_nu(total_vars);
         let max_num_rows = 1 << nu;
-        let combined_hint = Self::combine_hints_internal(hints, coeffs, max_num_rows);
+        let combined_hint = Self::combine_hints_internal(individual_hints, coeffs, max_num_rows);
         let joint_commitment = Self::combine_commitments_internal(commitments, coeffs);
         let proof = self.prove(
             setup,
@@ -266,6 +270,10 @@ impl CommitmentScheme for DoryCommitmentScheme {
             &joint_claim,
             &joint_commitment,
         )
+    }
+
+    fn split_batch_hint(batch_hint: &Self::BatchOpeningHint) -> Vec<Self::OpeningProofHint> {
+        batch_hint.clone()
     }
 
     fn protocol_name() -> &'static [u8] {
@@ -431,6 +439,10 @@ impl StreamingCommitmentScheme for DoryCommitmentScheme {
 
             (tier_2, row_commitments)
         }
+    }
+
+    fn streaming_batch_hint(hints: Vec<Self::OpeningProofHint>) -> Self::BatchOpeningHint {
+        hints
     }
 }
 

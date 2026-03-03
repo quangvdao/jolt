@@ -48,6 +48,7 @@ where
     type Proof = MockProof<F>;
     type BatchedProof = MockProof<F>;
     type OpeningProofHint = ();
+    type BatchOpeningHint = ();
 
     fn setup_prover(_num_vars: usize) -> Self::ProverSetup {}
 
@@ -73,14 +74,15 @@ where
         &self,
         polys: &[P],
         gens: &Self::ProverSetup,
-    ) -> Vec<(Self::Commitment, Self::OpeningProofHint)>
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
     where
         P: Borrow<MultilinearPolynomial<Self::Field>> + Sync,
     {
-        polys
+        let commitments = polys
             .iter()
-            .map(|poly| (self.commit(poly.borrow(), gens).0, ()))
-            .collect()
+            .map(|poly| self.commit(poly.borrow(), gens).0)
+            .collect();
+        (commitments, ())
     }
 
     fn prove<ProofTranscript: Transcript>(
@@ -114,7 +116,8 @@ where
         &self,
         _setup: &Self::ProverSetup,
         _poly_source: &S,
-        _hints: Vec<Self::OpeningProofHint>,
+        _batch_hint: Self::BatchOpeningHint,
+        _individual_hints: Vec<Self::OpeningProofHint>,
         _commitments: &[&Self::Commitment],
         opening_point: &[<Self::Field as JoltField>::Challenge],
         _claims: &[Self::Field],
@@ -138,6 +141,10 @@ where
     ) -> Result<(), ProofVerifyError> {
         assert_eq!(proof.opening_point, opening_point);
         Ok(())
+    }
+
+    fn split_batch_hint(_batch_hint: &Self::BatchOpeningHint) -> Vec<Self::OpeningProofHint> {
+        vec![]
     }
 
     fn protocol_name() -> &'static [u8] {
@@ -179,4 +186,6 @@ where
     ) -> (Self::Commitment, Self::OpeningProofHint) {
         (MockCommitment::default(), ())
     }
+
+    fn streaming_batch_hint(_hints: Vec<Self::OpeningProofHint>) -> Self::BatchOpeningHint {}
 }

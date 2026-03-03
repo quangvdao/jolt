@@ -68,7 +68,7 @@ fn commit_roundtrip() {
 }
 
 #[test]
-fn hachi_mega_poly_batch_roundtrip() {
+fn hachi_packed_poly_batch_roundtrip() {
     let layout = Cfg::commitment_layout(16).unwrap();
     let alpha = Cfg::D.trailing_zeros() as usize;
     let num_vars = layout.m_vars + layout.r_vars + alpha;
@@ -86,10 +86,10 @@ fn hachi_mega_poly_batch_roundtrip() {
     let setup = Scheme::setup_prover(num_vars);
     let pcs = Scheme::default();
 
-    let results = pcs.batch_commit(&[&poly1, &poly2], &setup);
-    assert_eq!(results.len(), 2);
+    let (commitments, _hint) = pcs.batch_commit(&[&poly1, &poly2], &setup);
     assert_eq!(
-        results[0].0, results[1].0,
-        "mega-poly commitments must be identical"
+        commitments.len(),
+        1,
+        "packed poly produces single commitment"
     );
 }

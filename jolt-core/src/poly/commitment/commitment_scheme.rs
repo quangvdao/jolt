@@ -26,10 +26,10 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         + Clone;
     type Proof: Sync + Send + CanonicalSerialize + CanonicalDeserialize + Clone + Debug;
     type BatchedProof: Sync + Send + CanonicalSerialize + CanonicalDeserialize;
-    /// A hint that helps the prover compute an opening proof. Typically some byproduct of
-    /// the commitment computation, e.g. for Dory the Pedersen commitments to the rows can be
-    /// used as a hint for the opening proof.
+    /// Per-polynomial hint from individual `commit()` calls (e.g. Dory row commitments).
     type OpeningProofHint: Sync + Send + Clone + Debug + PartialEq;
+    /// Hint produced by `batch_commit()` for the entire batch (e.g. Hachi packed commitment witness).
+    type BatchOpeningHint: Sync + Send + Clone + Debug;
 
     fn setup_prover(max_num_vars: usize) -> Self::ProverSetup;
 
@@ -51,7 +51,7 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         &self,
         polys: &[U],
         gens: &Self::ProverSetup,
-    ) -> Vec<(Self::Commitment, Self::OpeningProofHint)>
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
     where
         U: Borrow<MultilinearPolynomial<Self::Field>> + Sync;
 
@@ -80,7 +80,8 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         &self,
         setup: &Self::ProverSetup,
         poly_source: &S,
-        hints: Vec<Self::OpeningProofHint>,
+        batch_hint: Self::BatchOpeningHint,
+        individual_hints: Vec<Self::OpeningProofHint>,
         commitments: &[&Self::Commitment],
         opening_point: &[<Self::Field as JoltField>::Challenge],
         claims: &[Self::Field],
@@ -99,6 +100,12 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         claims: &[Self::Field],
         coeffs: &[Self::Field],
     ) -> Result<(), ProofVerifyError>;
+
+    /// Extract per-polynomial hints from a batch hint.
+    /// For PCS where `BatchOpeningHint` contains per-polynomial data (e.g. Dory),
+    /// returns a clone of the per-polynomial hints. For PCS where the batch hint
+    /// is a single aggregate (e.g. Hachi), returns an empty Vec.
+    fn split_batch_hint(batch_hint: &Self::BatchOpeningHint) -> Vec<Self::OpeningProofHint>;
 
     fn protocol_name() -> &'static [u8];
 
@@ -144,4 +151,8 @@ pub trait StreamingCommitmentScheme: CommitmentScheme {
         onehot_k: Option<usize>,
         tier1_commitments: &[Self::ChunkState],
     ) -> (Self::Commitment, Self::OpeningProofHint);
+
+    /// Convert per-polynomial hints from the streaming path into a batch hint.
+    /// Only called when `streaming_chunk_size` returns `Some`.
+    fn streaming_batch_hint(hints: Vec<Self::OpeningProofHint>) -> Self::BatchOpeningHint;
 }

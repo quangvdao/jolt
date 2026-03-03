@@ -1,6 +1,5 @@
 use std::borrow::Borrow;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
 use crate::field::fp128::JoltFp128;
@@ -16,9 +15,9 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use hachi_pcs::algebra::ring::CyclotomicRing;
 use hachi_pcs::primitives::multilinear_evals::DenseMultilinearEvals;
 use hachi_pcs::protocol::commitment::{
-    CommitmentConfig, HachiCommitmentCore, HachiCommitmentLayout, MegaPolyBlock, RingCommitment,
-    SparseBlockEntry,
+    CommitmentConfig, HachiCommitmentCore, MegaPolyBlock, RingCommitment, SparseBlockEntry,
 };
+use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
 use hachi_pcs::protocol::HachiCommitmentScheme;
 use hachi_pcs::protocol::HachiProverSetup;
@@ -34,8 +33,8 @@ pub struct JoltHachiCommitmentScheme<const D: usize, Cfg: CommitmentConfig> {
 
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct HachiBatchedProof<const D: usize> {
-    pub mega_poly_proof: ArkBridge<HachiProof<Fp128, D>>,
-    pub num_mega_polys: u32,
+    pub packed_poly_proof: ArkBridge<HachiProof<Fp128, D>>,
+    pub num_packed_polys: u32,
     pub individual_proofs: Vec<ArkBridge<HachiProof<Fp128, D>>>,
 }
 
@@ -58,35 +57,6 @@ impl Polynomial<Fp128> for HintOnlyPolynomial {
     }
 }
 
-/// Shared data for the mega-polynomial commitment.
-///
-/// Created once during `batch_commit` and shared (via Arc) across all
-/// per-polynomial hints. Contains the commitment witness AND the setup
-/// that was used, since the mega-poly may require a larger setup than
-/// the per-polynomial setup.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MegaPolyData<const D: usize> {
-    pub hint: HachiCommitmentHint<Fp128, D>,
-    pub prover_setup: HachiProverSetup<Fp128, D>,
-}
-
-/// Wrapper hint type distinguishing individual and mega-poly (shared) hints.
-#[derive(Clone, Debug)]
-pub enum HachiOpeningHint<const D: usize> {
-    Individual(HachiCommitmentHint<Fp128, D>),
-    MegaPoly(Arc<MegaPolyData<D>>),
-}
-
-impl<const D: usize> PartialEq for HachiOpeningHint<D> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Individual(a), Self::Individual(b)) => a == b,
-            (Self::MegaPoly(a), Self::MegaPoly(b)) => Arc::ptr_eq(a, b) || *a == *b,
-            _ => false,
-        }
-    }
-}
-
 impl<const D: usize, Cfg> CommitmentScheme for JoltHachiCommitmentScheme<D, Cfg>
 where
     Cfg: CommitmentConfig + Default,
@@ -98,7 +68,8 @@ where
     type Commitment = ArkBridge<RingCommitment<Fp128, D>>;
     type Proof = ArkBridge<HachiProof<Fp128, D>>;
     type BatchedProof = HachiBatchedProof<D>;
-    type OpeningProofHint = HachiOpeningHint<D>;
+    type OpeningProofHint = HachiCommitmentHint<Fp128, D>;
+    type BatchOpeningHint = HachiCommitmentHint<Fp128, D>;
 
     fn setup_prover(max_num_vars: usize) -> Self::ProverSetup {
         ArkBridge(
@@ -136,9 +107,7 @@ where
                 .map(|opt| opt.map(|v| v as usize))
                 .collect();
             hachi_pcs::protocol::commitment_scheme::commit_onehot::<Fp128, D, Cfg>(
-                onehot.K,
-                &indices,
-                &setup.0,
+                onehot.K, &indices, &setup.0,
             )
             .expect("Hachi commit_onehot failed")
         } else {
@@ -149,38 +118,39 @@ where
             )
             .expect("Hachi commit failed")
         };
-        (ArkBridge(commitment), HachiOpeningHint::Individual(hint))
+        (ArkBridge(commitment), hint)
     }
 
     fn batch_commit<U>(
         &self,
         polys: &[U],
         setup: &Self::ProverSetup,
-    ) -> Vec<(Self::Commitment, Self::OpeningProofHint)>
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
     where
         U: Borrow<MultilinearPolynomial<JoltFp128>> + Sync,
     {
-        if polys.is_empty() {
-            return vec![];
-        }
+        assert!(!polys.is_empty());
 
         let layout = setup.0.layout();
         let block_len = layout.block_len;
-        let blocks_per_poly = layout.num_blocks;
-        let n_padded = polys.len().next_power_of_two();
-        let total_mega_blocks = n_padded * blocks_per_poly;
-        let r_vars_mega = (total_mega_blocks as u32).trailing_zeros() as usize;
 
-        // Convert each polynomial into ring elements (dense) or sparse entries.
+        // Derive blocks_per_poly from the actual polynomial size, not from the
+        // setup layout (which is sized for the packed polynomial).
+        let poly_field_len = polys[0].borrow().len();
+        let poly_ring_len = poly_field_len.div_ceil(D);
+        let blocks_per_poly = poly_ring_len.div_ceil(block_len);
+
+        let n_padded = polys.len().next_power_of_two();
+        let total_packed_blocks = n_padded * blocks_per_poly;
+
         let poly_ring_data: Vec<PolyRingData<D>> = polys
             .par_iter()
             .map(|p| poly_to_ring_data(p.borrow(), block_len, blocks_per_poly))
             .collect();
 
-        // Assemble MegaPolyBlock descriptors per block.
-        let mut owned_blocks: Vec<OwnedBlockData<D>> = Vec::with_capacity(total_mega_blocks);
+        let mut owned_blocks: Vec<OwnedBlockData<D>> = Vec::with_capacity(total_packed_blocks);
         let mut ring_coeffs: Vec<CyclotomicRing<Fp128, D>> =
-            Vec::with_capacity(total_mega_blocks * block_len);
+            Vec::with_capacity(total_packed_blocks * block_len);
 
         for data in &poly_ring_data {
             match data {
@@ -193,17 +163,15 @@ where
                     }
                     let filled = all_rings.len().div_ceil(block_len);
                     for _ in filled..blocks_per_poly {
-                        ring_coeffs
-                            .extend(std::iter::repeat_n(CyclotomicRing::zero(), block_len));
+                        ring_coeffs.extend(std::iter::repeat_n(CyclotomicRing::zero(), block_len));
                         owned_blocks.push(OwnedBlockData::Zero);
                     }
                 }
                 PolyRingData::OneHot(per_block_entries) => {
                     for blk_entries in per_block_entries {
                         if blk_entries.is_empty() {
-                            ring_coeffs.extend(
-                                std::iter::repeat_n(CyclotomicRing::zero(), block_len),
-                            );
+                            ring_coeffs
+                                .extend(std::iter::repeat_n(CyclotomicRing::zero(), block_len));
                             owned_blocks.push(OwnedBlockData::Zero);
                         } else {
                             let mut block_ring =
@@ -224,7 +192,6 @@ where
             }
         }
 
-        // Pad remaining slots with zero blocks.
         for _ in polys.len()..n_padded {
             for _ in 0..blocks_per_poly {
                 ring_coeffs.extend(std::iter::repeat_n(CyclotomicRing::zero(), block_len));
@@ -232,8 +199,7 @@ where
             }
         }
 
-        // Build borrowed MegaPolyBlock slice from owned data.
-        let mega_blocks: Vec<MegaPolyBlock<'_, Fp128, D>> = owned_blocks
+        let packed_blocks: Vec<MegaPolyBlock<'_, Fp128, D>> = owned_blocks
             .iter()
             .map(|b| match b {
                 OwnedBlockData::Dense(v) => MegaPolyBlock::Dense(v),
@@ -242,31 +208,16 @@ where
             })
             .collect();
 
-        // Create a setup for the mega-poly: same m_vars, but r_vars includes
-        // the selector variables for choosing which sub-polynomial.
-        let mega_layout = HachiCommitmentLayout::new::<Cfg>(layout.m_vars, r_vars_mega)
-            .expect("Hachi mega-poly layout failed");
-        let (mega_prover_setup, _) =
-            HachiCommitmentCore::setup_with_layout::<Fp128, D, Cfg>(mega_layout)
-                .expect("Hachi mega-poly setup failed");
-
-        let witness =
-            HachiCommitmentCore::commit_mixed::<Fp128, D, Cfg>(&mega_blocks, &mega_prover_setup)
-                .expect("Hachi mega-poly commit_mixed failed");
+        let witness = HachiCommitmentCore::commit_mixed::<Fp128, D, Cfg>(&packed_blocks, &setup.0)
+            .expect("Hachi packed poly commit_mixed failed");
 
         let commitment = ArkBridge(witness.commitment.clone());
-        let mega_data = Arc::new(MegaPolyData {
-            hint: HachiCommitmentHint {
-                t_hat: witness.t_hat,
-                ring_coeffs,
-            },
-            prover_setup: mega_prover_setup,
-        });
+        let hint = HachiCommitmentHint {
+            t_hat: witness.t_hat,
+            ring_coeffs,
+        };
 
-        polys
-            .iter()
-            .map(|_| (commitment.clone(), HachiOpeningHint::MegaPoly(mega_data.clone())))
-            .collect()
+        (vec![commitment], hint)
     }
 
     fn prove<ProofTranscript: Transcript>(
@@ -278,13 +229,7 @@ where
         transcript: &mut ProofTranscript,
         commitment: &Self::Commitment,
     ) -> Self::Proof {
-        let hint = match hint {
-            Some(HachiOpeningHint::Individual(h)) => h,
-            Some(HachiOpeningHint::MegaPoly(_)) => {
-                panic!("prove() called with MegaPoly hint — use batch_prove() instead")
-            }
-            None => panic!("prove() requires a hint"),
-        };
+        let hint = hint.expect("prove() requires a hint");
         let hachi_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
@@ -300,6 +245,7 @@ where
                     Some(hint),
                     &mut adapter,
                     &commitment.0,
+                    BasisMode::Lagrange,
                 )
             }
             _ => {
@@ -311,6 +257,7 @@ where
                     Some(hint),
                     &mut adapter,
                     &commitment.0,
+                    BasisMode::Lagrange,
                 )
             }
         }
@@ -338,6 +285,7 @@ where
             &hachi_point,
             &hachi_opening,
             &commitment.0,
+            BasisMode::Lagrange,
         )
         .map_err(|_| ProofVerifyError::InternalError)
     }
@@ -347,98 +295,72 @@ where
         &self,
         setup: &Self::ProverSetup,
         _poly_source: &S,
-        hints: Vec<Self::OpeningProofHint>,
+        batch_hint: Self::BatchOpeningHint,
+        individual_hints: Vec<Self::OpeningProofHint>,
         commitments: &[&Self::Commitment],
         opening_point: &[JoltFp128],
         claims: &[JoltFp128],
         _coeffs: &[JoltFp128],
         transcript: &mut ProofTranscript,
     ) -> Self::BatchedProof {
-        // Partition into mega-poly and individual hints.
-        let mut mega_data: Option<Arc<MegaPolyData<D>>> = None;
-        let mut mega_claims: Vec<JoltFp128> = Vec::new();
-        let mut mega_commitment: Option<&Self::Commitment> = None;
-        let mut individual: Vec<(HachiCommitmentHint<Fp128, D>, &Self::Commitment, JoltFp128)> =
-            Vec::new();
+        // Batch claims are first in the sorted order, individual claims follow.
+        let num_individual = individual_hints.len();
+        let num_packed = claims.len() - num_individual;
+        assert!(
+            num_packed > 0,
+            "batch_prove requires at least one packed claim"
+        );
 
-        for (i, hint) in hints.into_iter().enumerate() {
-            match hint {
-                HachiOpeningHint::MegaPoly(arc) => {
-                    if mega_data.is_none() {
-                        mega_data = Some(arc);
-                        mega_commitment = Some(commitments[i]);
-                    }
-                    mega_claims.push(claims[i]);
-                }
-                HachiOpeningHint::Individual(h) => {
-                    individual.push((h, commitments[i], claims[i]));
-                }
-            }
-        }
+        let packed_claims = &claims[..num_packed];
+        let num_padded = num_packed.next_power_of_two();
+        let r_vars = (num_padded as u32).trailing_zeros() as usize;
 
-        // Mega-poly proof: selector challenge + single opening.
-        let mega_proof = if let Some(mega_data_arc) = mega_data {
-            let num_mega = mega_claims.len().next_power_of_two();
-            let r_vars = (num_mega as u32).trailing_zeros() as usize;
+        transcript.append_bytes(b"hachi_packed_num", &(num_packed as u64).to_le_bytes());
+        let rho: Vec<JoltFp128> = transcript.challenge_scalar_powers(r_vars);
 
-            // Sample selector challenge ρ from transcript.
-            transcript.append_bytes(b"hachi_mega_num", &(mega_claims.len() as u64).to_le_bytes());
-            let rho: Vec<JoltFp128> = transcript.challenge_scalar_powers(r_vars);
+        let eq_table = EqPolynomial::<JoltFp128>::evals(&rho);
+        let combined_claim: JoltFp128 = packed_claims
+            .iter()
+            .zip(eq_table.iter())
+            .map(|(&v, &eq)| v * eq)
+            .sum();
 
-            // Compute combined claim: v* = Σ_i eq(ρ, i) · v_i
-            let eq_table = EqPolynomial::<JoltFp128>::evals(&rho);
-            let combined_claim: JoltFp128 = mega_claims
-                .iter()
-                .zip(eq_table.iter())
-                .map(|(&v, &eq)| v * eq)
-                .sum();
+        let mut packed_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
+        packed_point.extend(rho.iter().map(jolt_to_hachi));
 
-            // Build mega opening point: (opening_point || ρ)
-            let mut mega_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
-            mega_point.extend(rho.iter().map(jolt_to_hachi));
-
-            let mega_num_vars = mega_point.len();
-            let poly_stub = HintOnlyPolynomial {
-                num_vars: mega_num_vars,
-            };
-
-            // Extract hint data and setup from the shared Arc.
-            let data = Arc::try_unwrap(mega_data_arc).unwrap_or_else(|arc| (*arc).clone());
-
-            let hachi_combined = jolt_to_hachi(&combined_claim);
-            let mega_commitment = mega_commitment.unwrap();
-
-            transcript.append_bytes(
-                b"hachi_mega_claim",
-                &hachi_combined.to_canonical_u128().to_le_bytes(),
-            );
-            let mut adapter = JoltToHachiTranscript::new(transcript);
-
-            let proof =
-                <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128>>::prove(
-                    &data.prover_setup,
-                    &poly_stub,
-                    &mega_point,
-                    Some(data.hint),
-                    &mut adapter,
-                    &mega_commitment.0,
-                )
-                .expect("Hachi mega-poly prove failed");
-            (ArkBridge(proof), mega_claims.len() as u32)
-        } else {
-            panic!("batch_prove called without any mega-poly hints")
+        let poly_stub = HintOnlyPolynomial {
+            num_vars: packed_point.len(),
         };
 
-        // Individual proofs (e.g. advice polynomials).
+        let hachi_combined = jolt_to_hachi(&combined_claim);
+        let packed_commitment = commitments[0];
+
+        transcript.append_bytes(
+            b"hachi_packed_claim",
+            &hachi_combined.to_canonical_u128().to_le_bytes(),
+        );
+        let mut adapter = JoltToHachiTranscript::new(transcript);
+
+        let packed_proof =
+            <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128>>::prove(
+                &setup.0,
+                &poly_stub,
+                &packed_point,
+                Some(batch_hint),
+                &mut adapter,
+                &packed_commitment.0,
+                BasisMode::Lagrange,
+            )
+            .expect("Hachi packed poly prove failed");
+
         let hachi_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
-        let individual_proofs: Vec<ArkBridge<HachiProof<Fp128, D>>> = individual
+        let individual_commitments = &commitments[num_packed..];
+        let individual_proofs: Vec<ArkBridge<HachiProof<Fp128, D>>> = individual_hints
             .into_iter()
+            .zip(individual_commitments.iter())
             .enumerate()
-            .map(|(i, (hint, commitment, _claim))| {
-                transcript.append_bytes(
-                    b"hachi_individual_item",
-                    &(i as u64).to_le_bytes(),
-                );
+            .map(|(i, (hint, commitment))| {
+                transcript.append_bytes(b"hachi_individual_item", &(i as u64).to_le_bytes());
                 let poly_stub = HintOnlyPolynomial {
                     num_vars: opening_point.len(),
                 };
@@ -451,6 +373,7 @@ where
                         Some(hint),
                         &mut adapter,
                         &commitment.0,
+                        BasisMode::Lagrange,
                     )
                     .expect("Hachi individual prove failed");
                 ArkBridge(proof)
@@ -458,8 +381,8 @@ where
             .collect();
 
         HachiBatchedProof {
-            mega_poly_proof: mega_proof.0,
-            num_mega_polys: mega_proof.1,
+            packed_poly_proof: ArkBridge(packed_proof),
+            num_packed_polys: num_packed as u32,
             individual_proofs,
         }
     }
@@ -475,70 +398,56 @@ where
         claims: &[JoltFp128],
         _coeffs: &[JoltFp128],
     ) -> Result<(), ProofVerifyError> {
-        let num_mega = proof.num_mega_polys as usize;
-        if num_mega > claims.len() || num_mega > commitments.len() {
+        let num_packed = proof.num_packed_polys as usize;
+        if num_packed > claims.len() || num_packed > commitments.len() {
             return Err(ProofVerifyError::InvalidInputLength(
                 claims.len(),
-                num_mega,
+                num_packed,
             ));
         }
 
-        let mega_claims = &claims[..num_mega];
-        let num_padded = num_mega.next_power_of_two();
+        let packed_claims = &claims[..num_packed];
+        let num_padded = num_packed.next_power_of_two();
         let selector_vars = (num_padded as u32).trailing_zeros() as usize;
 
         // Re-derive selector challenge ρ from transcript.
-        transcript.append_bytes(b"hachi_mega_num", &(num_mega as u64).to_le_bytes());
+        transcript.append_bytes(b"hachi_packed_num", &(num_packed as u64).to_le_bytes());
         let rho: Vec<JoltFp128> = transcript.challenge_scalar_powers(selector_vars);
 
         // Recompute combined claim.
         let eq_table = EqPolynomial::<JoltFp128>::evals(&rho);
-        let combined_claim: JoltFp128 = mega_claims
+        let combined_claim: JoltFp128 = packed_claims
             .iter()
             .zip(eq_table.iter())
             .map(|(&v, &eq)| v * eq)
             .sum();
 
-        // Build mega opening point.
-        let mut mega_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
-        mega_point.extend(rho.iter().map(jolt_to_hachi));
-
-        // Recreate mega-poly setup with matching layout (deterministic: same
-        // seed + same layout → same matrices). The mega layout uses the same
-        // m_vars as the individual setup, with r_vars extended by the selector.
-        let individual_layout = setup.0.expanded.seed.layout;
-        let r_vars_mega = individual_layout.r_vars + selector_vars;
-        let mega_layout = HachiCommitmentLayout::new::<Cfg>(individual_layout.m_vars, r_vars_mega)
-            .map_err(|_| ProofVerifyError::InternalError)?;
-        let (mega_prover_setup, _) =
-            HachiCommitmentCore::setup_with_layout::<Fp128, D, Cfg>(mega_layout)
-                .map_err(|_| ProofVerifyError::InternalError)?;
-        let mega_verifier_setup = HachiVerifierSetup {
-            expanded: mega_prover_setup.expanded,
-        };
+        let mut packed_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
+        packed_point.extend(rho.iter().map(jolt_to_hachi));
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
-        let mega_commitment = commitments[0];
+        let packed_commitment = commitments[0];
 
         transcript.append_bytes(
-            b"hachi_mega_claim",
+            b"hachi_packed_claim",
             &hachi_combined.to_canonical_u128().to_le_bytes(),
         );
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
         <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128>>::verify(
-            &proof.mega_poly_proof.0,
-            &mega_verifier_setup,
+            &proof.packed_poly_proof.0,
+            &setup.0,
             &mut adapter,
-            &mega_point,
+            &packed_point,
             &hachi_combined,
-            &mega_commitment.0,
+            &packed_commitment.0,
+            BasisMode::Lagrange,
         )
         .map_err(|_| ProofVerifyError::InternalError)?;
 
         // Verify individual proofs (advice etc.)
-        let individual_claims = &claims[num_mega..];
-        let individual_commitments = &commitments[num_mega..];
+        let individual_claims = &claims[num_packed..];
+        let individual_commitments = &commitments[num_packed..];
         if proof.individual_proofs.len() != individual_claims.len() {
             return Err(ProofVerifyError::InvalidInputLength(
                 individual_claims.len(),
@@ -554,10 +463,7 @@ where
             .zip(individual_commitments.iter())
             .enumerate()
         {
-            transcript.append_bytes(
-                b"hachi_individual_item",
-                &(i as u64).to_le_bytes(),
-            );
+            transcript.append_bytes(b"hachi_individual_item", &(i as u64).to_le_bytes());
             let hachi_claim = jolt_to_hachi(claim_i);
             let mut adapter = JoltToHachiTranscript::new(transcript);
             <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128>>::verify(
@@ -567,11 +473,16 @@ where
                 &hachi_point,
                 &hachi_claim,
                 &commitment_i.0,
+                BasisMode::Lagrange,
             )
             .map_err(|_| ProofVerifyError::InternalError)?;
         }
 
         Ok(())
+    }
+
+    fn split_batch_hint(_batch_hint: &Self::BatchOpeningHint) -> Vec<Self::OpeningProofHint> {
+        vec![]
     }
 
     fn protocol_name() -> &'static [u8] {
@@ -617,6 +528,10 @@ where
         _onehot_k: Option<usize>,
         _tier1_commitments: &[Self::ChunkState],
     ) -> (Self::Commitment, Self::OpeningProofHint) {
+        unreachable!("streaming_chunk_size returns None")
+    }
+
+    fn streaming_batch_hint(_hints: Vec<Self::OpeningProofHint>) -> Self::BatchOpeningHint {
         unreachable!("streaming_chunk_size returns None")
     }
 }

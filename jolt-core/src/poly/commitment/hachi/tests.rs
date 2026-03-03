@@ -7,7 +7,7 @@ use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use hachi_pcs::protocol::commitment::CommitmentConfig;
 use hachi_pcs::protocol::SmallTestCommitmentConfig;
-use hachi_pcs::{FromSmallInt, Polynomial};
+use hachi_pcs::FromSmallInt;
 
 type Cfg = SmallTestCommitmentConfig;
 type Scheme = JoltHachiCommitmentScheme<{ Cfg::D }, Cfg>;
@@ -17,13 +17,21 @@ fn polynomial_adapter_preserves_coefficients() {
     let evals: Vec<JoltFp128> = (0..16).map(|i| JoltFp128::from_u64(i as u64)).collect();
     let poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(evals.clone()));
 
-    let hachi_poly = super::commitment_scheme::to_hachi_poly(&poly);
+    let ring_coeffs = super::commitment_scheme::poly_to_ring_coeffs::<{ Cfg::D }>(&poly);
 
-    assert_eq!(hachi_poly.num_vars(), 4);
-
-    let hachi_coeffs = hachi_poly.coeffs();
-    assert_eq!(hachi_coeffs.len(), 16);
-    for (i, (&jolt_val, hachi_val)) in evals.iter().zip(hachi_coeffs.iter()).enumerate() {
+    assert_eq!(ring_coeffs.len() * Cfg::D, 16);
+    for (i, (&jolt_val, hachi_val)) in evals
+        .iter()
+        .zip(
+            ring_coeffs
+                .iter()
+                .flat_map(|r| r.coefficients().iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .iter(),
+        )
+        .enumerate()
+    {
         assert_eq!(
             jolt_to_hachi(&jolt_val),
             *hachi_val,
@@ -39,12 +47,16 @@ fn polynomial_adapter_compact_scalars() {
     let u8_coeffs: Vec<u8> = (0..8).collect();
     let poly = MultilinearPolynomial::U8Scalars(CompactPolynomial::from_coeffs(u8_coeffs.clone()));
 
-    let hachi_poly = super::commitment_scheme::to_hachi_poly(&poly);
-    assert_eq!(hachi_poly.num_vars(), 3);
+    let ring_coeffs = super::commitment_scheme::poly_to_ring_coeffs::<{ Cfg::D }>(&poly);
 
+    let field_coeffs: Vec<Fp128> = ring_coeffs
+        .iter()
+        .flat_map(|r| r.coefficients().iter())
+        .cloned()
+        .collect();
     for (i, &coeff) in u8_coeffs.iter().enumerate() {
         let expected = Fp128::from_u64(coeff as u64);
-        assert_eq!(hachi_poly.coeffs()[i], expected);
+        assert_eq!(field_coeffs[i], expected);
     }
 }
 
@@ -69,10 +81,13 @@ fn commit_roundtrip() {
 
 #[test]
 fn hachi_packed_poly_batch_roundtrip() {
-    let layout = Cfg::commitment_layout(16).unwrap();
+    let num_polys: usize = 2;
+    let selector_bits = num_polys.next_power_of_two().trailing_zeros() as usize;
+    let packed_num_vars = 16 + selector_bits;
+    let layout = Cfg::commitment_layout(packed_num_vars).unwrap();
     let alpha = Cfg::D.trailing_zeros() as usize;
-    let num_vars = layout.m_vars + layout.r_vars + alpha;
-    let len = 1usize << num_vars;
+    let individual_num_vars = layout.m_vars + layout.r_vars + alpha - selector_bits;
+    let len = 1usize << individual_num_vars;
 
     let poly1 = MultilinearPolynomial::LargeScalars(DensePolynomial::new(
         (0..len).map(|i| JoltFp128::from_u64(i as u64)).collect(),
@@ -83,7 +98,7 @@ fn hachi_packed_poly_batch_roundtrip() {
             .collect(),
     ));
 
-    let setup = Scheme::setup_prover(num_vars);
+    let setup = Scheme::setup_prover(packed_num_vars);
     let pcs = Scheme::default();
 
     let (commitments, _hint) = pcs.batch_commit(&[&poly1, &poly2], &setup);

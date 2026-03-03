@@ -138,6 +138,18 @@ pub type RV64IMACProver<'a> = JoltCpuProver<'a, Fr, DoryCommitmentScheme, Blake2
 pub type RV64IMACVerifier<'a> = JoltVerifier<'a, Fr, DoryCommitmentScheme, Blake2bTranscript>;
 pub type RV64IMACProof = JoltProof<Fr, DoryCommitmentScheme, Blake2bTranscript>;
 
+pub type HachiPcs = crate::poly::commitment::hachi::JoltHachiCommitmentScheme<
+    {
+        <hachi_pcs::protocol::ProductionFp128CommitmentConfig as hachi_pcs::protocol::commitment::CommitmentConfig>::D
+    },
+    hachi_pcs::protocol::ProductionFp128CommitmentConfig,
+>;
+#[cfg(feature = "prover")]
+pub type RV64IMACHachiProver<'a> =
+    JoltCpuProver<'a, crate::field::fp128::JoltFp128, HachiPcs, Blake2bTranscript>;
+pub type RV64IMACHachiVerifier<'a> =
+    JoltVerifier<'a, crate::field::fp128::JoltFp128, HachiPcs, Blake2bTranscript>;
+
 pub trait Serializable: CanonicalSerialize + CanonicalDeserialize + Sized {
     /// Gets the byte size of the serialized data
     fn size(&self) -> Result<usize> {

@@ -1,11 +1,21 @@
 use ark_serialize::CanonicalSerialize;
 use jolt_core::host;
+use jolt_core::poly::commitment::commitment_scheme::CommitmentScheme;
 use jolt_core::zkvm::prover::JoltProverPreprocessing;
 use jolt_core::zkvm::verifier::{JoltSharedPreprocessing, JoltVerifierPreprocessing};
-use jolt_core::zkvm::{RV64IMACProver, RV64IMACVerifier};
+use jolt_core::zkvm::{
+    HachiPcs, RV64IMACHachiProver, RV64IMACHachiVerifier, RV64IMACProver, RV64IMACVerifier,
+};
 use std::fs;
 use std::io::Write;
 use std::time::Instant;
+
+#[derive(Debug, Copy, Clone, clap::ValueEnum, strum_macros::Display, PartialEq)]
+#[strum(serialize_all = "kebab-case")]
+pub enum PcsChoice {
+    Dory,
+    Hachi,
+}
 
 // Empirically measured cycles per operation for RV64IMAC
 const CYCLES_PER_SHA256: f64 = 3396.0;
@@ -33,38 +43,53 @@ pub enum BenchType {
     Sha3Chain,
 }
 
-pub fn benchmarks(bench_type: BenchType) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+pub fn benchmarks(
+    bench_type: BenchType,
+    pcs: PcsChoice,
+) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     match bench_type {
-        BenchType::BTreeMap => btreemap(),
-        BenchType::Sha2 => sha2(),
-        BenchType::Sha3 => sha3(),
-        BenchType::Sha2Chain => sha2_chain(),
-        BenchType::Sha3Chain => sha3_chain(),
-        BenchType::Fibonacci => fibonacci(),
+        BenchType::BTreeMap => btreemap(pcs),
+        BenchType::Sha2 => sha2(pcs),
+        BenchType::Sha3 => sha3(pcs),
+        BenchType::Sha2Chain => sha2_chain(pcs),
+        BenchType::Sha3Chain => sha3_chain(pcs),
+        BenchType::Fibonacci => fibonacci(pcs),
     }
 }
 
-fn fibonacci() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    prove_example("fibonacci-guest", postcard::to_stdvec(&400000u32).unwrap())
+fn fibonacci(pcs: PcsChoice) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+    prove_example(
+        "fibonacci-guest",
+        postcard::to_stdvec(&400000u32).unwrap(),
+        pcs,
+    )
 }
 
-fn sha2() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha2(pcs: PcsChoice) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
-    prove_example("sha2-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap())
+    prove_example(
+        "sha2-guest",
+        postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
+        pcs,
+    )
 }
 
-fn sha3() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha3(pcs: PcsChoice) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_keccak256 as _;
-    prove_example("sha3-guest", postcard::to_stdvec(&vec![5u8; 2048]).unwrap())
+    prove_example(
+        "sha3-guest",
+        postcard::to_stdvec(&vec![5u8; 2048]).unwrap(),
+        pcs,
+    )
 }
 
-fn btreemap() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    prove_example("btreemap-guest", postcard::to_stdvec(&50u32).unwrap())
+fn btreemap(pcs: PcsChoice) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+    prove_example("btreemap-guest", postcard::to_stdvec(&50u32).unwrap(), pcs)
 }
 
-fn sha2_chain() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha2_chain(pcs: PcsChoice) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
     let mut inputs = vec![];
@@ -74,24 +99,24 @@ fn sha2_chain() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
         CYCLES_PER_SHA256,
     );
     inputs.append(&mut postcard::to_stdvec(&iters).unwrap());
-    prove_example("sha2-chain-guest", inputs)
+    prove_example("sha2-chain-guest", inputs, pcs)
 }
 
-fn sha3_chain() -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+fn sha3_chain(pcs: PcsChoice) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     #[cfg(feature = "host")]
     extern crate jolt_inlines_keccak256;
     let mut inputs = vec![];
     inputs.append(&mut postcard::to_stdvec(&[5u8; 32]).unwrap());
     inputs.append(&mut postcard::to_stdvec(&20u32).unwrap());
-    prove_example("sha3-chain-guest", inputs)
+    prove_example("sha3-chain-guest", inputs, pcs)
 }
 
 pub fn master_benchmark(
     bench_type: BenchType,
     bench_scale: usize,
     target_trace_size: Option<usize>,
+    pcs: PcsChoice,
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    // Ensure SHA2 inline library is linked and auto-registered
     #[cfg(feature = "host")]
     extern crate jolt_inlines_sha2;
     #[cfg(feature = "host")]
@@ -106,7 +131,6 @@ pub fn master_benchmark(
         let bench_target =
             target_trace_size.unwrap_or(((1 << bench_scale) as f64 * SAFETY_MARGIN) as usize);
 
-        // Map benchmark type to canonical name + input closure
         let (bench_name, input_fn): (&str, fn(usize) -> Vec<u8>) = match bench_type {
             BenchType::Fibonacci => ("fibonacci", |target| {
                 postcard::to_stdvec(&scale_to_target_ops(target, CYCLES_PER_FIBONACCI_UNIT))
@@ -135,35 +159,43 @@ pub fn master_benchmark(
             BenchType::Sha3 => panic!("Use sha3-chain instead"),
         };
 
-        tracing::info!("Running {bench_name} benchmark at scale 2^{bench_scale}");
+        let pcs_label = match pcs {
+            PcsChoice::Dory => "dory",
+            PcsChoice::Hachi => "hachi",
+        };
+        tracing::info!("Running {bench_name} benchmark at scale 2^{bench_scale} with {pcs_label}");
 
-        // Derive names from canonical bench_name
         let guest_name = format!("{bench_name}-guest");
-        // Generate input and run benchmark
         let input = input_fn(bench_target);
-        let (duration, proof_size, proof_size_comp, trace_length) = prove_example_with_trace(
-            &guest_name,
-            input,
-            max_trace_length,
-            bench_name,
-            bench_scale,
-        );
+        let (duration, proof_size, proof_size_comp, trace_length) = match pcs {
+            PcsChoice::Dory => prove_example_with_trace_dory(
+                &guest_name,
+                input,
+                max_trace_length,
+                bench_name,
+                bench_scale,
+            ),
+            PcsChoice::Hachi => {
+                prove_example_with_trace_hachi(&guest_name, input, max_trace_length)
+            }
+        };
 
         let proving_hz = trace_length as f64 / duration.as_secs_f64();
         let padded_proving_hz = trace_length.next_power_of_two() as f64 / duration.as_secs_f64();
         println!(
-            "{} (2^{}): Prover completed in {:.2}s ({:.1} kHz / padded {:.1} kHz)",
+            "{} (2^{}, {}): Prover completed in {:.2}s ({:.1} kHz / padded {:.1} kHz)",
             bench_name,
             bench_scale,
+            pcs_label,
             duration.as_secs_f64(),
             proving_hz / 1000.0,
             padded_proving_hz / 1000.0,
         );
 
-        // Write CSV
         let summary_line = format!(
-            "{},{},{:.2},{},{:.2},{},{}\n",
+            "{},{},{},{:.2},{},{:.2},{},{}\n",
             bench_name,
+            pcs_label,
             bench_scale,
             duration.as_secs_f64(),
             trace_length.next_power_of_two(),
@@ -172,13 +204,12 @@ pub fn master_benchmark(
             proof_size_comp
         );
 
-        // Write individual result file for resume detection
-        let individual_file = format!("benchmark-runs/results/{bench_name}_{bench_scale}.csv");
+        let individual_file =
+            format!("benchmark-runs/results/{bench_name}_{pcs_label}_{bench_scale}.csv");
         if let Err(e) = fs::write(&individual_file, &summary_line) {
             eprintln!("Failed to write individual result file {individual_file}: {e}");
         }
 
-        // Also append to consolidated timings file
         if let Err(e) = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -198,8 +229,18 @@ pub fn master_benchmark(
 fn prove_example(
     example_name: &str,
     serialized_input: Vec<u8>,
+    pcs: PcsChoice,
 ) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
-    let mut tasks = Vec::new();
+    match pcs {
+        PcsChoice::Dory => prove_example_dory(example_name, serialized_input),
+        PcsChoice::Hachi => prove_example_hachi(example_name, serialized_input),
+    }
+}
+
+fn prove_example_dory(
+    example_name: &str,
+    serialized_input: Vec<u8>,
+) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
     let mut program = host::Program::new(example_name);
     let (bytecode, init_memory_state, _) = program.decode();
     let (_lazy_trace, trace, _, program_io) = program.trace(&serialized_input, &[], &[]);
@@ -240,15 +281,64 @@ fn prove_example(
         verifier.verify().unwrap();
     };
 
-    tasks.push((
+    vec![(
         tracing::info_span!("Example_E2E"),
         Box::new(task) as Box<dyn FnOnce()>,
-    ));
-
-    tasks
+    )]
 }
 
-fn prove_example_with_trace(
+fn prove_example_hachi(
+    example_name: &str,
+    serialized_input: Vec<u8>,
+) -> Vec<(tracing::Span, Box<dyn FnOnce()>)> {
+    let mut program = host::Program::new(example_name);
+    let (bytecode, init_memory_state, _) = program.decode();
+    let (_lazy_trace, trace, _, program_io) = program.trace(&serialized_input, &[], &[]);
+    let padded_trace_len = (trace.len() + 1).next_power_of_two();
+    drop(trace);
+
+    let task = move || {
+        let shared_preprocessing = JoltSharedPreprocessing::new(
+            bytecode,
+            program_io.memory_layout.clone(),
+            init_memory_state,
+            padded_trace_len,
+        );
+        let preprocessing =
+            JoltProverPreprocessing::<_, HachiPcs>::new(shared_preprocessing.clone());
+
+        let elf_contents_opt = program.get_elf_contents();
+        let elf_contents = elf_contents_opt.as_deref().expect("elf contents is None");
+        let prover = RV64IMACHachiProver::gen_from_elf(
+            &preprocessing,
+            elf_contents,
+            &serialized_input,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        );
+        let program_io = prover.program_io.clone();
+        let (jolt_proof, _) = prover.prove();
+
+        let verifier_preprocessing = JoltVerifierPreprocessing::new(
+            shared_preprocessing,
+            HachiPcs::setup_verifier(&preprocessing.generators),
+        );
+        let verifier =
+            RV64IMACHachiVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
+                .expect("Failed to create verifier");
+        verifier.verify().unwrap();
+    };
+
+    vec![(
+        tracing::info_span!("Example_E2E"),
+        Box::new(task) as Box<dyn FnOnce()>,
+    )]
+}
+
+fn prove_example_with_trace_dory(
     example_name: &str,
     serialized_input: Vec<u8>,
     max_trace_length: usize,
@@ -292,7 +382,6 @@ fn prove_example_with_trace(
     drop(span);
     let proof_size = jolt_proof.serialized_size(ark_serialize::Compress::Yes);
 
-    // Stage 8: Dory opening proof (curve points - benefits from compression)
     let stage8_size_compressed = jolt_proof
         .joint_opening_proof
         .serialized_size(ark_serialize::Compress::Yes);
@@ -300,7 +389,6 @@ fn prove_example_with_trace(
         .joint_opening_proof
         .serialized_size(ark_serialize::Compress::No);
 
-    // Commitments (curve points - benefits from compression)
     let commitments_size_compressed = jolt_proof
         .commitments
         .serialized_size(ark_serialize::Compress::Yes);
@@ -308,7 +396,6 @@ fn prove_example_with_trace(
         .commitments
         .serialized_size(ark_serialize::Compress::No);
 
-    // Estimate proof size with full Dory compression (assuming ~3x compression ratio)
     let proof_size_full_compressed = proof_size - stage8_size_compressed
         + (stage8_size_uncompressed / 3)
         - commitments_size_compressed
@@ -326,4 +413,58 @@ fn prove_example_with_trace(
         proof_size_full_compressed,
         trace.len(),
     )
+}
+
+fn prove_example_with_trace_hachi(
+    example_name: &str,
+    serialized_input: Vec<u8>,
+    max_trace_length: usize,
+) -> (std::time::Duration, usize, usize, usize) {
+    let mut program = host::Program::new(example_name);
+    let (bytecode, init_memory_state, _) = program.decode();
+    let (_, trace, _, program_io) = program.trace(&serialized_input, &[], &[]);
+
+    assert!(
+        trace.len().next_power_of_two() <= max_trace_length,
+        "Trace is longer than expected"
+    );
+
+    let shared_preprocessing = JoltSharedPreprocessing::new(
+        bytecode.clone(),
+        program_io.memory_layout.clone(),
+        init_memory_state,
+        trace.len().next_power_of_two(),
+    );
+    let preprocessing = JoltProverPreprocessing::<_, HachiPcs>::new(shared_preprocessing.clone());
+
+    let elf_contents_opt = program.get_elf_contents();
+    let elf_contents = elf_contents_opt.as_deref().expect("elf contents is None");
+
+    let span = tracing::info_span!("E2E").entered();
+    let prover = RV64IMACHachiProver::gen_from_elf(
+        &preprocessing,
+        elf_contents,
+        &serialized_input,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+    );
+    let now = Instant::now();
+    let (jolt_proof, _) = prover.prove();
+    let prove_duration = now.elapsed();
+    drop(span);
+    let proof_size = jolt_proof.serialized_size(ark_serialize::Compress::Yes);
+
+    let verifier_preprocessing = JoltVerifierPreprocessing::new(
+        shared_preprocessing,
+        HachiPcs::setup_verifier(&preprocessing.generators),
+    );
+    let verifier =
+        RV64IMACHachiVerifier::new(&verifier_preprocessing, jolt_proof, program_io, None, None)
+            .expect("Failed to create verifier");
+    verifier.verify().unwrap();
+
+    (prove_duration, proof_size, proof_size, trace.len())
 }

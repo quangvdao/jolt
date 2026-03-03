@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[path = "../../benches/e2e_profiling.rs"]
 mod e2e_profiling;
-use e2e_profiling::{benchmarks, master_benchmark, BenchType};
+use e2e_profiling::{benchmarks, master_benchmark, BenchType, PcsChoice};
 
 use std::any::Any;
 
@@ -32,6 +32,10 @@ struct ProfileArgs {
     /// Type of benchmark to run
     #[clap(long, value_enum)]
     name: BenchType,
+
+    /// Polynomial commitment scheme
+    #[clap(long, value_enum, default_value = "dory")]
+    pcs: PcsChoice,
 }
 
 #[derive(Args, Debug)]
@@ -138,7 +142,7 @@ fn trace(args: ProfileArgs) {
     let trace_name = format!("{bench_name}_{timestamp}");
     let _guards = setup_tracing(args.format, &trace_name);
 
-    for (span, bench) in benchmarks(args.name).into_iter() {
+    for (span, bench) in benchmarks(args.name, args.pcs).into_iter() {
         span.in_scope(|| {
             bench();
             tracing::info!("Bench Complete");
@@ -161,8 +165,13 @@ fn run_benchmark(args: BenchmarkArgs) {
     let _guards = setup_tracing(args.profile_args.format, &trace_name);
 
     // Call master_benchmark with parameters
-    for (span, bench) in
-        master_benchmark(args.profile_args.name, scale, args.target_trace_size).into_iter()
+    for (span, bench) in master_benchmark(
+        args.profile_args.name,
+        scale,
+        args.target_trace_size,
+        args.profile_args.pcs,
+    )
+    .into_iter()
     {
         span.in_scope(|| {
             bench();

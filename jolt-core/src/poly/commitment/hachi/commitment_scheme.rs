@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
@@ -16,7 +17,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use hachi_pcs::algebra::ring::CyclotomicRing;
 use hachi_pcs::protocol::commitment::utils::crt_ntt::NttMatrixCache;
 use hachi_pcs::protocol::commitment::utils::linear::{
-    decompose_block, decompose_rows, mat_vec_mul_ntt_cached, MatrixSlot,
+    decompose_block, decompose_block_i8, decompose_rows_i8, mat_vec_mul_ntt_cached_i8, MatrixSlot,
 };
 use hachi_pcs::protocol::commitment::{CommitmentConfig, RingCommitment, SparseBlockEntry};
 use hachi_pcs::protocol::opening_point::BasisMode;
@@ -206,37 +207,61 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         _block_len: usize,
         delta: usize,
         log_basis: u32,
-    ) -> Result<Vec<Vec<CyclotomicRing<Fp128, D>>>, hachi_pcs::HachiError> {
+    ) -> Result<Vec<Vec<[i8; D]>>, hachi_pcs::HachiError> {
         let n_a = a_matrix.len();
-        let zero_t_hat = vec![CyclotomicRing::<Fp128, D>::zero(); n_a.checked_mul(delta).unwrap()];
+        let t_hat_len = n_a.checked_mul(delta).unwrap();
 
-        let results: Vec<Result<Vec<CyclotomicRing<Fp128, D>>, hachi_pcs::HachiError>> = self
-            .blocks
-            .par_iter()
-            .map(|block| match block {
-                PackedBlock::Zero => Ok(zero_t_hat.clone()),
-                PackedBlock::Dense(coeffs) => {
-                    let s_i = decompose_block(coeffs, delta, log_basis);
-                    let t_i = mat_vec_mul_ntt_cached(cache, MatrixSlot::A, &s_i)?;
-                    Ok(decompose_rows(&t_i, delta, log_basis))
+        let mut dense_indices: Vec<(usize, &[CyclotomicRing<Fp128, D>])> = Vec::new();
+        let mut onehot_blocks: Vec<(usize, &[SparseBlockEntry])> = Vec::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            match block {
+                PackedBlock::Dense(coeffs) => dense_indices.push((i, coeffs)),
+                PackedBlock::OneHot(entries) if !entries.is_empty() => {
+                    onehot_blocks.push((i, entries));
                 }
-                PackedBlock::OneHot(sparse_entries) => {
-                    if sparse_entries.is_empty() {
-                        return Ok(zero_t_hat.clone());
-                    }
-                    let mut t = vec![CyclotomicRing::<Fp128, D>::zero(); n_a];
-                    for entry in sparse_entries {
-                        let col = entry.pos_in_block * delta;
-                        for a in 0..n_a {
-                            t[a] += a_matrix[a][col].mul_by_monomial_sum(&entry.nonzero_coeffs);
-                        }
-                    }
-                    Ok(decompose_rows(&t, delta, log_basis))
-                }
+                _ => {}
+            }
+        }
+
+        let dense_results: Vec<(usize, Vec<[i8; D]>)> = dense_indices
+            .into_par_iter()
+            .map(|(i, coeffs)| {
+                let s_i = decompose_block_i8(coeffs, delta, log_basis);
+                let t_i: Vec<CyclotomicRing<Fp128, D>> =
+                    mat_vec_mul_ntt_cached_i8(cache, MatrixSlot::A, &s_i);
+                (i, decompose_rows_i8(&t_i, delta, log_basis))
             })
             .collect();
 
-        results.into_iter().collect()
+        let onehot_results: Vec<(usize, Vec<[i8; D]>)> = onehot_blocks
+            .into_par_iter()
+            .map(|(i, sparse_entries)| {
+                let mut t = vec![CyclotomicRing::<Fp128, D>::zero(); n_a];
+                for entry in sparse_entries {
+                    let col = entry.pos_in_block * delta;
+                    for a in 0..n_a {
+                        t[a] += a_matrix[a][col].mul_by_monomial_sum(&entry.nonzero_coeffs);
+                    }
+                }
+                (i, decompose_rows_i8(&t, delta, log_basis))
+            })
+            .collect();
+
+        let mut results: Vec<Vec<[i8; D]>> =
+            (0..self.blocks.len()).map(|_| Vec::new()).collect();
+        for (block_i, t_hat) in dense_results {
+            results[block_i] = t_hat;
+        }
+        for (block_i, t_hat) in onehot_results {
+            results[block_i] = t_hat;
+        }
+        for slot in &mut results {
+            if slot.is_empty() {
+                *slot = vec![[0i8; D]; t_hat_len];
+            }
+        }
+
+        Ok(results)
     }
 }
 
@@ -365,7 +390,7 @@ where
 
         let mut blocks: Vec<PackedBlock<D>> = Vec::with_capacity(total_packed_blocks);
 
-        for data in &poly_ring_data {
+        for data in poly_ring_data {
             match data {
                 PolyRingData::Dense(all_rings) => {
                     for chunk in all_rings.chunks(block_len) {
@@ -383,7 +408,7 @@ where
                         if blk_entries.is_empty() {
                             blocks.push(PackedBlock::Zero);
                         } else {
-                            blocks.push(PackedBlock::OneHot(blk_entries.clone()));
+                            blocks.push(PackedBlock::OneHot(blk_entries));
                         }
                     }
                 }
@@ -749,6 +774,7 @@ fn poly_to_ring_data<const D: usize>(
     match poly {
         MultilinearPolynomial::OneHot(onehot) => {
             let mut per_block: Vec<Vec<SparseBlockEntry>> = vec![Vec::new(); blocks_per_poly];
+            let mut block_maps: Vec<HashMap<usize, usize>> = vec![HashMap::new(); blocks_per_poly];
             let t = onehot.nonzero_indices.len();
             for (c, opt) in onehot.nonzero_indices.iter().enumerate() {
                 if let Some(idx) = opt {
@@ -759,12 +785,12 @@ fn poly_to_ring_data<const D: usize>(
                     let block_idx = ring_idx / block_len;
                     let pos_in_block = ring_idx % block_len;
                     if block_idx < blocks_per_poly {
-                        let entry = per_block[block_idx]
-                            .iter_mut()
-                            .find(|e| e.pos_in_block == pos_in_block);
-                        if let Some(existing) = entry {
-                            existing.nonzero_coeffs.push(coeff_idx);
+                        if let Some(&entry_idx) = block_maps[block_idx].get(&pos_in_block) {
+                            per_block[block_idx][entry_idx]
+                                .nonzero_coeffs
+                                .push(coeff_idx);
                         } else {
+                            block_maps[block_idx].insert(pos_in_block, per_block[block_idx].len());
                             per_block[block_idx].push(SparseBlockEntry {
                                 pos_in_block,
                                 nonzero_coeffs: vec![coeff_idx],
@@ -775,108 +801,93 @@ fn poly_to_ring_data<const D: usize>(
             }
             PolyRingData::OneHot(per_block)
         }
-        _ => {
-            let field_coeffs = materialize_coeffs(poly);
-            let ring_coeffs = pack_field_to_ring::<D>(&field_coeffs);
-            PolyRingData::Dense(ring_coeffs)
-        }
+        _ => PolyRingData::Dense(poly_to_ring_coeffs(poly)),
     }
 }
 
 pub(super) fn poly_to_ring_coeffs<const D: usize>(
     poly: &MultilinearPolynomial<JoltFp128>,
 ) -> Vec<CyclotomicRing<Fp128, D>> {
-    let field_coeffs = materialize_coeffs(poly);
-    pack_field_to_ring::<D>(&field_coeffs)
-}
-
-fn pack_field_to_ring<const D: usize>(field_coeffs: &[Fp128]) -> Vec<CyclotomicRing<Fp128, D>> {
-    let num_rings = field_coeffs.len().div_ceil(D);
-    let mut rings = Vec::with_capacity(num_rings);
-    for chunk in field_coeffs.chunks(D) {
-        let mut coeffs = [Fp128::zero(); D];
-        coeffs[..chunk.len()].copy_from_slice(chunk);
-        rings.push(CyclotomicRing::from_coefficients(coeffs));
-    }
-    rings
-}
-
-fn materialize_coeffs(poly: &MultilinearPolynomial<JoltFp128>) -> Vec<Fp128> {
     match poly {
         MultilinearPolynomial::LargeScalars(p) => {
-            // SAFETY: JoltFp128 is repr(transparent) over Fp128
-            #[allow(clippy::missing_transmute_annotations)]
-            unsafe {
-                std::mem::transmute(p.Z.clone())
-            }
+            // SAFETY: JoltFp128 is repr(transparent) over Fp128.
+            // Reinterpret the slice directly — avoids cloning the full coefficient vector.
+            let field_coeffs: &[Fp128] =
+                unsafe { std::slice::from_raw_parts(p.Z.as_ptr() as *const Fp128, p.Z.len()) };
+            pack_field_to_ring::<D>(field_coeffs)
         }
-        MultilinearPolynomial::BoolScalars(p) => p
-            .coeffs
-            .iter()
-            .map(|&b| if b { Fp128::one() } else { Fp128::zero() })
-            .collect(),
-        MultilinearPolynomial::U8Scalars(p) => p
-            .coeffs
-            .iter()
-            .map(|&v| Fp128::from_u64(v as u64))
-            .collect(),
-        MultilinearPolynomial::U16Scalars(p) => p
-            .coeffs
-            .iter()
-            .map(|&v| Fp128::from_u64(v as u64))
-            .collect(),
-        MultilinearPolynomial::U32Scalars(p) => p
-            .coeffs
-            .iter()
-            .map(|&v| Fp128::from_u64(v as u64))
-            .collect(),
+        MultilinearPolynomial::BoolScalars(p) => {
+            pack_scalars::<D, _, _>(&p.coeffs, |&b| if b { Fp128::one() } else { Fp128::zero() })
+        }
+        MultilinearPolynomial::U8Scalars(p) => {
+            pack_scalars::<D, _, _>(&p.coeffs, |&v| Fp128::from_u64(v as u64))
+        }
+        MultilinearPolynomial::U16Scalars(p) => {
+            pack_scalars::<D, _, _>(&p.coeffs, |&v| Fp128::from_u64(v as u64))
+        }
+        MultilinearPolynomial::U32Scalars(p) => {
+            pack_scalars::<D, _, _>(&p.coeffs, |&v| Fp128::from_u64(v as u64))
+        }
         MultilinearPolynomial::U64Scalars(p) => {
-            p.coeffs.iter().map(|&v| Fp128::from_u64(v)).collect()
+            pack_scalars::<D, _, _>(&p.coeffs, |&v| Fp128::from_u64(v))
         }
-        MultilinearPolynomial::U128Scalars(p) => p
-            .coeffs
-            .iter()
-            .map(|&v| <Fp128 as CanonicalField>::from_canonical_u128_reduced(v))
-            .collect(),
-        MultilinearPolynomial::I64Scalars(p) => p
-            .coeffs
-            .iter()
-            .map(|&v| {
-                if v >= 0 {
-                    Fp128::from_u64(v as u64)
-                } else {
-                    -Fp128::from_u64(v.unsigned_abs())
-                }
-            })
-            .collect(),
-        MultilinearPolynomial::I128Scalars(p) => p
-            .coeffs
-            .iter()
-            .map(|&v| {
-                let jolt = JoltFp128::from_i128(v);
+        MultilinearPolynomial::U128Scalars(p) => pack_scalars::<D, _, _>(&p.coeffs, |&v| {
+            <Fp128 as CanonicalField>::from_canonical_u128_reduced(v)
+        }),
+        MultilinearPolynomial::I64Scalars(p) => pack_scalars::<D, _, _>(&p.coeffs, |&v| {
+            if v >= 0 {
+                Fp128::from_u64(v as u64)
+            } else {
+                -Fp128::from_u64(v.unsigned_abs())
+            }
+        }),
+        MultilinearPolynomial::I128Scalars(p) => pack_scalars::<D, _, _>(&p.coeffs, |&v| {
+            let jolt = JoltFp128::from_i128(v);
+            jolt_to_hachi(&jolt)
+        }),
+        MultilinearPolynomial::S128Scalars(p) => pack_scalars::<D, _, _>(&p.coeffs, |v| {
+            if let Some(i) = v.to_i128() {
+                let jolt = JoltFp128::from_i128(i);
                 jolt_to_hachi(&jolt)
-            })
-            .collect(),
-        MultilinearPolynomial::S128Scalars(p) => p
-            .coeffs
-            .iter()
-            .map(|v| {
-                if let Some(i) = v.to_i128() {
-                    let jolt = JoltFp128::from_i128(i);
-                    jolt_to_hachi(&jolt)
+            } else {
+                let mag = v.magnitude_as_u128();
+                let f = <Fp128 as CanonicalField>::from_canonical_u128_reduced(mag);
+                if v.is_positive {
+                    f
                 } else {
-                    let mag = v.magnitude_as_u128();
-                    let f = <Fp128 as CanonicalField>::from_canonical_u128_reduced(mag);
-                    if v.is_positive {
-                        f
-                    } else {
-                        -f
-                    }
+                    -f
                 }
-            })
-            .collect(),
+            }
+        }),
         MultilinearPolynomial::OneHot(_) | MultilinearPolynomial::RLC(_) => {
             panic!("OneHot and RLC polynomials cannot be materialized for Hachi commit")
         }
     }
+}
+
+fn pack_scalars<const D: usize, T: Sync, F: Fn(&T) -> Fp128 + Sync + Send>(
+    scalars: &[T],
+    convert: F,
+) -> Vec<CyclotomicRing<Fp128, D>> {
+    scalars
+        .par_chunks(D)
+        .map(|chunk| {
+            let mut coeffs = [Fp128::zero(); D];
+            for (i, scalar) in chunk.iter().enumerate() {
+                coeffs[i] = convert(scalar);
+            }
+            CyclotomicRing::from_coefficients(coeffs)
+        })
+        .collect()
+}
+
+fn pack_field_to_ring<const D: usize>(field_coeffs: &[Fp128]) -> Vec<CyclotomicRing<Fp128, D>> {
+    field_coeffs
+        .par_chunks(D)
+        .map(|chunk| {
+            let mut coeffs = [Fp128::zero(); D];
+            coeffs[..chunk.len()].copy_from_slice(chunk);
+            CyclotomicRing::from_coefficients(coeffs)
+        })
+        .collect()
 }

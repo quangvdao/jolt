@@ -8,9 +8,9 @@ Branch: `lz/integrate-hachi`
 
 ## Architecture
 
-### Packed polynomial approach
+### Mega-polynomial approach
 
-All main witness polynomials are committed as a single Hachi commitment using `log₂(N)` selector variables. Given N polynomials P_0, ..., P_{N-1}, the packed polynomial is:
+All main witness polynomials are committed as a single Hachi commitment using `log₂(N)` selector variables. Given N polynomials P_0, ..., P_{N-1}, the mega-polynomial is:
 
 ```
 P*(x, y) = Σ_i eq(y, i) · P_i(x)    where y ∈ {0,1}^{log₂ N}
@@ -32,7 +32,7 @@ This eliminates the `lagrange_factor` workaround in Stage 8.
 
 ### Advice handling (deferred)
 
-Advice polynomials (TrustedAdvice, UntrustedAdvice) remain on separate Dory commitments for the first pass. They have a different lifecycle (committed outside streaming pipeline) and can be opened via a separate proof. Converting advice to one-hot and joining the packed commitment is a future workstream.
+Advice polynomials (TrustedAdvice, UntrustedAdvice) remain on separate Dory commitments for the first pass. They have a different lifecycle (committed outside streaming pipeline) and can be opened via a separate proof. Converting advice to one-hot and joining the mega-commitment is a future workstream.
 
 ---
 
@@ -93,7 +93,7 @@ Advice polynomials (TrustedAdvice, UntrustedAdvice) remain on separate Dory comm
 
 ### Phase 4 — Batch opening redesign
 
-- [ ] Design packed polynomial coefficient layout
+- [ ] Design mega-polynomial coefficient layout
   - Group by size class (dense T, one-hot K·T)
   - Zero-pad shorter polynomials
   - Determine selector variable ordering

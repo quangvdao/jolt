@@ -15,7 +15,7 @@ use std::{
 
 use crate::poly::commitment::dory::DoryContext;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
+use common::constants::{ONEHOT_CHUNK_THRESHOLD_LOG_T, XLEN};
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
@@ -60,7 +60,7 @@ use crate::{
         config::OneHotParams,
         instruction_lookups::{
             ra_virtual::InstructionRaSumcheckParams,
-            read_raf_checking::InstructionReadRafSumcheckParams,
+            read_raf_checking::InstructionReadRafSumcheckParams, LOG_K,
         },
         ram::{
             hamming_booleanity::HammingBooleanitySumcheckParams,
@@ -448,10 +448,10 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             self.preprocessing.shared.bytecode.code_size
         );
 
-        eprintln!("[PROVER] witness gen + commit...");
+        tracing::info!("witness gen + commit");
         let t0 = Instant::now();
         let (commitments, batch_hint) = self.generate_and_commit_witness_polynomials();
-        eprintln!("[PROVER] commit done ({:.1}s)", t0.elapsed().as_secs_f64());
+        tracing::info!("commit done ({:.1}s)", t0.elapsed().as_secs_f64());
         let untrusted_advice_commitment = self.generate_and_commit_untrusted_advice();
         self.generate_and_commit_trusted_advice();
 
@@ -486,13 +486,13 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         macro_rules! timed_stage {
             ($name:expr, $body:expr) => {{
-                eprintln!("[PROVER] {}...", $name);
-                let _t = Instant::now();
+                tracing::info!("{}...", $name);
+                let stage_start = Instant::now();
                 let r = $body;
-                eprintln!(
-                    "[PROVER] {} done ({:.1}s)",
+                tracing::info!(
+                    "{} done ({:.1}s)",
                     $name,
-                    _t.elapsed().as_secs_f64()
+                    stage_start.elapsed().as_secs_f64()
                 );
                 r
             }};
@@ -1521,8 +1521,23 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             entry.1 = *claim;
         }
 
-        let (poly_ids, coeffs_and_claims): (Vec<CommittedPolynomial>, Vec<(F, F)>) =
-            rlc_map.into_iter().collect();
+        let mut poly_ids: Vec<CommittedPolynomial> =
+            all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc())
+                .into_iter()
+                .filter(|poly| rlc_map.contains_key(poly))
+                .collect();
+        for advice_poly in [
+            CommittedPolynomial::TrustedAdvice,
+            CommittedPolynomial::UntrustedAdvice,
+        ] {
+            if rlc_map.contains_key(&advice_poly) {
+                poly_ids.push(advice_poly);
+            }
+        }
+        let coeffs_and_claims: Vec<(F, F)> = poly_ids
+            .iter()
+            .map(|poly| *rlc_map.get(poly).expect("missing RLC entry"))
+            .collect();
         let (coeffs, sorted_claims): (Vec<F>, Vec<F>) = coeffs_and_claims.into_iter().unzip();
 
         // Reconstruct per-polynomial hints from batch_hint (for Dory: clones
@@ -1564,12 +1579,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             poly_ids,
             layout: DoryGlobals::matrix_layout(),
         };
-
-        eprintln!(
-            "[PROVER] stage8: entering PCS::batch_prove ({} polys, point len {})",
-            coeffs.len(),
-            opening_point.r.len()
-        );
         PCS::default().batch_prove(
             &self.preprocessing.generators,
             &poly_source,
@@ -1644,8 +1653,6 @@ where
         // For PCS schemes that use packed polynomial batching (Hachi), size the
         // setup matrices for the packed polynomial (individual polys batched together).
         let max_num_vars = if PCS::uses_onehot_inc() {
-            use crate::zkvm::instruction_lookups::LOG_K;
-            use common::constants::XLEN;
             let inc_bits = XLEN + 1;
             let max_instruction_d = LOG_K.div_ceil(max_log_k_chunk);
             let max_d_inc = inc_bits.div_ceil(max_log_k_chunk);

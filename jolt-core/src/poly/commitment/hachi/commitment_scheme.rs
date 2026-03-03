@@ -7,6 +7,7 @@ use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+use crate::poly::one_hot_polynomial::OneHotPolynomial;
 use crate::poly::opening_proof::BatchPolynomialSource;
 use crate::transcripts::Transcript;
 use crate::utils::errors::ProofVerifyError;
@@ -69,6 +70,20 @@ enum PackedBlock<const D: usize> {
 struct JoltPackedPoly<const D: usize> {
     blocks: Vec<PackedBlock<D>>,
     block_len: usize,
+}
+
+fn to_hachi_opening_point<const D: usize>(point: &[JoltFp128]) -> Vec<Fp128> {
+    point.iter().rev().map(jolt_to_hachi).collect()
+}
+
+fn to_hachi_packed_opening_point<const D: usize>(
+    opening_point: &[JoltFp128],
+    rho: &[JoltFp128],
+    _m_vars: usize,
+) -> Vec<Fp128> {
+    let mut out = to_hachi_opening_point::<D>(opening_point);
+    out.extend(rho.iter().rev().map(jolt_to_hachi));
+    out
 }
 
 impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
@@ -229,12 +244,13 @@ fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
     ring_coeffs: Vec<CyclotomicRing<Fp128, D>>,
     setup: &HachiProverSetup<Fp128, D>,
 ) -> (RingCommitment<Fp128, D>, JoltHachiOpeningHint<D>) {
-    let dense_poly = DensePoly::from_ring_coeffs(ring_coeffs.clone());
+    let mut dense_poly = DensePoly::from_ring_coeffs(ring_coeffs);
     let (commitment, hachi_hint) = <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<
         Fp128,
         D,
     >>::commit(&dense_poly, setup)
     .expect("Hachi commit failed");
+    let ring_coeffs = std::mem::take(&mut dense_poly.coeffs);
     (
         commitment,
         JoltHachiOpeningHint {
@@ -245,7 +261,7 @@ fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
 }
 
 fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig>(
-    onehot: &crate::poly::one_hot_polynomial::OneHotPolynomial<JoltFp128>,
+    onehot: &OneHotPolynomial<JoltFp128>,
     setup: &HachiProverSetup<Fp128, D>,
 ) -> (RingCommitment<Fp128, D>, JoltHachiOpeningHint<D>) {
     let indices: Vec<Option<usize>> = onehot
@@ -406,7 +422,7 @@ where
         commitment: &Self::Commitment,
     ) -> Self::Proof {
         let hint = hint.expect("prove() requires a hint");
-        let hachi_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
+        let hachi_point = to_hachi_opening_point::<D>(opening_point);
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
         let proof = if let MultilinearPolynomial::OneHot(onehot) = poly {
@@ -458,7 +474,7 @@ where
         opening: &JoltFp128,
         commitment: &Self::Commitment,
     ) -> Result<(), ProofVerifyError> {
-        let hachi_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
+        let hachi_point = to_hachi_opening_point::<D>(opening_point);
         let hachi_opening = jolt_to_hachi(opening);
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
@@ -499,7 +515,7 @@ where
         let r_vars = (num_padded as u32).trailing_zeros() as usize;
 
         transcript.append_bytes(b"hachi_packed_num", &(num_packed as u64).to_le_bytes());
-        let rho: Vec<JoltFp128> = transcript.challenge_scalar_powers(r_vars);
+        let rho: Vec<JoltFp128> = transcript.challenge_vector(r_vars);
 
         let eq_table = EqPolynomial::<JoltFp128>::evals(&rho);
         let combined_claim: JoltFp128 = packed_claims
@@ -508,8 +524,11 @@ where
             .map(|(&v, &eq)| v * eq)
             .sum();
 
-        let mut packed_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
-        packed_point.extend(rho.iter().map(jolt_to_hachi));
+        let packed_point = to_hachi_packed_opening_point::<D>(
+            opening_point,
+            &rho,
+            setup.0.expanded.seed.layout.m_vars,
+        );
 
         let packed_poly = JoltPackedPoly {
             blocks: batch_hint.blocks,
@@ -537,7 +556,7 @@ where
             )
             .expect("Hachi packed poly prove failed");
 
-        let hachi_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
+        let hachi_point = to_hachi_opening_point::<D>(opening_point);
         let individual_commitments = &commitments[num_packed..];
         let individual_proofs: Vec<ArkBridge<HachiProof<Fp128, D>>> = individual_hints
             .into_iter()
@@ -593,7 +612,7 @@ where
         let selector_vars = (num_padded as u32).trailing_zeros() as usize;
 
         transcript.append_bytes(b"hachi_packed_num", &(num_packed as u64).to_le_bytes());
-        let rho: Vec<JoltFp128> = transcript.challenge_scalar_powers(selector_vars);
+        let rho: Vec<JoltFp128> = transcript.challenge_vector(selector_vars);
 
         let eq_table = EqPolynomial::<JoltFp128>::evals(&rho);
         let combined_claim: JoltFp128 = packed_claims
@@ -602,8 +621,11 @@ where
             .map(|(&v, &eq)| v * eq)
             .sum();
 
-        let mut packed_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
-        packed_point.extend(rho.iter().map(jolt_to_hachi));
+        let packed_point = to_hachi_packed_opening_point::<D>(
+            opening_point,
+            &rho,
+            setup.0.expanded.seed.layout.m_vars,
+        );
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
         let packed_commitment = commitments[0];
@@ -613,7 +635,6 @@ where
             &hachi_combined.to_canonical_u128().to_le_bytes(),
         );
         let mut adapter = JoltToHachiTranscript::new(transcript);
-
         <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::verify(
             &proof.packed_poly_proof.0,
             &setup.0,
@@ -634,7 +655,7 @@ where
             ));
         }
 
-        let hachi_point: Vec<Fp128> = opening_point.iter().map(jolt_to_hachi).collect();
+        let hachi_point = to_hachi_opening_point::<D>(opening_point);
         for (i, ((proof_i, claim_i), commitment_i)) in proof
             .individual_proofs
             .iter()
@@ -728,9 +749,11 @@ fn poly_to_ring_data<const D: usize>(
     match poly {
         MultilinearPolynomial::OneHot(onehot) => {
             let mut per_block: Vec<Vec<SparseBlockEntry>> = vec![Vec::new(); blocks_per_poly];
+            let t = onehot.nonzero_indices.len();
             for (c, opt) in onehot.nonzero_indices.iter().enumerate() {
                 if let Some(idx) = opt {
-                    let field_pos = c * onehot.K + *idx as usize;
+                    let k = *idx as usize;
+                    let field_pos = k * t + c;
                     let ring_idx = field_pos / D;
                     let coeff_idx = field_pos % D;
                     let block_idx = ring_idx / block_len;

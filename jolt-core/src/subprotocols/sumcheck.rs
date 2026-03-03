@@ -224,21 +224,15 @@ impl BatchedSumcheck {
         let (output_claim, r_sumcheck) =
             proof.verify(claim, max_num_rounds, max_degree, transcript)?;
 
-        let expected_output_claim = sumcheck_instances
-            .iter()
-            .zip(batching_coeffs.iter())
-            .map(|(sumcheck, coeff)| {
-                let offset = sumcheck.round_offset(max_num_rounds);
-                let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
+        let mut expected_output_claim = F::zero();
+        for (sumcheck, coeff) in sumcheck_instances.iter().zip(batching_coeffs.iter()) {
+            let offset = sumcheck.round_offset(max_num_rounds);
+            let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
 
-                // Cache polynomial opening claims, to be proven using either an
-                // opening proof or sumcheck (in the case of virtual polynomials).
-                sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
-                let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
-
-                claim * coeff
-            })
-            .sum();
+            sumcheck.cache_openings(opening_accumulator, transcript, r_slice);
+            let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
+            expected_output_claim += claim * coeff;
+        }
 
         if output_claim != expected_output_claim {
             return Err(ProofVerifyError::SumcheckVerificationError);

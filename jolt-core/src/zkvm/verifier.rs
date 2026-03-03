@@ -187,7 +187,7 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
     #[tracing::instrument(skip_all)]
     pub fn verify(mut self) -> Result<(), anyhow::Error> {
         let _pprof_verify = pprof_scope!("verify");
-        eprintln!("[VERIFIER] starting verify...");
+        tracing::info!("starting verify");
 
         fiat_shamir_preamble(
             &self.program_io,
@@ -672,14 +672,30 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             entry.1 = *claim;
         }
 
-        let (poly_ids, coeffs_and_claims): (Vec<CommittedPolynomial>, Vec<(F, F)>) =
-            rlc_map.into_iter().collect();
+        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
+        let mut poly_ids: Vec<CommittedPolynomial> = main_polys
+            .iter()
+            .copied()
+            .filter(|poly| rlc_map.contains_key(poly))
+            .collect();
+        for advice_poly in [
+            CommittedPolynomial::TrustedAdvice,
+            CommittedPolynomial::UntrustedAdvice,
+        ] {
+            if rlc_map.contains_key(&advice_poly) {
+                poly_ids.push(advice_poly);
+            }
+        }
+        let coeffs_and_claims: Vec<(F, F)> = poly_ids
+            .iter()
+            .map(|poly| *rlc_map.get(poly).expect("missing RLC entry"))
+            .collect();
         let (coeffs, sorted_claims): (Vec<F>, Vec<F>) = coeffs_and_claims.into_iter().unzip();
 
-        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
         let mut commitments_map: HashMap<CommittedPolynomial, PCS::Commitment> =
             if self.proof.commitments.len() == 1 {
                 main_polys
+                    .clone()
                     .into_iter()
                     .map(|p| (p, self.proof.commitments[0].clone()))
                     .collect()

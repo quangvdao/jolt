@@ -846,7 +846,17 @@ impl JoltField for JoltFp128 {
 
     #[inline]
     fn mul_to_product_mag<const M: usize>(&self, mag: &BigInt<M>) -> Self::UnreducedProduct {
-        UnreducedFp128(self.0.mul_wide_limbs::<M, 4>(mag.0))
+        if M <= 2 {
+            // 2-limb magnitudes fit in 256 bits without truncation.
+            UnreducedFp128(self.0.mul_wide_limbs::<M, 4>(mag.0))
+        } else {
+            // For >128-bit magnitudes, 128x(64*M) needs more than 4 limbs.
+            // Reducing the magnitude first avoids truncating high limbs.
+            let mag_reduced = Prime128M8M4M1M0::solinas_reduce(&mag.0);
+            let product = *self * Self(mag_reduced);
+            let limbs = product.to_unreduced().0;
+            UnreducedFp128([limbs[0], limbs[1], 0, 0])
+        }
     }
 
     #[inline]
@@ -877,6 +887,8 @@ impl JoltField for JoltFp128 {
 
 #[cfg(test)]
 mod tests {
+    use ark_ff::UniformRand;
+
     use super::*;
     use crate::field::JoltField;
 
@@ -923,5 +935,104 @@ mod tests {
     fn challenge_from_u128() {
         let f = <JoltFp128 as JoltField>::Challenge::from(42u128);
         assert_eq!(f, JoltFp128::from_u64(42));
+    }
+
+    #[test]
+    fn mul_to_product_mag_matches_field_mul_for_3_limb_magnitudes() {
+        let mut rng = ark_std::test_rng();
+
+        for _ in 0..1000 {
+            let a = JoltFp128::rand(&mut rng);
+            let mut limbs = [rng.next_u64(), rng.next_u64(), rng.next_u64()];
+            if limbs[2] == 0 {
+                limbs[2] = 1;
+            }
+            let mag = BigInt::<3>::new(limbs);
+
+            let got = JoltFp128::reduce_product(a.mul_to_product_mag(&mag));
+            let expected = a * JoltFp128(Prime128M8M4M1M0::solinas_reduce(&mag.0));
+            assert_eq!(got, expected, "a={a:?}, mag={:?}", mag.0);
+        }
+    }
+
+    #[test]
+    fn mul_to_product_mag_matches_field_mul_for_4_limb_magnitudes() {
+        let mut rng = ark_std::test_rng();
+
+        for _ in 0..1000 {
+            let a = JoltFp128::rand(&mut rng);
+            let mut limbs = [
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+            ];
+            if limbs[2] == 0 && limbs[3] == 0 {
+                limbs[3] = 1;
+            }
+            let mag = BigInt::<4>::new(limbs);
+
+            let got = JoltFp128::reduce_product(a.mul_to_product_mag(&mag));
+            let expected = a * JoltFp128(Prime128M8M4M1M0::solinas_reduce(&mag.0));
+            assert_eq!(got, expected, "a={a:?}, mag={:?}", mag.0);
+        }
+    }
+
+    #[test]
+    fn folded_accum4_single_product_matches_mul() {
+        let mut rng = ark_std::test_rng();
+
+        for _ in 0..1000 {
+            let a = JoltFp128::rand(&mut rng);
+            let b = JoltFp128::rand(&mut rng);
+            let expected = a * b;
+            let got = JoltFp128::reduce_product_accum(a.mul_to_product_accum(b));
+            assert_eq!(got, expected, "a={a:?}, b={b:?}");
+        }
+    }
+
+    #[test]
+    fn folded_accum4_accumulated_products_matches_sum() {
+        let mut rng = ark_std::test_rng();
+
+        let n = 4096;
+        let mut acc = FoldedAccum4::zero();
+        let mut expected = JoltFp128::zero();
+        for _ in 0..n {
+            let a = JoltFp128::rand(&mut rng);
+            let b = JoltFp128::rand(&mut rng);
+            acc += a.mul_to_product_accum(b);
+            expected += a * b;
+        }
+        let got = JoltFp128::reduce_product_accum(acc);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn folded_accum4_inner_outer_pattern() {
+        let mut rng = ark_std::test_rng();
+
+        let inner_size = 64;
+        let outer_size = 64;
+        let mut total_acc = FoldedAccum4::zero();
+        let mut expected = JoltFp128::zero();
+
+        for _ in 0..outer_size {
+            let e_out = JoltFp128::rand(&mut rng);
+            let mut inner_acc = FoldedAccum4::zero();
+            let mut inner_expected = JoltFp128::zero();
+            for _ in 0..inner_size {
+                let e_in = JoltFp128::rand(&mut rng);
+                let val = JoltFp128::rand(&mut rng);
+                inner_acc += e_in.mul_to_product_accum(val);
+                inner_expected += e_in * val;
+            }
+            let inner_reduced = JoltFp128::reduce_product_accum(inner_acc);
+            assert_eq!(inner_reduced, inner_expected);
+            total_acc += e_out.mul_to_product_accum(inner_reduced);
+            expected += e_out * inner_expected;
+        }
+        let got = JoltFp128::reduce_product_accum(total_acc);
+        assert_eq!(got, expected);
     }
 }

@@ -15,9 +15,9 @@ use crate::utils::errors::ProofVerifyError;
 use crate::utils::small_scalar::SmallScalar;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use hachi_pcs::algebra::ring::CyclotomicRing;
-use hachi_pcs::protocol::commitment::utils::crt_ntt::NttMatrixCache;
+use hachi_pcs::protocol::commitment::utils::crt_ntt::NttSlotCache;
 use hachi_pcs::protocol::commitment::utils::linear::{
-    decompose_block, decompose_block_i8, decompose_rows_i8, mat_vec_mul_ntt_cached_i8, MatrixSlot,
+    decompose_block, decompose_rows_i8, mat_vec_mul_ntt_tiled_i8,
 };
 use hachi_pcs::protocol::commitment::{CommitmentConfig, RingCommitment, SparseBlockEntry};
 use hachi_pcs::protocol::opening_point::BasisMode;
@@ -88,6 +88,8 @@ fn to_hachi_packed_opening_point<const D: usize>(
 }
 
 impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
+    type CommitCache = NttSlotCache<D>;
+
     fn num_ring_elems(&self) -> usize {
         self.blocks.len() * self.block_len
     }
@@ -203,7 +205,7 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     fn commit_inner(
         &self,
         a_matrix: &[Vec<CyclotomicRing<Fp128, D>>],
-        cache: &NttMatrixCache<D>,
+        ntt_a: &NttSlotCache<D>,
         _block_len: usize,
         delta: usize,
         log_basis: u32,
@@ -211,11 +213,15 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         let n_a = a_matrix.len();
         let t_hat_len = n_a.checked_mul(delta).unwrap();
 
-        let mut dense_indices: Vec<(usize, &[CyclotomicRing<Fp128, D>])> = Vec::new();
+        let mut dense_indices: Vec<usize> = Vec::new();
+        let mut dense_slices: Vec<&[CyclotomicRing<Fp128, D>]> = Vec::new();
         let mut onehot_blocks: Vec<(usize, &[SparseBlockEntry])> = Vec::new();
         for (i, block) in self.blocks.iter().enumerate() {
             match block {
-                PackedBlock::Dense(coeffs) => dense_indices.push((i, coeffs)),
+                PackedBlock::Dense(coeffs) => {
+                    dense_indices.push(i);
+                    dense_slices.push(coeffs);
+                }
                 PackedBlock::OneHot(entries) if !entries.is_empty() => {
                     onehot_blocks.push((i, entries));
                 }
@@ -223,14 +229,13 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
             }
         }
 
+        let dense_t_all: Vec<Vec<CyclotomicRing<Fp128, D>>> =
+            mat_vec_mul_ntt_tiled_i8(ntt_a, &dense_slices, delta, log_basis, None);
+
         let dense_results: Vec<(usize, Vec<[i8; D]>)> = dense_indices
             .into_par_iter()
-            .map(|(i, coeffs)| {
-                let s_i = decompose_block_i8(coeffs, delta, log_basis);
-                let t_i: Vec<CyclotomicRing<Fp128, D>> =
-                    mat_vec_mul_ntt_cached_i8(cache, MatrixSlot::A, &s_i);
-                (i, decompose_rows_i8(&t_i, delta, log_basis))
-            })
+            .zip(dense_t_all.into_par_iter())
+            .map(|(i, t_i)| (i, decompose_rows_i8(&t_i, delta, log_basis)))
             .collect();
 
         let onehot_results: Vec<(usize, Vec<[i8; D]>)> = onehot_blocks

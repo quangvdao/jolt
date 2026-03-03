@@ -94,6 +94,10 @@ impl CommitmentScheme for DoryCommitmentScheme {
         &self.layout
     }
 
+    fn dory_layout(config: &Self::Config) -> Option<DoryLayout> {
+        Some(*config)
+    }
+
     fn commit(
         &self,
         poly: &MultilinearPolynomial<ark_bn254::Fr>,

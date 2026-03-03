@@ -458,12 +458,26 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let onehot_inc = PCS::uses_onehot_inc();
         let main_polys = all_committed_polynomials(&self.one_hot_params, onehot_inc);
         let mut commitment_map: HashMap<CommittedPolynomial, PCS::Commitment> =
-            if commitments.len() == 1 {
+            if let Some(arity) = PCS::packed_main_commitment_arity() {
+                assert_eq!(
+                    arity, 1,
+                    "only arity=1 packed main commitments are supported"
+                );
+                assert_eq!(
+                    commitments.len(),
+                    arity,
+                    "packed main commitment arity mismatch"
+                );
                 main_polys
                     .into_iter()
                     .map(|p| (p, commitments[0].clone()))
                     .collect()
             } else {
+                assert_eq!(
+                    commitments.len(),
+                    main_polys.len(),
+                    "main commitment count mismatch"
+                );
                 main_polys
                     .into_iter()
                     .zip(commitments.iter().cloned())
@@ -550,7 +564,7 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             ram_K: self.one_hot_params.ram_k,
             rw_config: self.rw_config.clone(),
             one_hot_config: self.one_hot_params.to_config(),
-            dory_layout: DoryGlobals::get_layout(),
+            pcs_config: PCS::default().config().clone(),
         };
 
         let prove_duration = start.elapsed();
@@ -589,17 +603,23 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
     fn generate_and_commit_witness_polynomials(
         &mut self,
     ) -> (Vec<PCS::Commitment>, PCS::BatchOpeningHint) {
-        let _guard = DoryGlobals::initialize_context(
-            1 << self.one_hot_params.log_k_chunk,
-            self.padded_trace_len,
-            DoryContext::Main,
-            Some(DoryGlobals::get_layout()),
-        );
-
-        let polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
-        let T = DoryGlobals::get_T();
-        let K = 1usize << self.one_hot_params.log_k_chunk;
         let pcs = PCS::default();
+        let dory_layout = PCS::dory_layout(pcs.config());
+        let _guard = dory_layout.map(|layout| {
+            DoryGlobals::initialize_context(
+                1 << self.one_hot_params.log_k_chunk,
+                self.padded_trace_len,
+                DoryContext::Main,
+                Some(layout),
+            )
+        });
+        let polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
+        let T = if dory_layout.is_some() {
+            DoryGlobals::get_T()
+        } else {
+            self.padded_trace_len
+        };
+        let K = 1usize << self.one_hot_params.log_k_chunk;
 
         let (commitments, hint_map) = if let Some(chunk_size) = pcs.streaming_chunk_size(K, T) {
             let num_chunks = T / chunk_size;
@@ -647,22 +667,34 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 })
                 .collect();
 
-            // Tier 2: Compute final commitments from tier1 commitments
-            let (commitments, hints): (Vec<_>, Vec<_>) = tier1_per_poly
-                .into_par_iter()
-                .zip(&polys)
-                .map(|(tier1_commitments, poly)| {
-                    let onehot_k = poly.get_onehot_k(&self.one_hot_params);
-                    pcs.aggregate_chunks(
-                        &self.preprocessing.generators,
-                        onehot_k,
-                        &tier1_commitments,
-                    )
-                })
-                .unzip();
+            let onehot_ks: Vec<Option<usize>> = polys
+                .iter()
+                .map(|poly| poly.get_onehot_k(&self.one_hot_params))
+                .collect();
 
-            let batch_hint = PCS::streaming_batch_hint(hints);
-            (commitments, batch_hint)
+            if let Some((commitments, batch_hint)) = pcs.aggregate_streaming_batch(
+                &self.preprocessing.generators,
+                &onehot_ks,
+                &tier1_per_poly,
+            ) {
+                (commitments, batch_hint)
+            } else {
+                // Tier 2: Compute final commitments from tier1 commitments
+                let (commitments, hints): (Vec<_>, Vec<_>) = tier1_per_poly
+                    .into_par_iter()
+                    .zip(onehot_ks.into_par_iter())
+                    .map(|(tier1_commitments, onehot_k)| {
+                        pcs.aggregate_chunks(
+                            &self.preprocessing.generators,
+                            onehot_k,
+                            &tier1_commitments,
+                        )
+                    })
+                    .unzip();
+
+                let batch_hint = PCS::streaming_batch_hint(hints);
+                (commitments, batch_hint)
+            }
         } else {
             tracing::debug!("Non-streaming commit: {} polynomials, T={}", polys.len(), T,);
 
@@ -1376,12 +1408,15 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
     ) -> PCS::BatchedProof {
         tracing::info!("Stage 8 proving (batch opening)");
 
-        let _guard = DoryGlobals::initialize_context(
-            self.one_hot_params.k_chunk,
-            self.padded_trace_len,
-            DoryContext::Main,
-            Some(DoryGlobals::get_layout()),
-        );
+        let dory_layout = PCS::dory_layout(PCS::default().config());
+        let _guard = dory_layout.map(|layout| {
+            DoryGlobals::initialize_context(
+                self.one_hot_params.k_chunk,
+                self.padded_trace_len,
+                DoryContext::Main,
+                Some(layout),
+            )
+        });
 
         let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
             CommittedPolynomial::InstructionRa(0),
@@ -1508,6 +1543,86 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             ));
         }
 
+        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
+
+        if PCS::packed_main_commitment_arity().is_some() {
+            let mut claim_map: HashMap<CommittedPolynomial, F> = HashMap::new();
+            for (poly, claim) in polynomial_claims {
+                let prev = claim_map.insert(poly, claim);
+                assert!(prev.is_none(), "duplicate claim for polynomial: {poly:?}");
+            }
+
+            let mut sorted_claims = Vec::with_capacity(main_polys.len() + 2);
+            for poly in &main_polys {
+                let claim = claim_map
+                    .remove(poly)
+                    .expect("missing main polynomial claim for packed Hachi opening");
+                sorted_claims.push(claim);
+            }
+
+            let mut individual_ids = Vec::new();
+            for advice_poly in [
+                CommittedPolynomial::TrustedAdvice,
+                CommittedPolynomial::UntrustedAdvice,
+            ] {
+                if let Some(claim) = claim_map.remove(&advice_poly) {
+                    sorted_claims.push(claim);
+                    individual_ids.push(advice_poly);
+                }
+            }
+            assert!(
+                claim_map.is_empty(),
+                "unexpected leftover claims in packed Hachi opening"
+            );
+
+            let mut individual_hints = Vec::with_capacity(individual_ids.len());
+            let mut remaining_advice_hints = advice_hints;
+            for id in &individual_ids {
+                let hint = remaining_advice_hints
+                    .remove(id)
+                    .expect("missing advice hint for packed Hachi opening");
+                individual_hints.push(hint);
+            }
+
+            let mut commit_map = commitment_map;
+            let packed_commitment = commit_map
+                .remove(
+                    main_polys
+                        .first()
+                        .expect("missing main polynomial ids for packed Hachi opening"),
+                )
+                .expect("missing packed main commitment");
+            let mut commitment_refs = Vec::with_capacity(1 + individual_ids.len());
+            commitment_refs.push(packed_commitment);
+            for id in &individual_ids {
+                commitment_refs.push(
+                    commit_map
+                        .remove(id)
+                        .expect("missing advice commitment for packed Hachi opening"),
+                );
+            }
+            let commitment_ref_slice: Vec<&PCS::Commitment> = commitment_refs.iter().collect();
+
+            struct UnusedBatchSource;
+            impl<F: JoltField> crate::poly::opening_proof::BatchPolynomialSource<F> for UnusedBatchSource {
+                fn build_joint_polynomial(&self, _coeffs: &[F]) -> MultilinearPolynomial<F> {
+                    panic!("unused batch polynomial source for packed Hachi opening")
+                }
+            }
+
+            return PCS::default().batch_prove(
+                &self.preprocessing.generators,
+                &UnusedBatchSource,
+                batch_hint,
+                individual_hints,
+                &commitment_ref_slice,
+                &opening_point.r,
+                &sorted_claims,
+                &[],
+                &mut self.transcript,
+            );
+        }
+
         // Sample gamma and compute powers for RLC
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
         self.transcript.append_scalars(b"rlc_claims", &claims);
@@ -1516,16 +1631,15 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         // Accumulate gamma coefficients per unique polynomial (BTreeMap orders by CommittedPolynomial)
         let mut rlc_map = BTreeMap::new();
         for (gamma, (poly, claim)) in gamma_powers.iter().zip(polynomial_claims.iter()) {
-            let entry = rlc_map.entry(*poly).or_insert((F::zero(), F::zero()));
-            entry.0 += *gamma;
-            entry.1 = *claim;
+            let prev = rlc_map.insert(*poly, (*gamma, *claim));
+            assert!(prev.is_none(), "duplicate claim for polynomial: {poly:?}");
         }
 
-        let mut poly_ids: Vec<CommittedPolynomial> =
-            all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc())
-                .into_iter()
-                .filter(|poly| rlc_map.contains_key(poly))
-                .collect();
+        let mut poly_ids: Vec<CommittedPolynomial> = main_polys
+            .iter()
+            .copied()
+            .filter(|poly| rlc_map.contains_key(poly))
+            .collect();
         for advice_poly in [
             CommittedPolynomial::TrustedAdvice,
             CommittedPolynomial::UntrustedAdvice,
@@ -1542,7 +1656,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
 
         // Reconstruct per-polynomial hints from batch_hint (for Dory: clones
         // per-poly hints; for Hachi: returns empty Vec) and merge with advice hints.
-        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
         let per_poly_hints = PCS::split_batch_hint(&batch_hint);
         let mut all_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint> =
             main_polys.into_iter().zip(per_poly_hints).collect();
@@ -1696,7 +1809,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> Serializable
 mod tests {
     use ark_bn254::Fr;
     use hachi_pcs::protocol::{
-        commitment::CommitmentConfig, ProductionFp128CommitmentConfig as HachiTestCommitmentConfig,
+        commitment::CommitmentConfig, Fp128CommitmentConfig as HachiTestCommitmentConfig,
     };
     use serial_test::serial;
 
@@ -2412,20 +2525,27 @@ mod tests {
     #[test]
     #[serial]
     fn muldiv_e2e_hachi() {
-        // D=512 CyclotomicRing elements are ~8KB each; deep call stacks overflow
-        // the default 8MB thread stack.
+        // D=512 rings are ~8KB each; the prove path needs more than the default
+        // 8MB thread stack. Rayon workers get 64MB below, and we run the test
+        // body on a 64MB thread so the main thread doesn't overflow either.
         rayon::ThreadPoolBuilder::new()
             .stack_size(64 * 1024 * 1024)
             .build_global()
             .ok();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(muldiv_e2e_hachi_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn muldiv_e2e_hachi_inner() {
         let mut program = host::Program::new("muldiv-guest");
         let (bytecode, init_memory_state, _) = program.decode();
         let inputs = postcard::to_stdvec(&[9u32, 5u32, 3u32]).unwrap();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        // Production D=512: each one-hot polynomial's hint uses ~512MB (inner_width=65536 ×
-        // 8KB/ring). Minimize num_blocks by using the tightest power-of-2 trace length; muldiv
-        // traces ~2600 cycles so 4096 gives num_blocks=1.
         let shared_preprocessing = JoltSharedPreprocessing::new(
             bytecode.clone(),
             io_device.memory_layout.clone(),

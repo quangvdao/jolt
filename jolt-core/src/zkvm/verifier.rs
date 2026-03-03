@@ -551,14 +551,14 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
 
     /// Stage 8: Dory batch opening verification.
     fn verify_stage8(&mut self) -> Result<(), anyhow::Error> {
-        // Initialize DoryGlobals with the layout from the proof
-        // This ensures the verifier uses the same layout as the prover
-        let _guard = DoryGlobals::initialize_context(
-            1 << self.one_hot_params.log_k_chunk,
-            self.proof.trace_length.next_power_of_two(),
-            DoryContext::Main,
-            Some(self.proof.dory_layout),
-        );
+        let _guard = PCS::dory_layout(&self.proof.pcs_config).map(|layout| {
+            DoryGlobals::initialize_context(
+                1 << self.one_hot_params.log_k_chunk,
+                self.proof.trace_length.next_power_of_two(),
+                DoryContext::Main,
+                Some(layout),
+            )
+        });
 
         // Get the unified opening point from HammingWeightClaimReduction
         // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
@@ -659,6 +659,104 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             ));
         }
 
+        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
+        let mut commitments_map: HashMap<CommittedPolynomial, PCS::Commitment> =
+            if let Some(arity) = PCS::packed_main_commitment_arity() {
+                if arity != 1 {
+                    return Err(ProofVerifyError::InvalidInputLength(1, arity).into());
+                }
+                if self.proof.commitments.len() != arity {
+                    return Err(ProofVerifyError::InvalidInputLength(
+                        arity,
+                        self.proof.commitments.len(),
+                    )
+                    .into());
+                }
+                main_polys
+                    .clone()
+                    .into_iter()
+                    .map(|p| (p, self.proof.commitments[0].clone()))
+                    .collect()
+            } else {
+                if self.proof.commitments.len() != main_polys.len() {
+                    return Err(ProofVerifyError::InvalidInputLength(
+                        main_polys.len(),
+                        self.proof.commitments.len(),
+                    )
+                    .into());
+                }
+                main_polys
+                    .iter()
+                    .copied()
+                    .zip_eq(&self.proof.commitments)
+                    .map(|(p, c)| (p, c.clone()))
+                    .collect()
+            };
+        if let Some(ref commitment) = self.trusted_advice_commitment {
+            commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
+        }
+        if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
+            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
+        }
+
+        if PCS::packed_main_commitment_arity().is_some() {
+            let mut claim_map: HashMap<CommittedPolynomial, F> = HashMap::new();
+            for (poly, claim) in polynomial_claims {
+                let prev = claim_map.insert(poly, claim);
+                if prev.is_some() {
+                    return Err(ProofVerifyError::InternalError.into());
+                }
+            }
+
+            let mut sorted_claims = Vec::with_capacity(main_polys.len() + 2);
+            for poly in &main_polys {
+                let claim = claim_map
+                    .remove(poly)
+                    .ok_or(ProofVerifyError::InternalError)?;
+                sorted_claims.push(claim);
+            }
+
+            let mut individual_ids = Vec::new();
+            for advice_poly in [
+                CommittedPolynomial::TrustedAdvice,
+                CommittedPolynomial::UntrustedAdvice,
+            ] {
+                if let Some(claim) = claim_map.remove(&advice_poly) {
+                    sorted_claims.push(claim);
+                    individual_ids.push(advice_poly);
+                }
+            }
+            if !claim_map.is_empty() {
+                return Err(ProofVerifyError::InternalError.into());
+            }
+
+            let packed_commitment = commitments_map
+                .remove(main_polys.first().ok_or(ProofVerifyError::InternalError)?)
+                .ok_or(ProofVerifyError::InternalError)?;
+            let mut commitment_refs = Vec::with_capacity(1 + individual_ids.len());
+            commitment_refs.push(packed_commitment);
+            for id in &individual_ids {
+                commitment_refs.push(
+                    commitments_map
+                        .remove(id)
+                        .ok_or(ProofVerifyError::InternalError)?,
+                );
+            }
+            let commitment_ref_slice: Vec<&PCS::Commitment> = commitment_refs.iter().collect();
+
+            return PCS::default()
+                .batch_verify(
+                    &self.proof.joint_opening_proof,
+                    &self.preprocessing.generators,
+                    &mut self.transcript,
+                    &opening_point.r,
+                    &commitment_ref_slice,
+                    &sorted_claims,
+                    &[],
+                )
+                .context("Stage 8");
+        }
+
         // 2. Sample gamma and compute powers for RLC
         let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
         self.transcript.append_scalars(b"rlc_claims", &claims);
@@ -667,12 +765,12 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
         // Accumulate gamma coefficients per unique polynomial (BTreeMap for deterministic ordering)
         let mut rlc_map = BTreeMap::new();
         for (gamma, (poly, claim)) in gamma_powers.iter().zip(polynomial_claims.iter()) {
-            let entry = rlc_map.entry(*poly).or_insert((F::zero(), F::zero()));
-            entry.0 += *gamma;
-            entry.1 = *claim;
+            let prev = rlc_map.insert(*poly, (*gamma, *claim));
+            if prev.is_some() {
+                return Err(ProofVerifyError::InternalError.into());
+            }
         }
 
-        let main_polys = all_committed_polynomials(&self.one_hot_params, PCS::uses_onehot_inc());
         let mut poly_ids: Vec<CommittedPolynomial> = main_polys
             .iter()
             .copied()
@@ -691,27 +789,6 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             .map(|poly| *rlc_map.get(poly).expect("missing RLC entry"))
             .collect();
         let (coeffs, sorted_claims): (Vec<F>, Vec<F>) = coeffs_and_claims.into_iter().unzip();
-
-        let mut commitments_map: HashMap<CommittedPolynomial, PCS::Commitment> =
-            if self.proof.commitments.len() == 1 {
-                main_polys
-                    .clone()
-                    .into_iter()
-                    .map(|p| (p, self.proof.commitments[0].clone()))
-                    .collect()
-            } else {
-                main_polys
-                    .into_iter()
-                    .zip_eq(&self.proof.commitments)
-                    .map(|(p, c)| (p, c.clone()))
-                    .collect()
-            };
-        if let Some(ref commitment) = self.trusted_advice_commitment {
-            commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-        }
-        if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
-            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
-        }
 
         let commitment_refs: Vec<PCS::Commitment> = poly_ids
             .iter()

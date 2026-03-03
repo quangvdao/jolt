@@ -47,7 +47,7 @@ pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcr
     pub ram_K: usize,
     pub rw_config: ReadWriteConfig,
     pub one_hot_config: OneHotConfig,
-    pub dory_layout: DoryLayout,
+    pub pcs_config: PCS::Config,
 }
 
 impl CanonicalSerialize for DoryLayout {

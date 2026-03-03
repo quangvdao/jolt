@@ -6,6 +6,7 @@ use crate::poly::opening_proof::BatchPolynomialSource;
 use crate::transcripts::Transcript;
 use crate::{
     field::JoltField,
+    poly::commitment::dory::DoryLayout,
     poly::multilinear_polynomial::MultilinearPolynomial,
     utils::{errors::ProofVerifyError, small_scalar::SmallScalar},
 };
@@ -40,6 +41,12 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
     fn from_proof(proof: &Self::BatchedProof) -> Self;
 
     fn config(&self) -> &Self::Config;
+
+    /// Exposes Dory matrix layout when this PCS uses Dory contexts.
+    /// Non-Dory schemes return `None`.
+    fn dory_layout(_config: &Self::Config) -> Option<DoryLayout> {
+        None
+    }
 
     fn commit(
         &self,
@@ -109,6 +116,13 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
 
     fn protocol_name() -> &'static [u8];
 
+    /// Number of commitments used to represent all main witness polynomials.
+    /// `None` means one commitment per main polynomial.
+    /// `Some(1)` means all main polynomials share one packed commitment.
+    fn packed_main_commitment_arity() -> Option<usize> {
+        None
+    }
+
     /// Whether this PCS uses one-hot decomposition for increment polynomials.
     /// When true, increments are committed as:
     /// - `RdIncRa` + `RdIncMsb`
@@ -151,6 +165,18 @@ pub trait StreamingCommitmentScheme: CommitmentScheme {
         onehot_k: Option<usize>,
         tier1_commitments: &[Self::ChunkState],
     ) -> (Self::Commitment, Self::OpeningProofHint);
+
+    /// Optional PCS-specific streaming batch finalization hook.
+    /// If implemented, receives all per-polynomial chunk states and returns the
+    /// final commitments + batch hint directly.
+    fn aggregate_streaming_batch(
+        &self,
+        _setup: &Self::ProverSetup,
+        _onehot_ks: &[Option<usize>],
+        _tier1_per_poly: &[Vec<Self::ChunkState>],
+    ) -> Option<(Vec<Self::Commitment>, Self::BatchOpeningHint)> {
+        None
+    }
 
     /// Convert per-polynomial hints from the streaming path into a batch hint.
     /// Only called when `streaming_chunk_size` returns `Some`.

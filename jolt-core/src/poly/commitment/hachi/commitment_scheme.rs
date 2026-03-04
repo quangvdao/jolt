@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
@@ -21,7 +20,7 @@ use hachi_pcs::protocol::commitment::utils::crt_ntt::NttSlotCache;
 use hachi_pcs::protocol::commitment::utils::linear::decompose_rows_i8;
 use hachi_pcs::protocol::commitment::{
     compute_num_digits, compute_num_digits_fold, CommitmentConfig, HachiCommitmentLayout,
-    RingCommitment, SparseBlockEntry,
+    RingCommitment,
 };
 use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
@@ -68,57 +67,43 @@ pub enum HachiChunkState<const D: usize> {
     },
 }
 
-/// Thin view over the trace: all HachiPolyOps methods iterate the trace
-/// on-the-fly via the type-erased `index_of` callback.  Zero bytes of
-/// polynomial data are materialized.
+/// Streaming view over the packed one-hot trace. Uses T-major layout
+/// (field_pos = c * K + k) so cycle-contiguous entries map to adjacent
+/// ring elements, enabling per-block parallelism and sequential A-matrix
+/// access.
 #[derive(Clone, Copy)]
 struct JoltPackedPoly<const D: usize> {
     index_of: ErasedIndexFn,
     num_cycles: usize,
     num_polys: usize,
+    onehot_k: usize,
     block_len: usize,
     blocks_per_poly: usize,
     num_padded: usize,
 }
 
 impl<const D: usize> JoltPackedPoly<D> {
-    fn entries_for_block(&self, packed_block_idx: usize) -> Vec<SparseBlockEntry> {
-        let poly_idx = packed_block_idx / self.blocks_per_poly;
-        let block_idx = packed_block_idx % self.blocks_per_poly;
+    /// T-major layout: field_pos = c * K + k. Addr varies fast, cycle
+    /// varies slow. Opening-point convention: [r_addr_LE, r_cycle_LE].
+    #[inline]
+    fn decompose(&self, c: usize, k: u8) -> (usize, usize, usize) {
+        let field_pos = c * self.onehot_k + (k as usize);
+        let ring_idx = field_pos / D;
+        let coeff_idx = field_pos % D;
+        let block_within = ring_idx / self.block_len;
+        let pos_in_block = ring_idx % self.block_len;
+        (block_within, pos_in_block, coeff_idx)
+    }
 
-        if poly_idx >= self.num_polys {
-            return vec![];
-        }
-
-        let mut entries_map: HashMap<usize, usize> = HashMap::new();
-        let mut entries: Vec<SparseBlockEntry> = Vec::new();
-
-        // K-major layout: field_pos = k * T + c (address varies slowly, cycle
-        // varies fast).  This matches the old streaming_chunks_to_blocks and
-        // the opening-point convention [r_cycle_LE, r_addr_LE] produced by
-        // reversing [r_addr_BE, r_cycle_BE].
-        for c in 0..self.num_cycles {
-            if let Some(k) = self.index_of.call(c, poly_idx) {
-                let field_pos = (k as usize) * self.num_cycles + c;
-                let ring_idx = field_pos / D;
-                let coeff_idx = field_pos % D;
-                let block_of_ring = ring_idx / self.block_len;
-                if block_of_ring != block_idx {
-                    continue;
-                }
-                let pos_in_block = ring_idx % self.block_len;
-                if let Some(&entry_idx) = entries_map.get(&pos_in_block) {
-                    entries[entry_idx].nonzero_coeffs.push(coeff_idx);
-                } else {
-                    entries_map.insert(pos_in_block, entries.len());
-                    entries.push(SparseBlockEntry {
-                        pos_in_block,
-                        nonzero_coeffs: vec![coeff_idx],
-                    });
-                }
-            }
-        }
-        entries
+    /// Cycle range that may contribute to within-poly block `bw`.
+    /// Slight over-approximation; callers verify ring_idx bounds.
+    #[inline]
+    fn block_cycle_range(&self, bw: usize) -> (usize, usize) {
+        let ring_start = bw * self.block_len;
+        let ring_end = ring_start + self.block_len;
+        let c_start = (ring_start * D) / self.onehot_k;
+        let c_end = (ring_end * D).div_ceil(self.onehot_k).min(self.num_cycles);
+        (c_start, c_end)
     }
 }
 
@@ -131,14 +116,67 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
 
     #[tracing::instrument(skip_all, name = "evaluate_ring")]
     fn evaluate_ring(&self, scalars: &[Fp128]) -> CyclotomicRing<Fp128, D> {
-        let (eval, _) = self.evaluate_and_fold(scalars, &[], 0);
-        eval
+        let bl = self.block_len;
+        let bpp = self.blocks_per_poly;
+        let chunk_size = 512;
+        let num_chunks = self.num_cycles.div_ceil(chunk_size);
+
+        (0..num_chunks)
+            .into_par_iter()
+            .map(|chunk_idx| {
+                let c_start = chunk_idx * chunk_size;
+                let c_end = (c_start + chunk_size).min(self.num_cycles);
+                let mut acc = [Fp128::zero(); D];
+                for c in c_start..c_end {
+                    for p in 0..self.num_polys {
+                        if let Some(k) = self.index_of.call(c, p) {
+                            let (block_within, pos_in_block, ci) = self.decompose(c, k);
+                            let global_ring = (p * bpp + block_within) * bl + pos_in_block;
+                            if global_ring < scalars.len() {
+                                acc[ci] += scalars[global_ring];
+                            }
+                        }
+                    }
+                }
+                CyclotomicRing::from_coefficients(acc)
+            })
+            .reduce(CyclotomicRing::zero, |a, b| a + b)
     }
 
     #[tracing::instrument(skip_all, name = "fold_blocks")]
-    fn fold_blocks(&self, scalars: &[Fp128], block_len: usize) -> Vec<CyclotomicRing<Fp128, D>> {
-        let (_, folded) = self.evaluate_and_fold(&[], scalars, block_len);
-        folded
+    fn fold_blocks(
+        &self,
+        scalars: &[Fp128],
+        _block_len: usize,
+    ) -> Vec<CyclotomicRing<Fp128, D>> {
+        let bpp = self.blocks_per_poly;
+        let total_blocks = self.num_padded * bpp;
+
+        (0..total_blocks)
+            .into_par_iter()
+            .map(|b| {
+                let p = b / bpp;
+                if p >= self.num_polys {
+                    return CyclotomicRing::zero();
+                }
+                let bw = b % bpp;
+                let (c_start, c_end) = self.block_cycle_range(bw);
+                let ring_base = bw * self.block_len;
+                let mut acc = [Fp128::zero(); D];
+                for c in c_start..c_end {
+                    if let Some(k) = self.index_of.call(c, p) {
+                        let field_pos = c * self.onehot_k + (k as usize);
+                        let ring_idx = field_pos / D;
+                        let ci = field_pos % D;
+                        let pos = ring_idx.wrapping_sub(ring_base);
+                        if pos < self.block_len && pos < scalars.len() {
+                            acc[ci] += scalars[pos];
+                        }
+                    }
+                }
+                CyclotomicRing::from_coefficients(acc)
+            })
+            .collect()
     }
 
     #[tracing::instrument(skip_all, name = "evaluate_and_fold")]
@@ -148,52 +186,59 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         fold_scalars: &[Fp128],
         _block_len: usize,
     ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
-        let total_blocks = self.num_padded * self.blocks_per_poly;
+        if eval_scalars.is_empty() {
+            return (CyclotomicRing::zero(), self.fold_blocks(fold_scalars, 0));
+        }
+        if fold_scalars.is_empty() {
+            return (self.evaluate_ring(eval_scalars), vec![]);
+        }
+
         let bl = self.block_len;
-        let do_eval = !eval_scalars.is_empty();
-        let do_fold = !fold_scalars.is_empty();
+        let bpp = self.blocks_per_poly;
+        let total_blocks = self.num_padded * bpp;
 
-        let per_block: Vec<(CyclotomicRing<Fp128, D>, CyclotomicRing<Fp128, D>)> = (0
-            ..total_blocks)
+        let pairs: Vec<(CyclotomicRing<Fp128, D>, [Fp128; D])> = (0..total_blocks)
             .into_par_iter()
-            .map(|bi| {
-                let entries = self.entries_for_block(bi);
-                let block_start = bi * bl;
-
+            .map(|b| {
+                let p = b / bpp;
+                if p >= self.num_polys {
+                    return (CyclotomicRing::zero(), [Fp128::zero(); D]);
+                }
+                let bw = b % bpp;
+                let (c_start, c_end) = self.block_cycle_range(bw);
+                let ring_base = bw * bl;
                 let mut eval_acc = [Fp128::zero(); D];
                 let mut fold_acc = [Fp128::zero(); D];
-
-                for entry in &entries {
-                    if do_eval {
-                        let ring_idx = block_start + entry.pos_in_block;
-                        if ring_idx < eval_scalars.len() {
-                            let s = eval_scalars[ring_idx];
-                            for &ci in &entry.nonzero_coeffs {
-                                eval_acc[ci] += s;
+                for c in c_start..c_end {
+                    if let Some(k) = self.index_of.call(c, p) {
+                        let field_pos = c * self.onehot_k + (k as usize);
+                        let ring_idx = field_pos / D;
+                        let ci = field_pos % D;
+                        let pos = ring_idx.wrapping_sub(ring_base);
+                        if pos < bl {
+                            let global_ring = b * bl + pos;
+                            if global_ring < eval_scalars.len() {
+                                eval_acc[ci] += eval_scalars[global_ring];
+                            }
+                            if pos < fold_scalars.len() {
+                                fold_acc[ci] += fold_scalars[pos];
                             }
                         }
                     }
-                    if do_fold && entry.pos_in_block < fold_scalars.len() {
-                        let s = fold_scalars[entry.pos_in_block];
-                        for &ci in &entry.nonzero_coeffs {
-                            fold_acc[ci] += s;
-                        }
-                    }
                 }
-                (
-                    CyclotomicRing::from_coefficients(eval_acc),
-                    CyclotomicRing::from_coefficients(fold_acc),
-                )
+                (CyclotomicRing::from_coefficients(fold_acc), eval_acc)
             })
             .collect();
 
-        let eval_result = per_block
-            .iter()
-            .map(|(e, _)| *e)
-            .reduce(|a, b| a + b)
-            .unwrap_or_else(CyclotomicRing::zero);
-        let fold_result: Vec<_> = per_block.into_iter().map(|(_, f)| f).collect();
-        (eval_result, fold_result)
+        let fold_result: Vec<CyclotomicRing<Fp128, D>> = pairs.iter().map(|(f, _)| *f).collect();
+        let mut eval_total = [Fp128::zero(); D];
+        for (_, e) in &pairs {
+            for i in 0..D {
+                eval_total[i] += e[i];
+            }
+        }
+
+        (CyclotomicRing::from_coefficients(eval_total), fold_result)
     }
 
     fn decompose_fold(
@@ -204,37 +249,38 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         _log_basis: u32,
     ) -> Vec<CyclotomicRing<Fp128, D>> {
         let inner_width = block_len * delta;
-        let total_blocks = self.num_padded * self.blocks_per_poly;
+        let bpp = self.blocks_per_poly;
+        let chunk_size = 512;
+        let num_chunks = self.num_cycles.div_ceil(chunk_size);
 
-        let z_i32: Vec<[i32; D]> = (0..total_blocks)
+        let z_i32: Vec<[i32; D]> = (0..num_chunks)
             .into_par_iter()
             .fold(
                 || vec![[0i32; D]; inner_width],
-                |mut z, bi| {
-                    if bi >= challenges.len() {
-                        return z;
-                    }
-                    let c_i = &challenges[bi];
-                    let entries = self.entries_for_block(bi);
-                    for entry in &entries {
-                        assert!(
-                            entry.pos_in_block < block_len,
-                            "onehot entry position {} exceeds block_len {}",
-                            entry.pos_in_block,
-                            block_len,
-                        );
-                        let base_j = entry.pos_in_block * delta;
-                        for &ci in &entry.nonzero_coeffs {
-                            for (&pos, &challenge_coeff) in
-                                c_i.positions.iter().zip(c_i.coeffs.iter())
-                            {
-                                let target = ci + pos as usize;
-                                let (idx, sign) = if target < D {
-                                    (target, 1i32)
-                                } else {
-                                    (target - D, -1i32)
-                                };
-                                z[base_j][idx] += sign * challenge_coeff as i32;
+                |mut z, chunk_idx| {
+                    let c_start = chunk_idx * chunk_size;
+                    let c_end = (c_start + chunk_size).min(self.num_cycles);
+                    for c in c_start..c_end {
+                        for p in 0..self.num_polys {
+                            if let Some(k) = self.index_of.call(c, p) {
+                                let (block_within, pos_in_block, ci) = self.decompose(c, k);
+                                let packed_block = p * bpp + block_within;
+                                if packed_block >= challenges.len() {
+                                    continue;
+                                }
+                                let c_i = &challenges[packed_block];
+                                let base_j = pos_in_block * delta;
+                                for (&pos, &challenge_coeff) in
+                                    c_i.positions.iter().zip(c_i.coeffs.iter())
+                                {
+                                    let target = ci + pos as usize;
+                                    let (idx, sign) = if target < D {
+                                        (target, 1i32)
+                                    } else {
+                                        (target - D, -1i32)
+                                    };
+                                    z[base_j][idx] += sign * challenge_coeff as i32;
+                                }
                             }
                         }
                     }
@@ -283,41 +329,48 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     ) -> Result<Vec<Vec<[i8; D]>>, hachi_pcs::HachiError> {
         let n_a = a_matrix.len();
         let t_hat_len = n_a.checked_mul(num_digits_open).unwrap();
-        let total_blocks = self.num_padded * self.blocks_per_poly;
+        let bl = self.block_len;
+        let bpp = self.blocks_per_poly;
+        let total_blocks = self.num_padded * bpp;
 
-        let all_entries: Vec<Vec<SparseBlockEntry>> = (0..total_blocks)
+        let a_wide_all: Vec<Vec<WideCyclotomicRing<Fp128x8i32, D>>> = (0..bl)
             .into_par_iter()
-            .map(|bi| self.entries_for_block(bi))
-            .collect();
-
-        let unique_cols: std::collections::HashSet<usize> = all_entries
-            .iter()
-            .flat_map(|entries| entries.iter().map(|e| e.pos_in_block * num_digits_commit))
-            .collect();
-        let a_wide_cols: HashMap<usize, Vec<WideCyclotomicRing<Fp128x8i32, D>>> = unique_cols
-            .into_par_iter()
-            .map(|col| {
-                let wide_col: Vec<_> = (0..n_a)
+            .map(|pos| {
+                let col = pos * num_digits_commit;
+                (0..n_a)
                     .map(|a| WideCyclotomicRing::from_ring(&a_matrix[a][col]))
-                    .collect();
-                (col, wide_col)
+                    .collect()
             })
             .collect();
 
-        let results: Vec<Vec<[i8; D]>> = all_entries
+        let results: Vec<Vec<[i8; D]>> = (0..total_blocks)
             .into_par_iter()
-            .map(|entries| {
-                if entries.is_empty() {
+            .map(|b| {
+                let p = b / bpp;
+                if p >= self.num_polys {
                     return vec![[0i8; D]; t_hat_len];
                 }
-                let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
-                for entry in &entries {
-                    let col = entry.pos_in_block * num_digits_commit;
-                    let a_wide = &a_wide_cols[&col];
-                    for a in 0..n_a {
-                        a_wide[a].mul_by_monomial_sum_into(&mut t_wide[a], &entry.nonzero_coeffs);
+                let bw = b % bpp;
+                let (c_start, c_end) = self.block_cycle_range(bw);
+                let ring_base = bw * bl;
+                let mut t_wide: Vec<WideCyclotomicRing<Fp128x8i32, D>> =
+                    vec![WideCyclotomicRing::zero(); n_a];
+
+                for c in c_start..c_end {
+                    if let Some(k) = self.index_of.call(c, p) {
+                        let field_pos = c * self.onehot_k + (k as usize);
+                        let ring_idx = field_pos / D;
+                        let ci = field_pos % D;
+                        let pos = ring_idx.wrapping_sub(ring_base);
+                        if pos < bl {
+                            let a_wide = &a_wide_all[pos];
+                            for a in 0..n_a {
+                                a_wide[a].mul_by_monomial_sum_into(&mut t_wide[a], &[ci]);
+                            }
+                        }
                     }
                 }
+
                 let t: Vec<CyclotomicRing<Fp128, D>> =
                     t_wide.into_iter().map(|w| w.reduce()).collect();
                 decompose_rows_i8(&t, num_digits_open, log_basis)
@@ -335,9 +388,16 @@ fn to_hachi_opening_point<const D: usize>(point: &[JoltFp128]) -> Vec<Fp128> {
 fn to_hachi_packed_opening_point<const D: usize>(
     opening_point: &[JoltFp128],
     rho: &[JoltFp128],
-    _log_k: usize,
+    log_k: usize,
 ) -> Vec<Fp128> {
-    let mut out = to_hachi_opening_point::<D>(opening_point);
+    // Jolt opening point (BE): [addr_BE, cycle_BE]
+    // After rev: [cycle_LE, addr_LE]
+    let reversed: Vec<Fp128> = opening_point.iter().rev().map(jolt_to_hachi).collect();
+    let log_t = reversed.len() - log_k;
+    // T-major LE variable order: [addr_LE, cycle_LE, poly_LE]
+    let mut out = Vec::with_capacity(reversed.len() + rho.len());
+    out.extend_from_slice(&reversed[log_t..]);
+    out.extend_from_slice(&reversed[..log_t]);
     out.extend(rho.iter().rev().map(jolt_to_hachi));
     out
 }
@@ -470,7 +530,7 @@ fn erase_prove_source<S: BatchPolynomialSource<JoltFp128>>(source: &S) -> Erased
     }
 }
 
-fn build_packed_poly_from_fn<const D: usize>(
+fn build_packed_poly<const D: usize>(
     index_of: ErasedIndexFn,
     num_cycles: usize,
     num_polys: usize,
@@ -486,6 +546,7 @@ fn build_packed_poly_from_fn<const D: usize>(
         index_of,
         num_cycles,
         num_polys,
+        onehot_k,
         block_len,
         blocks_per_poly,
         num_padded,
@@ -568,7 +629,7 @@ where
 
         let index_fn = erase_batch_source(source);
         let packed_poly =
-            build_packed_poly_from_fn::<D>(index_fn, num_cycles, num_polys, onehot_k, block_len);
+            build_packed_poly::<D>(index_fn, num_cycles, num_polys, onehot_k, block_len);
         let total_packed_blocks = packed_poly.num_padded * packed_poly.blocks_per_poly;
         let packed_r_vars = (total_packed_blocks as u32).trailing_zeros() as usize;
         let batch_layout = onehot_commit_layout::<Cfg>(layout.m_vars, packed_r_vars);
@@ -751,20 +812,9 @@ where
         let num_polys = poly_source.num_polys().unwrap();
         let block_len = batch_hint.block_len;
 
-        let poly_field_len = num_cycles * onehot_k;
-        let poly_ring_len = poly_field_len.div_ceil(D);
-        let blocks_per_poly = poly_ring_len.div_ceil(block_len);
-
         let index_fn = erase_prove_source(poly_source);
-
-        let packed_poly = JoltPackedPoly::<D> {
-            index_of: index_fn,
-            num_cycles,
-            num_polys,
-            block_len,
-            blocks_per_poly,
-            num_padded: num_polys.next_power_of_two(),
-        };
+        let packed_poly =
+            build_packed_poly::<D>(index_fn, num_cycles, num_polys, onehot_k, block_len);
 
         let mut adapter = JoltToHachiTranscript::new(transcript);
 

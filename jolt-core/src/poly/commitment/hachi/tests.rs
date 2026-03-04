@@ -113,7 +113,8 @@ fn hachi_packed_poly_batch_roundtrip() {
     let setup = Scheme::setup_prover(packed_num_vars);
     let pcs = Scheme::default();
 
-    let (commitments, _hint) = pcs.batch_commit(&[&poly1, &poly2], &setup);
+    let polys: Vec<&MultilinearPolynomial<JoltFp128>> = vec![&poly1, &poly2];
+    let (commitments, _hint) = pcs.batch_commit(&polys, &setup);
     assert_eq!(
         commitments.len(),
         1,
@@ -162,7 +163,8 @@ fn hachi_batch_verify_rejects_truncated_individual_commitments() {
     let setup = Scheme::setup_prover(packed_num_vars);
     let verifier_setup = Scheme::setup_verifier(&setup);
     let pcs = Scheme::default();
-    let (commitments, batch_hint) = pcs.batch_commit(&[&dense_poly, &onehot_poly], &setup);
+    let main_polys: Vec<&MultilinearPolynomial<JoltFp128>> = vec![&dense_poly, &onehot_poly];
+    let (commitments, batch_hint) = pcs.batch_commit(&main_polys, &setup);
     let (advice_commitment, advice_hint) = pcs.commit(&advice_poly, &setup);
 
     let opening_point: Vec<JoltFp128> = (0..individual_num_vars)
@@ -226,7 +228,8 @@ fn hachi_batch_verify_rejects_invalid_num_packed() {
     let setup = Scheme::setup_prover(packed_num_vars);
     let verifier_setup = Scheme::setup_verifier(&setup);
     let pcs = Scheme::default();
-    let (commitments, batch_hint) = pcs.batch_commit(&[&poly1, &poly2], &setup);
+    let main_polys: Vec<&MultilinearPolynomial<JoltFp128>> = vec![&poly1, &poly2];
+    let (commitments, batch_hint) = pcs.batch_commit(&main_polys, &setup);
 
     let opening_point: Vec<JoltFp128> = (0..individual_num_vars)
         .map(|i| JoltFp128::from_u64((i as u64) + 5))

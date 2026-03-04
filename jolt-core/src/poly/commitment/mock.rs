@@ -1,4 +1,3 @@
-use std::borrow::Borrow;
 use std::marker::PhantomData;
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -11,7 +10,7 @@ use crate::{
     utils::{errors::ProofVerifyError, small_scalar::SmallScalar},
 };
 
-use super::commitment_scheme::CommitmentScheme;
+use super::commitment_scheme::{CommitmentScheme, PolynomialBatchSource};
 
 #[derive(Clone)]
 pub struct MockCommitScheme<F: JoltField> {
@@ -70,17 +69,13 @@ where
         (MockCommitment::default(), ())
     }
 
-    fn batch_commit<P>(
+    fn batch_commit<S: PolynomialBatchSource<Self::Field>>(
         &self,
-        polys: &[P],
+        source: &S,
         gens: &Self::ProverSetup,
-    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
-    where
-        P: Borrow<MultilinearPolynomial<Self::Field>> + Sync,
-    {
-        let commitments = polys
-            .iter()
-            .map(|poly| self.commit(poly.borrow(), gens).0)
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint) {
+        let commitments = (0..source.num_polys())
+            .map(|i| self.commit(source.get_poly(i).unwrap(), gens).0)
             .collect();
         (commitments, ())
     }

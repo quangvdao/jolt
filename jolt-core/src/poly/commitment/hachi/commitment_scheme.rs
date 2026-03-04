@@ -1,31 +1,35 @@
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
-use crate::poly::commitment::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme};
+use crate::poly::commitment::commitment_scheme::{
+    CommitmentScheme, PolynomialBatchSource, StreamingCommitmentScheme,
+};
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
-use crate::poly::one_hot_polynomial::OneHotPolynomial;
 use crate::poly::opening_proof::BatchPolynomialSource;
 use crate::transcripts::Transcript;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::small_scalar::SmallScalar;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use hachi_pcs::algebra::fields::wide::Fp128x8i32;
+use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
 use hachi_pcs::algebra::ring::{CyclotomicRing, WideCyclotomicRing};
 use hachi_pcs::protocol::commitment::utils::crt_ntt::NttSlotCache;
-use hachi_pcs::protocol::commitment::utils::linear::{
-    decompose_block, decompose_rows_i8, mat_vec_mul_ntt_i8,
+use hachi_pcs::protocol::commitment::utils::linear::decompose_rows_i8;
+use hachi_pcs::protocol::commitment::{
+    compute_num_digits, compute_num_digits_fold, CommitmentConfig, HachiCommitmentLayout,
+    RingCommitment, SparseBlockEntry,
 };
-use hachi_pcs::protocol::commitment::{CommitmentConfig, RingCommitment, SparseBlockEntry};
 use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
 use hachi_pcs::protocol::{HachiCommitmentScheme, HachiProverSetup, HachiVerifierSetup};
 use hachi_pcs::CommitmentScheme as HachiCommitmentSchemeTrait;
-use hachi_pcs::{CanonicalField, DensePoly, FieldCore, FromSmallInt, HachiPolyOps, OneHotPoly};
+use hachi_pcs::{
+    CanonicalField, DensePoly, FieldCore, FromSmallInt, HachiPolyOps, OneHotIndex, OneHotPoly,
+};
 use rayon::prelude::*;
 
 #[derive(Clone, Default)]
@@ -37,33 +41,22 @@ pub struct JoltHachiCommitmentScheme<const D: usize, Cfg: CommitmentConfig> {
 pub struct HachiBatchedProof<const D: usize> {
     pub packed_poly_proof: ArkBridge<HachiProof<Fp128, D>>,
     pub num_packed_polys: u32,
+    pub log_k: u32,
     pub individual_proofs: Vec<ArkBridge<HachiProof<Fp128, D>>>,
 }
 
-/// Batch hint: carries block-structured polynomial data for packed proving.
-/// Preserves one-hot vs dense block classification so the prove path can
-/// dispatch sparse operations.
 #[derive(Clone, Debug)]
 pub struct JoltHachiBatchHint<const D: usize> {
     hachi_hint: HachiCommitmentHint<Fp128, D>,
-    blocks: Vec<PackedBlock<D>>,
     block_len: usize,
     num_packed_polys: usize,
+    log_k: usize,
 }
 
-/// Individual hint: carries dense ring coefficients for single-poly proving
-/// (used for advice polynomials committed individually).
 #[derive(Clone, Debug, PartialEq)]
 pub struct JoltHachiOpeningHint<const D: usize> {
     hachi_hint: HachiCommitmentHint<Fp128, D>,
     ring_coeffs: Vec<CyclotomicRing<Fp128, D>>,
-}
-
-#[derive(Clone, Debug)]
-enum PackedBlock<const D: usize> {
-    Dense(Vec<CyclotomicRing<Fp128, D>>),
-    OneHot(Vec<SparseBlockEntry>),
-    Zero,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,234 +64,235 @@ pub enum HachiChunkState<const D: usize> {
     Dense(Vec<CyclotomicRing<Fp128, D>>),
     OneHot {
         onehot_k: usize,
-        indices: Vec<Option<usize>>,
+        indices: Vec<Option<u8>>,
     },
 }
 
-/// Packed polynomial combining multiple sub-polynomials with per-block
-/// dispatch: dense blocks use decompose + NTT matvec, one-hot blocks use
-/// sparse coefficient accumulation, zero blocks are skipped entirely.
-#[derive(Clone)]
+/// Thin view over the trace: all HachiPolyOps methods iterate the trace
+/// on-the-fly via the type-erased `index_of` callback.  Zero bytes of
+/// polynomial data are materialized.
+#[derive(Clone, Copy)]
 struct JoltPackedPoly<const D: usize> {
-    blocks: Vec<PackedBlock<D>>,
+    index_of: ErasedIndexFn,
+    num_cycles: usize,
+    num_polys: usize,
     block_len: usize,
+    blocks_per_poly: usize,
+    num_padded: usize,
 }
 
 impl<const D: usize> JoltPackedPoly<D> {
-    fn to_dense_poly(&self) -> DensePoly<Fp128, D> {
-        let mut ring_coeffs = vec![
-            CyclotomicRing::<Fp128, D>::zero();
-            self.blocks.len().saturating_mul(self.block_len)
-        ];
-        for (block_idx, block) in self.blocks.iter().enumerate() {
-            let block_start = block_idx * self.block_len;
-            match block {
-                PackedBlock::Dense(coeffs) => {
-                    ring_coeffs[block_start..(block_start + coeffs.len())].copy_from_slice(coeffs);
+    fn entries_for_block(&self, packed_block_idx: usize) -> Vec<SparseBlockEntry> {
+        let poly_idx = packed_block_idx / self.blocks_per_poly;
+        let block_idx = packed_block_idx % self.blocks_per_poly;
+
+        if poly_idx >= self.num_polys {
+            return vec![];
+        }
+
+        let mut entries_map: HashMap<usize, usize> = HashMap::new();
+        let mut entries: Vec<SparseBlockEntry> = Vec::new();
+
+        // K-major layout: field_pos = k * T + c (address varies slowly, cycle
+        // varies fast).  This matches the old streaming_chunks_to_blocks and
+        // the opening-point convention [r_cycle_LE, r_addr_LE] produced by
+        // reversing [r_addr_BE, r_cycle_BE].
+        for c in 0..self.num_cycles {
+            if let Some(k) = self.index_of.call(c, poly_idx) {
+                let field_pos = (k as usize) * self.num_cycles + c;
+                let ring_idx = field_pos / D;
+                let coeff_idx = field_pos % D;
+                let block_of_ring = ring_idx / self.block_len;
+                if block_of_ring != block_idx {
+                    continue;
                 }
-                PackedBlock::OneHot(entries) => {
-                    for entry in entries {
-                        let ring_idx = block_start + entry.pos_in_block;
-                        let mut coeffs = [Fp128::zero(); D];
-                        for &ci in &entry.nonzero_coeffs {
-                            coeffs[ci] = Fp128::one();
-                        }
-                        ring_coeffs[ring_idx] = CyclotomicRing::from_coefficients(coeffs);
-                    }
+                let pos_in_block = ring_idx % self.block_len;
+                if let Some(&entry_idx) = entries_map.get(&pos_in_block) {
+                    entries[entry_idx].nonzero_coeffs.push(coeff_idx);
+                } else {
+                    entries_map.insert(pos_in_block, entries.len());
+                    entries.push(SparseBlockEntry {
+                        pos_in_block,
+                        nonzero_coeffs: vec![coeff_idx],
+                    });
                 }
-                PackedBlock::Zero => {}
             }
         }
-        DensePoly::from_ring_coeffs(ring_coeffs)
+        entries
     }
-}
-
-fn to_hachi_opening_point<const D: usize>(point: &[JoltFp128]) -> Vec<Fp128> {
-    point.iter().rev().map(jolt_to_hachi).collect()
-}
-
-fn to_hachi_packed_opening_point<const D: usize>(
-    opening_point: &[JoltFp128],
-    rho: &[JoltFp128],
-    _m_vars: usize,
-) -> Vec<Fp128> {
-    let mut out = to_hachi_opening_point::<D>(opening_point);
-    out.extend(rho.iter().rev().map(jolt_to_hachi));
-    out
 }
 
 impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     type CommitCache = NttSlotCache<D>;
 
     fn num_ring_elems(&self) -> usize {
-        self.blocks.len() * self.block_len
+        (self.num_padded * self.blocks_per_poly) * self.block_len
     }
 
+    #[tracing::instrument(skip_all, name = "evaluate_ring")]
     fn evaluate_ring(&self, scalars: &[Fp128]) -> CyclotomicRing<Fp128, D> {
-        let bl = self.block_len;
-        self.blocks
-            .par_iter()
-            .enumerate()
-            .map(|(block_idx, block)| {
-                let block_start = block_idx * bl;
-                match block {
-                    PackedBlock::Dense(coeffs) => {
-                        let end = (block_start + coeffs.len()).min(scalars.len());
-                        if block_start >= scalars.len() {
-                            return CyclotomicRing::zero();
-                        }
-                        let mut acc = CyclotomicRing::<Fp128, D>::zero();
-                        for (f_i, &w_i) in coeffs.iter().zip(scalars[block_start..end].iter()) {
-                            acc += f_i.scale(&w_i);
-                        }
-                        acc
-                    }
-                    PackedBlock::OneHot(entries) => {
-                        let mut coeffs_arr = [Fp128::zero(); D];
-                        for entry in entries {
-                            let ring_idx = block_start + entry.pos_in_block;
-                            if ring_idx < scalars.len() {
-                                let s = scalars[ring_idx];
-                                for &ci in &entry.nonzero_coeffs {
-                                    coeffs_arr[ci] += s;
-                                }
-                            }
-                        }
-                        CyclotomicRing::from_coefficients(coeffs_arr)
-                    }
-                    PackedBlock::Zero => CyclotomicRing::zero(),
-                }
-            })
-            .reduce(CyclotomicRing::<Fp128, D>::zero, |a, b| a + b)
+        let (eval, _) = self.evaluate_and_fold(scalars, &[], 0);
+        eval
     }
 
+    #[tracing::instrument(skip_all, name = "fold_blocks")]
     fn fold_blocks(&self, scalars: &[Fp128], block_len: usize) -> Vec<CyclotomicRing<Fp128, D>> {
-        if block_len != self.block_len {
-            return self.to_dense_poly().fold_blocks(scalars, block_len);
-        }
-        self.blocks
-            .par_iter()
-            .map(|block| match block {
-                PackedBlock::Dense(coeffs) => {
-                    let mut acc = CyclotomicRing::<Fp128, D>::zero();
-                    for (b_j, &a_j) in coeffs.iter().zip(scalars.iter()) {
-                        acc += b_j.scale(&a_j);
-                    }
-                    acc
-                }
-                PackedBlock::OneHot(entries) => {
-                    let mut coeffs_arr = [Fp128::zero(); D];
-                    for entry in entries {
-                        if entry.pos_in_block < scalars.len() && entry.pos_in_block < block_len {
-                            let s = scalars[entry.pos_in_block];
+        let (_, folded) = self.evaluate_and_fold(&[], scalars, block_len);
+        folded
+    }
+
+    #[tracing::instrument(skip_all, name = "evaluate_and_fold")]
+    fn evaluate_and_fold(
+        &self,
+        eval_scalars: &[Fp128],
+        fold_scalars: &[Fp128],
+        _block_len: usize,
+    ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
+        let total_blocks = self.num_padded * self.blocks_per_poly;
+        let bl = self.block_len;
+        let do_eval = !eval_scalars.is_empty();
+        let do_fold = !fold_scalars.is_empty();
+
+        let per_block: Vec<(CyclotomicRing<Fp128, D>, CyclotomicRing<Fp128, D>)> = (0
+            ..total_blocks)
+            .into_par_iter()
+            .map(|bi| {
+                let entries = self.entries_for_block(bi);
+                let block_start = bi * bl;
+
+                let mut eval_acc = [Fp128::zero(); D];
+                let mut fold_acc = [Fp128::zero(); D];
+
+                for entry in &entries {
+                    if do_eval {
+                        let ring_idx = block_start + entry.pos_in_block;
+                        if ring_idx < eval_scalars.len() {
+                            let s = eval_scalars[ring_idx];
                             for &ci in &entry.nonzero_coeffs {
-                                coeffs_arr[ci] += s;
+                                eval_acc[ci] += s;
                             }
                         }
                     }
-                    CyclotomicRing::from_coefficients(coeffs_arr)
+                    if do_fold && entry.pos_in_block < fold_scalars.len() {
+                        let s = fold_scalars[entry.pos_in_block];
+                        for &ci in &entry.nonzero_coeffs {
+                            fold_acc[ci] += s;
+                        }
+                    }
                 }
-                PackedBlock::Zero => CyclotomicRing::zero(),
+                (
+                    CyclotomicRing::from_coefficients(eval_acc),
+                    CyclotomicRing::from_coefficients(fold_acc),
+                )
             })
-            .collect()
+            .collect();
+
+        let eval_result = per_block
+            .iter()
+            .map(|(e, _)| *e)
+            .reduce(|a, b| a + b)
+            .unwrap_or_else(CyclotomicRing::zero);
+        let fold_result: Vec<_> = per_block.into_iter().map(|(_, f)| f).collect();
+        (eval_result, fold_result)
     }
 
     fn decompose_fold(
         &self,
-        challenges: &[hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge],
+        challenges: &[SparseChallenge],
         block_len: usize,
         delta: usize,
-        log_basis: u32,
+        _log_basis: u32,
     ) -> Vec<CyclotomicRing<Fp128, D>> {
-        if block_len != self.block_len {
-            return self
-                .to_dense_poly()
-                .decompose_fold(challenges, block_len, delta, log_basis);
-        }
         let inner_width = block_len * delta;
-        let mut z_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); inner_width];
+        let total_blocks = self.num_padded * self.blocks_per_poly;
 
-        for (i, c_i) in challenges.iter().enumerate() {
-            if i >= self.blocks.len() {
-                continue;
-            }
-            match &self.blocks[i] {
-                PackedBlock::Dense(coeffs) => {
-                    let s_i = decompose_block(coeffs, delta, log_basis);
-                    for (j, z_j) in z_wide.iter_mut().enumerate() {
-                        *z_j += WideCyclotomicRing::from_ring(&s_i[j].mul_by_sparse(c_i));
+        let z_i32: Vec<[i32; D]> = (0..total_blocks)
+            .into_par_iter()
+            .fold(
+                || vec![[0i32; D]; inner_width],
+                |mut z, bi| {
+                    if bi >= challenges.len() {
+                        return z;
                     }
-                }
-                PackedBlock::OneHot(entries) => {
-                    for entry in entries {
+                    let c_i = &challenges[bi];
+                    let entries = self.entries_for_block(bi);
+                    for entry in &entries {
                         assert!(
                             entry.pos_in_block < block_len,
-                            "onehot entry position {} exceeds runtime block_len {} (packed block_len={})",
+                            "onehot entry position {} exceeds block_len {}",
                             entry.pos_in_block,
                             block_len,
-                            self.block_len
                         );
-                        let j = entry.pos_in_block * delta;
-                        let mut one_hot_coeffs = [Fp128::zero(); D];
+                        let base_j = entry.pos_in_block * delta;
                         for &ci in &entry.nonzero_coeffs {
-                            one_hot_coeffs[ci] = Fp128::one();
+                            for (&pos, &challenge_coeff) in
+                                c_i.positions.iter().zip(c_i.coeffs.iter())
+                            {
+                                let target = ci + pos as usize;
+                                let (idx, sign) = if target < D {
+                                    (target, 1i32)
+                                } else {
+                                    (target - D, -1i32)
+                                };
+                                z[base_j][idx] += sign * challenge_coeff as i32;
+                            }
                         }
-                        let one_hot = CyclotomicRing::from_coefficients(one_hot_coeffs);
-                        z_wide[j] += WideCyclotomicRing::from_ring(&one_hot.mul_by_sparse(c_i));
                     }
-                }
-                PackedBlock::Zero => {}
-            }
-        }
+                    z
+                },
+            )
+            .reduce(
+                || vec![[0i32; D]; inner_width],
+                |mut a, b| {
+                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                        for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
+                            *a_coeff += b_coeff;
+                        }
+                    }
+                    a
+                },
+            );
 
-        z_wide.into_iter().map(|w| w.reduce()).collect()
+        let q = (-Fp128::one()).to_canonical_u128() + 1;
+        z_i32
+            .into_iter()
+            .map(|arr| {
+                let coeffs = std::array::from_fn(|k| {
+                    let v = arr[k];
+                    if v >= 0 {
+                        Fp128::from_canonical_u128_reduced(v as u128)
+                    } else {
+                        Fp128::from_canonical_u128_reduced(q - ((-v) as u128))
+                    }
+                });
+                CyclotomicRing::from_coefficients(coeffs)
+            })
+            .collect()
     }
 
     #[allow(non_snake_case)]
+    #[tracing::instrument(skip_all, name = "commit_inner")]
     fn commit_inner(
         &self,
         a_matrix: &[Vec<CyclotomicRing<Fp128, D>>],
-        ntt_a: &NttSlotCache<D>,
+        _ntt_a: &NttSlotCache<D>,
         _block_len: usize,
-        delta: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
         log_basis: u32,
     ) -> Result<Vec<Vec<[i8; D]>>, hachi_pcs::HachiError> {
-        if _block_len != self.block_len {
-            return self
-                .to_dense_poly()
-                .commit_inner(a_matrix, ntt_a, _block_len, delta, log_basis);
-        }
         let n_a = a_matrix.len();
-        let t_hat_len = n_a.checked_mul(delta).unwrap();
+        let t_hat_len = n_a.checked_mul(num_digits_open).unwrap();
+        let total_blocks = self.num_padded * self.blocks_per_poly;
 
-        let mut dense_indices: Vec<usize> = Vec::new();
-        let mut dense_slices: Vec<&[CyclotomicRing<Fp128, D>]> = Vec::new();
-        let mut onehot_blocks: Vec<(usize, &[SparseBlockEntry])> = Vec::new();
-        for (i, block) in self.blocks.iter().enumerate() {
-            match block {
-                PackedBlock::Dense(coeffs) => {
-                    dense_indices.push(i);
-                    dense_slices.push(coeffs);
-                }
-                PackedBlock::OneHot(entries) if !entries.is_empty() => {
-                    onehot_blocks.push((i, entries));
-                }
-                _ => {}
-            }
-        }
-
-        let dense_t_all: Vec<Vec<CyclotomicRing<Fp128, D>>> =
-            mat_vec_mul_ntt_i8(ntt_a, &dense_slices, delta, log_basis);
-
-        let dense_results: Vec<(usize, Vec<[i8; D]>)> = dense_indices
+        let all_entries: Vec<Vec<SparseBlockEntry>> = (0..total_blocks)
             .into_par_iter()
-            .zip(dense_t_all.into_par_iter())
-            .map(|(i, t_i)| (i, decompose_rows_i8(&t_i, delta, log_basis)))
+            .map(|bi| self.entries_for_block(bi))
             .collect();
 
-        let unique_cols: std::collections::HashSet<usize> = onehot_blocks
+        let unique_cols: std::collections::HashSet<usize> = all_entries
             .iter()
-            .flat_map(|(_, entries)| entries.iter().map(|e| e.pos_in_block * delta))
+            .flat_map(|entries| entries.iter().map(|e| e.pos_in_block * num_digits_commit))
             .collect();
         let a_wide_cols: HashMap<usize, Vec<WideCyclotomicRing<Fp128x8i32, D>>> = unique_cols
             .into_par_iter()
@@ -310,12 +304,15 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
             })
             .collect();
 
-        let onehot_results: Vec<(usize, Vec<[i8; D]>)> = onehot_blocks
+        let results: Vec<Vec<[i8; D]>> = all_entries
             .into_par_iter()
-            .map(|(i, sparse_entries)| {
+            .map(|entries| {
+                if entries.is_empty() {
+                    return vec![[0i8; D]; t_hat_len];
+                }
                 let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
-                for entry in sparse_entries {
-                    let col = entry.pos_in_block * delta;
+                for entry in &entries {
+                    let col = entry.pos_in_block * num_digits_commit;
                     let a_wide = &a_wide_cols[&col];
                     for a in 0..n_a {
                         a_wide[a].mul_by_monomial_sum_into(&mut t_wide[a], &entry.nonzero_coeffs);
@@ -323,36 +320,72 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
                 }
                 let t: Vec<CyclotomicRing<Fp128, D>> =
                     t_wide.into_iter().map(|w| w.reduce()).collect();
-                (i, decompose_rows_i8(&t, delta, log_basis))
+                decompose_rows_i8(&t, num_digits_open, log_basis)
             })
             .collect();
-
-        let mut results: Vec<Vec<[i8; D]>> = (0..self.blocks.len()).map(|_| Vec::new()).collect();
-        for (block_i, t_hat) in dense_results {
-            results[block_i] = t_hat;
-        }
-        for (block_i, t_hat) in onehot_results {
-            results[block_i] = t_hat;
-        }
-        for slot in &mut results {
-            if slot.is_empty() {
-                *slot = vec![[0i8; D]; t_hat_len];
-            }
-        }
 
         Ok(results)
     }
 }
 
+fn to_hachi_opening_point<const D: usize>(point: &[JoltFp128]) -> Vec<Fp128> {
+    point.iter().rev().map(jolt_to_hachi).collect()
+}
+
+fn to_hachi_packed_opening_point<const D: usize>(
+    opening_point: &[JoltFp128],
+    rho: &[JoltFp128],
+    _log_k: usize,
+) -> Vec<Fp128> {
+    let mut out = to_hachi_opening_point::<D>(opening_point);
+    out.extend(rho.iter().rev().map(jolt_to_hachi));
+    out
+}
+
+fn onehot_commit_layout<Cfg: CommitmentConfig>(
+    m_vars: usize,
+    r_vars: usize,
+) -> HachiCommitmentLayout {
+    let log_basis = Cfg::decomposition().log_basis;
+    HachiCommitmentLayout::new_with_decomp(
+        m_vars,
+        r_vars,
+        Cfg::N_A,
+        1,
+        compute_num_digits(128, log_basis),
+        compute_num_digits_fold(r_vars, Cfg::CHALLENGE_WEIGHT, log_basis),
+        log_basis,
+    )
+    .unwrap()
+}
+
+fn advice_commit_layout<Cfg: CommitmentConfig>(
+    m_vars: usize,
+    r_vars: usize,
+) -> HachiCommitmentLayout {
+    let log_basis = Cfg::decomposition().log_basis;
+    HachiCommitmentLayout::new_with_decomp(
+        m_vars,
+        r_vars,
+        Cfg::N_A,
+        compute_num_digits(64, log_basis),
+        compute_num_digits(128, log_basis),
+        compute_num_digits_fold(r_vars, Cfg::CHALLENGE_WEIGHT, log_basis),
+        log_basis,
+    )
+    .unwrap()
+}
+
 fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
     ring_coeffs: Vec<CyclotomicRing<Fp128, D>>,
     setup: &HachiProverSetup<Fp128, D>,
+    layout: &HachiCommitmentLayout,
 ) -> (RingCommitment<Fp128, D>, JoltHachiOpeningHint<D>) {
     let mut dense_poly = DensePoly::from_ring_coeffs(ring_coeffs);
     let (commitment, hachi_hint) = <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<
         Fp128,
         D,
-    >>::commit(&dense_poly, setup)
+    >>::commit(&dense_poly, setup, layout)
     .expect("Hachi commit failed");
     let ring_coeffs = std::mem::take(&mut dense_poly.coeffs);
     (
@@ -364,22 +397,19 @@ fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
     )
 }
 
-fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig>(
-    onehot: &OneHotPolynomial<JoltFp128>,
+fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig, I: OneHotIndex>(
+    onehot_k: usize,
+    indices: Vec<Option<I>>,
     setup: &HachiProverSetup<Fp128, D>,
+    layout: &HachiCommitmentLayout,
 ) -> (RingCommitment<Fp128, D>, JoltHachiOpeningHint<D>) {
-    let indices: Vec<Option<usize>> = onehot
-        .nonzero_indices
-        .iter()
-        .map(|opt| opt.map(|v| v as usize))
-        .collect();
-    let layout = setup.layout();
-    let onehot_poly = OneHotPoly::<Fp128, D>::new(onehot.K, indices, layout.r_vars, layout.m_vars)
-        .expect("OneHotPoly construction failed");
+    let onehot_poly =
+        OneHotPoly::<Fp128, D, I>::new(onehot_k, indices, layout.r_vars, layout.m_vars)
+            .expect("OneHotPoly construction failed");
     let (commitment, hachi_hint) = <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<
         Fp128,
         D,
-    >>::commit(&onehot_poly, setup)
+    >>::commit(&onehot_poly, setup, layout)
     .expect("Hachi commit_onehot failed");
     (
         commitment,
@@ -388,6 +418,78 @@ fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig>(
             ring_coeffs: vec![],
         },
     )
+}
+
+/// Type-erased index callback.  Stores a raw data pointer and a monomorphized
+/// trampoline that knows how to call the concrete source type.
+///
+/// SAFETY: the caller **must** ensure the pointee outlives this struct.
+#[derive(Clone, Copy)]
+struct ErasedIndexFn {
+    ptr: usize,
+    call: unsafe fn(usize, usize, usize) -> Option<u8>,
+}
+
+// SAFETY: we only read through the pointer, and the source is Sync.
+unsafe impl Send for ErasedIndexFn {}
+unsafe impl Sync for ErasedIndexFn {}
+
+impl ErasedIndexFn {
+    #[inline]
+    fn call(&self, cycle: usize, poly: usize) -> Option<u8> {
+        // SAFETY: the pointer is valid for the lifetime of the packed poly.
+        unsafe { (self.call)(self.ptr, cycle, poly) }
+    }
+}
+
+fn erase_batch_source<S: PolynomialBatchSource<JoltFp128>>(source: &S) -> ErasedIndexFn {
+    unsafe fn trampoline<S: PolynomialBatchSource<JoltFp128>>(
+        ptr: usize,
+        c: usize,
+        p: usize,
+    ) -> Option<u8> {
+        (&*(ptr as *const S)).onehot_index(c, p)
+    }
+    ErasedIndexFn {
+        ptr: source as *const S as usize,
+        call: trampoline::<S>,
+    }
+}
+
+fn erase_prove_source<S: BatchPolynomialSource<JoltFp128>>(source: &S) -> ErasedIndexFn {
+    unsafe fn trampoline<S: BatchPolynomialSource<JoltFp128>>(
+        ptr: usize,
+        c: usize,
+        p: usize,
+    ) -> Option<u8> {
+        (&*(ptr as *const S)).onehot_index(c, p)
+    }
+    ErasedIndexFn {
+        ptr: source as *const S as usize,
+        call: trampoline::<S>,
+    }
+}
+
+fn build_packed_poly_from_fn<const D: usize>(
+    index_of: ErasedIndexFn,
+    num_cycles: usize,
+    num_polys: usize,
+    onehot_k: usize,
+    block_len: usize,
+) -> JoltPackedPoly<D> {
+    let poly_field_len = num_cycles * onehot_k;
+    let poly_ring_len = poly_field_len.div_ceil(D);
+    let blocks_per_poly = poly_ring_len.div_ceil(block_len);
+    let num_padded = num_polys.next_power_of_two();
+
+    JoltPackedPoly {
+        index_of,
+        num_cycles,
+        num_polys,
+        block_len,
+        blocks_per_poly,
+        num_padded,
+    }
 }
 
 impl<const D: usize, Cfg> CommitmentScheme for JoltHachiCommitmentScheme<D, Cfg>
@@ -433,86 +535,59 @@ where
         poly: &MultilinearPolynomial<JoltFp128>,
         setup: &Self::ProverSetup,
     ) -> (Self::Commitment, Self::OpeningProofHint) {
+        let setup_layout = setup.0.layout();
+        let poly_num_vars = poly.len().trailing_zeros() as usize;
+        let alpha = D.trailing_zeros() as usize;
+        let r_vars = poly_num_vars.saturating_sub(alpha + setup_layout.m_vars);
+        let layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, r_vars);
+
         let (commitment, hint) = if let MultilinearPolynomial::OneHot(onehot) = poly {
-            hachi_commit_onehot::<D, Cfg>(onehot, &setup.0)
+            let indices: Vec<Option<u8>> = onehot.nonzero_indices.as_ref().clone();
+            hachi_commit_onehot::<D, Cfg, u8>(onehot.K, indices, &setup.0, &layout)
         } else {
             let ring_coeffs = poly_to_ring_coeffs::<D>(poly);
-            hachi_commit_dense::<D, Cfg>(ring_coeffs, &setup.0)
+            hachi_commit_dense::<D, Cfg>(ring_coeffs, &setup.0, &layout)
         };
         (ArkBridge(commitment), hint)
     }
 
-    fn batch_commit<U>(
+    fn batch_commit<S: PolynomialBatchSource<JoltFp128>>(
         &self,
-        polys: &[U],
+        source: &S,
         setup: &Self::ProverSetup,
-    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
-    where
-        U: Borrow<MultilinearPolynomial<JoltFp128>> + Sync,
-    {
-        assert!(!polys.is_empty());
-
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint) {
+        assert!(source.num_polys() > 0);
         let layout = setup.0.layout();
         let block_len = layout.block_len;
 
-        let poly_field_len = polys[0].borrow().len();
-        let poly_ring_len = poly_field_len.div_ceil(D);
-        let blocks_per_poly = poly_ring_len.div_ceil(block_len);
+        let num_cycles = source
+            .num_cycles()
+            .expect("batch_commit requires lazy source");
+        let onehot_k = source.onehot_k().unwrap();
+        let num_polys = source.num_polys();
 
-        let n_padded = polys.len().next_power_of_two();
-        let total_packed_blocks = n_padded * blocks_per_poly;
+        let index_fn = erase_batch_source(source);
+        let packed_poly =
+            build_packed_poly_from_fn::<D>(index_fn, num_cycles, num_polys, onehot_k, block_len);
+        let total_packed_blocks = packed_poly.num_padded * packed_poly.blocks_per_poly;
+        let packed_r_vars = (total_packed_blocks as u32).trailing_zeros() as usize;
+        let batch_layout = onehot_commit_layout::<Cfg>(layout.m_vars, packed_r_vars);
 
-        let poly_ring_data: Vec<PolyRingData<D>> = polys
-            .par_iter()
-            .map(|p| poly_to_ring_data(p.borrow(), block_len, blocks_per_poly))
-            .collect();
-
-        let mut blocks: Vec<PackedBlock<D>> = Vec::with_capacity(total_packed_blocks);
-
-        for data in poly_ring_data {
-            match data {
-                PolyRingData::Dense(all_rings) => {
-                    for chunk in all_rings.chunks(block_len) {
-                        let mut block = vec![CyclotomicRing::<Fp128, D>::zero(); block_len];
-                        block[..chunk.len()].copy_from_slice(chunk);
-                        blocks.push(PackedBlock::Dense(block));
-                    }
-                    let filled = all_rings.len().div_ceil(block_len);
-                    for _ in filled..blocks_per_poly {
-                        blocks.push(PackedBlock::Zero);
-                    }
-                }
-                PolyRingData::OneHot(per_block_entries) => {
-                    for blk_entries in per_block_entries {
-                        if blk_entries.is_empty() {
-                            blocks.push(PackedBlock::Zero);
-                        } else {
-                            blocks.push(PackedBlock::OneHot(blk_entries));
-                        }
-                    }
-                }
-            }
-        }
-
-        for _ in polys.len()..n_padded {
-            for _ in 0..blocks_per_poly {
-                blocks.push(PackedBlock::Zero);
-            }
-        }
-
-        let packed_poly = JoltPackedPoly { blocks, block_len };
         let (commitment, hachi_hint) =
             <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::commit(
                 &packed_poly,
                 &setup.0,
+                &batch_layout,
             )
             .expect("Hachi packed poly commit failed");
 
+        let log_k = onehot_k.trailing_zeros() as usize;
+
         let hint = JoltHachiBatchHint {
             hachi_hint,
-            blocks: packed_poly.blocks,
             block_len,
-            num_packed_polys: polys.len(),
+            num_packed_polys: num_polys,
+            log_k,
         };
         (vec![ArkBridge(commitment)], hint)
     }
@@ -530,15 +605,17 @@ where
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
+        let setup_layout = setup.0.layout();
+        let alpha = D.trailing_zeros() as usize;
+        let r_vars = opening_point
+            .len()
+            .saturating_sub(alpha + setup_layout.m_vars);
+        let layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, r_vars);
+
         let proof = if let MultilinearPolynomial::OneHot(onehot) = poly {
-            let indices: Vec<Option<usize>> = onehot
-                .nonzero_indices
-                .iter()
-                .map(|opt| opt.map(|v| v as usize))
-                .collect();
-            let layout = setup.0.layout();
+            let indices: Vec<Option<u8>> = onehot.nonzero_indices.as_ref().clone();
             let onehot_poly =
-                OneHotPoly::<Fp128, D>::new(onehot.K, indices, layout.r_vars, layout.m_vars)
+                OneHotPoly::<Fp128, D, u8>::new(onehot.K, indices, layout.r_vars, layout.m_vars)
                     .expect("OneHotPoly construction failed");
             <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::prove(
                 &setup.0,
@@ -548,6 +625,7 @@ where
                 &mut adapter,
                 &commitment.0,
                 BasisMode::Lagrange,
+                &layout,
             )
         } else {
             let dense_poly = if hint.ring_coeffs.is_empty() {
@@ -564,6 +642,7 @@ where
                 &mut adapter,
                 &commitment.0,
                 BasisMode::Lagrange,
+                &layout,
             )
         }
         .expect("Hachi prove failed");
@@ -583,6 +662,13 @@ where
         let hachi_opening = jolt_to_hachi(opening);
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
+        let setup_layout = &setup.0.expanded.seed.layout;
+        let alpha = D.trailing_zeros() as usize;
+        let r_vars = opening_point
+            .len()
+            .saturating_sub(alpha + setup_layout.m_vars);
+        let layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, r_vars);
+
         <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::verify(
             &proof.0,
             &setup.0,
@@ -591,15 +677,16 @@ where
             &hachi_opening,
             &commitment.0,
             BasisMode::Lagrange,
+            &layout,
         )
         .map_err(|_| ProofVerifyError::InternalError)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn batch_prove<ProofTranscript: Transcript, S: BatchPolynomialSource<JoltFp128>>(
+    fn batch_prove<ProofTranscript: Transcript, PolySource: BatchPolynomialSource<JoltFp128>>(
         &self,
         setup: &Self::ProverSetup,
-        _poly_source: &S,
+        poly_source: &PolySource,
         batch_hint: Self::BatchOpeningHint,
         individual_hints: Vec<Self::OpeningProofHint>,
         commitments: &[&Self::Commitment],
@@ -639,16 +726,15 @@ where
             .map(|(&v, &eq)| v * eq)
             .sum();
 
-        let packed_point = to_hachi_packed_opening_point::<D>(
-            opening_point,
-            &rho,
-            setup.0.expanded.seed.layout.m_vars,
-        );
+        let setup_layout = &setup.0.expanded.seed.layout;
+        let log_k = batch_hint.log_k;
+        let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, log_k);
 
-        let packed_poly = JoltPackedPoly {
-            blocks: batch_hint.blocks,
-            block_len: batch_hint.block_len,
-        };
+        let alpha = D.trailing_zeros() as usize;
+        let packed_r_vars = packed_point
+            .len()
+            .saturating_sub(alpha + setup_layout.m_vars);
+        let packed_layout = onehot_commit_layout::<Cfg>(setup_layout.m_vars, packed_r_vars);
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
         let packed_commitment = commitments[0];
@@ -657,6 +743,29 @@ where
             b"hachi_packed_claim",
             &hachi_combined.to_canonical_u128().to_le_bytes(),
         );
+
+        let num_cycles = poly_source
+            .num_cycles()
+            .expect("batch_prove requires lazy source");
+        let onehot_k = poly_source.onehot_k().unwrap();
+        let num_polys = poly_source.num_polys().unwrap();
+        let block_len = batch_hint.block_len;
+
+        let poly_field_len = num_cycles * onehot_k;
+        let poly_ring_len = poly_field_len.div_ceil(D);
+        let blocks_per_poly = poly_ring_len.div_ceil(block_len);
+
+        let index_fn = erase_prove_source(poly_source);
+
+        let packed_poly = JoltPackedPoly::<D> {
+            index_of: index_fn,
+            num_cycles,
+            num_polys,
+            block_len,
+            blocks_per_poly,
+            num_padded: num_polys.next_power_of_two(),
+        };
+
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
         let packed_proof =
@@ -668,10 +777,16 @@ where
                 &mut adapter,
                 &packed_commitment.0,
                 BasisMode::Lagrange,
+                &packed_layout,
             )
             .expect("Hachi packed poly prove failed");
 
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
+        let indiv_r_vars = opening_point
+            .len()
+            .saturating_sub(alpha + setup_layout.m_vars);
+        let indiv_layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, indiv_r_vars);
+
         let individual_commitments = &commitments[1..];
         let individual_proofs: Vec<ArkBridge<HachiProof<Fp128, D>>> = individual_hints
             .into_iter()
@@ -690,6 +805,7 @@ where
                         &mut adapter,
                         &commitment.0,
                         BasisMode::Lagrange,
+                        &indiv_layout,
                     )
                     .expect("Hachi individual prove failed");
                 ArkBridge(proof)
@@ -699,6 +815,7 @@ where
         HachiBatchedProof {
             packed_poly_proof: ArkBridge(packed_proof),
             num_packed_polys: num_packed as u32,
+            log_k: log_k as u32,
             individual_proofs,
         }
     }
@@ -753,11 +870,15 @@ where
             .map(|(&v, &eq)| v * eq)
             .sum();
 
-        let packed_point = to_hachi_packed_opening_point::<D>(
-            opening_point,
-            &rho,
-            setup.0.expanded.seed.layout.m_vars,
-        );
+        let setup_layout = &setup.0.expanded.seed.layout;
+        let packed_point =
+            to_hachi_packed_opening_point::<D>(opening_point, &rho, proof.log_k as usize);
+
+        let alpha = D.trailing_zeros() as usize;
+        let packed_r_vars = packed_point
+            .len()
+            .saturating_sub(alpha + setup_layout.m_vars);
+        let packed_layout = onehot_commit_layout::<Cfg>(setup_layout.m_vars, packed_r_vars);
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
         let packed_commitment = commitments[0];
@@ -775,10 +896,16 @@ where
             &hachi_combined,
             &packed_commitment.0,
             BasisMode::Lagrange,
+            &packed_layout,
         )
         .map_err(|_| ProofVerifyError::InternalError)?;
 
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
+        let indiv_r_vars = opening_point
+            .len()
+            .saturating_sub(alpha + setup_layout.m_vars);
+        let indiv_layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, indiv_r_vars);
+
         let individual_commitments = &commitments[1..];
         for i in 0..individual_claims.len() {
             transcript.append_bytes(b"hachi_individual_item", &(i as u64).to_le_bytes());
@@ -792,6 +919,7 @@ where
                 &hachi_claim,
                 &individual_commitments[i].0,
                 BasisMode::Lagrange,
+                &indiv_layout,
             )
             .map_err(|_| ProofVerifyError::InternalError)?;
         }
@@ -823,291 +951,47 @@ where
     type ChunkState = HachiChunkState<D>;
 
     #[allow(non_snake_case)]
-    fn streaming_chunk_size(&self, K: usize, T: usize) -> Option<usize> {
-        if T == 0 {
-            return None;
-        }
-        Some(if K <= T { K } else { T })
+    fn streaming_chunk_size(&self, _K: usize, _T: usize) -> Option<usize> {
+        None
     }
 
     fn process_chunk<T: SmallScalar>(
         &self,
         _setup: &Self::ProverSetup,
-        chunk: &[T],
+        _chunk: &[T],
     ) -> Self::ChunkState {
-        let field_coeffs: Vec<Fp128> = chunk
-            .iter()
-            .map(|&scalar| jolt_to_hachi(&scalar.to_field::<JoltFp128>()))
-            .collect();
-        HachiChunkState::Dense(pack_field_to_ring::<D>(&field_coeffs))
+        unreachable!("Hachi uses batch_commit via PolynomialBatchSource, not streaming")
     }
 
     fn process_chunk_onehot(
         &self,
         _setup: &Self::ProverSetup,
-        onehot_k: usize,
-        chunk: &[Option<usize>],
+        _onehot_k: usize,
+        _chunk: &[Option<usize>],
     ) -> Self::ChunkState {
-        HachiChunkState::OneHot {
-            onehot_k,
-            indices: chunk.to_vec(),
-        }
+        unreachable!("Hachi uses batch_commit via PolynomialBatchSource, not streaming")
     }
 
     fn aggregate_chunks(
         &self,
-        setup: &Self::ProverSetup,
-        onehot_k: Option<usize>,
-        tier1_commitments: &[Self::ChunkState],
+        _setup: &Self::ProverSetup,
+        _onehot_k: Option<usize>,
+        _tier1_commitments: &[Self::ChunkState],
     ) -> (Self::Commitment, Self::OpeningProofHint) {
-        if let Some(k) = onehot_k {
-            let layout = setup.0.layout();
-            let mut indices = Vec::new();
-            for chunk in tier1_commitments {
-                match chunk {
-                    HachiChunkState::OneHot {
-                        onehot_k,
-                        indices: chunk_indices,
-                    } => {
-                        assert_eq!(*onehot_k, k, "inconsistent onehot_k across streamed chunks");
-                        indices.extend_from_slice(chunk_indices);
-                    }
-                    HachiChunkState::Dense(_) => panic!("mixed chunk types for onehot polynomial"),
-                }
-            }
-            let onehot_poly = OneHotPoly::<Fp128, D>::new(k, indices, layout.r_vars, layout.m_vars)
-                .expect("OneHotPoly construction failed");
-            let (commitment, hachi_hint) =
-                <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::commit(
-                    &onehot_poly,
-                    &setup.0,
-                )
-                .expect("Hachi commit_onehot failed");
-            return (
-                ArkBridge(commitment),
-                JoltHachiOpeningHint {
-                    hachi_hint,
-                    ring_coeffs: vec![],
-                },
-            );
-        }
-
-        let ring_coeffs = tier1_commitments
-            .iter()
-            .flat_map(|chunk| match chunk {
-                HachiChunkState::Dense(rings) => rings.clone(),
-                HachiChunkState::OneHot { .. } => {
-                    panic!("mixed chunk types for dense polynomial")
-                }
-            })
-            .collect::<Vec<_>>();
-        let (commitment, hint) = hachi_commit_dense::<D, Cfg>(ring_coeffs, &setup.0);
-        (ArkBridge(commitment), hint)
+        unreachable!("Hachi uses batch_commit via PolynomialBatchSource, not streaming")
     }
 
     fn aggregate_streaming_batch(
         &self,
-        setup: &Self::ProverSetup,
+        _setup: &Self::ProverSetup,
         _onehot_ks: &[Option<usize>],
-        tier1_per_poly: &[Vec<Self::ChunkState>],
+        _tier1_per_poly: &[Vec<Self::ChunkState>],
     ) -> Option<(Vec<Self::Commitment>, Self::BatchOpeningHint)> {
-        if tier1_per_poly.is_empty() {
-            return None;
-        }
-
-        let layout = setup.0.layout();
-        let block_len = layout.block_len;
-
-        let mut per_poly_blocks: Vec<Vec<PackedBlock<D>>> =
-            Vec::with_capacity(tier1_per_poly.len());
-        let mut max_blocks_per_poly = 0usize;
-        for poly_chunks in tier1_per_poly {
-            let (poly_blocks, blocks_per_poly) =
-                streaming_chunks_to_blocks::<D>(poly_chunks, block_len)?;
-            max_blocks_per_poly = max_blocks_per_poly.max(blocks_per_poly);
-            per_poly_blocks.push(poly_blocks);
-        }
-
-        let num_packed_polys = per_poly_blocks.len();
-        let n_padded = num_packed_polys.next_power_of_two();
-        let total_packed_blocks = n_padded * max_blocks_per_poly;
-        let mut blocks: Vec<PackedBlock<D>> = Vec::with_capacity(total_packed_blocks);
-
-        for poly_blocks in per_poly_blocks {
-            let filled = poly_blocks.len();
-            blocks.extend(poly_blocks);
-            for _ in filled..max_blocks_per_poly {
-                blocks.push(PackedBlock::Zero);
-            }
-        }
-        for _ in num_packed_polys..n_padded {
-            for _ in 0..max_blocks_per_poly {
-                blocks.push(PackedBlock::Zero);
-            }
-        }
-
-        for block in &blocks {
-            if let PackedBlock::OneHot(entries) = block {
-                for entry in entries {
-                    assert!(
-                        entry.pos_in_block < block_len,
-                        "invalid onehot entry position: {} >= block_len {}",
-                        entry.pos_in_block,
-                        block_len
-                    );
-                }
-            }
-        }
-
-        let packed_poly = JoltPackedPoly { blocks, block_len };
-        let (commitment, hachi_hint) =
-            <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::commit(
-                &packed_poly,
-                &setup.0,
-            )
-            .expect("Hachi packed poly commit failed");
-        let hint = JoltHachiBatchHint {
-            hachi_hint,
-            blocks: packed_poly.blocks,
-            block_len,
-            num_packed_polys,
-        };
-        Some((vec![ArkBridge(commitment)], hint))
+        None
     }
 
     fn streaming_batch_hint(_hints: Vec<Self::OpeningProofHint>) -> Self::BatchOpeningHint {
-        panic!("Hachi uses aggregate_streaming_batch, not streaming_batch_hint")
-    }
-}
-
-fn streaming_chunks_to_blocks<const D: usize>(
-    poly_chunks: &[HachiChunkState<D>],
-    block_len: usize,
-) -> Option<(Vec<PackedBlock<D>>, usize)> {
-    let first = poly_chunks.first()?;
-    match first {
-        HachiChunkState::Dense(_) => {
-            let mut all_rings = Vec::new();
-            for chunk in poly_chunks {
-                match chunk {
-                    HachiChunkState::Dense(rings) => all_rings.extend(rings.iter().cloned()),
-                    HachiChunkState::OneHot { .. } => return None,
-                }
-            }
-            let blocks_per_poly = all_rings.len().div_ceil(block_len);
-            let mut blocks = Vec::with_capacity(blocks_per_poly);
-            for chunk in all_rings.chunks(block_len) {
-                let mut block = vec![CyclotomicRing::<Fp128, D>::zero(); block_len];
-                block[..chunk.len()].copy_from_slice(chunk);
-                blocks.push(PackedBlock::Dense(block));
-            }
-            Some((blocks, blocks_per_poly))
-        }
-        HachiChunkState::OneHot { onehot_k, .. } => {
-            let mut indices = Vec::new();
-            for chunk in poly_chunks {
-                match chunk {
-                    HachiChunkState::OneHot {
-                        onehot_k: k,
-                        indices: chunk_indices,
-                    } => {
-                        if k != onehot_k {
-                            return None;
-                        }
-                        indices.extend_from_slice(chunk_indices);
-                    }
-                    HachiChunkState::Dense(_) => return None,
-                }
-            }
-
-            let t = indices.len();
-            let poly_field_len = onehot_k.checked_mul(t)?;
-            let poly_ring_len = poly_field_len.div_ceil(D);
-            let blocks_per_poly = poly_ring_len.div_ceil(block_len);
-
-            let mut per_block: Vec<Vec<SparseBlockEntry>> = vec![Vec::new(); blocks_per_poly];
-            let mut block_maps: Vec<HashMap<usize, usize>> = vec![HashMap::new(); blocks_per_poly];
-            for (c, opt) in indices.iter().enumerate() {
-                if let Some(k) = opt {
-                    if *k >= *onehot_k {
-                        return None;
-                    }
-                    let field_pos = k.checked_mul(t)?.checked_add(c)?;
-                    let ring_idx = field_pos / D;
-                    let coeff_idx = field_pos % D;
-                    let block_idx = ring_idx / block_len;
-                    let pos_in_block = ring_idx % block_len;
-                    if block_idx < blocks_per_poly {
-                        if let Some(&entry_idx) = block_maps[block_idx].get(&pos_in_block) {
-                            per_block[block_idx][entry_idx]
-                                .nonzero_coeffs
-                                .push(coeff_idx);
-                        } else {
-                            block_maps[block_idx].insert(pos_in_block, per_block[block_idx].len());
-                            per_block[block_idx].push(SparseBlockEntry {
-                                pos_in_block,
-                                nonzero_coeffs: vec![coeff_idx],
-                            });
-                        }
-                    }
-                }
-            }
-            let blocks = per_block
-                .into_iter()
-                .map(|entries| {
-                    if entries.is_empty() {
-                        PackedBlock::Zero
-                    } else {
-                        PackedBlock::OneHot(entries)
-                    }
-                })
-                .collect();
-            Some((blocks, blocks_per_poly))
-        }
-    }
-}
-
-enum PolyRingData<const D: usize> {
-    Dense(Vec<CyclotomicRing<Fp128, D>>),
-    OneHot(Vec<Vec<SparseBlockEntry>>),
-}
-
-fn poly_to_ring_data<const D: usize>(
-    poly: &MultilinearPolynomial<JoltFp128>,
-    block_len: usize,
-    blocks_per_poly: usize,
-) -> PolyRingData<D> {
-    match poly {
-        MultilinearPolynomial::OneHot(onehot) => {
-            let mut per_block: Vec<Vec<SparseBlockEntry>> = vec![Vec::new(); blocks_per_poly];
-            let mut block_maps: Vec<HashMap<usize, usize>> = vec![HashMap::new(); blocks_per_poly];
-            let t = onehot.nonzero_indices.len();
-            for (c, opt) in onehot.nonzero_indices.iter().enumerate() {
-                if let Some(idx) = opt {
-                    let k = *idx as usize;
-                    let field_pos = k * t + c;
-                    let ring_idx = field_pos / D;
-                    let coeff_idx = field_pos % D;
-                    let block_idx = ring_idx / block_len;
-                    let pos_in_block = ring_idx % block_len;
-                    if block_idx < blocks_per_poly {
-                        if let Some(&entry_idx) = block_maps[block_idx].get(&pos_in_block) {
-                            per_block[block_idx][entry_idx]
-                                .nonzero_coeffs
-                                .push(coeff_idx);
-                        } else {
-                            block_maps[block_idx].insert(pos_in_block, per_block[block_idx].len());
-                            per_block[block_idx].push(SparseBlockEntry {
-                                pos_in_block,
-                                nonzero_coeffs: vec![coeff_idx],
-                            });
-                        }
-                    }
-                }
-            }
-            PolyRingData::OneHot(per_block)
-        }
-        _ => PolyRingData::Dense(poly_to_ring_coeffs(poly)),
+        panic!("Hachi uses batch_commit via PolynomialBatchSource, not streaming")
     }
 }
 
@@ -1117,7 +1001,6 @@ pub(super) fn poly_to_ring_coeffs<const D: usize>(
     match poly {
         MultilinearPolynomial::LargeScalars(p) => {
             // SAFETY: JoltFp128 is repr(transparent) over Fp128.
-            // Reinterpret the slice directly — avoids cloning the full coefficient vector.
             let field_coeffs: &[Fp128] =
                 unsafe { std::slice::from_raw_parts(p.Z.as_ptr() as *const Fp128, p.Z.len()) };
             pack_field_to_ring::<D>(field_coeffs)

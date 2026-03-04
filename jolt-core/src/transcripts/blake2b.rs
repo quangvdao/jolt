@@ -23,6 +23,8 @@ pub struct Blake2bTranscript {
     /// `state_history` so that we can detect any deviations and the backtrace can
     /// tell us where it happened.
     expected_state_history: Option<Vec<[u8; 32]>>,
+    #[cfg(test)]
+    last_label: &'static [u8],
 }
 
 impl Blake2bTranscript {
@@ -61,10 +63,14 @@ impl Blake2bTranscript {
         #[cfg(test)]
         {
             if let Some(expected_state_history) = &self.expected_state_history {
-                assert!(
-                    new_state == expected_state_history[self.n_rounds as usize],
-                    "Fiat-Shamir transcript mismatch"
-                );
+                if new_state != expected_state_history[self.n_rounds as usize] {
+                    eprintln!(
+                        "[FS MISMATCH] round={}, last_label={:?}",
+                        self.n_rounds,
+                        std::str::from_utf8(self.last_label).unwrap_or("???"),
+                    );
+                    panic!("Fiat-Shamir transcript mismatch at round {}", self.n_rounds);
+                }
             }
             self.state_history.push(new_state);
         }
@@ -85,6 +91,8 @@ impl Transcript for Blake2bTranscript {
             state_history: vec![out.into()],
             #[cfg(test)]
             expected_state_history: None,
+            #[cfg(test)]
+            last_label: b"",
         }
     }
 
@@ -95,10 +103,12 @@ impl Transcript for Blake2bTranscript {
         self.expected_state_history = Some(other.state_history);
     }
 
-    // === Internal raw methods (EVM-compatible serialization) ===
-
     fn raw_append_label(&mut self, label: &'static [u8]) {
         assert!(label.len() < 33);
+        #[cfg(test)]
+        {
+            self.last_label = label;
+        }
         let mut padded = [0_u8; 32];
         padded[..label.len()].copy_from_slice(label);
         let hasher = self.hasher().chain_update(padded);
@@ -150,8 +160,6 @@ impl Transcript for Blake2bTranscript {
             .chain_update(&y_bytes[..y_size]);
         self.update_state(hasher.finalize().into());
     }
-
-    // === Challenge generation methods ===
 
     fn challenge_u128(&mut self) -> u128 {
         let mut buf = [0u8; 16];

@@ -29,11 +29,14 @@ use crate::{
     field::JoltField,
     guest,
     poly::{
-        commitment::{commitment_scheme::StreamingCommitmentScheme, dory::DoryGlobals},
+        commitment::{
+            commitment_scheme::{PolynomialBatchSource, StreamingCommitmentScheme},
+            dory::DoryGlobals,
+        },
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{
-            compute_advice_lagrange_factor, OpeningAccumulator, ProverOpeningAccumulator,
-            StreamingBatchSource, SumcheckId,
+            compute_advice_lagrange_factor, BatchPolynomialSource, OpeningAccumulator,
+            ProverOpeningAccumulator, StreamingBatchSource, SumcheckId,
         },
         rlc_polynomial::{RLCStreamingData, TraceSource},
     },
@@ -129,6 +132,61 @@ use rayon::prelude::*;
 use tracer::{
     emulator::memory::Memory, instruction::Cycle, ChunksIterator, JoltDevice, LazyTraceIterator,
 };
+
+struct LazyOneHotSource<'a> {
+    trace: &'a [Cycle],
+    polys: &'a [CommittedPolynomial],
+    preprocessing: &'a JoltSharedPreprocessing,
+    one_hot_params: &'a OneHotParams,
+}
+
+impl<F: JoltField> PolynomialBatchSource<F> for LazyOneHotSource<'_> {
+    fn num_polys(&self) -> usize {
+        self.polys.len()
+    }
+
+    fn onehot_index(&self, cycle_idx: usize, poly_idx: usize) -> Option<u8> {
+        self.polys[poly_idx].extract_index(
+            &self.trace[cycle_idx],
+            self.preprocessing,
+            self.one_hot_params,
+        )
+    }
+
+    fn num_cycles(&self) -> Option<usize> {
+        Some(self.trace.len())
+    }
+
+    fn onehot_k(&self) -> Option<usize> {
+        Some(self.one_hot_params.k_chunk)
+    }
+}
+
+impl<F: JoltField> BatchPolynomialSource<F> for LazyOneHotSource<'_> {
+    fn build_joint_polynomial(&self, _coeffs: &[F]) -> MultilinearPolynomial<F> {
+        panic!("LazyOneHotSource does not support build_joint_polynomial")
+    }
+
+    fn onehot_index(&self, cycle_idx: usize, poly_idx: usize) -> Option<u8> {
+        self.polys[poly_idx].extract_index(
+            &self.trace[cycle_idx],
+            self.preprocessing,
+            self.one_hot_params,
+        )
+    }
+
+    fn num_cycles(&self) -> Option<usize> {
+        Some(self.trace.len())
+    }
+
+    fn onehot_k(&self) -> Option<usize> {
+        Some(self.one_hot_params.k_chunk)
+    }
+
+    fn num_polys(&self) -> Option<usize> {
+        Some(self.polys.len())
+    }
+}
 
 /// Jolt CPU prover for RV64IMAC.
 pub struct JoltCpuProver<
@@ -657,15 +715,17 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
                 });
 
             // Transpose: row_commitments[chunk][poly] -> tier1_per_poly[poly][chunk]
-            let tier1_per_poly: Vec<Vec<PCS::ChunkState>> = (0..polys.len())
-                .into_par_iter()
-                .map(|poly_idx| {
-                    row_commitments
-                        .iter()
-                        .flat_map(|row| row.get(poly_idx).cloned())
-                        .collect()
-                })
+            // Consuming drain avoids cloning each ChunkState.
+            let num_polys = polys.len();
+            let num_chunks = row_commitments.len();
+            let mut tier1_per_poly: Vec<Vec<PCS::ChunkState>> = (0..num_polys)
+                .map(|_| Vec::with_capacity(num_chunks))
                 .collect();
+            for mut row in row_commitments.drain(..) {
+                for (poly_idx, state) in row.drain(..).enumerate() {
+                    tier1_per_poly[poly_idx].push(state);
+                }
+            }
 
             let onehot_ks: Vec<Option<usize>> = polys
                 .iter()
@@ -698,28 +758,38 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         } else {
             tracing::debug!("Non-streaming commit: {} polynomials, T={}", polys.len(), T,);
 
-            let trace: Vec<Cycle> = self
-                .lazy_trace
-                .clone()
-                .pad_using(T, |_| Cycle::NoOp)
-                .collect();
+            if PCS::uses_onehot_inc() {
+                let source = LazyOneHotSource {
+                    trace: &self.trace,
+                    polys: &polys,
+                    preprocessing: &self.preprocessing.shared,
+                    one_hot_params: &self.one_hot_params,
+                };
+                let (commitments, batch_hint) =
+                    pcs.batch_commit(&source, &self.preprocessing.generators);
+                (commitments, batch_hint)
+            } else {
+                let trace: Vec<Cycle> = self
+                    .lazy_trace
+                    .clone()
+                    .pad_using(T, |_| Cycle::NoOp)
+                    .collect();
+                let witnesses: Vec<MultilinearPolynomial<F>> = polys
+                    .par_iter()
+                    .map(|poly_id| {
+                        poly_id.generate_witness(
+                            &self.preprocessing.shared.bytecode,
+                            &self.preprocessing.shared.memory_layout,
+                            &trace,
+                            Some(&self.one_hot_params),
+                        )
+                    })
+                    .collect();
 
-            // Generate all witnesses first, then batch commit.
-            let witnesses: Vec<MultilinearPolynomial<F>> = polys
-                .par_iter()
-                .map(|poly_id| {
-                    poly_id.generate_witness(
-                        &self.preprocessing.shared.bytecode,
-                        &self.preprocessing.shared.memory_layout,
-                        &trace,
-                        Some(&self.one_hot_params),
-                    )
-                })
-                .collect();
-
-            let (commitments, batch_hint) =
-                pcs.batch_commit(&witnesses, &self.preprocessing.generators);
-            (commitments, batch_hint)
+                let (commitments, batch_hint) =
+                    pcs.batch_commit(&witnesses, &self.preprocessing.generators);
+                (commitments, batch_hint)
+            }
         };
 
         // Append commitments to transcript
@@ -1603,16 +1673,16 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
             }
             let commitment_ref_slice: Vec<&PCS::Commitment> = commitment_refs.iter().collect();
 
-            struct UnusedBatchSource;
-            impl<F: JoltField> crate::poly::opening_proof::BatchPolynomialSource<F> for UnusedBatchSource {
-                fn build_joint_polynomial(&self, _coeffs: &[F]) -> MultilinearPolynomial<F> {
-                    panic!("unused batch polynomial source for packed Hachi opening")
-                }
-            }
+            let lazy_source = LazyOneHotSource {
+                trace: &self.trace,
+                polys: &main_polys,
+                preprocessing: &self.preprocessing.shared,
+                one_hot_params: &self.one_hot_params,
+            };
 
             return PCS::default().batch_prove(
                 &self.preprocessing.generators,
-                &UnusedBatchSource,
+                &lazy_source,
                 batch_hint,
                 individual_hints,
                 &commitment_ref_slice,

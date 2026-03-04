@@ -9,7 +9,7 @@
 //! (2) HyperKZG is specialized to use KZG as the univariate commitment scheme, so it includes several optimizations (both during the transformation of multilinear-to-univariate claims
 //! and within the KZG commitment scheme implementation itself).
 use super::{
-    commitment_scheme::CommitmentScheme,
+    commitment_scheme::{CommitmentScheme, PolynomialBatchSource},
     kzg::{KZGProverKey, KZGVerifierKey, UnivariateKZG},
 };
 use crate::field::JoltField;
@@ -32,7 +32,6 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
     IntoParallelRefMutIterator, ParallelIterator,
 };
-use std::borrow::Borrow;
 use std::{marker::PhantomData, sync::Arc};
 
 pub struct HyperKZGSRS<P: Pairing>(Arc<SRS<P>>);
@@ -477,15 +476,15 @@ where
     }
 
     #[tracing::instrument(skip_all, name = "HyperKZG::batch_commit")]
-    fn batch_commit<U>(
+    fn batch_commit<S: PolynomialBatchSource<Self::Field>>(
         &self,
-        polys: &[U],
+        source: &S,
         gens: &Self::ProverSetup,
-    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
-    where
-        U: Borrow<MultilinearPolynomial<Self::Field>> + Sync,
-    {
-        let commitments = UnivariateKZG::commit_batch(&gens.kzg_pk, polys)
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint) {
+        let polys: Vec<&MultilinearPolynomial<Self::Field>> = (0..source.num_polys())
+            .map(|i| source.get_poly(i).unwrap())
+            .collect();
+        let commitments = UnivariateKZG::commit_batch(&gens.kzg_pk, &polys[..])
             .unwrap()
             .into_par_iter()
             .map(|c| HyperKZGCommitment(c))

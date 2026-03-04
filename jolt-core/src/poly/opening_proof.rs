@@ -35,6 +35,19 @@ pub trait BatchPolynomialSource<F: JoltField>: Send + Sync {
     /// Construct the joint (RLC) polynomial: `sum_i coeffs[i] * poly_i`.
     /// The returned polynomial may evaluate lazily (e.g., streaming from trace data).
     fn build_joint_polynomial(&self, coeffs: &[F]) -> MultilinearPolynomial<F>;
+
+    fn onehot_index(&self, _cycle_idx: usize, _poly_idx: usize) -> Option<u8> {
+        None
+    }
+    fn num_cycles(&self) -> Option<usize> {
+        None
+    }
+    fn onehot_k(&self) -> Option<usize> {
+        None
+    }
+    fn num_polys(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Streams polynomial data from the execution trace for Dory batch opening.
@@ -364,6 +377,8 @@ where
         opening_point: Vec<F::Challenge>,
         claim: F,
     ) {
+        #[cfg(test)]
+        eprintln!("[opening_claim] dense poly={polynomial:?} sumcheck={sumcheck:?}");
         transcript.append_scalar(b"opening_claim", &claim);
 
         // Add opening to map
@@ -387,6 +402,8 @@ where
         r_cycle: Vec<F::Challenge>,
         claims: Vec<F>,
     ) {
+        #[cfg(test)]
+        eprintln!("[opening_claim] sparse polys={polynomials:?} sumcheck={sumcheck:?}");
         claims.iter().for_each(|claim| {
             transcript.append_scalar(b"opening_claim", claim);
         });

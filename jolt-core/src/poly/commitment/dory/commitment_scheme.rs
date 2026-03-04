@@ -8,7 +8,9 @@ use super::wrappers::{
 };
 use crate::{
     field::JoltField,
-    poly::commitment::commitment_scheme::{CommitmentScheme, StreamingCommitmentScheme},
+    poly::commitment::commitment_scheme::{
+        CommitmentScheme, PolynomialBatchSource, StreamingCommitmentScheme,
+    },
     poly::multilinear_polynomial::MultilinearPolynomial,
     poly::opening_proof::BatchPolynomialSource,
     transcripts::Transcript,
@@ -118,19 +120,16 @@ impl CommitmentScheme for DoryCommitmentScheme {
         (tier_2, row_commitments)
     }
 
-    fn batch_commit<U>(
+    fn batch_commit<S: PolynomialBatchSource<ark_bn254::Fr>>(
         &self,
-        polys: &[U],
+        source: &S,
         gens: &Self::ProverSetup,
-    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
-    where
-        U: std::borrow::Borrow<MultilinearPolynomial<ark_bn254::Fr>> + Sync,
-    {
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint) {
         let _span = trace_span!("DoryCommitmentScheme::batch_commit").entered();
 
-        let results: Vec<(Self::Commitment, Self::OpeningProofHint)> = polys
-            .par_iter()
-            .map(|poly| self.commit(poly.borrow(), gens))
+        let results: Vec<(Self::Commitment, Self::OpeningProofHint)> = (0..source.num_polys())
+            .into_par_iter()
+            .map(|i| self.commit(source.get_poly(i).unwrap(), gens))
             .collect();
         let (commitments, hints): (Vec<_>, Vec<_>) = results.into_iter().unzip();
         (commitments, hints)

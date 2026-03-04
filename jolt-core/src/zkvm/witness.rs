@@ -373,6 +373,38 @@ impl CommittedPolynomial {
         }
     }
 
+    pub fn extract_index(
+        &self,
+        cycle: &Cycle,
+        preprocessing: &JoltSharedPreprocessing,
+        one_hot_params: &OneHotParams,
+    ) -> Option<u8> {
+        match self {
+            CommittedPolynomial::InstructionRa(i) => {
+                let idx = LookupQuery::<XLEN>::to_lookup_index(cycle);
+                Some(one_hot_params.lookup_index_chunk(idx, *i))
+            }
+            CommittedPolynomial::BytecodeRa(i) => {
+                let pc = preprocessing.bytecode.get_pc(cycle);
+                Some(one_hot_params.bytecode_pc_chunk(pc, *i))
+            }
+            CommittedPolynomial::RamRa(i) => remap_address(
+                cycle.ram_access().address() as u64,
+                &preprocessing.memory_layout,
+            )
+            .map(|addr| one_hot_params.ram_address_chunk(addr, *i)),
+            CommittedPolynomial::RdIncRa(i) => {
+                Some(one_hot_params.inc_chunk(rd_unsigned_inc(cycle), i + 1))
+            }
+            CommittedPolynomial::RdIncMsb => Some((rd_unsigned_inc(cycle) >> XLEN) as u8),
+            CommittedPolynomial::RamIncRa(i) => {
+                Some(one_hot_params.inc_chunk(ram_unsigned_inc(cycle), i + 1))
+            }
+            CommittedPolynomial::RamIncMsb => Some((ram_unsigned_inc(cycle) >> XLEN) as u8),
+            _ => panic!("extract_index called on non-onehot polynomial"),
+        }
+    }
+
     pub fn get_onehot_k(&self, one_hot_params: &OneHotParams) -> Option<usize> {
         match self {
             CommittedPolynomial::InstructionRa(_)

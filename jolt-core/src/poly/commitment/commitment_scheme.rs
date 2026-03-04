@@ -11,6 +11,40 @@ use crate::{
     utils::{errors::ProofVerifyError, small_scalar::SmallScalar},
 };
 
+pub trait PolynomialBatchSource<F: JoltField>: Sync {
+    fn num_polys(&self) -> usize;
+    fn get_poly(&self, _idx: usize) -> Option<&MultilinearPolynomial<F>> {
+        None
+    }
+    fn onehot_index(&self, _cycle_idx: usize, _poly_idx: usize) -> Option<u8> {
+        None
+    }
+    fn num_cycles(&self) -> Option<usize> {
+        None
+    }
+    fn onehot_k(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl<F: JoltField, U: Borrow<MultilinearPolynomial<F>> + Sync> PolynomialBatchSource<F> for [U] {
+    fn num_polys(&self) -> usize {
+        self.len()
+    }
+    fn get_poly(&self, idx: usize) -> Option<&MultilinearPolynomial<F>> {
+        Some(self[idx].borrow())
+    }
+}
+
+impl<F: JoltField, U: Borrow<MultilinearPolynomial<F>> + Sync> PolynomialBatchSource<F> for Vec<U> {
+    fn num_polys(&self) -> usize {
+        self.len()
+    }
+    fn get_poly(&self, idx: usize) -> Option<&MultilinearPolynomial<F>> {
+        Some(self[idx].borrow())
+    }
+}
+
 pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
     type Field: JoltField + Sized;
     /// PCS-specific configuration carried by the instance. Opaque to generic code.
@@ -54,13 +88,11 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         setup: &Self::ProverSetup,
     ) -> (Self::Commitment, Self::OpeningProofHint);
 
-    fn batch_commit<U>(
+    fn batch_commit<S: PolynomialBatchSource<Self::Field>>(
         &self,
-        polys: &[U],
+        source: &S,
         gens: &Self::ProverSetup,
-    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint)
-    where
-        U: Borrow<MultilinearPolynomial<Self::Field>> + Sync;
+    ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint);
 
     fn prove<ProofTranscript: Transcript>(
         &self,

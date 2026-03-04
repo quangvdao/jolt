@@ -1,5 +1,5 @@
 use super::commitment_scheme::JoltHachiCommitmentScheme;
-use super::wrappers::{jolt_to_hachi, Fp128};
+use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128};
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
@@ -10,6 +10,7 @@ use crate::poly::opening_proof::BatchPolynomialSource;
 use crate::transcripts::{Blake2bTranscript, Transcript};
 use crate::utils::errors::ProofVerifyError;
 use hachi_pcs::protocol::commitment::CommitmentConfig;
+use hachi_pcs::protocol::proof::{HachiProof, PackedDigits};
 use hachi_pcs::protocol::SmallTestCommitmentConfig;
 use hachi_pcs::FromSmallInt;
 
@@ -267,5 +268,47 @@ fn hachi_batch_verify_rejects_invalid_num_packed() {
     assert!(
         matches!(result, Err(ProofVerifyError::InvalidInputLength(_, _))),
         "expected InvalidInputLength for invalid num_packed_polys, got: {result:?}"
+    );
+}
+
+#[test]
+fn hachi_batch_verify_rejects_invalid_log_k() {
+    let setup = Scheme::setup_prover(16);
+    let verifier_setup = Scheme::setup_verifier(&setup);
+    let pcs = Scheme::default();
+    let opening_point = vec![JoltFp128::from_u64(3), JoltFp128::from_u64(5)];
+    let claim = JoltFp128::from_u64(7);
+
+    let packed_poly_proof = ArkBridge(HachiProof {
+        levels: vec![],
+        final_w: PackedDigits::from_i8_digits(&[], 1),
+    });
+    let proof = super::commitment_scheme::HachiBatchedProof {
+        packed_poly_proof,
+        num_packed_polys: 1,
+        log_k: (opening_point.len() + 1) as u32,
+        individual_proofs: vec![],
+    };
+    let commitment = <Scheme as CommitmentScheme>::Commitment::default();
+    let claims = vec![claim];
+    let commitment_refs = vec![&commitment];
+
+    let mut verify_transcript = Blake2bTranscript::new(b"hachi_single_bad_log_k");
+    let result = pcs.batch_verify(
+        &proof,
+        &verifier_setup,
+        &mut verify_transcript,
+        &opening_point,
+        &commitment_refs,
+        &claims,
+        &[],
+    );
+    assert!(
+        matches!(
+            result,
+            Err(ProofVerifyError::InvalidInputLength(expected, actual))
+                if expected == opening_point.len() && actual == opening_point.len() + 1
+        ),
+        "expected InvalidInputLength for invalid log_k, got: {result:?}"
     );
 }

@@ -64,12 +64,11 @@ impl Blake2bTranscript {
         {
             if let Some(expected_state_history) = &self.expected_state_history {
                 if new_state != expected_state_history[self.n_rounds as usize] {
-                    eprintln!(
-                        "[FS MISMATCH] round={}, last_label={:?}",
+                    panic!(
+                        "Fiat-Shamir transcript mismatch at round {}, last_label={:?}",
                         self.n_rounds,
                         std::str::from_utf8(self.last_label).unwrap_or("???"),
                     );
-                    panic!("Fiat-Shamir transcript mismatch at round {}", self.n_rounds);
                 }
             }
             self.state_history.push(new_state);

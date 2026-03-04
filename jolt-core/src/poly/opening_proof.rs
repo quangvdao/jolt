@@ -377,8 +377,6 @@ where
         opening_point: Vec<F::Challenge>,
         claim: F,
     ) {
-        #[cfg(test)]
-        eprintln!("[opening_claim] dense poly={polynomial:?} sumcheck={sumcheck:?}");
         transcript.append_scalar(b"opening_claim", &claim);
 
         // Add opening to map
@@ -402,8 +400,6 @@ where
         r_cycle: Vec<F::Challenge>,
         claims: Vec<F>,
     ) {
-        #[cfg(test)]
-        eprintln!("[opening_claim] sparse polys={polynomials:?} sumcheck={sumcheck:?}");
         claims.iter().for_each(|claim| {
             transcript.append_scalar(b"opening_claim", claim);
         });

@@ -383,6 +383,8 @@ where
             })
             .collect();
 
+        const REDUCE_INTERVAL: usize = 32_000;
+
         let mut results: Vec<Vec<[i8; D]>> = (0..real_blocks)
             .into_par_iter()
             .map_init(
@@ -396,6 +398,7 @@ where
                     let bw = b % bpp;
                     let (c_start, c_end) = self.block_cycle_range(bw);
                     let ring_base = bw * bl;
+                    let mut add_count = 0usize;
 
                     for c in c_start..c_end {
                         if let Some(k) = (self.index_of)(c, p) {
@@ -408,6 +411,13 @@ where
                                 for a in 0..n_a {
                                     a_wide_flat[a_base + a]
                                         .mul_by_monomial_sum_into(&mut t_wide[a], &[ci]);
+                                }
+                                add_count += 1;
+                                if add_count % REDUCE_INTERVAL == 0 {
+                                    for tw in t_wide.iter_mut() {
+                                        let r: CyclotomicRing<Fp128, D> = tw.reduce();
+                                        *tw = WideCyclotomicRing::from_ring(&r);
+                                    }
                                 }
                             }
                         }

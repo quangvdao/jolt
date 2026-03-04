@@ -637,7 +637,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         (proof, debug_info)
     }
 
-
     #[tracing::instrument(skip_all, name = "generate_and_commit_witness_polynomials")]
     fn generate_and_commit_witness_polynomials(
         &mut self,
@@ -1860,7 +1859,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> Serializable
 mod tests {
     use ark_bn254::Fr;
     use hachi_pcs::protocol::{
-        commitment::CommitmentConfig, Fp128CommitmentConfig as HachiTestCommitmentConfig,
+        commitment::CommitmentConfig, Fp128OneHotCommitmentConfig as HachiTestCommitmentConfig,
     };
     use serial_test::serial;
 

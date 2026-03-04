@@ -17,10 +17,11 @@ use hachi_pcs::algebra::fields::wide::Fp128x8i32;
 use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
 use hachi_pcs::algebra::ring::{CyclotomicRing, WideCyclotomicRing};
 use hachi_pcs::protocol::commitment::utils::crt_ntt::NttSlotCache;
+use hachi_pcs::protocol::commitment::utils::flat_matrix::FlatMatrix;
 use hachi_pcs::protocol::commitment::utils::linear::decompose_rows_i8;
 use hachi_pcs::protocol::commitment::{
-    compute_num_digits, compute_num_digits_fold, CommitmentConfig, HachiCommitmentLayout,
-    RingCommitment,
+    compute_num_digits, compute_num_digits_fold, optimal_m_r_split, CommitmentConfig,
+    Fp128BoundedCommitmentConfig, HachiCommitmentLayout, RingCommitment,
 };
 use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
@@ -144,11 +145,7 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     }
 
     #[tracing::instrument(skip_all, name = "fold_blocks")]
-    fn fold_blocks(
-        &self,
-        scalars: &[Fp128],
-        _block_len: usize,
-    ) -> Vec<CyclotomicRing<Fp128, D>> {
+    fn fold_blocks(&self, scalars: &[Fp128], _block_len: usize) -> Vec<CyclotomicRing<Fp128, D>> {
         let bpp = self.blocks_per_poly;
         let total_blocks = self.num_padded * bpp;
 
@@ -320,14 +317,15 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     #[tracing::instrument(skip_all, name = "commit_inner")]
     fn commit_inner(
         &self,
-        a_matrix: &[Vec<CyclotomicRing<Fp128, D>>],
+        a_matrix: &FlatMatrix<Fp128>,
         _ntt_a: &NttSlotCache<D>,
         _block_len: usize,
         num_digits_commit: usize,
         num_digits_open: usize,
         log_basis: u32,
     ) -> Result<Vec<Vec<[i8; D]>>, hachi_pcs::HachiError> {
-        let n_a = a_matrix.len();
+        let a_view = a_matrix.view::<D>();
+        let n_a = a_view.num_rows();
         let t_hat_len = n_a.checked_mul(num_digits_open).unwrap();
         let bl = self.block_len;
         let bpp = self.blocks_per_poly;
@@ -338,7 +336,7 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
             .map(|pos| {
                 let col = pos * num_digits_commit;
                 (0..n_a)
-                    .map(|a| WideCyclotomicRing::from_ring(&a_matrix[a][col]))
+                    .map(|a| WideCyclotomicRing::from_ring(&a_view.row(a)[col]))
                     .collect()
             })
             .collect();
@@ -434,6 +432,27 @@ fn advice_commit_layout<Cfg: CommitmentConfig>(
         log_basis,
     )
     .unwrap()
+}
+
+/// Compute the advice commit layout using the polynomial's own optimal m/r split
+/// rather than inheriting from the setup layout.
+///
+/// The setup may use a very different m/r split (optimized for onehot with
+/// num_digits_commit=1), so advice polynomials (with num_digits_commit=22)
+/// need their own split to keep inner_width within the setup's bounds.
+fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
+    poly_num_vars: usize,
+) -> HachiCommitmentLayout {
+    let alpha = D.trailing_zeros() as usize;
+    let reduced_vars = poly_num_vars.saturating_sub(alpha);
+    if reduced_vars <= 1 {
+        return advice_commit_layout::<Cfg>(reduced_vars.max(1), 0);
+    }
+    // Advice polynomials have log_commit_bound=64, so use that config for
+    // the optimal m/r split. All Fp128BoundedCommitmentConfig variants
+    // share the same N_A, CHALLENGE_WEIGHT, log_basis.
+    let (m_vars, r_vars) = optimal_m_r_split::<Fp128BoundedCommitmentConfig<64>>(reduced_vars);
+    advice_commit_layout::<Cfg>(m_vars, r_vars)
 }
 
 fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
@@ -560,7 +579,7 @@ where
     type Field = JoltFp128;
     type Config = ();
     type ProverSetup = ArkBridge<HachiProverSetup<Fp128, D>>;
-    type VerifierSetup = ArkBridge<HachiVerifierSetup<Fp128, D>>;
+    type VerifierSetup = ArkBridge<HachiVerifierSetup<Fp128>>;
     type Commitment = ArkBridge<RingCommitment<Fp128, D>>;
     type Proof = ArkBridge<HachiProof<Fp128, D>>;
     type BatchedProof = HachiBatchedProof<D>;
@@ -596,11 +615,8 @@ where
         poly: &MultilinearPolynomial<JoltFp128>,
         setup: &Self::ProverSetup,
     ) -> (Self::Commitment, Self::OpeningProofHint) {
-        let setup_layout = setup.0.layout();
         let poly_num_vars = poly.len().trailing_zeros() as usize;
-        let alpha = D.trailing_zeros() as usize;
-        let r_vars = poly_num_vars.saturating_sub(alpha + setup_layout.m_vars);
-        let layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, r_vars);
+        let layout = compute_advice_layout::<D, Cfg>(poly_num_vars);
 
         let (commitment, hint) = if let MultilinearPolynomial::OneHot(onehot) = poly {
             let indices: Vec<Option<u8>> = onehot.nonzero_indices.as_ref().clone();
@@ -666,12 +682,7 @@ where
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
-        let setup_layout = setup.0.layout();
-        let alpha = D.trailing_zeros() as usize;
-        let r_vars = opening_point
-            .len()
-            .saturating_sub(alpha + setup_layout.m_vars);
-        let layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, r_vars);
+        let layout = compute_advice_layout::<D, Cfg>(opening_point.len());
 
         let proof = if let MultilinearPolynomial::OneHot(onehot) = poly {
             let indices: Vec<Option<u8>> = onehot.nonzero_indices.as_ref().clone();
@@ -723,12 +734,7 @@ where
         let hachi_opening = jolt_to_hachi(opening);
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
-        let setup_layout = &setup.0.expanded.seed.layout;
-        let alpha = D.trailing_zeros() as usize;
-        let r_vars = opening_point
-            .len()
-            .saturating_sub(alpha + setup_layout.m_vars);
-        let layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, r_vars);
+        let layout = compute_advice_layout::<D, Cfg>(opening_point.len());
 
         <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::verify(
             &proof.0,
@@ -832,10 +838,7 @@ where
             .expect("Hachi packed poly prove failed");
 
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
-        let indiv_r_vars = opening_point
-            .len()
-            .saturating_sub(alpha + setup_layout.m_vars);
-        let indiv_layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, indiv_r_vars);
+        let indiv_layout = compute_advice_layout::<D, Cfg>(opening_point.len());
 
         let individual_commitments = &commitments[1..];
         let individual_proofs: Vec<ArkBridge<HachiProof<Fp128, D>>> = individual_hints
@@ -951,10 +954,7 @@ where
         .map_err(|_| ProofVerifyError::InternalError)?;
 
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
-        let indiv_r_vars = opening_point
-            .len()
-            .saturating_sub(alpha + setup_layout.m_vars);
-        let indiv_layout = advice_commit_layout::<Cfg>(setup_layout.m_vars, indiv_r_vars);
+        let indiv_layout = compute_advice_layout::<D, Cfg>(opening_point.len());
 
         let individual_commitments = &commitments[1..];
         for i in 0..individual_claims.len() {

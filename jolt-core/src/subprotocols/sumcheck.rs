@@ -76,8 +76,6 @@ impl BatchedSumcheck {
                 print_current_memory_usage(label.as_str());
             }
 
-            let r_prev = r_sumcheck.last().copied();
-
             let univariate_polys: Vec<UniPoly<F>> = sumcheck_instances
                 .iter_mut()
                 .zip(individual_claims.iter())
@@ -85,34 +83,22 @@ impl BatchedSumcheck {
                     let num_rounds = sumcheck.num_rounds();
                     let offset = sumcheck.round_offset(max_num_rounds);
                     let active = round >= offset && round < offset + num_rounds;
-                    if !active {
-                        UniPoly::from_coeff(vec![*previous_claim * two_inv])
+                    if active {
+                        sumcheck.compute_message(round - offset, *previous_claim)
                     } else {
-                        let local_round = round - offset;
-                        match (local_round, r_prev) {
-                            (0, _) | (_, None) => {
-                                sumcheck.compute_message(local_round, *previous_claim)
-                            }
-                            (_, Some(r)) => {
-                                sumcheck.fused_bind_eval(r, local_round, *previous_claim)
-                            }
-                        }
+                        UniPoly::from_coeff(vec![*previous_claim * two_inv])
                     }
                 })
                 .collect();
 
-            let max_degree = univariate_polys
-                .iter()
-                .map(|p| p.coeffs.len())
-                .max()
-                .unwrap_or(0);
-            let mut batched_coeffs = vec![F::zero(); max_degree];
-            for (poly, &coeff) in univariate_polys.iter().zip(&batching_coeffs) {
-                for (bc, pc) in batched_coeffs.iter_mut().zip(&poly.coeffs) {
-                    *bc += *pc * coeff;
-                }
-            }
-            let batched_univariate_poly = UniPoly::from_coeff(batched_coeffs);
+            let batched_univariate_poly: UniPoly<F> =
+                univariate_polys.iter().zip(&batching_coeffs).fold(
+                    UniPoly::from_coeff(vec![]),
+                    |mut batched_poly, (poly, &coeff)| {
+                        batched_poly += &(poly * coeff);
+                        batched_poly
+                    },
+                );
 
             let compressed_poly = batched_univariate_poly.compress();
 
@@ -138,17 +124,16 @@ impl BatchedSumcheck {
                 batched_claim = batched_univariate_poly.evaluate(&r_j);
             }
 
-            compressed_polys.push(compressed_poly);
-        }
+            for sumcheck in sumcheck_instances.iter_mut() {
+                let num_rounds = sumcheck.num_rounds();
+                let offset = sumcheck.round_offset(max_num_rounds);
+                let active = round >= offset && round < offset + num_rounds;
+                if active {
+                    sumcheck.ingest_challenge(r_j, round - offset);
+                }
+            }
 
-        // Apply the final bind for each instance: the challenge from its last active round
-        // was never applied inside the loop (the fused approach defers binding by one round).
-        for sumcheck in sumcheck_instances.iter_mut() {
-            let num_rounds = sumcheck.num_rounds();
-            let offset = sumcheck.round_offset(max_num_rounds);
-            let last_active_global = offset + num_rounds - 1;
-            let r_final = r_sumcheck[last_active_global];
-            sumcheck.ingest_challenge(r_final, num_rounds - 1);
+            compressed_polys.push(compressed_poly);
         }
 
         // Allow each sumcheck instance to perform any end-of-protocol work (e.g. flushing

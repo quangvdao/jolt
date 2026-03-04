@@ -140,14 +140,6 @@ harness = false
 name = "challenge_mult_performance"
 harness = false
 
-[[bench]]
-name = "degree2_sumcheck"
-harness = false
-
-[[bench]]
-name = "e2e_sumcheck"
-harness = false
-
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"

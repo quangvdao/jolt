@@ -637,25 +637,6 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         (proof, debug_info)
     }
 
-    /// Run only the sumcheck stages (1-7), skipping commitments and opening proofs.
-    /// Useful for benchmarking field arithmetic performance without PCS overhead.
-    #[tracing::instrument(skip_all, name = "prove_sumchecks_only")]
-    pub fn prove_sumchecks_only(mut self) {
-        fiat_shamir_preamble(
-            &self.program_io,
-            self.one_hot_params.ram_k,
-            self.trace.len(),
-            &mut self.transcript,
-        );
-
-        let _ = self.prove_stage1();
-        let _ = self.prove_stage2();
-        let _ = self.prove_stage3();
-        let _ = self.prove_stage4();
-        let _ = self.prove_stage5();
-        let _ = self.prove_stage6();
-        let _ = self.prove_stage7();
-    }
 
     #[tracing::instrument(skip_all, name = "generate_and_commit_witness_polynomials")]
     fn generate_and_commit_witness_polynomials(

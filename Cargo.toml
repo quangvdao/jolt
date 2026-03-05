@@ -163,7 +163,7 @@ blake2 = "0.10"
 blake3 = { version = "1.5.0" }
 jolt-optimizations = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
 dory = { package = "dory-pcs", version = "0.2.0", features = ["backends", "cache", "disk-persistence"] }
-hachi-pcs = { path = "../hachi" }
+hachi-pcs = { git = "https://github.com/LayerZero-Labs/hachi.git", branch = "main" }
 
 # Core Utilities
 clap = { version = "4.5.4", features = ["derive"] }

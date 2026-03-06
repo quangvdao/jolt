@@ -140,9 +140,9 @@ pub type RV64IMACProof = JoltProof<Fr, DoryCommitmentScheme, Blake2bTranscript>;
 
 pub type HachiPcs = crate::poly::commitment::hachi::JoltHachiCommitmentScheme<
     {
-        <hachi_pcs::protocol::Fp128OneHotCommitmentConfig as hachi_pcs::protocol::commitment::CommitmentConfig>::D
+        <crate::poly::commitment::hachi::Fp128OneHot256Config as hachi_pcs::protocol::commitment::CommitmentConfig>::D
     },
-    hachi_pcs::protocol::Fp128OneHotCommitmentConfig,
+    crate::poly::commitment::hachi::Fp128OneHot256Config,
 >;
 #[cfg(feature = "prover")]
 pub type RV64IMACHachiProver<'a> =

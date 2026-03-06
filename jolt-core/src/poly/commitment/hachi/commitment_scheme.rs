@@ -17,12 +17,13 @@ use hachi_pcs::algebra::fields::wide::Fp128x8i32;
 use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
 use hachi_pcs::algebra::ring::{CyclotomicRing, WideCyclotomicRing};
 use hachi_pcs::protocol::commitment::utils::crt_ntt::NttSlotCache;
-use hachi_pcs::protocol::commitment::utils::flat_matrix::FlatMatrix;
+use hachi_pcs::protocol::commitment::utils::flat_matrix::{FlatMatrix, RingMatrixView};
 use hachi_pcs::protocol::commitment::utils::linear::decompose_rows_i8;
 use hachi_pcs::protocol::commitment::{
     compute_num_digits, compute_num_digits_fold, optimal_m_r_split, CommitmentConfig,
-    Fp128BoundedCommitmentConfig, HachiCommitmentLayout, RingCommitment,
+    DecompositionParams, Fp128BoundedCommitmentConfig, HachiCommitmentLayout, RingCommitment,
 };
+use hachi_pcs::HachiError;
 use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
 use hachi_pcs::protocol::{HachiCommitmentScheme, HachiProverSetup, HachiVerifierSetup};
@@ -31,6 +32,63 @@ use hachi_pcs::{
     CanonicalField, DensePoly, FieldCore, FromSmallInt, HachiPolyOps, OneHotIndex, OneHotPoly,
 };
 use rayon::prelude::*;
+
+/// Tile size for commit_inner A-matrix tiling. Each tile occupies
+/// tile_size * n_a * sizeof(WideCyclotomicRing) ≈ tile_size * 16 KB.
+/// Must fit in the shared last-level cache (Apple Silicon P-cluster L2 = 16 MB,
+/// typical x86 L3 ≈ 32 MB). 1024 × 16 KB = 16 MB.
+const COMMIT_TILE_SIZE: usize = 1024;
+
+/// Maximum WideCyclotomicRing<Fp128x8i32> additions before i32 limb overflow.
+/// Each limb starts ≤ 65535; i32 max ≈ 2.1B → safe up to ~32K additions.
+const WIDE_RING_REDUCE_INTERVAL: usize = 32_000;
+
+/// decompose_fold z_chunk fits in cache when inner_width * D * 4 ≤ ~16 MB.
+/// With D=512: inner_width ≤ 8192.
+const DECOMPOSE_FOLD_CACHE_THRESHOLD: usize = 8_192;
+
+/// `Fp128BoundedCommitmentConfig` with `D = 256` instead of `512`.
+/// All other parameters (N_A, N_B, N_D, decomposition) are
+/// identical to the upstream `Fp128BoundedCommitmentConfig<LOG_COMMIT_BOUND>`.
+/// CHALLENGE_WEIGHT is 23 (vs 19 at D=512) to maintain ≥128-bit challenge entropy.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Fp128Bounded256Config<const LOG_COMMIT_BOUND: u32>;
+
+impl<const LOG_COMMIT_BOUND: u32> CommitmentConfig for Fp128Bounded256Config<LOG_COMMIT_BOUND> {
+    const D: usize = 256;
+    const N_A: usize = 1;
+    const N_B: usize = 1;
+    const N_D: usize = 1;
+    const CHALLENGE_WEIGHT: usize = 23;
+
+    fn decomposition() -> DecompositionParams {
+        DecompositionParams {
+            log_basis: 3,
+            log_commit_bound: LOG_COMMIT_BOUND,
+            log_open_bound: if LOG_COMMIT_BOUND < 128 {
+                Some(128)
+            } else {
+                None
+            },
+        }
+    }
+
+    fn commitment_layout(max_num_vars: usize) -> Result<HachiCommitmentLayout, HachiError> {
+        let alpha = Self::D.trailing_zeros() as usize;
+        let reduced_vars = max_num_vars.checked_sub(alpha).ok_or_else(|| {
+            HachiError::InvalidSetup("max_num_vars is smaller than alpha".to_string())
+        })?;
+        if reduced_vars == 0 {
+            return Err(HachiError::InvalidSetup(
+                "max_num_vars must leave at least one outer variable".to_string(),
+            ));
+        }
+        let (m_vars, r_vars) = optimal_m_r_split::<Self>(reduced_vars);
+        HachiCommitmentLayout::new::<Self>(m_vars, r_vars, &Self::decomposition())
+    }
+}
+
+pub type Fp128OneHot256Config = Fp128Bounded256Config<1>;
 
 #[derive(Clone, Default)]
 pub struct JoltHachiCommitmentScheme<const D: usize, Cfg: CommitmentConfig> {
@@ -90,24 +148,25 @@ struct JoltPackedPoly<const D: usize, IndexFn> {
 impl<const D: usize, IndexFn> JoltPackedPoly<D, IndexFn> {
     /// T-major layout: field_pos = c * K + k. Addr varies fast, cycle
     /// varies slow. Opening-point convention: [r_addr_LE, r_cycle_LE].
-    #[inline]
-    fn decompose(&self, c: usize, k: u8) -> (usize, usize, usize) {
-        let field_pos = c * self.onehot_k + (k as usize);
-        let ring_idx = field_pos / D;
-        let coeff_idx = field_pos % D;
-        let block_within = ring_idx / self.block_len;
-        let pos_in_block = ring_idx % self.block_len;
-        (block_within, pos_in_block, coeff_idx)
-    }
-
-    /// Cycle range that may contribute to within-poly block `bw`.
     /// Slight over-approximation; callers verify ring_idx bounds.
     #[inline]
     fn block_cycle_range(&self, bw: usize) -> (usize, usize) {
         let ring_start = bw * self.block_len;
         let ring_end = ring_start + self.block_len;
-        let c_start = (ring_start * D) / self.onehot_k;
-        let c_end = (ring_end * D).div_ceil(self.onehot_k).min(self.num_cycles);
+        let log_k = self.onehot_k.trailing_zeros();
+        let c_start = (ring_start * D) >> log_k;
+        let c_end = ((ring_end * D + self.onehot_k - 1) >> log_k).min(self.num_cycles);
+        (c_start, c_end)
+    }
+
+    /// Cycle range for a sub-tile [tile_start, tile_end) within block `bw`.
+    #[inline]
+    fn tile_cycle_range(&self, bw: usize, tile_start: usize, tile_end: usize) -> (usize, usize) {
+        let ring_start = bw * self.block_len + tile_start;
+        let ring_end = bw * self.block_len + tile_end;
+        let log_k = self.onehot_k.trailing_zeros();
+        let c_start = (ring_start * D) >> log_k;
+        let c_end = ((ring_end * D + self.onehot_k - 1) >> log_k).min(self.num_cycles);
         (c_start, c_end)
     }
 }
@@ -126,61 +185,86 @@ where
     fn evaluate_ring(&self, scalars: &[Fp128]) -> CyclotomicRing<Fp128, D> {
         let bl = self.block_len;
         let bpp = self.blocks_per_poly;
-        let chunk_size = 512;
-        let num_chunks = self.num_cycles.div_ceil(chunk_size);
+        let num_polys = self.num_polys;
 
-        (0..num_chunks)
+        let total = (0..bpp * num_polys)
             .into_par_iter()
-            .map(|chunk_idx| {
-                let c_start = chunk_idx * chunk_size;
-                let c_end = (c_start + chunk_size).min(self.num_cycles);
+            .map(|task_idx| {
+                let bw = task_idx / num_polys;
+                let p = task_idx % num_polys;
+                let (c_start, c_end) = self.block_cycle_range(bw);
+                let ring_base = bw * bl;
                 let mut acc = [Fp128::zero(); D];
+
                 for c in c_start..c_end {
-                    for p in 0..self.num_polys {
-                        if let Some(k) = (self.index_of)(c, p) {
-                            let (block_within, pos_in_block, ci) = self.decompose(c, k);
-                            let global_ring = (p * bpp + block_within) * bl + pos_in_block;
+                    if let Some(k) = (self.index_of)(c, p) {
+                        let field_pos = c * self.onehot_k + (k as usize);
+                        let ring_idx = field_pos >> D.trailing_zeros();
+                        let pos = ring_idx.wrapping_sub(ring_base);
+                        if pos < bl {
+                            let ci = field_pos & (D - 1);
+                            let global_ring = (p * bpp + bw) * bl + pos;
                             if global_ring < scalars.len() {
                                 acc[ci] += scalars[global_ring];
                             }
                         }
                     }
                 }
-                CyclotomicRing::from_coefficients(acc)
+                acc
             })
-            .reduce(CyclotomicRing::zero, |a, b| a + b)
+            .reduce(
+                || [Fp128::zero(); D],
+                |mut a, b| {
+                    for i in 0..D {
+                        a[i] += b[i];
+                    }
+                    a
+                },
+            );
+
+        CyclotomicRing::from_coefficients(total)
     }
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::fold_blocks")]
     fn fold_blocks(&self, scalars: &[Fp128], _block_len: usize) -> Vec<CyclotomicRing<Fp128, D>> {
         let bpp = self.blocks_per_poly;
         let total_blocks = self.num_padded * bpp;
-        let real_blocks = self.num_polys * bpp;
+        let num_polys = self.num_polys;
 
-        let mut result: Vec<CyclotomicRing<Fp128, D>> = (0..real_blocks)
+        let results_flat: Vec<[Fp128; D]> = (0..bpp * num_polys)
             .into_par_iter()
-            .map(|b| {
-                let p = b / bpp;
-                let bw = b % bpp;
+            .map(|task_idx| {
+                let bw = task_idx / num_polys;
+                let p = task_idx % num_polys;
                 let (c_start, c_end) = self.block_cycle_range(bw);
                 let ring_base = bw * self.block_len;
-                let mut acc = [Fp128::zero(); D];
+                let mut fold_acc = [Fp128::zero(); D];
                 for c in c_start..c_end {
                     if let Some(k) = (self.index_of)(c, p) {
                         let field_pos = c * self.onehot_k + (k as usize);
-                        let ring_idx = field_pos / D;
-                        let ci = field_pos % D;
+                        let ring_idx = field_pos >> D.trailing_zeros();
                         let pos = ring_idx.wrapping_sub(ring_base);
-                        if pos < self.block_len && pos < scalars.len() {
-                            acc[ci] += scalars[pos];
+                        if pos < self.block_len {
+                            let ci = field_pos & (D - 1);
+                            if pos < scalars.len() {
+                                fold_acc[ci] += scalars[pos];
+                            }
                         }
                     }
                 }
-                CyclotomicRing::from_coefficients(acc)
+                fold_acc
             })
             .collect();
-        result.resize(total_blocks, CyclotomicRing::zero());
-        result
+
+        let mut fold_result = vec![CyclotomicRing::zero(); total_blocks];
+        for bw in 0..bpp {
+            for p in 0..num_polys {
+                let task_idx = bw * num_polys + p;
+                let b = p * bpp + bw;
+                fold_result[b] = CyclotomicRing::from_coefficients(results_flat[task_idx]);
+            }
+        }
+        fold_result
     }
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::evaluate_and_fold")]
@@ -200,56 +284,53 @@ where
         let bl = self.block_len;
         let bpp = self.blocks_per_poly;
         let total_blocks = self.num_padded * bpp;
-        let real_blocks = self.num_polys * bpp;
+        let num_polys = self.num_polys;
 
-        let mut fold_result = vec![CyclotomicRing::zero(); total_blocks];
-        let eval_total = fold_result[..real_blocks]
-            .par_iter_mut()
-            .enumerate()
-            .fold(
-                || [Fp128::zero(); D],
-                |mut eval_local, (b, fold_slot)| {
-                    let p = b / bpp;
-                    let bw = b % bpp;
-                    let (c_start, c_end) = self.block_cycle_range(bw);
-                    let ring_base = bw * bl;
-                    let mut eval_acc = [Fp128::zero(); D];
-                    let mut fold_acc = [Fp128::zero(); D];
+        let results_flat: Vec<([Fp128; D], [Fp128; D])> = (0..bpp * num_polys)
+            .into_par_iter()
+            .map(|task_idx| {
+                let bw = task_idx / num_polys;
+                let p = task_idx % num_polys;
+                let (c_start, c_end) = self.block_cycle_range(bw);
+                let ring_base = bw * bl;
+                let mut eval_acc = [Fp128::zero(); D];
+                let mut fold_acc = [Fp128::zero(); D];
 
-                    for c in c_start..c_end {
-                        if let Some(k) = (self.index_of)(c, p) {
-                            let field_pos = c * self.onehot_k + (k as usize);
-                            let ring_idx = field_pos / D;
-                            let ci = field_pos % D;
-                            let pos = ring_idx.wrapping_sub(ring_base);
-                            if pos < bl {
-                                let global_ring = b * bl + pos;
-                                if global_ring < eval_scalars.len() {
-                                    eval_acc[ci] += eval_scalars[global_ring];
-                                }
-                                if pos < fold_scalars.len() {
-                                    fold_acc[ci] += fold_scalars[pos];
-                                }
+                for c in c_start..c_end {
+                    if let Some(k) = (self.index_of)(c, p) {
+                        let field_pos = c * self.onehot_k + (k as usize);
+                        let ring_idx = field_pos >> D.trailing_zeros();
+                        let pos = ring_idx.wrapping_sub(ring_base);
+                        if pos < bl {
+                            let ci = field_pos & (D - 1);
+                            let global_ring = (p * bpp + bw) * bl + pos;
+                            if global_ring < eval_scalars.len() {
+                                eval_acc[ci] += eval_scalars[global_ring];
+                            }
+                            if pos < fold_scalars.len() {
+                                fold_acc[ci] += fold_scalars[pos];
                             }
                         }
                     }
+                }
+                (eval_acc, fold_acc)
+            })
+            .collect();
 
-                    *fold_slot = CyclotomicRing::from_coefficients(fold_acc);
-                    for i in 0..D {
-                        eval_local[i] += eval_acc[i];
-                    }
-                    eval_local
-                },
-            )
-            .reduce(
-                || [Fp128::zero(); D],
-                |mut a, b| {
-                    for i in 0..D {
-                        a[i] += b[i];
-                    }
-                    a
-                },
-            );
+        let mut fold_result = vec![CyclotomicRing::zero(); total_blocks];
+        let mut eval_total = [Fp128::zero(); D];
+
+        for bw in 0..bpp {
+            for p in 0..num_polys {
+                let task_idx = bw * num_polys + p;
+                let (eval_acc, fold_acc) = results_flat[task_idx];
+                for i in 0..D {
+                    eval_total[i] += eval_acc[i];
+                }
+                let b = p * bpp + bw;
+                fold_result[b] = CyclotomicRing::from_coefficients(fold_acc);
+            }
+        }
 
         (CyclotomicRing::from_coefficients(eval_total), fold_result)
     }
@@ -263,84 +344,15 @@ where
         _log_basis: u32,
     ) -> Vec<CyclotomicRing<Fp128, D>> {
         let inner_width = block_len * delta;
-        let bpp = self.blocks_per_poly;
-        let chunk_size = 512;
-        let num_chunks = self.num_cycles.div_ceil(chunk_size);
 
-        // Per-thread accumulator is inner_width * D * 4 bytes. When this
-        // exceeds ~4MB the buffer no longer fits in L3 cache, causing
-        // massive slowdowns on large traces. Tile the inner_width dimension
-        // so each pass keeps the working set cache-resident.
-        const TILE_THRESHOLD_ELEMS: usize = 4096;
-        let tile_size = if inner_width <= TILE_THRESHOLD_ELEMS {
-            inner_width
+        let total_z = if inner_width <= DECOMPOSE_FOLD_CACHE_THRESHOLD {
+            self.decompose_fold_small(challenges, block_len, delta)
         } else {
-            TILE_THRESHOLD_ELEMS
+            self.decompose_fold_large(challenges, block_len, delta)
         };
-        let num_tiles = inner_width.div_ceil(tile_size);
-
-        let mut z_i32 = vec![[0i32; D]; inner_width];
-
-        for tile_idx in 0..num_tiles {
-            let tile_start = tile_idx * tile_size;
-            let tile_end = (tile_start + tile_size).min(inner_width);
-            let tile_len = tile_end - tile_start;
-
-            let tile: Vec<[i32; D]> = (0..num_chunks)
-                .into_par_iter()
-                .fold(
-                    || vec![[0i32; D]; tile_len],
-                    |mut z, chunk_idx| {
-                        let c_start = chunk_idx * chunk_size;
-                        let c_end = (c_start + chunk_size).min(self.num_cycles);
-                        for c in c_start..c_end {
-                            for p in 0..self.num_polys {
-                                if let Some(k) = (self.index_of)(c, p) {
-                                    let (block_within, pos_in_block, ci) = self.decompose(c, k);
-                                    let packed_block = p * bpp + block_within;
-                                    if packed_block >= challenges.len() {
-                                        continue;
-                                    }
-                                    let base_j = pos_in_block * delta;
-                                    if base_j < tile_start || base_j >= tile_end {
-                                        continue;
-                                    }
-                                    let local_j = base_j - tile_start;
-                                    let c_i = &challenges[packed_block];
-                                    for (&pos, &challenge_coeff) in
-                                        c_i.positions.iter().zip(c_i.coeffs.iter())
-                                    {
-                                        let target = ci + pos as usize;
-                                        let (idx, sign) = if target < D {
-                                            (target, 1i32)
-                                        } else {
-                                            (target - D, -1i32)
-                                        };
-                                        z[local_j][idx] += sign * challenge_coeff as i32;
-                                    }
-                                }
-                            }
-                        }
-                        z
-                    },
-                )
-                .reduce(
-                    || vec![[0i32; D]; tile_len],
-                    |mut a, b| {
-                        for (ai, bi) in a.iter_mut().zip(b.iter()) {
-                            for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
-                                *a_coeff += b_coeff;
-                            }
-                        }
-                        a
-                    },
-                );
-
-            z_i32[tile_start..tile_end].copy_from_slice(&tile);
-        }
 
         let q = (-Fp128::one()).to_canonical_u128() + 1;
-        z_i32
+        total_z
             .into_iter()
             .map(|arr| {
                 let coeffs = std::array::from_fn(|k| {
@@ -373,7 +385,45 @@ where
         let bl = self.block_len;
         let bpp = self.blocks_per_poly;
         let total_blocks = self.num_padded * bpp;
-        let real_blocks = self.num_polys * bpp;
+        let num_polys = self.num_polys;
+        let num_tasks = bpp * num_polys;
+
+        let results_flat: Vec<Vec<[i8; D]>> = if bl <= COMMIT_TILE_SIZE {
+            self.commit_inner_small(&a_view, n_a, num_digits_commit, num_digits_open, log_basis)
+        } else {
+            self.commit_inner_tiled(&a_view, n_a, num_digits_commit, num_digits_open, log_basis)
+        };
+
+        let mut results = vec![vec![[0i8; D]; t_hat_len]; total_blocks];
+        for task_idx in 0..num_tasks {
+            let bw = task_idx / num_polys;
+            let p = task_idx % num_polys;
+            let b = p * bpp + bw;
+            // SAFETY: each (bw, p) pair produces a unique b index
+            results[b] = unsafe { std::ptr::read(&results_flat[task_idx]) };
+        }
+        std::mem::forget(results_flat);
+
+        Ok(results)
+    }
+}
+
+impl<const D: usize, IndexFn> JoltPackedPoly<D, IndexFn>
+where
+    IndexFn: Fn(usize, usize) -> Option<u8> + Clone + Send + Sync,
+{
+    /// Fast path: a_wide_flat fits in L3. Precompute once, all tasks read from cache.
+    fn commit_inner_small(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        n_a: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> Vec<Vec<[i8; D]>> {
+        let bl = self.block_len;
+        let bpp = self.blocks_per_poly;
+        let num_polys = self.num_polys;
 
         let a_wide_flat: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..bl)
             .into_par_iter()
@@ -383,55 +433,274 @@ where
             })
             .collect();
 
-        const REDUCE_INTERVAL: usize = 32_000;
-
-        let mut results: Vec<Vec<[i8; D]>> = (0..real_blocks)
+        (0..bpp * num_polys)
             .into_par_iter()
-            .map_init(
-                || vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a],
-                |t_wide, b| {
-                    for tw in t_wide.iter_mut() {
-                        *tw = WideCyclotomicRing::zero();
-                    }
+            .map(|task_idx| {
+                let bw = task_idx / num_polys;
+                let p = task_idx % num_polys;
+                let (c_start, c_end) = self.block_cycle_range(bw);
+                let ring_base = bw * bl;
+                let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
 
-                    let p = b / bpp;
-                    let bw = b % bpp;
-                    let (c_start, c_end) = self.block_cycle_range(bw);
+                for c in c_start..c_end {
+                    if let Some(k) = (self.index_of)(c, p) {
+                        let field_pos = c * self.onehot_k + (k as usize);
+                        let ring_idx = field_pos >> D.trailing_zeros();
+                        let pos = ring_idx.wrapping_sub(ring_base);
+                        if pos < bl {
+                            let ci = field_pos & (D - 1);
+                            let a_base = pos * n_a;
+                            let a_slice = &a_wide_flat[a_base..a_base + n_a];
+                            for a in 0..n_a {
+                                a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[ci]);
+                            }
+                        }
+                    }
+                }
+
+                let t: Vec<CyclotomicRing<Fp128, D>> =
+                    t_wide.iter_mut().map(|w| w.reduce()).collect();
+                decompose_rows_i8(&t, num_digits_open, log_basis)
+            })
+            .collect()
+    }
+
+    /// Tiled path for large block_len: process a_wide in L3-sized tiles so
+    /// each task's A-matrix reads hit cache instead of streaming from DRAM.
+    fn commit_inner_tiled(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        n_a: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> Vec<Vec<[i8; D]>> {
+        let bl = self.block_len;
+        let bpp = self.blocks_per_poly;
+        let num_polys = self.num_polys;
+        let num_tasks = bpp * num_polys;
+        let tile_size = COMMIT_TILE_SIZE;
+        let num_tiles = bl.div_ceil(tile_size);
+
+        // Per-task accumulators that persist across tiles (16 KB each for n_a=1)
+        let mut task_accums: Vec<Vec<WideCyclotomicRing<Fp128x8i32, D>>> = (0..num_tasks)
+            .map(|_| vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a])
+            .collect();
+
+        // Each tile adds at most tile_size * D / onehot_k cycles worth of
+        // Fp128x8i32 limbs. Reduce before i32 overflow (~32K adds max).
+        let cycles_per_tile = (tile_size * D) / self.onehot_k;
+        let tiles_per_reduce = WIDE_RING_REDUCE_INTERVAL / cycles_per_tile.max(1);
+        let mut tiles_since_reduce = 0usize;
+
+        for tile in 0..num_tiles {
+            let tile_start = tile * tile_size;
+            let tile_end = (tile_start + tile_size).min(bl);
+            let tile_len = tile_end - tile_start;
+
+            let a_tile: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..tile_len)
+                .into_par_iter()
+                .flat_map_iter(|local_pos| {
+                    let pos = tile_start + local_pos;
+                    let col = pos * num_digits_commit;
+                    (0..n_a).map(move |a| WideCyclotomicRing::from_ring(&a_view.row(a)[col]))
+                })
+                .collect();
+
+            task_accums
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(task_idx, t_wide)| {
+                    let bw = task_idx / num_polys;
+                    let p = task_idx % num_polys;
+                    let (c_start, c_end) = self.tile_cycle_range(bw, tile_start, tile_end);
                     let ring_base = bw * bl;
-                    let mut add_count = 0usize;
 
                     for c in c_start..c_end {
                         if let Some(k) = (self.index_of)(c, p) {
                             let field_pos = c * self.onehot_k + (k as usize);
                             let ring_idx = field_pos / D;
-                            let ci = field_pos % D;
                             let pos = ring_idx.wrapping_sub(ring_base);
-                            if pos < bl {
-                                let a_base = pos * n_a;
+                            if pos >= tile_start && pos < tile_end {
+                                let ci = field_pos % D;
+                                let local_pos = pos - tile_start;
+                                let a_base = local_pos * n_a;
+                                let a_slice = &a_tile[a_base..a_base + n_a];
                                 for a in 0..n_a {
-                                    a_wide_flat[a_base + a]
-                                        .mul_by_monomial_sum_into(&mut t_wide[a], &[ci]);
-                                }
-                                add_count += 1;
-                                if add_count % REDUCE_INTERVAL == 0 {
-                                    for tw in t_wide.iter_mut() {
-                                        let r: CyclotomicRing<Fp128, D> = tw.reduce();
-                                        *tw = WideCyclotomicRing::from_ring(&r);
-                                    }
+                                    a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[ci]);
                                 }
                             }
                         }
                     }
+                });
 
-                    let t: Vec<CyclotomicRing<Fp128, D>> =
-                        t_wide.iter().map(|w| w.reduce()).collect();
-                    decompose_rows_i8(&t, num_digits_open, log_basis)
+            tiles_since_reduce += 1;
+            if tiles_since_reduce >= tiles_per_reduce {
+                task_accums.par_iter_mut().for_each(|t_wide| {
+                    for tw in t_wide.iter_mut() {
+                        let r: CyclotomicRing<Fp128, D> = tw.reduce();
+                        *tw = WideCyclotomicRing::from_ring(&r);
+                    }
+                });
+                tiles_since_reduce = 0;
+            }
+        }
+
+        task_accums
+            .into_par_iter()
+            .map(|mut t_wide| {
+                let t: Vec<CyclotomicRing<Fp128, D>> =
+                    t_wide.iter_mut().map(|w| w.reduce()).collect();
+                decompose_rows_i8(&t, num_digits_open, log_basis)
+            })
+            .collect()
+    }
+
+    /// Small path: per-task z_chunk fits in L3, tree-reduce is cheap.
+    fn decompose_fold_small(
+        &self,
+        challenges: &[SparseChallenge],
+        block_len: usize,
+        delta: usize,
+    ) -> Vec<[i32; D]> {
+        let bpp = self.blocks_per_poly;
+        let inner_width = block_len * delta;
+        let num_polys = self.num_polys;
+
+        (0..bpp * num_polys)
+            .into_par_iter()
+            .map(|task_idx| {
+                let bw = task_idx / num_polys;
+                let p = task_idx % num_polys;
+                let mut z_chunk = vec![[0i32; D]; inner_width];
+                let packed_block = p * bpp + bw;
+
+                if packed_block < challenges.len() {
+                    let c_i = &challenges[packed_block];
+                    if !c_i.positions.is_empty() {
+                        let (c_start, c_end) = self.block_cycle_range(bw);
+                        let ring_base = bw * block_len;
+                        Self::scatter_challenge(
+                            &self.index_of,
+                            p,
+                            c_start,
+                            c_end,
+                            self.onehot_k,
+                            ring_base,
+                            block_len,
+                            delta,
+                            c_i,
+                            &mut z_chunk,
+                        );
+                    }
+                }
+                z_chunk
+            })
+            .reduce(
+                || vec![[0i32; D]; inner_width],
+                |mut a, b| {
+                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                        for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
+                            *a_coeff += b_coeff;
+                        }
+                    }
+                    a
                 },
             )
-            .collect();
-        results.resize_with(total_blocks, || vec![[0i8; D]; t_hat_len]);
+    }
 
-        Ok(results)
+    /// Large path: use thread-local accumulation (fold → reduce) to avoid
+    /// allocating one huge buffer per task. Each Rayon thread reuses a single
+    /// buffer across all its assigned tasks, then we merge only ~2×num_threads
+    /// buffers instead of ~131K.
+    fn decompose_fold_large(
+        &self,
+        challenges: &[SparseChallenge],
+        block_len: usize,
+        delta: usize,
+    ) -> Vec<[i32; D]> {
+        let bpp = self.blocks_per_poly;
+        let inner_width = block_len * delta;
+        let num_polys = self.num_polys;
+
+        (0..bpp * num_polys)
+            .into_par_iter()
+            .fold(
+                || vec![[0i32; D]; inner_width],
+                |mut z_accum, task_idx| {
+                    let bw = task_idx / num_polys;
+                    let p = task_idx % num_polys;
+                    let packed_block = p * bpp + bw;
+
+                    if packed_block < challenges.len() {
+                        let c_i = &challenges[packed_block];
+                        if !c_i.positions.is_empty() {
+                            let (c_start, c_end) = self.block_cycle_range(bw);
+                            let ring_base = bw * block_len;
+                            Self::scatter_challenge(
+                                &self.index_of,
+                                p,
+                                c_start,
+                                c_end,
+                                self.onehot_k,
+                                ring_base,
+                                block_len,
+                                delta,
+                                c_i,
+                                &mut z_accum,
+                            );
+                        }
+                    }
+                    z_accum
+                },
+            )
+            .reduce(
+                || vec![[0i32; D]; inner_width],
+                |mut a, b| {
+                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                        for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
+                            *a_coeff += b_coeff;
+                        }
+                    }
+                    a
+                },
+            )
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_challenge(
+        index_of: &IndexFn,
+        p: usize,
+        c_start: usize,
+        c_end: usize,
+        onehot_k: usize,
+        ring_base: usize,
+        block_len: usize,
+        delta: usize,
+        c_i: &SparseChallenge,
+        z_chunk: &mut [[i32; D]],
+    ) {
+        for c in c_start..c_end {
+            if let Some(k) = index_of(c, p) {
+                let field_pos = c * onehot_k + (k as usize);
+                let ring_idx = field_pos >> D.trailing_zeros();
+                let pos_in_block = ring_idx.wrapping_sub(ring_base);
+                if pos_in_block < block_len {
+                    let ci = field_pos & (D - 1);
+                    let base_j = pos_in_block * delta;
+                    for (&pos, &challenge_coeff) in c_i.positions.iter().zip(c_i.coeffs.iter()) {
+                        let target = ci + pos as usize;
+                        let (idx, sign) = if target < D {
+                            (target, 1i32)
+                        } else {
+                            (target - D, -1i32)
+                        };
+                        z_chunk[base_j][idx] += sign * challenge_coeff as i32;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -569,7 +838,7 @@ fn build_packed_poly<const D: usize, IndexFn: Fn(usize, usize) -> Option<u8>>(
     block_len: usize,
 ) -> JoltPackedPoly<D, IndexFn> {
     let poly_field_len = num_cycles * onehot_k;
-    let poly_ring_len = poly_field_len.div_ceil(D);
+    let poly_ring_len = (poly_field_len + D - 1) >> D.trailing_zeros();
     let blocks_per_poly = poly_ring_len.div_ceil(block_len);
     let num_padded = num_polys.next_power_of_two();
 

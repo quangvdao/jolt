@@ -1858,15 +1858,13 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>> Serializable
 #[cfg(test)]
 mod tests {
     use ark_bn254::Fr;
-    use hachi_pcs::protocol::{
-        commitment::CommitmentConfig, Fp128OneHotCommitmentConfig as HachiTestCommitmentConfig,
-    };
+    use hachi_pcs::protocol::commitment::CommitmentConfig;
     use serial_test::serial;
 
     use crate::field::fp128::JoltFp128;
     use crate::host;
     use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
-    use crate::poly::commitment::hachi::JoltHachiCommitmentScheme;
+    use crate::poly::commitment::hachi::{Fp128OneHot256Config, JoltHachiCommitmentScheme};
     use crate::poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
@@ -1892,7 +1890,7 @@ mod tests {
     use jolt_inlines_sha2 as _;
 
     type HachiPcs =
-        JoltHachiCommitmentScheme<{ HachiTestCommitmentConfig::D }, HachiTestCommitmentConfig>;
+        JoltHachiCommitmentScheme<{ Fp128OneHot256Config::D }, Fp128OneHot256Config>;
     type RV64IMACHachiProver<'a> = JoltCpuProver<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
     type RV64IMACHachiVerifier<'a> = JoltVerifier<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
 

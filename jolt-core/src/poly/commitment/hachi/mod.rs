@@ -1,7 +1,7 @@
 mod commitment_scheme;
 mod wrappers;
 
-pub use commitment_scheme::JoltHachiCommitmentScheme;
+pub use commitment_scheme::{Fp128Bounded256Config, Fp128OneHot256Config, JoltHachiCommitmentScheme};
 pub use wrappers::JoltToHachiTranscript;
 
 #[cfg(test)]

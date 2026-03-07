@@ -2,7 +2,7 @@
 use crate::poly::multilinear_polynomial::PolynomialEvaluation;
 use crate::{
     subprotocols::streaming_schedule::LinearOnlySchedule,
-    zkvm::{claim_reductions::advice::ReductionPhase, config::OneHotConfig},
+    zkvm::claim_reductions::advice::ReductionPhase,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -15,7 +15,7 @@ use std::{
 
 use crate::poly::commitment::dory::DoryContext;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use common::constants::{ONEHOT_CHUNK_THRESHOLD_LOG_T, XLEN};
+use common::constants::XLEN;
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
@@ -335,16 +335,13 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         // and nu_main by roughly 0.5 each iteration.
         while {
             let log_t = padded_trace_len.log_2();
-            let log_k_chunk = OneHotConfig::new(log_t, false).log_k_chunk as usize;
+            let log_k_chunk = PCS::log_k_chunk_for_trace(log_t);
             let (sigma_main, nu_main) = DoryGlobals::main_sigma_nu(log_k_chunk, log_t);
             sigma_main < max_sigma_a || nu_main < max_nu_a
         } {
             if padded_trace_len >= max_padded_trace_length {
-                // This is a configuration error: the preprocessing was set up with
-                // max_padded_trace_length too small for the configured advice sizes.
-                // Cannot recover at runtime - user must fix their configuration.
                 let log_t = padded_trace_len.log_2();
-                let log_k_chunk = OneHotConfig::new(log_t, false).log_k_chunk as usize;
+                let log_k_chunk = PCS::log_k_chunk_for_trace(log_t);
                 let total_vars = log_k_chunk + log_t;
                 let (sigma_main, nu_main) = DoryGlobals::main_sigma_nu(log_k_chunk, log_t);
                 panic!(
@@ -451,10 +448,9 @@ impl<'a, F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, ProofTranscrip
         let ram_log_K = ram_K.log_2();
         let rw_config = ReadWriteConfig::new(log_T, ram_log_K);
         let one_hot_params = OneHotParams::new(
-            log_T,
+            PCS::log_k_chunk_for_trace(log_T),
             preprocessing.shared.bytecode.code_size,
             ram_K,
-            PCS::uses_onehot_inc(),
         );
 
         Self {
@@ -1805,12 +1801,7 @@ where
     pub fn new(shared: JoltSharedPreprocessing) -> JoltProverPreprocessing<F, PCS> {
         let max_T: usize = shared.max_padded_trace_length.next_power_of_two();
         let max_log_T = max_T.log_2();
-        let max_log_k_chunk = if PCS::uses_onehot_inc() || max_log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T
-        {
-            8
-        } else {
-            4
-        };
+        let max_log_k_chunk = PCS::log_k_chunk_for_trace(max_log_T);
         // For PCS schemes that use packed polynomial batching (Hachi), provide
         // the packed selector width directly so the PCS can size its setup for
         // the actual packed layout rather than only the flat variable count.

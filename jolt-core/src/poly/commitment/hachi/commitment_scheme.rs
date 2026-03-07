@@ -1251,6 +1251,17 @@ where
     fn uses_onehot_inc() -> bool {
         true
     }
+
+    #[allow(clippy::if_same_then_else)]
+    fn log_k_chunk_for_trace(log_T: usize) -> usize {
+        use common::constants::HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T;
+        // Hachi with D=256 requires log_k_chunk >= alpha = log2(D) = 8.
+        if log_T >= HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T {
+            8
+        } else {
+            8
+        }
+    }
 }
 
 impl<const D: usize, Cfg> StreamingCommitmentScheme for JoltHachiCommitmentScheme<D, Cfg>

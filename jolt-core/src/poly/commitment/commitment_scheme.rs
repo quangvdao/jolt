@@ -1,4 +1,5 @@
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
 use std::borrow::Borrow;
 use std::fmt::Debug;
 
@@ -177,6 +178,19 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
     /// When false (default), increments use dense `RdInc` / `RamInc`.
     fn uses_onehot_inc() -> bool {
         false
+    }
+
+    /// Returns the log₂ chunk size for one-hot encoding given the trace length.
+    ///
+    /// Each PCS can implement its own threshold-based switching policy.
+    /// Must be monotonically non-decreasing in `log_T` so that
+    /// `setup_prover_from_shape(max_log_T, ...)` sizes the setup correctly.
+    fn log_k_chunk_for_trace(log_T: usize) -> usize {
+        if log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
+            8
+        } else {
+            4
+        }
     }
 }
 

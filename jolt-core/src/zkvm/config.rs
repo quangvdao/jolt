@@ -4,9 +4,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use crate::field::JoltField;
 use crate::utils::math::Math;
 use crate::zkvm::instruction_lookups::LOG_K;
-use common::constants::{
-    INSTRUCTION_PHASES_THRESHOLD_LOG_T, ONEHOT_CHUNK_THRESHOLD_LOG_T, REGISTER_COUNT, XLEN,
-};
+use common::constants::{INSTRUCTION_PHASES_THRESHOLD_LOG_T, REGISTER_COUNT, XLEN};
 
 /// Bits needed to represent the unsigned offset increment.
 /// Increment range is `[-(2^XLEN - 1), 2^XLEN - 1]`; adding `2^XLEN` maps to `[1, 2^{XLEN+1} - 1]`,
@@ -135,23 +133,13 @@ pub struct OneHotConfig {
 }
 
 impl OneHotConfig {
-    /// Create a OneHotConfig with default values based on trace length.
+    /// Create a OneHotConfig from a pre-computed log_k_chunk value.
     ///
-    /// When `force_max_k_chunk` is true (Hachi), always uses `log_k_chunk=8`
-    /// regardless of trace length. This is because Hachi's lattice commitment
-    /// costs don't benefit from the smaller chunk size that Dory uses for short traces.
-    pub fn new(log_T: usize, force_max_k_chunk: bool) -> Self {
-        let log_k_chunk = if force_max_k_chunk || log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
-            8
-        } else {
-            4
-        };
-        let lookups_ra_virtual_log_k_chunk =
-            if force_max_k_chunk || log_T >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
-                LOG_K / 4
-            } else {
-                LOG_K / 8
-            };
+    /// The caller is responsible for choosing `log_k_chunk` (e.g. via
+    /// `CommitmentScheme::log_k_chunk_for_trace`). The `lookups_ra_virtual_log_k_chunk`
+    /// is derived as `4 * log_k_chunk`.
+    pub fn new(log_k_chunk: usize) -> Self {
+        let lookups_ra_virtual_log_k_chunk = 4 * log_k_chunk;
 
         Self {
             log_k_chunk: log_k_chunk as u8,
@@ -270,11 +258,9 @@ impl OneHotParams {
         }
     }
 
-    /// Create OneHotParams for the given trace parameters using default config.
-    ///
-    /// When `force_max_k_chunk` is true (Hachi), always uses `log_k_chunk=8`.
-    pub fn new(log_T: usize, bytecode_k: usize, ram_k: usize, force_max_k_chunk: bool) -> Self {
-        let config = OneHotConfig::new(log_T, force_max_k_chunk);
+    /// Create OneHotParams from a pre-computed `log_k_chunk` and proof parameters.
+    pub fn new(log_k_chunk: usize, bytecode_k: usize, ram_k: usize) -> Self {
+        let config = OneHotConfig::new(log_k_chunk);
         Self::from_config(&config, bytecode_k, ram_k)
     }
 
@@ -347,7 +333,7 @@ mod tests {
 
     #[test]
     fn inc_chunk_roundtrip() {
-        let params = OneHotParams::new(25, 256, 256, false);
+        let params = OneHotParams::new(8, 256, 256);
         assert_eq!(params.log_k_chunk, 8);
         assert_eq!(params.d_inc, INC_BITS.div_ceil(8));
         assert_eq!(params.d_inc, 9);
@@ -386,7 +372,7 @@ mod tests {
 
     #[test]
     fn inc_chunk_roundtrip_k4() {
-        let params = OneHotParams::new(10, 16, 16, false);
+        let params = OneHotParams::new(4, 16, 16);
         assert_eq!(params.log_k_chunk, 4);
         assert_eq!(params.d_inc, INC_BITS.div_ceil(4));
         assert_eq!(params.d_inc, 17);

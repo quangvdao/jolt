@@ -46,8 +46,8 @@ use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::{SumcheckInstanceParams, SumcheckInstanceVerifier};
 use crate::transcripts::Transcript;
 use crate::utils::math::Math;
-use crate::zkvm::config::OneHotConfig;
 use allocative::Allocative;
+use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
 use common::jolt_device::MemoryLayout;
 use rayon::prelude::*;
 
@@ -132,7 +132,11 @@ impl<F: JoltField> AdviceClaimReductionParams<F> {
         };
 
         let log_t = trace_len.log_2();
-        let log_k_chunk = OneHotConfig::new(log_t, false).log_k_chunk as usize;
+        let log_k_chunk = if log_t >= ONEHOT_CHUNK_THRESHOLD_LOG_T {
+            8
+        } else {
+            4
+        };
         let (main_col_vars, main_row_vars) = DoryGlobals::main_sigma_nu(log_k_chunk, log_t);
 
         let r_val = accumulator

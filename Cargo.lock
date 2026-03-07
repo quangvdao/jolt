@@ -2250,7 +2250,7 @@ dependencies = [
 [[package]]
 name = "hachi-derive"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Fhachi-perf-fixes#6bdf35118708ecea548313f9a3750ce34337c3fb"
+source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Ffix-norm-sumcheck#8a50c9eba1112d8c9366a6a1003c2599529234d3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2260,7 +2260,7 @@ dependencies = [
 [[package]]
 name = "hachi-pcs"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Fhachi-perf-fixes#6bdf35118708ecea548313f9a3750ce34337c3fb"
+source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Ffix-norm-sumcheck#8a50c9eba1112d8c9366a6a1003c2599529234d3"
 dependencies = [
  "aes",
  "blake2",
@@ -4044,7 +4044,7 @@ version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit 0.25.3+spec-1.1.0",
+ "toml_edit 0.25.4+spec-1.1.0",
 ]
 
 [[package]]
@@ -4573,7 +4573,7 @@ dependencies = [
 [[package]]
 name = "reth-codecs"
 version = "1.11.1"
-source = "git+https://github.com/paradigmxyz/reth#ae6edbd3336135cbfae9d5f2c0015dff7fb892c5"
+source = "git+https://github.com/paradigmxyz/reth#0aa77e8d9004df43ea35ea1fe0f4637ee672d867"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4591,7 +4591,7 @@ dependencies = [
 [[package]]
 name = "reth-codecs-derive"
 version = "1.11.1"
-source = "git+https://github.com/paradigmxyz/reth#ae6edbd3336135cbfae9d5f2c0015dff7fb892c5"
+source = "git+https://github.com/paradigmxyz/reth#0aa77e8d9004df43ea35ea1fe0f4637ee672d867"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4601,7 +4601,7 @@ dependencies = [
 [[package]]
 name = "reth-ethereum-primitives"
 version = "1.11.1"
-source = "git+https://github.com/paradigmxyz/reth#ae6edbd3336135cbfae9d5f2c0015dff7fb892c5"
+source = "git+https://github.com/paradigmxyz/reth#0aa77e8d9004df43ea35ea1fe0f4637ee672d867"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4615,7 +4615,7 @@ dependencies = [
 [[package]]
 name = "reth-primitives-traits"
 version = "1.11.1"
-source = "git+https://github.com/paradigmxyz/reth#ae6edbd3336135cbfae9d5f2c0015dff7fb892c5"
+source = "git+https://github.com/paradigmxyz/reth#0aa77e8d9004df43ea35ea1fe0f4637ee672d867"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4645,7 +4645,7 @@ dependencies = [
 [[package]]
 name = "reth-zstd-compressors"
 version = "1.11.1"
-source = "git+https://github.com/paradigmxyz/reth#ae6edbd3336135cbfae9d5f2c0015dff7fb892c5"
+source = "git+https://github.com/paradigmxyz/reth#0aa77e8d9004df43ea35ea1fe0f4637ee672d867"
 dependencies = [
  "zstd",
 ]
@@ -5391,12 +5391,12 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
+checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5841,9 +5841,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.3+spec-1.1.0"
+version = "0.25.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a07913e63758bc95142d9863a5a45173b71515e68b690cad70cf99c3255ce1"
+checksum = "7193cbd0ce53dc966037f54351dbbcf0d5a642c7f0038c382ef9e677ce8c13f2"
 dependencies = [
  "indexmap 2.13.0",
  "toml_datetime 1.0.0+spec-1.1.0",
@@ -6111,9 +6111,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.21.0"
+version = "1.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b672338555252d43fd2240c714dc444b8c6fb0a5c5335e65a07bba7742735ddb"
+checksum = "a68d3c8f01c0cfa54a75291d83601161799e4a89a39e0929f4b0354d88757a37"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -6727,9 +6727,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
-version = "0.7.14"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
@@ -6862,9 +6862,9 @@ dependencies = [
 
 [[package]]
 name = "z3"
-version = "0.19.12"
+version = "0.19.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eefc89611f6835ebe4c66501f6035e4e54c0b9a6777085a8c1cb360eb22fd8f"
+checksum = "d66e43501a6df283ebdb26614b8432250a19997c0a1165655a3541aa7875deaf"
 dependencies = [
  "log",
  "num",
@@ -6873,9 +6873,9 @@ dependencies = [
 
 [[package]]
 name = "z3-sys"
-version = "0.10.7"
+version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2edfd1f4106f59e475dde9eab39eec89cf2d3fb41189eab87d575e0fa40a0818"
+checksum = "5fc7af1cb6bb7271e5deb596479faaa3973af59033f3cfa9bbba9730724d264a"
 dependencies = [
  "bindgen",
  "pkg-config",

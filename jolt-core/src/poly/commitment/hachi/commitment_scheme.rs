@@ -1,5 +1,6 @@
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData, sync::Arc, time::Instant};
 
+use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout, PackedBlockRange};
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
@@ -21,13 +22,14 @@ use hachi_pcs::protocol::commitment::utils::flat_matrix::{FlatMatrix, RingMatrix
 use hachi_pcs::protocol::commitment::utils::linear::decompose_rows_i8;
 use hachi_pcs::protocol::commitment::{
     compute_num_digits, compute_num_digits_fold, optimal_m_r_split, CommitmentConfig,
-    DecompositionParams, Fp128BoundedCommitmentConfig, HachiCommitmentLayout, RingCommitment,
+    DecompositionParams, Fp128BoundedCommitmentConfig, HachiCommitmentCore, HachiCommitmentLayout,
+    RingCommitment,
 };
-use hachi_pcs::HachiError;
 use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
 use hachi_pcs::protocol::{HachiCommitmentScheme, HachiProverSetup, HachiVerifierSetup};
 use hachi_pcs::CommitmentScheme as HachiCommitmentSchemeTrait;
+use hachi_pcs::HachiError;
 use hachi_pcs::{
     CanonicalField, DensePoly, FieldCore, FromSmallInt, HachiPolyOps, OneHotIndex, OneHotPoly,
 };
@@ -106,7 +108,8 @@ pub struct HachiBatchedProof<const D: usize> {
 #[derive(Clone, Debug)]
 pub struct JoltHachiBatchHint<const D: usize> {
     hachi_hint: HachiCommitmentHint<Fp128, D>,
-    block_len: usize,
+    packed_layout: PackedBitLayout,
+    packed_block_cache: Arc<PackedBlockCache>,
     num_packed_polys: usize,
     log_k: usize,
 }
@@ -126,90 +129,92 @@ pub enum HachiChunkState<const D: usize> {
     },
 }
 
-/// Streaming view over the packed one-hot trace. Uses T-major layout
-/// (field_pos = c * K + k) so cycle-contiguous entries map to adjacent
-/// ring elements, enabling per-block parallelism and sequential A-matrix
-/// access.
-///
-/// Generic over `IndexFn` — a closure `(cycle, poly) -> Option<u8>` that
-/// the compiler monomorphizes and inlines into every hot loop, avoiding
-/// the overhead of an erased function pointer.
 #[derive(Clone)]
-struct JoltPackedPoly<const D: usize, IndexFn> {
-    index_of: IndexFn,
-    num_cycles: usize,
-    num_polys: usize,
-    onehot_k: usize,
+struct PackedBlockCache {
+    coeffs: Arc<[u8]>,
+    present_words: Arc<[u64]>,
     block_len: usize,
-    blocks_per_poly: usize,
-    num_padded: usize,
+    present_words_per_block: usize,
+    num_blocks: usize,
 }
 
-impl<const D: usize, IndexFn> JoltPackedPoly<D, IndexFn> {
-    /// T-major layout: field_pos = c * K + k. Addr varies fast, cycle
-    /// varies slow. Opening-point convention: [r_addr_LE, r_cycle_LE].
-    /// Slight over-approximation; callers verify ring_idx bounds.
-    #[inline]
-    fn block_cycle_range(&self, bw: usize) -> (usize, usize) {
-        let ring_start = bw * self.block_len;
-        let ring_end = ring_start + self.block_len;
-        let log_k = self.onehot_k.trailing_zeros();
-        let c_start = (ring_start * D) >> log_k;
-        let c_end = ((ring_end * D + self.onehot_k - 1) >> log_k).min(self.num_cycles);
-        (c_start, c_end)
-    }
-
-    /// Cycle range for a sub-tile [tile_start, tile_end) within block `bw`.
-    #[inline]
-    fn tile_cycle_range(&self, bw: usize, tile_start: usize, tile_end: usize) -> (usize, usize) {
-        let ring_start = bw * self.block_len + tile_start;
-        let ring_end = bw * self.block_len + tile_end;
-        let log_k = self.onehot_k.trailing_zeros();
-        let c_start = (ring_start * D) >> log_k;
-        let c_end = ((ring_end * D + self.onehot_k - 1) >> log_k).min(self.num_cycles);
-        (c_start, c_end)
+impl fmt::Debug for PackedBlockCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PackedBlockCache")
+            .field("block_len", &self.block_len)
+            .field("present_words_per_block", &self.present_words_per_block)
+            .field("num_blocks", &self.num_blocks)
+            .field("total_slots", &self.coeffs.len())
+            .finish()
     }
 }
 
-impl<const D: usize, IndexFn> HachiPolyOps<Fp128, D> for JoltPackedPoly<D, IndexFn>
-where
-    IndexFn: Fn(usize, usize) -> Option<u8> + Clone + Send + Sync,
-{
+impl PackedBlockCache {
+    #[inline]
+    fn coeffs_for_block(&self, block_idx: usize) -> &[u8] {
+        let start = block_idx * self.block_len;
+        &self.coeffs[start..start + self.block_len]
+    }
+
+    #[inline]
+    fn present_words_for_block(&self, block_idx: usize) -> &[u64] {
+        let start = block_idx * self.present_words_per_block;
+        &self.present_words[start..start + self.present_words_per_block]
+    }
+}
+
+/// Streaming view over the packed one-hot trace using a packed-specific
+/// cycle/poly tile layout.
+#[derive(Clone)]
+struct JoltPackedPoly<const D: usize> {
+    packed_layout: PackedBitLayout,
+    packed_block_cache: Arc<PackedBlockCache>,
+}
+
+impl<const D: usize> JoltPackedPoly<D> {
+    #[inline]
+    fn num_blocks(&self) -> usize {
+        self.packed_block_cache.num_blocks
+    }
+
+    #[inline]
+    fn for_each_nonzero_in_block(&self, block_idx: usize, mut f: impl FnMut(usize, usize)) {
+        let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+        let present_words = self.packed_block_cache.present_words_for_block(block_idx);
+        for (word_idx, &word) in present_words.iter().enumerate() {
+            let mut mask = word;
+            while mask != 0 {
+                let bit_idx = mask.trailing_zeros() as usize;
+                let pos_in_block = word_idx * u64::BITS as usize + bit_idx;
+                debug_assert!(pos_in_block < coeffs.len());
+                f(pos_in_block, coeffs[pos_in_block] as usize);
+                mask &= mask - 1;
+            }
+        }
+    }
+}
+
+impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     type CommitCache = NttSlotCache<D>;
 
     fn num_ring_elems(&self) -> usize {
-        (self.num_padded * self.blocks_per_poly) * self.block_len
+        self.num_blocks() * self.packed_layout.block_len()
     }
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::evaluate_ring")]
     fn evaluate_ring(&self, scalars: &[Fp128]) -> CyclotomicRing<Fp128, D> {
-        let bl = self.block_len;
-        let bpp = self.blocks_per_poly;
-        let num_polys = self.num_polys;
-
-        let total = (0..bpp * num_polys)
+        let block_len = self.packed_layout.block_len();
+        let total = (0..self.num_blocks())
             .into_par_iter()
-            .map(|task_idx| {
-                let bw = task_idx / num_polys;
-                let p = task_idx % num_polys;
-                let (c_start, c_end) = self.block_cycle_range(bw);
-                let ring_base = bw * bl;
+            .map(|block_idx| {
                 let mut acc = [Fp128::zero(); D];
 
-                for c in c_start..c_end {
-                    if let Some(k) = (self.index_of)(c, p) {
-                        let field_pos = c * self.onehot_k + (k as usize);
-                        let ring_idx = field_pos >> D.trailing_zeros();
-                        let pos = ring_idx.wrapping_sub(ring_base);
-                        if pos < bl {
-                            let ci = field_pos & (D - 1);
-                            let global_ring = (p * bpp + bw) * bl + pos;
-                            if global_ring < scalars.len() {
-                                acc[ci] += scalars[global_ring];
-                            }
-                        }
+                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                    let global_ring = block_idx * block_len + pos_in_block;
+                    if global_ring < scalars.len() {
+                        acc[coeff_idx] += scalars[global_ring];
                     }
-                }
+                });
                 acc
             })
             .reduce(
@@ -227,112 +232,36 @@ where
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::fold_blocks")]
     fn fold_blocks(&self, scalars: &[Fp128], _block_len: usize) -> Vec<CyclotomicRing<Fp128, D>> {
-        let bpp = self.blocks_per_poly;
-        let total_blocks = self.num_padded * bpp;
-        let num_polys = self.num_polys;
-
-        let results_flat: Vec<[Fp128; D]> = (0..bpp * num_polys)
+        let block_len = self.packed_layout.block_len();
+        (0..self.num_blocks())
             .into_par_iter()
-            .map(|task_idx| {
-                let bw = task_idx / num_polys;
-                let p = task_idx % num_polys;
-                let (c_start, c_end) = self.block_cycle_range(bw);
-                let ring_base = bw * self.block_len;
+            .map(|block_idx| {
                 let mut fold_acc = [Fp128::zero(); D];
-                for c in c_start..c_end {
-                    if let Some(k) = (self.index_of)(c, p) {
-                        let field_pos = c * self.onehot_k + (k as usize);
-                        let ring_idx = field_pos >> D.trailing_zeros();
-                        let pos = ring_idx.wrapping_sub(ring_base);
-                        if pos < self.block_len {
-                            let ci = field_pos & (D - 1);
-                            if pos < scalars.len() {
-                                fold_acc[ci] += scalars[pos];
-                            }
-                        }
+                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                    if pos_in_block < block_len && pos_in_block < scalars.len() {
+                        fold_acc[coeff_idx] += scalars[pos_in_block];
                     }
-                }
-                fold_acc
+                });
+                CyclotomicRing::from_coefficients(fold_acc)
             })
-            .collect();
-
-        let mut fold_result = vec![CyclotomicRing::zero(); total_blocks];
-        for bw in 0..bpp {
-            for p in 0..num_polys {
-                let task_idx = bw * num_polys + p;
-                let b = p * bpp + bw;
-                fold_result[b] = CyclotomicRing::from_coefficients(results_flat[task_idx]);
-            }
-        }
-        fold_result
+            .collect()
     }
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::evaluate_and_fold")]
     fn evaluate_and_fold(
         &self,
-        eval_scalars: &[Fp128],
+        eval_outer_scalars: &[Fp128],
         fold_scalars: &[Fp128],
         _block_len: usize,
     ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
-        if eval_scalars.is_empty() {
-            return (CyclotomicRing::zero(), self.fold_blocks(fold_scalars, 0));
-        }
-        if fold_scalars.is_empty() {
-            return (self.evaluate_ring(eval_scalars), vec![]);
-        }
-
-        let bl = self.block_len;
-        let bpp = self.blocks_per_poly;
-        let total_blocks = self.num_padded * bpp;
-        let num_polys = self.num_polys;
-
-        let results_flat: Vec<([Fp128; D], [Fp128; D])> = (0..bpp * num_polys)
-            .into_par_iter()
-            .map(|task_idx| {
-                let bw = task_idx / num_polys;
-                let p = task_idx % num_polys;
-                let (c_start, c_end) = self.block_cycle_range(bw);
-                let ring_base = bw * bl;
-                let mut eval_acc = [Fp128::zero(); D];
-                let mut fold_acc = [Fp128::zero(); D];
-
-                for c in c_start..c_end {
-                    if let Some(k) = (self.index_of)(c, p) {
-                        let field_pos = c * self.onehot_k + (k as usize);
-                        let ring_idx = field_pos >> D.trailing_zeros();
-                        let pos = ring_idx.wrapping_sub(ring_base);
-                        if pos < bl {
-                            let ci = field_pos & (D - 1);
-                            let global_ring = (p * bpp + bw) * bl + pos;
-                            if global_ring < eval_scalars.len() {
-                                eval_acc[ci] += eval_scalars[global_ring];
-                            }
-                            if pos < fold_scalars.len() {
-                                fold_acc[ci] += fold_scalars[pos];
-                            }
-                        }
-                    }
-                }
-                (eval_acc, fold_acc)
-            })
-            .collect();
-
-        let mut fold_result = vec![CyclotomicRing::zero(); total_blocks];
-        let mut eval_total = [Fp128::zero(); D];
-
-        for bw in 0..bpp {
-            for p in 0..num_polys {
-                let task_idx = bw * num_polys + p;
-                let (eval_acc, fold_acc) = results_flat[task_idx];
-                for i in 0..D {
-                    eval_total[i] += eval_acc[i];
-                }
-                let b = p * bpp + bw;
-                fold_result[b] = CyclotomicRing::from_coefficients(fold_acc);
-            }
-        }
-
-        (CyclotomicRing::from_coefficients(eval_total), fold_result)
+        let folded = self.fold_blocks(fold_scalars, 0);
+        let eval = folded
+            .iter()
+            .zip(eval_outer_scalars.iter())
+            .fold(CyclotomicRing::<Fp128, D>::zero(), |acc, (f_i, s_i)| {
+                acc + f_i.scale(s_i)
+            });
+        (eval, folded)
     }
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::decompose_fold")]
@@ -378,40 +307,53 @@ where
         num_digits_commit: usize,
         num_digits_open: usize,
         log_basis: u32,
-    ) -> Result<Vec<Vec<[i8; D]>>, hachi_pcs::HachiError> {
+    ) -> Result<Vec<Vec<[i8; D]>>, HachiError> {
         let a_view = a_matrix.view::<D>();
         let n_a = a_view.num_rows();
-        let t_hat_len = n_a.checked_mul(num_digits_open).unwrap();
-        let bl = self.block_len;
-        let bpp = self.blocks_per_poly;
-        let total_blocks = self.num_padded * bpp;
-        let num_polys = self.num_polys;
-        let num_tasks = bpp * num_polys;
-
-        let results_flat: Vec<Vec<[i8; D]>> = if bl <= COMMIT_TILE_SIZE {
-            self.commit_inner_small(&a_view, n_a, num_digits_commit, num_digits_open, log_basis)
+        let block_len = self.packed_layout.block_len();
+        let t_commit_inner = Instant::now();
+        let (branch, results_flat): (&str, Vec<Vec<[i8; D]>>) = if block_len <= COMMIT_TILE_SIZE {
+            (
+                "small",
+                self.commit_inner_small(
+                    &a_view,
+                    n_a,
+                    num_digits_commit,
+                    num_digits_open,
+                    log_basis,
+                ),
+            )
         } else {
-            self.commit_inner_tiled(&a_view, n_a, num_digits_commit, num_digits_open, log_basis)
+            (
+                "tiled",
+                self.commit_inner_tiled(
+                    &a_view,
+                    n_a,
+                    num_digits_commit,
+                    num_digits_open,
+                    log_basis,
+                ),
+            )
         };
+        eprintln!(
+            "    [packed poly] commit_inner: {:.2}s (branch={branch}, block_len={block_len}, num_blocks={})",
+            t_commit_inner.elapsed().as_secs_f64(),
+            self.num_blocks(),
+        );
 
-        let mut results = vec![vec![[0i8; D]; t_hat_len]; total_blocks];
-        for task_idx in 0..num_tasks {
-            let bw = task_idx / num_polys;
-            let p = task_idx % num_polys;
-            let b = p * bpp + bw;
-            // SAFETY: each (bw, p) pair produces a unique b index
-            results[b] = unsafe { std::ptr::read(&results_flat[task_idx]) };
-        }
-        std::mem::forget(results_flat);
-
-        Ok(results)
+        Ok(results_flat)
     }
 }
 
-impl<const D: usize, IndexFn> JoltPackedPoly<D, IndexFn>
-where
-    IndexFn: Fn(usize, usize) -> Option<u8> + Clone + Send + Sync,
-{
+impl<const D: usize> JoltPackedPoly<D> {
+    #[inline]
+    fn reduce_wide_accumulators(t_wide: &mut [WideCyclotomicRing<Fp128x8i32, D>]) {
+        for tw in t_wide.iter_mut() {
+            let reduced: CyclotomicRing<Fp128, D> = tw.reduce();
+            *tw = WideCyclotomicRing::from_ring(&reduced);
+        }
+    }
+
     /// Fast path: a_wide_flat fits in L3. Precompute once, all tasks read from cache.
     fn commit_inner_small(
         &self,
@@ -421,11 +363,9 @@ where
         num_digits_open: usize,
         log_basis: u32,
     ) -> Vec<Vec<[i8; D]>> {
-        let bl = self.block_len;
-        let bpp = self.blocks_per_poly;
-        let num_polys = self.num_polys;
+        let block_len = self.packed_layout.block_len();
 
-        let a_wide_flat: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..bl)
+        let a_wide_flat: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..block_len)
             .into_par_iter()
             .flat_map_iter(|pos| {
                 let col = pos * num_digits_commit;
@@ -433,30 +373,18 @@ where
             })
             .collect();
 
-        (0..bpp * num_polys)
+        (0..self.num_blocks())
             .into_par_iter()
-            .map(|task_idx| {
-                let bw = task_idx / num_polys;
-                let p = task_idx % num_polys;
-                let (c_start, c_end) = self.block_cycle_range(bw);
-                let ring_base = bw * bl;
+            .map(|block_idx| {
                 let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
 
-                for c in c_start..c_end {
-                    if let Some(k) = (self.index_of)(c, p) {
-                        let field_pos = c * self.onehot_k + (k as usize);
-                        let ring_idx = field_pos >> D.trailing_zeros();
-                        let pos = ring_idx.wrapping_sub(ring_base);
-                        if pos < bl {
-                            let ci = field_pos & (D - 1);
-                            let a_base = pos * n_a;
-                            let a_slice = &a_wide_flat[a_base..a_base + n_a];
-                            for a in 0..n_a {
-                                a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[ci]);
-                            }
-                        }
+                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                    let a_base = pos_in_block * n_a;
+                    let a_slice = &a_wide_flat[a_base..a_base + n_a];
+                    for a in 0..n_a {
+                        a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx]);
                     }
-                }
+                });
 
                 let t: Vec<CyclotomicRing<Fp128, D>> =
                     t_wide.iter_mut().map(|w| w.reduce()).collect();
@@ -465,8 +393,9 @@ where
             .collect()
     }
 
-    /// Tiled path for large block_len: process a_wide in L3-sized tiles so
-    /// each task's A-matrix reads hit cache instead of streaming from DRAM.
+    /// Tiled path for large block_len. Precomputes A-matrix tiles (shared
+    /// read-only, total = block_len * n_a * sizeof(WideRing)), then processes
+    /// blocks via par_iter so only O(num_threads) accumulators exist at a time.
     fn commit_inner_tiled(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
@@ -475,80 +404,50 @@ where
         num_digits_open: usize,
         log_basis: u32,
     ) -> Vec<Vec<[i8; D]>> {
-        let bl = self.block_len;
-        let bpp = self.blocks_per_poly;
-        let num_polys = self.num_polys;
-        let num_tasks = bpp * num_polys;
+        let block_len = self.packed_layout.block_len();
         let tile_size = COMMIT_TILE_SIZE;
-        let num_tiles = bl.div_ceil(tile_size);
+        let num_tiles = block_len.div_ceil(tile_size);
 
-        // Per-task accumulators that persist across tiles (16 KB each for n_a=1)
-        let mut task_accums: Vec<Vec<WideCyclotomicRing<Fp128x8i32, D>>> = (0..num_tasks)
-            .map(|_| vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a])
+        let a_tiles: Vec<Vec<WideCyclotomicRing<Fp128x8i32, D>>> = (0..num_tiles)
+            .map(|tile| {
+                let tile_start = tile * tile_size;
+                let tile_end = (tile_start + tile_size).min(block_len);
+                let tile_len = tile_end - tile_start;
+                (0..tile_len)
+                    .into_par_iter()
+                    .flat_map_iter(|local_pos| {
+                        let pos = tile_start + local_pos;
+                        let col = pos * num_digits_commit;
+                        (0..n_a).map(move |a| WideCyclotomicRing::from_ring(&a_view.row(a)[col]))
+                    })
+                    .collect()
+            })
             .collect();
 
-        // Each tile adds at most tile_size * D / onehot_k cycles worth of
-        // Fp128x8i32 limbs. Reduce before i32 overflow (~32K adds max).
-        let cycles_per_tile = (tile_size * D) / self.onehot_k;
-        let tiles_per_reduce = WIDE_RING_REDUCE_INTERVAL / cycles_per_tile.max(1);
-        let mut tiles_since_reduce = 0usize;
-
-        for tile in 0..num_tiles {
-            let tile_start = tile * tile_size;
-            let tile_end = (tile_start + tile_size).min(bl);
-            let tile_len = tile_end - tile_start;
-
-            let a_tile: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..tile_len)
-                .into_par_iter()
-                .flat_map_iter(|local_pos| {
-                    let pos = tile_start + local_pos;
-                    let col = pos * num_digits_commit;
-                    (0..n_a).map(move |a| WideCyclotomicRing::from_ring(&a_view.row(a)[col]))
-                })
-                .collect();
-
-            task_accums
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(task_idx, t_wide)| {
-                    let bw = task_idx / num_polys;
-                    let p = task_idx % num_polys;
-                    let (c_start, c_end) = self.tile_cycle_range(bw, tile_start, tile_end);
-                    let ring_base = bw * bl;
-
-                    for c in c_start..c_end {
-                        if let Some(k) = (self.index_of)(c, p) {
-                            let field_pos = c * self.onehot_k + (k as usize);
-                            let ring_idx = field_pos / D;
-                            let pos = ring_idx.wrapping_sub(ring_base);
-                            if pos >= tile_start && pos < tile_end {
-                                let ci = field_pos % D;
-                                let local_pos = pos - tile_start;
-                                let a_base = local_pos * n_a;
-                                let a_slice = &a_tile[a_base..a_base + n_a];
-                                for a in 0..n_a {
-                                    a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[ci]);
-                                }
-                            }
-                        }
-                    }
-                });
-
-            tiles_since_reduce += 1;
-            if tiles_since_reduce >= tiles_per_reduce {
-                task_accums.par_iter_mut().for_each(|t_wide| {
-                    for tw in t_wide.iter_mut() {
-                        let r: CyclotomicRing<Fp128, D> = tw.reduce();
-                        *tw = WideCyclotomicRing::from_ring(&r);
-                    }
-                });
-                tiles_since_reduce = 0;
-            }
-        }
-
-        task_accums
+        (0..self.num_blocks())
             .into_par_iter()
-            .map(|mut t_wide| {
+            .map(|block_idx| {
+                let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
+                let mut entries_since_reduce = 0usize;
+
+                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                    let tile_idx = pos_in_block / tile_size;
+                    let tile_start = tile_idx * tile_size;
+                    let local_pos = pos_in_block - tile_start;
+                    let a_tile = &a_tiles[tile_idx];
+                    let a_base = local_pos * n_a;
+                    let a_slice = &a_tile[a_base..a_base + n_a];
+                    for a in 0..n_a {
+                        a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx]);
+                    }
+
+                    entries_since_reduce += 1;
+                    if entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
+                        Self::reduce_wide_accumulators(&mut t_wide);
+                        entries_since_reduce = 0;
+                    }
+                });
+
                 let t: Vec<CyclotomicRing<Fp128, D>> =
                     t_wide.iter_mut().map(|w| w.reduce()).collect();
                 decompose_rows_i8(&t, num_digits_open, log_basis)
@@ -563,30 +462,19 @@ where
         block_len: usize,
         delta: usize,
     ) -> Vec<[i32; D]> {
-        let bpp = self.blocks_per_poly;
         let inner_width = block_len * delta;
-        let num_polys = self.num_polys;
 
-        (0..bpp * num_polys)
+        (0..self.num_blocks())
             .into_par_iter()
-            .map(|task_idx| {
-                let bw = task_idx / num_polys;
-                let p = task_idx % num_polys;
+            .map(|block_idx| {
                 let mut z_chunk = vec![[0i32; D]; inner_width];
-                let packed_block = p * bpp + bw;
 
-                if packed_block < challenges.len() {
-                    let c_i = &challenges[packed_block];
+                if block_idx < challenges.len() {
+                    let c_i = &challenges[block_idx];
                     if !c_i.positions.is_empty() {
-                        let (c_start, c_end) = self.block_cycle_range(bw);
-                        let ring_base = bw * block_len;
                         Self::scatter_challenge(
-                            &self.index_of,
-                            p,
-                            c_start,
-                            c_end,
-                            self.onehot_k,
-                            ring_base,
+                            self,
+                            block_idx,
                             block_len,
                             delta,
                             c_i,
@@ -619,31 +507,19 @@ where
         block_len: usize,
         delta: usize,
     ) -> Vec<[i32; D]> {
-        let bpp = self.blocks_per_poly;
         let inner_width = block_len * delta;
-        let num_polys = self.num_polys;
 
-        (0..bpp * num_polys)
+        (0..self.num_blocks())
             .into_par_iter()
             .fold(
                 || vec![[0i32; D]; inner_width],
-                |mut z_accum, task_idx| {
-                    let bw = task_idx / num_polys;
-                    let p = task_idx % num_polys;
-                    let packed_block = p * bpp + bw;
-
-                    if packed_block < challenges.len() {
-                        let c_i = &challenges[packed_block];
+                |mut z_accum, block_idx| {
+                    if block_idx < challenges.len() {
+                        let c_i = &challenges[block_idx];
                         if !c_i.positions.is_empty() {
-                            let (c_start, c_end) = self.block_cycle_range(bw);
-                            let ring_base = bw * block_len;
                             Self::scatter_challenge(
-                                &self.index_of,
-                                p,
-                                c_start,
-                                c_end,
-                                self.onehot_k,
-                                ring_base,
+                                self,
+                                block_idx,
                                 block_len,
                                 delta,
                                 c_i,
@@ -670,37 +546,27 @@ where
     #[inline]
     #[allow(clippy::too_many_arguments)]
     fn scatter_challenge(
-        index_of: &IndexFn,
-        p: usize,
-        c_start: usize,
-        c_end: usize,
-        onehot_k: usize,
-        ring_base: usize,
+        packed_poly: &Self,
+        block_idx: usize,
         block_len: usize,
         delta: usize,
         c_i: &SparseChallenge,
         z_chunk: &mut [[i32; D]],
     ) {
-        for c in c_start..c_end {
-            if let Some(k) = index_of(c, p) {
-                let field_pos = c * onehot_k + (k as usize);
-                let ring_idx = field_pos >> D.trailing_zeros();
-                let pos_in_block = ring_idx.wrapping_sub(ring_base);
-                if pos_in_block < block_len {
-                    let ci = field_pos & (D - 1);
-                    let base_j = pos_in_block * delta;
-                    for (&pos, &challenge_coeff) in c_i.positions.iter().zip(c_i.coeffs.iter()) {
-                        let target = ci + pos as usize;
-                        let (idx, sign) = if target < D {
-                            (target, 1i32)
-                        } else {
-                            (target - D, -1i32)
-                        };
-                        z_chunk[base_j][idx] += sign * challenge_coeff as i32;
-                    }
+        packed_poly.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+            if pos_in_block < block_len {
+                let base_j = pos_in_block * delta;
+                for (&pos, &challenge_coeff) in c_i.positions.iter().zip(c_i.coeffs.iter()) {
+                    let target = coeff_idx + pos as usize;
+                    let (idx, sign) = if target < D {
+                        (target, 1i32)
+                    } else {
+                        (target - D, -1i32)
+                    };
+                    z_chunk[base_j][idx] += sign * challenge_coeff as i32;
                 }
             }
-        }
+        });
     }
 }
 
@@ -711,41 +577,18 @@ fn to_hachi_opening_point<const D: usize>(point: &[JoltFp128]) -> Vec<Fp128> {
 fn to_hachi_packed_opening_point<const D: usize>(
     opening_point: &[JoltFp128],
     rho: &[JoltFp128],
-    log_k: usize,
+    packed_layout: PackedBitLayout,
 ) -> Vec<Fp128> {
-    // Jolt opening point (BE): [addr_BE, cycle_BE]
-    // After rev: [cycle_LE, addr_LE]
     let reversed: Vec<Fp128> = opening_point.iter().rev().map(jolt_to_hachi).collect();
+    let log_k = packed_layout.log_k();
     assert!(
         log_k <= reversed.len(),
-        "packed opening point expects log_k <= num_vars (log_k={}, num_vars={})",
-        log_k,
+        "packed opening point expects log_k <= num_vars (log_k={log_k}, num_vars={})",
         reversed.len()
     );
     let log_t = reversed.len() - log_k;
-    // T-major LE variable order: [addr_LE, cycle_LE, poly_LE]
-    let mut out = Vec::with_capacity(reversed.len() + rho.len());
-    out.extend_from_slice(&reversed[log_t..]);
-    out.extend_from_slice(&reversed[..log_t]);
-    out.extend(rho.iter().rev().map(jolt_to_hachi));
-    out
-}
-
-fn onehot_commit_layout<Cfg: CommitmentConfig>(
-    m_vars: usize,
-    r_vars: usize,
-) -> HachiCommitmentLayout {
-    let log_basis = Cfg::decomposition().log_basis;
-    HachiCommitmentLayout::new_with_decomp(
-        m_vars,
-        r_vars,
-        Cfg::N_A,
-        1,
-        compute_num_digits(128, log_basis),
-        compute_num_digits_fold(r_vars, Cfg::CHALLENGE_WEIGHT, log_basis),
-        log_basis,
-    )
-    .unwrap()
+    let rho_le: Vec<Fp128> = rho.iter().rev().map(jolt_to_hachi).collect();
+    packed_layout.reorder_packed_point(&reversed[..log_t], &reversed[log_t..], &rho_le)
 }
 
 fn advice_commit_layout<Cfg: CommitmentConfig>(
@@ -766,11 +609,7 @@ fn advice_commit_layout<Cfg: CommitmentConfig>(
 }
 
 /// Compute the advice commit layout using the polynomial's own optimal m/r split
-/// rather than inheriting from the setup layout.
-///
-/// The setup may use a very different m/r split (optimized for onehot with
-/// num_digits_commit=1), so advice polynomials (with num_digits_commit=22)
-/// need their own split to keep inner_width within the setup's bounds.
+/// rather than inheriting from the setup envelope.
 fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
     poly_num_vars: usize,
 ) -> HachiCommitmentLayout {
@@ -784,6 +623,54 @@ fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
     // share the same N_A, CHALLENGE_WEIGHT, log_basis.
     let (m_vars, r_vars) = optimal_m_r_split::<Fp128BoundedCommitmentConfig<64>>(reduced_vars);
     advice_commit_layout::<Cfg>(m_vars, r_vars)
+}
+
+fn choose_packed_layout_for_shape<const D: usize, Cfg: CommitmentConfig>(
+    log_k: usize,
+    log_t: usize,
+    log_packed: usize,
+) -> (PackedBitLayout, HachiCommitmentLayout) {
+    let packed_layout = choose_packed_bit_layout::<D, Cfg>(log_k, log_t, log_packed);
+    let hachi_layout = packed_layout.into_hachi_layout::<Cfg>();
+    (packed_layout, hachi_layout)
+}
+
+fn choose_packed_layout_for_dims<const D: usize, Cfg: CommitmentConfig>(
+    num_cycles: usize,
+    num_polys: usize,
+    onehot_k: usize,
+) -> (PackedBitLayout, HachiCommitmentLayout) {
+    assert!(
+        num_cycles.is_power_of_two(),
+        "packed Hachi layout expects num_cycles to be a power of two (got {num_cycles})"
+    );
+    assert!(
+        onehot_k.is_power_of_two(),
+        "packed Hachi layout expects onehot_k to be a power of two (got {onehot_k})"
+    );
+    let log_k = onehot_k.trailing_zeros() as usize;
+    let log_t = num_cycles.trailing_zeros() as usize;
+    let log_packed = num_polys.next_power_of_two().trailing_zeros() as usize;
+    choose_packed_layout_for_shape::<D, Cfg>(log_k, log_t, log_packed)
+}
+
+fn compute_packed_setup_layouts<const D: usize, Cfg: CommitmentConfig>(
+    max_log_t: usize,
+    max_log_k: usize,
+    log_packed: usize,
+) -> [HachiCommitmentLayout; 2] {
+    let advice_num_vars = max_log_k + max_log_t;
+    let advice_layout = compute_advice_layout::<D, Cfg>(advice_num_vars);
+    let (_, packed_layout) =
+        choose_packed_layout_for_shape::<D, Cfg>(max_log_k, max_log_t, log_packed);
+    if std::env::var_os("HACHI_SETUP_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "[jolt hachi setup] max_log_t={max_log_t}, max_log_k={max_log_k}, log_packed={log_packed}"
+        );
+        eprintln!("  advice_layout={advice_layout:?}");
+        eprintln!("  packed_layout={packed_layout:?}");
+    }
+    [advice_layout, packed_layout]
 }
 
 fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
@@ -830,26 +717,101 @@ fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig, I: OneHotIndex>(
     )
 }
 
-fn build_packed_poly<const D: usize, IndexFn: Fn(usize, usize) -> Option<u8>>(
+fn build_packed_block_cache<const D: usize, IndexFn>(
+    index_of: &IndexFn,
+    num_cycles: usize,
+    num_polys: usize,
+    packed_layout: PackedBitLayout,
+) -> Arc<PackedBlockCache>
+where
+    IndexFn: Fn(usize, usize) -> Option<u8> + Sync,
+{
+    let t_cache = Instant::now();
+    let block_len = packed_layout.block_len();
+    let num_blocks = packed_layout.num_blocks();
+    let present_words_per_block = block_len.div_ceil(u64::BITS as usize);
+    let total_slots = num_blocks
+        .checked_mul(block_len)
+        .expect("packed block cache size overflow");
+    let total_present_words = num_blocks
+        .checked_mul(present_words_per_block)
+        .expect("packed block presence size overflow");
+    let mut coeffs = vec![0u8; total_slots];
+    let mut present_words = vec![0u64; total_present_words];
+
+    coeffs
+        .par_chunks_mut(block_len)
+        .zip(present_words.par_chunks_mut(present_words_per_block))
+        .enumerate()
+        .for_each(|(block_idx, (coeffs_block, present_words_block))| {
+            let PackedBlockRange {
+                cycle_start,
+                cycle_end,
+                poly_start,
+                poly_end,
+            } = packed_layout.block_range(block_idx, num_cycles, num_polys);
+            for c in cycle_start..cycle_end {
+                for p in poly_start..poly_end {
+                    if let Some(k) = index_of(c, p) {
+                        let packed = packed_layout.locate(c, p, k as usize);
+                        debug_assert_eq!(packed.block_idx, block_idx);
+                        coeffs_block[packed.pos_in_block] = packed.coeff_idx as u8;
+                        let word_idx = packed.pos_in_block / u64::BITS as usize;
+                        let bit_idx = packed.pos_in_block % u64::BITS as usize;
+                        present_words_block[word_idx] |= 1u64 << bit_idx;
+                    }
+                }
+            }
+        });
+
+    eprintln!(
+        "    [packed poly] build_block_cache: {:.2}s (block_len={block_len}, num_blocks={num_blocks})",
+        t_cache.elapsed().as_secs_f64(),
+    );
+
+    Arc::new(PackedBlockCache {
+        coeffs: Arc::from(coeffs.into_boxed_slice()),
+        present_words: Arc::from(present_words.into_boxed_slice()),
+        block_len,
+        present_words_per_block,
+        num_blocks,
+    })
+}
+
+fn build_packed_poly<const D: usize, IndexFn>(
     index_of: IndexFn,
     num_cycles: usize,
     num_polys: usize,
-    onehot_k: usize,
-    block_len: usize,
-) -> JoltPackedPoly<D, IndexFn> {
-    let poly_field_len = num_cycles * onehot_k;
-    let poly_ring_len = (poly_field_len + D - 1) >> D.trailing_zeros();
-    let blocks_per_poly = poly_ring_len.div_ceil(block_len);
+    packed_layout: PackedBitLayout,
+    packed_block_cache: Option<Arc<PackedBlockCache>>,
+) -> JoltPackedPoly<D>
+where
+    IndexFn: Fn(usize, usize) -> Option<u8> + Sync,
+{
     let num_padded = num_polys.next_power_of_two();
+    assert_eq!(
+        num_padded,
+        packed_layout.num_padded_polys(),
+        "packed layout padding mismatch (expected {}, got {num_padded})",
+        packed_layout.num_padded_polys()
+    );
+    let packed_block_cache = packed_block_cache.unwrap_or_else(|| {
+        build_packed_block_cache::<D, _>(&index_of, num_cycles, num_polys, packed_layout)
+    });
+    assert_eq!(
+        packed_block_cache.block_len,
+        packed_layout.block_len(),
+        "packed block cache block_len mismatch"
+    );
+    assert_eq!(
+        packed_block_cache.num_blocks,
+        packed_layout.num_blocks(),
+        "packed block cache num_blocks mismatch"
+    );
 
     JoltPackedPoly {
-        index_of,
-        num_cycles,
-        num_polys,
-        onehot_k,
-        block_len,
-        blocks_per_poly,
-        num_padded,
+        packed_layout,
+        packed_block_cache,
     }
 }
 
@@ -873,6 +835,18 @@ where
                 max_num_vars,
             ),
         )
+    }
+
+    fn setup_prover_from_shape(
+        max_log_t: usize,
+        max_log_k: usize,
+        log_packed: Option<usize>,
+    ) -> Self::ProverSetup {
+        let setup_layouts =
+            compute_packed_setup_layouts::<D, Cfg>(max_log_t, max_log_k, log_packed.unwrap_or(0));
+        let (setup, _) = HachiCommitmentCore::setup_with_layouts::<Fp128, D, Cfg>(&setup_layouts)
+            .expect("Hachi packed setup failed");
+        ArkBridge(setup)
     }
 
     fn setup_verifier(setup: &Self::ProverSetup) -> Self::VerifierSetup {
@@ -915,21 +889,17 @@ where
         setup: &Self::ProverSetup,
     ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint) {
         assert!(source.num_polys() > 0);
-        let layout = setup.0.layout();
-        let block_len = layout.block_len;
-
         let num_cycles = source
             .num_cycles()
             .expect("batch_commit requires lazy source");
         let onehot_k = source.onehot_k().unwrap();
         let num_polys = source.num_polys();
+        let (packed_layout, batch_layout) =
+            choose_packed_layout_for_dims::<D, Cfg>(num_cycles, num_polys, onehot_k);
 
         let index_fn = |c: usize, p: usize| source.onehot_index(c, p);
         let packed_poly =
-            build_packed_poly::<D, _>(index_fn, num_cycles, num_polys, onehot_k, block_len);
-        let total_packed_blocks = packed_poly.num_padded * packed_poly.blocks_per_poly;
-        let packed_r_vars = (total_packed_blocks as u32).trailing_zeros() as usize;
-        let batch_layout = onehot_commit_layout::<Cfg>(layout.m_vars, packed_r_vars);
+            build_packed_poly::<D, _>(index_fn, num_cycles, num_polys, packed_layout, None);
 
         let (commitment, hachi_hint) =
             <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::commit(
@@ -939,13 +909,12 @@ where
             )
             .expect("Hachi packed poly commit failed");
 
-        let log_k = onehot_k.trailing_zeros() as usize;
-
         let hint = JoltHachiBatchHint {
             hachi_hint,
-            block_len,
+            packed_layout,
+            packed_block_cache: packed_poly.packed_block_cache.clone(),
             num_packed_polys: num_polys,
-            log_k,
+            log_k: packed_layout.log_k(),
         };
         (vec![ArkBridge(commitment)], hint)
     }
@@ -1074,21 +1043,15 @@ where
             .map(|(&v, &eq)| v * eq)
             .sum();
 
-        let setup_layout = &setup.0.expanded.seed.layout;
         let log_k = batch_hint.log_k;
         assert!(
             log_k <= opening_point.len(),
-            "batch_prove log_k exceeds opening point length (log_k={}, point_len={})",
-            log_k,
+            "batch_prove log_k exceeds opening point length (log_k={log_k}, point_len={})",
             opening_point.len()
         );
-        let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, log_k);
-
-        let alpha = D.trailing_zeros() as usize;
-        let packed_r_vars = packed_point
-            .len()
-            .saturating_sub(alpha + setup_layout.m_vars);
-        let packed_layout = onehot_commit_layout::<Cfg>(setup_layout.m_vars, packed_r_vars);
+        let packed_layout = batch_hint.packed_layout;
+        let packed_hachi_layout = packed_layout.into_hachi_layout::<Cfg>();
+        let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, packed_layout);
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
         let packed_commitment = commitments[0];
@@ -1101,13 +1064,20 @@ where
         let num_cycles = poly_source
             .num_cycles()
             .expect("batch_prove requires lazy source");
-        let onehot_k = poly_source.onehot_k().unwrap();
         let num_polys = poly_source.num_polys().unwrap();
-        let block_len = batch_hint.block_len;
+        assert_eq!(
+            num_polys, num_packed,
+            "batch_prove packed poly count mismatch (commit={num_packed}, prove={num_polys})"
+        );
 
         let index_fn = |c: usize, p: usize| poly_source.onehot_index(c, p);
-        let packed_poly =
-            build_packed_poly::<D, _>(index_fn, num_cycles, num_polys, onehot_k, block_len);
+        let packed_poly = build_packed_poly::<D, _>(
+            index_fn,
+            num_cycles,
+            num_polys,
+            packed_layout,
+            Some(batch_hint.packed_block_cache.clone()),
+        );
 
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
@@ -1120,7 +1090,7 @@ where
                 &mut adapter,
                 &packed_commitment.0,
                 BasisMode::Lagrange,
-                &packed_layout,
+                &packed_hachi_layout,
             )
             .expect("Hachi packed poly prove failed");
 
@@ -1210,7 +1180,6 @@ where
             .map(|(&v, &eq)| v * eq)
             .sum();
 
-        let setup_layout = &setup.0.expanded.seed.layout;
         let log_k = proof.log_k as usize;
         if log_k > opening_point.len() {
             return Err(ProofVerifyError::InvalidInputLength(
@@ -1218,13 +1187,10 @@ where
                 log_k,
             ));
         }
-        let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, log_k);
-
-        let alpha = D.trailing_zeros() as usize;
-        let packed_r_vars = packed_point
-            .len()
-            .saturating_sub(alpha + setup_layout.m_vars);
-        let packed_layout = onehot_commit_layout::<Cfg>(setup_layout.m_vars, packed_r_vars);
+        let log_t = opening_point.len() - log_k;
+        let (packed_layout, packed_hachi_layout) =
+            choose_packed_layout_for_shape::<D, Cfg>(log_k, log_t, selector_vars);
+        let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, packed_layout);
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
         let packed_commitment = commitments[0];
@@ -1242,7 +1208,7 @@ where
             &hachi_combined,
             &packed_commitment.0,
             BasisMode::Lagrange,
-            &packed_layout,
+            &packed_hachi_layout,
         )
         .map_err(|_| ProofVerifyError::InternalError)?;
 

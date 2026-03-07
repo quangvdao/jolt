@@ -1811,24 +1811,22 @@ where
         } else {
             4
         };
-        let base_num_vars = max_log_k_chunk + max_log_T;
-
-        // For PCS schemes that use packed polynomial batching (Hachi), size the
-        // setup matrices for the packed polynomial (individual polys batched together).
-        let max_num_vars = if PCS::uses_onehot_inc() {
+        // For PCS schemes that use packed polynomial batching (Hachi), provide
+        // the packed selector width directly so the PCS can size its setup for
+        // the actual packed layout rather than only the flat variable count.
+        let log_packed = if PCS::uses_onehot_inc() {
             let inc_bits = XLEN + 1;
             let max_instruction_d = LOG_K.div_ceil(max_log_k_chunk);
             let max_d_inc = inc_bits.div_ceil(max_log_k_chunk);
             let max_ram_d = XLEN.div_ceil(max_log_k_chunk);
             let max_bytecode_d = XLEN.div_ceil(max_log_k_chunk);
             let max_n_polys = max_instruction_d + 2 * max_d_inc + max_ram_d + max_bytecode_d;
-            let log_packed = max_n_polys.next_power_of_two().trailing_zeros() as usize;
-            base_num_vars + log_packed
+            Some(max_n_polys.next_power_of_two().trailing_zeros() as usize)
         } else {
-            base_num_vars
+            None
         };
 
-        let generators = PCS::setup_prover(max_num_vars);
+        let generators = PCS::setup_prover_from_shape(max_log_T, max_log_k_chunk, log_packed);
         JoltProverPreprocessing { generators, shared }
     }
 
@@ -1889,8 +1887,7 @@ mod tests {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
 
-    type HachiPcs =
-        JoltHachiCommitmentScheme<{ Fp128OneHot256Config::D }, Fp128OneHot256Config>;
+    type HachiPcs = JoltHachiCommitmentScheme<{ Fp128OneHot256Config::D }, Fp128OneHot256Config>;
     type RV64IMACHachiProver<'a> = JoltCpuProver<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
     type RV64IMACHachiVerifier<'a> = JoltVerifier<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
 

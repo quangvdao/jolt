@@ -68,6 +68,20 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
 
     fn setup_prover(max_num_vars: usize) -> Self::ProverSetup;
 
+    /// Build prover setup using the main-trace shape information when the PCS
+    /// needs more than a flat `max_num_vars` bound to size its matrices.
+    fn setup_prover_from_shape(
+        max_log_t: usize,
+        max_log_k: usize,
+        log_packed: Option<usize>,
+    ) -> Self::ProverSetup {
+        let max_num_vars = max_log_t
+            .checked_add(max_log_k)
+            .and_then(|n| n.checked_add(log_packed.unwrap_or(0)))
+            .expect("setup_prover_from_shape max_num_vars overflow");
+        Self::setup_prover(max_num_vars)
+    }
+
     fn setup_verifier(setup: &Self::ProverSetup) -> Self::VerifierSetup;
 
     /// Reconstruct a PCS instance from a batched proof (e.g. for the verifier to

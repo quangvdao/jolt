@@ -38,6 +38,7 @@ use hachi_pcs::protocol::commitment::{
     DecompositionParams, Fp128BoundedCommitmentConfig, HachiCommitmentCore, HachiCommitmentLayout,
     RingCommitment,
 };
+use hachi_pcs::protocol::hachi_poly_ops::CommitInnerWitness;
 use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
 use hachi_pcs::protocol::{HachiCommitmentScheme, HachiProverSetup, HachiVerifierSetup};
@@ -203,6 +204,12 @@ pub(super) struct PackedCommitInnerProfile {
     decompose_ns: u64,
     live_slots: usize,
     refresh_count: usize,
+}
+
+struct PackedCommitInnerOutput<const D: usize> {
+    t_hat: Vec<Vec<[i8; D]>>,
+    t: Vec<Vec<CyclotomicRing<Fp128, D>>>,
+    profile: PackedCommitInnerProfile,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -402,6 +409,61 @@ impl<const D: usize> JoltPackedPoly<D> {
         n_a == 1 && num_digits_commit == 1
     }
 
+    fn log_commit_inner_profile(
+        &self,
+        n_a: usize,
+        num_digits_commit: usize,
+        profile: PackedCommitInnerProfile,
+    ) {
+        if packed_hotpath_diagnostics_enabled() {
+            let occupancy = self.packed_block_cache.occupancy_summary();
+            eprintln!(
+                "    [packed poly] commit_inner(mode={}, n_a={n_a}, num_digits_commit={num_digits_commit}, block_len={}, num_blocks={}, avg_occupancy={:.1}%, p95_block={:.1}%, max_block={:.1}%, preload={:.3}s, iterate={:.3}s, refresh={:.3}s, decompose={:.3}s, live_slots={}, refreshes={})",
+                if profile.fast_path {
+                    if profile.cached_row {
+                        "fast-cached"
+                    } else {
+                        "fast-tiled"
+                    }
+                } else {
+                    "generic"
+                },
+                self.packed_layout.block_len(),
+                self.num_blocks(),
+                100.0 * self.packed_block_cache.occupancy_ratio(),
+                100.0 * occupancy.p95_ratio(self.packed_layout.block_len()),
+                100.0 * occupancy.max_ratio(self.packed_layout.block_len()),
+                nanos_to_secs(profile.preload_ns),
+                nanos_to_secs(profile.iterate_ns),
+                nanos_to_secs(profile.refresh_ns),
+                nanos_to_secs(profile.decompose_ns),
+                profile.live_slots,
+                profile.refresh_count,
+            );
+        }
+    }
+
+    fn commit_inner_output(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        n_a: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> PackedCommitInnerOutput<D> {
+        if self.can_use_commit_inner_fast_path(n_a, num_digits_commit) {
+            self.commit_inner_fast_singleton_output(a_view, num_digits_open, log_basis)
+        } else {
+            self.commit_inner_generic_output(
+                a_view,
+                n_a,
+                num_digits_commit,
+                num_digits_open,
+                log_basis,
+            )
+        }
+    }
+
     #[inline]
     fn can_cache_commit_wide_row(&self) -> bool {
         self.packed_layout
@@ -592,39 +654,32 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     ) -> Result<Vec<Vec<[i8; D]>>, HachiError> {
         let a_view = a_matrix.view::<D>();
         let n_a = a_view.num_rows();
-        let (results_flat, profile) = if self.can_use_commit_inner_fast_path(n_a, num_digits_commit)
-        {
-            self.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis)
-        } else {
-            self.commit_inner_generic(&a_view, n_a, num_digits_commit, num_digits_open, log_basis)
-        };
-        if packed_hotpath_diagnostics_enabled() {
-            let occupancy = self.packed_block_cache.occupancy_summary();
-            eprintln!(
-                "    [packed poly] commit_inner(mode={}, n_a={n_a}, num_digits_commit={num_digits_commit}, block_len={}, num_blocks={}, avg_occupancy={:.1}%, p95_block={:.1}%, max_block={:.1}%, preload={:.3}s, iterate={:.3}s, refresh={:.3}s, decompose={:.3}s, live_slots={}, refreshes={})",
-                if profile.fast_path {
-                    if profile.cached_row {
-                        "fast-cached"
-                    } else {
-                        "fast-tiled"
-                    }
-                } else {
-                    "generic"
-                },
-                self.packed_layout.block_len(),
-                self.num_blocks(),
-                100.0 * self.packed_block_cache.occupancy_ratio(),
-                100.0 * occupancy.p95_ratio(self.packed_layout.block_len()),
-                100.0 * occupancy.max_ratio(self.packed_layout.block_len()),
-                nanos_to_secs(profile.preload_ns),
-                nanos_to_secs(profile.iterate_ns),
-                nanos_to_secs(profile.refresh_ns),
-                nanos_to_secs(profile.decompose_ns),
-                profile.live_slots,
-                profile.refresh_count,
-            );
-        }
-        Ok(results_flat)
+        let output =
+            self.commit_inner_output(&a_view, n_a, num_digits_commit, num_digits_open, log_basis);
+        self.log_commit_inner_profile(n_a, num_digits_commit, output.profile);
+        Ok(output.t_hat)
+    }
+
+    #[allow(non_snake_case)]
+    #[tracing::instrument(skip_all, name = "JoltPackedPoly::commit_inner")]
+    fn commit_inner_witness(
+        &self,
+        a_matrix: &FlatMatrix<Fp128>,
+        _ntt_a: &NttSlotCache<D>,
+        _block_len: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> Result<CommitInnerWitness<Fp128, D>, HachiError> {
+        let a_view = a_matrix.view::<D>();
+        let n_a = a_view.num_rows();
+        let output =
+            self.commit_inner_output(&a_view, n_a, num_digits_commit, num_digits_open, log_basis);
+        self.log_commit_inner_profile(n_a, num_digits_commit, output.profile);
+        Ok(CommitInnerWitness {
+            t_hat: output.t_hat,
+            t: output.t,
+        })
     }
 }
 
@@ -688,14 +743,14 @@ impl<const D: usize> JoltPackedPoly<D> {
         }
     }
 
-    pub(super) fn commit_inner_generic(
+    fn commit_inner_generic_output(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
         n_a: usize,
         num_digits_commit: usize,
         num_digits_open: usize,
         log_basis: u32,
-    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+    ) -> PackedCommitInnerOutput<D> {
         let diagnostics = packed_hotpath_diagnostics_enabled();
         let block_len = self.packed_layout.block_len();
         let preload_start = diagnostics.then_some(Instant::now());
@@ -713,7 +768,7 @@ impl<const D: usize> JoltPackedPoly<D> {
         let live_slots = AtomicUsize::new(0);
         let refresh_count = AtomicUsize::new(0);
 
-        let results = (0..self.num_blocks())
+        let per_block = (0..self.num_blocks())
             .into_par_iter()
             .map(|block_idx| {
                 let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
@@ -757,17 +812,19 @@ impl<const D: usize> JoltPackedPoly<D> {
                 let decompose_start = diagnostics.then_some(Instant::now());
                 let t: Vec<CyclotomicRing<Fp128, D>> =
                     t_wide.iter_mut().map(|w| w.reduce()).collect();
-                let result = decompose_rows_i8(&t, num_digits_open, log_basis);
+                let t_hat = decompose_rows_i8(&t, num_digits_open, log_basis);
                 if let Some(start) = decompose_start {
                     decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
-                result
+                (t, t_hat)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let (t, t_hat): (Vec<_>, Vec<_>) = per_block.into_iter().unzip();
 
-        (
-            results,
-            PackedCommitInnerProfile {
+        PackedCommitInnerOutput {
+            t_hat,
+            t,
+            profile: PackedCommitInnerProfile {
                 fast_path: false,
                 cached_row: false,
                 preload_ns,
@@ -777,28 +834,58 @@ impl<const D: usize> JoltPackedPoly<D> {
                 live_slots: live_slots.load(Ordering::Relaxed),
                 refresh_count: refresh_count.load(Ordering::Relaxed),
             },
-        )
+        }
     }
 
+    #[allow(dead_code)]
+    pub(super) fn commit_inner_generic(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        n_a: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+        let output = self.commit_inner_generic_output(
+            a_view,
+            n_a,
+            num_digits_commit,
+            num_digits_open,
+            log_basis,
+        );
+        (output.t_hat, output.profile)
+    }
+
+    #[allow(dead_code)]
     pub(super) fn commit_inner_fast_singleton(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
         num_digits_open: usize,
         log_basis: u32,
     ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
-        if self.can_cache_commit_wide_row() {
-            self.commit_inner_fast_singleton_cached_row(a_view, num_digits_open, log_basis)
-        } else {
-            self.commit_inner_fast_singleton_tiled(a_view, num_digits_open, log_basis)
-        }
+        let output = self.commit_inner_fast_singleton_output(a_view, num_digits_open, log_basis);
+        (output.t_hat, output.profile)
     }
 
-    fn commit_inner_fast_singleton_cached_row(
+    fn commit_inner_fast_singleton_output(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
         num_digits_open: usize,
         log_basis: u32,
-    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+    ) -> PackedCommitInnerOutput<D> {
+        if self.can_cache_commit_wide_row() {
+            self.commit_inner_fast_singleton_cached_row_output(a_view, num_digits_open, log_basis)
+        } else {
+            self.commit_inner_fast_singleton_tiled_output(a_view, num_digits_open, log_basis)
+        }
+    }
+
+    fn commit_inner_fast_singleton_cached_row_output(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> PackedCommitInnerOutput<D> {
         let diagnostics = packed_hotpath_diagnostics_enabled();
         let block_len = self.packed_layout.block_len();
         let a_row = a_view.row(0);
@@ -814,7 +901,7 @@ impl<const D: usize> JoltPackedPoly<D> {
         let live_slots = AtomicUsize::new(0);
         let refresh_count = AtomicUsize::new(0);
 
-        let results = (0..self.num_blocks())
+        let per_block = (0..self.num_blocks())
             .into_par_iter()
             .map(|block_idx| {
                 let mut t_wide = WideCyclotomicRing::<Fp128x8i32, D>::zero();
@@ -862,17 +949,19 @@ impl<const D: usize> JoltPackedPoly<D> {
 
                 let decompose_start = diagnostics.then_some(Instant::now());
                 let t: CyclotomicRing<Fp128, D> = t_wide.reduce();
-                let result = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
+                let t_hat = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
                 if let Some(start) = decompose_start {
                     decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
-                result
+                (vec![t], t_hat)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let (t, t_hat): (Vec<_>, Vec<_>) = per_block.into_iter().unzip();
 
-        (
-            results,
-            PackedCommitInnerProfile {
+        PackedCommitInnerOutput {
+            t_hat,
+            t,
+            profile: PackedCommitInnerProfile {
                 fast_path: true,
                 cached_row: true,
                 preload_ns,
@@ -882,15 +971,15 @@ impl<const D: usize> JoltPackedPoly<D> {
                 live_slots: live_slots.load(Ordering::Relaxed),
                 refresh_count: refresh_count.load(Ordering::Relaxed),
             },
-        )
+        }
     }
 
-    fn commit_inner_fast_singleton_tiled(
+    fn commit_inner_fast_singleton_tiled_output(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
         num_digits_open: usize,
         log_basis: u32,
-    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+    ) -> PackedCommitInnerOutput<D> {
         let diagnostics = packed_hotpath_diagnostics_enabled();
         let block_len = self.packed_layout.block_len();
         let tile_size = COMMIT_TILE_SIZE.min(block_len.max(1));
@@ -1027,22 +1116,24 @@ impl<const D: usize> JoltPackedPoly<D> {
                 });
         }
 
-        let results = t_wide
+        let per_block = t_wide
             .into_par_iter()
             .map(|t_wide| {
                 let decompose_start = diagnostics.then_some(Instant::now());
                 let t: CyclotomicRing<Fp128, D> = t_wide.reduce();
-                let result = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
+                let t_hat = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
                 if let Some(start) = decompose_start {
                     decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
-                result
+                (vec![t], t_hat)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let (t, t_hat): (Vec<_>, Vec<_>) = per_block.into_iter().unzip();
 
-        (
-            results,
-            PackedCommitInnerProfile {
+        PackedCommitInnerOutput {
+            t_hat,
+            t,
+            profile: PackedCommitInnerProfile {
                 fast_path: true,
                 cached_row: false,
                 preload_ns: preload_ns.load(Ordering::Relaxed),
@@ -1052,7 +1143,7 @@ impl<const D: usize> JoltPackedPoly<D> {
                 live_slots: live_slots.load(Ordering::Relaxed),
                 refresh_count: refresh_count.load(Ordering::Relaxed),
             },
-        )
+        }
     }
 
     pub(super) fn decompose_fold_generic(
@@ -1609,7 +1700,8 @@ fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
     // Advice polynomials have log_commit_bound=64, so use that config for
     // the optimal m/r split. All Fp128BoundedCommitmentConfig variants
     // share the same N_A, CHALLENGE_WEIGHT, log_basis.
-    let (m_vars, r_vars) = optimal_m_r_split::<Fp128BoundedCommitmentConfig<64>>(reduced_vars);
+    let (m_vars, r_vars) =
+        optimal_m_r_split::<Fp128BoundedCommitmentConfig<64, INITIAL_LOG_BASIS>>(reduced_vars);
     advice_commit_layout::<Cfg>(m_vars, r_vars, INITIAL_LOG_BASIS)
 }
 

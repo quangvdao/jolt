@@ -2250,7 +2250,7 @@ dependencies = [
 [[package]]
 name = "hachi-derive"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Ffix-norm-sumcheck#8a50c9eba1112d8c9366a6a1003c2599529234d3"
+source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Ffix-norm-sumcheck#73414903583f51f8ef8d93ede90ba97470721cf3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2260,7 +2260,7 @@ dependencies = [
 [[package]]
 name = "hachi-pcs"
 version = "0.1.0"
-source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Ffix-norm-sumcheck#8a50c9eba1112d8c9366a6a1003c2599529234d3"
+source = "git+https://github.com/LayerZero-Labs/hachi.git?branch=quang%2Ffix-norm-sumcheck#73414903583f51f8ef8d93ede90ba97470721cf3"
 dependencies = [
  "aes",
  "blake2",

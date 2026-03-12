@@ -1,4 +1,16 @@
-use std::{fmt, marker::PhantomData, sync::Arc, time::Instant};
+use std::{
+    array::from_fn,
+    env::var_os,
+    fmt,
+    marker::PhantomData,
+    mem::{size_of, take},
+    slice::{from_raw_parts, from_ref},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
+    time::Instant,
+};
 
 use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout, PackedBlockRange};
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
@@ -14,6 +26,7 @@ use crate::transcripts::Transcript;
 use crate::utils::errors::ProofVerifyError;
 use crate::utils::small_scalar::SmallScalar;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use common::constants::HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T;
 use hachi_pcs::algebra::fields::wide::Fp128x8i32;
 use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
 use hachi_pcs::algebra::ring::{CyclotomicRing, WideCyclotomicRing};
@@ -35,11 +48,21 @@ use hachi_pcs::{
 };
 use rayon::prelude::*;
 
+/// Keep the initial Hachi decomposition basis fixed at 3 so the first-round
+/// layouts match the setup envelope used elsewhere in the scheme.
+const INITIAL_LOG_BASIS: u32 = 3;
+
 /// Tile size for commit_inner A-matrix tiling. Each tile occupies
 /// tile_size * n_a * sizeof(WideCyclotomicRing) ≈ tile_size * 16 KB.
 /// Must fit in the shared last-level cache (Apple Silicon P-cluster L2 = 16 MB,
 /// typical x86 L3 ≈ 32 MB). 1024 × 16 KB = 16 MB.
+#[allow(dead_code)]
 const COMMIT_TILE_SIZE: usize = 1024;
+
+/// Cache the full widened singleton A row only for smaller shapes. At
+/// `sha2-chain` scale, a 512 MiB row cache causes enough memory pressure to
+/// outweigh the saved bitmap scans.
+const COMMIT_WIDE_ROW_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum WideCyclotomicRing<Fp128x8i32> additions before i32 limb overflow.
 /// Each limb starts ≤ 65535; i32 max ≈ 2.1B → safe up to ~32K additions.
@@ -47,7 +70,153 @@ const WIDE_RING_REDUCE_INTERVAL: usize = 32_000;
 
 /// decompose_fold z_chunk fits in cache when inner_width * D * 4 ≤ ~16 MB.
 /// With D=512: inner_width ≤ 8192.
+#[allow(dead_code)]
 const DECOMPOSE_FOLD_CACHE_THRESHOLD: usize = 8_192;
+
+/// Per-worker stripe size for the large-shape decompose_fold path. At D=256,
+/// 4096 rows is 4 MiB of i32 output, which keeps merge working sets cacheable.
+const DECOMPOSE_FOLD_STRIPE_ROWS: usize = 4_096;
+const DECOMPOSE_FOLD_STRIPE_CHUNKS_PER_THREAD: usize = 2;
+
+/// The output-striped decompose-fold fast path scans every block for each inner
+/// position. That tradeoff pays off only once occupancy is high enough that the
+/// generic block-major reduction is mostly streaming over live entries anyway.
+const DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_NUMERATOR: usize = 1;
+const DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_DENOMINATOR: usize = 2;
+
+#[inline]
+fn packed_hotpath_diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| var_os("HACHI_PACKED_DIAGNOSTICS").is_some())
+}
+
+#[inline]
+fn nanos_to_secs(nanos: u64) -> f64 {
+    nanos as f64 / 1_000_000_000.0
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct PackedOccupancySummary {
+    nonempty_blocks: usize,
+    min_nonzero: usize,
+    p50_nonzero: usize,
+    p95_nonzero: usize,
+    max_nonzero: usize,
+    buckets: [usize; 5],
+}
+
+impl PackedOccupancySummary {
+    #[inline]
+    fn ratio_for(nonzero: usize, block_len: usize) -> f64 {
+        if block_len == 0 {
+            0.0
+        } else {
+            nonzero as f64 / block_len as f64
+        }
+    }
+
+    #[inline]
+    pub(super) fn nonempty_blocks(&self) -> usize {
+        self.nonempty_blocks
+    }
+
+    #[inline]
+    pub(super) fn bucket_counts(&self) -> [usize; 5] {
+        self.buckets
+    }
+
+    #[inline]
+    pub(super) fn p50_ratio(&self, block_len: usize) -> f64 {
+        Self::ratio_for(self.p50_nonzero, block_len)
+    }
+
+    #[inline]
+    pub(super) fn p95_ratio(&self, block_len: usize) -> f64 {
+        Self::ratio_for(self.p95_nonzero, block_len)
+    }
+
+    #[inline]
+    pub(super) fn max_ratio(&self, block_len: usize) -> f64 {
+        Self::ratio_for(self.max_nonzero, block_len)
+    }
+}
+
+#[inline]
+fn nearest_rank_count(
+    sorted_counts: &[usize],
+    percentile_numerator: usize,
+    percentile_denominator: usize,
+) -> usize {
+    if sorted_counts.is_empty() {
+        return 0;
+    }
+    let rank = (sorted_counts.len() * percentile_numerator).div_ceil(percentile_denominator);
+    sorted_counts[rank.saturating_sub(1)]
+}
+
+pub(super) fn summarize_block_occupancy(
+    nonzero_counts: &[u32],
+    block_len: usize,
+) -> PackedOccupancySummary {
+    let mut sorted_counts = nonzero_counts
+        .iter()
+        .map(|&count| count as usize)
+        .collect::<Vec<_>>();
+    sorted_counts.sort_unstable();
+
+    let mut buckets = [0usize; 5];
+    let mut nonempty_blocks = 0usize;
+    for &count in &sorted_counts {
+        if count == 0 || block_len == 0 {
+            buckets[0] += 1;
+        } else if count * 4 <= block_len {
+            buckets[1] += 1;
+        } else if count * 2 <= block_len {
+            buckets[2] += 1;
+        } else if count * 4 <= block_len * 3 {
+            buckets[3] += 1;
+        } else {
+            buckets[4] += 1;
+        }
+        if count != 0 {
+            nonempty_blocks += 1;
+        }
+    }
+
+    PackedOccupancySummary {
+        nonempty_blocks,
+        min_nonzero: sorted_counts.first().copied().unwrap_or(0),
+        p50_nonzero: nearest_rank_count(&sorted_counts, 50, 100),
+        p95_nonzero: nearest_rank_count(&sorted_counts, 95, 100),
+        max_nonzero: sorted_counts.last().copied().unwrap_or(0),
+        buckets,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PackedCommitInnerProfile {
+    fast_path: bool,
+    cached_row: bool,
+    preload_ns: u64,
+    iterate_ns: u64,
+    refresh_ns: u64,
+    decompose_ns: u64,
+    live_slots: usize,
+    refresh_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PackedDecomposeFoldProfile {
+    fast_path: bool,
+    striped_path: bool,
+    alloc_buffers: usize,
+    alloc_rows: usize,
+    scatter_ns: u64,
+    merge_ns: u64,
+    finalize_ns: u64,
+    scatter_updates: usize,
+    merge_calls: usize,
+}
 
 /// `Fp128BoundedCommitmentConfig` with `D = 256` instead of `512`.
 /// All other parameters (N_A, N_B, N_D, decomposition) are
@@ -130,12 +299,15 @@ pub enum HachiChunkState<const D: usize> {
 }
 
 #[derive(Clone)]
-struct PackedBlockCache {
+pub(super) struct PackedBlockCache {
     coeffs: Arc<[u8]>,
     present_words: Arc<[u64]>,
+    nonzero_counts: Arc<[u32]>,
     block_len: usize,
     present_words_per_block: usize,
     num_blocks: usize,
+    total_nonzero: usize,
+    occupancy_summary: PackedOccupancySummary,
 }
 
 impl fmt::Debug for PackedBlockCache {
@@ -145,6 +317,8 @@ impl fmt::Debug for PackedBlockCache {
             .field("present_words_per_block", &self.present_words_per_block)
             .field("num_blocks", &self.num_blocks)
             .field("total_slots", &self.coeffs.len())
+            .field("total_nonzero", &self.total_nonzero)
+            .field("occupancy_summary", &self.occupancy_summary)
             .finish()
     }
 }
@@ -161,12 +335,58 @@ impl PackedBlockCache {
         let start = block_idx * self.present_words_per_block;
         &self.present_words[start..start + self.present_words_per_block]
     }
+
+    #[inline]
+    fn nonzero_count(&self, block_idx: usize) -> usize {
+        self.nonzero_counts[block_idx] as usize
+    }
+
+    #[inline]
+    fn occupancy_ratio(&self) -> f64 {
+        let total_slots = self.num_blocks * self.block_len;
+        if total_slots == 0 {
+            0.0
+        } else {
+            self.total_nonzero as f64 / total_slots as f64
+        }
+    }
+
+    #[inline]
+    fn occupancy_summary(&self) -> PackedOccupancySummary {
+        self.occupancy_summary
+    }
+
+    #[inline]
+    fn has_denseish_occupancy(&self) -> bool {
+        self.total_nonzero * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_DENOMINATOR
+            >= self.num_blocks * self.block_len * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_NUMERATOR
+    }
+
+    #[inline]
+    fn coeff_at(&self, block_idx: usize, pos_in_block: usize) -> Option<usize> {
+        debug_assert!(pos_in_block < self.block_len);
+        let nonzero_count = self.nonzero_count(block_idx);
+        if nonzero_count == 0 {
+            return None;
+        }
+        if nonzero_count == self.block_len {
+            return Some(self.coeffs_for_block(block_idx)[pos_in_block] as usize);
+        }
+        let words = self.present_words_for_block(block_idx);
+        let word_idx = pos_in_block / u64::BITS as usize;
+        let bit_idx = pos_in_block % u64::BITS as usize;
+        if words[word_idx] & (1u64 << bit_idx) == 0 {
+            None
+        } else {
+            Some(self.coeffs_for_block(block_idx)[pos_in_block] as usize)
+        }
+    }
 }
 
 /// Streaming view over the packed one-hot trace using a packed-specific
 /// cycle/poly tile layout.
 #[derive(Clone)]
-struct JoltPackedPoly<const D: usize> {
+pub(super) struct JoltPackedPoly<const D: usize> {
     packed_layout: PackedBitLayout,
     packed_block_cache: Arc<PackedBlockCache>,
 }
@@ -178,8 +398,43 @@ impl<const D: usize> JoltPackedPoly<D> {
     }
 
     #[inline]
+    fn can_use_commit_inner_fast_path(&self, n_a: usize, num_digits_commit: usize) -> bool {
+        n_a == 1 && num_digits_commit == 1
+    }
+
+    #[inline]
+    fn can_cache_commit_wide_row(&self) -> bool {
+        self.packed_layout
+            .block_len()
+            .saturating_mul(size_of::<WideCyclotomicRing<Fp128x8i32, D>>())
+            <= COMMIT_WIDE_ROW_CACHE_MAX_BYTES
+    }
+
+    #[inline]
+    fn can_use_decompose_fold_fast_path(&self, block_len: usize, delta: usize) -> bool {
+        delta == 1
+            && block_len <= DECOMPOSE_FOLD_CACHE_THRESHOLD
+            && self.packed_block_cache.has_denseish_occupancy()
+    }
+
+    #[inline]
+    fn can_use_decompose_fold_striped_path(&self, delta: usize) -> bool {
+        delta == 1
+    }
+
+    #[inline]
     fn for_each_nonzero_in_block(&self, block_idx: usize, mut f: impl FnMut(usize, usize)) {
+        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
+        if nonzero_count == 0 {
+            return;
+        }
         let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+        if nonzero_count == self.packed_block_cache.block_len {
+            for (pos_in_block, &coeff_idx) in coeffs.iter().enumerate() {
+                f(pos_in_block, coeff_idx as usize);
+            }
+            return;
+        }
         let present_words = self.packed_block_cache.present_words_for_block(block_idx);
         for (word_idx, &word) in present_words.iter().enumerate() {
             let mut mask = word;
@@ -272,19 +527,20 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         delta: usize,
         _log_basis: u32,
     ) -> Vec<CyclotomicRing<Fp128, D>> {
-        let inner_width = block_len * delta;
-
-        let total_z = if inner_width <= DECOMPOSE_FOLD_CACHE_THRESHOLD {
-            self.decompose_fold_small(challenges, block_len, delta)
+        let (total_z, profile) = if self.can_use_decompose_fold_fast_path(block_len, delta) {
+            self.decompose_fold_fast_singleton(challenges, block_len, delta)
+        } else if self.can_use_decompose_fold_striped_path(delta) {
+            self.decompose_fold_striped_delta1(challenges, block_len)
         } else {
-            self.decompose_fold_large(challenges, block_len, delta)
+            self.decompose_fold_generic(challenges, block_len, delta)
         };
 
         let q = (-Fp128::one()).to_canonical_u128() + 1;
-        total_z
-            .into_iter()
+        let finalize_start = packed_hotpath_diagnostics_enabled().then_some(Instant::now());
+        let z = total_z
+            .into_par_iter()
             .map(|arr| {
-                let coeffs = std::array::from_fn(|k| {
+                let coeffs = from_fn(|k| {
                     let v = arr[k];
                     if v >= 0 {
                         Fp128::from_canonical_u128_reduced(v as u128)
@@ -294,7 +550,33 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
                 });
                 CyclotomicRing::from_coefficients(coeffs)
             })
-            .collect()
+            .collect();
+        let finalize_ns = finalize_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
+        if packed_hotpath_diagnostics_enabled() {
+            let occupancy = self.packed_block_cache.occupancy_summary();
+            eprintln!(
+                "    [packed poly] decompose_fold(mode={}, block_len={block_len}, num_blocks={}, avg_occupancy={:.1}%, p95_block={:.1}%, max_block={:.1}%, alloc_buffers={}, alloc_rows={}, scatter={:.3}s, merge={:.3}s, finalize={:.3}s, scatter_updates={}, merge_calls={})",
+                if profile.fast_path {
+                    "fast"
+                } else if profile.striped_path {
+                    "striped"
+                } else {
+                    "generic"
+                },
+                self.num_blocks(),
+                100.0 * self.packed_block_cache.occupancy_ratio(),
+                100.0 * occupancy.p95_ratio(self.packed_layout.block_len()),
+                100.0 * occupancy.max_ratio(self.packed_layout.block_len()),
+                profile.alloc_buffers,
+                profile.alloc_rows,
+                nanos_to_secs(profile.scatter_ns),
+                nanos_to_secs(profile.merge_ns),
+                nanos_to_secs(profile.finalize_ns + finalize_ns),
+                profile.scatter_updates,
+                profile.merge_calls,
+            );
+        }
+        z
     }
 
     #[allow(non_snake_case)]
@@ -310,37 +592,38 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     ) -> Result<Vec<Vec<[i8; D]>>, HachiError> {
         let a_view = a_matrix.view::<D>();
         let n_a = a_view.num_rows();
-        let block_len = self.packed_layout.block_len();
-        let t_commit_inner = Instant::now();
-        let (branch, results_flat): (&str, Vec<Vec<[i8; D]>>) = if block_len <= COMMIT_TILE_SIZE {
-            (
-                "small",
-                self.commit_inner_small(
-                    &a_view,
-                    n_a,
-                    num_digits_commit,
-                    num_digits_open,
-                    log_basis,
-                ),
-            )
+        let (results_flat, profile) = if self.can_use_commit_inner_fast_path(n_a, num_digits_commit)
+        {
+            self.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis)
         } else {
-            (
-                "tiled",
-                self.commit_inner_tiled(
-                    &a_view,
-                    n_a,
-                    num_digits_commit,
-                    num_digits_open,
-                    log_basis,
-                ),
-            )
+            self.commit_inner_generic(&a_view, n_a, num_digits_commit, num_digits_open, log_basis)
         };
-        eprintln!(
-            "    [packed poly] commit_inner: {:.2}s (branch={branch}, block_len={block_len}, num_blocks={})",
-            t_commit_inner.elapsed().as_secs_f64(),
-            self.num_blocks(),
-        );
-
+        if packed_hotpath_diagnostics_enabled() {
+            let occupancy = self.packed_block_cache.occupancy_summary();
+            eprintln!(
+                "    [packed poly] commit_inner(mode={}, n_a={n_a}, num_digits_commit={num_digits_commit}, block_len={}, num_blocks={}, avg_occupancy={:.1}%, p95_block={:.1}%, max_block={:.1}%, preload={:.3}s, iterate={:.3}s, refresh={:.3}s, decompose={:.3}s, live_slots={}, refreshes={})",
+                if profile.fast_path {
+                    if profile.cached_row {
+                        "fast-cached"
+                    } else {
+                        "fast-tiled"
+                    }
+                } else {
+                    "generic"
+                },
+                self.packed_layout.block_len(),
+                self.num_blocks(),
+                100.0 * self.packed_block_cache.occupancy_ratio(),
+                100.0 * occupancy.p95_ratio(self.packed_layout.block_len()),
+                100.0 * occupancy.max_ratio(self.packed_layout.block_len()),
+                nanos_to_secs(profile.preload_ns),
+                nanos_to_secs(profile.iterate_ns),
+                nanos_to_secs(profile.refresh_ns),
+                nanos_to_secs(profile.decompose_ns),
+                profile.live_slots,
+                profile.refresh_count,
+            );
+        }
         Ok(results_flat)
     }
 }
@@ -354,8 +637,718 @@ impl<const D: usize> JoltPackedPoly<D> {
         }
     }
 
-    /// Fast path: a_wide_flat fits in L3. Precompute once, all tasks read from cache.
-    fn commit_inner_small(
+    #[inline]
+    fn reduce_wide_accumulator(t_wide: &mut WideCyclotomicRing<Fp128x8i32, D>) {
+        let reduced: CyclotomicRing<Fp128, D> = t_wide.reduce();
+        *t_wide = WideCyclotomicRing::from_ring(&reduced);
+    }
+
+    #[inline(always)]
+    fn wide_ring_coeffs(ring: &WideCyclotomicRing<Fp128x8i32, D>) -> &[Fp128x8i32; D] {
+        // SAFETY: `WideCyclotomicRing` is `#[repr(transparent)]` over `[W; D]`,
+        // and here `W = Fp128x8i32`, so the layouts are identical.
+        unsafe { &*(ring as *const WideCyclotomicRing<Fp128x8i32, D> as *const [Fp128x8i32; D]) }
+    }
+
+    #[inline(always)]
+    fn wide_ring_coeffs_mut(ring: &mut WideCyclotomicRing<Fp128x8i32, D>) -> &mut [Fp128x8i32; D] {
+        // SAFETY: `WideCyclotomicRing` is `#[repr(transparent)]` over `[W; D]`,
+        // and here `W = Fp128x8i32`, so the layouts are identical.
+        unsafe { &mut *(ring as *mut WideCyclotomicRing<Fp128x8i32, D> as *mut [Fp128x8i32; D]) }
+    }
+
+    #[inline(always)]
+    fn shift_accumulate_into_fast(
+        src: &WideCyclotomicRing<Fp128x8i32, D>,
+        dst: &mut WideCyclotomicRing<Fp128x8i32, D>,
+        k: usize,
+    ) {
+        if k >= D {
+            src.shift_accumulate_into(dst, k);
+            return;
+        }
+
+        let src_coeffs = Self::wide_ring_coeffs(src);
+        let dst_coeffs = Self::wide_ring_coeffs_mut(dst);
+        if k == 0 {
+            for (dst_coeff, src_coeff) in dst_coeffs.iter_mut().zip(src_coeffs.iter()) {
+                *dst_coeff += *src_coeff;
+            }
+            return;
+        }
+
+        let split = D - k;
+        let (src_lo, src_hi) = src_coeffs.split_at(split);
+        let (dst_lo, dst_hi) = dst_coeffs.split_at_mut(k);
+        for (dst_coeff, src_coeff) in dst_hi.iter_mut().zip(src_lo.iter()) {
+            *dst_coeff += *src_coeff;
+        }
+        for (dst_coeff, src_coeff) in dst_lo.iter_mut().zip(src_hi.iter()) {
+            *dst_coeff -= *src_coeff;
+        }
+    }
+
+    pub(super) fn commit_inner_generic(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        n_a: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+        let diagnostics = packed_hotpath_diagnostics_enabled();
+        let block_len = self.packed_layout.block_len();
+        let preload_start = diagnostics.then_some(Instant::now());
+        let a_wide_flat: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..block_len)
+            .into_par_iter()
+            .flat_map_iter(|pos| {
+                let col = pos * num_digits_commit;
+                (0..n_a).map(move |a| WideCyclotomicRing::from_ring(&a_view.row(a)[col]))
+            })
+            .collect();
+        let preload_ns = preload_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
+        let iterate_ns = AtomicU64::new(0);
+        let refresh_ns = AtomicU64::new(0);
+        let decompose_ns = AtomicU64::new(0);
+        let live_slots = AtomicUsize::new(0);
+        let refresh_count = AtomicUsize::new(0);
+
+        let results = (0..self.num_blocks())
+            .into_par_iter()
+            .map(|block_idx| {
+                let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
+                let mut entries_since_reduce = 0usize;
+                let mut local_live_slots = 0usize;
+                let mut local_refresh_ns = 0u64;
+                let mut local_refresh_count = 0usize;
+                let iterate_start = diagnostics.then_some(Instant::now());
+
+                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                    let a_base = pos_in_block * n_a;
+                    let a_slice = &a_wide_flat[a_base..a_base + n_a];
+                    for a in 0..n_a {
+                        a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx]);
+                    }
+
+                    local_live_slots += 1;
+                    entries_since_reduce += 1;
+                    if entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
+                        let reduce_start = diagnostics.then_some(Instant::now());
+                        Self::reduce_wide_accumulators(&mut t_wide);
+                        if let Some(start) = reduce_start {
+                            local_refresh_ns += start.elapsed().as_nanos() as u64;
+                        }
+                        local_refresh_count += 1;
+                        entries_since_reduce = 0;
+                    }
+                });
+
+                if let Some(start) = iterate_start {
+                    let block_iter_ns = start.elapsed().as_nanos() as u64;
+                    iterate_ns.fetch_add(
+                        block_iter_ns.saturating_sub(local_refresh_ns),
+                        Ordering::Relaxed,
+                    );
+                    refresh_ns.fetch_add(local_refresh_ns, Ordering::Relaxed);
+                }
+                live_slots.fetch_add(local_live_slots, Ordering::Relaxed);
+                refresh_count.fetch_add(local_refresh_count, Ordering::Relaxed);
+
+                let decompose_start = diagnostics.then_some(Instant::now());
+                let t: Vec<CyclotomicRing<Fp128, D>> =
+                    t_wide.iter_mut().map(|w| w.reduce()).collect();
+                let result = decompose_rows_i8(&t, num_digits_open, log_basis);
+                if let Some(start) = decompose_start {
+                    decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                result
+            })
+            .collect();
+
+        (
+            results,
+            PackedCommitInnerProfile {
+                fast_path: false,
+                cached_row: false,
+                preload_ns,
+                iterate_ns: iterate_ns.load(Ordering::Relaxed),
+                refresh_ns: refresh_ns.load(Ordering::Relaxed),
+                decompose_ns: decompose_ns.load(Ordering::Relaxed),
+                live_slots: live_slots.load(Ordering::Relaxed),
+                refresh_count: refresh_count.load(Ordering::Relaxed),
+            },
+        )
+    }
+
+    pub(super) fn commit_inner_fast_singleton(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+        if self.can_cache_commit_wide_row() {
+            self.commit_inner_fast_singleton_cached_row(a_view, num_digits_open, log_basis)
+        } else {
+            self.commit_inner_fast_singleton_tiled(a_view, num_digits_open, log_basis)
+        }
+    }
+
+    fn commit_inner_fast_singleton_cached_row(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+        let diagnostics = packed_hotpath_diagnostics_enabled();
+        let block_len = self.packed_layout.block_len();
+        let a_row = a_view.row(0);
+        let preload_start = diagnostics.then_some(Instant::now());
+        let a_wide_row: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..block_len)
+            .into_par_iter()
+            .map(|pos| WideCyclotomicRing::from_ring(&a_row[pos]))
+            .collect();
+        let preload_ns = preload_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
+        let iterate_ns = AtomicU64::new(0);
+        let refresh_ns = AtomicU64::new(0);
+        let decompose_ns = AtomicU64::new(0);
+        let live_slots = AtomicUsize::new(0);
+        let refresh_count = AtomicUsize::new(0);
+
+        let results = (0..self.num_blocks())
+            .into_par_iter()
+            .map(|block_idx| {
+                let mut t_wide = WideCyclotomicRing::<Fp128x8i32, D>::zero();
+                let mut entries_since_reduce = 0usize;
+                let iterate_start = diagnostics.then_some(Instant::now());
+                let mut local_live_slots = 0usize;
+                let mut local_refresh_ns = 0u64;
+                let mut local_refresh_count = 0usize;
+
+                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                    Self::shift_accumulate_into_fast(
+                        &a_wide_row[pos_in_block],
+                        &mut t_wide,
+                        coeff_idx,
+                    );
+                    if diagnostics {
+                        local_live_slots += 1;
+                    }
+                    entries_since_reduce += 1;
+                    if entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
+                        let reduce_start = diagnostics.then_some(Instant::now());
+                        Self::reduce_wide_accumulator(&mut t_wide);
+                        if let Some(start) = reduce_start {
+                            local_refresh_ns += start.elapsed().as_nanos() as u64;
+                        }
+                        if diagnostics {
+                            local_refresh_count += 1;
+                        }
+                        entries_since_reduce = 0;
+                    }
+                });
+
+                if let Some(start) = iterate_start {
+                    let block_iter_ns = start.elapsed().as_nanos() as u64;
+                    iterate_ns.fetch_add(
+                        block_iter_ns.saturating_sub(local_refresh_ns),
+                        Ordering::Relaxed,
+                    );
+                    refresh_ns.fetch_add(local_refresh_ns, Ordering::Relaxed);
+                }
+                if diagnostics {
+                    live_slots.fetch_add(local_live_slots, Ordering::Relaxed);
+                    refresh_count.fetch_add(local_refresh_count, Ordering::Relaxed);
+                }
+
+                let decompose_start = diagnostics.then_some(Instant::now());
+                let t: CyclotomicRing<Fp128, D> = t_wide.reduce();
+                let result = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
+                if let Some(start) = decompose_start {
+                    decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                result
+            })
+            .collect();
+
+        (
+            results,
+            PackedCommitInnerProfile {
+                fast_path: true,
+                cached_row: true,
+                preload_ns,
+                iterate_ns: iterate_ns.load(Ordering::Relaxed),
+                refresh_ns: refresh_ns.load(Ordering::Relaxed),
+                decompose_ns: decompose_ns.load(Ordering::Relaxed),
+                live_slots: live_slots.load(Ordering::Relaxed),
+                refresh_count: refresh_count.load(Ordering::Relaxed),
+            },
+        )
+    }
+
+    fn commit_inner_fast_singleton_tiled(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+        let diagnostics = packed_hotpath_diagnostics_enabled();
+        let block_len = self.packed_layout.block_len();
+        let tile_size = COMMIT_TILE_SIZE.min(block_len.max(1));
+        let num_tiles = block_len.div_ceil(tile_size);
+        let word_bits = u64::BITS as usize;
+        let a_row = a_view.row(0);
+        let preload_ns = AtomicU64::new(0);
+        let iterate_ns = AtomicU64::new(0);
+        let refresh_ns = AtomicU64::new(0);
+        let decompose_ns = AtomicU64::new(0);
+        let live_slots = AtomicUsize::new(0);
+        let refresh_count = AtomicUsize::new(0);
+        let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); self.num_blocks()];
+        let mut entries_since_reduce = vec![0usize; self.num_blocks()];
+
+        for tile_idx in 0..num_tiles {
+            let tile_start = tile_idx * tile_size;
+            let tile_end = (tile_start + tile_size).min(block_len);
+            let preload_start = diagnostics.then_some(Instant::now());
+            let a_tile: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (tile_start..tile_end)
+                .into_par_iter()
+                .map(|pos| WideCyclotomicRing::from_ring(&a_row[pos]))
+                .collect();
+            if let Some(start) = preload_start {
+                preload_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+
+            let word_start = tile_start / word_bits;
+            let word_end = tile_end.div_ceil(word_bits);
+            t_wide
+                .par_iter_mut()
+                .zip(entries_since_reduce.par_iter_mut())
+                .enumerate()
+                .for_each(|(block_idx, (t_wide, entries_since_reduce))| {
+                    let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
+                    if nonzero_count == 0 {
+                        return;
+                    }
+
+                    let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+                    let iterate_start = diagnostics.then_some(Instant::now());
+                    let mut local_live_slots = 0usize;
+                    let mut local_refresh_ns = 0u64;
+                    let mut local_refresh_count = 0usize;
+
+                    if nonzero_count == block_len {
+                        for pos_in_block in tile_start..tile_end {
+                            let local_pos = pos_in_block - tile_start;
+                            Self::shift_accumulate_into_fast(
+                                &a_tile[local_pos],
+                                t_wide,
+                                coeffs[pos_in_block] as usize,
+                            );
+
+                            if diagnostics {
+                                local_live_slots += 1;
+                            }
+                            *entries_since_reduce += 1;
+                            if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
+                                let reduce_start = diagnostics.then_some(Instant::now());
+                                Self::reduce_wide_accumulator(t_wide);
+                                if let Some(start) = reduce_start {
+                                    local_refresh_ns += start.elapsed().as_nanos() as u64;
+                                }
+                                if diagnostics {
+                                    local_refresh_count += 1;
+                                }
+                                *entries_since_reduce = 0;
+                            }
+                        }
+                    } else {
+                        let present_words =
+                            self.packed_block_cache.present_words_for_block(block_idx);
+                        for word_idx in word_start..word_end {
+                            let word = present_words[word_idx];
+                            if word == 0 {
+                                continue;
+                            }
+
+                            let word_base = word_idx * word_bits;
+                            let start_bit = tile_start.saturating_sub(word_base);
+                            let end_bit = (tile_end - word_base).min(word_bits);
+                            let lower_mask = u64::MAX << start_bit;
+                            let upper_mask = if end_bit == word_bits {
+                                u64::MAX
+                            } else {
+                                (1u64 << end_bit) - 1
+                            };
+                            let mut mask = word & lower_mask & upper_mask;
+                            while mask != 0 {
+                                let bit_idx = mask.trailing_zeros() as usize;
+                                let pos_in_block = word_base + bit_idx;
+                                let local_pos = pos_in_block - tile_start;
+                                debug_assert!(pos_in_block < coeffs.len());
+                                Self::shift_accumulate_into_fast(
+                                    &a_tile[local_pos],
+                                    t_wide,
+                                    coeffs[pos_in_block] as usize,
+                                );
+
+                                if diagnostics {
+                                    local_live_slots += 1;
+                                }
+                                *entries_since_reduce += 1;
+                                if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
+                                    let reduce_start = diagnostics.then_some(Instant::now());
+                                    Self::reduce_wide_accumulator(t_wide);
+                                    if let Some(start) = reduce_start {
+                                        local_refresh_ns += start.elapsed().as_nanos() as u64;
+                                    }
+                                    if diagnostics {
+                                        local_refresh_count += 1;
+                                    }
+                                    *entries_since_reduce = 0;
+                                }
+
+                                mask &= mask - 1;
+                            }
+                        }
+                    }
+
+                    if let Some(start) = iterate_start {
+                        let block_iter_ns = start.elapsed().as_nanos() as u64;
+                        iterate_ns.fetch_add(
+                            block_iter_ns.saturating_sub(local_refresh_ns),
+                            Ordering::Relaxed,
+                        );
+                        refresh_ns.fetch_add(local_refresh_ns, Ordering::Relaxed);
+                    }
+                    if diagnostics {
+                        live_slots.fetch_add(local_live_slots, Ordering::Relaxed);
+                        refresh_count.fetch_add(local_refresh_count, Ordering::Relaxed);
+                    }
+                });
+        }
+
+        let results = t_wide
+            .into_par_iter()
+            .map(|t_wide| {
+                let decompose_start = diagnostics.then_some(Instant::now());
+                let t: CyclotomicRing<Fp128, D> = t_wide.reduce();
+                let result = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
+                if let Some(start) = decompose_start {
+                    decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                result
+            })
+            .collect();
+
+        (
+            results,
+            PackedCommitInnerProfile {
+                fast_path: true,
+                cached_row: false,
+                preload_ns: preload_ns.load(Ordering::Relaxed),
+                iterate_ns: iterate_ns.load(Ordering::Relaxed),
+                refresh_ns: refresh_ns.load(Ordering::Relaxed),
+                decompose_ns: decompose_ns.load(Ordering::Relaxed),
+                live_slots: live_slots.load(Ordering::Relaxed),
+                refresh_count: refresh_count.load(Ordering::Relaxed),
+            },
+        )
+    }
+
+    pub(super) fn decompose_fold_generic(
+        &self,
+        challenges: &[SparseChallenge],
+        block_len: usize,
+        delta: usize,
+    ) -> (Vec<[i32; D]>, PackedDecomposeFoldProfile) {
+        let inner_width = block_len * delta;
+        let diagnostics = packed_hotpath_diagnostics_enabled();
+        let alloc_buffers = AtomicUsize::new(0);
+        let alloc_rows = AtomicUsize::new(0);
+        let scatter_ns = AtomicU64::new(0);
+        let merge_ns = AtomicU64::new(0);
+        let scatter_updates = AtomicUsize::new(0);
+        let merge_calls = AtomicUsize::new(0);
+
+        let total_z = (0..self.num_blocks())
+            .into_par_iter()
+            .fold(
+                || {
+                    if diagnostics {
+                        alloc_buffers.fetch_add(1, Ordering::Relaxed);
+                        alloc_rows.fetch_add(inner_width, Ordering::Relaxed);
+                    }
+                    vec![[0i32; D]; inner_width]
+                },
+                |mut z_accum, block_idx| {
+                    if block_idx < challenges.len() {
+                        let c_i = &challenges[block_idx];
+                        if !c_i.positions.is_empty() {
+                            let scatter_start = diagnostics.then_some(Instant::now());
+                            Self::scatter_challenge(
+                                self,
+                                block_idx,
+                                block_len,
+                                delta,
+                                c_i,
+                                &mut z_accum,
+                            );
+                            if let Some(start) = scatter_start {
+                                scatter_ns.fetch_add(
+                                    start.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                            }
+                            scatter_updates.fetch_add(
+                                self.packed_block_cache.nonzero_count(block_idx),
+                                Ordering::Relaxed,
+                            );
+                        }
+                    }
+                    z_accum
+                },
+            )
+            .reduce(
+                || {
+                    if diagnostics {
+                        alloc_buffers.fetch_add(1, Ordering::Relaxed);
+                        alloc_rows.fetch_add(inner_width, Ordering::Relaxed);
+                    }
+                    vec![[0i32; D]; inner_width]
+                },
+                |mut a, b| {
+                    let merge_start = diagnostics.then_some(Instant::now());
+                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                        for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
+                            *a_coeff += b_coeff;
+                        }
+                    }
+                    if let Some(start) = merge_start {
+                        merge_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                    merge_calls.fetch_add(1, Ordering::Relaxed);
+                    a
+                },
+            );
+
+        (
+            total_z,
+            PackedDecomposeFoldProfile {
+                fast_path: false,
+                striped_path: false,
+                alloc_buffers: alloc_buffers.load(Ordering::Relaxed),
+                alloc_rows: alloc_rows.load(Ordering::Relaxed),
+                scatter_ns: scatter_ns.load(Ordering::Relaxed),
+                merge_ns: merge_ns.load(Ordering::Relaxed),
+                finalize_ns: 0,
+                scatter_updates: scatter_updates.load(Ordering::Relaxed),
+                merge_calls: merge_calls.load(Ordering::Relaxed),
+            },
+        )
+    }
+
+    pub(super) fn decompose_fold_striped_delta1(
+        &self,
+        challenges: &[SparseChallenge],
+        block_len: usize,
+    ) -> (Vec<[i32; D]>, PackedDecomposeFoldProfile) {
+        let diagnostics = packed_hotpath_diagnostics_enabled();
+        let alloc_buffers = AtomicUsize::new(0);
+        let alloc_rows = AtomicUsize::new(0);
+        let scatter_ns = AtomicU64::new(0);
+        let merge_ns = AtomicU64::new(0);
+        let scatter_updates = AtomicUsize::new(0);
+        let merge_calls = AtomicUsize::new(0);
+        let word_bits = u64::BITS as usize;
+        let stripe_rows = DECOMPOSE_FOLD_STRIPE_ROWS.min(block_len.max(1));
+        let block_limit = challenges.len().min(self.num_blocks());
+        let target_chunks =
+            (rayon::current_num_threads() * DECOMPOSE_FOLD_STRIPE_CHUNKS_PER_THREAD).max(1);
+        let block_chunk_len = block_limit.div_ceil(target_chunks).max(1);
+        let mut total_z = vec![[0i32; D]; block_len];
+
+        for stripe_start in (0..block_len).step_by(stripe_rows) {
+            let stripe_end = (stripe_start + stripe_rows).min(block_len);
+            let stripe_len = stripe_end - stripe_start;
+            let word_start = stripe_start / word_bits;
+            let word_end = stripe_end.div_ceil(word_bits);
+            let stripe = challenges[..block_limit]
+                .par_chunks(block_chunk_len)
+                .enumerate()
+                .map(|(chunk_idx, chunk)| {
+                    if diagnostics {
+                        alloc_buffers.fetch_add(1, Ordering::Relaxed);
+                        alloc_rows.fetch_add(stripe_len, Ordering::Relaxed);
+                    }
+                    let mut z_accum = vec![[0i32; D]; stripe_len];
+                    let block_start = chunk_idx * block_chunk_len;
+                    for (offset, c_i) in chunk.iter().enumerate() {
+                        let block_idx = block_start + offset;
+                        if c_i.positions.is_empty()
+                            || self.packed_block_cache.nonzero_count(block_idx) == 0
+                        {
+                            continue;
+                        }
+
+                        let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+                        let present_words =
+                            self.packed_block_cache.present_words_for_block(block_idx);
+                        let scatter_start = diagnostics.then_some(Instant::now());
+                        let mut local_updates = 0usize;
+                        for word_idx in word_start..word_end {
+                            let word = present_words[word_idx];
+                            if word == 0 {
+                                continue;
+                            }
+
+                            let word_base = word_idx * word_bits;
+                            let start_bit = stripe_start.saturating_sub(word_base);
+                            let end_bit = (stripe_end - word_base).min(word_bits);
+                            let lower_mask = u64::MAX << start_bit;
+                            let upper_mask = if end_bit == word_bits {
+                                u64::MAX
+                            } else {
+                                (1u64 << end_bit) - 1
+                            };
+                            let mut mask = word & lower_mask & upper_mask;
+                            while mask != 0 {
+                                let bit_idx = mask.trailing_zeros() as usize;
+                                let pos_in_block = word_base + bit_idx;
+                                let local_pos = pos_in_block - stripe_start;
+                                let coeff_idx = coeffs[pos_in_block] as usize;
+                                for (&pos, &challenge_coeff) in
+                                    c_i.positions.iter().zip(c_i.coeffs.iter())
+                                {
+                                    let target = coeff_idx + pos as usize;
+                                    let (idx, sign) = if target < D {
+                                        (target, 1i32)
+                                    } else {
+                                        (target - D, -1i32)
+                                    };
+                                    z_accum[local_pos][idx] += sign * challenge_coeff as i32;
+                                }
+                                local_updates += 1;
+                                mask &= mask - 1;
+                            }
+                        }
+                        if let Some(start) = scatter_start {
+                            scatter_ns
+                                .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        if diagnostics {
+                            scatter_updates.fetch_add(local_updates, Ordering::Relaxed);
+                        }
+                    }
+                    z_accum
+                })
+                .reduce_with(|mut a, b| {
+                    let merge_start = diagnostics.then_some(Instant::now());
+                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                        for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
+                            *a_coeff += b_coeff;
+                        }
+                    }
+                    if let Some(start) = merge_start {
+                        merge_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                    if diagnostics {
+                        merge_calls.fetch_add(1, Ordering::Relaxed);
+                    }
+                    a
+                })
+                .unwrap_or_else(|| vec![[0i32; D]; stripe_len]);
+            total_z[stripe_start..stripe_end].copy_from_slice(&stripe);
+        }
+
+        (
+            total_z,
+            PackedDecomposeFoldProfile {
+                fast_path: false,
+                striped_path: true,
+                alloc_buffers: alloc_buffers.load(Ordering::Relaxed),
+                alloc_rows: alloc_rows.load(Ordering::Relaxed),
+                scatter_ns: scatter_ns.load(Ordering::Relaxed),
+                merge_ns: merge_ns.load(Ordering::Relaxed),
+                finalize_ns: 0,
+                scatter_updates: scatter_updates.load(Ordering::Relaxed),
+                merge_calls: merge_calls.load(Ordering::Relaxed),
+            },
+        )
+    }
+
+    pub(super) fn decompose_fold_fast_singleton(
+        &self,
+        challenges: &[SparseChallenge],
+        block_len: usize,
+        delta: usize,
+    ) -> (Vec<[i32; D]>, PackedDecomposeFoldProfile) {
+        let diagnostics = packed_hotpath_diagnostics_enabled();
+        let scatter_ns = AtomicU64::new(0);
+        let scatter_updates = AtomicUsize::new(0);
+        let block_limit = challenges.len().min(self.num_blocks());
+        let rows: Vec<[i32; D]> = (0..block_len)
+            .into_par_iter()
+            .map(|pos_in_block| {
+                let scatter_start = diagnostics.then_some(Instant::now());
+                let mut row = [0i32; D];
+                let mut local_updates = 0usize;
+                for (block_idx, c_i) in challenges.iter().take(block_limit).enumerate() {
+                    if c_i.positions.is_empty() {
+                        continue;
+                    }
+                    let Some(coeff_idx) = self.packed_block_cache.coeff_at(block_idx, pos_in_block)
+                    else {
+                        continue;
+                    };
+                    local_updates += 1;
+                    for (&pos, &challenge_coeff) in c_i.positions.iter().zip(c_i.coeffs.iter()) {
+                        let target = coeff_idx + pos as usize;
+                        let (idx, sign) = if target < D {
+                            (target, 1i32)
+                        } else {
+                            (target - D, -1i32)
+                        };
+                        row[idx] += sign * challenge_coeff as i32;
+                    }
+                }
+                if let Some(start) = scatter_start {
+                    scatter_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                scatter_updates.fetch_add(local_updates, Ordering::Relaxed);
+                row
+            })
+            .collect();
+        let finalize_start = diagnostics.then_some(Instant::now());
+        let total_z = if delta == 1 {
+            rows
+        } else {
+            let inner_width = block_len * delta;
+            let mut total_z = vec![[0i32; D]; inner_width];
+            for (pos_in_block, row) in rows.into_iter().enumerate() {
+                total_z[pos_in_block * delta] = row;
+            }
+            total_z
+        };
+        let finalize_ns = finalize_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
+
+        (
+            total_z,
+            PackedDecomposeFoldProfile {
+                fast_path: true,
+                striped_path: false,
+                alloc_buffers: 1,
+                alloc_rows: block_len + if delta == 1 { 0 } else { block_len * delta },
+                scatter_ns: scatter_ns.load(Ordering::Relaxed),
+                merge_ns: 0,
+                finalize_ns,
+                scatter_updates: scatter_updates.load(Ordering::Relaxed),
+                merge_calls: 0,
+            },
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn commit_inner_small(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
         n_a: usize,
@@ -393,10 +1386,8 @@ impl<const D: usize> JoltPackedPoly<D> {
             .collect()
     }
 
-    /// Tiled path for large block_len. Precomputes A-matrix tiles (shared
-    /// read-only, total = block_len * n_a * sizeof(WideRing)), then processes
-    /// blocks via par_iter so only O(num_threads) accumulators exist at a time.
-    fn commit_inner_tiled(
+    #[allow(dead_code)]
+    pub(super) fn commit_inner_tiled(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
         n_a: usize,
@@ -455,8 +1446,8 @@ impl<const D: usize> JoltPackedPoly<D> {
             .collect()
     }
 
-    /// Small path: per-task z_chunk fits in L3, tree-reduce is cheap.
-    fn decompose_fold_small(
+    #[allow(dead_code)]
+    pub(super) fn decompose_fold_small(
         &self,
         challenges: &[SparseChallenge],
         block_len: usize,
@@ -497,11 +1488,8 @@ impl<const D: usize> JoltPackedPoly<D> {
             )
     }
 
-    /// Large path: use thread-local accumulation (fold → reduce) to avoid
-    /// allocating one huge buffer per task. Each Rayon thread reuses a single
-    /// buffer across all its assigned tasks, then we merge only ~2×num_threads
-    /// buffers instead of ~131K.
-    fn decompose_fold_large(
+    #[allow(dead_code)]
+    pub(super) fn decompose_fold_large(
         &self,
         challenges: &[SparseChallenge],
         block_len: usize,
@@ -594,8 +1582,8 @@ fn to_hachi_packed_opening_point<const D: usize>(
 fn advice_commit_layout<Cfg: CommitmentConfig>(
     m_vars: usize,
     r_vars: usize,
+    log_basis: u32,
 ) -> HachiCommitmentLayout {
-    let log_basis = Cfg::decomposition().log_basis;
     HachiCommitmentLayout::new_with_decomp(
         m_vars,
         r_vars,
@@ -616,13 +1604,13 @@ fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
     let alpha = D.trailing_zeros() as usize;
     let reduced_vars = poly_num_vars.saturating_sub(alpha);
     if reduced_vars <= 1 {
-        return advice_commit_layout::<Cfg>(reduced_vars.max(1), 0);
+        return advice_commit_layout::<Cfg>(reduced_vars.max(1), 0, INITIAL_LOG_BASIS);
     }
     // Advice polynomials have log_commit_bound=64, so use that config for
     // the optimal m/r split. All Fp128BoundedCommitmentConfig variants
     // share the same N_A, CHALLENGE_WEIGHT, log_basis.
     let (m_vars, r_vars) = optimal_m_r_split::<Fp128BoundedCommitmentConfig<64>>(reduced_vars);
-    advice_commit_layout::<Cfg>(m_vars, r_vars)
+    advice_commit_layout::<Cfg>(m_vars, r_vars, INITIAL_LOG_BASIS)
 }
 
 fn choose_packed_layout_for_shape<const D: usize, Cfg: CommitmentConfig>(
@@ -631,7 +1619,7 @@ fn choose_packed_layout_for_shape<const D: usize, Cfg: CommitmentConfig>(
     log_packed: usize,
 ) -> (PackedBitLayout, HachiCommitmentLayout) {
     let packed_layout = choose_packed_bit_layout::<D, Cfg>(log_k, log_t, log_packed);
-    let hachi_layout = packed_layout.into_hachi_layout::<Cfg>();
+    let hachi_layout = packed_layout.into_hachi_layout::<Cfg>(INITIAL_LOG_BASIS);
     (packed_layout, hachi_layout)
 }
 
@@ -663,7 +1651,7 @@ fn compute_packed_setup_layouts<const D: usize, Cfg: CommitmentConfig>(
     let advice_layout = compute_advice_layout::<D, Cfg>(advice_num_vars);
     let (_, packed_layout) =
         choose_packed_layout_for_shape::<D, Cfg>(max_log_k, max_log_t, log_packed);
-    if std::env::var_os("HACHI_SETUP_DIAGNOSTICS").is_some() {
+    if var_os("HACHI_SETUP_DIAGNOSTICS").is_some() {
         eprintln!(
             "[jolt hachi setup] max_log_t={max_log_t}, max_log_k={max_log_k}, log_packed={log_packed}"
         );
@@ -684,7 +1672,7 @@ fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
         D,
     >>::commit(&dense_poly, setup, layout)
     .expect("Hachi commit failed");
-    let ring_coeffs = std::mem::take(&mut dense_poly.coeffs);
+    let ring_coeffs = take(&mut dense_poly.coeffs);
     (
         commitment,
         JoltHachiOpeningHint {
@@ -738,47 +1726,85 @@ where
         .expect("packed block presence size overflow");
     let mut coeffs = vec![0u8; total_slots];
     let mut present_words = vec![0u64; total_present_words];
+    let mut nonzero_counts = vec![0u32; num_blocks];
 
     coeffs
         .par_chunks_mut(block_len)
         .zip(present_words.par_chunks_mut(present_words_per_block))
+        .zip(nonzero_counts.par_iter_mut())
         .enumerate()
-        .for_each(|(block_idx, (coeffs_block, present_words_block))| {
-            let PackedBlockRange {
-                cycle_start,
-                cycle_end,
-                poly_start,
-                poly_end,
-            } = packed_layout.block_range(block_idx, num_cycles, num_polys);
-            for c in cycle_start..cycle_end {
-                for p in poly_start..poly_end {
-                    if let Some(k) = index_of(c, p) {
-                        let packed = packed_layout.locate(c, p, k as usize);
-                        debug_assert_eq!(packed.block_idx, block_idx);
-                        coeffs_block[packed.pos_in_block] = packed.coeff_idx as u8;
-                        let word_idx = packed.pos_in_block / u64::BITS as usize;
-                        let bit_idx = packed.pos_in_block % u64::BITS as usize;
-                        present_words_block[word_idx] |= 1u64 << bit_idx;
+        .for_each(
+            |(block_idx, ((coeffs_block, present_words_block), nonzero_count))| {
+                let PackedBlockRange {
+                    cycle_start,
+                    cycle_end,
+                    poly_start,
+                    poly_end,
+                } = packed_layout.block_range(block_idx, num_cycles, num_polys);
+                let mut block_nonzero = 0u32;
+                for c in cycle_start..cycle_end {
+                    for p in poly_start..poly_end {
+                        if let Some(k) = index_of(c, p) {
+                            let packed = packed_layout.locate(c, p, k as usize);
+                            debug_assert_eq!(packed.block_idx, block_idx);
+                            let word_idx = packed.pos_in_block / u64::BITS as usize;
+                            let bit_idx = packed.pos_in_block % u64::BITS as usize;
+                            assert!(
+                                present_words_block[word_idx] & (1u64 << bit_idx) == 0,
+                                "packed block cache collision at block {block_idx}, pos {}",
+                                packed.pos_in_block
+                            );
+                            coeffs_block[packed.pos_in_block] = packed.coeff_idx as u8;
+                            present_words_block[word_idx] |= 1u64 << bit_idx;
+                            block_nonzero += 1;
+                        }
                     }
                 }
-            }
-        });
+                *nonzero_count = block_nonzero;
+            },
+        );
+
+    let total_nonzero = nonzero_counts
+        .iter()
+        .map(|&count| count as usize)
+        .sum::<usize>();
+    let occupancy_summary = summarize_block_occupancy(&nonzero_counts, block_len);
 
     eprintln!(
         "    [packed poly] build_block_cache: {:.2}s (block_len={block_len}, num_blocks={num_blocks})",
         t_cache.elapsed().as_secs_f64(),
     );
+    if packed_hotpath_diagnostics_enabled() {
+        let [empty_blocks, up_to_quarter, up_to_half, up_to_three_quarters, dense_blocks] =
+            occupancy_summary.bucket_counts();
+        eprintln!(
+            "    [packed poly] shape: cycles={num_cycles}, polys={num_polys}, block_len={block_len}, num_blocks={num_blocks}, avg_occupancy={:.1}%, p50_block={:.1}%, p95_block={:.1}%, max_block={:.1}%, nonempty_blocks={}/{num_blocks}, occ_buckets=[0:{} <=25:{} <=50:{} <=75:{} >75:{}], live_slots={total_nonzero}",
+            100.0 * total_nonzero as f64 / total_slots as f64,
+            100.0 * occupancy_summary.p50_ratio(block_len),
+            100.0 * occupancy_summary.p95_ratio(block_len),
+            100.0 * occupancy_summary.max_ratio(block_len),
+            occupancy_summary.nonempty_blocks(),
+            empty_blocks,
+            up_to_quarter,
+            up_to_half,
+            up_to_three_quarters,
+            dense_blocks,
+        );
+    }
 
     Arc::new(PackedBlockCache {
         coeffs: Arc::from(coeffs.into_boxed_slice()),
         present_words: Arc::from(present_words.into_boxed_slice()),
+        nonzero_counts: Arc::from(nonzero_counts.into_boxed_slice()),
         block_len,
         present_words_per_block,
         num_blocks,
+        total_nonzero,
+        occupancy_summary,
     })
 }
 
-fn build_packed_poly<const D: usize, IndexFn>(
+pub(super) fn build_packed_poly<const D: usize, IndexFn>(
     index_of: IndexFn,
     num_cycles: usize,
     num_polys: usize,
@@ -1050,7 +2076,7 @@ where
             opening_point.len()
         );
         let packed_layout = batch_hint.packed_layout;
-        let packed_hachi_layout = packed_layout.into_hachi_layout::<Cfg>();
+        let packed_hachi_layout = packed_layout.into_hachi_layout::<Cfg>(INITIAL_LOG_BASIS);
         let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, packed_layout);
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
@@ -1254,7 +2280,6 @@ where
 
     #[allow(clippy::if_same_then_else)]
     fn log_k_chunk_for_trace(log_T: usize) -> usize {
-        use common::constants::HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T;
         // Hachi with D=256 requires log_k_chunk >= alpha = log2(D) = 8.
         if log_T >= HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T {
             8
@@ -1322,7 +2347,7 @@ pub(super) fn poly_to_ring_coeffs<const D: usize>(
         MultilinearPolynomial::LargeScalars(p) => {
             // SAFETY: JoltFp128 is repr(transparent) over Fp128.
             let field_coeffs: &[Fp128] =
-                unsafe { std::slice::from_raw_parts(p.Z.as_ptr() as *const Fp128, p.Z.len()) };
+                unsafe { from_raw_parts(p.Z.as_ptr() as *const Fp128, p.Z.len()) };
             pack_field_to_ring::<D>(field_coeffs)
         }
         MultilinearPolynomial::BoolScalars(p) => {

@@ -153,8 +153,10 @@ impl PackedBitLayout {
     }
 
     #[inline]
-    pub(super) fn into_hachi_layout<Cfg: CommitmentConfig>(self) -> HachiCommitmentLayout {
-        let log_basis = Cfg::decomposition().log_basis;
+    pub(super) fn into_hachi_layout<Cfg: CommitmentConfig>(
+        self,
+        log_basis: u32,
+    ) -> HachiCommitmentLayout {
         HachiCommitmentLayout::new_with_decomp(
             self.m_vars(),
             self.r_vars(),

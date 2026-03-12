@@ -1,16 +1,25 @@
-use super::commitment_scheme::JoltHachiCommitmentScheme;
-use super::packed_layout::choose_packed_bit_layout;
+use std::{array::from_fn, collections::HashSet, time::Instant};
+
+use super::commitment_scheme::{
+    build_packed_poly, poly_to_ring_coeffs, summarize_block_occupancy, Fp128OneHot256Config,
+    HachiBatchedProof, JoltHachiCommitmentScheme, JoltPackedPoly,
+};
+use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout};
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128};
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::{CommitmentScheme, PolynomialBatchSource};
+use crate::poly::compact_polynomial::CompactPolynomial;
 use crate::poly::dense_mlpoly::DensePolynomial;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
 use crate::poly::one_hot_polynomial::OneHotPolynomial;
 use crate::poly::opening_proof::BatchPolynomialSource;
 use crate::transcripts::{Blake2bTranscript, Transcript};
 use crate::utils::errors::ProofVerifyError;
-use hachi_pcs::protocol::commitment::{optimal_m_r_split, CommitmentConfig};
+use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
+use hachi_pcs::algebra::ring::CyclotomicRing;
+use hachi_pcs::protocol::commitment::utils::flat_matrix::FlatMatrix;
+use hachi_pcs::protocol::commitment::{compute_num_digits, optimal_m_r_split, CommitmentConfig};
 use hachi_pcs::protocol::proof::{HachiProof, PackedDigits};
 use hachi_pcs::protocol::SmallTestCommitmentConfig;
 use hachi_pcs::FromSmallInt;
@@ -74,12 +83,77 @@ impl BatchPolynomialSource<JoltFp128> for TestPackedSource {
     }
 }
 
+fn build_test_packed_poly<const D: usize, C: CommitmentConfig>(
+    source: &TestPackedSource,
+) -> (JoltPackedPoly<D>, PackedBitLayout) {
+    let log_k = source.onehot_k.trailing_zeros() as usize;
+    let log_t = source.num_cycles().trailing_zeros() as usize;
+    let log_packed = source.per_poly.len().next_power_of_two().trailing_zeros() as usize;
+    let packed_layout = choose_packed_bit_layout::<D, C>(log_k, log_t, log_packed);
+    let index_fn = |cycle_idx: usize, poly_idx: usize| {
+        PolynomialBatchSource::onehot_index(source, cycle_idx, poly_idx)
+    };
+    let packed_poly = build_packed_poly::<D, _>(
+        index_fn,
+        source.num_cycles(),
+        source.per_poly.len(),
+        packed_layout,
+        None,
+    );
+    (packed_poly, packed_layout)
+}
+
+fn make_test_a_matrix<const D: usize>(
+    n_a: usize,
+    block_len: usize,
+    num_digits_commit: usize,
+) -> FlatMatrix<Fp128> {
+    let rows: Vec<Vec<CyclotomicRing<Fp128, D>>> = (0..n_a)
+        .map(|row_idx| {
+            (0..block_len * num_digits_commit)
+                .map(|col_idx| {
+                    CyclotomicRing::from_coefficients(from_fn(|coeff_idx| {
+                        let value = (row_idx as u64 + 1) * 1_000_000
+                            + (col_idx as u64 + 1) * 1_003
+                            + coeff_idx as u64;
+                        Fp128::from_u64(value)
+                    }))
+                })
+                .collect()
+        })
+        .collect();
+    FlatMatrix::from_ring_matrix(&rows)
+}
+
+fn make_test_challenges<const D: usize>(num_blocks: usize) -> Vec<SparseChallenge> {
+    (0..num_blocks)
+        .map(|block_idx| {
+            if block_idx % 5 == 0 {
+                SparseChallenge::zero()
+            } else {
+                SparseChallenge {
+                    positions: vec![
+                        (block_idx % D) as u32,
+                        ((block_idx + 3) % D) as u32,
+                        ((block_idx + 7) % D) as u32,
+                    ],
+                    coeffs: if block_idx % 2 == 0 {
+                        vec![1, -1, 2]
+                    } else {
+                        vec![-1, 2, -1]
+                    },
+                }
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn polynomial_adapter_preserves_coefficients() {
     let evals: Vec<JoltFp128> = (0..16).map(|i| JoltFp128::from_u64(i as u64)).collect();
     let poly = MultilinearPolynomial::LargeScalars(DensePolynomial::new(evals.clone()));
 
-    let ring_coeffs = super::commitment_scheme::poly_to_ring_coeffs::<{ Cfg::D }>(&poly);
+    let ring_coeffs = poly_to_ring_coeffs::<{ Cfg::D }>(&poly);
 
     assert_eq!(ring_coeffs.len() * Cfg::D, 16);
     for (i, (&jolt_val, hachi_val)) in evals
@@ -104,12 +178,10 @@ fn polynomial_adapter_preserves_coefficients() {
 
 #[test]
 fn polynomial_adapter_compact_scalars() {
-    use crate::poly::compact_polynomial::CompactPolynomial;
-
     let u8_coeffs: Vec<u8> = (0..8).collect();
     let poly = MultilinearPolynomial::U8Scalars(CompactPolynomial::from_coeffs(u8_coeffs.clone()));
 
-    let ring_coeffs = super::commitment_scheme::poly_to_ring_coeffs::<{ Cfg::D }>(&poly);
+    let ring_coeffs = poly_to_ring_coeffs::<{ Cfg::D }>(&poly);
 
     let field_coeffs: Vec<Fp128> = ring_coeffs
         .iter()
@@ -227,6 +299,362 @@ fn packed_layout_block_ranges_match_positions() {
 }
 
 #[test]
+fn packed_layout_live_entries_are_injective() {
+    let source = TestPackedSource::new(
+        vec![
+            vec![
+                Some(0),
+                Some(15),
+                None,
+                Some(1),
+                Some(14),
+                Some(2),
+                None,
+                Some(13),
+            ],
+            vec![
+                Some(15),
+                None,
+                Some(0),
+                Some(12),
+                Some(3),
+                None,
+                Some(11),
+                Some(4),
+            ],
+            vec![
+                Some(7),
+                Some(8),
+                Some(9),
+                None,
+                Some(10),
+                Some(6),
+                Some(5),
+                Some(0),
+            ],
+            vec![
+                None,
+                Some(1),
+                Some(2),
+                Some(3),
+                None,
+                Some(4),
+                Some(5),
+                Some(6),
+            ],
+            vec![
+                Some(15),
+                Some(14),
+                Some(13),
+                Some(12),
+                Some(11),
+                Some(10),
+                Some(9),
+                Some(8),
+            ],
+        ],
+        Cfg::D,
+    );
+    let log_k = Cfg::D.trailing_zeros() as usize;
+    let log_packed = source.per_poly.len().next_power_of_two().trailing_zeros() as usize;
+    let layout = choose_packed_bit_layout::<{ Cfg::D }, Cfg>(log_k, 3, log_packed);
+    let mut seen = HashSet::new();
+
+    for (poly_idx, indices) in source.per_poly.iter().enumerate() {
+        for (cycle_idx, &maybe_hot_index) in indices.iter().enumerate() {
+            let Some(hot_index) = maybe_hot_index else {
+                continue;
+            };
+            let packed = layout.locate(cycle_idx, poly_idx, hot_index as usize);
+            assert!(
+                seen.insert((packed.block_idx, packed.pos_in_block)),
+                "packed slot collision at cycle={cycle_idx}, poly={poly_idx}, hot_index={hot_index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn packed_occupancy_summary_reports_percentiles_and_buckets() {
+    let summary = summarize_block_occupancy(&[0u32, 16, 17, 32, 33, 48, 49, 64], 64);
+
+    assert_eq!(summary.nonempty_blocks(), 7);
+    assert_eq!(summary.bucket_counts(), [1, 1, 2, 2, 2]);
+    assert!((summary.p50_ratio(64) - 0.5).abs() < f64::EPSILON);
+    assert!((summary.p95_ratio(64) - 1.0).abs() < f64::EPSILON);
+    assert!((summary.max_ratio(64) - 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn packed_commit_inner_fast_matches_generic_and_reference_helpers() {
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+            vec![Some(15); 16],
+        ],
+        Cfg::D,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ Cfg::D }, Cfg>(&source);
+    let block_len = packed_layout.block_len();
+    let log_basis = Cfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ Cfg::D }>(1, block_len, 1);
+    let a_view = a_flat.view::<{ Cfg::D }>();
+
+    let (generic, _) = packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
+    let (fast, _) = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
+    let small = packed_poly.commit_inner_small(&a_view, 1, 1, num_digits_open, log_basis);
+    let tiled = packed_poly.commit_inner_tiled(&a_view, 1, 1, num_digits_open, log_basis);
+
+    assert_eq!(fast, generic, "fast commit_inner must match generic");
+    assert_eq!(small, generic, "small commit_inner must match generic");
+    assert_eq!(tiled, generic, "tiled commit_inner must match generic");
+}
+
+#[test]
+fn packed_commit_inner_generic_matches_reference_with_multiple_rows() {
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..8).map(Some).collect(),
+            vec![1, 3, 5, 7, 1, 3, 5, 7].into_iter().map(Some).collect(),
+            vec![
+                Some(7),
+                Some(6),
+                None,
+                Some(5),
+                Some(4),
+                None,
+                Some(3),
+                Some(2),
+            ],
+        ],
+        Cfg::D,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ Cfg::D }, Cfg>(&source);
+    let block_len = packed_layout.block_len();
+    let log_basis = Cfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ Cfg::D }>(2, block_len, 2);
+    let a_view = a_flat.view::<{ Cfg::D }>();
+
+    let (generic, _) = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
+    let small = packed_poly.commit_inner_small(&a_view, 2, 2, num_digits_open, log_basis);
+    let tiled = packed_poly.commit_inner_tiled(&a_view, 2, 2, num_digits_open, log_basis);
+
+    assert_eq!(small, generic, "small commit_inner must match generic");
+    assert_eq!(tiled, generic, "tiled commit_inner must match generic");
+}
+
+#[test]
+fn packed_decompose_fold_fast_matches_generic_and_reference_helpers() {
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+            vec![Some(15); 16],
+        ],
+        Cfg::D,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ Cfg::D }, Cfg>(&source);
+    let challenges = make_test_challenges::<{ Cfg::D }>(packed_layout.num_blocks());
+
+    let (generic, _) =
+        packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
+    let (striped, _) =
+        packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
+    let (fast, _) =
+        packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
+    let small = packed_poly.decompose_fold_small(&challenges, packed_layout.block_len(), 1);
+    let large = packed_poly.decompose_fold_large(&challenges, packed_layout.block_len(), 1);
+
+    assert_eq!(
+        striped, generic,
+        "striped decompose_fold must match generic"
+    );
+    assert_eq!(fast, generic, "fast decompose_fold must match generic");
+    assert_eq!(small, generic, "small decompose_fold must match generic");
+    assert_eq!(large, generic, "large decompose_fold must match generic");
+}
+
+#[test]
+fn packed_fast_paths_match_generic_in_d256_regime() {
+    type FastCfg = Fp128OneHot256Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            vec![
+                Some(0),
+                Some(255),
+                Some(1),
+                Some(254),
+                Some(2),
+                Some(253),
+                Some(3),
+                Some(252),
+            ],
+            vec![
+                Some(255),
+                Some(0),
+                Some(254),
+                Some(1),
+                Some(253),
+                Some(2),
+                Some(252),
+                Some(3),
+            ],
+            vec![
+                Some(127),
+                Some(128),
+                Some(64),
+                Some(192),
+                Some(32),
+                Some(224),
+                Some(16),
+                Some(240),
+            ],
+            vec![
+                Some(5),
+                None,
+                Some(10),
+                Some(15),
+                None,
+                Some(20),
+                Some(25),
+                Some(30),
+            ],
+            vec![
+                Some(250),
+                Some(200),
+                Some(150),
+                Some(100),
+                Some(50),
+                Some(0),
+                Some(25),
+                Some(75),
+            ],
+        ],
+        FastCfg::D,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let (generic_commit, _) =
+        packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
+    let (fast_commit, _) =
+        packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
+    let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
+    let (generic_fold, _) =
+        packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
+    let (striped_fold, _) =
+        packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
+    let (fast_fold, _) =
+        packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
+
+    assert_eq!(
+        fast_commit, generic_commit,
+        "D=256 fast commit_inner must match generic"
+    );
+    assert_eq!(
+        striped_fold, generic_fold,
+        "D=256 striped decompose_fold must match generic"
+    );
+    assert_eq!(
+        fast_fold, generic_fold,
+        "D=256 fast decompose_fold must match generic"
+    );
+}
+
+#[test]
+#[ignore = "profiling helper for packed fast paths"]
+fn packed_fast_path_benchmark_smoke() {
+    type FastCfg = Fp128OneHot256Config;
+
+    let source = TestPackedSource::new(
+        (0..16)
+            .map(|poly_idx| {
+                (0..32)
+                    .map(|cycle_idx| Some(((poly_idx * 17 + cycle_idx * 9) % FastCfg::D) as u8))
+                    .collect()
+            })
+            .collect(),
+        FastCfg::D,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
+
+    let generic_commit_start = Instant::now();
+    let _ = packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
+    let generic_commit = generic_commit_start.elapsed();
+
+    let fast_commit_start = Instant::now();
+    let _ = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
+    let fast_commit = fast_commit_start.elapsed();
+
+    let generic_fold_start = Instant::now();
+    let _ = packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
+    let generic_fold = generic_fold_start.elapsed();
+
+    let fast_fold_start = Instant::now();
+    let _ = packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
+    let fast_fold = fast_fold_start.elapsed();
+
+    eprintln!(
+        "packed bench: commit generic={generic_commit:?}, commit fast={fast_commit:?}, fold generic={generic_fold:?}, fold fast={fast_fold:?}"
+    );
+}
+
+#[test]
 fn hachi_batch_roundtrip_with_packed_layout() {
     let log_k = Cfg::D.trailing_zeros() as usize;
     let num_cycles = 1usize << 3;
@@ -309,7 +737,7 @@ fn hachi_batch_verify_rejects_truncated_individual_commitments() {
         levels: vec![],
         final_w: PackedDigits::from_i8_digits(&[], 1),
     });
-    let proof = super::commitment_scheme::HachiBatchedProof {
+    let proof = HachiBatchedProof {
         packed_poly_proof,
         num_packed_polys: 2,
         log_k: 1,
@@ -352,7 +780,7 @@ fn hachi_batch_verify_rejects_invalid_num_packed() {
         levels: vec![],
         final_w: PackedDigits::from_i8_digits(&[], 1),
     });
-    let proof = super::commitment_scheme::HachiBatchedProof {
+    let proof = HachiBatchedProof {
         packed_poly_proof,
         num_packed_polys: 0,
         log_k: 1,
@@ -391,7 +819,7 @@ fn hachi_batch_verify_rejects_invalid_log_k() {
         levels: vec![],
         final_w: PackedDigits::from_i8_digits(&[], 1),
     });
-    let proof = super::commitment_scheme::HachiBatchedProof {
+    let proof = HachiBatchedProof {
         packed_poly_proof,
         num_packed_polys: 1,
         log_k: (opening_point.len() + 1) as u32,

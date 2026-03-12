@@ -38,7 +38,7 @@ use hachi_pcs::protocol::commitment::{
     DecompositionParams, Fp128BoundedCommitmentConfig, HachiCommitmentCore, HachiCommitmentLayout,
     RingCommitment,
 };
-use hachi_pcs::protocol::hachi_poly_ops::CommitInnerWitness;
+use hachi_pcs::protocol::hachi_poly_ops::{CommitInnerWitness, DecomposeFoldWitness};
 use hachi_pcs::protocol::opening_point::BasisMode;
 use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
 use hachi_pcs::protocol::{HachiCommitmentScheme, HachiProverSetup, HachiVerifierSetup};
@@ -69,10 +69,9 @@ const COMMIT_WIDE_ROW_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Each limb starts ≤ 65535; i32 max ≈ 2.1B → safe up to ~32K additions.
 const WIDE_RING_REDUCE_INTERVAL: usize = 32_000;
 
-/// decompose_fold z_chunk fits in cache when inner_width * D * 4 ≤ ~16 MB.
-/// With D=512: inner_width ≤ 8192.
-#[allow(dead_code)]
-const DECOMPOSE_FOLD_CACHE_THRESHOLD: usize = 8_192;
+/// Cap the singleton decompose-fold path by its output footprint so large
+/// traces can still use it when the folded witness rows remain modest.
+const DECOMPOSE_FOLD_FAST_PATH_MAX_BYTES: usize = 128 * 1024 * 1024;
 
 /// Per-worker stripe size for the large-shape decompose_fold path. At D=256,
 /// 4096 rows is 4 MiB of i32 output, which keeps merge working sets cacheable.
@@ -475,7 +474,7 @@ impl<const D: usize> JoltPackedPoly<D> {
     #[inline]
     fn can_use_decompose_fold_fast_path(&self, block_len: usize, delta: usize) -> bool {
         delta == 1
-            && block_len <= DECOMPOSE_FOLD_CACHE_THRESHOLD
+            && block_len.saturating_mul(size_of::<[i32; D]>()) <= DECOMPOSE_FOLD_FAST_PATH_MAX_BYTES
             && self.packed_block_cache.has_denseish_occupancy()
     }
 
@@ -588,7 +587,7 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         block_len: usize,
         delta: usize,
         _log_basis: u32,
-    ) -> Vec<CyclotomicRing<Fp128, D>> {
+    ) -> DecomposeFoldWitness<Fp128, D> {
         let (total_z, profile) = if self.can_use_decompose_fold_fast_path(block_len, delta) {
             self.decompose_fold_fast_singleton(challenges, block_len, delta)
         } else if self.can_use_decompose_fold_striped_path(delta) {
@@ -599,8 +598,8 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
 
         let q = (-Fp128::one()).to_canonical_u128() + 1;
         let finalize_start = packed_hotpath_diagnostics_enabled().then_some(Instant::now());
-        let z = total_z
-            .into_par_iter()
+        let z_pre = total_z
+            .par_iter()
             .map(|arr| {
                 let coeffs = from_fn(|k| {
                     let v = arr[k];
@@ -614,6 +613,12 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
             })
             .collect();
         let finalize_ns = finalize_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
+        let centered_inf_norm = total_z
+            .iter()
+            .flat_map(|row| row.iter())
+            .map(|coeff| coeff.unsigned_abs())
+            .max()
+            .unwrap_or(0);
         if packed_hotpath_diagnostics_enabled() {
             let occupancy = self.packed_block_cache.occupancy_summary();
             eprintln!(
@@ -638,7 +643,11 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
                 profile.merge_calls,
             );
         }
-        z
+        DecomposeFoldWitness {
+            z_pre,
+            centered_coeffs: total_z,
+            centered_inf_norm,
+        }
     }
 
     #[allow(non_snake_case)]
@@ -1275,38 +1284,19 @@ impl<const D: usize> JoltPackedPoly<D> {
                     let block_start = chunk_idx * block_chunk_len;
                     for (offset, c_i) in chunk.iter().enumerate() {
                         let block_idx = block_start + offset;
-                        if c_i.positions.is_empty()
-                            || self.packed_block_cache.nonzero_count(block_idx) == 0
-                        {
+                        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
+                        if c_i.positions.is_empty() || nonzero_count == 0 {
                             continue;
                         }
 
                         let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
-                        let present_words =
-                            self.packed_block_cache.present_words_for_block(block_idx);
                         let scatter_start = diagnostics.then_some(Instant::now());
                         let mut local_updates = 0usize;
-                        for word_idx in word_start..word_end {
-                            let word = present_words[word_idx];
-                            if word == 0 {
-                                continue;
-                            }
-
-                            let word_base = word_idx * word_bits;
-                            let start_bit = stripe_start.saturating_sub(word_base);
-                            let end_bit = (stripe_end - word_base).min(word_bits);
-                            let lower_mask = u64::MAX << start_bit;
-                            let upper_mask = if end_bit == word_bits {
-                                u64::MAX
-                            } else {
-                                (1u64 << end_bit) - 1
-                            };
-                            let mut mask = word & lower_mask & upper_mask;
-                            while mask != 0 {
-                                let bit_idx = mask.trailing_zeros() as usize;
-                                let pos_in_block = word_base + bit_idx;
-                                let local_pos = pos_in_block - stripe_start;
-                                let coeff_idx = coeffs[pos_in_block] as usize;
+                        if nonzero_count == block_len {
+                            for (local_pos, &coeff_idx) in
+                                coeffs[stripe_start..stripe_end].iter().enumerate()
+                            {
+                                let coeff_idx = coeff_idx as usize;
                                 for (&pos, &challenge_coeff) in
                                     c_i.positions.iter().zip(c_i.coeffs.iter())
                                 {
@@ -1319,7 +1309,45 @@ impl<const D: usize> JoltPackedPoly<D> {
                                     z_accum[local_pos][idx] += sign * challenge_coeff as i32;
                                 }
                                 local_updates += 1;
-                                mask &= mask - 1;
+                            }
+                        } else {
+                            let present_words =
+                                self.packed_block_cache.present_words_for_block(block_idx);
+                            for word_idx in word_start..word_end {
+                                let word = present_words[word_idx];
+                                if word == 0 {
+                                    continue;
+                                }
+
+                                let word_base = word_idx * word_bits;
+                                let start_bit = stripe_start.saturating_sub(word_base);
+                                let end_bit = (stripe_end - word_base).min(word_bits);
+                                let lower_mask = u64::MAX << start_bit;
+                                let upper_mask = if end_bit == word_bits {
+                                    u64::MAX
+                                } else {
+                                    (1u64 << end_bit) - 1
+                                };
+                                let mut mask = word & lower_mask & upper_mask;
+                                while mask != 0 {
+                                    let bit_idx = mask.trailing_zeros() as usize;
+                                    let pos_in_block = word_base + bit_idx;
+                                    let local_pos = pos_in_block - stripe_start;
+                                    let coeff_idx = coeffs[pos_in_block] as usize;
+                                    for (&pos, &challenge_coeff) in
+                                        c_i.positions.iter().zip(c_i.coeffs.iter())
+                                    {
+                                        let target = coeff_idx + pos as usize;
+                                        let (idx, sign) = if target < D {
+                                            (target, 1i32)
+                                        } else {
+                                            (target - D, -1i32)
+                                        };
+                                        z_accum[local_pos][idx] += sign * challenge_coeff as i32;
+                                    }
+                                    local_updates += 1;
+                                    mask &= mask - 1;
+                                }
                             }
                         }
                         if let Some(start) = scatter_start {

@@ -424,8 +424,8 @@ fn packed_commit_inner_fast_matches_generic_and_reference_helpers() {
     let a_flat = make_test_a_matrix::<{ Cfg::D }>(1, block_len, 1);
     let a_view = a_flat.view::<{ Cfg::D }>();
 
-    let (generic, _) = packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
-    let (fast, _) = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
+    let generic = packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
+    let fast = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
     let small = packed_poly.commit_inner_small(&a_view, 1, 1, num_digits_open, log_basis);
     let tiled = packed_poly.commit_inner_tiled(&a_view, 1, 1, num_digits_open, log_basis);
 
@@ -460,7 +460,7 @@ fn packed_commit_inner_generic_matches_reference_with_multiple_rows() {
     let a_flat = make_test_a_matrix::<{ Cfg::D }>(2, block_len, 2);
     let a_view = a_flat.view::<{ Cfg::D }>();
 
-    let (generic, _) = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
+    let generic = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
     let small = packed_poly.commit_inner_small(&a_view, 2, 2, num_digits_open, log_basis);
     let tiled = packed_poly.commit_inner_tiled(&a_view, 2, 2, num_digits_open, log_basis);
 
@@ -503,12 +503,9 @@ fn packed_decompose_fold_fast_matches_generic_and_reference_helpers() {
     let (packed_poly, packed_layout) = build_test_packed_poly::<{ Cfg::D }, Cfg>(&source);
     let challenges = make_test_challenges::<{ Cfg::D }>(packed_layout.num_blocks());
 
-    let (generic, _) =
-        packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
-    let (striped, _) =
-        packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
-    let (fast, _) =
-        packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
+    let generic = packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
+    let striped = packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
+    let fast = packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
     let small = packed_poly.decompose_fold_small(&challenges, packed_layout.block_len(), 1);
     let large = packed_poly.decompose_fold_large(&challenges, packed_layout.block_len(), 1);
 
@@ -585,16 +582,15 @@ fn packed_fast_paths_match_generic_in_d256_regime() {
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
     let a_view = a_flat.view::<{ FastCfg::D }>();
-    let (generic_commit, _) =
+    let generic_commit =
         packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
-    let (fast_commit, _) =
-        packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
+    let fast_commit = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
     let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
-    let (generic_fold, _) =
+    let generic_fold =
         packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
-    let (striped_fold, _) =
+    let striped_fold =
         packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
-    let (fast_fold, _) =
+    let fast_fold =
         packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
 
     assert_eq!(

@@ -5,11 +5,7 @@ use std::{
     marker::PhantomData,
     mem::{size_of, take},
     slice::{from_raw_parts, from_ref},
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc, OnceLock,
-    },
-    time::Instant,
+    sync::Arc,
 };
 
 use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout, PackedBlockRange};
@@ -65,6 +61,11 @@ const COMMIT_TILE_SIZE: usize = 1024;
 /// outweigh the saved bitmap scans.
 const COMMIT_WIDE_ROW_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
+/// Cap the concurrently live widened block accumulators in the tiled singleton
+/// path. Large traces otherwise keep one wide ring per block, which spills far
+/// beyond LLC and turns the block sweep into a DRAM-heavy pass.
+const COMMIT_WIDE_BATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// Maximum WideCyclotomicRing<Fp128x8i32> additions before i32 limb overflow.
 /// Each limb starts ≤ 65535; i32 max ≈ 2.1B → safe up to ~32K additions.
 const WIDE_RING_REDUCE_INTERVAL: usize = 32_000;
@@ -84,17 +85,7 @@ const DECOMPOSE_FOLD_STRIPE_CHUNKS_PER_THREAD: usize = 2;
 const DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_NUMERATOR: usize = 1;
 const DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_DENOMINATOR: usize = 2;
 
-#[inline]
-fn packed_hotpath_diagnostics_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| var_os("HACHI_PACKED_DIAGNOSTICS").is_some())
-}
-
-#[inline]
-fn nanos_to_secs(nanos: u64) -> f64 {
-    nanos as f64 / 1_000_000_000.0
-}
-
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct PackedOccupancySummary {
     nonempty_blocks: usize,
@@ -105,6 +96,7 @@ pub(super) struct PackedOccupancySummary {
     buckets: [usize; 5],
 }
 
+#[cfg(test)]
 impl PackedOccupancySummary {
     #[inline]
     fn ratio_for(nonzero: usize, block_len: usize) -> f64 {
@@ -141,6 +133,7 @@ impl PackedOccupancySummary {
     }
 }
 
+#[cfg(test)]
 #[inline]
 fn nearest_rank_count(
     sorted_counts: &[usize],
@@ -154,6 +147,7 @@ fn nearest_rank_count(
     sorted_counts[rank.saturating_sub(1)]
 }
 
+#[cfg(test)]
 pub(super) fn summarize_block_occupancy(
     nonzero_counts: &[u32],
     block_len: usize,
@@ -193,35 +187,9 @@ pub(super) fn summarize_block_occupancy(
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct PackedCommitInnerProfile {
-    fast_path: bool,
-    cached_row: bool,
-    preload_ns: u64,
-    iterate_ns: u64,
-    refresh_ns: u64,
-    decompose_ns: u64,
-    live_slots: usize,
-    refresh_count: usize,
-}
-
 struct PackedCommitInnerOutput<const D: usize> {
     t_hat: Vec<Vec<[i8; D]>>,
     t: Vec<Vec<CyclotomicRing<Fp128, D>>>,
-    profile: PackedCommitInnerProfile,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct PackedDecomposeFoldProfile {
-    fast_path: bool,
-    striped_path: bool,
-    alloc_buffers: usize,
-    alloc_rows: usize,
-    scatter_ns: u64,
-    merge_ns: u64,
-    finalize_ns: u64,
-    scatter_updates: usize,
-    merge_calls: usize,
 }
 
 /// `Fp128BoundedCommitmentConfig` with `D = 256` instead of `512`.
@@ -313,7 +281,6 @@ pub(super) struct PackedBlockCache {
     present_words_per_block: usize,
     num_blocks: usize,
     total_nonzero: usize,
-    occupancy_summary: PackedOccupancySummary,
 }
 
 impl fmt::Debug for PackedBlockCache {
@@ -324,7 +291,6 @@ impl fmt::Debug for PackedBlockCache {
             .field("num_blocks", &self.num_blocks)
             .field("total_slots", &self.coeffs.len())
             .field("total_nonzero", &self.total_nonzero)
-            .field("occupancy_summary", &self.occupancy_summary)
             .finish()
     }
 }
@@ -345,21 +311,6 @@ impl PackedBlockCache {
     #[inline]
     fn nonzero_count(&self, block_idx: usize) -> usize {
         self.nonzero_counts[block_idx] as usize
-    }
-
-    #[inline]
-    fn occupancy_ratio(&self) -> f64 {
-        let total_slots = self.num_blocks * self.block_len;
-        if total_slots == 0 {
-            0.0
-        } else {
-            self.total_nonzero as f64 / total_slots as f64
-        }
-    }
-
-    #[inline]
-    fn occupancy_summary(&self) -> PackedOccupancySummary {
-        self.occupancy_summary
     }
 
     #[inline]
@@ -406,40 +357,6 @@ impl<const D: usize> JoltPackedPoly<D> {
     #[inline]
     fn can_use_commit_inner_fast_path(&self, n_a: usize, num_digits_commit: usize) -> bool {
         n_a == 1 && num_digits_commit == 1
-    }
-
-    fn log_commit_inner_profile(
-        &self,
-        n_a: usize,
-        num_digits_commit: usize,
-        profile: PackedCommitInnerProfile,
-    ) {
-        if packed_hotpath_diagnostics_enabled() {
-            let occupancy = self.packed_block_cache.occupancy_summary();
-            eprintln!(
-                "    [packed poly] commit_inner(mode={}, n_a={n_a}, num_digits_commit={num_digits_commit}, block_len={}, num_blocks={}, avg_occupancy={:.1}%, p95_block={:.1}%, max_block={:.1}%, preload={:.3}s, iterate={:.3}s, refresh={:.3}s, decompose={:.3}s, live_slots={}, refreshes={})",
-                if profile.fast_path {
-                    if profile.cached_row {
-                        "fast-cached"
-                    } else {
-                        "fast-tiled"
-                    }
-                } else {
-                    "generic"
-                },
-                self.packed_layout.block_len(),
-                self.num_blocks(),
-                100.0 * self.packed_block_cache.occupancy_ratio(),
-                100.0 * occupancy.p95_ratio(self.packed_layout.block_len()),
-                100.0 * occupancy.max_ratio(self.packed_layout.block_len()),
-                nanos_to_secs(profile.preload_ns),
-                nanos_to_secs(profile.iterate_ns),
-                nanos_to_secs(profile.refresh_ns),
-                nanos_to_secs(profile.decompose_ns),
-                profile.live_slots,
-                profile.refresh_count,
-            );
-        }
     }
 
     fn commit_inner_output(
@@ -588,7 +505,7 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         delta: usize,
         _log_basis: u32,
     ) -> DecomposeFoldWitness<Fp128, D> {
-        let (total_z, profile) = if self.can_use_decompose_fold_fast_path(block_len, delta) {
+        let total_z = if self.can_use_decompose_fold_fast_path(block_len, delta) {
             self.decompose_fold_fast_singleton(challenges, block_len, delta)
         } else if self.can_use_decompose_fold_striped_path(delta) {
             self.decompose_fold_striped_delta1(challenges, block_len)
@@ -597,7 +514,6 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         };
 
         let q = (-Fp128::one()).to_canonical_u128() + 1;
-        let finalize_start = packed_hotpath_diagnostics_enabled().then_some(Instant::now());
         let z_pre = total_z
             .par_iter()
             .map(|arr| {
@@ -612,37 +528,12 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
                 CyclotomicRing::from_coefficients(coeffs)
             })
             .collect();
-        let finalize_ns = finalize_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
         let centered_inf_norm = total_z
             .iter()
             .flat_map(|row| row.iter())
             .map(|coeff| coeff.unsigned_abs())
             .max()
             .unwrap_or(0);
-        if packed_hotpath_diagnostics_enabled() {
-            let occupancy = self.packed_block_cache.occupancy_summary();
-            eprintln!(
-                "    [packed poly] decompose_fold(mode={}, block_len={block_len}, num_blocks={}, avg_occupancy={:.1}%, p95_block={:.1}%, max_block={:.1}%, alloc_buffers={}, alloc_rows={}, scatter={:.3}s, merge={:.3}s, finalize={:.3}s, scatter_updates={}, merge_calls={})",
-                if profile.fast_path {
-                    "fast"
-                } else if profile.striped_path {
-                    "striped"
-                } else {
-                    "generic"
-                },
-                self.num_blocks(),
-                100.0 * self.packed_block_cache.occupancy_ratio(),
-                100.0 * occupancy.p95_ratio(self.packed_layout.block_len()),
-                100.0 * occupancy.max_ratio(self.packed_layout.block_len()),
-                profile.alloc_buffers,
-                profile.alloc_rows,
-                nanos_to_secs(profile.scatter_ns),
-                nanos_to_secs(profile.merge_ns),
-                nanos_to_secs(profile.finalize_ns + finalize_ns),
-                profile.scatter_updates,
-                profile.merge_calls,
-            );
-        }
         DecomposeFoldWitness {
             z_pre,
             centered_coeffs: total_z,
@@ -665,7 +556,6 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         let n_a = a_view.num_rows();
         let output =
             self.commit_inner_output(&a_view, n_a, num_digits_commit, num_digits_open, log_basis);
-        self.log_commit_inner_profile(n_a, num_digits_commit, output.profile);
         Ok(output.t_hat)
     }
 
@@ -684,7 +574,6 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         let n_a = a_view.num_rows();
         let output =
             self.commit_inner_output(&a_view, n_a, num_digits_commit, num_digits_open, log_basis);
-        self.log_commit_inner_profile(n_a, num_digits_commit, output.profile);
         Ok(CommitInnerWitness {
             t_hat: output.t_hat,
             t: output.t,
@@ -760,9 +649,7 @@ impl<const D: usize> JoltPackedPoly<D> {
         num_digits_open: usize,
         log_basis: u32,
     ) -> PackedCommitInnerOutput<D> {
-        let diagnostics = packed_hotpath_diagnostics_enabled();
         let block_len = self.packed_layout.block_len();
-        let preload_start = diagnostics.then_some(Instant::now());
         let a_wide_flat: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..block_len)
             .into_par_iter()
             .flat_map_iter(|pos| {
@@ -770,22 +657,12 @@ impl<const D: usize> JoltPackedPoly<D> {
                 (0..n_a).map(move |a| WideCyclotomicRing::from_ring(&a_view.row(a)[col]))
             })
             .collect();
-        let preload_ns = preload_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
-        let iterate_ns = AtomicU64::new(0);
-        let refresh_ns = AtomicU64::new(0);
-        let decompose_ns = AtomicU64::new(0);
-        let live_slots = AtomicUsize::new(0);
-        let refresh_count = AtomicUsize::new(0);
 
         let per_block = (0..self.num_blocks())
             .into_par_iter()
             .map(|block_idx| {
                 let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
                 let mut entries_since_reduce = 0usize;
-                let mut local_live_slots = 0usize;
-                let mut local_refresh_ns = 0u64;
-                let mut local_refresh_count = 0usize;
-                let iterate_start = diagnostics.then_some(Instant::now());
 
                 self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
                     let a_base = pos_in_block * n_a;
@@ -794,56 +671,22 @@ impl<const D: usize> JoltPackedPoly<D> {
                         a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx]);
                     }
 
-                    local_live_slots += 1;
                     entries_since_reduce += 1;
                     if entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
-                        let reduce_start = diagnostics.then_some(Instant::now());
                         Self::reduce_wide_accumulators(&mut t_wide);
-                        if let Some(start) = reduce_start {
-                            local_refresh_ns += start.elapsed().as_nanos() as u64;
-                        }
-                        local_refresh_count += 1;
                         entries_since_reduce = 0;
                     }
                 });
 
-                if let Some(start) = iterate_start {
-                    let block_iter_ns = start.elapsed().as_nanos() as u64;
-                    iterate_ns.fetch_add(
-                        block_iter_ns.saturating_sub(local_refresh_ns),
-                        Ordering::Relaxed,
-                    );
-                    refresh_ns.fetch_add(local_refresh_ns, Ordering::Relaxed);
-                }
-                live_slots.fetch_add(local_live_slots, Ordering::Relaxed);
-                refresh_count.fetch_add(local_refresh_count, Ordering::Relaxed);
-
-                let decompose_start = diagnostics.then_some(Instant::now());
                 let t: Vec<CyclotomicRing<Fp128, D>> =
                     t_wide.iter_mut().map(|w| w.reduce()).collect();
                 let t_hat = decompose_rows_i8(&t, num_digits_open, log_basis);
-                if let Some(start) = decompose_start {
-                    decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
                 (t, t_hat)
             })
             .collect::<Vec<_>>();
         let (t, t_hat): (Vec<_>, Vec<_>) = per_block.into_iter().unzip();
 
-        PackedCommitInnerOutput {
-            t_hat,
-            t,
-            profile: PackedCommitInnerProfile {
-                fast_path: false,
-                cached_row: false,
-                preload_ns,
-                iterate_ns: iterate_ns.load(Ordering::Relaxed),
-                refresh_ns: refresh_ns.load(Ordering::Relaxed),
-                decompose_ns: decompose_ns.load(Ordering::Relaxed),
-                live_slots: live_slots.load(Ordering::Relaxed),
-                refresh_count: refresh_count.load(Ordering::Relaxed),
-            },
-        }
+        PackedCommitInnerOutput { t_hat, t }
     }
 
     #[allow(dead_code)]
@@ -854,7 +697,7 @@ impl<const D: usize> JoltPackedPoly<D> {
         num_digits_commit: usize,
         num_digits_open: usize,
         log_basis: u32,
-    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+    ) -> Vec<Vec<[i8; D]>> {
         let output = self.commit_inner_generic_output(
             a_view,
             n_a,
@@ -862,7 +705,7 @@ impl<const D: usize> JoltPackedPoly<D> {
             num_digits_open,
             log_basis,
         );
-        (output.t_hat, output.profile)
+        output.t_hat
     }
 
     #[allow(dead_code)]
@@ -871,9 +714,9 @@ impl<const D: usize> JoltPackedPoly<D> {
         a_view: &RingMatrixView<'_, Fp128, D>,
         num_digits_open: usize,
         log_basis: u32,
-    ) -> (Vec<Vec<[i8; D]>>, PackedCommitInnerProfile) {
+    ) -> Vec<Vec<[i8; D]>> {
         let output = self.commit_inner_fast_singleton_output(a_view, num_digits_open, log_basis);
-        (output.t_hat, output.profile)
+        output.t_hat
     }
 
     fn commit_inner_fast_singleton_output(
@@ -895,30 +738,18 @@ impl<const D: usize> JoltPackedPoly<D> {
         num_digits_open: usize,
         log_basis: u32,
     ) -> PackedCommitInnerOutput<D> {
-        let diagnostics = packed_hotpath_diagnostics_enabled();
         let block_len = self.packed_layout.block_len();
         let a_row = a_view.row(0);
-        let preload_start = diagnostics.then_some(Instant::now());
         let a_wide_row: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (0..block_len)
             .into_par_iter()
             .map(|pos| WideCyclotomicRing::from_ring(&a_row[pos]))
             .collect();
-        let preload_ns = preload_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
-        let iterate_ns = AtomicU64::new(0);
-        let refresh_ns = AtomicU64::new(0);
-        let decompose_ns = AtomicU64::new(0);
-        let live_slots = AtomicUsize::new(0);
-        let refresh_count = AtomicUsize::new(0);
 
         let per_block = (0..self.num_blocks())
             .into_par_iter()
             .map(|block_idx| {
                 let mut t_wide = WideCyclotomicRing::<Fp128x8i32, D>::zero();
                 let mut entries_since_reduce = 0usize;
-                let iterate_start = diagnostics.then_some(Instant::now());
-                let mut local_live_slots = 0usize;
-                let mut local_refresh_ns = 0u64;
-                let mut local_refresh_count = 0usize;
 
                 self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
                     Self::shift_accumulate_into_fast(
@@ -926,61 +757,21 @@ impl<const D: usize> JoltPackedPoly<D> {
                         &mut t_wide,
                         coeff_idx,
                     );
-                    if diagnostics {
-                        local_live_slots += 1;
-                    }
                     entries_since_reduce += 1;
                     if entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
-                        let reduce_start = diagnostics.then_some(Instant::now());
                         Self::reduce_wide_accumulator(&mut t_wide);
-                        if let Some(start) = reduce_start {
-                            local_refresh_ns += start.elapsed().as_nanos() as u64;
-                        }
-                        if diagnostics {
-                            local_refresh_count += 1;
-                        }
                         entries_since_reduce = 0;
                     }
                 });
 
-                if let Some(start) = iterate_start {
-                    let block_iter_ns = start.elapsed().as_nanos() as u64;
-                    iterate_ns.fetch_add(
-                        block_iter_ns.saturating_sub(local_refresh_ns),
-                        Ordering::Relaxed,
-                    );
-                    refresh_ns.fetch_add(local_refresh_ns, Ordering::Relaxed);
-                }
-                if diagnostics {
-                    live_slots.fetch_add(local_live_slots, Ordering::Relaxed);
-                    refresh_count.fetch_add(local_refresh_count, Ordering::Relaxed);
-                }
-
-                let decompose_start = diagnostics.then_some(Instant::now());
                 let t: CyclotomicRing<Fp128, D> = t_wide.reduce();
                 let t_hat = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
-                if let Some(start) = decompose_start {
-                    decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
                 (vec![t], t_hat)
             })
             .collect::<Vec<_>>();
         let (t, t_hat): (Vec<_>, Vec<_>) = per_block.into_iter().unzip();
 
-        PackedCommitInnerOutput {
-            t_hat,
-            t,
-            profile: PackedCommitInnerProfile {
-                fast_path: true,
-                cached_row: true,
-                preload_ns,
-                iterate_ns: iterate_ns.load(Ordering::Relaxed),
-                refresh_ns: refresh_ns.load(Ordering::Relaxed),
-                decompose_ns: decompose_ns.load(Ordering::Relaxed),
-                live_slots: live_slots.load(Ordering::Relaxed),
-                refresh_count: refresh_count.load(Ordering::Relaxed),
-            },
-        }
+        PackedCommitInnerOutput { t_hat, t }
     }
 
     fn commit_inner_fast_singleton_tiled_output(
@@ -989,170 +780,162 @@ impl<const D: usize> JoltPackedPoly<D> {
         num_digits_open: usize,
         log_basis: u32,
     ) -> PackedCommitInnerOutput<D> {
-        let diagnostics = packed_hotpath_diagnostics_enabled();
         let block_len = self.packed_layout.block_len();
         let tile_size = COMMIT_TILE_SIZE.min(block_len.max(1));
         let num_tiles = block_len.div_ceil(tile_size);
         let word_bits = u64::BITS as usize;
         let a_row = a_view.row(0);
-        let preload_ns = AtomicU64::new(0);
-        let iterate_ns = AtomicU64::new(0);
-        let refresh_ns = AtomicU64::new(0);
-        let decompose_ns = AtomicU64::new(0);
-        let live_slots = AtomicUsize::new(0);
-        let refresh_count = AtomicUsize::new(0);
-        let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); self.num_blocks()];
-        let mut entries_since_reduce = vec![0usize; self.num_blocks()];
+        let wide_ring_bytes = size_of::<WideCyclotomicRing<Fp128x8i32, D>>().max(1);
+        let chunk_parallelism = rayon::current_num_threads()
+            .max(1)
+            .min(self.num_blocks().max(1));
+        let target_active_blocks = (COMMIT_WIDE_BATCH_MAX_BYTES / wide_ring_bytes)
+            .max(chunk_parallelism)
+            .min(self.num_blocks().max(1));
+        let blocks_per_chunk = target_active_blocks.div_ceil(chunk_parallelism).max(1);
+        let blocks_per_batch = (blocks_per_chunk * chunk_parallelism).min(self.num_blocks().max(1));
+        let mut t = vec![Vec::new(); self.num_blocks()];
+        let mut t_hat = vec![Vec::new(); self.num_blocks()];
 
-        for tile_idx in 0..num_tiles {
-            let tile_start = tile_idx * tile_size;
-            let tile_end = (tile_start + tile_size).min(block_len);
-            let preload_start = diagnostics.then_some(Instant::now());
-            let a_tile: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (tile_start..tile_end)
-                .into_par_iter()
-                .map(|pos| WideCyclotomicRing::from_ring(&a_row[pos]))
+        debug_assert!(
+            tile_size <= WIDE_RING_REDUCE_INTERVAL,
+            "tiled singleton commit assumes each tile fits within one unreduced window"
+        );
+
+        for batch_block_start in (0..self.num_blocks()).step_by(blocks_per_batch) {
+            let batch_block_end = (batch_block_start + blocks_per_batch).min(self.num_blocks());
+            let batch_chunk_starts: Vec<usize> = (batch_block_start..batch_block_end)
+                .step_by(blocks_per_chunk)
                 .collect();
-            if let Some(start) = preload_start {
-                preload_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
+            let mut batch_t_wide: Vec<Vec<WideCyclotomicRing<Fp128x8i32, D>>> = batch_chunk_starts
+                .iter()
+                .map(|&chunk_start| {
+                    let chunk_end = (chunk_start + blocks_per_chunk).min(batch_block_end);
+                    vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); chunk_end - chunk_start]
+                })
+                .collect();
+            let mut batch_entries_since_reduce: Vec<Vec<usize>> = batch_chunk_starts
+                .iter()
+                .map(|&chunk_start| {
+                    let chunk_end = (chunk_start + blocks_per_chunk).min(batch_block_end);
+                    vec![0usize; chunk_end - chunk_start]
+                })
+                .collect();
 
-            let word_start = tile_start / word_bits;
-            let word_end = tile_end.div_ceil(word_bits);
-            t_wide
-                .par_iter_mut()
-                .zip(entries_since_reduce.par_iter_mut())
-                .enumerate()
-                .for_each(|(block_idx, (t_wide, entries_since_reduce))| {
-                    let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
-                    if nonzero_count == 0 {
-                        return;
-                    }
+            for tile_idx in 0..num_tiles {
+                let tile_start = tile_idx * tile_size;
+                let tile_end = (tile_start + tile_size).min(block_len);
+                let a_tile: Vec<WideCyclotomicRing<Fp128x8i32, D>> = (tile_start..tile_end)
+                    .into_par_iter()
+                    .map(|pos| WideCyclotomicRing::from_ring(&a_row[pos]))
+                    .collect();
 
-                    let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
-                    let iterate_start = diagnostics.then_some(Instant::now());
-                    let mut local_live_slots = 0usize;
-                    let mut local_refresh_ns = 0u64;
-                    let mut local_refresh_count = 0usize;
-
-                    if nonzero_count == block_len {
-                        for pos_in_block in tile_start..tile_end {
-                            let local_pos = pos_in_block - tile_start;
-                            Self::shift_accumulate_into_fast(
-                                &a_tile[local_pos],
-                                t_wide,
-                                coeffs[pos_in_block] as usize,
-                            );
-
-                            if diagnostics {
-                                local_live_slots += 1;
-                            }
-                            *entries_since_reduce += 1;
-                            if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
-                                let reduce_start = diagnostics.then_some(Instant::now());
-                                Self::reduce_wide_accumulator(t_wide);
-                                if let Some(start) = reduce_start {
-                                    local_refresh_ns += start.elapsed().as_nanos() as u64;
-                                }
-                                if diagnostics {
-                                    local_refresh_count += 1;
-                                }
-                                *entries_since_reduce = 0;
-                            }
-                        }
-                    } else {
-                        let present_words =
-                            self.packed_block_cache.present_words_for_block(block_idx);
-                        for word_idx in word_start..word_end {
-                            let word = present_words[word_idx];
-                            if word == 0 {
+                let word_start = tile_start / word_bits;
+                let word_end = tile_end.div_ceil(word_bits);
+                batch_chunk_starts
+                    .par_iter()
+                    .zip(batch_t_wide.par_iter_mut())
+                    .zip(batch_entries_since_reduce.par_iter_mut())
+                    .for_each(|((&chunk_start, t_wide_chunk), entries_chunk)| {
+                        for (chunk_offset, (t_wide, entries_since_reduce)) in t_wide_chunk
+                            .iter_mut()
+                            .zip(entries_chunk.iter_mut())
+                            .enumerate()
+                        {
+                            let block_idx = chunk_start + chunk_offset;
+                            let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
+                            if nonzero_count == 0 {
                                 continue;
                             }
 
-                            let word_base = word_idx * word_bits;
-                            let start_bit = tile_start.saturating_sub(word_base);
-                            let end_bit = (tile_end - word_base).min(word_bits);
-                            let lower_mask = u64::MAX << start_bit;
-                            let upper_mask = if end_bit == word_bits {
-                                u64::MAX
+                            let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+
+                            if nonzero_count == block_len {
+                                for pos_in_block in tile_start..tile_end {
+                                    let local_pos = pos_in_block - tile_start;
+                                    Self::shift_accumulate_into_fast(
+                                        &a_tile[local_pos],
+                                        t_wide,
+                                        coeffs[pos_in_block] as usize,
+                                    );
+
+                                    *entries_since_reduce += 1;
+                                    if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
+                                        Self::reduce_wide_accumulator(t_wide);
+                                        *entries_since_reduce = 0;
+                                    }
+                                }
                             } else {
-                                (1u64 << end_bit) - 1
-                            };
-                            let mut mask = word & lower_mask & upper_mask;
-                            while mask != 0 {
-                                let bit_idx = mask.trailing_zeros() as usize;
-                                let pos_in_block = word_base + bit_idx;
-                                let local_pos = pos_in_block - tile_start;
-                                debug_assert!(pos_in_block < coeffs.len());
-                                Self::shift_accumulate_into_fast(
-                                    &a_tile[local_pos],
-                                    t_wide,
-                                    coeffs[pos_in_block] as usize,
-                                );
-
-                                if diagnostics {
-                                    local_live_slots += 1;
-                                }
-                                *entries_since_reduce += 1;
-                                if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
-                                    let reduce_start = diagnostics.then_some(Instant::now());
-                                    Self::reduce_wide_accumulator(t_wide);
-                                    if let Some(start) = reduce_start {
-                                        local_refresh_ns += start.elapsed().as_nanos() as u64;
+                                let present_words =
+                                    self.packed_block_cache.present_words_for_block(block_idx);
+                                for word_idx in word_start..word_end {
+                                    let word = present_words[word_idx];
+                                    if word == 0 {
+                                        continue;
                                     }
-                                    if diagnostics {
-                                        local_refresh_count += 1;
-                                    }
-                                    *entries_since_reduce = 0;
-                                }
 
-                                mask &= mask - 1;
+                                    let word_base = word_idx * word_bits;
+                                    let start_bit = tile_start.saturating_sub(word_base);
+                                    let end_bit = (tile_end - word_base).min(word_bits);
+                                    let lower_mask = u64::MAX << start_bit;
+                                    let upper_mask = if end_bit == word_bits {
+                                        u64::MAX
+                                    } else {
+                                        (1u64 << end_bit) - 1
+                                    };
+                                    let mut mask = word & lower_mask & upper_mask;
+                                    while mask != 0 {
+                                        let bit_idx = mask.trailing_zeros() as usize;
+                                        let pos_in_block = word_base + bit_idx;
+                                        let local_pos = pos_in_block - tile_start;
+                                        debug_assert!(pos_in_block < coeffs.len());
+                                        Self::shift_accumulate_into_fast(
+                                            &a_tile[local_pos],
+                                            t_wide,
+                                            coeffs[pos_in_block] as usize,
+                                        );
+
+                                        *entries_since_reduce += 1;
+                                        if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
+                                            Self::reduce_wide_accumulator(t_wide);
+                                            *entries_since_reduce = 0;
+                                        }
+
+                                        mask &= mask - 1;
+                                    }
+                                }
                             }
                         }
-                    }
+                    });
+            }
 
-                    if let Some(start) = iterate_start {
-                        let block_iter_ns = start.elapsed().as_nanos() as u64;
-                        iterate_ns.fetch_add(
-                            block_iter_ns.saturating_sub(local_refresh_ns),
-                            Ordering::Relaxed,
-                        );
-                        refresh_ns.fetch_add(local_refresh_ns, Ordering::Relaxed);
-                    }
-                    if diagnostics {
-                        live_slots.fetch_add(local_live_slots, Ordering::Relaxed);
-                        refresh_count.fetch_add(local_refresh_count, Ordering::Relaxed);
-                    }
-                });
-        }
+            let batch_outputs = batch_chunk_starts
+                .into_par_iter()
+                .zip(batch_t_wide.into_par_iter())
+                .map(|(chunk_start, mut t_wide_chunk)| {
+                    let t_chunk: Vec<CyclotomicRing<Fp128, D>> = t_wide_chunk
+                        .iter_mut()
+                        .map(|t_wide| t_wide.reduce())
+                        .collect();
+                    let t_hat_flat = decompose_rows_i8(&t_chunk, num_digits_open, log_basis);
+                    let t_hat_chunk: Vec<Vec<[i8; D]>> = t_hat_flat
+                        .chunks(num_digits_open)
+                        .map(|digits| digits.to_vec())
+                        .collect();
+                    (chunk_start, t_chunk, t_hat_chunk)
+                })
+                .collect::<Vec<_>>();
 
-        let per_block = t_wide
-            .into_par_iter()
-            .map(|t_wide| {
-                let decompose_start = diagnostics.then_some(Instant::now());
-                let t: CyclotomicRing<Fp128, D> = t_wide.reduce();
-                let t_hat = decompose_rows_i8(from_ref(&t), num_digits_open, log_basis);
-                if let Some(start) = decompose_start {
-                    decompose_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            for (chunk_start, t_chunk, t_hat_chunk) in batch_outputs {
+                for (offset, (t_i, t_hat_i)) in t_chunk.into_iter().zip(t_hat_chunk).enumerate() {
+                    let block_idx = chunk_start + offset;
+                    t[block_idx] = vec![t_i];
+                    t_hat[block_idx] = t_hat_i;
                 }
-                (vec![t], t_hat)
-            })
-            .collect::<Vec<_>>();
-        let (t, t_hat): (Vec<_>, Vec<_>) = per_block.into_iter().unzip();
-
-        PackedCommitInnerOutput {
-            t_hat,
-            t,
-            profile: PackedCommitInnerProfile {
-                fast_path: true,
-                cached_row: false,
-                preload_ns: preload_ns.load(Ordering::Relaxed),
-                iterate_ns: iterate_ns.load(Ordering::Relaxed),
-                refresh_ns: refresh_ns.load(Ordering::Relaxed),
-                decompose_ns: decompose_ns.load(Ordering::Relaxed),
-                live_slots: live_slots.load(Ordering::Relaxed),
-                refresh_count: refresh_count.load(Ordering::Relaxed),
-            },
+            }
         }
+
+        PackedCommitInnerOutput { t_hat, t }
     }
 
     pub(super) fn decompose_fold_generic(
@@ -1160,31 +943,17 @@ impl<const D: usize> JoltPackedPoly<D> {
         challenges: &[SparseChallenge],
         block_len: usize,
         delta: usize,
-    ) -> (Vec<[i32; D]>, PackedDecomposeFoldProfile) {
+    ) -> Vec<[i32; D]> {
         let inner_width = block_len * delta;
-        let diagnostics = packed_hotpath_diagnostics_enabled();
-        let alloc_buffers = AtomicUsize::new(0);
-        let alloc_rows = AtomicUsize::new(0);
-        let scatter_ns = AtomicU64::new(0);
-        let merge_ns = AtomicU64::new(0);
-        let scatter_updates = AtomicUsize::new(0);
-        let merge_calls = AtomicUsize::new(0);
 
         let total_z = (0..self.num_blocks())
             .into_par_iter()
             .fold(
-                || {
-                    if diagnostics {
-                        alloc_buffers.fetch_add(1, Ordering::Relaxed);
-                        alloc_rows.fetch_add(inner_width, Ordering::Relaxed);
-                    }
-                    vec![[0i32; D]; inner_width]
-                },
+                || vec![[0i32; D]; inner_width],
                 |mut z_accum, block_idx| {
                     if block_idx < challenges.len() {
                         let c_i = &challenges[block_idx];
                         if !c_i.positions.is_empty() {
-                            let scatter_start = diagnostics.then_some(Instant::now());
                             Self::scatter_challenge(
                                 self,
                                 block_idx,
@@ -1193,72 +962,31 @@ impl<const D: usize> JoltPackedPoly<D> {
                                 c_i,
                                 &mut z_accum,
                             );
-                            if let Some(start) = scatter_start {
-                                scatter_ns.fetch_add(
-                                    start.elapsed().as_nanos() as u64,
-                                    Ordering::Relaxed,
-                                );
-                            }
-                            scatter_updates.fetch_add(
-                                self.packed_block_cache.nonzero_count(block_idx),
-                                Ordering::Relaxed,
-                            );
                         }
                     }
                     z_accum
                 },
             )
             .reduce(
-                || {
-                    if diagnostics {
-                        alloc_buffers.fetch_add(1, Ordering::Relaxed);
-                        alloc_rows.fetch_add(inner_width, Ordering::Relaxed);
-                    }
-                    vec![[0i32; D]; inner_width]
-                },
+                || vec![[0i32; D]; inner_width],
                 |mut a, b| {
-                    let merge_start = diagnostics.then_some(Instant::now());
                     for (ai, bi) in a.iter_mut().zip(b.iter()) {
                         for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
                             *a_coeff += b_coeff;
                         }
                     }
-                    if let Some(start) = merge_start {
-                        merge_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    }
-                    merge_calls.fetch_add(1, Ordering::Relaxed);
                     a
                 },
             );
 
-        (
-            total_z,
-            PackedDecomposeFoldProfile {
-                fast_path: false,
-                striped_path: false,
-                alloc_buffers: alloc_buffers.load(Ordering::Relaxed),
-                alloc_rows: alloc_rows.load(Ordering::Relaxed),
-                scatter_ns: scatter_ns.load(Ordering::Relaxed),
-                merge_ns: merge_ns.load(Ordering::Relaxed),
-                finalize_ns: 0,
-                scatter_updates: scatter_updates.load(Ordering::Relaxed),
-                merge_calls: merge_calls.load(Ordering::Relaxed),
-            },
-        )
+        total_z
     }
 
     pub(super) fn decompose_fold_striped_delta1(
         &self,
         challenges: &[SparseChallenge],
         block_len: usize,
-    ) -> (Vec<[i32; D]>, PackedDecomposeFoldProfile) {
-        let diagnostics = packed_hotpath_diagnostics_enabled();
-        let alloc_buffers = AtomicUsize::new(0);
-        let alloc_rows = AtomicUsize::new(0);
-        let scatter_ns = AtomicU64::new(0);
-        let merge_ns = AtomicU64::new(0);
-        let scatter_updates = AtomicUsize::new(0);
-        let merge_calls = AtomicUsize::new(0);
+    ) -> Vec<[i32; D]> {
         let word_bits = u64::BITS as usize;
         let stripe_rows = DECOMPOSE_FOLD_STRIPE_ROWS.min(block_len.max(1));
         let block_limit = challenges.len().min(self.num_blocks());
@@ -1276,10 +1004,6 @@ impl<const D: usize> JoltPackedPoly<D> {
                 .par_chunks(block_chunk_len)
                 .enumerate()
                 .map(|(chunk_idx, chunk)| {
-                    if diagnostics {
-                        alloc_buffers.fetch_add(1, Ordering::Relaxed);
-                        alloc_rows.fetch_add(stripe_len, Ordering::Relaxed);
-                    }
                     let mut z_accum = vec![[0i32; D]; stripe_len];
                     let block_start = chunk_idx * block_chunk_len;
                     for (offset, c_i) in chunk.iter().enumerate() {
@@ -1290,8 +1014,6 @@ impl<const D: usize> JoltPackedPoly<D> {
                         }
 
                         let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
-                        let scatter_start = diagnostics.then_some(Instant::now());
-                        let mut local_updates = 0usize;
                         if nonzero_count == block_len {
                             for (local_pos, &coeff_idx) in
                                 coeffs[stripe_start..stripe_end].iter().enumerate()
@@ -1308,7 +1030,6 @@ impl<const D: usize> JoltPackedPoly<D> {
                                     };
                                     z_accum[local_pos][idx] += sign * challenge_coeff as i32;
                                 }
-                                local_updates += 1;
                             }
                         } else {
                             let present_words =
@@ -1345,33 +1066,18 @@ impl<const D: usize> JoltPackedPoly<D> {
                                         };
                                         z_accum[local_pos][idx] += sign * challenge_coeff as i32;
                                     }
-                                    local_updates += 1;
                                     mask &= mask - 1;
                                 }
                             }
-                        }
-                        if let Some(start) = scatter_start {
-                            scatter_ns
-                                .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                        }
-                        if diagnostics {
-                            scatter_updates.fetch_add(local_updates, Ordering::Relaxed);
                         }
                     }
                     z_accum
                 })
                 .reduce_with(|mut a, b| {
-                    let merge_start = diagnostics.then_some(Instant::now());
                     for (ai, bi) in a.iter_mut().zip(b.iter()) {
                         for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
                             *a_coeff += b_coeff;
                         }
-                    }
-                    if let Some(start) = merge_start {
-                        merge_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    }
-                    if diagnostics {
-                        merge_calls.fetch_add(1, Ordering::Relaxed);
                     }
                     a
                 })
@@ -1379,20 +1085,7 @@ impl<const D: usize> JoltPackedPoly<D> {
             total_z[stripe_start..stripe_end].copy_from_slice(&stripe);
         }
 
-        (
-            total_z,
-            PackedDecomposeFoldProfile {
-                fast_path: false,
-                striped_path: true,
-                alloc_buffers: alloc_buffers.load(Ordering::Relaxed),
-                alloc_rows: alloc_rows.load(Ordering::Relaxed),
-                scatter_ns: scatter_ns.load(Ordering::Relaxed),
-                merge_ns: merge_ns.load(Ordering::Relaxed),
-                finalize_ns: 0,
-                scatter_updates: scatter_updates.load(Ordering::Relaxed),
-                merge_calls: merge_calls.load(Ordering::Relaxed),
-            },
-        )
+        total_z
     }
 
     pub(super) fn decompose_fold_fast_singleton(
@@ -1400,17 +1093,12 @@ impl<const D: usize> JoltPackedPoly<D> {
         challenges: &[SparseChallenge],
         block_len: usize,
         delta: usize,
-    ) -> (Vec<[i32; D]>, PackedDecomposeFoldProfile) {
-        let diagnostics = packed_hotpath_diagnostics_enabled();
-        let scatter_ns = AtomicU64::new(0);
-        let scatter_updates = AtomicUsize::new(0);
+    ) -> Vec<[i32; D]> {
         let block_limit = challenges.len().min(self.num_blocks());
         let rows: Vec<[i32; D]> = (0..block_len)
             .into_par_iter()
             .map(|pos_in_block| {
-                let scatter_start = diagnostics.then_some(Instant::now());
                 let mut row = [0i32; D];
-                let mut local_updates = 0usize;
                 for (block_idx, c_i) in challenges.iter().take(block_limit).enumerate() {
                     if c_i.positions.is_empty() {
                         continue;
@@ -1419,7 +1107,6 @@ impl<const D: usize> JoltPackedPoly<D> {
                     else {
                         continue;
                     };
-                    local_updates += 1;
                     for (&pos, &challenge_coeff) in c_i.positions.iter().zip(c_i.coeffs.iter()) {
                         let target = coeff_idx + pos as usize;
                         let (idx, sign) = if target < D {
@@ -1430,15 +1117,10 @@ impl<const D: usize> JoltPackedPoly<D> {
                         row[idx] += sign * challenge_coeff as i32;
                     }
                 }
-                if let Some(start) = scatter_start {
-                    scatter_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
-                scatter_updates.fetch_add(local_updates, Ordering::Relaxed);
                 row
             })
             .collect();
-        let finalize_start = diagnostics.then_some(Instant::now());
-        let total_z = if delta == 1 {
+        if delta == 1 {
             rows
         } else {
             let inner_width = block_len * delta;
@@ -1447,23 +1129,7 @@ impl<const D: usize> JoltPackedPoly<D> {
                 total_z[pos_in_block * delta] = row;
             }
             total_z
-        };
-        let finalize_ns = finalize_start.map_or(0, |start| start.elapsed().as_nanos() as u64);
-
-        (
-            total_z,
-            PackedDecomposeFoldProfile {
-                fast_path: true,
-                striped_path: false,
-                alloc_buffers: 1,
-                alloc_rows: block_len + if delta == 1 { 0 } else { block_len * delta },
-                scatter_ns: scatter_ns.load(Ordering::Relaxed),
-                merge_ns: 0,
-                finalize_ns,
-                scatter_updates: scatter_updates.load(Ordering::Relaxed),
-                merge_calls: 0,
-            },
-        )
+        }
     }
 
     #[allow(dead_code)]
@@ -1834,7 +1500,6 @@ fn build_packed_block_cache<const D: usize, IndexFn>(
 where
     IndexFn: Fn(usize, usize) -> Option<u8> + Sync,
 {
-    let t_cache = Instant::now();
     let block_len = packed_layout.block_len();
     let num_blocks = packed_layout.num_blocks();
     let present_words_per_block = block_len.div_ceil(u64::BITS as usize);
@@ -1888,29 +1553,6 @@ where
         .iter()
         .map(|&count| count as usize)
         .sum::<usize>();
-    let occupancy_summary = summarize_block_occupancy(&nonzero_counts, block_len);
-
-    eprintln!(
-        "    [packed poly] build_block_cache: {:.2}s (block_len={block_len}, num_blocks={num_blocks})",
-        t_cache.elapsed().as_secs_f64(),
-    );
-    if packed_hotpath_diagnostics_enabled() {
-        let [empty_blocks, up_to_quarter, up_to_half, up_to_three_quarters, dense_blocks] =
-            occupancy_summary.bucket_counts();
-        eprintln!(
-            "    [packed poly] shape: cycles={num_cycles}, polys={num_polys}, block_len={block_len}, num_blocks={num_blocks}, avg_occupancy={:.1}%, p50_block={:.1}%, p95_block={:.1}%, max_block={:.1}%, nonempty_blocks={}/{num_blocks}, occ_buckets=[0:{} <=25:{} <=50:{} <=75:{} >75:{}], live_slots={total_nonzero}",
-            100.0 * total_nonzero as f64 / total_slots as f64,
-            100.0 * occupancy_summary.p50_ratio(block_len),
-            100.0 * occupancy_summary.p95_ratio(block_len),
-            100.0 * occupancy_summary.max_ratio(block_len),
-            occupancy_summary.nonempty_blocks(),
-            empty_blocks,
-            up_to_quarter,
-            up_to_half,
-            up_to_three_quarters,
-            dense_blocks,
-        );
-    }
 
     Arc::new(PackedBlockCache {
         coeffs: Arc::from(coeffs.into_boxed_slice()),
@@ -1920,7 +1562,6 @@ where
         present_words_per_block,
         num_blocks,
         total_nonzero,
-        occupancy_summary,
     })
 }
 

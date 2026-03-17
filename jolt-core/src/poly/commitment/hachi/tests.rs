@@ -20,7 +20,7 @@ use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
 use hachi_pcs::algebra::ring::CyclotomicRing;
 use hachi_pcs::protocol::commitment::utils::flat_matrix::FlatMatrix;
 use hachi_pcs::protocol::commitment::{compute_num_digits, optimal_m_r_split, CommitmentConfig};
-use hachi_pcs::protocol::proof::{HachiProof, PackedDigits};
+use hachi_pcs::protocol::proof::{HachiProof, HachiProofTail, PackedDigits};
 use hachi_pcs::protocol::SmallTestCommitmentConfig;
 use hachi_pcs::FromSmallInt;
 
@@ -727,11 +727,11 @@ fn hachi_batch_verify_rejects_truncated_individual_commitments() {
 
     let packed_poly_proof = ArkBridge(HachiProof {
         levels: vec![],
-        final_w: PackedDigits::from_i8_digits(&[], 1),
+        tail: HachiProofTail::Direct(PackedDigits::from_i8_digits(&[], 1)),
     });
     let indiv_proof = ArkBridge(HachiProof {
         levels: vec![],
-        final_w: PackedDigits::from_i8_digits(&[], 1),
+        tail: HachiProofTail::Direct(PackedDigits::from_i8_digits(&[], 1)),
     });
     let proof = HachiBatchedProof {
         packed_poly_proof,
@@ -774,7 +774,7 @@ fn hachi_batch_verify_rejects_invalid_num_packed() {
 
     let packed_poly_proof = ArkBridge(HachiProof {
         levels: vec![],
-        final_w: PackedDigits::from_i8_digits(&[], 1),
+        tail: HachiProofTail::Direct(PackedDigits::from_i8_digits(&[], 1)),
     });
     let proof = HachiBatchedProof {
         packed_poly_proof,
@@ -813,7 +813,7 @@ fn hachi_batch_verify_rejects_invalid_log_k() {
 
     let packed_poly_proof = ArkBridge(HachiProof {
         levels: vec![],
-        final_w: PackedDigits::from_i8_digits(&[], 1),
+        tail: HachiProofTail::Direct(PackedDigits::from_i8_digits(&[], 1)),
     });
     let proof = HachiBatchedProof {
         packed_poly_proof,

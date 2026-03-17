@@ -73,6 +73,7 @@ const WIDE_RING_REDUCE_INTERVAL: usize = 32_000;
 /// Cap the singleton decompose-fold path by its output footprint so large
 /// traces can still use it when the folded witness rows remain modest.
 const DECOMPOSE_FOLD_FAST_PATH_MAX_BYTES: usize = 128 * 1024 * 1024;
+const DECOMPOSE_FOLD_FAST_TILE_ROWS: usize = 8;
 
 /// Per-worker stripe size for the large-shape decompose_fold path. At D=256,
 /// 4096 rows is 4 MiB of i32 output, which keeps merge working sets cacheable.
@@ -231,6 +232,10 @@ impl<const LOG_COMMIT_BOUND: u32> CommitmentConfig for Fp128Bounded256Config<LOG
         let (m_vars, r_vars) = optimal_m_r_split::<Self>(reduced_vars);
         HachiCommitmentLayout::new::<Self>(m_vars, r_vars, &Self::decomposition())
     }
+
+    fn labrador_handoff_threshold() -> usize {
+        usize::MAX
+    }
 }
 
 pub type Fp128OneHot256Config = Fp128Bounded256Config<1>;
@@ -317,26 +322,6 @@ impl PackedBlockCache {
     fn has_denseish_occupancy(&self) -> bool {
         self.total_nonzero * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_DENOMINATOR
             >= self.num_blocks * self.block_len * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_NUMERATOR
-    }
-
-    #[inline]
-    fn coeff_at(&self, block_idx: usize, pos_in_block: usize) -> Option<usize> {
-        debug_assert!(pos_in_block < self.block_len);
-        let nonzero_count = self.nonzero_count(block_idx);
-        if nonzero_count == 0 {
-            return None;
-        }
-        if nonzero_count == self.block_len {
-            return Some(self.coeffs_for_block(block_idx)[pos_in_block] as usize);
-        }
-        let words = self.present_words_for_block(block_idx);
-        let word_idx = pos_in_block / u64::BITS as usize;
-        let bit_idx = pos_in_block % u64::BITS as usize;
-        if words[word_idx] & (1u64 << bit_idx) == 0 {
-            None
-        } else {
-            Some(self.coeffs_for_block(block_idx)[pos_in_block] as usize)
-        }
     }
 }
 
@@ -582,6 +567,23 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
 }
 
 impl<const D: usize> JoltPackedPoly<D> {
+    #[inline(always)]
+    fn accumulate_sparse_shift_i32(
+        row: &mut [i32; D],
+        coeff_idx: usize,
+        challenge: &SparseChallenge,
+    ) {
+        for (&pos, &challenge_coeff) in challenge.positions.iter().zip(challenge.coeffs.iter()) {
+            let target = coeff_idx + pos as usize;
+            let (idx, sign) = if target < D {
+                (target, 1i32)
+            } else {
+                (target - D, -1i32)
+            };
+            row[idx] += sign * challenge_coeff as i32;
+        }
+    }
+
     #[inline]
     fn reduce_wide_accumulators(t_wide: &mut [WideCyclotomicRing<Fp128x8i32, D>]) {
         for tw in t_wide.iter_mut() {
@@ -1095,31 +1097,83 @@ impl<const D: usize> JoltPackedPoly<D> {
         delta: usize,
     ) -> Vec<[i32; D]> {
         let block_limit = challenges.len().min(self.num_blocks());
-        let rows: Vec<[i32; D]> = (0..block_len)
-            .into_par_iter()
-            .map(|pos_in_block| {
-                let mut row = [0i32; D];
-                for (block_idx, c_i) in challenges.iter().take(block_limit).enumerate() {
-                    if c_i.positions.is_empty() {
-                        continue;
-                    }
-                    let Some(coeff_idx) = self.packed_block_cache.coeff_at(block_idx, pos_in_block)
-                    else {
-                        continue;
-                    };
-                    for (&pos, &challenge_coeff) in c_i.positions.iter().zip(c_i.coeffs.iter()) {
-                        let target = coeff_idx + pos as usize;
-                        let (idx, sign) = if target < D {
-                            (target, 1i32)
-                        } else {
-                            (target - D, -1i32)
-                        };
-                        row[idx] += sign * challenge_coeff as i32;
+        let mut full_blocks = Vec::with_capacity(block_limit);
+        let mut partial_blocks = Vec::with_capacity(block_limit);
+        for (block_idx, challenge) in challenges.iter().take(block_limit).enumerate() {
+            if challenge.positions.is_empty() {
+                continue;
+            }
+            let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
+            if nonzero_count == 0 {
+                continue;
+            }
+            if nonzero_count == block_len {
+                full_blocks.push(block_idx);
+            } else {
+                partial_blocks.push(block_idx);
+            }
+        }
+
+        let tile_rows = DECOMPOSE_FOLD_FAST_TILE_ROWS.min(block_len.max(1));
+        let word_bits = u64::BITS as usize;
+        let mut rows = vec![[0i32; D]; block_len];
+
+        rows.par_chunks_mut(tile_rows)
+            .enumerate()
+            .for_each(|(tile_idx, row_tile)| {
+                let tile_start = tile_idx * tile_rows;
+                let tile_end = tile_start + row_tile.len();
+                let word_start = tile_start / word_bits;
+                let word_end = tile_end.div_ceil(word_bits);
+
+                for &block_idx in full_blocks.iter() {
+                    let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+                    let challenge = &challenges[block_idx];
+                    for (local_pos, &coeff_idx) in coeffs[tile_start..tile_end].iter().enumerate() {
+                        Self::accumulate_sparse_shift_i32(
+                            &mut row_tile[local_pos],
+                            coeff_idx as usize,
+                            challenge,
+                        );
                     }
                 }
-                row
-            })
-            .collect();
+
+                for &block_idx in partial_blocks.iter() {
+                    let present_words = self.packed_block_cache.present_words_for_block(block_idx);
+                    let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+                    let challenge = &challenges[block_idx];
+
+                    for word_idx in word_start..word_end {
+                        let word = present_words[word_idx];
+                        if word == 0 {
+                            continue;
+                        }
+
+                        let word_base = word_idx * word_bits;
+                        let start_bit = tile_start.saturating_sub(word_base);
+                        let end_bit = (tile_end - word_base).min(word_bits);
+                        let lower_mask = u64::MAX << start_bit;
+                        let upper_mask = if end_bit == word_bits {
+                            u64::MAX
+                        } else {
+                            (1u64 << end_bit) - 1
+                        };
+                        let mut mask = word & lower_mask & upper_mask;
+                        while mask != 0 {
+                            let bit_idx = mask.trailing_zeros() as usize;
+                            let pos_in_block = word_base + bit_idx;
+                            let local_pos = pos_in_block - tile_start;
+                            Self::accumulate_sparse_shift_i32(
+                                &mut row_tile[local_pos],
+                                coeffs[pos_in_block] as usize,
+                                challenge,
+                            );
+                            mask &= mask - 1;
+                        }
+                    }
+                }
+            });
+
         if delta == 1 {
             rows
         } else {

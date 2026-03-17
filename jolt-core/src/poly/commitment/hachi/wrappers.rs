@@ -30,7 +30,8 @@ pub fn hachi_to_jolt(f: &Fp128) -> JoltFp128 {
 /// but we need to borrow a Jolt transcript that has a limited lifetime. The adapter is
 /// always used in a strictly scoped manner within a single prove/verify call.
 pub struct JoltToHachiTranscript<T: JoltTranscript> {
-    transcript: *mut T,
+    state: T,
+    sync_target: Option<*mut T>,
 }
 
 unsafe impl<T: JoltTranscript> Send for JoltToHachiTranscript<T> {}
@@ -39,20 +40,40 @@ unsafe impl<T: JoltTranscript> Sync for JoltToHachiTranscript<T> {}
 impl<T: JoltTranscript> JoltToHachiTranscript<T> {
     pub fn new(transcript: &mut T) -> Self {
         Self {
-            transcript: transcript as *mut T,
+            state: transcript.clone(),
+            sync_target: Some(transcript as *mut T),
         }
     }
 
     fn inner(&mut self) -> &mut T {
-        // SAFETY: The pointer is valid for the duration of the prove/verify call
-        // that created this adapter.
-        unsafe { &mut *self.transcript }
+        &mut self.state
+    }
+
+    #[inline]
+    fn absorb_label(&mut self, label: &[u8]) {
+        self.inner().append_bytes(b"hachi_label", label);
     }
 }
 
 impl<T: JoltTranscript> Clone for JoltToHachiTranscript<T> {
     fn clone(&self) -> Self {
-        unimplemented!("JoltToHachiTranscript is not clonable; Clone bound exists for trait compat")
+        Self {
+            state: self.state.clone(),
+            sync_target: None,
+        }
+    }
+}
+
+impl<T: JoltTranscript> Drop for JoltToHachiTranscript<T> {
+    fn drop(&mut self) {
+        if let Some(target) = self.sync_target {
+            // SAFETY: `sync_target` originates from `new(&mut T)` and remains valid for the
+            // scoped lifetime of the adapter. Syncing back on drop commits the owned Hachi-side
+            // transcript evolution into the caller's Jolt transcript.
+            unsafe {
+                *target = self.state.clone();
+            }
+        }
     }
 }
 
@@ -62,16 +83,19 @@ impl<T: JoltTranscript> HachiTranscript<Fp128> for JoltToHachiTranscript<T> {
     }
 
     fn append_bytes(&mut self, _label: &[u8], bytes: &[u8]) {
+        self.absorb_label(_label);
         self.inner().append_bytes(b"hachi_bytes", bytes);
     }
 
     fn append_field(&mut self, _label: &[u8], x: &Fp128) {
+        self.absorb_label(_label);
         let val = x.to_canonical_u128();
         self.inner()
             .append_bytes(b"hachi_field", &val.to_le_bytes());
     }
 
     fn append_serde<S: HachiSerialize>(&mut self, _label: &[u8], s: &S) {
+        self.absorb_label(_label);
         let mut buf = Vec::with_capacity(s.serialized_size(HachiCompress::No));
         s.serialize_uncompressed(&mut buf)
             .expect("HachiSerialize should not fail");
@@ -79,8 +103,19 @@ impl<T: JoltTranscript> HachiTranscript<Fp128> for JoltToHachiTranscript<T> {
     }
 
     fn challenge_scalar(&mut self, _label: &[u8]) -> Fp128 {
+        self.absorb_label(_label);
         let jolt_challenge: JoltFp128 = self.inner().challenge_scalar();
         jolt_to_hachi(&jolt_challenge)
+    }
+
+    fn challenge_bytes(&mut self, _label: &[u8], len: usize) -> Vec<u8> {
+        self.absorb_label(_label);
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            out.extend_from_slice(&self.inner().challenge_u128().to_le_bytes());
+        }
+        out.truncate(len);
+        out
     }
 }
 

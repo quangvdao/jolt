@@ -8,6 +8,7 @@ use hachi_pcs::primitives::serialization::Compress as HachiCompress;
 use hachi_pcs::protocol::transcript::Transcript as HachiTranscript;
 use hachi_pcs::HachiSerialize;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 pub type Fp128 = Prime128M8M4M1M0;
 
@@ -24,6 +25,13 @@ pub fn hachi_to_jolt(f: &Fp128) -> JoltFp128 {
     unsafe { std::mem::transmute_copy(f) }
 }
 
+struct TranscriptSyncTarget<T: JoltTranscript> {
+    ptr: *mut T,
+}
+
+unsafe impl<T: JoltTranscript> Send for TranscriptSyncTarget<T> {}
+unsafe impl<T: JoltTranscript> Sync for TranscriptSyncTarget<T> {}
+
 /// Bridge adapter: wraps a Jolt transcript pointer and implements Hachi's Transcript trait.
 ///
 /// Uses a raw pointer internally because Hachi's `Transcript` trait requires `'static`,
@@ -31,7 +39,7 @@ pub fn hachi_to_jolt(f: &Fp128) -> JoltFp128 {
 /// always used in a strictly scoped manner within a single prove/verify call.
 pub struct JoltToHachiTranscript<T: JoltTranscript> {
     state: T,
-    sync_target: Option<*mut T>,
+    sync_target: Option<Arc<TranscriptSyncTarget<T>>>,
 }
 
 unsafe impl<T: JoltTranscript> Send for JoltToHachiTranscript<T> {}
@@ -41,7 +49,9 @@ impl<T: JoltTranscript> JoltToHachiTranscript<T> {
     pub fn new(transcript: &mut T) -> Self {
         Self {
             state: transcript.clone(),
-            sync_target: Some(transcript as *mut T),
+            sync_target: Some(Arc::new(TranscriptSyncTarget {
+                ptr: transcript as *mut T,
+            })),
         }
     }
 
@@ -59,19 +69,22 @@ impl<T: JoltTranscript> Clone for JoltToHachiTranscript<T> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
-            sync_target: None,
+            sync_target: self.sync_target.clone(),
         }
     }
 }
 
 impl<T: JoltTranscript> Drop for JoltToHachiTranscript<T> {
     fn drop(&mut self) {
-        if let Some(target) = self.sync_target {
-            // SAFETY: `sync_target` originates from `new(&mut T)` and remains valid for the
-            // scoped lifetime of the adapter. Syncing back on drop commits the owned Hachi-side
-            // transcript evolution into the caller's Jolt transcript.
-            unsafe {
-                *target = self.state.clone();
+        if let Some(target) = &self.sync_target {
+            if Arc::strong_count(target) == 1 {
+                // SAFETY: `sync_target` originates from `new(&mut T)` and remains valid for the
+                // scoped lifetime of all adapter clones. Only the last surviving clone syncs back,
+                // which preserves Hachi's clone-and-commit transcript pattern without letting
+                // speculative clones overwrite the caller transcript.
+                unsafe {
+                    *target.ptr = self.state.clone();
+                }
             }
         }
     }

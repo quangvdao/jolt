@@ -113,6 +113,27 @@ use crate::zkvm::{
 // making the round polynomials quadratic (degree 2).
 const DEGREE_BOUND: usize = 2;
 
+fn inc_chunk_weights<F: JoltField>(one_hot_params: &OneHotParams, onehot_inc: bool) -> Vec<F> {
+    let inc_onehot_d = one_hot_params.inc_onehot_d();
+    let inc_full_d = if onehot_inc {
+        inc_onehot_d + 1
+    } else {
+        inc_onehot_d
+    };
+    let mut weights = Vec::with_capacity(inc_full_d);
+    for d in 0..inc_onehot_d {
+        let mut weight = F::one();
+        for _ in 0..(inc_onehot_d - 1 - d) {
+            weight *= F::from_u64(one_hot_params.k_chunk as u64);
+        }
+        weights.push(weight);
+    }
+    if onehot_inc {
+        weights.push(F::from_u128(1u128 << XLEN));
+    }
+    weights
+}
+
 /// Parameters for the fused HammingWeight + Address Reduction sumcheck.
 ///
 /// This sumcheck handles all three ra_i claim types in a single sumcheck:
@@ -289,17 +310,7 @@ impl<F: JoltField> HammingWeightClaimReductionParams<F> {
             }
         }
 
-        let mut inc_chunk_weights = Vec::with_capacity(inc_full_d);
-        for d in 0..inc_onehot_d {
-            let mut weight = F::one();
-            for _ in 0..(inc_onehot_d - 1 - d) {
-                weight *= F::from_u64(256);
-            }
-            inc_chunk_weights.push(weight);
-        }
-        if onehot_inc {
-            inc_chunk_weights.push(F::from_u128(1u128 << XLEN));
-        }
+        let inc_chunk_weights = inc_chunk_weights::<F>(one_hot_params, onehot_inc);
 
         let (claim_rd_value, claim_ram_value) = if onehot_inc {
             let (_, rd_inc_claim) = accumulator.get_committed_polynomial_opening(
@@ -715,6 +726,41 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T>
 
 #[cfg(test)]
 mod tests {
-    // TODO: Add tests comparing compute_all_G output against naive computation
-    // TODO: Add tests for sumcheck correctness
+    use common::constants::XLEN;
+
+    use crate::field::{fp128::JoltFp128, JoltField};
+    use crate::zkvm::config::OneHotParams;
+
+    use super::inc_chunk_weights;
+
+    #[test]
+    fn inc_chunk_weights_follow_chunk_radix() {
+        let one_hot_params = OneHotParams::new(4, 16, 16);
+        let weights = inc_chunk_weights::<JoltFp128>(&one_hot_params, true);
+        let radix = JoltFp128::from_u64(one_hot_params.k_chunk as u64);
+        let mut expected_first = JoltFp128::from_u64(1);
+        for _ in 0..(one_hot_params.inc_onehot_d() - 1) {
+            expected_first *= radix;
+        }
+
+        assert_eq!(
+            weights.len(),
+            one_hot_params.inc_onehot_d() + 1,
+            "onehot increment weights should include the MSB shift term"
+        );
+        assert_eq!(
+            weights[0], expected_first,
+            "the highest one-hot increment chunk should use radix k_chunk"
+        );
+        assert_eq!(
+            weights[1] * radix,
+            weights[0],
+            "adjacent one-hot increment chunk weights should differ by k_chunk"
+        );
+        assert_eq!(
+            *weights.last().unwrap(),
+            JoltFp128::from_u128(1u128 << XLEN),
+            "the final increment weight should still recover the signed MSB shift"
+        );
+    }
 }

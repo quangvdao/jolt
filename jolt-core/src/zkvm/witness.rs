@@ -51,14 +51,14 @@ pub enum CommittedPolynomial {
     RamRa(usize),
     /// One-hot ra polynomial for register increment (Hachi path).
     /// 8 polynomials `RdIncRa(0)..RdIncRa(7)` encoding the lower 64 bits of
-    /// `unsigned_rd_inc = rd_inc + 2^XLEN` as byte chunks 1..8.
+    /// `unsigned_rd_inc = rd_inc + 2^XLEN` as chunks 1..d_inc-1.
     RdIncRa(usize),
     /// One-hot polynomial for bit 64 (MSB) of unsigned_rd_inc (Hachi path).
     /// Committed as OneHot(K=256) with indices 0 or 1 for uniform treatment.
     RdIncMsb,
     /// One-hot ra polynomial for RAM increment (Hachi path).
     /// 8 polynomials `RamIncRa(0)..RamIncRa(7)` encoding the lower 64 bits of
-    /// `unsigned_ram_inc = ram_inc + 2^XLEN` as byte chunks 1..8.
+    /// `unsigned_ram_inc = ram_inc + 2^XLEN` as chunks 1..d_inc-1.
     RamIncRa(usize),
     /// One-hot polynomial for bit 64 (MSB) of unsigned_ram_inc (Hachi path).
     /// Committed as OneHot(K=256) with indices 0 or 1 for uniform treatment.
@@ -187,7 +187,7 @@ impl CommittedPolynomial {
                     .iter()
                     .map(|cycle| {
                         let unsigned_inc = rd_unsigned_inc(cycle);
-                        // idx maps to byte chunks 1..8 (skip chunk 0 = MSB)
+                        // idx maps to chunks 1..d_inc-1 (skip chunk 0 = MSB)
                         Some(one_hot_params.inc_chunk(unsigned_inc, idx + 1) as usize)
                     })
                     .collect();
@@ -205,7 +205,7 @@ impl CommittedPolynomial {
                     .iter()
                     .map(|cycle| {
                         let unsigned_inc = ram_unsigned_inc(cycle);
-                        // idx maps to byte chunks 1..8 (skip chunk 0 = MSB)
+                        // idx maps to chunks 1..d_inc-1 (skip chunk 0 = MSB)
                         Some(one_hot_params.inc_chunk(unsigned_inc, idx + 1) as usize)
                     })
                     .collect();

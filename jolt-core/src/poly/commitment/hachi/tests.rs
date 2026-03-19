@@ -246,6 +246,62 @@ fn packed_layout_reorders_poly_bits_into_inner_prefix() {
 }
 
 #[test]
+fn packed_layout_reorders_lifted_coeff_bits_for_k16() {
+    type FastCfg = Fp128OneHot256Config;
+
+    let log_k = 4usize;
+    let layout = choose_packed_bit_layout::<{ FastCfg::D }, FastCfg>(log_k, 8, 3);
+    let cycle_bits: Vec<usize> = (0..8).collect();
+    let addr_bits: Vec<usize> = (100..100 + log_k).collect();
+    let poly_bits: Vec<usize> = (200..203).collect();
+
+    let reordered = layout.reorder_packed_point(&cycle_bits, &addr_bits, &poly_bits);
+    let expected: Vec<usize> = addr_bits
+        .iter()
+        .copied()
+        .chain(cycle_bits[..layout.cycle_coeff_bits()].iter().copied())
+        .chain(poly_bits[..layout.poly_coeff_bits()].iter().copied())
+        .chain(
+            cycle_bits
+                [layout.cycle_coeff_bits()..layout.cycle_coeff_bits() + layout.cycle_inner_bits()]
+                .iter()
+                .copied(),
+        )
+        .chain(
+            poly_bits
+                [layout.poly_coeff_bits()..layout.poly_coeff_bits() + layout.poly_inner_bits()]
+                .iter()
+                .copied(),
+        )
+        .chain(
+            cycle_bits[layout.cycle_coeff_bits() + layout.cycle_inner_bits()..]
+                .iter()
+                .copied(),
+        )
+        .chain(
+            poly_bits[layout.poly_coeff_bits() + layout.poly_inner_bits()..]
+                .iter()
+                .copied(),
+        )
+        .collect();
+
+    assert_eq!(
+        reordered, expected,
+        "packed point permutation mismatch for K=16"
+    );
+    assert_eq!(
+        layout.cycle_coeff_bits() + layout.poly_coeff_bits(),
+        FastCfg::D.trailing_zeros() as usize - log_k,
+        "K=16 should lift the missing coefficient bits from cycle/poly axes"
+    );
+    assert_eq!(
+        layout.max_coeffs_per_entry(),
+        1usize << (FastCfg::D.trailing_zeros() as usize - log_k),
+        "K=16 should allow sixteen coefficients per packed entry at D=256"
+    );
+}
+
+#[test]
 fn packed_layout_preserves_hachi_optimal_total_split() {
     let alpha = Cfg::D.trailing_zeros() as usize;
     let log_k = alpha;
@@ -372,6 +428,38 @@ fn packed_layout_live_entries_are_injective() {
             );
         }
     }
+}
+
+#[test]
+fn packed_layout_k16_uses_multi_coeff_entries() {
+    type FastCfg = Fp128OneHot256Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+        ],
+        16,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let coeff_counts = packed_poly.entry_coeff_counts_for_test();
+    let live_coeff_counts = packed_poly.block_live_coeff_counts_for_test();
+
+    assert_eq!(
+        packed_poly.max_coeffs_per_entry_for_test(),
+        FastCfg::D / source.onehot_k,
+        "K=16 should pack sixteen logical chunks per D=256 ring entry"
+    );
+    assert!(
+        coeff_counts.iter().any(|&count| count > 1),
+        "K=16 packed layout should store multiple coefficients in at least one entry"
+    );
+    assert!(
+        live_coeff_counts
+            .iter()
+            .any(|&count| count > packed_layout.block_len()),
+        "K=16 packed blocks should contain more live coefficients than occupied entries"
+    );
 }
 
 #[test]
@@ -608,6 +696,109 @@ fn packed_fast_paths_match_generic_in_d256_regime() {
 }
 
 #[test]
+fn packed_commit_inner_generic_matches_multi_coeff_helpers_in_d256_k16_regime() {
+    type FastCfg = Fp128OneHot256Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+        ],
+        16,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+
+    let generic = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
+    let small = packed_poly.commit_inner_small(&a_view, 2, 2, num_digits_open, log_basis);
+    let tiled = packed_poly.commit_inner_tiled(&a_view, 2, 2, num_digits_open, log_basis);
+
+    assert_eq!(
+        small, generic,
+        "small commit_inner must match generic for K=16"
+    );
+    assert_eq!(
+        tiled, generic,
+        "tiled commit_inner must match generic for K=16"
+    );
+}
+
+#[test]
+fn packed_decompose_fold_generic_matches_multi_coeff_helpers_in_d256_k16_regime() {
+    type FastCfg = Fp128OneHot256Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+        ],
+        16,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
+
+    let generic = packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
+    let small = packed_poly.decompose_fold_small(&challenges, packed_layout.block_len(), 1);
+    let large = packed_poly.decompose_fold_large(&challenges, packed_layout.block_len(), 1);
+
+    assert_eq!(
+        small, generic,
+        "small decompose_fold must match generic for K=16"
+    );
+    assert_eq!(
+        large, generic,
+        "large decompose_fold must match generic for K=16"
+    );
+}
+
+#[test]
 #[ignore = "profiling helper for packed fast paths"]
 fn packed_fast_path_benchmark_smoke() {
     type FastCfg = Fp128OneHot256Config;
@@ -716,6 +907,182 @@ fn hachi_batch_roundtrip_with_packed_layout() {
         &[],
     )
     .expect("packed Hachi batch verify should succeed");
+}
+
+#[test]
+fn hachi_batch_roundtrip_with_packed_layout_k16() {
+    type FastCfg = Fp128OneHot256Config;
+    type FastScheme = JoltHachiCommitmentScheme<{ FastCfg::D }, FastCfg>;
+
+    let log_k = 4usize;
+    let num_cycles = 1usize << 4;
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+        ],
+        16,
+    );
+    let log_packed = source.per_poly.len().next_power_of_two().trailing_zeros() as usize;
+    let setup = FastScheme::setup_prover_from_shape(
+        num_cycles.trailing_zeros() as usize,
+        log_k,
+        Some(log_packed),
+    );
+    let verifier_setup = FastScheme::setup_verifier(&setup);
+    let pcs = FastScheme::default();
+
+    let (commitments, batch_hint) = pcs.batch_commit(&source, &setup);
+    assert_eq!(
+        commitments.len(),
+        1,
+        "packed Hachi should produce one commitment for K=16"
+    );
+
+    let opening_point: Vec<JoltFp128> = (0..(log_k + num_cycles.trailing_zeros() as usize))
+        .map(|i| JoltFp128::from_u64((i + 2) as u64))
+        .collect();
+
+    let claims: Vec<JoltFp128> = source
+        .per_poly
+        .iter()
+        .map(|indices| {
+            OneHotPolynomial::<JoltFp128>::from_indices(indices.clone(), 16, num_cycles)
+                .evaluate(&opening_point)
+        })
+        .collect();
+    let commitment_refs = vec![&commitments[0]];
+
+    let mut prove_transcript = Blake2bTranscript::new(b"hachi_batch_roundtrip_k16");
+    let proof = pcs.batch_prove(
+        &setup,
+        &source,
+        batch_hint,
+        vec![],
+        &commitment_refs,
+        &opening_point,
+        &claims,
+        &[],
+        &mut prove_transcript,
+    );
+
+    let mut verify_transcript = Blake2bTranscript::new(b"hachi_batch_roundtrip_k16");
+    pcs.batch_verify(
+        &proof,
+        &verifier_setup,
+        &mut verify_transcript,
+        &opening_point,
+        &commitment_refs,
+        &claims,
+        &[],
+    )
+    .expect("packed Hachi batch verify should succeed for K=16");
+}
+
+#[test]
+fn hachi_k256_setup_envelope_supports_k16_roundtrip() {
+    type FastCfg = Fp128OneHot256Config;
+    type FastScheme = JoltHachiCommitmentScheme<{ FastCfg::D }, FastCfg>;
+
+    let num_cycles = 1usize << 4;
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+        ],
+        16,
+    );
+    let log_packed = source.per_poly.len().next_power_of_two().trailing_zeros() as usize;
+    let setup = FastScheme::setup_prover_from_shape(
+        num_cycles.trailing_zeros() as usize,
+        8,
+        Some(log_packed),
+    );
+    let verifier_setup = FastScheme::setup_verifier(&setup);
+    let pcs = FastScheme::default();
+
+    let (commitments, batch_hint) = pcs.batch_commit(&source, &setup);
+    let opening_point: Vec<JoltFp128> = (0..(4 + num_cycles.trailing_zeros() as usize))
+        .map(|i| JoltFp128::from_u64((i + 7) as u64))
+        .collect();
+    let claims: Vec<JoltFp128> = source
+        .per_poly
+        .iter()
+        .map(|indices| {
+            OneHotPolynomial::<JoltFp128>::from_indices(indices.clone(), 16, num_cycles)
+                .evaluate(&opening_point)
+        })
+        .collect();
+    let commitment_refs = vec![&commitments[0]];
+
+    let mut prove_transcript = Blake2bTranscript::new(b"hachi_setup_envelope_k16");
+    let proof = pcs.batch_prove(
+        &setup,
+        &source,
+        batch_hint,
+        vec![],
+        &commitment_refs,
+        &opening_point,
+        &claims,
+        &[],
+        &mut prove_transcript,
+    );
+
+    let mut verify_transcript = Blake2bTranscript::new(b"hachi_setup_envelope_k16");
+    pcs.batch_verify(
+        &proof,
+        &verifier_setup,
+        &mut verify_transcript,
+        &opening_point,
+        &commitment_refs,
+        &claims,
+        &[],
+    )
+    .expect("K=256 setup envelope should still verify K=16 packed proofs");
 }
 
 #[test]

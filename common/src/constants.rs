@@ -13,8 +13,8 @@ pub const ALIGNMENT_FACTOR_BYTECODE: usize = 2;
 pub const ONEHOT_CHUNK_THRESHOLD_LOG_T: usize = 25;
 
 /// Hachi-specific threshold for the same one-hot chunking switch.
-/// Hachi with D=256 requires log_k_chunk >= 8 (the ring dimension alpha),
-/// so the small/large chunk sizes may differ from Dory's 4/8.
+/// Hachi now supports the same 4/8 switch as Dory: smaller traces use
+/// `log_k_chunk = 4` and larger traces use `log_k_chunk = 8`.
 pub const HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T: usize = 25;
 
 /// Threshold for trace length (log scale) at which we switch the number of

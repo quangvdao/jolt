@@ -47,9 +47,9 @@ pub const MAX_INSTRUCTION_D: usize = 32;
 pub const MAX_BYTECODE_D: usize = 6;
 /// Maximum number of RAM RA chunks (address splits into at most 8 chunks)
 pub const MAX_RAM_D: usize = 8;
-/// Maximum number of one-hot increment chunks (lower 64 bits, byte chunks 1..8).
-/// d_inc = ceil(65/8) = 9, minus 1 for the MSB = 8.
-pub const MAX_INC_D: usize = 8;
+/// Maximum number of one-hot increment chunks in the lower 64 bits.
+/// With `log_k_chunk = 4`, `d_inc = ceil(65 / 4) = 17`, minus one MSB chunk = 16.
+pub const MAX_INC_D: usize = 16;
 
 /// Asserts that the one_hot_params dimensions are within bounds.
 /// Call this once at the start of bulk operations to catch issues early.
@@ -73,6 +73,12 @@ pub fn assert_ra_bounds(one_hot_params: &OneHotParams) {
         one_hot_params.ram_d,
         MAX_RAM_D
     );
+    assert!(
+        one_hot_params.inc_onehot_d() <= MAX_INC_D,
+        "inc_onehot_d {} exceeds MAX_INC_D {}",
+        one_hot_params.inc_onehot_d(),
+        MAX_INC_D
+    );
 }
 
 /// Stores all RA chunk indices for a single cycle.
@@ -85,12 +91,12 @@ pub struct RaIndices {
     pub bytecode: [u8; MAX_BYTECODE_D],
     /// RAM RA chunk indices (None for non-memory cycles)
     pub ram: [Option<u8>; MAX_RAM_D],
-    /// Register increment one-hot chunk indices (byte chunks 1..8 of unsigned_rd_inc).
+    /// Register increment one-hot chunk indices (chunks 1..d_inc-1 of unsigned_rd_inc).
     /// Populated only when `onehot_inc` is true (Hachi path).
     pub rd_inc: [u8; MAX_INC_D],
     /// MSB (bit 64) of unsigned_rd_inc. Always 0 or 1.
     pub rd_inc_msb: u8,
-    /// RAM increment one-hot chunk indices (byte chunks 1..8 of unsigned_ram_inc).
+    /// RAM increment one-hot chunk indices (chunks 1..d_inc-1 of unsigned_ram_inc).
     /// Populated only when `onehot_inc` is true (Hachi path).
     pub ram_inc: [u8; MAX_INC_D],
     /// MSB (bit 64) of unsigned_ram_inc. Always 0 or 1.
@@ -158,6 +164,12 @@ impl RaIndices {
             one_hot_params.ram_d,
             MAX_RAM_D
         );
+        debug_assert!(
+            one_hot_params.inc_onehot_d() <= MAX_INC_D,
+            "inc_onehot_d {} exceeds MAX_INC_D {}",
+            one_hot_params.inc_onehot_d(),
+            MAX_INC_D
+        );
 
         // Instruction indices from lookup index
         let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
@@ -192,14 +204,15 @@ impl RaIndices {
         };
         let unsigned_rd_inc = (rd_inc + (1i128 << XLEN)) as u128;
         let rd_inc_msb = (unsigned_rd_inc >> XLEN) as u8;
+        let inc_onehot_d = one_hot_params.inc_onehot_d();
         let mut rd_inc_arr = [0u8; MAX_INC_D];
-        for i in 0..one_hot_params.inc_onehot_d().min(MAX_INC_D) {
+        for i in 0..inc_onehot_d {
             rd_inc_arr[i] = one_hot_params.inc_chunk(unsigned_rd_inc, i + 1);
         }
         let unsigned_ram_inc = (ram_inc + (1i128 << XLEN)) as u128;
         let ram_inc_msb = (unsigned_ram_inc >> XLEN) as u8;
         let mut ram_inc_arr = [0u8; MAX_INC_D];
-        for i in 0..one_hot_params.inc_onehot_d().min(MAX_INC_D) {
+        for i in 0..inc_onehot_d {
             ram_inc_arr[i] = one_hot_params.inc_chunk(unsigned_ram_inc, i + 1);
         }
 
@@ -1055,4 +1068,43 @@ pub fn compute_ra_indices(
         .par_iter()
         .map(|cycle| RaIndices::from_cycle(cycle, bytecode, memory_layout, one_hot_params))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use common::jolt_device::MemoryConfig;
+
+    use crate::zkvm::bytecode::BytecodePreprocessing;
+
+    use super::*;
+
+    #[test]
+    fn ra_indices_fill_all_increment_chunks_for_k16() {
+        let one_hot_params = OneHotParams::new(4, 16, 16);
+        let bytecode = BytecodePreprocessing::default();
+        let memory_layout = MemoryLayout::new(&MemoryConfig {
+            program_size: Some(1),
+            ..MemoryConfig::default()
+        });
+        let indices =
+            RaIndices::from_cycle(&Cycle::NoOp, &bytecode, &memory_layout, &one_hot_params);
+        let unsigned_zero_inc = 1u128 << XLEN;
+
+        assert_eq!(
+            one_hot_params.inc_onehot_d(),
+            MAX_INC_D,
+            "K=16 should use all increment chunk slots below the MSB"
+        );
+        for i in 0..one_hot_params.inc_onehot_d() {
+            let expected = one_hot_params.inc_chunk(unsigned_zero_inc, i + 1);
+            assert_eq!(
+                indices.rd_inc[i], expected,
+                "rd_inc chunk {i} should be populated for K=16"
+            );
+            assert_eq!(
+                indices.ram_inc[i], expected,
+                "ram_inc chunk {i} should be populated for K=16"
+            );
+        }
+    }
 }

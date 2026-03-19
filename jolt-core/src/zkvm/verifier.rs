@@ -744,6 +744,11 @@ impl<'a, F: JoltField, PCS: CommitmentScheme<Field = F>, ProofTranscript: Transc
             }
             let commitment_ref_slice: Vec<&PCS::Commitment> = commitment_refs.iter().collect();
 
+            PCS::validate_batch_proof_shape(
+                &self.proof.joint_opening_proof,
+                self.one_hot_params.log_k_chunk,
+            )?;
+
             return PCS::default()
                 .batch_verify(
                     &self.proof.joint_opening_proof,

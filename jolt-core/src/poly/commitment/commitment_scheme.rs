@@ -192,6 +192,22 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
             4
         }
     }
+
+    /// Returns the one-hot chunk sizes this PCS may use when preprocessing is
+    /// sized for `max_log_k`. PCS that switch chunk sizes at runtime should
+    /// override this to include every supported mode up to that bound.
+    fn supported_log_k_chunks(max_log_k: usize) -> Vec<usize> {
+        vec![max_log_k]
+    }
+
+    /// Optional PCS-specific consistency check between a batched proof and the
+    /// one-hot chunk size validated from `OneHotConfig`.
+    fn validate_batch_proof_shape(
+        _proof: &Self::BatchedProof,
+        _one_hot_log_k_chunk: usize,
+    ) -> Result<(), ProofVerifyError> {
+        Ok(())
+    }
 }
 
 pub trait StreamingCommitmentScheme: CommitmentScheme {

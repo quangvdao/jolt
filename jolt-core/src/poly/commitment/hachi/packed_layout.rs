@@ -27,16 +27,20 @@ pub(super) struct PackedBlockRange {
 }
 
 /// Bit layout for the packed one-hot polynomial after the first `alpha = log2(D)`
-/// address bits have been reserved for ring slots.
+/// coefficient bits have been selected.
 ///
-/// The current Hachi path uses `K = D = 256`, so `addr_inner_bits()` is usually
-/// zero and this layout mainly repartitions cycle and poly-selector bits.
+/// For `K >= D`, all `alpha` coefficient bits come from the one-hot address and
+/// `addr_inner_bits()` carries any remaining address bits into the reduced ring
+/// index. For `K < D`, only `log_k` coefficient bits come from the address and
+/// the remaining `alpha - log_k` bits are lifted from low cycle/poly bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PackedBitLayout {
     alpha_bits: usize,
     log_k: usize,
     log_t: usize,
     log_packed: usize,
+    cycle_coeff_bits: usize,
+    poly_coeff_bits: usize,
     cycle_inner_bits: usize,
     poly_inner_bits: usize,
 }
@@ -46,27 +50,32 @@ impl PackedBitLayout {
         log_k: usize,
         log_t: usize,
         log_packed: usize,
+        cycle_coeff_bits: usize,
+        poly_coeff_bits: usize,
         cycle_inner_bits: usize,
         poly_inner_bits: usize,
     ) -> Self {
         let alpha_bits = D.trailing_zeros() as usize;
+        let addr_coeff_bits = log_k.min(alpha_bits);
         assert!(
-            log_k >= alpha_bits,
-            "packed layout expects log_k >= alpha (log_k={log_k}, alpha={alpha_bits})"
+            cycle_coeff_bits + poly_coeff_bits == alpha_bits - addr_coeff_bits,
+            "packed layout coeff split mismatch (cycle_coeff_bits={cycle_coeff_bits}, poly_coeff_bits={poly_coeff_bits}, alpha={alpha_bits}, log_k={log_k})"
         );
         assert!(
-            cycle_inner_bits <= log_t,
-            "cycle_inner_bits exceeds log_t (cycle_inner_bits={cycle_inner_bits}, log_t={log_t})"
+            cycle_coeff_bits + cycle_inner_bits <= log_t,
+            "cycle coeff/inner bits exceed log_t (cycle_coeff_bits={cycle_coeff_bits}, cycle_inner_bits={cycle_inner_bits}, log_t={log_t})"
         );
         assert!(
-            poly_inner_bits <= log_packed,
-            "poly_inner_bits exceeds log_packed (poly_inner_bits={poly_inner_bits}, log_packed={log_packed})"
+            poly_coeff_bits + poly_inner_bits <= log_packed,
+            "poly coeff/inner bits exceed log_packed (poly_coeff_bits={poly_coeff_bits}, poly_inner_bits={poly_inner_bits}, log_packed={log_packed})"
         );
         Self {
             alpha_bits,
             log_k,
             log_t,
             log_packed,
+            cycle_coeff_bits,
+            poly_coeff_bits,
             cycle_inner_bits,
             poly_inner_bits,
         }
@@ -75,6 +84,16 @@ impl PackedBitLayout {
     #[inline]
     pub(super) fn log_k(&self) -> usize {
         self.log_k
+    }
+
+    #[cfg(test)]
+    pub(super) fn cycle_coeff_bits(&self) -> usize {
+        self.cycle_coeff_bits
+    }
+
+    #[cfg(test)]
+    pub(super) fn poly_coeff_bits(&self) -> usize {
+        self.poly_coeff_bits
     }
 
     #[cfg(test)]
@@ -88,18 +107,38 @@ impl PackedBitLayout {
     }
 
     #[inline]
+    pub(super) fn addr_coeff_bits(&self) -> usize {
+        self.log_k.min(self.alpha_bits)
+    }
+
+    #[inline]
     pub(super) fn addr_inner_bits(&self) -> usize {
-        self.log_k - self.alpha_bits
+        self.log_k - self.addr_coeff_bits()
+    }
+
+    #[inline]
+    pub(super) fn lifted_coeff_bits(&self) -> usize {
+        self.cycle_coeff_bits + self.poly_coeff_bits
+    }
+
+    #[inline]
+    pub(super) fn cycle_tile_bits(&self) -> usize {
+        self.cycle_coeff_bits + self.cycle_inner_bits
+    }
+
+    #[inline]
+    pub(super) fn poly_tile_bits(&self) -> usize {
+        self.poly_coeff_bits + self.poly_inner_bits
     }
 
     #[inline]
     pub(super) fn cycle_outer_bits(&self) -> usize {
-        self.log_t - self.cycle_inner_bits
+        self.log_t - self.cycle_tile_bits()
     }
 
     #[inline]
     pub(super) fn poly_outer_bits(&self) -> usize {
-        self.log_packed - self.poly_inner_bits
+        self.log_packed - self.poly_tile_bits()
     }
 
     #[inline]
@@ -134,22 +173,15 @@ impl PackedBitLayout {
     }
 
     #[inline]
-    pub(super) fn cycle_inner_len(&self) -> usize {
-        1usize
-            .checked_shl(self.cycle_inner_bits as u32)
-            .expect("packed cycle_inner_len overflow")
-    }
-
-    #[inline]
-    pub(super) fn poly_inner_len(&self) -> usize {
-        1usize
-            .checked_shl(self.poly_inner_bits as u32)
-            .expect("packed poly_inner_len overflow")
-    }
-
-    #[inline]
     pub(super) fn total_num_vars(&self) -> usize {
         self.alpha_bits + self.m_vars() + self.r_vars()
+    }
+
+    #[inline]
+    pub(super) fn max_coeffs_per_entry(&self) -> usize {
+        1usize
+            .checked_shl(self.lifted_coeff_bits() as u32)
+            .expect("packed max_coeffs_per_entry overflow")
     }
 
     #[inline]
@@ -176,28 +208,50 @@ impl PackedBitLayout {
         poly_idx: usize,
         hot_index: usize,
     ) -> PackedPosition {
-        let coeff_mask = (1usize << self.alpha_bits) - 1;
-        let coeff_idx = hot_index & coeff_mask;
-        let addr_hi = hot_index >> self.alpha_bits;
-        debug_assert!(addr_hi < (1usize << self.addr_inner_bits()));
+        let addr_coeff_bits = self.addr_coeff_bits();
+        let addr_coeff_mask = if addr_coeff_bits == 0 {
+            0
+        } else {
+            (1usize << addr_coeff_bits) - 1
+        };
+        let addr_coeff = hot_index & addr_coeff_mask;
+        let addr_inner = hot_index >> addr_coeff_bits;
+        debug_assert!(addr_inner < (1usize << self.addr_inner_bits()));
 
+        let cycle_coeff_mask = if self.cycle_coeff_bits == 0 {
+            0
+        } else {
+            (1usize << self.cycle_coeff_bits) - 1
+        };
+        let cycle_coeff = cycle_idx & cycle_coeff_mask;
+        let cycle_shifted = cycle_idx >> self.cycle_coeff_bits;
         let cycle_inner_mask = if self.cycle_inner_bits == 0 {
             0
         } else {
             (1usize << self.cycle_inner_bits) - 1
         };
+        let cycle_inner = cycle_shifted & cycle_inner_mask;
+        let cycle_outer = cycle_shifted >> self.cycle_inner_bits;
+
+        let poly_coeff_mask = if self.poly_coeff_bits == 0 {
+            0
+        } else {
+            (1usize << self.poly_coeff_bits) - 1
+        };
+        let poly_coeff = poly_idx & poly_coeff_mask;
+        let poly_shifted = poly_idx >> self.poly_coeff_bits;
         let poly_inner_mask = if self.poly_inner_bits == 0 {
             0
         } else {
             (1usize << self.poly_inner_bits) - 1
         };
+        let poly_inner = poly_shifted & poly_inner_mask;
+        let poly_outer = poly_shifted >> self.poly_inner_bits;
 
-        let cycle_inner = cycle_idx & cycle_inner_mask;
-        let cycle_outer = cycle_idx >> self.cycle_inner_bits;
-        let poly_inner = poly_idx & poly_inner_mask;
-        let poly_outer = poly_idx >> self.poly_inner_bits;
-
-        let pos_in_block = addr_hi
+        let coeff_idx = addr_coeff
+            | (cycle_coeff << addr_coeff_bits)
+            | (poly_coeff << (addr_coeff_bits + self.cycle_coeff_bits));
+        let pos_in_block = addr_inner
             | (cycle_inner << self.addr_inner_bits())
             | (poly_inner << (self.addr_inner_bits() + self.cycle_inner_bits));
         let block_idx = cycle_outer | (poly_outer << self.cycle_outer_bits());
@@ -233,10 +287,10 @@ impl PackedBitLayout {
             block_idx >> cycle_outer_bits
         };
 
-        let cycle_start = cycle_outer << self.cycle_inner_bits;
-        let cycle_end = (cycle_start + self.cycle_inner_len()).min(num_cycles);
-        let poly_start = poly_outer << self.poly_inner_bits;
-        let poly_end = (poly_start + self.poly_inner_len()).min(num_polys);
+        let cycle_start = cycle_outer << self.cycle_tile_bits();
+        let cycle_end = (cycle_start + (1usize << self.cycle_tile_bits())).min(num_cycles);
+        let poly_start = poly_outer << self.poly_tile_bits();
+        let poly_end = (poly_start + (1usize << self.poly_tile_bits())).min(num_polys);
 
         PackedBlockRange {
             cycle_start,
@@ -275,12 +329,19 @@ impl PackedBitLayout {
         );
 
         let mut out = Vec::with_capacity(self.total_num_vars());
-        out.extend_from_slice(&addr_bits_le[..self.alpha_bits]);
-        out.extend_from_slice(&addr_bits_le[self.alpha_bits..]);
-        out.extend_from_slice(&cycle_bits_le[..self.cycle_inner_bits]);
-        out.extend_from_slice(&poly_bits_le[..self.poly_inner_bits]);
-        out.extend_from_slice(&cycle_bits_le[self.cycle_inner_bits..]);
-        out.extend_from_slice(&poly_bits_le[self.poly_inner_bits..]);
+        let addr_coeff_bits = self.addr_coeff_bits();
+        out.extend_from_slice(&addr_bits_le[..addr_coeff_bits]);
+        out.extend_from_slice(&cycle_bits_le[..self.cycle_coeff_bits]);
+        out.extend_from_slice(&poly_bits_le[..self.poly_coeff_bits]);
+        out.extend_from_slice(&addr_bits_le[addr_coeff_bits..]);
+        out.extend_from_slice(
+            &cycle_bits_le[self.cycle_coeff_bits..self.cycle_coeff_bits + self.cycle_inner_bits],
+        );
+        out.extend_from_slice(
+            &poly_bits_le[self.poly_coeff_bits..self.poly_coeff_bits + self.poly_inner_bits],
+        );
+        out.extend_from_slice(&cycle_bits_le[self.cycle_tile_bits()..]);
+        out.extend_from_slice(&poly_bits_le[self.poly_tile_bits()..]);
         out
     }
 }
@@ -291,12 +352,14 @@ pub(super) fn choose_packed_bit_layout<const D: usize, Cfg: CommitmentConfig>(
     log_packed: usize,
 ) -> PackedBitLayout {
     let alpha_bits = D.trailing_zeros() as usize;
+    let addr_coeff_bits = log_k.min(alpha_bits);
+    let addr_inner_bits = log_k - addr_coeff_bits;
+    let lifted_coeff_bits = alpha_bits - addr_coeff_bits;
     assert!(
-        log_k >= alpha_bits,
-        "packed layout expects log_k >= alpha (log_k={log_k}, alpha={alpha_bits})"
+        lifted_coeff_bits <= log_t + log_packed,
+        "packed layout cannot lift coeff bits from cycle/poly (lifted_coeff_bits={lifted_coeff_bits}, log_t={log_t}, log_packed={log_packed})"
     );
-    let addr_inner_bits = log_k - alpha_bits;
-    let reduced_vars = addr_inner_bits + log_t + log_packed;
+    let reduced_vars = addr_inner_bits + log_t + log_packed - lifted_coeff_bits;
     assert!(
         reduced_vars > 0,
         "packed layout expects at least one reduced variable"
@@ -305,11 +368,12 @@ pub(super) fn choose_packed_bit_layout<const D: usize, Cfg: CommitmentConfig>(
     let (optimal_m_vars, _) = optimal_m_r_split::<Cfg>(reduced_vars);
     let target_m_vars = optimal_m_vars.clamp(addr_inner_bits.max(1), reduced_vars);
     let target_cycle_poly_inner = target_m_vars - addr_inner_bits;
+    let total_cycle_poly_tiled = target_cycle_poly_inner + lifted_coeff_bits;
 
-    let desired_poly_inner = if log_packed == 0 {
+    let desired_poly_tile = if log_packed == 0 {
         0
     } else {
-        target_cycle_poly_inner
+        total_cycle_poly_tiled
             .min(log_packed)
             .clamp(1, PACKED_MAX_POLY_TILE_BITS)
     };
@@ -317,40 +381,61 @@ pub(super) fn choose_packed_bit_layout<const D: usize, Cfg: CommitmentConfig>(
     let mut best_layout = None;
     let mut best_key = None;
 
-    let min_poly_inner = target_cycle_poly_inner.saturating_sub(log_t);
-    let max_poly_inner = target_cycle_poly_inner.min(log_packed);
-    for poly_inner_bits in min_poly_inner..=max_poly_inner {
-        let cycle_inner_bits = target_cycle_poly_inner - poly_inner_bits;
-        let layout =
-            PackedBitLayout::new::<D>(log_k, log_t, log_packed, cycle_inner_bits, poly_inner_bits);
-        let cycle_shortfall = if log_t >= PACKED_MIN_CYCLE_TILE_BITS {
-            PACKED_MIN_CYCLE_TILE_BITS.saturating_sub(cycle_inner_bits)
-        } else {
-            0
-        };
-        let poly_shortfall = if log_packed > 0 && poly_inner_bits == 0 {
-            1
-        } else {
-            0
-        };
-        let cycle_zero = if log_t > 0 && cycle_inner_bits == 0 {
-            1
-        } else {
-            0
-        };
+    let min_cycle_coeff = lifted_coeff_bits.saturating_sub(log_packed);
+    let max_cycle_coeff = lifted_coeff_bits.min(log_t);
+    for cycle_coeff_bits in min_cycle_coeff..=max_cycle_coeff {
+        let poly_coeff_bits = lifted_coeff_bits - cycle_coeff_bits;
+        if poly_coeff_bits > log_packed {
+            continue;
+        }
 
-        let key = (
-            cycle_shortfall,
-            poly_shortfall,
-            desired_poly_inner.abs_diff(poly_inner_bits),
-            cycle_zero,
-            usize::MAX - cycle_inner_bits,
-            poly_inner_bits,
-        );
+        let remaining_cycle_bits = log_t - cycle_coeff_bits;
+        let remaining_poly_bits = log_packed - poly_coeff_bits;
+        let min_poly_inner = target_cycle_poly_inner.saturating_sub(remaining_cycle_bits);
+        let max_poly_inner = target_cycle_poly_inner.min(remaining_poly_bits);
+        for poly_inner_bits in min_poly_inner..=max_poly_inner {
+            let cycle_inner_bits = target_cycle_poly_inner - poly_inner_bits;
+            let layout = PackedBitLayout::new::<D>(
+                log_k,
+                log_t,
+                log_packed,
+                cycle_coeff_bits,
+                poly_coeff_bits,
+                cycle_inner_bits,
+                poly_inner_bits,
+            );
+            let cycle_tile_bits = layout.cycle_tile_bits();
+            let poly_tile_bits = layout.poly_tile_bits();
+            let cycle_shortfall = if log_t >= PACKED_MIN_CYCLE_TILE_BITS {
+                PACKED_MIN_CYCLE_TILE_BITS.saturating_sub(cycle_tile_bits)
+            } else {
+                0
+            };
+            let poly_shortfall = if log_packed > 0 && poly_tile_bits == 0 {
+                1
+            } else {
+                0
+            };
+            let cycle_zero = if log_t > 0 && cycle_tile_bits == 0 {
+                1
+            } else {
+                0
+            };
 
-        if best_key.is_none_or(|best| key < best) {
-            best_key = Some(key);
-            best_layout = Some(layout);
+            let key = (
+                cycle_shortfall,
+                poly_shortfall,
+                desired_poly_tile.abs_diff(poly_tile_bits),
+                cycle_zero,
+                usize::MAX - cycle_tile_bits,
+                poly_coeff_bits,
+                poly_tile_bits,
+            );
+
+            if best_key.is_none_or(|best| key < best) {
+                best_key = Some(key);
+                best_layout = Some(layout);
+            }
         }
     }
 

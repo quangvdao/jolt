@@ -280,22 +280,29 @@ pub enum HachiChunkState<const D: usize> {
 #[derive(Clone)]
 pub(super) struct PackedBlockCache {
     coeffs: Arc<[u8]>,
+    coeff_counts: Arc<[u8]>,
     present_words: Arc<[u64]>,
     nonzero_counts: Arc<[u32]>,
+    live_coeff_counts: Arc<[u32]>,
+    max_coeffs_per_entry: usize,
     block_len: usize,
     present_words_per_block: usize,
     num_blocks: usize,
     total_nonzero: usize,
+    total_live_coeffs: usize,
 }
 
 impl fmt::Debug for PackedBlockCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PackedBlockCache")
+            .field("max_coeffs_per_entry", &self.max_coeffs_per_entry)
             .field("block_len", &self.block_len)
             .field("present_words_per_block", &self.present_words_per_block)
             .field("num_blocks", &self.num_blocks)
-            .field("total_slots", &self.coeffs.len())
+            .field("total_slots", &self.coeff_counts.len())
             .field("total_nonzero", &self.total_nonzero)
+            .field("live_coeff_blocks", &self.live_coeff_counts.len())
+            .field("total_live_coeffs", &self.total_live_coeffs)
             .finish()
     }
 }
@@ -303,8 +310,25 @@ impl fmt::Debug for PackedBlockCache {
 impl PackedBlockCache {
     #[inline]
     fn coeffs_for_block(&self, block_idx: usize) -> &[u8] {
+        assert!(
+            self.is_singleton(),
+            "coeffs_for_block requires singleton packed entries"
+        );
         let start = block_idx * self.block_len;
         &self.coeffs[start..start + self.block_len]
+    }
+
+    #[inline]
+    fn coeff_counts_for_block(&self, block_idx: usize) -> &[u8] {
+        let start = block_idx * self.block_len;
+        &self.coeff_counts[start..start + self.block_len]
+    }
+
+    #[inline]
+    fn coeffs_for_entry(&self, block_idx: usize, pos_in_block: usize, coeff_count: usize) -> &[u8] {
+        let global_pos = block_idx * self.block_len + pos_in_block;
+        let start = global_pos * self.max_coeffs_per_entry;
+        &self.coeffs[start..start + coeff_count]
     }
 
     #[inline]
@@ -319,7 +343,20 @@ impl PackedBlockCache {
     }
 
     #[inline]
+    fn live_coeff_count(&self, block_idx: usize) -> usize {
+        self.live_coeff_counts[block_idx] as usize
+    }
+
+    #[inline]
+    fn is_singleton(&self) -> bool {
+        self.max_coeffs_per_entry == 1
+    }
+
+    #[inline]
     fn has_denseish_occupancy(&self) -> bool {
+        if !self.is_singleton() {
+            return false;
+        }
         self.total_nonzero * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_DENOMINATOR
             >= self.num_blocks * self.block_len * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_NUMERATOR
     }
@@ -341,7 +378,7 @@ impl<const D: usize> JoltPackedPoly<D> {
 
     #[inline]
     fn can_use_commit_inner_fast_path(&self, n_a: usize, num_digits_commit: usize) -> bool {
-        n_a == 1 && num_digits_commit == 1
+        self.packed_block_cache.is_singleton() && n_a == 1 && num_digits_commit == 1
     }
 
     fn commit_inner_output(
@@ -375,26 +412,35 @@ impl<const D: usize> JoltPackedPoly<D> {
 
     #[inline]
     fn can_use_decompose_fold_fast_path(&self, block_len: usize, delta: usize) -> bool {
-        delta == 1
+        self.packed_block_cache.is_singleton()
+            && delta == 1
             && block_len.saturating_mul(size_of::<[i32; D]>()) <= DECOMPOSE_FOLD_FAST_PATH_MAX_BYTES
             && self.packed_block_cache.has_denseish_occupancy()
     }
 
     #[inline]
     fn can_use_decompose_fold_striped_path(&self, delta: usize) -> bool {
-        delta == 1
+        self.packed_block_cache.is_singleton() && delta == 1
     }
 
     #[inline]
-    fn for_each_nonzero_in_block(&self, block_idx: usize, mut f: impl FnMut(usize, usize)) {
-        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
-        if nonzero_count == 0 {
+    fn for_each_entry_in_block(&self, block_idx: usize, mut f: impl FnMut(usize, &[u8])) {
+        let live_coeff_count = self.packed_block_cache.live_coeff_count(block_idx);
+        if live_coeff_count == 0 {
             return;
         }
-        let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
+        debug_assert!(live_coeff_count >= nonzero_count);
+        let coeff_counts = self.packed_block_cache.coeff_counts_for_block(block_idx);
         if nonzero_count == self.packed_block_cache.block_len {
-            for (pos_in_block, &coeff_idx) in coeffs.iter().enumerate() {
-                f(pos_in_block, coeff_idx as usize);
+            for (pos_in_block, &coeff_count) in coeff_counts.iter().enumerate() {
+                let coeff_count = coeff_count as usize;
+                debug_assert!(coeff_count > 0);
+                f(
+                    pos_in_block,
+                    self.packed_block_cache
+                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
+                );
             }
             return;
         }
@@ -404,11 +450,49 @@ impl<const D: usize> JoltPackedPoly<D> {
             while mask != 0 {
                 let bit_idx = mask.trailing_zeros() as usize;
                 let pos_in_block = word_idx * u64::BITS as usize + bit_idx;
-                debug_assert!(pos_in_block < coeffs.len());
-                f(pos_in_block, coeffs[pos_in_block] as usize);
+                debug_assert!(pos_in_block < coeff_counts.len());
+                let coeff_count = coeff_counts[pos_in_block] as usize;
+                debug_assert!(coeff_count > 0);
+                f(
+                    pos_in_block,
+                    self.packed_block_cache
+                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
+                );
                 mask &= mask - 1;
             }
         }
+    }
+
+    #[inline]
+    fn for_each_nonzero_in_block(&self, block_idx: usize, mut f: impl FnMut(usize, usize)) {
+        self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
+            for &coeff_idx in coeffs {
+                f(pos_in_block, coeff_idx as usize);
+            }
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) fn max_coeffs_per_entry_for_test(&self) -> usize {
+        self.packed_block_cache.max_coeffs_per_entry
+    }
+
+    #[cfg(test)]
+    pub(super) fn entry_coeff_counts_for_test(&self) -> Vec<usize> {
+        self.packed_block_cache
+            .coeff_counts
+            .iter()
+            .map(|&count| count as usize)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn block_live_coeff_counts_for_test(&self) -> Vec<usize> {
+        self.packed_block_cache
+            .live_coeff_counts
+            .iter()
+            .map(|&count| count as usize)
+            .collect()
     }
 }
 
@@ -427,10 +511,13 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
             .map(|block_idx| {
                 let mut acc = [Fp128::zero(); D];
 
-                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
                     let global_ring = block_idx * block_len + pos_in_block;
                     if global_ring < scalars.len() {
-                        acc[coeff_idx] += scalars[global_ring];
+                        let scalar = scalars[global_ring];
+                        for &coeff_idx in coeffs {
+                            acc[coeff_idx as usize] += scalar;
+                        }
                     }
                 });
                 acc
@@ -455,9 +542,12 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
             .into_par_iter()
             .map(|block_idx| {
                 let mut fold_acc = [Fp128::zero(); D];
-                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
                     if pos_in_block < block_len && pos_in_block < scalars.len() {
-                        fold_acc[coeff_idx] += scalars[pos_in_block];
+                        let scalar = scalars[pos_in_block];
+                        for &coeff_idx in coeffs {
+                            fold_acc[coeff_idx as usize] += scalar;
+                        }
                     }
                 });
                 CyclotomicRing::from_coefficients(fold_acc)
@@ -666,14 +756,17 @@ impl<const D: usize> JoltPackedPoly<D> {
                 let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
                 let mut entries_since_reduce = 0usize;
 
-                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
                     let a_base = pos_in_block * n_a;
                     let a_slice = &a_wide_flat[a_base..a_base + n_a];
                     for a in 0..n_a {
-                        a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx]);
+                        for &coeff_idx in coeffs {
+                            a_slice[a]
+                                .mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx as usize]);
+                        }
                     }
 
-                    entries_since_reduce += 1;
+                    entries_since_reduce += coeffs.len();
                     if entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
                         Self::reduce_wide_accumulators(&mut t_wide);
                         entries_since_reduce = 0;
@@ -1210,11 +1303,14 @@ impl<const D: usize> JoltPackedPoly<D> {
             .map(|block_idx| {
                 let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
 
-                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
                     let a_base = pos_in_block * n_a;
                     let a_slice = &a_wide_flat[a_base..a_base + n_a];
                     for a in 0..n_a {
-                        a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx]);
+                        for &coeff_idx in coeffs {
+                            a_slice[a]
+                                .mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx as usize]);
+                        }
                     }
                 });
 
@@ -1260,7 +1356,7 @@ impl<const D: usize> JoltPackedPoly<D> {
                 let mut t_wide = vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); n_a];
                 let mut entries_since_reduce = 0usize;
 
-                self.for_each_nonzero_in_block(block_idx, |pos_in_block, coeff_idx| {
+                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
                     let tile_idx = pos_in_block / tile_size;
                     let tile_start = tile_idx * tile_size;
                     let local_pos = pos_in_block - tile_start;
@@ -1268,10 +1364,13 @@ impl<const D: usize> JoltPackedPoly<D> {
                     let a_base = local_pos * n_a;
                     let a_slice = &a_tile[a_base..a_base + n_a];
                     for a in 0..n_a {
-                        a_slice[a].mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx]);
+                        for &coeff_idx in coeffs {
+                            a_slice[a]
+                                .mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx as usize]);
+                        }
                     }
 
-                    entries_since_reduce += 1;
+                    entries_since_reduce += coeffs.len();
                     if entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
                         Self::reduce_wide_accumulators(&mut t_wide);
                         entries_since_reduce = 0;
@@ -1482,23 +1581,33 @@ fn choose_packed_layout_for_dims<const D: usize, Cfg: CommitmentConfig>(
     choose_packed_layout_for_shape::<D, Cfg>(log_k, log_t, log_packed)
 }
 
-fn compute_packed_setup_layouts<const D: usize, Cfg: CommitmentConfig>(
+fn compute_packed_setup_layouts<const D: usize, Cfg>(
     max_log_t: usize,
     max_log_k: usize,
     log_packed: usize,
-) -> [HachiCommitmentLayout; 2] {
+) -> Vec<HachiCommitmentLayout>
+where
+    Cfg: CommitmentConfig + Default,
+{
     let advice_num_vars = max_log_k + max_log_t;
     let advice_layout = compute_advice_layout::<D, Cfg>(advice_num_vars);
-    let (_, packed_layout) =
-        choose_packed_layout_for_shape::<D, Cfg>(max_log_k, max_log_t, log_packed);
+    let mut setup_layouts = vec![advice_layout];
+    let packed_log_ks = JoltHachiCommitmentScheme::<D, Cfg>::supported_log_k_chunks(max_log_k);
     if var_os("HACHI_SETUP_DIAGNOSTICS").is_some() {
         eprintln!(
             "[jolt hachi setup] max_log_t={max_log_t}, max_log_k={max_log_k}, log_packed={log_packed}"
         );
         eprintln!("  advice_layout={advice_layout:?}");
-        eprintln!("  packed_layout={packed_layout:?}");
     }
-    [advice_layout, packed_layout]
+    for log_k in packed_log_ks {
+        let (_, packed_layout) =
+            choose_packed_layout_for_shape::<D, Cfg>(log_k, max_log_t, log_packed);
+        if var_os("HACHI_SETUP_DIAGNOSTICS").is_some() {
+            eprintln!("  packed_layout(log_k={log_k})={packed_layout:?}");
+        }
+        setup_layouts.push(packed_layout);
+    }
+    setup_layouts
 }
 
 fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
@@ -1556,24 +1665,35 @@ where
 {
     let block_len = packed_layout.block_len();
     let num_blocks = packed_layout.num_blocks();
+    let max_coeffs_per_entry = packed_layout.max_coeffs_per_entry();
     let present_words_per_block = block_len.div_ceil(u64::BITS as usize);
     let total_slots = num_blocks
         .checked_mul(block_len)
         .expect("packed block cache size overflow");
+    let total_coeff_slots = total_slots
+        .checked_mul(max_coeffs_per_entry)
+        .expect("packed block coeff cache size overflow");
     let total_present_words = num_blocks
         .checked_mul(present_words_per_block)
         .expect("packed block presence size overflow");
-    let mut coeffs = vec![0u8; total_slots];
+    let mut coeffs = vec![0u8; total_coeff_slots];
+    let mut coeff_counts = vec![0u8; total_slots];
     let mut present_words = vec![0u64; total_present_words];
     let mut nonzero_counts = vec![0u32; num_blocks];
+    let mut live_coeff_counts = vec![0u32; num_blocks];
 
     coeffs
-        .par_chunks_mut(block_len)
+        .par_chunks_mut(block_len * max_coeffs_per_entry)
+        .zip(coeff_counts.par_chunks_mut(block_len))
         .zip(present_words.par_chunks_mut(present_words_per_block))
         .zip(nonzero_counts.par_iter_mut())
+        .zip(live_coeff_counts.par_iter_mut())
         .enumerate()
         .for_each(
-            |(block_idx, ((coeffs_block, present_words_block), nonzero_count))| {
+            |(
+                block_idx,
+                ((((coeffs_block, coeff_counts_block), present_words_block), nonzero_count), live_coeff_count),
+            )| {
                 let PackedBlockRange {
                     cycle_start,
                     cycle_end,
@@ -1581,6 +1701,7 @@ where
                     poly_end,
                 } = packed_layout.block_range(block_idx, num_cycles, num_polys);
                 let mut block_nonzero = 0u32;
+                let mut block_live_coeffs = 0u32;
                 for c in cycle_start..cycle_end {
                     for p in poly_start..poly_end {
                         if let Some(k) = index_of(c, p) {
@@ -1588,18 +1709,33 @@ where
                             debug_assert_eq!(packed.block_idx, block_idx);
                             let word_idx = packed.pos_in_block / u64::BITS as usize;
                             let bit_idx = packed.pos_in_block % u64::BITS as usize;
+                            let count = coeff_counts_block[packed.pos_in_block] as usize;
+                            let entry_base = packed.pos_in_block * max_coeffs_per_entry;
+                            let entry_coeffs =
+                                &mut coeffs_block[entry_base..entry_base + max_coeffs_per_entry];
                             assert!(
-                                present_words_block[word_idx] & (1u64 << bit_idx) == 0,
-                                "packed block cache collision at block {block_idx}, pos {}",
+                                count < max_coeffs_per_entry,
+                                "packed block cache entry overflow at block {block_idx}, pos {}",
                                 packed.pos_in_block
                             );
-                            coeffs_block[packed.pos_in_block] = packed.coeff_idx as u8;
-                            present_words_block[word_idx] |= 1u64 << bit_idx;
-                            block_nonzero += 1;
+                            assert!(
+                                !entry_coeffs[..count].contains(&(packed.coeff_idx as u8)),
+                                "packed block cache duplicate coeff at block {block_idx}, pos {}, coeff {}",
+                                packed.pos_in_block,
+                                packed.coeff_idx
+                            );
+                            entry_coeffs[count] = packed.coeff_idx as u8;
+                            coeff_counts_block[packed.pos_in_block] = (count + 1) as u8;
+                            if count == 0 {
+                                present_words_block[word_idx] |= 1u64 << bit_idx;
+                                block_nonzero += 1;
+                            }
+                            block_live_coeffs += 1;
                         }
                     }
                 }
                 *nonzero_count = block_nonzero;
+                *live_coeff_count = block_live_coeffs;
             },
         );
 
@@ -1607,15 +1743,23 @@ where
         .iter()
         .map(|&count| count as usize)
         .sum::<usize>();
+    let total_live_coeffs = live_coeff_counts
+        .iter()
+        .map(|&count| count as usize)
+        .sum::<usize>();
 
     Arc::new(PackedBlockCache {
         coeffs: Arc::from(coeffs.into_boxed_slice()),
+        coeff_counts: Arc::from(coeff_counts.into_boxed_slice()),
         present_words: Arc::from(present_words.into_boxed_slice()),
         nonzero_counts: Arc::from(nonzero_counts.into_boxed_slice()),
+        live_coeff_counts: Arc::from(live_coeff_counts.into_boxed_slice()),
+        max_coeffs_per_entry,
         block_len,
         present_words_per_block,
         num_blocks,
         total_nonzero,
+        total_live_coeffs,
     })
 }
 
@@ -1643,6 +1787,16 @@ where
         packed_block_cache.block_len,
         packed_layout.block_len(),
         "packed block cache block_len mismatch"
+    );
+    assert_eq!(
+        packed_block_cache.max_coeffs_per_entry,
+        packed_layout.max_coeffs_per_entry(),
+        "packed block cache coeff capacity mismatch"
+    );
+    debug_assert_eq!(
+        packed_block_cache.is_singleton(),
+        packed_layout.lifted_coeff_bits() == 0,
+        "packed block cache/layout singleton mismatch"
     );
     assert_eq!(
         packed_block_cache.num_blocks,
@@ -2093,14 +2247,34 @@ where
         true
     }
 
-    #[allow(clippy::if_same_then_else)]
     fn log_k_chunk_for_trace(log_T: usize) -> usize {
-        // Hachi with D=256 requires log_k_chunk >= alpha = log2(D) = 8.
         if log_T >= HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T {
             8
         } else {
-            8
+            4
         }
+    }
+
+    fn supported_log_k_chunks(max_log_k: usize) -> Vec<usize> {
+        if max_log_k > 4 {
+            vec![4, max_log_k]
+        } else {
+            vec![max_log_k]
+        }
+    }
+
+    fn validate_batch_proof_shape(
+        proof: &Self::BatchedProof,
+        one_hot_log_k_chunk: usize,
+    ) -> Result<(), ProofVerifyError> {
+        let proof_log_k = proof.log_k as usize;
+        if proof_log_k != one_hot_log_k_chunk {
+            return Err(ProofVerifyError::InvalidInputLength(
+                one_hot_log_k_chunk,
+                proof_log_k,
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -1807,11 +1807,17 @@ where
         // the actual packed layout rather than only the flat variable count.
         let log_packed = if PCS::uses_onehot_inc() {
             let inc_bits = XLEN + 1;
-            let max_instruction_d = LOG_K.div_ceil(max_log_k_chunk);
-            let max_d_inc = inc_bits.div_ceil(max_log_k_chunk);
-            let max_ram_d = XLEN.div_ceil(max_log_k_chunk);
-            let max_bytecode_d = XLEN.div_ceil(max_log_k_chunk);
-            let max_n_polys = max_instruction_d + 2 * max_d_inc + max_ram_d + max_bytecode_d;
+            let max_n_polys = PCS::supported_log_k_chunks(max_log_k_chunk)
+                .into_iter()
+                .map(|log_k_chunk| {
+                    let instruction_d = LOG_K.div_ceil(log_k_chunk);
+                    let d_inc = inc_bits.div_ceil(log_k_chunk);
+                    let ram_d = XLEN.div_ceil(log_k_chunk);
+                    let bytecode_d = XLEN.div_ceil(log_k_chunk);
+                    instruction_d + 2 * d_inc + ram_d + bytecode_d
+                })
+                .max()
+                .expect("supported_log_k_chunks must return at least one mode");
             Some(max_n_polys.next_power_of_two().trailing_zeros() as usize)
         } else {
             None

@@ -1,6 +1,6 @@
 use hachi_pcs::protocol::commitment::{
     compute_num_digits, compute_num_digits_fold, optimal_m_r_split, CommitmentConfig,
-    HachiCommitmentLayout,
+    HachiCommitmentLayout, HachiScheduleInputs,
 };
 
 /// Avoid degenerate layouts that tile only across polynomials and barely any
@@ -10,6 +10,22 @@ const PACKED_MIN_CYCLE_TILE_BITS: usize = 6;
 /// Cap the number of inner poly bits so each block spans a modest number of
 /// polynomials instead of turning every block into an all-polys mega-tile.
 const PACKED_MAX_POLY_TILE_BITS: usize = 4;
+
+fn level0_layout_params<Cfg: CommitmentConfig>(
+    max_num_vars: usize,
+    log_basis: u32,
+) -> (usize, usize) {
+    let current_w_len = 1usize.checked_shl(max_num_vars as u32).unwrap_or(0);
+    let params = Cfg::level_params_with_log_basis(
+        HachiScheduleInputs {
+            max_num_vars,
+            level: 0,
+            current_w_len,
+        },
+        log_basis,
+    );
+    (params.n_a, params.challenge_l1_mass)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PackedPosition {
@@ -189,13 +205,15 @@ impl PackedBitLayout {
         self,
         log_basis: u32,
     ) -> HachiCommitmentLayout {
+        let (n_a, challenge_l1_mass) =
+            level0_layout_params::<Cfg>(self.total_num_vars(), log_basis);
         HachiCommitmentLayout::new_with_decomp(
             self.m_vars(),
             self.r_vars(),
-            Cfg::N_A,
+            n_a,
             1,
             compute_num_digits(128, log_basis),
-            compute_num_digits_fold(self.r_vars(), Cfg::CHALLENGE_WEIGHT, log_basis),
+            compute_num_digits_fold(self.r_vars(), challenge_l1_mass, log_basis),
             log_basis,
         )
         .expect("invalid packed Hachi layout")

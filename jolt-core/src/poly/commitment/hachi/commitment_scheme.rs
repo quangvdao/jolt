@@ -30,9 +30,8 @@ use hachi_pcs::protocol::commitment::utils::crt_ntt::NttSlotCache;
 use hachi_pcs::protocol::commitment::utils::flat_matrix::{FlatMatrix, RingMatrixView};
 use hachi_pcs::protocol::commitment::utils::linear::decompose_rows_i8;
 use hachi_pcs::protocol::commitment::{
-    compute_num_digits, compute_num_digits_fold, optimal_m_r_split, CommitmentConfig,
-    DecompositionParams, Fp128BoundedCommitmentConfig, HachiCommitmentCore, HachiCommitmentLayout,
-    RingCommitment,
+    compute_num_digits, compute_num_digits_fold, CommitmentConfig, Fp128D64BoundedCommitmentConfig,
+    HachiCommitmentCore, HachiCommitmentLayout, HachiScheduleInputs, RingCommitment,
 };
 use hachi_pcs::protocol::hachi_poly_ops::{CommitInnerWitness, DecomposeFoldWitness};
 use hachi_pcs::protocol::opening_point::BasisMode;
@@ -70,21 +69,10 @@ const COMMIT_WIDE_BATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Each limb starts ≤ 65535; i32 max ≈ 2.1B → safe up to ~32K additions.
 const WIDE_RING_REDUCE_INTERVAL: usize = 32_000;
 
-/// Cap the singleton decompose-fold path by its output footprint so large
-/// traces can still use it when the folded witness rows remain modest.
-const DECOMPOSE_FOLD_FAST_PATH_MAX_BYTES: usize = 128 * 1024 * 1024;
-const DECOMPOSE_FOLD_FAST_TILE_ROWS: usize = 8;
-
-/// Per-worker stripe size for the large-shape decompose_fold path. At D=256,
-/// 4096 rows is 4 MiB of i32 output, which keeps merge working sets cacheable.
+/// Per-worker stripe size for the large-shape decompose_fold path. At D=64,
+/// 4096 rows is 1 MiB of i32 output, which keeps merge working sets cacheable.
 const DECOMPOSE_FOLD_STRIPE_ROWS: usize = 4_096;
 const DECOMPOSE_FOLD_STRIPE_CHUNKS_PER_THREAD: usize = 2;
-
-/// The output-striped decompose-fold fast path scans every block for each inner
-/// position. That tradeoff pays off only once occupancy is high enough that the
-/// generic block-major reduction is mostly streaming over live entries anyway.
-const DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_NUMERATOR: usize = 1;
-const DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_DENOMINATOR: usize = 2;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -193,52 +181,60 @@ struct PackedCommitInnerOutput<const D: usize> {
     t: Vec<Vec<CyclotomicRing<Fp128, D>>>,
 }
 
-/// `Fp128BoundedCommitmentConfig` with `D = 256` instead of `512`.
-/// All other parameters (N_A, N_B, N_D, decomposition) are
-/// identical to the upstream `Fp128BoundedCommitmentConfig<LOG_COMMIT_BOUND>`.
-/// CHALLENGE_WEIGHT is 23 (vs 19 at D=512) to maintain ≥128-bit challenge entropy.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Fp128Bounded256Config<const LOG_COMMIT_BOUND: u32>;
+/// Mirror Hachi's bounded D=64 profile while keeping Jolt's level-0 basis fixed.
+pub type Fp128Bounded64Config<const LOG_COMMIT_BOUND: u32> =
+    Fp128D64BoundedCommitmentConfig<LOG_COMMIT_BOUND, INITIAL_LOG_BASIS>;
 
-impl<const LOG_COMMIT_BOUND: u32> CommitmentConfig for Fp128Bounded256Config<LOG_COMMIT_BOUND> {
-    const D: usize = 256;
-    const N_A: usize = 1;
-    const N_B: usize = 1;
-    const N_D: usize = 1;
-    const CHALLENGE_WEIGHT: usize = 23;
+pub type Fp128OneHot64Config = Fp128Bounded64Config<1>;
 
-    fn decomposition() -> DecompositionParams {
-        DecompositionParams {
-            log_basis: 3,
-            log_commit_bound: LOG_COMMIT_BOUND,
-            log_open_bound: if LOG_COMMIT_BOUND < 128 {
-                Some(128)
-            } else {
-                None
-            },
-        }
-    }
-
-    fn commitment_layout(max_num_vars: usize) -> Result<HachiCommitmentLayout, HachiError> {
-        let alpha = Self::D.trailing_zeros() as usize;
-        let reduced_vars = max_num_vars.checked_sub(alpha).ok_or_else(|| {
-            HachiError::InvalidSetup("max_num_vars is smaller than alpha".to_string())
-        })?;
-        if reduced_vars == 0 {
-            return Err(HachiError::InvalidSetup(
-                "max_num_vars must leave at least one outer variable".to_string(),
-            ));
-        }
-        let (m_vars, r_vars) = optimal_m_r_split::<Self>(reduced_vars);
-        HachiCommitmentLayout::new::<Self>(m_vars, r_vars, &Self::decomposition())
-    }
-
-    fn labrador_handoff_threshold() -> usize {
-        usize::MAX
-    }
+fn level0_layout_params<Cfg: CommitmentConfig>(
+    max_num_vars: usize,
+    log_basis: u32,
+) -> (usize, usize) {
+    let current_w_len = 1usize.checked_shl(max_num_vars as u32).unwrap_or(0);
+    let params = Cfg::level_params_with_log_basis(
+        HachiScheduleInputs {
+            max_num_vars,
+            level: 0,
+            current_w_len,
+        },
+        log_basis,
+    );
+    (params.n_a, params.challenge_l1_mass)
 }
 
-pub type Fp128OneHot256Config = Fp128Bounded256Config<1>;
+fn optimal_advice_m_r_split<Cfg: CommitmentConfig>(
+    reduced_vars: usize,
+    log_basis: u32,
+) -> (usize, usize) {
+    if reduced_vars <= 2 || reduced_vars >= 53 {
+        let r = reduced_vars / 2;
+        return (reduced_vars - r, r);
+    }
+
+    let alpha = Cfg::D.trailing_zeros() as usize;
+    let max_num_vars = reduced_vars
+        .checked_add(alpha)
+        .expect("advice layout variable count overflow");
+    let (n_a, challenge_l1_mass) = level0_layout_params::<Cfg>(max_num_vars, log_basis);
+    let delta_open = compute_num_digits(128, log_basis) as u64;
+    let delta_commit = compute_num_digits(64, log_basis) as u64;
+    let c1 = delta_open + n_a as u64 * delta_commit;
+
+    let mut best_r = reduced_vars / 2;
+    let mut best_cost = u64::MAX;
+    for r in 1..reduced_vars {
+        let m = reduced_vars - r;
+        let delta_fold = compute_num_digits_fold(r, challenge_l1_mass, log_basis) as u64;
+        let cost = c1 * (1u64 << r) + delta_commit * delta_fold * (1u64 << m);
+        if cost < best_cost {
+            best_cost = cost;
+            best_r = r;
+        }
+    }
+
+    (reduced_vars - best_r, best_r)
+}
 
 #[derive(Clone, Default)]
 pub struct JoltHachiCommitmentScheme<const D: usize, Cfg: CommitmentConfig> {
@@ -351,15 +347,6 @@ impl PackedBlockCache {
     fn is_singleton(&self) -> bool {
         self.max_coeffs_per_entry == 1
     }
-
-    #[inline]
-    fn has_denseish_occupancy(&self) -> bool {
-        if !self.is_singleton() {
-            return false;
-        }
-        self.total_nonzero * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_DENOMINATOR
-            >= self.num_blocks * self.block_len * DECOMPOSE_FOLD_FAST_PATH_OCCUPANCY_NUMERATOR
-    }
 }
 
 /// Streaming view over the packed one-hot trace using a packed-specific
@@ -411,19 +398,6 @@ impl<const D: usize> JoltPackedPoly<D> {
     }
 
     #[inline]
-    fn can_use_decompose_fold_fast_path(&self, block_len: usize, delta: usize) -> bool {
-        self.packed_block_cache.is_singleton()
-            && delta == 1
-            && block_len.saturating_mul(size_of::<[i32; D]>()) <= DECOMPOSE_FOLD_FAST_PATH_MAX_BYTES
-            && self.packed_block_cache.has_denseish_occupancy()
-    }
-
-    #[inline]
-    fn can_use_decompose_fold_striped_path(&self, delta: usize) -> bool {
-        self.packed_block_cache.is_singleton() && delta == 1
-    }
-
-    #[inline]
     fn for_each_entry_in_block(&self, block_idx: usize, mut f: impl FnMut(usize, &[u8])) {
         let live_coeff_count = self.packed_block_cache.live_coeff_count(block_idx);
         if live_coeff_count == 0 {
@@ -451,6 +425,75 @@ impl<const D: usize> JoltPackedPoly<D> {
                 let bit_idx = mask.trailing_zeros() as usize;
                 let pos_in_block = word_idx * u64::BITS as usize + bit_idx;
                 debug_assert!(pos_in_block < coeff_counts.len());
+                let coeff_count = coeff_counts[pos_in_block] as usize;
+                debug_assert!(coeff_count > 0);
+                f(
+                    pos_in_block,
+                    self.packed_block_cache
+                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
+                );
+                mask &= mask - 1;
+            }
+        }
+    }
+
+    #[inline]
+    fn for_each_entry_in_block_range(
+        &self,
+        block_idx: usize,
+        pos_start: usize,
+        pos_end: usize,
+        mut f: impl FnMut(usize, &[u8]),
+    ) {
+        let block_len = self.packed_block_cache.block_len;
+        let pos_start = pos_start.min(block_len);
+        let pos_end = pos_end.min(block_len);
+        if pos_start >= pos_end {
+            return;
+        }
+        let live_coeff_count = self.packed_block_cache.live_coeff_count(block_idx);
+        if live_coeff_count == 0 {
+            return;
+        }
+        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
+        let coeff_counts = self.packed_block_cache.coeff_counts_for_block(block_idx);
+        if nonzero_count == block_len {
+            for (offset, &coeff_count) in coeff_counts[pos_start..pos_end].iter().enumerate() {
+                let coeff_count = coeff_count as usize;
+                debug_assert!(coeff_count > 0);
+                let pos_in_block = pos_start + offset;
+                f(
+                    pos_in_block,
+                    self.packed_block_cache
+                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
+                );
+            }
+            return;
+        }
+
+        let word_bits = u64::BITS as usize;
+        let word_start = pos_start / word_bits;
+        let word_end = pos_end.div_ceil(word_bits);
+        let present_words = self.packed_block_cache.present_words_for_block(block_idx);
+        for word_idx in word_start..word_end {
+            let word = present_words[word_idx];
+            if word == 0 {
+                continue;
+            }
+
+            let word_base = word_idx * word_bits;
+            let start_bit = pos_start.saturating_sub(word_base);
+            let end_bit = (pos_end - word_base).min(word_bits);
+            let lower_mask = u64::MAX << start_bit;
+            let upper_mask = if end_bit == word_bits {
+                u64::MAX
+            } else {
+                (1u64 << end_bit) - 1
+            };
+            let mut mask = word & lower_mask & upper_mask;
+            while mask != 0 {
+                let bit_idx = mask.trailing_zeros() as usize;
+                let pos_in_block = word_base + bit_idx;
                 let coeff_count = coeff_counts[pos_in_block] as usize;
                 debug_assert!(coeff_count > 0);
                 f(
@@ -580,10 +623,8 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         delta: usize,
         _log_basis: u32,
     ) -> DecomposeFoldWitness<Fp128, D> {
-        let total_z = if self.can_use_decompose_fold_fast_path(block_len, delta) {
+        let total_z = if self.packed_block_cache.is_singleton() {
             self.decompose_fold_fast_singleton(challenges, block_len, delta)
-        } else if self.can_use_decompose_fold_striped_path(delta) {
-            self.decompose_fold_striped_delta1(challenges, block_len)
         } else {
             self.decompose_fold_generic(challenges, block_len, delta)
         };
@@ -658,19 +699,28 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
 
 impl<const D: usize> JoltPackedPoly<D> {
     #[inline(always)]
-    fn accumulate_sparse_shift_i32(
-        row: &mut [i32; D],
-        coeff_idx: usize,
-        challenge: &SparseChallenge,
-    ) {
-        for (&pos, &challenge_coeff) in challenge.positions.iter().zip(challenge.coeffs.iter()) {
-            let target = coeff_idx + pos as usize;
-            let (idx, sign) = if target < D {
-                (target, 1i32)
-            } else {
-                (target - D, -1i32)
-            };
-            row[idx] += sign * challenge_coeff as i32;
+    fn accumulate_rotated_i32(dst: &mut [i32; D], rotated: &[i32; D]) {
+        for (dst_coeff, &rotated_coeff) in dst.iter_mut().zip(rotated.iter()) {
+            *dst_coeff += rotated_coeff;
+        }
+    }
+
+    #[inline(always)]
+    fn fill_rotated_challenge_i32(table: &mut [[i32; D]], challenge: &SparseChallenge) {
+        debug_assert!(D.is_power_of_two());
+        debug_assert!(table.len() >= D);
+
+        let mut dense = [0i32; D];
+        for (&pos, &coeff) in challenge.positions.iter().zip(challenge.coeffs.iter()) {
+            dense[pos as usize] = coeff as i32;
+        }
+
+        for (coeff_idx, row) in table.iter_mut().enumerate().take(D) {
+            let split = D - coeff_idx;
+            row[coeff_idx..D].copy_from_slice(&dense[..split]);
+            for (dst, src) in row[..coeff_idx].iter_mut().zip(dense[split..].iter()) {
+                *dst = -*src;
+            }
         }
     }
 
@@ -1039,44 +1089,49 @@ impl<const D: usize> JoltPackedPoly<D> {
         block_len: usize,
         delta: usize,
     ) -> Vec<[i32; D]> {
-        let inner_width = block_len * delta;
+        if block_len == 0 {
+            return Vec::new();
+        }
 
-        let total_z = (0..self.num_blocks())
-            .into_par_iter()
-            .fold(
-                || vec![[0i32; D]; inner_width],
-                |mut z_accum, block_idx| {
-                    if block_idx < challenges.len() {
-                        let c_i = &challenges[block_idx];
-                        if !c_i.positions.is_empty() {
-                            Self::scatter_challenge(
-                                self,
-                                block_idx,
-                                block_len,
-                                delta,
-                                c_i,
-                                &mut z_accum,
-                            );
-                        }
-                    }
-                    z_accum
-                },
-            )
-            .reduce(
-                || vec![[0i32; D]; inner_width],
-                |mut a, b| {
-                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
-                        for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
-                            *a_coeff += b_coeff;
-                        }
-                    }
-                    a
-                },
-            );
+        let block_limit = challenges.len().min(self.num_blocks());
+        let num_threads = rayon::current_num_threads().max(1).min(block_len);
+        let row_chunk_len = block_len.div_ceil(num_threads).max(1);
+        let mut rows = vec![[0i32; D]; block_len];
 
-        total_z
+        rows.par_chunks_mut(row_chunk_len)
+            .enumerate()
+            .for_each(|(chunk_idx, row_chunk)| {
+                let pos_start = chunk_idx * row_chunk_len;
+                let pos_end = pos_start + row_chunk.len();
+                let mut rotated = vec![[0i32; D]; D];
+
+                for block_idx in 0..block_limit {
+                    let challenge = &challenges[block_idx];
+                    if challenge.positions.is_empty()
+                        || self.packed_block_cache.live_coeff_count(block_idx) == 0
+                    {
+                        continue;
+                    }
+
+                    Self::fill_rotated_challenge_i32(&mut rotated, challenge);
+                    self.for_each_entry_in_block_range(
+                        block_idx,
+                        pos_start,
+                        pos_end,
+                        |pos_in_block, coeffs| {
+                            let row = &mut row_chunk[pos_in_block - pos_start];
+                            for &coeff_idx in coeffs {
+                                Self::accumulate_rotated_i32(row, &rotated[coeff_idx as usize]);
+                            }
+                        },
+                    );
+                }
+            });
+
+        Self::expand_decompose_fold_rows(rows, delta)
     }
 
+    #[allow(dead_code)]
     pub(super) fn decompose_fold_striped_delta1(
         &self,
         challenges: &[SparseChallenge],
@@ -1207,26 +1262,32 @@ impl<const D: usize> JoltPackedPoly<D> {
             }
         }
 
-        let tile_rows = DECOMPOSE_FOLD_FAST_TILE_ROWS.min(block_len.max(1));
+        if block_len == 0 {
+            return Vec::new();
+        }
+
+        let num_threads = rayon::current_num_threads().max(1).min(block_len);
+        let row_chunk_len = block_len.div_ceil(num_threads).max(1);
         let word_bits = u64::BITS as usize;
         let mut rows = vec![[0i32; D]; block_len];
 
-        rows.par_chunks_mut(tile_rows)
+        rows.par_chunks_mut(row_chunk_len)
             .enumerate()
-            .for_each(|(tile_idx, row_tile)| {
-                let tile_start = tile_idx * tile_rows;
-                let tile_end = tile_start + row_tile.len();
-                let word_start = tile_start / word_bits;
-                let word_end = tile_end.div_ceil(word_bits);
+            .for_each(|(chunk_idx, row_chunk)| {
+                let pos_start = chunk_idx * row_chunk_len;
+                let pos_end = pos_start + row_chunk.len();
+                let word_start = pos_start / word_bits;
+                let word_end = pos_end.div_ceil(word_bits);
+                let mut rotated = vec![[0i32; D]; D];
 
                 for &block_idx in full_blocks.iter() {
                     let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
                     let challenge = &challenges[block_idx];
-                    for (local_pos, &coeff_idx) in coeffs[tile_start..tile_end].iter().enumerate() {
-                        Self::accumulate_sparse_shift_i32(
-                            &mut row_tile[local_pos],
-                            coeff_idx as usize,
-                            challenge,
+                    Self::fill_rotated_challenge_i32(&mut rotated, challenge);
+                    for (local_pos, &coeff_idx) in coeffs[pos_start..pos_end].iter().enumerate() {
+                        Self::accumulate_rotated_i32(
+                            &mut row_chunk[local_pos],
+                            &rotated[coeff_idx as usize],
                         );
                     }
                 }
@@ -1235,6 +1296,7 @@ impl<const D: usize> JoltPackedPoly<D> {
                     let present_words = self.packed_block_cache.present_words_for_block(block_idx);
                     let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
                     let challenge = &challenges[block_idx];
+                    Self::fill_rotated_challenge_i32(&mut rotated, challenge);
 
                     for word_idx in word_start..word_end {
                         let word = present_words[word_idx];
@@ -1243,8 +1305,8 @@ impl<const D: usize> JoltPackedPoly<D> {
                         }
 
                         let word_base = word_idx * word_bits;
-                        let start_bit = tile_start.saturating_sub(word_base);
-                        let end_bit = (tile_end - word_base).min(word_bits);
+                        let start_bit = pos_start.saturating_sub(word_base);
+                        let end_bit = (pos_end - word_base).min(word_bits);
                         let lower_mask = u64::MAX << start_bit;
                         let upper_mask = if end_bit == word_bits {
                             u64::MAX
@@ -1255,11 +1317,10 @@ impl<const D: usize> JoltPackedPoly<D> {
                         while mask != 0 {
                             let bit_idx = mask.trailing_zeros() as usize;
                             let pos_in_block = word_base + bit_idx;
-                            let local_pos = pos_in_block - tile_start;
-                            Self::accumulate_sparse_shift_i32(
-                                &mut row_tile[local_pos],
-                                coeffs[pos_in_block] as usize,
-                                challenge,
+                            let local_pos = pos_in_block - pos_start;
+                            Self::accumulate_rotated_i32(
+                                &mut row_chunk[local_pos],
+                                &rotated[coeffs[pos_in_block] as usize],
                             );
                             mask &= mask - 1;
                         }
@@ -1267,16 +1328,7 @@ impl<const D: usize> JoltPackedPoly<D> {
                 }
             });
 
-        if delta == 1 {
-            rows
-        } else {
-            let inner_width = block_len * delta;
-            let mut total_z = vec![[0i32; D]; inner_width];
-            for (pos_in_block, row) in rows.into_iter().enumerate() {
-                total_z[pos_in_block * delta] = row;
-            }
-            total_z
-        }
+        Self::expand_decompose_fold_rows(rows, delta)
     }
 
     #[allow(dead_code)]
@@ -1494,6 +1546,19 @@ impl<const D: usize> JoltPackedPoly<D> {
             }
         });
     }
+
+    #[inline]
+    fn expand_decompose_fold_rows(rows: Vec<[i32; D]>, delta: usize) -> Vec<[i32; D]> {
+        if delta == 1 {
+            return rows;
+        }
+
+        let mut total_z = vec![[0i32; D]; rows.len() * delta];
+        for (pos_in_block, row) in rows.into_iter().enumerate() {
+            total_z[pos_in_block * delta] = row;
+        }
+        total_z
+    }
 }
 
 fn to_hachi_opening_point<const D: usize>(point: &[JoltFp128]) -> Vec<Fp128> {
@@ -1522,13 +1587,19 @@ fn advice_commit_layout<Cfg: CommitmentConfig>(
     r_vars: usize,
     log_basis: u32,
 ) -> HachiCommitmentLayout {
+    let alpha = Cfg::D.trailing_zeros() as usize;
+    let max_num_vars = m_vars
+        .checked_add(r_vars)
+        .and_then(|vars| vars.checked_add(alpha))
+        .expect("advice layout variable count overflow");
+    let (n_a, challenge_l1_mass) = level0_layout_params::<Cfg>(max_num_vars, log_basis);
     HachiCommitmentLayout::new_with_decomp(
         m_vars,
         r_vars,
-        Cfg::N_A,
+        n_a,
         compute_num_digits(64, log_basis),
         compute_num_digits(128, log_basis),
-        compute_num_digits_fold(r_vars, Cfg::CHALLENGE_WEIGHT, log_basis),
+        compute_num_digits_fold(r_vars, challenge_l1_mass, log_basis),
         log_basis,
     )
     .unwrap()
@@ -1544,11 +1615,9 @@ fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
     if reduced_vars <= 1 {
         return advice_commit_layout::<Cfg>(reduced_vars.max(1), 0, INITIAL_LOG_BASIS);
     }
-    // Advice polynomials have log_commit_bound=64, so use that config for
-    // the optimal m/r split. All Fp128BoundedCommitmentConfig variants
-    // share the same N_A, CHALLENGE_WEIGHT, log_basis.
-    let (m_vars, r_vars) =
-        optimal_m_r_split::<Fp128BoundedCommitmentConfig<64, INITIAL_LOG_BASIS>>(reduced_vars);
+    // Advice polynomials have log_commit_bound=64 even when the main one-hot
+    // witness uses a narrower commit bound, so choose the split from that cost model.
+    let (m_vars, r_vars) = optimal_advice_m_r_split::<Cfg>(reduced_vars, INITIAL_LOG_BASIS);
     advice_commit_layout::<Cfg>(m_vars, r_vars, INITIAL_LOG_BASIS)
 }
 

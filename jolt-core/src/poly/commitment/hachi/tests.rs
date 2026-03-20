@@ -1,7 +1,7 @@
 use std::{array::from_fn, collections::HashSet, time::Instant};
 
 use super::commitment_scheme::{
-    build_packed_poly, poly_to_ring_coeffs, summarize_block_occupancy, Fp128OneHot256Config,
+    build_packed_poly, poly_to_ring_coeffs, summarize_block_occupancy, Fp128OneHot64Config,
     HachiBatchedProof, JoltHachiCommitmentScheme, JoltPackedPoly,
 };
 use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout};
@@ -247,7 +247,7 @@ fn packed_layout_reorders_poly_bits_into_inner_prefix() {
 
 #[test]
 fn packed_layout_reorders_lifted_coeff_bits_for_k16() {
-    type FastCfg = Fp128OneHot256Config;
+    type FastCfg = Fp128OneHot64Config;
 
     let log_k = 4usize;
     let layout = choose_packed_bit_layout::<{ FastCfg::D }, FastCfg>(log_k, 8, 3);
@@ -297,7 +297,7 @@ fn packed_layout_reorders_lifted_coeff_bits_for_k16() {
     assert_eq!(
         layout.max_coeffs_per_entry(),
         1usize << (FastCfg::D.trailing_zeros() as usize - log_k),
-        "K=16 should allow sixteen coefficients per packed entry at D=256"
+        "K=16 should allow D/K coefficients per packed entry"
     );
 }
 
@@ -432,7 +432,7 @@ fn packed_layout_live_entries_are_injective() {
 
 #[test]
 fn packed_layout_k16_uses_multi_coeff_entries() {
-    type FastCfg = Fp128OneHot256Config;
+    type FastCfg = Fp128OneHot64Config;
 
     let source = TestPackedSource::new(
         vec![
@@ -448,7 +448,7 @@ fn packed_layout_k16_uses_multi_coeff_entries() {
     assert_eq!(
         packed_poly.max_coeffs_per_entry_for_test(),
         FastCfg::D / source.onehot_k,
-        "K=16 should pack sixteen logical chunks per D=256 ring entry"
+        "K=16 should pack D/K logical chunks per ring entry"
     );
     assert!(
         coeff_counts.iter().any(|&count| count > 1),
@@ -607,8 +607,97 @@ fn packed_decompose_fold_fast_matches_generic_and_reference_helpers() {
 }
 
 #[test]
-fn packed_fast_paths_match_generic_in_d256_regime() {
-    type FastCfg = Fp128OneHot256Config;
+fn packed_fast_paths_match_generic_in_d64_regime() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            vec![
+                Some(0),
+                Some(63),
+                Some(1),
+                Some(62),
+                Some(2),
+                Some(61),
+                Some(3),
+                Some(60),
+            ],
+            vec![
+                Some(63),
+                Some(0),
+                Some(62),
+                Some(1),
+                Some(61),
+                Some(2),
+                Some(60),
+                Some(3),
+            ],
+            vec![
+                Some(31),
+                Some(32),
+                Some(16),
+                Some(48),
+                Some(8),
+                Some(56),
+                Some(4),
+                Some(60),
+            ],
+            vec![
+                Some(5),
+                None,
+                Some(10),
+                Some(15),
+                None,
+                Some(20),
+                Some(25),
+                Some(30),
+            ],
+            vec![
+                Some(58),
+                Some(48),
+                Some(38),
+                Some(28),
+                Some(18),
+                Some(8),
+                Some(12),
+                Some(22),
+            ],
+        ],
+        FastCfg::D,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let generic_commit =
+        packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
+    let fast_commit = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
+    let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
+    let generic_fold =
+        packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
+    let striped_fold =
+        packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
+    let fast_fold =
+        packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
+
+    assert_eq!(
+        fast_commit, generic_commit,
+        "D=64 fast commit_inner must match generic"
+    );
+    assert_eq!(
+        striped_fold, generic_fold,
+        "D=64 striped decompose_fold must match generic"
+    );
+    assert_eq!(
+        fast_fold, generic_fold,
+        "D=64 fast decompose_fold must match generic"
+    );
+}
+
+#[test]
+fn packed_fast_paths_match_generic_in_k256_singleton_regime() {
+    type FastCfg = Fp128OneHot64Config;
 
     let source = TestPackedSource::new(
         vec![
@@ -663,7 +752,7 @@ fn packed_fast_paths_match_generic_in_d256_regime() {
                 Some(75),
             ],
         ],
-        FastCfg::D,
+        256,
     );
     let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
@@ -683,21 +772,21 @@ fn packed_fast_paths_match_generic_in_d256_regime() {
 
     assert_eq!(
         fast_commit, generic_commit,
-        "D=256 fast commit_inner must match generic"
+        "K=256 fast commit_inner must match generic"
     );
     assert_eq!(
         striped_fold, generic_fold,
-        "D=256 striped decompose_fold must match generic"
+        "K=256 striped decompose_fold must match generic"
     );
     assert_eq!(
         fast_fold, generic_fold,
-        "D=256 fast decompose_fold must match generic"
+        "K=256 fast decompose_fold must match generic"
     );
 }
 
 #[test]
-fn packed_commit_inner_generic_matches_multi_coeff_helpers_in_d256_k16_regime() {
-    type FastCfg = Fp128OneHot256Config;
+fn packed_commit_inner_generic_matches_multi_coeff_helpers_in_d64_k16_regime() {
+    type FastCfg = Fp128OneHot64Config;
 
     let source = TestPackedSource::new(
         vec![
@@ -749,8 +838,8 @@ fn packed_commit_inner_generic_matches_multi_coeff_helpers_in_d256_k16_regime() 
 }
 
 #[test]
-fn packed_decompose_fold_generic_matches_multi_coeff_helpers_in_d256_k16_regime() {
-    type FastCfg = Fp128OneHot256Config;
+fn packed_decompose_fold_generic_matches_multi_coeff_helpers_in_d64_k16_regime() {
+    type FastCfg = Fp128OneHot64Config;
 
     let source = TestPackedSource::new(
         vec![
@@ -801,7 +890,7 @@ fn packed_decompose_fold_generic_matches_multi_coeff_helpers_in_d256_k16_regime(
 #[test]
 #[ignore = "profiling helper for packed fast paths"]
 fn packed_fast_path_benchmark_smoke() {
-    type FastCfg = Fp128OneHot256Config;
+    type FastCfg = Fp128OneHot64Config;
 
     let source = TestPackedSource::new(
         (0..16)
@@ -839,6 +928,76 @@ fn packed_fast_path_benchmark_smoke() {
     eprintln!(
         "packed bench: commit generic={generic_commit:?}, commit fast={fast_commit:?}, fold generic={generic_fold:?}, fold fast={fast_fold:?}"
     );
+}
+
+#[test]
+#[ignore = "profiling helper for K=16 packed decompose_fold"]
+fn packed_k16_decompose_fold_benchmark_smoke() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        (0..32)
+            .map(|poly_idx| {
+                (0..256)
+                    .map(|cycle_idx| {
+                        if (poly_idx + cycle_idx) % 11 == 0 {
+                            None
+                        } else {
+                            Some(((poly_idx * 7 + cycle_idx * 5) % 16) as u8)
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+        16,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
+
+    let generic_start = Instant::now();
+    let _ = packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
+    let generic = generic_start.elapsed();
+
+    let large_start = Instant::now();
+    let _ = packed_poly.decompose_fold_large(&challenges, packed_layout.block_len(), 1);
+    let large = large_start.elapsed();
+
+    eprintln!("packed K=16 decompose_fold: generic={generic:?}, large={large:?}");
+}
+
+#[test]
+#[ignore = "profiling helper for K=256 packed decompose_fold"]
+fn packed_k256_decompose_fold_benchmark_smoke() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        (0..32)
+            .map(|poly_idx| {
+                (0..256)
+                    .map(|cycle_idx| {
+                        if (poly_idx * 3 + cycle_idx) % 13 == 0 {
+                            None
+                        } else {
+                            Some(((poly_idx * 37 + cycle_idx * 29) % 256) as u8)
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+        256,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
+
+    let striped_start = Instant::now();
+    let _ = packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
+    let striped = striped_start.elapsed();
+
+    let fast_start = Instant::now();
+    let _ = packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
+    let fast = fast_start.elapsed();
+
+    eprintln!("packed K=256 decompose_fold: striped={striped:?}, fast={fast:?}");
 }
 
 #[test]
@@ -911,7 +1070,7 @@ fn hachi_batch_roundtrip_with_packed_layout() {
 
 #[test]
 fn hachi_batch_roundtrip_with_packed_layout_k16() {
-    type FastCfg = Fp128OneHot256Config;
+    type FastCfg = Fp128OneHot64Config;
     type FastScheme = JoltHachiCommitmentScheme<{ FastCfg::D }, FastCfg>;
 
     let log_k = 4usize;
@@ -1003,7 +1162,7 @@ fn hachi_batch_roundtrip_with_packed_layout_k16() {
 
 #[test]
 fn hachi_k256_setup_envelope_supports_k16_roundtrip() {
-    type FastCfg = Fp128OneHot256Config;
+    type FastCfg = Fp128OneHot64Config;
     type FastScheme = JoltHachiCommitmentScheme<{ FastCfg::D }, FastCfg>;
 
     let num_cycles = 1usize << 4;

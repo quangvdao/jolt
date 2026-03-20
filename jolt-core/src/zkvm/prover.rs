@@ -1859,7 +1859,7 @@ mod tests {
     use crate::field::fp128::JoltFp128;
     use crate::host;
     use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
-    use crate::poly::commitment::hachi::{Fp128OneHot256Config, JoltHachiCommitmentScheme};
+    use crate::poly::commitment::hachi::{Fp128OneHot64Config, JoltHachiCommitmentScheme};
     use crate::poly::{
         commitment::{
             commitment_scheme::CommitmentScheme,
@@ -1884,7 +1884,7 @@ mod tests {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
 
-    type HachiPcs = JoltHachiCommitmentScheme<{ Fp128OneHot256Config::D }, Fp128OneHot256Config>;
+    type HachiPcs = JoltHachiCommitmentScheme<{ Fp128OneHot64Config::D }, Fp128OneHot64Config>;
     type RV64IMACHachiProver<'a> = JoltCpuProver<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
     type RV64IMACHachiVerifier<'a> = JoltVerifier<'a, JoltFp128, HachiPcs, Blake2bTranscript>;
 

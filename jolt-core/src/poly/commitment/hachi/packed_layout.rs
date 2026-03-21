@@ -42,6 +42,38 @@ pub(super) struct PackedBlockRange {
     pub poly_end: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SingletonLocateParams {
+    pub addr_coeff_mask: usize,
+    pub addr_coeff_bits: usize,
+    pub cycle_inner_mask: usize,
+    pub poly_inner_mask: usize,
+    pub cycle_shift: usize,
+    pub poly_shift: usize,
+}
+
+impl SingletonLocateParams {
+    #[inline(always)]
+    pub fn locate(&self, cycle_idx: usize, poly_idx: usize, hot_index: usize) -> (usize, usize) {
+        let coeff_idx = hot_index & self.addr_coeff_mask;
+        let addr_inner = hot_index >> self.addr_coeff_bits;
+        let cycle_inner = cycle_idx & self.cycle_inner_mask;
+        let poly_inner = poly_idx & self.poly_inner_mask;
+        let pos = addr_inner | (cycle_inner << self.cycle_shift) | (poly_inner << self.poly_shift);
+        (pos, coeff_idx)
+    }
+
+    #[inline(always)]
+    pub fn cycle_shifted(&self, cycle_idx: usize) -> usize {
+        (cycle_idx & self.cycle_inner_mask) << self.cycle_shift
+    }
+
+    #[inline(always)]
+    pub fn poly_shifted(&self, poly_idx: usize) -> usize {
+        (poly_idx & self.poly_inner_mask) << self.poly_shift
+    }
+}
+
 /// Bit layout for the packed one-hot polynomial after the first `alpha = log2(D)`
 /// coefficient bits have been selected.
 ///
@@ -194,6 +226,7 @@ impl PackedBitLayout {
     }
 
     #[inline]
+    #[cfg(test)]
     pub(super) fn max_coeffs_per_entry(&self) -> usize {
         1usize
             .checked_shl(self.lifted_coeff_bits() as u32)
@@ -217,6 +250,35 @@ impl PackedBitLayout {
             log_basis,
         )
         .expect("invalid packed Hachi layout")
+    }
+
+    /// Precomputed constants for the singleton locate fast path.
+    #[inline(always)]
+    pub(super) fn singleton_params(&self) -> SingletonLocateParams {
+        debug_assert_eq!(self.lifted_coeff_bits(), 0);
+        let addr_coeff_bits = self.addr_coeff_bits();
+        let addr_inner_bits = self.addr_inner_bits();
+        SingletonLocateParams {
+            addr_coeff_mask: (1usize << addr_coeff_bits).wrapping_sub(1),
+            addr_coeff_bits,
+            cycle_inner_mask: (1usize << self.cycle_inner_bits).wrapping_sub(1),
+            poly_inner_mask: (1usize << self.poly_inner_bits).wrapping_sub(1),
+            poly_shift: addr_inner_bits,
+            cycle_shift: addr_inner_bits + self.poly_inner_bits,
+        }
+    }
+
+    /// Singleton fast path: computes (pos_in_block, coeff_idx) when
+    /// lifted_coeff_bits == 0.
+    #[inline(always)]
+    pub(super) fn locate_singleton(
+        &self,
+        cycle_idx: usize,
+        poly_idx: usize,
+        hot_index: usize,
+    ) -> (usize, usize) {
+        self.singleton_params()
+            .locate(cycle_idx, poly_idx, hot_index)
     }
 
     #[inline]
@@ -270,8 +332,8 @@ impl PackedBitLayout {
             | (cycle_coeff << addr_coeff_bits)
             | (poly_coeff << (addr_coeff_bits + self.cycle_coeff_bits));
         let pos_in_block = addr_inner
-            | (cycle_inner << self.addr_inner_bits())
-            | (poly_inner << (self.addr_inner_bits() + self.cycle_inner_bits));
+            | (poly_inner << self.addr_inner_bits())
+            | (cycle_inner << (self.addr_inner_bits() + self.poly_inner_bits));
         let block_idx = cycle_outer | (poly_outer << self.cycle_outer_bits());
 
         PackedPosition {
@@ -353,10 +415,10 @@ impl PackedBitLayout {
         out.extend_from_slice(&poly_bits_le[..self.poly_coeff_bits]);
         out.extend_from_slice(&addr_bits_le[addr_coeff_bits..]);
         out.extend_from_slice(
-            &cycle_bits_le[self.cycle_coeff_bits..self.cycle_coeff_bits + self.cycle_inner_bits],
+            &poly_bits_le[self.poly_coeff_bits..self.poly_coeff_bits + self.poly_inner_bits],
         );
         out.extend_from_slice(
-            &poly_bits_le[self.poly_coeff_bits..self.poly_coeff_bits + self.poly_inner_bits],
+            &cycle_bits_le[self.cycle_coeff_bits..self.cycle_coeff_bits + self.cycle_inner_bits],
         );
         out.extend_from_slice(&cycle_bits_le[self.cycle_tile_bits()..]);
         out.extend_from_slice(&poly_bits_le[self.poly_tile_bits()..]);

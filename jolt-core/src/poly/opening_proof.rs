@@ -39,6 +39,11 @@ pub trait BatchPolynomialSource<F: JoltField>: Send + Sync {
     fn onehot_index(&self, _cycle_idx: usize, _poly_idx: usize) -> Option<u8> {
         None
     }
+    fn batch_onehot_indices(&self, cycle_idx: usize, poly_start: usize, buf: &mut [Option<u8>]) {
+        for (i, slot) in buf.iter_mut().enumerate() {
+            *slot = self.onehot_index(cycle_idx, poly_start + i);
+        }
+    }
     fn num_cycles(&self) -> Option<usize> {
         None
     }

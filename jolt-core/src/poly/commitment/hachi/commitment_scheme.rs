@@ -1,14 +1,12 @@
 use std::{
     array::from_fn,
     env::var_os,
-    fmt,
     marker::PhantomData,
     mem::{size_of, take},
     slice::{from_raw_parts, from_ref},
-    sync::Arc,
 };
 
-use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout, PackedBlockRange};
+use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout};
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
@@ -73,9 +71,6 @@ const WIDE_RING_REDUCE_INTERVAL: usize = 32_000;
 
 /// Per-worker stripe size for the large-shape decompose_fold path. At D=64,
 /// 4096 rows is 1 MiB of i32 output, which keeps merge working sets cacheable.
-const DECOMPOSE_FOLD_STRIPE_ROWS: usize = 4_096;
-const DECOMPOSE_FOLD_STRIPE_CHUNKS_PER_THREAD: usize = 2;
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct PackedOccupancySummary {
@@ -255,7 +250,6 @@ pub struct HachiBatchedProof<const D: usize> {
 pub struct JoltHachiBatchHint<const D: usize> {
     hachi_hint: HachiCommitmentHint<Fp128, D>,
     packed_layout: PackedBitLayout,
-    packed_block_cache: Arc<PackedBlockCache>,
     num_packed_polys: usize,
     log_k: usize,
 }
@@ -275,99 +269,55 @@ pub enum HachiChunkState<const D: usize> {
     },
 }
 
-#[derive(Clone)]
-pub(super) struct PackedBlockCache {
-    coeffs: Arc<[u8]>,
-    coeff_counts: Arc<[u8]>,
-    present_words: Arc<[u64]>,
-    nonzero_counts: Arc<[u32]>,
-    live_coeff_counts: Arc<[u32]>,
-    max_coeffs_per_entry: usize,
-    block_len: usize,
-    present_words_per_block: usize,
-    num_blocks: usize,
-    total_nonzero: usize,
-    total_live_coeffs: usize,
+/// Streaming view over the packed one-hot trace. Instead of materializing
+/// a block cache, holds the original index function and re-reads entries
+/// on the fly via `packed_layout.locate_singleton()` / `locate()`.
+///
+/// `index_fn(cycle, poly) -> Option<u8>` returns the one-hot index for a
+/// single (cycle, poly) pair.
+///
+/// `batch_fn(cycle, poly_start, buf)` fills `buf[0..len]` with the one-hot
+/// indices for polys `poly_start..poly_start+len` at the given cycle,
+/// amortizing per-cycle work (e.g. loading the trace entry once).
+pub(super) struct JoltPackedPoly<F, B, const D: usize> {
+    packed_layout: PackedBitLayout,
+    index_fn: F,
+    batch_fn: B,
+    num_cycles: usize,
+    num_polys: usize,
 }
 
-impl fmt::Debug for PackedBlockCache {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PackedBlockCache")
-            .field("max_coeffs_per_entry", &self.max_coeffs_per_entry)
-            .field("block_len", &self.block_len)
-            .field("present_words_per_block", &self.present_words_per_block)
-            .field("num_blocks", &self.num_blocks)
-            .field("total_slots", &self.coeff_counts.len())
-            .field("total_nonzero", &self.total_nonzero)
-            .field("live_coeff_blocks", &self.live_coeff_counts.len())
-            .field("total_live_coeffs", &self.total_live_coeffs)
-            .finish()
+impl<F: Clone, B: Clone, const D: usize> Clone for JoltPackedPoly<F, B, D> {
+    fn clone(&self) -> Self {
+        Self {
+            packed_layout: self.packed_layout,
+            index_fn: self.index_fn.clone(),
+            batch_fn: self.batch_fn.clone(),
+            num_cycles: self.num_cycles,
+            num_polys: self.num_polys,
+        }
     }
 }
 
-impl PackedBlockCache {
+impl<
+        F: Fn(usize, usize) -> Option<u8> + Sync,
+        B: Fn(usize, usize, &mut [Option<u8>]) + Sync,
+        const D: usize,
+    > JoltPackedPoly<F, B, D>
+{
     #[inline]
-    fn coeffs_for_block(&self, block_idx: usize) -> &[u8] {
-        assert!(
-            self.is_singleton(),
-            "coeffs_for_block requires singleton packed entries"
-        );
-        let start = block_idx * self.block_len;
-        &self.coeffs[start..start + self.block_len]
-    }
-
-    #[inline]
-    fn coeff_counts_for_block(&self, block_idx: usize) -> &[u8] {
-        let start = block_idx * self.block_len;
-        &self.coeff_counts[start..start + self.block_len]
-    }
-
-    #[inline]
-    fn coeffs_for_entry(&self, block_idx: usize, pos_in_block: usize, coeff_count: usize) -> &[u8] {
-        let global_pos = block_idx * self.block_len + pos_in_block;
-        let start = global_pos * self.max_coeffs_per_entry;
-        &self.coeffs[start..start + coeff_count]
-    }
-
-    #[inline]
-    fn present_words_for_block(&self, block_idx: usize) -> &[u64] {
-        let start = block_idx * self.present_words_per_block;
-        &self.present_words[start..start + self.present_words_per_block]
-    }
-
-    #[inline]
-    fn nonzero_count(&self, block_idx: usize) -> usize {
-        self.nonzero_counts[block_idx] as usize
-    }
-
-    #[inline]
-    fn live_coeff_count(&self, block_idx: usize) -> usize {
-        self.live_coeff_counts[block_idx] as usize
+    fn num_blocks(&self) -> usize {
+        self.packed_layout.num_blocks()
     }
 
     #[inline]
     fn is_singleton(&self) -> bool {
-        self.max_coeffs_per_entry == 1
-    }
-}
-
-/// Streaming view over the packed one-hot trace using a packed-specific
-/// cycle/poly tile layout.
-#[derive(Clone)]
-pub(super) struct JoltPackedPoly<const D: usize> {
-    packed_layout: PackedBitLayout,
-    packed_block_cache: Arc<PackedBlockCache>,
-}
-
-impl<const D: usize> JoltPackedPoly<D> {
-    #[inline]
-    fn num_blocks(&self) -> usize {
-        self.packed_block_cache.num_blocks
+        self.packed_layout.lifted_coeff_bits() == 0
     }
 
     #[inline]
     fn can_use_commit_inner_fast_path(&self, n_a: usize, num_digits_commit: usize) -> bool {
-        self.packed_block_cache.is_singleton() && n_a == 1 && num_digits_commit == 1
+        self.is_singleton() && n_a == 1 && num_digits_commit == 1
     }
 
     #[inline]
@@ -420,40 +370,28 @@ impl<const D: usize> JoltPackedPoly<D> {
 
     #[inline]
     fn for_each_entry_in_block(&self, block_idx: usize, mut f: impl FnMut(usize, &[u8])) {
-        let live_coeff_count = self.packed_block_cache.live_coeff_count(block_idx);
-        if live_coeff_count == 0 {
-            return;
-        }
-        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
-        debug_assert!(live_coeff_count >= nonzero_count);
-        let coeff_counts = self.packed_block_cache.coeff_counts_for_block(block_idx);
-        if nonzero_count == self.packed_block_cache.block_len {
-            for (pos_in_block, &coeff_count) in coeff_counts.iter().enumerate() {
-                let coeff_count = coeff_count as usize;
-                debug_assert!(coeff_count > 0);
-                f(
-                    pos_in_block,
-                    self.packed_block_cache
-                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
-                );
+        let range = self
+            .packed_layout
+            .block_range(block_idx, self.num_cycles, self.num_polys);
+        if self.is_singleton() {
+            for c in range.cycle_start..range.cycle_end {
+                for p in range.poly_start..range.poly_end {
+                    if let Some(k) = (self.index_fn)(c, p) {
+                        let (pos, coeff_idx) =
+                            self.packed_layout.locate_singleton(c, p, k as usize);
+                        f(pos, &[coeff_idx as u8]);
+                    }
+                }
             }
-            return;
-        }
-        let present_words = self.packed_block_cache.present_words_for_block(block_idx);
-        for (word_idx, &word) in present_words.iter().enumerate() {
-            let mut mask = word;
-            while mask != 0 {
-                let bit_idx = mask.trailing_zeros() as usize;
-                let pos_in_block = word_idx * u64::BITS as usize + bit_idx;
-                debug_assert!(pos_in_block < coeff_counts.len());
-                let coeff_count = coeff_counts[pos_in_block] as usize;
-                debug_assert!(coeff_count > 0);
-                f(
-                    pos_in_block,
-                    self.packed_block_cache
-                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
-                );
-                mask &= mask - 1;
+        } else {
+            for c in range.cycle_start..range.cycle_end {
+                for p in range.poly_start..range.poly_end {
+                    if let Some(k) = (self.index_fn)(c, p) {
+                        let pos = self.packed_layout.locate(c, p, k as usize);
+                        debug_assert_eq!(pos.block_idx, block_idx);
+                        f(pos.pos_in_block, &[pos.coeff_idx as u8]);
+                    }
+                }
             }
         }
     }
@@ -466,63 +404,38 @@ impl<const D: usize> JoltPackedPoly<D> {
         pos_end: usize,
         mut f: impl FnMut(usize, &[u8]),
     ) {
-        let block_len = self.packed_block_cache.block_len;
+        let block_len = self.packed_layout.block_len();
         let pos_start = pos_start.min(block_len);
         let pos_end = pos_end.min(block_len);
         if pos_start >= pos_end {
             return;
         }
-        let live_coeff_count = self.packed_block_cache.live_coeff_count(block_idx);
-        if live_coeff_count == 0 {
-            return;
-        }
-        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
-        let coeff_counts = self.packed_block_cache.coeff_counts_for_block(block_idx);
-        if nonzero_count == block_len {
-            for (offset, &coeff_count) in coeff_counts[pos_start..pos_end].iter().enumerate() {
-                let coeff_count = coeff_count as usize;
-                debug_assert!(coeff_count > 0);
-                let pos_in_block = pos_start + offset;
-                f(
-                    pos_in_block,
-                    self.packed_block_cache
-                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
-                );
+        let range = self
+            .packed_layout
+            .block_range(block_idx, self.num_cycles, self.num_polys);
+        if self.is_singleton() {
+            for c in range.cycle_start..range.cycle_end {
+                for p in range.poly_start..range.poly_end {
+                    if let Some(k) = (self.index_fn)(c, p) {
+                        let (pos, coeff_idx) =
+                            self.packed_layout.locate_singleton(c, p, k as usize);
+                        if pos >= pos_start && pos < pos_end {
+                            f(pos, &[coeff_idx as u8]);
+                        }
+                    }
+                }
             }
-            return;
-        }
-
-        let word_bits = u64::BITS as usize;
-        let word_start = pos_start / word_bits;
-        let word_end = pos_end.div_ceil(word_bits);
-        let present_words = self.packed_block_cache.present_words_for_block(block_idx);
-        for word_idx in word_start..word_end {
-            let word = present_words[word_idx];
-            if word == 0 {
-                continue;
-            }
-
-            let word_base = word_idx * word_bits;
-            let start_bit = pos_start.saturating_sub(word_base);
-            let end_bit = (pos_end - word_base).min(word_bits);
-            let lower_mask = u64::MAX << start_bit;
-            let upper_mask = if end_bit == word_bits {
-                u64::MAX
-            } else {
-                (1u64 << end_bit) - 1
-            };
-            let mut mask = word & lower_mask & upper_mask;
-            while mask != 0 {
-                let bit_idx = mask.trailing_zeros() as usize;
-                let pos_in_block = word_base + bit_idx;
-                let coeff_count = coeff_counts[pos_in_block] as usize;
-                debug_assert!(coeff_count > 0);
-                f(
-                    pos_in_block,
-                    self.packed_block_cache
-                        .coeffs_for_entry(block_idx, pos_in_block, coeff_count),
-                );
-                mask &= mask - 1;
+        } else {
+            for c in range.cycle_start..range.cycle_end {
+                for p in range.poly_start..range.poly_end {
+                    if let Some(k) = (self.index_fn)(c, p) {
+                        let pos = self.packed_layout.locate(c, p, k as usize);
+                        debug_assert_eq!(pos.block_idx, block_idx);
+                        if pos.pos_in_block >= pos_start && pos.pos_in_block < pos_end {
+                            f(pos.pos_in_block, &[pos.coeff_idx as u8]);
+                        }
+                    }
+                }
             }
         }
     }
@@ -535,32 +448,14 @@ impl<const D: usize> JoltPackedPoly<D> {
             }
         });
     }
-
-    #[cfg(test)]
-    pub(super) fn max_coeffs_per_entry_for_test(&self) -> usize {
-        self.packed_block_cache.max_coeffs_per_entry
-    }
-
-    #[cfg(test)]
-    pub(super) fn entry_coeff_counts_for_test(&self) -> Vec<usize> {
-        self.packed_block_cache
-            .coeff_counts
-            .iter()
-            .map(|&count| count as usize)
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn block_live_coeff_counts_for_test(&self) -> Vec<usize> {
-        self.packed_block_cache
-            .live_coeff_counts
-            .iter()
-            .map(|&count| count as usize)
-            .collect()
-    }
 }
 
-impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
+impl<
+        F: Fn(usize, usize) -> Option<u8> + Clone + Send + Sync,
+        B: Fn(usize, usize, &mut [Option<u8>]) + Clone + Send + Sync,
+        const D: usize,
+    > HachiPolyOps<Fp128, D> for JoltPackedPoly<F, B, D>
+{
     type CommitCache = NttSlotCache<D>;
 
     fn num_ring_elems(&self) -> usize {
@@ -644,7 +539,7 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
         delta: usize,
         _log_basis: u32,
     ) -> DecomposeFoldWitness<Fp128, D> {
-        let total_z = if self.packed_block_cache.is_singleton() {
+        let total_z = if self.is_singleton() {
             self.decompose_fold_fast_singleton(challenges, block_len, delta)
         } else {
             self.decompose_fold_generic(challenges, block_len, delta)
@@ -718,7 +613,12 @@ impl<const D: usize> HachiPolyOps<Fp128, D> for JoltPackedPoly<D> {
     }
 }
 
-impl<const D: usize> JoltPackedPoly<D> {
+impl<
+        F: Fn(usize, usize) -> Option<u8> + Sync,
+        B: Fn(usize, usize, &mut [Option<u8>]) + Sync,
+        const D: usize,
+    > JoltPackedPoly<F, B, D>
+{
     #[inline(always)]
     fn accumulate_rotated_i32(dst: &mut [i32; D], rotated: &[i32; D]) {
         for (dst_coeff, &rotated_coeff) in dst.iter_mut().zip(rotated.iter()) {
@@ -1102,7 +1002,6 @@ impl<const D: usize> JoltPackedPoly<D> {
         let block_len = self.packed_layout.block_len();
         let tile_size = COMMIT_TILE_SIZE.min(block_len.max(1));
         let num_tiles = block_len.div_ceil(tile_size);
-        let word_bits = u64::BITS as usize;
         let a_row = a_view.row(0);
         let wide_ring_bytes = size_of::<WideCyclotomicRing<Fp128x8i32, D>>().max(1);
         let chunk_parallelism = rayon::current_num_threads()
@@ -1149,8 +1048,6 @@ impl<const D: usize> JoltPackedPoly<D> {
                     .map(|pos| WideCyclotomicRing::from_ring(&a_row[pos]))
                     .collect();
 
-                let word_start = tile_start / word_bits;
-                let word_end = tile_end.div_ceil(word_bits);
                 batch_chunk_starts
                     .par_iter()
                     .zip(batch_t_wide.par_iter_mut())
@@ -1162,68 +1059,26 @@ impl<const D: usize> JoltPackedPoly<D> {
                             .enumerate()
                         {
                             let block_idx = chunk_start + chunk_offset;
-                            let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
-                            if nonzero_count == 0 {
-                                continue;
-                            }
-
-                            let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
-
-                            if nonzero_count == block_len {
-                                for pos_in_block in tile_start..tile_end {
+                            self.for_each_entry_in_block_range(
+                                block_idx,
+                                tile_start,
+                                tile_end,
+                                |pos_in_block, coeffs| {
                                     let local_pos = pos_in_block - tile_start;
-                                    Self::shift_accumulate_into_fast(
-                                        &a_tile[local_pos],
-                                        t_wide,
-                                        coeffs[pos_in_block] as usize,
-                                    );
-
-                                    *entries_since_reduce += 1;
-                                    if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
-                                        Self::reduce_wide_accumulator(t_wide);
-                                        *entries_since_reduce = 0;
-                                    }
-                                }
-                            } else {
-                                let present_words =
-                                    self.packed_block_cache.present_words_for_block(block_idx);
-                                for word_idx in word_start..word_end {
-                                    let word = present_words[word_idx];
-                                    if word == 0 {
-                                        continue;
-                                    }
-
-                                    let word_base = word_idx * word_bits;
-                                    let start_bit = tile_start.saturating_sub(word_base);
-                                    let end_bit = (tile_end - word_base).min(word_bits);
-                                    let lower_mask = u64::MAX << start_bit;
-                                    let upper_mask = if end_bit == word_bits {
-                                        u64::MAX
-                                    } else {
-                                        (1u64 << end_bit) - 1
-                                    };
-                                    let mut mask = word & lower_mask & upper_mask;
-                                    while mask != 0 {
-                                        let bit_idx = mask.trailing_zeros() as usize;
-                                        let pos_in_block = word_base + bit_idx;
-                                        let local_pos = pos_in_block - tile_start;
-                                        debug_assert!(pos_in_block < coeffs.len());
+                                    for &coeff_idx in coeffs {
                                         Self::shift_accumulate_into_fast(
                                             &a_tile[local_pos],
                                             t_wide,
-                                            coeffs[pos_in_block] as usize,
+                                            coeff_idx as usize,
                                         );
-
                                         *entries_since_reduce += 1;
                                         if *entries_since_reduce >= WIDE_RING_REDUCE_INTERVAL {
                                             Self::reduce_wide_accumulator(t_wide);
                                             *entries_since_reduce = 0;
                                         }
-
-                                        mask &= mask - 1;
                                     }
-                                }
-                            }
+                                },
+                            );
                         }
                     });
             }
@@ -1268,148 +1123,61 @@ impl<const D: usize> JoltPackedPoly<D> {
         }
 
         let block_limit = challenges.len().min(self.num_blocks());
-        let num_threads = rayon::current_num_threads().max(1).min(block_len);
-        let row_chunk_len = block_len.div_ceil(num_threads).max(1);
-        let mut rows = vec![[0i32; D]; block_len];
+        let num_threads = rayon::current_num_threads().max(1);
+        let blocks_per_chunk = block_limit.div_ceil(num_threads).max(1);
+        let num_chunks = block_limit.div_ceil(blocks_per_chunk);
 
-        rows.par_chunks_mut(row_chunk_len)
-            .enumerate()
-            .for_each(|(chunk_idx, row_chunk)| {
-                let pos_start = chunk_idx * row_chunk_len;
-                let pos_end = pos_start + row_chunk.len();
-                let mut rotated = vec![[0i32; D]; D];
-
-                for block_idx in 0..block_limit {
+        let rows = (0..num_chunks)
+            .into_par_iter()
+            .map(|chunk_idx| {
+                let chunk_start = chunk_idx * blocks_per_chunk;
+                let chunk_end = (chunk_start + blocks_per_chunk).min(block_limit);
+                let mut local_rows = vec![[0i32; D]; block_len];
+                let mut rotated = [[0i32; D]; D];
+                let mut idx_buf = vec![None::<u8>; self.num_polys];
+                for block_idx in chunk_start..chunk_end {
                     let challenge = &challenges[block_idx];
-                    if challenge.positions.is_empty()
-                        || self.packed_block_cache.live_coeff_count(block_idx) == 0
-                    {
+                    if challenge.positions.is_empty() {
                         continue;
                     }
-
                     Self::fill_rotated_challenge_i32(&mut rotated, challenge);
-                    self.for_each_entry_in_block_range(
-                        block_idx,
-                        pos_start,
-                        pos_end,
-                        |pos_in_block, coeffs| {
-                            let row = &mut row_chunk[pos_in_block - pos_start];
-                            for &coeff_idx in coeffs {
-                                Self::accumulate_rotated_i32(row, &rotated[coeff_idx as usize]);
-                            }
-                        },
-                    );
-                }
-            });
-
-        Self::expand_decompose_fold_rows(rows, delta)
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn decompose_fold_striped_delta1(
-        &self,
-        challenges: &[SparseChallenge],
-        block_len: usize,
-    ) -> Vec<[i32; D]> {
-        let word_bits = u64::BITS as usize;
-        let stripe_rows = DECOMPOSE_FOLD_STRIPE_ROWS.min(block_len.max(1));
-        let block_limit = challenges.len().min(self.num_blocks());
-        let target_chunks =
-            (rayon::current_num_threads() * DECOMPOSE_FOLD_STRIPE_CHUNKS_PER_THREAD).max(1);
-        let block_chunk_len = block_limit.div_ceil(target_chunks).max(1);
-        let mut total_z = vec![[0i32; D]; block_len];
-
-        for stripe_start in (0..block_len).step_by(stripe_rows) {
-            let stripe_end = (stripe_start + stripe_rows).min(block_len);
-            let stripe_len = stripe_end - stripe_start;
-            let word_start = stripe_start / word_bits;
-            let word_end = stripe_end.div_ceil(word_bits);
-            let stripe = challenges[..block_limit]
-                .par_chunks(block_chunk_len)
-                .enumerate()
-                .map(|(chunk_idx, chunk)| {
-                    let mut z_accum = vec![[0i32; D]; stripe_len];
-                    let block_start = chunk_idx * block_chunk_len;
-                    for (offset, c_i) in chunk.iter().enumerate() {
-                        let block_idx = block_start + offset;
-                        let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
-                        if c_i.positions.is_empty() || nonzero_count == 0 {
-                            continue;
-                        }
-
-                        let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
-                        if nonzero_count == block_len {
-                            for (local_pos, &coeff_idx) in
-                                coeffs[stripe_start..stripe_end].iter().enumerate()
-                            {
-                                let coeff_idx = coeff_idx as usize;
-                                for (&pos, &challenge_coeff) in
-                                    c_i.positions.iter().zip(c_i.coeffs.iter())
-                                {
-                                    let target = coeff_idx + pos as usize;
-                                    let (idx, sign) = if target < D {
-                                        (target, 1i32)
-                                    } else {
-                                        (target - D, -1i32)
-                                    };
-                                    z_accum[local_pos][idx] += sign * challenge_coeff as i32;
-                                }
-                            }
-                        } else {
-                            let present_words =
-                                self.packed_block_cache.present_words_for_block(block_idx);
-                            for word_idx in word_start..word_end {
-                                let word = present_words[word_idx];
-                                if word == 0 {
-                                    continue;
-                                }
-
-                                let word_base = word_idx * word_bits;
-                                let start_bit = stripe_start.saturating_sub(word_base);
-                                let end_bit = (stripe_end - word_base).min(word_bits);
-                                let lower_mask = u64::MAX << start_bit;
-                                let upper_mask = if end_bit == word_bits {
-                                    u64::MAX
-                                } else {
-                                    (1u64 << end_bit) - 1
-                                };
-                                let mut mask = word & lower_mask & upper_mask;
-                                while mask != 0 {
-                                    let bit_idx = mask.trailing_zeros() as usize;
-                                    let pos_in_block = word_base + bit_idx;
-                                    let local_pos = pos_in_block - stripe_start;
-                                    let coeff_idx = coeffs[pos_in_block] as usize;
-                                    for (&pos, &challenge_coeff) in
-                                        c_i.positions.iter().zip(c_i.coeffs.iter())
-                                    {
-                                        let target = coeff_idx + pos as usize;
-                                        let (idx, sign) = if target < D {
-                                            (target, 1i32)
-                                        } else {
-                                            (target - D, -1i32)
-                                        };
-                                        z_accum[local_pos][idx] += sign * challenge_coeff as i32;
-                                    }
-                                    mask &= mask - 1;
-                                }
+                    let range =
+                        self.packed_layout
+                            .block_range(block_idx, self.num_cycles, self.num_polys);
+                    if range.poly_start >= range.poly_end || range.cycle_start >= range.cycle_end {
+                        continue;
+                    }
+                    let poly_len = range.poly_end - range.poly_start;
+                    let buf = &mut idx_buf[..poly_len];
+                    for c in range.cycle_start..range.cycle_end {
+                        (self.batch_fn)(c, range.poly_start, buf);
+                        for (i, p) in (range.poly_start..range.poly_end).enumerate() {
+                            if let Some(k) = buf[i] {
+                                let pos = self.packed_layout.locate(c, p, k as usize);
+                                debug_assert_eq!(pos.block_idx, block_idx);
+                                Self::accumulate_rotated_i32(
+                                    &mut local_rows[pos.pos_in_block],
+                                    &rotated[pos.coeff_idx],
+                                );
                             }
                         }
                     }
-                    z_accum
-                })
-                .reduce_with(|mut a, b| {
-                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
-                        for (a_coeff, b_coeff) in ai.iter_mut().zip(bi.iter()) {
-                            *a_coeff += b_coeff;
+                }
+                local_rows
+            })
+            .reduce(
+                || vec![[0i32; D]; block_len],
+                |mut a, b| {
+                    for (a_row, b_row) in a.iter_mut().zip(b.iter()) {
+                        for d in 0..D {
+                            a_row[d] += b_row[d];
                         }
                     }
                     a
-                })
-                .unwrap_or_else(|| vec![[0i32; D]; stripe_len]);
-            total_z[stripe_start..stripe_end].copy_from_slice(&stripe);
-        }
+                },
+            );
 
-        total_z
+        Self::expand_decompose_fold_rows(rows, delta)
     }
 
     pub(super) fn decompose_fold_fast_singleton(
@@ -1418,89 +1186,78 @@ impl<const D: usize> JoltPackedPoly<D> {
         block_len: usize,
         delta: usize,
     ) -> Vec<[i32; D]> {
-        let block_limit = challenges.len().min(self.num_blocks());
-        let mut full_blocks = Vec::with_capacity(block_limit);
-        let mut partial_blocks = Vec::with_capacity(block_limit);
-        for (block_idx, challenge) in challenges.iter().take(block_limit).enumerate() {
-            if challenge.positions.is_empty() {
-                continue;
-            }
-            let nonzero_count = self.packed_block_cache.nonzero_count(block_idx);
-            if nonzero_count == 0 {
-                continue;
-            }
-            if nonzero_count == block_len {
-                full_blocks.push(block_idx);
-            } else {
-                partial_blocks.push(block_idx);
-            }
-        }
-
         if block_len == 0 {
             return Vec::new();
         }
 
-        let num_threads = rayon::current_num_threads().max(1).min(block_len);
-        let row_chunk_len = block_len.div_ceil(num_threads).max(1);
-        let word_bits = u64::BITS as usize;
-        let mut rows = vec![[0i32; D]; block_len];
+        let block_limit = challenges.len().min(self.num_blocks());
+        let num_threads = rayon::current_num_threads().max(1);
+        let blocks_per_chunk = block_limit.div_ceil(num_threads).max(1);
+        let num_chunks = block_limit.div_ceil(blocks_per_chunk);
 
-        rows.par_chunks_mut(row_chunk_len)
-            .enumerate()
-            .for_each(|(chunk_idx, row_chunk)| {
-                let pos_start = chunk_idx * row_chunk_len;
-                let pos_end = pos_start + row_chunk.len();
-                let word_start = pos_start / word_bits;
-                let word_end = pos_end.div_ceil(word_bits);
-                let mut rotated = vec![[0i32; D]; D];
+        let params = self.packed_layout.singleton_params();
 
-                for &block_idx in full_blocks.iter() {
-                    let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
+        let rows = (0..num_chunks)
+            .into_par_iter()
+            .map(|chunk_idx| {
+                let chunk_start = chunk_idx * blocks_per_chunk;
+                let chunk_end = (chunk_start + blocks_per_chunk).min(block_limit);
+                let mut local_rows = vec![[0i32; D]; block_len];
+                let mut rotated = [[0i32; D]; D];
+                let mut idx_buf = vec![None::<u8>; self.num_polys];
+                for block_idx in chunk_start..chunk_end {
                     let challenge = &challenges[block_idx];
-                    Self::fill_rotated_challenge_i32(&mut rotated, challenge);
-                    for (local_pos, &coeff_idx) in coeffs[pos_start..pos_end].iter().enumerate() {
-                        Self::accumulate_rotated_i32(
-                            &mut row_chunk[local_pos],
-                            &rotated[coeff_idx as usize],
-                        );
+                    if challenge.positions.is_empty() {
+                        continue;
                     }
-                }
-
-                for &block_idx in partial_blocks.iter() {
-                    let present_words = self.packed_block_cache.present_words_for_block(block_idx);
-                    let coeffs = self.packed_block_cache.coeffs_for_block(block_idx);
-                    let challenge = &challenges[block_idx];
                     Self::fill_rotated_challenge_i32(&mut rotated, challenge);
-
-                    for word_idx in word_start..word_end {
-                        let word = present_words[word_idx];
-                        if word == 0 {
-                            continue;
-                        }
-
-                        let word_base = word_idx * word_bits;
-                        let start_bit = pos_start.saturating_sub(word_base);
-                        let end_bit = (pos_end - word_base).min(word_bits);
-                        let lower_mask = u64::MAX << start_bit;
-                        let upper_mask = if end_bit == word_bits {
-                            u64::MAX
-                        } else {
-                            (1u64 << end_bit) - 1
-                        };
-                        let mut mask = word & lower_mask & upper_mask;
-                        while mask != 0 {
-                            let bit_idx = mask.trailing_zeros() as usize;
-                            let pos_in_block = word_base + bit_idx;
-                            let local_pos = pos_in_block - pos_start;
-                            Self::accumulate_rotated_i32(
-                                &mut row_chunk[local_pos],
-                                &rotated[coeffs[pos_in_block] as usize],
-                            );
-                            mask &= mask - 1;
+                    let range =
+                        self.packed_layout
+                            .block_range(block_idx, self.num_cycles, self.num_polys);
+                    if range.poly_start >= range.poly_end || range.cycle_start >= range.cycle_end {
+                        continue;
+                    }
+                    let poly_len = range.poly_end - range.poly_start;
+                    let buf = &mut idx_buf[..poly_len];
+                    let poly_shifted: Vec<usize> = (range.poly_start..range.poly_end)
+                        .map(|p| params.poly_shifted(p))
+                        .collect();
+                    for c in range.cycle_start..range.cycle_end {
+                        (self.batch_fn)(c, range.poly_start, buf);
+                        let cs = params.cycle_shifted(c);
+                        for (i, slot) in buf.iter().enumerate() {
+                            if let Some(k) = *slot {
+                                let k = k as usize;
+                                let coeff_idx = k & params.addr_coeff_mask;
+                                let addr_inner = k >> params.addr_coeff_bits;
+                                let pos =
+                                    addr_inner | cs | unsafe { *poly_shifted.get_unchecked(i) };
+                                // SAFETY: pos < block_len by construction (bit fields
+                                // partition the m_vars address space);
+                                // coeff_idx < D since addr_coeff_mask < D.
+                                unsafe {
+                                    Self::accumulate_rotated_i32(
+                                        local_rows.get_unchecked_mut(pos),
+                                        rotated.get_unchecked(coeff_idx),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
-            });
+                local_rows
+            })
+            .reduce(
+                || vec![[0i32; D]; block_len],
+                |mut a, b| {
+                    for (a_row, b_row) in a.iter_mut().zip(b.iter()) {
+                        for d in 0..D {
+                            a_row[d] += b_row[d];
+                        }
+                    }
+                    a
+                },
+            );
 
         Self::expand_decompose_fold_rows(rows, delta)
     }
@@ -1903,124 +1660,47 @@ fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig, I: OneHotIndex>(
     )
 }
 
-fn build_packed_block_cache<const D: usize, IndexFn>(
-    index_of: &IndexFn,
+#[tracing::instrument(skip_all, name = "fused_build_and_commit")]
+fn fused_build_and_commit<const D: usize, Cfg, F, B>(
+    index_fn: F,
+    batch_fn: B,
     num_cycles: usize,
     num_polys: usize,
     packed_layout: PackedBitLayout,
-) -> Arc<PackedBlockCache>
+    batch_layout: &HachiCommitmentLayout,
+    setup: &HachiProverSetup<Fp128, D>,
+) -> (RingCommitment<Fp128, D>, HachiCommitmentHint<Fp128, D>)
 where
-    IndexFn: Fn(usize, usize) -> Option<u8> + Sync,
+    Cfg: CommitmentConfig,
+    F: Fn(usize, usize) -> Option<u8> + Clone + Send + Sync,
+    B: Fn(usize, usize, &mut [Option<u8>]) + Clone + Send + Sync,
 {
-    let block_len = packed_layout.block_len();
-    let num_blocks = packed_layout.num_blocks();
-    let max_coeffs_per_entry = packed_layout.max_coeffs_per_entry();
-    let present_words_per_block = block_len.div_ceil(u64::BITS as usize);
-    let total_slots = num_blocks
-        .checked_mul(block_len)
-        .expect("packed block cache size overflow");
-    let total_coeff_slots = total_slots
-        .checked_mul(max_coeffs_per_entry)
-        .expect("packed block coeff cache size overflow");
-    let total_present_words = num_blocks
-        .checked_mul(present_words_per_block)
-        .expect("packed block presence size overflow");
-    let mut coeffs = vec![0u8; total_coeff_slots];
-    let mut coeff_counts = vec![0u8; total_slots];
-    let mut present_words = vec![0u64; total_present_words];
-    let mut nonzero_counts = vec![0u32; num_blocks];
-    let mut live_coeff_counts = vec![0u32; num_blocks];
+    let packed_poly = JoltPackedPoly {
+        packed_layout,
+        index_fn,
+        batch_fn,
+        num_cycles,
+        num_polys,
+    };
 
-    coeffs
-        .par_chunks_mut(block_len * max_coeffs_per_entry)
-        .zip(coeff_counts.par_chunks_mut(block_len))
-        .zip(present_words.par_chunks_mut(present_words_per_block))
-        .zip(nonzero_counts.par_iter_mut())
-        .zip(live_coeff_counts.par_iter_mut())
-        .enumerate()
-        .for_each(
-            |(
-                block_idx,
-                ((((coeffs_block, coeff_counts_block), present_words_block), nonzero_count), live_coeff_count),
-            )| {
-                let PackedBlockRange {
-                    cycle_start,
-                    cycle_end,
-                    poly_start,
-                    poly_end,
-                } = packed_layout.block_range(block_idx, num_cycles, num_polys);
-                let mut block_nonzero = 0u32;
-                let mut block_live_coeffs = 0u32;
-                for c in cycle_start..cycle_end {
-                    for p in poly_start..poly_end {
-                        if let Some(k) = index_of(c, p) {
-                            let packed = packed_layout.locate(c, p, k as usize);
-                            debug_assert_eq!(packed.block_idx, block_idx);
-                            let word_idx = packed.pos_in_block / u64::BITS as usize;
-                            let bit_idx = packed.pos_in_block % u64::BITS as usize;
-                            let count = coeff_counts_block[packed.pos_in_block] as usize;
-                            let entry_base = packed.pos_in_block * max_coeffs_per_entry;
-                            let entry_coeffs =
-                                &mut coeffs_block[entry_base..entry_base + max_coeffs_per_entry];
-                            assert!(
-                                count < max_coeffs_per_entry,
-                                "packed block cache entry overflow at block {block_idx}, pos {}",
-                                packed.pos_in_block
-                            );
-                            assert!(
-                                !entry_coeffs[..count].contains(&(packed.coeff_idx as u8)),
-                                "packed block cache duplicate coeff at block {block_idx}, pos {}, coeff {}",
-                                packed.pos_in_block,
-                                packed.coeff_idx
-                            );
-                            entry_coeffs[count] = packed.coeff_idx as u8;
-                            coeff_counts_block[packed.pos_in_block] = (count + 1) as u8;
-                            if count == 0 {
-                                present_words_block[word_idx] |= 1u64 << bit_idx;
-                                block_nonzero += 1;
-                            }
-                            block_live_coeffs += 1;
-                        }
-                    }
-                }
-                *nonzero_count = block_nonzero;
-                *live_coeff_count = block_live_coeffs;
-            },
-        );
-
-    let total_nonzero = nonzero_counts
-        .iter()
-        .map(|&count| count as usize)
-        .sum::<usize>();
-    let total_live_coeffs = live_coeff_counts
-        .iter()
-        .map(|&count| count as usize)
-        .sum::<usize>();
-
-    Arc::new(PackedBlockCache {
-        coeffs: Arc::from(coeffs.into_boxed_slice()),
-        coeff_counts: Arc::from(coeff_counts.into_boxed_slice()),
-        present_words: Arc::from(present_words.into_boxed_slice()),
-        nonzero_counts: Arc::from(nonzero_counts.into_boxed_slice()),
-        live_coeff_counts: Arc::from(live_coeff_counts.into_boxed_slice()),
-        max_coeffs_per_entry,
-        block_len,
-        present_words_per_block,
-        num_blocks,
-        total_nonzero,
-        total_live_coeffs,
-    })
+    <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::commit(
+        &packed_poly,
+        setup,
+        batch_layout,
+    )
+    .expect("Hachi packed poly commit failed")
 }
 
-pub(super) fn build_packed_poly<const D: usize, IndexFn>(
-    index_of: IndexFn,
+pub(super) fn build_packed_poly<F, B, const D: usize>(
+    index_fn: F,
+    batch_fn: B,
     num_cycles: usize,
     num_polys: usize,
     packed_layout: PackedBitLayout,
-    packed_block_cache: Option<Arc<PackedBlockCache>>,
-) -> JoltPackedPoly<D>
+) -> JoltPackedPoly<F, B, D>
 where
-    IndexFn: Fn(usize, usize) -> Option<u8> + Sync,
+    F: Fn(usize, usize) -> Option<u8> + Sync,
+    B: Fn(usize, usize, &mut [Option<u8>]) + Sync,
 {
     let num_padded = num_polys.next_power_of_two();
     assert_eq!(
@@ -2029,33 +1709,13 @@ where
         "packed layout padding mismatch (expected {}, got {num_padded})",
         packed_layout.num_padded_polys()
     );
-    let packed_block_cache = packed_block_cache.unwrap_or_else(|| {
-        build_packed_block_cache::<D, _>(&index_of, num_cycles, num_polys, packed_layout)
-    });
-    assert_eq!(
-        packed_block_cache.block_len,
-        packed_layout.block_len(),
-        "packed block cache block_len mismatch"
-    );
-    assert_eq!(
-        packed_block_cache.max_coeffs_per_entry,
-        packed_layout.max_coeffs_per_entry(),
-        "packed block cache coeff capacity mismatch"
-    );
-    debug_assert_eq!(
-        packed_block_cache.is_singleton(),
-        packed_layout.lifted_coeff_bits() == 0,
-        "packed block cache/layout singleton mismatch"
-    );
-    assert_eq!(
-        packed_block_cache.num_blocks,
-        packed_layout.num_blocks(),
-        "packed block cache num_blocks mismatch"
-    );
 
     JoltPackedPoly {
         packed_layout,
-        packed_block_cache,
+        index_fn,
+        batch_fn,
+        num_cycles,
+        num_polys,
     }
 }
 
@@ -2142,21 +1802,22 @@ where
             choose_packed_layout_for_dims::<D, Cfg>(num_cycles, num_polys, onehot_k);
 
         let index_fn = |c: usize, p: usize| source.onehot_index(c, p);
-        let packed_poly =
-            build_packed_poly::<D, _>(index_fn, num_cycles, num_polys, packed_layout, None);
-
-        let (commitment, hachi_hint) =
-            <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::commit(
-                &packed_poly,
-                &setup.0,
-                &batch_layout,
-            )
-            .expect("Hachi packed poly commit failed");
+        let batch_fn = |c: usize, p_start: usize, buf: &mut [Option<u8>]| {
+            source.batch_onehot_indices(c, p_start, buf)
+        };
+        let (commitment, hachi_hint) = fused_build_and_commit::<D, Cfg, _, _>(
+            index_fn,
+            batch_fn,
+            num_cycles,
+            num_polys,
+            packed_layout,
+            &batch_layout,
+            &setup.0,
+        );
 
         let hint = JoltHachiBatchHint {
             hachi_hint,
             packed_layout,
-            packed_block_cache: packed_poly.packed_block_cache.clone(),
             num_packed_polys: num_polys,
             log_k: packed_layout.log_k(),
         };
@@ -2315,13 +1976,11 @@ where
         );
 
         let index_fn = |c: usize, p: usize| poly_source.onehot_index(c, p);
-        let packed_poly = build_packed_poly::<D, _>(
-            index_fn,
-            num_cycles,
-            num_polys,
-            packed_layout,
-            Some(batch_hint.packed_block_cache.clone()),
-        );
+        let batch_fn = |c: usize, p_start: usize, buf: &mut [Option<u8>]| {
+            poly_source.batch_onehot_indices(c, p_start, buf)
+        };
+        let packed_poly =
+            build_packed_poly(index_fn, batch_fn, num_cycles, num_polys, packed_layout);
 
         let mut adapter = JoltToHachiTranscript::new(transcript);
 

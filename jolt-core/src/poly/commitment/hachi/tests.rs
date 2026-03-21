@@ -83,22 +83,31 @@ impl BatchPolynomialSource<JoltFp128> for TestPackedSource {
     }
 }
 
-fn build_test_packed_poly<const D: usize, C: CommitmentConfig>(
+#[allow(clippy::type_complexity)]
+fn build_test_packed_poly_with_fn<const D: usize, C: CommitmentConfig>(
     source: &TestPackedSource,
-) -> (JoltPackedPoly<D>, PackedBitLayout) {
+) -> (
+    JoltPackedPoly<
+        impl Fn(usize, usize) -> Option<u8> + Sync + '_,
+        impl Fn(usize, usize, &mut [Option<u8>]) + Sync + '_,
+        D,
+    >,
+    PackedBitLayout,
+) {
     let log_k = source.onehot_k.trailing_zeros() as usize;
     let log_t = source.num_cycles().trailing_zeros() as usize;
     let log_packed = source.per_poly.len().next_power_of_two().trailing_zeros() as usize;
     let packed_layout = choose_packed_bit_layout::<D, C>(log_k, log_t, log_packed);
-    let index_fn = |cycle_idx: usize, poly_idx: usize| {
-        PolynomialBatchSource::onehot_index(source, cycle_idx, poly_idx)
+    let index_fn = move |c: usize, p: usize| PolynomialBatchSource::onehot_index(source, c, p);
+    let batch_fn = move |c: usize, p_start: usize, buf: &mut [Option<u8>]| {
+        PolynomialBatchSource::<JoltFp128>::batch_onehot_indices(source, c, p_start, buf)
     };
-    let packed_poly = build_packed_poly::<D, _>(
+    let packed_poly = build_packed_poly(
         index_fn,
+        batch_fn,
         source.num_cycles(),
         source.per_poly.len(),
         packed_layout,
-        None,
     );
     (packed_poly, packed_layout)
 }
@@ -228,8 +237,8 @@ fn packed_layout_reorders_poly_bits_into_inner_prefix() {
     let expected: Vec<usize> = addr_bits
         .iter()
         .copied()
-        .chain(cycle_bits[..layout.cycle_inner_bits()].iter().copied())
         .chain(poly_bits[..layout.poly_inner_bits()].iter().copied())
+        .chain(cycle_bits[..layout.cycle_inner_bits()].iter().copied())
         .chain(cycle_bits[layout.cycle_inner_bits()..].iter().copied())
         .chain(poly_bits[layout.poly_inner_bits()..].iter().copied())
         .collect();
@@ -262,14 +271,14 @@ fn packed_layout_reorders_lifted_coeff_bits_for_k16() {
         .chain(cycle_bits[..layout.cycle_coeff_bits()].iter().copied())
         .chain(poly_bits[..layout.poly_coeff_bits()].iter().copied())
         .chain(
-            cycle_bits
-                [layout.cycle_coeff_bits()..layout.cycle_coeff_bits() + layout.cycle_inner_bits()]
+            poly_bits
+                [layout.poly_coeff_bits()..layout.poly_coeff_bits() + layout.poly_inner_bits()]
                 .iter()
                 .copied(),
         )
         .chain(
-            poly_bits
-                [layout.poly_coeff_bits()..layout.poly_coeff_bits() + layout.poly_inner_bits()]
+            cycle_bits
+                [layout.cycle_coeff_bits()..layout.cycle_coeff_bits() + layout.cycle_inner_bits()]
                 .iter()
                 .copied(),
         )
@@ -441,24 +450,21 @@ fn packed_layout_k16_uses_multi_coeff_entries() {
         ],
         16,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
-    let coeff_counts = packed_poly.entry_coeff_counts_for_test();
-    let live_coeff_counts = packed_poly.block_live_coeff_counts_for_test();
+    let (_packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
 
     assert_eq!(
-        packed_poly.max_coeffs_per_entry_for_test(),
+        packed_layout.max_coeffs_per_entry(),
         FastCfg::D / source.onehot_k,
         "K=16 should pack D/K logical chunks per ring entry"
     );
     assert!(
-        coeff_counts.iter().any(|&count| count > 1),
-        "K=16 packed layout should store multiple coefficients in at least one entry"
+        packed_layout.max_coeffs_per_entry() > 1,
+        "K=16 packed layout should store multiple coefficients per entry"
     );
     assert!(
-        live_coeff_counts
-            .iter()
-            .any(|&count| count > packed_layout.block_len()),
-        "K=16 packed blocks should contain more live coefficients than occupied entries"
+        packed_layout.lifted_coeff_bits() > 0,
+        "K=16 packed layout should not be singleton"
     );
 }
 
@@ -505,7 +511,7 @@ fn packed_commit_inner_fast_matches_generic_and_reference_helpers() {
         ],
         Cfg::D,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ Cfg::D }, Cfg>(&source);
+    let (packed_poly, packed_layout) = build_test_packed_poly_with_fn::<{ Cfg::D }, Cfg>(&source);
     let block_len = packed_layout.block_len();
     let log_basis = Cfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
@@ -541,7 +547,7 @@ fn packed_commit_inner_generic_matches_reference_with_multiple_rows() {
         ],
         Cfg::D,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ Cfg::D }, Cfg>(&source);
+    let (packed_poly, packed_layout) = build_test_packed_poly_with_fn::<{ Cfg::D }, Cfg>(&source);
     let block_len = packed_layout.block_len();
     let log_basis = Cfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
@@ -615,7 +621,8 @@ fn packed_commit_inner_column_sweep_matches_generic_in_k256_singleton_regime() {
         ],
         256,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
@@ -663,7 +670,8 @@ fn packed_commit_inner_column_sweep_matches_generic_in_d64_k16_regime() {
         ],
         16,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
@@ -710,19 +718,14 @@ fn packed_decompose_fold_fast_matches_generic_and_reference_helpers() {
         ],
         Cfg::D,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ Cfg::D }, Cfg>(&source);
+    let (packed_poly, packed_layout) = build_test_packed_poly_with_fn::<{ Cfg::D }, Cfg>(&source);
     let challenges = make_test_challenges::<{ Cfg::D }>(packed_layout.num_blocks());
 
     let generic = packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
-    let striped = packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
     let fast = packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
     let small = packed_poly.decompose_fold_small(&challenges, packed_layout.block_len(), 1);
     let large = packed_poly.decompose_fold_large(&challenges, packed_layout.block_len(), 1);
 
-    assert_eq!(
-        striped, generic,
-        "striped decompose_fold must match generic"
-    );
     assert_eq!(fast, generic, "fast decompose_fold must match generic");
     assert_eq!(small, generic, "small decompose_fold must match generic");
     assert_eq!(large, generic, "large decompose_fold must match generic");
@@ -787,7 +790,8 @@ fn packed_fast_paths_match_generic_in_d64_regime() {
         ],
         FastCfg::D,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
@@ -798,18 +802,12 @@ fn packed_fast_paths_match_generic_in_d64_regime() {
     let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
     let generic_fold =
         packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
-    let striped_fold =
-        packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
     let fast_fold =
         packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
 
     assert_eq!(
         fast_commit, generic_commit,
         "D=64 fast commit_inner must match generic"
-    );
-    assert_eq!(
-        striped_fold, generic_fold,
-        "D=64 striped decompose_fold must match generic"
     );
     assert_eq!(
         fast_fold, generic_fold,
@@ -876,7 +874,8 @@ fn packed_fast_paths_match_generic_in_k256_singleton_regime() {
         ],
         256,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
@@ -887,18 +886,12 @@ fn packed_fast_paths_match_generic_in_k256_singleton_regime() {
     let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
     let generic_fold =
         packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
-    let striped_fold =
-        packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
     let fast_fold =
         packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
 
     assert_eq!(
         fast_commit, generic_commit,
         "K=256 fast commit_inner must match generic"
-    );
-    assert_eq!(
-        striped_fold, generic_fold,
-        "K=256 striped decompose_fold must match generic"
     );
     assert_eq!(
         fast_fold, generic_fold,
@@ -939,7 +932,8 @@ fn packed_commit_inner_generic_matches_multi_coeff_helpers_in_d64_k16_regime() {
         ],
         16,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
@@ -992,7 +986,8 @@ fn packed_decompose_fold_generic_matches_multi_coeff_helpers_in_d64_k16_regime()
         ],
         16,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
 
     let generic = packed_poly.decompose_fold_generic(&challenges, packed_layout.block_len(), 1);
@@ -1024,7 +1019,8 @@ fn packed_fast_path_benchmark_smoke() {
             .collect(),
         FastCfg::D,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
@@ -1073,7 +1069,8 @@ fn packed_k16_commit_inner_benchmark_smoke() {
             .collect(),
         16,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
@@ -1111,7 +1108,8 @@ fn packed_k256_commit_inner_benchmark_smoke() {
             .collect(),
         256,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
@@ -1149,7 +1147,8 @@ fn packed_k16_decompose_fold_benchmark_smoke() {
             .collect(),
         16,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
 
     let generic_start = Instant::now();
@@ -1184,18 +1183,15 @@ fn packed_k256_decompose_fold_benchmark_smoke() {
             .collect(),
         256,
     );
-    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
     let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
-
-    let striped_start = Instant::now();
-    let _ = packed_poly.decompose_fold_striped_delta1(&challenges, packed_layout.block_len());
-    let striped = striped_start.elapsed();
 
     let fast_start = Instant::now();
     let _ = packed_poly.decompose_fold_fast_singleton(&challenges, packed_layout.block_len(), 1);
     let fast = fast_start.elapsed();
 
-    eprintln!("packed K=256 decompose_fold: striped={striped:?}, fast={fast:?}");
+    eprintln!("packed K=256 decompose_fold: fast={fast:?}");
 }
 
 #[test]

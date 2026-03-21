@@ -20,14 +20,14 @@ use crate::{
 use super::instruction::{CircuitFlags, LookupQuery};
 
 /// Compute the unsigned register increment for a cycle: `rd_inc + 2^XLEN`.
-fn rd_unsigned_inc(cycle: &Cycle) -> u128 {
+pub(super) fn rd_unsigned_inc(cycle: &Cycle) -> u128 {
     let (_, rd_pre, rd_post) = cycle.rd_write().unwrap_or_default();
     let rd_inc = rd_post as i128 - rd_pre as i128;
     (rd_inc + (1i128 << XLEN)) as u128
 }
 
 /// Compute the unsigned RAM increment for a cycle: `ram_inc + 2^XLEN`.
-fn ram_unsigned_inc(cycle: &Cycle) -> u128 {
+pub(super) fn ram_unsigned_inc(cycle: &Cycle) -> u128 {
     let ram_inc = match cycle.ram_access() {
         tracer::instruction::RAMAccess::Write(write) => {
             write.post_value as i128 - write.pre_value as i128
@@ -373,6 +373,7 @@ impl CommittedPolynomial {
         }
     }
 
+    #[inline(always)]
     pub fn extract_index(
         &self,
         cycle: &Cycle,

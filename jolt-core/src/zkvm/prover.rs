@@ -96,6 +96,7 @@ use crate::{
     zkvm::{
         bytecode::read_raf_checking::BytecodeReadRafSumcheckProver,
         fiat_shamir_preamble,
+        instruction::LookupQuery,
         instruction_lookups::{
             ra_virtual::InstructionRaSumcheckProver as LookupsRaSumcheckProver,
             read_raf_checking::InstructionReadRafSumcheckProver,
@@ -119,7 +120,7 @@ use crate::{
             product::ProductVirtualRemainderProver,
             shift::ShiftSumcheckProver,
         },
-        witness::CommittedPolynomial,
+        witness::{ram_unsigned_inc, rd_unsigned_inc, CommittedPolynomial},
         ProverDebugInfo,
     },
 };
@@ -145,12 +146,107 @@ impl<F: JoltField> PolynomialBatchSource<F> for LazyOneHotSource<'_> {
         self.polys.len()
     }
 
+    #[inline(always)]
     fn onehot_index(&self, cycle_idx: usize, poly_idx: usize) -> Option<u8> {
         self.polys[poly_idx].extract_index(
             &self.trace[cycle_idx],
             self.preprocessing,
             self.one_hot_params,
         )
+    }
+
+    #[inline]
+    fn batch_onehot_indices(&self, cycle_idx: usize, poly_start: usize, buf: &mut [Option<u8>]) {
+        let cycle = &self.trace[cycle_idx];
+        let params = self.one_hot_params;
+        let preprocessing = self.preprocessing;
+
+        let mut i = 0;
+        while i < buf.len() {
+            let p = poly_start + i;
+            match self.polys[p] {
+                CommittedPolynomial::InstructionRa(chunk_idx) => {
+                    let base = LookupQuery::<XLEN>::to_lookup_index(cycle);
+                    buf[i] = Some(params.lookup_index_chunk(base, chunk_idx));
+                    i += 1;
+                    while i < buf.len() {
+                        if let CommittedPolynomial::InstructionRa(ci) = self.polys[poly_start + i] {
+                            buf[i] = Some(params.lookup_index_chunk(base, ci));
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                CommittedPolynomial::BytecodeRa(chunk_idx) => {
+                    let pc = preprocessing.bytecode.get_pc(cycle);
+                    buf[i] = Some(params.bytecode_pc_chunk(pc, chunk_idx));
+                    i += 1;
+                    while i < buf.len() {
+                        if let CommittedPolynomial::BytecodeRa(ci) = self.polys[poly_start + i] {
+                            buf[i] = Some(params.bytecode_pc_chunk(pc, ci));
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                CommittedPolynomial::RamRa(chunk_idx) => {
+                    let addr_opt = remap_address(
+                        cycle.ram_access().address() as u64,
+                        &preprocessing.memory_layout,
+                    );
+                    buf[i] = addr_opt.map(|addr| params.ram_address_chunk(addr, chunk_idx));
+                    i += 1;
+                    while i < buf.len() {
+                        if let CommittedPolynomial::RamRa(ci) = self.polys[poly_start + i] {
+                            buf[i] = addr_opt.map(|addr| params.ram_address_chunk(addr, ci));
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                CommittedPolynomial::RdIncRa(chunk_idx) => {
+                    let base = rd_unsigned_inc(cycle);
+                    buf[i] = Some(params.inc_chunk(base, chunk_idx + 1));
+                    i += 1;
+                    while i < buf.len() {
+                        if let CommittedPolynomial::RdIncRa(ci) = self.polys[poly_start + i] {
+                            buf[i] = Some(params.inc_chunk(base, ci + 1));
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                CommittedPolynomial::RamIncRa(chunk_idx) => {
+                    let base = ram_unsigned_inc(cycle);
+                    buf[i] = Some(params.inc_chunk(base, chunk_idx + 1));
+                    i += 1;
+                    while i < buf.len() {
+                        if let CommittedPolynomial::RamIncRa(ci) = self.polys[poly_start + i] {
+                            buf[i] = Some(params.inc_chunk(base, ci + 1));
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                CommittedPolynomial::RdIncMsb => {
+                    buf[i] = Some((rd_unsigned_inc(cycle) >> XLEN) as u8);
+                    i += 1;
+                }
+                CommittedPolynomial::RamIncMsb => {
+                    buf[i] = Some((ram_unsigned_inc(cycle) >> XLEN) as u8);
+                    i += 1;
+                }
+                _ => {
+                    buf[i] = self.polys[p].extract_index(cycle, preprocessing, params);
+                    i += 1;
+                }
+            }
+        }
     }
 
     fn num_cycles(&self) -> Option<usize> {
@@ -167,12 +263,18 @@ impl<F: JoltField> BatchPolynomialSource<F> for LazyOneHotSource<'_> {
         panic!("LazyOneHotSource does not support build_joint_polynomial")
     }
 
+    #[inline(always)]
     fn onehot_index(&self, cycle_idx: usize, poly_idx: usize) -> Option<u8> {
         self.polys[poly_idx].extract_index(
             &self.trace[cycle_idx],
             self.preprocessing,
             self.one_hot_params,
         )
+    }
+
+    #[inline]
+    fn batch_onehot_indices(&self, cycle_idx: usize, poly_start: usize, buf: &mut [Option<u8>]) {
+        PolynomialBatchSource::<F>::batch_onehot_indices(self, cycle_idx, poly_start, buf)
     }
 
     fn num_cycles(&self) -> Option<usize> {

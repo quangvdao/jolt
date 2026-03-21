@@ -64,6 +64,8 @@ const COMMIT_WIDE_ROW_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// path. Large traces otherwise keep one wide ring per block, which spills far
 /// beyond LLC and turns the block sweep into a DRAM-heavy pass.
 const COMMIT_WIDE_BATCH_MAX_BYTES: usize = 64 * 1024 * 1024;
+const COMMIT_COLUMN_SWEEP_TILE_BYTES: usize = 1usize << 21;
+const COMMIT_COLUMN_SWEEP_THRESHOLD: usize = 128;
 
 /// Maximum WideCyclotomicRing<Fp128x8i32> additions before i32 limb overflow.
 /// Each limb starts ≤ 65535; i32 max ≈ 2.1B → safe up to ~32K additions.
@@ -368,6 +370,17 @@ impl<const D: usize> JoltPackedPoly<D> {
         self.packed_block_cache.is_singleton() && n_a == 1 && num_digits_commit == 1
     }
 
+    #[inline]
+    fn can_use_commit_inner_column_sweep(&self) -> bool {
+        let num_blocks = self.num_blocks();
+        if num_blocks == 0 {
+            return false;
+        }
+        let num_threads = rayon::current_num_threads().min(num_blocks).max(1);
+        let blocks_per_thread = num_blocks.div_ceil(num_threads);
+        blocks_per_thread > COMMIT_COLUMN_SWEEP_THRESHOLD
+    }
+
     fn commit_inner_output(
         &self,
         a_view: &RingMatrixView<'_, Fp128, D>,
@@ -376,7 +389,15 @@ impl<const D: usize> JoltPackedPoly<D> {
         num_digits_open: usize,
         log_basis: u32,
     ) -> PackedCommitInnerOutput<D> {
-        if self.can_use_commit_inner_fast_path(n_a, num_digits_commit) {
+        if self.can_use_commit_inner_column_sweep() {
+            self.commit_inner_column_sweep_output(
+                a_view,
+                n_a,
+                num_digits_commit,
+                num_digits_open,
+                log_basis,
+            )
+        } else if self.can_use_commit_inner_fast_path(n_a, num_digits_commit) {
             self.commit_inner_fast_singleton_output(a_view, num_digits_open, log_basis)
         } else {
             self.commit_inner_generic_output(
@@ -811,8 +832,11 @@ impl<const D: usize> JoltPackedPoly<D> {
                     let a_slice = &a_wide_flat[a_base..a_base + n_a];
                     for a in 0..n_a {
                         for &coeff_idx in coeffs {
-                            a_slice[a]
-                                .mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx as usize]);
+                            Self::shift_accumulate_into_fast(
+                                &a_slice[a],
+                                &mut t_wide[a],
+                                coeff_idx as usize,
+                            );
                         }
                     }
 
@@ -834,6 +858,137 @@ impl<const D: usize> JoltPackedPoly<D> {
         PackedCommitInnerOutput { t_hat, t }
     }
 
+    fn commit_inner_column_sweep_output(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        n_a: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> PackedCommitInnerOutput<D> {
+        let num_blocks = self.num_blocks();
+        let block_len = self.packed_layout.block_len();
+        let wide_ring_bytes = size_of::<WideCyclotomicRing<Fp128x8i32, D>>().max(1);
+        let accum_bytes = n_a.saturating_mul(wide_ring_bytes);
+        let block_tile = if accum_bytes == 0 {
+            num_blocks.max(1)
+        } else {
+            (COMMIT_COLUMN_SWEEP_TILE_BYTES / accum_bytes).max(1)
+        };
+        let num_threads = rayon::current_num_threads().min(num_blocks).max(1);
+        let blocks_per_thread = num_blocks.div_ceil(num_threads);
+
+        let thread_results = (0..num_threads)
+            .into_par_iter()
+            .map(|thread_idx| {
+                let block_start = thread_idx * blocks_per_thread;
+                let block_end = (block_start + blocks_per_thread).min(num_blocks);
+                if block_start >= block_end {
+                    return (
+                        block_start,
+                        Vec::<Vec<CyclotomicRing<Fp128, D>>>::new(),
+                        Vec::<Vec<[i8; D]>>::new(),
+                    );
+                }
+
+                let my_count = block_end - block_start;
+                let zero_t = vec![CyclotomicRing::<Fp128, D>::zero(); n_a];
+                let zero_t_hat = decompose_rows_i8(&zero_t, num_digits_open, log_basis);
+                let mut t = vec![zero_t.clone(); my_count];
+                let mut t_hat = vec![zero_t_hat.clone(); my_count];
+
+                for tile_start in (0..my_count).step_by(block_tile) {
+                    let tile_end = (tile_start + block_tile).min(my_count);
+                    let tile_len = tile_end - tile_start;
+                    let mut position_entries: Vec<Vec<(u32, u8)>> = vec![Vec::new(); block_len];
+                    let mut active_positions = Vec::new();
+
+                    for local_block in 0..tile_len {
+                        let block_idx = block_start + tile_start + local_block;
+                        self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
+                            let bucket = &mut position_entries[pos_in_block];
+                            if bucket.is_empty() {
+                                active_positions.push(pos_in_block);
+                            }
+                            for &coeff_idx in coeffs {
+                                bucket.push((local_block as u32, coeff_idx));
+                            }
+                        });
+                    }
+
+                    if active_positions.is_empty() {
+                        continue;
+                    }
+                    active_positions.sort_unstable();
+
+                    let mut accumulators =
+                        vec![WideCyclotomicRing::<Fp128x8i32, D>::zero(); tile_len * n_a];
+                    let mut adds_since_reduce = vec![0usize; tile_len];
+
+                    for &pos_in_block in active_positions.iter() {
+                        let entries = &position_entries[pos_in_block];
+                        let col = pos_in_block * num_digits_commit;
+                        for a_idx in 0..n_a {
+                            let a_wide = WideCyclotomicRing::from_ring(&a_view.row(a_idx)[col]);
+                            for &(local_block, coeff_idx) in entries.iter() {
+                                let accum_idx = local_block as usize * n_a + a_idx;
+                                Self::shift_accumulate_into_fast(
+                                    &a_wide,
+                                    &mut accumulators[accum_idx],
+                                    coeff_idx as usize,
+                                );
+                            }
+                        }
+
+                        for &(local_block, _) in entries.iter() {
+                            let local_block = local_block as usize;
+                            adds_since_reduce[local_block] += 1;
+                            if adds_since_reduce[local_block] >= WIDE_RING_REDUCE_INTERVAL {
+                                let accum_start = local_block * n_a;
+                                Self::reduce_wide_accumulators(
+                                    &mut accumulators[accum_start..accum_start + n_a],
+                                );
+                                adds_since_reduce[local_block] = 0;
+                            }
+                        }
+                    }
+
+                    let t_chunk: Vec<CyclotomicRing<Fp128, D>> = accumulators
+                        .iter_mut()
+                        .map(|accumulator| accumulator.reduce())
+                        .collect();
+                    let t_hat_chunk = decompose_rows_i8(&t_chunk, num_digits_open, log_basis);
+
+                    for local_block in 0..tile_len {
+                        let block_offset = tile_start + local_block;
+                        let ring_start = local_block * n_a;
+                        let ring_end = ring_start + n_a;
+                        let digit_start = ring_start * num_digits_open;
+                        let digit_end = ring_end * num_digits_open;
+                        t[block_offset] = t_chunk[ring_start..ring_end].to_vec();
+                        t_hat[block_offset] = t_hat_chunk[digit_start..digit_end].to_vec();
+                    }
+                }
+
+                (block_start, t, t_hat)
+            })
+            .collect::<Vec<_>>();
+
+        let mut t = vec![Vec::new(); num_blocks];
+        let mut t_hat = vec![Vec::new(); num_blocks];
+        for (block_start, t_chunk, t_hat_chunk) in thread_results {
+            for (offset, (t_block, t_hat_block)) in
+                t_chunk.into_iter().zip(t_hat_chunk.into_iter()).enumerate()
+            {
+                let block_idx = block_start + offset;
+                t[block_idx] = t_block;
+                t_hat[block_idx] = t_hat_block;
+            }
+        }
+
+        PackedCommitInnerOutput { t_hat, t }
+    }
+
     #[allow(dead_code)]
     pub(super) fn commit_inner_generic(
         &self,
@@ -844,6 +999,25 @@ impl<const D: usize> JoltPackedPoly<D> {
         log_basis: u32,
     ) -> Vec<Vec<[i8; D]>> {
         let output = self.commit_inner_generic_output(
+            a_view,
+            n_a,
+            num_digits_commit,
+            num_digits_open,
+            log_basis,
+        );
+        output.t_hat
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn commit_inner_column_sweep(
+        &self,
+        a_view: &RingMatrixView<'_, Fp128, D>,
+        n_a: usize,
+        num_digits_commit: usize,
+        num_digits_open: usize,
+        log_basis: u32,
+    ) -> Vec<Vec<[i8; D]>> {
+        let output = self.commit_inner_column_sweep_output(
             a_view,
             n_a,
             num_digits_commit,
@@ -1360,8 +1534,11 @@ impl<const D: usize> JoltPackedPoly<D> {
                     let a_slice = &a_wide_flat[a_base..a_base + n_a];
                     for a in 0..n_a {
                         for &coeff_idx in coeffs {
-                            a_slice[a]
-                                .mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx as usize]);
+                            Self::shift_accumulate_into_fast(
+                                &a_slice[a],
+                                &mut t_wide[a],
+                                coeff_idx as usize,
+                            );
                         }
                     }
                 });
@@ -1417,8 +1594,11 @@ impl<const D: usize> JoltPackedPoly<D> {
                     let a_slice = &a_tile[a_base..a_base + n_a];
                     for a in 0..n_a {
                         for &coeff_idx in coeffs {
-                            a_slice[a]
-                                .mul_by_monomial_sum_into(&mut t_wide[a], &[coeff_idx as usize]);
+                            Self::shift_accumulate_into_fast(
+                                &a_slice[a],
+                                &mut t_wide[a],
+                                coeff_idx as usize,
+                            );
                         }
                     }
 

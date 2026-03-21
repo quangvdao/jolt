@@ -557,6 +557,128 @@ fn packed_commit_inner_generic_matches_reference_with_multiple_rows() {
 }
 
 #[test]
+fn packed_commit_inner_column_sweep_matches_generic_in_k256_singleton_regime() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            vec![
+                Some(0),
+                Some(255),
+                Some(1),
+                Some(254),
+                Some(2),
+                Some(253),
+                Some(3),
+                Some(252),
+            ],
+            vec![
+                Some(255),
+                Some(0),
+                Some(254),
+                Some(1),
+                Some(253),
+                Some(2),
+                Some(252),
+                Some(3),
+            ],
+            vec![
+                Some(127),
+                Some(128),
+                Some(64),
+                Some(192),
+                Some(32),
+                Some(224),
+                Some(16),
+                Some(240),
+            ],
+            vec![
+                Some(5),
+                None,
+                Some(10),
+                Some(15),
+                None,
+                Some(20),
+                Some(25),
+                Some(30),
+            ],
+            vec![
+                Some(250),
+                Some(200),
+                Some(150),
+                Some(100),
+                Some(50),
+                Some(0),
+                Some(25),
+                Some(75),
+            ],
+        ],
+        256,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+
+    let generic = packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
+    let sweep = packed_poly.commit_inner_column_sweep(&a_view, 1, 1, num_digits_open, log_basis);
+
+    assert_eq!(
+        sweep, generic,
+        "column-sweep commit_inner must match generic for K=256"
+    );
+}
+
+#[test]
+fn packed_commit_inner_column_sweep_matches_generic_in_d64_k16_regime() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+        ],
+        16,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+
+    let generic = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
+    let sweep = packed_poly.commit_inner_column_sweep(&a_view, 2, 2, num_digits_open, log_basis);
+
+    assert_eq!(
+        sweep, generic,
+        "column-sweep commit_inner must match generic for K=16"
+    );
+}
+
+#[test]
 fn packed_decompose_fold_fast_matches_generic_and_reference_helpers() {
     let source = TestPackedSource::new(
         vec![
@@ -928,6 +1050,82 @@ fn packed_fast_path_benchmark_smoke() {
     eprintln!(
         "packed bench: commit generic={generic_commit:?}, commit fast={fast_commit:?}, fold generic={generic_fold:?}, fold fast={fast_fold:?}"
     );
+}
+
+#[test]
+#[ignore = "profiling helper for K=16 packed commit_inner"]
+fn packed_k16_commit_inner_benchmark_smoke() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        (0..32)
+            .map(|poly_idx| {
+                (0..256)
+                    .map(|cycle_idx| {
+                        if (poly_idx + cycle_idx) % 11 == 0 {
+                            None
+                        } else {
+                            Some(((poly_idx * 7 + cycle_idx * 5) % 16) as u8)
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+        16,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+
+    let generic_start = Instant::now();
+    let _ = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
+    let generic = generic_start.elapsed();
+
+    let sweep_start = Instant::now();
+    let _ = packed_poly.commit_inner_column_sweep(&a_view, 2, 2, num_digits_open, log_basis);
+    let sweep = sweep_start.elapsed();
+
+    eprintln!("packed K=16 commit_inner: generic={generic:?}, sweep={sweep:?}");
+}
+
+#[test]
+#[ignore = "profiling helper for K=256 packed commit_inner"]
+fn packed_k256_commit_inner_benchmark_smoke() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        (0..32)
+            .map(|poly_idx| {
+                (0..256)
+                    .map(|cycle_idx| {
+                        if (poly_idx * 3 + cycle_idx) % 13 == 0 {
+                            None
+                        } else {
+                            Some(((poly_idx * 37 + cycle_idx * 29) % 256) as u8)
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+        256,
+    );
+    let (packed_poly, packed_layout) = build_test_packed_poly::<{ FastCfg::D }, FastCfg>(&source);
+    let log_basis = FastCfg::decomposition().log_basis;
+    let num_digits_open = compute_num_digits(128, log_basis);
+    let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
+    let a_view = a_flat.view::<{ FastCfg::D }>();
+
+    let fast_start = Instant::now();
+    let _ = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
+    let fast = fast_start.elapsed();
+
+    let sweep_start = Instant::now();
+    let _ = packed_poly.commit_inner_column_sweep(&a_view, 1, 1, num_digits_open, log_basis);
+    let sweep = sweep_start.elapsed();
+
+    eprintln!("packed K=256 commit_inner: fast={fast:?}, sweep={sweep:?}");
 }
 
 #[test]

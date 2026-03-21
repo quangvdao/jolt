@@ -12,10 +12,10 @@ pub const ALIGNMENT_FACTOR_BYTECODE: usize = 2;
 /// This value was empirically determined.
 pub const ONEHOT_CHUNK_THRESHOLD_LOG_T: usize = 25;
 
-/// Hachi-specific threshold for the same one-hot chunking switch.
-/// Hachi now supports the same 4/8 switch as Dory: smaller traces use
-/// `log_k_chunk = 4` and larger traces use `log_k_chunk = 8`.
-pub const HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T: usize = 25;
+/// Hachi-specific threshold for the one-hot chunking switch.
+/// Smaller Hachi traces (`log_t < 21`) use `log_k_chunk = 4`; larger traces use
+/// `log_k_chunk = 8`.
+pub const HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T: usize = 21;
 
 /// Threshold for trace length (log scale) at which we switch the number of
 /// instruction sumcheck phases from 16 to 8. Below this threshold, we use

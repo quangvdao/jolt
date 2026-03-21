@@ -1192,54 +1192,97 @@ impl<
 
         let block_limit = challenges.len().min(self.num_blocks());
         let num_threads = rayon::current_num_threads().max(1);
-        let blocks_per_chunk = block_limit.div_ceil(num_threads).max(1);
-        let num_chunks = block_limit.div_ceil(blocks_per_chunk);
-
         let params = self.packed_layout.singleton_params();
+        let cycle_inner_span = params.cycle_inner_mask + 1;
+        let cycle_outer_bits = self.packed_layout.cycle_outer_bits();
+        let cycle_outer_count = self.num_cycles.div_ceil(cycle_inner_span);
+        let outers_per_chunk = cycle_outer_count.div_ceil(num_threads).max(1);
+        let num_chunks = cycle_outer_count.div_ceil(outers_per_chunk);
+        let poly_group_span = params.poly_inner_mask + 1;
+        let poly_shifted: Vec<usize> = (0..self.num_polys)
+            .map(|p| params.poly_shifted(p))
+            .collect();
+        let cycle_shifted: Vec<usize> = (0..cycle_inner_span)
+            .map(|c| params.cycle_shifted(c))
+            .collect();
+        let poly_groups: Vec<(usize, usize, usize)> = (0..self.num_polys)
+            .step_by(poly_group_span.max(1))
+            .map(|group_start| {
+                let group_end = (group_start + poly_group_span).min(self.num_polys);
+                let poly_outer = group_start / poly_group_span.max(1);
+                let block_base = poly_outer << cycle_outer_bits;
+                (group_start, group_end, block_base)
+            })
+            .collect();
 
         let rows = (0..num_chunks)
             .into_par_iter()
             .map(|chunk_idx| {
-                let chunk_start = chunk_idx * blocks_per_chunk;
-                let chunk_end = (chunk_start + blocks_per_chunk).min(block_limit);
+                let outer_start = chunk_idx * outers_per_chunk;
+                let outer_end = (outer_start + outers_per_chunk).min(cycle_outer_count);
                 let mut local_rows = vec![[0i32; D]; block_len];
-                let mut rotated = [[0i32; D]; D];
                 let mut idx_buf = vec![None::<u8>; self.num_polys];
-                for block_idx in chunk_start..chunk_end {
-                    let challenge = &challenges[block_idx];
-                    if challenge.positions.is_empty() {
-                        continue;
+                let mut group_block_indices = vec![usize::MAX; poly_groups.len()];
+                let mut rotated_tables = vec![[[0i32; D]; D]; poly_groups.len()];
+                // Streaming is naturally cycle-major. Consume each trace row once,
+                // then apply every poly-outer challenge that lands on that cycle
+                // while the corresponding output slice is still hot.
+                for cycle_outer in outer_start..outer_end {
+                    for (group_idx, ((_, _, block_base), block_idx_slot)) in poly_groups
+                        .iter()
+                        .zip(group_block_indices.iter_mut())
+                        .enumerate()
+                    {
+                        let block_idx = cycle_outer | *block_base;
+                        *block_idx_slot = if block_idx < block_limit
+                            && !challenges[block_idx].positions.is_empty()
+                        {
+                            // SAFETY: `group_idx < poly_groups.len() == rotated_tables.len()`
+                            // by construction, and `block_idx < block_limit <= challenges.len()`
+                            // from the guard above.
+                            Self::fill_rotated_challenge_i32(
+                                unsafe { rotated_tables.get_unchecked_mut(group_idx) },
+                                unsafe { challenges.get_unchecked(block_idx) },
+                            );
+                            block_idx
+                        } else {
+                            usize::MAX
+                        };
                     }
-                    Self::fill_rotated_challenge_i32(&mut rotated, challenge);
-                    let range =
-                        self.packed_layout
-                            .block_range(block_idx, self.num_cycles, self.num_polys);
-                    if range.poly_start >= range.poly_end || range.cycle_start >= range.cycle_end {
-                        continue;
-                    }
-                    let poly_len = range.poly_end - range.poly_start;
-                    let buf = &mut idx_buf[..poly_len];
-                    let poly_shifted: Vec<usize> = (range.poly_start..range.poly_end)
-                        .map(|p| params.poly_shifted(p))
-                        .collect();
-                    for c in range.cycle_start..range.cycle_end {
-                        (self.batch_fn)(c, range.poly_start, buf);
-                        let cs = params.cycle_shifted(c);
-                        for (i, slot) in buf.iter().enumerate() {
-                            if let Some(k) = *slot {
-                                let k = k as usize;
-                                let coeff_idx = k & params.addr_coeff_mask;
-                                let addr_inner = k >> params.addr_coeff_bits;
-                                let pos =
-                                    addr_inner | cs | unsafe { *poly_shifted.get_unchecked(i) };
-                                // SAFETY: pos < block_len by construction (bit fields
-                                // partition the m_vars address space);
-                                // coeff_idx < D since addr_coeff_mask < D.
-                                unsafe {
-                                    Self::accumulate_rotated_i32(
-                                        local_rows.get_unchecked_mut(pos),
-                                        rotated.get_unchecked(coeff_idx),
-                                    );
+
+                    let cycle_start = cycle_outer * cycle_inner_span;
+                    let cycle_end = (cycle_start + cycle_inner_span).min(self.num_cycles);
+                    for c in cycle_start..cycle_end {
+                        (self.batch_fn)(c, 0, &mut idx_buf);
+                        let cs =
+                            unsafe { *cycle_shifted.get_unchecked(c & params.cycle_inner_mask) };
+                        for (group_idx, ((group_start, group_end, _), &block_idx)) in poly_groups
+                            .iter()
+                            .zip(group_block_indices.iter())
+                            .enumerate()
+                        {
+                            if block_idx == usize::MAX {
+                                continue;
+                            }
+                            let buf = &idx_buf[*group_start..*group_end];
+                            let poly_offsets = &poly_shifted[*group_start..*group_end];
+                            for (slot, &poly_offset) in buf.iter().zip(poly_offsets.iter()) {
+                                if let Some(k) = *slot {
+                                    let k = k as usize;
+                                    let coeff_idx = k & params.addr_coeff_mask;
+                                    let addr_inner = k >> params.addr_coeff_bits;
+                                    let pos = addr_inner | cs | poly_offset;
+                                    // SAFETY: pos < block_len by construction (bit fields
+                                    // partition the m_vars address space); coeff_idx < D.
+                                    unsafe {
+                                        let rotated = rotated_tables
+                                            .get_unchecked(group_idx)
+                                            .get_unchecked(coeff_idx);
+                                        Self::accumulate_rotated_i32(
+                                            local_rows.get_unchecked_mut(pos),
+                                            rotated,
+                                        );
+                                    }
                                 }
                             }
                         }

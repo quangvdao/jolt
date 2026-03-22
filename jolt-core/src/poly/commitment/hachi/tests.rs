@@ -1,9 +1,9 @@
 use std::{array::from_fn, collections::HashSet, time::Instant};
 
 use super::commitment_scheme::{
-    build_packed_poly, poly_to_ring_coeffs, summarize_block_occupancy, Fp128OneHot64Config,
-    HachiBatchedProof, JoltHachiCommitmentScheme, JoltPackedPoly,
+    poly_to_ring_coeffs, Fp128OneHot64Config, HachiBatchedProof, JoltHachiCommitmentScheme,
 };
+use super::packed_poly::{build_packed_poly, summarize_block_occupancy, JoltPackedPoly};
 use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout};
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128};
 use crate::field::fp128::JoltFp128;

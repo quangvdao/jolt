@@ -149,7 +149,6 @@ impl PackedBitLayout {
         self.cycle_inner_bits
     }
 
-    #[cfg(test)]
     pub(super) fn poly_inner_bits(&self) -> usize {
         self.poly_inner_bits
     }

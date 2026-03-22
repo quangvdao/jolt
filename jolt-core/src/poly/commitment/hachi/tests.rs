@@ -3,8 +3,8 @@ use std::{array::from_fn, collections::HashSet, time::Instant};
 use super::commitment_scheme::{
     poly_to_ring_coeffs, Fp128OneHot64Config, HachiBatchedProof, JoltHachiCommitmentScheme,
 };
-use super::packed_poly::{build_packed_poly, summarize_block_occupancy, JoltPackedPoly};
 use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout};
+use super::packed_poly::{build_packed_poly, summarize_block_occupancy, JoltPackedPoly};
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128};
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
@@ -22,7 +22,7 @@ use hachi_pcs::protocol::commitment::utils::flat_matrix::FlatMatrix;
 use hachi_pcs::protocol::commitment::{compute_num_digits, optimal_m_r_split, CommitmentConfig};
 use hachi_pcs::protocol::proof::{HachiProof, HachiProofTail, PackedDigits};
 use hachi_pcs::protocol::SmallTestCommitmentConfig;
-use hachi_pcs::FromSmallInt;
+use hachi_pcs::{FromSmallInt, HachiPolyOps};
 
 type Cfg = SmallTestCommitmentConfig;
 type Scheme = JoltHachiCommitmentScheme<{ Cfg::D }, Cfg>;
@@ -88,8 +88,8 @@ fn build_test_packed_poly_with_fn<const D: usize, C: CommitmentConfig>(
     source: &TestPackedSource,
 ) -> (
     JoltPackedPoly<
-        impl Fn(usize, usize) -> Option<u8> + Sync + '_,
-        impl Fn(usize, usize, &mut [Option<u8>]) + Sync + '_,
+        impl Fn(usize, usize) -> Option<u8> + Clone + Send + Sync + '_,
+        impl Fn(usize, usize, &mut [Option<u8>]) + Clone + Send + Sync + '_,
         D,
     >,
     PackedBitLayout,
@@ -896,6 +896,176 @@ fn packed_fast_paths_match_generic_in_k256_singleton_regime() {
     assert_eq!(
         fast_fold, generic_fold,
         "K=256 fast decompose_fold must match generic"
+    );
+}
+
+#[test]
+fn packed_fold_blocks_fast_singleton_matches_generic_in_k256_regime() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            vec![
+                Some(0),
+                Some(255),
+                Some(1),
+                Some(254),
+                Some(2),
+                Some(253),
+                Some(3),
+                Some(252),
+            ],
+            vec![
+                Some(255),
+                Some(0),
+                Some(254),
+                Some(1),
+                Some(253),
+                Some(2),
+                Some(252),
+                Some(3),
+            ],
+            vec![
+                Some(127),
+                Some(128),
+                Some(64),
+                Some(192),
+                Some(32),
+                Some(224),
+                Some(16),
+                Some(240),
+            ],
+            vec![
+                Some(5),
+                None,
+                Some(10),
+                Some(15),
+                None,
+                Some(20),
+                Some(25),
+                Some(30),
+            ],
+            vec![
+                Some(250),
+                Some(200),
+                Some(150),
+                Some(100),
+                Some(50),
+                Some(0),
+                Some(25),
+                Some(75),
+            ],
+        ],
+        256,
+    );
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
+    let fold_scalars: Vec<Fp128> = (0..packed_layout.block_len())
+        .map(|idx| Fp128::from_u64((idx as u64 * 11 + 7) % 257))
+        .collect();
+
+    let generic = packed_poly.fold_blocks_generic(&fold_scalars);
+    let fast = packed_poly.fold_blocks_fast_singleton(&fold_scalars);
+    let dispatched = packed_poly.fold_blocks(&fold_scalars, packed_layout.block_len());
+
+    assert_eq!(fast, generic, "K=256 fast fold_blocks must match generic");
+    assert_eq!(
+        dispatched, fast,
+        "K=256 fold_blocks dispatch must use fast path"
+    );
+}
+
+#[test]
+fn packed_evaluate_and_fold_fast_singleton_matches_generic_in_k256_regime() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            vec![
+                Some(0),
+                Some(255),
+                Some(1),
+                Some(254),
+                Some(2),
+                Some(253),
+                Some(3),
+                Some(252),
+            ],
+            vec![
+                Some(255),
+                Some(0),
+                Some(254),
+                Some(1),
+                Some(253),
+                Some(2),
+                Some(252),
+                Some(3),
+            ],
+            vec![
+                Some(127),
+                Some(128),
+                Some(64),
+                Some(192),
+                Some(32),
+                Some(224),
+                Some(16),
+                Some(240),
+            ],
+            vec![
+                Some(5),
+                None,
+                Some(10),
+                Some(15),
+                None,
+                Some(20),
+                Some(25),
+                Some(30),
+            ],
+            vec![
+                Some(250),
+                Some(200),
+                Some(150),
+                Some(100),
+                Some(50),
+                Some(0),
+                Some(25),
+                Some(75),
+            ],
+        ],
+        256,
+    );
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
+    let fold_scalars: Vec<Fp128> = (0..packed_layout.block_len())
+        .map(|idx| Fp128::from_u64((idx as u64 * 11 + 7) % 257))
+        .collect();
+    let eval_outer_scalars: Vec<Fp128> = (0..packed_layout.num_blocks())
+        .map(|idx| Fp128::from_u64((idx as u64 * 13 + 5) % 257))
+        .collect();
+
+    let generic = packed_poly.evaluate_and_fold_generic(&eval_outer_scalars, &fold_scalars);
+    let fast = packed_poly.evaluate_and_fold_fast_singleton(&eval_outer_scalars, &fold_scalars);
+    let dispatched = packed_poly.evaluate_and_fold(
+        &eval_outer_scalars,
+        &fold_scalars,
+        packed_layout.block_len(),
+    );
+
+    assert_eq!(
+        fast.1, generic.1,
+        "K=256 fast evaluate_and_fold must match generic folded blocks"
+    );
+    assert_eq!(
+        fast.0, generic.0,
+        "K=256 fast evaluate_and_fold must match generic evaluation"
+    );
+    assert_eq!(
+        dispatched.1, fast.1,
+        "K=256 evaluate_and_fold dispatch must use fast folded blocks"
+    );
+    assert_eq!(
+        dispatched.0, fast.0,
+        "K=256 evaluate_and_fold dispatch must use fast evaluation"
     );
 }
 

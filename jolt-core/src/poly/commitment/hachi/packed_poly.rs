@@ -372,22 +372,11 @@ impl<
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::fold_blocks")]
     fn fold_blocks(&self, scalars: &[Fp128], _block_len: usize) -> Vec<CyclotomicRing<Fp128, D>> {
-        let block_len = self.packed_layout.block_len();
-        (0..self.num_blocks())
-            .into_par_iter()
-            .map(|block_idx| {
-                let mut fold_acc = [Fp128::zero(); D];
-                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
-                    if pos_in_block < block_len && pos_in_block < scalars.len() {
-                        let scalar = scalars[pos_in_block];
-                        for &coeff_idx in coeffs {
-                            fold_acc[coeff_idx as usize] += scalar;
-                        }
-                    }
-                });
-                CyclotomicRing::from_coefficients(fold_acc)
-            })
-            .collect()
+        if self.is_singleton() {
+            self.fold_blocks_fast_singleton(scalars)
+        } else {
+            self.fold_blocks_generic(scalars)
+        }
     }
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::evaluate_and_fold")]
@@ -397,14 +386,11 @@ impl<
         fold_scalars: &[Fp128],
         _block_len: usize,
     ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
-        let folded = self.fold_blocks(fold_scalars, 0);
-        let eval = folded
-            .iter()
-            .zip(eval_outer_scalars.iter())
-            .fold(CyclotomicRing::<Fp128, D>::zero(), |acc, (f_i, s_i)| {
-                acc + f_i.scale(s_i)
-            });
-        (eval, folded)
+        if self.is_singleton() {
+            self.evaluate_and_fold_fast_singleton(eval_outer_scalars, fold_scalars)
+        } else {
+            self.evaluate_and_fold_generic(eval_outer_scalars, fold_scalars)
+        }
     }
 
     #[tracing::instrument(skip_all, name = "JoltPackedPoly::decompose_fold")]
@@ -578,6 +564,104 @@ impl<
         for (dst_coeff, src_coeff) in dst_lo.iter_mut().zip(src_hi.iter()) {
             *dst_coeff -= *src_coeff;
         }
+    }
+
+    #[inline]
+    fn sum_folded_blocks(
+        folded: &[CyclotomicRing<Fp128, D>],
+        eval_outer_scalars: &[Fp128],
+    ) -> CyclotomicRing<Fp128, D> {
+        folded
+            .par_iter()
+            .enumerate()
+            .filter(|(block_idx, _)| *block_idx < eval_outer_scalars.len())
+            .map(|(block_idx, folded_block)| folded_block.scale(&eval_outer_scalars[block_idx]))
+            .reduce(CyclotomicRing::<Fp128, D>::zero, |acc, contrib| {
+                acc + contrib
+            })
+    }
+
+    pub(super) fn fold_blocks_generic(&self, scalars: &[Fp128]) -> Vec<CyclotomicRing<Fp128, D>> {
+        let block_len = self.packed_layout.block_len();
+        (0..self.num_blocks())
+            .into_par_iter()
+            .map(|block_idx| {
+                let mut fold_acc = [Fp128::zero(); D];
+                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
+                    if pos_in_block < block_len && pos_in_block < scalars.len() {
+                        let scalar = scalars[pos_in_block];
+                        for &coeff_idx in coeffs {
+                            fold_acc[coeff_idx as usize] += scalar;
+                        }
+                    }
+                });
+                CyclotomicRing::from_coefficients(fold_acc)
+            })
+            .collect()
+    }
+
+    pub(super) fn fold_blocks_fast_singleton(
+        &self,
+        scalars: &[Fp128],
+    ) -> Vec<CyclotomicRing<Fp128, D>> {
+        let params = self.packed_layout.singleton_params();
+        let poly_shifted: Vec<usize> = (0..self.num_polys)
+            .map(|poly_idx| params.poly_shifted(poly_idx))
+            .collect();
+
+        (0..self.num_blocks())
+            .into_par_iter()
+            .map(|block_idx| {
+                let range =
+                    self.packed_layout
+                        .block_range(block_idx, self.num_cycles, self.num_polys);
+                if range.poly_start >= range.poly_end || range.cycle_start >= range.cycle_end {
+                    return CyclotomicRing::zero();
+                }
+
+                let poly_offsets = &poly_shifted[range.poly_start..range.poly_end];
+                let mut idx_buf = vec![None::<u8>; poly_offsets.len()];
+                let mut fold_acc = [Fp128::zero(); D];
+
+                for cycle_idx in range.cycle_start..range.cycle_end {
+                    (self.batch_fn)(cycle_idx, range.poly_start, &mut idx_buf);
+                    let cycle_shifted = params.cycle_shifted(cycle_idx);
+                    for (slot, &poly_offset) in idx_buf.iter().zip(poly_offsets.iter()) {
+                        if let Some(k) = *slot {
+                            let k = k as usize;
+                            let coeff_idx = k & params.addr_coeff_mask;
+                            let addr_inner = k >> params.addr_coeff_bits;
+                            let pos_in_block = addr_inner | cycle_shifted | poly_offset;
+                            if pos_in_block < scalars.len() {
+                                fold_acc[coeff_idx] += scalars[pos_in_block];
+                            }
+                        }
+                    }
+                }
+
+                CyclotomicRing::from_coefficients(fold_acc)
+            })
+            .collect()
+    }
+
+    pub(super) fn evaluate_and_fold_generic(
+        &self,
+        eval_outer_scalars: &[Fp128],
+        fold_scalars: &[Fp128],
+    ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
+        let folded = self.fold_blocks_generic(fold_scalars);
+        let eval = Self::sum_folded_blocks(&folded, eval_outer_scalars);
+        (eval, folded)
+    }
+
+    pub(super) fn evaluate_and_fold_fast_singleton(
+        &self,
+        eval_outer_scalars: &[Fp128],
+        fold_scalars: &[Fp128],
+    ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
+        let folded = self.fold_blocks_fast_singleton(fold_scalars);
+        let eval = Self::sum_folded_blocks(&folded, eval_outer_scalars);
+        (eval, folded)
     }
 
     fn commit_inner_generic_output(

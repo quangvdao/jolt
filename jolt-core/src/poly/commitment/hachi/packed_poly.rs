@@ -1,6 +1,6 @@
 use std::{array::from_fn, mem::size_of, slice::from_ref};
 
-use super::packed_layout::PackedBitLayout;
+use super::packed_layout::{PackedBitLayout, SingletonLocateParams};
 use super::wrappers::Fp128;
 use hachi_pcs::algebra::fields::wide::Fp128x8i32;
 use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
@@ -566,36 +566,89 @@ impl<
         }
     }
 
-    #[inline]
-    fn sum_folded_blocks(
-        folded: &[CyclotomicRing<Fp128, D>],
-        eval_outer_scalars: &[Fp128],
+    fn compute_fold_block_generic(
+        &self,
+        block_idx: usize,
+        scalars: &[Fp128],
+        idx_buf: &mut Vec<Option<u8>>,
     ) -> CyclotomicRing<Fp128, D> {
-        folded
-            .par_iter()
-            .enumerate()
-            .filter(|(block_idx, _)| *block_idx < eval_outer_scalars.len())
-            .map(|(block_idx, folded_block)| folded_block.scale(&eval_outer_scalars[block_idx]))
-            .reduce(CyclotomicRing::<Fp128, D>::zero, |acc, contrib| {
-                acc + contrib
-            })
+        let range = self
+            .packed_layout
+            .block_range(block_idx, self.num_cycles, self.num_polys);
+        if range.poly_start >= range.poly_end || range.cycle_start >= range.cycle_end {
+            return CyclotomicRing::zero();
+        }
+
+        let poly_len = range.poly_end - range.poly_start;
+        if idx_buf.len() < poly_len {
+            idx_buf.resize(poly_len, None);
+        }
+        let idx_buf = &mut idx_buf[..poly_len];
+        let mut fold_acc = [Fp128::zero(); D];
+
+        for cycle_idx in range.cycle_start..range.cycle_end {
+            (self.batch_fn)(cycle_idx, range.poly_start, idx_buf);
+            for (local_poly_idx, slot) in idx_buf.iter().enumerate() {
+                if let Some(k) = *slot {
+                    let poly_idx = range.poly_start + local_poly_idx;
+                    let pos = self.packed_layout.locate(cycle_idx, poly_idx, k as usize);
+                    debug_assert_eq!(pos.block_idx, block_idx);
+                    if pos.pos_in_block < scalars.len() {
+                        fold_acc[pos.coeff_idx] += scalars[pos.pos_in_block];
+                    }
+                }
+            }
+        }
+
+        CyclotomicRing::from_coefficients(fold_acc)
+    }
+
+    fn compute_fold_block_fast_singleton(
+        &self,
+        block_idx: usize,
+        scalars: &[Fp128],
+        params: SingletonLocateParams,
+        poly_shifted: &[usize],
+        idx_buf: &mut Vec<Option<u8>>,
+    ) -> CyclotomicRing<Fp128, D> {
+        let range = self
+            .packed_layout
+            .block_range(block_idx, self.num_cycles, self.num_polys);
+        if range.poly_start >= range.poly_end || range.cycle_start >= range.cycle_end {
+            return CyclotomicRing::zero();
+        }
+
+        let poly_offsets = &poly_shifted[range.poly_start..range.poly_end];
+        if idx_buf.len() < poly_offsets.len() {
+            idx_buf.resize(poly_offsets.len(), None);
+        }
+        let idx_buf = &mut idx_buf[..poly_offsets.len()];
+        let mut fold_acc = [Fp128::zero(); D];
+
+        for cycle_idx in range.cycle_start..range.cycle_end {
+            (self.batch_fn)(cycle_idx, range.poly_start, idx_buf);
+            let cycle_shifted = params.cycle_shifted(cycle_idx);
+            for (slot, &poly_offset) in idx_buf.iter().zip(poly_offsets.iter()) {
+                if let Some(k) = *slot {
+                    let k = k as usize;
+                    let coeff_idx = k & params.addr_coeff_mask;
+                    let addr_inner = k >> params.addr_coeff_bits;
+                    let pos_in_block = addr_inner | cycle_shifted | poly_offset;
+                    if pos_in_block < scalars.len() {
+                        fold_acc[coeff_idx] += scalars[pos_in_block];
+                    }
+                }
+            }
+        }
+
+        CyclotomicRing::from_coefficients(fold_acc)
     }
 
     pub(super) fn fold_blocks_generic(&self, scalars: &[Fp128]) -> Vec<CyclotomicRing<Fp128, D>> {
-        let block_len = self.packed_layout.block_len();
         (0..self.num_blocks())
             .into_par_iter()
-            .map(|block_idx| {
-                let mut fold_acc = [Fp128::zero(); D];
-                self.for_each_entry_in_block(block_idx, |pos_in_block, coeffs| {
-                    if pos_in_block < block_len && pos_in_block < scalars.len() {
-                        let scalar = scalars[pos_in_block];
-                        for &coeff_idx in coeffs {
-                            fold_acc[coeff_idx as usize] += scalar;
-                        }
-                    }
-                });
-                CyclotomicRing::from_coefficients(fold_acc)
+            .map_init(Vec::<Option<u8>>::new, |idx_buf, block_idx| {
+                self.compute_fold_block_generic(block_idx, scalars, idx_buf)
             })
             .collect()
     }
@@ -611,35 +664,14 @@ impl<
 
         (0..self.num_blocks())
             .into_par_iter()
-            .map(|block_idx| {
-                let range =
-                    self.packed_layout
-                        .block_range(block_idx, self.num_cycles, self.num_polys);
-                if range.poly_start >= range.poly_end || range.cycle_start >= range.cycle_end {
-                    return CyclotomicRing::zero();
-                }
-
-                let poly_offsets = &poly_shifted[range.poly_start..range.poly_end];
-                let mut idx_buf = vec![None::<u8>; poly_offsets.len()];
-                let mut fold_acc = [Fp128::zero(); D];
-
-                for cycle_idx in range.cycle_start..range.cycle_end {
-                    (self.batch_fn)(cycle_idx, range.poly_start, &mut idx_buf);
-                    let cycle_shifted = params.cycle_shifted(cycle_idx);
-                    for (slot, &poly_offset) in idx_buf.iter().zip(poly_offsets.iter()) {
-                        if let Some(k) = *slot {
-                            let k = k as usize;
-                            let coeff_idx = k & params.addr_coeff_mask;
-                            let addr_inner = k >> params.addr_coeff_bits;
-                            let pos_in_block = addr_inner | cycle_shifted | poly_offset;
-                            if pos_in_block < scalars.len() {
-                                fold_acc[coeff_idx] += scalars[pos_in_block];
-                            }
-                        }
-                    }
-                }
-
-                CyclotomicRing::from_coefficients(fold_acc)
+            .map_init(Vec::<Option<u8>>::new, |idx_buf, block_idx| {
+                self.compute_fold_block_fast_singleton(
+                    block_idx,
+                    scalars,
+                    params,
+                    &poly_shifted,
+                    idx_buf,
+                )
             })
             .collect()
     }
@@ -649,8 +681,27 @@ impl<
         eval_outer_scalars: &[Fp128],
         fold_scalars: &[Fp128],
     ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
-        let folded = self.fold_blocks_generic(fold_scalars);
-        let eval = Self::sum_folded_blocks(&folded, eval_outer_scalars);
+        let mut folded = vec![CyclotomicRing::<Fp128, D>::zero(); self.num_blocks()];
+        let eval = folded
+            .par_iter_mut()
+            .enumerate()
+            .map_init(
+                Vec::<Option<u8>>::new,
+                |idx_buf, (block_idx, folded_slot)| {
+                    let folded_block =
+                        self.compute_fold_block_generic(block_idx, fold_scalars, idx_buf);
+                    let eval_contrib = if block_idx < eval_outer_scalars.len() {
+                        folded_block.scale(&eval_outer_scalars[block_idx])
+                    } else {
+                        CyclotomicRing::zero()
+                    };
+                    *folded_slot = folded_block;
+                    eval_contrib
+                },
+            )
+            .reduce(CyclotomicRing::<Fp128, D>::zero, |acc, contrib| {
+                acc + contrib
+            });
         (eval, folded)
     }
 
@@ -659,8 +710,36 @@ impl<
         eval_outer_scalars: &[Fp128],
         fold_scalars: &[Fp128],
     ) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
-        let folded = self.fold_blocks_fast_singleton(fold_scalars);
-        let eval = Self::sum_folded_blocks(&folded, eval_outer_scalars);
+        let params = self.packed_layout.singleton_params();
+        let poly_shifted: Vec<usize> = (0..self.num_polys)
+            .map(|poly_idx| params.poly_shifted(poly_idx))
+            .collect();
+        let mut folded = vec![CyclotomicRing::<Fp128, D>::zero(); self.num_blocks()];
+        let eval = folded
+            .par_iter_mut()
+            .enumerate()
+            .map_init(
+                Vec::<Option<u8>>::new,
+                |idx_buf, (block_idx, folded_slot)| {
+                    let folded_block = self.compute_fold_block_fast_singleton(
+                        block_idx,
+                        fold_scalars,
+                        params,
+                        &poly_shifted,
+                        idx_buf,
+                    );
+                    let eval_contrib = if block_idx < eval_outer_scalars.len() {
+                        folded_block.scale(&eval_outer_scalars[block_idx])
+                    } else {
+                        CyclotomicRing::zero()
+                    };
+                    *folded_slot = folded_block;
+                    eval_contrib
+                },
+            )
+            .reduce(CyclotomicRing::<Fp128, D>::zero, |acc, contrib| {
+                acc + contrib
+            });
         (eval, folded)
     }
 

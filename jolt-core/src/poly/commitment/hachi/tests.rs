@@ -22,7 +22,7 @@ use hachi_pcs::protocol::commitment::utils::flat_matrix::FlatMatrix;
 use hachi_pcs::protocol::commitment::{compute_num_digits, optimal_m_r_split, CommitmentConfig};
 use hachi_pcs::protocol::proof::{HachiProof, HachiProofTail, PackedDigits};
 use hachi_pcs::protocol::SmallTestCommitmentConfig;
-use hachi_pcs::{FromSmallInt, HachiPolyOps};
+use hachi_pcs::{FieldCore, FromSmallInt, HachiPolyOps};
 
 type Cfg = SmallTestCommitmentConfig;
 type Scheme = JoltHachiCommitmentScheme<{ Cfg::D }, Cfg>;
@@ -155,6 +155,61 @@ fn make_test_challenges<const D: usize>(num_blocks: usize) -> Vec<SparseChalleng
             }
         })
         .collect()
+}
+
+fn reference_fold_blocks<const D: usize>(
+    source: &TestPackedSource,
+    packed_layout: PackedBitLayout,
+    scalars: &[Fp128],
+) -> Vec<CyclotomicRing<Fp128, D>> {
+    let num_cycles = source.num_cycles();
+    let num_polys = source.per_poly.len();
+    (0..packed_layout.num_blocks())
+        .map(|block_idx| {
+            let range = packed_layout.block_range(block_idx, num_cycles, num_polys);
+            let mut fold_acc = [Fp128::zero(); D];
+            for cycle_idx in range.cycle_start..range.cycle_end {
+                for poly_idx in range.poly_start..range.poly_end {
+                    if let Some(k) = source.per_poly[poly_idx][cycle_idx] {
+                        if packed_layout.lifted_coeff_bits() == 0 {
+                            let (pos_in_block, coeff_idx) =
+                                packed_layout.locate_singleton(cycle_idx, poly_idx, k as usize);
+                            if pos_in_block < scalars.len() {
+                                fold_acc[coeff_idx] += scalars[pos_in_block];
+                            }
+                        } else {
+                            let pos = packed_layout.locate(cycle_idx, poly_idx, k as usize);
+                            assert_eq!(pos.block_idx, block_idx, "reference block mismatch");
+                            if pos.pos_in_block < scalars.len() {
+                                fold_acc[pos.coeff_idx] += scalars[pos.pos_in_block];
+                            }
+                        }
+                    }
+                }
+            }
+            CyclotomicRing::from_coefficients(fold_acc)
+        })
+        .collect()
+}
+
+fn reference_evaluate_and_fold<const D: usize>(
+    source: &TestPackedSource,
+    packed_layout: PackedBitLayout,
+    eval_outer_scalars: &[Fp128],
+    fold_scalars: &[Fp128],
+) -> (CyclotomicRing<Fp128, D>, Vec<CyclotomicRing<Fp128, D>>) {
+    let folded = reference_fold_blocks::<D>(source, packed_layout, fold_scalars);
+    let eval = folded
+        .iter()
+        .enumerate()
+        .filter(|(block_idx, _)| *block_idx < eval_outer_scalars.len())
+        .fold(
+            CyclotomicRing::<Fp128, D>::zero(),
+            |acc, (block_idx, folded_block)| {
+                acc + folded_block.scale(&eval_outer_scalars[block_idx])
+            },
+        );
+    (eval, folded)
 }
 
 #[test]
@@ -1066,6 +1121,91 @@ fn packed_evaluate_and_fold_fast_singleton_matches_generic_in_k256_regime() {
     assert_eq!(
         dispatched.0, fast.0,
         "K=256 evaluate_and_fold dispatch must use fast evaluation"
+    );
+}
+
+#[test]
+fn packed_evaluate_and_fold_matches_reference_in_d64_k16_regime() {
+    type FastCfg = Fp128OneHot64Config;
+
+    let source = TestPackedSource::new(
+        vec![
+            (0u8..16).map(Some).collect(),
+            (0u8..16).rev().map(Some).collect(),
+            vec![1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15]
+                .into_iter()
+                .map(Some)
+                .collect(),
+            vec![
+                Some(0),
+                None,
+                Some(2),
+                Some(4),
+                None,
+                Some(6),
+                Some(8),
+                Some(10),
+                None,
+                Some(12),
+                Some(14),
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(5),
+            ],
+        ],
+        16,
+    );
+    let (packed_poly, packed_layout) =
+        build_test_packed_poly_with_fn::<{ FastCfg::D }, FastCfg>(&source);
+    let fold_scalars: Vec<Fp128> = (0..packed_layout.block_len())
+        .map(|idx| Fp128::from_u64((idx as u64 * 17 + 3) % 257))
+        .collect();
+    let eval_outer_scalars: Vec<Fp128> = (0..packed_layout.num_blocks())
+        .map(|idx| Fp128::from_u64((idx as u64 * 19 + 9) % 257))
+        .collect();
+
+    let reference_fold =
+        reference_fold_blocks::<{ FastCfg::D }>(&source, packed_layout, &fold_scalars);
+    let generic_fold = packed_poly.fold_blocks_generic(&fold_scalars);
+    let dispatched_fold = packed_poly.fold_blocks(&fold_scalars, packed_layout.block_len());
+    let reference_eval = reference_evaluate_and_fold::<{ FastCfg::D }>(
+        &source,
+        packed_layout,
+        &eval_outer_scalars,
+        &fold_scalars,
+    );
+    let generic_eval = packed_poly.evaluate_and_fold_generic(&eval_outer_scalars, &fold_scalars);
+    let dispatched_eval = packed_poly.evaluate_and_fold(
+        &eval_outer_scalars,
+        &fold_scalars,
+        packed_layout.block_len(),
+    );
+
+    assert_eq!(
+        generic_fold, reference_fold,
+        "K=16 generic fold_blocks must match the direct reference"
+    );
+    assert_eq!(
+        dispatched_fold, reference_fold,
+        "K=16 fold_blocks dispatch must match the direct reference"
+    );
+    assert_eq!(
+        generic_eval.1, reference_eval.1,
+        "K=16 generic evaluate_and_fold must match the direct reference folds"
+    );
+    assert_eq!(
+        generic_eval.0, reference_eval.0,
+        "K=16 generic evaluate_and_fold must match the direct reference evaluation"
+    );
+    assert_eq!(
+        dispatched_eval.1, reference_eval.1,
+        "K=16 evaluate_and_fold dispatch must match the direct reference folds"
+    );
+    assert_eq!(
+        dispatched_eval.0, reference_eval.0,
+        "K=16 evaluate_and_fold dispatch must match the direct reference evaluation"
     );
 }
 

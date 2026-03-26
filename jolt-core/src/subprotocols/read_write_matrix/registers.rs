@@ -355,6 +355,11 @@ impl<F: JoltField, C: OneHotCoeff<F>> CycleMajorMatrixEntry<F> for RegistersCycl
         ra_lookup_table: Option<&OneHotCoeffLookupTable<F>>,
         wa_lookup_table: Option<&OneHotCoeffLookupTable<F>>,
     ) -> [F::UnreducedProduct; 2] {
+        // Compute the field-level sum ra*val + wa*(val+inc) with full modular
+        // reduction, then widen to UnreducedProduct. Summing two UnreducedProduct
+        // values directly can overflow for 128-bit fields (the carry out of the
+        // top limb is lost in Add<UnreducedFp128<4>>).
+        let one = F::one();
         match (even, odd) {
             (Some(even), Some(odd)) => {
                 debug_assert!(even.row().is_even());
@@ -365,35 +370,31 @@ impl<F: JoltField, C: OneHotCoeff<F>> CycleMajorMatrixEntry<F> for RegistersCycl
                 let wa_evals =
                     OneHotCoeff::evals(Some(&even.wa_coeff), Some(&odd.wa_coeff), wa_lookup_table);
                 let val_evals = [even.val_coeff, odd.val_coeff - even.val_coeff];
-                [
-                    ra_evals[0].mul_to_product(val_evals[0])
-                        + wa_evals[0].mul_to_product(val_evals[0] + inc_evals[0]),
-                    ra_evals[1].mul_to_product(val_evals[1])
-                        + wa_evals[1].mul_to_product(val_evals[1] + inc_evals[1]),
-                ]
+                let eval_0 =
+                    ra_evals[0] * val_evals[0] + wa_evals[0] * (val_evals[0] + inc_evals[0]);
+                let eval_1 =
+                    ra_evals[1] * val_evals[1] + wa_evals[1] * (val_evals[1] + inc_evals[1]);
+                [one.mul_to_product(eval_0), one.mul_to_product(eval_1)]
             }
             (Some(even), None) => {
                 let odd_val_coeff = F::from_u64(even.next_val);
                 let ra_evals = OneHotCoeff::evals(Some(&even.ra_coeff), None, ra_lookup_table);
                 let wa_evals = OneHotCoeff::evals(Some(&even.wa_coeff), None, wa_lookup_table);
                 let val_evals = [even.val_coeff, odd_val_coeff - even.val_coeff];
-                [
-                    ra_evals[0].mul_to_product(val_evals[0])
-                        + wa_evals[0].mul_to_product(val_evals[0] + inc_evals[0]),
-                    ra_evals[1].mul_to_product(val_evals[1])
-                        + wa_evals[1].mul_to_product(val_evals[1] + inc_evals[1]),
-                ]
+                let eval_0 =
+                    ra_evals[0] * val_evals[0] + wa_evals[0] * (val_evals[0] + inc_evals[0]);
+                let eval_1 =
+                    ra_evals[1] * val_evals[1] + wa_evals[1] * (val_evals[1] + inc_evals[1]);
+                [one.mul_to_product(eval_0), one.mul_to_product(eval_1)]
             }
             (None, Some(odd)) => {
                 let even_val_coeff = F::from_u64(odd.prev_val);
                 let ra_evals = OneHotCoeff::evals(None, Some(&odd.ra_coeff), ra_lookup_table);
                 let wa_evals = OneHotCoeff::evals(None, Some(&odd.wa_coeff), wa_lookup_table);
                 let val_evals = [even_val_coeff, odd.val_coeff - even_val_coeff];
-                [
-                    F::UnreducedProduct::zero(),
-                    ra_evals[1].mul_to_product(val_evals[1])
-                        + wa_evals[1].mul_to_product(val_evals[1] + inc_evals[1]),
-                ]
+                let eval_1 =
+                    ra_evals[1] * val_evals[1] + wa_evals[1] * (val_evals[1] + inc_evals[1]);
+                [F::UnreducedProduct::zero(), one.mul_to_product(eval_1)]
             }
             (None, None) => panic!("Both entries are None"),
         }

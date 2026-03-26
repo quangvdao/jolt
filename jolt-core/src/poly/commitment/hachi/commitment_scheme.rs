@@ -3,10 +3,11 @@ use std::{env::var_os, marker::PhantomData, mem::take, slice::from_raw_parts};
 use super::packed_layout::{choose_packed_bit_layout, PackedBitLayout};
 use super::packed_poly::{build_packed_poly, JoltPackedPoly};
 use super::wrappers::{jolt_to_hachi, ArkBridge, Fp128, JoltToHachiTranscript};
+use crate::curve::JoltCurve;
 use crate::field::fp128::JoltFp128;
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::{
-    CommitmentScheme, PolynomialBatchSource, StreamingCommitmentScheme,
+    CommitmentScheme, PolynomialBatchSource, StreamingCommitmentScheme, ZkEvalCommitment,
 };
 use crate::poly::eq_poly::EqPolynomial;
 use crate::poly::multilinear_polynomial::MultilinearPolynomial;
@@ -429,7 +430,7 @@ where
         hint: Option<Self::OpeningProofHint>,
         transcript: &mut ProofTranscript,
         commitment: &Self::Commitment,
-    ) -> Self::Proof {
+    ) -> (Self::Proof, Option<Self::Field>) {
         let hint = hint.expect("prove() requires a hint");
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
         let mut adapter = JoltToHachiTranscript::new(transcript);
@@ -470,7 +471,7 @@ where
             )
         }
         .expect("Hachi prove failed");
-        ArkBridge(proof)
+        (ArkBridge(proof), None)
     }
 
     fn verify<ProofTranscript: Transcript>(
@@ -921,4 +922,20 @@ fn pack_field_to_ring<const D: usize>(field_coeffs: &[Fp128]) -> Vec<CyclotomicR
             CyclotomicRing::from_coefficients(coeffs)
         })
         .collect()
+}
+
+impl<const D: usize, Cfg, C> ZkEvalCommitment<C> for JoltHachiCommitmentScheme<D, Cfg>
+where
+    Cfg: CommitmentConfig + Default,
+    C: JoltCurve<F = <Self as CommitmentScheme>::Field>,
+{
+    fn eval_commitment(_proof: &Self::BatchedProof) -> Option<C::G1> {
+        None
+    }
+    fn eval_commitment_gens(_setup: &Self::ProverSetup) -> Option<(C::G1, C::G1)> {
+        None
+    }
+    fn eval_commitment_gens_verifier(_setup: &Self::VerifierSetup) -> Option<(C::G1, C::G1)> {
+        None
+    }
 }

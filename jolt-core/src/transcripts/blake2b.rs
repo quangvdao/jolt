@@ -1,7 +1,5 @@
 use super::transcript::Transcript;
 use crate::field::JoltField;
-use ark_ec::{AffineRepr, CurveGroup};
-use ark_serialize::CanonicalSerialize;
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 
@@ -133,31 +131,6 @@ impl Transcript for Blake2bTranscript {
         scalar.serialize_uncompressed(&mut buf[..size]).unwrap();
         buf[..size].reverse();
         self.raw_append_bytes(&buf[..size]);
-    }
-
-    fn raw_append_point<G: CurveGroup>(&mut self, point: &G) {
-        if point.is_zero() {
-            self.raw_append_bytes(&[0_u8; 64]);
-            return;
-        }
-
-        let aff = point.into_affine();
-        let mut x_bytes = [0u8; 32];
-        let mut y_bytes = [0u8; 32];
-        let x = aff.x().unwrap();
-        let x_size = x.serialized_size(ark_serialize::Compress::Yes);
-        x.serialize_compressed(&mut x_bytes[..x_size]).unwrap();
-        x_bytes[..x_size].reverse();
-        let y = aff.y().unwrap();
-        let y_size = y.serialized_size(ark_serialize::Compress::Yes);
-        y.serialize_compressed(&mut y_bytes[..y_size]).unwrap();
-        y_bytes[..y_size].reverse();
-
-        let hasher = self
-            .hasher()
-            .chain_update(&x_bytes[..x_size])
-            .chain_update(&y_bytes[..y_size]);
-        self.update_state(hasher.finalize().into());
     }
 
     fn challenge_u128(&mut self) -> u128 {

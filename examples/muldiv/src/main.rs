@@ -7,11 +7,12 @@ pub fn main() {
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_muldiv(target_dir);
 
-    let shared_preprocessing = guest::preprocess_shared_muldiv(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_muldiv(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_muldiv(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_muldiv(
         shared_preprocessing,
         prover_preprocessing.generators.to_verifier_setup(),
+        None,
     );
 
     let prove = guest::build_prover_muldiv(program, prover_preprocessing);

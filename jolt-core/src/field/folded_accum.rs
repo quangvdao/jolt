@@ -309,5 +309,4 @@ impl Folded256ProductAccum {
     }
 }
 
-// Fp128 folded type — 128-bit field products use 4 positional slots.
 impl_folded_core_traits!(Folded128ProductAccum, 4, 5);

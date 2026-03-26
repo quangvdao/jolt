@@ -13,11 +13,11 @@ pub fn main() {
     let b = vec![0usize, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
     let mut program = guest::compile_advice_demo(target_dir);
-    let shared_preprocessing = guest::preprocess_shared_advice_demo(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_advice_demo(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_advice_demo(shared_preprocessing.clone());
     let verifier_setup = prover_preprocessing.generators.to_verifier_setup();
     let verifier_preprocessing =
-        guest::preprocess_verifier_advice_demo(shared_preprocessing, verifier_setup);
+        guest::preprocess_verifier_advice_demo(shared_preprocessing, verifier_setup, None);
     let prove_advice_demo = guest::build_prover_advice_demo(program, prover_preprocessing);
     let verify_advice_demo = guest::build_verifier_advice_demo(verifier_preprocessing);
 

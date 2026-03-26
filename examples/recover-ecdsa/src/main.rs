@@ -31,11 +31,12 @@ pub fn main() {
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_recover(target_dir);
 
-    let shared_preprocessing = guest::preprocess_shared_recover(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_recover(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_recover(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_recover(
         shared_preprocessing,
         prover_preprocessing.generators.to_verifier_setup(),
+        None,
     );
 
     if save_to_disk {

@@ -1,8 +1,12 @@
 use std::fs::File;
 
+use crate::zkvm::config::OneHotParams;
+use crate::zkvm::witness::CommittedPolynomial;
 use crate::{
+    curve::Bn254Curve,
     field::JoltField,
     poly::opening_proof::ProverOpeningAccumulator,
+    poly::opening_proof::{OpeningId, SumcheckId},
     poly::{
         commitment::commitment_scheme::CommitmentScheme, commitment::dory::DoryCommitmentScheme,
     },
@@ -35,6 +39,51 @@ pub mod registers;
 pub mod spartan;
 pub mod verifier;
 pub mod witness;
+
+pub(crate) fn stage8_opening_ids(
+    one_hot_params: &OneHotParams,
+    include_trusted_advice: bool,
+    include_untrusted_advice: bool,
+) -> Vec<OpeningId> {
+    let mut opening_ids = Vec::new();
+
+    opening_ids.push(OpeningId::committed(
+        CommittedPolynomial::RamInc,
+        SumcheckId::IncClaimReduction,
+    ));
+    opening_ids.push(OpeningId::committed(
+        CommittedPolynomial::RdInc,
+        SumcheckId::IncClaimReduction,
+    ));
+
+    for i in 0..one_hot_params.instruction_d {
+        opening_ids.push(OpeningId::committed(
+            CommittedPolynomial::InstructionRa(i),
+            SumcheckId::HammingWeightClaimReduction,
+        ));
+    }
+    for i in 0..one_hot_params.bytecode_d {
+        opening_ids.push(OpeningId::committed(
+            CommittedPolynomial::BytecodeRa(i),
+            SumcheckId::HammingWeightClaimReduction,
+        ));
+    }
+    for i in 0..one_hot_params.ram_d {
+        opening_ids.push(OpeningId::committed(
+            CommittedPolynomial::RamRa(i),
+            SumcheckId::HammingWeightClaimReduction,
+        ));
+    }
+
+    if include_trusted_advice {
+        opening_ids.push(OpeningId::TrustedAdvice(SumcheckId::AdviceClaimReduction));
+    }
+    if include_untrusted_advice {
+        opening_ids.push(OpeningId::UntrustedAdvice(SumcheckId::AdviceClaimReduction));
+    }
+
+    opening_ids
+}
 
 // Scoped CPU profiler for performance analysis. Feature-gated by "pprof".
 // Usage: let _guard = pprof_scope!("label");
@@ -121,6 +170,7 @@ pub fn fiat_shamir_preamble(
     program_io: &JoltDevice,
     ram_K: usize,
     trace_length: usize,
+    entry_address: u64,
     transcript: &mut impl Transcript,
 ) {
     transcript.append_u64(b"max_input_size", program_io.memory_layout.max_input_size);
@@ -131,12 +181,15 @@ pub fn fiat_shamir_preamble(
     transcript.append_u64(b"panic", program_io.panic as u64);
     transcript.append_u64(b"ram_K", ram_K as u64);
     transcript.append_u64(b"trace_length", trace_length as u64);
+    transcript.append_u64(b"entry_address", entry_address);
 }
 
 #[cfg(feature = "prover")]
-pub type RV64IMACProver<'a> = JoltCpuProver<'a, Fr, DoryCommitmentScheme, Blake2bTranscript>;
-pub type RV64IMACVerifier<'a> = JoltVerifier<'a, Fr, DoryCommitmentScheme, Blake2bTranscript>;
-pub type RV64IMACProof = JoltProof<Fr, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACProver<'a> =
+    JoltCpuProver<'a, Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACVerifier<'a> =
+    JoltVerifier<'a, Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACProof = JoltProof<Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
 
 pub type HachiPcs = crate::poly::commitment::hachi::JoltHachiCommitmentScheme<
     {
@@ -145,10 +198,20 @@ pub type HachiPcs = crate::poly::commitment::hachi::JoltHachiCommitmentScheme<
     crate::poly::commitment::hachi::Fp128OneHot64Config,
 >;
 #[cfg(feature = "prover")]
-pub type RV64IMACHachiProver<'a> =
-    JoltCpuProver<'a, crate::field::fp128::JoltFp128, HachiPcs, Blake2bTranscript>;
-pub type RV64IMACHachiVerifier<'a> =
-    JoltVerifier<'a, crate::field::fp128::JoltFp128, HachiPcs, Blake2bTranscript>;
+pub type RV64IMACHachiProver<'a> = JoltCpuProver<
+    'a,
+    crate::field::fp128::JoltFp128,
+    crate::curve::fp128_curve::Fp128Curve,
+    HachiPcs,
+    Blake2bTranscript,
+>;
+pub type RV64IMACHachiVerifier<'a> = JoltVerifier<
+    'a,
+    crate::field::fp128::JoltFp128,
+    crate::curve::fp128_curve::Fp128Curve,
+    HachiPcs,
+    Blake2bTranscript,
+>;
 
 pub trait Serializable: CanonicalSerialize + CanonicalDeserialize + Sized {
     /// Gets the byte size of the serialized data
@@ -182,16 +245,6 @@ pub trait Serializable: CanonicalSerialize + CanonicalDeserialize + Sized {
     fn deserialize_from_bytes(bytes: &[u8]) -> Result<Self> {
         let cursor = Cursor::new(bytes);
         Ok(Self::deserialize_compressed(cursor)?)
-    }
-
-    /// Deserializes data from bytes but skips checks for performance
-    fn deserialize_from_bytes_unchecked(bytes: &[u8]) -> Result<Self> {
-        let cursor = Cursor::new(bytes);
-        Ok(Self::deserialize_with_mode(
-            cursor,
-            ark_serialize::Compress::Yes,
-            ark_serialize::Validate::No,
-        )?)
     }
 }
 

@@ -1,11 +1,14 @@
+use crate::curve::{Bn254Curve, JoltCurve};
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
-use crate::poly::commitment::commitment_scheme::StreamingCommitmentScheme;
+use crate::poly::commitment::commitment_scheme::{StreamingCommitmentScheme, ZkEvalCommitment};
+use crate::utils::errors::ProofVerifyError;
+use crate::zkvm::bytecode::PreprocessingError;
+use crate::zkvm::verifier::BlindfoldSetup;
 
 use crate::guest::program::Program;
 use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
-use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::proof_serialization::JoltProof;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::zkvm::verifier::JoltVerifier;
@@ -17,23 +20,48 @@ pub fn preprocess(
     guest: &Program,
     max_trace_length: usize,
     verifier_setup: <DoryCommitmentScheme as CommitmentScheme>::VerifierSetup,
-) -> JoltVerifierPreprocessing<ark_bn254::Fr, DoryCommitmentScheme> {
-    let (bytecode, memory_init, program_size) = guest.decode();
+    blindfold_setup: Option<BlindfoldSetup<Bn254Curve>>,
+) -> Result<
+    JoltVerifierPreprocessing<ark_bn254::Fr, Bn254Curve, DoryCommitmentScheme>,
+    PreprocessingError,
+> {
+    let shared = preprocess_shared(guest, max_trace_length)?;
+    Ok(JoltVerifierPreprocessing::new(
+        shared,
+        verifier_setup,
+        blindfold_setup,
+    ))
+}
+
+fn preprocess_shared(
+    guest: &Program,
+    max_trace_length: usize,
+) -> Result<JoltSharedPreprocessing, PreprocessingError> {
+    let (bytecode, memory_init, program_size, e_entry) = guest.decode();
 
     let mut memory_config = guest.memory_config;
     memory_config.program_size = Some(program_size);
     let memory_layout = MemoryLayout::new(&memory_config);
-    let shared =
-        JoltSharedPreprocessing::new(bytecode, memory_layout, memory_init, max_trace_length);
-    JoltVerifierPreprocessing::new(shared, verifier_setup)
+    JoltSharedPreprocessing::new(
+        bytecode,
+        memory_layout,
+        memory_init,
+        max_trace_length,
+        e_entry,
+    )
 }
 
-pub fn verify<F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, FS: Transcript>(
+pub fn verify<
+    F: JoltField,
+    C: JoltCurve<F = F>,
+    PCS: StreamingCommitmentScheme<Field = F> + ZkEvalCommitment<C>,
+    FS: Transcript,
+>(
     inputs_bytes: &[u8],
     trusted_advice_commitment: Option<<PCS as CommitmentScheme>::Commitment>,
     outputs_bytes: &[u8],
-    proof: JoltProof<F, PCS, FS>,
-    preprocessing: &JoltVerifierPreprocessing<F, PCS>,
+    proof: JoltProof<F, C, PCS, FS>,
+    preprocessing: &JoltVerifierPreprocessing<F, C, PCS>,
 ) -> Result<(), ProofVerifyError> {
     use common::jolt_device::JoltDevice;
     let memory_layout = &preprocessing.shared.memory_layout;
@@ -58,6 +86,5 @@ pub fn verify<F: JoltField, PCS: StreamingCommitmentScheme<Field = F>, FS: Trans
         trusted_advice_commitment,
         None,
     )?;
-    verifier.verify().unwrap();
-    Ok(())
+    verifier.verify()
 }

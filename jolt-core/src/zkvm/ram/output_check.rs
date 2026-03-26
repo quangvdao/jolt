@@ -1,3 +1,9 @@
+#[cfg(feature = "zk")]
+use crate::poly::opening_proof::OpeningId;
+#[cfg(feature = "zk")]
+use crate::subprotocols::blindfold::{
+    InputClaimConstraint, OutputClaimConstraint, ProductTerm, ValueSource,
+};
 use crate::{
     field::JoltField,
     poly::{
@@ -116,6 +122,71 @@ impl<F: JoltField> SumcheckInstanceParams<F> for OutputSumcheckParams<F> {
         debug_assert_eq!(addr_challenges.len(), self.log_K());
         OpeningPoint::<LITTLE_ENDIAN, F>::new(addr_challenges).match_endianness()
     }
+
+    #[cfg(feature = "zk")]
+    fn input_claim_constraint(&self) -> InputClaimConstraint {
+        InputClaimConstraint::default()
+    }
+
+    #[cfg(feature = "zk")]
+    fn input_constraint_challenge_values(&self, _: &dyn OpeningAccumulator<F>) -> Vec<F> {
+        Vec::new()
+    }
+
+    #[cfg(feature = "zk")]
+    fn output_claim_constraint(&self) -> Option<OutputClaimConstraint> {
+        // expected_output_claim = eq_eval * io_mask_eval * (val_final - val_io_eval)
+        //                       = eq_eval * io_mask_eval * val_final - eq_eval * io_mask_eval * val_io_eval
+        //
+        // Challenge layout:
+        //   Challenge(0) = eq_eval * io_mask_eval
+        //   Challenge(1) = -eq_eval * io_mask_eval * val_io_eval (constant term)
+        let val_final_opening =
+            OpeningId::virt(VirtualPolynomial::RamValFinal, SumcheckId::RamOutputCheck);
+
+        let terms = vec![
+            // eq*io_mask * val_final
+            ProductTerm::scaled(
+                ValueSource::Challenge(0),
+                vec![ValueSource::Opening(val_final_opening)],
+            ),
+            // -eq*io_mask*val_io (constant term, no opening factors)
+            ProductTerm::single(ValueSource::Challenge(1)),
+        ];
+
+        Some(OutputClaimConstraint::sum_of_products(terms))
+    }
+
+    #[cfg(feature = "zk")]
+    fn output_constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
+        self.constraint_challenge_values(sumcheck_challenges)
+    }
+}
+
+impl<F: JoltField> OutputSumcheckParams<F> {
+    pub fn constraint_challenge_values(&self, sumcheck_challenges: &[F::Challenge]) -> Vec<F> {
+        let r_address = &self.r_address;
+        let r_address_prime = self.normalize_opening_point(sumcheck_challenges).r;
+        let program_io = &self.program_io;
+
+        let io_mask = RangeMaskPolynomial::<F>::new(
+            remap_address(
+                program_io.memory_layout.input_start,
+                &program_io.memory_layout,
+            )
+            .unwrap() as u128,
+            remap_address(RAM_START_ADDRESS, &program_io.memory_layout).unwrap() as u128,
+        );
+
+        let eq_eval: F = EqPolynomial::<F>::mle(r_address, &r_address_prime);
+        let io_mask_eval = io_mask.evaluate_mle(&r_address_prime);
+        let val_io_eval: F = super::eval_io_mle::<F>(program_io, &r_address_prime);
+
+        let eq_io_mask = eq_eval * io_mask_eval;
+        let neg_eq_io_mask_val_io = -eq_io_mask * val_io_eval;
+
+        vec![eq_io_mask, neg_eq_io_mask_val_io]
+    }
 }
 
 #[derive(Allocative)]
@@ -133,6 +204,10 @@ pub struct OutputSumcheckProver<F: JoltField> {
     /// i.e. io_mask(k) = 1 if k is in the "IO" region of memory,
     /// and 0 otherwise.
     io_mask: MultilinearPolynomial<F>,
+    /// Number of initial address variables where q_constant = q_quadratic = 0,
+    /// allowing us to skip the expensive fold computation.
+    /// Equal to min(v_2(io_start), v_2(io_end)) where v_2 is the 2-adic valuation.
+    num_zero_address_vars: usize,
     #[allocative(skip)]
     pub params: OutputSumcheckParams<F>,
 }
@@ -169,11 +244,21 @@ impl<F: JoltField> OutputSumcheckProver<F> {
 
         let eq_r_address = GruenSplitEqPolynomial::new(&params.r_address, BindingOrder::LowToHigh);
 
+        // io_mask is 1 on [io_start, io_end) and 0 elsewhere. With LowToHigh binding,
+        // round j pairs indices (2g, 2g+1) which differ in bit x_j. The pair cannot
+        // straddle the block boundary as long as 2^(j+1) divides both io_start and io_end.
+        // When io_mask[2g] == io_mask[2g+1] for all g, the fold produces q_constant = 0
+        // (because val_final == val_io on the I/O region) and q_quadratic = 0 (because
+        // io1 - io0 = 0). This lets us skip the expensive par_fold_out_in_unreduced.
+        let num_zero_address_vars =
+            (io_start.trailing_zeros().min(io_end.trailing_zeros()) as usize).min(K.log_2());
+
         Self {
             val_final: final_ram_state.to_vec().into(),
             val_io: val_io.into(),
             eq_r_address,
             io_mask: io_mask.into(),
+            num_zero_address_vars,
             params,
         }
     }
@@ -187,6 +272,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OutputSumchec
     #[tracing::instrument(skip_all, name = "OutputSumcheckProver::compute_message")]
     fn compute_message(&mut self, round: usize, previous_claim: F) -> UniPoly<F> {
         if self.params.is_internal_cycle_gap_round(round) {
+            let two_inv = F::from_u64(2).inverse().unwrap();
+            return UniPoly::from_coeff(vec![previous_claim * two_inv]);
+        }
+
+        if round < self.num_zero_address_vars {
             let two_inv = F::from_u64(2).inverse().unwrap();
             return UniPoly::from_coeff(vec![previous_claim * two_inv]);
         }
@@ -250,13 +340,11 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OutputSumchec
     fn cache_openings(
         &self,
         accumulator: &mut ProverOpeningAccumulator<F>,
-        transcript: &mut T,
         sumcheck_challenges: &[F::Challenge],
     ) {
         let Self { val_final, .. } = self;
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         accumulator.append_virtual(
-            transcript,
             VirtualPolynomial::RamValFinal,
             SumcheckId::RamOutputCheck,
             opening_point.clone(),
@@ -329,12 +417,10 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OutputSumch
     fn cache_openings(
         &self,
         accumulator: &mut VerifierOpeningAccumulator<F>,
-        transcript: &mut T,
         sumcheck_challenges: &[<F as JoltField>::Challenge],
     ) {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
         accumulator.append_virtual(
-            transcript,
             VirtualPolynomial::RamValFinal,
             SumcheckId::RamOutputCheck,
             opening_point.clone(),

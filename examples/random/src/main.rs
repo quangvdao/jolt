@@ -7,11 +7,12 @@ pub fn main() {
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_rand(target_dir);
 
-    let shared_preprocessing = guest::preprocess_shared_rand(&mut program);
+    let shared_preprocessing = guest::preprocess_shared_rand(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_rand(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_rand(
         shared_preprocessing,
         prover_preprocessing.generators.to_verifier_setup(),
+        None,
     );
 
     let prove = guest::build_prover_rand(program, prover_preprocessing);

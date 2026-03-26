@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use crate::poly::opening_proof::BatchPolynomialSource;
 use crate::transcripts::Transcript;
 use crate::{
+    curve::JoltCurve,
     field::JoltField,
     poly::commitment::dory::DoryLayout,
     poly::multilinear_polynomial::MultilinearPolynomial,
@@ -117,6 +118,24 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         gens: &Self::ProverSetup,
     ) -> (Vec<Self::Commitment>, Self::BatchOpeningHint);
 
+    /// Homomorphically combines multiple commitments into a single commitment, computed as a
+    /// linear combination with the given coefficients.
+    fn combine_commitments<C: Borrow<Self::Commitment>>(
+        _commitments: &[C],
+        _coeffs: &[Self::Field],
+    ) -> Self::Commitment {
+        todo!("`combine_commitments` should be on a separate `AdditivelyHomomorphic` trait")
+    }
+
+    /// Homomorphically combines multiple opening proof hints into a single hint, computed as a
+    /// linear combination with the given coefficients.
+    fn combine_hints(
+        _hints: Vec<Self::OpeningProofHint>,
+        _coeffs: &[Self::Field],
+    ) -> Self::OpeningProofHint {
+        unimplemented!()
+    }
+
     fn prove<ProofTranscript: Transcript>(
         &self,
         setup: &Self::ProverSetup,
@@ -125,7 +144,7 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         hint: Option<Self::OpeningProofHint>,
         transcript: &mut ProofTranscript,
         commitment: &Self::Commitment,
-    ) -> Self::Proof;
+    ) -> (Self::Proof, Option<Self::Field>);
 
     fn verify<ProofTranscript: Transcript>(
         &self,
@@ -215,6 +234,31 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         _one_hot_log_k_chunk: usize,
     ) -> Result<(), ProofVerifyError> {
         Ok(())
+    }
+}
+
+pub trait ZkEvalCommitment<C: JoltCurve>: CommitmentScheme {
+    /// Returns the evaluation commitment (e.g. y_com) if present in the proof.
+    fn eval_commitment(proof: &Self::BatchedProof) -> Option<C::G1>;
+
+    /// Returns the generators used for evaluation commitments in the prover setup.
+    fn eval_commitment_gens(setup: &Self::ProverSetup) -> Option<(C::G1, C::G1)>;
+
+    /// Returns the generators used for evaluation commitments in the verifier setup.
+    fn eval_commitment_gens_verifier(setup: &Self::VerifierSetup) -> Option<(C::G1, C::G1)>;
+
+    /// Extracts the y_blinding scalar from a batched proof (used in ZK mode).
+    #[cfg(feature = "zk")]
+    fn eval_blinding(proof: &Self::BatchedProof) -> Option<Self::Field> {
+        let _ = proof;
+        None
+    }
+
+    /// Extracts G1 generators and blinding generator from the prover setup for Pedersen commitments.
+    /// Returns None for PCS that don't support ZK Pedersen commitments.
+    #[cfg(feature = "zk")]
+    fn zk_generators(_setup: &Self::ProverSetup, _count: usize) -> Option<(Vec<C::G1>, C::G1)> {
+        None
     }
 }
 

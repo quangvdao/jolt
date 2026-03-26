@@ -142,7 +142,6 @@ pub fn display_panic_backtrace(emulator_state: &Emulator) {
         }
     };
 
-    // Get panic location from most recent frame.
     let panic_info = call_stack.back().and_then(|last_frame| {
         resolve_frame(&loader, last_frame)
             .map(|resolved| (resolved.function_name, resolved.location))

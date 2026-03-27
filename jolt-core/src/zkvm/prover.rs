@@ -2172,24 +2172,28 @@ impl<
                     SumcheckId::HammingWeightClaimReduction,
                 );
                 polynomial_claims.push((CommittedPolynomial::RdIncRa(i), claim));
+                scaling_factors.push(F::one());
             }
             let (_, rd_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::RdIncMsb,
                 SumcheckId::HammingWeightClaimReduction,
             );
             polynomial_claims.push((CommittedPolynomial::RdIncMsb, rd_msb_claim));
+            scaling_factors.push(F::one());
             for i in 0..self.one_hot_params.inc_onehot_d() {
                 let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                     CommittedPolynomial::RamIncRa(i),
                     SumcheckId::HammingWeightClaimReduction,
                 );
                 polynomial_claims.push((CommittedPolynomial::RamIncRa(i), claim));
+                scaling_factors.push(F::one());
             }
             let (_, ram_msb_claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::RamIncMsb,
                 SumcheckId::HammingWeightClaimReduction,
             );
             polynomial_claims.push((CommittedPolynomial::RamIncMsb, ram_msb_claim));
+            scaling_factors.push(F::one());
         } else {
             let (_ram_inc_point, ram_inc_claim) =
                 self.opening_accumulator.get_committed_polynomial_opening(
@@ -2219,7 +2223,9 @@ impl<
 
             let lagrange_factor: F = r_address_stage7.iter().map(|r| F::one() - *r).product();
             polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
+            scaling_factors.push(lagrange_factor);
             polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
+            scaling_factors.push(lagrange_factor);
         }
 
         for i in 0..self.one_hot_params.instruction_d {

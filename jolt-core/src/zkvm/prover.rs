@@ -3443,6 +3443,27 @@ mod tests {
         assert!(verifier.verify().is_err());
     }
 
+    #[cfg(not(feature = "zk"))]
+    #[test]
+    #[serial]
+    fn verifier_rejects_empty_sumcheck_round_polynomial() {
+        let (verifier_preprocessing, mut proof, program_io) = prove_fibonacci(9);
+        let crate::subprotocols::sumcheck::SumcheckInstanceProof::Clear(stage1) =
+            &mut proof.stage1_sumcheck_proof
+        else {
+            panic!("expected standard sumcheck proof");
+        };
+        stage1.compressed_polys[0].coeffs_except_linear_term.clear();
+
+        let verifier =
+            RV64IMACVerifier::new(&verifier_preprocessing, proof, program_io, None, None).unwrap();
+        assert!(matches!(
+            verifier.verify(),
+            Err(ProofVerifyError::MalformedProof(message))
+                if message.contains("empty compressed sumcheck polynomial")
+        ));
+    }
+
     /// Security property: the verifier must reject a proof when the verifier's preprocessing
     /// has a different entry_address than the one used to generate the proof.
     ///

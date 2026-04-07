@@ -136,6 +136,20 @@ pub trait CommitmentScheme: Clone + Sync + Send + Default + 'static {
         unimplemented!()
     }
 
+    /// Generates a proof of evaluation for a polynomial at a specific point.
+    ///
+    /// # Arguments
+    /// * `setup` - The prover setup for the commitment scheme
+    /// * `poly` - The multilinear polynomial being proved
+    /// * `opening_point` - The point at which the polynomial is evaluated
+    /// * `hint` - An optional hint that helps optimize the proof generation.
+    ///   When `None`, implementations should compute the hint internally if needed.
+    /// * `transcript` - The transcript for Fiat-Shamir transformation
+    ///
+    /// # Returns
+    /// A tuple containing:
+    /// - The proof of the polynomial evaluation at the specified point
+    /// - An optional ZK blinding factor (y_blinding) for use in BlindFold; None for non-ZK schemes
     fn prove<ProofTranscript: Transcript>(
         &self,
         setup: &Self::ProverSetup,

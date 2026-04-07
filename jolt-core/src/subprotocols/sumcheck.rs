@@ -7,7 +7,9 @@ use crate::field::JoltField;
 use crate::poly::commitment::pedersen::PedersenGenerators;
 #[cfg(feature = "zk")]
 use crate::poly::opening_proof::OpeningId;
-use crate::poly::opening_proof::{ProverOpeningAccumulator, VerifierOpeningAccumulator};
+use crate::poly::opening_proof::{
+    AbstractVerifierOpeningAccumulator, ProverOpeningAccumulator, VerifierOpeningAccumulator,
+};
 use crate::poly::unipoly::{CompressedUniPoly, UniPoly};
 use crate::subprotocols::sumcheck_prover::SumcheckInstanceProver;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceVerifier;
@@ -98,11 +100,14 @@ impl BatchedSumcheck {
                     if active {
                         sumcheck.compute_message(round - offset, *previous_claim)
                     } else {
+                        // Variable is "dummy" for this instance: polynomial is independent of it,
+                        // so the round univariate is constant with H(0)=H(1)=previous_claim/2.
                         UniPoly::from_coeff(vec![*previous_claim * two_inv])
                     }
                 })
                 .collect();
 
+            // Linear combination of individual univariate polynomials
             let batched_univariate_poly: UniPoly<F> =
                 univariate_polys.iter().zip(&batching_coeffs).fold(
                     UniPoly::from_coeff(vec![]),
@@ -126,6 +131,7 @@ impl BatchedSumcheck {
 
             #[cfg(test)]
             {
+                // Sanity check
                 let h0 = batched_univariate_poly.evaluate::<F>(&F::zero());
                 let h1 = batched_univariate_poly.evaluate::<F>(&F::one());
                 assert_eq!(
@@ -401,7 +407,9 @@ impl BatchedSumcheck {
 
     pub fn verify<F: JoltField, C: JoltCurve<F = F>, ProofTranscript: Transcript>(
         proof: &SumcheckInstanceProof<F, C, ProofTranscript>,
-        sumcheck_instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>>,
+        sumcheck_instances: Vec<
+            &dyn SumcheckInstanceVerifier<F, ProofTranscript, VerifierOpeningAccumulator<F>>,
+        >,
         opening_accumulator: &mut VerifierOpeningAccumulator<F>,
         transcript: &mut ProofTranscript,
     ) -> Result<(Vec<F>, Vec<F::Challenge>), ProofVerifyError> {
@@ -454,6 +462,8 @@ impl BatchedSumcheck {
                 let offset = sumcheck.round_offset(max_num_rounds);
                 let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
 
+                // Cache polynomial opening claims, to be proven using either an
+                // opening proof or sumcheck (in the case of virtual polynomials).
                 sumcheck.cache_openings(opening_accumulator, r_slice);
                 let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
 
@@ -479,10 +489,14 @@ impl BatchedSumcheck {
 
     /// Verify a standard (non-ZK) sumcheck proof without requiring a curve type.
     /// Used by opening proof reduction which doesn't need ZK mode.
-    pub fn verify_standard<F: JoltField, ProofTranscript: Transcript>(
+    pub fn verify_standard<
+        F: JoltField,
+        ProofTranscript: Transcript,
+        A: AbstractVerifierOpeningAccumulator<F>,
+    >(
         proof: &ClearSumcheckProof<F, ProofTranscript>,
-        sumcheck_instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript>>,
-        opening_accumulator: &mut VerifierOpeningAccumulator<F>,
+        sumcheck_instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, A>>,
+        opening_accumulator: &mut A,
         transcript: &mut ProofTranscript,
     ) -> Result<Vec<F::Challenge>, ProofVerifyError> {
         let max_degree = sumcheck_instances
@@ -522,7 +536,8 @@ impl BatchedSumcheck {
             .iter()
             .zip(batching_coeffs.iter())
             .map(|(sumcheck, coeff)| {
-                let r_slice = &r_sumcheck[max_num_rounds - sumcheck.num_rounds()..];
+                let offset = sumcheck.round_offset(max_num_rounds);
+                let r_slice = &r_sumcheck[offset..offset + sumcheck.num_rounds()];
                 sumcheck.cache_openings(opening_accumulator, r_slice);
                 let claim = sumcheck.expected_output_claim(opening_accumulator, r_slice);
                 claim * coeff
@@ -573,10 +588,11 @@ impl<F: JoltField, ProofTranscript: Transcript> ClearSumcheckProof<F, ProofTrans
             ));
         }
         for i in 0..self.compressed_polys.len() {
-            if self.compressed_polys[i].degree() > degree_bound {
+            let poly_degree = self.compressed_polys[i].degree();
+            if poly_degree == 0 || poly_degree > degree_bound {
                 return Err(ProofVerifyError::InvalidInputLength(
                     degree_bound,
-                    self.compressed_polys[i].degree(),
+                    poly_degree,
                 ));
             }
 

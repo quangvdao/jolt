@@ -6,10 +6,8 @@
 //! necessarily of the same size, each opened at a different point) into a single opening.
 
 use crate::{
-    poly::{
-        matrix_layout::MatrixLayout,
-        rlc_polynomial::{RLCPolynomial, RLCStreamingData, TraceSource},
-    },
+    poly::matrix_layout::MatrixLayout,
+    poly::rlc_polynomial::{RLCPolynomial, RLCStreamingData, TraceSource},
     zkvm::{claim_reductions::AdviceKind, config::OneHotParams},
 };
 use allocative::Allocative;
@@ -19,7 +17,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use super::multilinear_polynomial::MultilinearPolynomial;
+use super::{
+    commitment::commitment_scheme::CommitmentScheme, multilinear_polynomial::MultilinearPolynomial,
+};
 use crate::{
     field::JoltField,
     transcripts::Transcript,
@@ -30,26 +30,30 @@ use crate::{
 /// Constructed by the Jolt prover from trace + preprocessing data.
 /// Each PCS calls methods on the source as needed:
 /// - Dory calls `build_joint_polynomial` to get a streaming RLC polynomial
-/// - Hachi ignores the source and uses ring_coeffs from its OpeningProofHint
+/// - Hachi ignores the source and uses ring coefficients from its opening proof hint
 pub trait BatchPolynomialSource<F: JoltField>: Send + Sync {
     /// Construct the joint (RLC) polynomial: `sum_i coeffs[i] * poly_i`.
-    /// The returned polynomial may evaluate lazily (e.g., streaming from trace data).
+    /// The returned polynomial may evaluate lazily, for example by streaming from trace data.
     fn build_joint_polynomial(&self, coeffs: &[F]) -> MultilinearPolynomial<F>;
 
     fn onehot_index(&self, _cycle_idx: usize, _poly_idx: usize) -> Option<u8> {
         None
     }
+
     fn batch_onehot_indices(&self, cycle_idx: usize, poly_start: usize, buf: &mut [Option<u8>]) {
         for (i, slot) in buf.iter_mut().enumerate() {
             *slot = self.onehot_index(cycle_idx, poly_start + i);
         }
     }
+
     fn num_cycles(&self) -> Option<usize> {
         None
     }
+
     fn onehot_k(&self) -> Option<usize> {
         None
     }
+
     fn num_polys(&self) -> Option<usize> {
         None
     }
@@ -321,6 +325,106 @@ pub trait OpeningAccumulator<F: JoltField> {
         kind: AdviceKind,
         sumcheck: SumcheckId,
     ) -> Option<(OpeningPoint<BIG_ENDIAN, F>, F)>;
+}
+
+/// Extends `OpeningAccumulator` with mutation methods for verifier-side accumulators.
+/// Separates the read-only `get_*` interface from the write-side `append_*` / `flush` / `take`
+/// methods that only verifier accumulators need.
+pub trait AbstractVerifierOpeningAccumulator<F: JoltField>: OpeningAccumulator<F> {
+    fn append_virtual(
+        &mut self,
+        polynomial: VirtualPolynomial,
+        sumcheck: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    );
+
+    fn append_untrusted_advice(
+        &mut self,
+        sumcheck_id: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    );
+
+    fn append_trusted_advice(
+        &mut self,
+        sumcheck_id: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    );
+
+    fn append_dense(
+        &mut self,
+        polynomial: CommittedPolynomial,
+        sumcheck: SumcheckId,
+        opening_point: Vec<F::Challenge>,
+    );
+
+    fn append_sparse(
+        &mut self,
+        polynomials: Vec<CommittedPolynomial>,
+        sumcheck: SumcheckId,
+        opening_point: Vec<F::Challenge>,
+    );
+
+    /// Flush accumulated pending claims to the transcript.
+    fn flush_to_transcript<T: Transcript>(&mut self, transcript: &mut T);
+
+    /// Take pending claims (for ZK mode output commitment).
+    fn take_pending_claims(&mut self) -> Vec<F>;
+}
+
+/// State for Dory batch opening (Stage 8).
+/// This is a generic interface for batch opening proofs.
+#[derive(Clone, Allocative)]
+pub struct DoryOpeningState<F: JoltField> {
+    /// Unified opening point for all polynomials (length = log_k_chunk + log_T)
+    pub opening_point: Vec<F::Challenge>,
+    /// γ^i coefficients for the RLC polynomial
+    pub gamma_powers: Vec<F>,
+    /// (polynomial, claim) pairs at the opening point
+    /// (with Lagrange factors already applied for shorter polys)
+    pub polynomial_claims: Vec<(CommittedPolynomial, F)>,
+}
+
+impl<F: JoltField> DoryOpeningState<F> {
+    /// Build streaming RLC polynomial from this state.
+    /// Streams directly from trace - no witness regeneration needed.
+    /// Advice polynomials are passed separately (not streamed from trace).
+    #[tracing::instrument(skip_all)]
+    pub fn build_streaming_rlc<PCS: CommitmentScheme<Field = F>>(
+        &self,
+        one_hot_params: OneHotParams,
+        trace_source: TraceSource,
+        rlc_streaming_data: Arc<RLCStreamingData>,
+        mut opening_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
+        advice_polys: HashMap<CommittedPolynomial, MultilinearPolynomial<F>>,
+    ) -> (MultilinearPolynomial<F>, PCS::OpeningProofHint) {
+        // Accumulate gamma coefficients per polynomial
+        let mut rlc_map = BTreeMap::new();
+        for (gamma, (poly, _claim)) in self.gamma_powers.iter().zip(self.polynomial_claims.iter()) {
+            *rlc_map.entry(*poly).or_insert(F::zero()) += *gamma;
+        }
+
+        let (poly_ids, coeffs): (Vec<CommittedPolynomial>, Vec<F>) =
+            rlc_map.iter().map(|(k, v)| (*k, *v)).unzip();
+
+        let joint_poly = MultilinearPolynomial::RLC(RLCPolynomial::new_streaming(
+            one_hot_params,
+            rlc_streaming_data,
+            trace_source,
+            poly_ids.clone(),
+            &coeffs,
+            advice_polys,
+            crate::poly::commitment::dory::DoryGlobals::matrix_layout(),
+        ));
+
+        let hints: Vec<PCS::OpeningProofHint> = rlc_map
+            .into_keys()
+            .map(|k| opening_hints.remove(&k).unwrap())
+            .collect();
+
+        let hint = PCS::combine_hints(hints, &coeffs);
+
+        (joint_poly, hint)
+    }
 }
 
 impl<F> Default for ProverOpeningAccumulator<F>
@@ -633,6 +737,71 @@ impl<F: JoltField> OpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
     }
 }
 
+impl<F: JoltField> AbstractVerifierOpeningAccumulator<F> for VerifierOpeningAccumulator<F> {
+    fn append_dense(
+        &mut self,
+        polynomial: CommittedPolynomial,
+        sumcheck: SumcheckId,
+        opening_point: Vec<F::Challenge>,
+    ) {
+        let key = OpeningId::committed(polynomial, sumcheck);
+        let point = OpeningPoint::<BIG_ENDIAN, F>::new(opening_point);
+        self.populate_or_alias_opening(key, point);
+    }
+
+    fn append_sparse(
+        &mut self,
+        polynomials: Vec<CommittedPolynomial>,
+        sumcheck: SumcheckId,
+        opening_point: Vec<F::Challenge>,
+    ) {
+        let point = OpeningPoint::<BIG_ENDIAN, F>::new(opening_point);
+        for label in polynomials.into_iter() {
+            let key = OpeningId::committed(label, sumcheck);
+            self.populate_or_alias_opening(key, point.clone());
+        }
+    }
+
+    fn append_virtual(
+        &mut self,
+        polynomial: VirtualPolynomial,
+        sumcheck: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) {
+        let key = OpeningId::virt(polynomial, sumcheck);
+        self.populate_or_alias_opening(key, opening_point);
+    }
+
+    fn append_untrusted_advice(
+        &mut self,
+        sumcheck_id: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) {
+        let key = OpeningId::UntrustedAdvice(sumcheck_id);
+        self.populate_or_alias_opening(key, opening_point);
+    }
+
+    fn append_trusted_advice(
+        &mut self,
+        sumcheck_id: SumcheckId,
+        opening_point: OpeningPoint<BIG_ENDIAN, F>,
+    ) {
+        let key = OpeningId::TrustedAdvice(sumcheck_id);
+        self.populate_or_alias_opening(key, opening_point);
+    }
+
+    fn flush_to_transcript<T: Transcript>(&mut self, transcript: &mut T) {
+        for claim in self.pending_claims.drain(..) {
+            transcript.append_scalar(b"opening_claim", &claim);
+        }
+        self.pending_claim_ids.clear();
+    }
+
+    fn take_pending_claims(&mut self) -> Vec<F> {
+        std::mem::take(&mut self.pending_claims)
+    }
+}
+
 impl<F> VerifierOpeningAccumulator<F>
 where
     F: JoltField,
@@ -726,8 +895,6 @@ where
             return;
         }
 
-        // ZK mode: claims are not pre-populated — use zero placeholder (matching old behavior).
-        // In ZK mode the actual claim values are proven via BlindFold, not checked directly.
         let claim = F::zero();
         self.pending_claims.push(claim);
         self.pending_claim_ids.push(key);
@@ -740,69 +907,6 @@ where
     #[cfg(test)]
     pub fn compare_to(&mut self, prover_openings: ProverOpeningAccumulator<F>) {
         self.prover_opening_accumulator = Some(prover_openings);
-    }
-
-    pub fn append_dense(
-        &mut self,
-        polynomial: CommittedPolynomial,
-        sumcheck: SumcheckId,
-        opening_point: Vec<F::Challenge>,
-    ) {
-        let key = OpeningId::committed(polynomial, sumcheck);
-        let point = OpeningPoint::<BIG_ENDIAN, F>::new(opening_point);
-        self.populate_or_alias_opening(key, point);
-    }
-
-    pub fn append_sparse(
-        &mut self,
-        polynomials: Vec<CommittedPolynomial>,
-        sumcheck: SumcheckId,
-        opening_point: Vec<F::Challenge>,
-    ) {
-        let point = OpeningPoint::<BIG_ENDIAN, F>::new(opening_point);
-        for label in polynomials.into_iter() {
-            let key = OpeningId::committed(label, sumcheck);
-            self.populate_or_alias_opening(key, point.clone());
-        }
-    }
-
-    pub fn append_virtual(
-        &mut self,
-        polynomial: VirtualPolynomial,
-        sumcheck: SumcheckId,
-        opening_point: OpeningPoint<BIG_ENDIAN, F>,
-    ) {
-        let key = OpeningId::virt(polynomial, sumcheck);
-        self.populate_or_alias_opening(key, opening_point);
-    }
-
-    pub fn append_untrusted_advice(
-        &mut self,
-        sumcheck_id: SumcheckId,
-        opening_point: OpeningPoint<BIG_ENDIAN, F>,
-    ) {
-        let key = OpeningId::UntrustedAdvice(sumcheck_id);
-        self.populate_or_alias_opening(key, opening_point);
-    }
-
-    pub fn append_trusted_advice(
-        &mut self,
-        sumcheck_id: SumcheckId,
-        opening_point: OpeningPoint<BIG_ENDIAN, F>,
-    ) {
-        let key = OpeningId::TrustedAdvice(sumcheck_id);
-        self.populate_or_alias_opening(key, opening_point);
-    }
-
-    pub fn flush_to_transcript<T: Transcript>(&mut self, transcript: &mut T) {
-        for claim in self.pending_claims.drain(..) {
-            transcript.append_scalar(b"opening_claim", &claim);
-        }
-        self.pending_claim_ids.clear();
-    }
-
-    pub fn take_pending_claims(&mut self) -> Vec<F> {
-        std::mem::take(&mut self.pending_claims)
     }
 
     pub fn take_pending_claim_ids(&mut self) -> Vec<OpeningId> {

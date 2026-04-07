@@ -10,8 +10,8 @@ use crate::{
         eq_poly::EqPolynomial,
         multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding},
         opening_proof::{
-            OpeningAccumulator, OpeningPoint, ProverOpeningAccumulator, SumcheckId,
-            VerifierOpeningAccumulator, BIG_ENDIAN, LITTLE_ENDIAN,
+            AbstractVerifierOpeningAccumulator, OpeningAccumulator, OpeningPoint,
+            ProverOpeningAccumulator, SumcheckId, BIG_ENDIAN, LITTLE_ENDIAN,
         },
         range_mask_polynomial::RangeMaskPolynomial,
         split_eq_poly::GruenSplitEqPolynomial,
@@ -308,7 +308,20 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceProver<F, T> for OutputSumchec
             [c0, e]
         });
 
-        eq_r_address.gruen_poly_deg_3(q_constant, q_quadratic, previous_claim)
+        // When phase1_num_rounds < log_T, the input_claim is pre-scaled by
+        // 2^(phase3_cycle_rounds) to compensate for the gap-round halvings that follow.
+        // The raw q_constant and q_quadratic sum to the unscaled claim, so we must
+        // scale them by the same factor to satisfy poly(0) + poly(1) == previous_claim.
+        let gap = self.params.phase3_cycle_rounds();
+        if gap > 0 {
+            eq_r_address.gruen_poly_deg_3(
+                q_constant.mul_pow_2(gap),
+                q_quadratic.mul_pow_2(gap),
+                previous_claim,
+            )
+        } else {
+            eq_r_address.gruen_poly_deg_3(q_constant, q_quadratic, previous_claim)
+        }
     }
 
     #[tracing::instrument(skip_all, name = "OutputSumcheckProver::ingest_challenge")]
@@ -375,16 +388,14 @@ impl<F: JoltField> OutputSumcheckVerifier<F> {
     }
 }
 
-impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OutputSumcheckVerifier<F> {
+impl<F: JoltField, T: Transcript, A: AbstractVerifierOpeningAccumulator<F>>
+    SumcheckInstanceVerifier<F, T, A> for OutputSumcheckVerifier<F>
+{
     fn get_params(&self) -> &dyn SumcheckInstanceParams<F> {
         &self.params
     }
 
-    fn expected_output_claim(
-        &self,
-        accumulator: &VerifierOpeningAccumulator<F>,
-        sumcheck_challenges: &[F::Challenge],
-    ) -> F {
+    fn expected_output_claim(&self, accumulator: &A, sumcheck_challenges: &[F::Challenge]) -> F {
         let val_final_claim = accumulator
             .get_virtual_polynomial_opening(
                 VirtualPolynomial::RamValFinal,
@@ -416,7 +427,7 @@ impl<F: JoltField, T: Transcript> SumcheckInstanceVerifier<F, T> for OutputSumch
 
     fn cache_openings(
         &self,
-        accumulator: &mut VerifierOpeningAccumulator<F>,
+        accumulator: &mut A,
         sumcheck_challenges: &[<F as JoltField>::Challenge],
     ) {
         let opening_point = self.params.normalize_opening_point(sumcheck_challenges);

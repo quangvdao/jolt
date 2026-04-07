@@ -2632,14 +2632,18 @@ mod tests {
     use std::sync::Arc;
 
     use ark_bn254::Fr;
+    #[cfg(not(feature = "zk"))]
     use hachi_pcs::protocol::commitment::CommitmentConfig;
     use serial_test::serial;
 
+    #[cfg(not(feature = "zk"))]
     use crate::curve::fp128_curve::Fp128Curve;
     use crate::curve::Bn254Curve;
+    #[cfg(not(feature = "zk"))]
     use crate::field::fp128::JoltFp128;
     use crate::host;
     use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
+    #[cfg(not(feature = "zk"))]
     use crate::poly::commitment::hachi::{Fp128OneHot64Config, JoltHachiCommitmentScheme};
     #[cfg(feature = "zk")]
     use crate::poly::commitment::pedersen::PedersenGenerators;
@@ -2651,8 +2655,10 @@ mod tests {
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{OpeningAccumulator, SumcheckId},
     };
+    #[cfg(not(feature = "zk"))]
     use crate::transcripts::Blake2bTranscript;
     use crate::zkvm::claim_reductions::AdviceKind;
+    #[cfg(not(feature = "zk"))]
     use crate::zkvm::prover::JoltCpuProver;
     use crate::zkvm::verifier::JoltSharedPreprocessing;
     use crate::zkvm::witness::CommittedPolynomial;
@@ -2669,9 +2675,12 @@ mod tests {
     #[cfg(feature = "host")]
     use jolt_inlines_sha2 as _;
 
+    #[cfg(not(feature = "zk"))]
     type HachiPcs = JoltHachiCommitmentScheme<{ Fp128OneHot64Config::D }, Fp128OneHot64Config>;
+    #[cfg(not(feature = "zk"))]
     type RV64IMACHachiProver<'a> =
         JoltCpuProver<'a, JoltFp128, Fp128Curve, HachiPcs, Blake2bTranscript>;
+    #[cfg(not(feature = "zk"))]
     type RV64IMACHachiVerifier<'a> =
         JoltVerifier<'a, JoltFp128, Fp128Curve, HachiPcs, Blake2bTranscript>;
 
@@ -3652,6 +3661,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "zk"))]
     #[test]
     #[serial]
     fn muldiv_e2e_hachi() {
@@ -3670,6 +3680,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(not(feature = "zk"))]
     fn muldiv_e2e_hachi_inner() {
         let mut program = host::Program::new("muldiv-guest");
         let (bytecode, init_memory_state, _, e_entry) = program.decode();

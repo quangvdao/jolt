@@ -4,7 +4,7 @@ use ark_ff::{BigInt, UniformRand};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
-use hachi_pcs::algebra::Prime128Offset5823;
+use hachi_pcs::algebra::Prime128Offset275;
 use hachi_pcs::{CanonicalField, FieldCore, FieldSampling};
 use num_traits::{One, Zero};
 use rand::Rng;
@@ -23,7 +23,7 @@ use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
 /// hachi prime family, yielding the fastest Solinas reduction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct JoltFp128(pub Prime128Offset5823);
+pub struct JoltFp128(pub Prime128Offset275);
 
 impl Hash for JoltFp128 {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -217,13 +217,13 @@ fn from_limb_slice(limbs: &[u64]) -> JoltFp128 {
     JoltFp128::from_u128((lo as u128) | ((hi as u128) << 64))
 }
 
-/// Reconstruct `Prime128Offset5823` from a canonical 2-limb representation.
+/// Reconstruct `Prime128Offset275` from a canonical 2-limb representation.
 /// The input must already be a valid canonical field element (i.e. < p).
 ///
-/// SAFETY: `Prime128Offset5823` is `repr(transparent)` over `[u64; 2]`.
+/// SAFETY: `Prime128Offset275` is `repr(transparent)` over `[u64; 2]`.
 /// Callers must ensure limbs represent a canonical field element.
 #[inline(always)]
-fn limbs_to_fp128(limbs: [u64; 2]) -> Prime128Offset5823 {
+fn limbs_to_fp128(limbs: [u64; 2]) -> Prime128Offset275 {
     unsafe { transmute(limbs) }
 }
 
@@ -414,8 +414,8 @@ impl AddAssign<UnreducedFp128<4>> for Folded128ProductAccum {
 
 impl Folded128ProductAccum {
     #[inline(always)]
-    pub fn from_mul(a: Prime128Offset5823, b: Prime128Offset5823) -> Self {
-        // SAFETY: Prime128Offset5823 is repr(transparent) over [u64; 2].
+    pub fn from_mul(a: Prime128Offset275, b: Prime128Offset275) -> Self {
+        // SAFETY: Prime128Offset275 is repr(transparent) over [u64; 2].
         let a_limbs: [u64; 2] = unsafe { transmute(a) };
         let b_limbs: [u64; 2] = unsafe { transmute(b) };
         let (a0, a1) = (a_limbs[0], a_limbs[1]);
@@ -519,7 +519,7 @@ impl CanonicalDeserialize for JoltFp128 {
             .map_err(SerializationError::IoError)?;
         let val = u128::from_le_bytes(buf);
         Ok(Self(
-            <Prime128Offset5823 as CanonicalField>::from_canonical_u128_reduced(val),
+            <Prime128Offset275 as CanonicalField>::from_canonical_u128_reduced(val),
         ))
     }
 }
@@ -531,14 +531,14 @@ impl UniformRand for JoltFp128 {
         let lo = rng.next_u64();
         let hi = rng.next_u64();
         let val = (lo as u128) | ((hi as u128) << 64);
-        Self(<Prime128Offset5823 as CanonicalField>::from_canonical_u128_reduced(val))
+        Self(<Prime128Offset275 as CanonicalField>::from_canonical_u128_reduced(val))
     }
 }
 
 impl From<u128> for JoltFp128 {
     #[inline]
     fn from(val: u128) -> Self {
-        Self(<Prime128Offset5823 as CanonicalField>::from_canonical_u128_reduced(val))
+        Self(<Prime128Offset275 as CanonicalField>::from_canonical_u128_reduced(val))
     }
 }
 
@@ -546,7 +546,7 @@ impl JoltField for JoltFp128 {
     const NUM_BYTES: usize = 16;
     const NUM_LIMBS: usize = 2;
 
-    // SAFETY: Prime128Offset5823 is repr(transparent) over u128.
+    // SAFETY: Prime128Offset275 is repr(transparent) over u128.
     // With trivial Montgomery (R=1), these are the multiplicative identity.
     const MONTGOMERY_R: Self = unsafe { transmute(1u128) };
     const MONTGOMERY_R_SQUARE: Self = unsafe { transmute(1u128) };
@@ -592,7 +592,7 @@ impl JoltField for JoltFp128 {
     #[inline]
     fn from_u64(n: u64) -> Self {
         Self(
-            <Prime128Offset5823 as CanonicalField>::from_canonical_u128_checked(n as u128)
+            <Prime128Offset275 as CanonicalField>::from_canonical_u128_checked(n as u128)
                 .expect("u64 must be canonical for Fp128"),
         )
     }
@@ -617,12 +617,12 @@ impl JoltField for JoltFp128 {
 
     #[inline]
     fn from_u128(val: u128) -> Self {
-        Self(<Prime128Offset5823 as CanonicalField>::from_canonical_u128_reduced(val))
+        Self(<Prime128Offset275 as CanonicalField>::from_canonical_u128_reduced(val))
     }
 
     #[inline]
     fn mul_u64(&self, n: u64) -> Self {
-        Self(Prime128Offset5823::solinas_reduce(&self.0.mul_wide_u64(n)))
+        Self(Prime128Offset275::solinas_reduce(&self.0.mul_wide_u64(n)))
     }
 
     #[inline]
@@ -658,7 +658,7 @@ impl JoltField for JoltFp128 {
 
     #[inline(always)]
     fn to_unreduced(&self) -> Self::UnreducedElem {
-        // SAFETY: JoltFp128 is repr(transparent) over Prime128Offset5823,
+        // SAFETY: JoltFp128 is repr(transparent) over Prime128Offset275,
         // which is a newtype over [u64; 2]. UnreducedFp128<2> wraps [u64; 2].
         unsafe { transmute(*self) }
     }
@@ -710,7 +710,7 @@ impl JoltField for JoltFp128 {
         } else {
             // For >128-bit magnitudes, 128x(64*M) needs more than 4 limbs.
             // Reducing the magnitude first avoids truncating high limbs.
-            let mag_reduced = Prime128Offset5823::solinas_reduce(&mag.0);
+            let mag_reduced = Prime128Offset275::solinas_reduce(&mag.0);
             let product = *self * Self(mag_reduced);
             let limbs = product.to_unreduced().0;
             UnreducedFp128([limbs[0], limbs[1], 0, 0])
@@ -719,27 +719,27 @@ impl JoltField for JoltFp128 {
 
     #[inline]
     fn reduce_mul_u64(x: Self::UnreducedMulU64) -> Self {
-        Self(Prime128Offset5823::solinas_reduce(&x.0))
+        Self(Prime128Offset275::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_mul_u128(x: Self::UnreducedMulU128) -> Self {
-        Self(Prime128Offset5823::solinas_reduce(&x.0))
+        Self(Prime128Offset275::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_mul_u128_accum(x: Self::UnreducedMulU128Accum) -> Self {
-        Self(Prime128Offset5823::solinas_reduce(&x.0))
+        Self(Prime128Offset275::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_product(x: Self::UnreducedProduct) -> Self {
-        Self(Prime128Offset5823::solinas_reduce(&x.0))
+        Self(Prime128Offset275::solinas_reduce(&x.0))
     }
 
     #[inline]
     fn reduce_product_accum(x: Self::UnreducedProductAccum) -> Self {
-        Self(Prime128Offset5823::solinas_reduce(&x.normalize_to_limbs()))
+        Self(Prime128Offset275::solinas_reduce(&x.normalize_to_limbs()))
     }
 }
 
@@ -808,7 +808,7 @@ mod tests {
             let mag = BigInt::<3>::new(limbs);
 
             let got = JoltFp128::reduce_product(a.mul_to_product_mag(&mag));
-            let expected = a * JoltFp128(Prime128Offset5823::solinas_reduce(&mag.0));
+            let expected = a * JoltFp128(Prime128Offset275::solinas_reduce(&mag.0));
             assert_eq!(got, expected, "a={a:?}, mag={:?}", mag.0);
         }
     }
@@ -831,7 +831,7 @@ mod tests {
             let mag = BigInt::<4>::new(limbs);
 
             let got = JoltFp128::reduce_product(a.mul_to_product_mag(&mag));
-            let expected = a * JoltFp128(Prime128Offset5823::solinas_reduce(&mag.0));
+            let expected = a * JoltFp128(Prime128Offset275::solinas_reduce(&mag.0));
             assert_eq!(got, expected, "a={a:?}, mag={:?}", mag.0);
         }
     }

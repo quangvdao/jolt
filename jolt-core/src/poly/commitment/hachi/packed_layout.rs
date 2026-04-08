@@ -247,6 +247,7 @@ impl PackedBitLayout {
             compute_num_digits(128, log_basis),
             compute_num_digits_fold(self.r_vars(), challenge_l1_mass, log_basis),
             log_basis,
+            0,
         )
         .expect("invalid packed Hachi layout")
     }

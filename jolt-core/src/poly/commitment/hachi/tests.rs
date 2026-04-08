@@ -18,13 +18,13 @@ use crate::transcripts::{Blake2bTranscript, Transcript};
 use crate::utils::errors::ProofVerifyError;
 use hachi_pcs::algebra::ring::sparse_challenge::SparseChallenge;
 use hachi_pcs::algebra::ring::CyclotomicRing;
+use hachi_pcs::protocol::commitment::presets::fp128::D32OneHot;
 use hachi_pcs::protocol::commitment::utils::flat_matrix::FlatMatrix;
 use hachi_pcs::protocol::commitment::{compute_num_digits, optimal_m_r_split, CommitmentConfig};
-use hachi_pcs::protocol::proof::{HachiProof, HachiProofTail, PackedDigits};
-use hachi_pcs::protocol::SmallTestCommitmentConfig;
+use hachi_pcs::protocol::proof::HachiProof;
 use hachi_pcs::{FieldCore, FromSmallInt, HachiPolyOps};
 
-type Cfg = SmallTestCommitmentConfig;
+type Cfg = D32OneHot;
 type Scheme = JoltHachiCommitmentScheme<{ Cfg::D }, Cfg>;
 
 #[derive(Clone)]
@@ -131,7 +131,8 @@ fn make_test_a_matrix<const D: usize>(
                 .collect()
         })
         .collect();
-    FlatMatrix::from_ring_matrix(&rows)
+    let flat_rows: Vec<CyclotomicRing<Fp128, D>> = rows.into_iter().flatten().collect();
+    FlatMatrix::from_ring_slice(&flat_rows)
 }
 
 fn make_test_challenges<const D: usize>(num_blocks: usize) -> Vec<SparseChallenge> {
@@ -260,10 +261,7 @@ fn polynomial_adapter_compact_scalars() {
 
 #[test]
 fn commit_roundtrip() {
-    // compute_advice_layout hardcodes 64-bit commit bounds (ceil(64/3) = 22
-    // digits), which exceeds SmallTestCommitmentConfig's fixed B matrix width
-    // for large polynomials. Use alpha+1 variables so reduced_vars=1, which
-    // triggers the early-return path and produces a small enough layout.
+    // Keep reduced_vars=1 so this smoke test exercises the smallest advice layout.
     let alpha = Cfg::D.trailing_zeros() as usize;
     let num_vars = alpha + 1;
     let len = 1usize << num_vars;
@@ -571,7 +569,7 @@ fn packed_commit_inner_fast_matches_generic_and_reference_helpers() {
     let log_basis = Cfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ Cfg::D }>(1, block_len, 1);
-    let a_view = a_flat.view::<{ Cfg::D }>();
+    let a_view = a_flat.ring_view::<{ Cfg::D }>(1, block_len);
 
     let generic = packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
     let fast = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
@@ -607,7 +605,7 @@ fn packed_commit_inner_generic_matches_reference_with_multiple_rows() {
     let log_basis = Cfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ Cfg::D }>(2, block_len, 2);
-    let a_view = a_flat.view::<{ Cfg::D }>();
+    let a_view = a_flat.ring_view::<{ Cfg::D }>(2, block_len * 2);
 
     let generic = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
     let small = packed_poly.commit_inner_small(&a_view, 2, 2, num_digits_open, log_basis);
@@ -681,7 +679,7 @@ fn packed_commit_inner_column_sweep_matches_generic_in_k256_singleton_regime() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(1, packed_layout.block_len());
 
     let generic = packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
     let sweep = packed_poly.commit_inner_column_sweep(&a_view, 1, 1, num_digits_open, log_basis);
@@ -730,7 +728,7 @@ fn packed_commit_inner_column_sweep_matches_generic_in_d64_k16_regime() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(2, packed_layout.block_len() * 2);
 
     let generic = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
     let sweep = packed_poly.commit_inner_column_sweep(&a_view, 2, 2, num_digits_open, log_basis);
@@ -850,7 +848,7 @@ fn packed_fast_paths_match_generic_in_d64_regime() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(1, packed_layout.block_len());
     let generic_commit =
         packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
     let fast_commit = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
@@ -934,7 +932,7 @@ fn packed_fast_paths_match_generic_in_k256_singleton_regime() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(1, packed_layout.block_len());
     let generic_commit =
         packed_poly.commit_inner_generic(&a_view, 1, 1, num_digits_open, log_basis);
     let fast_commit = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
@@ -1247,7 +1245,7 @@ fn packed_commit_inner_generic_matches_multi_coeff_helpers_in_d64_k16_regime() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(2, packed_layout.block_len() * 2);
 
     let generic = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
     let small = packed_poly.commit_inner_small(&a_view, 2, 2, num_digits_open, log_basis);
@@ -1334,7 +1332,7 @@ fn packed_fast_path_benchmark_smoke() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(1, packed_layout.block_len());
     let challenges = make_test_challenges::<{ FastCfg::D }>(packed_layout.num_blocks());
 
     let generic_commit_start = Instant::now();
@@ -1384,7 +1382,7 @@ fn packed_k16_commit_inner_benchmark_smoke() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(2, packed_layout.block_len(), 2);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(2, packed_layout.block_len() * 2);
 
     let generic_start = Instant::now();
     let _ = packed_poly.commit_inner_generic(&a_view, 2, 2, num_digits_open, log_basis);
@@ -1423,7 +1421,7 @@ fn packed_k256_commit_inner_benchmark_smoke() {
     let log_basis = FastCfg::decomposition().log_basis;
     let num_digits_open = compute_num_digits(128, log_basis);
     let a_flat = make_test_a_matrix::<{ FastCfg::D }>(1, packed_layout.block_len(), 1);
-    let a_view = a_flat.view::<{ FastCfg::D }>();
+    let a_view = a_flat.ring_view::<{ FastCfg::D }>(1, packed_layout.block_len());
 
     let fast_start = Instant::now();
     let _ = packed_poly.commit_inner_fast_singleton(&a_view, num_digits_open, log_basis);
@@ -1755,14 +1753,8 @@ fn hachi_batch_verify_rejects_truncated_individual_commitments() {
     let pcs = Scheme::default();
     let opening_point = vec![JoltFp128::from_u64(3), JoltFp128::from_u64(5)];
 
-    let packed_poly_proof = ArkBridge(HachiProof {
-        levels: vec![],
-        tail: HachiProofTail::new(PackedDigits::from_i8_digits(&[], 1)),
-    });
-    let indiv_proof = ArkBridge(HachiProof {
-        levels: vec![],
-        tail: HachiProofTail::new(PackedDigits::from_i8_digits(&[], 1)),
-    });
+    let packed_poly_proof = ArkBridge(HachiProof { steps: vec![] });
+    let indiv_proof = ArkBridge(HachiProof { steps: vec![] });
     let proof = HachiBatchedProof {
         packed_poly_proof,
         num_packed_polys: 2,
@@ -1802,10 +1794,7 @@ fn hachi_batch_verify_rejects_invalid_num_packed() {
     let pcs = Scheme::default();
     let opening_point = vec![JoltFp128::from_u64(3), JoltFp128::from_u64(5)];
 
-    let packed_poly_proof = ArkBridge(HachiProof {
-        levels: vec![],
-        tail: HachiProofTail::new(PackedDigits::from_i8_digits(&[], 1)),
-    });
+    let packed_poly_proof = ArkBridge(HachiProof { steps: vec![] });
     let proof = HachiBatchedProof {
         packed_poly_proof,
         num_packed_polys: 0,
@@ -1841,10 +1830,7 @@ fn hachi_batch_verify_rejects_invalid_log_k() {
     let opening_point = vec![JoltFp128::from_u64(3), JoltFp128::from_u64(5)];
     let claim = JoltFp128::from_u64(7);
 
-    let packed_poly_proof = ArkBridge(HachiProof {
-        levels: vec![],
-        tail: HachiProofTail::new(PackedDigits::from_i8_digits(&[], 1)),
-    });
+    let packed_poly_proof = ArkBridge(HachiProof { steps: vec![] });
     let proof = HachiBatchedProof {
         packed_poly_proof,
         num_packed_polys: 1,

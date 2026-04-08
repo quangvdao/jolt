@@ -3,25 +3,25 @@ use crate::transcripts::Transcript as JoltTranscript;
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
-use hachi_pcs::algebra::Prime128Offset5823;
+use hachi_pcs::algebra::Prime128Offset275;
 use hachi_pcs::primitives::serialization::Compress as HachiCompress;
 use hachi_pcs::protocol::transcript::Transcript as HachiTranscript;
 use hachi_pcs::HachiSerialize;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-pub type Fp128 = Prime128Offset5823;
+pub type Fp128 = Prime128Offset275;
 
 #[inline]
 pub fn jolt_to_hachi(f: &JoltFp128) -> Fp128 {
-    // SAFETY: JoltFp128 is repr(transparent) over Prime128Offset5823.
+    // SAFETY: JoltFp128 is repr(transparent) over Prime128Offset275.
     unsafe { std::mem::transmute_copy(f) }
 }
 
 #[inline]
 #[allow(dead_code)]
 pub fn hachi_to_jolt(f: &Fp128) -> JoltFp128 {
-    // SAFETY: JoltFp128 is repr(transparent) over Prime128Offset5823.
+    // SAFETY: JoltFp128 is repr(transparent) over Prime128Offset275.
     unsafe { std::mem::transmute_copy(f) }
 }
 

@@ -9,6 +9,7 @@ use hachi_pcs::protocol::commitment::utils::crt_ntt::NttSlotCache;
 use hachi_pcs::protocol::commitment::utils::flat_matrix::{FlatMatrix, RingMatrixView};
 use hachi_pcs::protocol::commitment::utils::linear::decompose_rows_i8;
 use hachi_pcs::protocol::hachi_poly_ops::{CommitInnerWitness, DecomposeFoldWitness};
+use hachi_pcs::protocol::proof::FlatDigitBlocks;
 use hachi_pcs::HachiError;
 use hachi_pcs::{CanonicalField, FieldCore, HachiPolyOps};
 use rayon::prelude::*;
@@ -441,16 +442,18 @@ impl<
         &self,
         a_matrix: &FlatMatrix<Fp128>,
         _ntt_a: &NttSlotCache<D>,
-        _block_len: usize,
+        n_a: usize,
+        block_len: usize,
         num_digits_commit: usize,
         num_digits_open: usize,
         log_basis: u32,
-    ) -> Result<Vec<Vec<[i8; D]>>, HachiError> {
-        let a_view = a_matrix.view::<D>();
-        let n_a = a_view.num_rows();
+        matrix_stride: usize,
+    ) -> Result<FlatDigitBlocks<D>, HachiError> {
+        debug_assert_eq!(block_len, self.packed_layout.block_len());
+        let a_view = a_matrix.ring_view::<D>(n_a, matrix_stride);
         let output =
             self.commit_inner_output(&a_view, n_a, num_digits_commit, num_digits_open, log_basis);
-        Ok(output.t_hat)
+        Ok(FlatDigitBlocks::from_blocks(output.t_hat))
     }
 
     #[allow(non_snake_case)]
@@ -459,17 +462,19 @@ impl<
         &self,
         a_matrix: &FlatMatrix<Fp128>,
         _ntt_a: &NttSlotCache<D>,
-        _block_len: usize,
+        n_a: usize,
+        block_len: usize,
         num_digits_commit: usize,
         num_digits_open: usize,
         log_basis: u32,
+        matrix_stride: usize,
     ) -> Result<CommitInnerWitness<Fp128, D>, HachiError> {
-        let a_view = a_matrix.view::<D>();
-        let n_a = a_view.num_rows();
+        debug_assert_eq!(block_len, self.packed_layout.block_len());
+        let a_view = a_matrix.ring_view::<D>(n_a, matrix_stride);
         let output =
             self.commit_inner_output(&a_view, n_a, num_digits_commit, num_digits_open, log_basis);
         Ok(CommitInnerWitness {
-            t_hat: output.t_hat,
+            t_hat: FlatDigitBlocks::from_blocks(output.t_hat),
             t: output.t,
         })
     }
@@ -913,8 +918,8 @@ impl<
             })
             .collect::<Vec<_>>();
 
-        let mut t = vec![Vec::new(); num_blocks];
-        let mut t_hat = vec![Vec::new(); num_blocks];
+        let mut t: Vec<Vec<CyclotomicRing<Fp128, D>>> = vec![Vec::new(); num_blocks];
+        let mut t_hat: Vec<Vec<[i8; D]>> = vec![Vec::new(); num_blocks];
         for (block_start, t_chunk, t_hat_chunk) in thread_results {
             for (offset, (t_block, t_hat_block)) in
                 t_chunk.into_iter().zip(t_hat_chunk.into_iter()).enumerate()

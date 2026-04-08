@@ -18,12 +18,13 @@ use crate::utils::small_scalar::SmallScalar;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::constants::HACHI_ONEHOT_CHUNK_THRESHOLD_LOG_T;
 use hachi_pcs::algebra::ring::CyclotomicRing;
+use hachi_pcs::protocol::commitment::presets::fp128::D64StaticBounded;
 use hachi_pcs::protocol::commitment::{
-    compute_num_digits, compute_num_digits_fold, CommitmentConfig, Fp128D64BoundedCommitmentConfig,
-    HachiCommitmentCore, HachiCommitmentLayout, HachiScheduleInputs, RingCommitment,
+    compute_num_digits, compute_num_digits_fold, CommitmentConfig, HachiCommitmentCore,
+    HachiCommitmentLayout, HachiScheduleInputs, RingCommitment,
 };
 use hachi_pcs::protocol::opening_point::BasisMode;
-use hachi_pcs::protocol::proof::{HachiCommitmentHint, HachiProof};
+use hachi_pcs::protocol::proof::{HachiBatchedCommitmentHint, HachiProof};
 use hachi_pcs::protocol::{HachiCommitmentScheme, HachiProverSetup, HachiVerifierSetup};
 use hachi_pcs::CommitmentScheme as HachiCommitmentSchemeTrait;
 use hachi_pcs::{CanonicalField, DensePoly, FieldCore, FromSmallInt, OneHotIndex, OneHotPoly};
@@ -35,11 +36,11 @@ const INITIAL_LOG_BASIS: u32 = 3;
 
 /// Mirror Hachi's bounded D=64 profile while keeping Jolt's level-0 basis fixed.
 pub type Fp128Bounded64Config<const LOG_COMMIT_BOUND: u32> =
-    Fp128D64BoundedCommitmentConfig<LOG_COMMIT_BOUND, INITIAL_LOG_BASIS>;
+    D64StaticBounded<LOG_COMMIT_BOUND, INITIAL_LOG_BASIS, INITIAL_LOG_BASIS>;
 
 pub type Fp128OneHot64Config = Fp128Bounded64Config<1>;
 
-fn level0_layout_params<Cfg: CommitmentConfig>(
+fn level0_layout_params<Cfg: CommitmentConfig<Field = Fp128>>(
     max_num_vars: usize,
     log_basis: u32,
 ) -> (usize, usize) {
@@ -55,7 +56,7 @@ fn level0_layout_params<Cfg: CommitmentConfig>(
     (params.n_a, params.challenge_l1_mass)
 }
 
-fn optimal_advice_m_r_split<Cfg: CommitmentConfig>(
+fn optimal_advice_m_r_split<Cfg: CommitmentConfig<Field = Fp128>>(
     reduced_vars: usize,
     log_basis: u32,
 ) -> (usize, usize) {
@@ -89,7 +90,7 @@ fn optimal_advice_m_r_split<Cfg: CommitmentConfig>(
 }
 
 #[derive(Clone, Default)]
-pub struct JoltHachiCommitmentScheme<const D: usize, Cfg: CommitmentConfig> {
+pub struct JoltHachiCommitmentScheme<const D: usize, Cfg: CommitmentConfig<Field = Fp128>> {
     _cfg: PhantomData<Cfg>,
 }
 
@@ -103,7 +104,7 @@ pub struct HachiBatchedProof<const D: usize> {
 
 #[derive(Clone, Debug)]
 pub struct JoltHachiBatchHint<const D: usize> {
-    hachi_hint: HachiCommitmentHint<Fp128, D>,
+    hachi_hint: HachiBatchedCommitmentHint<Fp128, D>,
     packed_layout: PackedBitLayout,
     num_packed_polys: usize,
     log_k: usize,
@@ -111,7 +112,7 @@ pub struct JoltHachiBatchHint<const D: usize> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct JoltHachiOpeningHint<const D: usize> {
-    hachi_hint: HachiCommitmentHint<Fp128, D>,
+    hachi_hint: HachiBatchedCommitmentHint<Fp128, D>,
     ring_coeffs: Vec<CyclotomicRing<Fp128, D>>,
 }
 
@@ -145,7 +146,7 @@ fn to_hachi_packed_opening_point<const D: usize>(
     packed_layout.reorder_packed_point(&reversed[..log_t], &reversed[log_t..], &rho_le)
 }
 
-fn advice_commit_layout<Cfg: CommitmentConfig>(
+fn advice_commit_layout<Cfg: CommitmentConfig<Field = Fp128>>(
     m_vars: usize,
     r_vars: usize,
     log_basis: u32,
@@ -164,13 +165,14 @@ fn advice_commit_layout<Cfg: CommitmentConfig>(
         compute_num_digits(128, log_basis),
         compute_num_digits_fold(r_vars, challenge_l1_mass, log_basis),
         log_basis,
+        0,
     )
     .unwrap()
 }
 
 /// Compute the advice commit layout using the polynomial's own optimal m/r split
 /// rather than inheriting from the setup envelope.
-fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
+fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig<Field = Fp128>>(
     poly_num_vars: usize,
 ) -> HachiCommitmentLayout {
     let alpha = D.trailing_zeros() as usize;
@@ -184,7 +186,7 @@ fn compute_advice_layout<const D: usize, Cfg: CommitmentConfig>(
     advice_commit_layout::<Cfg>(m_vars, r_vars, INITIAL_LOG_BASIS)
 }
 
-fn choose_packed_layout_for_shape<const D: usize, Cfg: CommitmentConfig>(
+fn choose_packed_layout_for_shape<const D: usize, Cfg: CommitmentConfig<Field = Fp128>>(
     log_k: usize,
     log_t: usize,
     log_packed: usize,
@@ -194,7 +196,7 @@ fn choose_packed_layout_for_shape<const D: usize, Cfg: CommitmentConfig>(
     (packed_layout, hachi_layout)
 }
 
-fn choose_packed_layout_for_dims<const D: usize, Cfg: CommitmentConfig>(
+fn choose_packed_layout_for_dims<const D: usize, Cfg: CommitmentConfig<Field = Fp128>>(
     num_cycles: usize,
     num_polys: usize,
     onehot_k: usize,
@@ -219,7 +221,7 @@ fn compute_packed_setup_layouts<const D: usize, Cfg>(
     log_packed: usize,
 ) -> Vec<HachiCommitmentLayout>
 where
-    Cfg: CommitmentConfig + Default,
+    Cfg: CommitmentConfig<Field = Fp128> + Default,
 {
     let advice_num_vars = max_log_k + max_log_t;
     let advice_layout = compute_advice_layout::<D, Cfg>(advice_num_vars);
@@ -242,16 +244,15 @@ where
     setup_layouts
 }
 
-fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
+fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig<Field = Fp128>>(
     ring_coeffs: Vec<CyclotomicRing<Fp128, D>>,
     setup: &HachiProverSetup<Fp128, D>,
-    layout: &HachiCommitmentLayout,
 ) -> (RingCommitment<Fp128, D>, JoltHachiOpeningHint<D>) {
     let mut dense_poly = DensePoly::from_ring_coeffs(ring_coeffs);
     let (commitment, hachi_hint) = <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<
         Fp128,
         D,
-    >>::commit(&dense_poly, setup, layout)
+    >>::commit(std::slice::from_ref(&dense_poly), setup)
     .expect("Hachi commit failed");
     let ring_coeffs = take(&mut dense_poly.coeffs);
     (
@@ -263,7 +264,7 @@ fn hachi_commit_dense<const D: usize, Cfg: CommitmentConfig>(
     )
 }
 
-fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig, I: OneHotIndex>(
+fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig<Field = Fp128>, I: OneHotIndex>(
     onehot_k: usize,
     indices: Vec<Option<I>>,
     setup: &HachiProverSetup<Fp128, D>,
@@ -275,7 +276,7 @@ fn hachi_commit_onehot<const D: usize, Cfg: CommitmentConfig, I: OneHotIndex>(
     let (commitment, hachi_hint) = <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<
         Fp128,
         D,
-    >>::commit(&onehot_poly, setup, layout)
+    >>::commit(std::slice::from_ref(&onehot_poly), setup)
     .expect("Hachi commit_onehot failed");
     (
         commitment,
@@ -293,11 +294,13 @@ fn fused_build_and_commit<const D: usize, Cfg, F, B>(
     num_cycles: usize,
     num_polys: usize,
     packed_layout: PackedBitLayout,
-    batch_layout: &HachiCommitmentLayout,
     setup: &HachiProverSetup<Fp128, D>,
-) -> (RingCommitment<Fp128, D>, HachiCommitmentHint<Fp128, D>)
+) -> (
+    RingCommitment<Fp128, D>,
+    HachiBatchedCommitmentHint<Fp128, D>,
+)
 where
-    Cfg: CommitmentConfig,
+    Cfg: CommitmentConfig<Field = Fp128>,
     F: Fn(usize, usize) -> Option<u8> + Clone + Send + Sync,
     B: Fn(usize, usize, &mut [Option<u8>]) + Clone + Send + Sync,
 {
@@ -310,16 +313,15 @@ where
     };
 
     <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::commit(
-        &packed_poly,
+        std::slice::from_ref(&packed_poly),
         setup,
-        batch_layout,
     )
     .expect("Hachi packed poly commit failed")
 }
 
 impl<const D: usize, Cfg> CommitmentScheme for JoltHachiCommitmentScheme<D, Cfg>
 where
-    Cfg: CommitmentConfig + Default,
+    Cfg: CommitmentConfig<Field = Fp128> + Default,
 {
     type Field = JoltFp128;
     type Config = ();
@@ -335,6 +337,7 @@ where
         ArkBridge(
             <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::setup_prover(
                 max_num_vars,
+                1,
             ),
         )
     }
@@ -380,7 +383,7 @@ where
             hachi_commit_onehot::<D, Cfg, u8>(onehot.K, indices, &setup.0, &layout)
         } else {
             let ring_coeffs = poly_to_ring_coeffs::<D>(poly);
-            hachi_commit_dense::<D, Cfg>(ring_coeffs, &setup.0, &layout)
+            hachi_commit_dense::<D, Cfg>(ring_coeffs, &setup.0)
         };
         (ArkBridge(commitment), hint)
     }
@@ -396,7 +399,7 @@ where
             .expect("batch_commit requires lazy source");
         let onehot_k = source.onehot_k().unwrap();
         let num_polys = source.num_polys();
-        let (packed_layout, batch_layout) =
+        let (packed_layout, _) =
             choose_packed_layout_for_dims::<D, Cfg>(num_cycles, num_polys, onehot_k);
 
         let index_fn = |c: usize, p: usize| source.onehot_index(c, p);
@@ -409,7 +412,6 @@ where
             num_cycles,
             num_polys,
             packed_layout,
-            &batch_layout,
             &setup.0,
         );
 
@@ -450,7 +452,6 @@ where
                 &mut adapter,
                 &commitment.0,
                 BasisMode::Lagrange,
-                &layout,
             )
         } else {
             let dense_poly = if hint.ring_coeffs.is_empty() {
@@ -467,7 +468,6 @@ where
                 &mut adapter,
                 &commitment.0,
                 BasisMode::Lagrange,
-                &layout,
             )
         }
         .expect("Hachi prove failed");
@@ -487,8 +487,6 @@ where
         let hachi_opening = jolt_to_hachi(opening);
         let mut adapter = JoltToHachiTranscript::new(transcript);
 
-        let layout = compute_advice_layout::<D, Cfg>(opening_point.len());
-
         <HachiCommitmentScheme<D, Cfg> as HachiCommitmentSchemeTrait<Fp128, D>>::verify(
             &proof.0,
             &setup.0,
@@ -497,7 +495,6 @@ where
             &hachi_opening,
             &commitment.0,
             BasisMode::Lagrange,
-            &layout,
         )
         .map_err(|_| ProofVerifyError::InternalError)
     }
@@ -553,7 +550,6 @@ where
             opening_point.len()
         );
         let packed_layout = batch_hint.packed_layout;
-        let packed_hachi_layout = packed_layout.into_hachi_layout::<Cfg>(INITIAL_LOG_BASIS);
         let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, packed_layout);
 
         let hachi_combined = jolt_to_hachi(&combined_claim);
@@ -591,12 +587,10 @@ where
                 &mut adapter,
                 &packed_commitment.0,
                 BasisMode::Lagrange,
-                &packed_hachi_layout,
             )
             .expect("Hachi packed poly prove failed");
 
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
-        let indiv_layout = compute_advice_layout::<D, Cfg>(opening_point.len());
 
         let individual_commitments = &commitments[1..];
         let individual_proofs: Vec<ArkBridge<HachiProof<Fp128>>> = individual_hints
@@ -616,7 +610,6 @@ where
                         &mut adapter,
                         &commitment.0,
                         BasisMode::Lagrange,
-                        &indiv_layout,
                     )
                     .expect("Hachi individual prove failed");
                 ArkBridge(proof)
@@ -689,7 +682,7 @@ where
             ));
         }
         let log_t = opening_point.len() - log_k;
-        let (packed_layout, packed_hachi_layout) =
+        let (packed_layout, _) =
             choose_packed_layout_for_shape::<D, Cfg>(log_k, log_t, selector_vars);
         let packed_point = to_hachi_packed_opening_point::<D>(opening_point, &rho, packed_layout);
 
@@ -709,12 +702,10 @@ where
             &hachi_combined,
             &packed_commitment.0,
             BasisMode::Lagrange,
-            &packed_hachi_layout,
         )
         .map_err(|_| ProofVerifyError::InternalError)?;
 
         let hachi_point = to_hachi_opening_point::<D>(opening_point);
-        let indiv_layout = compute_advice_layout::<D, Cfg>(opening_point.len());
 
         let individual_commitments = &commitments[1..];
         for i in 0..individual_claims.len() {
@@ -729,7 +720,6 @@ where
                 &hachi_claim,
                 &individual_commitments[i].0,
                 BasisMode::Lagrange,
-                &indiv_layout,
             )
             .map_err(|_| ProofVerifyError::InternalError)?;
         }
@@ -786,7 +776,7 @@ where
 
 impl<const D: usize, Cfg> StreamingCommitmentScheme for JoltHachiCommitmentScheme<D, Cfg>
 where
-    Cfg: CommitmentConfig + Default,
+    Cfg: CommitmentConfig<Field = Fp128> + Default,
 {
     type ChunkState = HachiChunkState<D>;
 
@@ -926,7 +916,7 @@ fn pack_field_to_ring<const D: usize>(field_coeffs: &[Fp128]) -> Vec<CyclotomicR
 
 impl<const D: usize, Cfg, C> ZkEvalCommitment<C> for JoltHachiCommitmentScheme<D, Cfg>
 where
-    Cfg: CommitmentConfig + Default,
+    Cfg: CommitmentConfig<Field = Fp128> + Default,
     C: JoltCurve<F = <Self as CommitmentScheme>::Field>,
 {
     fn eval_commitment(_proof: &Self::BatchedProof) -> Option<C::G1> {

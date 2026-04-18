@@ -283,12 +283,16 @@ public helpers expose safe APIs**.
 Under those constraints the clear leverage points, in order of expected
 impact and feasibility, are:
 
-1. **Word-aligned `memset` + shared-alignment `memcmp` overrides (shipped).**
+1. **Memops crate + local `revm-interpreter` hot-path patch (shipped).**
    See section 10.
-   Current default saves ~11.4 M expanded cycles (~2.2 %) on the real mainnet
-   block, at the cost of a ~0.49 M regression (~2.7 %) on the small
-   `ether_transfers_osaka_1M.json` fixture. The target workload here is the
-   mainnet-sized block, so we keep the mainnet win.
+   Current default saves ~45.8 M expanded cycles (~9.0 %) on the real
+   mainnet block relative to the original baseline
+   (`510.28 M -> 464.50 M`).
+   Of that, the `revm` hot-path patch contributes ~34.4 M cycles on top of
+   the memops-only build (`498.93 M -> 464.50 M`).
+   The cost is a ~0.48 M regression (~2.7 %) on the small
+   `ether_transfers_osaka_1M.json` fixture, so this is a deliberate
+   optimization for the mainnet-sized target workload.
 
 2. **RLP / MPT decoder reshape.**
    Rewrite `zeth_mpt::mpt::node::Node::decode` and `resolve_digests` to read
@@ -297,38 +301,32 @@ impact and feasibility, are:
    are a common fast path).
    Medium effort; addresses ranks 3, 4, 10 (~36.8 M cycles).
 
-3. **Byte-array -> word-array representation in hot revm structures.**
+3. **Byte-array -> word-array representation in remaining revm structures.**
    Represent `U256` stack slots and `SharedMemory` as `[u64; N]` with byte
    views for EVM semantics.
-   Big upstream surface, meaningful payoff. This now looks even more attractive
-   because the top remaining hotspots are still `revm` stack swaps and memory
-   writes, not libc-style memops.
+   Big upstream surface, meaningful payoff. After the local
+   `revm-interpreter` patch, the next largest memop rows are no longer stack
+   swaps or `mstore`; the remaining pressure is mostly MPT decoding,
+   allocation, and generic bytecode analysis.
 
-4. **Targeted `revm` patches before a full `memcpy` rewrite.**
-   Patch `revm_interpreter::Stack::{dup,exchange}` and the `mstore` /
-   `SharedMemory` write path to move four `u64` limbs explicitly instead of
-   routing 32-byte `U256` values through generic byte-slice operations.
-   The trace still shows `swap::<1>`, `swap::<2>`, `swap::<3>`, and `mstore`
-   as large memop hotspots.
-
-5. **Shifted-write `memcpy` override.**
+4. **Shifted-write `memcpy` override.**
    Match or beat `compiler_builtins`' mismatched-alignment path (LW on the
    4-byte-aligned source into aligned SW writes through a moving shift/OR
    window). Harder to get right than `memset`; only worth doing once we
    have tests that cover all alignment corners.
 
-6. **Allocator.** Partly out of scope unless swapping `zeroos_runtime_musl`
+5. **Allocator.** Partly out of scope unless swapping `zeroos_runtime_musl`
    for a simpler bump allocator in this example.
 
-## 10. `memops` crate: scope and measurement
+## 10. `memops` crate and `revm` hot-path patch
 
 `examples/stateless-evm/memops/` is a small `no_std` crate that installs
 `#[no_mangle] memset` and `memcmp` (RV64IMAC only) and exposes safe helpers
 (`copy_words` / `zero_words` / `swap_words` / `cmp_words`) in `crate::safe`.
 
-### What we measured
+### Measurement matrix
 
-We measured six variants on the mainnet fixture:
+We measured seven variants on the mainnet fixture:
 
 | Variant | `memcpy` cycles | `memcmp` cycles | `memset` cycles | Total expanded |
 |---|---:|---:|---:|---:|
@@ -338,7 +336,8 @@ We measured six variants on the mainnet fixture:
 | Alignment-minimised overrides  | 119.62 M | 2.91 M | - | 533.25 M |
 | `memset` override only         | 95.78 M | 14.27 M | ~1.4 M | 507.16 M |
 | `memset` + full-reassembly `memcmp` | 95.78 M | 1.29 M | ~1.4 M | 497.36 M |
-| **Shipped: `memset` + shared-alignment `memcmp`** | **95.78 M** | **2.88 M** | **~1.4 M** | **498.93 M** |
+| `memset` + shared-alignment `memcmp` | 95.78 M | 2.88 M | ~1.4 M | 498.93 M |
+| **Shipped: memops + `revm` hot-path patch** | **95.78 M** | **2.88 M** | **~1.4 M** | **464.50 M** |
 
 Interpretation:
 
@@ -362,10 +361,21 @@ Interpretation:
 - `memset` has no second pointer so the alignment-matching concern does
   not apply. Our `SD`-per-8-byte loop straightforwardly beats
   `compiler_builtins`' mixed `SW`/`SB` loop.
+- The local `revm-interpreter` patch then attacks the fixed-width `U256`
+  movers directly:
+  - `Stack::dup` now copies four `u64` limbs explicitly instead of lowering a
+    single `U256` copy through `ptr::copy_nonoverlapping`.
+  - `Stack::exchange` now swaps four `u64` limbs explicitly instead of
+    lowering through `ptr::swap_nonoverlapping`.
+  - `MemoryTr` gained `set_u256_be`, and `SharedMemory` overrides it with an
+    aligned four-word store path. `mstore` now calls that directly.
+  On the mainnet fixture this drops total subword-memop cycles from
+  `227.29 M` to `192.57 M`, and the old `swap::<1>`, `swap::<2>`,
+  `swap::<3>`, and `mstore` rows disappear from the top-20 memop table.
 
-Net shipped win on mainnet: **-11.36 M expanded cycles (-2.2 %)**, clean
-clippy, with a **+0.49 M expanded-cycle (+2.7 %)** regression on the small
-EF fixture.
+Net shipped win on mainnet: **-45.79 M expanded cycles (-9.0 %)** relative
+to the original baseline, clean clippy, with a **+0.48 M expanded-cycle
+(+2.7 %)** regression on the small EF fixture.
 
 ## 11. Instrumentation deltas (reference)
 
@@ -384,7 +394,12 @@ Files touched to produce these numbers:
   - `--keccak-backend {inline,software}` CLI flag.
 - `examples/hash-bench/src/main.rs`: `JOLT_ANALYZE_ONLY` fast-path that skips
   prove/verify for cheap per-call cycle measurement.
-- `Cargo.toml` (workspace): `rustc-demangle = "0.1"` added.
+- `patches/revm-interpreter/`: local crates.io override carrying the
+  `Stack::{dup,exchange}` and `MemoryTr::set_u256_be` hot-path patch.
+- `Cargo.toml` (workspace):
+  - `rustc-demangle = "0.1"` added.
+  - `[patch.crates-io] revm-interpreter = { path = "patches/revm-interpreter" }`
+    added.
 
 Reproduce from branch tip:
 

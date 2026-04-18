@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "50405a27f57f80a96ab9d91e93180bca22217a3a"
+  },
+  "path_in_vcs": "crates/interpreter"
+}

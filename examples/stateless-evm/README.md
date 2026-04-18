@@ -29,6 +29,9 @@ or lie about the post-state root.
 Keccak256 and secp256k1 signature verification inside the guest are
 routed through Jolt inlines (`jolt-inlines-keccak256`,
 `jolt-inlines-secp256k1`), which is why these proofs are tractable.
+This branch also carries a local `revm-interpreter` patch that rewrites
+the hottest `U256` stack and memory moves as explicit 64-bit limb
+operations, rather than byte-slice copies.
 
 ## Layout
 
@@ -39,6 +42,9 @@ routed through Jolt inlines (`jolt-inlines-keccak256`,
 - `host/` — CLI that loads fixtures, pre-recovers signers, compiles
   the guest, and either traces (`--mode analyze`) or prove+verifies
   (`--mode prove`) a block.
+- `patches/revm-interpreter/` — local crates.io override for
+  `revm-interpreter`, used to optimize `Stack::{dup,exchange}` and the
+  `mstore` / `SharedMemory` write path for Jolt's 8-byte memory model.
 - `fixtures/` — committed JSON fixtures:
   - `empty_block_osaka_1M.json` and `ether_transfers_osaka_1M.json`
     from the Ethereum Foundation's `zkevm-benchmark-workload` (v0.0.7).
@@ -63,7 +69,7 @@ cargo run --release -p stateless-evm -- \
     examples/stateless-evm/fixtures/ether_transfers_osaka_1M.json \
     --mode analyze
 
-# Trace a real Ethereum mainnet block (~499M cycles, ~75-80s on a laptop)
+# Trace a real Ethereum mainnet block (~464M cycles, ~65-75s on a laptop)
 cargo run --release -p stateless-evm -- \
     examples/stateless-evm/fixtures/mainnet_block_22974576.json \
     --mode analyze
@@ -98,7 +104,7 @@ analysis complete: cycles=1862817 padded_cycles=2097152 success=true
 `ether_transfers_osaka_1M.json` adds 47 transactions and lands around
 18.2M cycles with the current memops configuration.
 `mainnet_block_22974576.json` is a full-size mainnet
-block (115 txs, 7.6M gas used) and lands at ~499M cycles / 2^29 padded.
+block (115 txs, 7.6M gas used) and lands at ~464M cycles / 2^29 padded.
 
 ## Fixture format
 

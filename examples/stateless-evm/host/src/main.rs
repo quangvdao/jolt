@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use eyre::{bail, Context, Result};
-use guest::{CryptoTraceStats, PreparedStatelessInput, ValidationOutput};
+use guest::{CryptoTraceStats, MemopsTraceStats, PreparedStatelessInput, ValidationOutput};
 use jolt_sdk::{host::Program, F};
 use object::{Object, ObjectSymbol, SymbolKind};
 use stateless::{StatelessInput, UncompressedPublicKey};
@@ -651,6 +651,74 @@ fn log_crypto_stats(name: &str, stats: &CryptoTraceStats) {
     );
 }
 
+fn format_hist8(hist: &[u64; 8]) -> String {
+    hist.iter()
+        .enumerate()
+        .map(|(i, count)| format!("{i}:{count}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn log_memops_stats(name: &str, stats: &MemopsTraceStats) {
+    let avg_memcpy_bytes = if stats.memcpy_calls == 0 {
+        0.0
+    } else {
+        stats.memcpy_bytes as f64 / stats.memcpy_calls as f64
+    };
+    let avg_memmove_bytes = if stats.memmove_calls == 0 {
+        0.0
+    } else {
+        stats.memmove_bytes as f64 / stats.memmove_calls as f64
+    };
+
+    info!(
+        "memops detail: name={name} memcpy_calls={} memcpy_bytes={} avg_memcpy_bytes={avg_memcpy_bytes:.2} memmove_calls={} memmove_bytes={} avg_memmove_bytes={avg_memmove_bytes:.2}",
+        stats.memcpy_calls,
+        stats.memcpy_bytes,
+        stats.memmove_calls,
+        stats.memmove_bytes,
+    );
+    info!(
+        "memops path split: name={name} memcpy_byte_only={} memcpy_aligned_word={} memcpy_misaligned_word={} memmove_forward_byte_only={} memmove_forward_aligned_word={} memmove_forward_misaligned_word={} memmove_backward_byte_only={} memmove_backward_aligned_word={} memmove_backward_misaligned_word={}",
+        stats.memcpy_byte_only_calls,
+        stats.memcpy_aligned_word_calls,
+        stats.memcpy_misaligned_word_calls,
+        stats.memmove_forward_byte_only_calls,
+        stats.memmove_forward_aligned_word_calls,
+        stats.memmove_forward_misaligned_word_calls,
+        stats.memmove_backward_byte_only_calls,
+        stats.memmove_backward_aligned_word_calls,
+        stats.memmove_backward_misaligned_word_calls,
+    );
+
+    let hist = &stats.memcpy_size_hist;
+    let total_hist: u64 = hist.iter().sum();
+    let pct = |count: u64| -> f64 {
+        if total_hist == 0 {
+            0.0
+        } else {
+            100.0 * count as f64 / total_hist as f64
+        }
+    };
+    info!(
+        "memcpy size histogram: name={name} 0..16={} ({:.1}%) 16..32={} ({:.1}%) 32..64={} ({:.1}%) 64..128={} ({:.1}%) 128..256={} ({:.1}%) 256..512={} ({:.1}%) 512..1024={} ({:.1}%) >=1024={} ({:.1}%)",
+        hist[0], pct(hist[0]),
+        hist[1], pct(hist[1]),
+        hist[2], pct(hist[2]),
+        hist[3], pct(hist[3]),
+        hist[4], pct(hist[4]),
+        hist[5], pct(hist[5]),
+        hist[6], pct(hist[6]),
+        hist[7], pct(hist[7]),
+    );
+    info!(
+        "memcpy alignment histograms (mod 8): name={name} src=[{}] dst=[{}] xor=[{}]",
+        format_hist8(&stats.memcpy_src_align_hist),
+        format_hist8(&stats.memcpy_dst_align_hist),
+        format_hist8(&stats.memcpy_align_diff_hist),
+    );
+}
+
 fn make_guest_program() -> Program {
     let mut program = Program::new("stateless-evm-guest");
     program.set_func("stateless_validate");
@@ -784,6 +852,7 @@ fn analyze_single(
     check_expected_success(expected_success, output)?;
     log_trace_stats(name, &guest_binary, &summary.bytecode, &summary.trace);
     log_crypto_stats(name, &output.crypto_stats);
+    log_memops_stats(name, &output.memops_stats);
 
     info!(
         "analysis complete: name={name} cycles={total_cycles} padded_cycles={padded_cycles} success={} block_hash=0x{} elapsed={elapsed:?}",

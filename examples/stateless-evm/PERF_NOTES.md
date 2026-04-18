@@ -321,12 +321,13 @@ impact and feasibility, are:
 ## 10. `memops` crate and `revm` hot-path patch
 
 `examples/stateless-evm/memops/` is a small `no_std` crate that installs
-`#[no_mangle] memset` and `memcmp` (RV64IMAC only) and exposes safe helpers
+`#[no_mangle] memcpy`, `memmove`, `memset`, and `memcmp` (RV64IMAC only),
+collects guest-side `memcpy` / `memmove` telemetry, and exposes safe helpers
 (`copy_words` / `zero_words` / `swap_words` / `cmp_words`) in `crate::safe`.
 
 ### Measurement matrix
 
-We measured seven variants on the mainnet fixture:
+We measured nine mainnet configurations:
 
 | Variant | `memcpy` cycles | `memcmp` cycles | `memset` cycles | Total expanded |
 |---|---:|---:|---:|---:|
@@ -338,6 +339,7 @@ We measured seven variants on the mainnet fixture:
 | `memset` + full-reassembly `memcmp` | 95.78 M | 1.29 M | ~1.4 M | 497.36 M |
 | `memset` + shared-alignment `memcmp` | 95.78 M | 2.88 M | ~1.4 M | 498.93 M |
 | **Shipped: memops + `revm` hot-path patch** | **95.78 M** | **2.88 M** | **~1.4 M** | **464.50 M** |
+| **Current: shifted-word `memcpy` / `memmove` port + shipped stack** | **34.22 M** | **2.88 M** | **~1.4 M** | **429.31 M** |
 
 Interpretation:
 
@@ -349,6 +351,21 @@ Interpretation:
   `(src ^ dst) & 7 != 0` regresses memcpy by ~25 M expanded cycles
   (+26 %) on this block, because the `(src ^ dst) & 7` test fires often
   in MPT / RLP / EVM memory paths.
+- A direct local port of that shifted-word idea, written in explicit
+  `u64` operations and paired with guest-side size/alignment counters,
+  fixes the original mistake.
+  On mainnet it cuts the `memcpy` hotspot from `95.78 M` down to
+  `34.22 M` cycles and total expanded cycles from `464.50 M` down to
+  `429.31 M`.
+  The remaining `memcpy` row in the subword-only hotspot table is now the
+  byte-prefix / byte-tail / partial-load scaffolding; the bulk aligned copy
+  has moved to `LD` / `SD` and therefore disappears from that table.
+  The new counters explain why this matters:
+  `41.7 %` of `memcpy` calls on mainnet take the misaligned-word path,
+  `54.1 %` take the aligned-word path, and only `4.2 %` are short enough
+  to stay byte-only.
+  The size distribution is concentrated in `32..64 B` (`30.9 %`) and
+  `128..256 B` (`34.9 %`) copies, with average size `96.56 B`.
 - `compiler_builtins`'s `memcmp` is a byte loop.
   A full word-reassembly `memcmp` buys the biggest mainnet win
   (`510.28 M -> 497.36 M` total expanded), but it regressed the small
@@ -373,16 +390,21 @@ Interpretation:
   `227.29 M` to `192.57 M`, and the old `swap::<1>`, `swap::<2>`,
   `swap::<3>`, and `mstore` rows disappear from the top-20 memop table.
 
-Net shipped win on mainnet: **-45.79 M expanded cycles (-9.0 %)** relative
-to the original baseline, clean clippy, with a **+0.48 M expanded-cycle
-(+2.7 %)** regression on the small EF fixture.
+Current net win on mainnet: **-80.98 M expanded cycles (-15.9 %)** relative
+to the original `compiler_builtins` baseline, and an additional
+**-35.19 M expanded cycles (-7.6 %)** relative to the previously shipped
+`memset` + shared-alignment `memcmp` + `revm` hot-path build.
+On the small EF transfer fixture this new `memcpy` / `memmove` port lowers
+total expanded cycles from `18.18 M` to `17.77 M`, nearly back to the
+`17.70 M` `compiler_builtins` baseline.
 
 ## 11. Instrumentation deltas (reference)
 
 Files touched to produce these numbers:
 
 - `examples/stateless-evm/guest/src/lib.rs`: `CryptoTraceStats`,
-  `keccak_size_hist_136` histogram, `software-keccak` feature gate.
+  `MemopsTraceStats`, `keccak_size_hist_136` histogram, `software-keccak`
+  feature gate.
 - `examples/stateless-evm/guest/Cargo.toml`: `software-keccak` feature.
 - `examples/stateless-evm/host/Cargo.toml`: added `tracer`, `object`,
   `rustc-demangle`.
@@ -390,8 +412,13 @@ Files touched to produce these numbers:
   - `load_guest_binary` / `load_function_symbols` / `lookup_function_id`
     (ELF symbol table parsing).
   - `log_trace_stats`, `log_opcode_split`, `log_helpers_by_source`,
-    `log_memops_by_function`, `log_crypto_stats`.
+    `log_memops_by_function`, `log_crypto_stats`, `log_memops_stats`.
   - `--keccak-backend {inline,software}` CLI flag.
+- `examples/stateless-evm/memops/src/lib.rs`: `RawMemopsTraceStats` and
+  guest-facing trace reset / snapshot helpers.
+- `examples/stateless-evm/memops/src/riscv_overrides.rs`: shifted-word
+  `memcpy` / `memmove` port, `memset` / `memcmp` overrides, and
+  `memcpy` / `memmove` size-alignment counters.
 - `examples/hash-bench/src/main.rs`: `JOLT_ANALYZE_ONLY` fast-path that skips
   prove/verify for cheap per-call cycle measurement.
 - `patches/revm-interpreter/`: local crates.io override carrying the

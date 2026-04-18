@@ -69,7 +69,7 @@ cargo run --release -p stateless-evm -- \
     examples/stateless-evm/fixtures/ether_transfers_osaka_1M.json \
     --mode analyze
 
-# Trace a real Ethereum mainnet block (~464M cycles, ~65-75s on a laptop)
+# Trace a real Ethereum mainnet block (~429M cycles, ~60-70s on a laptop)
 cargo run --release -p stateless-evm -- \
     examples/stateless-evm/fixtures/mainnet_block_22974576.json \
     --mode analyze
@@ -102,9 +102,9 @@ analysis complete: cycles=1862817 padded_cycles=2097152 success=true
 ```
 
 `ether_transfers_osaka_1M.json` adds 47 transactions and lands around
-18.2M cycles with the current memops configuration.
+17.8M cycles with the current memops configuration.
 `mainnet_block_22974576.json` is a full-size mainnet
-block (115 txs, 7.6M gas used) and lands at ~464M cycles / 2^29 padded.
+block (115 txs, 7.6M gas used) and lands at ~429M cycles / 2^29 padded.
 
 ## Fixture format
 

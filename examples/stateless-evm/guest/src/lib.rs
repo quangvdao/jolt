@@ -46,11 +46,33 @@ pub struct CryptoTraceStats {
     pub keccak_size_hist_136: [u64; 8],
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemopsTraceStats {
+    pub memcpy_calls: u64,
+    pub memcpy_bytes: u64,
+    pub memmove_calls: u64,
+    pub memmove_bytes: u64,
+    pub memcpy_byte_only_calls: u64,
+    pub memcpy_aligned_word_calls: u64,
+    pub memcpy_misaligned_word_calls: u64,
+    pub memmove_forward_byte_only_calls: u64,
+    pub memmove_forward_aligned_word_calls: u64,
+    pub memmove_forward_misaligned_word_calls: u64,
+    pub memmove_backward_byte_only_calls: u64,
+    pub memmove_backward_aligned_word_calls: u64,
+    pub memmove_backward_misaligned_word_calls: u64,
+    pub memcpy_size_hist: [u64; 8],
+    pub memcpy_src_align_hist: [u64; 8],
+    pub memcpy_dst_align_hist: [u64; 8],
+    pub memcpy_align_diff_hist: [u64; 8],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationOutput {
     pub success: bool,
     pub block_hash: [u8; 32],
     pub crypto_stats: CryptoTraceStats,
+    pub memops_stats: MemopsTraceStats,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +158,43 @@ fn snapshot_crypto_stats() -> CryptoTraceStats {
         precompile_p256verify_fallbacks: PRECOMPILE_P256VERIFY_FALLBACKS.load(Ordering::Relaxed),
         keccak_size_hist_136,
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn reset_memops_stats() {
+    stateless_evm_memops::reset_trace_stats();
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+fn reset_memops_stats() {}
+
+#[cfg(target_arch = "riscv64")]
+fn snapshot_memops_stats() -> MemopsTraceStats {
+    let stats = stateless_evm_memops::snapshot_trace_stats();
+    MemopsTraceStats {
+        memcpy_calls: stats.memcpy_calls,
+        memcpy_bytes: stats.memcpy_bytes,
+        memmove_calls: stats.memmove_calls,
+        memmove_bytes: stats.memmove_bytes,
+        memcpy_byte_only_calls: stats.memcpy_byte_only_calls,
+        memcpy_aligned_word_calls: stats.memcpy_aligned_word_calls,
+        memcpy_misaligned_word_calls: stats.memcpy_misaligned_word_calls,
+        memmove_forward_byte_only_calls: stats.memmove_forward_byte_only_calls,
+        memmove_forward_aligned_word_calls: stats.memmove_forward_aligned_word_calls,
+        memmove_forward_misaligned_word_calls: stats.memmove_forward_misaligned_word_calls,
+        memmove_backward_byte_only_calls: stats.memmove_backward_byte_only_calls,
+        memmove_backward_aligned_word_calls: stats.memmove_backward_aligned_word_calls,
+        memmove_backward_misaligned_word_calls: stats.memmove_backward_misaligned_word_calls,
+        memcpy_size_hist: stats.memcpy_size_hist,
+        memcpy_src_align_hist: stats.memcpy_src_align_hist,
+        memcpy_dst_align_hist: stats.memcpy_dst_align_hist,
+        memcpy_align_diff_hist: stats.memcpy_align_diff_hist,
+    }
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+fn snapshot_memops_stats() -> MemopsTraceStats {
+    MemopsTraceStats::default()
 }
 
 fn be_bytes_to_limbs(bytes: &[u8; 32]) -> [u64; 4] {
@@ -475,6 +534,7 @@ pub fn stateless_validate(input: &[u8]) -> ValidationOutput {
     stateless_evm_memops::link_overrides();
     install_jolt_crypto();
     reset_crypto_stats();
+    reset_memops_stats();
 
     let prepared = match postcard::from_bytes::<PreparedStatelessInput>(input) {
         Ok(prepared) => prepared,
@@ -483,6 +543,7 @@ pub fn stateless_validate(input: &[u8]) -> ValidationOutput {
                 success: false,
                 block_hash: [0u8; 32],
                 crypto_stats: CryptoTraceStats::default(),
+                memops_stats: MemopsTraceStats::default(),
             };
         }
     };
@@ -504,10 +565,12 @@ pub fn stateless_validate(input: &[u8]) -> ValidationOutput {
     )
     .is_ok();
     let crypto_stats = snapshot_crypto_stats();
+    let memops_stats = snapshot_memops_stats();
 
     ValidationOutput {
         success,
         block_hash,
         crypto_stats,
+        memops_stats,
     }
 }

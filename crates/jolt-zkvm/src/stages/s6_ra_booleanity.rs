@@ -49,10 +49,7 @@ impl<F: Field> RaBooleanityStage<F> {
     pub fn new(ra_polys: Vec<Vec<F>>, eq_point: Vec<F>, gamma_powers: Vec<F>) -> Self {
         let num_vars = eq_point.len();
         let expected_len = 1usize << num_vars;
-        assert!(
-            !ra_polys.is_empty(),
-            "must have at least one RA polynomial"
-        );
+        assert!(!ra_polys.is_empty(), "must have at least one RA polynomial");
         assert_eq!(
             ra_polys.len(),
             gamma_powers.len(),
@@ -116,10 +113,7 @@ impl<F: Field, T: Transcript> ProverStage<F, T> for RaBooleanityStage<F> {
     }
 
     fn extract_claims(&mut self, challenges: &[F], _final_eval: F) -> Vec<ProverClaim<F>> {
-        let ra_polys = self
-            .ra_polys
-            .take()
-            .expect("extract_claims() called twice");
+        let ra_polys = self.ra_polys.take().expect("extract_claims() called twice");
 
         // HighToLow binding: challenges are MSB-first, no reversal needed.
         let eval_point = challenges.to_vec();
@@ -176,15 +170,14 @@ impl<F: Field> SumcheckCompute<F> for RaBooleanityWitness<F> {
         // t₁(2) = Σ_j eq_rest[j] · Σ_i γ^i · (ra_i(2,j)² - ra_i(2,j))
         let mut t1_at_2 = F::zero();
         for j in 0..half {
-            let (eq_lo, eq_hi) =
-                self.eq
-                    .sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
+            let (eq_lo, eq_hi) = self
+                .eq
+                .sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
             let eq_rest = eq_lo + eq_hi;
 
             let mut inner_2 = F::zero();
             for (i, ra) in self.ra_polys.iter().enumerate() {
-                let (ra_lo, ra_hi) =
-                    ra.sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
+                let (ra_lo, ra_hi) = ra.sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
                 let ra_at_2 = two * ra_hi - ra_lo;
                 inner_2 += self.gamma_powers[i] * ra_at_2 * (ra_at_2 - one);
             }
@@ -205,9 +198,9 @@ impl<F: Field> SumcheckCompute<F> for RaBooleanityWitness<F> {
 
         // HighToLow: pair [j] (MSB=0) with [j + half] (MSB=1).
         for j in 0..half {
-            let (eq_lo, eq_hi) =
-                self.eq
-                    .sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
+            let (eq_lo, eq_hi) = self
+                .eq
+                .sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
             let eq_d = eq_hi - eq_lo;
 
             // Accumulate γ-batched booleanity sum at t=0, t=2, t=3.
@@ -216,8 +209,7 @@ impl<F: Field> SumcheckCompute<F> for RaBooleanityWitness<F> {
             let mut inner_3 = F::zero();
 
             for (i, ra) in self.ra_polys.iter().enumerate() {
-                let (ra_lo, ra_hi) =
-                    ra.sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
+                let (ra_lo, ra_hi) = ra.sumcheck_eval_pair(j, jolt_poly::BindingOrder::HighToLow);
                 let ra_d = ra_hi - ra_lo;
                 let gamma_i = self.gamma_powers[i];
 
@@ -266,11 +258,7 @@ mod tests {
     use rand_core::{RngCore, SeedableRng};
 
     /// Brute-force computation of the RA booleanity sum.
-    fn brute_force_ra_booleanity(
-        ra_polys: &[Vec<Fr>],
-        eq_point: &[Fr],
-        gamma_powers: &[Fr],
-    ) -> Fr {
+    fn brute_force_ra_booleanity(ra_polys: &[Vec<Fr>], eq_point: &[Fr], gamma_powers: &[Fr]) -> Fr {
         let n = ra_polys[0].len();
         let eq_table = EqPolynomial::new(eq_point.to_vec()).evaluations();
         let one = Fr::one();
@@ -322,7 +310,10 @@ mod tests {
 
         // Verify brute-force sum is zero for boolean inputs.
         let brute_sum = brute_force_ra_booleanity(&ra_polys, &eq_point, &gamma_powers);
-        assert!(brute_sum.is_zero(), "brute-force sum should be zero for boolean RA polys");
+        assert!(
+            brute_sum.is_zero(),
+            "brute-force sum should be zero for boolean RA polys"
+        );
 
         let ra_copy: Vec<Vec<Fr>> = ra_polys.clone();
         let mut stage = RaBooleanityStage::new(ra_polys, eq_point, gamma_powers.clone());
@@ -336,24 +327,16 @@ mod tests {
         assert!(batch.claims[0].claimed_sum.is_zero());
 
         let claims_snapshot = batch.claims.clone();
-        let proof = BatchedSumcheckProver::prove(
-            &batch.claims,
-            &mut batch.witnesses,
-            &mut pt,
-        );
+        let proof = BatchedSumcheckProver::prove(&batch.claims, &mut batch.witnesses, &mut pt);
 
         let mut vt = Blake2bTranscript::new(b"ra_bool");
-        let (final_eval, challenges) = BatchedSumcheckVerifier::verify(
-            &claims_snapshot,
-            &proof,
-            &mut vt,
-        )
-        .expect("verification should succeed");
+        let (final_eval, challenges) =
+            BatchedSumcheckVerifier::verify(&claims_snapshot, &proof, &mut vt)
+                .expect("verification should succeed");
 
         // Oracle check: final_eval = eq(r, challenges) · Σ_i γ^i · (ra_i(challenges)² - ra_i(challenges)).
-        let eq_at_r =
-            Polynomial::new(EqPolynomial::new(stage.eq_point.clone()).evaluations())
-                .evaluate(&challenges);
+        let eq_at_r = Polynomial::new(EqPolynomial::new(stage.eq_point.clone()).evaluations())
+            .evaluate(&challenges);
         let one = Fr::one();
         let inner: Fr = ra_copy
             .iter()
@@ -367,12 +350,11 @@ mod tests {
         assert_eq!(final_eval, expected, "oracle check failed");
 
         // Extract claims and verify evaluations.
-        let claims =
-            <RaBooleanityStage<Fr> as ProverStage<Fr, Blake2bTranscript>>::extract_claims(
-                &mut stage,
-                &challenges,
-                final_eval,
-            );
+        let claims = <RaBooleanityStage<Fr> as ProverStage<Fr, Blake2bTranscript>>::extract_claims(
+            &mut stage,
+            &challenges,
+            final_eval,
+        );
         assert_eq!(claims.len(), total_d);
         for (i, claim) in claims.iter().enumerate() {
             let expected_eval = Polynomial::new(ra_copy[i].clone()).evaluate(&challenges);
@@ -430,7 +412,10 @@ mod tests {
             .collect();
 
         let claimed_sum = brute_force_ra_booleanity(&ra_polys, &eq_point, &gamma_powers);
-        assert!(!claimed_sum.is_zero(), "random witness should have nonzero sum");
+        assert!(
+            !claimed_sum.is_zero(),
+            "random witness should have nonzero sum"
+        );
 
         // Build stage with the actual (nonzero) claimed sum.
         let mut stage = RaBooleanityStage {
@@ -446,18 +431,10 @@ mod tests {
         batch.claims[0].claimed_sum = claimed_sum;
 
         let claims_snapshot = batch.claims.clone();
-        let proof = BatchedSumcheckProver::prove(
-            &batch.claims,
-            &mut batch.witnesses,
-            &mut pt,
-        );
+        let proof = BatchedSumcheckProver::prove(&batch.claims, &mut batch.witnesses, &mut pt);
 
         let mut vt = Blake2bTranscript::new(b"nonbool");
-        let result = BatchedSumcheckVerifier::verify(
-            &claims_snapshot,
-            &proof,
-            &mut vt,
-        );
+        let result = BatchedSumcheckVerifier::verify(&claims_snapshot, &proof, &mut vt);
         assert!(result.is_ok(), "non-boolean verification failed");
     }
 
@@ -479,18 +456,10 @@ mod tests {
         let mut batch = stage.build(&[], &mut pt);
 
         let claims_snapshot = batch.claims.clone();
-        let proof = BatchedSumcheckProver::prove(
-            &batch.claims,
-            &mut batch.witnesses,
-            &mut pt,
-        );
+        let proof = BatchedSumcheckProver::prove(&batch.claims, &mut batch.witnesses, &mut pt);
 
         let mut vt = Blake2bTranscript::new(b"zeros");
-        let result = BatchedSumcheckVerifier::verify(
-            &claims_snapshot,
-            &proof,
-            &mut vt,
-        );
+        let result = BatchedSumcheckVerifier::verify(&claims_snapshot, &proof, &mut vt);
         assert!(result.is_ok(), "all-zeros verification failed");
     }
 }

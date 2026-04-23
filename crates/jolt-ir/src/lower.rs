@@ -26,14 +26,21 @@
 //! 2. **Preamble** (slot-independent): emit one `LoadPair` per opening, one
 //!    `LoadChallenge` per challenge, one `Const` per constant value. If the
 //!    grid contains `t ≥ 2` (i.e. `degree ≥ 2`), additionally hoist
-//!    `diff[i] = hi[i] - lo[i]` via `Sub` so that per-slot interpolation is a
-//!    single `Fma`.
-//! 3. **Per-slot body**: for each output slot, materialize the interpolated
-//!    opening values (`Fma(diff, t, lo)` for `t ≥ 2`, or just `lo` for
-//!    `t = 0`), then walk the DAG in post-order, allocating one fresh
-//!    register per non-leaf node and memoizing by `ExprId` so shared
-//!    subtrees emit ops only once. The root register is written via
-//!    `StoreSlot { slot, src: root_reg }`.
+//!    `diff[i] = hi[i] - lo[i]` via `Sub` so per-slot interpolation is a
+//!    single `Add`.
+//! 3. **Per-slot body**: maintain a running `cur[i]` per opening (initialized
+//!    to `lo[i]`). For each output slot `t`, advance every `cur[i]` by
+//!    `diff[i]` as many times as needed to reach `t` (the grid jumps are
+//!    `0 → 2 → 3 → … → degree`, so steps are `{2, 1, 1, …}` after slot 0).
+//!    Then walk the DAG in post-order, allocating one fresh register per
+//!    non-leaf node and memoizing by `ExprId` so shared subtrees emit ops
+//!    only once. The root register is written via `StoreSlot { slot, src }`.
+//!
+//! Incremental interpolation is preferred over the algebraically-equivalent
+//! `Fma(diff, t, lo)` because `fr_add` is ≈5–8× cheaper than `fr_mul` on
+//! BN254 (and similar on other MNT-scale curves). Over the whole `pairwise_reduce`
+//! kernel body, this saves `(degree − 1) · num_openings` `fr_mul`s per pair
+//! at the cost of one extra `fr_add` per opening per grid step.
 //!
 //! `Neg(x)` lowers to `Sub { lhs: const_zero, rhs: x }` since [`KernelOp`]
 //! has no negation primitive. A `Const(0)` register is preallocated whenever
@@ -96,10 +103,6 @@ pub fn lower_custom_expr(
     }
 
     let needs_diffs = degree >= 2;
-    let grid_t_values: Vec<u64> = (1..degree).map(|k| (k + 1) as u64).collect();
-    for &t in &grid_t_values {
-        let _newly_inserted = constants.insert(t as i128);
-    }
     if needs_neg {
         let _newly_inserted = constants.insert(0);
     }
@@ -148,33 +151,36 @@ pub fn lower_custom_expr(
         }
     }
 
+    // Incremental interpolation: `cur[o]` starts at `lo[o]` and is advanced
+    // by `diff[o]` as we step through the grid {0, 2, 3, ..., degree}.
+    // Slot 0 uses `lo` directly (no adds); each subsequent slot advances cur
+    // by `(slot_t - prev_t)` steps. This replaces `degree − 1` `fr_mul`s
+    // (the Fma-based alternative `lo + t · diff`) with `degree` `fr_add`s
+    // per opening, which matters when field mul ≫ field add (≈5–8× on BN254).
+    let mut cur: BTreeMap<u32, RegId> = lo_reg.clone();
+    let mut prev_t: usize = 0;
+
     for slot in 0..degree {
         let t = if slot == 0 { 0 } else { slot + 1 };
-
-        let opening_value: BTreeMap<u32, RegId> = if t == 0 {
-            lo_reg.clone()
-        } else {
-            let t_reg = const_reg[&(t as i128)];
-            openings
-                .iter()
-                .map(|&o| {
-                    let p_reg = alloc.next();
-                    ops.push(KernelOp::Fma {
-                        a: diff_reg[&o],
-                        b: t_reg,
-                        c: lo_reg[&o],
-                        dst: p_reg,
-                    });
-                    (o, p_reg)
-                })
-                .collect()
-        };
+        let steps = t - prev_t;
+        for _ in 0..steps {
+            for &o in &openings {
+                let new_reg = alloc.next();
+                ops.push(KernelOp::Add {
+                    lhs: cur[&o],
+                    rhs: diff_reg[&o],
+                    dst: new_reg,
+                });
+                let _prev = cur.insert(o, new_reg);
+            }
+        }
+        prev_t = t;
 
         let mut node_reg: Vec<Option<RegId>> = vec![None; n_nodes];
         let root = lower_node(
             expr,
             expr.root(),
-            &opening_value,
+            &cur,
             &chal_reg,
             &const_reg,
             &mut node_reg,
@@ -457,6 +463,39 @@ mod tests {
         let x = b.opening(0);
         let expr = b.build(x);
         let _ = lower_custom_expr(&expr, 1, 0, BindingOrder::LowToHigh);
+    }
+
+    #[test]
+    fn incremental_interpolation_no_fma() {
+        // Two openings, degree 3 → grid {0, 2, 3}. Slot 1 needs 2 steps, slot
+        // 2 needs 1 step. Total 2 openings × (2 + 1) = 6 Add ops for
+        // interpolation, plus 2 Sub ops for diffs. No Fma ops.
+        let b = ExprBuilder::new();
+        let x = b.opening(0);
+        let y = b.opening(1);
+        let expr = b.build(x * y);
+
+        let ir = lower_custom_expr(&expr, 2, 3, BindingOrder::LowToHigh);
+        assert!(ir.is_valid());
+
+        let fmas = ir
+            .ops
+            .iter()
+            .filter(|op| matches!(op, KernelOp::Fma { .. }))
+            .count();
+        assert_eq!(fmas, 0, "interpolation should use Add, not Fma");
+
+        // 2 openings × 3 grid advances (2 for slot 1 + 1 for slot 2) = 6
+        // interpolation Adds.
+        let adds = ir
+            .ops
+            .iter()
+            .filter(|op| matches!(op, KernelOp::Add { .. }))
+            .count();
+        assert_eq!(
+            adds, 6,
+            "expected 6 incremental Adds (2 openings × 3 steps)"
+        );
     }
 
     #[test]

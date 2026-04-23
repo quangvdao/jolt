@@ -28,7 +28,10 @@ use std::fmt::Write;
 use std::marker::PhantomData;
 
 use jolt_field::Field;
-use jolt_ir::{Expr, ExprVisitor, KernelDescriptor, KernelShape, Var};
+use jolt_ir::{
+    ConstVal, Expr, ExprVisitor, KernelDescriptor, KernelIR, KernelIteration, KernelOp,
+    KernelShape, Var,
+};
 use metal::CompileOptions;
 
 use crate::kernel::MetalKernel;
@@ -150,34 +153,33 @@ pub fn compile_with_mode<F: Field>(
         }
     } else {
         // Single-pass path for small D and non-ProductSum shapes.
-        let (eval_body_weighted, eval_body_unweighted, weight_folded) =
-            match &descriptor.shape {
-                KernelShape::ProductSum {
-                    num_inputs_per_product,
-                    num_products,
-                } => {
-                    let d = *num_inputs_per_product;
-                    let p = *num_products;
-                    let fold = d > 2 * p;
-                    let body = generate_product_sum_body(d, p, fold);
-                    let body_unw = if fold {
-                        generate_product_sum_body(d, p, false)
-                    } else {
-                        body.clone()
-                    };
-                    (body, body_unw, fold)
-                }
-                KernelShape::EqProduct => {
-                    let body = r"
+        let (eval_body_weighted, eval_body_unweighted, weight_folded) = match &descriptor.shape {
+            KernelShape::ProductSum {
+                num_inputs_per_product,
+                num_products,
+            } => {
+                let d = *num_inputs_per_product;
+                let p = *num_products;
+                let fold = d > 2 * p;
+                let body = generate_product_sum_body(d, p, fold);
+                let body_unw = if fold {
+                    generate_product_sum_body(d, p, false)
+                } else {
+                    body.clone()
+                };
+                (body, body_unw, fold)
+            }
+            KernelShape::EqProduct => {
+                let body = r"
         evals[0] = fr_mul(lo[0], lo[1]);
         Fr a2 = fr_sub(fr_add(hi[0], hi[0]), lo[0]);
         Fr b2 = fr_sub(fr_add(hi[1], hi[1]), lo[1]);
         evals[1] = fr_mul(a2, b2);"
-                        .to_string();
-                    (body.clone(), body, false)
-                }
-                KernelShape::HammingBooleanity => {
-                    let body = r"
+                    .to_string();
+                (body.clone(), body, false)
+            }
+            KernelShape::HammingBooleanity => {
+                let body = r"
         Fr d_eq = fr_sub(hi[0], lo[0]);
         Fr d_h = fr_sub(hi[1], lo[1]);
         evals[0] = fr_mul(fr_mul(lo[0], lo[1]), fr_sub(lo[1], fr_one()));
@@ -187,15 +189,15 @@ pub fn compile_with_mode<F: Field>(
         eq_val = fr_add(eq_val, d_eq);
         h_val = fr_add(h_val, d_h);
         evals[2] = fr_mul(fr_mul(eq_val, h_val), fr_sub(h_val, fr_one()));"
-                        .to_string();
-                    (body.clone(), body, false)
-                }
-                KernelShape::Custom { expr, num_inputs } => {
-                    let body =
-                        generate_custom_body::<F>(expr, *num_inputs, descriptor.degree, challenges);
-                    (body.clone(), body, false)
-                }
-            };
+                    .to_string();
+                (body.clone(), body, false)
+            }
+            KernelShape::Custom { expr, num_inputs } => {
+                let body =
+                    generate_custom_body::<F>(expr, *num_inputs, descriptor.degree, challenges);
+                (body.clone(), body, false)
+            }
+        };
 
         for variant in [
             KernelVariant::LowToHigh,
@@ -494,10 +496,7 @@ fn generate_reduce_kernel(
         }
         let _ = writeln!(s, "    }}");
         if stride > 1 {
-            let _ = writeln!(
-                s,
-                "    threadgroup_barrier(mem_flags::mem_threadgroup);"
-            );
+            let _ = writeln!(s, "    threadgroup_barrier(mem_flags::mem_threadgroup);");
         }
         stride /= 2;
     }
@@ -665,16 +664,10 @@ fn generate_split_pass_reduce_kernel(
                 // Load pair
                 if matches!(variant, KernelVariant::HighToLow) {
                     let _ = writeln!(s, "            Fr lo = input_{input_idx}[i];");
-                    let _ = writeln!(
-                        s,
-                        "            Fr hi = input_{input_idx}[i + n_pairs];"
-                    );
+                    let _ = writeln!(s, "            Fr hi = input_{input_idx}[i + n_pairs];");
                 } else {
                     let _ = writeln!(s, "            Fr lo = input_{input_idx}[2u * i];");
-                    let _ = writeln!(
-                        s,
-                        "            Fr hi = input_{input_idx}[2u * i + 1u];"
-                    );
+                    let _ = writeln!(s, "            Fr hi = input_{input_idx}[2u * i + 1u];");
                 }
                 let _ = writeln!(s, "            Fr diff = fr_sub(hi, lo);");
 
@@ -689,19 +682,13 @@ fn generate_split_pass_reduce_kernel(
                         let _ = writeln!(s, "            Fr val_{c} = hi;");
                     } else if c > 0 && (base + c - 1) < d - 1 {
                         // Incremental: val_c = val_{c-1} + diff
-                        let _ = writeln!(
-                            s,
-                            "            Fr val_{c} = fr_add(val_{}, diff);",
-                            c - 1
-                        );
+                        let _ =
+                            writeln!(s, "            Fr val_{c} = fr_add(val_{}, diff);", c - 1);
                     } else {
                         // From scratch: hi + eval_idx * diff
                         let _ = writeln!(s, "            Fr val_{c} = hi;");
                         for _ in 0..eval_idx {
-                            let _ = writeln!(
-                                s,
-                                "            val_{c} = fr_add(val_{c}, diff);"
-                            );
+                            let _ = writeln!(s, "            val_{c} = fr_add(val_{c}, diff);");
                         }
                     }
                 }
@@ -711,10 +698,7 @@ fn generate_split_pass_reduce_kernel(
                     if j == 0 {
                         let _ = writeln!(s, "            prod_{c} = val_{c};");
                     } else {
-                        let _ = writeln!(
-                            s,
-                            "            prod_{c} = fr_mul(prod_{c}, val_{c});"
-                        );
+                        let _ = writeln!(s, "            prod_{c} = fr_mul(prod_{c}, val_{c});");
                     }
                 }
 
@@ -735,8 +719,7 @@ fn generate_split_pass_reduce_kernel(
         match strategy {
             AccumulationStrategy::WeightedFmadd => {
                 for c in 0..chunk_size {
-                    let _ =
-                        writeln!(s, "        acc_fmadd(wa_{c}, w, {acc_var}_{c});");
+                    let _ = writeln!(s, "        acc_fmadd(wa_{c}, w, {acc_var}_{c});");
                 }
             }
             AccumulationStrategy::DirectAdd => {
@@ -777,10 +760,7 @@ fn generate_split_pass_reduce_kernel(
                     "        sh[{sh_base}u + simd_id] = fr_to_mont(acc_reduce(wa_{c}));",
                 );
             } else {
-                let _ = writeln!(
-                    s,
-                    "        sh[{sh_base}u + simd_id] = acc_reduce(wa_{c});",
-                );
+                let _ = writeln!(s, "        sh[{sh_base}u + simd_id] = acc_reduce(wa_{c});",);
             }
         }
         let _ = writeln!(s, "    }}");
@@ -801,10 +781,7 @@ fn generate_split_pass_reduce_kernel(
             }
             let _ = writeln!(s, "    }}");
             if stride > 1 {
-                let _ = writeln!(
-                    s,
-                    "    threadgroup_barrier(mem_flags::mem_threadgroup);"
-                );
+                let _ = writeln!(s, "    threadgroup_barrier(mem_flags::mem_threadgroup);");
             }
             stride /= 2;
         }
@@ -1039,4 +1016,149 @@ impl<F: Field> ExprVisitor for MslCodeGen<F> {
         let _ = writeln!(self.code, "            Fr {name} = fr_mul({lhs}, {rhs});");
         name
     }
+}
+
+/// Compile a pre-lowered [`KernelIR`] into five Metal compute pipelines.
+///
+/// Companion to [`compile_with_mode`]: same reduce-kernel wrapper (L2H, H2L,
+/// Tensor, L2H_unw, H2L_unw), but the per-pair body comes from walking the
+/// flat `KernelIR` op list instead of an [`Expr`] DAG. See
+/// [`generate_custom_ir_body`] for the op-to-MSL mapping.
+///
+/// # Panics
+///
+/// - `ir.iteration` is not [`KernelIteration::PerPair`] — only pairwise
+///   reduce kernels are currently wired into Metal dispatch.
+/// - Any op references a register / buffer / slot out of range (covered by
+///   `KernelIR::is_valid`, which the caller is expected to have checked).
+pub fn compile_ir_with_mode<F: Field>(
+    device: &metal::Device,
+    ir: &KernelIR,
+    challenges: &[F],
+    mode: CompileMode,
+) -> MetalKernel<F> {
+    assert!(
+        matches!(ir.iteration, KernelIteration::PerPair { .. }),
+        "Metal backend requires PerPair iteration for compile_ir (got {:?})",
+        ir.iteration
+    );
+
+    let num_inputs = ir.num_inputs as usize;
+    let num_evals = ir.num_evals as usize;
+
+    let eval_body = generate_custom_ir_body::<F>(ir, challenges);
+
+    let mut msl = String::with_capacity(65536);
+    for variant in [
+        KernelVariant::LowToHigh,
+        KernelVariant::HighToLow,
+        KernelVariant::Tensor,
+    ] {
+        msl.push_str(&generate_reduce_kernel(
+            num_inputs, num_evals, &eval_body, variant, false, true,
+        ));
+        msl.push('\n');
+    }
+    for variant in [KernelVariant::LowToHigh, KernelVariant::HighToLow] {
+        msl.push_str(&generate_reduce_kernel(
+            num_inputs, num_evals, &eval_body, variant, false, false,
+        ));
+        msl.push('\n');
+    }
+
+    let noinline = matches!(mode, CompileMode::FastCompile);
+    let source = build_source_with_mode(&[SHADER_BN254_FR, SHADER_WIDE_ACC, &msl], noinline);
+    let options = CompileOptions::new();
+    let library = device
+        .new_library_with_source(&source, &options)
+        .unwrap_or_else(|e| panic!("IR reduce kernel MSL compilation failed: {e}"));
+
+    MetalKernel {
+        pipeline_l2h: make_pipeline(device, &library, "reduce_kernel_l2h"),
+        pipeline_h2l: make_pipeline(device, &library, "reduce_kernel_h2l"),
+        pipeline_tensor: make_pipeline(device, &library, "reduce_kernel_tensor"),
+        pipeline_l2h_unw: make_pipeline(device, &library, "reduce_kernel_l2h_unw"),
+        pipeline_h2l_unw: make_pipeline(device, &library, "reduce_kernel_h2l_unw"),
+        num_evals,
+        num_inputs,
+        _marker: PhantomData,
+    }
+}
+
+/// Emit the MSL `eval_body` for a [`KernelIR`] op sequence.
+///
+/// The generated body is inserted into the inner grid-stride loop of
+/// [`generate_reduce_kernel`], which already provides `Fr lo[num_inputs]`,
+/// `Fr hi[num_inputs]`, and `Fr evals[num_evals]` in scope.
+///
+/// Each `RegId r` maps to a fresh MSL local `r_{r}` declared via
+/// `Fr r_{r} = ...;`. The current [`lower_custom_expr`](jolt_ir::lower_custom_expr)
+/// uses a monotonically incrementing register allocator, so each destination
+/// register appears exactly once and no redeclaration occurs.
+///
+/// `LoadChallenge` and `Const` are lowered to inline 8-limb aggregate
+/// literals via [`field_to_msl_literal`]; the value is the baked challenge
+/// or `F::from_i128(val)` computed at compile time.
+///
+/// `Fma { a, b, c }` expands to `fr_add(fr_mul(r_a, r_b), r_c)` — MSL has no
+/// fused primitive for BN254 Fr, so the inline nested form matches what
+/// LLVM would have produced from a hand-written expression anyway.
+fn generate_custom_ir_body<F: Field>(ir: &KernelIR, challenges: &[F]) -> String {
+    let mut s = String::with_capacity(64 * ir.ops.len());
+
+    for op in &ir.ops {
+        match *op {
+            KernelOp::LoadPair {
+                buf,
+                dst_lo,
+                dst_hi,
+            } => {
+                let _ = writeln!(s, "        Fr r_{dst_lo} = lo[{buf}];");
+                let _ = writeln!(s, "        Fr r_{dst_hi} = hi[{buf}];");
+            }
+            KernelOp::LoadOne { .. } => {
+                unreachable!(
+                    "LoadOne invalid in PerPair kernel (should have been caught by is_valid)"
+                );
+            }
+            KernelOp::LoadChallenge { idx, dst } => {
+                let val = challenges.get(idx as usize).unwrap_or_else(|| {
+                    panic!(
+                        "LoadChallenge idx {idx} out of range (challenges.len() = {})",
+                        challenges.len()
+                    )
+                });
+                let literal = field_to_msl_literal(val);
+                let _ = writeln!(s, "        Fr r_{dst} = {literal};");
+            }
+            KernelOp::Const {
+                value: ConstVal::I128(v),
+                dst,
+            } => {
+                let f_val = i128_to_field::<F>(v);
+                let literal = field_to_msl_literal(&f_val);
+                let _ = writeln!(s, "        Fr r_{dst} = {literal};");
+            }
+            KernelOp::Add { lhs, rhs, dst } => {
+                let _ = writeln!(s, "        Fr r_{dst} = fr_add(r_{lhs}, r_{rhs});");
+            }
+            KernelOp::Sub { lhs, rhs, dst } => {
+                let _ = writeln!(s, "        Fr r_{dst} = fr_sub(r_{lhs}, r_{rhs});");
+            }
+            KernelOp::Mul { lhs, rhs, dst } => {
+                let _ = writeln!(s, "        Fr r_{dst} = fr_mul(r_{lhs}, r_{rhs});");
+            }
+            KernelOp::Fma { a, b, c, dst } => {
+                let _ = writeln!(
+                    s,
+                    "        Fr r_{dst} = fr_add(fr_mul(r_{a}, r_{b}), r_{c});"
+                );
+            }
+            KernelOp::StoreSlot { slot, src } => {
+                let _ = writeln!(s, "        evals[{slot}] = r_{src};");
+            }
+        }
+    }
+
+    s
 }

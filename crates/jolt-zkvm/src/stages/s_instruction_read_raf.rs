@@ -188,9 +188,8 @@ impl<F: Field, B: ComputeBackend, T: Transcript> ProverStage<F, T>
                 )
             });
 
-        let witness =
-            SegmentedEvaluator::new(addr_evaluator, log_k, Arc::clone(&self.backend))
-                .then(log_t, transition);
+        let witness = SegmentedEvaluator::new(addr_evaluator, log_k, Arc::clone(&self.backend))
+            .then(log_t, transition);
 
         // Degree: max(address=2, cycle=n_virtual+2) = n_virtual+2 for n_virtual >= 1.
         let degree = n_virtual + 2;
@@ -513,10 +512,7 @@ mod tests {
         for (i, claim) in prover_claims.iter().enumerate() {
             let poly = Polynomial::new(claim.evaluations.clone());
             let expected = poly.evaluate(&claim.point);
-            assert_eq!(
-                claim.eval, expected,
-                "RA claim {i}: eval mismatch"
-            );
+            assert_eq!(claim.eval, expected, "RA claim {i}: eval mismatch");
             // Point length = log_t (cycle variables only).
             assert_eq!(claim.point.len(), 3);
         }

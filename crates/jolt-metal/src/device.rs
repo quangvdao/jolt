@@ -2,7 +2,7 @@ use std::ffi::c_void;
 
 use jolt_compute::{BindingOrder, ComputeBackend, Scalar};
 use jolt_field::Field;
-use jolt_ir::KernelDescriptor;
+use jolt_ir::{KernelDescriptor, KernelIR};
 use metal::{Device, MTLResourceOptions, MTLSize};
 
 use crate::buffer::MetalBuffer;
@@ -287,6 +287,10 @@ impl ComputeBackend for MetalBackend {
         challenges: &[F],
     ) -> MetalKernel<F> {
         compiler::compile_with_mode(&self.device, desc, challenges, self.compile_mode)
+    }
+
+    fn compile_kernel_ir<F: Field>(&self, ir: &KernelIR, challenges: &[F]) -> MetalKernel<F> {
+        compiler::compile_ir_with_mode(&self.device, ir, challenges, self.compile_mode)
     }
 
     fn upload<T: Scalar>(&self, data: &[T]) -> Self::Buffer<T> {

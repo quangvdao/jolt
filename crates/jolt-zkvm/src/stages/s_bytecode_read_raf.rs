@@ -122,9 +122,7 @@ impl<F: Field, B: ComputeBackend> BytecodeReadRafStage<F, B> {
     }
 }
 
-impl<F: Field, B: ComputeBackend, T: Transcript> ProverStage<F, T>
-    for BytecodeReadRafStage<F, B>
-{
+impl<F: Field, B: ComputeBackend, T: Transcript> ProverStage<F, T> for BytecodeReadRafStage<F, B> {
     fn name(&self) -> &'static str {
         "S_bytecode_read_raf"
     }
@@ -137,7 +135,10 @@ impl<F: Field, B: ComputeBackend, T: Transcript> ProverStage<F, T>
 
         let f_tables = self.f_tables.take().expect("f_tables already consumed");
         let val_tables = self.val_tables.take().expect("val_tables already consumed");
-        let f_entry_trace = self.f_entry_trace.take().expect("f_entry_trace already consumed");
+        let f_entry_trace = self
+            .f_entry_trace
+            .take()
+            .expect("f_entry_trace already consumed");
         let f_entry_expected = self
             .f_entry_expected
             .take()
@@ -182,8 +183,7 @@ impl<F: Field, B: ComputeBackend, T: Transcript> ProverStage<F, T>
                     .iter()
                     .map(|vt| Polynomial::new(vt.clone()).evaluate(r_addr))
                     .collect();
-                let bound_f_entry =
-                    Polynomial::new(f_entry_expected).evaluate(r_addr);
+                let bound_f_entry = Polynomial::new(f_entry_expected).evaluate(r_addr);
 
                 // Materialize RA polynomials over cycle domain.
                 let ra_tables = ra_materializer(r_addr, d);
@@ -200,8 +200,7 @@ impl<F: Field, B: ComputeBackend, T: Transcript> ProverStage<F, T>
                     .iter()
                     .map(|rc| EqPolynomial::new(rc.clone()).evaluations())
                     .collect();
-                let eq_entry =
-                    EqPolynomial::new(vec![F::zero(); r_cycles[0].len()]).evaluations();
+                let eq_entry = EqPolynomial::new(vec![F::zero(); r_cycles[0].len()]).evaluations();
 
                 let mut combined_eq = vec![F::zero(); t_len];
                 for j in 0..t_len {
@@ -233,9 +232,8 @@ impl<F: Field, B: ComputeBackend, T: Transcript> ProverStage<F, T>
                 )
             });
 
-        let witness =
-            SegmentedEvaluator::new(addr_evaluator, log_k, Arc::clone(&self.backend))
-                .then(log_t, transition);
+        let witness = SegmentedEvaluator::new(addr_evaluator, log_k, Arc::clone(&self.backend))
+            .then(log_t, transition);
 
         // The claim degree is max(address_degree, cycle_degree) = max(2, d+1) = d+1 for d >= 1.
         let degree = d + 1;
@@ -294,10 +292,7 @@ fn build_address_descriptor<F: Field>(gamma_powers: &[F]) -> (KernelDescriptor, 
 
     let mut sum = b.challenge(0) * b.opening(0) * b.opening(N_STAGES as u32);
     for s in 1..N_STAGES {
-        sum = sum
-            + b.challenge(s as u32)
-                * b.opening(s as u32)
-                * b.opening((N_STAGES + s) as u32);
+        sum = sum + b.challenge(s as u32) * b.opening(s as u32) * b.opening((N_STAGES + s) as u32);
     }
 
     let trace_idx = (2 * N_STAGES) as u32;
@@ -382,8 +377,7 @@ pub fn brute_force_bytecode_read_raf<F: Field>(
             for s in 0..N_STAGES {
                 inner += gamma_powers[s] * eq_tables[s][j] * val_tables[s][addr];
             }
-            inner +=
-                gamma_entry * eq_entry[j] * f_entry_trace[addr] * f_entry_expected[addr];
+            inner += gamma_entry * eq_entry[j] * f_entry_trace[addr] * f_entry_expected[addr];
 
             sum += ra_prod * inner;
         }
@@ -528,8 +522,7 @@ mod tests {
             for s in 0..N_STAGES {
                 inner += gamma_powers[s] * eq_tables[s][j] * val_tables[s][addr];
             }
-            inner +=
-                gamma_entry * eq_entry[j] * f_entry_trace[addr] * f_entry_expected[addr];
+            inner += gamma_entry * eq_entry[j] * f_entry_trace[addr] * f_entry_expected[addr];
             claimed_sum += inner;
         }
 

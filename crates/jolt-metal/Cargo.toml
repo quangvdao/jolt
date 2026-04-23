@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "threshold"
 harness = false
+
+[[bench]]
+name = "custom_ir_vs_stack_vm"
+harness = false

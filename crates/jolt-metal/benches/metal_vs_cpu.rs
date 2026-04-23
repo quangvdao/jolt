@@ -250,19 +250,27 @@ fn bench_interpolate(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(n as u64));
 
-        group.bench_with_input(BenchmarkId::new(format!("metal/{label}"), n), &n, |bench, _| {
-            bench.iter(|| {
-                let buf = metal.upload(&data);
-                metal.interpolate_pairs(buf, scalar)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new(format!("metal/{label}"), n),
+            &n,
+            |bench, _| {
+                bench.iter(|| {
+                    let buf = metal.upload(&data);
+                    metal.interpolate_pairs(buf, scalar)
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new(format!("cpu/{label}"), n), &n, |bench, _| {
-            bench.iter(|| {
-                let buf = cpu.upload(&data);
-                cpu.interpolate_pairs(buf, scalar)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new(format!("cpu/{label}"), n),
+            &n,
+            |bench, _| {
+                bench.iter(|| {
+                    let buf = cpu.upload(&data);
+                    cpu.interpolate_pairs(buf, scalar)
+                });
+            },
+        );
     }
     group.finish();
 }

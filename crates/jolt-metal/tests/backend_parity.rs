@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use jolt_compute::{BindingOrder, ComputeBackend};
 use jolt_cpu::CpuBackend;
 use jolt_field::{Field, Fr};
-use jolt_ir::{ExprBuilder, KernelDescriptor, KernelShape};
+use jolt_ir::{lower_custom_expr, ExprBuilder, KernelDescriptor, KernelShape};
 use jolt_metal::MetalBackend;
 use num_traits::Zero;
 use rand::rngs::StdRng;
@@ -761,10 +761,7 @@ fn pairwise_reduce_product_sum_d8_sizes() {
             BindingOrder::LowToHigh,
         );
 
-        assert_eq!(
-            expected, got,
-            "D=8 mismatch at n_pairs={n_pairs}"
-        );
+        assert_eq!(expected, got, "D=8 mismatch at n_pairs={n_pairs}");
     }
 }
 
@@ -1081,4 +1078,209 @@ fn pairwise_reduce_product_sum_known_values() {
     assert_eq!(got[0], Fr::from_u64(1680), "P(1) mismatch");
     // P(∞) = diff[0]*diff[1]*diff[2]*diff[3] = 4*4*4*4 = 256
     assert_eq!(got[3], Fr::from_u64(256), "P(∞) mismatch");
+}
+
+/// IR-path parity: booleanity `h*h - h` compiled via auto-lowered
+/// `KernelIR` must produce the same `pairwise_reduce` output as the stack-VM
+/// `Expr` path.
+#[test]
+fn pairwise_reduce_custom_ir_booleanity() {
+    let metal = &*METAL;
+    let mut rng = StdRng::seed_from_u64(0xE001);
+
+    let b = ExprBuilder::new();
+    let h = b.opening(0);
+    let expr = b.build(h * h - h);
+
+    let desc = KernelDescriptor {
+        shape: KernelShape::Custom {
+            expr: expr.clone(),
+            num_inputs: 1,
+        },
+        degree: 2,
+        tensor_split: None,
+    };
+
+    let stack_vm = metal.compile_kernel::<Fr>(&desc);
+    let ir = lower_custom_expr(&expr, 1, 2, jolt_ir::BindingOrder::LowToHigh);
+    let ir_k = metal.compile_kernel_ir::<Fr>(&ir, &[]);
+
+    let n = 512;
+    let inputs: Vec<Vec<Fr>> = vec![random_elements(&mut rng, n)];
+    let weights = random_elements(&mut rng, n / 2);
+
+    let mtl_bufs: Vec<_> = inputs.iter().map(|v| metal.upload(v)).collect();
+    let mtl_refs: Vec<_> = mtl_bufs.iter().collect();
+    let mtl_w = metal.upload(&weights);
+
+    for order in [BindingOrder::LowToHigh, BindingOrder::HighToLow] {
+        let expected = metal.pairwise_reduce(&mtl_refs, &mtl_w, &stack_vm, desc.num_evals(), order);
+        let got = metal.pairwise_reduce(&mtl_refs, &mtl_w, &ir_k, desc.num_evals(), order);
+        assert_eq!(expected, got, "booleanity IR-path mismatch ({order:?})");
+    }
+}
+
+/// IR-path parity: `γ · o0 · o1` compiled via auto-lowered `KernelIR` with a
+/// baked challenge must match the stack-VM `Expr` path.
+#[test]
+fn pairwise_reduce_custom_ir_with_challenges() {
+    let metal = &*METAL;
+    let mut rng = StdRng::seed_from_u64(0xE002);
+
+    let b = ExprBuilder::new();
+    let a = b.opening(0);
+    let bv = b.opening(1);
+    let gamma = b.challenge(0);
+    let expr = b.build(gamma * a * bv);
+
+    let desc = KernelDescriptor {
+        shape: KernelShape::Custom {
+            expr: expr.clone(),
+            num_inputs: 2,
+        },
+        degree: 3,
+        tensor_split: None,
+    };
+
+    let challenges = vec![Fr::random(&mut rng)];
+    let stack_vm = metal.compile_kernel_with_challenges::<Fr>(&desc, &challenges);
+    let ir = lower_custom_expr(&expr, 2, 3, jolt_ir::BindingOrder::LowToHigh);
+    let ir_k = metal.compile_kernel_ir::<Fr>(&ir, &challenges);
+
+    let n = 256;
+    let inputs: Vec<Vec<Fr>> = (0..2).map(|_| random_elements(&mut rng, n)).collect();
+    let weights = random_elements(&mut rng, n / 2);
+
+    let mtl_bufs: Vec<_> = inputs.iter().map(|v| metal.upload(v)).collect();
+    let mtl_refs: Vec<_> = mtl_bufs.iter().collect();
+    let mtl_w = metal.upload(&weights);
+
+    for order in [BindingOrder::LowToHigh, BindingOrder::HighToLow] {
+        let expected = metal.pairwise_reduce(&mtl_refs, &mtl_w, &stack_vm, desc.num_evals(), order);
+        let got = metal.pairwise_reduce(&mtl_refs, &mtl_w, &ir_k, desc.num_evals(), order);
+        assert_eq!(
+            expected, got,
+            "challenge-bound IR-path mismatch ({order:?})"
+        );
+    }
+}
+
+/// IR-path parity on a real production kernel: the bytecode_read_raf
+/// address-phase kernel from `jolt-zkvm`. 12 inputs, 6 challenges, degree 2.
+/// Exercises register reuse (shared `diff`, `opening_value`, challenge
+/// registers across all stage terms) and the full `LoadPair / LoadChallenge
+/// / Sub / Const / Fma / Mul / Add / StoreSlot` op set.
+#[test]
+fn pairwise_reduce_custom_ir_address_kernel() {
+    let metal = &*METAL;
+    let mut rng = StdRng::seed_from_u64(0xE003);
+
+    const N_STAGES: usize = 5;
+    let num_inputs = 2 * N_STAGES + 2;
+    let b = ExprBuilder::new();
+
+    let mut sum = b.challenge(0) * b.opening(0) * b.opening(N_STAGES as u32);
+    for s in 1..N_STAGES {
+        sum = sum + b.challenge(s as u32) * b.opening(s as u32) * b.opening((N_STAGES + s) as u32);
+    }
+    let trace_idx = (2 * N_STAGES) as u32;
+    let expected_idx = (2 * N_STAGES + 1) as u32;
+    sum = sum + b.challenge(N_STAGES as u32) * b.opening(trace_idx) * b.opening(expected_idx);
+    let expr = b.build(sum);
+
+    let desc = KernelDescriptor {
+        shape: KernelShape::Custom {
+            expr: expr.clone(),
+            num_inputs,
+        },
+        degree: 2,
+        tensor_split: None,
+    };
+
+    let challenges: Vec<Fr> = (0..=N_STAGES).map(|_| Fr::random(&mut rng)).collect();
+
+    let stack_vm = metal.compile_kernel_with_challenges::<Fr>(&desc, &challenges);
+    let ir = lower_custom_expr(&expr, num_inputs, 2, jolt_ir::BindingOrder::LowToHigh);
+    let ir_k = metal.compile_kernel_ir::<Fr>(&ir, &challenges);
+
+    let n = 1024;
+    let inputs: Vec<Vec<Fr>> = (0..num_inputs)
+        .map(|_| random_elements(&mut rng, n))
+        .collect();
+    let weights = random_elements(&mut rng, n / 2);
+
+    let mtl_bufs: Vec<_> = inputs.iter().map(|v| metal.upload(v)).collect();
+    let mtl_refs: Vec<_> = mtl_bufs.iter().collect();
+    let mtl_w = metal.upload(&weights);
+
+    for order in [BindingOrder::LowToHigh, BindingOrder::HighToLow] {
+        let expected = metal.pairwise_reduce(&mtl_refs, &mtl_w, &stack_vm, desc.num_evals(), order);
+        let got = metal.pairwise_reduce(&mtl_refs, &mtl_w, &ir_k, desc.num_evals(), order);
+        assert_eq!(expected, got, "address-kernel IR-path mismatch ({order:?})");
+    }
+
+    // Also verify against CPU baseline to close the loop.
+    let cpu = CpuBackend;
+    let cpu_k = jolt_cpu::compile_with_challenges::<Fr>(&desc, &challenges);
+    let cpu_refs: Vec<&Vec<Fr>> = inputs.iter().collect();
+    let cpu_w = cpu.upload(&weights);
+    let cpu_expected = cpu.pairwise_reduce(
+        &cpu_refs,
+        &cpu_w,
+        &cpu_k,
+        desc.num_evals(),
+        BindingOrder::LowToHigh,
+    );
+    let mtl_ir_lth = metal.pairwise_reduce(
+        &mtl_refs,
+        &mtl_w,
+        &ir_k,
+        desc.num_evals(),
+        BindingOrder::LowToHigh,
+    );
+    assert_eq!(
+        cpu_expected, mtl_ir_lth,
+        "CPU stack VM vs Metal IR address-kernel mismatch"
+    );
+}
+
+/// IR-path parity for unweighted dispatch. Ensures the L2H/H2L unweighted
+/// pipelines compiled from the IR body match the stack-VM equivalents.
+#[test]
+fn pairwise_reduce_unweighted_custom_ir_booleanity() {
+    let metal = &*METAL;
+    let mut rng = StdRng::seed_from_u64(0xE004);
+
+    let b = ExprBuilder::new();
+    let h = b.opening(0);
+    let expr = b.build(h * h - h);
+
+    let desc = KernelDescriptor {
+        shape: KernelShape::Custom {
+            expr: expr.clone(),
+            num_inputs: 1,
+        },
+        degree: 2,
+        tensor_split: None,
+    };
+
+    let stack_vm = metal.compile_kernel::<Fr>(&desc);
+    let ir = lower_custom_expr(&expr, 1, 2, jolt_ir::BindingOrder::LowToHigh);
+    let ir_k = metal.compile_kernel_ir::<Fr>(&ir, &[]);
+
+    let n = 512;
+    let inputs: Vec<Vec<Fr>> = vec![random_elements(&mut rng, n)];
+
+    let mtl_bufs: Vec<_> = inputs.iter().map(|v| metal.upload(v)).collect();
+    let mtl_refs: Vec<_> = mtl_bufs.iter().collect();
+
+    for order in [BindingOrder::LowToHigh, BindingOrder::HighToLow] {
+        let expected =
+            metal.pairwise_reduce_unweighted(&mtl_refs, &stack_vm, desc.num_evals(), order);
+        let got = metal.pairwise_reduce_unweighted(&mtl_refs, &ir_k, desc.num_evals(), order);
+        assert_eq!(
+            expected, got,
+            "unweighted booleanity IR-path mismatch ({order:?})"
+        );
+    }
 }

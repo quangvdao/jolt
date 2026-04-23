@@ -308,9 +308,7 @@ pub fn make_jal_terminal(addr: u64) -> tracer::instruction::Cycle {
             operands: FormatJ { rd: 1, imm: 0 },
             ..JAL::default()
         },
-        register_state: RegisterStateFormatJ {
-            rd: (0, addr + 4),
-        },
+        register_state: RegisterStateFormatJ { rd: (0, addr + 4) },
         ram_access: (),
     })
 }

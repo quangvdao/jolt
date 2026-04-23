@@ -31,16 +31,11 @@ fn random_table(n: usize, rng: &mut ChaCha20Rng) -> Vec<Fr> {
 }
 
 fn random_bool_table(n: usize, rng: &mut ChaCha20Rng) -> Vec<Fr> {
-    (0..n)
-        .map(|_| Fr::from_u64(rng.next_u64() % 2))
-        .collect()
+    (0..n).map(|_| Fr::from_u64(rng.next_u64() % 2)).collect()
 }
 
 /// Brute-force instruction read-RAF claimed sum.
-fn brute_force_instruction_raf(
-    f_table: &[Fr],
-    val_table: &[Fr],
-) -> Fr {
+fn brute_force_instruction_raf(f_table: &[Fr], val_table: &[Fr]) -> Fr {
     f_table
         .iter()
         .zip(val_table.iter())
@@ -96,8 +91,8 @@ fn group5_instruction_raf_plus_reduction_plus_val_eval() {
             vec![ra]
         });
 
-    let raf_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> = Box::new(
-        InstructionReadRafStage::new(
+    let raf_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> =
+        Box::new(InstructionReadRafStage::new(
             f_table,
             val_table,
             r_reduction.clone(),
@@ -105,8 +100,7 @@ fn group5_instruction_raf_plus_reduction_plus_val_eval() {
             ra_materializer,
             raf_claimed_sum,
             cpu(),
-        ),
-    );
+        ));
 
     // --- ClaimReduction data ---
     let ram_inc = random_table(t, &mut rng);
@@ -114,29 +108,24 @@ fn group5_instruction_raf_plus_reduction_plus_val_eval() {
     let c0 = Fr::random(&mut rng);
     let c1 = Fr::random(&mut rng);
 
-    let reduction_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> = Box::new(
-        ClaimReductionStage::increment(
+    let reduction_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> =
+        Box::new(ClaimReductionStage::increment(
             ram_inc.clone(),
             rd_inc.clone(),
             r_reduction.clone(),
             c0,
             c1,
             cpu(),
-        ),
-    );
+        ));
 
     // --- RegistersValEval data ---
     let inc = random_table(t, &mut rng);
     let wa = random_table(t, &mut rng);
     let val_eval_sum = brute_force_val_eval(&inc, &wa, &r_reduction);
 
-    let val_eval_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> =
-        Box::new(RegistersValEvalStage::new(
-            inc.clone(),
-            wa.clone(),
-            r_reduction.clone(),
-            val_eval_sum,
-        ));
+    let val_eval_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> = Box::new(
+        RegistersValEvalStage::new(inc.clone(), wa.clone(), r_reduction.clone(), val_eval_sum),
+    );
 
     // --- Compose into Group 5 ---
     let mut composite = CompositeStage::new(
@@ -200,24 +189,15 @@ fn group5_instruction_raf_plus_reduction_plus_val_eval() {
         "ram_inc eval mismatch"
     );
     let expected_rd_inc = Polynomial::new(rd_inc).evaluate(&reduction_eval_point);
-    assert_eq!(
-        all_claims[2].eval, expected_rd_inc,
-        "rd_inc eval mismatch"
-    );
+    assert_eq!(all_claims[2].eval, expected_rd_inc, "rd_inc eval mismatch");
 
     // Claims 3-4: RegistersValEval (inc, wa at cycle point, HighToLow = no reversal)
     let val_eval_challenges = &challenges[log_k..];
     let val_eval_point: Vec<Fr> = val_eval_challenges.to_vec();
     let expected_inc = Polynomial::new(inc).evaluate(&val_eval_point);
-    assert_eq!(
-        all_claims[3].eval, expected_inc,
-        "inc eval mismatch"
-    );
+    assert_eq!(all_claims[3].eval, expected_inc, "inc eval mismatch");
     let expected_wa = Polynomial::new(wa).evaluate(&val_eval_point);
-    assert_eq!(
-        all_claims[4].eval, expected_wa,
-        "wa eval mismatch"
-    );
+    assert_eq!(all_claims[4].eval, expected_wa, "wa eval mismatch");
 }
 
 /// Group 6 test: RaBooleanity (log_K+log_T, HighToLow) +
@@ -259,8 +239,9 @@ fn group6_ra_booleanity_plus_hamming_plus_reduction() {
     let h_evals: Vec<Fr> = random_bool_table(t, &mut rng);
     let eq_point_t: Vec<Fr> = (0..log_t).map(|_| Fr::random(&mut rng)).collect();
 
-    let hamming_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> =
-        Box::new(HammingBooleanityStage::new(h_evals.clone(), eq_point_t, cpu()));
+    let hamming_stage: Box<dyn ProverStage<Fr, Blake2bTranscript>> = Box::new(
+        HammingBooleanityStage::new(h_evals.clone(), eq_point_t, cpu()),
+    );
 
     // ClaimReduction: 2 polys over cycle domain
     let p0 = random_table(t, &mut rng);
@@ -337,12 +318,14 @@ fn group6_ra_booleanity_plus_hamming_plus_reduction() {
     let reduction_eval_point: Vec<Fr> = reduction_challenges.iter().rev().copied().collect();
     let expected_p0 = Polynomial::new(p0).evaluate(&reduction_eval_point);
     assert_eq!(
-        all_claims[d + 1].eval, expected_p0,
+        all_claims[d + 1].eval,
+        expected_p0,
         "reduction p0 eval mismatch"
     );
     let expected_p1 = Polynomial::new(p1).evaluate(&reduction_eval_point);
     assert_eq!(
-        all_claims[d + 2].eval, expected_p1,
+        all_claims[d + 2].eval,
+        expected_p1,
         "reduction p1 eval mismatch"
     );
 }

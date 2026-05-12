@@ -211,6 +211,73 @@ impl BatchCommitmentSource<Fr> for DenseBatch {
     }
 }
 
+struct I128Batch {
+    ids: Vec<usize>,
+    rows: Vec<Vec<i128>>,
+    dense: Vec<Vec<Fr>>,
+    map_rows_calls: AtomicUsize,
+}
+
+impl I128Batch {
+    fn new(rows: Vec<Vec<i128>>) -> Self {
+        let dense = rows
+            .iter()
+            .map(|row| row.iter().map(|&value| Fr::from_i128(value)).collect())
+            .collect();
+        Self {
+            ids: (0..rows.len()).collect(),
+            rows,
+            dense,
+            map_rows_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl BatchCommitmentSource<Fr> for I128Batch {
+    type Id = usize;
+
+    type Source<'a>
+        = DenseSource<'a>
+    where
+        Self: 'a;
+
+    fn source_ids(&self) -> &[Self::Id] {
+        &self.ids
+    }
+
+    fn num_vars(&self, id: Self::Id) -> usize {
+        self.rows[id].len().ilog2() as usize
+    }
+
+    fn source(&self, id: Self::Id) -> Self::Source<'_> {
+        DenseSource {
+            evaluations: &self.dense[id],
+        }
+    }
+
+    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    where
+        R: Send,
+        V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
+    {
+        let _ = self.map_rows_calls.fetch_add(1, Ordering::SeqCst);
+        let row_len = 1usize << sigma;
+        let num_rows = self.rows[ids[0]].len() / row_len;
+
+        (0..num_rows)
+            .map(|row_index| {
+                ids.iter()
+                    .map(|&id| {
+                        let start = row_index * row_len;
+                        let end = start + row_len;
+                        visit(id, SourceRow::I128(&self.rows[id][start..end]))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
 #[test]
 fn commit_batch_dense_matches_direct_and_uses_shared_rows() {
     let num_vars = 4;
@@ -261,6 +328,24 @@ fn commit_batch_dense_matches_direct_and_uses_shared_rows() {
 }
 
 #[test]
+fn commit_batch_i128_matches_dense_commitment() {
+    let num_vars = 4;
+    let prover_setup = DoryScheme::setup_prover(num_vars);
+    let batch = I128Batch::new(vec![
+        vec![0, 1, -1, 7, -3, 0, 12, -8, 4, 5, -6, 0, 9, -2, 3, 1],
+        vec![2, -4, 0, 0, 11, -9, 5, 6, -1, 8, 0, -7, 3, 3, -2, 10],
+    ]);
+
+    let results = DoryScheme::commit_batch(&batch, batch.source_ids(), &prover_setup);
+    assert_eq!(batch.map_rows_calls.load(Ordering::SeqCst), 1);
+
+    for (id, dense) in batch.dense.iter().enumerate() {
+        let (direct, _) = DoryScheme::commit(dense, &prover_setup);
+        assert_eq!(results[id].0, direct);
+    }
+}
+
+#[test]
 fn commit_batch_zk_dense_outputs_openable_hints() {
     let num_vars = 4;
     let mut rng = ChaCha20Rng::seed_from_u64(376);
@@ -298,30 +383,36 @@ fn commit_batch_zk_dense_outputs_openable_hints() {
 struct OneHotBatch {
     ids: Vec<usize>,
     log_domain_size: u8,
-    rows: Vec<Vec<Option<OneHotIndex>>>,
+    chunks: Vec<Vec<Vec<Option<OneHotIndex>>>>,
     dense: Vec<Vec<Fr>>,
     map_rows_calls: AtomicUsize,
 }
 
 impl OneHotBatch {
-    fn new(log_domain_size: u8, rows: Vec<Vec<Option<OneHotIndex>>>) -> Self {
+    fn new(log_domain_size: u8, chunks: Vec<Vec<Vec<Option<OneHotIndex>>>>) -> Self {
         let domain_size = 1usize << log_domain_size;
-        let dense = rows
+        let dense = chunks
             .iter()
-            .map(|row| {
-                let mut evals = vec![Fr::from_u64(0); row.len() * domain_size];
-                for (column, hot_index) in row.iter().enumerate() {
-                    if let Some(hot_index) = hot_index {
-                        evals[hot_index.get() * row.len() + column] = Fr::from_u64(1);
+            .map(|source_chunks| {
+                let row_len = source_chunks[0].len();
+                let trace_len = source_chunks.len() * row_len;
+                let mut evals = vec![Fr::from_u64(0); trace_len * domain_size];
+                for (chunk_index, chunk) in source_chunks.iter().enumerate() {
+                    assert_eq!(chunk.len(), row_len);
+                    for (column, hot_index) in chunk.iter().enumerate() {
+                        if let Some(hot_index) = hot_index {
+                            evals[hot_index.get() * trace_len + chunk_index * row_len + column] =
+                                Fr::from_u64(1);
+                        }
                     }
                 }
                 evals
             })
             .collect();
         Self {
-            ids: (0..rows.len()).collect(),
+            ids: (0..chunks.len()).collect(),
             log_domain_size,
-            rows,
+            chunks,
             dense,
             map_rows_calls: AtomicUsize::new(0),
         }
@@ -356,18 +447,21 @@ impl BatchCommitmentSource<Fr> for OneHotBatch {
         V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
     {
         let _ = self.map_rows_calls.fetch_add(1, Ordering::SeqCst);
-        vec![ids
-            .iter()
-            .map(|&id| {
-                visit(
-                    id,
-                    SourceRow::OneHot(OneHotRow {
-                        log_domain_size: self.log_domain_size,
-                        entries: OneHotEntries::MaybeZero(&self.rows[id]),
-                    }),
-                )
+        (0..self.chunks[ids[0]].len())
+            .map(|chunk_index| {
+                ids.iter()
+                    .map(|&id| {
+                        visit(
+                            id,
+                            SourceRow::OneHot(OneHotRow {
+                                log_domain_size: self.log_domain_size,
+                                entries: OneHotEntries::MaybeZero(&self.chunks[id][chunk_index]),
+                            }),
+                        )
+                    })
+                    .collect()
             })
-            .collect()]
+            .collect()
     }
 }
 
@@ -377,18 +471,18 @@ fn commit_batch_one_hot_matches_streaming_dense_layout() {
     let log_domain_size = 2;
     let prover_setup = DoryScheme::setup_prover(num_vars);
     let rows = vec![
-        vec![
+        vec![vec![
             Some(OneHotIndex::new(2, log_domain_size).expect("valid index")),
             None,
             Some(OneHotIndex::new(0, log_domain_size).expect("valid index")),
             Some(OneHotIndex::new(3, log_domain_size).expect("valid index")),
-        ],
-        vec![
+        ]],
+        vec![vec![
             Some(OneHotIndex::new(1, log_domain_size).expect("valid index")),
             Some(OneHotIndex::new(0, log_domain_size).expect("valid index")),
             None,
             Some(OneHotIndex::new(2, log_domain_size).expect("valid index")),
-        ],
+        ]],
     ];
     let batch = OneHotBatch::new(log_domain_size, rows);
 
@@ -399,6 +493,42 @@ fn commit_batch_one_hot_matches_streaming_dense_layout() {
         let (direct, _) = DoryScheme::commit(dense, &prover_setup);
         assert_eq!(results[id].0, direct);
     }
+}
+
+#[test]
+fn commit_batch_one_hot_matches_multi_chunk_streaming_layout() {
+    let num_vars = 6;
+    let log_domain_size = 2;
+    let prover_setup = DoryScheme::setup_prover(num_vars);
+    let source_chunks = vec![vec![
+        vec![
+            Some(OneHotIndex::new(0, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(1, log_domain_size).expect("valid index")),
+            None,
+            Some(OneHotIndex::new(3, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(2, log_domain_size).expect("valid index")),
+            None,
+            Some(OneHotIndex::new(1, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(0, log_domain_size).expect("valid index")),
+        ],
+        vec![
+            None,
+            Some(OneHotIndex::new(2, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(3, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(0, log_domain_size).expect("valid index")),
+            None,
+            Some(OneHotIndex::new(1, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(2, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(3, log_domain_size).expect("valid index")),
+        ],
+    ]];
+    let batch = OneHotBatch::new(log_domain_size, source_chunks);
+
+    let results = DoryScheme::commit_batch(&batch, batch.source_ids(), &prover_setup);
+    assert_eq!(batch.map_rows_calls.load(Ordering::SeqCst), 1);
+
+    let (direct, _) = DoryScheme::commit(&batch.dense[0], &prover_setup);
+    assert_eq!(results[0].0, direct);
 }
 
 #[test]

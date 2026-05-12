@@ -574,10 +574,7 @@ fn commit_onehot_row(row: OneHotRow<'_>, setup: &DoryProverSetup) -> Vec<ArkG1> 
         }
     }
 
-    let sums = jolt_optimizations::batch_g1_additions_multi(
-        &g1_bases,
-        &columns_by_hot_index,
-    );
+    let sums = batch_g1_additions_multi_affine(&g1_bases, &columns_by_hot_index);
 
     let mut row_commitments = vec![ArkG1(G1Projective::zero()); k];
     for (hot_index, sum) in sums.into_iter().enumerate() {

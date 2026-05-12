@@ -14,6 +14,7 @@ use dory::primitives::arithmetic::{
 };
 use dory::primitives::poly::{MultilinearLagrange, Polynomial as DoryPolynomial};
 use dory::Mode;
+use jolt_crypto::ec::bn254::batch_addition::batch_g1_additions_multi_affine;
 use jolt_crypto::{Bn254G1, Bn254GT, Commitment, DeriveSetup, JoltGroup, PedersenSetup};
 use jolt_field::{Fr, FromPrimitiveInt};
 use jolt_openings::{
@@ -25,6 +26,10 @@ use jolt_openings::{
 use jolt_poly::MultilinearPoly;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
+
+use ark_bn254::{G1Affine, G1Projective};
+use ark_ec::CurveGroup;
+use dory::backends::arkworks::ArkG1 as ArkG1Struct;
 
 use crate::transcript::JoltToDoryTranscript;
 use crate::types::{DoryCommitment, DoryHint, DoryProof, DoryProverSetup, DoryVerifierSetup};
@@ -506,11 +511,10 @@ fn commit_i128_row(values: &[i128], setup: &ArkworksProverSetup) -> ArkG1 {
         values.len(),
         setup.g1_vec.len(),
     );
-    let scalars: Vec<ArkFr> = values
-        .iter()
-        .map(|&value| jolt_fr_to_ark(&Fr::from_i128(value)))
-        .collect();
-    G1Routines::msm(&setup.g1_vec[..scalars.len()], &scalars)
+    let g1_bases = g1_bases_affine(setup, values.len());
+    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_i128::<G1Projective>(
+        &g1_bases, values, true,
+    ))
 }
 
 /// One-hot commit: O(T) group additions for unit-valued one-hot polynomials.
@@ -576,15 +580,17 @@ fn commit_one_hot_row(
         }
     }
 
-    columns_by_hot_index
+    let g1_bases = g1_bases_affine(setup, num_columns);
+    batch_g1_additions_multi_affine(&g1_bases, &columns_by_hot_index)
         .into_iter()
-        .map(|columns| {
-            columns
-                .iter()
-                .fold(<InnerBN254 as PairingCurve>::G1::identity(), |acc, &col| {
-                    <InnerBN254 as PairingCurve>::G1::add(&acc, &setup.g1_vec[col])
-                })
-        })
+        .map(|affine| ArkG1Struct(affine.into()))
+        .collect()
+}
+
+fn g1_bases_affine(setup: &ArkworksProverSetup, len: usize) -> Vec<G1Affine> {
+    setup.g1_vec[..len]
+        .iter()
+        .map(|base| base.0.into_affine())
         .collect()
 }
 

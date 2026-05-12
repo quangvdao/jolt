@@ -18,9 +18,9 @@ use jolt_crypto::{Bn254G1, Bn254GT, Commitment, DeriveSetup, JoltGroup, Pedersen
 use jolt_field::{Fr, FromPrimitiveInt};
 use jolt_openings::{
     homomorphic_prove_batch, homomorphic_verify_batch, AdditivelyHomomorphic,
-    AdditivelyHomomorphicVerifier, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
-    OpeningClaim, OpeningsError, ProverClaim, PublicVerifierSetup, SourceRow, ZkOpeningScheme,
-    ZkOpeningSchemeVerifier,
+    AdditivelyHomomorphicVerifier, BatchCommitmentSource, CommitmentScheme,
+    CommitmentSchemeVerifier, CommitmentSource, OpeningClaim, OpeningsError, ProverClaim,
+    PublicVerifierSetup, SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_poly::MultilinearPoly;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
@@ -114,6 +114,47 @@ impl DoryScheme {
                 ark_to_jolt_fr(&commit_blind),
             ),
         )
+    }
+
+    fn commit_batch_with_mode<B, M>(
+        batch: &B,
+        ids: &[B::Id],
+        setup: &DoryProverSetup,
+    ) -> Vec<(DoryCommitment, DoryHint)>
+    where
+        B: BatchCommitmentSource<Fr>,
+        M: Mode,
+    {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+
+        let max_num_vars = ids
+            .iter()
+            .map(|&id| batch.num_vars(id))
+            .max()
+            .expect("ids is non-empty");
+        let sigma = max_num_vars.div_ceil(2);
+        let row_major = batch.map_rows(sigma, ids, |_, row| commit_source_row(row, &setup.0));
+
+        let mut chunks_by_source: Vec<Vec<DoryChunkCommitment>> = (0..ids.len())
+            .map(|_| Vec::with_capacity(row_major.len()))
+            .collect();
+        for row in row_major {
+            assert_eq!(
+                row.len(),
+                ids.len(),
+                "batch source returned a ragged row of committed sources",
+            );
+            for (source_chunks, chunk) in chunks_by_source.iter_mut().zip(row) {
+                source_chunks.push(chunk);
+            }
+        }
+
+        chunks_by_source
+            .into_iter()
+            .map(|chunks| aggregate_batch_chunks::<M>(chunks, setup))
+            .collect()
     }
 }
 
@@ -219,6 +260,15 @@ impl CommitmentScheme for DoryScheme {
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint) {
         Self::commit_with_mode::<S, Transparent>(source, setup)
+    }
+
+    #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch")]
+    fn commit_batch<B: BatchCommitmentSource<Self::Field>>(
+        batch: &B,
+        ids: &[B::Id],
+        setup: &Self::ProverSetup,
+    ) -> Vec<(Self::Output, Self::OpeningHint)> {
+        Self::commit_batch_with_mode::<B, Transparent>(batch, ids, setup)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open")]
@@ -364,6 +414,15 @@ impl ZkOpeningScheme for DoryScheme {
         Self::commit_with_mode::<S, dory::ZK>(source, setup)
     }
 
+    #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_zk")]
+    fn commit_batch_zk<B: BatchCommitmentSource<Self::Field>>(
+        batch: &B,
+        ids: &[B::Id],
+        setup: &Self::ProverSetup,
+    ) -> Vec<(Self::Output, Self::OpeningHint)> {
+        Self::commit_batch_with_mode::<B, dory::ZK>(batch, ids, setup)
+    }
+
     #[tracing::instrument(skip_all, name = "DoryScheme::open_zk")]
     fn open_zk(
         poly: &Self::Polynomial,
@@ -402,6 +461,11 @@ impl ZkOpeningScheme for DoryScheme {
     }
 }
 
+enum DoryChunkCommitment {
+    Dense(ArkG1),
+    OneHot(Vec<ArkG1>),
+}
+
 /// Dense commit: full MSM per row, parallel over rows.
 fn commit_rows_dense<S: CommitmentSource<Fr> + ?Sized>(
     source: &S,
@@ -422,6 +486,31 @@ fn commit_rows_dense<S: CommitmentSource<Fr> + ?Sized>(
             G1Routines::msm(&g1_bases[..scalars.len()], &scalars)
         })
         .collect()
+}
+
+fn commit_field_row(values: &[Fr], setup: &ArkworksProverSetup) -> ArkG1 {
+    assert!(
+        values.len() <= setup.g1_vec.len(),
+        "Dory row length ({}) exceeds G1 SRS size ({})",
+        values.len(),
+        setup.g1_vec.len(),
+    );
+    let scalars: Vec<ArkFr> = values.iter().map(jolt_fr_to_ark).collect();
+    G1Routines::msm(&setup.g1_vec[..scalars.len()], &scalars)
+}
+
+fn commit_i128_row(values: &[i128], setup: &ArkworksProverSetup) -> ArkG1 {
+    assert!(
+        values.len() <= setup.g1_vec.len(),
+        "Dory row length ({}) exceeds G1 SRS size ({})",
+        values.len(),
+        setup.g1_vec.len(),
+    );
+    let scalars: Vec<ArkFr> = values
+        .iter()
+        .map(|&value| jolt_fr_to_ark(&Fr::from_i128(value)))
+        .collect();
+    G1Routines::msm(&setup.g1_vec[..scalars.len()], &scalars)
 }
 
 /// One-hot commit: O(T) group additions for unit-valued one-hot polynomials.
@@ -453,6 +542,124 @@ fn commit_rows_one_hot<S: CommitmentSource<Fr> + ?Sized>(
                 })
         })
         .collect()
+}
+
+fn commit_one_hot_row(
+    row: jolt_openings::OneHotRow<'_>,
+    setup: &ArkworksProverSetup,
+) -> Vec<ArkG1> {
+    let k = 1usize << row.log_domain_size;
+    let num_columns = match row.entries {
+        jolt_openings::OneHotEntries::OnePerColumn(indices) => indices.len(),
+        jolt_openings::OneHotEntries::MaybeZero(indices) => indices.len(),
+    };
+    assert!(
+        num_columns <= setup.g1_vec.len(),
+        "Dory one-hot row length ({}) exceeds G1 SRS size ({})",
+        num_columns,
+        setup.g1_vec.len(),
+    );
+
+    let mut columns_by_hot_index: Vec<Vec<usize>> = vec![Vec::new(); k];
+    match row.entries {
+        jolt_openings::OneHotEntries::OnePerColumn(indices) => {
+            for (column, hot_index) in indices.iter().enumerate() {
+                columns_by_hot_index[hot_index.get()].push(column);
+            }
+        }
+        jolt_openings::OneHotEntries::MaybeZero(indices) => {
+            for (column, hot_index) in indices.iter().enumerate() {
+                if let Some(hot_index) = hot_index {
+                    columns_by_hot_index[hot_index.get()].push(column);
+                }
+            }
+        }
+    }
+
+    columns_by_hot_index
+        .into_iter()
+        .map(|columns| {
+            columns
+                .iter()
+                .fold(<InnerBN254 as PairingCurve>::G1::identity(), |acc, &col| {
+                    <InnerBN254 as PairingCurve>::G1::add(&acc, &setup.g1_vec[col])
+                })
+        })
+        .collect()
+}
+
+fn commit_source_row(row: SourceRow<'_, Fr>, setup: &ArkworksProverSetup) -> DoryChunkCommitment {
+    match row {
+        SourceRow::FieldElements(values) => {
+            DoryChunkCommitment::Dense(commit_field_row(values, setup))
+        }
+        SourceRow::I128(values) => DoryChunkCommitment::Dense(commit_i128_row(values, setup)),
+        SourceRow::OneHot(row) => DoryChunkCommitment::OneHot(commit_one_hot_row(row, setup)),
+    }
+}
+
+fn aggregate_batch_chunks<M: Mode>(
+    chunks: Vec<DoryChunkCommitment>,
+    setup: &DoryProverSetup,
+) -> (DoryCommitment, DoryHint) {
+    assert!(!chunks.is_empty(), "cannot aggregate an empty source");
+
+    match &chunks[0] {
+        DoryChunkCommitment::Dense(_) => {
+            let mut row_commitments = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                match chunk {
+                    DoryChunkCommitment::Dense(row_commitment) => {
+                        row_commitments.push(row_commitment);
+                    }
+                    DoryChunkCommitment::OneHot(_) => {
+                        panic!("batch source mixed dense and one-hot rows for one source");
+                    }
+                }
+            }
+            finish_row_commitments::<M>(row_commitments, setup)
+        }
+        DoryChunkCommitment::OneHot(first) => {
+            let rows_per_hot_index = chunks.len();
+            let k = first.len();
+            let mut row_commitments =
+                vec![<InnerBN254 as PairingCurve>::G1::identity(); rows_per_hot_index * k];
+
+            for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+                match chunk {
+                    DoryChunkCommitment::OneHot(commitments) => {
+                        assert_eq!(
+                            commitments.len(),
+                            k,
+                            "batch source changed one-hot domain size within one source",
+                        );
+                        for (hot_index, row_commitment) in commitments.into_iter().enumerate() {
+                            row_commitments[chunk_index + hot_index * rows_per_hot_index] =
+                                row_commitment;
+                        }
+                    }
+                    DoryChunkCommitment::Dense(_) => {
+                        panic!("batch source mixed dense and one-hot rows for one source");
+                    }
+                }
+            }
+            finish_row_commitments::<M>(row_commitments, setup)
+        }
+    }
+}
+
+fn finish_row_commitments<M: Mode>(
+    row_commitments: Vec<ArkG1>,
+    setup: &DoryProverSetup,
+) -> (DoryCommitment, DoryHint) {
+    let (tier_2, commit_blind) = commit_rows_tier_2::<M>(&row_commitments, setup);
+    (
+        DoryCommitment(ark_to_jolt_gt(&tier_2)),
+        DoryHint::new(
+            ark_to_jolt_g1_vec(row_commitments),
+            ark_to_jolt_fr(&commit_blind),
+        ),
+    )
 }
 
 fn compute_row_commitments<S: CommitmentSource<Fr> + ?Sized>(
@@ -488,14 +695,14 @@ fn source_row_to_dense(row: SourceRow<'_, Fr>, expected_len: usize) -> Vec<Fr> {
                 jolt_openings::OneHotEntries::OnePerColumn(indices) => {
                     dense.resize(indices.len() * domain_size, Fr::from_u64(0));
                     for (col, hot_index) in indices.iter().enumerate() {
-                        dense[col * domain_size + hot_index.get()] = Fr::from_u64(1);
+                        dense[hot_index.get() * indices.len() + col] = Fr::from_u64(1);
                     }
                 }
                 jolt_openings::OneHotEntries::MaybeZero(indices) => {
                     dense.resize(indices.len() * domain_size, Fr::from_u64(0));
                     for (col, hot_index) in indices.iter().enumerate() {
                         if let Some(hot_index) = hot_index {
-                            dense[col * domain_size + hot_index.get()] = Fr::from_u64(1);
+                            dense[hot_index.get() * indices.len() + col] = Fr::from_u64(1);
                         }
                     }
                 }

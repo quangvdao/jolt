@@ -316,7 +316,9 @@ impl OneHotIndex {
 /// `log_domain_size` says that every hot coordinate lives in a one-hot domain
 /// of size `2^log_domain_size`. For current Jolt this is `4` or `8`.
 /// The `entries` field records whether each trace column has a required hot
-/// coordinate or may be zero, depending on the row source.
+/// coordinate or may be zero, depending on the row source. Dory consumes this
+/// as its streaming one-hot chunk shape: one row commitment per hot coordinate,
+/// with trace columns contributing to the row for their hot coordinate.
 pub struct OneHotRow<'a> {
     pub log_domain_size: u8,
     pub entries: OneHotEntries<'a>,
@@ -357,9 +359,12 @@ pub enum SourceRow<'a, F> {
     /// polynomials without first materializing field elements.
     I128(&'a [i128]),
 
-    /// A row whose entries are one-hot vectors over a small domain.
+    /// A streaming one-hot chunk whose entries are one-hot vectors over a small
+    /// domain.
     ///
     /// This preserves the current Dory grouped-addition path for RA polynomials.
+    /// Backends that do not exploit this shape can expand it explicitly in
+    /// hot-coordinate-major order.
     OneHot(OneHotRow<'a>),
 }
 
@@ -441,6 +446,7 @@ The generic semantics are:
    `log_domain_size` means each column entry lives in `{0, ..., 2^log_domain_size - 1}`.
    `OneHotEntries::OnePerColumn(indices)` means every column contributes one basis vector.
    `OneHotEntries::MaybeZero(indices)` means `Some(k)` contributes `e_k`, and `None` contributes the zero vector.
+   Its dense expansion for this row shape is hot-coordinate-major inside the chunk: entry `(hot_index, column)` maps to `hot_index * num_columns + column`.
 
 Only `CommitmentSource` and `BatchCommitmentSource` are core API concepts.
 `I128` and `OneHot` are optional row encodings.

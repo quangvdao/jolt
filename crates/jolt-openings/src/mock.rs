@@ -131,19 +131,21 @@ impl<F: Field> CommitmentScheme for MockCommitmentScheme<F> {
                 let domain_size = 1usize << row.log_domain_size;
                 match row.entries {
                     crate::OneHotEntries::OnePerColumn(indices) => {
-                        for hot_index in indices {
-                            let mut dense = vec![F::zero(); domain_size];
-                            dense[hot_index.get()] = F::from_u64(1);
-                            evaluations.extend(dense);
+                        let start = evaluations.len();
+                        evaluations.resize(start + indices.len() * domain_size, F::zero());
+                        for (col, hot_index) in indices.iter().enumerate() {
+                            evaluations[start + hot_index.get() * indices.len() + col] =
+                                F::from_u64(1);
                         }
                     }
                     crate::OneHotEntries::MaybeZero(indices) => {
-                        for hot_index in indices {
-                            let mut dense = vec![F::zero(); domain_size];
+                        let start = evaluations.len();
+                        evaluations.resize(start + indices.len() * domain_size, F::zero());
+                        for (col, hot_index) in indices.iter().enumerate() {
                             if let Some(hot_index) = hot_index {
-                                dense[hot_index.get()] = F::from_u64(1);
+                                evaluations[start + hot_index.get() * indices.len() + col] =
+                                    F::from_u64(1);
                             }
-                            evaluations.extend(dense);
                         }
                     }
                 }
@@ -373,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn one_hot_source_rows_materialize_per_entry_blocks() {
+    fn one_hot_source_rows_materialize_hot_coordinate_major() {
         struct TestSource {
             entries: Vec<Option<OneHotIndex>>,
             dense: Polynomial<Fr>,
@@ -413,8 +415,8 @@ mod tests {
             None,
         ];
         let mut dense = vec![Fr::from_u64(0); 16];
-        dense[1] = Fr::from_u64(1);
-        dense[11] = Fr::from_u64(1);
+        dense[4] = Fr::from_u64(1);
+        dense[14] = Fr::from_u64(1);
 
         let source = TestSource {
             entries,

@@ -43,7 +43,9 @@ impl OneHotIndex {
 ///
 /// `log_domain_size` says that every hot coordinate lives in a one-hot domain
 /// of size `2^log_domain_size`. The entries record whether each trace column
-/// has a required hot coordinate or may be zero.
+/// has a required hot coordinate or may be zero. Dory consumes this as the
+/// current streaming one-hot chunk shape: it builds one row commitment per hot
+/// coordinate, with columns contributing to the row for their hot coordinate.
 pub struct OneHotRow<'a> {
     pub log_domain_size: u8,
     pub entries: OneHotEntries<'a>,
@@ -83,7 +85,13 @@ pub enum SourceRow<'a, F> {
     /// elements.
     I128(&'a [i128]),
 
-    /// A row whose entries are one-hot vectors over a small domain.
+    /// A streaming one-hot chunk whose entries are one-hot vectors over a small
+    /// domain.
+    ///
+    /// This is included for Jolt's RA commitments, where Dory can preserve the
+    /// existing grouped-addition path without materializing a dense `{0,1}`
+    /// table. Backends that do not exploit this shape can expand it explicitly
+    /// in the same hot-coordinate-major order.
     OneHot(OneHotRow<'a>),
 }
 

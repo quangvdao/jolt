@@ -209,19 +209,20 @@ where
             let domain_size = 1usize << row.log_domain_size;
             match row.entries {
                 crate::sources::OneHotEntries::OnePerColumn(indices) => {
-                    for hot_index in indices {
-                        let mut dense = vec![F::zero(); domain_size];
-                        dense[hot_index.get()] = F::from_u64(1);
-                        evaluations.extend(dense);
+                    let start = evaluations.len();
+                    evaluations.resize(start + indices.len() * domain_size, F::zero());
+                    for (col, hot_index) in indices.iter().enumerate() {
+                        evaluations[start + hot_index.get() * indices.len() + col] = F::from_u64(1);
                     }
                 }
                 crate::sources::OneHotEntries::MaybeZero(indices) => {
-                    for hot_index in indices {
-                        let mut dense = vec![F::zero(); domain_size];
+                    let start = evaluations.len();
+                    evaluations.resize(start + indices.len() * domain_size, F::zero());
+                    for (col, hot_index) in indices.iter().enumerate() {
                         if let Some(hot_index) = hot_index {
-                            dense[hot_index.get()] = F::from_u64(1);
+                            evaluations[start + hot_index.get() * indices.len() + col] =
+                                F::from_u64(1);
                         }
-                        evaluations.extend(dense);
                     }
                 }
             }

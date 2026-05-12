@@ -5,12 +5,15 @@
 
 #![expect(clippy::expect_used, reason = "tests may panic on assertion failures")]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use dory::backends::arkworks::ArkG1;
 use jolt_dory::DoryScheme;
 use jolt_field::{Fr, FromPrimitiveInt, RandomSampling};
 use jolt_openings::{
-    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
-    CommitmentSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, BatchCommitmentSource, CommitmentScheme,
+    CommitmentSchemeVerifier, CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, SourceRow,
+    ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_poly::{OneHotPolynomial, Polynomial};
 use jolt_transcript::{Blake2bTranscript, KeccakTranscript, Transcript};
@@ -114,6 +117,288 @@ fn one_hot_commitment_matches_dense() {
         one_hot_commitment, dense_commitment,
         "one-hot commitment must match the equivalent dense table"
     );
+}
+
+struct DenseSource<'a> {
+    evaluations: &'a [Fr],
+}
+
+impl CommitmentSource<Fr> for DenseSource<'_> {
+    fn num_vars(&self) -> usize {
+        self.evaluations.len().ilog2() as usize
+    }
+
+    fn evaluate(&self, point: &[Fr]) -> Fr {
+        Polynomial::new(self.evaluations.to_vec()).evaluate(point)
+    }
+
+    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
+    {
+        let row_len = 1usize << sigma;
+        for (row_index, row) in self.evaluations.chunks(row_len).enumerate() {
+            visit(row_index, SourceRow::FieldElements(row));
+        }
+    }
+
+    fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
+        Polynomial::new(self.evaluations.to_vec()).fold_rows(left, sigma)
+    }
+}
+
+struct DenseBatch {
+    ids: Vec<usize>,
+    evaluations: Vec<Vec<Fr>>,
+    map_rows_calls: AtomicUsize,
+}
+
+impl DenseBatch {
+    fn new(evaluations: Vec<Vec<Fr>>) -> Self {
+        Self {
+            ids: (0..evaluations.len()).collect(),
+            evaluations,
+            map_rows_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl BatchCommitmentSource<Fr> for DenseBatch {
+    type Id = usize;
+
+    type Source<'a>
+        = DenseSource<'a>
+    where
+        Self: 'a;
+
+    fn source_ids(&self) -> &[Self::Id] {
+        &self.ids
+    }
+
+    fn num_vars(&self, id: Self::Id) -> usize {
+        self.evaluations[id].len().ilog2() as usize
+    }
+
+    fn source(&self, id: Self::Id) -> Self::Source<'_> {
+        DenseSource {
+            evaluations: &self.evaluations[id],
+        }
+    }
+
+    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    where
+        R: Send,
+        V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
+    {
+        let _ = self.map_rows_calls.fetch_add(1, Ordering::SeqCst);
+        let row_len = 1usize << sigma;
+        let num_rows = self.evaluations[ids[0]].len() / row_len;
+
+        (0..num_rows)
+            .map(|row_index| {
+                ids.iter()
+                    .map(|&id| {
+                        let start = row_index * row_len;
+                        let end = start + row_len;
+                        visit(
+                            id,
+                            SourceRow::FieldElements(&self.evaluations[id][start..end]),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn commit_batch_dense_matches_direct_and_uses_shared_rows() {
+    let num_vars = 4;
+    let mut rng = ChaCha20Rng::seed_from_u64(375);
+    let prover_setup = DoryScheme::setup_prover(num_vars);
+
+    let poly_a = Polynomial::<Fr>::random(num_vars, &mut rng);
+    let poly_b = Polynomial::<Fr>::random(num_vars, &mut rng);
+    let batch = DenseBatch::new(vec![
+        poly_a.evaluations().to_vec(),
+        poly_b.evaluations().to_vec(),
+    ]);
+
+    let results = DoryScheme::commit_batch(&batch, batch.source_ids(), &prover_setup);
+    assert_eq!(
+        batch.map_rows_calls.load(Ordering::SeqCst),
+        1,
+        "Dory batch commitment should use one shared row traversal",
+    );
+
+    for (id, poly) in [poly_a, poly_b].into_iter().enumerate() {
+        let (direct, _) = DoryScheme::commit(poly.evaluations(), &prover_setup);
+        assert_eq!(results[id].0, direct);
+
+        let point: Vec<Fr> = (0..num_vars).map(|_| Fr::random(&mut rng)).collect();
+        let eval = poly.evaluate(&point);
+        let mut pt = Blake2bTranscript::new(b"batch-dense");
+        let proof = DoryScheme::open(
+            &poly,
+            &point,
+            eval,
+            &prover_setup,
+            Some(results[id].1.clone()),
+            &mut pt,
+        );
+        let mut vt = Blake2bTranscript::new(b"batch-dense");
+        let verifier_setup = DoryScheme::setup_verifier(num_vars);
+        DoryScheme::verify(
+            &results[id].0,
+            &point,
+            eval,
+            &proof,
+            &verifier_setup,
+            &mut vt,
+        )
+        .expect("batch dense commitment hint should open and verify");
+    }
+}
+
+#[test]
+fn commit_batch_zk_dense_outputs_openable_hints() {
+    let num_vars = 4;
+    let mut rng = ChaCha20Rng::seed_from_u64(376);
+    let prover_setup = DoryScheme::setup_prover(num_vars);
+    let verifier_setup = DoryScheme::setup_verifier(num_vars);
+
+    let poly_a = Polynomial::<Fr>::random(num_vars, &mut rng);
+    let poly_b = Polynomial::<Fr>::random(num_vars, &mut rng);
+    let batch = DenseBatch::new(vec![
+        poly_a.evaluations().to_vec(),
+        poly_b.evaluations().to_vec(),
+    ]);
+
+    let results = DoryScheme::commit_batch_zk(&batch, batch.source_ids(), &prover_setup);
+    assert_eq!(batch.map_rows_calls.load(Ordering::SeqCst), 1);
+
+    for (id, poly) in [poly_a, poly_b].into_iter().enumerate() {
+        let point: Vec<Fr> = (0..num_vars).map(|_| Fr::random(&mut rng)).collect();
+        let eval = poly.evaluate(&point);
+        let mut pt = Blake2bTranscript::new(b"batch-zk-dense");
+        let (proof, _, _) = DoryScheme::open_zk(
+            &poly,
+            &point,
+            eval,
+            &prover_setup,
+            results[id].1.clone(),
+            &mut pt,
+        );
+        let mut vt = Blake2bTranscript::new(b"batch-zk-dense");
+        DoryScheme::verify_zk(&results[id].0, &point, &proof, &verifier_setup, &mut vt)
+            .expect("batch ZK dense commitment hint should open and verify");
+    }
+}
+
+struct OneHotBatch {
+    ids: Vec<usize>,
+    log_domain_size: u8,
+    rows: Vec<Vec<Option<OneHotIndex>>>,
+    dense: Vec<Vec<Fr>>,
+    map_rows_calls: AtomicUsize,
+}
+
+impl OneHotBatch {
+    fn new(log_domain_size: u8, rows: Vec<Vec<Option<OneHotIndex>>>) -> Self {
+        let domain_size = 1usize << log_domain_size;
+        let dense = rows
+            .iter()
+            .map(|row| {
+                let mut evals = vec![Fr::from_u64(0); row.len() * domain_size];
+                for (column, hot_index) in row.iter().enumerate() {
+                    if let Some(hot_index) = hot_index {
+                        evals[hot_index.get() * row.len() + column] = Fr::from_u64(1);
+                    }
+                }
+                evals
+            })
+            .collect();
+        Self {
+            ids: (0..rows.len()).collect(),
+            log_domain_size,
+            rows,
+            dense,
+            map_rows_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl BatchCommitmentSource<Fr> for OneHotBatch {
+    type Id = usize;
+
+    type Source<'a>
+        = DenseSource<'a>
+    where
+        Self: 'a;
+
+    fn source_ids(&self) -> &[Self::Id] {
+        &self.ids
+    }
+
+    fn num_vars(&self, id: Self::Id) -> usize {
+        self.dense[id].len().ilog2() as usize
+    }
+
+    fn source(&self, id: Self::Id) -> Self::Source<'_> {
+        DenseSource {
+            evaluations: &self.dense[id],
+        }
+    }
+
+    fn map_rows<R, V>(&self, _sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    where
+        R: Send,
+        V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
+    {
+        let _ = self.map_rows_calls.fetch_add(1, Ordering::SeqCst);
+        vec![ids
+            .iter()
+            .map(|&id| {
+                visit(
+                    id,
+                    SourceRow::OneHot(OneHotRow {
+                        log_domain_size: self.log_domain_size,
+                        entries: OneHotEntries::MaybeZero(&self.rows[id]),
+                    }),
+                )
+            })
+            .collect()]
+    }
+}
+
+#[test]
+fn commit_batch_one_hot_matches_streaming_dense_layout() {
+    let num_vars = 4;
+    let log_domain_size = 2;
+    let prover_setup = DoryScheme::setup_prover(num_vars);
+    let rows = vec![
+        vec![
+            Some(OneHotIndex::new(2, log_domain_size).expect("valid index")),
+            None,
+            Some(OneHotIndex::new(0, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(3, log_domain_size).expect("valid index")),
+        ],
+        vec![
+            Some(OneHotIndex::new(1, log_domain_size).expect("valid index")),
+            Some(OneHotIndex::new(0, log_domain_size).expect("valid index")),
+            None,
+            Some(OneHotIndex::new(2, log_domain_size).expect("valid index")),
+        ],
+    ];
+    let batch = OneHotBatch::new(log_domain_size, rows);
+
+    let results = DoryScheme::commit_batch(&batch, batch.source_ids(), &prover_setup);
+    assert_eq!(batch.map_rows_calls.load(Ordering::SeqCst), 1);
+
+    for (id, dense) in batch.dense.iter().enumerate() {
+        let (direct, _) = DoryScheme::commit(dense, &prover_setup);
+        assert_eq!(results[id].0, direct);
+    }
 }
 
 #[test]

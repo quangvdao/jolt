@@ -345,7 +345,7 @@ pub enum SourceRow<'a, F> {
     ///
     /// This preserves the current Dory small-scalar MSM path for increment
     /// polynomials without first materializing field elements.
-    SignedI128(&'a [i128]),
+    I128(&'a [i128]),
 
     /// A row whose entries are one-hot vectors over a small domain.
     ///
@@ -426,17 +426,17 @@ pub trait BatchCommitmentSource<F>: Send + Sync {
 The generic semantics are:
 
 1. `FieldElements` is the canonical dense row of field evaluations.
-2. `SignedI128` is a dense row of signed integers embedded canonically into `F`.
+2. `I128` is a dense row of signed integers embedded canonically into `F`.
 3. `OneHot` is a row of one-hot vector entries.
    `log_domain_size` means each column entry lives in `{0, ..., 2^log_domain_size - 1}`.
    `OneHotEntries::OnePerColumn(indices)` means every column contributes one basis vector.
    `OneHotEntries::MaybeZero(indices)` means `Some(k)` contributes `e_k`, and `None` contributes the zero vector.
 
 Only `CommitmentSource` and `BatchCommitmentSource` are core API concepts.
-`SignedI128` and `OneHot` are optional row encodings.
+`I128` and `OneHot` are optional row encodings.
 They are included to preserve current Jolt/Dory performance without forcing `jolt-core` to call Dory-specific APIs:
 
-1. `SignedI128` maps exactly to current Dory `PCS::process_chunk` for `RdInc` and `RamInc`.
+1. `I128` maps exactly to current Dory `PCS::process_chunk` for `RdInc` and `RamInc`.
 2. `OneHot` maps exactly to current Dory `PCS::process_chunk_onehot` for `InstructionRa`, `BytecodeRa`, and `RamRa`.
 3. A backend that does not care about these encodings can immediately materialize or interpret them as field rows.
 
@@ -516,7 +516,7 @@ The Dory row helper is private to `jolt-dory`:
 ```rust
 fn commit_row(row: SourceRow<'_, Fr>, setup: &DoryProverSetup) -> Vec<ArkG1> {
     match row {
-        SourceRow::SignedI128(values) => commit_small_scalar_row(values, setup),
+        SourceRow::I128(values) => commit_small_scalar_row(values, setup),
         SourceRow::OneHot(row) => commit_onehot_row(row, setup),
         SourceRow::FieldElements(values) => commit_field_row(values, setup),
     }
@@ -653,7 +653,7 @@ impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
                         post_value as i128 - pre_value as i128
                     })
                     .collect();
-                visit(id, SourceRow::SignedI128(&row))
+                visit(id, SourceRow::I128(&row))
             }
             CommittedPolynomial::InstructionRa(idx) => {
                 let row: Vec<OneHotIndex> = cycles
@@ -679,7 +679,7 @@ impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
 ```
 
 `visit_row` should contain exactly the current row generation logic from `CommittedPolynomial::stream_witness_and_commit_rows`, but it invokes the row visitor instead of calling `PCS::process_chunk` or `PCS::process_chunk_onehot`.
-For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today and call `visit(id, SourceRow::SignedI128(&row))`.
+For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today and call `visit(id, SourceRow::I128(&row))`.
 `InstructionRa` and `BytecodeRa` build a temporary `Vec<OneHotIndex>` and use `OneHotEntries::OnePerColumn`.
 `RamRa` builds a temporary `Vec<Option<OneHotIndex>>` and uses `OneHotEntries::MaybeZero`.
 Materialized dense sources can call `visit(row_index, SourceRow::FieldElements(existing_slice))` directly.

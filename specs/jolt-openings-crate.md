@@ -5,7 +5,7 @@
 | Author(s)   | @quangvdao   |
 | Created     | 2026-05-12   |
 | Status      | proposed     |
-| PR          |              |
+| PR          | [#1521](https://github.com/a16z/jolt/pull/1521) |
 
 ## Summary
 

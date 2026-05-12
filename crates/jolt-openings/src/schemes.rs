@@ -21,10 +21,6 @@ pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
     type Proof: Clone + Send + Sync + Serialize + DeserializeOwned;
     type BatchProof: Clone + Send + Sync + Serialize + DeserializeOwned;
     type VerifierSetup: Clone + Send + Sync + Serialize + DeserializeOwned;
-    type VerifierSetupParams;
-
-    /// Builds verifier setup directly from public setup parameters.
-    fn verifier_setup(params: Self::VerifierSetupParams) -> Self::VerifierSetup;
 
     /// Verifies one opening proof.
     fn verify(
@@ -50,6 +46,20 @@ pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
         point: &[Self::Field],
         eval: &Self::Field,
     );
+}
+
+/// Verifier setup derivable from public parameters without prover setup.
+///
+/// Transparent schemes such as Dory can build verifier setup from a size
+/// parameter alone. Structured-reference-string schemes such as KZG generally
+/// cannot: their verifier setup contains trapdoor-derived elements generated
+/// during setup, so verifier-only code should receive the verifier setup as an
+/// input rather than pretending it can derive it from public generators.
+pub trait PublicVerifierSetup: CommitmentSchemeVerifier {
+    type PublicParams;
+
+    /// Builds verifier setup directly from public parameters.
+    fn verifier_setup(params: Self::PublicParams) -> Self::VerifierSetup;
 }
 
 /// Prover-side interface for a polynomial commitment scheme.

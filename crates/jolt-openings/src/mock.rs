@@ -15,7 +15,7 @@ use crate::error::OpeningsError;
 use crate::homomorphic::{homomorphic_prove_batch, homomorphic_verify_batch};
 use crate::schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
-    CommitmentSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    CommitmentSchemeVerifier, PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use crate::sources::{CommitmentSource, SourceRow};
 
@@ -57,9 +57,6 @@ impl<F: Field> CommitmentSchemeVerifier for MockCommitmentScheme<F> {
     type Proof = MockProof<F>;
     type BatchProof = Vec<MockProof<F>>;
     type VerifierSetup = ();
-    type VerifierSetupParams = ();
-
-    fn verifier_setup(_params: Self::VerifierSetupParams) -> Self::VerifierSetup {}
 
     fn verify(
         commitment: &Self::Output,
@@ -100,6 +97,12 @@ impl<F: Field> CommitmentSchemeVerifier for MockCommitmentScheme<F> {
     ) -> Result<(), OpeningsError> {
         homomorphic_verify_batch::<Self, _>(claims, proof, setup, transcript)
     }
+}
+
+impl<F: Field> PublicVerifierSetup for MockCommitmentScheme<F> {
+    type PublicParams = ();
+
+    fn verifier_setup(_params: Self::PublicParams) -> Self::VerifierSetup {}
 }
 
 impl<F: Field> CommitmentScheme for MockCommitmentScheme<F> {

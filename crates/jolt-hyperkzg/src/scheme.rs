@@ -259,11 +259,6 @@ where
     type Proof = HyperKZGProof<P>;
     type BatchProof = Vec<HyperKZGProof<P>>;
     type VerifierSetup = HyperKZGVerifierSetup<P>;
-    type VerifierSetupParams = HyperKZGVerifierSetup<P>;
-
-    fn verifier_setup(params: Self::VerifierSetupParams) -> Self::VerifierSetup {
-        params
-    }
 
     fn verify(
         commitment: &Self::Output,

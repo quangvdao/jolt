@@ -19,7 +19,8 @@ use jolt_field::{Fr, FromPrimitiveInt};
 use jolt_openings::{
     homomorphic_prove_batch, homomorphic_verify_batch, AdditivelyHomomorphic,
     AdditivelyHomomorphicVerifier, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
-    OpeningClaim, OpeningsError, ProverClaim, SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    OpeningClaim, OpeningsError, ProverClaim, PublicVerifierSetup, SourceRow, ZkOpeningScheme,
+    ZkOpeningSchemeVerifier,
 };
 use jolt_poly::MultilinearPoly;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
@@ -139,11 +140,6 @@ impl CommitmentSchemeVerifier for DoryScheme {
     type Proof = DoryProof;
     type BatchProof = Vec<DoryProof>;
     type VerifierSetup = DoryVerifierSetup;
-    type VerifierSetupParams = usize;
-
-    fn verifier_setup(max_num_vars: Self::VerifierSetupParams) -> DoryVerifierSetup {
-        Self::setup_verifier(max_num_vars)
-    }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::verify")]
     fn verify(
@@ -190,6 +186,14 @@ impl CommitmentSchemeVerifier for DoryScheme {
         }
         transcript.append(&Label(b"dory_opening_eval"));
         eval.append_to_transcript(transcript);
+    }
+}
+
+impl PublicVerifierSetup for DoryScheme {
+    type PublicParams = usize;
+
+    fn verifier_setup(max_num_vars: Self::PublicParams) -> DoryVerifierSetup {
+        Self::setup_verifier(max_num_vars)
     }
 }
 

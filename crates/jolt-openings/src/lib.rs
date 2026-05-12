@@ -11,6 +11,8 @@
 //!          │
 //! CommitmentScheme                commit / commit_batch / open / prove_batch
 //!
+//! PublicVerifierSetup             verifier_setup from public params
+//!
 //! AdditivelyHomomorphicVerifier   combine commitments
 //!          │
 //! AdditivelyHomomorphic           combine opening hints
@@ -35,7 +37,7 @@ pub use homomorphic::{
 };
 pub use schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
-    CommitmentSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    CommitmentSchemeVerifier, PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 pub use sources::{
     BatchCommitmentSource, CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, SourceId,

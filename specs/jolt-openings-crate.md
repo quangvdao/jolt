@@ -54,24 +54,27 @@ Preserve from current `main`:
 1. `jolt-openings` remains backend-neutral and must not depend on `jolt-core`, `jolt-dory`, `dory`, arkworks, `common`, `tracer`, `jolt-sdk`, Akita, or Hachi.
 2. `jolt-openings` depends only on reusable leaf crates plus generic dependencies: `jolt-field`, `jolt-poly`, `jolt-transcript`, `jolt-crypto`, `serde`, `thiserror`, and `tracing`.
 3. The base verifier trait does not expose prover-only associated types such as `ProverSetup`, `Polynomial`, `OpeningHint`, or `SetupParams`.
-4. The base PCS traits expose single-claim openings through `open` and `verify`, fused batched openings through `prove_batch` and `verify_batch`, and batched commitment through `commit_batch`.
-5. Single-claim `open` and `verify` are semantic PCS operations, not homomorphic-only operations.
+4. The base verifier trait does not require verifier setup to be derivable from public parameters.
+   Verifier-only code receives `PCS::VerifierSetup`.
+   Schemes whose verifier setup can be constructed from public parameters implement the separate `PublicVerifierSetup` extension trait.
+5. The base PCS traits expose single-claim openings through `open` and `verify`, fused batched openings through `prove_batch` and `verify_batch`, and batched commitment through `commit_batch`.
+6. Single-claim `open` and `verify` are semantic PCS operations, not homomorphic-only operations.
    Native batched schemes may implement them as singleton wrappers around their fused batch path, but verifier code should be able to verify one opening through the base verifier trait.
-6. `commit_batch` must preserve current CycleMajor Dory streaming behavior: one padded trace scan, per-row work for all committed polynomials, small-scalar MSM for dense increment rows, and one-hot grouped additions for RA rows.
-7. Homomorphic batch proving and verification have byte-identical Fiat-Shamir behavior between prover and verifier.
+7. `commit_batch` must preserve current CycleMajor Dory streaming behavior: one padded trace scan, per-row work for all committed polynomials, small-scalar MSM for dense increment rows, and one-hot grouped additions for RA rows.
+8. Homomorphic batch proving and verification have byte-identical Fiat-Shamir behavior between prover and verifier.
    They absorb the same claim count, the same evaluations, and draw the same per-point RLC challenges in the same order.
-8. `prove_batch` returns both `PCS::BatchProof` and the per-group joint evaluations needed by later transcript binding.
+9. `prove_batch` returns both `PCS::BatchProof` and the per-group joint evaluations needed by later transcript binding.
    Batch verification does not silently perform post-opening transcript binding.
-9. `OpeningClaim` is generic over `PCS: CommitmentSchemeVerifier`, not over a raw commitment type.
+10. `OpeningClaim` is generic over `PCS: CommitmentSchemeVerifier`, not over a raw commitment type.
    Verifier-only code can name opening claims without importing prover-only PCS types.
-10. `jolt-core` keeps protocol-specific opening bookkeeping.
+11. `jolt-core` keeps protocol-specific opening bookkeeping.
    `OpeningId`, `PolynomialId`, `SumcheckId`, `OpeningPoint`, `ProverOpeningAccumulator`, and `VerifierOpeningAccumulator` do not move into `jolt-openings`.
-11. Dory layout, Dory matrix embedding policy, Stage 8 claim ordering, and BlindFold constraints do not move into `jolt-openings`.
-12. Dory's current transparent and ZK proofs remain verifier-compatible with current `main`.
-13. `JoltProof` stores the opening proof as `PCS::BatchProof`, not `PCS::Proof`.
-14. Standard and ZK `muldiv` end-to-end proofs continue to pass.
-15. The implementation introduces no Akita dependency and no compatibility shim for old PCS trait names.
-16. `cargo tree -d` must not show duplicate resolved versions of `jolt-field`, `jolt-transcript`, `jolt-crypto`, or `jolt-openings`.
+12. Dory layout, Dory matrix embedding policy, Stage 8 claim ordering, and BlindFold constraints do not move into `jolt-openings`.
+13. Dory's current transparent and ZK proofs remain verifier-compatible with current `main`.
+14. `JoltProof` stores the opening proof as `PCS::BatchProof`, not `PCS::Proof`.
+15. Standard and ZK `muldiv` end-to-end proofs continue to pass.
+16. The implementation introduces no Akita dependency and no compatibility shim for old PCS trait names.
+17. `cargo tree -d` must not show duplicate resolved versions of `jolt-field`, `jolt-transcript`, `jolt-crypto`, or `jolt-openings`.
 
 No new `jolt-eval` invariant is required for this spec.
 The relevant invariants are proof acceptance, transcript parity, and prover/verifier consistency, which are covered by focused crate tests and `jolt-core` end-to-end tests.
@@ -93,10 +96,11 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 
 ### Acceptance Criteria
 
-- [ ] `crates/jolt-openings/src/schemes.rs` defines `CommitmentSchemeVerifier`, `CommitmentScheme`, `AdditivelyHomomorphicVerifier`, `AdditivelyHomomorphic`, `ZkOpeningSchemeVerifier`, and `ZkOpeningScheme` with the role split.
+- [ ] `crates/jolt-openings/src/schemes.rs` defines `CommitmentSchemeVerifier`, `PublicVerifierSetup`, `CommitmentScheme`, `AdditivelyHomomorphicVerifier`, `AdditivelyHomomorphic`, `ZkOpeningSchemeVerifier`, and `ZkOpeningScheme` with the role split.
 - [ ] `StreamingCommitment` is not part of the canonical `jolt-openings` API.
 - [ ] `crates/jolt-openings/src/sources.rs` defines `SourceId`, `SourceRow`, `CommitmentSource`, and `BatchCommitmentSource`.
-- [ ] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `VerifierSetupParams`, `verifier_setup`, `verify`, `verify_batch`, and `bind_opening_inputs`.
+- [ ] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `verify`, `verify_batch`, and `bind_opening_inputs`.
+- [ ] `PublicVerifierSetup` contains `PublicParams` and `verifier_setup` for schemes whose verifier setup is derivable without prover setup.
 - [ ] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `Polynomial`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, and `prove_batch`.
 - [ ] `commit_batch` has a default implementation that commits one source at a time, and Dory overrides it for batch-source row streaming.
 - [ ] Homomorphic extension traits contain only the additive-combination operations needed by the default homomorphic batch helper.
@@ -218,11 +222,13 @@ CommitmentSchemeVerifier
   - VerifierSetup
   - Proof
   - BatchProof
-  - VerifierSetupParams
-  - verifier_setup
   - verify
   - verify_batch
   - bind_opening_inputs
+
+PublicVerifierSetup: CommitmentSchemeVerifier
+  - PublicParams
+  - verifier_setup
 
 CommitmentScheme: CommitmentSchemeVerifier
   - ProverSetup
@@ -256,6 +262,8 @@ ZkOpeningScheme: ZkOpeningSchemeVerifier + CommitmentScheme
 This hierarchy is a role split, not a lifecycle split.
 Verifier-only code can bound on `CommitmentSchemeVerifier` without naming prover-only data.
 Prover code gets the verifier surface because `CommitmentScheme` extends `CommitmentSchemeVerifier`.
+Verifier setup construction is not part of the base verifier trait because not every scheme can derive verifier setup from public parameters alone.
+Transparent schemes such as Dory can implement `PublicVerifierSetup`; structured-reference-string schemes such as HyperKZG receive verifier setup generated by setup and do not need an identity-style verifier setup constructor.
 Single-opening `open` and `verify` are required PCS basics; fused batching remains the primary production API.
 For schemes with no specialized singleton protocol, the singleton methods may wrap the one-claim batch path.
 Homomorphic extension traits only add linear combination primitives.
@@ -818,11 +826,14 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 4. `BatchProof = Vec<DoryProof>`.
    Each element is the single Dory proof for one opening-point group after the homomorphic helper RLC-combines that group's claims.
    The current Stage 8 cutover creates one such group, so the proof vector has length one there.
-5. `VerifierSetupParams = usize`.
-6. `verifier_setup(max_num_vars)` derives the deterministic verifier setup.
-7. `verify` verifies one Dory opening proof.
-8. `verify_batch` delegates to `homomorphic_verify_batch`.
-9. `bind_opening_inputs` preserves Dory's transcript binding semantics.
+5. `verify` verifies one Dory opening proof.
+6. `verify_batch` delegates to `homomorphic_verify_batch`.
+7. `bind_opening_inputs` preserves Dory's transcript binding semantics.
+
+`PublicVerifierSetup for DoryScheme`:
+
+1. `PublicParams = usize`.
+2. `verifier_setup(max_num_vars)` derives the deterministic verifier setup.
 
 `CommitmentScheme for DoryScheme`:
 
@@ -923,7 +934,7 @@ The extension trait should describe the capability directly, such as deriving Pe
 
 1. **Greenfield `jolt-openings` implementation.**
    Rejected because #1467 already encodes design decisions learned from prior verifier and PCS refactors.
-   Reimplementing from memory risks missing important details such as `VerifierSetupParams`, `project_verifier_setup`, `OpeningClaim`'s verifier-only bound, and separation of batch verification from opening-input binding.
+   Reimplementing from memory risks missing important details such as `project_verifier_setup`, `OpeningClaim`'s verifier-only bound, and separation of batch verification from opening-input binding.
 
 2. **Keep current `jolt-openings` reduce API and only wire it into `jolt-core`.**
    Rejected because it keeps batching as an external orchestration step and still forces future non-homomorphic schemes into the wrong abstraction.

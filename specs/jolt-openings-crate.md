@@ -43,7 +43,7 @@ Port or adapt from #1467:
 
 Preserve from current `main`:
 
-1. Current `crates/jolt-dory` wrapper types, transcript bridge, source-batch streaming behavior, and bounded proof deserialization.
+1. Current `crates/jolt-dory` wrapper types, transcript bridge, batch-source streaming behavior, and bounded proof deserialization.
 2. Current Dory ZK commitment fixes.
 3. Current `jolt-core` Stage 8 claim construction, advice handling, and Dory layout behavior.
 4. Current BlindFold opening proof data flow and ZK verification behavior.
@@ -95,17 +95,17 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 
 - [ ] `crates/jolt-openings/src/schemes.rs` defines `CommitmentSchemeVerifier`, `CommitmentScheme`, `AdditivelyHomomorphicVerifier`, `AdditivelyHomomorphic`, `ZkOpeningSchemeVerifier`, and `ZkOpeningScheme` with the role split.
 - [ ] `StreamingCommitment` is not part of the canonical `jolt-openings` API.
-- [ ] `crates/jolt-openings/src/sources.rs` defines `SourceId`, `SourceRow`, `CommitmentSource`, and `CommitmentSourceBatch`.
+- [ ] `crates/jolt-openings/src/sources.rs` defines `SourceId`, `SourceRow`, `CommitmentSource`, and `BatchCommitmentSource`.
 - [ ] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `VerifierSetupParams`, `verifier_setup`, `verify`, `verify_batch`, and `bind_opening_inputs`.
 - [ ] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `Polynomial`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, and `prove_batch`.
-- [ ] `commit_batch` has a default implementation that commits one source at a time, and Dory overrides it for batch-row streaming.
+- [ ] `commit_batch` has a default implementation that commits one source at a time, and Dory overrides it for batch-source row streaming.
 - [ ] Homomorphic extension traits contain only the additive-combination operations needed by the default homomorphic batch helper.
 - [ ] `crates/jolt-openings/src/homomorphic.rs` contains #1467's `homomorphic_prove_batch`, `homomorphic_verify_batch`, `rlc_combine`, and `rlc_combine_scalars`.
 - [ ] `homomorphic_prove_batch` and `homomorphic_verify_batch` group claims by opening point and use the same transcript schedule.
 - [ ] `crates/jolt-openings/src/claims.rs` exposes `ProverClaim<F>` and `OpeningClaim<F, PCS: CommitmentSchemeVerifier<Field = F>>`.
 - [ ] The old standalone `reduce_prover` / `reduce_verifier` production API is removed or demoted so production callers use `prove_batch` / `verify_batch`.
 - [ ] `crates/jolt-openings/src/mock.rs` implements the split traits and has tests covering single-claim, multi-claim, shared-point, distinct-point, and tampered-evaluation cases.
-- [ ] `crates/jolt-dory` implements the split trait family while preserving current `main` wrapper types, bounded deserialization, transcript bridge, source-batch streaming support, and ZK behavior.
+- [ ] `crates/jolt-dory` implements the split trait family while preserving current `main` wrapper types, bounded deserialization, transcript bridge, batch-source streaming support, and ZK behavior.
 - [ ] Dory `commit_batch` preserves CycleMajor trace commitment shape: same polynomial order, same row length, same row-commitment ordering, same `DoryHint` row commitments, and same transcript-visible commitments as current `main`.
 - [ ] `DoryScheme::BatchProof = Vec<DoryProof>` for the homomorphic Dory implementation.
 - [ ] `DoryScheme::prove_batch` delegates to `homomorphic_prove_batch`.
@@ -207,7 +207,7 @@ jolt-core
 ```
 
 `jolt-openings` owns the abstract PCS API and generic homomorphic batch helper.
-`jolt-dory` owns Dory-specific commitments, proofs, setup types, transcript adaptation, row commitments, source-batch commitment adapters, and Dory proof hardening.
+`jolt-dory` owns Dory-specific commitments, proofs, setup types, transcript adaptation, row commitments, batch-source commitment adapters, and Dory proof hardening.
 `jolt-core` owns the Jolt protocol's opening IDs, accumulators, Stage 8 claim assembly, Dory layout selection, proof object, source adapters, and BlindFold wiring.
 
 The trait hierarchy is:
@@ -269,7 +269,7 @@ Streaming is a source traversal strategy, not a standalone commitment-scheme tra
 The core semantic object is `CommitmentSource`; `SourceRow` is only a traversal view for commitment implementations that can exploit row structure:
 
 ```rust
-/// Stable identifier for a committed source inside a source batch.
+/// Stable identifier for a committed source inside a batch commitment source.
 ///
 /// In the Dory/Jolt trace path this can be a logical committed polynomial id
 /// such as `InstructionRa(0)` or `RamInc`. In a packed PCS path this can instead
@@ -305,11 +305,11 @@ impl OneHotIndex {
 ///
 /// `log_domain_size` says that every hot coordinate lives in a one-hot domain
 /// of size `2^log_domain_size`. For current Jolt this is `4` or `8`.
-/// The `columns` field records whether each trace column has a required hot
+/// The `entries` field records whether each trace column has a required hot
 /// coordinate or may be zero, depending on the row source.
 pub struct OneHotRow<'a> {
     pub log_domain_size: u8,
-    pub columns: OneHotColumns<'a>,
+    pub entries: OneHotEntries<'a>,
 }
 
 /// Per-column one-hot data for a `OneHotRow`.
@@ -318,7 +318,7 @@ pub struct OneHotRow<'a> {
 /// `InstructionRa` and `BytecodeRa` have one hot coordinate for every trace
 /// column. `RamRa` can have no committed RAM address for a column after address
 /// remapping, so it needs the zero-or-one representation.
-pub enum OneHotColumns<'a> {
+pub enum OneHotEntries<'a> {
     /// Every trace column contributes exactly one one-hot basis vector.
     ///
     /// Entry `indices[col] = k` means column `col` contributes `e_k`.
@@ -339,13 +339,13 @@ pub enum OneHotColumns<'a> {
 /// evaluations and use the default source traversal.
 pub enum SourceRow<'a, F> {
     /// A dense row of field evaluations.
-    DenseField(&'a [F]),
+    FieldElements(&'a [F]),
 
     /// A dense row of signed integers embedded canonically into `F`.
     ///
     /// This preserves the current Dory small-scalar MSM path for increment
     /// polynomials without first materializing field elements.
-    DenseI128(&'a [i128]),
+    SignedI128(&'a [i128]),
 
     /// A row whose entries are one-hot vectors over a small domain.
     ///
@@ -388,7 +388,7 @@ pub trait CommitmentSource<F>: Send + Sync {
 /// lets Jolt scan the padded trace once and produce row work for many committed
 /// sources in source-id order. The default PCS implementation can ignore this
 /// hook and commit sources one at a time through `source(id)`.
-pub trait CommitmentSourceBatch<F>: Send + Sync {
+pub trait BatchCommitmentSource<F>: Send + Sync {
     type Id: SourceId;
 
     /// Borrowed single-source adapter for a source in this batch.
@@ -411,7 +411,7 @@ pub trait CommitmentSourceBatch<F>: Send + Sync {
     /// shape: one padded trace scan, parallel work over trace rows, and inner
     /// parallel work over the requested source ids. The returned vector is
     /// row-major: `output[row_index][id_index]`.
-    fn map_batch_rows<R, V>(
+    fn map_rows<R, V>(
         &self,
         sigma: usize,
         ids: &[Self::Id],
@@ -425,18 +425,18 @@ pub trait CommitmentSourceBatch<F>: Send + Sync {
 
 The generic semantics are:
 
-1. `DenseField` is the canonical dense row of field evaluations.
-2. `DenseI128` is a dense row of signed integers embedded canonically into `F`.
+1. `FieldElements` is the canonical dense row of field evaluations.
+2. `SignedI128` is a dense row of signed integers embedded canonically into `F`.
 3. `OneHot` is a row of one-hot vector entries.
    `log_domain_size` means each column entry lives in `{0, ..., 2^log_domain_size - 1}`.
-   `OneHotColumns::OnePerColumn(indices)` means every column contributes one basis vector.
-   `OneHotColumns::MaybeZero(indices)` means `Some(k)` contributes `e_k`, and `None` contributes the zero vector.
+   `OneHotEntries::OnePerColumn(indices)` means every column contributes one basis vector.
+   `OneHotEntries::MaybeZero(indices)` means `Some(k)` contributes `e_k`, and `None` contributes the zero vector.
 
-Only `CommitmentSource` and `CommitmentSourceBatch` are core API concepts.
-`DenseI128` and `OneHot` are optional row encodings.
+Only `CommitmentSource` and `BatchCommitmentSource` are core API concepts.
+`SignedI128` and `OneHot` are optional row encodings.
 They are included to preserve current Jolt/Dory performance without forcing `jolt-core` to call Dory-specific APIs:
 
-1. `DenseI128` maps exactly to current Dory `PCS::process_chunk` for `RdInc` and `RamInc`.
+1. `SignedI128` maps exactly to current Dory `PCS::process_chunk` for `RdInc` and `RamInc`.
 2. `OneHot` maps exactly to current Dory `PCS::process_chunk_onehot` for `InstructionRa`, `BytecodeRa`, and `RamRa`.
 3. A backend that does not care about these encodings can immediately materialize or interpret them as field rows.
 
@@ -445,15 +445,15 @@ Current Jolt chunks have `log_k_chunk` equal to `4` or `8`, and the chunk extrac
 The row encoding should require `log_domain_size <= 8`, so `u8` covers every valid hot coordinate.
 Current code uses `Option<usize>` for all one-hot rows, but semantically only `RamRa` needs optional columns:
 
-1. `InstructionRa` always has one lookup index per cycle, so it can use `OneHotColumns::OnePerColumn`.
-2. `BytecodeRa` always has one bytecode PC chunk per cycle, so it can use `OneHotColumns::OnePerColumn`.
-3. `RamRa` can map a cycle to no committed RAM address after `remap_address`, so it uses `OneHotColumns::MaybeZero`.
+1. `InstructionRa` always has one lookup index per cycle, so it can use `OneHotEntries::OnePerColumn`.
+2. `BytecodeRa` always has one bytecode PC chunk per cycle, so it can use `OneHotEntries::OnePerColumn`.
+3. `RamRa` can map a cycle to no committed RAM address after `remap_address`, so it uses `OneHotEntries::MaybeZero`.
 
 This is the Dory-dependent part of the source API.
 The alternative is to move these encodings behind a Dory-only trait, but then stable Rust cannot make the generic `PCS::commit_batch(&batch, ...)` dispatch to the optimized Dory implementation only for batches that implement that Dory-only trait.
 Without specialization or downcasting, Jolt would have to call a Dory-specific method directly, which defeats the cutover goal.
 
-`CommitmentSourceBatch::map_batch_rows` is the no-regression hook.
+`BatchCommitmentSource::map_rows` is the no-regression hook.
 It lets Jolt's trace-backed source scan the padded trace once, parallelize over trace rows, and run the caller's row-processing closure for every requested committed polynomial in source-id order.
 Calling `CommitmentSource::for_each_row` independently for every committed polynomial would be simpler but would rescan the trace per polynomial, so it is not acceptable for the zkVM hot path.
 
@@ -465,7 +465,7 @@ fn commit<S: CommitmentSource<Self::Field> + ?Sized>(
     setup: &Self::ProverSetup,
 ) -> (Self::Output, Self::OpeningHint);
 
-fn commit_batch<B: CommitmentSourceBatch<Self::Field>>(
+fn commit_batch<B: BatchCommitmentSource<Self::Field>>(
     batch: &B,
     ids: &[B::Id],
     setup: &Self::ProverSetup,
@@ -487,7 +487,7 @@ fn commit_zk<S: CommitmentSource<Self::Field> + ?Sized>(
     setup: &Self::ProverSetup,
 ) -> (Self::Output, Self::OpeningHint);
 
-fn commit_batch_zk<B: CommitmentSourceBatch<Self::Field>>(
+fn commit_batch_zk<B: BatchCommitmentSource<Self::Field>>(
     batch: &B,
     ids: &[B::Id],
     setup: &Self::ProverSetup,
@@ -504,7 +504,7 @@ fn commit_batch_zk<B: CommitmentSourceBatch<Self::Field>>(
 Dory overrides both `commit_batch` and `commit_batch_zk`.
 The implementation is the current streaming algorithm moved behind the PCS boundary:
 
-1. Call `batch.map_batch_rows(sigma, ids, |id, row| commit_row(row, setup))` over padded trace rows.
+1. Call `batch.map_rows(sigma, ids, |id, row| commit_row(row, setup))` over padded trace rows.
 2. For each row and each requested source id, compute a Dory row commitment from `SourceRow`.
 3. Receive row-major row commitments in the same source-id order as `ids`.
 4. Transpose to per-source row-commitment vectors exactly as current `generate_and_commit_witness_polynomials` does.
@@ -516,9 +516,9 @@ The Dory row helper is private to `jolt-dory`:
 ```rust
 fn commit_row(row: SourceRow<'_, Fr>, setup: &DoryProverSetup) -> Vec<ArkG1> {
     match row {
-        SourceRow::DenseI128(values) => commit_small_scalar_row(values, setup),
+        SourceRow::SignedI128(values) => commit_small_scalar_row(values, setup),
         SourceRow::OneHot(row) => commit_onehot_row(row, setup),
-        SourceRow::DenseField(values) => commit_field_row(values, setup),
+        SourceRow::FieldElements(values) => commit_field_row(values, setup),
     }
 }
 ```
@@ -536,14 +536,14 @@ fn commit_onehot_row(row: OneHotRow<'_>, setup: &DoryProverSetup) -> Vec<ArkG1> 
         .collect::<Vec<G1Affine>>();
 
     let mut columns_by_hot_index = vec![Vec::new(); k];
-    match row.columns {
-        OneHotColumns::OnePerColumn(indices) => {
+    match row.entries {
+        OneHotEntries::OnePerColumn(indices) => {
             debug_assert_eq!(indices.len(), row_len);
             for (column, hot_index) in indices.iter().enumerate() {
                 columns_by_hot_index[hot_index.get()].push(column);
             }
         }
-        OneHotColumns::MaybeZero(indices) => {
+        OneHotEntries::MaybeZero(indices) => {
             debug_assert_eq!(indices.len(), row_len);
             for (column, hot_index) in indices.iter().enumerate() {
                 if let Some(hot_index) = hot_index {
@@ -580,12 +580,12 @@ That packed source commits once, and the Jolt/Akita adapter is responsible for t
 
 This keeps `jolt-openings` neutral about commitment granularity:
 
-1. Dory can use `CommitmentSourceBatch` to preserve its current one-trace-scan / many-Dory-commitments behavior.
+1. Dory can use `BatchCommitmentSource` to preserve its current one-trace-scan / many-Dory-commitments behavior.
 2. A packed scheme can use one `CommitmentSource` for the whole packed witness group and return a single commitment for that group.
 3. The protocol layer owns logical-polynomial-to-source claim routing because that routing depends on Jolt's witness IDs, packed layout, and opening-point construction.
 4. The PCS layer only sees committed sources and opening claims against those sources.
 
-`jolt-core` should replace `CommittedPolynomial::stream_witness_and_commit_rows` with a trace-backed source batch:
+`jolt-core` should replace `CommittedPolynomial::stream_witness_and_commit_rows` with a trace-backed batch commitment source:
 
 ```rust
 struct JoltTraceCommitmentBatch<'a, F> {
@@ -597,7 +597,7 @@ struct JoltTraceCommitmentBatch<'a, F> {
     _field: PhantomData<F>,
 }
 
-impl<F: JoltField> CommitmentSourceBatch<F> for JoltTraceCommitmentBatch<'_, F> {
+impl<F: JoltField> BatchCommitmentSource<F> for JoltTraceCommitmentBatch<'_, F> {
     type Id = CommittedPolynomial;
     type Source<'a> = JoltTracePolynomialSource<'a, F> where Self: 'a;
 
@@ -609,7 +609,7 @@ impl<F: JoltField> CommitmentSourceBatch<F> for JoltTraceCommitmentBatch<'_, F> 
         JoltTracePolynomialSource { batch: self, id }
     }
 
-    fn map_batch_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, F>) -> R + Send + Sync,
@@ -653,7 +653,7 @@ impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
                         post_value as i128 - pre_value as i128
                     })
                     .collect();
-                visit(id, SourceRow::DenseI128(&row))
+                visit(id, SourceRow::SignedI128(&row))
             }
             CommittedPolynomial::InstructionRa(idx) => {
                 let row: Vec<OneHotIndex> = cycles
@@ -668,7 +668,7 @@ impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
                     id,
                     SourceRow::OneHot(OneHotRow {
                         log_domain_size: self.one_hot_params.log_k_chunk as u8,
-                        columns: OneHotColumns::OnePerColumn(&row),
+                        entries: OneHotEntries::OnePerColumn(&row),
                     }),
                 )
             }
@@ -679,10 +679,10 @@ impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
 ```
 
 `visit_row` should contain exactly the current row generation logic from `CommittedPolynomial::stream_witness_and_commit_rows`, but it invokes the row visitor instead of calling `PCS::process_chunk` or `PCS::process_chunk_onehot`.
-For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today and call `visit(id, SourceRow::DenseI128(&row))`.
-`InstructionRa` and `BytecodeRa` build a temporary `Vec<OneHotIndex>` and use `OneHotColumns::OnePerColumn`.
-`RamRa` builds a temporary `Vec<Option<OneHotIndex>>` and uses `OneHotColumns::MaybeZero`.
-Materialized dense sources can call `visit(row_index, SourceRow::DenseField(existing_slice))` directly.
+For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today and call `visit(id, SourceRow::SignedI128(&row))`.
+`InstructionRa` and `BytecodeRa` build a temporary `Vec<OneHotIndex>` and use `OneHotEntries::OnePerColumn`.
+`RamRa` builds a temporary `Vec<Option<OneHotIndex>>` and uses `OneHotEntries::MaybeZero`.
+Materialized dense sources can call `visit(row_index, SourceRow::FieldElements(existing_slice))` directly.
 No `Cow` is needed because the row view only has to live for the duration of the `visit` call.
 
 The intended prover call-site change is narrow.
@@ -741,11 +741,11 @@ For ZK mode the last line becomes:
 let commitments_and_hints = PCS::commit_batch_zk(&batch, &ids, &setup);
 ```
 
-The loop body, row order, and row encodings are unchanged; they move from `jolt-core` into `JoltTraceCommitmentBatch::map_batch_rows` plus Dory's private `commit_row` and tier-2 aggregation.
+The loop body, row order, and row encodings are unchanged; they move from `jolt-core` into `JoltTraceCommitmentBatch::map_rows` plus Dory's private `commit_row` and tier-2 aggregation.
 That is why this can preserve current streaming behavior exactly while eliminating `StreamingCommitment` as a public commitment-scheme trait.
 
 The closure does not imply dynamic dispatch.
-`map_batch_rows` is generic over `V`, so Rust monomorphizes the concrete closure at the call site, the same way it monomorphizes `Iterator::map` or Rayon closures.
+`map_rows` is generic over `V`, so Rust monomorphizes the concrete closure at the call site, the same way it monomorphizes `Iterator::map` or Rayon closures.
 The higher-ranked bound `for<'row> Fn(... SourceRow<'row, F>) -> R` says only that the closure must accept a row borrowed for any short lifetime; it does not create a trait object or heap allocation.
 The temporary row vector is allocated in `visit_row`, borrowed into `visit`, consumed immediately by Dory's row MSM or one-hot addition helper, and then dropped.
 This corresponds to the current path, where the same temporary row vector is allocated and passed immediately to `PCS::process_chunk` or `PCS::process_chunk_onehot`.
@@ -809,7 +809,7 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 5. `setup(max_num_vars)` returns prover and verifier setup.
 6. `project_verifier_setup(&prover_setup)` projects prover setup down to verifier setup.
 7. `commit` commits through the current Dory row commitment path.
-8. `commit_batch` overrides the default with source-batch row streaming.
+8. `commit_batch` overrides the default with batch-source row streaming.
 9. `open` proves one Dory opening.
 10. `prove_batch` delegates to `homomorphic_prove_batch`.
 
@@ -837,7 +837,7 @@ The high-level migration is:
 2. Replace imports of the internal PCS trait with `jolt_openings` traits.
 3. Replace `PCS::Commitment` associated type usage with `PCS::Output`.
 4. Replace CycleMajor witness commitment calls to `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` with `PCS::commit_batch` over `JoltTraceCommitmentBatch`.
-5. Replace ZK CycleMajor witness commitment calls with `PCS::commit_batch_zk` over the same source batch.
+5. Replace ZK CycleMajor witness commitment calls with `PCS::commit_batch_zk` over the same batch commitment source.
 6. Replace `PCS::Proof` proof storage with `PCS::BatchProof`.
 7. Replace Stage 8's direct `PCS::prove` call with `PCS::prove_batch`.
 8. Replace Stage 8's direct `PCS::verify` call with `PCS::verify_batch`.

@@ -162,11 +162,15 @@ Feature and dependency checks:
 ### Performance
 
 The refactor should not regress prover performance.
-The Dory Stage 8 path is performance-sensitive because current `main` builds a streaming RLC polynomial directly from the trace rather than regenerating witness polynomials.
+There are two separate streaming paths to keep straight.
+Witness commitment streaming is the current CycleMajor commitment path that builds Dory row commitments while scanning the padded trace.
+That path should move behind `commit_batch` and `commit_batch_zk`.
+Stage 8 opening streaming is the current Dory RLC path that builds a joint polynomial directly from the trace rather than regenerating witness polynomials.
+That path should keep the same algorithmic shape while entering the PCS through `prove_batch` and `verify_batch`.
 
 Performance requirements:
 
-1. Preserve the current Stage 8 streaming RLC optimization unless an equivalent or faster path is implemented.
+1. Preserve the current Stage 8 streaming RLC optimization unless an equivalent or faster source-based path is implemented.
 2. Avoid materializing all committed polynomials in Stage 8 merely to fit the new API.
 3. Keep Dory row-commitment hint combination in the hot path when it avoids recomputing row commitments.
 4. Do not introduce dynamic dispatch in the prover hot path.
@@ -839,18 +843,20 @@ The high-level migration is:
 8. Replace Stage 8's direct `PCS::verify` call with `PCS::verify_batch`.
 9. Preserve Stage 8's claim construction and ZK constraint coefficient logic.
 
-Stage 8 is the main adaptation point.
-Current `main` builds a single Dory-shaped joint polynomial using `DoryOpeningState::build_streaming_rlc`.
-That optimization should remain unless the new batch API can express the same work without extra materialization.
+Stage 8 is the main adaptation point for openings, not for witness commitment.
+The old commitment-time streaming trait should disappear from the public PCS API, because `commit_batch` and `commit_batch_zk` take over that boundary.
+Current `main` also has a separate Stage 8 optimization: `DoryOpeningState::build_streaming_rlc` builds a single joint RLC polynomial directly from the trace and existing hints.
+That optimization is still the right first implementation as long as it is exposed through the new batch-opening API.
 
-The acceptable first cutover is:
+The first cutover should be:
 
-1. Keep current Stage 8's streaming RLC construction.
-2. Wrap the resulting joint polynomial, unified opening point, and joint claim as the input to `PCS::prove_batch`.
-3. Treat Dory's batch proof as a one-group `Vec<DoryProof>`.
+1. Keep the current Stage 8 joint RLC construction and hint-combination algorithm.
+2. Represent the resulting joint polynomial, unified opening point, and joint claim as the single opening-point group passed to `PCS::prove_batch`.
+3. Let Dory's `prove_batch` delegate to the homomorphic helper, which returns a one-element `Vec<DoryProof>` for this one group.
 4. On the verifier, build the corresponding one-group `OpeningClaim` and call `PCS::verify_batch`.
 
-This preserves current Dory behavior while changing the public PCS boundary to #1467's fused batch API.
+This means the public API is new, but the performance-critical Stage 8 work is not rederived during the cutover.
+The same source abstraction can later make the joint RLC polynomial less Dory-shaped, but the first PR should not require moving Jolt's opening accumulator, claim ordering, or BlindFold constraint logic into `jolt-openings`.
 Future Akita work can implement a different `prove_batch` / `verify_batch` body without changing `jolt-core`'s trait definitions.
 
 ### Proof Serialization

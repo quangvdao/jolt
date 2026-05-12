@@ -1,0 +1,329 @@
+//! Homomorphic batched-opening helper via random linear combination.
+
+use jolt_crypto::HomomorphicCommitment;
+use jolt_field::Field;
+use jolt_transcript::{AppendToTranscript, LabelWithCount, Transcript};
+
+use crate::claims::{OpeningClaim, ProverClaim};
+use crate::error::OpeningsError;
+use crate::schemes::{
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
+    CommitmentSchemeVerifier,
+};
+use crate::sources::CommitmentSource;
+
+/// Groups prover claims by point, RLC-combines each group, and opens one proof
+/// per group.
+#[tracing::instrument(skip_all, name = "homomorphic_prove_batch")]
+pub fn homomorphic_prove_batch<PCS, T>(
+    claims: Vec<ProverClaim<PCS::Field, PCS::Polynomial>>,
+    hints: Vec<PCS::OpeningHint>,
+    setup: &PCS::ProverSetup,
+    transcript: &mut T,
+) -> Vec<PCS::Proof>
+where
+    PCS: AdditivelyHomomorphic,
+    PCS::Output: HomomorphicCommitment<PCS::Field>,
+    T: Transcript<Challenge = PCS::Field>,
+{
+    assert_eq!(
+        claims.len(),
+        hints.len(),
+        "one opening hint is required for each prover claim",
+    );
+    if claims.is_empty() {
+        return Vec::new();
+    }
+
+    bind_batch_claims::<PCS::Field, _, _>(&claims, transcript);
+
+    let groups = group_prover_claims_by_point::<PCS>(claims.into_iter().zip(hints).collect());
+    let mut proofs = Vec::with_capacity(groups.len());
+    for (point, group_claims) in groups {
+        let rho: PCS::Field = transcript.challenge();
+        let powers = rho_powers(rho, group_claims.len());
+
+        let mut eval_slices = Vec::with_capacity(group_claims.len());
+        let mut evals = Vec::with_capacity(group_claims.len());
+        let mut hints = Vec::with_capacity(group_claims.len());
+        for (claim, hint) in &group_claims {
+            eval_slices.push(source_evaluations(&claim.polynomial));
+            evals.push(claim.eval);
+            hints.push(hint.clone());
+        }
+        let eval_slices: Vec<&[PCS::Field]> = eval_slices.iter().map(Vec::as_slice).collect();
+
+        let combined_evals = rlc_combine(&eval_slices, rho);
+        let combined_eval = rlc_combine_scalars(&evals, rho);
+        let combined_hint = PCS::combine_hints(hints, &powers);
+        let combined_polynomial = PCS::Polynomial::from(combined_evals);
+        proofs.push(PCS::open(
+            &combined_polynomial,
+            &point,
+            combined_eval,
+            setup,
+            Some(combined_hint),
+            transcript,
+        ));
+    }
+    proofs
+}
+
+/// Groups verifier claims by point, RLC-combines each group, and verifies one
+/// proof per group.
+#[tracing::instrument(skip_all, name = "homomorphic_verify_batch")]
+pub fn homomorphic_verify_batch<PCS, T>(
+    claims: Vec<OpeningClaim<PCS::Field, PCS>>,
+    proofs: &[PCS::Proof],
+    setup: &PCS::VerifierSetup,
+    transcript: &mut T,
+) -> Result<(), OpeningsError>
+where
+    PCS: AdditivelyHomomorphicVerifier,
+    PCS::Output: HomomorphicCommitment<PCS::Field>,
+    T: Transcript<Challenge = PCS::Field>,
+{
+    if claims.is_empty() {
+        if proofs.is_empty() {
+            return Ok(());
+        }
+        return Err(OpeningsError::VerificationFailed);
+    }
+
+    bind_batch_claims::<PCS::Field, _, _>(&claims, transcript);
+
+    let groups = group_opening_claims_by_point::<PCS>(claims);
+    if groups.len() != proofs.len() {
+        return Err(OpeningsError::VerificationFailed);
+    }
+
+    for ((point, group_claims), proof) in groups.into_iter().zip(proofs.iter()) {
+        let rho: PCS::Field = transcript.challenge();
+        let powers = rho_powers(rho, group_claims.len());
+
+        let commitments: Vec<PCS::Output> = group_claims
+            .iter()
+            .map(|claim| claim.commitment.clone())
+            .collect();
+        let evals: Vec<PCS::Field> = group_claims.iter().map(|claim| claim.eval).collect();
+
+        let combined_commitment = PCS::combine(&commitments, &powers);
+        let combined_eval = rlc_combine_scalars(&evals, rho);
+        PCS::verify(
+            &combined_commitment,
+            &point,
+            combined_eval,
+            proof,
+            setup,
+            transcript,
+        )?;
+    }
+    Ok(())
+}
+
+/// result[i] = p_1[i] + ρ · p_2[i] + ρ² · p_3[i] + ... .
+#[expect(
+    clippy::expect_used,
+    reason = "empty polynomials is an API contract violation"
+)]
+#[tracing::instrument(skip_all, name = "rlc_combine")]
+pub fn rlc_combine<F: Field>(polynomials: &[&[F]], rho: F) -> Vec<F> {
+    let (last, rest) = polynomials
+        .split_last()
+        .expect("rlc_combine requires at least one polynomial");
+    let len = last.len();
+
+    let mut result = last.to_vec();
+    for p in rest.iter().rev() {
+        assert_eq!(p.len(), len);
+        for (r, &val) in result.iter_mut().zip(p.iter()) {
+            *r = *r * rho + val;
+        }
+    }
+    result
+}
+
+/// v_1 + ρ · v_2 + ρ² · v_3 + ... .
+pub fn rlc_combine_scalars<F: Field>(evals: &[F], rho: F) -> F {
+    assert!(!evals.is_empty(), "need at least one evaluation");
+    let mut result = F::zero();
+    for &v in evals.iter().rev() {
+        result = result * rho + v;
+    }
+    result
+}
+
+fn bind_batch_claims<F, C, T>(claims: &[C], transcript: &mut T)
+where
+    F: Field,
+    C: ClaimEval<F>,
+    T: Transcript<Challenge = F>,
+{
+    transcript.append(&LabelWithCount(b"rlc_claims", claims.len() as u64));
+    for claim in claims {
+        claim.eval().append_to_transcript(transcript);
+    }
+}
+
+trait ClaimEval<F: Field> {
+    fn eval(&self) -> F;
+}
+
+impl<F, P> ClaimEval<F> for ProverClaim<F, P>
+where
+    F: Field,
+{
+    fn eval(&self) -> F {
+        self.eval
+    }
+}
+
+impl<F, PCS> ClaimEval<F> for OpeningClaim<F, PCS>
+where
+    F: Field,
+    PCS: CommitmentSchemeVerifier<Field = F>,
+{
+    fn eval(&self) -> F {
+        self.eval
+    }
+}
+
+fn rho_powers<F: Field>(rho: F, n: usize) -> Vec<F> {
+    std::iter::successors(Some(F::from_u64(1)), |prev| Some(*prev * rho))
+        .take(n)
+        .collect()
+}
+
+fn source_evaluations<F, S>(source: &S) -> Vec<F>
+where
+    F: Field,
+    S: CommitmentSource<F>,
+{
+    let mut evaluations = Vec::with_capacity(1usize << source.num_vars());
+    source.for_each_row(source.num_vars(), |_, row| match row {
+        crate::sources::SourceRow::FieldElements(values) => evaluations.extend_from_slice(values),
+        crate::sources::SourceRow::I128(values) => {
+            evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
+        }
+        crate::sources::SourceRow::OneHot(row) => {
+            let domain_size = 1usize << row.log_domain_size;
+            match row.entries {
+                crate::sources::OneHotEntries::OnePerColumn(indices) => {
+                    for hot_index in indices {
+                        let mut dense = vec![F::zero(); domain_size];
+                        dense[hot_index.get()] = F::from_u64(1);
+                        evaluations.extend(dense);
+                    }
+                }
+                crate::sources::OneHotEntries::MaybeZero(indices) => {
+                    for hot_index in indices {
+                        let mut dense = vec![F::zero(); domain_size];
+                        if let Some(hot_index) = hot_index {
+                            dense[hot_index.get()] = F::from_u64(1);
+                        }
+                        evaluations.extend(dense);
+                    }
+                }
+            }
+        }
+    });
+    evaluations
+}
+
+type ProverPointGroup<F, PCS> = Vec<(Vec<F>, Vec<ProverClaimWithHint<F, PCS>>)>;
+
+type ProverClaimWithHint<F, PCS> = (
+    ProverClaim<F, <PCS as CommitmentScheme>::Polynomial>,
+    <PCS as CommitmentScheme>::OpeningHint,
+);
+
+fn group_prover_claims_by_point<PCS>(
+    claims: Vec<ProverClaimWithHint<PCS::Field, PCS>>,
+) -> ProverPointGroup<PCS::Field, PCS>
+where
+    PCS: CommitmentScheme,
+{
+    let mut groups: ProverPointGroup<PCS::Field, PCS> = Vec::new();
+    for (claim, hint) in claims {
+        if let Some((_, group)) = groups.iter_mut().find(|(point, _)| *point == claim.point) {
+            group.push((claim, hint));
+        } else {
+            let point = claim.point.clone();
+            groups.push((point, vec![(claim, hint)]));
+        }
+    }
+    groups
+}
+
+type OpeningPointGroup<F, PCS> = Vec<(Vec<F>, Vec<OpeningClaim<F, PCS>>)>;
+
+fn group_opening_claims_by_point<PCS>(
+    claims: Vec<OpeningClaim<PCS::Field, PCS>>,
+) -> OpeningPointGroup<PCS::Field, PCS>
+where
+    PCS: CommitmentSchemeVerifier,
+{
+    let mut groups: OpeningPointGroup<PCS::Field, PCS> = Vec::new();
+    for claim in claims {
+        if let Some((_, group)) = groups.iter_mut().find(|(point, _)| *point == claim.point) {
+            group.push(claim);
+        } else {
+            let point = claim.point.clone();
+            groups.push((point, vec![claim]));
+        }
+    }
+    groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jolt_field::{Fr, FromPrimitiveInt, RandomSampling};
+    use jolt_poly::Polynomial;
+
+    #[test]
+    fn rlc_combine_single_polynomial_is_identity() {
+        let evals: Vec<Fr> = (0..4).map(|i| Fr::from_u64(i + 1)).collect();
+        let rho = Fr::from_u64(7);
+        let result = rlc_combine(&[&evals], rho);
+        assert_eq!(result, evals);
+    }
+
+    #[test]
+    fn rlc_combine_two_polynomials() {
+        let p1: Vec<Fr> = (1..=4).map(Fr::from_u64).collect();
+        let p2: Vec<Fr> = (5..=8).map(Fr::from_u64).collect();
+        let rho = Fr::from_u64(3);
+        let result = rlc_combine(&[&p1, &p2], rho);
+        for i in 0..4 {
+            assert_eq!(result[i], p1[i] + rho * p2[i], "mismatch at index {i}");
+        }
+    }
+
+    #[test]
+    fn rlc_combine_scalars_consistent_with_rlc_combine() {
+        use rand_chacha::rand_core::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let mut rng = ChaCha20Rng::seed_from_u64(555);
+        let num_vars = 3;
+        let rho = Fr::from_u64(7);
+
+        let p1 = Polynomial::<Fr>::random(num_vars, &mut rng);
+        let p2 = Polynomial::<Fr>::random(num_vars, &mut rng);
+        let p3 = Polynomial::<Fr>::random(num_vars, &mut rng);
+
+        let point: Vec<Fr> = (0..num_vars).map(|_| Fr::random(&mut rng)).collect();
+
+        let eval1 = p1.evaluate(&point);
+        let eval2 = p2.evaluate(&point);
+        let eval3 = p3.evaluate(&point);
+
+        let combined = rlc_combine(&[p1.evaluations(), p2.evaluations(), p3.evaluations()], rho);
+        let combined_poly = Polynomial::new(combined);
+        let result_via_poly = combined_poly.evaluate(&point);
+        let result_via_scalars = rlc_combine_scalars(&[eval1, eval2, eval3], rho);
+
+        assert_eq!(result_via_poly, result_via_scalars);
+    }
+}

@@ -1,42 +1,43 @@
-//! PCS traits and opening reduction for the Jolt zkVM.
+//! PCS traits and homomorphic batch openings for the Jolt zkVM.
 //!
-//! Abstract interfaces for polynomial commitment schemes (PCS) and a reduction
-//! framework for batching opening claims. Protocol code is written generically
-//! over the PCS with zero implementation leakage.
-//!
-//! # Design
-//!
-//! - **Stateless.** No accumulators. Claims are plain data ([`ProverClaim`],
-//!   [`VerifierClaim`]) collected by the caller in `Vec`s.
-//! - **Reduction is separate from proving.** [`reduce_prover`] /
-//!   [`reduce_verifier`] transform claims (many → fewer) via RLC.
-//!   The PCS opens the reduced claims.
-//! - **No batching in PCS traits.** Batching is a reduction concern, not a
-//!   PCS property.
+//! The crate owns the abstract polynomial-commitment boundary. Protocol code
+//! asks to commit and open sources; PCS backends decide whether to materialize,
+//! stream, parallelize by row, or use a backend-specific schedule.
 //!
 //! # Trait Hierarchy
 //!
 //! ```text
-//!                 Commitment              (jolt-crypto: Output type)
-//!                     │
-//!             CommitmentScheme            (+ Field, Proof, commit/open/verify)
-//!                ╱        ╲
-//! AdditivelyHomomorphic   ZkOpeningScheme
-//!       (+ combine)        (+ commit_zk/open_zk/verify_zk)
-//!             │
-//!   StreamingCommitment
-//!     (+ begin/feed/finish)
+//! CommitmentSchemeVerifier        verify / verify_batch
+//!          │
+//! CommitmentScheme                commit / commit_batch / open / prove_batch
+//!
+//! AdditivelyHomomorphicVerifier   combine commitments
+//!          │
+//! AdditivelyHomomorphic           combine opening hints
+//!
+//! ZkOpeningSchemeVerifier         verify_zk
+//!          │
+//! ZkOpeningScheme                 commit_zk / commit_batch_zk / open_zk
 //! ```
 
 mod claims;
 mod error;
+mod homomorphic;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
-mod reduction;
 mod schemes;
+mod sources;
 
-pub use claims::{ProverClaim, VerifierClaim};
+pub use claims::{OpeningClaim, ProverClaim};
 pub use error::OpeningsError;
-pub use reduction::{reduce_prover, reduce_verifier, rlc_combine, rlc_combine_scalars};
-
-pub use schemes::{AdditivelyHomomorphic, CommitmentScheme, StreamingCommitment, ZkOpeningScheme};
+pub use homomorphic::{
+    homomorphic_prove_batch, homomorphic_verify_batch, rlc_combine, rlc_combine_scalars,
+};
+pub use schemes::{
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
+    CommitmentSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+};
+pub use sources::{
+    BatchCommitmentSource, CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, SourceId,
+    SourceRow,
+};

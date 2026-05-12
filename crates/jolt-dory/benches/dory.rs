@@ -4,7 +4,10 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use jolt_dory::{DoryScheme, DoryVerifierSetup};
 use jolt_field::{Fr, RandomSampling};
-use jolt_openings::{CommitmentScheme, StreamingCommitment, ZkOpeningScheme};
+use jolt_openings::{
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
+    CommitmentSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+};
 use jolt_poly::{OneHotPolynomial, Polynomial};
 use jolt_transcript::Transcript;
 use rand_chacha::ChaCha20Rng;
@@ -165,7 +168,7 @@ fn bench_combine(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(num_vars), &num_vars, |b, _| {
             b.iter(|| {
-                <DoryScheme as jolt_openings::AdditivelyHomomorphic>::combine(
+                <DoryScheme as AdditivelyHomomorphicVerifier>::combine(
                     &[commit_a.clone(), commit_b.clone()],
                     &[s_a, s_b],
                 )
@@ -198,11 +201,7 @@ fn bench_combine_hints(c: &mut Criterion) {
             |b, _| {
                 b.iter_batched(
                     || hints.clone(),
-                    |hs| {
-                        <DoryScheme as jolt_openings::AdditivelyHomomorphic>::combine_hints(
-                            hs, &scalars,
-                        )
-                    },
+                    |hs| <DoryScheme as AdditivelyHomomorphic>::combine_hints(hs, &scalars),
                     criterion::BatchSize::SmallInput,
                 );
             },

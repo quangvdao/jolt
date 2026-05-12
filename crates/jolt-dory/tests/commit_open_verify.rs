@@ -9,7 +9,8 @@ use dory::backends::arkworks::ArkG1;
 use jolt_dory::DoryScheme;
 use jolt_field::{Fr, FromPrimitiveInt, RandomSampling};
 use jolt_openings::{
-    AdditivelyHomomorphic, CommitmentScheme, StreamingCommitment, ZkOpeningScheme,
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
+    CommitmentSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_poly::{OneHotPolynomial, Polynomial};
 use jolt_transcript::{Blake2bTranscript, KeccakTranscript, Transcript};

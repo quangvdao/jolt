@@ -3,7 +3,6 @@
 use dory::backends::arkworks::G1Routines;
 use dory::primitives::arithmetic::DoryRoutines;
 use jolt_field::Fr;
-use jolt_openings::StreamingCommitment;
 
 use crate::scheme::{
     ark_to_jolt_fr, ark_to_jolt_g1, ark_to_jolt_g1_vec, ark_to_jolt_gt, commit_rows_tier_2,
@@ -28,12 +27,7 @@ impl crate::DoryScheme {
             ),
         )
     }
-}
-
-impl StreamingCommitment for crate::DoryScheme {
-    type PartialCommitment = DoryPartialCommitment;
-
-    fn begin(_setup: &Self::ProverSetup) -> Self::PartialCommitment {
+    pub fn begin(_setup: &DoryProverSetup) -> DoryPartialCommitment {
         DoryPartialCommitment {
             row_commitments: Vec::new(),
         }
@@ -43,7 +37,7 @@ impl StreamingCommitment for crate::DoryScheme {
     /// matching the per-row work in [`DoryScheme::commit`](crate::DoryScheme::commit)'s
     /// dense path. Caller must feed every row at the same chunk width.
     #[tracing::instrument(skip_all, name = "DoryScheme::stream_feed")]
-    fn feed(partial: &mut Self::PartialCommitment, chunk: &[Fr], setup: &Self::ProverSetup) {
+    pub fn feed(partial: &mut DoryPartialCommitment, chunk: &[Fr], setup: &DoryProverSetup) {
         assert!(
             chunk.len().is_power_of_two(),
             "streaming: chunk length ({}) must be a power of two",
@@ -67,7 +61,7 @@ impl StreamingCommitment for crate::DoryScheme {
     /// streamed row count is a power of two (the layout `DoryScheme::commit`
     /// produces).
     #[tracing::instrument(skip_all, name = "DoryScheme::stream_finish")]
-    fn finish(partial: Self::PartialCommitment, setup: &Self::ProverSetup) -> Self::Output {
+    pub fn finish(partial: DoryPartialCommitment, setup: &DoryProverSetup) -> DoryCommitment {
         let num_rows = partial.row_commitments.len();
         validate_row_count(num_rows, setup);
 
@@ -93,7 +87,7 @@ fn validate_row_count(num_rows: usize, setup: &DoryProverSetup) {
 #[cfg(test)]
 mod tests {
     use jolt_field::RandomSampling;
-    use jolt_openings::{CommitmentScheme, StreamingCommitment};
+    use jolt_openings::CommitmentScheme;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 

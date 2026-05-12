@@ -2,12 +2,11 @@
 //!
 //! Wraps the [Dory](https://eprint.iacr.org/2020/1274) polynomial commitment
 //! scheme for BN254 with transparent setup, logarithmic proof size, and
-//! logarithmic verification. Supports streaming commitment and additive
-//! homomorphism for batch opening reduction.
+//! logarithmic verification. Supports Dory-specific streaming commitment
+//! helpers and additive homomorphism for batch opening reduction.
 //!
 //! Implements [`CommitmentScheme`](jolt_openings::CommitmentScheme),
 //! [`AdditivelyHomomorphic`](jolt_openings::AdditivelyHomomorphic),
-//! [`StreamingCommitment`](jolt_openings::StreamingCommitment), and
 //! [`ZkOpeningScheme`](jolt_openings::ZkOpeningScheme) from `jolt-openings`.
 //!
 //! # Public API

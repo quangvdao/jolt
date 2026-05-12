@@ -15,8 +15,12 @@ use dory::primitives::arithmetic::{
 use dory::primitives::poly::{MultilinearLagrange, Polynomial as DoryPolynomial};
 use dory::Mode;
 use jolt_crypto::{Bn254G1, Bn254GT, Commitment, DeriveSetup, JoltGroup, PedersenSetup};
-use jolt_field::Fr;
-use jolt_openings::{AdditivelyHomomorphic, CommitmentScheme, OpeningsError, ZkOpeningScheme};
+use jolt_field::{Fr, FromPrimitiveInt};
+use jolt_openings::{
+    homomorphic_prove_batch, homomorphic_verify_batch, AdditivelyHomomorphic,
+    AdditivelyHomomorphicVerifier, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
+    OpeningClaim, OpeningsError, ProverClaim, SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+};
 use jolt_poly::MultilinearPoly;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
@@ -94,12 +98,12 @@ impl DoryScheme {
         DoryVerifierSetup(prover_setup.0.to_verifier_setup())
     }
 
-    fn commit_with_mode<P, M>(poly: &P, setup: &DoryProverSetup) -> (DoryCommitment, DoryHint)
+    fn commit_with_mode<S, M>(source: &S, setup: &DoryProverSetup) -> (DoryCommitment, DoryHint)
     where
-        P: MultilinearPoly<Fr> + ?Sized,
+        S: CommitmentSource<Fr> + ?Sized,
         M: Mode,
     {
-        let row_commitments = compute_row_commitments(poly, setup);
+        let row_commitments = compute_row_commitments(source, setup);
         let (tier_2, commit_blind) = commit_rows_tier_2::<M>(&row_commitments, setup);
 
         (
@@ -130,31 +134,87 @@ impl Commitment for DoryScheme {
     type Output = DoryCommitment;
 }
 
-impl CommitmentScheme for DoryScheme {
+impl CommitmentSchemeVerifier for DoryScheme {
     type Field = Fr;
     type Proof = DoryProof;
-    type ProverSetup = DoryProverSetup;
+    type BatchProof = Vec<DoryProof>;
     type VerifierSetup = DoryVerifierSetup;
+    type VerifierSetupParams = usize;
+
+    fn verifier_setup(max_num_vars: Self::VerifierSetupParams) -> DoryVerifierSetup {
+        Self::setup_verifier(max_num_vars)
+    }
+
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify")]
+    fn verify(
+        commitment: &Self::Output,
+        point: &[Fr],
+        eval: Fr,
+        proof: &Self::Proof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
+        let ark_eval = jolt_fr_to_ark(&eval);
+        let ark_commitment = jolt_gt_to_ark(&commitment.0);
+        let mut dory_transcript = JoltToDoryTranscript::new(transcript);
+
+        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
+            ark_commitment,
+            ark_eval,
+            &ark_point,
+            &proof.0,
+            setup.0.clone().into_inner(),
+            &mut dory_transcript,
+        )
+        .map_err(|_| OpeningsError::VerificationFailed)
+    }
+
+    fn verify_batch(
+        claims: Vec<OpeningClaim<Self::Field, Self>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        homomorphic_verify_batch::<Self, _>(claims, proof, setup, transcript)
+    }
+
+    fn bind_opening_inputs(
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+        point: &[Self::Field],
+        eval: &Self::Field,
+    ) {
+        transcript.append(&LabelWithCount(b"dory_opening_point", point.len() as u64));
+        for p in point {
+            p.append_to_transcript(transcript);
+        }
+        transcript.append(&Label(b"dory_opening_eval"));
+        eval.append_to_transcript(transcript);
+    }
+}
+
+impl CommitmentScheme for DoryScheme {
+    type ProverSetup = DoryProverSetup;
     type Polynomial = jolt_poly::Polynomial<Fr>;
     type OpeningHint = DoryHint;
     type SetupParams = usize;
 
     fn setup(max_num_vars: Self::SetupParams) -> (DoryProverSetup, DoryVerifierSetup) {
         let prover = Self::setup_prover(max_num_vars);
-        let verifier = Self::verifier_setup(&prover);
+        let verifier = Self::project_verifier_setup(&prover);
         (prover, verifier)
     }
 
-    fn verifier_setup(prover_setup: &DoryProverSetup) -> DoryVerifierSetup {
+    fn project_verifier_setup(prover_setup: &DoryProverSetup) -> DoryVerifierSetup {
         DoryVerifierSetup(prover_setup.0.to_verifier_setup())
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::commit")]
-    fn commit<P: MultilinearPoly<Fr> + ?Sized>(
-        poly: &P,
+    fn commit<S: CommitmentSource<Fr> + ?Sized>(
+        source: &S,
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint) {
-        Self::commit_with_mode::<P, Transparent>(poly, setup)
+        Self::commit_with_mode::<S, Transparent>(source, setup)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open")]
@@ -202,46 +262,17 @@ impl CommitmentScheme for DoryScheme {
         DoryProof(proof)
     }
 
-    #[tracing::instrument(skip_all, name = "DoryScheme::verify")]
-    fn verify(
-        commitment: &Self::Output,
-        point: &[Fr],
-        eval: Fr,
-        proof: &Self::Proof,
-        setup: &Self::VerifierSetup,
+    fn prove_batch(
+        claims: Vec<ProverClaim<Self::Field, Self::Polynomial>>,
+        hints: Vec<Self::OpeningHint>,
+        setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
-        let ark_eval = jolt_fr_to_ark(&eval);
-        let ark_commitment = jolt_gt_to_ark(&commitment.0);
-        let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-
-        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
-            ark_commitment,
-            ark_eval,
-            &ark_point,
-            &proof.0,
-            setup.0.clone().into_inner(),
-            &mut dory_transcript,
-        )
-        .map_err(|_| OpeningsError::VerificationFailed)
-    }
-
-    fn bind_opening_inputs(
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-        point: &[Self::Field],
-        eval: &Self::Field,
-    ) {
-        transcript.append(&LabelWithCount(b"dory_opening_point", point.len() as u64));
-        for p in point {
-            p.append_to_transcript(transcript);
-        }
-        transcript.append(&Label(b"dory_opening_eval"));
-        eval.append_to_transcript(transcript);
+    ) -> Self::BatchProof {
+        homomorphic_prove_batch::<Self, _>(claims, hints, setup, transcript)
     }
 }
 
-impl AdditivelyHomomorphic for DoryScheme {
+impl AdditivelyHomomorphicVerifier for DoryScheme {
     #[tracing::instrument(skip_all, name = "DoryScheme::combine")]
     fn combine(commitments: &[Self::Output], scalars: &[Self::Field]) -> Self::Output {
         assert_eq!(commitments.len(), scalars.len());
@@ -254,7 +285,9 @@ impl AdditivelyHomomorphic for DoryScheme {
 
         DoryCommitment(ark_to_jolt_gt(&combined))
     }
+}
 
+impl AdditivelyHomomorphic for DoryScheme {
     #[tracing::instrument(skip_all, name = "DoryScheme::combine_hints")]
     fn combine_hints(hints: Vec<Self::OpeningHint>, scalars: &[Self::Field]) -> Self::OpeningHint {
         assert_eq!(hints.len(), scalars.len());
@@ -287,15 +320,44 @@ impl AdditivelyHomomorphic for DoryScheme {
     }
 }
 
-impl ZkOpeningScheme for DoryScheme {
+impl ZkOpeningSchemeVerifier for DoryScheme {
     type HidingCommitment = Bn254G1;
+
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify_zk")]
+    fn verify_zk(
+        commitment: &Self::Output,
+        point: &[Fr],
+        proof: &Self::Proof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
+        // In ZK mode dory::verify reads the evaluation commitment from `proof.y_com`,
+        // so the caller-side eval is unused here.
+        let dummy_eval = <ArkFr as DoryField>::zero();
+        let ark_commitment = jolt_gt_to_ark(&commitment.0);
+        let mut dory_transcript = JoltToDoryTranscript::new(transcript);
+
+        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
+            ark_commitment,
+            dummy_eval,
+            &ark_point,
+            &proof.0,
+            setup.0.clone().into_inner(),
+            &mut dory_transcript,
+        )
+        .map_err(|_| OpeningsError::VerificationFailed)
+    }
+}
+
+impl ZkOpeningScheme for DoryScheme {
     type Blind = Fr;
 
-    fn commit_zk<P: MultilinearPoly<Fr> + ?Sized>(
-        poly: &P,
+    fn commit_zk<S: CommitmentSource<Fr> + ?Sized>(
+        source: &S,
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint) {
-        Self::commit_with_mode::<P, dory::ZK>(poly, setup)
+        Self::commit_with_mode::<S, dory::ZK>(source, setup)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open_zk")]
@@ -334,37 +396,11 @@ impl ZkOpeningScheme for DoryScheme {
 
         (DoryProof(proof), y_com, blinding)
     }
-
-    #[tracing::instrument(skip_all, name = "DoryScheme::verify_zk")]
-    fn verify_zk(
-        commitment: &Self::Output,
-        point: &[Fr],
-        proof: &Self::Proof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
-        // In ZK mode dory::verify reads the evaluation commitment from `proof.y_com`,
-        // so the caller-side eval is unused here.
-        let dummy_eval = <ArkFr as DoryField>::zero();
-        let ark_commitment = jolt_gt_to_ark(&commitment.0);
-        let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-
-        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
-            ark_commitment,
-            dummy_eval,
-            &ark_point,
-            &proof.0,
-            setup.0.clone().into_inner(),
-            &mut dory_transcript,
-        )
-        .map_err(|_| OpeningsError::VerificationFailed)
-    }
 }
 
 /// Dense commit: full MSM per row, parallel over rows.
-fn commit_rows_dense<P: MultilinearPoly<Fr> + ?Sized>(
-    poly: &P,
+fn commit_rows_dense<S: CommitmentSource<Fr> + ?Sized>(
+    source: &S,
     sigma: usize,
     setup: &ArkworksProverSetup,
 ) -> Vec<ArkG1> {
@@ -372,7 +408,9 @@ fn commit_rows_dense<P: MultilinearPoly<Fr> + ?Sized>(
     let g1_bases = &setup.g1_vec[..num_cols];
 
     let mut rows: Vec<Vec<Fr>> = Vec::new();
-    poly.for_each_row(sigma, &mut |_, row| rows.push(row.to_vec()));
+    source.for_each_row(sigma, |_, row| {
+        rows.push(source_row_to_dense(row, num_cols));
+    });
 
     rows.par_iter()
         .map(|row| {
@@ -383,8 +421,8 @@ fn commit_rows_dense<P: MultilinearPoly<Fr> + ?Sized>(
 }
 
 /// One-hot commit: O(T) group additions for unit-valued one-hot polynomials.
-fn commit_rows_one_hot<P: MultilinearPoly<Fr> + ?Sized>(
-    poly: &P,
+fn commit_rows_one_hot<S: CommitmentSource<Fr> + ?Sized>(
+    source: &S,
     num_rows: usize,
     num_cols: usize,
     setup: &ArkworksProverSetup,
@@ -392,7 +430,7 @@ fn commit_rows_one_hot<P: MultilinearPoly<Fr> + ?Sized>(
     let g1_bases = &setup.g1_vec[..num_cols];
 
     let mut cols_per_row: Vec<Vec<usize>> = vec![Vec::new(); num_rows];
-    poly.for_each_one(&mut |flat_idx| {
+    source.for_each_one(|flat_idx: usize| {
         let row = flat_idx / num_cols;
         let col = flat_idx % num_cols;
         debug_assert!(
@@ -413,19 +451,54 @@ fn commit_rows_one_hot<P: MultilinearPoly<Fr> + ?Sized>(
         .collect()
 }
 
-fn compute_row_commitments<P: MultilinearPoly<Fr> + ?Sized>(
-    poly: &P,
+fn compute_row_commitments<S: CommitmentSource<Fr> + ?Sized>(
+    source: &S,
     setup: &DoryProverSetup,
 ) -> Vec<ArkG1> {
-    let num_vars = poly.num_vars();
+    let num_vars = source.num_vars();
     let sigma = num_vars.div_ceil(2);
     let num_cols = 1usize << sigma;
     let num_rows = 1usize << (num_vars - sigma);
 
-    if poly.is_one_hot() {
-        commit_rows_one_hot(poly, num_rows, num_cols, &setup.0)
+    if source.is_one_hot() {
+        commit_rows_one_hot(source, num_rows, num_cols, &setup.0)
     } else {
-        commit_rows_dense(poly, sigma, &setup.0)
+        commit_rows_dense(source, sigma, &setup.0)
+    }
+}
+
+fn source_row_to_dense(row: SourceRow<'_, Fr>, expected_len: usize) -> Vec<Fr> {
+    match row {
+        SourceRow::FieldElements(values) => {
+            assert_eq!(values.len(), expected_len);
+            values.to_vec()
+        }
+        SourceRow::I128(values) => {
+            assert_eq!(values.len(), expected_len);
+            values.iter().map(|&value| Fr::from_i128(value)).collect()
+        }
+        SourceRow::OneHot(row) => {
+            let domain_size = 1usize << row.log_domain_size;
+            let mut dense = Vec::new();
+            match row.entries {
+                jolt_openings::OneHotEntries::OnePerColumn(indices) => {
+                    dense.resize(indices.len() * domain_size, Fr::from_u64(0));
+                    for (col, hot_index) in indices.iter().enumerate() {
+                        dense[col * domain_size + hot_index.get()] = Fr::from_u64(1);
+                    }
+                }
+                jolt_openings::OneHotEntries::MaybeZero(indices) => {
+                    dense.resize(indices.len() * domain_size, Fr::from_u64(0));
+                    for (col, hot_index) in indices.iter().enumerate() {
+                        if let Some(hot_index) = hot_index {
+                            dense[col * domain_size + hot_index.get()] = Fr::from_u64(1);
+                        }
+                    }
+                }
+            }
+            assert_eq!(dense.len(), expected_len);
+            dense
+        }
     }
 }
 

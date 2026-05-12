@@ -149,7 +149,7 @@ fn validate_proof_round_count(buf: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     use jolt_field::RandomSampling;
-    use jolt_openings::CommitmentScheme;
+    use jolt_openings::{CommitmentScheme, CommitmentSchemeVerifier};
     use jolt_poly::Polynomial;
     use jolt_transcript::Transcript;
     use rand_chacha::ChaCha20Rng;

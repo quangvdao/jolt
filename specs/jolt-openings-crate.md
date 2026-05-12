@@ -263,7 +263,9 @@ Homomorphic extension traits only add linear combination primitives.
 ### Source-Oriented Commitment API
 
 The PCS should consume polynomial sources directly.
-Streaming is a source traversal strategy, not a standalone commitment-scheme trait.
+Streaming is not a standalone commitment-scheme trait, but it is also not quarantined entirely inside source implementations.
+The source abstraction describes what data is available and which traversal shapes can expose it without materializing all committed polynomials.
+The PCS implementation still owns the commitment algorithm: parallel scheduling, row MSM strategy, one-hot grouping, tier-2 aggregation, hint construction, and transparent-vs-ZK finishing.
 
 `jolt-openings` should expose source traits with two layers.
 The core semantic object is `CommitmentSource`; `SourceRow` is only a traversal view for commitment implementations that can exploit row structure:
@@ -453,9 +455,14 @@ This is the Dory-dependent part of the source API.
 The alternative is to move these encodings behind a Dory-only trait, but then stable Rust cannot make the generic `PCS::commit_batch(&batch, ...)` dispatch to the optimized Dory implementation only for batches that implement that Dory-only trait.
 Without specialization or downcasting, Jolt would have to call a Dory-specific method directly, which defeats the cutover goal.
 
-`BatchCommitmentSource::map_rows` is the no-regression hook.
+`BatchCommitmentSource::map_rows` is the no-regression traversal hook.
 It lets Jolt's trace-backed source scan the padded trace once, parallelize over trace rows, and run the caller's row-processing closure for every requested committed polynomial in source-id order.
 Calling `CommitmentSource::for_each_row` independently for every committed polynomial would be simpler but would rescan the trace per polynomial, so it is not acceptable for the zkVM hot path.
+
+The hook does not make the source responsible for the commitment algorithm.
+Dory's `commit_batch` and `commit_batch_zk` choose how to consume the row views, how much work to parallelize at the row/source/aggregation layers, and how to build `DoryHint`.
+The default `commit_batch` can ignore shared traversal and commit one `CommitmentSource` at a time.
+Future CPU, GPU, or lattice backends can make different scheduling choices behind the same PCS method boundary.
 
 The PCS trait should commit sources, not materialized polynomials:
 
@@ -569,9 +576,26 @@ fn commit_onehot_row(row: OneHotRow<'_>, setup: &DoryProverSetup) -> Vec<ArkG1> 
 ```
 
 This is the same division of labor as current `process_chunk` / `process_chunk_onehot`, but without exposing Dory tier-1 chunks as a public PCS trait.
-The row-processing closure is generic, not trait-object based, so the Jolt trace-batch hot path can remain statically dispatched and parallelized by the concrete batch source.
+The row-processing closure is generic, not trait-object based, so the Jolt trace-batch hot path can remain statically dispatched.
+Dory decides the parallel schedule inside its `commit_batch` implementation while using the concrete batch source for shared data access.
 For non-Dory schemes, the default `commit_batch` is correct and simple.
 They can add an optimized override only if their backend benefits from batch-row source traversal.
+
+### Compatibility with Bolt's Compute Boundary
+
+The source API should line up with the compiler/backend split being developed on the `refactor/crates` branch.
+Bolt represents commitment work as compute-level obligations such as `compute.oracle_dense_trace`, `compute.oracle_one_hot_chunk`, `compute.oracle_family_append`, and `compute.pcs_commit_batch`.
+Those operations describe oracle data, oracle families, and batch commitment obligations without requiring protocol code to know whether the prover will materialize each oracle, stream trace rows, use a sparse one-hot path, or eventually target a non-CPU backend.
+
+This PR should provide the Rust PCS boundary that Bolt can lower into:
+
+1. Bolt's oracle buffers map naturally to `CommitmentSource` values.
+2. Bolt's oracle families and `compute.pcs_commit_batch` map naturally to `BatchCommitmentSource` plus `PCS::commit_batch`.
+3. Bolt's current provider-style override for `commit_batch` corresponds to a PCS/backend override in this API.
+4. Protocol code should request commitments over sources; backend code should choose the execution strategy.
+
+This means the abstraction should remain strategy-oblivious above the PCS boundary.
+It should not bake Dory's row-major streaming schedule into `jolt-openings`, but it should leave enough structure for Dory, Bolt-generated CPU code, and future GPU or lattice backends to preserve their own optimized commitment paths.
 
 The Akita/Hachi packed path suggests one important constraint on this abstraction: a source id names a committed source, not necessarily one logical Jolt polynomial.
 For Dory, the natural source ids are the individual `CommittedPolynomial` variants, and `commit_batch` returns one commitment per logical polynomial.

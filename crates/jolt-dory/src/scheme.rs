@@ -21,8 +21,9 @@ use jolt_field::{Fr, FromPrimitiveInt};
 use jolt_openings::{
     homomorphic_prove_batch, homomorphic_verify_batch, AdditivelyHomomorphic,
     AdditivelyHomomorphicVerifier, BatchCommitmentSource, CommitmentScheme,
-    CommitmentSchemeVerifier, CommitmentSource, OpeningClaim, OpeningsError, ProverClaim,
-    PublicVerifierSetup, SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
+    EvaluationCommitmentScheme, OpeningClaim, OpeningsError, ProverClaim, PublicVerifierSetup,
+    SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
@@ -747,6 +748,32 @@ impl ZkOpeningScheme for DoryScheme {
         let nu = num_vars - sigma;
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
         Self::open_zk_source_with_shape(poly, point, nu, sigma, setup, hint, &mut dory_transcript)
+    }
+}
+
+impl EvaluationCommitmentScheme<Bn254G1> for DoryScheme {
+    fn batch_eval_commitment(proof: &Self::BatchProof) -> Option<Bn254G1> {
+        let [proof] = proof.as_slice() else {
+            return None;
+        };
+        proof.0.y_com.as_ref().copied().map(ark_to_jolt_g1)
+    }
+
+    fn eval_commitment_gens_verifier(setup: &Self::VerifierSetup) -> Option<(Bn254G1, Bn254G1)> {
+        Some((ark_to_jolt_g1(setup.0.g1_0), ark_to_jolt_g1(setup.0.h1)))
+    }
+}
+
+impl EvaluationCommitmentProver<Bn254G1> for DoryScheme {
+    fn eval_commitment_gens(setup: &Self::ProverSetup) -> Option<(Bn254G1, Bn254G1)> {
+        let g1_0 = setup.0.g1_vec.first().copied().map(ark_to_jolt_g1)?;
+        Some((g1_0, ark_to_jolt_g1(setup.0.h1)))
+    }
+
+    fn zk_generators(setup: &Self::ProverSetup, count: usize) -> Option<(Vec<Bn254G1>, Bn254G1)> {
+        let count = std::cmp::min(count, setup.0.g1_vec.len());
+        let g1s = ark_to_jolt_g1_vec(setup.0.g1_vec[..count].to_vec());
+        Some((g1s, ark_to_jolt_g1(setup.0.h1)))
     }
 }
 

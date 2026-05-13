@@ -199,3 +199,34 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
     where
         S: CommitmentSource<Self::Field> + ?Sized;
 }
+
+/// Verifier-side hooks for schemes whose ZK openings bind a hidden evaluation.
+///
+/// Jolt's BlindFold integration needs to absorb the commitment to the hidden
+/// evaluation and use the same commitment generators inside its verifier R1CS.
+/// Schemes without this Dory-style evaluation commitment should not implement
+/// this extension trait.
+pub trait EvaluationCommitmentScheme<G>: ZkOpeningSchemeVerifier
+where
+    G: Clone + Send + Sync + 'static,
+{
+    /// Extracts the hidden evaluation commitment from a batch proof.
+    fn batch_eval_commitment(proof: &Self::BatchProof) -> Option<G>;
+
+    /// Returns the verifier-side generators used by the hidden evaluation
+    /// commitment relation.
+    fn eval_commitment_gens_verifier(setup: &Self::VerifierSetup) -> Option<(G, G)>;
+}
+
+/// Prover-side hooks for schemes whose ZK openings bind a hidden evaluation.
+pub trait EvaluationCommitmentProver<G>: EvaluationCommitmentScheme<G> + ZkOpeningScheme
+where
+    G: Clone + Send + Sync + 'static,
+{
+    /// Returns the prover-side generators used by the hidden evaluation
+    /// commitment relation.
+    fn eval_commitment_gens(setup: &Self::ProverSetup) -> Option<(G, G)>;
+
+    /// Returns Pedersen generators derived from the PCS setup for BlindFold.
+    fn zk_generators(setup: &Self::ProverSetup, count: usize) -> Option<(Vec<G>, G)>;
+}

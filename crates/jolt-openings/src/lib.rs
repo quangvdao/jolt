@@ -37,7 +37,8 @@ pub use homomorphic::{
 };
 pub use schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
-    CommitmentSchemeVerifier, PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    CommitmentSchemeVerifier, EvaluationCommitmentProver, EvaluationCommitmentScheme,
+    PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 pub use sources::{
     BatchCommitmentSource, CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, SourceId,

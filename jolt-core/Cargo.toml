@@ -86,6 +86,7 @@ allocative.workspace = true
 inferno = { workspace = true, optional = true }
 jolt-program = { workspace = true, features = ["image", "serialization"] }
 jolt-field.workspace = true
+jolt-dory.workspace = true
 jolt-openings.workspace = true
 jolt-poly.workspace = true
 jolt-riscv = { workspace = true, features = ["serialization"] }

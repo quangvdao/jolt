@@ -2721,6 +2721,7 @@ dependencies = [
  "iai-callgrind",
  "inferno 0.12.6",
  "itertools 0.14.0",
+ "jolt-dory",
  "jolt-field",
  "jolt-inlines-keccak256",
  "jolt-inlines-sha2",

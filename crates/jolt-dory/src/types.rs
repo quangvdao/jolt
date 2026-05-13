@@ -98,6 +98,11 @@ impl DoryHint {
             commit_blind,
         }
     }
+
+    /// Splits the hint into row commitments and the commitment blinding scalar.
+    pub fn into_parts(self) -> (Vec<Bn254G1>, Fr) {
+        (self.row_commitments, self.commit_blind)
+    }
 }
 
 #[derive(Clone)]

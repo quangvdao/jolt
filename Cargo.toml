@@ -377,6 +377,7 @@ common = { path = "./common", default-features = false }
 tracer = { path = "./tracer", default-features = false }
 jolt-core = { path = "./jolt-core", default-features = false }
 jolt-crypto = { path = "./crates/jolt-crypto" }
+jolt-dory = { path = "./crates/jolt-dory" }
 jolt-field = { path = "./crates/jolt-field" }
 jolt-openings = { path = "./crates/jolt-openings" }
 jolt-poly = { path = "./crates/jolt-poly" }

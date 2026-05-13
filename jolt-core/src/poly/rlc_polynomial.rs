@@ -102,8 +102,8 @@ impl<F: JoltField> RLCPolynomial<F> {
     /// Constructs an `RLCPolynomial` as a linear combination of `polynomials` with the provided
     /// `coefficients`.
     ///
-    /// This is a legacy helper (used by some commitment backends) that eagerly combines dense
-    /// polynomials into `dense_rlc` and stores one-hot polynomials lazily in `one_hot_rlc`.
+    /// This materializing helper eagerly combines dense polynomials into `dense_rlc`
+    /// and stores one-hot polynomials lazily in `one_hot_rlc`.
     pub fn linear_combination(
         poly_ids: Vec<CommittedPolynomial>,
         polynomials: Vec<Arc<MultilinearPolynomial<F>>>,

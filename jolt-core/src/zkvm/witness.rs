@@ -249,8 +249,8 @@ where
 
 /// Trace-backed batch source for the current CycleMajor witness commitments.
 ///
-/// This adapter is the bridge from Jolt's existing streaming witness path to
-/// the source-oriented PCS API. It does not materialize witness polynomials in
+/// This adapter exposes Jolt's streaming witness path through the
+/// source-oriented PCS API. It does not materialize witness polynomials in
 /// the hot batch path: [`map_rows`](BatchCommitmentSource::map_rows) clones the
 /// lazy trace iterator, pads it exactly as the current prover does, chunks it by
 /// the existing Dory row width, and derives all requested committed-polynomial

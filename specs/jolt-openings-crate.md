@@ -117,6 +117,7 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 - [x] The old standalone `reduce_prover` / `reduce_verifier` production API is not part of the new production surface; production Dory batch opening uses `prove_batch` / `verify_batch`.
 - [x] `crates/jolt-openings/src/mock.rs` implements the split traits and has tests covering single-claim, multi-claim, shared-point, distinct-point, and tampered-evaluation cases.
 - [x] `crates/jolt-dory` implements the split trait family while preserving current `main` wrapper types, bounded deserialization, transcript bridge, batch-source streaming support, and ZK behavior.
+- [x] `crates/jolt-dory` does not expose merge-target public APIs for borrowed-ark setup, Dory-native proof entrypoints, or standalone begin/feed/finish streaming commitments; those strategies live behind canonical `jolt-openings` trait methods.
 - [x] Dory `commit_batch` preserves CycleMajor trace commitment shape: same polynomial order, same row length, same row-commitment ordering, same `DoryHint` row commitments, and same transcript-visible commitments as current `main`.
 - [x] `DoryScheme::BatchProof = Vec<DoryProof>` for the homomorphic Dory implementation.
 - [x] `DoryScheme::prove_batch` delegates to `homomorphic_prove_batch`.

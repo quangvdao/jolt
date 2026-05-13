@@ -1183,7 +1183,7 @@ impl DoryHint {
     }
 }
 
-/// Bridges [`CommitmentSource<Fr>`] to dory-pcs's polynomial traits
+/// Adapts [`CommitmentSource<Fr>`] to dory-pcs's polynomial traits
 /// without materializing the full evaluation table.
 struct DorySourceAdapter<'a, S: CommitmentSource<Fr> + ?Sized> {
     source: &'a S,

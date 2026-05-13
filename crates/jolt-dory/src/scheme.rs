@@ -573,7 +573,6 @@ impl PublicVerifierSetup for DoryScheme {
 
 impl CommitmentScheme for DoryScheme {
     type ProverSetup = DoryProverSetup;
-    type Polynomial = jolt_poly::Polynomial<Fr>;
     type OpeningHint = DoryHint;
     type SetupParams = usize;
 
@@ -605,14 +604,17 @@ impl CommitmentScheme for DoryScheme {
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open")]
-    fn open(
-        poly: &Self::Polynomial,
+    fn open<S>(
+        poly: &S,
         point: &[Fr],
         _eval: Fr,
         setup: &Self::ProverSetup,
         hint: Option<Self::OpeningHint>,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::Proof {
+    ) -> Self::Proof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
         let num_vars = point.len();
         let sigma = num_vars.div_ceil(2);
         let nu = num_vars - sigma;
@@ -632,13 +634,16 @@ impl CommitmentScheme for DoryScheme {
         Self::open_source_with_shape(poly, point, nu, sigma, setup, hint, &mut dory_transcript)
     }
 
-    fn prove_batch(
-        claims: Vec<ProverClaim<Self::Field, Self::Polynomial>>,
+    fn prove_batch<S>(
+        claims: Vec<ProverClaim<Self::Field, S>>,
         hints: Vec<Self::OpeningHint>,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof {
-        homomorphic_prove_batch::<Self, _>(claims, hints, setup, transcript)
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field>,
+    {
+        homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
     }
 }
 
@@ -726,14 +731,17 @@ impl ZkOpeningScheme for DoryScheme {
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open_zk")]
-    fn open_zk(
-        poly: &Self::Polynomial,
+    fn open_zk<S>(
+        poly: &S,
         point: &[Fr],
         _eval: Fr,
         setup: &Self::ProverSetup,
         hint: Self::OpeningHint,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> (Self::Proof, Self::HidingCommitment, Self::Blind) {
+    ) -> (Self::Proof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
         let num_vars = point.len();
         let sigma = num_vars.div_ceil(2);
         let nu = num_vars - sigma;
@@ -1069,9 +1077,35 @@ mod tests {
     use super::*;
     use jolt_crypto::{Pedersen, VectorCommitment};
     use jolt_field::{FromPrimitiveInt, RandomSampling};
+    use jolt_openings::SourceRow;
     use jolt_poly::Polynomial;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    struct FoldOnlySource {
+        poly: Polynomial<Fr>,
+    }
+
+    impl CommitmentSource<Fr> for FoldOnlySource {
+        fn num_vars(&self) -> usize {
+            self.poly.num_vars()
+        }
+
+        fn evaluate(&self, point: &[Fr]) -> Fr {
+            self.poly.evaluate(point)
+        }
+
+        fn for_each_row<V>(&self, _sigma: usize, _visit: V)
+        where
+            V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
+        {
+            panic!("single-claim prove_batch must not materialize source rows")
+        }
+
+        fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
+            self.poly.fold_rows(left, sigma)
+        }
+    }
 
     #[test]
     fn commit_open_verify_round_trip() {
@@ -1193,6 +1227,47 @@ mod tests {
             result.is_ok(),
             "generic Dory opening must evaluate at the caller's Jolt-order point"
         );
+    }
+
+    #[test]
+    fn single_claim_prove_batch_opens_source_without_materializing_rows() {
+        let num_vars = 3;
+        let mut rng = ChaCha20Rng::seed_from_u64(414);
+        let prover_setup = DoryScheme::setup_prover(num_vars);
+        let verifier_setup = DoryVerifierSetup(prover_setup.0.to_verifier_setup());
+
+        let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
+        let source = FoldOnlySource { poly: poly.clone() };
+        let point: Vec<Fr> = (0..num_vars)
+            .map(|_| <Fr as RandomSampling>::random(&mut rng))
+            .collect();
+        let eval = poly.evaluate(&point);
+        let (commitment, hint) = DoryScheme::commit(&poly, &prover_setup);
+
+        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"single-batch");
+        let proof = DoryScheme::prove_batch(
+            vec![ProverClaim {
+                polynomial: source,
+                point: point.clone(),
+                eval,
+            }],
+            vec![hint],
+            &prover_setup,
+            &mut prove_transcript,
+        );
+
+        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"single-batch");
+        DoryScheme::verify_batch(
+            vec![OpeningClaim {
+                commitment,
+                point,
+                eval,
+            }],
+            &proof,
+            &verifier_setup,
+            &mut verify_transcript,
+        )
+        .expect("single-claim batch proof should verify");
     }
 
     #[test]

@@ -15,8 +15,8 @@ use crate::sources::CommitmentSource;
 /// Groups prover claims by point, RLC-combines each group, and opens one proof
 /// per group.
 #[tracing::instrument(skip_all, name = "homomorphic_prove_batch")]
-pub fn homomorphic_prove_batch<PCS, T>(
-    claims: Vec<ProverClaim<PCS::Field, PCS::Polynomial>>,
+pub fn homomorphic_prove_batch<PCS, T, S>(
+    claims: Vec<ProverClaim<PCS::Field, S>>,
     hints: Vec<PCS::OpeningHint>,
     setup: &PCS::ProverSetup,
     transcript: &mut T,
@@ -24,6 +24,7 @@ pub fn homomorphic_prove_batch<PCS, T>(
 where
     PCS: AdditivelyHomomorphic,
     PCS::Output: HomomorphicCommitment<PCS::Field>,
+    S: CommitmentSource<PCS::Field>,
     T: Transcript<Challenge = PCS::Field>,
 {
     assert_eq!(
@@ -37,7 +38,27 @@ where
 
     bind_batch_claims::<PCS::Field, _, _>(&claims, transcript);
 
-    let groups = group_prover_claims_by_point::<PCS>(claims.into_iter().zip(hints).collect());
+    if claims.len() == 1 {
+        let _rho: PCS::Field = transcript.challenge();
+        let mut claims = claims.into_iter();
+        let mut hints = hints.into_iter();
+        let Some(claim) = claims.next() else {
+            unreachable!("single claim exists after len check");
+        };
+        let Some(hint) = hints.next() else {
+            unreachable!("single hint exists after len check");
+        };
+        return vec![PCS::open(
+            &claim.polynomial,
+            &claim.point,
+            claim.eval,
+            setup,
+            Some(hint),
+            transcript,
+        )];
+    }
+
+    let groups = group_prover_claims_by_point::<PCS, S>(claims.into_iter().zip(hints).collect());
     let mut proofs = Vec::with_capacity(groups.len());
     for (point, group_claims) in groups {
         let rho: PCS::Field = transcript.challenge();
@@ -56,9 +77,8 @@ where
         let combined_evals = rlc_combine(&eval_slices, rho);
         let combined_eval = rlc_combine_scalars(&evals, rho);
         let combined_hint = PCS::combine_hints(hints, &powers);
-        let combined_polynomial = PCS::Polynomial::from(combined_evals);
         proofs.push(PCS::open(
-            &combined_polynomial,
+            &combined_evals,
             &point,
             combined_eval,
             setup,
@@ -202,20 +222,18 @@ where
     crate::sources::materialize_source_evaluations(source)
 }
 
-type ProverPointGroup<F, PCS> = Vec<(Vec<F>, Vec<ProverClaimWithHint<F, PCS>>)>;
+type ProverPointGroup<F, PCS, S> = Vec<(Vec<F>, Vec<ProverClaimWithHint<F, PCS, S>>)>;
 
-type ProverClaimWithHint<F, PCS> = (
-    ProverClaim<F, <PCS as CommitmentScheme>::Polynomial>,
-    <PCS as CommitmentScheme>::OpeningHint,
-);
+type ProverClaimWithHint<F, PCS, S> = (ProverClaim<F, S>, <PCS as CommitmentScheme>::OpeningHint);
 
-fn group_prover_claims_by_point<PCS>(
-    claims: Vec<ProverClaimWithHint<PCS::Field, PCS>>,
-) -> ProverPointGroup<PCS::Field, PCS>
+fn group_prover_claims_by_point<PCS, S>(
+    claims: Vec<ProverClaimWithHint<PCS::Field, PCS, S>>,
+) -> ProverPointGroup<PCS::Field, PCS, S>
 where
     PCS: CommitmentScheme,
+    S: CommitmentSource<PCS::Field>,
 {
-    let mut groups: ProverPointGroup<PCS::Field, PCS> = Vec::new();
+    let mut groups: ProverPointGroup<PCS::Field, PCS, S> = Vec::new();
     for (claim, hint) in claims {
         if let Some((_, group)) = groups.iter_mut().find(|(point, _)| *point == claim.point) {
             group.push((claim, hint));

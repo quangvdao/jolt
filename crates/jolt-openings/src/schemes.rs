@@ -65,7 +65,6 @@ pub trait PublicVerifierSetup: CommitmentSchemeVerifier {
 /// Prover-side interface for a polynomial commitment scheme.
 pub trait CommitmentScheme: CommitmentSchemeVerifier {
     type ProverSetup: Clone + Send + Sync;
-    type Polynomial: CommitmentSource<Self::Field> + From<Vec<Self::Field>>;
     type OpeningHint: Clone + Send + Sync + Default;
     type SetupParams;
 
@@ -96,22 +95,26 @@ pub trait CommitmentScheme: CommitmentSchemeVerifier {
     }
 
     /// Proves one opening.
-    fn open(
-        polynomial: &Self::Polynomial,
+    fn open<S>(
+        polynomial: &S,
         point: &[Self::Field],
         eval: Self::Field,
         setup: &Self::ProverSetup,
         hint: Option<Self::OpeningHint>,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::Proof;
+    ) -> Self::Proof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized;
 
     /// Proves a fused batch opening.
-    fn prove_batch(
-        claims: Vec<ProverClaim<Self::Field, Self::Polynomial>>,
+    fn prove_batch<S>(
+        claims: Vec<ProverClaim<Self::Field, S>>,
         hints: Vec<Self::OpeningHint>,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof;
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field>;
 }
 
 /// Verifier-side additive combination of commitments.
@@ -185,12 +188,14 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
 
     /// Opens a ZK/hiding commitment using the hint returned by
     /// [`commit_zk`](Self::commit_zk).
-    fn open_zk(
-        polynomial: &Self::Polynomial,
+    fn open_zk<S>(
+        polynomial: &S,
         point: &[Self::Field],
         eval: Self::Field,
         setup: &Self::ProverSetup,
         hint: Self::OpeningHint,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> (Self::Proof, Self::HidingCommitment, Self::Blind);
+    ) -> (Self::Proof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field> + ?Sized;
 }

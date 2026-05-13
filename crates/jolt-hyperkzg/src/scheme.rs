@@ -17,7 +17,6 @@ use jolt_openings::{
     AdditivelyHomomorphicVerifier, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
     OpeningClaim, OpeningsError, ProverClaim, SourceRow,
 };
-use jolt_poly::Polynomial;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use num_traits::{One, Zero};
 use rayon::prelude::*;
@@ -304,7 +303,6 @@ where
     P::G1: AppendToTranscript,
 {
     type ProverSetup = HyperKZGProverSetup<P>;
-    type Polynomial = Polynomial<P::ScalarField>;
     type OpeningHint = ();
     type SetupParams = (usize, P::G1, P::G2);
 
@@ -333,25 +331,32 @@ where
         (HyperKZGCommitment { point }, ())
     }
 
-    fn open(
-        poly: &Self::Polynomial,
+    fn open<S>(
+        poly: &S,
         point: &[Self::Field],
         _eval: Self::Field,
         setup: &Self::ProverSetup,
         _hint: Option<Self::OpeningHint>,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::Proof {
-        Self::open(setup, poly.evaluations(), point, transcript)
+    ) -> Self::Proof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
+        let evaluations = source_to_evaluations(poly);
+        Self::open(setup, &evaluations, point, transcript)
             .expect("HyperKZG open should not fail with valid inputs")
     }
 
-    fn prove_batch(
-        claims: Vec<ProverClaim<Self::Field, Self::Polynomial>>,
+    fn prove_batch<S>(
+        claims: Vec<ProverClaim<Self::Field, S>>,
         hints: Vec<Self::OpeningHint>,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof {
-        homomorphic_prove_batch::<Self, _>(claims, hints, setup, transcript)
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field>,
+    {
+        homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
     }
 }
 

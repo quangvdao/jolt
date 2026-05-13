@@ -107,7 +107,6 @@ impl<F: Field> PublicVerifierSetup for MockCommitmentScheme<F> {
 
 impl<F: Field> CommitmentScheme for MockCommitmentScheme<F> {
     type ProverSetup = ();
-    type Polynomial = Polynomial<F>;
     type OpeningHint = ();
     type SetupParams = ();
 
@@ -129,26 +128,32 @@ impl<F: Field> CommitmentScheme for MockCommitmentScheme<F> {
         )
     }
 
-    fn open(
-        poly: &Self::Polynomial,
+    fn open<S>(
+        poly: &S,
         _point: &[Self::Field],
         _eval: Self::Field,
         _setup: &Self::ProverSetup,
         _hint: Option<()>,
         _transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::Proof {
+    ) -> Self::Proof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
         MockProof {
-            evaluations: poly.evaluations().to_vec(),
+            evaluations: materialize_source_evaluations(poly),
         }
     }
 
-    fn prove_batch(
-        claims: Vec<ProverClaim<Self::Field, Self::Polynomial>>,
+    fn prove_batch<S>(
+        claims: Vec<ProverClaim<Self::Field, S>>,
         hints: Vec<Self::OpeningHint>,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof {
-        homomorphic_prove_batch::<Self, _>(claims, hints, setup, transcript)
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field>,
+    {
+        homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
     }
 }
 
@@ -229,16 +234,19 @@ impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {
         Self::commit(source, setup)
     }
 
-    fn open_zk(
-        poly: &Self::Polynomial,
+    fn open_zk<S>(
+        poly: &S,
         _point: &[Self::Field],
         eval: Self::Field,
         _setup: &Self::ProverSetup,
         _hint: Self::OpeningHint,
         _transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> (Self::Proof, Self::HidingCommitment, Self::Blind) {
+    ) -> (Self::Proof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
         let proof = MockProof {
-            evaluations: poly.evaluations().to_vec(),
+            evaluations: materialize_source_evaluations(poly),
         };
         let eval_commitment = MockHidingCommitment { eval };
         (proof, eval_commitment, ())

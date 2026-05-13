@@ -1,7 +1,6 @@
 //! Dory polynomial commitment scheme implementation
 
 use super::dory_globals::{DoryGlobals, DoryLayout};
-use super::jolt_dory_routines::JoltG1Routines;
 use super::wrappers::{
     ark_to_jolt, jolt_to_ark, ArkDoryProof, ArkFr, ArkG1, ArkGT, ArkworksProverSetup,
     ArkworksVerifierSetup, JoltToDoryTranscript, BN254,
@@ -18,6 +17,7 @@ use crate::{
 };
 use ark_bn254::G1Projective;
 use ark_ff::Zero;
+use dory::backends::arkworks::G1Routines;
 use dory::primitives::{
     arithmetic::{Field as DoryField, Group},
     poly::Polynomial,
@@ -135,7 +135,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
             <MultilinearPolynomial<ark_bn254::Fr> as Polynomial<ArkFr>>::commit::<
                 BN254,
                 DoryMode,
-                JoltG1Routines,
+                G1Routines,
             >(poly, nu, sigma, setup)
             .expect("commitment should succeed");
 

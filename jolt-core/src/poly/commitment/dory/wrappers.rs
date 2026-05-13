@@ -27,8 +27,6 @@ pub use dory::backends::arkworks::{
     ArkDoryProof, ArkFr, ArkG1, ArkG2, ArkGT, ArkworksProverSetup, ArkworksVerifierSetup, BN254,
 };
 
-pub type JoltFieldWrapper = ArkFr;
-
 #[inline]
 pub fn jolt_to_ark(f: &Fr) -> ArkFr {
     // SAFETY: ArkFr and Fr have the same memory layout

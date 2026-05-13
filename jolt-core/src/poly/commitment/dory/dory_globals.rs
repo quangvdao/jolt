@@ -249,13 +249,6 @@ impl DoryGlobals {
         Self::balanced_sigma_nu(advice_vars)
     }
 
-    /// How many row variables of the *cycle* segment exist in the unified point:
-    /// `row_cycle_len = max(0, log_t - sigma_main)`.
-    #[inline]
-    pub fn cycle_row_len(log_t: usize, sigma_main: usize) -> usize {
-        log_t.saturating_sub(sigma_main)
-    }
-
     /// Get the current Dory context
     pub fn current_context() -> DoryContext {
         CURRENT_CONTEXT.load(Ordering::SeqCst).into()

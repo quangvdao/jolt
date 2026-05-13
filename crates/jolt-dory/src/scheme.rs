@@ -259,36 +259,14 @@ impl DoryScheme {
         )
     }
 
-    /// Opens a transparent Dory commitment for a source that already implements
-    /// the dory-pcs polynomial traits over [`ArkFr`].
+    /// Opens a transparent Dory commitment using a borrowed dory-pcs prover setup.
     ///
     /// This Dory-specific entrypoint exists for the current `jolt-core` cutover:
     /// legacy Stage 8 polynomials already live in arkworks/Dory form, and routing
     /// them through `CommitmentSource<jolt_field::Fr>` would allocate conversion
     /// vectors in every Dory vector/matrix product. `ark_point` must already be in
-    /// Dory's point order, i.e. the reverse of Jolt's opening-point order.
-    #[tracing::instrument(skip_all, name = "DoryScheme::open_dory_source_with_shape")]
-    pub fn open_dory_source_with_shape<S, T>(
-        source: &S,
-        ark_point: &[ArkFr],
-        nu: usize,
-        sigma: usize,
-        setup: &DoryProverSetup,
-        hint: DoryHint,
-        transcript: &mut T,
-    ) -> DoryProof
-    where
-        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
-        T: DoryTranscript<Curve = InnerBN254>,
-    {
-        Self::open_dory_source_with_ark_setup(
-            source, ark_point, nu, sigma, &setup.0, hint, transcript,
-        )
-    }
-
-    /// Opens a transparent Dory commitment using a borrowed dory-pcs prover setup.
-    ///
-    /// This avoids cloning the SRS when a protocol layer already owns the
+    /// Dory's point order, i.e. the reverse of Jolt's opening-point order. The
+    /// borrowed setup avoids cloning the SRS when a protocol layer still owns the
     /// underlying arkworks setup.
     #[tracing::instrument(skip_all, name = "DoryScheme::open_dory_source_with_ark_setup")]
     pub fn open_dory_source_with_ark_setup<S, T>(
@@ -359,31 +337,6 @@ impl DoryScheme {
         let y_com = ark_to_jolt_g1(proof.0.y_com.expect("ZK proof must contain y_com"));
         let blinding = y_blinding.expect("ZK proof must return y_blinding");
         (proof, y_com, blinding)
-    }
-
-    /// Opens a hiding Dory commitment for a source that already implements the
-    /// dory-pcs polynomial traits over [`ArkFr`].
-    ///
-    /// Like [`Self::open_dory_source_with_shape`], this preserves the native
-    /// arkworks Stage 8 path while still centralizing Dory proof generation in
-    /// `jolt-dory`. `ark_point` must already be in Dory's point order.
-    #[tracing::instrument(skip_all, name = "DoryScheme::open_zk_dory_source_with_shape")]
-    pub fn open_zk_dory_source_with_shape<S, T>(
-        source: &S,
-        ark_point: &[ArkFr],
-        nu: usize,
-        sigma: usize,
-        setup: &DoryProverSetup,
-        hint: DoryHint,
-        transcript: &mut T,
-    ) -> (DoryProof, Bn254G1, Fr)
-    where
-        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
-        T: DoryTranscript<Curve = InnerBN254>,
-    {
-        Self::open_zk_dory_source_with_ark_setup(
-            source, ark_point, nu, sigma, &setup.0, hint, transcript,
-        )
     }
 
     /// Opens a hiding Dory commitment using a borrowed dory-pcs prover setup.
@@ -1080,7 +1033,7 @@ impl<S: CommitmentSource<Fr> + ?Sized> DoryPolynomial<ArkFr> for DorySourceAdapt
     }
 
     fn evaluate(&self, point: &[ArkFr]) -> ArkFr {
-        let native_point: Vec<Fr> = point.iter().map(ark_to_jolt_fr).collect();
+        let native_point: Vec<Fr> = point.iter().rev().map(ark_to_jolt_fr).collect();
         jolt_fr_to_ark(&self.source.evaluate(&native_point))
     }
 
@@ -1190,6 +1143,55 @@ mod tests {
         assert_eq!(
             commit_sum_direct, combined,
             "combine([1,1]) must match commitment to sum"
+        );
+    }
+
+    #[test]
+    fn generic_open_preserves_jolt_point_order() {
+        let num_vars = 3;
+        let prover_setup = DoryScheme::setup_prover(num_vars);
+        let verifier_setup = DoryVerifierSetup(prover_setup.0.to_verifier_setup());
+
+        // f(x0, x1, x2) = x0. Reversing the opening point evaluates x2
+        // instead, so this catches accidental Dory/Jolt point-order swaps.
+        let evals = vec![
+            Fr::from_u64(0),
+            Fr::from_u64(0),
+            Fr::from_u64(0),
+            Fr::from_u64(0),
+            Fr::from_u64(1),
+            Fr::from_u64(1),
+            Fr::from_u64(1),
+            Fr::from_u64(1),
+        ];
+        let poly = Polynomial::new(evals);
+        let point = vec![Fr::from_u64(2), Fr::from_u64(3), Fr::from_u64(5)];
+        let eval = poly.evaluate(&point);
+
+        let (commitment, hint) = DoryScheme::commit(poly.evaluations(), &prover_setup);
+
+        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"point-order");
+        let proof = DoryScheme::open(
+            &poly,
+            &point,
+            eval,
+            &prover_setup,
+            Some(hint),
+            &mut prove_transcript,
+        );
+
+        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"point-order");
+        let result = DoryScheme::verify(
+            &commitment,
+            &point,
+            eval,
+            &proof,
+            &verifier_setup,
+            &mut verify_transcript,
+        );
+        assert!(
+            result.is_ok(),
+            "generic Dory opening must evaluate at the caller's Jolt-order point"
         );
     }
 

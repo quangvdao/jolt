@@ -5,7 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::curve::JoltCurve;
-use crate::poly::commitment::commitment_scheme::{CommitmentScheme, ZkEvalCommitment};
+use crate::poly::commitment::commitment_scheme::{
+    BatchOpeningScheme, CommitmentScheme, ZkEvalCommitment,
+};
 #[cfg(feature = "zk")]
 use crate::poly::commitment::dory::bind_opening_inputs_zk;
 use crate::poly::commitment::dory::{bind_opening_inputs, DoryContext, DoryGlobals};
@@ -253,7 +255,7 @@ impl<
         'a,
         F: JoltField,
         C: JoltCurve<F = F>,
-        PCS: CommitmentScheme<Field = F> + ZkEvalCommitment<C>,
+        PCS: CommitmentScheme<Field = F> + BatchOpeningScheme<Field = F> + ZkEvalCommitment<C>,
         ProofTranscript: Transcript,
     > JoltVerifier<'a, F, C, PCS, ProofTranscript>
 {
@@ -1382,7 +1384,7 @@ impl<
         );
         let r1cs = builder.build();
 
-        let eval_commitment = PCS::eval_commitment(&self.proof.joint_opening_proof)
+        let eval_commitment = PCS::batch_eval_commitment(&self.proof.joint_opening_proof)
             .ok_or(ProofVerifyError::InvalidOpeningProof)?;
         let eval_commitments = vec![eval_commitment];
 
@@ -1664,7 +1666,7 @@ impl<
 
         let zk_mode = self.opening_accumulator.zk_mode;
         if zk_mode {
-            PCS::verify(
+            PCS::verify_batch(
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,
@@ -1675,7 +1677,7 @@ impl<
 
             #[cfg(feature = "zk")]
             {
-                let y_com: C::G1 = PCS::eval_commitment(&self.proof.joint_opening_proof)
+                let y_com: C::G1 = PCS::batch_eval_commitment(&self.proof.joint_opening_proof)
                     .ok_or(ProofVerifyError::InvalidOpeningProof)?;
                 bind_opening_inputs_zk::<F, C, _>(&mut self.transcript, &opening_point.r, &y_com);
             }
@@ -1684,7 +1686,7 @@ impl<
                 return Err(ProofVerifyError::ZkFeatureRequired);
             }
         } else {
-            PCS::verify(
+            PCS::verify_batch(
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,

@@ -10,7 +10,7 @@ use crate::{
     utils::{errors::ProofVerifyError, small_scalar::SmallScalar},
 };
 
-use super::commitment_scheme::CommitmentScheme;
+use super::commitment_scheme::{BatchOpeningScheme, CommitmentScheme};
 
 #[derive(Clone)]
 pub struct MockCommitScheme<F: JoltField> {
@@ -130,5 +130,31 @@ where
         _tier1_commitments: &[Self::ChunkState],
     ) -> (Self::Commitment, Self::OpeningProofHint) {
         (MockCommitment::default(), ())
+    }
+}
+
+impl<F> BatchOpeningScheme for MockCommitScheme<F>
+where
+    F: JoltField,
+{
+    fn prove_batch<ProofTranscript: Transcript>(
+        setup: &Self::ProverSetup,
+        poly: &MultilinearPolynomial<Self::Field>,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        hint: Option<Self::OpeningProofHint>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self::BatchedProof, Option<Self::Field>) {
+        Self::prove(setup, poly, opening_point, hint, transcript)
+    }
+
+    fn verify_batch<ProofTranscript: Transcript>(
+        proof: &Self::BatchedProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut ProofTranscript,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        opening: &Self::Field,
+        commitment: &Self::Commitment,
+    ) -> Result<(), ProofVerifyError> {
+        Self::verify(proof, setup, transcript, opening_point, opening, commitment)
     }
 }

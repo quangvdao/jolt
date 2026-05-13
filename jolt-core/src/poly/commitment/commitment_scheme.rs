@@ -134,6 +134,11 @@ pub trait ZkEvalCommitment<C: JoltCurve>: CommitmentScheme {
     /// Returns the evaluation commitment (e.g. y_com) if present in the proof.
     fn eval_commitment(proof: &Self::Proof) -> Option<C::G1>;
 
+    /// Returns the evaluation commitment from a batch proof, if present.
+    fn batch_eval_commitment(_proof: &Self::BatchedProof) -> Option<C::G1> {
+        None
+    }
+
     /// Returns the generators used for evaluation commitments in the prover setup.
     fn eval_commitment_gens(setup: &Self::ProverSetup) -> Option<(C::G1, C::G1)>;
 
@@ -198,4 +203,32 @@ pub trait SourceBatchCommitmentScheme: CommitmentScheme {
     ) -> Vec<(Self::Commitment, Self::OpeningProofHint)> {
         Self::commit_batch(batch, ids, setup)
     }
+}
+
+/// Batch-opening support for the old in-core PCS trait family.
+///
+/// This compatibility trait exposes Stage 8 through a batch-shaped proof while
+/// `jolt-core` still stores old PCS associated types. The current Stage 8
+/// implementation builds one homomorphically RLC-combined polynomial before
+/// entering the PCS, so the compatibility method receives a single combined
+/// opening group and returns `BatchedProof`.
+pub trait BatchOpeningScheme: CommitmentScheme {
+    /// Proves the already-combined Stage 8 opening group.
+    fn prove_batch<ProofTranscript: Transcript>(
+        setup: &Self::ProverSetup,
+        poly: &MultilinearPolynomial<Self::Field>,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        hint: Option<Self::OpeningProofHint>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self::BatchedProof, Option<Self::Field>);
+
+    /// Verifies the already-combined Stage 8 opening group.
+    fn verify_batch<ProofTranscript: Transcript>(
+        proof: &Self::BatchedProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut ProofTranscript,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        opening: &Self::Field,
+        commitment: &Self::Commitment,
+    ) -> Result<(), ProofVerifyError>;
 }

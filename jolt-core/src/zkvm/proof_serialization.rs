@@ -52,7 +52,7 @@ pub struct JoltProof<
     pub stage7_sumcheck_proof: SumcheckInstanceProof<F, C, FS>,
     #[cfg(feature = "zk")]
     pub blindfold_proof: BlindFoldProof<F, C>,
-    pub joint_opening_proof: PCS::Proof,
+    pub joint_opening_proof: PCS::BatchedProof,
     pub untrusted_advice_commitment: Option<PCS::Commitment>,
     #[cfg(not(feature = "zk"))]
     pub opening_claims: Claims<F>,

@@ -895,6 +895,11 @@ This means the public API is new, but the performance-critical Stage 8 work is n
 The same source abstraction can later make the joint RLC polynomial less Dory-shaped, but the first PR should not require moving Jolt's opening accumulator, claim ordering, or BlindFold constraint logic into `jolt-openings`.
 Future Akita work can implement a different `prove_batch` / `verify_batch` body without changing `jolt-core`'s trait definitions.
 
+While `jolt-core` is still on the in-core PCS trait family, this first cutover is represented by a `BatchOpeningScheme` compatibility trait.
+It keeps the existing Stage 8 RLC polynomial construction and exposes the result as a single-group `PCS::BatchedProof`.
+For the old Dory wrapper this is a one-element `Vec<ArkDoryProof>`, matching the canonical `jolt-dory` shape.
+ZK mode extracts the evaluation commitment from that single-group batch proof before binding the same transcript input and BlindFold opening data as before.
+
 ### Proof Serialization
 
 Current `JoltProof` contains:
@@ -908,6 +913,8 @@ The refactor changes it to:
 ```rust
 pub joint_opening_proof: PCS::BatchProof
 ```
+
+In the in-core compatibility layer this is spelled `PCS::BatchedProof`; the canonical `jolt-openings` trait spells the same concept `PCS::BatchProof`.
 
 Renaming the field is optional.
 The behaviorally important change is that the proof object is scheme-defined batch proof storage.

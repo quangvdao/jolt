@@ -35,7 +35,8 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::{
-                SourceBatchCommitmentScheme, StreamingCommitmentScheme, ZkEvalCommitment,
+                BatchOpeningScheme, SourceBatchCommitmentScheme, StreamingCommitmentScheme,
+                ZkEvalCommitment,
             },
             dory::{DoryGlobals, DoryLayout},
         },
@@ -204,6 +205,7 @@ impl<
         F: JoltField,
         C: JoltCurve<F = F>,
         PCS: SourceBatchCommitmentScheme<Field = F>
+            + BatchOpeningScheme<Field = F>
             + StreamingCommitmentScheme<Field = F>
             + ZkEvalCommitment<C>,
         ProofTranscript: Transcript,
@@ -1359,7 +1361,7 @@ impl<
 
     #[tracing::instrument(skip_all)]
     #[cfg(feature = "zk")]
-    fn prove_blindfold(&mut self, joint_opening_proof: &PCS::Proof) -> BlindFoldProof<F, C> {
+    fn prove_blindfold(&mut self, joint_opening_proof: &PCS::BatchedProof) -> BlindFoldProof<F, C> {
         use crate::curve::JoltGroupElement;
         use rayon::prelude::*;
 
@@ -1763,7 +1765,7 @@ impl<
             .preprocessing
             .pedersen_generators(pedersen_generator_count);
         let eval_commitments =
-            vec![PCS::eval_commitment(joint_opening_proof).expect("missing eval commitment")];
+            vec![PCS::batch_eval_commitment(joint_opening_proof).expect("missing eval commitment")];
 
         let hyrax = &r1cs.hyrax;
         let hyrax_C = hyrax.C;
@@ -1902,7 +1904,7 @@ impl<
     fn prove_stage8(
         &mut self,
         opening_proof_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
-    ) -> PCS::Proof {
+    ) -> PCS::BatchedProof {
         tracing::info!("Stage 8 proving (Dory batch opening)");
 
         let _guard = DoryGlobals::initialize_context(
@@ -2070,7 +2072,7 @@ impl<
             advice_polys,
         );
 
-        let (proof, _y_blinding) = PCS::prove(
+        let (proof, _y_blinding) = PCS::prove_batch(
             &self.preprocessing.generators,
             &joint_poly,
             &opening_point.r,
@@ -2080,7 +2082,8 @@ impl<
 
         #[cfg(feature = "zk")]
         {
-            let y_com: C::G1 = PCS::eval_commitment(&proof).expect("ZK proof must have y_com");
+            let y_com: C::G1 =
+                PCS::batch_eval_commitment(&proof).expect("ZK proof must have y_com");
             bind_opening_inputs_zk::<F, C, _>(&mut self.transcript, &opening_point.r, &y_com);
             self.blindfold_accumulator.set_opening_proof_data(
                 crate::subprotocols::blindfold::OpeningProofData {

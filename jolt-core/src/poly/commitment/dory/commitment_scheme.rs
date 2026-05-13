@@ -10,7 +10,8 @@ use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::commitment::commitment_scheme::{
-        CommitmentScheme, SourceBatchCommitmentScheme, StreamingCommitmentScheme, ZkEvalCommitment,
+        BatchOpeningScheme, CommitmentScheme, SourceBatchCommitmentScheme,
+        StreamingCommitmentScheme, ZkEvalCommitment,
     },
     poly::multilinear_polynomial::MultilinearPolynomial,
     transcripts::Transcript,
@@ -477,6 +478,33 @@ impl SourceBatchCommitmentScheme for DoryCommitmentScheme {
     }
 }
 
+impl BatchOpeningScheme for DoryCommitmentScheme {
+    fn prove_batch<ProofTranscript: Transcript>(
+        setup: &Self::ProverSetup,
+        poly: &MultilinearPolynomial<Self::Field>,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        hint: Option<Self::OpeningProofHint>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self::BatchedProof, Option<Self::Field>) {
+        let (proof, y_blinding) = Self::prove(setup, poly, opening_point, hint, transcript);
+        (vec![proof], y_blinding)
+    }
+
+    fn verify_batch<ProofTranscript: Transcript>(
+        proof: &Self::BatchedProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut ProofTranscript,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        opening: &Self::Field,
+        commitment: &Self::Commitment,
+    ) -> Result<(), ProofVerifyError> {
+        let [proof] = proof.as_slice() else {
+            return Err(ProofVerifyError::InvalidOpeningProof);
+        };
+        Self::verify(proof, setup, transcript, opening_point, opening, commitment)
+    }
+}
+
 fn convert_new_dory_commitment_and_hint(
     (commitment, hint): (jolt_dory::DoryCommitment, jolt_dory::DoryHint),
 ) -> (ArkGT, DoryOpeningProofHint) {
@@ -498,6 +526,21 @@ where
     C::G1: From<ArkG1>,
 {
     fn eval_commitment(proof: &Self::Proof) -> Option<C::G1> {
+        #[cfg(feature = "zk")]
+        {
+            proof.y_com.as_ref().copied().map(C::G1::from)
+        }
+        #[cfg(not(feature = "zk"))]
+        {
+            let _ = proof;
+            None
+        }
+    }
+
+    fn batch_eval_commitment(proof: &Self::BatchedProof) -> Option<C::G1> {
+        let [proof] = proof.as_slice() else {
+            return None;
+        };
         #[cfg(feature = "zk")]
         {
             proof.y_com.as_ref().copied().map(C::G1::from)

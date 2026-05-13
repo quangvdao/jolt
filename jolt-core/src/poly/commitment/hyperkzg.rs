@@ -9,7 +9,7 @@
 //! (2) HyperKZG is specialized to use KZG as the univariate commitment scheme, so it includes several optimizations (both during the transformation of multilinear-to-univariate claims
 //! and within the KZG commitment scheme implementation itself).
 use super::{
-    commitment_scheme::CommitmentScheme,
+    commitment_scheme::{BatchOpeningScheme, CommitmentScheme},
     kzg::{KZGProverKey, KZGVerifierKey, UnivariateKZG},
 };
 use crate::field::JoltField;
@@ -563,6 +563,39 @@ where
         _tier1_commitments: &[Self::ChunkState],
     ) -> (Self::Commitment, Self::OpeningProofHint) {
         unimplemented!("HyperKZG does not support streaming commitment")
+    }
+}
+
+impl<P: Pairing> BatchOpeningScheme for HyperKZG<P>
+where
+    <P as Pairing>::ScalarField: JoltField,
+{
+    fn prove_batch<ProofTranscript: Transcript>(
+        setup: &Self::ProverSetup,
+        poly: &MultilinearPolynomial<Self::Field>,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        hint: Option<Self::OpeningProofHint>,
+        transcript: &mut ProofTranscript,
+    ) -> (Self::BatchedProof, Option<Self::Field>) {
+        Self::prove(setup, poly, opening_point, hint, transcript)
+    }
+
+    fn verify_batch<ProofTranscript: Transcript>(
+        proof: &Self::BatchedProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut ProofTranscript,
+        opening_point: &[<Self::Field as JoltField>::Challenge],
+        opening: &Self::Field,
+        commitment: &Self::Commitment,
+    ) -> Result<(), ProofVerifyError> {
+        <Self as CommitmentScheme>::verify(
+            proof,
+            setup,
+            transcript,
+            opening_point,
+            opening,
+            commitment,
+        )
     }
 }
 

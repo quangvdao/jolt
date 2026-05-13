@@ -5,7 +5,7 @@
 //! parallel schedule.
 
 use jolt_field::Field;
-use jolt_poly::MultilinearPoly;
+use jolt_poly::{MultilinearPoly, OneHotPolynomial, Polynomial, RlcSource};
 
 /// Stable identifier for a committed source inside a batch commitment source.
 ///
@@ -85,6 +85,13 @@ pub enum SourceRow<'a, F> {
     /// elements.
     I128(&'a [i128]),
 
+    /// A dense row of unsigned 64-bit integers embedded canonically into the field.
+    ///
+    /// This preserves the common compact-polynomial benchmark and commitment
+    /// path without paying the cost of first converting every row entry into a
+    /// full-width field element.
+    U64(&'a [u64]),
+
     /// A streaming one-hot chunk whose entries are one-hot vectors over a small
     /// domain.
     ///
@@ -116,6 +123,26 @@ pub trait CommitmentSource<F: Field>: Send + Sync {
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>);
 
+    /// Maps row-shaped chunks of the source into owned backend results.
+    ///
+    /// This is the performance-oriented companion to
+    /// [`for_each_row`](Self::for_each_row). The default implementation is a
+    /// sequential traversal, which is sufficient for lazy sources that produce
+    /// temporary row buffers. Materialized sources can override this method to
+    /// parallelize over borrowed row chunks without first copying them into an
+    /// owned staging buffer.
+    fn map_rows<R, V>(&self, sigma: usize, visit: V) -> Vec<R>
+    where
+        R: Send,
+        V: for<'row> Fn(usize, SourceRow<'row, F>) -> R + Send + Sync,
+    {
+        let mut rows = Vec::new();
+        self.for_each_row(sigma, |row_index, row| {
+            rows.push(visit(row_index, row));
+        });
+        rows
+    }
+
     /// Whether the whole source is a unit-valued one-hot polynomial.
     ///
     /// This preserves existing commitment fast paths that only need hot
@@ -140,41 +167,163 @@ pub trait CommitmentSource<F: Field>: Send + Sync {
     fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F>;
 }
 
-impl<F, T> CommitmentSource<F> for T
+fn multilinear_num_vars<F, T>(source: &T) -> usize
 where
     F: Field,
     T: MultilinearPoly<F> + ?Sized,
 {
+    MultilinearPoly::num_vars(source)
+}
+
+fn multilinear_evaluate<F, T>(source: &T, point: &[F]) -> F
+where
+    F: Field,
+    T: MultilinearPoly<F> + ?Sized,
+{
+    MultilinearPoly::evaluate(source, point)
+}
+
+fn multilinear_for_each_row<F, T, V>(source: &T, sigma: usize, mut visit: V)
+where
+    F: Field,
+    T: MultilinearPoly<F> + ?Sized,
+    V: for<'row> FnMut(usize, SourceRow<'row, F>),
+{
+    MultilinearPoly::for_each_row(source, sigma, &mut |row_index, row| {
+        visit(row_index, SourceRow::FieldElements(row));
+    });
+}
+
+fn multilinear_is_one_hot<F, T>(source: &T) -> bool
+where
+    F: Field,
+    T: MultilinearPoly<F> + ?Sized,
+{
+    MultilinearPoly::is_one_hot(source)
+}
+
+fn multilinear_for_each_one<F, T, V>(source: &T, mut visit: V)
+where
+    F: Field,
+    T: MultilinearPoly<F> + ?Sized,
+    V: FnMut(usize),
+{
+    MultilinearPoly::for_each_one(source, &mut visit);
+}
+
+fn multilinear_fold_rows<F, T>(source: &T, left: &[F], sigma: usize) -> Vec<F>
+where
+    F: Field,
+    T: MultilinearPoly<F> + ?Sized,
+{
+    MultilinearPoly::fold_rows(source, left, sigma)
+}
+
+macro_rules! impl_commitment_source_for_multilinear {
+    ($ty:ty) => {
+        impl<F: Field> CommitmentSource<F> for $ty {
+            fn num_vars(&self) -> usize {
+                multilinear_num_vars(self)
+            }
+
+            fn evaluate(&self, point: &[F]) -> F {
+                multilinear_evaluate(self, point)
+            }
+
+            fn for_each_row<V>(&self, sigma: usize, visit: V)
+            where
+                V: for<'row> FnMut(usize, SourceRow<'row, F>),
+            {
+                multilinear_for_each_row(self, sigma, visit);
+            }
+
+            fn is_one_hot(&self) -> bool {
+                multilinear_is_one_hot(self)
+            }
+
+            fn for_each_one<V>(&self, visit: V)
+            where
+                V: FnMut(usize),
+            {
+                multilinear_for_each_one(self, visit);
+            }
+
+            fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
+                multilinear_fold_rows(self, left, sigma)
+            }
+        }
+    };
+}
+
+impl_commitment_source_for_multilinear!(Polynomial<F>);
+impl_commitment_source_for_multilinear!(Vec<F>);
+impl_commitment_source_for_multilinear!([F]);
+
+impl<F, S> CommitmentSource<F> for RlcSource<F, S>
+where
+    F: Field,
+    S: MultilinearPoly<F>,
+{
     fn num_vars(&self) -> usize {
-        MultilinearPoly::num_vars(self)
+        multilinear_num_vars(self)
     }
 
     fn evaluate(&self, point: &[F]) -> F {
-        MultilinearPoly::evaluate(self, point)
+        multilinear_evaluate(self, point)
     }
 
-    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+    fn for_each_row<V>(&self, sigma: usize, visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>),
     {
-        MultilinearPoly::for_each_row(self, sigma, &mut |row_index, row| {
-            visit(row_index, SourceRow::FieldElements(row));
-        });
+        multilinear_for_each_row(self, sigma, visit);
     }
 
     fn is_one_hot(&self) -> bool {
-        MultilinearPoly::is_one_hot(self)
+        multilinear_is_one_hot(self)
     }
 
-    fn for_each_one<V>(&self, mut visit: V)
+    fn for_each_one<V>(&self, visit: V)
     where
         V: FnMut(usize),
     {
-        MultilinearPoly::for_each_one(self, &mut visit);
+        multilinear_for_each_one(self, visit);
     }
 
     fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
-        MultilinearPoly::fold_rows(self, left, sigma)
+        multilinear_fold_rows(self, left, sigma)
+    }
+}
+
+impl<F: Field> CommitmentSource<F> for OneHotPolynomial {
+    fn num_vars(&self) -> usize {
+        multilinear_num_vars::<F, _>(self)
+    }
+
+    fn evaluate(&self, point: &[F]) -> F {
+        multilinear_evaluate(self, point)
+    }
+
+    fn for_each_row<V>(&self, sigma: usize, visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, F>),
+    {
+        multilinear_for_each_row(self, sigma, visit);
+    }
+
+    fn is_one_hot(&self) -> bool {
+        multilinear_is_one_hot::<F, _>(self)
+    }
+
+    fn for_each_one<V>(&self, visit: V)
+    where
+        V: FnMut(usize),
+    {
+        multilinear_for_each_one::<F, _, _>(self, visit);
+    }
+
+    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
+        multilinear_fold_rows(self, left, sigma)
     }
 }
 
@@ -217,6 +366,10 @@ where
         SourceRow::I128(values) => {
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
+        }
+        SourceRow::U64(values) => {
+            flush_one_hot(&mut evaluations, &mut one_hot_chunks);
+            evaluations.extend(values.iter().map(|&value| F::from_u64(value)));
         }
         SourceRow::OneHot(row) => {
             let domain_size = 1usize << row.log_domain_size;

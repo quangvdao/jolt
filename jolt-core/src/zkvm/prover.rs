@@ -116,7 +116,7 @@ use crate::{
             },
             shift::ShiftSumcheckParams,
         },
-        witness::{all_committed_polynomials, CycleMajorTraceBatch},
+        witness::{all_committed_polynomials, CycleMajorTraceBatch, PolynomialCommitmentSource},
     },
 };
 
@@ -697,7 +697,10 @@ where
                         &trace,
                         Some(&self.one_hot_params),
                     );
-                    PCS::commit(&witness, &self.preprocessing.generators)
+                    PCS::commit(
+                        &PolynomialCommitmentSource(&witness),
+                        &self.preprocessing.generators,
+                    )
                 })
                 .unzip();
 
@@ -770,7 +773,10 @@ where
         let _guard =
             DoryGlobals::initialize_context(1, advice_len, DoryContext::UntrustedAdvice, None);
         let _ctx = DoryGlobals::with_context(DoryContext::UntrustedAdvice);
-        let (commitment, hint) = PCS::commit(&poly, &self.preprocessing.generators);
+        let (commitment, hint) = PCS::commit(
+            &PolynomialCommitmentSource(&poly),
+            &self.preprocessing.generators,
+        );
         self.transcript
             .append_serializable(b"untrusted_advice", &commitment);
 
@@ -2071,10 +2077,11 @@ where
             .iter()
             .map(|point| (*point).into())
             .collect();
+        let joint_poly_source = PolynomialCommitmentSource(&joint_poly);
 
         #[cfg(feature = "zk")]
         let (proof, y_com, y_blinding) = PCS::prove_fused_batch_zk(
-            &joint_poly,
+            &joint_poly_source,
             &pcs_opening_point,
             joint_claim,
             hint,
@@ -2084,7 +2091,7 @@ where
 
         #[cfg(not(feature = "zk"))]
         let proof = PCS::prove_fused_batch(
-            &joint_poly,
+            &joint_poly_source,
             &pcs_opening_point,
             joint_claim,
             Some(hint),
@@ -2251,7 +2258,7 @@ mod tests {
     };
     use crate::zkvm::claim_reductions::AdviceKind;
     use crate::zkvm::verifier::JoltSharedPreprocessing;
-    use crate::zkvm::witness::CommittedPolynomial;
+    use crate::zkvm::witness::{CommittedPolynomial, PolynomialCommitmentSource};
     use crate::zkvm::{
         prover::JoltProverPreprocessing,
         ram::populate_memory_states,
@@ -2302,7 +2309,10 @@ mod tests {
             DoryGlobals::initialize_context(1, advice_len, DoryContext::TrustedAdvice, None);
         let (commitment, hint) = {
             let _ctx = DoryGlobals::with_context(DoryContext::TrustedAdvice);
-            DoryScheme::commit(&poly, &preprocessing.generators)
+            DoryScheme::commit(
+                &PolynomialCommitmentSource(&poly),
+                &preprocessing.generators,
+            )
         };
         (commitment, hint)
     }

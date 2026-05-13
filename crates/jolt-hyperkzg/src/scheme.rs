@@ -423,6 +423,9 @@ where
         SourceRow::I128(values) => {
             evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
         }
+        SourceRow::U64(values) => {
+            evaluations.extend(values.iter().map(|&value| F::from_u64(value)));
+        }
         SourceRow::OneHot(row) => {
             let domain_size = 1usize << row.log_domain_size;
             match row.entries {

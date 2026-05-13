@@ -17,8 +17,11 @@ use crate::zkvm::config::OneHotParams;
 use crate::zkvm::instruction::InstructionFlags;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::{
-    field::JoltField,
-    poly::{multilinear_polynomial::MultilinearPolynomial, one_hot_polynomial::OneHotPolynomial},
+    field::{ChallengeFieldOps, FieldChallengeOps, JoltField},
+    poly::{
+        multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
+        one_hot_polynomial::OneHotPolynomial,
+    },
     zkvm::ram::remap_address,
 };
 
@@ -61,6 +64,101 @@ pub fn all_committed_polynomials(one_hot_params: &OneHotParams) -> Vec<Committed
         polynomials.push(CommittedPolynomial::BytecodeRa(i));
     }
     polynomials
+}
+
+/// Commitment-source view over a materialized Jolt multilinear polynomial.
+///
+/// The blanket `MultilinearPoly` source implementation is intentionally
+/// backend-neutral and exposes rows as field elements. Jolt's materialized
+/// witness/advice polynomials often retain smaller scalar encodings, and Dory
+/// can commit those rows without first expanding them into field elements. This
+/// adapter keeps that compact row information available for direct,
+/// non-streaming commits while still delegating evaluation, one-hot traversal,
+/// and opening-time row folds to the underlying polynomial.
+pub struct PolynomialCommitmentSource<'a, F: JoltField>(pub &'a MultilinearPolynomial<F>);
+
+impl<F> CommitmentSource<F> for PolynomialCommitmentSource<'_, F>
+where
+    F: JoltField + jolt_field::Field + ChallengeFieldOps<F> + FieldChallengeOps<F>,
+    for<'a> &'a F::Challenge: Into<F>,
+{
+    fn num_vars(&self) -> usize {
+        MultilinearPoly::num_vars(self.0)
+    }
+
+    fn evaluate(&self, point: &[F]) -> F {
+        PolynomialEvaluation::evaluate(self.0, point)
+    }
+
+    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, F>),
+    {
+        match self.0 {
+            MultilinearPolynomial::I128Scalars(poly) => {
+                let row_len = 1usize << sigma;
+                for (row_index, row) in poly.coeffs.chunks(row_len).enumerate() {
+                    visit(row_index, SourceRow::I128(row));
+                }
+            }
+            MultilinearPolynomial::U64Scalars(poly) => {
+                let row_len = 1usize << sigma;
+                for (row_index, row) in poly.coeffs.chunks(row_len).enumerate() {
+                    visit(row_index, SourceRow::U64(row));
+                }
+            }
+            _ => MultilinearPoly::for_each_row(self.0, sigma, &mut |row_index, row| {
+                visit(row_index, SourceRow::FieldElements(row));
+            }),
+        }
+    }
+
+    fn map_rows<R, V>(&self, sigma: usize, visit: V) -> Vec<R>
+    where
+        R: Send,
+        V: for<'row> Fn(usize, SourceRow<'row, F>) -> R + Send + Sync,
+    {
+        match self.0 {
+            MultilinearPolynomial::I128Scalars(poly) => {
+                let row_len = 1usize << sigma;
+                poly.coeffs
+                    .par_chunks(row_len)
+                    .enumerate()
+                    .map(|(row_index, row)| visit(row_index, SourceRow::I128(row)))
+                    .collect()
+            }
+            MultilinearPolynomial::U64Scalars(poly) => {
+                let row_len = 1usize << sigma;
+                poly.coeffs
+                    .par_chunks(row_len)
+                    .enumerate()
+                    .map(|(row_index, row)| visit(row_index, SourceRow::U64(row)))
+                    .collect()
+            }
+            _ => {
+                let mut rows = Vec::new();
+                self.for_each_row(sigma, |row_index, row| {
+                    rows.push(visit(row_index, row));
+                });
+                rows
+            }
+        }
+    }
+
+    fn is_one_hot(&self) -> bool {
+        MultilinearPoly::is_one_hot(self.0)
+    }
+
+    fn for_each_one<V>(&self, mut visit: V)
+    where
+        V: FnMut(usize),
+    {
+        MultilinearPoly::for_each_one(self.0, &mut visit);
+    }
+
+    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
+        MultilinearPoly::fold_rows(self.0, left, sigma)
+    }
 }
 
 /// Trace-backed batch source for the current CycleMajor witness commitments.
@@ -236,7 +334,7 @@ where
                                 .map(|&value| <SourceField as FromPrimitiveInt>::from_i128(value)),
                         );
                     }
-                    SourceRow::FieldElements(_) | SourceRow::OneHot(_) => {
+                    SourceRow::FieldElements(_) | SourceRow::U64(_) | SourceRow::OneHot(_) => {
                         panic!("increment rows must be emitted as i128 source rows");
                     }
                 });
@@ -274,7 +372,7 @@ where
                         };
                         cycle_offset += entries_len;
                     }
-                    SourceRow::FieldElements(_) | SourceRow::I128(_) => {
+                    SourceRow::FieldElements(_) | SourceRow::I128(_) | SourceRow::U64(_) => {
                         panic!("RA rows must be emitted as one-hot source rows");
                     }
                 });
@@ -450,6 +548,7 @@ mod cycle_major_trace_batch_tests {
     #[derive(Debug, PartialEq, Eq)]
     enum RowSnapshot {
         I128(Vec<i128>),
+        U64(Vec<u64>),
         OnePerColumn(Vec<usize>),
         MaybeZero(Vec<Option<usize>>),
         FieldElements(Vec<SourceField>),
@@ -458,6 +557,7 @@ mod cycle_major_trace_batch_tests {
     fn snapshot(row: SourceRow<'_, SourceField>) -> RowSnapshot {
         match row {
             SourceRow::I128(values) => RowSnapshot::I128(values.to_vec()),
+            SourceRow::U64(values) => RowSnapshot::U64(values.to_vec()),
             SourceRow::OneHot(row) => match row.entries {
                 OneHotEntries::OnePerColumn(indices) => {
                     RowSnapshot::OnePerColumn(indices.iter().map(|index| index.get()).collect())

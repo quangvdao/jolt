@@ -122,15 +122,56 @@ impl DoryScheme {
         M: Mode,
     {
         let row_commitments = compute_row_commitments(source, setup);
-        let (tier_2, commit_blind) = commit_rows_tier_2::<M>(&row_commitments, setup);
+        finish_row_commitments::<M>(row_commitments, setup)
+    }
 
-        (
-            DoryCommitment(ark_to_jolt_gt(&tier_2)),
-            DoryHint::new(
-                ark_to_jolt_g1_vec(row_commitments),
-                ark_to_jolt_fr(&commit_blind),
-            ),
-        )
+    fn commit_with_shape_mode<S, M>(
+        source: &S,
+        nu: usize,
+        sigma: usize,
+        setup: &ArkworksProverSetup,
+    ) -> (DoryCommitment, DoryHint)
+    where
+        S: CommitmentSource<Fr> + ?Sized,
+        M: Mode,
+    {
+        let row_commitments = compute_row_commitments_with_shape(source, nu, sigma, setup);
+        finish_row_commitments::<M>(row_commitments, setup)
+    }
+
+    /// Commits a source using an explicit Dory matrix shape.
+    ///
+    /// The generic [`CommitmentScheme::commit`] entrypoint chooses a balanced
+    /// shape from the source's variable count. Jolt's cycle-major streaming
+    /// path sometimes commits a shorter dense source in the larger matrix
+    /// shape dictated by the trace/one-hot batch. This Dory-specific entrypoint
+    /// makes that layout choice explicit: the source is traversed with
+    /// `2^sigma` columns, and one-hot sources reserve `2^nu` row slots.
+    #[tracing::instrument(skip_all, name = "DoryScheme::commit_with_shape")]
+    pub fn commit_with_shape<S>(
+        source: &S,
+        nu: usize,
+        sigma: usize,
+        setup: &DoryProverSetup,
+    ) -> (DoryCommitment, DoryHint)
+    where
+        S: CommitmentSource<Fr> + ?Sized,
+    {
+        Self::commit_with_shape_mode::<S, Transparent>(source, nu, sigma, &setup.0)
+    }
+
+    /// Commits a hiding source using an explicit Dory matrix shape.
+    #[tracing::instrument(skip_all, name = "DoryScheme::commit_zk_with_shape")]
+    pub fn commit_zk_with_shape<S>(
+        source: &S,
+        nu: usize,
+        sigma: usize,
+        setup: &DoryProverSetup,
+    ) -> (DoryCommitment, DoryHint)
+    where
+        S: CommitmentSource<Fr> + ?Sized,
+    {
+        Self::commit_with_shape_mode::<S, dory::ZK>(source, nu, sigma, &setup.0)
     }
 
     fn commit_batch_with_mode<B, M>(
@@ -152,7 +193,8 @@ impl DoryScheme {
             .max()
             .expect("ids is non-empty");
         let sigma = max_num_vars.div_ceil(2);
-        let row_major = batch.map_rows(sigma, ids, |_, row| commit_source_row(row, setup));
+        let ctx = CommitRowContext::new(setup, 1usize << sigma);
+        let row_major = batch.map_rows(sigma, ids, |_, row| commit_source_row(row, &ctx));
 
         let mut chunks_by_source: Vec<Vec<DoryChunkCommitment>> = (0..ids.len())
             .map(|_| Vec::with_capacity(row_major.len()))
@@ -895,6 +937,20 @@ enum DoryChunkCommitment {
     OneHot(Vec<ArkG1>),
 }
 
+struct CommitRowContext<'a> {
+    setup: &'a ArkworksProverSetup,
+    g1_bases_affine: Vec<G1Affine>,
+}
+
+impl<'a> CommitRowContext<'a> {
+    fn new(setup: &'a ArkworksProverSetup, row_len: usize) -> Self {
+        Self {
+            setup,
+            g1_bases_affine: g1_bases_affine(setup, row_len),
+        }
+    }
+}
+
 /// Dense commit: full MSM per row, parallel over rows.
 fn commit_rows_dense<S: CommitmentSource<Fr> + ?Sized>(
     source: &S,
@@ -902,19 +958,10 @@ fn commit_rows_dense<S: CommitmentSource<Fr> + ?Sized>(
     setup: &ArkworksProverSetup,
 ) -> Vec<ArkG1> {
     let num_cols = 1usize << sigma;
-    let g1_bases = &setup.g1_vec[..num_cols];
+    let ctx = CommitRowContext::new(setup, num_cols);
 
-    let mut rows: Vec<Vec<Fr>> = Vec::new();
-    source.for_each_row(sigma, |_, row| {
-        rows.push(source_row_to_dense(row, num_cols));
-    });
-
-    rows.par_iter()
-        .map(|row| {
-            let scalars: Vec<ArkFr> = row.iter().map(jolt_fr_to_ark).collect();
-            JoltG1Routines::msm(&g1_bases[..scalars.len()], &scalars)
-        })
-        .collect()
+    let chunks = source.map_rows(sigma, |_, row| commit_source_row(row, &ctx));
+    flatten_chunks(chunks)
 }
 
 fn commit_field_row(values: &[Fr], setup: &ArkworksProverSetup) -> ArkG1 {
@@ -928,16 +975,31 @@ fn commit_field_row(values: &[Fr], setup: &ArkworksProverSetup) -> ArkG1 {
     JoltG1Routines::msm(&setup.g1_vec[..scalars.len()], &scalars)
 }
 
-fn commit_i128_row(values: &[i128], setup: &ArkworksProverSetup) -> ArkG1 {
+fn commit_i128_row(values: &[i128], ctx: &CommitRowContext<'_>) -> ArkG1 {
     assert!(
-        values.len() <= setup.g1_vec.len(),
+        values.len() <= ctx.g1_bases_affine.len(),
         "Dory row length ({}) exceeds G1 SRS size ({})",
         values.len(),
-        setup.g1_vec.len(),
+        ctx.g1_bases_affine.len(),
     );
-    let g1_bases = g1_bases_affine(setup, values.len());
     ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_i128::<G1Projective>(
-        &g1_bases, values, true,
+        &ctx.g1_bases_affine[..values.len()],
+        values,
+        true,
+    ))
+}
+
+fn commit_u64_row(values: &[u64], ctx: &CommitRowContext<'_>) -> ArkG1 {
+    assert!(
+        values.len() <= ctx.g1_bases_affine.len(),
+        "Dory row length ({}) exceeds G1 SRS size ({})",
+        values.len(),
+        ctx.g1_bases_affine.len(),
+    );
+    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_u64::<G1Projective>(
+        &ctx.g1_bases_affine[..values.len()],
+        values,
+        true,
     ))
 }
 
@@ -972,20 +1034,17 @@ fn commit_rows_one_hot<S: CommitmentSource<Fr> + ?Sized>(
         .collect()
 }
 
-fn commit_one_hot_row(
-    row: jolt_openings::OneHotRow<'_>,
-    setup: &ArkworksProverSetup,
-) -> Vec<ArkG1> {
+fn commit_one_hot_row(row: jolt_openings::OneHotRow<'_>, ctx: &CommitRowContext<'_>) -> Vec<ArkG1> {
     let k = 1usize << row.log_domain_size;
     let num_columns = match row.entries {
         jolt_openings::OneHotEntries::OnePerColumn(indices) => indices.len(),
         jolt_openings::OneHotEntries::MaybeZero(indices) => indices.len(),
     };
     assert!(
-        num_columns <= setup.g1_vec.len(),
+        num_columns <= ctx.g1_bases_affine.len(),
         "Dory one-hot row length ({}) exceeds G1 SRS size ({})",
         num_columns,
-        setup.g1_vec.len(),
+        ctx.g1_bases_affine.len(),
     );
 
     let mut columns_by_hot_index: Vec<Vec<usize>> = vec![Vec::new(); k];
@@ -1004,8 +1063,7 @@ fn commit_one_hot_row(
         }
     }
 
-    let g1_bases = g1_bases_affine(setup, num_columns);
-    batch_g1_additions_multi_affine(&g1_bases, &columns_by_hot_index)
+    batch_g1_additions_multi_affine(&ctx.g1_bases_affine[..num_columns], &columns_by_hot_index)
         .into_iter()
         .map(|affine| ArkG1Struct(affine.into()))
         .collect()
@@ -1013,18 +1071,62 @@ fn commit_one_hot_row(
 
 fn g1_bases_affine(setup: &ArkworksProverSetup, len: usize) -> Vec<G1Affine> {
     setup.g1_vec[..len]
-        .iter()
+        .par_iter()
         .map(|base| base.0.into_affine())
         .collect()
 }
 
-fn commit_source_row(row: SourceRow<'_, Fr>, setup: &ArkworksProverSetup) -> DoryChunkCommitment {
+fn commit_source_row(row: SourceRow<'_, Fr>, ctx: &CommitRowContext<'_>) -> DoryChunkCommitment {
     match row {
         SourceRow::FieldElements(values) => {
-            DoryChunkCommitment::Dense(commit_field_row(values, setup))
+            DoryChunkCommitment::Dense(commit_field_row(values, ctx.setup))
         }
-        SourceRow::I128(values) => DoryChunkCommitment::Dense(commit_i128_row(values, setup)),
-        SourceRow::OneHot(row) => DoryChunkCommitment::OneHot(commit_one_hot_row(row, setup)),
+        SourceRow::I128(values) => DoryChunkCommitment::Dense(commit_i128_row(values, ctx)),
+        SourceRow::U64(values) => DoryChunkCommitment::Dense(commit_u64_row(values, ctx)),
+        SourceRow::OneHot(row) => DoryChunkCommitment::OneHot(commit_one_hot_row(row, ctx)),
+    }
+}
+
+fn flatten_chunks(chunks: Vec<DoryChunkCommitment>) -> Vec<ArkG1> {
+    let Some(first) = chunks.first() else {
+        return Vec::new();
+    };
+
+    match first {
+        DoryChunkCommitment::Dense(_) => chunks
+            .into_iter()
+            .map(|chunk| match chunk {
+                DoryChunkCommitment::Dense(row_commitment) => row_commitment,
+                DoryChunkCommitment::OneHot(_) => {
+                    panic!("source mixed dense and one-hot rows during commitment");
+                }
+            })
+            .collect(),
+        DoryChunkCommitment::OneHot(first) => {
+            let rows_per_hot_index = chunks.len();
+            let k = first.len();
+            let mut row_commitments =
+                vec![<InnerBN254 as PairingCurve>::G1::identity(); rows_per_hot_index * k];
+            for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+                match chunk {
+                    DoryChunkCommitment::OneHot(commitments) => {
+                        assert_eq!(
+                            commitments.len(),
+                            k,
+                            "source changed one-hot domain size during commitment",
+                        );
+                        for (hot_index, row_commitment) in commitments.into_iter().enumerate() {
+                            row_commitments[chunk_index + hot_index * rows_per_hot_index] =
+                                row_commitment;
+                        }
+                    }
+                    DoryChunkCommitment::Dense(_) => {
+                        panic!("source mixed dense and one-hot rows during commitment");
+                    }
+                }
+            }
+            row_commitments
+        }
     }
 }
 
@@ -1098,48 +1200,23 @@ fn compute_row_commitments<S: CommitmentSource<Fr> + ?Sized>(
 ) -> Vec<ArkG1> {
     let num_vars = source.num_vars();
     let sigma = num_vars.div_ceil(2);
-    let num_cols = 1usize << sigma;
-    let num_rows = 1usize << (num_vars - sigma);
+    let nu = num_vars - sigma;
 
+    compute_row_commitments_with_shape(source, nu, sigma, setup)
+}
+
+fn compute_row_commitments_with_shape<S: CommitmentSource<Fr> + ?Sized>(
+    source: &S,
+    nu: usize,
+    sigma: usize,
+    setup: &ArkworksProverSetup,
+) -> Vec<ArkG1> {
+    let num_cols = 1usize << sigma;
+    let num_rows = 1usize << nu;
     if source.is_one_hot() {
         commit_rows_one_hot(source, num_rows, num_cols, setup)
     } else {
         commit_rows_dense(source, sigma, setup)
-    }
-}
-
-fn source_row_to_dense(row: SourceRow<'_, Fr>, expected_len: usize) -> Vec<Fr> {
-    match row {
-        SourceRow::FieldElements(values) => {
-            assert_eq!(values.len(), expected_len);
-            values.to_vec()
-        }
-        SourceRow::I128(values) => {
-            assert_eq!(values.len(), expected_len);
-            values.iter().map(|&value| Fr::from_i128(value)).collect()
-        }
-        SourceRow::OneHot(row) => {
-            let domain_size = 1usize << row.log_domain_size;
-            let mut dense = Vec::new();
-            match row.entries {
-                jolt_openings::OneHotEntries::OnePerColumn(indices) => {
-                    dense.resize(indices.len() * domain_size, Fr::from_u64(0));
-                    for (col, hot_index) in indices.iter().enumerate() {
-                        dense[hot_index.get() * indices.len() + col] = Fr::from_u64(1);
-                    }
-                }
-                jolt_openings::OneHotEntries::MaybeZero(indices) => {
-                    dense.resize(indices.len() * domain_size, Fr::from_u64(0));
-                    for (col, hot_index) in indices.iter().enumerate() {
-                        if let Some(hot_index) = hot_index {
-                            dense[hot_index.get() * indices.len() + col] = Fr::from_u64(1);
-                        }
-                    }
-                }
-            }
-            assert_eq!(dense.len(), expected_len);
-            dense
-        }
     }
 }
 
@@ -1226,6 +1303,53 @@ mod tests {
         poly: Polynomial<Fr>,
     }
 
+    struct U64Source {
+        evaluations: Vec<u64>,
+    }
+
+    impl U64Source {
+        fn field_evaluation(&self, point: &[Fr]) -> Fr {
+            let dense: Vec<Fr> = self
+                .evaluations
+                .iter()
+                .map(|&value| Fr::from_u64(value))
+                .collect();
+            dense.evaluate(point)
+        }
+    }
+
+    impl CommitmentSource<Fr> for U64Source {
+        fn num_vars(&self) -> usize {
+            self.evaluations.len().ilog2() as usize
+        }
+
+        fn evaluate(&self, point: &[Fr]) -> Fr {
+            self.field_evaluation(point)
+        }
+
+        fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+        where
+            V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
+        {
+            let row_len = 1usize << sigma;
+            for (row_index, row) in self.evaluations.chunks(row_len).enumerate() {
+                visit(row_index, SourceRow::U64(row));
+            }
+        }
+
+        fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
+            let row_len = 1usize << sigma;
+            let mut result = vec![Fr::from_u64(0); row_len];
+            for (row_index, row) in self.evaluations.chunks(row_len).enumerate() {
+                let weight = left[row_index];
+                for (dest, &value) in result.iter_mut().zip(row) {
+                    *dest += Fr::from_u64(value) * weight;
+                }
+            }
+            result
+        }
+    }
+
     impl CommitmentSource<Fr> for FoldOnlySource {
         fn num_vars(&self) -> usize {
             self.poly.num_vars()
@@ -1283,6 +1407,44 @@ mod tests {
             &mut verify_transcript,
         );
         assert!(result.is_ok(), "Verification failed: {result:?}");
+    }
+
+    #[test]
+    fn u64_source_commit_open_verify_round_trip() {
+        let num_vars = 4;
+        let prover_setup = DoryScheme::setup_prover(num_vars);
+        let verifier_setup = DoryVerifierSetup(prover_setup.0.to_verifier_setup());
+
+        let source = U64Source {
+            evaluations: (0..(1 << num_vars)).map(|value| value as u64).collect(),
+        };
+        let point: Vec<Fr> = (0..num_vars)
+            .map(|idx| Fr::from_u64((idx + 2) as u64))
+            .collect();
+        let eval = source.evaluate(&point);
+
+        let (commitment, hint) = DoryScheme::commit(&source, &prover_setup);
+        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"test-u64");
+        let proof = DoryScheme::open(
+            &source,
+            &point,
+            eval,
+            &prover_setup,
+            Some(hint),
+            &mut prove_transcript,
+        );
+
+        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"test-u64");
+        let result = DoryScheme::verify(
+            &commitment,
+            &point,
+            eval,
+            &proof,
+            &verifier_setup,
+            &mut verify_transcript,
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]

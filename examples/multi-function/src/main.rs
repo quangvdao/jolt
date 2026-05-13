@@ -10,7 +10,9 @@ pub fn main() {
 
     let shared_preprocessing = guest::preprocess_shared_add(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_add(shared_preprocessing.clone());
-    let verifier_setup = prover_preprocessing.generators.to_verifier_setup();
+    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+        &prover_preprocessing.generators,
+    );
     let verifier_preprocessing =
         guest::preprocess_verifier_add(shared_preprocessing, verifier_setup, None);
 
@@ -25,7 +27,9 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_mul(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_mul(
         shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
+        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+            &prover_preprocessing.generators,
+        ),
         None,
     );
 

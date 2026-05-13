@@ -12,7 +12,9 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_merkle_tree(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_merkle_tree(
         shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
+        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+            &prover_preprocessing.generators,
+        ),
         None,
     );
 
@@ -36,7 +38,7 @@ pub fn main() {
         TrustedAdvice::new(leaf2),
         TrustedAdvice::new(leaf3),
         UntrustedAdvice::new(leaf4),
-        trusted_advice_commitment,
+        trusted_advice_commitment.clone(),
         trusted_advice_hint,
     );
     info!("Prover runtime: {} s", now.elapsed().as_secs_f64());

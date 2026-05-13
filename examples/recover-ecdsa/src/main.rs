@@ -35,7 +35,9 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_recover(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_recover(
         shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
+        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+            &prover_preprocessing.generators,
+        ),
         None,
     );
 

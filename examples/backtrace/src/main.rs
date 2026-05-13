@@ -53,7 +53,9 @@ fn run_nostd(target_dir: &str, should_panic: bool) {
         guest_nostd::preprocess_prover_panic_backtrace_nostd(shared_preprocessing.clone());
     let verifier_preprocessing = guest_nostd::preprocess_verifier_panic_backtrace_nostd(
         shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
+        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+            &prover_preprocessing.generators,
+        ),
         None,
     );
 
@@ -93,7 +95,9 @@ fn run_std(target_dir: &str, should_panic: bool) {
         guest_std::preprocess_prover_panic_backtrace_std(shared_preprocessing.clone());
     let verifier_preprocessing = guest_std::preprocess_verifier_panic_backtrace_std(
         shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
+        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+            &prover_preprocessing.generators,
+        ),
         None,
     );
 

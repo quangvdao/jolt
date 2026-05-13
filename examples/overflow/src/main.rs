@@ -42,7 +42,9 @@ pub fn main() {
         guest::preprocess_prover_allocate_stack_with_increased_size(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_allocate_stack_with_increased_size(
         shared_preprocessing,
-        prover_preprocessing.generators.to_verifier_setup(),
+        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+            &prover_preprocessing.generators,
+        ),
         None,
     );
 

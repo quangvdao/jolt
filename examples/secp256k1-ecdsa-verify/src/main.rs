@@ -11,7 +11,9 @@ pub fn main() {
         guest::preprocess_shared_secp256k1_ecdsa_verify(&mut program).unwrap();
     let prover_preprocessing =
         guest::preprocess_prover_secp256k1_ecdsa_verify(shared_preprocessing.clone());
-    let verifier_setup = prover_preprocessing.generators.to_verifier_setup();
+    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+        &prover_preprocessing.generators,
+    );
     let verifier_preprocessing = guest::preprocess_verifier_secp256k1_ecdsa_verify(
         shared_preprocessing,
         verifier_setup,

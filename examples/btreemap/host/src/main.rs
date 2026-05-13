@@ -28,7 +28,9 @@ pub fn btreemap() {
     let verifier_preprocessing = step!("Preprocessing verifier", {
         guest::preprocess_verifier_btreemap(
             shared_preprocessing,
-            prover_preprocessing.generators.to_verifier_setup(),
+            <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+                &prover_preprocessing.generators,
+            ),
             None,
         )
     });

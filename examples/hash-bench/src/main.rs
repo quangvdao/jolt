@@ -8,7 +8,9 @@ pub fn main() {
 
     let shared_preprocessing = guest::preprocess_shared_hashbench(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_hashbench(shared_preprocessing.clone());
-    let verifier_setup = prover_preprocessing.generators.to_verifier_setup();
+    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
+        &prover_preprocessing.generators,
+    );
     let verifier_preprocessing =
         guest::preprocess_verifier_hashbench(shared_preprocessing, verifier_setup, None);
 

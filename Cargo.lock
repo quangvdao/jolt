@@ -2731,6 +2731,7 @@ dependencies = [
  "jolt-poly",
  "jolt-program",
  "jolt-riscv",
+ "jolt-transcript",
  "light-poseidon",
  "memory-stats",
  "num",

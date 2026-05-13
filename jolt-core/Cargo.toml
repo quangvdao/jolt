@@ -90,6 +90,7 @@ jolt-field = { workspace = true, features = ["allocative"] }
 jolt-dory.workspace = true
 jolt-openings.workspace = true
 jolt-poly.workspace = true
+jolt-transcript.workspace = true
 jolt-riscv = { workspace = true, features = ["serialization"] }
 jolt-inlines-sha2 = { workspace = true, features = ["host"], optional = true }
 jolt-inlines-keccak256 = { workspace = true, features = [

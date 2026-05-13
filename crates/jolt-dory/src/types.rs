@@ -2,7 +2,9 @@
 
 use std::io::Cursor;
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
+};
 use dory::backends::arkworks::{
     ArkDoryProof, ArkG1, ArkGT, ArkworksProverSetup, ArkworksVerifierSetup,
 };
@@ -32,6 +34,36 @@ impl<'de> Deserialize<'de> for DoryCommitment {
         // and non-r-torsion elements), which the previous round-trip through
         // ArkGT skipped.
         Bn254GT::deserialize(deserializer).map(Self)
+    }
+}
+
+impl CanonicalSerialize for DoryCommitment {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        self.0.serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.0.serialized_size(compress)
+    }
+}
+
+impl Valid for DoryCommitment {
+    fn check(&self) -> Result<(), SerializationError> {
+        self.0.check()
+    }
+}
+
+impl CanonicalDeserialize for DoryCommitment {
+    fn deserialize_with_mode<R: std::io::Read>(
+        reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        Bn254GT::deserialize_with_mode(reader, compress, validate).map(Self)
     }
 }
 
@@ -67,10 +99,89 @@ impl<'de> Deserialize<'de> for DoryProof {
     }
 }
 
-#[derive(Clone)]
+impl CanonicalSerialize for DoryProof {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        self.0.serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.0.serialized_size(compress)
+    }
+}
+
+impl Valid for DoryProof {
+    fn check(&self) -> Result<(), SerializationError> {
+        self.0.check()
+    }
+}
+
+impl CanonicalDeserialize for DoryProof {
+    fn deserialize_with_mode<R: std::io::Read>(
+        mut reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        if compress == Compress::Yes {
+            let mut buf = Vec::new();
+            let _bytes_read = reader.read_to_end(&mut buf)?;
+            validate_proof_round_count(&buf).map_err(|_| SerializationError::InvalidData)?;
+            ArkDoryProof::deserialize_with_mode(&buf[..], compress, validate).map(Self)
+        } else {
+            ArkDoryProof::deserialize_with_mode(reader, compress, validate).map(Self)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct DoryProverSetup(pub ArkworksProverSetup);
 
-#[derive(Clone)]
+impl Serialize for DoryProverSetup {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        canonical_serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DoryProverSetup {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        canonical_deserialize(deserializer).map(Self)
+    }
+}
+
+impl CanonicalSerialize for DoryProverSetup {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        self.0.serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.0.serialized_size(compress)
+    }
+}
+
+impl Valid for DoryProverSetup {
+    fn check(&self) -> Result<(), SerializationError> {
+        self.0.check()
+    }
+}
+
+impl CanonicalDeserialize for DoryProverSetup {
+    fn deserialize_with_mode<R: std::io::Read>(
+        reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        ArkworksProverSetup::deserialize_with_mode(reader, compress, validate).map(Self)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct DoryVerifierSetup(pub ArkworksVerifierSetup);
 
 impl Serialize for DoryVerifierSetup {
@@ -85,7 +196,37 @@ impl<'de> Deserialize<'de> for DoryVerifierSetup {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+impl CanonicalSerialize for DoryVerifierSetup {
+    fn serialize_with_mode<W: std::io::Write>(
+        &self,
+        writer: W,
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
+        self.0.serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: Compress) -> usize {
+        self.0.serialized_size(compress)
+    }
+}
+
+impl Valid for DoryVerifierSetup {
+    fn check(&self) -> Result<(), SerializationError> {
+        self.0.check()
+    }
+}
+
+impl CanonicalDeserialize for DoryVerifierSetup {
+    fn deserialize_with_mode<R: std::io::Read>(
+        reader: R,
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
+        ArkworksVerifierSetup::deserialize_with_mode(reader, compress, validate).map(Self)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DoryHint {
     pub(crate) row_commitments: Vec<Bn254G1>,
     pub(crate) commit_blind: Fr,
@@ -265,6 +406,72 @@ mod tests {
             &mut verify_transcript,
         );
         assert!(result.is_ok(), "deserialized proof must verify correctly");
+    }
+
+    #[test]
+    fn dory_canonical_round_trips_support_core_proof_storage() {
+        let num_vars = 2;
+        let mut rng = ChaCha20Rng::seed_from_u64(405);
+
+        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let mut prover_setup_bytes = Vec::new();
+        prover_setup
+            .serialize_compressed(&mut prover_setup_bytes)
+            .expect("serialize prover setup");
+        let prover_setup = DoryProverSetup::deserialize_compressed(&prover_setup_bytes[..])
+            .expect("deserialize prover setup");
+
+        let verifier_setup = DoryVerifierSetup(prover_setup.0.to_verifier_setup());
+        let mut verifier_setup_bytes = Vec::new();
+        verifier_setup
+            .serialize_compressed(&mut verifier_setup_bytes)
+            .expect("serialize verifier setup");
+        let verifier_setup = DoryVerifierSetup::deserialize_compressed(&verifier_setup_bytes[..])
+            .expect("deserialize verifier setup");
+
+        let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
+        let point: Vec<Fr> = (0..num_vars)
+            .map(|_| <Fr as RandomSampling>::random(&mut rng))
+            .collect();
+        let eval = poly.evaluate(&point);
+        let (commitment, hint) = crate::DoryScheme::commit(poly.evaluations(), &prover_setup);
+
+        let mut commitment_bytes = Vec::new();
+        commitment
+            .serialize_compressed(&mut commitment_bytes)
+            .expect("serialize commitment");
+        let commitment = DoryCommitment::deserialize_compressed(&commitment_bytes[..])
+            .expect("deserialize commitment");
+
+        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"canonical");
+        let proof = crate::DoryScheme::open(
+            &poly,
+            &point,
+            eval,
+            &prover_setup,
+            Some(hint),
+            &mut prove_transcript,
+        );
+
+        let mut proof_bytes = Vec::new();
+        proof
+            .serialize_compressed(&mut proof_bytes)
+            .expect("serialize proof");
+        let proof = DoryProof::deserialize_compressed(&proof_bytes[..]).expect("deserialize proof");
+
+        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"canonical");
+        let result = crate::DoryScheme::verify(
+            &commitment,
+            &point,
+            eval,
+            &proof,
+            &verifier_setup,
+            &mut verify_transcript,
+        );
+        assert!(
+            result.is_ok(),
+            "canonical round-tripped Dory types must verify correctly"
+        );
     }
 
     #[test]

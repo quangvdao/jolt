@@ -101,38 +101,42 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 
 ### Acceptance Criteria
 
-- [ ] `crates/jolt-openings/src/schemes.rs` defines `CommitmentSchemeVerifier`, `PublicVerifierSetup`, `CommitmentScheme`, `AdditivelyHomomorphicVerifier`, `AdditivelyHomomorphic`, `ZkOpeningSchemeVerifier`, and `ZkOpeningScheme` with the role split.
-- [ ] `StreamingCommitment` is not part of the canonical `jolt-openings` API.
-- [ ] `crates/jolt-openings/src/sources.rs` defines `SourceId`, `SourceRow`, `CommitmentSource`, and `BatchCommitmentSource`.
-- [ ] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `verify`, `verify_batch`, and `bind_opening_inputs`.
-- [ ] `PublicVerifierSetup` contains `PublicParams` and `verifier_setup` for schemes whose verifier setup is derivable without prover setup.
-- [ ] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `Polynomial`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, and `prove_batch`.
-- [ ] `commit_batch` has a default implementation that commits one source at a time, and Dory overrides it for batch-source row streaming.
-- [ ] Homomorphic extension traits contain only the additive-combination operations needed by the default homomorphic batch helper.
-- [ ] `crates/jolt-openings/src/homomorphic.rs` contains #1467's `homomorphic_prove_batch`, `homomorphic_verify_batch`, `rlc_combine`, and `rlc_combine_scalars`.
-- [ ] `homomorphic_prove_batch` and `homomorphic_verify_batch` group claims by opening point and use the same transcript schedule.
-- [ ] `crates/jolt-openings/src/claims.rs` exposes `ProverClaim<F>` and `OpeningClaim<F, PCS: CommitmentSchemeVerifier<Field = F>>`.
-- [ ] The old standalone `reduce_prover` / `reduce_verifier` production API is removed or demoted so production callers use `prove_batch` / `verify_batch`.
-- [ ] `crates/jolt-openings/src/mock.rs` implements the split traits and has tests covering single-claim, multi-claim, shared-point, distinct-point, and tampered-evaluation cases.
-- [ ] `crates/jolt-dory` implements the split trait family while preserving current `main` wrapper types, bounded deserialization, transcript bridge, batch-source streaming support, and ZK behavior.
-- [ ] Dory `commit_batch` preserves CycleMajor trace commitment shape: same polynomial order, same row length, same row-commitment ordering, same `DoryHint` row commitments, and same transcript-visible commitments as current `main`.
-- [ ] `DoryScheme::BatchProof = Vec<DoryProof>` for the homomorphic Dory implementation.
-- [ ] `DoryScheme::prove_batch` delegates to `homomorphic_prove_batch`.
-- [ ] `DoryScheme::verify_batch` delegates to `homomorphic_verify_batch`.
-- [ ] `jolt-core` depends on `jolt-openings` and `jolt-dory` instead of using the internal PCS trait as the canonical interface.
-- [ ] `jolt-core` call sites use `PCS::Output` for commitments, matching `jolt_crypto::Commitment`, rather than `PCS::Commitment`.
-- [ ] `JoltProof` stores `joint_opening_proof: PCS::BatchProof` or an equivalently named `PCS::BatchProof` field.
-- [ ] Stage 8 prover calls `PCS::prove_batch`.
-- [ ] Stage 8 verifier calls `PCS::verify_batch`.
-- [ ] Stage 8 keeps the same dense increment scaling, RA polynomial ordering, advice Lagrange scaling, `opening_ids`, `constraint_coeffs`, and `joint_claim` semantics as current `main`.
-- [ ] ZK mode still extracts and binds the Dory evaluation commitment needed by BlindFold.
-- [ ] `cargo nextest run -p jolt-openings --features test-utils --cargo-quiet` passes.
-- [ ] `cargo nextest run -p jolt-dory --cargo-quiet` passes.
-- [ ] `cargo nextest run -p jolt-core muldiv --cargo-quiet --features host` passes.
-- [ ] `cargo nextest run -p jolt-core muldiv --cargo-quiet --features host,zk` passes.
-- [ ] `cargo clippy --all --features host -q --all-targets -- -D warnings` passes.
-- [ ] `cargo clippy --all --features host,zk -q --all-targets -- -D warnings` passes.
-- [ ] `cargo fmt -q` produces no diff.
+- [x] `crates/jolt-openings/src/schemes.rs` defines `CommitmentSchemeVerifier`, `PublicVerifierSetup`, `CommitmentScheme`, `AdditivelyHomomorphicVerifier`, `AdditivelyHomomorphic`, `ZkOpeningSchemeVerifier`, and `ZkOpeningScheme` with the role split.
+- [x] `StreamingCommitment` is not part of the canonical `jolt-openings` API.
+- [x] `crates/jolt-openings/src/sources.rs` defines `SourceId`, `SourceRow`, `CommitmentSource`, and `BatchCommitmentSource`.
+- [x] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `verify`, `verify_batch`, and `bind_opening_inputs`.
+- [x] `PublicVerifierSetup` contains `PublicParams` and `verifier_setup` for schemes whose verifier setup is derivable without prover setup.
+- [x] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `Polynomial`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, and `prove_batch`.
+- [x] `commit_batch` has a default implementation that commits one source at a time, and Dory overrides it for batch-source row streaming.
+- [x] Homomorphic extension traits contain only the additive-combination operations needed by the default homomorphic batch helper.
+- [x] `crates/jolt-openings/src/homomorphic.rs` contains #1467's `homomorphic_prove_batch`, `homomorphic_verify_batch`, `rlc_combine`, and `rlc_combine_scalars`.
+- [x] `homomorphic_prove_batch` and `homomorphic_verify_batch` group claims by opening point and use the same transcript schedule.
+- [x] `crates/jolt-openings/src/claims.rs` exposes `ProverClaim<F, P>` and `OpeningClaim<F, PCS: CommitmentSchemeVerifier<Field = F>>`.
+- [x] The old standalone `reduce_prover` / `reduce_verifier` production API is not part of the new production surface; production Dory batch opening uses `prove_batch` / `verify_batch`.
+- [x] `crates/jolt-openings/src/mock.rs` implements the split traits and has tests covering single-claim, multi-claim, shared-point, distinct-point, and tampered-evaluation cases.
+- [x] `crates/jolt-dory` implements the split trait family while preserving current `main` wrapper types, bounded deserialization, transcript bridge, batch-source streaming support, and ZK behavior.
+- [x] Dory `commit_batch` preserves CycleMajor trace commitment shape: same polynomial order, same row length, same row-commitment ordering, same `DoryHint` row commitments, and same transcript-visible commitments as current `main`.
+- [x] `DoryScheme::BatchProof = Vec<DoryProof>` for the homomorphic Dory implementation.
+- [x] `DoryScheme::prove_batch` delegates to `homomorphic_prove_batch`.
+- [x] `DoryScheme::verify_batch` delegates to `homomorphic_verify_batch`.
+- [x] `jolt-core` depends on `jolt-openings` and `jolt-dory`, with the remaining in-core PCS traits acting as documented compatibility bridges around old proof/setup/hint/field/transcript types.
+- [x] `JoltProof` stores `joint_opening_proof` as the batch-shaped old associated type `PCS::BatchedProof`, corresponding to canonical `PCS::BatchProof`.
+- [x] Stage 8 prover calls `PCS::prove_batch`.
+- [x] Stage 8 verifier calls `PCS::verify_batch`.
+- [x] Stage 8 keeps the same dense increment scaling, RA polynomial ordering, advice Lagrange scaling, `opening_ids`, `constraint_coeffs`, and `joint_claim` semantics as current `main`.
+- [x] ZK mode still extracts and binds the Dory evaluation commitment needed by BlindFold.
+- [x] `cargo nextest run -p jolt-openings --features test-utils --cargo-quiet` passes.
+- [x] `cargo nextest run -p jolt-dory --cargo-quiet` passes.
+- [x] `cargo nextest run -p jolt-core muldiv --cargo-quiet --features host` passes.
+- [x] `cargo nextest run -p jolt-core muldiv --cargo-quiet --features host,zk` passes.
+- [x] `cargo clippy --all --features host -q --all-targets -- -D warnings` passes.
+- [x] `cargo clippy --all --features host,zk -q --all-targets -- -D warnings` passes.
+- [x] `cargo fmt -q` produces no diff.
+
+Deferred to the final old/new trait-family cutover:
+
+- [ ] `jolt-core` call sites use `PCS::Output` for commitments, matching `jolt_crypto::Commitment`, rather than the old `PCS::Commitment`.
+- [ ] The in-core `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkOpeningSupport` bridges are removed once proof/setup/hint/field/transcript and serialization types compile directly against `jolt-openings`.
 
 ### Testing Strategy
 

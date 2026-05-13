@@ -32,9 +32,9 @@
 //!
 //! This must match exactly how the Poseidon transcript hashes commitments.
 
-use crate::symbolic_traits::ast_commitment_scheme::AstCommitmentScheme;
 #[cfg(not(feature = "zk"))]
-use crate::symbolic_traits::ast_commitment_scheme::AstProof;
+use crate::symbolic_traits::ast_commitment_scheme::AstBatchedProof;
+use crate::symbolic_traits::ast_commitment_scheme::AstCommitmentScheme;
 use crate::symbolic_traits::ast_curve::AstCurve;
 use crate::symbolic_traits::opening_accumulator::AstOpeningAccumulator;
 use ark_ff::PrimeField;
@@ -392,7 +392,7 @@ pub fn symbolize_proof<OutputTranscript: Transcript>(
             stage5_sumcheck_proof: stage5_sumcheck,
             stage6_sumcheck_proof: stage6_sumcheck,
             stage7_sumcheck_proof: stage7_sumcheck,
-            joint_opening_proof: AstProof::default(),
+            joint_opening_proof: AstBatchedProof::default(),
             untrusted_advice_commitment,
             trace_length: real_proof.trace_length,
             ram_K: real_proof.ram_K,

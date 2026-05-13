@@ -222,6 +222,15 @@ impl<F: Field> ZkOpeningSchemeVerifier for MockCommitmentScheme<F> {
         }
         Ok(())
     }
+
+    fn verify_batch_zk(
+        claims: Vec<OpeningClaim<Self::Field, Self>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        Self::verify_batch(claims, proof, setup, transcript)
+    }
 }
 
 impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {
@@ -250,6 +259,20 @@ impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {
         };
         let eval_commitment = MockHidingCommitment { eval };
         (proof, eval_commitment, ())
+    }
+
+    fn prove_batch_zk<S>(
+        claims: Vec<ProverClaim<Self::Field, S>>,
+        hints: Vec<Self::OpeningHint>,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field>,
+    {
+        let eval = claims.first().map_or_else(F::zero, |claim| claim.eval);
+        let proof = Self::prove_batch(claims, hints, setup, transcript);
+        (proof, MockHidingCommitment { eval }, ())
     }
 }
 

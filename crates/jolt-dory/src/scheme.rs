@@ -710,6 +710,21 @@ impl ZkOpeningSchemeVerifier for DoryScheme {
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
         Self::verify_zk_with_shape(commitment, point, proof, setup, &mut dory_transcript)
     }
+
+    fn verify_batch_zk(
+        claims: Vec<OpeningClaim<Self::Field, Self>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        let [claim] = claims.as_slice() else {
+            return Err(OpeningsError::VerificationFailed);
+        };
+        let [proof] = proof.as_slice() else {
+            return Err(OpeningsError::VerificationFailed);
+        };
+        Self::verify_zk(&claim.commitment, &claim.point, proof, setup, transcript)
+    }
 }
 
 impl ZkOpeningScheme for DoryScheme {
@@ -748,6 +763,32 @@ impl ZkOpeningScheme for DoryScheme {
         let nu = num_vars - sigma;
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
         Self::open_zk_source_with_shape(poly, point, nu, sigma, setup, hint, &mut dory_transcript)
+    }
+
+    fn prove_batch_zk<S>(
+        claims: Vec<ProverClaim<Self::Field, S>>,
+        hints: Vec<Self::OpeningHint>,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field>,
+    {
+        let [claim] = claims.as_slice() else {
+            panic!("Dory ZK batch opening currently expects one already-combined claim");
+        };
+        let [hint] = hints.as_slice() else {
+            panic!("Dory ZK batch opening currently expects one opening hint");
+        };
+        let (proof, y_com, y_blinding) = Self::open_zk(
+            &claim.polynomial,
+            &claim.point,
+            claim.eval,
+            setup,
+            hint.clone(),
+            transcript,
+        );
+        (vec![proof], y_com, y_blinding)
     }
 }
 
@@ -1333,6 +1374,52 @@ mod tests {
             &mut verify_transcript,
         );
         assert!(result.is_ok(), "ZK verification failed: {result:?}");
+    }
+
+    #[test]
+    fn zk_single_claim_batch_round_trip() {
+        let num_vars = 3;
+        let mut rng = ChaCha20Rng::seed_from_u64(601);
+
+        let prover_setup = DoryScheme::setup_prover(num_vars);
+        let verifier_setup = DoryScheme::project_verifier_setup(&prover_setup);
+
+        let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
+        let point: Vec<Fr> = (0..num_vars)
+            .map(|_| <Fr as RandomSampling>::random(&mut rng))
+            .collect();
+        let eval = poly.evaluate(&point);
+        let (commitment, hint) = DoryScheme::commit_zk(&poly, &prover_setup);
+
+        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-batch");
+        let (proof, y_com, _blind) = DoryScheme::prove_batch_zk(
+            vec![ProverClaim {
+                polynomial: poly,
+                point: point.clone(),
+                eval,
+            }],
+            vec![hint],
+            &prover_setup,
+            &mut prove_transcript,
+        );
+        assert_eq!(
+            DoryScheme::batch_eval_commitment(&proof),
+            Some(y_com),
+            "batch proof should expose the hidden evaluation commitment"
+        );
+
+        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-batch");
+        DoryScheme::verify_batch_zk(
+            vec![OpeningClaim {
+                commitment,
+                point,
+                eval,
+            }],
+            &proof,
+            &verifier_setup,
+            &mut verify_transcript,
+        )
+        .expect("ZK batch proof should verify");
     }
 
     #[test]

@@ -160,6 +160,14 @@ pub trait ZkOpeningSchemeVerifier: CommitmentSchemeVerifier {
         setup: &Self::VerifierSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
+
+    /// Verifies a fused ZK batch-opening proof.
+    fn verify_batch_zk(
+        claims: Vec<OpeningClaim<Self::Field, Self>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError>;
 }
 
 /// Prover-side interface for openings that hide evaluations.
@@ -198,6 +206,16 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
     ) -> (Self::Proof, Self::HidingCommitment, Self::Blind)
     where
         S: CommitmentSource<Self::Field> + ?Sized;
+
+    /// Proves a fused ZK batch opening.
+    fn prove_batch_zk<S>(
+        claims: Vec<ProverClaim<Self::Field, S>>,
+        hints: Vec<Self::OpeningHint>,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field>;
 }
 
 /// Verifier-side hooks for schemes whose ZK openings bind a hidden evaluation.

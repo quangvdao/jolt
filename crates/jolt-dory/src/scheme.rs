@@ -7,7 +7,7 @@
     reason = "ZK proof y_com/y_blinding are Dory-mode invariants; dory::prove/verify errors are caller-precondition violations surfaced via panic; the dory adapter's commit is unreachable because DoryScheme pre-computes row commitments"
 )]
 
-use dory::backends::arkworks::{ArkworksProverSetup, G1Routines, G2Routines};
+use dory::backends::arkworks::ArkworksProverSetup;
 use dory::mode::Transparent;
 use dory::primitives::arithmetic::{
     DoryRoutines, Field as DoryField, Group as DoryGroup, PairingCurve,
@@ -31,13 +31,20 @@ use ark_bn254::{G1Affine, G1Projective};
 use ark_ec::CurveGroup;
 use dory::backends::arkworks::ArkG1 as ArkG1Struct;
 
+use crate::routines::{JoltG1Routines, JoltG2Routines};
 use crate::transcript::JoltToDoryTranscript;
 use crate::types::{DoryCommitment, DoryHint, DoryProof, DoryProverSetup, DoryVerifierSetup};
 
 // All jolt types below are #[repr(transparent)] over the same arkworks
 // inner type as their dory-pcs counterpart, guaranteeing identical layout.
 
-pub(crate) type ArkFr = dory::backends::arkworks::ArkFr;
+/// Dory-pcs's arkworks scalar wrapper.
+///
+/// Most callers should use the backend-neutral `jolt_field::Fr` APIs on
+/// `DoryScheme`. This type is exposed for Dory-native integration points that
+/// already implement dory-pcs polynomial traits and need to avoid converting
+/// large opening-time vectors through the generic source abstraction.
+pub type ArkFr = dory::backends::arkworks::ArkFr;
 pub(crate) type ArkG1 = dory::backends::arkworks::ArkG1;
 pub(crate) type ArkGT = dory::backends::arkworks::ArkGT;
 type InnerBN254 = dory::backends::arkworks::BN254;
@@ -104,7 +111,7 @@ impl DoryScheme {
         DoryVerifierSetup(prover_setup.0.to_verifier_setup())
     }
 
-    fn commit_with_mode<S, M>(source: &S, setup: &DoryProverSetup) -> (DoryCommitment, DoryHint)
+    fn commit_with_mode<S, M>(source: &S, setup: &ArkworksProverSetup) -> (DoryCommitment, DoryHint)
     where
         S: CommitmentSource<Fr> + ?Sized,
         M: Mode,
@@ -124,7 +131,7 @@ impl DoryScheme {
     fn commit_batch_with_mode<B, M>(
         batch: &B,
         ids: &[B::Id],
-        setup: &DoryProverSetup,
+        setup: &ArkworksProverSetup,
     ) -> Vec<(DoryCommitment, DoryHint)>
     where
         B: BatchCommitmentSource<Fr>,
@@ -140,7 +147,7 @@ impl DoryScheme {
             .max()
             .expect("ids is non-empty");
         let sigma = max_num_vars.div_ceil(2);
-        let row_major = batch.map_rows(sigma, ids, |_, row| commit_source_row(row, &setup.0));
+        let row_major = batch.map_rows(sigma, ids, |_, row| commit_source_row(row, setup));
 
         let mut chunks_by_source: Vec<Vec<DoryChunkCommitment>> = (0..ids.len())
             .map(|_| Vec::with_capacity(row_major.len()))
@@ -162,12 +169,42 @@ impl DoryScheme {
             .collect()
     }
 
+    /// Commits a source batch using a borrowed dory-pcs prover setup.
+    ///
+    /// This Dory-specific bridge lets legacy callers that still store the raw
+    /// arkworks setup avoid cloning the SRS while the full trait-family cutover
+    /// is in progress.
+    #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_with_ark_setup")]
+    pub fn commit_batch_with_ark_setup<B>(
+        batch: &B,
+        ids: &[B::Id],
+        setup: &ArkworksProverSetup,
+    ) -> Vec<(DoryCommitment, DoryHint)>
+    where
+        B: BatchCommitmentSource<Fr>,
+    {
+        Self::commit_batch_with_mode::<B, Transparent>(batch, ids, setup)
+    }
+
+    /// Commits a hiding source batch using a borrowed dory-pcs prover setup.
+    #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_zk_with_ark_setup")]
+    pub fn commit_batch_zk_with_ark_setup<B>(
+        batch: &B,
+        ids: &[B::Id],
+        setup: &ArkworksProverSetup,
+    ) -> Vec<(DoryCommitment, DoryHint)>
+    where
+        B: BatchCommitmentSource<Fr>,
+    {
+        Self::commit_batch_with_mode::<B, dory::ZK>(batch, ids, setup)
+    }
+
     fn open_source_with_mode<S, T, M>(
         source: &S,
         point: &[Fr],
         nu: usize,
         sigma: usize,
-        setup: &DoryProverSetup,
+        setup: &ArkworksProverSetup,
         hint: DoryHint,
         transcript: &mut T,
     ) -> (DoryProof, Option<Fr>)
@@ -177,18 +214,37 @@ impl DoryScheme {
         M: Mode,
     {
         let adapter = DorySourceAdapter::new(source);
-        let (row_commitments, commit_blind) = hint.into_ark_parts();
         let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
 
+        Self::open_dory_source_with_mode::<_, _, M>(
+            &adapter, &ark_point, nu, sigma, setup, hint, transcript,
+        )
+    }
+
+    fn open_dory_source_with_mode<S, T, M>(
+        source: &S,
+        ark_point: &[ArkFr],
+        nu: usize,
+        sigma: usize,
+        setup: &ArkworksProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> (DoryProof, Option<Fr>)
+    where
+        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
+        T: DoryTranscript<Curve = InnerBN254>,
+        M: Mode,
+    {
+        let (row_commitments, commit_blind) = hint.into_ark_parts();
         let (proof, y_blinding) =
-            dory::prove::<ArkFr, InnerBN254, G1Routines, G2Routines, _, _, M>(
-                &adapter,
-                &ark_point,
+            dory::prove::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _, _, M>(
+                source,
+                ark_point,
                 row_commitments,
                 commit_blind,
                 nu,
                 sigma,
-                &setup.0,
+                setup,
                 transcript,
             )
             .unwrap_or_else(|e| panic!("dory::prove failed: {e:?}"));
@@ -197,6 +253,57 @@ impl DoryScheme {
             DoryProof(proof),
             y_blinding.map(|blind| ark_to_jolt_fr(&blind)),
         )
+    }
+
+    /// Opens a transparent Dory commitment for a source that already implements
+    /// the dory-pcs polynomial traits over [`ArkFr`].
+    ///
+    /// This Dory-specific entrypoint exists for the current `jolt-core` cutover:
+    /// legacy Stage 8 polynomials already live in arkworks/Dory form, and routing
+    /// them through `CommitmentSource<jolt_field::Fr>` would allocate conversion
+    /// vectors in every Dory vector/matrix product. `ark_point` must already be in
+    /// Dory's point order, i.e. the reverse of Jolt's opening-point order.
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_dory_source_with_shape")]
+    pub fn open_dory_source_with_shape<S, T>(
+        source: &S,
+        ark_point: &[ArkFr],
+        nu: usize,
+        sigma: usize,
+        setup: &DoryProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> DoryProof
+    where
+        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        Self::open_dory_source_with_ark_setup(
+            source, ark_point, nu, sigma, &setup.0, hint, transcript,
+        )
+    }
+
+    /// Opens a transparent Dory commitment using a borrowed dory-pcs prover setup.
+    ///
+    /// This avoids cloning the SRS when a protocol layer already owns the
+    /// underlying arkworks setup.
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_dory_source_with_ark_setup")]
+    pub fn open_dory_source_with_ark_setup<S, T>(
+        source: &S,
+        ark_point: &[ArkFr],
+        nu: usize,
+        sigma: usize,
+        setup: &ArkworksProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> DoryProof
+    where
+        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let (proof, _blind) = Self::open_dory_source_with_mode::<S, T, Transparent>(
+            source, ark_point, nu, sigma, setup, hint, transcript,
+        );
+        proof
     }
 
     /// Opens a transparent Dory commitment for an arbitrary commitment source.
@@ -219,7 +326,7 @@ impl DoryScheme {
         T: DoryTranscript<Curve = InnerBN254>,
     {
         let (proof, _blind) = Self::open_source_with_mode::<S, T, Transparent>(
-            source, point, nu, sigma, setup, hint, transcript,
+            source, point, nu, sigma, &setup.0, hint, transcript,
         );
         proof
     }
@@ -243,7 +350,58 @@ impl DoryScheme {
         T: DoryTranscript<Curve = InnerBN254>,
     {
         let (proof, y_blinding) = Self::open_source_with_mode::<S, T, dory::ZK>(
-            source, point, nu, sigma, setup, hint, transcript,
+            source, point, nu, sigma, &setup.0, hint, transcript,
+        );
+        let y_com = ark_to_jolt_g1(proof.0.y_com.expect("ZK proof must contain y_com"));
+        let blinding = y_blinding.expect("ZK proof must return y_blinding");
+        (proof, y_com, blinding)
+    }
+
+    /// Opens a hiding Dory commitment for a source that already implements the
+    /// dory-pcs polynomial traits over [`ArkFr`].
+    ///
+    /// Like [`Self::open_dory_source_with_shape`], this preserves the native
+    /// arkworks Stage 8 path while still centralizing Dory proof generation in
+    /// `jolt-dory`. `ark_point` must already be in Dory's point order.
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_zk_dory_source_with_shape")]
+    pub fn open_zk_dory_source_with_shape<S, T>(
+        source: &S,
+        ark_point: &[ArkFr],
+        nu: usize,
+        sigma: usize,
+        setup: &DoryProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> (DoryProof, Bn254G1, Fr)
+    where
+        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        Self::open_zk_dory_source_with_ark_setup(
+            source, ark_point, nu, sigma, &setup.0, hint, transcript,
+        )
+    }
+
+    /// Opens a hiding Dory commitment using a borrowed dory-pcs prover setup.
+    ///
+    /// This is the ZK counterpart of
+    /// [`Self::open_dory_source_with_ark_setup`].
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_zk_dory_source_with_ark_setup")]
+    pub fn open_zk_dory_source_with_ark_setup<S, T>(
+        source: &S,
+        ark_point: &[ArkFr],
+        nu: usize,
+        sigma: usize,
+        setup: &ArkworksProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> (DoryProof, Bn254G1, Fr)
+    where
+        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let (proof, y_blinding) = Self::open_dory_source_with_mode::<S, T, dory::ZK>(
+            source, ark_point, nu, sigma, setup, hint, transcript,
         );
         let y_com = ark_to_jolt_g1(proof.0.y_com.expect("ZK proof must contain y_com"));
         let blinding = y_blinding.expect("ZK proof must return y_blinding");
@@ -272,10 +430,40 @@ impl DoryScheme {
         let ark_eval = jolt_fr_to_ark(&eval);
         let ark_commitment = jolt_gt_to_ark(&commitment.0);
 
-        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
+        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
             ark_commitment,
             ark_eval,
             &ark_point,
+            &proof.0,
+            setup.0.clone().into_inner(),
+            transcript,
+        )
+        .map_err(|_| OpeningsError::VerificationFailed)
+    }
+
+    /// Verifies a transparent Dory opening using Dory-native scalar inputs.
+    ///
+    /// Most callers should prefer [`Self::verify_with_shape`]. This entrypoint
+    /// is for legacy arkworks/Dory callers that already have the point and
+    /// evaluation in dory-pcs form and should not allocate conversion vectors.
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify_dory_with_shape")]
+    pub fn verify_dory_with_shape<T>(
+        commitment: &DoryCommitment,
+        ark_point: &[ArkFr],
+        ark_eval: ArkFr,
+        proof: &DoryProof,
+        setup: &DoryVerifierSetup,
+        transcript: &mut T,
+    ) -> Result<(), OpeningsError>
+    where
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let ark_commitment = jolt_gt_to_ark(&commitment.0);
+
+        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
+            ark_commitment,
+            ark_eval,
+            ark_point,
             &proof.0,
             setup.0.clone().into_inner(),
             transcript,
@@ -303,10 +491,40 @@ impl DoryScheme {
         let dummy_eval = <ArkFr as DoryField>::zero();
         let ark_commitment = jolt_gt_to_ark(&commitment.0);
 
-        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
+        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
             ark_commitment,
             dummy_eval,
             &ark_point,
+            &proof.0,
+            setup.0.clone().into_inner(),
+            transcript,
+        )
+        .map_err(|_| OpeningsError::VerificationFailed)
+    }
+
+    /// Verifies a hiding Dory opening using Dory-native scalar inputs.
+    ///
+    /// `ark_point` must already be in Dory's point order. The evaluation is not
+    /// public in ZK mode, so this mirrors dory-pcs verification with a dummy
+    /// scalar while binding the evaluation commitment from the proof.
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify_zk_dory_with_shape")]
+    pub fn verify_zk_dory_with_shape<T>(
+        commitment: &DoryCommitment,
+        ark_point: &[ArkFr],
+        proof: &DoryProof,
+        setup: &DoryVerifierSetup,
+        transcript: &mut T,
+    ) -> Result<(), OpeningsError>
+    where
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let dummy_eval = <ArkFr as DoryField>::zero();
+        let ark_commitment = jolt_gt_to_ark(&commitment.0);
+
+        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
+            ark_commitment,
+            dummy_eval,
+            ark_point,
             &proof.0,
             setup.0.clone().into_inner(),
             transcript,
@@ -417,7 +635,7 @@ impl CommitmentScheme for DoryScheme {
         source: &S,
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint) {
-        Self::commit_with_mode::<S, Transparent>(source, setup)
+        Self::commit_with_mode::<S, Transparent>(source, &setup.0)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch")]
@@ -426,7 +644,7 @@ impl CommitmentScheme for DoryScheme {
         ids: &[B::Id],
         setup: &Self::ProverSetup,
     ) -> Vec<(Self::Output, Self::OpeningHint)> {
-        Self::commit_batch_with_mode::<B, Transparent>(batch, ids, setup)
+        Self::commit_batch_with_mode::<B, Transparent>(batch, ids, &setup.0)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open")]
@@ -445,7 +663,7 @@ impl CommitmentScheme for DoryScheme {
         let hint = match hint {
             Some(hint) => hint,
             None => DoryHint::new(
-                ark_to_jolt_g1_vec(compute_row_commitments(poly, setup)),
+                ark_to_jolt_g1_vec(compute_row_commitments(poly, &setup.0)),
                 Fr::from_u64(0),
             ),
         };
@@ -538,7 +756,7 @@ impl ZkOpeningScheme for DoryScheme {
         source: &S,
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint) {
-        Self::commit_with_mode::<S, dory::ZK>(source, setup)
+        Self::commit_with_mode::<S, dory::ZK>(source, &setup.0)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_zk")]
@@ -547,7 +765,7 @@ impl ZkOpeningScheme for DoryScheme {
         ids: &[B::Id],
         setup: &Self::ProverSetup,
     ) -> Vec<(Self::Output, Self::OpeningHint)> {
-        Self::commit_batch_with_mode::<B, dory::ZK>(batch, ids, setup)
+        Self::commit_batch_with_mode::<B, dory::ZK>(batch, ids, &setup.0)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open_zk")]
@@ -589,7 +807,7 @@ fn commit_rows_dense<S: CommitmentSource<Fr> + ?Sized>(
     rows.par_iter()
         .map(|row| {
             let scalars: Vec<ArkFr> = row.iter().map(jolt_fr_to_ark).collect();
-            G1Routines::msm(&g1_bases[..scalars.len()], &scalars)
+            JoltG1Routines::msm(&g1_bases[..scalars.len()], &scalars)
         })
         .collect()
 }
@@ -602,7 +820,7 @@ fn commit_field_row(values: &[Fr], setup: &ArkworksProverSetup) -> ArkG1 {
         setup.g1_vec.len(),
     );
     let scalars: Vec<ArkFr> = values.iter().map(jolt_fr_to_ark).collect();
-    G1Routines::msm(&setup.g1_vec[..scalars.len()], &scalars)
+    JoltG1Routines::msm(&setup.g1_vec[..scalars.len()], &scalars)
 }
 
 fn commit_i128_row(values: &[i128], setup: &ArkworksProverSetup) -> ArkG1 {
@@ -707,7 +925,7 @@ fn commit_source_row(row: SourceRow<'_, Fr>, setup: &ArkworksProverSetup) -> Dor
 
 fn aggregate_batch_chunks<M: Mode>(
     chunks: Vec<DoryChunkCommitment>,
-    setup: &DoryProverSetup,
+    setup: &ArkworksProverSetup,
 ) -> (DoryCommitment, DoryHint) {
     assert!(!chunks.is_empty(), "cannot aggregate an empty source");
 
@@ -757,7 +975,7 @@ fn aggregate_batch_chunks<M: Mode>(
 
 fn finish_row_commitments<M: Mode>(
     row_commitments: Vec<ArkG1>,
-    setup: &DoryProverSetup,
+    setup: &ArkworksProverSetup,
 ) -> (DoryCommitment, DoryHint) {
     let (tier_2, commit_blind) = commit_rows_tier_2::<M>(&row_commitments, setup);
     (
@@ -771,7 +989,7 @@ fn finish_row_commitments<M: Mode>(
 
 fn compute_row_commitments<S: CommitmentSource<Fr> + ?Sized>(
     source: &S,
-    setup: &DoryProverSetup,
+    setup: &ArkworksProverSetup,
 ) -> Vec<ArkG1> {
     let num_vars = source.num_vars();
     let sigma = num_vars.div_ceil(2);
@@ -779,9 +997,9 @@ fn compute_row_commitments<S: CommitmentSource<Fr> + ?Sized>(
     let num_rows = 1usize << (num_vars - sigma);
 
     if source.is_one_hot() {
-        commit_rows_one_hot(source, num_rows, num_cols, &setup.0)
+        commit_rows_one_hot(source, num_rows, num_cols, setup)
     } else {
-        commit_rows_dense(source, sigma, &setup.0)
+        commit_rows_dense(source, sigma, setup)
     }
 }
 
@@ -822,12 +1040,12 @@ fn source_row_to_dense(row: SourceRow<'_, Fr>, expected_len: usize) -> Vec<Fr> {
 
 pub(crate) fn commit_rows_tier_2<M: Mode>(
     row_commitments: &[ArkG1],
-    setup: &DoryProverSetup,
+    setup: &ArkworksProverSetup,
 ) -> (ArkGT, ArkFr) {
-    let g2_bases = &setup.0.g2_vec[..row_commitments.len()];
+    let g2_bases = &setup.g2_vec[..row_commitments.len()];
     let tier_2 = <InnerBN254 as PairingCurve>::multi_pair_g2_setup(row_commitments, g2_bases);
     let commit_blind = M::sample::<ArkFr>();
-    let tier_2 = M::mask(tier_2, &setup.0.ht, &commit_blind);
+    let tier_2 = M::mask(tier_2, &setup.ht, &commit_blind);
     (tier_2, commit_blind)
 }
 

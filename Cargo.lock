@@ -2791,6 +2791,7 @@ dependencies = [
  "jolt-crypto",
  "jolt-field",
  "jolt-openings",
+ "jolt-optimizations",
  "jolt-poly",
  "jolt-transcript",
  "rand_chacha 0.3.1",

@@ -24,12 +24,13 @@
 //! - [`DoryPartialCommitment`] — intermediate state for streaming commitment.
 //! - [`DoryHint`] — row commitments and commitment blind reusable as opening proof hint.
 
+mod routines;
 mod scheme;
 mod streaming;
 mod transcript;
 mod types;
 
-pub use scheme::DoryScheme;
+pub use scheme::{ArkFr, DoryScheme};
 pub use types::{
     DoryCommitment, DoryHint, DoryPartialCommitment, DoryProof, DoryProverSetup, DoryVerifierSetup,
 };

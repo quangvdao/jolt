@@ -1,9 +1,9 @@
 //! Streaming (chunked) commitment for the Dory scheme.
 
-use dory::backends::arkworks::G1Routines;
 use dory::primitives::arithmetic::DoryRoutines;
 use jolt_field::Fr;
 
+use crate::routines::JoltG1Routines;
 use crate::scheme::{
     ark_to_jolt_fr, ark_to_jolt_g1, ark_to_jolt_g1_vec, ark_to_jolt_gt, commit_rows_tier_2,
     jolt_fr_to_ark, jolt_g1_vec_to_ark, ArkFr,
@@ -18,7 +18,7 @@ impl crate::DoryScheme {
     ) -> (DoryCommitment, DoryHint) {
         validate_row_count(partial.row_commitments.len(), setup);
         let row_commitments = jolt_g1_vec_to_ark(partial.row_commitments);
-        let (tier_2, commit_blind) = commit_rows_tier_2::<dory::ZK>(&row_commitments, setup);
+        let (tier_2, commit_blind) = commit_rows_tier_2::<dory::ZK>(&row_commitments, &setup.0);
         (
             DoryCommitment(ark_to_jolt_gt(&tier_2)),
             DoryHint::new(
@@ -52,7 +52,7 @@ impl crate::DoryScheme {
 
         let g1_bases = &setup.0.g1_vec[..chunk.len()];
         let scalars: Vec<ArkFr> = chunk.iter().map(jolt_fr_to_ark).collect();
-        let row_commitment = G1Routines::msm(g1_bases, &scalars);
+        let row_commitment = JoltG1Routines::msm(g1_bases, &scalars);
         partial.row_commitments.push(ark_to_jolt_g1(row_commitment));
     }
 
@@ -66,7 +66,7 @@ impl crate::DoryScheme {
         validate_row_count(num_rows, setup);
 
         let ark_rows = jolt_g1_vec_to_ark(partial.row_commitments);
-        let (tier_2, _) = commit_rows_tier_2::<dory::Transparent>(&ark_rows, setup);
+        let (tier_2, _) = commit_rows_tier_2::<dory::Transparent>(&ark_rows, &setup.0);
         DoryCommitment(ark_to_jolt_gt(&tier_2))
     }
 }

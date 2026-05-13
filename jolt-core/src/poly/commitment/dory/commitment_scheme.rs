@@ -12,7 +12,7 @@ use crate::{
     poly::commitment::commitment_scheme::{
         BatchOpeningScheme, CommitmentScheme, SourceBatchCommitmentScheme, ZkOpeningSupport,
     },
-    poly::multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
+    poly::multilinear_polynomial::MultilinearPolynomial,
     transcripts::Transcript,
     utils::{errors::ProofVerifyError, math::Math},
 };
@@ -20,10 +20,10 @@ use ark_bn254::G1Projective;
 use ark_ff::Zero;
 use dory::primitives::{
     arithmetic::{Field as DoryField, Group},
-    poly::{MultilinearLagrange, Polynomial},
+    poly::Polynomial,
 };
 use jolt_crypto::Bn254G1;
-use jolt_openings::{BatchCommitmentSource, CommitmentSource, SourceRow};
+use jolt_openings::BatchCommitmentSource;
 use rayon::prelude::*;
 use std::borrow::Borrow;
 use tracing::trace_span;
@@ -170,33 +170,32 @@ impl CommitmentScheme for DoryCommitmentScheme {
         let _span = trace_span!("DoryCommitmentScheme::prove").entered();
 
         let hint = convert_old_dory_hint(hint.unwrap_or_else(|| Self::commit(poly, setup).1));
-        let setup = jolt_dory::DoryProverSetup(setup.clone());
-        let source = CoreOpeningSource(poly);
         let (nu, sigma) = current_dory_shape();
-        let point = convert_opening_point(opening_point);
+        let point = convert_dory_opening_point(opening_point);
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
         #[cfg(feature = "zk")]
         {
-            let (proof, _y_com, y_blinding) = jolt_dory::DoryScheme::open_zk_source_with_shape(
-                &source,
-                &point,
-                nu,
-                sigma,
-                &setup,
-                hint,
-                &mut dory_transcript,
-            );
+            let (proof, _y_com, y_blinding) =
+                jolt_dory::DoryScheme::open_zk_dory_source_with_ark_setup(
+                    poly,
+                    &point,
+                    nu,
+                    sigma,
+                    setup,
+                    hint,
+                    &mut dory_transcript,
+                );
             (proof.0, Some(ark_bn254::Fr::from(y_blinding)))
         }
         #[cfg(not(feature = "zk"))]
         {
-            let proof = jolt_dory::DoryScheme::open_source_with_shape(
-                &source,
+            let proof = jolt_dory::DoryScheme::open_dory_source_with_ark_setup(
+                poly,
                 &point,
                 nu,
                 sigma,
-                &setup,
+                setup,
                 hint,
                 &mut dory_transcript,
             );
@@ -217,13 +216,13 @@ impl CommitmentScheme for DoryCommitmentScheme {
         let proof = jolt_dory::DoryProof(proof.clone());
         let setup = jolt_dory::DoryVerifierSetup(setup.clone());
         let commitment = jolt_dory::DoryCommitment::from_dory_pcs(*commitment);
-        let point = convert_opening_point(opening_point);
+        let point = convert_dory_opening_point(opening_point);
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
         #[cfg(feature = "zk")]
         let result = {
             let _ = opening;
-            jolt_dory::DoryScheme::verify_zk_with_shape(
+            jolt_dory::DoryScheme::verify_zk_dory_with_shape(
                 &commitment,
                 &point,
                 &proof,
@@ -232,10 +231,10 @@ impl CommitmentScheme for DoryCommitmentScheme {
             )
         };
         #[cfg(not(feature = "zk"))]
-        let result = jolt_dory::DoryScheme::verify_with_shape(
+        let result = jolt_dory::DoryScheme::verify_dory_with_shape(
             &commitment,
             &point,
-            jolt_field::Fr::from(*opening),
+            jolt_to_ark(opening),
             &proof,
             &setup,
             &mut dory_transcript,
@@ -326,8 +325,7 @@ impl SourceBatchCommitmentScheme for DoryCommitmentScheme {
         ids: &[B::Id],
         setup: &Self::ProverSetup,
     ) -> Vec<(Self::Commitment, Self::OpeningProofHint)> {
-        let setup = jolt_dory::DoryProverSetup(setup.clone());
-        <jolt_dory::DoryScheme as jolt_openings::CommitmentScheme>::commit_batch(batch, ids, &setup)
+        jolt_dory::DoryScheme::commit_batch_with_ark_setup(batch, ids, setup)
             .into_iter()
             .map(convert_new_dory_commitment_and_hint)
             .collect()
@@ -339,13 +337,10 @@ impl SourceBatchCommitmentScheme for DoryCommitmentScheme {
         ids: &[B::Id],
         setup: &Self::ProverSetup,
     ) -> Vec<(Self::Commitment, Self::OpeningProofHint)> {
-        let setup = jolt_dory::DoryProverSetup(setup.clone());
-        <jolt_dory::DoryScheme as jolt_openings::ZkOpeningScheme>::commit_batch_zk(
-            batch, ids, &setup,
-        )
-        .into_iter()
-        .map(convert_new_dory_commitment_and_hint)
-        .collect()
+        jolt_dory::DoryScheme::commit_batch_zk_with_ark_setup(batch, ids, setup)
+            .into_iter()
+            .map(convert_new_dory_commitment_and_hint)
+            .collect()
     }
 }
 
@@ -360,33 +355,32 @@ impl BatchOpeningScheme for DoryCommitmentScheme {
         let hint = convert_old_dory_hint(
             hint.expect("Dory batch opening requires the combined opening hint"),
         );
-        let setup = jolt_dory::DoryProverSetup(setup.clone());
-        let source = CoreOpeningSource(poly);
         let (nu, sigma) = current_dory_shape();
-        let point = convert_opening_point(opening_point);
+        let point = convert_dory_opening_point(opening_point);
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
         #[cfg(feature = "zk")]
         {
-            let (proof, _y_com, y_blinding) = jolt_dory::DoryScheme::open_zk_source_with_shape(
-                &source,
-                &point,
-                nu,
-                sigma,
-                &setup,
-                hint,
-                &mut dory_transcript,
-            );
+            let (proof, _y_com, y_blinding) =
+                jolt_dory::DoryScheme::open_zk_dory_source_with_ark_setup(
+                    poly,
+                    &point,
+                    nu,
+                    sigma,
+                    setup,
+                    hint,
+                    &mut dory_transcript,
+                );
             (vec![proof.0], Some(ark_bn254::Fr::from(y_blinding)))
         }
         #[cfg(not(feature = "zk"))]
         {
-            let proof = jolt_dory::DoryScheme::open_source_with_shape(
-                &source,
+            let proof = jolt_dory::DoryScheme::open_dory_source_with_ark_setup(
+                poly,
                 &point,
                 nu,
                 sigma,
-                &setup,
+                setup,
                 hint,
                 &mut dory_transcript,
             );
@@ -408,13 +402,13 @@ impl BatchOpeningScheme for DoryCommitmentScheme {
         let proof = jolt_dory::DoryProof(proof.clone());
         let setup = jolt_dory::DoryVerifierSetup(setup.clone());
         let commitment = jolt_dory::DoryCommitment::from_dory_pcs(*commitment);
-        let point = convert_opening_point(opening_point);
+        let point = convert_dory_opening_point(opening_point);
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
         #[cfg(feature = "zk")]
         let result = {
             let _ = opening;
-            jolt_dory::DoryScheme::verify_zk_with_shape(
+            jolt_dory::DoryScheme::verify_zk_dory_with_shape(
                 &commitment,
                 &point,
                 &proof,
@@ -423,75 +417,16 @@ impl BatchOpeningScheme for DoryCommitmentScheme {
             )
         };
         #[cfg(not(feature = "zk"))]
-        let result = jolt_dory::DoryScheme::verify_with_shape(
+        let result = jolt_dory::DoryScheme::verify_dory_with_shape(
             &commitment,
             &point,
-            jolt_field::Fr::from(*opening),
+            jolt_to_ark(opening),
             &proof,
             &setup,
             &mut dory_transcript,
         );
 
         result.map_err(|_| ProofVerifyError::InternalError)
-    }
-}
-
-struct CoreOpeningSource<'a>(&'a MultilinearPolynomial<ark_bn254::Fr>);
-
-impl CommitmentSource<jolt_field::Fr> for CoreOpeningSource<'_> {
-    fn num_vars(&self) -> usize {
-        if matches!(self.0, MultilinearPolynomial::RLC(_)) {
-            let (nu, sigma) = current_dory_shape();
-            nu + sigma
-        } else {
-            self.0.get_num_vars()
-        }
-    }
-
-    fn evaluate(&self, point: &[jolt_field::Fr]) -> jolt_field::Fr {
-        let point: Vec<ark_bn254::Fr> = point
-            .iter()
-            .rev()
-            .copied()
-            .map(ark_bn254::Fr::from)
-            .collect();
-        jolt_field::Fr::from(PolynomialEvaluation::evaluate(self.0, point.as_slice()))
-    }
-
-    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
-    where
-        V: for<'row> FnMut(usize, SourceRow<'row, jolt_field::Fr>),
-    {
-        assert!(
-            !matches!(self.0, MultilinearPolynomial::RLC(_)),
-            "streaming RLC openings require a precomputed Dory hint"
-        );
-        let num_cols = 1usize << sigma;
-        let len = self.0.original_len();
-        let mut row = Vec::with_capacity(num_cols);
-        for row_index in 0..len.div_ceil(num_cols) {
-            row.clear();
-            let start = row_index * num_cols;
-            let end = (start + num_cols).min(len);
-            row.extend((start..end).map(|idx| jolt_field::Fr::from(self.0.get_coeff(idx))));
-            visit(row_index, SourceRow::FieldElements(&row));
-        }
-    }
-
-    fn fold_rows(&self, left: &[jolt_field::Fr], sigma: usize) -> Vec<jolt_field::Fr> {
-        let left: Vec<ArkFr> = left
-            .iter()
-            .copied()
-            .map(ark_bn254::Fr::from)
-            .map(|value| jolt_to_ark(&value))
-            .collect();
-        let nu = self.num_vars().saturating_sub(sigma);
-        <MultilinearPolynomial<ark_bn254::Fr> as MultilinearLagrange<ArkFr>>::vector_matrix_product(
-            self.0, &left, nu, sigma,
-        )
-        .iter()
-        .map(|value| jolt_field::Fr::from(ark_to_jolt(value)))
-        .collect()
     }
 }
 
@@ -502,12 +437,16 @@ fn current_dory_shape() -> (usize, usize) {
     )
 }
 
-fn convert_opening_point(
+fn convert_dory_opening_point(
     opening_point: &[<ark_bn254::Fr as JoltField>::Challenge],
-) -> Vec<jolt_field::Fr> {
+) -> Vec<jolt_dory::ArkFr> {
     reorder_opening_point_for_layout::<ark_bn254::Fr>(opening_point)
         .iter()
-        .map(|point| jolt_field::Fr::from(ark_bn254::Fr::from(*point)))
+        .rev()
+        .map(|point| {
+            let point: ark_bn254::Fr = (*point).into();
+            jolt_to_ark(&point)
+        })
         .collect()
 }
 

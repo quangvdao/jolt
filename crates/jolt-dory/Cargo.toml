@@ -15,6 +15,7 @@ ark-serialize = { workspace = true }
 jolt-crypto = { workspace = true }
 jolt-field = { workspace = true }
 jolt-openings = { workspace = true }
+jolt-optimizations = { workspace = true }
 jolt-poly = { workspace = true }
 jolt-transcript = { workspace = true }
 dory = { workspace = true }

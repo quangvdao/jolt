@@ -6,6 +6,7 @@ use crate::{
 use allocative::Allocative;
 use ark_ff::biginteger::S128;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Valid};
+use jolt_poly::MultilinearPoly;
 use rayon::prelude::*;
 use strum_macros::EnumIter;
 use thiserror::Error;
@@ -76,6 +77,64 @@ pub enum BindingOrder {
 impl<F: JoltField> Default for MultilinearPolynomial<F> {
     fn default() -> Self {
         Self::LargeScalars(DensePolynomial::default())
+    }
+}
+
+impl<F> MultilinearPoly<F> for MultilinearPolynomial<F>
+where
+    F: JoltField + jolt_field::Field,
+    for<'a> &'a F::Challenge: Into<F>,
+    F: FieldChallengeOps<F>,
+    F: ChallengeFieldOps<F>,
+{
+    fn num_vars(&self) -> usize {
+        match self {
+            Self::RLC(_) => {
+                (DoryGlobals::get_max_num_rows() * DoryGlobals::get_num_columns()).log_2()
+            }
+            _ => self.get_num_vars(),
+        }
+    }
+
+    fn evaluate(&self, point: &[F]) -> F {
+        PolynomialEvaluation::evaluate(self, point)
+    }
+
+    fn for_each_row(&self, sigma: usize, visit: &mut dyn FnMut(usize, &[F])) {
+        if matches!(self, Self::RLC(_) | Self::OneHot(_)) {
+            panic!("RLC/OneHot polynomials should use specialized Dory source paths");
+        }
+
+        let row_len = 1usize << sigma;
+        let num_rows = self.len().div_ceil(row_len);
+        for row_index in 0..num_rows {
+            let start = row_index * row_len;
+            let end = (start + row_len).min(self.len());
+            match self {
+                Self::LargeScalars(poly) => visit(row_index, &poly.Z[start..end]),
+                _ => {
+                    let row: Vec<F> = (start..end).map(|idx| self.get_coeff(idx)).collect();
+                    visit(row_index, &row);
+                }
+            }
+        }
+    }
+
+    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
+        match self {
+            Self::RLC(poly) => poly.vector_matrix_product(left),
+            _ => {
+                let row_len = 1usize << sigma;
+                let mut result = vec![F::zero(); row_len];
+                self.for_each_row(sigma, &mut |row_idx, values| {
+                    let left_value = left[row_idx];
+                    for (dest, &value) in result.iter_mut().zip(values.iter()) {
+                        *dest += left_value * value;
+                    }
+                });
+                result
+            }
+        }
     }
 }
 

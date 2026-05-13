@@ -4,6 +4,7 @@
 //! precomputed lookup tables).
 use ark_bn254::FrConfig;
 use ark_ff::{BigInt, Fp, MontConfig};
+#[cfg(not(target_arch = "wasm32"))]
 use num_traits::Zero;
 
 type Fr = ark_bn254::Fr;
@@ -36,6 +37,7 @@ const N: usize = 4;
 
 const MODULUS: [u64; N] = <FrConfig as MontConfig<N>>::MODULUS.0;
 const INV: u64 = <FrConfig as MontConfig<N>>::INV;
+#[cfg(not(target_arch = "wasm32"))]
 const R: BigInt<N> = <FrConfig as MontConfig<N>>::R;
 
 const MODULUS_HAS_SPARE_BIT: bool = MODULUS[N - 1] >> 63 == 0;
@@ -109,11 +111,13 @@ const BARRETT_MU: u64 = {
 };
 
 /// 16384-entry lookup table mapping small integers to their Montgomery form.
+#[cfg(not(target_arch = "wasm32"))]
 const PRECOMP_TABLE_SIZE: usize = 1 << 14;
 
 /// `PRECOMP_TABLE[i]` = Montgomery form of `i` for BN254 Fr.
 ///
 /// Uses `Fp::new()` which converts standard form → Montgomery form at compile time.
+#[cfg(not(target_arch = "wasm32"))]
 static PRECOMP_TABLE: [Fr; PRECOMP_TABLE_SIZE] = {
     let mut table: [Fr; PRECOMP_TABLE_SIZE] =
         [Fp::new_unchecked(BigInt([0u64; N])); PRECOMP_TABLE_SIZE];
@@ -320,6 +324,7 @@ pub(crate) fn from_montgomery_reduce<const L: usize>(unreduced: BigInt<L>) -> Fr
 }
 
 /// Multiply BigInt<4> by u64, producing BigInt<5>.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 fn bigint4_mul_u64(a: &BigInt<N>, b: u64) -> BigInt<5> {
     let mut res = BigInt::<5>([0u64; 5]);
@@ -332,6 +337,7 @@ fn bigint4_mul_u64(a: &BigInt<N>, b: u64) -> BigInt<5> {
 }
 
 /// Multiply BigInt<4> by u128, producing BigInt<6>.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 fn bigint4_mul_u128(a: &BigInt<N>, b: u128) -> BigInt<6> {
     if b == 0 {
@@ -360,6 +366,7 @@ fn bigint4_mul_u128(a: &BigInt<N>, b: u128) -> BigInt<6> {
 }
 
 /// Barrett reduce BigInt<5> → Fr (N+1 → field element)
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 fn from_unchecked_nplus1(element: BigInt<5>) -> Fr {
     let r = barrett_reduce_5_to_4(element);
@@ -367,6 +374,7 @@ fn from_unchecked_nplus1(element: BigInt<5>) -> Fr {
 }
 
 /// Barrett reduce BigInt<6> → Fr via two rounds
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 fn from_unchecked_nplus2(element: BigInt<6>) -> Fr {
     // Round 1: reduce top 5 limbs (indices 1..6)
@@ -386,6 +394,7 @@ fn from_unchecked_nplus2(element: BigInt<6>) -> Fr {
 }
 
 /// Multiply a field element by u64.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub(crate) fn mul_u64(a: Fr, b: u64) -> Fr {
     if b == 0 || Zero::is_zero(&a) {
@@ -399,6 +408,7 @@ pub(crate) fn mul_u64(a: Fr, b: u64) -> Fr {
 }
 
 /// Multiply a field element by i64.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub(crate) fn mul_i64(a: Fr, b: i64) -> Fr {
     let abs = b.unsigned_abs();
@@ -411,6 +421,7 @@ pub(crate) fn mul_i64(a: Fr, b: i64) -> Fr {
 }
 
 /// Multiply a field element by u128.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub(crate) fn mul_u128(a: Fr, b: u128) -> Fr {
     if b >> 64 == 0 {
@@ -422,6 +433,7 @@ pub(crate) fn mul_u128(a: Fr, b: u128) -> Fr {
 }
 
 /// Multiply a field element by i128.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub(crate) fn mul_i128(a: Fr, b: i128) -> Fr {
     if b == 0 || Zero::is_zero(&a) {
@@ -445,6 +457,7 @@ pub(crate) fn mul_i128(a: Fr, b: i128) -> Fr {
 }
 
 /// Convert u64 → Fr using precomp table for small values, mul_u64(R, n) otherwise.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub(crate) fn from_u64(n: u64) -> Fr {
     if (n as usize) < PRECOMP_TABLE_SIZE {
@@ -455,6 +468,7 @@ pub(crate) fn from_u64(n: u64) -> Fr {
 }
 
 /// Convert u128 → Fr using precomp table for small values, mul_u128(R, n) otherwise.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub(crate) fn from_u128(n: u128) -> Fr {
     if n < PRECOMP_TABLE_SIZE as u128 {

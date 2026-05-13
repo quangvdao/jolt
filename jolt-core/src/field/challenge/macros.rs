@@ -272,14 +272,36 @@ macro_rules! impl_field_ops_inline {
     };
 
     (@mul_challenge_field optimized, $f:ty, $lhs:expr, $rhs:expr) => {
-        $rhs.mul_by_hi_2limbs($lhs.low, $lhs.high)
+        {
+            // The hi-limb shortcut is a native-target optimization; WASM
+            // verifiers must remain bit-for-bit consistent with native proofs.
+            #[cfg(target_arch = "wasm32")]
+            {
+                Into::<$f>::into($lhs) * $rhs
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                $rhs.mul_by_hi_2limbs($lhs.low, $lhs.high)
+            }
+        }
     };
     (@mul_challenge_field standard, $f:ty, $lhs:expr, $rhs:expr) => {
         Into::<$f>::into($lhs) * $rhs
     };
 
     (@mul_field_challenge optimized, $f:ty, $lhs:expr, $rhs:expr) => {
-        $lhs.mul_by_hi_2limbs($rhs.low, $rhs.high)
+        {
+            // The hi-limb shortcut is a native-target optimization; WASM
+            // verifiers must remain bit-for-bit consistent with native proofs.
+            #[cfg(target_arch = "wasm32")]
+            {
+                $lhs * Into::<$f>::into($rhs)
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                $lhs.mul_by_hi_2limbs($rhs.low, $rhs.high)
+            }
+        }
     };
     (@mul_field_challenge standard, $f:ty, $lhs:expr, $rhs:expr) => {
         $lhs * Into::<$f>::into($rhs)

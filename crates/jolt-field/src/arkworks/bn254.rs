@@ -400,33 +400,74 @@ impl RandomSampling for Fr {
     }
 }
 
+// The custom limb reducers are a native hot path. WASM verification uses
+// arkworks' portable constructors and multiplication so proofs generated on
+// native targets verify identically in the browser/Node runtime.
 impl FromPrimitiveInt for Fr {
     #[inline]
     fn from_u64(n: u64) -> Self {
-        Fr(bn254_ops::from_u64(n))
+        #[cfg(target_arch = "wasm32")]
+        {
+            Fr(InnerFr::from(n))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Fr(bn254_ops::from_u64(n))
+        }
     }
 
     #[inline]
     fn from_i64(val: i64) -> Self {
-        if val.is_negative() {
-            -Fr(bn254_ops::from_u64(val.unsigned_abs()))
-        } else {
-            Fr(bn254_ops::from_u64(val as u64))
+        #[cfg(target_arch = "wasm32")]
+        {
+            let abs = Fr(InnerFr::from(val.unsigned_abs()));
+            if val.is_negative() {
+                -abs
+            } else {
+                abs
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if val.is_negative() {
+                -Fr(bn254_ops::from_u64(val.unsigned_abs()))
+            } else {
+                Fr(bn254_ops::from_u64(val as u64))
+            }
         }
     }
 
     #[inline]
     fn from_i128(val: i128) -> Self {
-        if val.is_negative() {
-            -Fr(bn254_ops::from_u128(val.unsigned_abs()))
-        } else {
-            Fr(bn254_ops::from_u128(val as u128))
+        #[cfg(target_arch = "wasm32")]
+        {
+            let abs = Fr(InnerFr::from(val.unsigned_abs()));
+            if val.is_negative() {
+                -abs
+            } else {
+                abs
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if val.is_negative() {
+                -Fr(bn254_ops::from_u128(val.unsigned_abs()))
+            } else {
+                Fr(bn254_ops::from_u128(val as u128))
+            }
         }
     }
 
     #[inline]
     fn from_u128(val: u128) -> Self {
-        Fr(bn254_ops::from_u128(val))
+        #[cfg(target_arch = "wasm32")]
+        {
+            Fr(InnerFr::from(val))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Fr(bn254_ops::from_u128(val))
+        }
     }
 }
 
@@ -439,22 +480,60 @@ impl crate::MulPow2 for Fr {}
 impl MulPrimitiveInt for Fr {
     #[inline]
     fn mul_u64(&self, n: u64) -> Self {
-        Fr(bn254_ops::mul_u64(self.0, n))
+        #[cfg(target_arch = "wasm32")]
+        {
+            Fr(self.0 * InnerFr::from(n))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Fr(bn254_ops::mul_u64(self.0, n))
+        }
     }
 
     #[inline(always)]
     fn mul_i64(&self, n: i64) -> Self {
-        Fr(bn254_ops::mul_i64(self.0, n))
+        #[cfg(target_arch = "wasm32")]
+        {
+            let abs = Fr(self.0 * InnerFr::from(n.unsigned_abs()));
+            if n.is_negative() {
+                -abs
+            } else {
+                abs
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Fr(bn254_ops::mul_i64(self.0, n))
+        }
     }
 
     #[inline(always)]
     fn mul_u128(&self, n: u128) -> Self {
-        Fr(bn254_ops::mul_u128(self.0, n))
+        #[cfg(target_arch = "wasm32")]
+        {
+            Fr(self.0 * InnerFr::from(n))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Fr(bn254_ops::mul_u128(self.0, n))
+        }
     }
 
     #[inline]
     fn mul_i128(&self, n: i128) -> Self {
-        Fr(bn254_ops::mul_i128(self.0, n))
+        #[cfg(target_arch = "wasm32")]
+        {
+            let abs = Fr(self.0 * InnerFr::from(n.unsigned_abs()));
+            if n.is_negative() {
+                -abs
+            } else {
+                abs
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Fr(bn254_ops::mul_i128(self.0, n))
+        }
     }
 }
 

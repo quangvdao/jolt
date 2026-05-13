@@ -128,23 +128,31 @@ pub trait CommitmentScheme: Clone + Sync + Send + 'static {
     fn protocol_name() -> &'static [u8];
 }
 
-pub trait ZkEvalCommitment<C: JoltCurve>: CommitmentScheme {
-    /// Returns the evaluation commitment (e.g. y_com) if present in the proof.
-    fn eval_commitment(proof: &Self::Proof) -> Option<C::G1>;
-
-    /// Returns the evaluation commitment from a batch proof, if present.
+/// ZK opening data needed by Stage 8 and BlindFold while `jolt-core` still uses
+/// the in-core PCS trait family.
+///
+/// This is a temporary compatibility trait. The canonical cutover should move
+/// these capabilities onto `jolt-openings` / backend-owned extension traits.
+pub trait ZkOpeningSupport<C: JoltCurve>: CommitmentScheme {
+    /// Returns the hiding commitment to the opened evaluation from a batch
+    /// proof, if the proof was produced in ZK mode.
     fn batch_eval_commitment(_proof: &Self::BatchedProof) -> Option<C::G1> {
         None
     }
 
-    /// Returns the generators used for evaluation commitments in the prover setup.
+    /// Returns the generators used for Dory-style evaluation commitments in
+    /// the prover setup.
     fn eval_commitment_gens(setup: &Self::ProverSetup) -> Option<(C::G1, C::G1)>;
 
-    /// Returns the generators used for evaluation commitments in the verifier setup.
+    /// Returns the generators used for Dory-style evaluation commitments in
+    /// the verifier setup.
     fn eval_commitment_gens_verifier(setup: &Self::VerifierSetup) -> Option<(C::G1, C::G1)>;
 
-    /// Extracts G1 generators and blinding generator from the prover setup for Pedersen commitments.
-    /// Returns None for PCS that don't support ZK Pedersen commitments.
+    /// Extracts G1 generators and the blinding generator from the prover setup
+    /// for BlindFold Pedersen commitments.
+    ///
+    /// Returns `None` for PCS backends that do not support ZK Pedersen
+    /// commitments.
     #[cfg(feature = "zk")]
     fn zk_generators(_setup: &Self::ProverSetup, _count: usize) -> Option<(Vec<C::G1>, C::G1)> {
         None

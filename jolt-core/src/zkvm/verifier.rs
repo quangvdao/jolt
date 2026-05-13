@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::curve::JoltCurve;
 use crate::poly::commitment::commitment_scheme::{
-    BatchOpeningScheme, CommitmentScheme, ZkEvalCommitment,
+    BatchOpeningScheme, CommitmentScheme, ZkOpeningSupport,
 };
 #[cfg(feature = "zk")]
 use crate::poly::commitment::dory::bind_opening_inputs_zk;
@@ -255,7 +255,7 @@ impl<
         'a,
         F: JoltField,
         C: JoltCurve<F = F>,
-        PCS: CommitmentScheme<Field = F> + BatchOpeningScheme<Field = F> + ZkEvalCommitment<C>,
+        PCS: CommitmentScheme<Field = F> + BatchOpeningScheme<Field = F> + ZkOpeningSupport<C>,
         ProofTranscript: Transcript,
     > JoltVerifier<'a, F, C, PCS, ProofTranscript>
 {
@@ -1928,7 +1928,7 @@ impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>>
 }
 
 #[cfg(feature = "prover")]
-impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F> + ZkEvalCommitment<C>>
+impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F> + ZkOpeningSupport<C>>
     From<&JoltProverPreprocessing<F, C, PCS>> for JoltVerifierPreprocessing<F, C, PCS>
 {
     fn from(prover_preprocessing: &JoltProverPreprocessing<F, C, PCS>) -> Self {

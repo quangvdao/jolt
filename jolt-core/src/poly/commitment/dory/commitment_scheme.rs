@@ -10,7 +10,7 @@ use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::commitment::commitment_scheme::{
-        BatchOpeningScheme, CommitmentScheme, SourceBatchCommitmentScheme, ZkEvalCommitment,
+        BatchOpeningScheme, CommitmentScheme, SourceBatchCommitmentScheme, ZkOpeningSupport,
     },
     poly::multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     transcripts::Transcript,
@@ -537,22 +537,10 @@ fn convert_new_dory_commitment_and_hint(
     )
 }
 
-impl<C: JoltCurve> ZkEvalCommitment<C> for DoryCommitmentScheme
+impl<C: JoltCurve> ZkOpeningSupport<C> for DoryCommitmentScheme
 where
     C::G1: From<ArkG1>,
 {
-    fn eval_commitment(proof: &Self::Proof) -> Option<C::G1> {
-        #[cfg(feature = "zk")]
-        {
-            proof.y_com.as_ref().copied().map(C::G1::from)
-        }
-        #[cfg(not(feature = "zk"))]
-        {
-            let _ = proof;
-            None
-        }
-    }
-
     fn batch_eval_commitment(proof: &Self::BatchedProof) -> Option<C::G1> {
         let [proof] = proof.as_slice() else {
             return None;

@@ -3,7 +3,7 @@ use crate::curve::{Bn254Curve, JoltCurve};
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::commitment_scheme::{
-    BatchOpeningScheme, SourceBatchCommitmentScheme, ZkEvalCommitment,
+    BatchOpeningScheme, SourceBatchCommitmentScheme, ZkOpeningSupport,
 };
 use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
@@ -45,7 +45,7 @@ pub fn preprocess(
 pub fn prove<
     F: JoltField,
     C: JoltCurve<F = F>,
-    PCS: SourceBatchCommitmentScheme<Field = F> + BatchOpeningScheme<Field = F> + ZkEvalCommitment<C>,
+    PCS: SourceBatchCommitmentScheme<Field = F> + BatchOpeningScheme<Field = F> + ZkOpeningSupport<C>,
     FS: Transcript,
 >(
     guest: &Program,

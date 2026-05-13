@@ -894,7 +894,7 @@ These bridges exist because `jolt-core` still has several old surfaces that are 
 3. Stage 8 still owns Jolt-specific claim accumulation, `OpeningId` ordering, RLC polynomial construction, layout-sensitive opening point reordering, and BlindFold constraints.
    Those are protocol concerns and should not move into `jolt-openings`.
 4. ZK mode needs Dory evaluation commitments, evaluation blindings, Pedersen generator derivation, and BlindFold opening proof data.
-   `jolt-dory` exposes most of these capabilities, but `jolt-core` still consumes them through its old `ZkEvalCommitment<C>` and `PedersenGenerators<C>` surface.
+   `jolt-dory` exposes most of these capabilities, but `jolt-core` still consumes them through the temporary in-core `ZkOpeningSupport<C>` and `PedersenGenerators<C>` surface.
 5. Dory layout globals are still used by `jolt-core` polynomial adapters, opening point construction, proof serialization, and tests.
    Full cutover should either keep that layout state explicitly in `jolt-core` or replace it with a small protocol-owned layout/config object; it should not hide the layout inside the backend-neutral PCS API.
 
@@ -924,10 +924,10 @@ The final cutover additionally requires:
 2. Introduce explicit conversions or a broader field migration between `ark_bn254::Fr` / `JoltField` and `jolt_field::Fr` / `jolt_field::Field`.
    This should be done without dense rematerialization in prover hot paths.
 3. Reconcile `crate::transcripts::Transcript` with `jolt_transcript::Transcript` so Dory transcript binding remains byte-identical in transparent and ZK mode.
-4. Replace `ZkEvalCommitment<C>` with one or more narrow `jolt-openings` extension traits that expose exactly the needed ZK capabilities: hiding evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation.
+4. Move `ZkOpeningSupport<C>` onto one or more narrow `jolt-openings` extension traits that expose exactly the needed ZK capabilities: hiding evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation.
 5. Decide the ownership boundary for `DoryGlobals` / `DoryLayout`.
    The layout affects Jolt's polynomial indexing and opening points, so it should remain protocol-owned even if the Dory backend consumes a layout/config value.
-6. Remove `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkEvalCommitment` from the in-core PCS surface once all call sites compile against `jolt-openings`.
+6. Remove `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkOpeningSupport` from the in-core PCS surface once all call sites compile against `jolt-openings`.
 
 Stage 8 is the main adaptation point for openings, not for witness commitment.
 The old commitment-time streaming trait should disappear from the public PCS API, because `commit_batch` and `commit_batch_zk` take over that boundary.

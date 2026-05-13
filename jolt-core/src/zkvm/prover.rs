@@ -35,7 +35,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::{
-                BatchOpeningScheme, SourceBatchCommitmentScheme, ZkEvalCommitment,
+                BatchOpeningScheme, SourceBatchCommitmentScheme, ZkOpeningSupport,
             },
             dory::{DoryGlobals, DoryLayout},
         },
@@ -205,7 +205,7 @@ impl<
         C: JoltCurve<F = F>,
         PCS: SourceBatchCommitmentScheme<Field = F>
             + BatchOpeningScheme<Field = F>
-            + ZkEvalCommitment<C>,
+            + ZkOpeningSupport<C>,
         ProofTranscript: Transcript,
     > JoltCpuProver<'a, F, C, PCS, ProofTranscript>
 {
@@ -2174,7 +2174,7 @@ where
     #[cfg(feature = "zk")]
     pub fn blindfold_setup(&self) -> BlindfoldSetup<C>
     where
-        PCS: ZkEvalCommitment<C>,
+        PCS: ZkOpeningSupport<C>,
     {
         use common::constants::MAX_BLINDFOLD_GENERATORS;
 
@@ -2186,7 +2186,7 @@ where
     #[cfg(feature = "zk")]
     pub fn pedersen_generators(&self, count: usize) -> PedersenGenerators<C>
     where
-        PCS: ZkEvalCommitment<C>,
+        PCS: ZkOpeningSupport<C>,
     {
         let gens: PedersenGenerators<C> = self.blindfold_setup().into();
         PedersenGenerators::new(

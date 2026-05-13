@@ -446,6 +446,58 @@ mod tests {
     }
 
     #[test]
+    fn strided_source_rows_materialize_skipped_columns() {
+        struct TestSource {
+            rows: Vec<Vec<u64>>,
+            dense: Polynomial<Fr>,
+        }
+
+        impl CommitmentSource<Fr> for TestSource {
+            fn num_vars(&self) -> usize {
+                self.dense.num_vars()
+            }
+
+            fn evaluate(&self, point: &[Fr]) -> Fr {
+                self.dense.evaluate(point)
+            }
+
+            fn for_each_row<V>(&self, _sigma: usize, mut visit: V)
+            where
+                V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
+            {
+                for (row_index, row) in self.rows.iter().enumerate() {
+                    visit(
+                        row_index,
+                        SourceRow::StridedU64 {
+                            values: row,
+                            column_stride: 4,
+                        },
+                    );
+                }
+            }
+
+            fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
+                self.dense.fold_rows(left, sigma)
+            }
+        }
+
+        let rows = vec![vec![3, 5], vec![7, 11]];
+        let mut dense = vec![Fr::from_u64(0); 16];
+        dense[0] = Fr::from_u64(3);
+        dense[4] = Fr::from_u64(5);
+        dense[8] = Fr::from_u64(7);
+        dense[12] = Fr::from_u64(11);
+
+        let source = TestSource {
+            rows,
+            dense: Polynomial::new(dense.clone()),
+        };
+
+        let (commitment, ()) = MockPCS::commit(&source, &());
+        assert_eq!(commitment.evaluations, dense);
+    }
+
+    #[test]
     fn one_hot_source_rows_materialize_hot_coordinate_major() {
         struct TestSource {
             entries: Vec<Option<OneHotIndex>>,

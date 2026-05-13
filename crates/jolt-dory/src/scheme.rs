@@ -1408,6 +1408,12 @@ mod tests {
         evaluations: Vec<u64>,
     }
 
+    struct StridedU64Source {
+        rows: Vec<Vec<u64>>,
+        dense: Polynomial<Fr>,
+        column_stride: usize,
+    }
+
     impl U64Source {
         fn field_evaluation(&self, point: &[Fr]) -> Fr {
             let dense: Vec<Fr> = self
@@ -1448,6 +1454,35 @@ mod tests {
                 }
             }
             result
+        }
+    }
+
+    impl CommitmentSource<Fr> for StridedU64Source {
+        fn num_vars(&self) -> usize {
+            self.dense.num_vars()
+        }
+
+        fn evaluate(&self, point: &[Fr]) -> Fr {
+            self.dense.evaluate(point)
+        }
+
+        fn for_each_row<V>(&self, _sigma: usize, mut visit: V)
+        where
+            V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
+        {
+            for (row_index, row) in self.rows.iter().enumerate() {
+                visit(
+                    row_index,
+                    SourceRow::StridedU64 {
+                        values: row,
+                        column_stride: self.column_stride,
+                    },
+                );
+            }
+        }
+
+        fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
+            self.dense.fold_rows(left, sigma)
         }
     }
 
@@ -1546,6 +1581,31 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn strided_u64_commit_matches_dense_zero_padded_rows() {
+        let prover_setup = DoryScheme::setup_prover(6);
+        let mut dense = vec![Fr::from_u64(0); 16];
+        dense[0] = Fr::from_u64(3);
+        dense[4] = Fr::from_u64(5);
+        dense[8] = Fr::from_u64(7);
+        dense[12] = Fr::from_u64(11);
+
+        let source = StridedU64Source {
+            rows: vec![vec![3, 5], vec![7, 11]],
+            dense: Polynomial::new(dense.clone()),
+            column_stride: 4,
+        };
+        let dense_source = Polynomial::new(dense);
+
+        let (strided_commitment, strided_hint) =
+            DoryScheme::commit_with_shape(&source, 1, 3, &prover_setup);
+        let (dense_commitment, dense_hint) =
+            DoryScheme::commit_with_shape(&dense_source, 1, 3, &prover_setup);
+
+        assert_eq!(strided_commitment, dense_commitment);
+        assert_eq!(strided_hint.row_commitments, dense_hint.row_commitments);
     }
 
     #[test]

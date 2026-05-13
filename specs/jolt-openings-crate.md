@@ -10,12 +10,12 @@
 ## Summary
 
 Jolt currently has two polynomial commitment scheme APIs in the workspace.
-The production zkVM path still uses the monolithic in-core trait in `jolt-core/src/poly/commitment/commitment_scheme.rs`, while `crates/jolt-openings` and `crates/jolt-dory` define the extracted crate boundary.
-The current branch has started wiring that boundary into `jolt-core` for source-batch commitments, but the in-core trait family is still the public PCS surface used by `JoltProof`, prover preprocessing, verifier preprocessing, Stage 8, and BlindFold setup.
+The production zkVM path still has the monolithic in-core trait in `jolt-core/src/poly/commitment/commitment_scheme.rs`, while `crates/jolt-openings` and `crates/jolt-dory` define the extracted crate boundary.
+This PR's target is the full `jolt-core` PCS type-family migration: `jolt-core` should compile against the canonical `jolt-openings` traits directly, and the old in-core PCS trait family should be removed rather than left as a compatibility layer.
 
 This spec proposes a main-target API refactor that ports PR [#1467](https://github.com/a16z/jolt/pull/1467) onto current `main`, with review-driven adjustments recorded here.
-The final target makes `jolt-openings` the canonical backend-neutral opening API, splits verifier and prover PCS surfaces, makes fused batched openings the primary API, moves Dory onto the extracted trait family, and cuts `jolt-core` over to `PCS::BatchProof` without introducing Akita or changing the Jolt protocol.
-Until `jolt-core`'s proof, setup, hint, transcript, and field surfaces are migrated, this PR may use narrow compatibility traits that delegate to `jolt-dory` internally.
+The final target makes `jolt-openings` the canonical backend-neutral opening API, splits verifier and prover PCS surfaces, makes fused batched openings the primary API, moves Dory onto the extracted trait family, and cuts `jolt-core` over to `PCS::BatchProof` / `PCS::Output` without introducing Akita or changing the Jolt protocol.
+Any existing bridge traits in this branch are implementation scaffolding only; they are not part of the merge target and should be deleted once the direct type-family migration is complete.
 
 The implementation should be a mechanical transplant of #1467's hard-earned design except where this spec explicitly diverges, not a greenfield rewrite.
 Adaptation is only for current `main` drift, especially current Dory hardening, current Dory ZK evaluation commitments, Stage 8's streaming RLC optimization, and BlindFold wiring.
@@ -25,6 +25,7 @@ Adaptation is only for current `main` drift, especially current Dory hardening, 
 ### Goal
 
 Make `crates/jolt-openings` the canonical polynomial-opening abstraction used by `jolt-core`, with a verifier-first trait hierarchy and fused `prove_batch` / `verify_batch` API that can support Dory today and future non-Dory schemes such as Akita while keeping native batch proving on the primary production path.
+This includes replacing the old `jolt-core` PCS associated types, proof storage, setup plumbing, Stage 8 accumulators, ZK hooks, mock PCS, HyperKZG integration points, and public prover/verifier generic bounds with the `jolt-openings` type family.
 
 ### Source of Truth
 
@@ -77,8 +78,9 @@ Preserve from current `main`:
 14. `JoltProof` stores the opening proof as `PCS::BatchProof`, not `PCS::Proof`.
 15. Standard and ZK `muldiv` end-to-end proofs continue to pass.
 16. The implementation introduces no Akita dependency.
-17. Temporary in-core compatibility traits are allowed only as staging boundaries while `jolt-core` still stores old setup, commitment, hint, proof, field, transcript, and serialization types.
-    They must delegate to the canonical `jolt-openings` / `jolt-dory` operations where the type boundary already permits it, and they must be removed in the final old/new trait-family cutover.
+17. The final PR state contains no in-core PCS compatibility trait family.
+    `jolt-core/src/poly/commitment/commitment_scheme.rs` should no longer define `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, or `ZkOpeningSupport` as wrappers around `jolt-openings`.
+    Direct users should import the canonical `jolt-openings` traits or a narrow backend-owned extension trait.
 18. `cargo tree -d` must not show duplicate resolved versions of `jolt-field`, `jolt-transcript`, `jolt-crypto`, or `jolt-openings`.
 
 No new `jolt-eval` invariant is required for this spec.
@@ -88,12 +90,12 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 
 1. Integrating Akita or Hachi.
 2. Adding lattice parameters, lattice proof types, or Akita-specific Stage 8 branches.
-3. Redesigning the whole proof format beyond replacing the opening proof field with `PCS::BatchProof`.
+3. Redesigning the whole proof format beyond replacing PCS-owned associated fields with the canonical `jolt-openings` types.
 4. Moving Stage 8 sumcheck wiring, opening IDs, accumulator types, or BlindFold constraints into `jolt-openings`.
 5. Replacing the current Jolt prover pipeline with the verifier/compiler runtime from `refactor/crates`.
 6. Porting unrelated #1467 hygiene changes such as debug-test clippy suppressions when they are not needed on current `main`.
 7. Adding a new batch-ZK opening abstraction beyond the #1467 ZK split.
-8. Preserving the old internal `CommitmentScheme` trait as a permanent compatibility layer after the final old/new trait-family cutover.
+8. Preserving the old internal `CommitmentScheme` trait as a permanent or merge-ready compatibility layer.
 9. Changing guest execution, bytecode expansion, memory checking, instruction lookups, or sumcheck protocol semantics.
 10. Changing Dory's transcript labels or proof verification behavior except where required to preserve current `main` behavior under the new trait API.
 
@@ -119,12 +121,22 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 - [x] `DoryScheme::BatchProof = Vec<DoryProof>` for the homomorphic Dory implementation.
 - [x] `DoryScheme::prove_batch` delegates to `homomorphic_prove_batch`.
 - [x] `DoryScheme::verify_batch` delegates to `homomorphic_verify_batch`.
-- [x] `jolt-core` depends on `jolt-openings` and `jolt-dory`, with the remaining in-core PCS traits acting as documented compatibility bridges around old proof/setup/hint/field/transcript types.
-- [x] `JoltProof` stores `joint_opening_proof` as the batch-shaped old associated type `PCS::BatchedProof`, corresponding to canonical `PCS::BatchProof`.
-- [x] Stage 8 prover calls `PCS::prove_batch`.
-- [x] Stage 8 verifier calls `PCS::verify_batch`.
+- [x] `jolt-core` depends on `jolt-openings` and `jolt-dory`.
+- [ ] `jolt-core` imports the canonical `jolt_openings::{CommitmentSchemeVerifier, CommitmentScheme, PublicVerifierSetup, ZkOpeningSchemeVerifier, ZkOpeningScheme}` traits directly instead of the old in-core PCS trait family.
+- [ ] `jolt-core` call sites use `PCS::Output` for commitments, matching `jolt_crypto::Commitment`, rather than the old `PCS::Commitment`.
+- [ ] `jolt-core` call sites use `PCS::OpeningHint`, `PCS::Proof`, `PCS::BatchProof`, `PCS::ProverSetup`, and `PCS::VerifierSetup` from `jolt-openings` directly.
+- [ ] `JoltProof` stores `joint_opening_proof` as canonical `PCS::BatchProof`.
+- [ ] Prover preprocessing and verifier preprocessing store canonical `jolt-openings` setup, commitment, and opening-hint associated types.
+- [ ] Public prover/verifier generic bounds and SDK-facing generated functions name the canonical `jolt-openings` PCS traits.
+- [ ] Stage 8 prover calls canonical `jolt-openings` `PCS::prove_batch`.
+- [ ] Stage 8 verifier calls canonical `jolt-openings` `PCS::verify_batch`.
 - [x] Stage 8 keeps the same dense increment scaling, RA polynomial ordering, advice Lagrange scaling, `opening_ids`, `constraint_coeffs`, and `joint_claim` semantics as current `main`.
-- [x] ZK mode still extracts and binds the Dory evaluation commitment needed by BlindFold.
+- [ ] ZK mode still extracts and binds the Dory evaluation commitment needed by BlindFold after the in-core ZK bridge is removed.
+- [ ] ZK evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation are expressed through `jolt-openings` / backend-owned extension traits rather than in-core `ZkOpeningSupport`.
+- [ ] `DoryCommitmentScheme`'s old wrapper types are either removed or reduced to protocol layout glue that does not define a separate PCS trait family.
+- [ ] The in-core `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkOpeningSupport` bridges are removed.
+- [ ] No production `jolt-core` code calls Dory-specific borrowed-ark bridge APIs to enter the PCS; it enters through canonical `jolt-openings` methods.
+- [ ] HyperKZG and the mock PCS compile against the same `jolt-openings` trait family used by Dory, or are explicitly removed from `jolt-core` production generic bounds if they are no longer supported there.
 - [x] `cargo nextest run -p jolt-openings --features test-utils --cargo-quiet` passes.
 - [x] `cargo nextest run -p jolt-dory --cargo-quiet` passes.
 - [x] `cargo nextest run -p jolt-core muldiv --cargo-quiet --features host` passes.
@@ -132,11 +144,6 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 - [x] `cargo clippy --all --features host -q --all-targets -- -D warnings` passes.
 - [x] `cargo clippy --all --features host,zk -q --all-targets -- -D warnings` passes.
 - [x] `cargo fmt -q` produces no diff.
-
-Deferred to the final old/new trait-family cutover:
-
-- [ ] `jolt-core` call sites use `PCS::Output` for commitments, matching `jolt_crypto::Commitment`, rather than the old `PCS::Commitment`.
-- [ ] The in-core `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkOpeningSupport` bridges are removed once proof/setup/hint/field/transcript and serialization types compile directly against `jolt-openings`.
 
 ### Testing Strategy
 
@@ -194,7 +201,9 @@ Concrete checks:
 
 1. `cargo nextest run -p jolt-core muldiv --cargo-quiet --features host` should not show obvious runtime blowups.
 2. Existing Dory benches should compile.
-3. If a reviewer requests performance data, run the existing Dory and opening reduction benches before and after the cutover.
+3. Run the existing Criterion benchmark path for Dory/opening-heavy workloads before and after the full `jolt-core` type-family cutover.
+   The PR should include the measured comparison against `main` or a clear explanation of any unavoidable noise.
+4. Treat any material prover regression in Stage 8 or CycleMajor commitment as a blocker unless the implementation explains and justifies a deliberate algorithmic tradeoff.
 
 ## Design
 
@@ -630,7 +639,7 @@ This keeps `jolt-openings` neutral about commitment granularity:
 4. The PCS layer only sees committed sources and opening claims against those sources.
 
 `jolt-core` should replace `CommittedPolynomial::stream_witness_and_commit_rows` with a trace-backed batch commitment source.
-The current implementation has this shape as `CycleMajorTraceBatch`: row generation now lives in the source adapter, and the in-core `SourceBatchCommitmentScheme` bridge delegates those source rows to `jolt-dory` while the larger old/new PCS trait cutover is still in progress.
+The current implementation has this shape as `CycleMajorTraceBatch`: row generation now lives in the source adapter, and the remaining work is to pass those source rows directly to canonical `PCS::commit_batch` / `PCS::commit_batch_zk` without an in-core source-batch bridge.
 The final state is for the prover to pass the same batch source directly to `PCS::commit_batch` / `PCS::commit_batch_zk`.
 
 ```rust
@@ -738,10 +747,9 @@ Materialized dense sources can call `visit(row_index, SourceRow::FieldElements(e
 No `Cow` is needed because the row view only has to live for the duration of the `visit` call.
 
 The prover call-site change is narrow: the old row-generation helper disappears and the CycleMajor branch passes `CycleMajorTraceBatch` to source-batch commit entry points.
-While `jolt-core` is still on the in-core PCS trait family, those entry points are temporarily exposed through a `SourceBatchCommitmentScheme` compatibility trait.
-That trait replaces the old chunk-streaming commitment surface: source-batch support is a PCS capability, not a property every chunk-streaming helper should advertise.
-For Dory, the compatibility implementation delegates to `jolt-dory::DoryScheme`'s canonical `jolt_openings::CommitmentScheme::commit_batch` and `ZkOpeningScheme::commit_batch_zk`, then converts the commitment and hint back into the old `jolt-core` wrapper types.
-After the full trait-family cutover the same calls should resolve to `jolt-openings::CommitmentScheme` / `ZkOpeningScheme` directly.
+The current branch temporarily exposes those entry points through a `SourceBatchCommitmentScheme` compatibility trait because the surrounding proof/setup/hint type family has not yet been migrated.
+That bridge should be deleted in this PR.
+The final call should resolve to `jolt-openings::CommitmentScheme` / `ZkOpeningScheme` directly, with Dory providing the optimized batch-source override behind the canonical trait.
 
 ```rust
 let row_len = DoryGlobals::get_num_columns();
@@ -875,10 +883,10 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 
 `jolt-core` should be cut over without changing protocol semantics.
 
-#### Current Wiring
+#### Bridge State To Remove
 
-The current branch is not a full `jolt-core` cutover to `jolt-openings` / `jolt-dory`.
-It has two deliberate bridge points:
+The current branch has not yet completed the full `jolt-core` cutover to `jolt-openings` / `jolt-dory`.
+It has bridge points that explain the remaining migration work, but these bridge points are not merge-target architecture:
 
 1. `SourceBatchCommitmentScheme` lets `jolt-core` commit trace/advice source batches while still returning old in-core commitment and hint associated types.
    The Dory implementation delegates to `jolt_dory::DoryScheme::{commit_batch, commit_batch_zk}` and then converts the result back into the old `DoryCommitmentScheme` wrapper types.
@@ -904,7 +912,7 @@ These bridges exist because `jolt-core` still has several old surfaces that are 
 
 Because of these differences, replacing `DoryCommitmentScheme` with `jolt_dory::DoryScheme` in `jolt-core` is not a local import change.
 It is a cross-cutting migration of associated types, serialization contracts, field/challenge conversions, transcript adapters, and ZK extension hooks.
-The current bridge is therefore acceptable as an implementation staging point, but not as the final architecture.
+This PR is now scoped to do that migration rather than preserving the bridge layer.
 
 #### Final Cutover
 
@@ -913,8 +921,8 @@ The high-level migration is:
 1. Add `jolt-openings` and `jolt-dory` as dependencies.
 2. Replace imports of the internal PCS trait with `jolt_openings` traits.
 3. Replace `PCS::Commitment` associated type usage with `PCS::Output`.
-4. Keep any pre-cutover source-batch bridge narrow; only PCS backends that really support the source row shapes should implement it.
-5. Remove the remaining pre-cutover source-batch bridge once `jolt-core` proof, hint, setup, and transcript types are on the new trait family.
+4. Move source-batch commitment call sites directly to canonical `PCS::commit_batch` / `PCS::commit_batch_zk`.
+5. Remove the pre-cutover source-batch bridge once those call sites compile against `jolt-openings`.
 6. Keep Dory tier-1 and tier-2 row aggregation private to the concrete backend once no in-core caller needs direct chunk-level access.
 7. Replace `PCS::Proof` proof storage with `PCS::BatchProof`.
 8. Replace Stage 8's direct `PCS::prove` call with `PCS::prove_batch`.
@@ -928,10 +936,11 @@ The final cutover additionally requires:
 2. Introduce explicit conversions or a broader field migration between `ark_bn254::Fr` / `JoltField` and `jolt_field::Fr` / `jolt_field::Field`.
    This should be done without dense rematerialization in prover hot paths.
 3. Reconcile `crate::transcripts::Transcript` with `jolt_transcript::Transcript` so Dory transcript binding remains byte-identical in transparent and ZK mode.
-4. Move `ZkOpeningSupport<C>` onto one or more narrow `jolt-openings` extension traits that expose exactly the needed ZK capabilities: hiding evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation.
+   The preferred end state is a single transcript trait family for PCS APIs; if `jolt-core` keeps its transcript facade for protocol code, the PCS boundary should use an explicit adapter type rather than a second PCS trait.
+4. Move `ZkOpeningSupport<C>` onto one or more narrow `jolt-openings` or backend-owned extension traits that expose exactly the needed ZK capabilities: hiding evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation.
 5. Decide the ownership boundary for `DoryGlobals` / `DoryLayout`.
    The layout affects Jolt's polynomial indexing and opening points, so it should remain protocol-owned even if the Dory backend consumes a layout/config value.
-6. Remove `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkOpeningSupport` from the in-core PCS surface once all call sites compile against `jolt-openings`.
+6. Remove `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkOpeningSupport` from the in-core PCS surface before this PR is considered complete.
 
 Stage 8 is the main adaptation point for openings, not for witness commitment.
 The old commitment-time streaming trait should disappear from the public PCS API, because `commit_batch` and `commit_batch_zk` take over that boundary.
@@ -949,27 +958,23 @@ In the final cutover this means the public API is new, but the performance-criti
 The same source abstraction can later make the joint RLC polynomial less Dory-shaped, but the first PR should not require moving Jolt's opening accumulator, claim ordering, or BlindFold constraint logic into `jolt-openings`.
 Future Akita work can implement a different `prove_batch` / `verify_batch` body without changing `jolt-core`'s trait definitions.
 
-While `jolt-core` is still on the in-core PCS trait family, this first cutover is represented by a `BatchOpeningScheme` compatibility trait.
-It keeps the existing Stage 8 RLC polynomial construction and exposes the result as a single-group `PCS::BatchedProof`.
-For the old Dory wrapper this is a one-element `Vec<ArkDoryProof>`, matching the canonical `jolt-dory` shape.
-ZK mode extracts the evaluation commitment from that single-group batch proof before binding the same transcript input and BlindFold opening data as before.
-This bridge should disappear once `JoltProof`, preprocessing, transcripts, fields, and ZK extension hooks are on the canonical `jolt-openings` surfaces.
+The current branch represents this through a `BatchOpeningScheme` compatibility trait while `jolt-core` still uses old associated types.
+That bridge is now part of the cleanup scope.
+The final Stage 8 code should call canonical `PCS::prove_batch` / `PCS::verify_batch`, store canonical `PCS::BatchProof`, and use canonical or backend-owned ZK extension hooks to extract the evaluation commitment before binding the same transcript input and BlindFold opening data as before.
 
 ### Proof Serialization
 
-Current `JoltProof` contains:
+Pre-cutover `JoltProof` contains:
 
 ```rust
 pub joint_opening_proof: PCS::Proof
 ```
 
-The refactor changes it to:
+The full cutover changes it to:
 
 ```rust
 pub joint_opening_proof: PCS::BatchProof
 ```
-
-In the in-core compatibility layer this is spelled `PCS::BatchedProof`; the canonical `jolt-openings` trait spells the same concept `PCS::BatchProof`.
 
 Renaming the field is optional.
 The behaviorally important change is that the proof object is scheme-defined batch proof storage.
@@ -1017,7 +1022,7 @@ The extension trait should describe the capability directly, such as deriving Pe
 
 ## Documentation
 
-No Jolt book changes are required for the spec-only PR.
+No Jolt book changes are required for this internal API refactor unless reviewers request them.
 
 The implementation PR should update crate-level docs in:
 
@@ -1026,7 +1031,7 @@ The implementation PR should update crate-level docs in:
 3. `crates/jolt-openings/src/homomorphic.rs`
 4. `crates/jolt-dory/src/lib.rs`
 
-The implementation PR should not add user-facing Jolt book documentation unless reviewers request it.
+The PR should not add user-facing Jolt book documentation unless reviewers request it.
 This is an internal API boundary refactor with no intended SDK or guest-facing behavior change.
 
 ## Execution
@@ -1044,19 +1049,23 @@ Implementation should proceed mechanically:
 9. Update Stage 8 prover to produce a batch proof through `PCS::prove_batch`.
 10. Update Stage 8 verifier to verify through `PCS::verify_batch`.
 11. Reconcile ZK and BlindFold extraction through the split ZK traits or a narrow extension trait.
-12. Remove or quarantine the old internal PCS trait after call sites stop depending on it.
-13. Run focused crate tests.
-14. Run `muldiv` in standard and ZK mode.
-15. Run clippy in standard and ZK mode.
+12. Remove the old internal PCS trait family after call sites stop depending on it.
+13. Delete bridge-only Dory APIs, wrappers, and conversions that become unused after direct `jolt-openings` integration.
+14. Run focused crate tests.
+15. Run `muldiv` in standard and ZK mode.
+16. Run clippy in standard and ZK mode.
+17. Run the existing Criterion benchmark path against `main` and the PR branch for Dory/opening-heavy workloads.
 
 Recommended commit structure for the implementation PR:
 
 1. `refactor(openings): port verifier PCS split`
 2. `refactor(dory): implement split openings traits`
-3. `refactor(core): use batched opening proofs`
-4. `test(openings): cover fused batch helpers`
+3. `refactor(core): migrate PCS type family`
+4. `refactor(core): remove in-core PCS bridges`
+5. `perf(dory): preserve opening and commitment hot paths`
+6. `test(openings): cover fused batch helpers`
 
-This spec PR should land first so implementation review can reference the intended boundary.
+The spec should stay in the implementation PR so reviewers can check code against the intended boundary as the cutover proceeds.
 
 ## References
 

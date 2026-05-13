@@ -1,7 +1,7 @@
 //! Integration tests for the Dory commitment scheme.
 //!
 //! Public-API-only tests — no `pub(crate)` imports. Exercises commit, open,
-//! verify, streaming, combine, and negative cases across transcript backends.
+//! verify, source-batch commitment, combine, and negative cases across transcript backends.
 
 #![expect(clippy::expect_used, reason = "tests may panic on assertion failures")]
 
@@ -67,31 +67,6 @@ fn commit_open_verify_both_transcripts() {
     let num_vars = 4;
     round_trip::<Blake2bTranscript>(num_vars, 200, b"blake2b-rt");
     round_trip::<KeccakTranscript>(num_vars, 200, b"keccak-rt");
-}
-
-#[test]
-fn streaming_equals_direct_various_sizes() {
-    for num_vars in [2usize, 4, 6] {
-        let sigma = num_vars.div_ceil(2);
-        let num_cols = 1usize << sigma;
-        let mut rng = ChaCha20Rng::seed_from_u64(300 + num_vars as u64);
-
-        let prover_setup = DoryScheme::setup_prover(num_vars);
-        let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
-
-        let (direct, _) = DoryScheme::commit(poly.evaluations(), &prover_setup);
-
-        let mut partial = DoryScheme::begin(&prover_setup);
-        for row in poly.evaluations().chunks(num_cols) {
-            DoryScheme::feed(&mut partial, row, &prover_setup);
-        }
-        let streamed = DoryScheme::finish(partial, &prover_setup);
-
-        assert_eq!(
-            direct, streamed,
-            "streaming and direct must match for num_vars={num_vars}"
-        );
-    }
 }
 
 #[test]
@@ -529,46 +504,6 @@ fn commit_batch_one_hot_matches_multi_chunk_streaming_layout() {
 
     let (direct, _) = DoryScheme::commit(&batch.dense[0], &prover_setup);
     assert_eq!(results[0].0, direct);
-}
-
-#[test]
-fn streaming_zk_commitment_is_blinded_and_verifies() {
-    let num_vars = 4usize;
-    let sigma = num_vars.div_ceil(2);
-    let num_cols = 1usize << sigma;
-    let mut rng = ChaCha20Rng::seed_from_u64(350);
-
-    let prover_setup = DoryScheme::setup_prover(num_vars);
-    let verifier_setup = DoryScheme::setup_verifier(num_vars);
-    let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
-    let point: Vec<Fr> = (0..num_vars)
-        .map(|_| <Fr as RandomSampling>::random(&mut rng))
-        .collect();
-    let eval = poly.evaluate(&point);
-
-    let mut partial = DoryScheme::begin(&prover_setup);
-    for row in poly.evaluations().chunks(num_cols) {
-        DoryScheme::feed(&mut partial, row, &prover_setup);
-    }
-    let (commitment, hint) = DoryScheme::finish_zk(partial, &prover_setup);
-
-    let mut partial_again = DoryScheme::begin(&prover_setup);
-    for row in poly.evaluations().chunks(num_cols) {
-        DoryScheme::feed(&mut partial_again, row, &prover_setup);
-    }
-    let (commitment_again, _) = DoryScheme::finish_zk(partial_again, &prover_setup);
-    assert_ne!(
-        commitment, commitment_again,
-        "streaming ZK commitments must use fresh blinding"
-    );
-
-    let mut pt = Blake2bTranscript::new(b"stream-zk");
-    let (proof, _eval_com, _blind) =
-        DoryScheme::open_zk(&poly, &point, eval, &prover_setup, hint, &mut pt);
-
-    let mut vt = Blake2bTranscript::new(b"stream-zk");
-    DoryScheme::verify_zk(&commitment, &point, &proof, &verifier_setup, &mut vt)
-        .expect("streaming ZK commitment must verify");
 }
 
 #[test]

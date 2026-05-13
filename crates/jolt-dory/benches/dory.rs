@@ -123,37 +123,6 @@ fn bench_verify(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_streaming_commit(c: &mut Criterion) {
-    let mut group = c.benchmark_group("streaming_commit");
-    for num_vars in [4, 8, 12] {
-        let setup = DoryScheme::setup_prover(num_vars);
-        let sigma = num_vars.div_ceil(2);
-        let num_cols = 1usize << sigma;
-
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_vars),
-            &num_vars,
-            |b, &nv| {
-                b.iter_batched(
-                    || {
-                        let mut rng = ChaCha20Rng::seed_from_u64(0);
-                        Polynomial::<Fr>::random(nv, &mut rng)
-                    },
-                    |poly| {
-                        let mut partial = DoryScheme::begin(&setup);
-                        for row in poly.evaluations().chunks(num_cols) {
-                            DoryScheme::feed(&mut partial, row, &setup);
-                        }
-                        DoryScheme::finish(partial, &setup)
-                    },
-                    criterion::BatchSize::SmallInput,
-                );
-            },
-        );
-    }
-    group.finish();
-}
-
 fn bench_combine(c: &mut Criterion) {
     let mut group = c.benchmark_group("combine");
     for num_vars in [4, 8] {
@@ -317,7 +286,6 @@ criterion_group!(
     bench_commit_one_hot,
     bench_open,
     bench_verify,
-    bench_streaming_commit,
     bench_combine,
     bench_combine_hints,
     bench_open_zk,

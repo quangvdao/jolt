@@ -255,11 +255,6 @@ impl DoryHint {
     }
 }
 
-#[derive(Clone)]
-pub struct DoryPartialCommitment {
-    pub row_commitments: Vec<Bn254G1>,
-}
-
 fn canonical_serialize<T: CanonicalSerialize, S: Serializer>(
     value: &T,
     serializer: S,

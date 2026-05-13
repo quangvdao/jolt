@@ -1,6 +1,6 @@
 //! Public Dory types for the `jolt-openings` commitment traits.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
@@ -121,18 +121,11 @@ impl Valid for DoryProof {
 
 impl CanonicalDeserialize for DoryProof {
     fn deserialize_with_mode<R: std::io::Read>(
-        mut reader: R,
+        reader: R,
         compress: Compress,
         validate: Validate,
     ) -> Result<Self, SerializationError> {
-        if compress == Compress::Yes {
-            let mut buf = Vec::new();
-            let _bytes_read = reader.read_to_end(&mut buf)?;
-            validate_proof_round_count(&buf).map_err(|_| SerializationError::InvalidData)?;
-            ArkDoryProof::deserialize_with_mode(&buf[..], compress, validate).map(Self)
-        } else {
-            ArkDoryProof::deserialize_with_mode(reader, compress, validate).map(Self)
-        }
+        deserialize_proof_with_round_limit(reader, compress, validate).map(Self)
     }
 }
 
@@ -264,20 +257,60 @@ fn canonical_deserialize<'de, T: CanonicalDeserialize, D: Deserializer<'de>>(
 /// and would OOM on attacker-supplied lengths near `u32::MAX`.
 fn validate_proof_round_count(buf: &[u8]) -> Result<(), String> {
     let mut cursor = Cursor::new(buf);
-    let _: ArkGT = CanonicalDeserialize::deserialize_compressed(&mut cursor)
-        .map_err(|e| format!("invalid Dory proof VMV.c: {e}"))?;
-    let _: ArkGT = CanonicalDeserialize::deserialize_compressed(&mut cursor)
-        .map_err(|e| format!("invalid Dory proof VMV.d2: {e}"))?;
-    let _: ArkG1 = CanonicalDeserialize::deserialize_compressed(&mut cursor)
-        .map_err(|e| format!("invalid Dory proof VMV.e1: {e}"))?;
-    let num_rounds: u32 = CanonicalDeserialize::deserialize_compressed(&mut cursor)
-        .map_err(|e| format!("invalid Dory proof round count: {e}"))?;
+    read_and_validate_proof_round_count(&mut cursor, Compress::Yes, Validate::No)
+        .map_err(|e| format!("invalid Dory proof prefix: {e}"))
+}
+
+fn deserialize_proof_with_round_limit<R: Read>(
+    reader: R,
+    compress: Compress,
+    validate: Validate,
+) -> Result<ArkDoryProof, SerializationError> {
+    let mut recorder = RecordingReader::new(reader);
+    read_and_validate_proof_round_count(&mut recorder, compress, validate)?;
+    let replay = Cursor::new(recorder.recorded).chain(recorder.reader);
+    ArkDoryProof::deserialize_with_mode(replay, compress, validate)
+}
+
+fn read_and_validate_proof_round_count<R: Read>(
+    reader: &mut R,
+    compress: Compress,
+    validate: Validate,
+) -> Result<(), SerializationError> {
+    let _: ArkGT =
+        CanonicalDeserialize::deserialize_with_mode(reader.by_ref(), compress, validate)?;
+    let _: ArkGT =
+        CanonicalDeserialize::deserialize_with_mode(reader.by_ref(), compress, validate)?;
+    let _: ArkG1 =
+        CanonicalDeserialize::deserialize_with_mode(reader.by_ref(), compress, validate)?;
+    let num_rounds: u32 =
+        CanonicalDeserialize::deserialize_with_mode(reader.by_ref(), compress, validate)?;
     if num_rounds as usize > MAX_SERIALIZED_PROOF_ROUNDS {
-        return Err(format!(
-            "Dory proof round count ({num_rounds}) exceeds maximum ({MAX_SERIALIZED_PROOF_ROUNDS})"
-        ));
+        return Err(SerializationError::InvalidData);
     }
     Ok(())
+}
+
+struct RecordingReader<R> {
+    reader: R,
+    recorded: Vec<u8>,
+}
+
+impl<R> RecordingReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            recorded: Vec::new(),
+        }
+    }
+}
+
+impl<R: Read> Read for RecordingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.reader.read(buf)?;
+        self.recorded.extend_from_slice(&buf[..count]);
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
@@ -453,6 +486,40 @@ mod tests {
             result.is_ok(),
             "canonical round-tripped Dory types must verify correctly"
         );
+    }
+
+    #[test]
+    fn dory_proof_deserialization_preserves_following_bytes() {
+        let num_vars = 2;
+        let mut rng = ChaCha20Rng::seed_from_u64(406);
+
+        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
+        let point: Vec<Fr> = (0..num_vars)
+            .map(|_| <Fr as RandomSampling>::random(&mut rng))
+            .collect();
+        let eval = poly.evaluate(&point);
+
+        let mut transcript = jolt_transcript::Blake2bTranscript::new(b"canonical-stream");
+        let proof =
+            crate::DoryScheme::open(&poly, &point, eval, &prover_setup, None, &mut transcript);
+
+        let mut bytes = Vec::new();
+        vec![proof]
+            .serialize_compressed(&mut bytes)
+            .expect("serialize proof vector");
+        7_u64
+            .serialize_compressed(&mut bytes)
+            .expect("serialize trailing field");
+
+        let mut cursor = Cursor::new(bytes);
+        let proofs = Vec::<DoryProof>::deserialize_compressed(&mut cursor)
+            .expect("deserialize proof vector");
+        let trailing =
+            u64::deserialize_compressed(&mut cursor).expect("deserialize trailing field");
+
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(trailing, 7);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::commitment::commitment_scheme::{
-        CommitmentScheme, StreamingCommitmentScheme, ZkEvalCommitment,
+        CommitmentScheme, SourceBatchCommitmentScheme, StreamingCommitmentScheme, ZkEvalCommitment,
     },
     poly::multilinear_polynomial::MultilinearPolynomial,
     transcripts::Transcript,
@@ -23,6 +23,7 @@ use dory::primitives::{
     arithmetic::{Field as DoryField, Group, PairingCurve},
     poly::Polynomial,
 };
+use jolt_openings::{BatchCommitmentSource, OneHotEntries, SourceRow};
 use rayon::prelude::*;
 use std::borrow::Borrow;
 use tracing::trace_span;
@@ -443,6 +444,76 @@ impl StreamingCommitmentScheme for DoryCommitmentScheme {
                 tier_2,
                 DoryOpeningProofHint::new(row_commitments, commit_blind),
             )
+        }
+    }
+}
+
+impl SourceBatchCommitmentScheme for DoryCommitmentScheme {
+    fn commit_batch<B: BatchCommitmentSource<jolt_field::Fr>>(
+        batch: &B,
+        ids: &[B::Id],
+        setup: &Self::ProverSetup,
+    ) -> Vec<(Self::Commitment, Self::OpeningProofHint)> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+
+        let max_num_vars = ids
+            .iter()
+            .map(|&id| batch.num_vars(id))
+            .max()
+            .expect("ids is non-empty");
+        let sigma = max_num_vars.div_ceil(2);
+        let row_commitments =
+            batch.map_rows(sigma, ids, |_, row| dory_source_row_commitment(row, setup));
+
+        (0..ids.len())
+            .into_par_iter()
+            .map(|source_index| {
+                let tier1_with_kind: Vec<_> = row_commitments
+                    .iter()
+                    .flat_map(|row| row.get(source_index).cloned())
+                    .collect();
+                let onehot_k = tier1_with_kind.iter().find_map(|(_, onehot_k)| *onehot_k);
+                debug_assert!(
+                    tier1_with_kind
+                        .iter()
+                        .all(|(_, row_onehot_k)| *row_onehot_k == onehot_k),
+                    "source changed row encoding within one Dory batch commitment",
+                );
+                let tier1_commitments: Vec<_> = tier1_with_kind
+                    .into_iter()
+                    .map(|(chunk, _)| chunk)
+                    .collect();
+                Self::aggregate_chunks(setup, onehot_k, &tier1_commitments)
+            })
+            .collect()
+    }
+}
+
+fn dory_source_row_commitment(
+    row: SourceRow<'_, jolt_field::Fr>,
+    setup: &ArkworksProverSetup,
+) -> (Vec<ArkG1>, Option<usize>) {
+    match row {
+        SourceRow::I128(values) => (DoryCommitmentScheme::process_chunk(setup, values), None),
+        SourceRow::OneHot(row) => {
+            let onehot_k = 1usize << row.log_domain_size;
+            let indices: Vec<Option<usize>> = match row.entries {
+                OneHotEntries::OnePerColumn(indices) => {
+                    indices.iter().map(|index| Some(index.get())).collect()
+                }
+                OneHotEntries::MaybeZero(indices) => {
+                    indices.iter().map(|index| index.map(|i| i.get())).collect()
+                }
+            };
+            (
+                DoryCommitmentScheme::process_chunk_onehot(setup, onehot_k, &indices),
+                Some(onehot_k),
+            )
+        }
+        SourceRow::FieldElements(_) => {
+            panic!("DoryCommitmentScheme source-batch path expects compact CycleMajor rows")
         }
     }
 }

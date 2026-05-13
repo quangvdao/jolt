@@ -729,7 +729,9 @@ Materialized dense sources can call `visit(row_index, SourceRow::FieldElements(e
 No `Cow` is needed because the row view only has to live for the duration of the `visit` call.
 
 The prover call-site change is narrow: the old row-generation helper disappears and the CycleMajor branch passes `CycleMajorTraceBatch` to source-batch commit entry points.
-While `jolt-core` is still on the in-core PCS trait family, those entry points are temporarily hosted on `StreamingCommitmentScheme`; after the full trait-family cutover they should be the `jolt-openings::CommitmentScheme` / `ZkOpeningScheme` methods directly.
+While `jolt-core` is still on the in-core PCS trait family, those entry points are temporarily exposed through a `SourceBatchCommitmentScheme` compatibility trait.
+That trait is deliberately separate from `StreamingCommitmentScheme`: source-batch support is a PCS capability, not a property every chunk-streaming helper should advertise.
+After the full trait-family cutover the same calls should resolve to `jolt-openings::CommitmentScheme` / `ZkOpeningScheme` directly.
 
 ```rust
 let row_len = DoryGlobals::get_num_columns();
@@ -770,8 +772,8 @@ For ZK mode the last line becomes:
 let commitments_and_hints = PCS::commit_batch_zk(&batch, &ids, &setup);
 ```
 
-The loop body, row order, and row encodings are unchanged; they move from `jolt-core` into `CycleMajorTraceBatch::map_rows` plus Dory's private `commit_row` and tier-2 aggregation.
-That is why this can preserve current streaming behavior exactly while eliminating `StreamingCommitment` as a public commitment-scheme trait.
+The loop body, row order, and row encodings are unchanged; they move from the prover into `CycleMajorTraceBatch::map_rows` plus Dory's source-batch implementation.
+That is why this can preserve current streaming behavior exactly while moving toward `commit_batch` / `commit_batch_zk` as the public commitment boundary.
 
 The closure does not imply dynamic dispatch.
 `map_rows` is generic over `V`, so Rust monomorphizes the concrete closure at the call site, the same way it monomorphizes `Iterator::map` or Rayon closures.
@@ -868,12 +870,13 @@ The high-level migration is:
 1. Add `jolt-openings` and `jolt-dory` as dependencies.
 2. Replace imports of the internal PCS trait with `jolt_openings` traits.
 3. Replace `PCS::Commitment` associated type usage with `PCS::Output`.
-4. Move the in-core `StreamingCommitmentScheme::commit_batch` / `commit_batch_zk` source-batch entry points to the canonical `jolt-openings` traits.
-5. Remove public exposure of `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` once no in-core caller needs them.
-6. Replace `PCS::Proof` proof storage with `PCS::BatchProof`.
-7. Replace Stage 8's direct `PCS::prove` call with `PCS::prove_batch`.
-8. Replace Stage 8's direct `PCS::verify` call with `PCS::verify_batch`.
-9. Preserve Stage 8's claim construction and ZK constraint coefficient logic.
+4. Keep any pre-cutover source-batch bridge separate from the old base `StreamingCommitmentScheme`; only PCS backends that really support the source row shapes should implement it.
+5. Move the remaining pre-cutover source-batch bridge to the canonical `jolt-openings` traits once `jolt-core` proof, hint, setup, and transcript types are on the new trait family.
+6. Remove public exposure of `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` once no in-core caller needs them.
+7. Replace `PCS::Proof` proof storage with `PCS::BatchProof`.
+8. Replace Stage 8's direct `PCS::prove` call with `PCS::prove_batch`.
+9. Replace Stage 8's direct `PCS::verify` call with `PCS::verify_batch`.
+10. Preserve Stage 8's claim construction and ZK constraint coefficient logic.
 
 Stage 8 is the main adaptation point for openings, not for witness commitment.
 The old commitment-time streaming trait should disappear from the public PCS API, because `commit_batch` and `commit_batch_zk` take over that boundary.

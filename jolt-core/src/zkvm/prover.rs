@@ -34,7 +34,9 @@ use crate::{
     guest,
     poly::{
         commitment::{
-            commitment_scheme::{StreamingCommitmentScheme, ZkEvalCommitment},
+            commitment_scheme::{
+                SourceBatchCommitmentScheme, StreamingCommitmentScheme, ZkEvalCommitment,
+            },
             dory::{DoryGlobals, DoryLayout},
         },
         eq_poly::EqPolynomial,
@@ -201,7 +203,9 @@ impl<
         'a,
         F: JoltField,
         C: JoltCurve<F = F>,
-        PCS: StreamingCommitmentScheme<Field = F> + ZkEvalCommitment<C>,
+        PCS: SourceBatchCommitmentScheme<Field = F>
+            + StreamingCommitmentScheme<Field = F>
+            + ZkEvalCommitment<C>,
         ProofTranscript: Transcript,
     > JoltCpuProver<'a, F, C, PCS, ProofTranscript>
 {

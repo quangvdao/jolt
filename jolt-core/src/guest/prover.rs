@@ -2,7 +2,9 @@ use super::program::Program;
 use crate::curve::{Bn254Curve, JoltCurve};
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
-use crate::poly::commitment::commitment_scheme::{StreamingCommitmentScheme, ZkEvalCommitment};
+use crate::poly::commitment::commitment_scheme::{
+    SourceBatchCommitmentScheme, StreamingCommitmentScheme, ZkEvalCommitment,
+};
 use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
 use crate::zkvm::bytecode::PreprocessingError;
@@ -43,7 +45,9 @@ pub fn preprocess(
 pub fn prove<
     F: JoltField,
     C: JoltCurve<F = F>,
-    PCS: StreamingCommitmentScheme<Field = F> + ZkEvalCommitment<C>,
+    PCS: SourceBatchCommitmentScheme<Field = F>
+        + StreamingCommitmentScheme<Field = F>
+        + ZkEvalCommitment<C>,
     FS: Transcript,
 >(
     guest: &Program,

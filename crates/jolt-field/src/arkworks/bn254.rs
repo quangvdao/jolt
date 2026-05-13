@@ -307,6 +307,13 @@ impl Fr {
         Limbs((self.0).0 .0)
     }
 
+    /// Multiplies this field element by a 125-bit challenge stored in the high
+    /// two Montgomery limbs used by Jolt's optimized challenge type.
+    #[inline(always)]
+    pub fn mul_by_hi_2limbs(&self, limb_lo: u64, limb_hi: u64) -> Self {
+        Fr(self.0.mul_by_hi_2limbs(limb_lo, limb_hi))
+    }
+
     /// Construct from the inner arkworks element.
     #[inline(always)]
     pub(crate) fn from_inner(inner: InnerFr) -> Self {

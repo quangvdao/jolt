@@ -230,7 +230,11 @@ where
                 dense.reserve(self.padded_trace_len);
                 self.for_each_native_row(id, |_, row| match row {
                     SourceRow::I128(values) => {
-                        dense.extend(values.iter().map(|&value| SourceField::from_i128(value)));
+                        dense.extend(
+                            values
+                                .iter()
+                                .map(|&value| <SourceField as FromPrimitiveInt>::from_i128(value)),
+                        );
                     }
                     SourceRow::FieldElements(_) | SourceRow::OneHot(_) => {
                         panic!("increment rows must be emitted as i128 source rows");
@@ -242,7 +246,7 @@ where
             | CommittedPolynomial::RamRa(_) => {
                 dense.resize(
                     self.padded_trace_len * self.one_hot_params.k_chunk,
-                    SourceField::from_u64(0),
+                    <SourceField as FromPrimitiveInt>::from_u64(0),
                 );
                 let mut cycle_offset = 0;
                 self.for_each_native_row(id, |_, row| match row {
@@ -252,7 +256,7 @@ where
                                 for (column, index) in indices.iter().enumerate() {
                                     dense[index.get() * self.padded_trace_len
                                         + cycle_offset
-                                        + column] = SourceField::from_u64(1);
+                                        + column] = <SourceField as FromPrimitiveInt>::from_u64(1);
                                 }
                                 indices.len()
                             }
@@ -261,7 +265,8 @@ where
                                     if let Some(index) = index {
                                         dense[index.get() * self.padded_trace_len
                                             + cycle_offset
-                                            + column] = SourceField::from_u64(1);
+                                            + column] =
+                                            <SourceField as FromPrimitiveInt>::from_u64(1);
                                     }
                                 }
                                 indices.len()

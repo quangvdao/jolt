@@ -145,6 +145,26 @@ impl From<&MontU128Challenge<ark_bn254::Fr>> for ark_bn254::Fr {
 
 impl_field_ops_inline!(MontU128Challenge<ark_bn254::Fr>, ark_bn254::Fr, optimized);
 
+impl From<MontU128Challenge<jolt_field::Fr>> for jolt_field::Fr {
+    #[inline(always)]
+    fn from(challenge: MontU128Challenge<jolt_field::Fr>) -> jolt_field::Fr {
+        jolt_field::Fr::from(
+            ark_bn254::Fr::from_bigint_unchecked(BigInt::new(challenge.to_bigint_array())).unwrap(),
+        )
+    }
+}
+
+impl From<&MontU128Challenge<jolt_field::Fr>> for jolt_field::Fr {
+    #[inline(always)]
+    fn from(challenge: &MontU128Challenge<jolt_field::Fr>) -> jolt_field::Fr {
+        jolt_field::Fr::from(
+            ark_bn254::Fr::from_bigint_unchecked(BigInt::new(challenge.to_bigint_array())).unwrap(),
+        )
+    }
+}
+
+impl_field_ops_inline!(MontU128Challenge<jolt_field::Fr>, jolt_field::Fr, optimized);
+
 impl From<MontU128Challenge<TrackedFr>> for TrackedFr {
     #[inline(always)]
     fn from(challenge: MontU128Challenge<TrackedFr>) -> TrackedFr {
@@ -188,6 +208,37 @@ impl OptimizedMul<ark_bn254::Fr, ark_bn254::Fr> for MontU128Challenge<ark_bn254:
     fn mul_01_optimized(self, other: ark_bn254::Fr) -> Self::Output {
         if other.is_zero() {
             ark_bn254::Fr::zero()
+        } else if other.is_one() {
+            self.into()
+        } else {
+            self * other
+        }
+    }
+}
+
+impl OptimizedMul<jolt_field::Fr, jolt_field::Fr> for MontU128Challenge<jolt_field::Fr> {
+    #[inline(always)]
+    fn mul_0_optimized(self, other: jolt_field::Fr) -> Self::Output {
+        if other.is_zero() {
+            jolt_field::Fr::zero()
+        } else {
+            self * other
+        }
+    }
+
+    #[inline(always)]
+    fn mul_1_optimized(self, other: jolt_field::Fr) -> Self::Output {
+        if other.is_one() {
+            self.into()
+        } else {
+            self * other
+        }
+    }
+
+    #[inline(always)]
+    fn mul_01_optimized(self, other: jolt_field::Fr) -> Self::Output {
+        if other.is_zero() {
+            jolt_field::Fr::zero()
         } else if other.is_one() {
             self.into()
         } else {

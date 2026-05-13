@@ -91,6 +91,26 @@ impl Into<ark_bn254::Fr> for &Mont254BitChallenge<ark_bn254::Fr> {
 
 impl_field_ops_inline!(Mont254BitChallenge<ark_bn254::Fr>, ark_bn254::Fr, standard);
 
+impl Into<jolt_field::Fr> for Mont254BitChallenge<jolt_field::Fr> {
+    #[inline(always)]
+    fn into(self) -> jolt_field::Fr {
+        self.value()
+    }
+}
+
+impl Into<jolt_field::Fr> for &Mont254BitChallenge<jolt_field::Fr> {
+    #[inline(always)]
+    fn into(self) -> jolt_field::Fr {
+        self.value()
+    }
+}
+
+impl_field_ops_inline!(
+    Mont254BitChallenge<jolt_field::Fr>,
+    jolt_field::Fr,
+    standard
+);
+
 impl Into<TrackedFr> for Mont254BitChallenge<TrackedFr> {
     #[inline(always)]
     fn into(self) -> TrackedFr {
@@ -127,6 +147,34 @@ impl OptimizedMul<ark_bn254::Fr, ark_bn254::Fr> for Mont254BitChallenge<ark_bn25
     fn mul_01_optimized(self, other: ark_bn254::Fr) -> Self::Output {
         if other.is_zero() {
             ark_bn254::Fr::zero()
+        } else if other.is_one() {
+            self.into()
+        } else {
+            self * other
+        }
+    }
+}
+
+impl OptimizedMul<jolt_field::Fr, jolt_field::Fr> for Mont254BitChallenge<jolt_field::Fr> {
+    fn mul_0_optimized(self, other: jolt_field::Fr) -> Self::Output {
+        if other.is_zero() {
+            jolt_field::Fr::zero()
+        } else {
+            self * other
+        }
+    }
+
+    fn mul_1_optimized(self, other: jolt_field::Fr) -> Self::Output {
+        if other.is_one() {
+            self.into()
+        } else {
+            self * other
+        }
+    }
+
+    fn mul_01_optimized(self, other: jolt_field::Fr) -> Self::Output {
+        if other.is_zero() {
+            jolt_field::Fr::zero()
         } else if other.is_one() {
             self.into()
         } else {

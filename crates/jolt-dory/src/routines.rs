@@ -26,24 +26,24 @@ fn raw_scalar(scalar: &ArkFr) -> ArkworksFr {
     unsafe { std::mem::transmute_copy::<ArkFr, ArkworksFr>(scalar) }
 }
 
-fn g1_projectives(points: &[ArkG1]) -> &[G1Projective] {
+fn g1_points(points: &[ArkG1]) -> &[G1Projective] {
     // SAFETY: ArkG1 is repr(transparent) over ark_bn254::G1Projective.
     unsafe { std::slice::from_raw_parts(points.as_ptr().cast::<G1Projective>(), points.len()) }
 }
 
-fn g1_projectives_mut(points: &mut [ArkG1]) -> &mut [G1Projective] {
+fn g1_points_mut(points: &mut [ArkG1]) -> &mut [G1Projective] {
     // SAFETY: ArkG1 is repr(transparent) over ark_bn254::G1Projective.
     unsafe {
         std::slice::from_raw_parts_mut(points.as_mut_ptr().cast::<G1Projective>(), points.len())
     }
 }
 
-fn g2_projectives(points: &[ArkG2]) -> &[G2Projective] {
+fn g2_points(points: &[ArkG2]) -> &[G2Projective] {
     // SAFETY: ArkG2 is repr(transparent) over ark_bn254::G2Projective.
     unsafe { std::slice::from_raw_parts(points.as_ptr().cast::<G2Projective>(), points.len()) }
 }
 
-fn g2_projectives_mut(points: &mut [ArkG2]) -> &mut [G2Projective] {
+fn g2_points_mut(points: &mut [ArkG2]) -> &mut [G2Projective] {
     // SAFETY: ArkG2 is repr(transparent) over ark_bn254::G2Projective.
     unsafe {
         std::slice::from_raw_parts_mut(points.as_mut_ptr().cast::<G2Projective>(), points.len())
@@ -63,7 +63,7 @@ pub struct JoltG1Routines;
 
 impl DoryRoutines<ArkG1> for JoltG1Routines {
     fn msm(bases: &[ArkG1], scalars: &[ArkFr]) -> ArkG1 {
-        let affines = G1Projective::normalize_batch(g1_projectives(bases));
+        let affines = G1Projective::normalize_batch(g1_points(bases));
         let result = <G1Projective as VariableBaseMSM>::msm_serial(&affines, raw_scalars(scalars))
             .expect("Dory G1 MSM input lengths should match");
         ArkG1(result)
@@ -82,8 +82,8 @@ impl DoryRoutines<ArkG1> for JoltG1Routines {
     fn fixed_scalar_mul_bases_then_add(bases: &[ArkG1], vs: &mut [ArkG1], scalar: &ArkFr) {
         assert_eq!(bases.len(), vs.len(), "Dory vector lengths must match");
         jolt_optimizations::vector_add_scalar_mul_g1_online(
-            g1_projectives_mut(vs),
-            g1_projectives(bases),
+            g1_points_mut(vs),
+            g1_points(bases),
             raw_scalar(scalar),
         );
     }
@@ -91,9 +91,9 @@ impl DoryRoutines<ArkG1> for JoltG1Routines {
     fn fixed_scalar_mul_vs_then_add(vs: &mut [ArkG1], addends: &[ArkG1], scalar: &ArkFr) {
         assert_eq!(vs.len(), addends.len(), "Dory vector lengths must match");
         jolt_optimizations::vector_scalar_mul_add_gamma_g1_online(
-            g1_projectives_mut(vs),
+            g1_points_mut(vs),
             raw_scalar(scalar),
-            g1_projectives(addends),
+            g1_points(addends),
         );
     }
 
@@ -106,7 +106,7 @@ pub struct JoltG2Routines;
 
 impl DoryRoutines<ArkG2> for JoltG2Routines {
     fn msm(bases: &[ArkG2], scalars: &[ArkFr]) -> ArkG2 {
-        let affines = G2Projective::normalize_batch(g2_projectives(bases));
+        let affines = G2Projective::normalize_batch(g2_points(bases));
         let result = <G2Projective as VariableBaseMSM>::msm_serial(
             &affines[..scalars.len()],
             raw_scalars(scalars),
@@ -130,8 +130,8 @@ impl DoryRoutines<ArkG2> for JoltG2Routines {
     fn fixed_scalar_mul_bases_then_add(bases: &[ArkG2], vs: &mut [ArkG2], scalar: &ArkFr) {
         assert_eq!(bases.len(), vs.len(), "Dory vector lengths must match");
         jolt_optimizations::vector_add_scalar_mul_g2_online(
-            g2_projectives_mut(vs),
-            g2_projectives(bases),
+            g2_points_mut(vs),
+            g2_points(bases),
             raw_scalar(scalar),
         );
     }
@@ -139,9 +139,9 @@ impl DoryRoutines<ArkG2> for JoltG2Routines {
     fn fixed_scalar_mul_vs_then_add(vs: &mut [ArkG2], addends: &[ArkG2], scalar: &ArkFr) {
         assert_eq!(vs.len(), addends.len(), "Dory vector lengths must match");
         jolt_optimizations::vector_scalar_mul_add_gamma_g2_online(
-            g2_projectives_mut(vs),
+            g2_points_mut(vs),
             raw_scalar(scalar),
-            g2_projectives(addends),
+            g2_points(addends),
         );
     }
 

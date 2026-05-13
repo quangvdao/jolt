@@ -880,7 +880,8 @@ It has two deliberate bridge points:
    The Dory implementation delegates to `jolt_dory::DoryScheme::{commit_batch, commit_batch_zk}` and then converts the result back into the old `DoryCommitmentScheme` wrapper types.
 2. `BatchOpeningScheme` lets Stage 8 store and verify a batch-shaped proof while still using the old in-core `JoltProof`, transcript, setup, and BlindFold plumbing.
    The Dory prover side delegates the single combined Stage 8 opening to `jolt_dory::DoryScheme::{open_source_with_shape, open_zk_source_with_shape}` and converts the resulting proof back into a one-element `Vec<ArkDoryProof>`.
-   The verifier side still delegates to the old in-core Dory verifier until the verifier setup, commitment, transcript, and proof wrapper boundary is migrated.
+   The Dory verifier side delegates to `jolt_dory::DoryScheme::{verify_with_shape, verify_zk_with_shape}` after converting the old verifier setup, commitment, transcript, point, and proof wrappers at the bridge boundary.
+   This keeps the Dory proof algorithm canonical while `jolt-core` still owns old proof storage and transcript types.
 
 These bridges exist because `jolt-core` still has several old surfaces that are intentionally outside `jolt-openings`:
 

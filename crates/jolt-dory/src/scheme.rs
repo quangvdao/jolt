@@ -249,6 +249,83 @@ impl DoryScheme {
         let blinding = y_blinding.expect("ZK proof must return y_blinding");
         (proof, y_com, blinding)
     }
+
+    /// Verifies a transparent Dory opening using an already Dory-compatible
+    /// transcript adapter.
+    ///
+    /// This is the verifier-side counterpart to `open_source_with_shape` for
+    /// protocol layers that still own their transcript type but delegate Dory
+    /// verification to this crate.
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify_with_shape")]
+    pub fn verify_with_shape<T>(
+        commitment: &DoryCommitment,
+        point: &[Fr],
+        eval: Fr,
+        proof: &DoryProof,
+        setup: &DoryVerifierSetup,
+        transcript: &mut T,
+    ) -> Result<(), OpeningsError>
+    where
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
+        let ark_eval = jolt_fr_to_ark(&eval);
+        let ark_commitment = jolt_gt_to_ark(&commitment.0);
+
+        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
+            ark_commitment,
+            ark_eval,
+            &ark_point,
+            &proof.0,
+            setup.0.clone().into_inner(),
+            transcript,
+        )
+        .map_err(|_| OpeningsError::VerificationFailed)
+    }
+
+    /// Verifies a ZK/hiding Dory opening using an already Dory-compatible
+    /// transcript adapter.
+    ///
+    /// In ZK mode the evaluation is hidden and Dory verifies against the
+    /// evaluation commitment embedded in the proof.
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify_zk_with_shape")]
+    pub fn verify_zk_with_shape<T>(
+        commitment: &DoryCommitment,
+        point: &[Fr],
+        proof: &DoryProof,
+        setup: &DoryVerifierSetup,
+        transcript: &mut T,
+    ) -> Result<(), OpeningsError>
+    where
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
+        let dummy_eval = <ArkFr as DoryField>::zero();
+        let ark_commitment = jolt_gt_to_ark(&commitment.0);
+
+        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
+            ark_commitment,
+            dummy_eval,
+            &ark_point,
+            &proof.0,
+            setup.0.clone().into_inner(),
+            transcript,
+        )
+        .map_err(|_| OpeningsError::VerificationFailed)
+    }
+}
+
+impl DoryCommitment {
+    /// Converts a raw `dory-pcs` BN254 commitment into the public jolt-dory
+    /// wrapper.
+    ///
+    /// This is intentionally Dory-specific. It exists for protocol layers that
+    /// still store legacy `dory-pcs` commitments while migrating verification
+    /// onto `DoryScheme`.
+    #[inline]
+    pub fn from_dory_pcs(commitment: dory::backends::arkworks::ArkGT) -> Self {
+        Self(ark_to_jolt_gt(&commitment))
+    }
 }
 
 impl DeriveSetup<DoryProverSetup> for PedersenSetup<Bn254G1> {
@@ -284,20 +361,8 @@ impl CommitmentSchemeVerifier for DoryScheme {
         setup: &Self::VerifierSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError> {
-        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
-        let ark_eval = jolt_fr_to_ark(&eval);
-        let ark_commitment = jolt_gt_to_ark(&commitment.0);
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-
-        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
-            ark_commitment,
-            ark_eval,
-            &ark_point,
-            &proof.0,
-            setup.0.clone().into_inner(),
-            &mut dory_transcript,
-        )
-        .map_err(|_| OpeningsError::VerificationFailed)
+        Self::verify_with_shape(commitment, point, eval, proof, setup, &mut dory_transcript)
     }
 
     fn verify_batch(
@@ -461,22 +526,8 @@ impl ZkOpeningSchemeVerifier for DoryScheme {
         setup: &Self::VerifierSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError> {
-        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
-        // In ZK mode dory::verify reads the evaluation commitment from `proof.y_com`,
-        // so the caller-side eval is unused here.
-        let dummy_eval = <ArkFr as DoryField>::zero();
-        let ark_commitment = jolt_gt_to_ark(&commitment.0);
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-
-        dory::verify::<ArkFr, InnerBN254, G1Routines, G2Routines, _>(
-            ark_commitment,
-            dummy_eval,
-            &ark_point,
-            &proof.0,
-            setup.0.clone().into_inner(),
-            &mut dory_transcript,
-        )
-        .map_err(|_| OpeningsError::VerificationFailed)
+        Self::verify_zk_with_shape(commitment, point, proof, setup, &mut dory_transcript)
     }
 }
 

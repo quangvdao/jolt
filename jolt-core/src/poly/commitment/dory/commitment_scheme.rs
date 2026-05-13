@@ -535,7 +535,34 @@ impl BatchOpeningScheme for DoryCommitmentScheme {
         let [proof] = proof.as_slice() else {
             return Err(ProofVerifyError::InvalidOpeningProof);
         };
-        Self::verify(proof, setup, transcript, opening_point, opening, commitment)
+        let proof = jolt_dory::DoryProof(proof.clone());
+        let setup = jolt_dory::DoryVerifierSetup(setup.clone());
+        let commitment = jolt_dory::DoryCommitment::from_dory_pcs(*commitment);
+        let point = convert_opening_point(opening_point);
+        let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
+
+        #[cfg(feature = "zk")]
+        let result = {
+            let _ = opening;
+            jolt_dory::DoryScheme::verify_zk_with_shape(
+                &commitment,
+                &point,
+                &proof,
+                &setup,
+                &mut dory_transcript,
+            )
+        };
+        #[cfg(not(feature = "zk"))]
+        let result = jolt_dory::DoryScheme::verify_with_shape(
+            &commitment,
+            &point,
+            jolt_field::Fr::from(*opening),
+            &proof,
+            &setup,
+            &mut dory_transcript,
+        );
+
+        result.map_err(|_| ProofVerifyError::InternalError)
     }
 }
 

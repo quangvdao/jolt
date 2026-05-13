@@ -12,11 +12,12 @@ use strum::EnumCount;
 use crate::poly::opening_proof::{OpeningPoint, Openings};
 #[cfg(feature = "zk")]
 use crate::subprotocols::blindfold::BlindFoldProof;
+use crate::zkvm::JoltCommitmentScheme;
 use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::{
-        commitment::{commitment_scheme::CommitmentScheme, dory::DoryLayout},
+        commitment::dory::DoryLayout,
         opening_proof::{OpeningId, PolynomialId, SumcheckId},
     },
     utils::errors::ProofVerifyError,
@@ -35,12 +36,12 @@ use crate::{
 
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltProof<
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: JoltCommitmentScheme<F, C>,
     FS: Transcript,
 > {
-    pub commitments: Vec<PCS::Commitment>,
+    pub commitments: Vec<PCS::Output>,
     pub stage1_uni_skip_first_round_proof: UniSkipFirstRoundProofVariant<F, C, FS>,
     pub stage1_sumcheck_proof: SumcheckInstanceProof<F, C, FS>,
     pub stage2_uni_skip_first_round_proof: UniSkipFirstRoundProofVariant<F, C, FS>,
@@ -52,8 +53,8 @@ pub struct JoltProof<
     pub stage7_sumcheck_proof: SumcheckInstanceProof<F, C, FS>,
     #[cfg(feature = "zk")]
     pub blindfold_proof: BlindFoldProof<F, C>,
-    pub joint_opening_proof: PCS::BatchedProof,
-    pub untrusted_advice_commitment: Option<PCS::Commitment>,
+    pub joint_opening_proof: PCS::BatchProof,
+    pub untrusted_advice_commitment: Option<PCS::Output>,
     #[cfg(not(feature = "zk"))]
     pub opening_claims: Claims<F>,
     pub trace_length: usize,
@@ -63,8 +64,12 @@ pub struct JoltProof<
     pub dory_layout: DoryLayout,
 }
 
-impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>, FS: Transcript>
-    JoltProof<F, C, PCS, FS>
+impl<
+        F: JoltField + jolt_field::Field,
+        C: JoltCurve<F = F>,
+        PCS: JoltCommitmentScheme<F, C>,
+        FS: Transcript,
+    > JoltProof<F, C, PCS, FS>
 {
     /// Verifies all sumcheck and uniskip proofs use the same ZK variant.
     /// Returns the ZK mode if consistent, or an error if any stage disagrees.

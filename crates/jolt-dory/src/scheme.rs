@@ -697,11 +697,11 @@ impl AdditivelyHomomorphic for DoryScheme {
         assert_eq!(hints.len(), scalars.len());
         assert!(!hints.is_empty(), "combine_hints: empty hint set");
 
-        let num_rows = hints[0].row_commitments.len();
-        assert!(
-            hints.iter().all(|h| h.row_commitments.len() == num_rows),
-            "combine_hints: ragged hint lengths",
-        );
+        let num_rows = hints
+            .iter()
+            .map(|hint| hint.row_commitments.len())
+            .max()
+            .unwrap_or(0);
 
         let combined_blind = hints
             .iter()
@@ -714,7 +714,9 @@ impl AdditivelyHomomorphic for DoryScheme {
             .map(|row| {
                 let mut acc = Bn254G1::default();
                 for (hint, &scalar) in hints.iter().zip(scalars.iter()) {
-                    acc += hint.row_commitments[row].scalar_mul(&scalar);
+                    if let Some(row_commitment) = hint.row_commitments.get(row) {
+                        acc += row_commitment.scalar_mul(&scalar);
+                    }
                 }
                 acc
             })
@@ -1213,7 +1215,7 @@ impl<S: CommitmentSource<Fr> + ?Sized> MultilinearLagrange<ArkFr> for DorySource
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jolt_crypto::{Pedersen, VectorCommitment};
+    use jolt_crypto::{Bn254, JoltGroup, Pedersen, VectorCommitment};
     use jolt_field::{FromPrimitiveInt, RandomSampling};
     use jolt_openings::SourceRow;
     use jolt_poly::Polynomial;
@@ -1315,6 +1317,30 @@ mod tests {
         assert_eq!(
             commit_sum_direct, combined,
             "combine([1,1]) must match commitment to sum"
+        );
+    }
+
+    #[test]
+    fn combine_hints_zero_pads_ragged_rows() {
+        let g = Bn254::g1_generator();
+        let h = g.scalar_mul(&Fr::from_u64(11));
+        let k = g.scalar_mul(&Fr::from_u64(13));
+        let a = Fr::from_u64(2);
+        let b = Fr::from_u64(7);
+
+        let hint_a = DoryHint::from_parts(vec![g], Fr::from_u64(3));
+        let hint_b = DoryHint::from_parts(vec![h, k], Fr::from_u64(5));
+
+        let combined = DoryScheme::combine_hints(vec![hint_a, hint_b], &[a, b]);
+        let (rows, blind) = combined.into_parts();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], g.scalar_mul(&a) + h.scalar_mul(&b));
+        assert_eq!(rows[1], k.scalar_mul(&b));
+        assert_eq!(
+            blind,
+            a * Fr::from_u64(3) + b * Fr::from_u64(5),
+            "combined hint blind must match the same linear combination"
         );
     }
 

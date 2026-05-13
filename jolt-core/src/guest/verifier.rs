@@ -1,13 +1,10 @@
-use crate::curve::{Bn254Curve, JoltCurve};
+use crate::curve::JoltCurve;
 use crate::field::JoltField;
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
-use crate::poly::commitment::commitment_scheme::{BatchOpeningScheme, ZkOpeningSupport};
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::bytecode::PreprocessingError;
 use crate::zkvm::verifier::BlindfoldSetup;
 
 use crate::guest::program::Program;
-use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
 use crate::zkvm::proof_serialization::JoltProof;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
@@ -15,16 +12,16 @@ use crate::zkvm::verifier::JoltVerifier;
 use crate::zkvm::verifier::JoltVerifierPreprocessing;
 use common::jolt_device::MemoryConfig;
 use common::jolt_device::MemoryLayout;
+use jolt_crypto::Bn254;
+use jolt_dory::{DoryScheme, DoryVerifierSetup};
+use jolt_field::Fr;
 
 pub fn preprocess(
     guest: &Program,
     max_trace_length: usize,
-    verifier_setup: <DoryCommitmentScheme as CommitmentScheme>::VerifierSetup,
-    blindfold_setup: Option<BlindfoldSetup<Bn254Curve>>,
-) -> Result<
-    JoltVerifierPreprocessing<ark_bn254::Fr, Bn254Curve, DoryCommitmentScheme>,
-    PreprocessingError,
-> {
+    verifier_setup: DoryVerifierSetup,
+    blindfold_setup: Option<BlindfoldSetup<Bn254>>,
+) -> Result<JoltVerifierPreprocessing<Fr, Bn254, DoryScheme>, PreprocessingError> {
     let shared = preprocess_shared(guest, max_trace_length)?;
     Ok(JoltVerifierPreprocessing::new(
         shared,
@@ -52,13 +49,13 @@ fn preprocess_shared(
 }
 
 pub fn verify<
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: BatchOpeningScheme<Field = F> + ZkOpeningSupport<C>,
-    FS: Transcript,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    FS: Transcript + jolt_transcript::Transcript<Challenge = F>,
 >(
     inputs_bytes: &[u8],
-    trusted_advice_commitment: Option<<PCS as CommitmentScheme>::Commitment>,
+    trusted_advice_commitment: Option<PCS::Output>,
     outputs_bytes: &[u8],
     proof: JoltProof<F, C, PCS, FS>,
     preprocessing: &JoltVerifierPreprocessing<F, C, PCS>,

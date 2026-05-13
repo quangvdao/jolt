@@ -16,14 +16,14 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use super::{
-    commitment::commitment_scheme::CommitmentScheme, multilinear_polynomial::MultilinearPolynomial,
-};
+use super::multilinear_polynomial::MultilinearPolynomial;
 use crate::{
     field::JoltField,
     transcripts::Transcript,
     zkvm::witness::{CommittedPolynomial, VirtualPolynomial},
 };
+use jolt_crypto::HomomorphicCommitment;
+use jolt_openings::AdditivelyHomomorphic;
 
 pub type Endianness = bool;
 pub const BIG_ENDIAN: Endianness = false;
@@ -324,19 +324,22 @@ pub struct DoryOpeningState<F: JoltField> {
     pub polynomial_claims: Vec<(CommittedPolynomial, F)>,
 }
 
-impl<F: JoltField> DoryOpeningState<F> {
+impl<F: JoltField + jolt_field::Field> DoryOpeningState<F> {
     /// Build streaming RLC polynomial from this state.
     /// Streams directly from trace - no witness regeneration needed.
     /// Advice polynomials are passed separately (not streamed from trace).
     #[tracing::instrument(skip_all)]
-    pub fn build_streaming_rlc<PCS: CommitmentScheme<Field = F>>(
+    pub fn build_streaming_rlc<PCS: AdditivelyHomomorphic<Field = F>>(
         &self,
         one_hot_params: OneHotParams,
         trace_source: TraceSource,
         rlc_streaming_data: Arc<RLCStreamingData>,
-        mut opening_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
+        mut opening_hints: HashMap<CommittedPolynomial, PCS::OpeningHint>,
         advice_polys: HashMap<CommittedPolynomial, MultilinearPolynomial<F>>,
-    ) -> (MultilinearPolynomial<F>, PCS::OpeningProofHint) {
+    ) -> (MultilinearPolynomial<F>, PCS::OpeningHint)
+    where
+        PCS::Output: HomomorphicCommitment<F>,
+    {
         // Accumulate gamma coefficients per polynomial
         let mut rlc_map = BTreeMap::new();
         for (gamma, (poly, _claim)) in self.gamma_powers.iter().zip(self.polynomial_claims.iter()) {
@@ -355,7 +358,7 @@ impl<F: JoltField> DoryOpeningState<F> {
             advice_polys,
         ));
 
-        let hints: Vec<PCS::OpeningProofHint> = rlc_map
+        let hints: Vec<PCS::OpeningHint> = rlc_map
             .into_keys()
             .map(|k| opening_hints.remove(&k).unwrap())
             .collect();

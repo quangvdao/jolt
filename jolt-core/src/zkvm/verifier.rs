@@ -5,12 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::curve::JoltCurve;
-use crate::poly::commitment::commitment_scheme::{
-    BatchOpeningScheme, CommitmentScheme, ZkOpeningSupport,
-};
-#[cfg(feature = "zk")]
-use crate::poly::commitment::dory::bind_opening_inputs_zk;
-use crate::poly::commitment::dory::{bind_opening_inputs, DoryContext, DoryGlobals};
+use crate::poly::commitment::dory::{DoryContext, DoryGlobals};
 use crate::poly::commitment::pedersen::PedersenGenerators;
 #[cfg(feature = "zk")]
 use crate::poly::lagrange_poly::LagrangeHelper;
@@ -223,12 +218,12 @@ use tracer::JoltDevice;
 
 pub struct JoltVerifier<
     'a,
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
-    ProofTranscript: Transcript,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
 > {
-    pub trusted_advice_commitment: Option<PCS::Commitment>,
+    pub trusted_advice_commitment: Option<PCS::Output>,
     pub program_io: JoltDevice,
     pub proof: JoltProof<F, C, PCS, ProofTranscript>,
     pub preprocessing: &'a JoltVerifierPreprocessing<F, C, PCS>,
@@ -253,17 +248,17 @@ struct Stage8VerifyData<F: JoltField> {
 
 impl<
         'a,
-        F: JoltField,
+        F: JoltField + jolt_field::Field,
         C: JoltCurve<F = F>,
-        PCS: CommitmentScheme<Field = F> + BatchOpeningScheme<Field = F> + ZkOpeningSupport<C>,
-        ProofTranscript: Transcript,
+        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+        ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
     > JoltVerifier<'a, F, C, PCS, ProofTranscript>
 {
     pub fn new(
         preprocessing: &'a JoltVerifierPreprocessing<F, C, PCS>,
         proof: JoltProof<F, C, PCS, ProofTranscript>,
         mut program_io: JoltDevice,
-        trusted_advice_commitment: Option<PCS::Commitment>,
+        trusted_advice_commitment: Option<PCS::Output>,
         _debug_info: Option<ProverDebugInfo<F, ProofTranscript, PCS>>,
     ) -> Result<Self, ProofVerifyError> {
         // Memory layout checks
@@ -322,9 +317,9 @@ impl<
         }
 
         #[cfg(test)]
-        let mut transcript = ProofTranscript::new(b"Jolt");
+        let mut transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
         #[cfg(not(test))]
-        let transcript = ProofTranscript::new(b"Jolt");
+        let transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
 
         #[cfg(test)]
         {
@@ -880,7 +875,11 @@ impl<
             &mut self.opening_accumulator,
         );
         // Domain-separate the batching challenge.
-        self.transcript.append_bytes(b"ram_val_check_gamma", &[]);
+        crate::transcripts::Transcript::append_bytes(
+            &mut self.transcript,
+            b"ram_val_check_gamma",
+            &[],
+        );
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
         let initial_ram_state = crate::zkvm::ram::gen_ram_initial_memory_state::<F>(
             self.proof.ram_K,
@@ -1402,7 +1401,8 @@ impl<
             PCS::eval_commitment_gens_verifier(&self.preprocessing.generators);
         let verifier =
             BlindFoldVerifier::<_, _>::new(&pedersen_generators, &r1cs, eval_commitment_gens);
-        let mut blindfold_transcript = ProofTranscript::new(b"BlindFold");
+        let mut blindfold_transcript =
+            <ProofTranscript as crate::transcripts::Transcript>::new(b"BlindFold");
 
         verifier
             .verify(
@@ -1663,39 +1663,45 @@ impl<
         }
 
         let joint_commitment = self.compute_joint_commitment(&mut commitments_map, &state)?;
+        let pcs_opening_point: Vec<F> = opening_point
+            .r
+            .iter()
+            .map(|point| (*point).into())
+            .collect();
 
         let zk_mode = self.opening_accumulator.zk_mode;
         if zk_mode {
-            PCS::verify_batch(
+            PCS::verify_fused_batch_zk(
+                &joint_commitment,
+                &pcs_opening_point,
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,
-                &opening_point.r,
-                &F::zero(),
-                &joint_commitment,
-            )?;
+            )
+            .map_err(|_| ProofVerifyError::InvalidOpeningProof)?;
 
             #[cfg(feature = "zk")]
             {
                 let y_com: C::G1 = PCS::batch_eval_commitment(&self.proof.joint_opening_proof)
                     .ok_or(ProofVerifyError::InvalidOpeningProof)?;
-                bind_opening_inputs_zk::<F, C, _>(&mut self.transcript, &opening_point.r, &y_com);
+                PCS::bind_zk_opening_inputs(&mut self.transcript, &pcs_opening_point, &y_com);
             }
             #[cfg(not(feature = "zk"))]
             {
                 return Err(ProofVerifyError::ZkFeatureRequired);
             }
         } else {
-            PCS::verify_batch(
+            PCS::verify_fused_batch(
+                &joint_commitment,
+                &pcs_opening_point,
+                joint_claim,
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,
-                &opening_point.r,
-                &joint_claim,
-                &joint_commitment,
-            )?;
+            )
+            .map_err(|_| ProofVerifyError::InvalidOpeningProof)?;
 
-            bind_opening_inputs::<F, _>(&mut self.transcript, &opening_point.r, &joint_claim);
+            PCS::bind_opening_inputs(&mut self.transcript, &pcs_opening_point, &joint_claim);
         }
 
         Ok(Stage8VerifyData {
@@ -1707,9 +1713,9 @@ impl<
     /// Compute joint commitment for the batch opening.
     fn compute_joint_commitment(
         &self,
-        commitment_map: &mut HashMap<CommittedPolynomial, PCS::Commitment>,
+        commitment_map: &mut HashMap<CommittedPolynomial, PCS::Output>,
         state: &DoryOpeningState<F>,
-    ) -> Result<PCS::Commitment, ProofVerifyError> {
+    ) -> Result<PCS::Output, ProofVerifyError> {
         let mut rlc_map = HashMap::new();
         for (gamma, (poly, _claim)) in state
             .gamma_powers
@@ -1719,7 +1725,7 @@ impl<
             *rlc_map.entry(*poly).or_insert(F::zero()) += *gamma;
         }
 
-        let (coeffs, commitments): (Vec<F>, Vec<PCS::Commitment>) = rlc_map
+        let (coeffs, commitments): (Vec<F>, Vec<PCS::Output>) = rlc_map
             .into_iter()
             .map(|(k, v)| {
                 commitment_map
@@ -1731,7 +1737,7 @@ impl<
             .into_iter()
             .unzip();
 
-        Ok(PCS::combine_commitments(&commitments, &coeffs))
+        Ok(PCS::combine(&commitments, &coeffs))
     }
 }
 
@@ -1851,9 +1857,9 @@ impl<C: JoltCurve> From<BlindfoldSetup<C>> for PedersenGenerators<C> {
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltVerifierPreprocessing<F, C, PCS>
 where
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
 {
     pub generators: PCS::VerifierSetup,
     pub shared: JoltSharedPreprocessing,
@@ -1862,17 +1868,17 @@ where
 
 impl<F, C, PCS> Serializable for JoltVerifierPreprocessing<F, C, PCS>
 where
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
 {
 }
 
 impl<F, C, PCS> JoltVerifierPreprocessing<F, C, PCS>
 where
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
 {
     pub fn save_to_target_dir(&self, target_dir: &str) -> std::io::Result<()> {
         let filename = Path::new(target_dir).join("jolt_verifier_preprocessing.dat");
@@ -1892,8 +1898,11 @@ where
     }
 }
 
-impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>>
-    JoltVerifierPreprocessing<F, C, PCS>
+impl<
+        F: JoltField + jolt_field::Field,
+        C: JoltCurve<F = F>,
+        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    > JoltVerifierPreprocessing<F, C, PCS>
 {
     #[tracing::instrument(skip_all, name = "JoltVerifierPreprocessing::new")]
     pub fn new(
@@ -1928,12 +1937,15 @@ impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>>
 }
 
 #[cfg(feature = "prover")]
-impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F> + ZkOpeningSupport<C>>
-    From<&JoltProverPreprocessing<F, C, PCS>> for JoltVerifierPreprocessing<F, C, PCS>
+impl<
+        F: JoltField + jolt_field::Field,
+        C: JoltCurve<F = F>,
+        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    > From<&JoltProverPreprocessing<F, C, PCS>> for JoltVerifierPreprocessing<F, C, PCS>
 {
     fn from(prover_preprocessing: &JoltProverPreprocessing<F, C, PCS>) -> Self {
         let shared = prover_preprocessing.shared.clone();
-        let generators = PCS::setup_verifier(&prover_preprocessing.generators);
+        let generators = PCS::project_verifier_setup(&prover_preprocessing.generators);
         #[cfg(not(feature = "zk"))]
         let blindfold_setup = None;
         #[cfg(feature = "zk")]

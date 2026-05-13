@@ -120,19 +120,17 @@ impl<C: JoltCurve> PedersenGenerators<C> {
 }
 
 #[cfg(test)]
-impl PedersenGenerators<crate::curve::Bn254Curve> {
+impl<C: JoltCurve> PedersenGenerators<C> {
     /// Test-only: derives generators from hash-to-curve. Production code uses Dory URS.
     pub fn deterministic(count: usize) -> Self {
-        use ark_bn254::G1Projective;
-        use ark_std::UniformRand;
         use rand_chacha::ChaCha20Rng;
         use rand_core::SeedableRng;
         use sha3::Digest;
 
-        let hash_to_g1 = |domain: &[u8]| -> crate::curve::Bn254G1 {
+        let hash_to_g1 = |domain: &[u8]| -> C::G1 {
             let hash = sha3::Sha3_256::digest(domain);
             let mut rng = ChaCha20Rng::from_seed(hash.into());
-            crate::curve::Bn254G1(G1Projective::rand(&mut rng))
+            C::random_g1(&mut rng)
         };
 
         let generators = (0..count)

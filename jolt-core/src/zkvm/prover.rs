@@ -13,12 +13,9 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(not(feature = "zk"))]
-use crate::poly::commitment::dory::bind_opening_inputs;
-#[cfg(feature = "zk")]
-use crate::poly::commitment::dory::bind_opening_inputs_zk;
 use crate::poly::commitment::dory::DoryContext;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use jolt_openings::CommitmentScheme;
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::ram::remap_address;
@@ -29,16 +26,40 @@ use crate::zkvm::Serializable;
 use crate::utils::profiling::print_current_memory_usage;
 #[cfg(feature = "allocative")]
 use crate::utils::profiling::{print_data_structure_heap_usage, write_flamegraph_svg};
+use crate::zkvm::{
+    bytecode::read_raf_checking::BytecodeReadRafSumcheckProver,
+    fiat_shamir_preamble,
+    instruction_lookups::{
+        ra_virtual::InstructionRaSumcheckProver as LookupsRaSumcheckProver,
+        read_raf_checking::InstructionReadRafSumcheckProver,
+    },
+    proof_serialization::JoltProof,
+    r1cs::key::UniformSpartanKey,
+    ram::{
+        gen_ram_memory_states, hamming_booleanity::HammingBooleanitySumcheckProver,
+        output_check::OutputSumcheckProver, prover_accumulate_advice,
+        ra_virtual::RamRaVirtualSumcheckProver,
+        raf_evaluation::RafEvaluationSumcheckProver as RamRafEvaluationSumcheckProver,
+        read_write_checking::RamReadWriteCheckingProver,
+    },
+    registers::{
+        read_write_checking::RegistersReadWriteCheckingProver,
+        val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
+    },
+    spartan::{
+        instruction_input::InstructionInputSumcheckProver,
+        outer::{OuterRemainingStreamingSumcheck, OuterSharedState},
+        product::ProductVirtualRemainderProver,
+        shift::ShiftSumcheckProver,
+    },
+    witness::CommittedPolynomial,
+    ProverDebugInfo,
+};
 use crate::{
     field::JoltField,
     guest,
     poly::{
-        commitment::{
-            commitment_scheme::{
-                BatchOpeningScheme, SourceBatchCommitmentScheme, ZkOpeningSupport,
-            },
-            dory::{DoryGlobals, DoryLayout},
-        },
+        commitment::dory::{DoryGlobals, DoryLayout},
         eq_poly::EqPolynomial,
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{
@@ -98,38 +119,6 @@ use crate::{
         witness::{all_committed_polynomials, CycleMajorTraceBatch},
     },
 };
-use crate::{
-    poly::commitment::commitment_scheme::CommitmentScheme,
-    zkvm::{
-        bytecode::read_raf_checking::BytecodeReadRafSumcheckProver,
-        fiat_shamir_preamble,
-        instruction_lookups::{
-            ra_virtual::InstructionRaSumcheckProver as LookupsRaSumcheckProver,
-            read_raf_checking::InstructionReadRafSumcheckProver,
-        },
-        proof_serialization::JoltProof,
-        r1cs::key::UniformSpartanKey,
-        ram::{
-            gen_ram_memory_states, hamming_booleanity::HammingBooleanitySumcheckProver,
-            output_check::OutputSumcheckProver, prover_accumulate_advice,
-            ra_virtual::RamRaVirtualSumcheckProver,
-            raf_evaluation::RafEvaluationSumcheckProver as RamRafEvaluationSumcheckProver,
-            read_write_checking::RamReadWriteCheckingProver,
-        },
-        registers::{
-            read_write_checking::RegistersReadWriteCheckingProver,
-            val_evaluation::ValEvaluationSumcheckProver as RegistersValEvaluationSumcheckProver,
-        },
-        spartan::{
-            instruction_input::InstructionInputSumcheckProver,
-            outer::{OuterRemainingStreamingSumcheck, OuterSharedState},
-            product::ProductVirtualRemainderProver,
-            shift::ShiftSumcheckProver,
-        },
-        witness::CommittedPolynomial,
-        ProverDebugInfo,
-    },
-};
 
 #[cfg(feature = "allocative")]
 use allocative::FlameGraphBuilder;
@@ -166,10 +155,10 @@ use crate::zkvm::verifier::BlindfoldSetup;
 /// Jolt CPU prover for RV64IMAC.
 pub struct JoltCpuProver<
     'a,
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
-    ProofTranscript: Transcript,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
 > {
     pub preprocessing: &'a JoltProverPreprocessing<F, C, PCS>,
     pub program_io: JoltDevice,
@@ -201,13 +190,15 @@ pub struct JoltCpuProver<
 
 impl<
         'a,
-        F: JoltField,
+        F: JoltField + jolt_field::Field,
         C: JoltCurve<F = F>,
-        PCS: SourceBatchCommitmentScheme<Field = F>
-            + BatchOpeningScheme<Field = F>
-            + ZkOpeningSupport<C>,
-        ProofTranscript: Transcript,
+        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+        ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
     > JoltCpuProver<'a, F, C, PCS, ProofTranscript>
+where
+    for<'challenge> &'challenge F::Challenge: Into<F>,
+    for<'batch> CycleMajorTraceBatch<'batch, LazyTraceIterator>:
+        jolt_openings::BatchCommitmentSource<F, Id = CommittedPolynomial>,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn gen_from_elf(
@@ -216,8 +207,8 @@ impl<
         inputs: &[u8],
         untrusted_advice: &[u8],
         trusted_advice: &[u8],
-        trusted_advice_commitment: Option<PCS::Commitment>,
-        trusted_advice_hint: Option<PCS::OpeningProofHint>,
+        trusted_advice_commitment: Option<PCS::Output>,
+        trusted_advice_hint: Option<PCS::OpeningHint>,
         advice_tape: Option<tracer::AdviceTape>,
     ) -> Self {
         let memory_config = MemoryConfig {
@@ -358,8 +349,8 @@ impl<
         lazy_trace: LazyTraceIterator,
         mut trace: Vec<Cycle>,
         mut program_io: JoltDevice,
-        trusted_advice_commitment: Option<PCS::Commitment>,
-        trusted_advice_hint: Option<PCS::OpeningProofHint>,
+        trusted_advice_commitment: Option<PCS::Output>,
+        trusted_advice_hint: Option<PCS::OpeningHint>,
         final_memory_state: Memory,
     ) -> Self {
         // Truncate trailing zero bytes from outputs. Both prover and verifier
@@ -426,7 +417,7 @@ impl<
             )
             .next_power_of_two() as usize;
 
-        let transcript = ProofTranscript::new(b"Jolt");
+        let transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
         let opening_accumulator = ProverOpeningAccumulator::new(trace.len().log_2());
 
         let spartan_key = UniformSpartanKey::new(trace.len());
@@ -669,8 +660,8 @@ impl<
     fn generate_and_commit_witness_polynomials(
         &mut self,
     ) -> (
-        Vec<PCS::Commitment>,
-        HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
+        Vec<PCS::Output>,
+        HashMap<CommittedPolynomial, PCS::OpeningHint>,
     ) {
         let _guard = DoryGlobals::initialize_context(
             1 << self.one_hot_params.log_k_chunk,
@@ -755,7 +746,7 @@ impl<
         (commitments, hint_map)
     }
 
-    fn generate_and_commit_untrusted_advice(&mut self) -> Option<PCS::Commitment> {
+    fn generate_and_commit_untrusted_advice(&mut self) -> Option<PCS::Output> {
         if self.program_io.untrusted_advice.is_empty() {
             return None;
         }
@@ -1061,7 +1052,11 @@ impl<
             &mut self.opening_accumulator,
         );
         // Domain-separate the batching challenge.
-        self.transcript.append_bytes(b"ram_val_check_gamma", &[]);
+        crate::transcripts::Transcript::append_bytes(
+            &mut self.transcript,
+            b"ram_val_check_gamma",
+            &[],
+        );
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
         let ram_val_check_params = RamValCheckSumcheckParams::new_from_prover(
             &self.one_hot_params,
@@ -1359,7 +1354,7 @@ impl<
 
     #[tracing::instrument(skip_all)]
     #[cfg(feature = "zk")]
-    fn prove_blindfold(&mut self, joint_opening_proof: &PCS::BatchedProof) -> BlindFoldProof<F, C> {
+    fn prove_blindfold(&mut self, joint_opening_proof: &PCS::BatchProof) -> BlindFoldProof<F, C> {
         use crate::curve::JoltGroupElement;
         use rayon::prelude::*;
 
@@ -1511,7 +1506,7 @@ impl<
                         .batching_coefficients
                         .iter()
                         .zip(&zk_data.input_claim_scaling_exponents)
-                        .map(|(alpha, &scale)| alpha.mul_pow_2(scale))
+                        .map(|(alpha, &scale)| crate::field::JoltField::mul_pow_2(alpha, scale))
                         .collect();
                     for cv in &zk_data.input_constraint_challenge_values {
                         challenge_values.extend(cv.iter().cloned());
@@ -1614,7 +1609,7 @@ impl<
                         .batching_coefficients
                         .iter()
                         .zip(&zk_data.input_claim_scaling_exponents)
-                        .map(|(alpha, &scale)| alpha.mul_pow_2(scale))
+                        .map(|(alpha, &scale)| crate::field::JoltField::mul_pow_2(alpha, scale))
                         .collect();
                     for cv_inner in &zk_data.input_constraint_challenge_values {
                         cv.extend(cv_inner.iter().cloned());
@@ -1780,7 +1775,7 @@ impl<
         // Regular noncoeff rows: committed fresh by the prover
         let regular_noncoeff_start = (R_coeff + output_claims_rows) * hyrax_C;
         let noncoeff_row_blindings: Vec<F> = (0..regular_noncoeff_rows)
-            .map(|_| F::random(&mut rng))
+            .map(|_| <F as crate::field::JoltField>::random(&mut rng))
             .collect();
         let noncoeff_row_commitments: Vec<C::G1> = (0..regular_noncoeff_rows)
             .into_par_iter()
@@ -1821,7 +1816,8 @@ impl<
         let eval_commitment_gens = PCS::eval_commitment_gens(&self.preprocessing.generators);
         let prover =
             BlindFoldProver::<_, _>::new(&pedersen_generators, &r1cs, eval_commitment_gens);
-        let mut blindfold_transcript = ProofTranscript::new(b"BlindFold");
+        let mut blindfold_transcript =
+            <ProofTranscript as crate::transcripts::Transcript>::new(b"BlindFold");
 
         prover.prove(&real_instance, &real_witness, &z, &mut blindfold_transcript)
     }
@@ -1901,8 +1897,8 @@ impl<
     #[tracing::instrument(skip_all)]
     fn prove_stage8(
         &mut self,
-        opening_proof_hints: HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
-    ) -> PCS::BatchedProof {
+        opening_proof_hints: HashMap<CommittedPolynomial, PCS::OpeningHint>,
+    ) -> PCS::BatchProof {
         tracing::info!("Stage 8 proving (Dory batch opening)");
 
         let _guard = DoryGlobals::initialize_context(
@@ -2070,31 +2066,47 @@ impl<
             advice_polys,
         );
 
-        let (proof, _y_blinding) = PCS::prove_batch(
-            &self.preprocessing.generators,
+        let pcs_opening_point: Vec<F> = opening_point
+            .r
+            .iter()
+            .map(|point| (*point).into())
+            .collect();
+
+        #[cfg(feature = "zk")]
+        let (proof, y_com, y_blinding) = PCS::prove_fused_batch_zk(
             &joint_poly,
-            &opening_point.r,
+            &pcs_opening_point,
+            joint_claim,
+            hint,
+            &self.preprocessing.generators,
+            &mut self.transcript,
+        );
+
+        #[cfg(not(feature = "zk"))]
+        let proof = PCS::prove_fused_batch(
+            &joint_poly,
+            &pcs_opening_point,
+            joint_claim,
             Some(hint),
+            &self.preprocessing.generators,
             &mut self.transcript,
         );
 
         #[cfg(feature = "zk")]
         {
-            let y_com: C::G1 =
-                PCS::batch_eval_commitment(&proof).expect("ZK proof must have y_com");
-            bind_opening_inputs_zk::<F, C, _>(&mut self.transcript, &opening_point.r, &y_com);
+            PCS::bind_zk_opening_inputs(&mut self.transcript, &pcs_opening_point, &y_com);
             self.blindfold_accumulator.set_opening_proof_data(
                 crate::subprotocols::blindfold::OpeningProofData {
                     opening_ids,
                     constraint_coeffs,
                     joint_claim,
-                    y_blinding: _y_blinding.expect("ZK mode requires y_blinding"),
+                    y_blinding,
                 },
             );
         }
         #[cfg(not(feature = "zk"))]
         {
-            bind_opening_inputs::<F, _>(&mut self.transcript, &opening_point.r, &joint_claim);
+            PCS::bind_opening_inputs(&mut self.transcript, &pcs_opening_point, &joint_claim);
         }
 
         proof
@@ -2103,12 +2115,12 @@ impl<
 
 pub struct JoltAdvice<F: JoltField, PCS: CommitmentScheme<Field = F>> {
     pub untrusted_advice_polynomial: Option<MultilinearPolynomial<F>>,
-    pub trusted_advice_commitment: Option<PCS::Commitment>,
+    pub trusted_advice_commitment: Option<PCS::Output>,
     pub trusted_advice_polynomial: Option<MultilinearPolynomial<F>>,
     /// Hint for untrusted advice (for batched Dory opening)
-    pub untrusted_advice_hint: Option<PCS::OpeningProofHint>,
+    pub untrusted_advice_hint: Option<PCS::OpeningHint>,
     /// Hint for trusted advice (for batched Dory opening)
-    pub trusted_advice_hint: Option<PCS::OpeningProofHint>,
+    pub trusted_advice_hint: Option<PCS::OpeningHint>,
 }
 
 #[cfg(feature = "allocative")]
@@ -2137,9 +2149,9 @@ fn write_instance_flamegraph_svg(
 
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltProverPreprocessing<
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
 > {
     pub generators: PCS::ProverSetup,
     pub shared: JoltSharedPreprocessing,
@@ -2148,9 +2160,9 @@ pub struct JoltProverPreprocessing<
 
 impl<F, C, PCS> JoltProverPreprocessing<F, C, PCS>
 where
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
 {
     #[tracing::instrument(skip_all, name = "JoltProverPreprocessing::gen")]
     pub fn new(shared: JoltSharedPreprocessing) -> Self {
@@ -2162,7 +2174,7 @@ where
         } else {
             8
         };
-        let generators = PCS::setup_prover(max_log_k_chunk + max_log_T);
+        let (generators, _) = PCS::setup(max_log_k_chunk + max_log_T);
 
         JoltProverPreprocessing {
             generators,
@@ -2172,10 +2184,7 @@ where
     }
 
     #[cfg(feature = "zk")]
-    pub fn blindfold_setup(&self) -> BlindfoldSetup<C>
-    where
-        PCS: ZkOpeningSupport<C>,
-    {
+    pub fn blindfold_setup(&self) -> BlindfoldSetup<C> {
         use common::constants::MAX_BLINDFOLD_GENERATORS;
 
         let (g1s, h1) = PCS::zk_generators(&self.generators, MAX_BLINDFOLD_GENERATORS)
@@ -2184,10 +2193,7 @@ where
     }
 
     #[cfg(feature = "zk")]
-    pub fn pedersen_generators(&self, count: usize) -> PedersenGenerators<C>
-    where
-        PCS: ZkOpeningSupport<C>,
-    {
+    pub fn pedersen_generators(&self, count: usize) -> PedersenGenerators<C> {
         let gens: PedersenGenerators<C> = self.blindfold_setup().into();
         PedersenGenerators::new(
             gens.message_generators[..count].to_vec(),
@@ -2213,8 +2219,11 @@ where
     }
 }
 
-impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>> Serializable
-    for JoltProverPreprocessing<F, C, PCS>
+impl<
+        F: JoltField + jolt_field::Field,
+        C: JoltCurve<F = F>,
+        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    > Serializable for JoltProverPreprocessing<F, C, PCS>
 {
 }
 
@@ -2226,19 +2235,17 @@ mod tests {
 
     use std::sync::Arc;
 
-    use ark_bn254::Fr;
+    use jolt_dory::{DoryCommitment, DoryHint, DoryScheme};
+    use jolt_field::Fr;
+    use jolt_openings::CommitmentScheme;
     use serial_test::serial;
 
-    use crate::curve::Bn254Curve;
     use crate::host;
     use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
     #[cfg(feature = "zk")]
     use crate::poly::commitment::pedersen::PedersenGenerators;
     use crate::poly::{
-        commitment::{
-            commitment_scheme::CommitmentScheme,
-            dory::{DoryCommitmentScheme, DoryContext},
-        },
+        commitment::dory::DoryContext,
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{OpeningAccumulator, SumcheckId},
     };
@@ -2276,12 +2283,9 @@ mod tests {
     }
 
     fn commit_trusted_advice_preprocessing_only(
-        preprocessing: &JoltProverPreprocessing<Fr, Bn254Curve, DoryCommitmentScheme>,
+        preprocessing: &JoltProverPreprocessing<Fr, jolt_crypto::Bn254, DoryScheme>,
         trusted_advice_bytes: &[u8],
-    ) -> (
-        <DoryCommitmentScheme as CommitmentScheme>::Commitment,
-        <DoryCommitmentScheme as CommitmentScheme>::OpeningProofHint,
-    ) {
+    ) -> (DoryCommitment, DoryHint) {
         let max_trusted_advice_size = preprocessing.shared.memory_layout.max_trusted_advice_size;
         let mut trusted_advice_words = vec![0u64; (max_trusted_advice_size as usize) / 8];
         populate_memory_states(
@@ -2298,7 +2302,7 @@ mod tests {
             DoryGlobals::initialize_context(1, advice_len, DoryContext::TrustedAdvice, None);
         let (commitment, hint) = {
             let _ctx = DoryGlobals::with_context(DoryContext::TrustedAdvice);
-            DoryCommitmentScheme::commit(&poly, &preprocessing.generators)
+            DoryScheme::commit(&poly, &preprocessing.generators)
         };
         (commitment, hint)
     }
@@ -2555,7 +2559,7 @@ mod tests {
             &inputs,
             &untrusted_advice,
             &trusted_advice,
-            Some(trusted_commitment),
+            Some(trusted_commitment.clone()),
             Some(trusted_hint),
             None,
         );
@@ -2621,7 +2625,7 @@ mod tests {
             lazy_trace,
             trace,
             io_device,
-            Some(trusted_commitment),
+            Some(trusted_commitment.clone()),
             Some(trusted_hint),
             final_memory_state,
         );
@@ -2682,7 +2686,7 @@ mod tests {
             &inputs,
             &untrusted_advice,
             &trusted_advice,
-            Some(trusted_commitment),
+            Some(trusted_commitment.clone()),
             Some(trusted_hint),
             None,
         );
@@ -2745,7 +2749,7 @@ mod tests {
             lazy_trace,
             trace,
             io_device,
-            Some(trusted_commitment),
+            Some(trusted_commitment.clone()),
             Some(trusted_hint),
             final_memory_state,
         );
@@ -3011,7 +3015,6 @@ mod tests {
     fn blindfold_r1cs_satisfaction() {
         DoryGlobals::reset();
 
-        use crate::curve::Bn254Curve;
         use crate::subprotocols::blindfold::{
             BakedPublicInputs, BlindFoldWitness, RoundWitness, StageConfig, StageWitness,
             VerifierR1CSBuilder,
@@ -3024,7 +3027,7 @@ mod tests {
         /// For ZK proofs, creates synthetic witnesses with correct degrees to test R1CS structure.
         fn process_stage<ProofTranscript: Transcript>(
             _stage_name: &str,
-            proof: &SumcheckInstanceProof<Fr, Bn254Curve, ProofTranscript>,
+            proof: &SumcheckInstanceProof<Fr, jolt_crypto::Bn254, ProofTranscript>,
             transcript: &mut KeccakTranscript,
         ) -> Vec<(RoundWitness<Fr>, usize)> {
             match proof {
@@ -3142,7 +3145,7 @@ mod tests {
         println!("\n=== BlindFold R1CS Satisfaction Test (All 7 Stages) ===\n");
 
         // Process all 7 stages and verify each one
-        let stage_proofs: Vec<(&str, &SumcheckInstanceProof<Fr, Bn254Curve, _>)> = vec![
+        let stage_proofs: Vec<(&str, &SumcheckInstanceProof<Fr, jolt_crypto::Bn254, _>)> = vec![
             ("Stage 1 (Spartan Outer)", &jolt_proof.stage1_sumcheck_proof),
             (
                 "Stage 2 (Product Virtual)",
@@ -3377,7 +3380,6 @@ mod tests {
     #[test]
     #[serial]
     fn blindfold_protocol_e2e() {
-        use crate::curve::Bn254Curve;
         use crate::subprotocols::blindfold::{
             BakedPublicInputs, BlindFoldProver, BlindFoldVerifier, BlindFoldVerifierInput,
             BlindFoldWitness, RelaxedR1CSInstance, RoundWitness, StageConfig, StageWitness,
@@ -3419,7 +3421,7 @@ mod tests {
         let builder = VerifierR1CSBuilder::<Fr>::new(&configs, &baked);
         let r1cs = builder.build();
 
-        let gens = PedersenGenerators::<Bn254Curve>::deterministic(r1cs.hyrax.C + 1);
+        let gens = PedersenGenerators::<jolt_crypto::Bn254>::deterministic(r1cs.hyrax.C + 1);
 
         let z = blindfold_witness.assign(&r1cs);
         r1cs.check_satisfaction(&z).unwrap();
@@ -3451,16 +3453,17 @@ mod tests {
             w_row_blindings[R_coeff + row] = blinding;
         }
 
-        let (real_instance, real_witness) = RelaxedR1CSInstance::<Fr, Bn254Curve>::new_non_relaxed(
-            &witness,
-            r1cs.num_constraints,
-            hyrax_C,
-            round_commitments,
-            Vec::new(),
-            noncoeff_row_commitments,
-            Vec::new(),
-            w_row_blindings,
-        );
+        let (real_instance, real_witness) =
+            RelaxedR1CSInstance::<Fr, jolt_crypto::Bn254>::new_non_relaxed(
+                &witness,
+                r1cs.num_constraints,
+                hyrax_C,
+                round_commitments,
+                Vec::new(),
+                noncoeff_row_commitments,
+                Vec::new(),
+                w_row_blindings,
+            );
 
         let prover = BlindFoldProver::new(&gens, &r1cs, None);
         let verifier = BlindFoldVerifier::new(&gens, &r1cs, None);
@@ -3572,7 +3575,7 @@ mod tests {
             &inputs,
             &untrusted_advice,
             &trusted_advice,
-            Some(trusted_commitment),
+            Some(trusted_commitment.clone()),
             Some(trusted_hint),
             None,
         );

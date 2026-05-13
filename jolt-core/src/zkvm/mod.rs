@@ -3,10 +3,9 @@ use std::fs::File;
 use crate::zkvm::config::{OneHotConfig, OneHotParams, ReadWriteConfig};
 use crate::zkvm::witness::CommittedPolynomial;
 use crate::{
-    curve::Bn254Curve,
+    curve::JoltCurve,
     field::JoltField,
-    poly::commitment::commitment_scheme::CommitmentScheme,
-    poly::commitment::dory::{DoryCommitmentScheme, DoryLayout},
+    poly::commitment::dory::DoryLayout,
     poly::opening_proof::ProverOpeningAccumulator,
     poly::opening_proof::{OpeningId, SumcheckId},
     transcripts::Transcript,
@@ -35,9 +34,14 @@ use crate::transcripts::Blake2bTranscript;
 use crate::transcripts::KeccakTranscript;
 #[cfg(feature = "transcript-poseidon")]
 use crate::transcripts::PoseidonTranscript;
-use ark_bn254::Fr;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Valid};
 use eyre::Result;
+use jolt_crypto::{Bn254, HomomorphicCommitment};
+use jolt_dory::DoryScheme;
+use jolt_field::Fr;
+use jolt_openings::{
+    AdditivelyHomomorphic, CommitmentScheme, EvaluationCommitmentProver, ZkOpeningScheme,
+};
 use proof_serialization::JoltProof;
 #[cfg(feature = "prover")]
 use prover::JoltCpuProver;
@@ -45,6 +49,46 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use tracer::JoltDevice;
 use verifier::JoltVerifier;
+
+/// PCS contract required by Jolt's current proving pipeline.
+///
+/// The extracted `jolt-openings` traits stay backend-neutral. This trait
+/// collects the extra requirements that Jolt core currently needs for Stage 8:
+/// canonical proof serialization, additive commitment/hint combination, Dory's
+/// hidden-evaluation commitment for BlindFold, and size-only setup.
+pub trait JoltCommitmentScheme<F, C>:
+    jolt_crypto::Commitment<
+        Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid,
+    > + CommitmentScheme<
+        Field = F,
+        SetupParams = usize,
+        ProverSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
+    > + jolt_openings::CommitmentSchemeVerifier<
+        BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,
+        VerifierSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
+    > + AdditivelyHomomorphic<Field = F>
+    + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+    + EvaluationCommitmentProver<C::G1>
+where
+    F: JoltField + jolt_field::Field,
+    C: JoltCurve<F = F>,
+{
+}
+
+impl<F, C, PCS> JoltCommitmentScheme<F, C> for PCS
+where
+    F: JoltField + jolt_field::Field,
+    C: JoltCurve<F = F>,
+    PCS: CommitmentScheme<Field = F, SetupParams = usize>
+        + AdditivelyHomomorphic<Field = F>
+        + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+        + EvaluationCommitmentProver<C::G1>,
+    PCS::Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid,
+    PCS::BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,
+    PCS::ProverSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
+    PCS::VerifierSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
+{
+}
 
 pub mod bytecode;
 pub mod claim_reductions;
@@ -236,22 +280,18 @@ pub fn fiat_shamir_preamble(
 }
 
 #[cfg(all(feature = "prover", feature = "transcript-poseidon"))]
-pub type RV64IMACProver<'a> =
-    JoltCpuProver<'a, Fr, Bn254Curve, DoryCommitmentScheme, PoseidonTranscript>;
+pub type RV64IMACProver<'a> = JoltCpuProver<'a, Fr, Bn254, DoryScheme, PoseidonTranscript>;
 #[cfg(feature = "transcript-poseidon")]
-pub type RV64IMACVerifier<'a> =
-    JoltVerifier<'a, Fr, Bn254Curve, DoryCommitmentScheme, PoseidonTranscript>;
+pub type RV64IMACVerifier<'a> = JoltVerifier<'a, Fr, Bn254, DoryScheme, PoseidonTranscript>;
 #[cfg(feature = "transcript-poseidon")]
-pub type RV64IMACProof = JoltProof<Fr, Bn254Curve, DoryCommitmentScheme, PoseidonTranscript>;
+pub type RV64IMACProof = JoltProof<Fr, Bn254, DoryScheme, PoseidonTranscript>;
 
 #[cfg(all(feature = "prover", feature = "transcript-keccak"))]
-pub type RV64IMACProver<'a> =
-    JoltCpuProver<'a, Fr, Bn254Curve, DoryCommitmentScheme, KeccakTranscript>;
+pub type RV64IMACProver<'a> = JoltCpuProver<'a, Fr, Bn254, DoryScheme, KeccakTranscript>;
 #[cfg(feature = "transcript-keccak")]
-pub type RV64IMACVerifier<'a> =
-    JoltVerifier<'a, Fr, Bn254Curve, DoryCommitmentScheme, KeccakTranscript>;
+pub type RV64IMACVerifier<'a> = JoltVerifier<'a, Fr, Bn254, DoryScheme, KeccakTranscript>;
 #[cfg(feature = "transcript-keccak")]
-pub type RV64IMACProof = JoltProof<Fr, Bn254Curve, DoryCommitmentScheme, KeccakTranscript>;
+pub type RV64IMACProof = JoltProof<Fr, Bn254, DoryScheme, KeccakTranscript>;
 
 #[cfg(all(
     feature = "prover",
@@ -261,30 +301,26 @@ pub type RV64IMACProof = JoltProof<Fr, Bn254Curve, DoryCommitmentScheme, KeccakT
         feature = "transcript-blake2b"
     ))
 ))]
-pub type RV64IMACProver<'a> =
-    JoltCpuProver<'a, Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACProver<'a> = JoltCpuProver<'a, Fr, Bn254, DoryScheme, Blake2bTranscript>;
 #[cfg(not(any(
     feature = "transcript-poseidon",
     feature = "transcript-keccak",
     feature = "transcript-blake2b"
 )))]
-pub type RV64IMACVerifier<'a> =
-    JoltVerifier<'a, Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACVerifier<'a> = JoltVerifier<'a, Fr, Bn254, DoryScheme, Blake2bTranscript>;
 #[cfg(not(any(
     feature = "transcript-poseidon",
     feature = "transcript-keccak",
     feature = "transcript-blake2b"
 )))]
-pub type RV64IMACProof = JoltProof<Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACProof = JoltProof<Fr, Bn254, DoryScheme, Blake2bTranscript>;
 
 #[cfg(all(feature = "prover", feature = "transcript-blake2b"))]
-pub type RV64IMACProver<'a> =
-    JoltCpuProver<'a, Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACProver<'a> = JoltCpuProver<'a, Fr, Bn254, DoryScheme, Blake2bTranscript>;
 #[cfg(feature = "transcript-blake2b")]
-pub type RV64IMACVerifier<'a> =
-    JoltVerifier<'a, Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACVerifier<'a> = JoltVerifier<'a, Fr, Bn254, DoryScheme, Blake2bTranscript>;
 #[cfg(feature = "transcript-blake2b")]
-pub type RV64IMACProof = JoltProof<Fr, Bn254Curve, DoryCommitmentScheme, Blake2bTranscript>;
+pub type RV64IMACProof = JoltProof<Fr, Bn254, DoryScheme, Blake2bTranscript>;
 
 pub trait Serializable: CanonicalSerialize + CanonicalDeserialize + Sized {
     /// Gets the byte size of the serialized data

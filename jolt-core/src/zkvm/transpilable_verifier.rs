@@ -40,7 +40,6 @@
 //! - Stage 7: AddressVariables phase (bind address-derived coordinates)
 
 use crate::curve::JoltCurve;
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 #[cfg(not(feature = "zk"))]
 use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
 use crate::subprotocols::sumcheck::{BatchedSumcheck, ClearSumcheckProof, SumcheckInstanceProof};
@@ -115,13 +114,13 @@ fn extract_clear_proof<F: JoltField, C: JoltCurve<F = F>, T: Transcript>(
 /// - For transpilation: `A = AstOpeningAccumulator` (symbolic accumulator)
 pub struct TranspilableVerifier<
     'a,
-    F: JoltField,
+    F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: CommitmentScheme<Field = F>,
-    ProofTranscript: Transcript,
+    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
     A: AbstractVerifierOpeningAccumulator<F> = VerifierOpeningAccumulator<F>,
 > {
-    pub trusted_advice_commitment: Option<PCS::Commitment>,
+    pub trusted_advice_commitment: Option<PCS::Output>,
     pub program_io: JoltDevice,
     pub proof: JoltProof<F, C, PCS, ProofTranscript>,
     pub preprocessing: &'a JoltVerifierPreprocessing<F, C, PCS>,
@@ -139,10 +138,10 @@ pub struct TranspilableVerifier<
 
 impl<
         'a,
-        F: JoltField,
+        F: JoltField + jolt_field::Field,
         C: JoltCurve<F = F>,
-        PCS: CommitmentScheme<Field = F>,
-        ProofTranscript: Transcript,
+        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+        ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
         A: AbstractVerifierOpeningAccumulator<F>,
     > TranspilableVerifier<'a, F, C, PCS, ProofTranscript, A>
 {
@@ -154,7 +153,7 @@ impl<
         preprocessing: &'a JoltVerifierPreprocessing<F, C, PCS>,
         proof: JoltProof<F, C, PCS, ProofTranscript>,
         mut program_io: JoltDevice,
-        trusted_advice_commitment: Option<PCS::Commitment>,
+        trusted_advice_commitment: Option<PCS::Output>,
         _debug_info: Option<ProverDebugInfo<F, ProofTranscript, PCS>>,
     ) -> Result<
         TranspilableVerifier<'a, F, C, PCS, ProofTranscript, VerifierOpeningAccumulator<F>>,
@@ -207,9 +206,9 @@ impl<
         }
 
         #[cfg(test)]
-        let mut transcript = ProofTranscript::new(b"Jolt");
+        let mut transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
         #[cfg(not(test))]
-        let transcript = ProofTranscript::new(b"Jolt");
+        let transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
 
         #[cfg(test)]
         {
@@ -272,7 +271,7 @@ impl<
         preprocessing: &'a JoltVerifierPreprocessing<F, C, PCS>,
         proof: JoltProof<F, C, PCS, ProofTranscript>,
         program_io: JoltDevice,
-        trusted_advice_commitment: Option<PCS::Commitment>,
+        trusted_advice_commitment: Option<PCS::Output>,
         transcript: ProofTranscript,
         opening_accumulator: A,
     ) -> Self {
@@ -488,7 +487,11 @@ impl<
             &mut self.opening_accumulator,
         );
         // Domain-separate the batching challenge.
-        self.transcript.append_bytes(b"ram_val_check_gamma", &[]);
+        crate::transcripts::Transcript::append_bytes(
+            &mut self.transcript,
+            b"ram_val_check_gamma",
+            &[],
+        );
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
         let initial_ram_state = crate::zkvm::ram::gen_ram_initial_memory_state::<F>(
             self.proof.ram_K,

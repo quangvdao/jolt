@@ -766,6 +766,19 @@ impl ZkOpeningSchemeVerifier for DoryScheme {
         };
         Self::verify_zk(commitment, point, proof, setup, transcript)
     }
+
+    fn bind_zk_opening_inputs(
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+        point: &[Self::Field],
+        hiding_commitment: &Self::HidingCommitment,
+    ) {
+        transcript.append(&LabelWithCount(b"dory_opening_point", point.len() as u64));
+        for p in point {
+            p.append_to_transcript(transcript);
+        }
+        transcript.append(&Label(b"dory_eval_commitment"));
+        hiding_commitment.append_to_transcript(transcript);
+    }
 }
 
 impl ZkOpeningScheme for DoryScheme {

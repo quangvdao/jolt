@@ -272,6 +272,14 @@ impl<F: Field> ZkOpeningSchemeVerifier for MockCommitmentScheme<F> {
         };
         Self::verify_zk(commitment, point, proof, setup, transcript)
     }
+
+    fn bind_zk_opening_inputs(
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+        point: &[Self::Field],
+        hiding_commitment: &Self::HidingCommitment,
+    ) {
+        Self::bind_opening_inputs(transcript, point, &hiding_commitment.eval);
+    }
 }
 
 impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {

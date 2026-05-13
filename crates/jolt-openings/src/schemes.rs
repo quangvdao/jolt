@@ -217,6 +217,16 @@ pub trait ZkOpeningSchemeVerifier: CommitmentSchemeVerifier {
         setup: &Self::VerifierSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
+
+    /// Binds one ZK opening input to the Fiat-Shamir transcript.
+    ///
+    /// The evaluation is hidden, so the transcript receives the opening point
+    /// and the hiding commitment to the evaluation instead of the scalar value.
+    fn bind_zk_opening_inputs(
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+        point: &[Self::Field],
+        hiding_commitment: &Self::HidingCommitment,
+    );
 }
 
 /// Prover-side interface for openings that hide evaluations.

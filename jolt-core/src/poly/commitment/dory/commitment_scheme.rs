@@ -1,7 +1,7 @@
 //! Dory polynomial commitment scheme implementation
 
 use super::dory_globals::{DoryGlobals, DoryLayout};
-use super::jolt_dory_routines::{JoltG1Routines, JoltG2Routines};
+use super::jolt_dory_routines::JoltG1Routines;
 use super::wrappers::{
     ark_to_jolt, jolt_to_ark, ArkDoryProof, ArkFr, ArkG1, ArkGT, ArkworksProverSetup,
     ArkworksVerifierSetup, JoltToDoryTranscript, BN254,
@@ -169,49 +169,39 @@ impl CommitmentScheme for DoryCommitmentScheme {
     ) -> (Self::Proof, Option<Self::Field>) {
         let _span = trace_span!("DoryCommitmentScheme::prove").entered();
 
-        let (row_commitments, commit_blind) = hint
-            .map(DoryOpeningProofHint::into_parts)
-            .unwrap_or_else(|| {
-                let (_commitment, hint) = Self::commit(poly, setup);
-                hint.into_parts()
-            });
-
-        let num_cols = DoryGlobals::get_num_columns();
-        let num_rows = DoryGlobals::get_max_num_rows();
-        let sigma = num_cols.log_2();
-        let nu = num_rows.log_2();
-
-        let reordered_point = reorder_opening_point_for_layout::<ark_bn254::Fr>(opening_point);
-        let ark_point: Vec<ArkFr> = reordered_point
-            .iter()
-            .rev()
-            .map(|p| {
-                let f_val: ark_bn254::Fr = (*p).into();
-                jolt_to_ark(&f_val)
-            })
-            .collect();
-
+        let hint = convert_old_dory_hint(hint.unwrap_or_else(|| Self::commit(poly, setup).1));
+        let setup = jolt_dory::DoryProverSetup(setup.clone());
+        let source = CoreOpeningSource(poly);
+        let (nu, sigma) = current_dory_shape();
+        let point = convert_opening_point(opening_point);
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
         #[cfg(feature = "zk")]
-        type DoryMode = dory::ZK;
-        #[cfg(not(feature = "zk"))]
-        type DoryMode = dory::Transparent;
-
-        let (proof, y_blinding) =
-            dory::prove::<ArkFr, BN254, JoltG1Routines, JoltG2Routines, _, _, DoryMode>(
-                poly,
-                &ark_point,
-                row_commitments,
-                commit_blind,
+        {
+            let (proof, _y_com, y_blinding) = jolt_dory::DoryScheme::open_zk_source_with_shape(
+                &source,
+                &point,
                 nu,
                 sigma,
-                setup,
+                &setup,
+                hint,
                 &mut dory_transcript,
-            )
-            .expect("proof generation should succeed");
-
-        (proof, y_blinding.map(|b| ark_to_jolt(&b)))
+            );
+            (proof.0, Some(ark_bn254::Fr::from(y_blinding)))
+        }
+        #[cfg(not(feature = "zk"))]
+        {
+            let proof = jolt_dory::DoryScheme::open_source_with_shape(
+                &source,
+                &point,
+                nu,
+                sigma,
+                &setup,
+                hint,
+                &mut dory_transcript,
+            );
+            (proof.0, None)
+        }
     }
 
     fn verify<ProofTranscript: Transcript>(
@@ -224,32 +214,34 @@ impl CommitmentScheme for DoryCommitmentScheme {
     ) -> Result<(), ProofVerifyError> {
         let _span = trace_span!("DoryCommitmentScheme::verify").entered();
 
-        let reordered_point = reorder_opening_point_for_layout::<ark_bn254::Fr>(opening_point);
-
-        // Dory uses the opposite endian-ness as Jolt
-        let ark_point: Vec<ArkFr> = reordered_point
-            .iter()
-            .rev()
-            .map(|p| {
-                let f_val: ark_bn254::Fr = (*p).into();
-                jolt_to_ark(&f_val)
-            })
-            .collect();
-        let ark_eval: ArkFr = jolt_to_ark(opening);
-
+        let proof = jolt_dory::DoryProof(proof.clone());
+        let setup = jolt_dory::DoryVerifierSetup(setup.clone());
+        let commitment = jolt_dory::DoryCommitment::from_dory_pcs(*commitment);
+        let point = convert_opening_point(opening_point);
         let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
 
-        dory::verify::<ArkFr, BN254, JoltG1Routines, JoltG2Routines, _>(
-            *commitment,
-            ark_eval,
-            &ark_point,
-            proof,
-            setup.clone().into_inner(),
+        #[cfg(feature = "zk")]
+        let result = {
+            let _ = opening;
+            jolt_dory::DoryScheme::verify_zk_with_shape(
+                &commitment,
+                &point,
+                &proof,
+                &setup,
+                &mut dory_transcript,
+            )
+        };
+        #[cfg(not(feature = "zk"))]
+        let result = jolt_dory::DoryScheme::verify_with_shape(
+            &commitment,
+            &point,
+            jolt_field::Fr::from(*opening),
+            &proof,
+            &setup,
             &mut dory_transcript,
-        )
-        .map_err(|_| ProofVerifyError::InternalError)?;
+        );
 
-        Ok(())
+        result.map_err(|_| ProofVerifyError::InternalError)
     }
 
     fn protocol_name() -> &'static [u8] {

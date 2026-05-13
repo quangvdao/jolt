@@ -882,6 +882,8 @@ It has two deliberate bridge points:
    The Dory prover side delegates the single combined Stage 8 opening to `jolt_dory::DoryScheme::{open_source_with_shape, open_zk_source_with_shape}` and converts the resulting proof back into a one-element `Vec<ArkDoryProof>`.
    The Dory verifier side delegates to `jolt_dory::DoryScheme::{verify_with_shape, verify_zk_with_shape}` after converting the old verifier setup, commitment, transcript, point, and proof wrappers at the bridge boundary.
    This keeps the Dory proof algorithm canonical while `jolt-core` still owns old proof storage and transcript types.
+3. The old single-proof Dory `prove` and `verify` methods now use the same `jolt-dory` opening and verification entrypoints as the batch bridge.
+   The old single-commitment `commit` method remains in-core because AddressMajor and advice contexts still depend on `DoryGlobals` layout behavior that is not yet expressed as a `jolt-dory` layout parameter.
 
 These bridges exist because `jolt-core` still has several old surfaces that are intentionally outside `jolt-openings`:
 

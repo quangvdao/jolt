@@ -620,21 +620,23 @@ This keeps `jolt-openings` neutral about commitment granularity:
 3. The protocol layer owns logical-polynomial-to-source claim routing because that routing depends on Jolt's witness IDs, packed layout, and opening-point construction.
 4. The PCS layer only sees committed sources and opening claims against those sources.
 
-`jolt-core` should replace `CommittedPolynomial::stream_witness_and_commit_rows` with a trace-backed batch commitment source:
+`jolt-core` should replace `CommittedPolynomial::stream_witness_and_commit_rows` with a trace-backed batch commitment source.
+The first implementation slice has this shape as `CycleMajorTraceBatch`: row generation now lives in the source adapter, and the existing in-core `StreamingCommitmentScheme` call site consumes those source rows through a small bridge while the larger old/new PCS trait cutover is still in progress.
+The final state is for the prover to pass the same batch source directly to `PCS::commit_batch` / `PCS::commit_batch_zk`.
 
 ```rust
-struct JoltTraceCommitmentBatch<'a, F> {
+struct CycleMajorTraceBatch<'a, I> {
     trace: LazyTraceIterator,
     padded_len: usize,
     preprocessing: &'a JoltSharedPreprocessing,
     one_hot_params: &'a OneHotParams,
     ids: Vec<CommittedPolynomial>,
-    _field: PhantomData<F>,
+    row_len: usize,
 }
 
-impl<F: JoltField> BatchCommitmentSource<F> for JoltTraceCommitmentBatch<'_, F> {
+impl BatchCommitmentSource<Fr> for CycleMajorTraceBatch<'_, LazyTraceIterator> {
     type Id = CommittedPolynomial;
-    type Source<'a> = JoltTracePolynomialSource<'a, F> where Self: 'a;
+    type Source<'a> = CycleMajorTraceSource<'a, LazyTraceIterator> where Self: 'a;
 
     fn source_ids(&self) -> &[Self::Id] {
         &self.ids
@@ -647,26 +649,27 @@ impl<F: JoltField> BatchCommitmentSource<F> for JoltTraceCommitmentBatch<'_, F> 
     fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
-        V: for<'row> Fn(Self::Id, SourceRow<'row, F>) -> R + Send + Sync,
+        V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
     {
         let row_len = 1usize << sigma;
-        let num_rows = self.padded_len / row_len;
-        let mut outputs: Vec<Vec<R>> = (0..num_rows).map(|_| Vec::new()).collect();
+        assert_eq!(row_len, self.row_len);
 
-        self.trace
+        let rows = self.trace
             .clone()
             .pad_using(self.padded_len, |_| Cycle::NoOp)
             .iter_chunks(row_len)
-            .zip(outputs.iter_mut())
+            .enumerate()
             .par_bridge()
-            .for_each(|(cycles, out)| {
-                *out = ids
-                    .par_iter()
+            .map(|(row_index, cycles)| {
+                let row = ids
+                    .iter()
                     .map(|&id| self.visit_row(id, &cycles, &visit))
-                    .collect();
-            });
+                    .collect::<Vec<_>>();
+                (row_index, row)
+            })
+            .collect::<Vec<_>>();
 
-        outputs
+        reorder_by_row_index(rows)
     }
 }
 ```
@@ -674,10 +677,10 @@ impl<F: JoltField> BatchCommitmentSource<F> for JoltTraceCommitmentBatch<'_, F> 
 The borrowed-row helper has this shape:
 
 ```rust
-impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
+impl CycleMajorTraceBatch<'_, LazyTraceIterator> {
     fn visit_row<R, V>(&self, id: CommittedPolynomial, cycles: &[Cycle], visit: &V) -> R
     where
-        V: for<'row> Fn(CommittedPolynomial, SourceRow<'row, F>) -> R,
+        V: for<'row> Fn(CommittedPolynomial, SourceRow<'row, Fr>) -> R,
     {
         match id {
             CommittedPolynomial::RdInc => {
@@ -696,7 +699,7 @@ impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
                     .map(|cycle| {
                         let lookup_index = LookupQuery::<XLEN>::to_lookup_index(cycle);
                         let k = self.one_hot_params.lookup_index_chunk(lookup_index, idx);
-                        OneHotIndex::new(k, self.one_hot_params.log_k_chunk as u8).unwrap()
+                        one_hot_index(k, self.one_hot_params.log_k_chunk as u8)
                     })
                     .collect();
                 visit(
@@ -707,46 +710,41 @@ impl<'a, F: JoltField> JoltTraceCommitmentBatch<'a, F> {
                     }),
                 )
             }
-            _ => unimplemented!("other committed-polynomial variants use the same pattern"),
+            CommittedPolynomial::RamInc => { /* same i128 row shape */ }
+            CommittedPolynomial::BytecodeRa(idx) => { /* same OnePerColumn row shape */ }
+            CommittedPolynomial::RamRa(idx) => { /* same MaybeZero row shape */ }
+            CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
+                panic!("advice polynomials are outside the CycleMajor trace batch")
+            }
         }
     }
 }
 ```
 
-`visit_row` should contain exactly the current row generation logic from `CommittedPolynomial::stream_witness_and_commit_rows`, but it invokes the row visitor instead of calling `PCS::process_chunk` or `PCS::process_chunk_onehot`.
+`visit_row` contains exactly the row generation logic that used to live in `CommittedPolynomial::stream_witness_and_commit_rows`, but it invokes the row visitor instead of calling `PCS::process_chunk` or `PCS::process_chunk_onehot`.
 For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today and call `visit(id, SourceRow::I128(&row))`.
 `InstructionRa` and `BytecodeRa` build a temporary `Vec<OneHotIndex>` and use `OneHotEntries::OnePerColumn`.
 `RamRa` builds a temporary `Vec<Option<OneHotIndex>>` and uses `OneHotEntries::MaybeZero`.
 Materialized dense sources can call `visit(row_index, SourceRow::FieldElements(existing_slice))` directly.
 No `Cow` is needed because the row view only has to live for the duration of the `visit` call.
 
-The intended prover call-site change is narrow.
-The current CycleMajor branch:
+The first prover call-site change is narrow: the old row-generation helper disappears and the existing in-core streaming PCS trait consumes rows from `CycleMajorTraceBatch`.
+This intermediate bridge is:
 
 ```rust
 let row_len = DoryGlobals::get_num_columns();
-let num_rows = T / DoryGlobals::get_max_num_rows();
-let mut row_commitments: Vec<Vec<PCS::ChunkState>> = vec![vec![]; num_rows];
-
-self.lazy_trace
-    .clone()
-    .pad_using(T, |_| Cycle::NoOp)
-    .iter_chunks(row_len)
-    .zip(row_commitments.iter_mut())
-    .par_bridge()
-    .for_each(|(cycles, row_commitments)| {
-        *row_commitments = polynomials
-            .par_iter()
-            .map(|poly| {
-                poly.stream_witness_and_commit_rows::<_, PCS>(
-                    &cycles,
-                    preprocessing,
-                    one_hot_params,
-                    &setup,
-                )
-            })
-            .collect();
-    });
+let num_trace_rows = T / row_len;
+let batch = CycleMajorTraceBatch::new(
+    self.lazy_trace.clone(),
+    preprocessing,
+    one_hot_params,
+    ids.clone(),
+    T,
+    row_len,
+);
+let row_commitments = batch.map_rows(row_len.log_2(), &ids, |_, row| {
+    commit_cycle_major_source_row::<F, PCS>(&setup, row)
+});
 
 let row_commitments = transpose(row_commitments);
 let commitments_and_hints = row_commitments
@@ -755,16 +753,17 @@ let commitments_and_hints = row_commitments
     .collect::<Vec<_>>();
 ```
 
-should become:
+After the full old/new PCS trait cutover, this bridge should collapse to:
 
 ```rust
 let ids = CommittedPolynomial::all_for_config(one_hot_params);
-let batch = JoltTraceCommitmentBatch::new(
+let batch = CycleMajorTraceBatch::new(
     self.lazy_trace.clone(),
     T,
     preprocessing,
     one_hot_params,
     ids.clone(),
+    row_len,
 );
 
 let commitments_and_hints = PCS::commit_batch(&batch, &ids, &setup);
@@ -776,7 +775,7 @@ For ZK mode the last line becomes:
 let commitments_and_hints = PCS::commit_batch_zk(&batch, &ids, &setup);
 ```
 
-The loop body, row order, and row encodings are unchanged; they move from `jolt-core` into `JoltTraceCommitmentBatch::map_rows` plus Dory's private `commit_row` and tier-2 aggregation.
+The loop body, row order, and row encodings are unchanged; they move from `jolt-core` into `CycleMajorTraceBatch::map_rows` plus Dory's private `commit_row` and tier-2 aggregation.
 That is why this can preserve current streaming behavior exactly while eliminating `StreamingCommitment` as a public commitment-scheme trait.
 
 The closure does not imply dynamic dispatch.
@@ -874,7 +873,7 @@ The high-level migration is:
 1. Add `jolt-openings` and `jolt-dory` as dependencies.
 2. Replace imports of the internal PCS trait with `jolt_openings` traits.
 3. Replace `PCS::Commitment` associated type usage with `PCS::Output`.
-4. Replace CycleMajor witness commitment calls to `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` with `PCS::commit_batch` over `JoltTraceCommitmentBatch`.
+4. Replace the temporary CycleMajor bridge from `CycleMajorTraceBatch` rows to `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` with `PCS::commit_batch` over `CycleMajorTraceBatch`.
 5. Replace ZK CycleMajor witness commitment calls with `PCS::commit_batch_zk` over the same batch commitment source.
 6. Replace `PCS::Proof` proof storage with `PCS::BatchProof`.
 7. Replace Stage 8's direct `PCS::prove` call with `PCS::prove_batch`.

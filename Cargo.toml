@@ -135,8 +135,6 @@ log.workspace = true
 env_logger.workspace = true
 zeroos-build.workspace = true
 
-ark-bn254.workspace = true
-
 jolt-sdk = { workspace = true, features = ["host"] }
 jolt-core = { workspace = true, features = ["default"] }
 jolt-crypto.workspace = true

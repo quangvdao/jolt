@@ -40,6 +40,23 @@ pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
 
+    /// Verifies a batch proof for one opening claim that the caller has
+    /// already fused with the surrounding protocol's linear combination.
+    ///
+    /// Unlike [`verify_batch`](Self::verify_batch), this method does not own
+    /// batch randomization or bind a batch-RLC challenge. It exists for
+    /// protocols such as Jolt Stage 8, where the sumcheck transcript has
+    /// already chosen the linear combination before entering the PCS layer, but
+    /// the proof container is still batch-shaped.
+    fn verify_fused_batch(
+        commitment: &Self::Output,
+        point: &[Self::Field],
+        eval: Self::Field,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError>;
+
     /// Binds one transparent opening input to the Fiat-Shamir transcript.
     fn bind_opening_inputs(
         transcript: &mut impl Transcript<Challenge = Self::Field>,
@@ -115,6 +132,24 @@ pub trait CommitmentScheme: CommitmentSchemeVerifier {
     ) -> Self::BatchProof
     where
         S: CommitmentSource<Self::Field>;
+
+    /// Proves a batch-shaped opening for one already-fused claim.
+    ///
+    /// The caller supplies the polynomial, point, evaluation, and opening hint
+    /// after performing any protocol-level linear combination. Implementations
+    /// should route directly to the single-opening prover and wrap the result
+    /// in their batch-proof representation, preserving the caller's transcript
+    /// schedule.
+    fn prove_fused_batch<S>(
+        polynomial: &S,
+        point: &[Self::Field],
+        eval: Self::Field,
+        hint: Option<Self::OpeningHint>,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized;
 }
 
 /// Verifier-side additive combination of commitments.
@@ -168,6 +203,20 @@ pub trait ZkOpeningSchemeVerifier: CommitmentSchemeVerifier {
         setup: &Self::VerifierSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
+
+    /// Verifies a ZK batch proof for one already-fused opening claim.
+    ///
+    /// This mirrors [`CommitmentSchemeVerifier::verify_fused_batch`] for
+    /// schemes whose opening proof hides the evaluation. The public evaluation
+    /// is intentionally absent because it is bound through the proof's hiding
+    /// commitment.
+    fn verify_fused_batch_zk(
+        commitment: &Self::Output,
+        point: &[Self::Field],
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError>;
 }
 
 /// Prover-side interface for openings that hide evaluations.
@@ -216,6 +265,21 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
     ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
     where
         S: CommitmentSource<Self::Field>;
+
+    /// Proves a ZK batch-shaped opening for one already-fused claim.
+    ///
+    /// The returned hiding commitment and blind are the same objects produced
+    /// by [`open_zk`](Self::open_zk); only the proof container is batch-shaped.
+    fn prove_fused_batch_zk<S>(
+        polynomial: &S,
+        point: &[Self::Field],
+        eval: Self::Field,
+        hint: Self::OpeningHint,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field> + ?Sized;
 }
 
 /// Verifier-side hooks for schemes whose ZK openings bind a hidden evaluation.

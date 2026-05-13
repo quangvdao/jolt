@@ -97,6 +97,20 @@ impl<F: Field> CommitmentSchemeVerifier for MockCommitmentScheme<F> {
     ) -> Result<(), OpeningsError> {
         homomorphic_verify_batch::<Self, _>(claims, proof, setup, transcript)
     }
+
+    fn verify_fused_batch(
+        commitment: &Self::Output,
+        point: &[Self::Field],
+        eval: Self::Field,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        let [proof] = proof.as_slice() else {
+            return Err(OpeningsError::VerificationFailed);
+        };
+        Self::verify(commitment, point, eval, proof, setup, transcript)
+    }
 }
 
 impl<F: Field> PublicVerifierSetup for MockCommitmentScheme<F> {
@@ -154,6 +168,20 @@ impl<F: Field> CommitmentScheme for MockCommitmentScheme<F> {
         S: CommitmentSource<Self::Field>,
     {
         homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
+    }
+
+    fn prove_fused_batch<S>(
+        polynomial: &S,
+        point: &[Self::Field],
+        eval: Self::Field,
+        hint: Option<Self::OpeningHint>,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
+        vec![Self::open(polynomial, point, eval, setup, hint, transcript)]
     }
 }
 
@@ -231,6 +259,19 @@ impl<F: Field> ZkOpeningSchemeVerifier for MockCommitmentScheme<F> {
     ) -> Result<(), OpeningsError> {
         Self::verify_batch(claims, proof, setup, transcript)
     }
+
+    fn verify_fused_batch_zk(
+        commitment: &Self::Output,
+        point: &[Self::Field],
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        let [proof] = proof.as_slice() else {
+            return Err(OpeningsError::VerificationFailed);
+        };
+        Self::verify_zk(commitment, point, proof, setup, transcript)
+    }
 }
 
 impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {
@@ -273,6 +314,22 @@ impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {
         let eval = claims.first().map_or_else(F::zero, |claim| claim.eval);
         let proof = Self::prove_batch(claims, hints, setup, transcript);
         (proof, MockHidingCommitment { eval }, ())
+    }
+
+    fn prove_fused_batch_zk<S>(
+        polynomial: &S,
+        point: &[Self::Field],
+        eval: Self::Field,
+        hint: Self::OpeningHint,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
+        let (proof, eval_commitment, blind) =
+            Self::open_zk(polynomial, point, eval, setup, hint, transcript);
+        (vec![proof], eval_commitment, blind)
     }
 }
 

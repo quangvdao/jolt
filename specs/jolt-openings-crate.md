@@ -728,12 +728,11 @@ For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today 
 Materialized dense sources can call `visit(row_index, SourceRow::FieldElements(existing_slice))` directly.
 No `Cow` is needed because the row view only has to live for the duration of the `visit` call.
 
-The first prover call-site change is narrow: the old row-generation helper disappears and the existing in-core streaming PCS trait consumes rows from `CycleMajorTraceBatch`.
-This intermediate bridge is:
+The prover call-site change is narrow: the old row-generation helper disappears and the CycleMajor branch passes `CycleMajorTraceBatch` to source-batch commit entry points.
+While `jolt-core` is still on the in-core PCS trait family, those entry points are temporarily hosted on `StreamingCommitmentScheme`; after the full trait-family cutover they should be the `jolt-openings::CommitmentScheme` / `ZkOpeningScheme` methods directly.
 
 ```rust
 let row_len = DoryGlobals::get_num_columns();
-let num_trace_rows = T / row_len;
 let batch = CycleMajorTraceBatch::new(
     self.lazy_trace.clone(),
     preprocessing,
@@ -742,18 +741,14 @@ let batch = CycleMajorTraceBatch::new(
     T,
     row_len,
 );
-let row_commitments = batch.map_rows(row_len.log_2(), &ids, |_, row| {
-    commit_cycle_major_source_row::<F, PCS>(&setup, row)
-});
 
-let row_commitments = transpose(row_commitments);
-let commitments_and_hints = row_commitments
-    .into_par_iter()
-    .map(|rows| PCS::aggregate_chunks(&setup, one_hot_params.k_chunk, &rows))
-    .collect::<Vec<_>>();
+#[cfg(feature = "zk")]
+let commitments_and_hints = PCS::commit_batch_zk(&batch, &ids, &setup);
+#[cfg(not(feature = "zk"))]
+let commitments_and_hints = PCS::commit_batch(&batch, &ids, &setup);
 ```
 
-After the full old/new PCS trait cutover, this bridge should collapse to:
+After the full old/new PCS trait cutover, the same call shape should remain but resolve to the canonical `jolt-openings` traits:
 
 ```rust
 let ids = CommittedPolynomial::all_for_config(one_hot_params);
@@ -873,8 +868,8 @@ The high-level migration is:
 1. Add `jolt-openings` and `jolt-dory` as dependencies.
 2. Replace imports of the internal PCS trait with `jolt_openings` traits.
 3. Replace `PCS::Commitment` associated type usage with `PCS::Output`.
-4. Replace the temporary CycleMajor bridge from `CycleMajorTraceBatch` rows to `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` with `PCS::commit_batch` over `CycleMajorTraceBatch`.
-5. Replace ZK CycleMajor witness commitment calls with `PCS::commit_batch_zk` over the same batch commitment source.
+4. Move the in-core `StreamingCommitmentScheme::commit_batch` / `commit_batch_zk` source-batch entry points to the canonical `jolt-openings` traits.
+5. Remove public exposure of `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` once no in-core caller needs them.
 6. Replace `PCS::Proof` proof storage with `PCS::BatchProof`.
 7. Replace Stage 8's direct `PCS::prove` call with `PCS::prove_batch`.
 8. Replace Stage 8's direct `PCS::verify` call with `PCS::verify_batch`.

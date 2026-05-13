@@ -24,7 +24,6 @@ use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::ram::remap_address;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::zkvm::Serializable;
-use jolt_openings::{BatchCommitmentSource, OneHotEntries, SourceRow};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::profiling::print_current_memory_usage;
@@ -161,34 +160,6 @@ use crate::zkvm::r1cs::constraints::{
 };
 #[cfg(feature = "zk")]
 use crate::zkvm::verifier::BlindfoldSetup;
-
-fn commit_cycle_major_source_row<F, PCS>(
-    setup: &PCS::ProverSetup,
-    row: SourceRow<'_, jolt_field::Fr>,
-) -> PCS::ChunkState
-where
-    F: JoltField,
-    PCS: StreamingCommitmentScheme<Field = F>,
-{
-    match row {
-        SourceRow::I128(values) => PCS::process_chunk(setup, values),
-        SourceRow::OneHot(row) => {
-            let onehot_k = 1usize << row.log_domain_size;
-            let indices: Vec<Option<usize>> = match row.entries {
-                OneHotEntries::OnePerColumn(indices) => {
-                    indices.iter().map(|index| Some(index.get())).collect()
-                }
-                OneHotEntries::MaybeZero(indices) => {
-                    indices.iter().map(|index| index.map(|i| i.get())).collect()
-                }
-            };
-            PCS::process_chunk_onehot(setup, onehot_k, &indices)
-        }
-        SourceRow::FieldElements(_) => {
-            panic!("CycleMajor trace batch should emit compact source rows")
-        }
-    }
-}
 
 /// Jolt CPU prover for RV64IMAC.
 pub struct JoltCpuProver<
@@ -750,7 +721,6 @@ impl<
                 num_trace_rows
             );
 
-            // Tier 1: Compute row commitments for each polynomial
             let trace_batch = CycleMajorTraceBatch::new(
                 self.lazy_trace.clone(),
                 &self.preprocessing.shared,
@@ -759,40 +729,14 @@ impl<
                 T,
                 row_len,
             );
-            let row_commitments: Vec<Vec<PCS::ChunkState>> =
-                trace_batch.map_rows(row_len.log_2(), &polys, |_, row| {
-                    commit_cycle_major_source_row::<F, PCS>(&self.preprocessing.generators, row)
-                });
-            assert_eq!(
-                row_commitments.len(),
-                num_trace_rows,
-                "CycleMajor trace batch produced an unexpected number of rows",
-            );
+            #[cfg(feature = "zk")]
+            let commitments_and_hints =
+                PCS::commit_batch_zk(&trace_batch, &polys, &self.preprocessing.generators);
+            #[cfg(not(feature = "zk"))]
+            let commitments_and_hints =
+                PCS::commit_batch(&trace_batch, &polys, &self.preprocessing.generators);
 
-            // Transpose: row_commitments[row][poly] -> tier1_per_poly[poly][row]
-            let tier1_per_poly: Vec<Vec<PCS::ChunkState>> = (0..polys.len())
-                .into_par_iter()
-                .map(|poly_idx| {
-                    row_commitments
-                        .iter()
-                        .flat_map(|row| row.get(poly_idx).cloned())
-                        .collect()
-                })
-                .collect();
-
-            // Tier 2: Compute final commitments from tier1 commitments
-            let (commitments, hints): (Vec<_>, Vec<_>) = tier1_per_poly
-                .into_par_iter()
-                .zip(&polys)
-                .map(|(tier1_commitments, poly)| {
-                    let onehot_k = poly.get_onehot_k(&self.one_hot_params);
-                    PCS::aggregate_chunks(
-                        &self.preprocessing.generators,
-                        onehot_k,
-                        &tier1_commitments,
-                    )
-                })
-                .unzip();
+            let (commitments, hints): (Vec<_>, Vec<_>) = commitments_and_hints.into_iter().unzip();
 
             let hint_map = HashMap::from_iter(zip_eq(polys, hints));
             (commitments, hint_map)

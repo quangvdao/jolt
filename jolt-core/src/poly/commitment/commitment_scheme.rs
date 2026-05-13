@@ -5,10 +5,8 @@ use std::fmt::Debug;
 
 use crate::transcripts::Transcript;
 use crate::{
-    curve::JoltCurve,
-    field::JoltField,
-    poly::multilinear_polynomial::MultilinearPolynomial,
-    utils::{errors::ProofVerifyError, small_scalar::SmallScalar},
+    curve::JoltCurve, field::JoltField, poly::multilinear_polynomial::MultilinearPolynomial,
+    utils::errors::ProofVerifyError,
 };
 
 pub trait CommitmentScheme: Clone + Sync + Send + 'static {
@@ -153,35 +151,12 @@ pub trait ZkEvalCommitment<C: JoltCurve>: CommitmentScheme {
     }
 }
 
-pub trait StreamingCommitmentScheme: CommitmentScheme {
-    /// The type representing chunk state (tier 1 commitments)
-    type ChunkState: Send + Sync + Clone + PartialEq + Debug;
-
-    /// Compute tier 1 commitment for a chunk of small scalar values
-    fn process_chunk<T: SmallScalar>(setup: &Self::ProverSetup, chunk: &[T]) -> Self::ChunkState;
-
-    /// Compute tier 1 commitment for a chunk of one-hot values
-    fn process_chunk_onehot(
-        setup: &Self::ProverSetup,
-        onehot_k: usize,
-        chunk: &[Option<usize>],
-    ) -> Self::ChunkState;
-
-    /// Compute tier 2 commitment from accumulated tier 1 commitments
-    fn aggregate_chunks(
-        setup: &Self::ProverSetup,
-        onehot_k: Option<usize>,
-        tier1_commitments: &[Self::ChunkState],
-    ) -> (Self::Commitment, Self::OpeningProofHint);
-}
-
 /// Source-batch commitment support for the old in-core PCS trait family.
 ///
 /// This is a temporary compatibility boundary while `jolt-core` still stores
 /// proofs, hints, and setup parameters in the pre-`jolt-openings` associated
-/// types. It intentionally lives outside [`StreamingCommitmentScheme`] so a PCS
-/// only advertises source-batch support when it has an implementation matching
-/// the source row shapes it accepts.
+/// types. A PCS only implements this trait when it has an implementation
+/// matching the source row shapes it accepts.
 ///
 /// After the full PCS cutover, callers should use
 /// `jolt_openings::CommitmentScheme::commit_batch` and

@@ -457,8 +457,8 @@ Only `CommitmentSource` and `BatchCommitmentSource` are core API concepts.
 `I128` and `OneHot` are optional row encodings.
 They are included to preserve current Jolt/Dory performance without forcing `jolt-core` to call Dory-specific APIs:
 
-1. `I128` maps exactly to current Dory `PCS::process_chunk` for `RdInc` and `RamInc`.
-2. `OneHot` maps exactly to current Dory `PCS::process_chunk_onehot` for `InstructionRa`, `BytecodeRa`, and `RamRa`.
+1. `I128` maps exactly to the previous Dory dense-row chunk path for `RdInc` and `RamInc`.
+2. `OneHot` maps exactly to the previous Dory one-hot chunk path for `InstructionRa`, `BytecodeRa`, and `RamRa`.
 3. A backend that does not care about these encodings can immediately materialize or interpret them as field rows.
 
 `OneHotIndex` is intentionally not `usize`.
@@ -549,7 +549,7 @@ fn commit_row(row: SourceRow<'_, Fr>, setup: &DoryProverSetup) -> Vec<ArkG1> {
 }
 ```
 
-The one-hot Dory helper is the current `process_chunk_onehot` with only the row representation changed:
+The one-hot Dory helper is the previous `process_chunk_onehot` behavior with only the row representation changed:
 
 ```rust
 fn commit_onehot_row(row: OneHotRow<'_>, setup: &DoryProverSetup) -> Vec<ArkG1> {
@@ -591,7 +591,7 @@ fn commit_onehot_row(row: OneHotRow<'_>, setup: &DoryProverSetup) -> Vec<ArkG1> 
 }
 ```
 
-This is the same division of labor as current `process_chunk` / `process_chunk_onehot`, but without exposing Dory tier-1 chunks as a public PCS trait.
+This is the same division of labor as the old `process_chunk` / `process_chunk_onehot` path, but without exposing Dory tier-1 chunks as a public PCS trait.
 The row-processing closure is generic, not trait-object based, so the Jolt trace-batch hot path can remain statically dispatched.
 Dory decides the parallel schedule inside its `commit_batch` implementation while using the concrete batch source for shared data access.
 For non-Dory schemes, the default `commit_batch` is correct and simple.
@@ -626,7 +626,7 @@ This keeps `jolt-openings` neutral about commitment granularity:
 4. The PCS layer only sees committed sources and opening claims against those sources.
 
 `jolt-core` should replace `CommittedPolynomial::stream_witness_and_commit_rows` with a trace-backed batch commitment source.
-The first implementation slice has this shape as `CycleMajorTraceBatch`: row generation now lives in the source adapter, and the existing in-core `StreamingCommitmentScheme` call site consumes those source rows through a small bridge while the larger old/new PCS trait cutover is still in progress.
+The current implementation has this shape as `CycleMajorTraceBatch`: row generation now lives in the source adapter, and the in-core `SourceBatchCommitmentScheme` bridge delegates those source rows to `jolt-dory` while the larger old/new PCS trait cutover is still in progress.
 The final state is for the prover to pass the same batch source directly to `PCS::commit_batch` / `PCS::commit_batch_zk`.
 
 ```rust
@@ -726,7 +726,7 @@ impl CycleMajorTraceBatch<'_, LazyTraceIterator> {
 }
 ```
 
-`visit_row` contains exactly the row generation logic that used to live in `CommittedPolynomial::stream_witness_and_commit_rows`, but it invokes the row visitor instead of calling `PCS::process_chunk` or `PCS::process_chunk_onehot`.
+`visit_row` contains exactly the row generation logic that used to live in `CommittedPolynomial::stream_witness_and_commit_rows`, but it invokes the row visitor instead of calling an old chunk-level PCS method.
 For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today and call `visit(id, SourceRow::I128(&row))`.
 `InstructionRa` and `BytecodeRa` build a temporary `Vec<OneHotIndex>` and use `OneHotEntries::OnePerColumn`.
 `RamRa` builds a temporary `Vec<Option<OneHotIndex>>` and uses `OneHotEntries::MaybeZero`.
@@ -735,7 +735,7 @@ No `Cow` is needed because the row view only has to live for the duration of the
 
 The prover call-site change is narrow: the old row-generation helper disappears and the CycleMajor branch passes `CycleMajorTraceBatch` to source-batch commit entry points.
 While `jolt-core` is still on the in-core PCS trait family, those entry points are temporarily exposed through a `SourceBatchCommitmentScheme` compatibility trait.
-That trait is deliberately separate from `StreamingCommitmentScheme`: source-batch support is a PCS capability, not a property every chunk-streaming helper should advertise.
+That trait replaces the old chunk-streaming commitment surface: source-batch support is a PCS capability, not a property every chunk-streaming helper should advertise.
 For Dory, the compatibility implementation delegates to `jolt-dory::DoryScheme`'s canonical `jolt_openings::CommitmentScheme::commit_batch` and `ZkOpeningScheme::commit_batch_zk`, then converts the commitment and hint back into the old `jolt-core` wrapper types.
 After the full trait-family cutover the same calls should resolve to `jolt-openings::CommitmentScheme` / `ZkOpeningScheme` directly.
 
@@ -785,7 +785,7 @@ The closure does not imply dynamic dispatch.
 `map_rows` is generic over `V`, so Rust monomorphizes the concrete closure at the call site, the same way it monomorphizes `Iterator::map` or Rayon closures.
 The higher-ranked bound `for<'row> Fn(... SourceRow<'row, F>) -> R` says only that the closure must accept a row borrowed for any short lifetime; it does not create a trait object or heap allocation.
 The temporary row vector is allocated in `visit_row`, borrowed into `visit`, consumed immediately by Dory's row MSM or one-hot addition helper, and then dropped.
-This corresponds to the current path, where the same temporary row vector is allocated and passed immediately to `PCS::process_chunk` or `PCS::process_chunk_onehot`.
+This corresponds to the old path, where the same temporary row vector was allocated and passed immediately to the chunk-level Dory commitment helper.
 
 ### Homomorphic Batched Opening Protocol
 
@@ -907,9 +907,9 @@ The high-level migration is:
 1. Add `jolt-openings` and `jolt-dory` as dependencies.
 2. Replace imports of the internal PCS trait with `jolt_openings` traits.
 3. Replace `PCS::Commitment` associated type usage with `PCS::Output`.
-4. Keep any pre-cutover source-batch bridge separate from the old base `StreamingCommitmentScheme`; only PCS backends that really support the source row shapes should implement it.
+4. Keep any pre-cutover source-batch bridge narrow; only PCS backends that really support the source row shapes should implement it.
 5. Remove the remaining pre-cutover source-batch bridge once `jolt-core` proof, hint, setup, and transcript types are on the new trait family.
-6. Remove public exposure of `process_chunk`, `process_chunk_onehot`, and `aggregate_chunks` once no in-core caller needs them.
+6. Keep Dory tier-1 and tier-2 row aggregation private to the concrete backend once no in-core caller needs direct chunk-level access.
 7. Replace `PCS::Proof` proof storage with `PCS::BatchProof`.
 8. Replace Stage 8's direct `PCS::prove` call with `PCS::prove_batch`.
 9. Replace Stage 8's direct `PCS::verify` call with `PCS::verify_batch`.
@@ -925,7 +925,7 @@ The final cutover additionally requires:
 4. Replace `ZkEvalCommitment<C>` with one or more narrow `jolt-openings` extension traits that expose exactly the needed ZK capabilities: hiding evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation.
 5. Decide the ownership boundary for `DoryGlobals` / `DoryLayout`.
    The layout affects Jolt's polynomial indexing and opening points, so it should remain protocol-owned even if the Dory backend consumes a layout/config value.
-6. Remove `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, `StreamingCommitmentScheme`, and `ZkEvalCommitment` from the in-core PCS surface once all call sites compile against `jolt-openings`.
+6. Remove `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkEvalCommitment` from the in-core PCS surface once all call sites compile against `jolt-openings`.
 
 Stage 8 is the main adaptation point for openings, not for witness commitment.
 The old commitment-time streaming trait should disappear from the public PCS API, because `commit_batch` and `commit_batch_zk` take over that boundary.

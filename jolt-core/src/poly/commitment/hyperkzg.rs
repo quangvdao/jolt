@@ -20,7 +20,7 @@ use crate::{
     msm::VariableBaseMSM,
     poly::{commitment::kzg::SRS, dense_mlpoly::DensePolynomial, unipoly::UniPoly},
     transcripts::Transcript,
-    utils::{errors::ProofVerifyError, small_scalar::SmallScalar},
+    utils::errors::ProofVerifyError,
 };
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
@@ -538,31 +538,6 @@ where
 
     fn protocol_name() -> &'static [u8] {
         b"hyperkzg"
-    }
-}
-
-impl<P: Pairing> super::commitment_scheme::StreamingCommitmentScheme for HyperKZG<P>
-where
-    <P as Pairing>::ScalarField: JoltField,
-{
-    type ChunkState = ();
-
-    fn process_chunk<T: SmallScalar>(_setup: &Self::ProverSetup, _chunk: &[T]) -> Self::ChunkState {
-    }
-
-    fn process_chunk_onehot(
-        _setup: &Self::ProverSetup,
-        _onehot_k: usize,
-        _chunk: &[Option<usize>],
-    ) -> Self::ChunkState {
-    }
-
-    fn aggregate_chunks(
-        _setup: &Self::ProverSetup,
-        _onehot_k: Option<usize>,
-        _tier1_commitments: &[Self::ChunkState],
-    ) -> (Self::Commitment, Self::OpeningProofHint) {
-        unimplemented!("HyperKZG does not support streaming commitment")
     }
 }
 

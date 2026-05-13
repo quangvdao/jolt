@@ -35,8 +35,7 @@ use crate::{
     poly::{
         commitment::{
             commitment_scheme::{
-                BatchOpeningScheme, SourceBatchCommitmentScheme, StreamingCommitmentScheme,
-                ZkEvalCommitment,
+                BatchOpeningScheme, SourceBatchCommitmentScheme, ZkEvalCommitment,
             },
             dory::{DoryGlobals, DoryLayout},
         },
@@ -169,7 +168,7 @@ pub struct JoltCpuProver<
     'a,
     F: JoltField,
     C: JoltCurve<F = F>,
-    PCS: StreamingCommitmentScheme<Field = F>,
+    PCS: CommitmentScheme<Field = F>,
     ProofTranscript: Transcript,
 > {
     pub preprocessing: &'a JoltProverPreprocessing<F, C, PCS>,
@@ -206,7 +205,6 @@ impl<
         C: JoltCurve<F = F>,
         PCS: SourceBatchCommitmentScheme<Field = F>
             + BatchOpeningScheme<Field = F>
-            + StreamingCommitmentScheme<Field = F>
             + ZkEvalCommitment<C>,
         ProofTranscript: Transcript,
     > JoltCpuProver<'a, F, C, PCS, ProofTranscript>

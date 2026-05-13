@@ -10,18 +10,16 @@ use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::commitment::commitment_scheme::{
-        BatchOpeningScheme, CommitmentScheme, SourceBatchCommitmentScheme,
-        StreamingCommitmentScheme, ZkEvalCommitment,
+        BatchOpeningScheme, CommitmentScheme, SourceBatchCommitmentScheme, ZkEvalCommitment,
     },
     poly::multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     transcripts::Transcript,
-    utils::{errors::ProofVerifyError, math::Math, small_scalar::SmallScalar},
+    utils::{errors::ProofVerifyError, math::Math},
 };
-use ark_bn254::{G1Affine, G1Projective};
-use ark_ec::CurveGroup;
+use ark_bn254::G1Projective;
 use ark_ff::Zero;
 use dory::primitives::{
-    arithmetic::{Field as DoryField, Group, PairingCurve},
+    arithmetic::{Field as DoryField, Group},
     poly::{MultilinearLagrange, Polynomial},
 };
 use jolt_crypto::Bn254G1;
@@ -49,20 +47,6 @@ impl DoryOpeningProofHint {
 
     fn into_parts(self) -> (Vec<ArkG1>, ArkFr) {
         (self.row_commitments, self.commit_blind)
-    }
-}
-
-fn maybe_blind_commitment(setup: &ArkworksProverSetup, commitment: ArkGT) -> (ArkGT, ArkFr) {
-    #[cfg(feature = "zk")]
-    {
-        let commit_blind = <dory::ZK as dory::Mode>::sample::<ArkFr>();
-        let commitment = <dory::ZK as dory::Mode>::mask(commitment, &setup.ht, &commit_blind);
-        (commitment, commit_blind)
-    }
-    #[cfg(not(feature = "zk"))]
-    {
-        let _ = setup;
-        (commitment, <ArkFr as DoryField>::zero())
     }
 }
 
@@ -341,112 +325,6 @@ impl CommitmentScheme for DoryCommitmentScheme {
                 ark_coeff * **commitment
             })
             .reduce(ArkGT::identity, |a, b| a + b)
-    }
-}
-
-impl StreamingCommitmentScheme for DoryCommitmentScheme {
-    type ChunkState = Vec<ArkG1>; // Tier 1 commitment chunks
-
-    #[tracing::instrument(skip_all, name = "DoryCommitmentScheme::compute_tier1_commitment")]
-    fn process_chunk<T: SmallScalar>(setup: &Self::ProverSetup, chunk: &[T]) -> Self::ChunkState {
-        debug_assert_eq!(chunk.len(), DoryGlobals::get_num_columns());
-
-        let row_len = DoryGlobals::get_num_columns();
-        let g1_slice =
-            unsafe { std::slice::from_raw_parts(setup.g1_vec.as_ptr(), setup.g1_vec.len()) };
-
-        let g1_bases: Vec<G1Affine> = g1_slice[..row_len]
-            .iter()
-            .map(|g| g.0.into_affine())
-            .collect();
-
-        let row_commitment =
-            ArkG1(T::msm(&g1_bases[..chunk.len()], chunk).expect("MSM calculation failed."));
-        vec![row_commitment]
-    }
-
-    #[tracing::instrument(
-        skip_all,
-        name = "DoryCommitmentScheme::compute_tier1_commitment_onehot"
-    )]
-    fn process_chunk_onehot(
-        setup: &Self::ProverSetup,
-        onehot_k: usize,
-        chunk: &[Option<usize>],
-    ) -> Self::ChunkState {
-        let K = onehot_k;
-
-        let row_len = DoryGlobals::get_num_columns();
-        let g1_slice =
-            unsafe { std::slice::from_raw_parts(setup.g1_vec.as_ptr(), setup.g1_vec.len()) };
-
-        let g1_bases: Vec<G1Affine> = g1_slice[..row_len]
-            .iter()
-            .map(|g| g.0.into_affine())
-            .collect();
-
-        let mut indices_per_k: Vec<Vec<usize>> = vec![Vec::new(); K];
-        for (col_index, k) in chunk.iter().enumerate() {
-            if let Some(k) = k {
-                indices_per_k[*k].push(col_index);
-            }
-        }
-
-        let results = jolt_optimizations::batch_g1_additions_multi(&g1_bases, &indices_per_k);
-
-        let mut row_commitments = vec![ArkG1(G1Projective::zero()); K];
-        for (k, result) in results.into_iter().enumerate() {
-            if !indices_per_k[k].is_empty() {
-                row_commitments[k] = ArkG1(G1Projective::from(result));
-            }
-        }
-        row_commitments
-    }
-
-    #[tracing::instrument(skip_all, name = "DoryCommitmentScheme::compute_tier2_commitment")]
-    fn aggregate_chunks(
-        setup: &Self::ProverSetup,
-        onehot_k: Option<usize>,
-        chunks: &[Self::ChunkState],
-    ) -> (Self::Commitment, Self::OpeningProofHint) {
-        let num_rows = DoryGlobals::get_max_num_rows();
-
-        if let Some(_K) = onehot_k {
-            let row_len = DoryGlobals::get_num_columns();
-            let T = DoryGlobals::get_T();
-            let rows_per_k = T / row_len;
-
-            let mut row_commitments = vec![ArkG1(G1Projective::zero()); num_rows];
-            for (chunk_index, commitments) in chunks.iter().enumerate() {
-                row_commitments
-                    .par_iter_mut()
-                    .skip(chunk_index)
-                    .step_by(rows_per_k)
-                    .zip(commitments.par_iter())
-                    .for_each(|(dest, src)| *dest = *src);
-            }
-
-            let g2_bases = &setup.g2_vec[..num_rows];
-            let tier_2 = <BN254 as PairingCurve>::multi_pair_g2_setup(&row_commitments, g2_bases);
-            let (tier_2, commit_blind) = maybe_blind_commitment(setup, tier_2);
-
-            (
-                tier_2,
-                DoryOpeningProofHint::new(row_commitments, commit_blind),
-            )
-        } else {
-            let row_commitments: Vec<ArkG1> =
-                chunks.iter().flat_map(|chunk| chunk.clone()).collect();
-
-            let g2_bases = &setup.g2_vec[..row_commitments.len()];
-            let tier_2 = <BN254 as PairingCurve>::multi_pair_g2_setup(&row_commitments, g2_bases);
-            let (tier_2, commit_blind) = maybe_blind_commitment(setup, tier_2);
-
-            (
-                tier_2,
-                DoryOpeningProofHint::new(row_commitments, commit_blind),
-            )
-        }
     }
 }
 

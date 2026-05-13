@@ -1,9 +1,7 @@
 use crate::curve::{Bn254Curve, JoltCurve};
 use crate::field::JoltField;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
-use crate::poly::commitment::commitment_scheme::{
-    BatchOpeningScheme, StreamingCommitmentScheme, ZkEvalCommitment,
-};
+use crate::poly::commitment::commitment_scheme::{BatchOpeningScheme, ZkEvalCommitment};
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::bytecode::PreprocessingError;
 use crate::zkvm::verifier::BlindfoldSetup;
@@ -56,7 +54,7 @@ fn preprocess_shared(
 pub fn verify<
     F: JoltField,
     C: JoltCurve<F = F>,
-    PCS: BatchOpeningScheme<Field = F> + StreamingCommitmentScheme<Field = F> + ZkEvalCommitment<C>,
+    PCS: BatchOpeningScheme<Field = F> + ZkEvalCommitment<C>,
     FS: Transcript,
 >(
     inputs_bytes: &[u8],

@@ -77,9 +77,9 @@ In Jolt, witness polynomials can be committed in a **streaming** fashion: rather
 
 ## Implementation
 
-The Jolt implementation of Dory lives in `jolt-core/src/poly/commitment/dory/` and wraps the [`a16z/dory`](https://github.com/a16z/dory/) library. Key files:
+The Jolt implementation of Dory lives primarily in `crates/jolt-dory/` and wraps the [`a16z/dory`](https://github.com/a16z/dory/) library through the canonical `jolt-openings` PCS traits. Key files:
 
-- `commitment_scheme.rs` &mdash; Implements the `CommitmentScheme` and `StreamingCommitmentScheme` traits.
-- `dory_globals.rs` &mdash; Manages per-context Dory matrix dimensions ($\nu$, $\sigma$) and coefficient layout.
-- `wrappers.rs` &mdash; Bridges Jolt's `MultilinearPolynomial` types to Dory's polynomial interface, including specialized `commit_tier_1` for compact scalars and one-hot polynomials.
-- `jolt_dory_routines.rs` &mdash; Custom implementations of low-level group operations (MSM, vector-scalar multiplication, folding) used by the Dory prover and verifier.
+- `crates/jolt-dory/src/scheme.rs` &mdash; Implements `DoryScheme`, including single openings, fused batched openings, ZK openings, and streaming batch commitments.
+- `crates/jolt-dory/src/types.rs` &mdash; Defines the public Dory commitment, proof, setup, and opening-hint wrapper types used by `jolt-core`.
+- `crates/jolt-dory/src/routines.rs` &mdash; Custom implementations of low-level group operations used by the Dory prover and verifier.
+- `jolt-core/src/poly/commitment/dory/dory_globals.rs` &mdash; Manages Jolt-owned Dory matrix dimensions ($\nu$, $\sigma$) and coefficient layout used by the zkVM protocol.

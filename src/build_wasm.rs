@@ -7,12 +7,9 @@ use std::{
     path::Path,
 };
 
-use ark_bn254::Fr;
 use eyre::Result;
 use jolt_core::{
-    curve::Bn254Curve,
     host::Program,
-    poly::commitment::dory::DoryCommitmentScheme,
     zkvm::{
         prover::JoltProverPreprocessing,
         verifier::{JoltSharedPreprocessing, JoltVerifierPreprocessing},
@@ -59,7 +56,9 @@ fn preprocess_and_save(func_name: &str, attributes: &Attributes, is_std: bool) -
     )?;
 
     let prover_preprocessing =
-        JoltProverPreprocessing::<Fr, Bn254Curve, DoryCommitmentScheme>::new(shared);
+        JoltProverPreprocessing::<jolt_field::Fr, jolt_crypto::Bn254, jolt_dory::DoryScheme>::new(
+            shared,
+        );
     let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
 
     let verifier_bytes = verifier_preprocessing.serialize_to_bytes()?;

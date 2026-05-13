@@ -23,6 +23,10 @@ host = [
   "jolt-core/default",
   "jolt-platform/std",
   "dep:common",
+  "dep:jolt-crypto",
+  "dep:jolt-dory",
+  "dep:jolt-field",
+  "dep:jolt-openings",
   "dep:jolt-program",
   "dep:tracer",
   "postcard/use-std",
@@ -40,7 +44,15 @@ guest-std = [
   "zeroos-std",
 ]
 
-guest-verifier = ["guest-std", "dep:common", "jolt-core/minimal"]
+guest-verifier = [
+  "guest-std",
+  "dep:common",
+  "dep:jolt-crypto",
+  "dep:jolt-dory",
+  "dep:jolt-field",
+  "dep:jolt-openings",
+  "jolt-core/minimal",
+]
 
 malloc-shim = ["jolt-platform/malloc-shim"]
 transcript-poseidon = ["jolt-core/transcript-poseidon"]
@@ -82,6 +94,10 @@ jolt-sdk-macros.workspace = true
 # Host-only dependencies
 common = { workspace = true, optional = true }
 jolt-core = { workspace = true, default-features = false, optional = true }
+jolt-crypto = { workspace = true, optional = true }
+jolt-dory = { workspace = true, optional = true }
+jolt-field = { workspace = true, optional = true }
+jolt-openings = { workspace = true, optional = true }
 jolt-program = { workspace = true, optional = true }
 tracer = { workspace = true, default-features = false, features = [
   "std",

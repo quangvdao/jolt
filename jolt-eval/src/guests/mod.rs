@@ -2,9 +2,6 @@ pub mod fibonacci;
 pub mod secp256k1_ecdsa;
 pub mod sha2_chain;
 
-use ark_bn254::Fr;
-use jolt_core::curve::Bn254Curve;
-use jolt_core::poly::commitment::dory::DoryCommitmentScheme;
 use jolt_core::transcripts::Blake2bTranscript;
 
 use common::constants::{DEFAULT_MAX_TRUSTED_ADVICE_SIZE, DEFAULT_MAX_UNTRUSTED_ADVICE_SIZE};
@@ -17,9 +14,9 @@ pub use secp256k1_ecdsa::Secp256k1EcdsaVerify;
 pub use sha2_chain::Sha2Chain;
 pub use tracer::JoltDevice;
 
-pub type F = Fr;
-pub type C = Bn254Curve;
-pub type PCS = DoryCommitmentScheme;
+pub type F = jolt_field::Fr;
+pub type C = jolt_crypto::Bn254;
+pub type PCS = jolt_dory::DoryScheme;
 pub type FS = Blake2bTranscript;
 
 pub type Proof = jolt_core::zkvm::proof_serialization::JoltProof<F, C, PCS, FS>;

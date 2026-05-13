@@ -15,6 +15,11 @@ clap = { version = "4.6", features = ["derive"] }
 
 rand_core.workspace = true
 jolt-core = { path = "../jolt-core" }
+jolt-crypto = { path = "../crates/jolt-crypto" }
+jolt-dory = { path = "../crates/jolt-dory" }
+jolt-field = { path = "../crates/jolt-field" }
+jolt-openings = { path = "../crates/jolt-openings" }
+jolt-transcript = { path = "../crates/jolt-transcript" }
 zklean-extractor = { path = "../zklean-extractor" }
 common = { path = "../common" }
 light-poseidon = "0.4.0"

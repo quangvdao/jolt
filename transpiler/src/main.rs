@@ -38,12 +38,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use common::jolt_device::JoltDevice;
-use jolt_core::curve::Bn254Curve;
-use jolt_core::poly::commitment::dory::{ArkGT, DoryCommitmentScheme};
 use jolt_core::transcripts::Transcript;
 use jolt_core::zkvm::transpilable_verifier::TranspilableVerifier;
 use jolt_core::zkvm::verifier::JoltVerifierPreprocessing;
 use jolt_core::zkvm::RV64IMACProof;
+use jolt_dory::{DoryCommitment, DoryScheme};
 use transpiler::{
     gnark_codegen, symbolize_proof, AstCommitmentScheme, AstCurve, AstOpeningAccumulator,
     SelectedAstTranscript,
@@ -138,7 +137,7 @@ fn main() {
     println!("  inputs: {} bytes", io_device.inputs.len());
     println!("  outputs: {} bytes", io_device.outputs.len());
 
-    // Preprocessing uses DoryCommitmentScheme, the default PCS in jolt-sdk.
+    // Preprocessing uses DoryScheme, the default PCS in jolt-sdk.
     // We only need the `shared` field (memory layout, bytecode info) for transpilation;
     // the commitment scheme generators are replaced with stubs for symbolic execution.
     println!("\nLoading preprocessing from: {:?}", args.preprocessing);
@@ -149,9 +148,9 @@ fn main() {
         )
     });
     let real_preprocessing: JoltVerifierPreprocessing<
-        ark_bn254::Fr,
-        Bn254Curve,
-        DoryCommitmentScheme,
+        jolt_field::Fr,
+        jolt_crypto::Bn254,
+        DoryScheme,
     > = CanonicalDeserialize::deserialize_compressed(&preprocessing_bytes[..])
         .expect("Failed to deserialize preprocessing");
     println!(
@@ -189,12 +188,12 @@ fn main() {
     // Load and symbolize trusted advice commitment (if provided).
     // The commitment is serialized separately from the proof because it's pre-committed
     // by the host before proving (not included in JoltProof).
-    // The commitment file contains Option<ArkGT> (the return type of commit_trusted_advice_*).
+    // The commitment file contains Option<DoryCommitment> (the canonical trusted-advice PCS output).
     let symbolic_trusted_advice = if let Some(ref path) = args.trusted_advice {
         println!("\nLoading trusted advice commitment from: {path:?}");
         let advice_bytes = std::fs::read(path)
             .unwrap_or_else(|e| panic!("Failed to read trusted advice file {path:?}: {e}"));
-        let real_commitment: Option<ArkGT> =
+        let real_commitment: Option<DoryCommitment> =
             CanonicalDeserialize::deserialize_compressed(&advice_bytes[..])
                 .expect("Failed to deserialize trusted advice commitment");
         let real_commitment =

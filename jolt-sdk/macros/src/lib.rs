@@ -173,8 +173,8 @@ impl MacroBuilder {
         let has_trusted_advice = !self.trusted_func_args.is_empty();
 
         let commitment_param_in_closure = if has_trusted_advice {
-            quote! { , trusted_advice_commitment: Option<<jolt::PCS as jolt::CommitmentScheme>::Commitment>,
-            trusted_advice_hint: Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningProofHint> }
+            quote! { , trusted_advice_commitment: Option<<jolt::PCS as jolt::Commitment>::Output>,
+            trusted_advice_hint: Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningHint> }
         } else {
             quote! {}
         };
@@ -187,7 +187,7 @@ impl MacroBuilder {
 
         let return_type = if has_trusted_advice {
             quote! {
-                impl Fn(#(#all_types),*, Option<<jolt::PCS as jolt::CommitmentScheme>::Commitment>, Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningProofHint>) -> #prove_output_ty + Sync + Send
+                impl Fn(#(#all_types),*, Option<<jolt::PCS as jolt::Commitment>::Output>, Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningHint>) -> #prove_output_ty + Sync + Send
             }
         } else {
             quote! {
@@ -239,13 +239,13 @@ impl MacroBuilder {
         let has_trusted_advice = !self.trusted_func_args.is_empty();
 
         let commitment_param_in_signature = if has_trusted_advice {
-            quote! { Option<<jolt::PCS as jolt::CommitmentScheme>::Commitment>, }
+            quote! { Option<<jolt::PCS as jolt::Commitment>::Output>, }
         } else {
             quote! {}
         };
 
         let commitment_param_in_closure = if has_trusted_advice {
-            quote! { trusted_advice_commitment: Option<<jolt::PCS as jolt::CommitmentScheme>::Commitment>, }
+            quote! { trusted_advice_commitment: Option<<jolt::PCS as jolt::Commitment>::Output>, }
         } else {
             quote! {}
         };
@@ -598,7 +598,7 @@ impl MacroBuilder {
             #[cfg(all(not(target_arch = "wasm32"), not(feature = "guest")))]
             pub fn #preprocess_verifier_fn_name(
                 shared_preprocess: jolt::JoltSharedPreprocessing,
-                generators: <jolt::PCS as jolt::CommitmentScheme>::VerifierSetup,
+                generators: <jolt::PCS as jolt::CommitmentSchemeVerifier>::VerifierSetup,
                 blindfold_setup: Option<jolt::BlindfoldSetup<jolt::Curve>>,
             ) -> jolt::JoltVerifierPreprocessing<jolt::F, jolt::Curve, jolt::PCS>
             {
@@ -639,8 +639,8 @@ impl MacroBuilder {
                 #[cfg(all(not(target_arch = "wasm32"), not(feature = "guest")))]
                 pub fn #commit_fn_name(
                     _preprocessing: &jolt::JoltProverPreprocessing<jolt::F, jolt::Curve, jolt::PCS>,
-                ) -> (Option<<jolt::PCS as jolt::CommitmentScheme>::Commitment>,
-                      Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningProofHint>)
+                ) -> (Option<<jolt::PCS as jolt::Commitment>::Output>,
+                      Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningHint>)
                 {
                     (None, None)
                 }
@@ -662,8 +662,8 @@ impl MacroBuilder {
             pub fn #commit_fn_name(
                 #(#trusted_advice_inputs,)*
                 preprocessing: &jolt::JoltProverPreprocessing<jolt::F, jolt::Curve, jolt::PCS>,
-            ) -> (Option<<jolt::PCS as jolt::CommitmentScheme>::Commitment>,
-                  Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningProofHint>)
+            ) -> (Option<<jolt::PCS as jolt::Commitment>::Output>,
+                  Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningHint>)
             {
                 #imports
                 use jolt::CommitmentScheme;
@@ -747,8 +747,8 @@ impl MacroBuilder {
         let has_trusted_advice = !self.trusted_func_args.is_empty();
 
         let commitment_param = if has_trusted_advice {
-            quote! { , trusted_advice_commitment: Option<<jolt::PCS as jolt::CommitmentScheme>::Commitment>,
-            trusted_advice_hint: Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningProofHint> }
+            quote! { , trusted_advice_commitment: Option<<jolt::PCS as jolt::Commitment>::Output>,
+            trusted_advice_hint: Option<<jolt::PCS as jolt::CommitmentScheme>::OpeningHint> }
         } else {
             quote! {}
         };

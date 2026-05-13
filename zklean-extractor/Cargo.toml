@@ -27,6 +27,8 @@ allocative.workspace = true
 num-bigint = "0.4"
 
 jolt-core = { path = "../jolt-core" }
+jolt-crypto = { path = "../crates/jolt-crypto" }
+jolt-field = { path = "../crates/jolt-field" }
 common = { path = "../common" }
 tracer = { path = "../tracer" }
 

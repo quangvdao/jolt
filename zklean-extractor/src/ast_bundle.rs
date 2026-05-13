@@ -644,7 +644,7 @@ impl Default for AstBundle {
 ///
 /// This type is PCS-agnostic: chunk count is derived from the concrete commitment's
 /// serialized size during `symbolize_proof()`, not hardcoded here.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AstCommitment {
     /// The MleAst chunks representing this commitment (one per 32 bytes of serialized form)
     pub chunks: Vec<MleAst>,
@@ -727,5 +727,15 @@ impl PartialEq for AstCommitment {
                 .iter()
                 .zip(other.chunks.iter())
                 .all(|(a, b)| a.root() == b.root())
+    }
+}
+
+impl Eq for AstCommitment {}
+
+impl jolt_crypto::HomomorphicCommitment<MleAst> for AstCommitment {
+    fn linear_combine(_c1: &Self, _c2: &Self, _scalar: &MleAst) -> Self {
+        unimplemented!(
+            "AstCommitment homomorphic combination is not needed for stages 1-7 transpilation"
+        )
     }
 }

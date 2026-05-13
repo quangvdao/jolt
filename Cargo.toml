@@ -139,6 +139,9 @@ ark-bn254.workspace = true
 
 jolt-sdk = { workspace = true, features = ["host"] }
 jolt-core = { workspace = true, features = ["default"] }
+jolt-crypto.workspace = true
+jolt-dory.workspace = true
+jolt-field.workspace = true
 common = { workspace = true, features = ["std"] }
 
 [profile.test]

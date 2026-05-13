@@ -117,7 +117,7 @@ pub struct TranspilableVerifier<
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
     PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
-    ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
+    ProofTranscript: Transcript,
     A: AbstractVerifierOpeningAccumulator<F> = VerifierOpeningAccumulator<F>,
 > {
     pub trusted_advice_commitment: Option<PCS::Output>,
@@ -141,7 +141,7 @@ impl<
         F: JoltField + jolt_field::Field,
         C: JoltCurve<F = F>,
         PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
-        ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
+        ProofTranscript: Transcript,
         A: AbstractVerifierOpeningAccumulator<F>,
     > TranspilableVerifier<'a, F, C, PCS, ProofTranscript, A>
 {

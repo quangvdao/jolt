@@ -412,7 +412,7 @@ pub enum Node {
 /// An AST intended for representing an MLE computation (although it will actually work for any
 /// multivariate polynomial). The nodes are stored in a global arena, which allows each AST handle
 /// to remain [`Copy`] and [`Sized`] while supporting unbounded growth of the underlying graph.
-#[derive(Debug, PartialOrd, Ord, Clone, Copy)]
+#[derive(Debug, PartialOrd, Ord, Clone, Copy, Serialize, Deserialize)]
 pub struct MleAst {
     /// Index of the root node in the arena.
     /// nodes: [ ]
@@ -1247,8 +1247,8 @@ impl Default for MleAst {
 }
 
 impl std::hash::Hash for MleAst {
-    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {
-        unimplemented!("hash unimplemented for MleAst")
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.root.hash(state);
     }
 }
 
@@ -1481,6 +1481,98 @@ impl JoltField for MleAst {
         x
     }
 }
+
+impl jolt_field::AdditiveGroup for MleAst {}
+impl jolt_field::RingCore for MleAst {}
+impl jolt_field::FieldCore for MleAst {}
+
+impl jolt_field::Invertible for MleAst {
+    fn inverse(&self) -> Option<Self> {
+        <Self as JoltField>::inverse(self)
+    }
+}
+
+impl jolt_field::FromPrimitiveInt for MleAst {
+    fn from_u64(v: u64) -> Self {
+        <Self as JoltField>::from_u64(v)
+    }
+
+    fn from_i64(v: i64) -> Self {
+        <Self as JoltField>::from_i64(v)
+    }
+
+    fn from_u128(v: u128) -> Self {
+        <Self as JoltField>::from_u128(v)
+    }
+
+    fn from_i128(v: i128) -> Self {
+        <Self as JoltField>::from_i128(v)
+    }
+}
+
+impl jolt_field::FixedByteSize for MleAst {
+    const NUM_BYTES: usize = 32;
+}
+
+impl jolt_field::CanonicalBytes for MleAst {
+    fn to_bytes_le(&self, out: &mut [u8]) {
+        out.fill(0);
+        if let Node::Atom(Atom::Scalar(value)) = get_node(self.root) {
+            for (chunk, limb) in out.chunks_mut(8).zip(value) {
+                chunk.copy_from_slice(&limb.to_le_bytes());
+            }
+        }
+    }
+}
+
+impl jolt_field::ReducingBytes for MleAst {
+    fn from_le_bytes_mod_order(bytes: &[u8]) -> Self {
+        <Self as JoltField>::from_bytes(bytes)
+    }
+}
+
+impl jolt_field::FixedBytes<32> for MleAst {}
+
+impl jolt_field::CanonicalBitLength for MleAst {
+    fn num_bits(&self) -> u32 {
+        match get_node(self.root) {
+            Node::Atom(Atom::Scalar(value)) => value
+                .iter()
+                .rposition(|limb| *limb != 0)
+                .map_or(0, |idx| 64 * idx as u32 + (64 - value[idx].leading_zeros())),
+            _ => 254,
+        }
+    }
+}
+
+impl jolt_field::CanonicalU64 for MleAst {
+    fn to_canonical_u64_checked(&self) -> Option<u64> {
+        match get_node(self.root) {
+            Node::Atom(Atom::Scalar([lo, 0, 0, 0])) => Some(lo),
+            _ => None,
+        }
+    }
+}
+
+impl jolt_field::TranscriptChallenge for MleAst {
+    fn from_challenge_bytes(bytes: &[u8]) -> Self {
+        <Self as JoltField>::from_bytes(bytes)
+    }
+}
+
+impl jolt_field::RandomSampling for MleAst {
+    fn random<R: rand_core::RngCore>(_rng: &mut R) -> Self {
+        unimplemented!("Not needed for constructing ASTs")
+    }
+}
+
+impl jolt_field::WithAccumulator for MleAst {
+    type Accumulator = jolt_field::NaiveAccumulator<Self>;
+}
+
+impl jolt_field::MulPow2 for MleAst {}
+impl jolt_field::MulPrimitiveInt for MleAst {}
+impl jolt_field::Field for MleAst {}
 
 /// Serialization for MleAst uses thread-local tunneling to pass symbolic values
 /// through the generic `Transcript` trait (which expects `CanonicalSerialize`).

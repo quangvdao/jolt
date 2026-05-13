@@ -66,7 +66,7 @@ Arkworks dependencies use a fork: `a16z/arkworks-algebra` branch `dev/twist-shou
 
 - `host/`: Guest ELF compilation and program analysis (feature-gated behind `host`)
 - `zkvm/`: Jolt PIOP — prover, verifier, R1CS/Spartan, memory checking, instruction lookups
-- `poly/`: Polynomial types, commitment schemes (Dory, HyperKZG), opening proofs
+- `poly/`: Polynomial types, Dory layout state, opening proof bookkeeping
 - `field/`: `JoltField` trait and BN254 scalar field implementation
 - `subprotocols/`: Sumcheck (batched, streaming, univariate skip), booleanity checks, BlindFold ZK protocol
 - `msm/`: Multi-scalar multiplication
@@ -87,8 +87,9 @@ Feature flag hierarchy: `host` ⊃ `prover` ⊃ `minimal`. Most code is uncondit
 Most core types are generic over three parameters:
 
 ```
-F: JoltField                              — scalar field (BN254 Fr)
-PCS: CommitmentScheme<Field = F>          — polynomial commitment (DoryCommitmentScheme)
+F: JoltField                              — scalar field (usually jolt_field::Fr)
+C: JoltCurve<F = F>                       — curve backend used by ZK opening data
+PCS: JoltCommitmentScheme<F, C>           — canonical jolt-openings PCS (usually jolt_dory::DoryScheme)
 ProofTranscript: Transcript               — Fiat-Shamir transcript (Blake2bTranscript)
 ```
 
@@ -180,7 +181,7 @@ BlindFold makes all sumcheck proofs zero-knowledge without SNARK composition. In
 **Supporting changes:**
 - `poly/commitment/pedersen.rs`: Pedersen commitment scheme for small vectors (round polynomials)
 - `curve.rs`: `JoltCurve`/`JoltGroupElement` traits for elliptic curve abstractions
-- `poly/commitment/dory/commitment_scheme.rs`: ZK evaluation commitments (`y_com`) — Dory proves evaluation correctness without revealing the evaluation value
+- `crates/jolt-dory/src/scheme.rs`: ZK evaluation commitments (`y_com`) — Dory proves evaluation correctness without revealing the evaluation value
 - `sumcheck.rs` / `univariate_skip.rs`: `prove_zk`/`verify_zk` variants
 
 **CRITICAL INVARIANT — Sumcheck claim/constraint synchronization:**

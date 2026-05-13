@@ -40,8 +40,6 @@ use crate::symbolic_traits::opening_accumulator::AstOpeningAccumulator;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
 #[cfg(not(feature = "zk"))]
-use jolt_core::curve::Bn254Curve;
-#[cfg(not(feature = "zk"))]
 use jolt_core::curve::JoltCurve;
 #[cfg(not(feature = "zk"))]
 use jolt_core::poly::opening_proof::OpeningPoint;
@@ -101,7 +99,10 @@ impl VarAllocator {
     /// Allocate a single variable with its concrete value (Fr field, default).
     ///
     /// This is the primary allocation method for stages 1-7.
-    pub fn alloc_with_value(&mut self, description: &str, value: &ark_bn254::Fr) -> MleAst {
+    pub fn alloc_with_value<V>(&mut self, description: &str, value: &V) -> MleAst
+    where
+        V: Copy + Into<ark_bn254::Fr>,
+    {
         self.alloc_with_value_and_field(description, value, TargetField::Fr)
     }
 
@@ -115,13 +116,17 @@ impl VarAllocator {
     /// # Note
     /// The value is stored as a decimal string regardless of field.
     /// For Fq values, ensure the value fits in the Fq modulus.
-    pub fn alloc_with_value_and_field(
+    pub fn alloc_with_value_and_field<V>(
         &mut self,
         description: &str,
-        value: &ark_bn254::Fr,
+        value: &V,
         target_field: TargetField,
-    ) -> MleAst {
+    ) -> MleAst
+    where
+        V: Copy + Into<ark_bn254::Fr>,
+    {
         use ark_ff::PrimeField;
+        let value: ark_bn254::Fr = (*value).into();
         let idx = self.next_idx;
         self.descriptions
             .push((idx, description.to_string(), target_field));
@@ -134,17 +139,23 @@ impl VarAllocator {
     ///
     /// Both symbolic variables and witness values are recorded in the same call,
     /// guaranteeing they stay in sync.
-    pub fn alloc_n_with_values(&mut self, values: &[ark_bn254::Fr], prefix: &str) -> Vec<MleAst> {
+    pub fn alloc_n_with_values<V>(&mut self, values: &[V], prefix: &str) -> Vec<MleAst>
+    where
+        V: Copy + Into<ark_bn254::Fr>,
+    {
         self.alloc_n_with_values_and_field(values, prefix, TargetField::Fr)
     }
 
     /// Allocate N variables with explicit field kind.
-    pub fn alloc_n_with_values_and_field(
+    pub fn alloc_n_with_values_and_field<V>(
         &mut self,
-        values: &[ark_bn254::Fr],
+        values: &[V],
         prefix: &str,
         target_field: TargetField,
-    ) -> Vec<MleAst> {
+    ) -> Vec<MleAst>
+    where
+        V: Copy + Into<ark_bn254::Fr>,
+    {
         values
             .iter()
             .enumerate()
@@ -307,63 +318,63 @@ pub fn symbolize_proof<OutputTranscript: Transcript>(
         };
 
         // === Symbolize stage 1 uni-skip proof ===
-        let stage1_uni_skip = symbolize_uni_skip_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage1_uni_skip = symbolize_uni_skip_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage1_uni_skip_first_round_proof,
             &mut alloc,
             "stage1_uni_skip",
         );
 
         // === Symbolize stage 1 sumcheck proof ===
-        let stage1_sumcheck = symbolize_sumcheck_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage1_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage1_sumcheck_proof,
             &mut alloc,
             "stage1_sumcheck",
         );
 
         // === Symbolize stage 2 uni-skip proof ===
-        let stage2_uni_skip = symbolize_uni_skip_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage2_uni_skip = symbolize_uni_skip_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage2_uni_skip_first_round_proof,
             &mut alloc,
             "stage2_uni_skip",
         );
 
         // === Symbolize stage 2 sumcheck proof ===
-        let stage2_sumcheck = symbolize_sumcheck_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage2_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage2_sumcheck_proof,
             &mut alloc,
             "stage2_sumcheck",
         );
 
         // === Symbolize stage 3 sumcheck proof ===
-        let stage3_sumcheck = symbolize_sumcheck_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage3_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage3_sumcheck_proof,
             &mut alloc,
             "stage3_sumcheck",
         );
 
         // === Symbolize stage 4 sumcheck proof ===
-        let stage4_sumcheck = symbolize_sumcheck_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage4_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage4_sumcheck_proof,
             &mut alloc,
             "stage4_sumcheck",
         );
 
         // === Symbolize stage 5 sumcheck proof ===
-        let stage5_sumcheck = symbolize_sumcheck_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage5_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage5_sumcheck_proof,
             &mut alloc,
             "stage5_sumcheck",
         );
 
         // === Symbolize stage 6 sumcheck proof ===
-        let stage6_sumcheck = symbolize_sumcheck_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage6_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage6_sumcheck_proof,
             &mut alloc,
             "stage6_sumcheck",
         );
 
         // === Symbolize stage 7 sumcheck proof ===
-        let stage7_sumcheck = symbolize_sumcheck_variant::<Bn254Curve, _, OutputTranscript>(
+        let stage7_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
             &real_proof.stage7_sumcheck_proof,
             &mut alloc,
             "stage7_sumcheck",
@@ -421,8 +432,8 @@ pub fn symbolize_proof<OutputTranscript: Transcript>(
 // (MleAst variables) while simultaneously recording witness values in VarAllocator.
 
 #[cfg(not(feature = "zk"))]
-fn symbolize_uni_skip_variant<C: JoltCurve<F = ark_bn254::Fr>, T: Transcript, OutT: Transcript>(
-    real: &UniSkipFirstRoundProofVariant<ark_bn254::Fr, C, T>,
+fn symbolize_uni_skip_variant<C: JoltCurve<F = jolt_field::Fr>, T: Transcript, OutT: Transcript>(
+    real: &UniSkipFirstRoundProofVariant<jolt_field::Fr, C, T>,
     alloc: &mut VarAllocator,
     prefix: &str,
 ) -> UniSkipFirstRoundProofVariant<MleAst, AstCurve, OutT> {
@@ -441,8 +452,8 @@ fn symbolize_uni_skip_variant<C: JoltCurve<F = ark_bn254::Fr>, T: Transcript, Ou
 }
 
 #[cfg(not(feature = "zk"))]
-fn symbolize_sumcheck_variant<C: JoltCurve<F = ark_bn254::Fr>, T: Transcript, OutT: Transcript>(
-    real: &SumcheckInstanceProof<ark_bn254::Fr, C, T>,
+fn symbolize_sumcheck_variant<C: JoltCurve<F = jolt_field::Fr>, T: Transcript, OutT: Transcript>(
+    real: &SumcheckInstanceProof<jolt_field::Fr, C, T>,
     alloc: &mut VarAllocator,
     prefix: &str,
 ) -> SumcheckInstanceProof<MleAst, AstCurve, OutT> {

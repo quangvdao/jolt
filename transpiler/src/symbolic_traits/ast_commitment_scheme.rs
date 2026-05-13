@@ -44,14 +44,18 @@
 //! hold symbolic curve points.
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use jolt_core::field::JoltField;
-use jolt_core::poly::commitment::commitment_scheme::CommitmentScheme;
-use jolt_core::poly::multilinear_polynomial::MultilinearPolynomial;
-use jolt_core::transcripts::Transcript;
-use jolt_core::utils::errors::ProofVerifyError;
-use std::borrow::Borrow;
-use zklean_extractor::mle_ast::MleAst;
-use zklean_extractor::AstCommitment;
+use jolt_crypto::Commitment;
+use jolt_openings::{
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
+    CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
+    EvaluationCommitmentScheme, OpeningsError, ProverClaim, PublicVerifierSetup, ZkOpeningScheme,
+    ZkOpeningSchemeVerifier,
+};
+use jolt_transcript::Transcript;
+use serde::{Deserialize, Serialize};
+use zklean_extractor::{mle_ast::MleAst, AstCommitment};
+
+use super::ast_curve::AstGroupElement;
 
 // =============================================================================
 // Type Definitions
@@ -65,96 +69,303 @@ use zklean_extractor::AstCommitment;
 pub struct AstCommitmentScheme;
 
 /// Verifier setup - empty for symbolic execution
-#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(
+    Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize, Serialize, Deserialize,
+)]
 pub struct AstVerifierSetup;
 
 /// Prover setup - empty, never used in verification
-#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(
+    Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize, Serialize, Deserialize,
+)]
 pub struct AstProverSetup;
 
 /// Opening proof - vector of MleAst for future PCS extensibility
-#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(
+    Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize, Serialize, Deserialize,
+)]
 pub struct AstProof(pub Vec<MleAst>);
 
 /// Batched opening proof - vector of MleAst for future PCS extensibility
-#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(
+    Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize, Serialize, Deserialize,
+)]
 pub struct AstBatchedProof(pub Vec<MleAst>);
 
 /// Opening proof hint - not used in verification
-#[derive(Clone, Debug, Default, PartialEq, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    CanonicalSerialize,
+    CanonicalDeserialize,
+    Serialize,
+    Deserialize,
+)]
 pub struct AstOpeningHint;
 
 // =============================================================================
-// CommitmentScheme Implementation
+// Canonical commitment scheme implementation
 // =============================================================================
 
-impl CommitmentScheme for AstCommitmentScheme {
-    type Field = MleAst;
-    type ProverSetup = AstProverSetup;
-    type VerifierSetup = AstVerifierSetup;
-    type Commitment = AstCommitment;
-    type Proof = AstProof;
-    type BatchedProof = AstBatchedProof;
-    type OpeningProofHint = AstOpeningHint;
+impl Commitment for AstCommitmentScheme {
+    type Output = AstCommitment;
+}
 
-    fn setup_prover(_max_num_vars: usize) -> Self::ProverSetup {
-        panic!("AstCommitmentScheme::setup_prover should never be called during verification")
+impl CommitmentSchemeVerifier for AstCommitmentScheme {
+    type Field = MleAst;
+    type Proof = AstProof;
+    type BatchProof = AstBatchedProof;
+    type VerifierSetup = AstVerifierSetup;
+
+    fn verify(
+        _commitment: &Self::Output,
+        _point: &[Self::Field],
+        _eval: Self::Field,
+        _proof: &Self::Proof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        unimplemented!("AstCommitmentScheme::verify is not needed for stages 1-7 transpilation")
     }
 
-    fn setup_verifier(_setup: &Self::ProverSetup) -> Self::VerifierSetup {
+    fn verify_batch(
+        _claims: Vec<jolt_openings::OpeningClaim<Self::Field, Self>>,
+        _proof: &Self::BatchProof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        unimplemented!(
+            "AstCommitmentScheme::verify_batch is not needed for stages 1-7 transpilation"
+        )
+    }
+
+    fn verify_fused_batch(
+        _commitment: &Self::Output,
+        _point: &[Self::Field],
+        _eval: Self::Field,
+        _proof: &Self::BatchProof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        unimplemented!(
+            "AstCommitmentScheme::verify_fused_batch is not needed for stages 1-7 transpilation"
+        )
+    }
+
+    fn bind_opening_inputs(
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+        _point: &[Self::Field],
+        _eval: &Self::Field,
+    ) {
+    }
+}
+
+impl PublicVerifierSetup for AstCommitmentScheme {
+    type PublicParams = ();
+
+    fn verifier_setup(_params: Self::PublicParams) -> Self::VerifierSetup {
+        AstVerifierSetup
+    }
+}
+
+impl CommitmentScheme for AstCommitmentScheme {
+    type ProverSetup = AstProverSetup;
+    type OpeningHint = AstOpeningHint;
+    type SetupParams = usize;
+
+    fn setup(_params: Self::SetupParams) -> (Self::ProverSetup, Self::VerifierSetup) {
+        (AstProverSetup, AstVerifierSetup)
+    }
+
+    fn project_verifier_setup(_prover_setup: &Self::ProverSetup) -> Self::VerifierSetup {
         AstVerifierSetup
     }
 
-    fn commit(
-        _poly: &MultilinearPolynomial<Self::Field>,
+    fn commit<S: CommitmentSource<Self::Field> + ?Sized>(
+        _source: &S,
         _setup: &Self::ProverSetup,
-    ) -> (Self::Commitment, Self::OpeningProofHint) {
+    ) -> (Self::Output, Self::OpeningHint) {
         panic!("AstCommitmentScheme::commit should never be called during verification")
     }
 
-    fn batch_commit<U>(
-        _polys: &[U],
-        _gens: &Self::ProverSetup,
-    ) -> Vec<(Self::Commitment, Self::OpeningProofHint)>
-    where
-        U: Borrow<MultilinearPolynomial<Self::Field>> + Sync,
-    {
-        panic!("AstCommitmentScheme::batch_commit should never be called during verification")
-    }
-
-    fn combine_commitments<C: Borrow<Self::Commitment>>(
-        _commitments: &[C],
-        _coeffs: &[Self::Field],
-    ) -> Self::Commitment {
-        // TODO: Implement for stage 8 PCS verification
-        // This should combine AstCommitments symbolically
-        todo!("AstCommitmentScheme::combine_commitments - implement for stage 8")
-    }
-
-    fn prove<ProofTranscript: Transcript>(
+    fn open<S>(
+        _polynomial: &S,
+        _point: &[Self::Field],
+        _eval: Self::Field,
         _setup: &Self::ProverSetup,
-        _poly: &MultilinearPolynomial<Self::Field>,
-        _opening_point: &[<Self::Field as JoltField>::Challenge],
-        _hint: Option<Self::OpeningProofHint>,
-        _transcript: &mut ProofTranscript,
-    ) -> (Self::Proof, Option<Self::Field>) {
-        panic!("AstCommitmentScheme::prove should never be called during verification")
+        _hint: Option<Self::OpeningHint>,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Self::Proof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
+        panic!("AstCommitmentScheme::open should never be called during verification")
     }
 
-    fn verify<ProofTranscript: Transcript>(
+    fn prove_batch<S>(
+        _claims: Vec<ProverClaim<Self::Field, S>>,
+        _hints: Vec<Self::OpeningHint>,
+        _setup: &Self::ProverSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field>,
+    {
+        panic!("AstCommitmentScheme::prove_batch should never be called during verification")
+    }
+
+    fn prove_fused_batch<S>(
+        _polynomial: &S,
+        _point: &[Self::Field],
+        _eval: Self::Field,
+        _hint: Option<Self::OpeningHint>,
+        _setup: &Self::ProverSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Self::BatchProof
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
+        panic!("AstCommitmentScheme::prove_fused_batch should never be called during verification")
+    }
+}
+
+impl AdditivelyHomomorphicVerifier for AstCommitmentScheme {
+    fn combine(_commitments: &[Self::Output], _scalars: &[Self::Field]) -> Self::Output {
+        unimplemented!("AstCommitmentScheme::combine is not needed for stages 1-7 transpilation")
+    }
+}
+
+impl AdditivelyHomomorphic for AstCommitmentScheme {
+    fn combine_hints(
+        _hints: Vec<Self::OpeningHint>,
+        _scalars: &[Self::Field],
+    ) -> Self::OpeningHint {
+        AstOpeningHint
+    }
+}
+
+impl ZkOpeningSchemeVerifier for AstCommitmentScheme {
+    type HidingCommitment = AstGroupElement;
+
+    fn verify_zk(
+        _commitment: &Self::Output,
+        _point: &[Self::Field],
         _proof: &Self::Proof,
         _setup: &Self::VerifierSetup,
-        _transcript: &mut ProofTranscript,
-        _opening_point: &[<Self::Field as JoltField>::Challenge],
-        _opening: &Self::Field,
-        _commitment: &Self::Commitment,
-    ) -> Result<(), ProofVerifyError> {
-        // TODO: Implement for stage 8 PCS verification
-        // This should generate symbolic constraints for the opening check
-        todo!("AstCommitmentScheme::verify - implement for stage 8")
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        unimplemented!("AstCommitmentScheme::verify_zk is not needed for stages 1-7 transpilation")
     }
 
-    fn protocol_name() -> &'static [u8] {
-        b"AstCommitmentScheme"
+    fn verify_batch_zk(
+        _claims: Vec<jolt_openings::OpeningClaim<Self::Field, Self>>,
+        _proof: &Self::BatchProof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        unimplemented!(
+            "AstCommitmentScheme::verify_batch_zk is not needed for stages 1-7 transpilation"
+        )
+    }
+
+    fn verify_fused_batch_zk(
+        _commitment: &Self::Output,
+        _point: &[Self::Field],
+        _proof: &Self::BatchProof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<(), OpeningsError> {
+        unimplemented!(
+            "AstCommitmentScheme::verify_fused_batch_zk is not needed for stages 1-7 transpilation"
+        )
+    }
+
+    fn bind_zk_opening_inputs(
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+        _point: &[Self::Field],
+        _hiding_commitment: &Self::HidingCommitment,
+    ) {
+    }
+}
+
+impl ZkOpeningScheme for AstCommitmentScheme {
+    type Blind = MleAst;
+
+    fn commit_zk<S: CommitmentSource<Self::Field> + ?Sized>(
+        _source: &S,
+        _setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        panic!("AstCommitmentScheme::commit_zk should never be called during verification")
+    }
+
+    fn open_zk<S>(
+        _polynomial: &S,
+        _point: &[Self::Field],
+        _eval: Self::Field,
+        _setup: &Self::ProverSetup,
+        _hint: Self::OpeningHint,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::Proof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
+        panic!("AstCommitmentScheme::open_zk should never be called during verification")
+    }
+
+    fn prove_batch_zk<S>(
+        _claims: Vec<ProverClaim<Self::Field, S>>,
+        _hints: Vec<Self::OpeningHint>,
+        _setup: &Self::ProverSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field>,
+    {
+        panic!("AstCommitmentScheme::prove_batch_zk should never be called during verification")
+    }
+
+    fn prove_fused_batch_zk<S>(
+        _polynomial: &S,
+        _point: &[Self::Field],
+        _eval: Self::Field,
+        _hint: Self::OpeningHint,
+        _setup: &Self::ProverSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    where
+        S: CommitmentSource<Self::Field> + ?Sized,
+    {
+        panic!(
+            "AstCommitmentScheme::prove_fused_batch_zk should never be called during verification"
+        )
+    }
+}
+
+impl EvaluationCommitmentScheme<AstGroupElement> for AstCommitmentScheme {
+    fn batch_eval_commitment(_proof: &Self::BatchProof) -> Option<AstGroupElement> {
+        None
+    }
+
+    fn eval_commitment_gens_verifier(
+        _setup: &Self::VerifierSetup,
+    ) -> Option<(AstGroupElement, AstGroupElement)> {
+        None
+    }
+}
+
+impl EvaluationCommitmentProver<AstGroupElement> for AstCommitmentScheme {
+    fn eval_commitment_gens(
+        _setup: &Self::ProverSetup,
+    ) -> Option<(AstGroupElement, AstGroupElement)> {
+        None
+    }
+
+    fn zk_generators(
+        _setup: &Self::ProverSetup,
+        _count: usize,
+    ) -> Option<(Vec<AstGroupElement>, AstGroupElement)> {
+        None
     }
 }

@@ -12,13 +12,15 @@ use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Read, SerializationError, Valid, Write,
 };
 use jolt_core::curve::{JoltCurve, JoltGroupElement};
+use jolt_transcript::{AppendToTranscript, Transcript};
+use serde::{Deserialize, Serialize};
 use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
 use zklean_extractor::mle_ast::MleAst;
 
 /// Stub group element for symbolic execution.
 ///
 /// Never constructed at runtime; all operations are unimplemented.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AstGroupElement;
 
 impl Add for AstGroupElement {
@@ -118,8 +120,12 @@ impl JoltGroupElement for AstGroupElement {
     }
 }
 
+impl AppendToTranscript for AstGroupElement {
+    fn append_to_transcript<T: Transcript>(&self, _transcript: &mut T) {}
+}
+
 /// Stub GT element for symbolic execution.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AstGTElement;
 
 impl Add for AstGTElement {

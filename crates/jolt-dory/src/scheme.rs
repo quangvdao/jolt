@@ -216,36 +216,6 @@ impl DoryScheme {
             .collect()
     }
 
-    /// Commits a source batch using a borrowed dory-pcs prover setup.
-    ///
-    /// This Dory-specific bridge lets legacy callers that still store the raw
-    /// arkworks setup avoid cloning the SRS while the full trait-family cutover
-    /// is in progress.
-    #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_with_ark_setup")]
-    pub fn commit_batch_with_ark_setup<B>(
-        batch: &B,
-        ids: &[B::Id],
-        setup: &ArkworksProverSetup,
-    ) -> Vec<(DoryCommitment, DoryHint)>
-    where
-        B: BatchCommitmentSource<Fr>,
-    {
-        Self::commit_batch_with_mode::<B, Transparent>(batch, ids, setup)
-    }
-
-    /// Commits a hiding source batch using a borrowed dory-pcs prover setup.
-    #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_zk_with_ark_setup")]
-    pub fn commit_batch_zk_with_ark_setup<B>(
-        batch: &B,
-        ids: &[B::Id],
-        setup: &ArkworksProverSetup,
-    ) -> Vec<(DoryCommitment, DoryHint)>
-    where
-        B: BatchCommitmentSource<Fr>,
-    {
-        Self::commit_batch_with_mode::<B, dory::ZK>(batch, ids, setup)
-    }
-
     fn open_source_with_mode<S, T, M>(
         source: &S,
         point: &[Fr],
@@ -302,35 +272,6 @@ impl DoryScheme {
         )
     }
 
-    /// Opens a transparent Dory commitment using a borrowed dory-pcs prover setup.
-    ///
-    /// This Dory-specific entrypoint exists for the current `jolt-core` cutover:
-    /// legacy Stage 8 polynomials already live in arkworks/Dory form, and routing
-    /// them through `CommitmentSource<jolt_field::Fr>` would allocate conversion
-    /// vectors in every Dory vector/matrix product. `ark_point` must already be in
-    /// Dory's point order, i.e. the reverse of Jolt's opening-point order. The
-    /// borrowed setup avoids cloning the SRS when a protocol layer still owns the
-    /// underlying arkworks setup.
-    #[tracing::instrument(skip_all, name = "DoryScheme::open_dory_source_with_ark_setup")]
-    pub fn open_dory_source_with_ark_setup<S, T>(
-        source: &S,
-        ark_point: &[ArkFr],
-        nu: usize,
-        sigma: usize,
-        setup: &ArkworksProverSetup,
-        hint: DoryHint,
-        transcript: &mut T,
-    ) -> DoryProof
-    where
-        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
-        T: DoryTranscript<Curve = InnerBN254>,
-    {
-        let (proof, _blind) = Self::open_dory_source_with_mode::<S, T, Transparent>(
-            source, ark_point, nu, sigma, setup, hint, transcript,
-        );
-        proof
-    }
-
     /// Opens a transparent Dory commitment for an arbitrary commitment source.
     ///
     /// This entrypoint is for protocol layers that already know the Dory matrix
@@ -382,32 +323,6 @@ impl DoryScheme {
         (proof, y_com, blinding)
     }
 
-    /// Opens a hiding Dory commitment using a borrowed dory-pcs prover setup.
-    ///
-    /// This is the ZK counterpart of
-    /// [`Self::open_dory_source_with_ark_setup`].
-    #[tracing::instrument(skip_all, name = "DoryScheme::open_zk_dory_source_with_ark_setup")]
-    pub fn open_zk_dory_source_with_ark_setup<S, T>(
-        source: &S,
-        ark_point: &[ArkFr],
-        nu: usize,
-        sigma: usize,
-        setup: &ArkworksProverSetup,
-        hint: DoryHint,
-        transcript: &mut T,
-    ) -> (DoryProof, Bn254G1, Fr)
-    where
-        S: DoryPolynomial<ArkFr> + MultilinearLagrange<ArkFr>,
-        T: DoryTranscript<Curve = InnerBN254>,
-    {
-        let (proof, y_blinding) = Self::open_dory_source_with_mode::<S, T, dory::ZK>(
-            source, ark_point, nu, sigma, setup, hint, transcript,
-        );
-        let y_com = ark_to_jolt_g1(proof.0.y_com.expect("ZK proof must contain y_com"));
-        let blinding = y_blinding.expect("ZK proof must return y_blinding");
-        (proof, y_com, blinding)
-    }
-
     /// Verifies a transparent Dory opening using an already Dory-compatible
     /// transcript adapter.
     ///
@@ -434,36 +349,6 @@ impl DoryScheme {
             ark_commitment,
             ark_eval,
             &ark_point,
-            &proof.0,
-            setup.0.clone().into_inner(),
-            transcript,
-        )
-        .map_err(|_| OpeningsError::VerificationFailed)
-    }
-
-    /// Verifies a transparent Dory opening using Dory-native scalar inputs.
-    ///
-    /// Most callers should prefer [`Self::verify_with_shape`]. This entrypoint
-    /// is for legacy arkworks/Dory callers that already have the point and
-    /// evaluation in dory-pcs form and should not allocate conversion vectors.
-    #[tracing::instrument(skip_all, name = "DoryScheme::verify_dory_with_shape")]
-    pub fn verify_dory_with_shape<T>(
-        commitment: &DoryCommitment,
-        ark_point: &[ArkFr],
-        ark_eval: ArkFr,
-        proof: &DoryProof,
-        setup: &DoryVerifierSetup,
-        transcript: &mut T,
-    ) -> Result<(), OpeningsError>
-    where
-        T: DoryTranscript<Curve = InnerBN254>,
-    {
-        let ark_commitment = jolt_gt_to_ark(&commitment.0);
-
-        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
-            ark_commitment,
-            ark_eval,
-            ark_point,
             &proof.0,
             setup.0.clone().into_inner(),
             transcript,
@@ -500,49 +385,6 @@ impl DoryScheme {
             transcript,
         )
         .map_err(|_| OpeningsError::VerificationFailed)
-    }
-
-    /// Verifies a hiding Dory opening using Dory-native scalar inputs.
-    ///
-    /// `ark_point` must already be in Dory's point order. The evaluation is not
-    /// public in ZK mode, so this mirrors dory-pcs verification with a dummy
-    /// scalar while binding the evaluation commitment from the proof.
-    #[tracing::instrument(skip_all, name = "DoryScheme::verify_zk_dory_with_shape")]
-    pub fn verify_zk_dory_with_shape<T>(
-        commitment: &DoryCommitment,
-        ark_point: &[ArkFr],
-        proof: &DoryProof,
-        setup: &DoryVerifierSetup,
-        transcript: &mut T,
-    ) -> Result<(), OpeningsError>
-    where
-        T: DoryTranscript<Curve = InnerBN254>,
-    {
-        let dummy_eval = <ArkFr as DoryField>::zero();
-        let ark_commitment = jolt_gt_to_ark(&commitment.0);
-
-        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
-            ark_commitment,
-            dummy_eval,
-            ark_point,
-            &proof.0,
-            setup.0.clone().into_inner(),
-            transcript,
-        )
-        .map_err(|_| OpeningsError::VerificationFailed)
-    }
-}
-
-impl DoryCommitment {
-    /// Converts a raw `dory-pcs` BN254 commitment into the public jolt-dory
-    /// wrapper.
-    ///
-    /// This is intentionally Dory-specific. It exists for protocol layers that
-    /// still store legacy `dory-pcs` commitments while migrating verification
-    /// onto `DoryScheme`.
-    #[inline]
-    pub fn from_dory_pcs(commitment: dory::backends::arkworks::ArkGT) -> Self {
-        Self(ark_to_jolt_gt(&commitment))
     }
 }
 
@@ -1651,17 +1493,19 @@ mod tests {
         let a = Fr::from_u64(2);
         let b = Fr::from_u64(7);
 
-        let hint_a = DoryHint::from_parts(vec![g], Fr::from_u64(3));
-        let hint_b = DoryHint::from_parts(vec![h, k], Fr::from_u64(5));
+        let hint_a = DoryHint::new(vec![g], Fr::from_u64(3));
+        let hint_b = DoryHint::new(vec![h, k], Fr::from_u64(5));
 
         let combined = DoryScheme::combine_hints(vec![hint_a, hint_b], &[a, b]);
-        let (rows, blind) = combined.into_parts();
 
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], g.scalar_mul(&a) + h.scalar_mul(&b));
-        assert_eq!(rows[1], k.scalar_mul(&b));
+        assert_eq!(combined.row_commitments.len(), 2);
         assert_eq!(
-            blind,
+            combined.row_commitments[0],
+            g.scalar_mul(&a) + h.scalar_mul(&b)
+        );
+        assert_eq!(combined.row_commitments[1], k.scalar_mul(&b));
+        assert_eq!(
+            combined.commit_blind,
             a * Fr::from_u64(3) + b * Fr::from_u64(5),
             "combined hint blind must match the same linear combination"
         );

@@ -1,4 +1,4 @@
-//! Wrapper types bridging dory-pcs to jolt-openings.
+//! Public Dory types for the `jolt-openings` commitment traits.
 
 use std::io::Cursor;
 
@@ -238,20 +238,6 @@ impl DoryHint {
             row_commitments,
             commit_blind,
         }
-    }
-
-    /// Builds a Dory opening hint from row commitments and the commitment blind.
-    ///
-    /// This is the public counterpart to the hint returned by `commit` and
-    /// `commit_batch`. It is useful for protocol layers that still own legacy
-    /// hint storage while delegating opening proof generation to `DoryScheme`.
-    pub fn from_parts(row_commitments: Vec<Bn254G1>, commit_blind: Fr) -> Self {
-        Self::new(row_commitments, commit_blind)
-    }
-
-    /// Splits the hint into row commitments and the commitment blinding scalar.
-    pub fn into_parts(self) -> (Vec<Bn254G1>, Fr) {
-        (self.row_commitments, self.commit_blind)
     }
 }
 

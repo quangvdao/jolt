@@ -13,7 +13,7 @@ use crate::{
         BatchOpeningScheme, CommitmentScheme, SourceBatchCommitmentScheme,
         StreamingCommitmentScheme, ZkEvalCommitment,
     },
-    poly::multilinear_polynomial::MultilinearPolynomial,
+    poly::multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
     transcripts::Transcript,
     utils::{errors::ProofVerifyError, math::Math, small_scalar::SmallScalar},
 };
@@ -22,9 +22,10 @@ use ark_ec::CurveGroup;
 use ark_ff::Zero;
 use dory::primitives::{
     arithmetic::{Field as DoryField, Group, PairingCurve},
-    poly::Polynomial,
+    poly::{MultilinearLagrange, Polynomial},
 };
-use jolt_openings::BatchCommitmentSource;
+use jolt_crypto::Bn254G1;
+use jolt_openings::{BatchCommitmentSource, CommitmentSource, SourceRow};
 use rayon::prelude::*;
 use std::borrow::Borrow;
 use tracing::trace_span;
@@ -486,8 +487,41 @@ impl BatchOpeningScheme for DoryCommitmentScheme {
         hint: Option<Self::OpeningProofHint>,
         transcript: &mut ProofTranscript,
     ) -> (Self::BatchedProof, Option<Self::Field>) {
-        let (proof, y_blinding) = Self::prove(setup, poly, opening_point, hint, transcript);
-        (vec![proof], y_blinding)
+        let hint = convert_old_dory_hint(
+            hint.expect("Dory batch opening requires the combined opening hint"),
+        );
+        let setup = jolt_dory::DoryProverSetup(setup.clone());
+        let source = CoreOpeningSource(poly);
+        let (nu, sigma) = current_dory_shape();
+        let point = convert_opening_point(opening_point);
+        let mut dory_transcript = JoltToDoryTranscript::<ProofTranscript>::new(transcript);
+
+        #[cfg(feature = "zk")]
+        {
+            let (proof, _y_com, y_blinding) = jolt_dory::DoryScheme::open_zk_source_with_shape(
+                &source,
+                &point,
+                nu,
+                sigma,
+                &setup,
+                hint,
+                &mut dory_transcript,
+            );
+            (vec![proof.0], Some(ark_bn254::Fr::from(y_blinding)))
+        }
+        #[cfg(not(feature = "zk"))]
+        {
+            let proof = jolt_dory::DoryScheme::open_source_with_shape(
+                &source,
+                &point,
+                nu,
+                sigma,
+                &setup,
+                hint,
+                &mut dory_transcript,
+            );
+            (vec![proof.0], None)
+        }
     }
 
     fn verify_batch<ProofTranscript: Transcript>(
@@ -503,6 +537,91 @@ impl BatchOpeningScheme for DoryCommitmentScheme {
         };
         Self::verify(proof, setup, transcript, opening_point, opening, commitment)
     }
+}
+
+struct CoreOpeningSource<'a>(&'a MultilinearPolynomial<ark_bn254::Fr>);
+
+impl CommitmentSource<jolt_field::Fr> for CoreOpeningSource<'_> {
+    fn num_vars(&self) -> usize {
+        if matches!(self.0, MultilinearPolynomial::RLC(_)) {
+            let (nu, sigma) = current_dory_shape();
+            nu + sigma
+        } else {
+            self.0.get_num_vars()
+        }
+    }
+
+    fn evaluate(&self, point: &[jolt_field::Fr]) -> jolt_field::Fr {
+        let point: Vec<ark_bn254::Fr> = point
+            .iter()
+            .rev()
+            .copied()
+            .map(ark_bn254::Fr::from)
+            .collect();
+        jolt_field::Fr::from(PolynomialEvaluation::evaluate(self.0, point.as_slice()))
+    }
+
+    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, jolt_field::Fr>),
+    {
+        assert!(
+            !matches!(self.0, MultilinearPolynomial::RLC(_)),
+            "streaming RLC openings require a precomputed Dory hint"
+        );
+        let num_cols = 1usize << sigma;
+        let len = self.0.original_len();
+        let mut row = Vec::with_capacity(num_cols);
+        for row_index in 0..len.div_ceil(num_cols) {
+            row.clear();
+            let start = row_index * num_cols;
+            let end = (start + num_cols).min(len);
+            row.extend((start..end).map(|idx| jolt_field::Fr::from(self.0.get_coeff(idx))));
+            visit(row_index, SourceRow::FieldElements(&row));
+        }
+    }
+
+    fn fold_rows(&self, left: &[jolt_field::Fr], sigma: usize) -> Vec<jolt_field::Fr> {
+        let left: Vec<ArkFr> = left
+            .iter()
+            .copied()
+            .map(ark_bn254::Fr::from)
+            .map(|value| jolt_to_ark(&value))
+            .collect();
+        let nu = self.num_vars().saturating_sub(sigma);
+        <MultilinearPolynomial<ark_bn254::Fr> as MultilinearLagrange<ArkFr>>::vector_matrix_product(
+            self.0, &left, nu, sigma,
+        )
+        .iter()
+        .map(|value| jolt_field::Fr::from(ark_to_jolt(value)))
+        .collect()
+    }
+}
+
+fn current_dory_shape() -> (usize, usize) {
+    (
+        DoryGlobals::get_max_num_rows().log_2(),
+        DoryGlobals::get_num_columns().log_2(),
+    )
+}
+
+fn convert_opening_point(
+    opening_point: &[<ark_bn254::Fr as JoltField>::Challenge],
+) -> Vec<jolt_field::Fr> {
+    reorder_opening_point_for_layout::<ark_bn254::Fr>(opening_point)
+        .iter()
+        .map(|point| jolt_field::Fr::from(ark_bn254::Fr::from(*point)))
+        .collect()
+}
+
+fn convert_old_dory_hint(hint: DoryOpeningProofHint) -> jolt_dory::DoryHint {
+    let (row_commitments, commit_blind) = hint.into_parts();
+    let row_commitments = row_commitments
+        .into_iter()
+        .map(|commitment| Bn254G1::from(commitment.0))
+        .collect();
+    let commit_blind = jolt_field::Fr::from(ark_to_jolt(&commit_blind));
+    jolt_dory::DoryHint::from_parts(row_commitments, commit_blind)
 }
 
 fn convert_new_dory_commitment_and_hint(

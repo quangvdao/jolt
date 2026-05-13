@@ -13,6 +13,7 @@ use dory::primitives::arithmetic::{
     DoryRoutines, Field as DoryField, Group as DoryGroup, PairingCurve,
 };
 use dory::primitives::poly::{MultilinearLagrange, Polynomial as DoryPolynomial};
+use dory::primitives::transcript::Transcript as DoryTranscript;
 use dory::Mode;
 use jolt_crypto::ec::bn254::batch_addition::batch_g1_additions_multi_affine;
 use jolt_crypto::{Bn254G1, Bn254GT, Commitment, DeriveSetup, JoltGroup, PedersenSetup};
@@ -23,7 +24,6 @@ use jolt_openings::{
     CommitmentSchemeVerifier, CommitmentSource, OpeningClaim, OpeningsError, ProverClaim,
     PublicVerifierSetup, SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
-use jolt_poly::MultilinearPoly;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
 
@@ -161,6 +161,94 @@ impl DoryScheme {
             .map(|chunks| aggregate_batch_chunks::<M>(chunks, setup))
             .collect()
     }
+
+    fn open_source_with_mode<S, T, M>(
+        source: &S,
+        point: &[Fr],
+        nu: usize,
+        sigma: usize,
+        setup: &DoryProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> (DoryProof, Option<Fr>)
+    where
+        S: CommitmentSource<Fr> + ?Sized,
+        T: DoryTranscript<Curve = InnerBN254>,
+        M: Mode,
+    {
+        let adapter = DorySourceAdapter::new(source);
+        let (row_commitments, commit_blind) = hint.into_ark_parts();
+        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
+
+        let (proof, y_blinding) =
+            dory::prove::<ArkFr, InnerBN254, G1Routines, G2Routines, _, _, M>(
+                &adapter,
+                &ark_point,
+                row_commitments,
+                commit_blind,
+                nu,
+                sigma,
+                &setup.0,
+                transcript,
+            )
+            .unwrap_or_else(|e| panic!("dory::prove failed: {e:?}"));
+
+        (
+            DoryProof(proof),
+            y_blinding.map(|blind| ark_to_jolt_fr(&blind)),
+        )
+    }
+
+    /// Opens a transparent Dory commitment for an arbitrary commitment source.
+    ///
+    /// This entrypoint is for protocol layers that already know the Dory matrix
+    /// shape and already have a row-commitment hint. It preserves streaming
+    /// opening paths without forcing the source through `DoryScheme::Polynomial`.
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_source_with_shape")]
+    pub fn open_source_with_shape<S, T>(
+        source: &S,
+        point: &[Fr],
+        nu: usize,
+        sigma: usize,
+        setup: &DoryProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> DoryProof
+    where
+        S: CommitmentSource<Fr> + ?Sized,
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let (proof, _blind) = Self::open_source_with_mode::<S, T, Transparent>(
+            source, point, nu, sigma, setup, hint, transcript,
+        );
+        proof
+    }
+
+    /// Opens a ZK/hiding Dory commitment for an arbitrary commitment source.
+    ///
+    /// Returns the proof, the hiding commitment to the evaluation, and the
+    /// evaluation blinding scalar consumed later by BlindFold.
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_zk_source_with_shape")]
+    pub fn open_zk_source_with_shape<S, T>(
+        source: &S,
+        point: &[Fr],
+        nu: usize,
+        sigma: usize,
+        setup: &DoryProverSetup,
+        hint: DoryHint,
+        transcript: &mut T,
+    ) -> (DoryProof, Bn254G1, Fr)
+    where
+        S: CommitmentSource<Fr> + ?Sized,
+        T: DoryTranscript<Curve = InnerBN254>,
+    {
+        let (proof, y_blinding) = Self::open_source_with_mode::<S, T, dory::ZK>(
+            source, point, nu, sigma, setup, hint, transcript,
+        );
+        let y_com = ark_to_jolt_g1(proof.0.y_com.expect("ZK proof must contain y_com"));
+        let blinding = y_blinding.expect("ZK proof must return y_blinding");
+        (proof, y_com, blinding)
+    }
 }
 
 impl DeriveSetup<DoryProverSetup> for PedersenSetup<Bn254G1> {
@@ -286,39 +374,22 @@ impl CommitmentScheme for DoryScheme {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Self::Proof {
         let num_vars = point.len();
-        let adapter = DorySourceAdapter::new(poly);
         let sigma = num_vars.div_ceil(2);
         let nu = num_vars - sigma;
 
-        let (row_commitments, commit_blind) = match hint {
-            Some(h) => h.into_ark_parts(),
-            None => (
-                compute_row_commitments(poly, setup),
-                <ArkFr as DoryField>::zero(),
+        let hint = match hint {
+            Some(hint) => hint,
+            None => DoryHint::new(
+                ark_to_jolt_g1_vec(compute_row_commitments(poly, setup)),
+                Fr::from_u64(0),
             ),
         };
         debug_assert!(
-            commit_blind.is_zero(),
+            hint.commit_blind == Fr::from_u64(0),
             "commit_blind should be 0 for transparent mode"
         );
-
-        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-
-        let (proof, _blind) =
-            dory::prove::<ArkFr, InnerBN254, G1Routines, G2Routines, _, _, Transparent>(
-                &adapter,
-                &ark_point,
-                row_commitments,
-                commit_blind,
-                nu,
-                sigma,
-                &setup.0,
-                &mut dory_transcript,
-            )
-            .unwrap_or_else(|e| panic!("dory::prove failed: {e:?}"));
-
-        DoryProof(proof)
+        Self::open_source_with_shape(poly, point, nu, sigma, setup, hint, &mut dory_transcript)
     }
 
     fn prove_batch(
@@ -438,31 +509,10 @@ impl ZkOpeningScheme for DoryScheme {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> (Self::Proof, Self::HidingCommitment, Self::Blind) {
         let num_vars = point.len();
-        let adapter = DorySourceAdapter::new(poly);
         let sigma = num_vars.div_ceil(2);
         let nu = num_vars - sigma;
-        let (row_commitments, commit_blind) = hint.into_ark_parts();
-
-        let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-
-        let (proof, y_blinding) =
-            dory::prove::<ArkFr, InnerBN254, G1Routines, G2Routines, _, _, dory::mode::ZK>(
-                &adapter,
-                &ark_point,
-                row_commitments,
-                commit_blind,
-                nu,
-                sigma,
-                &setup.0,
-                &mut dory_transcript,
-            )
-            .unwrap_or_else(|e| panic!("dory::prove (ZK) failed: {e:?}"));
-
-        let y_com = ark_to_jolt_g1(proof.y_com.expect("ZK proof must contain y_com"));
-        let blinding = ark_to_jolt_fr(&y_blinding.expect("ZK proof must return y_blinding"));
-
-        (DoryProof(proof), y_com, blinding)
+        Self::open_zk_source_with_shape(poly, point, nu, sigma, setup, hint, &mut dory_transcript)
     }
 }
 
@@ -739,19 +789,19 @@ impl DoryHint {
     }
 }
 
-/// Bridges [`MultilinearPoly<Fr>`] to dory-pcs's polynomial traits
+/// Bridges [`CommitmentSource<Fr>`] to dory-pcs's polynomial traits
 /// without materializing the full evaluation table.
-struct DorySourceAdapter<'a, S: MultilinearPoly<Fr>> {
+struct DorySourceAdapter<'a, S: CommitmentSource<Fr> + ?Sized> {
     source: &'a S,
 }
 
-impl<'a, S: MultilinearPoly<Fr>> DorySourceAdapter<'a, S> {
+impl<'a, S: CommitmentSource<Fr> + ?Sized> DorySourceAdapter<'a, S> {
     fn new(source: &'a S) -> Self {
         Self { source }
     }
 }
 
-impl<S: MultilinearPoly<Fr>> DoryPolynomial<ArkFr> for DorySourceAdapter<'_, S> {
+impl<S: CommitmentSource<Fr> + ?Sized> DoryPolynomial<ArkFr> for DorySourceAdapter<'_, S> {
     fn num_vars(&self) -> usize {
         self.source.num_vars()
     }
@@ -780,7 +830,7 @@ impl<S: MultilinearPoly<Fr>> DoryPolynomial<ArkFr> for DorySourceAdapter<'_, S> 
     }
 }
 
-impl<S: MultilinearPoly<Fr>> MultilinearLagrange<ArkFr> for DorySourceAdapter<'_, S> {
+impl<S: CommitmentSource<Fr> + ?Sized> MultilinearLagrange<ArkFr> for DorySourceAdapter<'_, S> {
     fn vector_matrix_product(&self, left_vec: &[ArkFr], _nu: usize, sigma: usize) -> Vec<ArkFr> {
         let native_left: Vec<Fr> = left_vec.iter().map(ark_to_jolt_fr).collect();
         let result = self.source.fold_rows(&native_left, sigma);

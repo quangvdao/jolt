@@ -312,6 +312,24 @@ impl DoryGlobals {
         num_cols / k
     }
 
+    /// Returns the opening point in the variable order expected by Dory's row/column split.
+    ///
+    /// Jolt records the unified Stage 8 point as address variables followed by
+    /// cycle variables. In `AddressMajor` layout, Dory's matrix rows are keyed by
+    /// cycle variables and columns by address variables, so the point is
+    /// reordered to cycle-then-address before entering Dory. `CycleMajor` keeps
+    /// the Jolt order.
+    pub fn reorder_opening_point_for_layout<C: Clone>(opening_point: &[C]) -> Vec<C> {
+        if Self::get_layout() == DoryLayout::AddressMajor {
+            let log_T = Self::get_T().log_2();
+            let log_K = opening_point.len().saturating_sub(log_T);
+            let (r_address, r_cycle) = opening_point.split_at(log_K);
+            [r_cycle, r_address].concat()
+        } else {
+            opening_point.to_vec()
+        }
+    }
+
     fn set_max_num_rows_for_context(max_num_rows: usize, context: DoryContext) {
         match context {
             DoryContext::Main => {

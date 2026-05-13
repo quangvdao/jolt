@@ -79,11 +79,27 @@ pub enum SourceRow<'a, F> {
     /// A dense row of field evaluations.
     FieldElements(&'a [F]),
 
+    /// A dense row whose entries occupy evenly spaced columns.
+    ///
+    /// `column_stride` is the distance between consecutive occupied columns in
+    /// the backend's row view. For example, values with stride `4` occupy
+    /// columns `0, 4, 8, ...`; all intervening columns are zero.
+    StridedFieldElements {
+        values: &'a [F],
+        column_stride: usize,
+    },
+
     /// A dense row of signed integers embedded canonically into the field.
     ///
     /// This preserves small-scalar MSM paths without first materializing field
     /// elements.
     I128(&'a [i128]),
+
+    /// A strided signed-integer row embedded canonically into the field.
+    StridedI128 {
+        values: &'a [i128],
+        column_stride: usize,
+    },
 
     /// A dense row of unsigned 64-bit integers embedded canonically into the field.
     ///
@@ -91,6 +107,12 @@ pub enum SourceRow<'a, F> {
     /// path without paying the cost of first converting every row entry into a
     /// full-width field element.
     U64(&'a [u64]),
+
+    /// A strided unsigned-integer row embedded canonically into the field.
+    StridedU64 {
+        values: &'a [u64],
+        column_stride: usize,
+    },
 
     /// A streaming one-hot chunk whose entries are one-hot vectors over a small
     /// domain.
@@ -363,13 +385,52 @@ where
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             evaluations.extend_from_slice(values);
         }
+        SourceRow::StridedFieldElements {
+            values,
+            column_stride,
+        } => {
+            flush_one_hot(&mut evaluations, &mut one_hot_chunks);
+            for value in values {
+                evaluations.push(*value);
+                evaluations.extend(std::iter::repeat_n(
+                    F::zero(),
+                    column_stride.saturating_sub(1),
+                ));
+            }
+        }
         SourceRow::I128(values) => {
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
         }
+        SourceRow::StridedI128 {
+            values,
+            column_stride,
+        } => {
+            flush_one_hot(&mut evaluations, &mut one_hot_chunks);
+            for value in values {
+                evaluations.push(F::from_i128(*value));
+                evaluations.extend(std::iter::repeat_n(
+                    F::zero(),
+                    column_stride.saturating_sub(1),
+                ));
+            }
+        }
         SourceRow::U64(values) => {
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             evaluations.extend(values.iter().map(|&value| F::from_u64(value)));
+        }
+        SourceRow::StridedU64 {
+            values,
+            column_stride,
+        } => {
+            flush_one_hot(&mut evaluations, &mut one_hot_chunks);
+            for value in values {
+                evaluations.push(F::from_u64(*value));
+                evaluations.extend(std::iter::repeat_n(
+                    F::zero(),
+                    column_stride.saturating_sub(1),
+                ));
+            }
         }
         SourceRow::OneHot(row) => {
             let domain_size = 1usize << row.log_domain_size;

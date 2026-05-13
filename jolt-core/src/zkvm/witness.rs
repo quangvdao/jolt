@@ -19,6 +19,7 @@ use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::{
     field::{ChallengeFieldOps, FieldChallengeOps, JoltField},
     poly::{
+        commitment::dory::{DoryContext, DoryGlobals, DoryLayout},
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
         one_hot_polynomial::OneHotPolynomial,
     },
@@ -77,6 +78,17 @@ pub fn all_committed_polynomials(one_hot_params: &OneHotParams) -> Vec<Committed
 /// and opening-time row folds to the underlying polynomial.
 pub struct PolynomialCommitmentSource<'a, F: JoltField>(pub &'a MultilinearPolynomial<F>);
 
+fn address_major_dense_shape() -> Option<(usize, usize)> {
+    (DoryGlobals::current_context() == DoryContext::Main
+        && DoryGlobals::get_layout() == DoryLayout::AddressMajor)
+        .then(|| {
+            (
+                DoryGlobals::address_major_cycles_per_row(),
+                DoryGlobals::k_from_matrix_shape(),
+            )
+        })
+}
+
 impl<F> CommitmentSource<F> for PolynomialCommitmentSource<'_, F>
 where
     F: JoltField + jolt_field::Field + ChallengeFieldOps<F> + FieldChallengeOps<F>,
@@ -96,20 +108,57 @@ where
     {
         match self.0 {
             MultilinearPolynomial::I128Scalars(poly) => {
-                let row_len = 1usize << sigma;
+                let strided = address_major_dense_shape();
+                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
                 for (row_index, row) in poly.coeffs.chunks(row_len).enumerate() {
-                    visit(row_index, SourceRow::I128(row));
+                    if let Some((_, column_stride)) = strided {
+                        visit(
+                            row_index,
+                            SourceRow::StridedI128 {
+                                values: row,
+                                column_stride,
+                            },
+                        );
+                    } else {
+                        visit(row_index, SourceRow::I128(row));
+                    }
                 }
             }
             MultilinearPolynomial::U64Scalars(poly) => {
-                let row_len = 1usize << sigma;
+                let strided = address_major_dense_shape();
+                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
                 for (row_index, row) in poly.coeffs.chunks(row_len).enumerate() {
-                    visit(row_index, SourceRow::U64(row));
+                    if let Some((_, column_stride)) = strided {
+                        visit(
+                            row_index,
+                            SourceRow::StridedU64 {
+                                values: row,
+                                column_stride,
+                            },
+                        );
+                    } else {
+                        visit(row_index, SourceRow::U64(row));
+                    }
                 }
             }
-            _ => MultilinearPoly::for_each_row(self.0, sigma, &mut |row_index, row| {
-                visit(row_index, SourceRow::FieldElements(row));
-            }),
+            _ => {
+                if let Some((row_len, column_stride)) = address_major_dense_shape() {
+                    let row_sigma = row_len.trailing_zeros() as usize;
+                    MultilinearPoly::for_each_row(self.0, row_sigma, &mut |row_index, row| {
+                        visit(
+                            row_index,
+                            SourceRow::StridedFieldElements {
+                                values: row,
+                                column_stride,
+                            },
+                        );
+                    });
+                } else {
+                    MultilinearPoly::for_each_row(self.0, sigma, &mut |row_index, row| {
+                        visit(row_index, SourceRow::FieldElements(row));
+                    });
+                }
+            }
         }
     }
 
@@ -120,19 +169,45 @@ where
     {
         match self.0 {
             MultilinearPolynomial::I128Scalars(poly) => {
-                let row_len = 1usize << sigma;
+                let strided = address_major_dense_shape();
+                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
                 poly.coeffs
                     .par_chunks(row_len)
                     .enumerate()
-                    .map(|(row_index, row)| visit(row_index, SourceRow::I128(row)))
+                    .map(|(row_index, row)| {
+                        if let Some((_, column_stride)) = strided {
+                            visit(
+                                row_index,
+                                SourceRow::StridedI128 {
+                                    values: row,
+                                    column_stride,
+                                },
+                            )
+                        } else {
+                            visit(row_index, SourceRow::I128(row))
+                        }
+                    })
                     .collect()
             }
             MultilinearPolynomial::U64Scalars(poly) => {
-                let row_len = 1usize << sigma;
+                let strided = address_major_dense_shape();
+                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
                 poly.coeffs
                     .par_chunks(row_len)
                     .enumerate()
-                    .map(|(row_index, row)| visit(row_index, SourceRow::U64(row)))
+                    .map(|(row_index, row)| {
+                        if let Some((_, column_stride)) = strided {
+                            visit(
+                                row_index,
+                                SourceRow::StridedU64 {
+                                    values: row,
+                                    column_stride,
+                                },
+                            )
+                        } else {
+                            visit(row_index, SourceRow::U64(row))
+                        }
+                    })
                     .collect()
             }
             _ => {
@@ -146,14 +221,25 @@ where
     }
 
     fn is_one_hot(&self) -> bool {
-        MultilinearPoly::is_one_hot(self.0)
+        matches!(self.0, MultilinearPolynomial::OneHot(_)) || MultilinearPoly::is_one_hot(self.0)
     }
 
     fn for_each_one<V>(&self, mut visit: V)
     where
         V: FnMut(usize),
     {
-        MultilinearPoly::for_each_one(self.0, &mut visit);
+        match self.0 {
+            MultilinearPolynomial::OneHot(poly) => {
+                let layout = DoryGlobals::get_layout();
+                let t = poly.nonzero_indices.len();
+                for (cycle, address) in poly.nonzero_indices.iter().enumerate() {
+                    if let Some(address) = address {
+                        visit(layout.address_cycle_to_index(*address as usize, cycle, poly.K, t));
+                    }
+                }
+            }
+            _ => MultilinearPoly::for_each_one(self.0, &mut visit),
+        }
     }
 
     fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
@@ -334,7 +420,12 @@ where
                                 .map(|&value| <SourceField as FromPrimitiveInt>::from_i128(value)),
                         );
                     }
-                    SourceRow::FieldElements(_) | SourceRow::U64(_) | SourceRow::OneHot(_) => {
+                    SourceRow::FieldElements(_)
+                    | SourceRow::StridedFieldElements { .. }
+                    | SourceRow::U64(_)
+                    | SourceRow::StridedU64 { .. }
+                    | SourceRow::StridedI128 { .. }
+                    | SourceRow::OneHot(_) => {
                         panic!("increment rows must be emitted as i128 source rows");
                     }
                 });
@@ -372,7 +463,12 @@ where
                         };
                         cycle_offset += entries_len;
                     }
-                    SourceRow::FieldElements(_) | SourceRow::I128(_) | SourceRow::U64(_) => {
+                    SourceRow::FieldElements(_)
+                    | SourceRow::StridedFieldElements { .. }
+                    | SourceRow::I128(_)
+                    | SourceRow::StridedI128 { .. }
+                    | SourceRow::U64(_)
+                    | SourceRow::StridedU64 { .. } => {
                         panic!("RA rows must be emitted as one-hot source rows");
                     }
                 });
@@ -549,15 +645,26 @@ mod cycle_major_trace_batch_tests {
     enum RowSnapshot {
         I128(Vec<i128>),
         U64(Vec<u64>),
+        StridedI128(Vec<i128>, usize),
+        StridedU64(Vec<u64>, usize),
         OnePerColumn(Vec<usize>),
         MaybeZero(Vec<Option<usize>>),
         FieldElements(Vec<SourceField>),
+        StridedFieldElements(Vec<SourceField>, usize),
     }
 
     fn snapshot(row: SourceRow<'_, SourceField>) -> RowSnapshot {
         match row {
             SourceRow::I128(values) => RowSnapshot::I128(values.to_vec()),
+            SourceRow::StridedI128 {
+                values,
+                column_stride,
+            } => RowSnapshot::StridedI128(values.to_vec(), column_stride),
             SourceRow::U64(values) => RowSnapshot::U64(values.to_vec()),
+            SourceRow::StridedU64 {
+                values,
+                column_stride,
+            } => RowSnapshot::StridedU64(values.to_vec(), column_stride),
             SourceRow::OneHot(row) => match row.entries {
                 OneHotEntries::OnePerColumn(indices) => {
                     RowSnapshot::OnePerColumn(indices.iter().map(|index| index.get()).collect())
@@ -570,6 +677,10 @@ mod cycle_major_trace_batch_tests {
                 ),
             },
             SourceRow::FieldElements(values) => RowSnapshot::FieldElements(values.to_vec()),
+            SourceRow::StridedFieldElements {
+                values,
+                column_stride,
+            } => RowSnapshot::StridedFieldElements(values.to_vec(), column_stride),
         }
     }
 

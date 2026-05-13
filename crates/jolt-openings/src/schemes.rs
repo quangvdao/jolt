@@ -97,6 +97,21 @@ pub trait CommitmentScheme: CommitmentSchemeVerifier {
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint);
 
+    /// Commits to one source using an explicit row/column traversal shape.
+    ///
+    /// Most schemes derive their commitment shape directly from the source and
+    /// can use the default implementation. Dory-style matrix commitments may
+    /// need a protocol-selected shape so short dense sources and one-hot
+    /// sources share the same row domain.
+    fn commit_with_shape<S: CommitmentSource<Self::Field> + ?Sized>(
+        source: &S,
+        _nu: usize,
+        _sigma: usize,
+        setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        Self::commit(source, setup)
+    }
+
     /// Commits to a batch of sources.
     fn commit_batch<B: BatchCommitmentSource<Self::Field>>(
         batch: &B,
@@ -238,6 +253,20 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
         source: &S,
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint);
+
+    /// Commits in ZK/hiding mode using an explicit row/column traversal shape.
+    ///
+    /// The default delegates to [`commit_zk`](Self::commit_zk). Matrix-shaped
+    /// schemes can override this when the protocol has already selected a
+    /// shared source layout.
+    fn commit_zk_with_shape<S: CommitmentSource<Self::Field> + ?Sized>(
+        source: &S,
+        _nu: usize,
+        _sigma: usize,
+        setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        Self::commit_zk(source, setup)
+    }
 
     /// Commits to a batch of sources in the scheme's ZK/hiding mode.
     fn commit_batch_zk<B: BatchCommitmentSource<Self::Field>>(

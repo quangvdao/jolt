@@ -686,6 +686,8 @@ where
                 .clone()
                 .pad_using(T, |_| Cycle::NoOp)
                 .collect();
+            let (num_rows, num_cols) = DoryGlobals::matrix_shape();
+            let (nu, sigma) = (num_rows.log_2(), num_cols.log_2());
 
             // Generate witnesses and commit using the regular (non-streaming) path
             let (commitments, hints): (Vec<_>, Vec<_>) = polys
@@ -697,8 +699,10 @@ where
                         &trace,
                         Some(&self.one_hot_params),
                     );
-                    PCS::commit(
+                    PCS::commit_with_shape(
                         &PolynomialCommitmentSource(&witness),
+                        nu,
+                        sigma,
                         &self.preprocessing.generators,
                     )
                 })
@@ -773,8 +777,12 @@ where
         let _guard =
             DoryGlobals::initialize_context(1, advice_len, DoryContext::UntrustedAdvice, None);
         let _ctx = DoryGlobals::with_context(DoryContext::UntrustedAdvice);
-        let (commitment, hint) = PCS::commit(
+        let (num_rows, num_cols) = DoryGlobals::matrix_shape();
+        let (nu, sigma) = (num_rows.log_2(), num_cols.log_2());
+        let (commitment, hint) = PCS::commit_with_shape(
             &PolynomialCommitmentSource(&poly),
+            nu,
+            sigma,
             &self.preprocessing.generators,
         );
         self.transcript
@@ -2077,12 +2085,17 @@ where
             .iter()
             .map(|point| (*point).into())
             .collect();
+        let dory_opening_point: Vec<F> =
+            DoryGlobals::reorder_opening_point_for_layout(&opening_point.r)
+                .iter()
+                .map(|point| (*point).into())
+                .collect();
         let joint_poly_source = PolynomialCommitmentSource(&joint_poly);
 
         #[cfg(feature = "zk")]
         let (proof, y_com, y_blinding) = PCS::prove_fused_batch_zk(
             &joint_poly_source,
-            &pcs_opening_point,
+            &dory_opening_point,
             joint_claim,
             hint,
             &self.preprocessing.generators,
@@ -2092,7 +2105,7 @@ where
         #[cfg(not(feature = "zk"))]
         let proof = PCS::prove_fused_batch(
             &joint_poly_source,
-            &pcs_opening_point,
+            &dory_opening_point,
             joint_claim,
             Some(hint),
             &self.preprocessing.generators,
@@ -2244,7 +2257,6 @@ mod tests {
 
     use jolt_dory::{DoryCommitment, DoryHint, DoryScheme};
     use jolt_field::Fr;
-    use jolt_openings::CommitmentScheme;
     use serial_test::serial;
 
     use crate::host;
@@ -2256,6 +2268,7 @@ mod tests {
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{OpeningAccumulator, SumcheckId},
     };
+    use crate::utils::math::Math;
     use crate::zkvm::claim_reductions::AdviceKind;
     use crate::zkvm::verifier::JoltSharedPreprocessing;
     use crate::zkvm::witness::{CommittedPolynomial, PolynomialCommitmentSource};
@@ -2309,8 +2322,12 @@ mod tests {
             DoryGlobals::initialize_context(1, advice_len, DoryContext::TrustedAdvice, None);
         let (commitment, hint) = {
             let _ctx = DoryGlobals::with_context(DoryContext::TrustedAdvice);
-            DoryScheme::commit(
+            let (num_rows, num_cols) = DoryGlobals::matrix_shape();
+            let (nu, sigma) = (num_rows.log_2(), num_cols.log_2());
+            DoryScheme::commit_with_shape(
                 &PolynomialCommitmentSource(&poly),
+                nu,
+                sigma,
                 &preprocessing.generators,
             )
         };

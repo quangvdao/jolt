@@ -651,6 +651,15 @@ impl CommitmentScheme for DoryScheme {
         Self::commit_with_mode::<S, Transparent>(source, &setup.0)
     }
 
+    fn commit_with_shape<S: CommitmentSource<Fr> + ?Sized>(
+        source: &S,
+        nu: usize,
+        sigma: usize,
+        setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        DoryScheme::commit_with_shape(source, nu, sigma, setup)
+    }
+
     #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch")]
     fn commit_batch<B: BatchCommitmentSource<Self::Field>>(
         batch: &B,
@@ -835,6 +844,15 @@ impl ZkOpeningScheme for DoryScheme {
         Self::commit_with_mode::<S, dory::ZK>(source, &setup.0)
     }
 
+    fn commit_zk_with_shape<S: CommitmentSource<Fr> + ?Sized>(
+        source: &S,
+        nu: usize,
+        sigma: usize,
+        setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        DoryScheme::commit_zk_with_shape(source, nu, sigma, setup)
+    }
+
     #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_zk")]
     fn commit_batch_zk<B: BatchCommitmentSource<Self::Field>>(
         batch: &B,
@@ -975,6 +993,55 @@ fn commit_field_row(values: &[Fr], setup: &ArkworksProverSetup) -> ArkG1 {
     JoltG1Routines::msm(&setup.g1_vec[..scalars.len()], &scalars)
 }
 
+fn strided_affine_bases(
+    values_len: usize,
+    column_stride: usize,
+    ctx: &CommitRowContext<'_>,
+) -> Vec<G1Affine> {
+    assert!(
+        column_stride > 0,
+        "Dory strided row column stride must be nonzero"
+    );
+    assert!(
+        values_len == 0 || (values_len - 1) * column_stride < ctx.g1_bases_affine.len(),
+        "Dory strided row length ({values_len}) with stride ({column_stride}) exceeds G1 SRS row size ({})",
+        ctx.g1_bases_affine.len(),
+    );
+    ctx.g1_bases_affine
+        .iter()
+        .step_by(column_stride)
+        .take(values_len)
+        .copied()
+        .collect()
+}
+
+fn commit_strided_field_row(
+    values: &[Fr],
+    column_stride: usize,
+    ctx: &CommitRowContext<'_>,
+) -> ArkG1 {
+    assert!(
+        column_stride > 0,
+        "Dory strided row column stride must be nonzero"
+    );
+    assert!(
+        values.is_empty() || (values.len() - 1) * column_stride < ctx.setup.g1_vec.len(),
+        "Dory strided row length ({}) with stride ({column_stride}) exceeds G1 SRS size ({})",
+        values.len(),
+        ctx.setup.g1_vec.len(),
+    );
+    let bases: Vec<ArkG1Struct> = ctx
+        .setup
+        .g1_vec
+        .iter()
+        .step_by(column_stride)
+        .take(values.len())
+        .copied()
+        .collect();
+    let scalars: Vec<ArkFr> = values.iter().map(jolt_fr_to_ark).collect();
+    JoltG1Routines::msm(&bases, &scalars)
+}
+
 fn commit_i128_row(values: &[i128], ctx: &CommitRowContext<'_>) -> ArkG1 {
     assert!(
         values.len() <= ctx.g1_bases_affine.len(),
@@ -989,6 +1056,17 @@ fn commit_i128_row(values: &[i128], ctx: &CommitRowContext<'_>) -> ArkG1 {
     ))
 }
 
+fn commit_strided_i128_row(
+    values: &[i128],
+    column_stride: usize,
+    ctx: &CommitRowContext<'_>,
+) -> ArkG1 {
+    let bases = strided_affine_bases(values.len(), column_stride, ctx);
+    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_i128::<G1Projective>(
+        &bases, values, true,
+    ))
+}
+
 fn commit_u64_row(values: &[u64], ctx: &CommitRowContext<'_>) -> ArkG1 {
     assert!(
         values.len() <= ctx.g1_bases_affine.len(),
@@ -1000,6 +1078,17 @@ fn commit_u64_row(values: &[u64], ctx: &CommitRowContext<'_>) -> ArkG1 {
         &ctx.g1_bases_affine[..values.len()],
         values,
         true,
+    ))
+}
+
+fn commit_strided_u64_row(
+    values: &[u64],
+    column_stride: usize,
+    ctx: &CommitRowContext<'_>,
+) -> ArkG1 {
+    let bases = strided_affine_bases(values.len(), column_stride, ctx);
+    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_u64::<G1Projective>(
+        &bases, values, true,
     ))
 }
 
@@ -1081,8 +1170,20 @@ fn commit_source_row(row: SourceRow<'_, Fr>, ctx: &CommitRowContext<'_>) -> Dory
         SourceRow::FieldElements(values) => {
             DoryChunkCommitment::Dense(commit_field_row(values, ctx.setup))
         }
+        SourceRow::StridedFieldElements {
+            values,
+            column_stride,
+        } => DoryChunkCommitment::Dense(commit_strided_field_row(values, column_stride, ctx)),
         SourceRow::I128(values) => DoryChunkCommitment::Dense(commit_i128_row(values, ctx)),
+        SourceRow::StridedI128 {
+            values,
+            column_stride,
+        } => DoryChunkCommitment::Dense(commit_strided_i128_row(values, column_stride, ctx)),
         SourceRow::U64(values) => DoryChunkCommitment::Dense(commit_u64_row(values, ctx)),
+        SourceRow::StridedU64 {
+            values,
+            column_stride,
+        } => DoryChunkCommitment::Dense(commit_strided_u64_row(values, column_stride, ctx)),
         SourceRow::OneHot(row) => DoryChunkCommitment::OneHot(commit_one_hot_row(row, ctx)),
     }
 }

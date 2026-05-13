@@ -371,11 +371,40 @@ pub enum SourceRow<'a, F> {
     /// A dense row of field evaluations.
     FieldElements(&'a [F]),
 
+    /// A dense row whose entries occupy evenly spaced columns.
+    ///
+    /// `column_stride` is the distance between consecutive occupied columns.
+    /// Values with stride `4`, for example, occupy columns `0, 4, 8, ...`.
+    /// This captures layout-induced sparse rows without making the source know
+    /// a concrete commitment backend.
+    StridedFieldElements {
+        values: &'a [F],
+        column_stride: usize,
+    },
+
     /// A dense row of signed integers embedded canonically into `F`.
     ///
     /// This preserves the current Dory small-scalar MSM path for increment
     /// polynomials without first materializing field elements.
     I128(&'a [i128]),
+
+    /// A strided signed-integer row embedded canonically into `F`.
+    StridedI128 {
+        values: &'a [i128],
+        column_stride: usize,
+    },
+
+    /// A dense row of unsigned 64-bit integers embedded canonically into `F`.
+    ///
+    /// This preserves compact materialized advice and benchmark paths without
+    /// first materializing field elements.
+    U64(&'a [u64]),
+
+    /// A strided unsigned-integer row embedded canonically into `F`.
+    StridedU64 {
+        values: &'a [u64],
+        column_stride: usize,
+    },
 
     /// A streaming one-hot chunk whose entries are one-hot vectors over a small
     /// domain.
@@ -407,6 +436,16 @@ pub trait CommitmentSource<F>: Send + Sync {
     fn for_each_row<V>(&self, sigma: usize, visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>);
+
+    /// Maps row-shaped chunks into owned backend results.
+    ///
+    /// The default is a sequential traversal through `for_each_row`.
+    /// Materialized sources can override this to parallelize over borrowed row
+    /// chunks without copying rows into an owned staging buffer.
+    fn map_rows<R, V>(&self, sigma: usize, visit: V) -> Vec<R>
+    where
+        R: Send,
+        V: for<'row> Fn(usize, SourceRow<'row, F>) -> R + Send + Sync;
 
     /// Folds rows against the left-side weights used by opening algorithms.
     ///
@@ -459,20 +498,24 @@ pub trait BatchCommitmentSource<F>: Send + Sync {
 The generic semantics are:
 
 1. `FieldElements` is the canonical dense row of field evaluations.
-2. `I128` is a dense row of signed integers embedded canonically into `F`.
-3. `OneHot` is a row of one-hot vector entries.
+2. `StridedFieldElements` is the same dense row view, but its values occupy evenly spaced columns and all skipped columns are zero.
+3. `I128` and `U64` are dense rows of small scalars embedded canonically into `F`.
+4. `StridedI128` and `StridedU64` are the small-scalar counterparts of `StridedFieldElements`.
+5. `OneHot` is a row of one-hot vector entries.
    `log_domain_size` means each column entry lives in `{0, ..., 2^log_domain_size - 1}`.
    `OneHotEntries::OnePerColumn(indices)` means every column contributes one basis vector.
    `OneHotEntries::MaybeZero(indices)` means `Some(k)` contributes `e_k`, and `None` contributes the zero vector.
    Its dense expansion for this row shape is hot-coordinate-major inside the chunk: entry `(hot_index, column)` maps to `hot_index * num_columns + column`.
 
 Only `CommitmentSource` and `BatchCommitmentSource` are core API concepts.
-`I128` and `OneHot` are optional row encodings.
+`I128`, `U64`, strided rows, and `OneHot` are optional row encodings.
 They are included to preserve current Jolt/Dory performance without forcing `jolt-core` to call Dory-specific APIs:
 
 1. `I128` maps exactly to the previous Dory dense-row chunk path for `RdInc` and `RamInc`.
-2. `OneHot` maps exactly to the previous Dory one-hot chunk path for `InstructionRa`, `BytecodeRa`, and `RamRa`.
-3. A backend that does not care about these encodings can immediately materialize or interpret them as field rows.
+2. `U64` preserves compact materialized advice and benchmark paths.
+3. Strided rows preserve AddressMajor dense-polynomial embedding, where dense values sit in every `K`th column of the Dory matrix.
+4. `OneHot` maps exactly to the previous Dory one-hot chunk path for `InstructionRa`, `BytecodeRa`, and `RamRa`.
+5. A backend that does not care about these encodings can immediately materialize or interpret them as field rows.
 
 `OneHotIndex` is intentionally not `usize`.
 Current Jolt chunks have `log_k_chunk` equal to `4` or `8`, and the chunk extraction helpers already return `u8`.
@@ -555,9 +598,19 @@ The Dory row helper is private to `jolt-dory`:
 ```rust
 fn commit_row(row: SourceRow<'_, Fr>, setup: &DoryProverSetup) -> Vec<ArkG1> {
     match row {
-        SourceRow::I128(values) => commit_small_scalar_row(values, setup),
-        SourceRow::OneHot(row) => commit_onehot_row(row, setup),
         SourceRow::FieldElements(values) => commit_field_row(values, setup),
+        SourceRow::StridedFieldElements { values, column_stride } => {
+            commit_field_row_at_stride(values, column_stride, setup)
+        }
+        SourceRow::I128(values) => commit_small_scalar_row(values, setup),
+        SourceRow::StridedI128 { values, column_stride } => {
+            commit_small_scalar_row_at_stride(values, column_stride, setup)
+        }
+        SourceRow::U64(values) => commit_u64_row(values, setup),
+        SourceRow::StridedU64 { values, column_stride } => {
+            commit_u64_row_at_stride(values, column_stride, setup)
+        }
+        SourceRow::OneHot(row) => commit_onehot_row(row, setup),
     }
 }
 ```
@@ -743,6 +796,11 @@ For example, `RdInc` and `RamInc` build the same temporary `Vec<i128>` as today 
 `InstructionRa` and `BytecodeRa` build a temporary `Vec<OneHotIndex>` and use `OneHotEntries::OnePerColumn`.
 `RamRa` builds a temporary `Vec<Option<OneHotIndex>>` and uses `OneHotEntries::MaybeZero`.
 Materialized dense sources can call `visit(row_index, SourceRow::FieldElements(existing_slice))` directly.
+For layout-shaped dense rows, a materialized source can instead emit a strided
+row such as `SourceRow::StridedI128 { values, column_stride }`.
+This is needed for Jolt's AddressMajor Dory layout: dense trace polynomials are
+embedded in evenly spaced columns of the main matrix, while advice contexts
+remain contiguous in their smaller preprocessing-only matrices.
 No `Cow` is needed because the row view only has to live for the duration of the `visit` call.
 
 The prover call-site change is narrow: the old row-generation helper disappears and the CycleMajor branch passes `CycleMajorTraceBatch` to canonical source-batch commit entry points.
@@ -858,9 +916,10 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 5. `setup(max_num_vars)` returns prover and verifier setup.
 6. `project_verifier_setup(&prover_setup)` projects prover setup down to verifier setup.
 7. `commit` commits through the current Dory row commitment path.
-8. `commit_batch` overrides the default with batch-source row streaming.
-9. `open` proves one Dory opening.
-10. `prove_batch` delegates to `homomorphic_prove_batch`.
+8. `commit_with_shape` commits through the same row path using a protocol-selected matrix shape.
+9. `commit_batch` overrides the default with batch-source row streaming.
+10. `open` proves one Dory opening.
+11. `prove_batch` delegates to `homomorphic_prove_batch`.
 
 `AdditivelyHomomorphicVerifier for DoryScheme`:
 

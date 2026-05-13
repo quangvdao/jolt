@@ -420,11 +420,47 @@ where
     let mut evaluations = Vec::with_capacity(1 << source.num_vars());
     source.for_each_row(source.num_vars(), |_, row| match row {
         SourceRow::FieldElements(values) => evaluations.extend_from_slice(values),
+        SourceRow::StridedFieldElements {
+            values,
+            column_stride,
+        } => {
+            for value in values {
+                evaluations.push(*value);
+                evaluations.extend(std::iter::repeat_n(
+                    F::zero(),
+                    column_stride.saturating_sub(1),
+                ));
+            }
+        }
         SourceRow::I128(values) => {
             evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
         }
+        SourceRow::StridedI128 {
+            values,
+            column_stride,
+        } => {
+            for value in values {
+                evaluations.push(F::from_i128(*value));
+                evaluations.extend(std::iter::repeat_n(
+                    F::zero(),
+                    column_stride.saturating_sub(1),
+                ));
+            }
+        }
         SourceRow::U64(values) => {
             evaluations.extend(values.iter().map(|&value| F::from_u64(value)));
+        }
+        SourceRow::StridedU64 {
+            values,
+            column_stride,
+        } => {
+            for value in values {
+                evaluations.push(F::from_u64(*value));
+                evaluations.extend(std::iter::repeat_n(
+                    F::zero(),
+                    column_stride.saturating_sub(1),
+                ));
+            }
         }
         SourceRow::OneHot(row) => {
             let domain_size = 1usize << row.log_domain_size;

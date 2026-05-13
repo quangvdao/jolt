@@ -1668,12 +1668,17 @@ impl<
             .iter()
             .map(|point| (*point).into())
             .collect();
+        let dory_opening_point: Vec<F> =
+            DoryGlobals::reorder_opening_point_for_layout(&opening_point.r)
+                .iter()
+                .map(|point| (*point).into())
+                .collect();
 
         let zk_mode = self.opening_accumulator.zk_mode;
         if zk_mode {
             PCS::verify_fused_batch_zk(
                 &joint_commitment,
-                &pcs_opening_point,
+                &dory_opening_point,
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,
@@ -1693,7 +1698,7 @@ impl<
         } else {
             PCS::verify_fused_batch(
                 &joint_commitment,
-                &pcs_opening_point,
+                &dory_opening_point,
                 joint_claim,
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,

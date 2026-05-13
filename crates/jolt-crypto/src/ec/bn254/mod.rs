@@ -129,6 +129,36 @@ macro_rules! impl_jolt_group_wrapper {
             }
         }
 
+        impl ::ark_serialize::CanonicalSerialize for $wrapper {
+            fn serialize_with_mode<W: ::ark_serialize::Write>(
+                &self,
+                writer: W,
+                compress: ::ark_serialize::Compress,
+            ) -> Result<(), ::ark_serialize::SerializationError> {
+                self.0.serialize_with_mode(writer, compress)
+            }
+
+            fn serialized_size(&self, compress: ::ark_serialize::Compress) -> usize {
+                self.0.serialized_size(compress)
+            }
+        }
+
+        impl ::ark_serialize::Valid for $wrapper {
+            fn check(&self) -> Result<(), ::ark_serialize::SerializationError> {
+                self.0.check()
+            }
+        }
+
+        impl ::ark_serialize::CanonicalDeserialize for $wrapper {
+            fn deserialize_with_mode<R: ::ark_serialize::Read>(
+                reader: R,
+                compress: ::ark_serialize::Compress,
+                validate: ::ark_serialize::Validate,
+            ) -> Result<Self, ::ark_serialize::SerializationError> {
+                <$projective>::deserialize_with_mode(reader, compress, validate).map(Self)
+            }
+        }
+
         impl ::jolt_transcript::AppendToTranscript for $wrapper {
             fn append_to_transcript<T: ::jolt_transcript::Transcript>(&self, transcript: &mut T) {
                 use ::ark_serialize::CanonicalSerialize;

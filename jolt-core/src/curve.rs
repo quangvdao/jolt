@@ -309,6 +309,96 @@ impl JoltCurve for Bn254Curve {
     }
 }
 
+impl JoltGroupElement for jolt_crypto::Bn254G1 {
+    type Scalar = jolt_field::Fr;
+
+    fn zero() -> Self {
+        <Self as jolt_crypto::JoltGroup>::identity()
+    }
+
+    fn is_zero(&self) -> bool {
+        <Self as jolt_crypto::JoltGroup>::is_identity(self)
+    }
+
+    fn double(&self) -> Self {
+        <Self as jolt_crypto::JoltGroup>::double(self)
+    }
+
+    fn scalar_mul(&self, scalar: &Self::Scalar) -> Self {
+        <Self as jolt_crypto::JoltGroup>::scalar_mul(self, scalar)
+    }
+}
+
+impl JoltGroupElement for jolt_crypto::Bn254G2 {
+    type Scalar = jolt_field::Fr;
+
+    fn zero() -> Self {
+        <Self as jolt_crypto::JoltGroup>::identity()
+    }
+
+    fn is_zero(&self) -> bool {
+        <Self as jolt_crypto::JoltGroup>::is_identity(self)
+    }
+
+    fn double(&self) -> Self {
+        <Self as jolt_crypto::JoltGroup>::double(self)
+    }
+
+    fn scalar_mul(&self, scalar: &Self::Scalar) -> Self {
+        <Self as jolt_crypto::JoltGroup>::scalar_mul(self, scalar)
+    }
+}
+
+impl JoltCurve for jolt_crypto::Bn254 {
+    type F = jolt_field::Fr;
+    type G1 = jolt_crypto::Bn254G1;
+    type G2 = jolt_crypto::Bn254G2;
+    type G1Affine = G1Affine;
+    type GT = jolt_crypto::Bn254GT;
+
+    fn g1_generator() -> Self::G1 {
+        jolt_crypto::Bn254::g1_generator()
+    }
+
+    fn g2_generator() -> Self::G2 {
+        jolt_crypto::Bn254::g2_generator()
+    }
+
+    #[inline]
+    fn g1_to_affine(point: &Self::G1) -> Self::G1Affine {
+        point.into_inner().into_affine()
+    }
+
+    fn pairing(g1: &Self::G1, g2: &Self::G2) -> Self::GT {
+        <jolt_crypto::Bn254 as jolt_crypto::PairingGroup>::pairing(g1, g2)
+    }
+
+    fn multi_pairing(g1s: &[Self::G1], g2s: &[Self::G2]) -> Self::GT {
+        <jolt_crypto::Bn254 as jolt_crypto::PairingGroup>::multi_pairing(g1s, g2s)
+    }
+
+    fn g1_msm(bases: &[Self::G1], scalars: &[Self::F]) -> Self::G1 {
+        <Self::G1 as jolt_crypto::JoltGroup>::msm(bases, scalars)
+    }
+
+    #[inline]
+    fn g1_affine_msm(bases: &[Self::G1Affine], scalars: &[Self::F]) -> Self::G1 {
+        debug_assert_eq!(bases.len(), scalars.len());
+        let ark_scalars: Vec<Fr> = scalars.iter().map(|scalar| (*scalar).into()).collect();
+        let result: G1Projective =
+            VariableBaseMSM::msm(bases, &ark_scalars).expect("msm length mismatch");
+        jolt_crypto::Bn254G1::from(result)
+    }
+
+    fn g2_msm(bases: &[Self::G2], scalars: &[Self::F]) -> Self::G2 {
+        <Self::G2 as jolt_crypto::JoltGroup>::msm(bases, scalars)
+    }
+
+    fn random_g1<R: rand_core::RngCore>(rng: &mut R) -> Self::G1 {
+        jolt_crypto::Bn254::random_g1(rng)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +474,21 @@ mod tests {
 
         let result = Bn254Curve::g1_msm(&bases, &scalars);
         let expected = g.scalar_mul(&Fr::from(5u64));
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn jolt_crypto_bn254_curve_uses_extracted_field() {
+        type Curve = jolt_crypto::Bn254;
+        type Scalar = <Curve as JoltCurve>::F;
+
+        let g = Curve::g1_generator();
+        let scalars = vec![Scalar::from(2u64), Scalar::from(3u64)];
+        let bases = vec![g, g];
+
+        let result = Curve::g1_msm(&bases, &scalars);
+        let expected = g.scalar_mul(&Scalar::from(5u64));
 
         assert_eq!(result, expected);
     }

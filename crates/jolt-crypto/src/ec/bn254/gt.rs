@@ -209,3 +209,33 @@ impl<'de> serde::Deserialize<'de> for Bn254GT {
         Ok(Self(inner))
     }
 }
+
+impl ark_serialize::CanonicalSerialize for Bn254GT {
+    fn serialize_with_mode<W: ark_serialize::Write>(
+        &self,
+        writer: W,
+        compress: ark_serialize::Compress,
+    ) -> Result<(), ark_serialize::SerializationError> {
+        self.0.serialize_with_mode(writer, compress)
+    }
+
+    fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
+        self.0.serialized_size(compress)
+    }
+}
+
+impl ark_serialize::Valid for Bn254GT {
+    fn check(&self) -> Result<(), ark_serialize::SerializationError> {
+        self.0.check()
+    }
+}
+
+impl ark_serialize::CanonicalDeserialize for Bn254GT {
+    fn deserialize_with_mode<R: ark_serialize::Read>(
+        reader: R,
+        compress: ark_serialize::Compress,
+        validate: ark_serialize::Validate,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        Fq12::deserialize_with_mode(reader, compress, validate).map(Self)
+    }
+}

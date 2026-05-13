@@ -197,38 +197,9 @@ fn rho_powers<F: Field>(rho: F, n: usize) -> Vec<F> {
 fn source_evaluations<F, S>(source: &S) -> Vec<F>
 where
     F: Field,
-    S: CommitmentSource<F>,
+    S: CommitmentSource<F> + ?Sized,
 {
-    let mut evaluations = Vec::with_capacity(1usize << source.num_vars());
-    source.for_each_row(source.num_vars(), |_, row| match row {
-        crate::sources::SourceRow::FieldElements(values) => evaluations.extend_from_slice(values),
-        crate::sources::SourceRow::I128(values) => {
-            evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
-        }
-        crate::sources::SourceRow::OneHot(row) => {
-            let domain_size = 1usize << row.log_domain_size;
-            match row.entries {
-                crate::sources::OneHotEntries::OnePerColumn(indices) => {
-                    let start = evaluations.len();
-                    evaluations.resize(start + indices.len() * domain_size, F::zero());
-                    for (col, hot_index) in indices.iter().enumerate() {
-                        evaluations[start + hot_index.get() * indices.len() + col] = F::from_u64(1);
-                    }
-                }
-                crate::sources::OneHotEntries::MaybeZero(indices) => {
-                    let start = evaluations.len();
-                    evaluations.resize(start + indices.len() * domain_size, F::zero());
-                    for (col, hot_index) in indices.iter().enumerate() {
-                        if let Some(hot_index) = hot_index {
-                            evaluations[start + hot_index.get() * indices.len() + col] =
-                                F::from_u64(1);
-                        }
-                    }
-                }
-            }
-        }
-    });
-    evaluations
+    crate::sources::materialize_source_evaluations(source)
 }
 
 type ProverPointGroup<F, PCS> = Vec<(Vec<F>, Vec<ProverClaimWithHint<F, PCS>>)>;

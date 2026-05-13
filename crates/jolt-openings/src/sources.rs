@@ -178,6 +178,76 @@ where
     }
 }
 
+pub(crate) fn materialize_source_evaluations<F, S>(source: &S) -> Vec<F>
+where
+    F: Field,
+    S: CommitmentSource<F> + ?Sized,
+{
+    fn flush_one_hot<F: Field>(
+        evaluations: &mut Vec<F>,
+        pending: &mut Option<(usize, Vec<Vec<Option<usize>>>)>,
+    ) {
+        let Some((domain_size, chunks)) = pending.take() else {
+            return;
+        };
+
+        let trace_len = chunks.iter().map(Vec::len).sum::<usize>();
+        let start = evaluations.len();
+        evaluations.resize(start + trace_len * domain_size, F::zero());
+
+        let mut chunk_offset = 0;
+        for chunk in chunks {
+            for (column, hot_index) in chunk.iter().enumerate() {
+                if let Some(hot_index) = hot_index {
+                    evaluations[start + hot_index * trace_len + chunk_offset + column] =
+                        F::from_u64(1);
+                }
+            }
+            chunk_offset += chunk.len();
+        }
+    }
+
+    let mut evaluations = Vec::with_capacity(1usize << source.num_vars());
+    let mut one_hot_chunks = None;
+    source.for_each_row(source.num_vars(), |_, row| match row {
+        SourceRow::FieldElements(values) => {
+            flush_one_hot(&mut evaluations, &mut one_hot_chunks);
+            evaluations.extend_from_slice(values);
+        }
+        SourceRow::I128(values) => {
+            flush_one_hot(&mut evaluations, &mut one_hot_chunks);
+            evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
+        }
+        SourceRow::OneHot(row) => {
+            let domain_size = 1usize << row.log_domain_size;
+            let chunk = match row.entries {
+                OneHotEntries::OnePerColumn(indices) => {
+                    indices.iter().map(|index| Some(index.get())).collect()
+                }
+                OneHotEntries::MaybeZero(indices) => indices
+                    .iter()
+                    .map(|index| index.map(OneHotIndex::get))
+                    .collect(),
+            };
+
+            match &mut one_hot_chunks {
+                Some((existing_domain_size, chunks)) => {
+                    assert_eq!(
+                        *existing_domain_size, domain_size,
+                        "one source changed one-hot domain size during materialization",
+                    );
+                    chunks.push(chunk);
+                }
+                None => {
+                    one_hot_chunks = Some((domain_size, vec![chunk]));
+                }
+            }
+        }
+    });
+    flush_one_hot(&mut evaluations, &mut one_hot_chunks);
+    evaluations
+}
+
 /// A batch of committed sources that can share one traversal.
 ///
 /// This is the no-regression traversal hook for current CycleMajor Dory

@@ -17,7 +17,7 @@ use crate::schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
     CommitmentSchemeVerifier, PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
-use crate::sources::{CommitmentSource, SourceRow};
+use crate::sources::{materialize_source_evaluations, CommitmentSource};
 
 #[derive(Clone, Debug)]
 pub struct MockCommitmentScheme<F: Field>(PhantomData<F>);
@@ -121,37 +121,12 @@ impl<F: Field> CommitmentScheme for MockCommitmentScheme<F> {
         source: &S,
         _setup: &Self::ProverSetup,
     ) -> (Self::Output, ()) {
-        let mut evaluations = Vec::with_capacity(1 << source.num_vars());
-        source.for_each_row(source.num_vars(), |_, row| match row {
-            SourceRow::FieldElements(values) => evaluations.extend_from_slice(values),
-            SourceRow::I128(values) => {
-                evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
-            }
-            SourceRow::OneHot(row) => {
-                let domain_size = 1usize << row.log_domain_size;
-                match row.entries {
-                    crate::OneHotEntries::OnePerColumn(indices) => {
-                        let start = evaluations.len();
-                        evaluations.resize(start + indices.len() * domain_size, F::zero());
-                        for (col, hot_index) in indices.iter().enumerate() {
-                            evaluations[start + hot_index.get() * indices.len() + col] =
-                                F::from_u64(1);
-                        }
-                    }
-                    crate::OneHotEntries::MaybeZero(indices) => {
-                        let start = evaluations.len();
-                        evaluations.resize(start + indices.len() * domain_size, F::zero());
-                        for (col, hot_index) in indices.iter().enumerate() {
-                            if let Some(hot_index) = hot_index {
-                                evaluations[start + hot_index.get() * indices.len() + col] =
-                                    F::from_u64(1);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        (MockCommitment { evaluations }, ())
+        (
+            MockCommitment {
+                evaluations: materialize_source_evaluations(source),
+            },
+            (),
+        )
     }
 
     fn open(
@@ -420,6 +395,72 @@ mod tests {
 
         let source = TestSource {
             entries,
+            dense: Polynomial::new(dense.clone()),
+        };
+
+        let (commitment, ()) = MockPCS::commit(&source, &());
+        assert_eq!(commitment.evaluations, dense);
+    }
+
+    #[test]
+    fn one_hot_source_rows_materialize_multi_row_hot_coordinate_major() {
+        struct TestSource {
+            chunks: Vec<Vec<Option<OneHotIndex>>>,
+            dense: Polynomial<Fr>,
+        }
+
+        impl CommitmentSource<Fr> for TestSource {
+            fn num_vars(&self) -> usize {
+                self.dense.num_vars()
+            }
+
+            fn evaluate(&self, point: &[Fr]) -> Fr {
+                self.dense.evaluate(point)
+            }
+
+            fn for_each_row<V>(&self, _sigma: usize, mut visit: V)
+            where
+                V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
+            {
+                for (row_index, chunk) in self.chunks.iter().enumerate() {
+                    visit(
+                        row_index,
+                        SourceRow::OneHot(OneHotRow {
+                            log_domain_size: 2,
+                            entries: OneHotEntries::MaybeZero(chunk),
+                        }),
+                    );
+                }
+            }
+
+            fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
+                self.dense.fold_rows(left, sigma)
+            }
+        }
+
+        let chunks = vec![
+            vec![
+                Some(OneHotIndex::new(1, 2).expect("valid index")),
+                None,
+                Some(OneHotIndex::new(3, 2).expect("valid index")),
+                None,
+            ],
+            vec![
+                Some(OneHotIndex::new(0, 2).expect("valid index")),
+                Some(OneHotIndex::new(2, 2).expect("valid index")),
+                None,
+                Some(OneHotIndex::new(1, 2).expect("valid index")),
+            ],
+        ];
+        let mut dense = vec![Fr::from_u64(0); 32];
+        dense[4] = Fr::from_u64(1);
+        dense[8] = Fr::from_u64(1);
+        dense[15] = Fr::from_u64(1);
+        dense[21] = Fr::from_u64(1);
+        dense[26] = Fr::from_u64(1);
+
+        let source = TestSource {
+            chunks,
             dense: Polynomial::new(dense.clone()),
         };
 

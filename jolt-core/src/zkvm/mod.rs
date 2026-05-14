@@ -1,13 +1,11 @@
 use std::fs::File;
 
-use crate::zkvm::config::{OneHotConfig, OneHotParams, ReadWriteConfig};
-use crate::zkvm::witness::CommittedPolynomial;
+use crate::zkvm::config::{OneHotConfig, ReadWriteConfig};
 use crate::{
     curve::JoltCurve,
     field::JoltField,
     poly::commitment::dory::DoryLayout,
     poly::opening_proof::ProverOpeningAccumulator,
-    poly::opening_proof::{OpeningId, SumcheckId},
     transcripts::Transcript,
 };
 
@@ -106,51 +104,6 @@ pub mod spartan;
 pub mod transpilable_verifier;
 pub mod verifier;
 pub mod witness;
-
-pub(crate) fn stage8_opening_ids(
-    one_hot_params: &OneHotParams,
-    include_trusted_advice: bool,
-    include_untrusted_advice: bool,
-) -> Vec<OpeningId> {
-    let mut opening_ids = Vec::new();
-
-    opening_ids.push(OpeningId::committed(
-        CommittedPolynomial::RamInc,
-        SumcheckId::IncClaimReduction,
-    ));
-    opening_ids.push(OpeningId::committed(
-        CommittedPolynomial::RdInc,
-        SumcheckId::IncClaimReduction,
-    ));
-
-    for i in 0..one_hot_params.instruction_d {
-        opening_ids.push(OpeningId::committed(
-            CommittedPolynomial::InstructionRa(i),
-            SumcheckId::HammingWeightClaimReduction,
-        ));
-    }
-    for i in 0..one_hot_params.bytecode_d {
-        opening_ids.push(OpeningId::committed(
-            CommittedPolynomial::BytecodeRa(i),
-            SumcheckId::HammingWeightClaimReduction,
-        ));
-    }
-    for i in 0..one_hot_params.ram_d {
-        opening_ids.push(OpeningId::committed(
-            CommittedPolynomial::RamRa(i),
-            SumcheckId::HammingWeightClaimReduction,
-        ));
-    }
-
-    if include_trusted_advice {
-        opening_ids.push(OpeningId::TrustedAdvice(SumcheckId::AdviceClaimReduction));
-    }
-    if include_untrusted_advice {
-        opening_ids.push(OpeningId::UntrustedAdvice(SumcheckId::AdviceClaimReduction));
-    }
-
-    opening_ids
-}
 
 // Scoped CPU profiler for performance analysis. Feature-gated by "pprof".
 // Usage: let _guard = pprof_scope!("label");

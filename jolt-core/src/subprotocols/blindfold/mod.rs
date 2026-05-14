@@ -91,14 +91,15 @@ pub struct UniSkipStageData<F: JoltField, C: JoltCurve<F = F>> {
 
 /// ZK data from the PCS opening proof stage (stage 8).
 ///
-/// Stores the opening IDs, batching coefficients, joint claim, and blinding
-/// factor needed by BlindFold's extra constraint.
+/// Stores the opening IDs, batching coefficients, hidden output witness, and
+/// hidden output commitment needed by BlindFold's extra constraint.
 #[derive(Clone, Debug)]
-pub struct OpeningProofData<F: JoltField> {
+pub struct OpeningProofData<F: JoltField, G> {
     pub opening_ids: Vec<OpeningId>,
     pub constraint_coeffs: Vec<F>,
     pub joint_claim: F,
     pub y_blinding: F,
+    pub eval_commitment: G,
 }
 
 /// Accumulates BlindFold-specific data during ZK proving.
@@ -109,7 +110,7 @@ pub struct OpeningProofData<F: JoltField> {
 pub struct BlindFoldAccumulator<F: JoltField, C: JoltCurve<F = F>> {
     stage_data: Vec<ZkStageData<F, C>>,
     uniskip_data: Vec<UniSkipStageData<F, C>>,
-    opening_proof_data: Option<OpeningProofData<F>>,
+    opening_proof_data: Option<OpeningProofData<F, C::G1>>,
 }
 
 impl<F: JoltField, C: JoltCurve<F = F>> BlindFoldAccumulator<F, C> {
@@ -137,11 +138,11 @@ impl<F: JoltField, C: JoltCurve<F = F>> BlindFoldAccumulator<F, C> {
         std::mem::take(&mut self.uniskip_data)
     }
 
-    pub fn set_opening_proof_data(&mut self, data: OpeningProofData<F>) {
+    pub fn set_opening_proof_data(&mut self, data: OpeningProofData<F, C::G1>) {
         self.opening_proof_data = Some(data);
     }
 
-    pub fn take_opening_proof_data(&mut self) -> OpeningProofData<F> {
+    pub fn take_opening_proof_data(&mut self) -> OpeningProofData<F, C::G1> {
         self.opening_proof_data
             .take()
             .expect("opening_proof_data must be set before prove_blindfold")

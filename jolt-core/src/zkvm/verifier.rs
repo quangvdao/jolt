@@ -10,7 +10,7 @@ use ark_serialize::{
 };
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use common::jolt_device::MemoryLayout;
-use jolt_openings::OpeningClaim;
+use jolt_openings::{BatchOpeningPoint, BatchOutputExpression, VerifierBatchOpeningTerm};
 use jolt_riscv::NormalizedInstruction;
 use tracer::JoltDevice;
 
@@ -81,15 +81,15 @@ use crate::zkvm::{
         product::ProductVirtualRemainderVerifier, shift::ShiftSumcheckVerifier,
         verify_stage1_uni_skip, verify_stage2_uni_skip,
     },
-    stage8_opening_ids, JoltCommitmentScheme, ProverDebugInfo,
+    JoltCommitmentScheme, ProverDebugInfo,
 };
 use crate::{
     field::JoltField,
     poly::{
         eq_poly::EqPolynomial,
         opening_proof::{
-            compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator, OpeningId,
-            SumcheckId, VerifierOpeningAccumulator,
+            compute_advice_lagrange_factor, OpeningAccumulator, OpeningId, SumcheckId,
+            VerifierOpeningAccumulator,
         },
     },
     pprof_scope,
@@ -248,9 +248,10 @@ pub struct JoltVerifier<
 
 #[derive(Clone, Debug)]
 #[cfg_attr(not(feature = "zk"), allow(dead_code))]
-struct Stage8VerifyData<F: JoltField> {
+struct Stage8VerifyData<F: JoltField, G> {
     opening_ids: Vec<OpeningId>,
     constraint_coeffs: Vec<F>,
+    eval_commitment: Option<G>,
 }
 
 impl<
@@ -1158,7 +1159,7 @@ impl<
         stage2_batched_input_values: &[F],
         uniskip_output_constraints: &[Option<OutputClaimConstraint>; 2],
         uniskip_output_challenge_values: &[Vec<F>; 2],
-        stage8_data: &Stage8VerifyData<F>,
+        stage8_data: &Stage8VerifyData<F, C::G1>,
         oc_blocks: Vec<Vec<OpeningId>>,
     ) -> Result<(), ProofVerifyError> {
         // Build stage configurations including uni-skip rounds.
@@ -1382,7 +1383,9 @@ impl<
         );
         let r1cs = builder.build();
 
-        let eval_commitment = PCS::batch_eval_commitment(&self.proof.joint_opening_proof)
+        let eval_commitment = stage8_data
+            .eval_commitment
+            .clone()
             .ok_or(ProofVerifyError::InvalidOpeningProof)?;
         let eval_commitments = vec![eval_commitment];
 
@@ -1499,7 +1502,7 @@ impl<
     }
 
     /// Stage 8: Dory batch opening verification.
-    fn verify_stage8(&mut self) -> Result<Stage8VerifyData<F>, ProofVerifyError> {
+    fn verify_stage8(&mut self) -> Result<Stage8VerifyData<F, C::G1>, ProofVerifyError> {
         // Get the unified opening point from HammingWeightClaimReduction
         // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
         let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
@@ -1509,122 +1512,21 @@ impl<
         let log_k_chunk = self.one_hot_params.log_k_chunk;
         let r_address_stage7 = &opening_point.r[..log_k_chunk];
 
-        // 1. Collect all (polynomial, claim) pairs
-        let mut polynomial_claims = Vec::new();
-        let mut scaling_factors = Vec::new();
-
-        // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
-        let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::RamInc,
-            SumcheckId::IncClaimReduction,
-        );
-        let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::RdInc,
-            SumcheckId::IncClaimReduction,
-        );
-
-        // Dense polynomials are zero-padded in the Dory matrix, so their evaluation
-        // includes a factor eq(r_addr, 0) = ∏(1 − r_addr_i).
-        let lagrange_factor: F = EqPolynomial::zero_selector(r_address_stage7);
-        polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
-        scaling_factors.push(lagrange_factor);
-        polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
-        scaling_factors.push(lagrange_factor);
-
-        // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
-        for i in 0..self.one_hot_params.instruction_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::InstructionRa(i),
-                SumcheckId::HammingWeightClaimReduction,
-            );
-            polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
-            scaling_factors.push(F::one());
-        }
-        for i in 0..self.one_hot_params.bytecode_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::BytecodeRa(i),
-                SumcheckId::HammingWeightClaimReduction,
-            );
-            polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
-            scaling_factors.push(F::one());
-        }
-        for i in 0..self.one_hot_params.ram_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
-                CommittedPolynomial::RamRa(i),
-                SumcheckId::HammingWeightClaimReduction,
-            );
-            polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
-            scaling_factors.push(F::one());
-        }
-
-        // Advice polynomials: TrustedAdvice and UntrustedAdvice (from AdviceClaimReduction in Stage 6)
-        // These are committed with smaller dimensions, so we apply Lagrange factors to embed
-        // them in the top-left block of the main Dory matrix.
-        let mut include_trusted_advice = false;
-        let mut include_untrusted_advice = false;
-
-        if let Some((advice_point, advice_claim)) = self
-            .opening_accumulator
-            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
-        {
-            let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((
-                CommittedPolynomial::TrustedAdvice,
-                advice_claim * lagrange_factor,
-            ));
-            scaling_factors.push(lagrange_factor);
-            include_trusted_advice = true;
-        }
-
-        if let Some((advice_point, advice_claim)) = self
-            .opening_accumulator
-            .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
-        {
-            let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((
-                CommittedPolynomial::UntrustedAdvice,
-                advice_claim * lagrange_factor,
-            ));
-            scaling_factors.push(lagrange_factor);
-            include_untrusted_advice = true;
-        }
-
-        // 2. Sample gamma and compute powers for RLC
-        let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
-        // In non-ZK mode, absorb claims before sampling gamma for Fiat-Shamir binding.
-        // In ZK mode, claims are secret; binding comes from BlindFold constraints instead.
-        #[cfg(not(feature = "zk"))]
-        self.transcript.append_scalars(b"rlc_claims", &claims);
-        let gamma_powers: Vec<F> = self
-            .transcript
-            .challenge_scalar_powers(polynomial_claims.len());
-        let constraint_coeffs: Vec<F> = gamma_powers
+        let pcs_opening_point: Vec<F> = opening_point
+            .r
             .iter()
-            .zip(&scaling_factors)
-            .map(|(gamma, scale)| *gamma * *scale)
+            .map(|point| (*point).into())
             .collect();
-
-        let opening_ids = stage8_opening_ids(
-            &self.one_hot_params,
-            include_trusted_advice,
-            include_untrusted_advice,
-        );
-        let joint_claim: F = gamma_powers
-            .iter()
-            .zip(claims.iter())
-            .map(|(gamma, claim)| *gamma * claim)
-            .sum();
-
-        // Build state for computing joint commitment/claim
-        let state = DoryOpeningState {
-            opening_point: opening_point.r.clone(),
-            gamma_powers: gamma_powers.clone(),
-            polynomial_claims,
+        let dory_opening_point: Vec<F> =
+            DoryGlobals::reorder_opening_point_for_layout(&opening_point.r)
+                .iter()
+                .map(|point| (*point).into())
+                .collect();
+        let point = BatchOpeningPoint {
+            public: pcs_opening_point,
+            proof: dory_opening_point,
         };
 
-        // Build commitments map
         let mut commitments_map = HashMap::new();
         let expected_polynomials = all_committed_polynomials(&self.one_hot_params);
         if expected_polynomials.len() != self.proof.commitments.len() {
@@ -1639,113 +1541,222 @@ impl<
         {
             commitments_map.insert(polynomial, commitment.clone());
         }
-
-        // Add advice commitments if they're part of the batch
         if let Some(ref commitment) = self.trusted_advice_commitment {
-            if state
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::TrustedAdvice)
-            {
-                commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
-            }
+            commitments_map.insert(CommittedPolynomial::TrustedAdvice, commitment.clone());
         }
         if let Some(ref commitment) = self.proof.untrusted_advice_commitment {
-            if state
-                .polynomial_claims
-                .iter()
-                .any(|(p, _)| *p == CommittedPolynomial::UntrustedAdvice)
-            {
-                commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
-            }
+            commitments_map.insert(CommittedPolynomial::UntrustedAdvice, commitment.clone());
         }
 
-        let joint_commitment = self.compute_joint_commitment(&mut commitments_map, &state)?;
-        let pcs_opening_point: Vec<F> = opening_point
-            .r
-            .iter()
-            .map(|point| (*point).into())
-            .collect();
-        let dory_opening_point: Vec<F> =
-            DoryGlobals::reorder_opening_point_for_layout(&opening_point.r)
-                .iter()
-                .map(|point| (*point).into())
-                .collect();
+        let mut opening_terms = Vec::new();
+
+        // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
+        let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            CommittedPolynomial::RamInc,
+            SumcheckId::IncClaimReduction,
+        );
+        let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            CommittedPolynomial::RdInc,
+            SumcheckId::IncClaimReduction,
+        );
+
+        // Dense polynomials are zero-padded in the Dory matrix, so their evaluation
+        // includes a factor eq(r_addr, 0) = ∏(1 − r_addr_i).
+        let lagrange_factor: F = EqPolynomial::zero_selector(r_address_stage7);
+        opening_terms.push(VerifierBatchOpeningTerm {
+            claim_id: OpeningId::committed(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            ),
+            source_id: CommittedPolynomial::RamInc,
+            commitment: commitments_map
+                .get(&CommittedPolynomial::RamInc)
+                .cloned()
+                .ok_or(ProofVerifyError::InternalError)?,
+            point: point.clone(),
+            eval: ram_inc_claim,
+            eval_scale: lagrange_factor,
+        });
+        opening_terms.push(VerifierBatchOpeningTerm {
+            claim_id: OpeningId::committed(
+                CommittedPolynomial::RdInc,
+                SumcheckId::IncClaimReduction,
+            ),
+            source_id: CommittedPolynomial::RdInc,
+            commitment: commitments_map
+                .get(&CommittedPolynomial::RdInc)
+                .cloned()
+                .ok_or(ProofVerifyError::InternalError)?,
+            point: point.clone(),
+            eval: rd_inc_claim,
+            eval_scale: lagrange_factor,
+        });
+
+        // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
+        for i in 0..self.one_hot_params.instruction_d {
+            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::InstructionRa(i),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            let source_id = CommittedPolynomial::InstructionRa(i);
+            opening_terms.push(VerifierBatchOpeningTerm {
+                claim_id: OpeningId::committed(source_id, SumcheckId::HammingWeightClaimReduction),
+                source_id,
+                commitment: commitments_map
+                    .get(&source_id)
+                    .cloned()
+                    .ok_or(ProofVerifyError::InternalError)?,
+                point: point.clone(),
+                eval: claim,
+                eval_scale: F::one(),
+            });
+        }
+        for i in 0..self.one_hot_params.bytecode_d {
+            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::BytecodeRa(i),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            let source_id = CommittedPolynomial::BytecodeRa(i);
+            opening_terms.push(VerifierBatchOpeningTerm {
+                claim_id: OpeningId::committed(source_id, SumcheckId::HammingWeightClaimReduction),
+                source_id,
+                commitment: commitments_map
+                    .get(&source_id)
+                    .cloned()
+                    .ok_or(ProofVerifyError::InternalError)?,
+                point: point.clone(),
+                eval: claim,
+                eval_scale: F::one(),
+            });
+        }
+        for i in 0..self.one_hot_params.ram_d {
+            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamRa(i),
+                SumcheckId::HammingWeightClaimReduction,
+            );
+            let source_id = CommittedPolynomial::RamRa(i);
+            opening_terms.push(VerifierBatchOpeningTerm {
+                claim_id: OpeningId::committed(source_id, SumcheckId::HammingWeightClaimReduction),
+                source_id,
+                commitment: commitments_map
+                    .get(&source_id)
+                    .cloned()
+                    .ok_or(ProofVerifyError::InternalError)?,
+                point: point.clone(),
+                eval: claim,
+                eval_scale: F::one(),
+            });
+        }
+
+        // Advice polynomials: TrustedAdvice and UntrustedAdvice (from AdviceClaimReduction in Stage 6)
+        // These are committed with smaller dimensions, so we apply Lagrange factors to embed
+        // them in the top-left block of the main Dory matrix.
+        if let Some((advice_point, advice_claim)) = self
+            .opening_accumulator
+            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
+        {
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+            opening_terms.push(VerifierBatchOpeningTerm {
+                claim_id: OpeningId::TrustedAdvice(SumcheckId::AdviceClaimReduction),
+                source_id: CommittedPolynomial::TrustedAdvice,
+                commitment: commitments_map
+                    .get(&CommittedPolynomial::TrustedAdvice)
+                    .cloned()
+                    .ok_or(ProofVerifyError::InvalidOpeningProof)?,
+                point: point.clone(),
+                eval: advice_claim,
+                eval_scale: lagrange_factor,
+            });
+        }
+
+        if let Some((advice_point, advice_claim)) = self
+            .opening_accumulator
+            .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
+        {
+            let lagrange_factor =
+                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+            opening_terms.push(VerifierBatchOpeningTerm {
+                claim_id: OpeningId::UntrustedAdvice(SumcheckId::AdviceClaimReduction),
+                source_id: CommittedPolynomial::UntrustedAdvice,
+                commitment: commitments_map
+                    .get(&CommittedPolynomial::UntrustedAdvice)
+                    .cloned()
+                    .ok_or(ProofVerifyError::InvalidOpeningProof)?,
+                point: point.clone(),
+                eval: advice_claim,
+                eval_scale: lagrange_factor,
+            });
+        }
 
         let zk_mode = self.opening_accumulator.zk_mode;
         if zk_mode {
-            PCS::verify_batch_zk(
-                vec![OpeningClaim {
-                    commitment: joint_commitment,
-                    point: dory_opening_point.clone(),
-                    eval: joint_claim,
-                }],
-                &self.proof.joint_opening_proof,
-                &self.preprocessing.generators,
-                &mut self.transcript,
-            )
-            .map_err(|_| ProofVerifyError::InvalidOpeningProof)?;
-
             #[cfg(feature = "zk")]
             {
-                let y_com: C::G1 = PCS::batch_eval_commitment(&self.proof.joint_opening_proof)
+                let public = PCS::verify_batch_opening_zk(
+                    opening_terms,
+                    &self.proof.joint_opening_proof,
+                    &self.preprocessing.generators,
+                    &mut self.transcript,
+                )
+                .map_err(|_| ProofVerifyError::InvalidOpeningProof)?;
+
+                let relation = public
+                    .single_linear_relation()
                     .ok_or(ProofVerifyError::InvalidOpeningProof)?;
-                PCS::bind_zk_opening_inputs(&mut self.transcript, &pcs_opening_point, &y_com);
+                let output = public
+                    .outputs
+                    .get(relation.output_index)
+                    .ok_or(ProofVerifyError::InvalidOpeningProof)?;
+                let eval_commitment = output
+                    .value
+                    .as_hidden()
+                    .cloned()
+                    .ok_or(ProofVerifyError::InvalidOpeningProof)?;
+                let BatchOutputExpression::Linear(linear_terms) = &relation.expression;
+                let (opening_ids, constraint_coeffs): (Vec<_>, Vec<_>) =
+                    linear_terms.iter().copied().unzip();
+
+                Ok(Stage8VerifyData {
+                    opening_ids,
+                    constraint_coeffs,
+                    eval_commitment: Some(eval_commitment),
+                })
             }
             #[cfg(not(feature = "zk"))]
             {
-                return Err(ProofVerifyError::ZkFeatureRequired);
+                Err(ProofVerifyError::ZkFeatureRequired)
             }
         } else {
-            PCS::verify_batch(
-                vec![OpeningClaim {
-                    commitment: joint_commitment,
-                    point: dory_opening_point,
-                    eval: joint_claim,
-                }],
+            let public = PCS::verify_batch_opening(
+                opening_terms,
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,
             )
             .map_err(|_| ProofVerifyError::InvalidOpeningProof)?;
 
-            PCS::bind_opening_inputs(&mut self.transcript, &pcs_opening_point, &joint_claim);
-        }
+            let relation = public
+                .single_linear_relation()
+                .ok_or(ProofVerifyError::InvalidOpeningProof)?;
+            let output = public
+                .outputs
+                .get(relation.output_index)
+                .ok_or(ProofVerifyError::InvalidOpeningProof)?;
+            output
+                .value
+                .as_public()
+                .ok_or(ProofVerifyError::InvalidOpeningProof)?;
+            let BatchOutputExpression::Linear(linear_terms) = &relation.expression;
+            let (opening_ids, constraint_coeffs): (Vec<_>, Vec<_>) =
+                linear_terms.iter().copied().unzip();
 
-        Ok(Stage8VerifyData {
-            opening_ids,
-            constraint_coeffs,
-        })
-    }
-
-    /// Compute joint commitment for the batch opening.
-    fn compute_joint_commitment(
-        &self,
-        commitment_map: &mut HashMap<CommittedPolynomial, PCS::Output>,
-        state: &DoryOpeningState<F>,
-    ) -> Result<PCS::Output, ProofVerifyError> {
-        let mut rlc_map = HashMap::new();
-        for (gamma, (poly, _claim)) in state
-            .gamma_powers
-            .iter()
-            .zip(state.polynomial_claims.iter())
-        {
-            *rlc_map.entry(*poly).or_insert(F::zero()) += *gamma;
-        }
-
-        let (coeffs, commitments): (Vec<F>, Vec<PCS::Output>) = rlc_map
-            .into_iter()
-            .map(|(k, v)| {
-                commitment_map
-                    .remove(&k)
-                    .map(|c| (v, c))
-                    .ok_or(ProofVerifyError::InternalError)
+            Ok(Stage8VerifyData {
+                opening_ids,
+                constraint_coeffs,
+                eval_commitment: None,
             })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
-
-        Ok(PCS::combine(&commitments, &coeffs))
+        }
     }
 }
 

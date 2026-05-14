@@ -1,7 +1,4 @@
-#[cfg(feature = "zk")]
 use crate::poly::opening_proof::OpeningId;
-#[cfg(feature = "zk")]
-use crate::zkvm::stage8_opening_ids;
 use crate::zkvm::{claim_reductions::advice::ReductionPhase, config::OneHotConfig};
 #[cfg(feature = "zk")]
 use common::constants::MAX_BLINDFOLD_GENERATORS;
@@ -14,12 +11,17 @@ use std::{
     io::{Read, Result as IoResult, Write},
     marker::PhantomData,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use crate::poly::commitment::dory::DoryContext;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use jolt_openings::{CommitmentScheme, ProverClaim};
+#[cfg(feature = "zk")]
+use jolt_openings::BatchOutputExpression;
+use jolt_openings::{
+    BatchOpeningPoint, BatchOpeningSource, CommitmentScheme, CommitmentSource, LinearSourceTerm,
+    ProverBatchOpeningTerm, SourceRow,
+};
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::ram::remap_address;
@@ -67,10 +69,10 @@ use crate::{
         eq_poly::EqPolynomial,
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{
-            compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator,
-            ProverOpeningAccumulator, SumcheckId,
+            compute_advice_lagrange_factor, OpeningAccumulator, ProverOpeningAccumulator,
+            SumcheckId,
         },
-        rlc_polynomial::{RLCStreamingData, TraceSource},
+        rlc_polynomial::{RLCPolynomial, RLCStreamingData, TraceSource},
     },
     pprof_scope,
     subprotocols::{
@@ -191,6 +193,146 @@ pub struct JoltCpuProver<
     blindfold_accumulator: BlindFoldAccumulator<F, C>,
     #[cfg(not(feature = "zk"))]
     _curve: PhantomData<C>,
+}
+
+struct Stage8OpeningSourceBatch<F, PCS>
+where
+    F: JoltField + jolt_field::Field,
+    PCS: CommitmentScheme<Field = F>,
+{
+    one_hot_params: OneHotParams,
+    trace_source: TraceSource,
+    streaming_data: Arc<RLCStreamingData>,
+    opening_hints: HashMap<CommittedPolynomial, PCS::OpeningHint>,
+    advice_polys: Mutex<Option<HashMap<CommittedPolynomial, MultilinearPolynomial<F>>>>,
+    cached_rlc: Mutex<Option<Stage8CachedRlc<F>>>,
+}
+
+struct Stage8CachedRlc<F: JoltField + jolt_field::Field> {
+    terms: Vec<LinearSourceTerm<F, CommittedPolynomial>>,
+    chunk_len: usize,
+    source: MultilinearPolynomial<F>,
+}
+
+struct Stage8OpeningSource<'a, F, PCS>
+where
+    F: JoltField + jolt_field::Field,
+    PCS: CommitmentScheme<Field = F>,
+{
+    batch: &'a Stage8OpeningSourceBatch<F, PCS>,
+    id: CommittedPolynomial,
+}
+
+impl<F, PCS> BatchOpeningSource<F, PCS::OpeningHint> for Stage8OpeningSourceBatch<F, PCS>
+where
+    F: JoltField + jolt_field::Field,
+    for<'challenge> &'challenge F::Challenge: Into<F>,
+    PCS: CommitmentScheme<Field = F>,
+{
+    type Id = CommittedPolynomial;
+    type Source<'a>
+        = Stage8OpeningSource<'a, F, PCS>
+    where
+        Self: 'a;
+
+    fn source(&self, id: Self::Id) -> Self::Source<'_> {
+        Stage8OpeningSource { batch: self, id }
+    }
+
+    fn opening_hint(&self, id: Self::Id) -> &PCS::OpeningHint {
+        &self.opening_hints[&id]
+    }
+
+    fn fold_linear_rows(
+        &self,
+        terms: &[LinearSourceTerm<F, Self::Id>],
+        left: &[F],
+        chunk_len: usize,
+    ) -> Vec<F> {
+        let mut cache = self
+            .cached_rlc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let rebuild = cache
+            .as_ref()
+            .is_none_or(|cached| cached.terms != terms || cached.chunk_len != chunk_len);
+        if rebuild {
+            let mut advice_polys = self
+                .advice_polys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let advice_polys = advice_polys.take().unwrap_or_default();
+            let (poly_ids, coeffs): (Vec<_>, Vec<_>) = terms
+                .iter()
+                .map(|term| (term.source_id, term.coefficient))
+                .unzip();
+            let source = MultilinearPolynomial::RLC(RLCPolynomial::new_streaming(
+                self.one_hot_params.clone(),
+                Arc::clone(&self.streaming_data),
+                self.trace_source.clone(),
+                poly_ids,
+                &coeffs,
+                advice_polys,
+            ));
+            *cache = Some(Stage8CachedRlc {
+                terms: terms.to_vec(),
+                chunk_len,
+                source,
+            });
+        }
+
+        let cached = cache
+            .as_ref()
+            .expect("Stage 8 RLC source cache initialized before folding");
+        let sigma = chunk_len.trailing_zeros() as usize;
+        jolt_poly::MultilinearPoly::fold_rows(&cached.source, left, sigma)
+    }
+}
+
+impl<F, PCS> CommitmentSource<F> for Stage8OpeningSource<'_, F, PCS>
+where
+    F: JoltField + jolt_field::Field,
+    for<'challenge> &'challenge F::Challenge: Into<F>,
+    PCS: CommitmentScheme<Field = F>,
+{
+    fn num_vars(&self) -> usize {
+        match self.id {
+            CommittedPolynomial::RdInc | CommittedPolynomial::RamInc => {
+                self.batch.trace_source.len().log_2()
+            }
+            CommittedPolynomial::InstructionRa(_)
+            | CommittedPolynomial::BytecodeRa(_)
+            | CommittedPolynomial::RamRa(_) => {
+                self.batch.trace_source.len().log_2() + self.batch.one_hot_params.log_k_chunk
+            }
+            CommittedPolynomial::TrustedAdvice | CommittedPolynomial::UntrustedAdvice => {
+                self.batch.trace_source.len().log_2()
+            }
+        }
+    }
+
+    fn evaluate(&self, _point: &[F]) -> F {
+        panic!("Stage8OpeningSource is only used through source-backed batch opening")
+    }
+
+    fn for_each_row<V>(&self, _chunk_len: usize, _visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, F>),
+    {
+        panic!("Stage8OpeningSource is only used through source-backed batch opening")
+    }
+
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+        self.batch.fold_linear_rows(
+            &[LinearSourceTerm {
+                source_id: self.id,
+                coefficient: F::one(),
+            }],
+            left,
+            chunk_len,
+        )
+    }
 }
 
 impl<
@@ -533,7 +675,7 @@ where
 
         let joint_opening_proof = self.prove_stage8(opening_proof_hints);
         #[cfg(feature = "zk")]
-        let blindfold_proof = self.prove_blindfold(&joint_opening_proof);
+        let blindfold_proof = self.prove_blindfold();
 
         #[cfg(not(feature = "zk"))]
         let opening_claims =
@@ -1372,7 +1514,7 @@ where
 
     #[tracing::instrument(skip_all)]
     #[cfg(feature = "zk")]
-    fn prove_blindfold(&mut self, joint_opening_proof: &PCS::BatchProof) -> BlindFoldProof<F, C> {
+    fn prove_blindfold(&mut self) -> BlindFoldProof<F, C> {
         use crate::curve::JoltGroupElement;
         use rayon::prelude::*;
 
@@ -1775,8 +1917,7 @@ where
         let pedersen_generators = self
             .preprocessing
             .pedersen_generators(pedersen_generator_count);
-        let eval_commitments =
-            vec![PCS::batch_eval_commitment(joint_opening_proof).expect("missing eval commitment")];
+        let eval_commitments = vec![stage8_data.eval_commitment];
 
         let hyrax = &r1cs.hyrax;
         let hyrax_C = hyrax.C;
@@ -1935,8 +2076,7 @@ where
         let log_k_chunk = self.one_hot_params.log_k_chunk;
         let r_address_stage7 = &opening_point.r[..log_k_chunk];
 
-        let mut polynomial_claims = Vec::new();
-        let mut scaling_factors = Vec::new();
+        let mut opening_terms = Vec::new();
 
         // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
         // at r_cycle_stage6 only (length log_T)
@@ -1952,10 +2092,41 @@ where
         // Dense polynomials are zero-padded in the Dory matrix, so their evaluation
         // includes a factor eq(r_addr, 0) = ∏(1 − r_addr_i).
         let lagrange_factor: F = EqPolynomial::zero_selector(r_address_stage7);
-        polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
-        scaling_factors.push(lagrange_factor);
-        polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
-        scaling_factors.push(lagrange_factor);
+        let pcs_opening_point: Vec<F> = opening_point
+            .r
+            .iter()
+            .map(|point| (*point).into())
+            .collect();
+        let dory_opening_point: Vec<F> =
+            DoryGlobals::reorder_opening_point_for_layout(&opening_point.r)
+                .iter()
+                .map(|point| (*point).into())
+                .collect();
+        let point = BatchOpeningPoint {
+            public: pcs_opening_point,
+            proof: dory_opening_point,
+        };
+
+        opening_terms.push(ProverBatchOpeningTerm {
+            claim_id: OpeningId::committed(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            ),
+            source_id: CommittedPolynomial::RamInc,
+            point: point.clone(),
+            eval: ram_inc_claim,
+            eval_scale: lagrange_factor,
+        });
+        opening_terms.push(ProverBatchOpeningTerm {
+            claim_id: OpeningId::committed(
+                CommittedPolynomial::RdInc,
+                SumcheckId::IncClaimReduction,
+            ),
+            source_id: CommittedPolynomial::RdInc,
+            point: point.clone(),
+            eval: rd_inc_claim,
+            eval_scale: lagrange_factor,
+        });
 
         // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
         // These are at (r_address_stage7, r_cycle_stage6)
@@ -1964,49 +2135,66 @@ where
                 CommittedPolynomial::InstructionRa(i),
                 SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
-            scaling_factors.push(F::one());
+            opening_terms.push(ProverBatchOpeningTerm {
+                claim_id: OpeningId::committed(
+                    CommittedPolynomial::InstructionRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                ),
+                source_id: CommittedPolynomial::InstructionRa(i),
+                point: point.clone(),
+                eval: claim,
+                eval_scale: F::one(),
+            });
         }
         for i in 0..self.one_hot_params.bytecode_d {
             let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::BytecodeRa(i),
                 SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
-            scaling_factors.push(F::one());
+            opening_terms.push(ProverBatchOpeningTerm {
+                claim_id: OpeningId::committed(
+                    CommittedPolynomial::BytecodeRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                ),
+                source_id: CommittedPolynomial::BytecodeRa(i),
+                point: point.clone(),
+                eval: claim,
+                eval_scale: F::one(),
+            });
         }
         for i in 0..self.one_hot_params.ram_d {
             let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::RamRa(i),
                 SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
-            scaling_factors.push(F::one());
+            opening_terms.push(ProverBatchOpeningTerm {
+                claim_id: OpeningId::committed(
+                    CommittedPolynomial::RamRa(i),
+                    SumcheckId::HammingWeightClaimReduction,
+                ),
+                source_id: CommittedPolynomial::RamRa(i),
+                point: point.clone(),
+                eval: claim,
+                eval_scale: F::one(),
+            });
         }
 
         // Advice polynomials: TrustedAdvice and UntrustedAdvice (from AdviceClaimReduction in Stage 6)
         // These are committed with smaller dimensions, so we apply Lagrange factors to embed
         // them in the top-left block of the main Dory matrix.
-        #[cfg(feature = "zk")]
-        let mut include_trusted_advice = false;
-        #[cfg(feature = "zk")]
-        let mut include_untrusted_advice = false;
-
         if let Some((advice_point, advice_claim)) = self
             .opening_accumulator
             .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
         {
             let lagrange_factor =
                 compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((
-                CommittedPolynomial::TrustedAdvice,
-                advice_claim * lagrange_factor,
-            ));
-            scaling_factors.push(lagrange_factor);
-            #[cfg(feature = "zk")]
-            {
-                include_trusted_advice = true;
-            }
+            opening_terms.push(ProverBatchOpeningTerm {
+                claim_id: OpeningId::TrustedAdvice(SumcheckId::AdviceClaimReduction),
+                source_id: CommittedPolynomial::TrustedAdvice,
+                point: point.clone(),
+                eval: advice_claim,
+                eval_scale: lagrange_factor,
+            });
         }
 
         if let Some((advice_point, advice_claim)) = self
@@ -2015,49 +2203,14 @@ where
         {
             let lagrange_factor =
                 compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
-            polynomial_claims.push((
-                CommittedPolynomial::UntrustedAdvice,
-                advice_claim * lagrange_factor,
-            ));
-            scaling_factors.push(lagrange_factor);
-            #[cfg(feature = "zk")]
-            {
-                include_untrusted_advice = true;
-            }
+            opening_terms.push(ProverBatchOpeningTerm {
+                claim_id: OpeningId::UntrustedAdvice(SumcheckId::AdviceClaimReduction),
+                source_id: CommittedPolynomial::UntrustedAdvice,
+                point: point.clone(),
+                eval: advice_claim,
+                eval_scale: lagrange_factor,
+            });
         }
-
-        // 2. Sample gamma and compute powers for RLC
-        let claims: Vec<F> = polynomial_claims.iter().map(|(_, c)| *c).collect();
-        // In non-ZK mode, absorb claims before sampling gamma for Fiat-Shamir binding.
-        // In ZK mode, claims are secret; binding comes from BlindFold constraints instead.
-        #[cfg(not(feature = "zk"))]
-        self.transcript.append_scalars(b"rlc_claims", &claims);
-        let gamma_powers: Vec<F> = self.transcript.challenge_scalar_powers(claims.len());
-        #[cfg(feature = "zk")]
-        let constraint_coeffs: Vec<F> = gamma_powers
-            .iter()
-            .zip(&scaling_factors)
-            .map(|(gamma, scale)| *gamma * *scale)
-            .collect();
-        let joint_claim: F = gamma_powers
-            .iter()
-            .zip(claims.iter())
-            .map(|(gamma, claim)| *gamma * claim)
-            .sum();
-
-        #[cfg(feature = "zk")]
-        let opening_ids = stage8_opening_ids(
-            &self.one_hot_params,
-            include_trusted_advice,
-            include_untrusted_advice,
-        );
-
-        // Build DoryOpeningState
-        let state = DoryOpeningState {
-            opening_point: opening_point.r.clone(),
-            gamma_powers,
-            polynomial_claims,
-        };
 
         let streaming_data = Arc::new(RLCStreamingData {
             bytecode: Arc::clone(&self.preprocessing.shared.bytecode),
@@ -2073,68 +2226,55 @@ where
             advice_polys.insert(CommittedPolynomial::UntrustedAdvice, poly);
         }
 
-        // Build streaming RLC polynomial directly (no witness poly regeneration!)
-        // Use materialized trace (default, single pass) instead of lazy trace
-        let (joint_poly, hint) = state.build_streaming_rlc::<PCS>(
-            self.one_hot_params.clone(),
-            TraceSource::Materialized(Arc::clone(&self.trace)),
+        let source_batch = Stage8OpeningSourceBatch::<F, PCS> {
+            one_hot_params: self.one_hot_params.clone(),
             streaming_data,
-            opening_proof_hints,
-            advice_polys,
-        );
-
-        let pcs_opening_point: Vec<F> = opening_point
-            .r
-            .iter()
-            .map(|point| (*point).into())
-            .collect();
-        let dory_opening_point: Vec<F> =
-            DoryGlobals::reorder_opening_point_for_layout(&opening_point.r)
-                .iter()
-                .map(|point| (*point).into())
-                .collect();
+            trace_source: TraceSource::Materialized(Arc::clone(&self.trace)),
+            opening_hints: opening_proof_hints,
+            advice_polys: Mutex::new(Some(advice_polys)),
+            cached_rlc: Mutex::new(None),
+        };
 
         #[cfg(feature = "zk")]
-        let (proof, y_com, y_blinding) = PCS::prove_batch_zk(
-            vec![ProverClaim {
-                polynomial: PolynomialCommitmentSource::new(&joint_poly),
-                point: dory_opening_point.clone(),
-                eval: joint_claim,
-            }],
-            vec![hint],
+        let opening_result = PCS::prove_batch_opening_zk(
+            opening_terms,
+            &source_batch,
             &self.preprocessing.generators,
             &mut self.transcript,
         );
-
         #[cfg(not(feature = "zk"))]
-        let proof = PCS::prove_batch(
-            vec![ProverClaim {
-                polynomial: PolynomialCommitmentSource::new(&joint_poly),
-                point: dory_opening_point,
-                eval: joint_claim,
-            }],
-            vec![hint],
+        let opening_result = PCS::prove_batch_opening(
+            opening_terms,
+            &source_batch,
             &self.preprocessing.generators,
             &mut self.transcript,
         );
 
         #[cfg(feature = "zk")]
         {
-            PCS::bind_zk_opening_inputs(&mut self.transcript, &pcs_opening_point, &y_com);
+            let relation = opening_result
+                .public
+                .single_linear_relation()
+                .expect("Dory Stage 8 returns one linear relation");
+            let output_index = relation.output_index;
+            let eval_commitment = *opening_result.public.outputs[output_index]
+                .value
+                .as_hidden()
+                .expect("Dory Stage 8 ZK output is hidden");
+            let BatchOutputExpression::Linear(linear_terms) = &relation.expression;
+            let (opening_ids, constraint_coeffs): (Vec<_>, Vec<_>) =
+                linear_terms.iter().copied().unzip();
             self.blindfold_accumulator
                 .set_opening_proof_data(OpeningProofData {
                     opening_ids,
                     constraint_coeffs,
-                    joint_claim,
-                    y_blinding,
+                    joint_claim: opening_result.witness.output_values[output_index],
+                    y_blinding: opening_result.witness.output_blinds[output_index],
+                    eval_commitment,
                 });
         }
-        #[cfg(not(feature = "zk"))]
-        {
-            PCS::bind_opening_inputs(&mut self.transcript, &pcs_opening_point, &joint_claim);
-        }
 
-        proof
+        opening_result.proof
     }
 }
 

@@ -59,7 +59,9 @@ use jolt_core::transcripts::Transcript;
 use jolt_core::zkvm::proof_serialization::Claims;
 use jolt_core::zkvm::proof_serialization::JoltProof;
 use jolt_core::zkvm::RV64IMACProof;
+#[cfg(not(feature = "zk"))]
 use jolt_crypto::Bn254;
+#[cfg(not(feature = "zk"))]
 use jolt_field::Fr as JoltFr;
 #[cfg(not(feature = "zk"))]
 use std::collections::BTreeMap;

@@ -383,20 +383,6 @@ impl CommitmentSchemeVerifier for DoryScheme {
         homomorphic_verify_batch::<Self, _>(claims, proof, setup, transcript)
     }
 
-    fn verify_fused_batch(
-        commitment: &Self::Output,
-        point: &[Self::Field],
-        eval: Self::Field,
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        let [proof] = proof.as_slice() else {
-            return Err(OpeningsError::VerificationFailed);
-        };
-        Self::verify(commitment, point, eval, proof, setup, transcript)
-    }
-
     fn bind_opening_inputs(
         transcript: &mut impl Transcript<Challenge = Self::Field>,
         point: &[Self::Field],
@@ -492,20 +478,6 @@ impl CommitmentScheme for DoryScheme {
     {
         homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
     }
-
-    fn prove_fused_batch<S>(
-        polynomial: &S,
-        point: &[Self::Field],
-        eval: Self::Field,
-        hint: Option<Self::OpeningHint>,
-        setup: &Self::ProverSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof
-    where
-        S: CommitmentSource<Self::Field> + ?Sized,
-    {
-        vec![Self::open(polynomial, point, eval, setup, hint, transcript)]
-    }
 }
 
 impl AdditivelyHomomorphicVerifier for DoryScheme {
@@ -593,19 +565,6 @@ impl ZkOpeningSchemeVerifier for DoryScheme {
         Self::verify_zk(&claim.commitment, &claim.point, proof, setup, transcript)
     }
 
-    fn verify_fused_batch_zk(
-        commitment: &Self::Output,
-        point: &[Self::Field],
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        let [proof] = proof.as_slice() else {
-            return Err(OpeningsError::VerificationFailed);
-        };
-        Self::verify_zk(commitment, point, proof, setup, transcript)
-    }
-
     fn bind_zk_opening_inputs(
         transcript: &mut impl Transcript<Challenge = Self::Field>,
         point: &[Self::Field],
@@ -670,29 +629,14 @@ impl ZkOpeningScheme for DoryScheme {
         let [hint] = hints.as_slice() else {
             panic!("Dory ZK batch opening expects one already-combined hint");
         };
-        Self::prove_fused_batch_zk(
+        let (proof, y_com, y_blinding) = Self::open_zk(
             &claim.polynomial,
             &claim.point,
             claim.eval,
-            hint.clone(),
             setup,
+            hint.clone(),
             transcript,
-        )
-    }
-
-    fn prove_fused_batch_zk<S>(
-        polynomial: &S,
-        point: &[Self::Field],
-        eval: Self::Field,
-        hint: Self::OpeningHint,
-        setup: &Self::ProverSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
-    where
-        S: CommitmentSource<Self::Field> + ?Sized,
-    {
-        let (proof, y_com, y_blinding) =
-            Self::open_zk(polynomial, point, eval, setup, hint, transcript);
+        );
         (vec![proof], y_com, y_blinding)
     }
 }
@@ -1548,8 +1492,8 @@ mod tests {
         let mut verify_transcript = Blake2bTranscript::new(b"single-batch");
         DoryScheme::verify_batch(
             vec![OpeningClaim {
-                commitment,
-                point,
+                commitment: commitment.clone(),
+                point: point.clone(),
                 eval,
             }],
             &proof,
@@ -1557,43 +1501,20 @@ mod tests {
             &mut verify_transcript,
         )
         .expect("single-claim batch proof should verify");
-    }
 
-    #[test]
-    fn fused_batch_opens_source_without_batch_transcript_rlc() {
-        let num_vars = 3;
-        let mut rng = ChaCha20Rng::seed_from_u64(415);
-        let prover_setup = DoryScheme::setup_prover(num_vars);
-        let verifier_setup = DoryScheme::project_verifier_setup(&prover_setup);
-
-        let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
-        let source = FoldOnlySource { poly: poly.clone() };
-        let point: Vec<Fr> = (0..num_vars)
-            .map(|_| <Fr as RandomSampling>::random(&mut rng))
-            .collect();
-        let eval = poly.evaluate(&point);
-        let (commitment, hint) = DoryScheme::commit(&poly, &prover_setup);
-
-        let mut prove_transcript = Blake2bTranscript::new(b"fused-batch");
-        let proof = DoryScheme::prove_fused_batch(
-            &source,
-            &point,
-            eval,
-            Some(hint),
-            &prover_setup,
-            &mut prove_transcript,
-        );
-
-        let mut verify_transcript = Blake2bTranscript::new(b"fused-batch");
-        DoryScheme::verify_fused_batch(
+        let [single_proof] = proof.as_slice() else {
+            panic!("single-claim batch should contain one proof");
+        };
+        let mut direct_verify_transcript = Blake2bTranscript::new(b"single-batch");
+        DoryScheme::verify(
             &commitment,
             &point,
             eval,
-            &proof,
+            single_proof,
             &verifier_setup,
-            &mut verify_transcript,
+            &mut direct_verify_transcript,
         )
-        .expect("already-fused batch proof should verify");
+        .expect("single-claim batch should use the raw single-opening transcript");
     }
 
     #[test]
@@ -1678,43 +1599,6 @@ mod tests {
             &mut verify_transcript,
         )
         .expect("ZK batch proof should verify");
-    }
-
-    #[test]
-    fn zk_fused_batch_round_trip() {
-        let num_vars = 3;
-        let mut rng = ChaCha20Rng::seed_from_u64(602);
-
-        let prover_setup = DoryScheme::setup_prover(num_vars);
-        let verifier_setup = DoryScheme::project_verifier_setup(&prover_setup);
-
-        let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
-        let point: Vec<Fr> = (0..num_vars)
-            .map(|_| <Fr as RandomSampling>::random(&mut rng))
-            .collect();
-        let eval = poly.evaluate(&point);
-        let (commitment, hint) = DoryScheme::commit_zk(&poly, &prover_setup);
-
-        let mut prove_transcript = Blake2bTranscript::new(b"zk-fused-batch");
-        let (proof, y_com, _blind) = DoryScheme::prove_fused_batch_zk(
-            &poly,
-            &point,
-            eval,
-            hint,
-            &prover_setup,
-            &mut prove_transcript,
-        );
-        assert_eq!(DoryScheme::batch_eval_commitment(&proof), Some(y_com));
-
-        let mut verify_transcript = Blake2bTranscript::new(b"zk-fused-batch");
-        DoryScheme::verify_fused_batch_zk(
-            &commitment,
-            &point,
-            &proof,
-            &verifier_setup,
-            &mut verify_transcript,
-        )
-        .expect("ZK fused batch proof should verify");
     }
 
     #[test]

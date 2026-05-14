@@ -19,7 +19,7 @@ use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::{
     field::{ChallengeFieldOps, FieldChallengeOps, JoltField},
     poly::{
-        commitment::dory::DoryGlobals,
+        commitment::dory::DoryLayout,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
         one_hot_polynomial::OneHotPolynomial,
     },
@@ -79,6 +79,7 @@ pub fn all_committed_polynomials(one_hot_params: &OneHotParams) -> Vec<Committed
 pub struct PolynomialCommitmentSource<'a, F: JoltField> {
     polynomial: &'a MultilinearPolynomial<F>,
     row_shape: PolynomialCommitmentRowShape,
+    one_hot_layout: DoryLayout,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +100,7 @@ impl<'a, F: JoltField> PolynomialCommitmentSource<'a, F> {
         Self {
             polynomial,
             row_shape: PolynomialCommitmentRowShape::Natural,
+            one_hot_layout: DoryLayout::CycleMajor,
         }
     }
 
@@ -110,6 +112,7 @@ impl<'a, F: JoltField> PolynomialCommitmentSource<'a, F> {
         Self {
             polynomial,
             row_shape: PolynomialCommitmentRowShape::Chunk { chunk_len },
+            one_hot_layout: DoryLayout::CycleMajor,
         }
     }
 
@@ -118,6 +121,7 @@ impl<'a, F: JoltField> PolynomialCommitmentSource<'a, F> {
         chunk_len: usize,
         values_per_row: usize,
         column_stride: usize,
+        one_hot_layout: DoryLayout,
     ) -> Self {
         assert!(
             chunk_len.is_power_of_two(),
@@ -138,6 +142,7 @@ impl<'a, F: JoltField> PolynomialCommitmentSource<'a, F> {
                 values_per_row,
                 column_stride,
             },
+            one_hot_layout,
         }
     }
 
@@ -310,11 +315,15 @@ where
     {
         match self.polynomial {
             MultilinearPolynomial::OneHot(poly) => {
-                let layout = DoryGlobals::get_layout();
                 let t = poly.nonzero_indices.len();
                 for (cycle, address) in poly.nonzero_indices.iter().enumerate() {
                     if let Some(address) = address {
-                        visit(layout.address_cycle_to_index(*address as usize, cycle, poly.K, t));
+                        visit(self.one_hot_layout.address_cycle_to_index(
+                            *address as usize,
+                            cycle,
+                            poly.K,
+                            t,
+                        ));
                     }
                 }
             }

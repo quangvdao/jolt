@@ -30,7 +30,12 @@ pub mod mock;
 mod schemes;
 mod sources;
 
-pub use claims::{OpeningClaim, ProverClaim};
+pub use claims::{
+    BatchOpeningPoint, BatchOpeningProverResult, BatchOpeningPublic, BatchOutputExpression,
+    BatchOutputRelation, BatchOutputValue, LinearSourceTerm, OpenedBatchOutput, OpeningClaim,
+    ProverBatchOpeningTerm, ProverClaim, VerifierBatchOpeningTerm, ZkBatchOpeningProverResult,
+    ZkBatchOpeningWitness,
+};
 pub use error::OpeningsError;
 pub use homomorphic::{
     homomorphic_prove_batch, homomorphic_verify_batch, rlc_combine, rlc_combine_scalars,
@@ -41,6 +46,6 @@ pub use schemes::{
     PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 pub use sources::{
-    BatchCommitmentSource, CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, SourceId,
-    SourceRow,
+    BatchCommitmentSource, BatchOpeningSource, CommitmentSource, OneHotEntries, OneHotIndex,
+    OneHotRow, SourceId, SourceRow,
 };

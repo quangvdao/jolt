@@ -97,20 +97,6 @@ impl<F: Field> CommitmentSchemeVerifier for MockCommitmentScheme<F> {
     ) -> Result<(), OpeningsError> {
         homomorphic_verify_batch::<Self, _>(claims, proof, setup, transcript)
     }
-
-    fn verify_fused_batch(
-        commitment: &Self::Output,
-        point: &[Self::Field],
-        eval: Self::Field,
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        let [proof] = proof.as_slice() else {
-            return Err(OpeningsError::VerificationFailed);
-        };
-        Self::verify(commitment, point, eval, proof, setup, transcript)
-    }
 }
 
 impl<F: Field> PublicVerifierSetup for MockCommitmentScheme<F> {
@@ -168,20 +154,6 @@ impl<F: Field> CommitmentScheme for MockCommitmentScheme<F> {
         S: CommitmentSource<Self::Field>,
     {
         homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
-    }
-
-    fn prove_fused_batch<S>(
-        polynomial: &S,
-        point: &[Self::Field],
-        eval: Self::Field,
-        hint: Option<Self::OpeningHint>,
-        setup: &Self::ProverSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof
-    where
-        S: CommitmentSource<Self::Field> + ?Sized,
-    {
-        vec![Self::open(polynomial, point, eval, setup, hint, transcript)]
     }
 }
 
@@ -260,19 +232,6 @@ impl<F: Field> ZkOpeningSchemeVerifier for MockCommitmentScheme<F> {
         Self::verify_batch(claims, proof, setup, transcript)
     }
 
-    fn verify_fused_batch_zk(
-        commitment: &Self::Output,
-        point: &[Self::Field],
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        let [proof] = proof.as_slice() else {
-            return Err(OpeningsError::VerificationFailed);
-        };
-        Self::verify_zk(commitment, point, proof, setup, transcript)
-    }
-
     fn bind_zk_opening_inputs(
         transcript: &mut impl Transcript<Challenge = Self::Field>,
         point: &[Self::Field],
@@ -323,22 +282,6 @@ impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {
         let proof = Self::prove_batch(claims, hints, setup, transcript);
         (proof, MockHidingCommitment { eval }, ())
     }
-
-    fn prove_fused_batch_zk<S>(
-        polynomial: &S,
-        point: &[Self::Field],
-        eval: Self::Field,
-        hint: Self::OpeningHint,
-        setup: &Self::ProverSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
-    where
-        S: CommitmentSource<Self::Field> + ?Sized,
-    {
-        let (proof, eval_commitment, blind) =
-            Self::open_zk(polynomial, point, eval, setup, hint, transcript);
-        (vec![proof], eval_commitment, blind)
-    }
 }
 
 #[cfg(test)]
@@ -346,8 +289,9 @@ impl<F: Field> ZkOpeningScheme for MockCommitmentScheme<F> {
 mod tests {
     use super::*;
     use crate::{
-        CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, OpeningClaim, ProverClaim,
-        SourceRow,
+        BatchOpeningPoint, BatchOpeningSource, BatchOutputExpression, CommitmentSource,
+        OneHotEntries, OneHotIndex, OneHotRow, OpeningClaim, ProverBatchOpeningTerm, ProverClaim,
+        SourceRow, VerifierBatchOpeningTerm,
     };
     use jolt_field::{Fr, FromPrimitiveInt, RandomSampling};
     use jolt_poly::{MultilinearPoly, Polynomial};
@@ -754,6 +698,114 @@ mod tests {
         let hints = vec![(); claims.len()];
         let proofs = MockPCS::prove_batch(claims, hints, &(), &mut transcript);
         assert_eq!(proofs.len(), 2, "two distinct points → two batch proofs");
+    }
+
+    #[test]
+    fn source_backed_opening_returns_public_relations() {
+        struct TestOpeningBatch {
+            polynomials: Vec<Polynomial<Fr>>,
+            hints: Vec<()>,
+        }
+
+        impl BatchOpeningSource<Fr, ()> for TestOpeningBatch {
+            type Id = usize;
+            type Source<'a>
+                = &'a Polynomial<Fr>
+            where
+                Self: 'a;
+
+            fn source(&self, id: Self::Id) -> Self::Source<'_> {
+                &self.polynomials[id]
+            }
+
+            fn opening_hint(&self, id: Self::Id) -> &() {
+                &self.hints[id]
+            }
+        }
+
+        let mut rng = ChaCha20Rng::seed_from_u64(450);
+        let p1 = Polynomial::<Fr>::random(3, &mut rng);
+        let p2 = Polynomial::<Fr>::random(3, &mut rng);
+        let point: Vec<Fr> = (0..3).map(|_| Fr::random(&mut rng)).collect();
+        let eval1 = p1.evaluate(&point);
+        let eval2 = p2.evaluate(&point);
+        let scale1 = Fr::from_u64(5);
+        let scale2 = Fr::from_u64(7);
+
+        let batch = TestOpeningBatch {
+            polynomials: vec![p1.clone(), p2.clone()],
+            hints: vec![(), ()],
+        };
+        let (c1, ()) = MockPCS::commit(&p1, &());
+        let (c2, ()) = MockPCS::commit(&p2, &());
+
+        let prover_terms = vec![
+            ProverBatchOpeningTerm {
+                claim_id: 10u8,
+                source_id: 0usize,
+                point: BatchOpeningPoint::same(point.clone()),
+                eval: eval1,
+                eval_scale: scale1,
+            },
+            ProverBatchOpeningTerm {
+                claim_id: 11u8,
+                source_id: 1usize,
+                point: BatchOpeningPoint::same(point.clone()),
+                eval: eval2,
+                eval_scale: scale2,
+            },
+        ];
+
+        let verifier_terms = vec![
+            VerifierBatchOpeningTerm::<Fr, MockPCS, _, _> {
+                claim_id: 10u8,
+                source_id: 0usize,
+                commitment: c1,
+                point: BatchOpeningPoint::same(point.clone()),
+                eval: eval1,
+                eval_scale: scale1,
+            },
+            VerifierBatchOpeningTerm::<Fr, MockPCS, _, _> {
+                claim_id: 11u8,
+                source_id: 1usize,
+                commitment: c2,
+                point: BatchOpeningPoint::same(point),
+                eval: eval2,
+                eval_scale: scale2,
+            },
+        ];
+
+        let mut prover_transcript = Blake2bTranscript::new(b"source-backed");
+        let prover_result =
+            MockPCS::prove_batch_opening(prover_terms, &batch, &(), &mut prover_transcript);
+
+        let mut verifier_transcript = Blake2bTranscript::new(b"source-backed");
+        let verifier_public = MockPCS::verify_batch_opening(
+            verifier_terms,
+            &prover_result.proof,
+            &(),
+            &mut verifier_transcript,
+        )
+        .expect("source-backed mock proof should verify");
+
+        assert_eq!(prover_result.public, verifier_public);
+        assert_eq!(verifier_public.outputs.len(), 2);
+        assert_eq!(
+            verifier_public.outputs[0].value.as_public(),
+            Some(&(eval1 * scale1)),
+        );
+        assert_eq!(
+            verifier_public.outputs[1].value.as_public(),
+            Some(&(eval2 * scale2)),
+        );
+        assert!(matches!(
+            &verifier_public.relations[0].expression,
+            BatchOutputExpression::Linear(terms) if terms == &vec![(10u8, scale1)]
+        ));
+        assert!(matches!(
+            &verifier_public.relations[1].expression,
+            BatchOutputExpression::Linear(terms) if terms == &vec![(11u8, scale2)]
+        ));
     }
 
     #[test]

@@ -55,8 +55,8 @@ use verifier::JoltVerifier;
 ///
 /// The extracted `jolt-openings` traits stay backend-neutral. This trait
 /// collects the extra requirements that Jolt core currently needs for Stage 8:
-/// canonical proof serialization, additive commitment/hint combination, Dory's
-/// hidden-evaluation commitment for BlindFold, and size-only setup.
+/// canonical proof serialization, additive commitment/hint combination,
+/// Dory's hidden-evaluation commitment for BlindFold, and size-only setup.
 pub trait JoltCommitmentScheme<F, C>:
     Commitment<Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid>
     + CommitmentScheme<

@@ -19,7 +19,7 @@ use std::{
 
 use crate::poly::commitment::dory::DoryContext;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use jolt_openings::CommitmentScheme;
+use jolt_openings::{CommitmentScheme, ProverClaim};
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::ram::remap_address;
@@ -688,6 +688,7 @@ where
                 .clone()
                 .pad_using(T, |_| Cycle::NoOp)
                 .collect();
+            let one_hot_layout = DoryGlobals::get_layout();
             let (_num_rows, num_cols) = DoryGlobals::matrix_shape();
             let values_per_row = DoryGlobals::address_major_cycles_per_row();
             let column_stride = DoryGlobals::k_from_matrix_shape();
@@ -707,6 +708,7 @@ where
                         num_cols,
                         values_per_row,
                         column_stride,
+                        one_hot_layout,
                     );
                     #[cfg(feature = "zk")]
                     let commitment = PCS::commit_zk(&source, &self.preprocessing.generators);
@@ -2091,24 +2093,27 @@ where
                 .iter()
                 .map(|point| (*point).into())
                 .collect();
-        let joint_poly_source = PolynomialCommitmentSource::new(&joint_poly);
 
         #[cfg(feature = "zk")]
-        let (proof, y_com, y_blinding) = PCS::prove_fused_batch_zk(
-            &joint_poly_source,
-            &dory_opening_point,
-            joint_claim,
-            hint,
+        let (proof, y_com, y_blinding) = PCS::prove_batch_zk(
+            vec![ProverClaim {
+                polynomial: PolynomialCommitmentSource::new(&joint_poly),
+                point: dory_opening_point.clone(),
+                eval: joint_claim,
+            }],
+            vec![hint],
             &self.preprocessing.generators,
             &mut self.transcript,
         );
 
         #[cfg(not(feature = "zk"))]
-        let proof = PCS::prove_fused_batch(
-            &joint_poly_source,
-            &dory_opening_point,
-            joint_claim,
-            Some(hint),
+        let proof = PCS::prove_batch(
+            vec![ProverClaim {
+                polynomial: PolynomialCommitmentSource::new(&joint_poly),
+                point: dory_opening_point,
+                eval: joint_claim,
+            }],
+            vec![hint],
             &self.preprocessing.generators,
             &mut self.transcript,
         );

@@ -14,19 +14,20 @@ The production zkVM path had a monolithic in-core trait in `jolt-core/src/poly/c
 This PR's target is the full `jolt-core` PCS type-family migration: `jolt-core` compiles against the canonical `jolt-openings` traits directly, and the old in-core PCS trait family is removed rather than left as a compatibility layer.
 
 This spec describes the active main-target API refactor that ports PR [#1467](https://github.com/a16z/jolt/pull/1467) onto current `main`, with review-driven adjustments recorded here.
-The target makes `jolt-openings` the canonical backend-neutral opening API, splits verifier and prover PCS surfaces, makes fused batched openings the primary API, moves Dory onto the extracted trait family, and cuts `jolt-core` over to `PCS::BatchProof` / `PCS::Output` without introducing Akita or changing the Jolt protocol.
+The target makes `jolt-openings` the canonical backend-neutral opening API, splits verifier and prover PCS surfaces, exposes source-backed commitment and opening entry points, moves Dory onto the extracted trait family, and cuts `jolt-core` over to `PCS::BatchProof` / `PCS::Output` without introducing Akita or changing the Jolt protocol.
 Any bridge traits introduced earlier in the branch were implementation scaffolding only; they are not part of the merge target and are removed by the direct type-family migration.
 
 The branch has now completed the full `jolt-core` PCS type-family cutover and introduced source-backed commitment entry points.
 An interim version used explicit shaped commitment extension traits so Dory/Jolt could pass a protocol-selected matrix shape without putting that shape on the base PCS trait.
 Those traits have been removed.
 The merge-target API moves only backend-neutral traversal information onto `CommitmentSource` / `BatchCommitmentSource`: a source may advertise the natural commitment chunk length it can stream efficiently, while Dory privately interprets that chunk length as its internal matrix split.
+The next merge-target adjustment is the analogous opening-side cutover: Stage 8 should provide raw opening terms and a source batch, while the PCS owns fusion, transcript challenges, proof construction, and the returned output relation.
 
 This distinction is important.
 `jolt-openings` should not learn Dory's partition vocabulary, and a source should not have a backend-specific associated `Partition` type.
 The source API describes what can be traversed without materialization.
 The backend API decides how that traversal maps to its commitment algorithm.
-Dory's `sigma`, `nu`, row-commitment aggregation, and opening-point reordering remain Dory/Jolt implementation details.
+Dory's `sigma`, `nu`, row-commitment aggregation, opening-point coordinate conversion, and proof output choices remain Dory/Jolt implementation details.
 
 The implementation should be a mechanical transplant of #1467's hard-earned design except where this spec explicitly diverges, not a greenfield rewrite.
 Adaptation is only for current `main` drift, especially current Dory hardening, current Dory ZK evaluation commitments, Stage 8's streaming RLC optimization, and BlindFold wiring.
@@ -35,7 +36,10 @@ Adaptation is only for current `main` drift, especially current Dory hardening, 
 
 ### Goal
 
-Make `crates/jolt-openings` the canonical polynomial-opening abstraction used by `jolt-core`, with a verifier-first trait hierarchy and fused `prove_batch` / `verify_batch` API that can support Dory today and future non-Dory schemes such as Akita while keeping native batch proving on the primary production path.
+Make `crates/jolt-openings` the canonical polynomial-opening abstraction used by `jolt-core`, with a verifier-first trait hierarchy and batch-opening APIs that Stage 8 can call with raw opening claims plus an opening source batch.
+Stage 8 should no longer build a Dory-shaped joint RLC polynomial before entering the PCS.
+Instead, the PCS should produce the batch proof and return a backend-neutral description of the output relation it chose.
+This can support Dory today and future non-Dory schemes such as Akita while keeping native batch proving on the primary production path.
 This includes replacing the old `jolt-core` PCS associated types, proof storage, setup plumbing, Stage 8 accumulators, ZK hooks, mock PCS, HyperKZG integration points, and public prover/verifier generic bounds with the `jolt-openings` type family.
 
 ### Source of Truth
@@ -48,7 +52,7 @@ Port or adapt from #1467:
 
 1. `crates/jolt-openings/src/schemes.rs`: verifier/prover split and extension traits.
 2. `crates/jolt-openings/src/sources.rs`: backend-neutral commitment source and batch-source traits.
-3. `crates/jolt-openings/src/homomorphic.rs`: homomorphic fused batch helpers.
+3. `crates/jolt-openings/src/homomorphic.rs`: homomorphic batch helpers.
 4. `crates/jolt-openings/src/claims.rs`: `ProverClaim` and verifier-only `OpeningClaim`.
 5. `crates/jolt-openings/src/lib.rs`: public exports and crate-level API documentation.
 6. `crates/jolt-openings/src/mock.rs`: mock PCS implementation under the split trait family.
@@ -71,33 +75,40 @@ Preserve from current `main`:
 4. The base verifier trait does not require verifier setup to be derivable from public parameters.
    Verifier-only code receives `PCS::VerifierSetup`.
    Schemes whose verifier setup can be constructed from public parameters implement the separate `PublicVerifierSetup` extension trait.
-5. The base PCS traits expose single-claim openings through `open` and `verify`, fused batched openings through `prove_batch` and `verify_batch`, and batched commitment through `commit_batch`.
+5. The base PCS traits expose single-claim openings through `open` and `verify`, ordinary batched openings through `prove_batch` and `verify_batch`, source-backed batched openings through the batch-opening-source API, and batched commitment through `commit_batch`.
+   A singleton ordinary batch is a raw single opening wrapped in `PCS::BatchProof`; it does not draw a homomorphic batch challenge.
 6. Single-claim `open` and `verify` are semantic PCS operations, not homomorphic-only operations.
-   Native batched schemes may implement them as singleton wrappers around their fused batch path, but verifier code should be able to verify one opening through the base verifier trait.
+   Native batched schemes may implement them with their own singleton proof path, but verifier code should be able to verify one opening through the base verifier trait.
 7. `commit_batch` must preserve current CycleMajor Dory streaming behavior: one padded trace scan, per-row work for all committed polynomials, small-scalar MSM for dense increment rows, and one-hot grouped additions for RA rows.
 8. Homomorphic batch proving and verification have byte-identical Fiat-Shamir behavior between prover and verifier.
    They absorb the same claim count, the same evaluations, and draw the same per-point RLC challenges in the same order.
-9. `prove_batch` returns `PCS::BatchProof`.
-   `jolt-core` remains responsible for the per-group joint evaluations, hiding commitments, and post-opening transcript binding needed by Stage 8 and BlindFold.
-   Batch verification does not silently perform post-opening transcript binding.
-10. `OpeningClaim` is generic over `PCS: CommitmentSchemeVerifier`, not over a raw commitment type.
+9. Source-backed batch opening returns both `PCS::BatchProof` and a public description of the output relation created by the PCS.
+   In transparent mode the output can be a public scalar.
+   In ZK mode the output can be a hiding commitment plus prover-only witness data such as the hidden scalar and blinding.
+10. The PCS owns the batch-opening transcript challenge schedule.
+    `jolt-core` must not sample Stage 8 fusion challenges and then ask the PCS to verify a pre-fused singleton opening.
+    The relation returned by the PCS is the source of truth for BlindFold coefficients.
+11. Stage 8 raw opening terms carry two distinct scalars when needed: the raw accumulator evaluation and an `eval_scale` describing how that raw value embeds into the PCS output relation.
+    Dory's current invariant must be preserved: source, hint, and commitment fusion use the PCS batch coefficient, while BlindFold/evaluation coefficients use `batch_coefficient * eval_scale`.
+12. `OpeningClaim` is generic over `PCS: CommitmentSchemeVerifier`, not over a raw commitment type.
    Verifier-only code can name opening claims without importing prover-only PCS types.
-11. `jolt-core` keeps protocol-specific opening bookkeeping.
+13. `jolt-core` keeps protocol-specific opening bookkeeping.
    `OpeningId`, `PolynomialId`, `SumcheckId`, `OpeningPoint`, `ProverOpeningAccumulator`, and `VerifierOpeningAccumulator` do not move into `jolt-openings`.
-12. Dory layout, Dory matrix embedding policy, Stage 8 claim ordering, and BlindFold constraints do not move into `jolt-openings`.
-13. `jolt-openings` must not expose Dory's `sigma`/`nu` split, Dory matrix shape, or a generic associated partition type whose real values are Dory-specific.
+14. Dory layout, Dory matrix embedding policy, Stage 8 claim ordering, and BlindFold constraints do not move into `jolt-openings`.
+    Stage 8 claim collection remains in `jolt-core`; Stage 8 fusion and proof-output construction move behind the PCS batch-opening API.
+15. `jolt-openings` must not expose Dory's `sigma`/`nu` split, Dory matrix shape, or a generic associated partition type whose real values are Dory-specific.
     It may expose backend-neutral traversal facts, such as a natural commitment chunk length, that a concrete backend can interpret privately.
-14. Opening hints for schemes whose opening algorithm depends on a commitment traversal must carry enough backend-owned information to replay the same traversal at opening time.
+16. Opening hints for schemes whose opening algorithm depends on a commitment traversal must carry enough backend-owned information to replay the same traversal at opening time.
     For Dory, the hint records the selected chunk length and row commitments, and Dory derives its private opening shape from that hint instead of recomputing a balanced split from the opening point.
-15. The merge-target API does not require `jolt-core` to call shaped PCS extensions.
-16. Dory's current transparent and ZK proofs remain verifier-compatible with current `main`.
-17. `JoltProof` stores the opening proof as `PCS::BatchProof`, not `PCS::Proof`.
-18. Standard and ZK `muldiv` end-to-end proofs continue to pass.
-19. The implementation introduces no Akita dependency.
-20. The final PR state contains no in-core PCS compatibility trait family.
+17. The merge-target API does not require `jolt-core` to call shaped PCS extensions.
+18. Dory's current transparent and ZK proofs remain verifier-compatible with current `main`.
+19. `JoltProof` stores the opening proof as `PCS::BatchProof`, not `PCS::Proof`.
+20. Standard and ZK `muldiv` end-to-end proofs continue to pass.
+21. The implementation introduces no Akita dependency.
+22. The final PR state contains no in-core PCS compatibility trait family.
     `jolt-core/src/poly/commitment/commitment_scheme.rs` should no longer define `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, or `ZkOpeningSupport` as wrappers around `jolt-openings`.
     Direct users should import the canonical `jolt-openings` traits or a narrow backend-owned extension trait.
-21. `cargo tree -d` must not show duplicate resolved versions of `jolt-field`, `jolt-transcript`, `jolt-crypto`, or `jolt-openings`.
+23. `cargo tree -d` must not show duplicate resolved versions of `jolt-field`, `jolt-transcript`, `jolt-crypto`, or `jolt-openings`.
 
 No new `jolt-eval` invariant is required for this spec.
 The relevant invariants are proof acceptance, transcript parity, and prover/verifier consistency, which are covered by focused crate tests and `jolt-core` end-to-end tests.
@@ -110,7 +121,7 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 4. Moving Stage 8 sumcheck wiring, opening IDs, accumulator types, or BlindFold constraints into `jolt-openings`.
 5. Replacing the current Jolt prover pipeline with the verifier/compiler runtime from `refactor/crates`.
 6. Porting unrelated #1467 hygiene changes such as debug-test clippy suppressions when they are not needed on current `main`.
-7. Adding a new batch-ZK opening abstraction beyond the #1467 ZK split.
+7. Moving BlindFold itself into `jolt-openings`.
 8. Preserving the old internal `CommitmentScheme` trait as a permanent or merge-ready compatibility layer.
 9. Changing guest execution, bytecode expansion, memory checking, instruction lookups, or sumcheck protocol semantics.
 10. Changing Dory's transcript labels or proof verification behavior except where required to preserve current `main` behavior under the new trait API.
@@ -122,34 +133,37 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 - [x] `crates/jolt-openings/src/schemes.rs` defines `CommitmentSchemeVerifier`, `PublicVerifierSetup`, `CommitmentScheme`, `AdditivelyHomomorphicVerifier`, `AdditivelyHomomorphic`, `ZkOpeningSchemeVerifier`, and `ZkOpeningScheme` with the role split.
 - [x] `StreamingCommitment` is not part of the canonical `jolt-openings` API.
 - [x] `crates/jolt-openings/src/sources.rs` defines `SourceId`, `SourceRow`, `CommitmentSource`, and `BatchCommitmentSource`.
-- [x] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `verify`, `verify_batch`, `verify_fused_batch`, and `bind_opening_inputs`.
+- [ ] `crates/jolt-openings/src/claims.rs` defines raw batch-opening claim types parameterized by claim id and source id.
+- [ ] `crates/jolt-openings/src/sources.rs` defines a source-backed batch-opening trait that can expose committed sources, opening hints, and efficient linear row folding without materializing every source.
+- [ ] `crates/jolt-openings/src/schemes.rs` defines source-backed transparent and ZK batch-opening methods that return proof plus output-relation metadata.
+- [x] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `verify`, `verify_batch`, and `bind_opening_inputs`.
 - [x] `PublicVerifierSetup` contains `PublicParams` and `verifier_setup` for schemes whose verifier setup is derivable without prover setup.
-- [x] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, `prove_batch`, and `prove_fused_batch`.
+- [x] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, and `prove_batch`.
 - [x] `commit_batch` has a default implementation that commits one source at a time, and Dory overrides it for batch-source row streaming.
 - [x] Homomorphic extension traits contain only the additive-combination operations needed by the default homomorphic batch helper.
 - [x] `crates/jolt-openings/src/homomorphic.rs` contains #1467's `homomorphic_prove_batch`, `homomorphic_verify_batch`, `rlc_combine`, and `rlc_combine_scalars`.
 - [x] `homomorphic_prove_batch` and `homomorphic_verify_batch` group claims by opening point and use the same transcript schedule.
 - [x] `crates/jolt-openings/src/claims.rs` exposes `ProverClaim<F, P>` and `OpeningClaim<F, PCS: CommitmentSchemeVerifier<Field = F>>`.
-- [x] The old standalone `reduce_prover` / `reduce_verifier` production API is not part of the new production surface; production Dory batch opening uses `prove_batch` / `verify_batch`.
+- [x] The old standalone `reduce_prover` / `reduce_verifier` production API is not part of the new production surface; ordinary Dory batch opening uses `prove_batch` / `verify_batch`, and Stage 8 uses source-backed batch opening.
 - [x] `crates/jolt-openings/src/mock.rs` implements the split traits and has tests covering single-claim, multi-claim, shared-point, distinct-point, and tampered-evaluation cases.
 - [x] `crates/jolt-dory` implements the split trait family while preserving current `main` wrapper types, bounded deserialization, transcript bridge, batch-source streaming support, and ZK behavior.
 - [x] `crates/jolt-dory` does not expose merge-target public APIs for borrowed-ark setup, Dory-native proof entrypoints, or standalone begin/feed/finish streaming commitments; those strategies live behind canonical `jolt-openings` trait methods.
 - [x] Dory `commit_batch` preserves CycleMajor trace commitment shape: same polynomial order, same row length, same row-commitment ordering, same `DoryHint` row commitments, and same transcript-visible commitments as current `main`.
 - [x] `DoryScheme::BatchProof = Vec<DoryProof>` for the homomorphic Dory implementation.
-- [x] `DoryScheme::prove_batch` delegates to `homomorphic_prove_batch`.
-- [x] `DoryScheme::verify_batch` delegates to `homomorphic_verify_batch`.
+- [x] Ordinary `DoryScheme::prove_batch` and `DoryScheme::verify_batch` can still use the generic homomorphic helper for non-Stage-8 callers.
+- [ ] Dory's source-backed batch-opening implementation owns Stage 8 fusion, samples the same challenge schedule, combines hints and commitments internally, and returns the output relation.
 - [x] `jolt-core` depends on `jolt-openings` and `jolt-dory`.
-- [x] `jolt-core` imports the canonical `jolt_openings::{CommitmentSchemeVerifier, CommitmentScheme, PublicVerifierSetup, ZkOpeningSchemeVerifier, ZkOpeningScheme}` traits directly instead of the old in-core PCS trait family.
+- [x] `jolt-core` imports the canonical `jolt_openings` PCS traits and extension traits directly instead of the old in-core PCS trait family.
 - [x] `jolt-core` call sites use `PCS::Output` for commitments, matching `jolt_crypto::Commitment`, rather than the old `PCS::Commitment`.
 - [x] `jolt-core` call sites use `PCS::OpeningHint`, `PCS::Proof`, `PCS::BatchProof`, `PCS::ProverSetup`, and `PCS::VerifierSetup` from `jolt-openings` directly.
 - [x] `JoltProof` stores `joint_opening_proof` as canonical `PCS::BatchProof`.
 - [x] Prover preprocessing and verifier preprocessing store canonical `jolt-openings` setup, commitment, and opening-hint associated types.
 - [x] Public prover/verifier generic bounds and SDK-facing generated functions name the canonical `jolt-openings` PCS traits.
-- [x] Stage 8 prover calls canonical `jolt-openings` `PCS::prove_batch`.
-- [x] Stage 8 verifier calls canonical `jolt-openings` `PCS::verify_batch`.
-- [x] Stage 8 keeps the same dense increment scaling, RA polynomial ordering, advice Lagrange scaling, `opening_ids`, `constraint_coeffs`, and `joint_claim` semantics as current `main`.
-- [x] ZK mode still extracts and binds the Dory evaluation commitment needed by BlindFold after the in-core ZK bridge is removed.
-- [x] ZK evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation are expressed through `jolt-openings` / backend-owned extension traits rather than in-core `ZkOpeningSupport`.
+- [ ] Stage 8 prover calls canonical source-backed `jolt-openings` batch opening with raw opening terms and a Stage 8 opening source batch, not with one already-combined streaming joint claim.
+- [ ] Stage 8 verifier calls the matching canonical source-backed batch verifier with raw verifier terms and commitments, not with one precomputed joint commitment.
+- [ ] Stage 8 keeps the same dense increment scaling, RA polynomial ordering, advice Lagrange scaling, `opening_ids`, `constraint_coeffs`, and `joint_claim` semantics as current `main`, with those coefficients returned by the PCS output relation.
+- [ ] ZK mode receives the Dory evaluation commitment and prover-only blinding through the PCS batch-opening result needed by BlindFold.
+- [ ] ZK evaluation commitment output, evaluation blinding witness, and Pedersen generator derivation are expressed through `jolt-openings` results / backend-owned extension traits rather than in-core `ZkOpeningSupport`.
 - [x] `DoryCommitmentScheme`'s old wrapper types are removed; Dory layout glue remains protocol-owned in `jolt-core`.
 - [x] The in-core `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, and `ZkOpeningSupport` bridges are removed.
 - [x] No production `jolt-core` code calls Dory-specific borrowed-ark bridge APIs to enter the PCS; it enters through canonical `jolt-openings` methods.
@@ -170,7 +184,7 @@ Source-traversal cleanup acceptance criteria:
 - [x] Dory derives its private `sigma` from the hint's recorded chunk length and its private `nu` from the hint's row-commitment count.
 - [x] Dory commitment hints record the selected chunk length, and `open` / `open_zk` use the hint to replay the commitment traversal rather than recomputing a balanced split from the opening point length.
 - [x] `jolt-core` call sites enter through `PCS::commit`, `PCS::commit_zk`, `PCS::commit_batch`, or `PCS::commit_batch_zk`; no production `jolt-core`, SDK, or transpiler call site calls a shaped PCS extension.
-- [x] `PolynomialCommitmentSource` and `CycleMajorTraceBatch` no longer need to read Dory globals in order to satisfy a generic source API; any Jolt layout choice is passed into the source adapter as source configuration.
+- [x] `PolynomialCommitmentSource` and `CycleMajorTraceBatch` no longer read Dory globals in order to satisfy a generic source API; Jolt layout choices such as AddressMajor striding and one-hot flat-index order are passed into the source adapter as source configuration.
 
 ### Testing Strategy
 
@@ -183,6 +197,8 @@ Focused `jolt-openings` tests should validate the API in isolation:
 5. A tampered evaluation is rejected.
 6. `rlc_combine` and `rlc_combine_scalars` agree with direct polynomial evaluation.
 7. Prover and verifier transcripts remain in sync for the batch helper path.
+8. Source-backed batch opening returns a proof and a linear output relation whose coefficients match the PCS-sampled challenge schedule.
+9. ZK source-backed batch opening returns hidden outputs in public data and keeps output values/blinds prover-only.
 
 Focused `jolt-dory` tests should validate the real PCS implementation:
 
@@ -194,6 +210,7 @@ Focused `jolt-dory` tests should validate the real PCS implementation:
 6. ZK opening behavior still produces and verifies the expected hiding commitment.
 7. A source committed with a non-default natural chunk length opens using the chunk length recorded in `DoryHint`.
 8. CycleMajor batch commitment produces byte-identical commitments before and after replacing shaped traits with source traversal hints.
+9. Stage 8 source-backed Dory opening produces the same proof acceptance behavior and BlindFold coefficients as the pre-cutover streaming RLC path.
 
 `jolt-core` tests should validate the real zkVM integration:
 
@@ -215,16 +232,17 @@ There are two separate streaming paths to keep straight.
 Witness commitment streaming is the current CycleMajor commitment path that builds Dory row commitments while scanning the padded trace.
 That path should move behind `commit_batch` and `commit_batch_zk`.
 Stage 8 opening streaming is the current Dory RLC path that builds a joint polynomial directly from the trace rather than regenerating witness polynomials.
-That path should keep the same algorithmic shape while entering the PCS through `prove_batch` and `verify_batch`.
+That path should keep the same algorithmic shape, but the joint source should be constructed inside the PCS source-backed batch-opening implementation instead of in `jolt-core`.
 
 Performance requirements:
 
-1. Preserve the current Stage 8 streaming RLC optimization unless an equivalent or faster source-based path is implemented.
+1. Preserve the current Stage 8 streaming RLC optimization while moving fusion behind the PCS batch-opening boundary.
 2. Avoid materializing all committed polynomials in Stage 8 merely to fit the new API.
 3. Keep Dory row-commitment hint combination in the hot path when it avoids recomputing row commitments.
 4. Do not introduce dynamic dispatch in the prover hot path.
-5. Keep parallelism in Dory commitment and hint combination.
-6. Preserve current `#[inline]` and low-level optimized group operation behavior where code moves between crates.
+5. Keep parallelism in Dory commitment, opening-source folding, and hint combination.
+6. Preserve the current distinction between source/hint/commitment coefficients and evaluation/BlindFold coefficients.
+7. Preserve current `#[inline]` and low-level optimized group operation behavior where code moves between crates.
 
 Concrete checks:
 
@@ -258,9 +276,9 @@ jolt-openings
 jolt-core
 ```
 
-`jolt-openings` owns the abstract PCS API and generic homomorphic batch helper.
-`jolt-dory` owns Dory-specific commitments, proofs, setup types, transcript adaptation, row commitments, batch-source commitment adapters, and Dory proof hardening.
-`jolt-core` owns the Jolt protocol's opening IDs, accumulators, Stage 8 claim assembly, Dory layout selection, proof object, source adapters, and BlindFold wiring.
+`jolt-openings` owns the abstract PCS API, source traits, batch-opening claim/result vocabulary, and generic ordinary homomorphic batch helper.
+`jolt-dory` owns Dory-specific commitments, proofs, setup types, transcript adaptation, row commitments, batch-source commitment adapters, source-backed opening fusion, and Dory proof hardening.
+`jolt-core` owns the Jolt protocol's opening IDs, accumulators, Stage 8 raw claim assembly, proof object, source adapters, and BlindFold wiring.
 
 The trait hierarchy is:
 
@@ -272,7 +290,7 @@ CommitmentSchemeVerifier
   - BatchProof
   - verify
   - verify_batch
-  - verify_fused_batch
+  - verify_batch_opening
   - bind_opening_inputs
 
 PublicVerifierSetup: CommitmentSchemeVerifier
@@ -281,7 +299,6 @@ PublicVerifierSetup: CommitmentSchemeVerifier
 
 CommitmentScheme: CommitmentSchemeVerifier
   - ProverSetup
-  - Polynomial
   - OpeningHint
   - SetupParams
   - setup
@@ -290,7 +307,7 @@ CommitmentScheme: CommitmentSchemeVerifier
   - commit_batch
   - open
   - prove_batch
-  - prove_fused_batch
+  - prove_batch_opening
 
 AdditivelyHomomorphicVerifier: CommitmentSchemeVerifier
   - combine
@@ -302,14 +319,15 @@ ZkOpeningSchemeVerifier: CommitmentSchemeVerifier
   - HidingCommitment
   - verify_zk
   - verify_batch_zk
-  - verify_fused_batch_zk
+  - verify_batch_opening_zk
 
 ZkOpeningScheme: ZkOpeningSchemeVerifier + CommitmentScheme
   - Blind
   - commit_zk
   - commit_batch_zk
   - open_zk
-  - prove_fused_batch_zk
+  - prove_batch_zk
+  - prove_batch_opening_zk
 ```
 
 This hierarchy is a role split, not a lifecycle split.
@@ -317,8 +335,9 @@ Verifier-only code can bound on `CommitmentSchemeVerifier` without naming prover
 Prover code gets the verifier surface because `CommitmentScheme` extends `CommitmentSchemeVerifier`.
 Verifier setup construction is not part of the base verifier trait because not every scheme can derive verifier setup from public parameters alone.
 Transparent schemes such as Dory can implement `PublicVerifierSetup`; structured-reference-string schemes such as HyperKZG receive verifier setup generated by setup and do not need an identity-style verifier setup constructor.
-Single-opening `open` and `verify` are required PCS basics; fused batching remains the primary production API.
-For schemes with no specialized singleton protocol, the singleton methods may wrap the one-claim batch path.
+Single-opening `open` and `verify` are required PCS basics.
+Ordinary `prove_batch` / `verify_batch` remain useful for generic homomorphic batching over already-available sources.
+Stage 8 should use the source-backed batch-opening methods because the PCS, not `jolt-core`, should own the fusion challenge and output relation.
 Homomorphic extension traits only add linear combination primitives.
 
 ### Source-Oriented Commitment API
@@ -607,9 +626,8 @@ This is the Dory-dependent part of the source API.
 The alternative is to move these encodings behind a Dory-only trait, but then stable Rust cannot make the generic `PCS::commit_batch(&batch, ...)` dispatch to the optimized Dory implementation only for batches that implement that Dory-only trait.
 Without specialization or downcasting, Jolt would have to call a Dory-specific method directly, which defeats the cutover goal.
 
-The current branch is in a halfway state here.
-It has the source row encodings and canonical batch commitment path, but it still passes a Dory-shaped `sigma` through source traversal and uses shaped extension traits at Jolt call sites that need a protocol-selected matrix layout.
-The next cleanup replaces those with `natural_chunk_len` and source-adapter configuration, so source traversal remains generic while Dory's `sigma`/`nu` interpretation becomes private again.
+The current branch uses this source-traversal shape directly.
+Source traversal receives a backend-neutral `chunk_len`, Jolt-specific layout choices are carried by source-adapter configuration, and Dory's `sigma`/`nu` interpretation is private to `jolt-dory`.
 
 `BatchCommitmentSource::map_rows` is the no-regression traversal hook.
 It lets Jolt's trace-backed source scan the padded trace once, parallelize over trace rows, and run the caller's row-processing closure for every requested committed polynomial in source-id order.
@@ -746,6 +764,266 @@ Dory decides the parallel schedule inside its `commit_batch` implementation whil
 For non-Dory schemes, the default `commit_batch` is correct and simple.
 They can add an optimized override only if their backend benefits from batch-row source traversal.
 
+### Source-Backed Batch Opening API
+
+The opening-side API should mirror the commitment-side source split, but it must abstract one more thing: the PCS output.
+For Stage 8, the useful boundary is not "Jolt hands the PCS one already-combined polynomial."
+The useful boundary is "Jolt hands the PCS raw claims against committed sources, and the PCS returns the proof plus the relation between raw claims and whatever output it opened."
+
+The generic claim vocabulary should distinguish:
+
+1. The `claim_id`, which names the protocol value that later systems such as BlindFold care about.
+   In Jolt this is `OpeningId`.
+2. The `source_id`, which names the committed source that the PCS opens.
+   In Dory/Jolt this is usually `CommittedPolynomial`; in a packed scheme it could name a packed witness group.
+3. The raw evaluation, before any Stage 8 embedding factor.
+4. The evaluation scale, which says how the raw value contributes to the PCS output relation.
+   This is not necessarily the same scalar used to combine sources, hints, or commitments.
+
+```rust
+/// Public verifier knowledge about a claimed evaluation.
+///
+/// Transparent opening verification receives the scalar value.
+/// ZK opening verification receives no scalar value; the PCS output is instead
+/// represented by a hiding commitment returned in `BatchOpeningPublic`.
+pub enum OpeningValue<F> {
+    Public(F),
+    Hidden,
+}
+
+/// Opening point in both protocol and backend coordinates.
+///
+/// `public` is the semantic point used for transcript binding and for the
+/// protocol's opening claim. `proof` is the coordinate order the PCS backend
+/// uses internally for the proof. Most schemes set these equal. Dory/Jolt sets
+/// `proof` to the current layout-coordinate opening point.
+pub struct BatchOpeningPoint<F> {
+    pub public: Vec<F>,
+    pub proof: Vec<F>,
+}
+
+/// Prover-side raw opening term for source-backed batch opening.
+///
+/// `eval` is the raw accumulator value for `claim_id`.
+/// `eval_scale` embeds that raw value into the PCS output relation.
+/// For current Dory Stage 8, source/hint/commitment fusion uses only the PCS
+/// challenge coefficient, while the returned BlindFold relation uses
+/// `challenge_coefficient * eval_scale`.
+pub struct ProverBatchOpeningTerm<F, ClaimId, SourceId> {
+    pub claim_id: ClaimId,
+    pub source_id: SourceId,
+    pub point: BatchOpeningPoint<F>,
+    pub eval: F,
+    pub eval_scale: F,
+}
+
+/// Verifier-side raw opening term for source-backed batch opening.
+pub struct VerifierBatchOpeningTerm<F, PCS, ClaimId, SourceId>
+where
+    PCS: CommitmentSchemeVerifier<Field = F>,
+{
+    pub claim_id: ClaimId,
+    pub source_id: SourceId,
+    pub commitment: PCS::Output,
+    pub point: BatchOpeningPoint<F>,
+    pub eval: OpeningValue<F>,
+    pub eval_scale: F,
+}
+
+/// A linear coefficient applied to a committed source.
+pub struct LinearSourceTerm<F, SourceId> {
+    pub source_id: SourceId,
+    pub coefficient: F,
+}
+```
+
+The source batch used for opening is deliberately different from `BatchCommitmentSource`.
+Commitment asks how to traverse many sources to produce commitments.
+Opening asks how to recover one source, replay its opening hint, and optionally fold a linear combination of sources without materializing them all.
+
+```rust
+/// A batch of already-committed sources available for opening.
+///
+/// Opening hints are backend-owned, so the trait is parameterized by the hint
+/// type instead of by a concrete PCS. This keeps source plumbing neutral while
+/// still allowing Dory to preserve its row-commitment hint path.
+pub trait BatchOpeningSource<F, OpeningHint>: Send + Sync
+where
+    F: Field,
+{
+    type Id: SourceId;
+
+    type Source<'a>: CommitmentSource<F> + 'a
+    where
+        Self: 'a;
+
+    /// Returns the source identified by `id`.
+    fn source(&self, id: Self::Id) -> Self::Source<'_>;
+
+    /// Borrows the opening hint produced when this source was committed.
+    ///
+    /// This is intentionally borrowed rather than returned by value: Dory hints
+    /// contain row commitments, and source-backed batch opening must be able to
+    /// combine those hints without cloning the row-commitment vectors in Stage 8.
+    fn opening_hint(&self, id: Self::Id) -> &OpeningHint;
+
+    /// Folds a linear combination of sources against the left-side weights used
+    /// by opening algorithms.
+    ///
+    /// The default implementation may fold each source separately and add the
+    /// results. Dory's Stage 8 source batch should override this to preserve the
+    /// current one-pass streaming RLC path.
+    fn fold_linear_rows(
+        &self,
+        terms: &[LinearSourceTerm<F, Self::Id>],
+        left: &[F],
+        chunk_len: usize,
+    ) -> Vec<F>;
+}
+```
+
+The PCS batch-opening result should describe the opened output without requiring callers to know whether the backend used one Dory RLC, several native batch proofs, a packed opening, or a future nonlinear proof relation.
+
+```rust
+/// The value opened by a batch-opening proof.
+pub enum BatchOutputValue<F, HidingCommitment> {
+    Public(F),
+    Hidden(HidingCommitment),
+}
+
+/// One PCS output created during batch opening.
+pub struct OpenedBatchOutput<F, HidingCommitment> {
+    /// Public semantic point used for protocol binding.
+    pub point: Vec<F>,
+    pub value: BatchOutputValue<F, HidingCommitment>,
+}
+
+/// Relation between raw opening claims and an opened PCS output.
+pub struct BatchOutputRelation<F, ClaimId> {
+    pub output_index: usize,
+    pub expression: BatchOutputExpression<F, ClaimId>,
+}
+
+/// Current Dory/Jolt uses `Linear`.
+/// `SumOfProducts` leaves room for a future PCS whose public output relation is
+/// not a single linear combination of raw openings.
+pub enum BatchOutputExpression<F, ClaimId> {
+    Linear(Vec<(ClaimId, F)>),
+    SumOfProducts(Vec<Vec<(ClaimId, F)>>),
+}
+
+/// Public data returned by both prover and verifier batch-opening paths.
+pub struct BatchOpeningPublic<F, ClaimId, HidingCommitment> {
+    pub outputs: Vec<OpenedBatchOutput<F, HidingCommitment>>,
+    pub relations: Vec<BatchOutputRelation<F, ClaimId>>,
+}
+
+/// Prover-only data for hidden outputs.
+pub struct ZkBatchOpeningWitness<F, Blind> {
+    pub output_values: Vec<F>,
+    pub output_blinds: Vec<Blind>,
+}
+
+pub struct BatchOpeningProveResult<Proof, F, ClaimId> {
+    pub proof: Proof,
+    pub public: BatchOpeningPublic<F, ClaimId, ()>,
+}
+
+pub struct BatchOpeningVerifyResult<F, ClaimId> {
+    pub public: BatchOpeningPublic<F, ClaimId, ()>,
+}
+
+pub struct ZkBatchOpeningProveResult<Proof, F, ClaimId, HidingCommitment, Blind> {
+    pub proof: Proof,
+    pub public: BatchOpeningPublic<F, ClaimId, HidingCommitment>,
+    pub witness: ZkBatchOpeningWitness<F, Blind>,
+}
+
+pub struct ZkBatchOpeningVerifyResult<F, ClaimId, HidingCommitment> {
+    pub public: BatchOpeningPublic<F, ClaimId, HidingCommitment>,
+}
+```
+
+The corresponding trait methods should live on the PCS traits rather than in `jolt-core`:
+
+```rust
+fn prove_batch_opening<B, ClaimId>(
+    source_batch: &B,
+    claims: &[ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>],
+    setup: &Self::ProverSetup,
+    transcript: &mut impl Transcript<Challenge = Self::Field>,
+) -> BatchOpeningProveResult<Self::BatchProof, Self::Field, ClaimId>
+where
+    Self: Sized,
+    B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
+    ClaimId: Copy + Eq + Ord + Send + Sync + 'static;
+
+fn verify_batch_opening<ClaimId, SrcId>(
+    claims: &[VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SrcId>],
+    proof: &Self::BatchProof,
+    setup: &Self::VerifierSetup,
+    transcript: &mut impl Transcript<Challenge = Self::Field>,
+) -> Result<BatchOpeningVerifyResult<Self::Field, ClaimId>, OpeningsError>
+where
+    Self: Sized,
+    ClaimId: Copy + Eq + Ord + Send + Sync + 'static,
+    SrcId: SourceId;
+```
+
+The ZK extension mirrors this shape:
+
+```rust
+fn prove_batch_opening_zk<B, ClaimId>(
+    source_batch: &B,
+    claims: &[ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>],
+    setup: &Self::ProverSetup,
+    transcript: &mut impl Transcript<Challenge = Self::Field>,
+) -> ZkBatchOpeningProveResult<
+    Self::BatchProof,
+    Self::Field,
+    ClaimId,
+    Self::HidingCommitment,
+    Self::Blind,
+>
+where
+    Self: Sized,
+    B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
+    ClaimId: Copy + Eq + Ord + Send + Sync + 'static;
+
+fn verify_batch_opening_zk<ClaimId, SrcId>(
+    claims: &[VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SrcId>],
+    proof: &Self::BatchProof,
+    setup: &Self::VerifierSetup,
+    transcript: &mut impl Transcript<Challenge = Self::Field>,
+) -> Result<
+    ZkBatchOpeningVerifyResult<Self::Field, ClaimId, Self::HidingCommitment>,
+    OpeningsError,
+>
+where
+    Self: Sized,
+    ClaimId: Copy + Eq + Ord + Send + Sync + 'static,
+    SrcId: SourceId;
+```
+
+For current Dory Stage 8, the returned public data has one output and one linear relation.
+In transparent mode:
+
+```text
+outputs[0] = Public(joint_claim)
+relations[0] = Linear([(opening_id_i, gamma_i * eval_scale_i)])
+```
+
+In ZK mode:
+
+```text
+outputs[0] = Hidden(y_com)
+relations[0] = Linear([(opening_id_i, gamma_i * eval_scale_i)])
+witness.output_values[0] = joint_claim
+witness.output_blinds[0] = y_blinding
+```
+
+This gives BlindFold exactly the same information it receives today, but from the PCS result rather than from `jolt-core` reimplementing Dory's fusion logic.
+
 ### Compatibility with Bolt's Compute Boundary
 
 The source API should line up with the compiler/backend split being developed on the `refactor/crates` branch.
@@ -756,8 +1034,9 @@ This PR should provide the Rust PCS boundary that Bolt can lower into:
 
 1. Bolt's oracle buffers map naturally to `CommitmentSource` values.
 2. Bolt's oracle families and `compute.pcs_commit_batch` map naturally to `BatchCommitmentSource` plus `PCS::commit_batch`.
-3. Bolt's current provider-style override for `commit_batch` corresponds to a PCS/backend override in this API.
-4. Protocol code should request commitments over sources; backend code should choose the execution strategy.
+3. Bolt's opening obligations map naturally to raw batch-opening terms plus `BatchOpeningSource`.
+4. Bolt's current provider-style override for `commit_batch` corresponds to a PCS/backend override in this API, and the same split should apply to batch openings.
+5. Protocol code should request commitments and openings over sources; backend code should choose the execution strategy.
 
 This means the abstraction should remain strategy-oblivious above the PCS boundary.
 It should not bake Dory's row-major streaming schedule into `jolt-openings`, but it should leave enough structure for Dory, Bolt-generated CPU code, and future GPU or lattice backends to preserve their own optimized commitment paths.
@@ -940,37 +1219,49 @@ The higher-ranked bound `for<'row> Fn(... SourceRow<'row, F>) -> R` says only th
 The temporary row vector is allocated in `visit_row`, borrowed into `visit`, consumed immediately by Dory's row MSM or one-hot addition helper, and then dropped.
 This corresponds to the old path, where the same temporary row vector was allocated and passed immediately to the chunk-level Dory commitment helper.
 
-### Homomorphic Batched Opening Protocol
+### Ordinary Homomorphic Batched Opening Helper
 
 The default homomorphic batch helper implements the standard group-by-point RLC protocol.
+It is still useful for schemes and tests that already have concrete per-claim sources and want an ordinary homomorphic batch proof.
+It is not the Stage 8 boundary after this spec's opening-source cutover, because Stage 8 must preserve streaming fusion inside the PCS.
+
+Singleton batches are special.
+When `prove_batch` / `verify_batch` receive exactly one claim, they call `open` / `verify` directly and wrap or unwrap the one proof in `PCS::BatchProof`.
+They do not absorb `rlc_claims` and do not draw a batch challenge.
+This remains the correct behavior for a real singleton opening.
+It should not be used as a loophole for Stage 8 to pre-fuse many raw claims into one Dory-shaped source before entering the PCS layer.
 
 Prover:
 
 1. Receive `Vec<ProverClaim<F>>` and matching `Vec<PCS::OpeningHint>`.
-2. Append the claim count under `rlc_claims`.
-3. Append all claimed evaluations.
-4. Group claims by opening point.
-5. For each group, draw `rho`.
-6. RLC-combine polynomial evaluation tables with powers of `rho`.
-7. RLC-combine scalar evaluations with powers of `rho`.
-8. RLC-combine opening hints with powers of `rho`.
-9. Call `PCS::open` on the combined polynomial and point.
-10. Return `PCS::BatchProof` and per-group joint evaluations.
+2. If there is one claim, call `PCS::open` on that claim and return a one-proof `PCS::BatchProof`.
+3. Otherwise append the claim count under `rlc_claims`.
+4. Append all claimed evaluations.
+5. Group claims by opening point.
+6. For each group, draw `rho`.
+7. RLC-combine polynomial evaluation tables with powers of `rho`.
+8. RLC-combine scalar evaluations with powers of `rho`.
+9. RLC-combine opening hints with powers of `rho`.
+10. Call `PCS::open` on the combined polynomial and point.
+11. Return `PCS::BatchProof`.
 
 Verifier:
 
 1. Receive `Vec<OpeningClaim<F, PCS>>` and `PCS::BatchProof`.
-2. Append the same claim count under `rlc_claims`.
-3. Append all claimed evaluations in the same order.
-4. Group claims by opening point.
-5. For each group, draw the same `rho`.
-6. RLC-combine commitments with powers of `rho`.
-7. RLC-combine scalar evaluations with powers of `rho`.
-8. Call `PCS::verify` on the combined commitment and point.
+2. If there is one claim, require one proof and call `PCS::verify` on that claim.
+3. Otherwise append the same claim count under `rlc_claims`.
+4. Append all claimed evaluations in the same order.
+5. Group claims by opening point.
+6. For each group, draw the same `rho`.
+7. RLC-combine commitments with powers of `rho`.
+8. RLC-combine scalar evaluations with powers of `rho`.
+9. Call `PCS::verify` on the combined commitment and point.
 
 The helper is generic over homomorphic schemes.
 It emits one `PCS::Proof` per opening-point group after RLC combination, and the scheme's `PCS::BatchProof` stores those per-group proofs.
-Non-homomorphic schemes are not required to implement `combine` or `combine_hints`; they can implement fused `prove_batch` and `verify_batch` directly while satisfying base `open` and `verify` as singleton special cases.
+Non-homomorphic schemes are not required to implement `combine` or `combine_hints`; they can implement `prove_batch` and `verify_batch` directly while satisfying base `open` and `verify` as singleton special cases.
+Source-backed batch opening is a separate higher-level PCS entry point.
+It may internally use this helper, a native batch protocol, one proof per claim, or a scheme-specific streaming fusion path.
 
 ### Dory Implementation
 
@@ -982,8 +1273,8 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 2. `VerifierSetup = DoryVerifierSetup`.
 3. `Proof = DoryProof`.
 4. `BatchProof = Vec<DoryProof>`.
-   Each element is the single Dory proof for one opening-point group after the homomorphic helper RLC-combines that group's claims.
-   The current Stage 8 cutover creates one such group, so the proof vector has length one there.
+   For ordinary homomorphic batch opening, each element is the single Dory proof for one opening-point group after the helper RLC-combines that group's claims.
+   For Stage 8 source-backed batch opening, the current Dory implementation returns a one-element vector because Dory proves one fused source/output.
 5. `verify` verifies one Dory opening proof.
 6. `verify_batch` delegates to `homomorphic_verify_batch`.
 7. `bind_opening_inputs` preserves Dory's transcript binding semantics.
@@ -1003,7 +1294,8 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 6. `commit` commits through the current Dory row commitment path.
 7. `commit_batch` overrides the default with batch-source row streaming.
 8. `open` proves one Dory opening.
-9. `prove_batch` delegates to `homomorphic_prove_batch`.
+9. Ordinary `prove_batch` can delegate to `homomorphic_prove_batch`.
+10. Source-backed `prove_batch_opening` owns Stage 8 fusion and does not route through the materializing multi-claim helper.
 
 Dory no longer implements a shaped commitment extension.
 Source-selected traversal is enough: `CommitmentSource::natural_chunk_len` / `BatchCommitmentSource::natural_chunk_len` provide the row width, and Dory stores the selected chunk length in `DoryHint` so opening uses the same traversal as commitment.
@@ -1021,6 +1313,7 @@ Source-selected traversal is enough: `CommitmentSource::natural_chunk_len` / `Ba
 1. Preserve current Dory `y_com` behavior.
 2. Preserve current `y_blinding` behavior.
 3. Preserve BlindFold compatibility.
+4. Source-backed ZK batch opening returns `Hidden(y_com)` in `BatchOpeningPublic` and returns `joint_claim` / `y_blinding` in the prover-only witness.
 
 ZK commitments use the same source-selected traversal.
 `commit_zk` and `commit_batch_zk` choose the same chunk length as transparent commitment and store it in the same backend-owned hint shape.
@@ -1040,6 +1333,21 @@ The cleaned-up Dory flow is:
 4. Dory commits rows and stores `chunk_len` in `DoryHint`.
 5. Opening reads `chunk_len` from `DoryHint`, derives the same private split, folds rows with that chunk length, and produces the single Dory proof.
 
+The Stage 8 source-backed Dory flow is:
+
+1. Receive raw `ProverBatchOpeningTerm`s in Jolt's Stage 8 order.
+2. In transparent mode, absorb the scaled evaluations under the same labels and in the same order as current Stage 8.
+   In ZK mode, do not absorb secret evaluations.
+3. Draw the batch challenge powers inside Dory's source-backed batch-opening method.
+4. Aggregate source coefficients by `source_id` using `gamma_i`, not `gamma_i * eval_scale_i`.
+5. Combine borrowed Dory row-commitment hints with those unscaled source coefficients, without cloning hint row-commitment vectors.
+6. Use the term's `BatchOpeningPoint::proof` coordinate for the Dory proof while retaining `BatchOpeningPoint::public` for protocol binding/output metadata.
+7. Build or fold the fused source through `BatchOpeningSource::fold_linear_rows` so the existing streaming RLC path is preserved.
+8. Compute the PCS output relation coefficients as `gamma_i * eval_scale_i` in the original claim order.
+9. Prove one Dory opening of the fused source and return a one-element `Vec<DoryProof>`.
+10. In transparent mode, return `Public(joint_claim)`.
+   In ZK mode, return `Hidden(y_com)` plus prover-only `joint_claim` and `y_blinding`.
+
 ### `jolt-core` Integration
 
 `jolt-core` should be cut over without changing protocol semantics.
@@ -1054,13 +1362,13 @@ Several boundaries intentionally remain outside `jolt-openings`:
 
 1. `JoltProof`, prover preprocessing, verifier preprocessing, and SDK generated APIs continue to own the zkVM proof format and serialization surface.
    The PCS-owned fields are canonical associated types such as `PCS::Output`, `PCS::OpeningHint`, `PCS::ProverSetup`, `PCS::VerifierSetup`, and `PCS::BatchProof`.
-2. Stage 8 owns Jolt-specific claim accumulation, `OpeningId` ordering, RLC polynomial construction, layout-sensitive opening point reordering, and BlindFold constraints.
-   Those are protocol concerns and do not move into `jolt-openings`.
-3. ZK mode consumes backend-owned extension traits for evaluation commitment extraction, evaluation blinding extraction, and Pedersen generator derivation.
+2. Stage 8 owns Jolt-specific claim accumulation, `OpeningId` ordering, and BlindFold consumption of the returned output relation.
+   Stage 8 does not own PCS batch fusion, joint commitment construction, or joint proof-output construction.
+3. ZK mode consumes the hidden-output data returned by the source-backed batch-opening API, plus backend-owned extension traits for Pedersen generator derivation.
    This keeps BlindFold compatible without putting Dory-specific `y_com` semantics on the base PCS trait.
 4. Dory layout globals remain protocol-owned in `jolt-core`.
    The layout affects Jolt's polynomial indexing, opening points, and streaming witness sources, so it should not be hidden inside a backend-neutral PCS API.
-   The generic source traits should receive the resulting traversal choice as source configuration, not reach back into Dory globals themselves.
+   The generic source traits should receive the resulting traversal and point-conversion choices as source configuration, not reach back into Dory globals themselves.
 
 #### Final Cutover Shape
 
@@ -1072,28 +1380,145 @@ The high-level migration is:
 4. Source-batch commitment call sites enter through canonical `PCS::commit_batch` / `PCS::commit_batch_zk`.
 5. Dory tier-1 and tier-2 row aggregation are private to the concrete backend.
 6. Proof storage uses `PCS::BatchProof`.
-7. Stage 8 proving calls `PCS::prove_batch`.
-8. Stage 8 verification calls `PCS::verify_batch`.
-9. Stage 8's claim construction and ZK constraint coefficient logic are preserved.
+7. Stage 8 proving calls source-backed `PCS::prove_batch_opening` / `PCS::prove_batch_opening_zk`.
+8. Stage 8 verification calls source-backed `PCS::verify_batch_opening` / `PCS::verify_batch_opening_zk`.
+9. Stage 8's raw claim construction is preserved, while fusion coefficients and output relations are returned by the PCS.
 10. The old in-core PCS bridge files are deleted.
 
 Stage 8 is the main adaptation point for openings, not for witness commitment.
 The old commitment-time streaming trait should disappear from the public PCS API, because `commit_batch` and `commit_batch_zk` take over that boundary.
 Current `main` also has a separate Stage 8 optimization: `DoryOpeningState::build_streaming_rlc` builds a single joint RLC polynomial directly from the trace and existing hints.
-That optimization is still the right first implementation as long as it is exposed through the new batch-opening API.
+The implementation should preserve that algorithmic behavior, but the construction should become the Dory implementation of source-backed batch opening rather than a pre-PCS step in `jolt-core`.
 
-The first cutover should be:
+The cutover should be:
 
-1. Keep the current Stage 8 joint RLC construction and hint-combination algorithm.
-2. Represent the resulting joint polynomial, unified opening point, and joint claim as the single opening-point group passed to `PCS::prove_batch`.
-3. Let Dory's `prove_batch` delegate to the homomorphic helper, which returns a one-element `Vec<DoryProof>` for this one group.
-4. On the verifier, build the corresponding one-group `OpeningClaim` and call `PCS::verify_batch`.
+1. Keep Stage 8's collection of raw accumulator openings and `OpeningId` order in `jolt-core`.
+2. Stop multiplying advice and dense-increment claims into a pre-scaled `polynomial_claims` vector.
+   Instead, pass raw `eval` plus `eval_scale` on each batch-opening term.
+3. Build a `Stage8OpeningSourceBatch` that can expose trace-backed committed sources, advice sources, opening hints, and the current streaming row-folding behavior.
+4. Let the PCS sample the fusion challenge, combine sources/hints/commitments, and produce the opened output.
+5. Use the returned `BatchOutputRelation` to populate non-ZK claim data and ZK BlindFold data.
 
-In the final cutover this means the public API is new, but the performance-critical Stage 8 work is not rederived during the cutover.
-The same source abstraction can later make the joint RLC polynomial less Dory-shaped, but the first PR should not require moving Jolt's opening accumulator, claim ordering, or BlindFold constraint logic into `jolt-openings`.
-Future Akita work can implement a different `prove_batch` / `verify_batch` body without changing `jolt-core`'s trait definitions.
+The final Stage 8 code calls canonical source-backed batch-opening methods, stores canonical `PCS::BatchProof`, and consumes the returned public/prover-only output data.
+Future Akita work can implement a different source-backed batch-opening body without changing `jolt-core`'s Stage 8 raw-claim collection.
 
-The final Stage 8 code calls canonical `PCS::prove_batch` / `PCS::verify_batch`, stores canonical `PCS::BatchProof`, and uses canonical or backend-owned ZK extension hooks to extract the evaluation commitment before binding the same transcript input and BlindFold opening data as before.
+The prover call should have this shape:
+
+```rust
+let opening_point = self.stage8_opening_point();
+let opening_batch = Stage8OpeningSourceBatch::<F, PCS>::new(
+    self.one_hot_params.clone(),
+    TraceSource::Materialized(Arc::clone(&self.trace)),
+    Arc::new(RLCStreamingData {
+        bytecode: Arc::clone(&self.preprocessing.shared.bytecode),
+        memory_layout: self.preprocessing.shared.memory_layout.clone(),
+    }),
+    opening_proof_hints,
+    self.take_stage8_advice_polys(),
+);
+
+let terms: Vec<ProverBatchOpeningTerm<F, OpeningId, CommittedPolynomial>> =
+    self.stage8_raw_opening_terms(&opening_point);
+
+#[cfg(feature = "zk")]
+let opening_result = PCS::prove_batch_opening_zk(
+    &opening_batch,
+    &terms,
+    &self.preprocessing.generators,
+    &mut self.transcript,
+);
+
+#[cfg(not(feature = "zk"))]
+let opening_result = PCS::prove_batch_opening(
+    &opening_batch,
+    &terms,
+    &self.preprocessing.generators,
+    &mut self.transcript,
+);
+
+let proof = opening_result.proof;
+```
+
+Each Stage 8 term uses the same public/proof point pair:
+
+```rust
+let point = BatchOpeningPoint {
+    public: opening_point.r.iter().map(|x| (*x).into()).collect(),
+    proof: DoryGlobals::reorder_opening_point_for_layout(&opening_point.r)
+        .iter()
+        .map(|x| (*x).into())
+        .collect(),
+};
+```
+
+The pair is generic: future schemes whose proof coordinates match protocol coordinates set `proof = public`.
+This keeps the point-coordinate distinction explicit without putting Dory's `sigma`/`nu` or row layout vocabulary into `jolt-openings`.
+
+The Stage 8 source batch should concentrate the current streaming RLC behavior:
+
+```rust
+struct Stage8OpeningSourceBatch<F, PCS>
+where
+    PCS: CommitmentScheme<Field = F>,
+{
+    one_hot_params: OneHotParams,
+    trace_source: TraceSource,
+    streaming_data: Arc<RLCStreamingData>,
+    hints: HashMap<CommittedPolynomial, PCS::OpeningHint>,
+    advice_polys: HashMap<CommittedPolynomial, MultilinearPolynomial<F>>,
+}
+
+impl<F, PCS> BatchOpeningSource<F, PCS::OpeningHint> for Stage8OpeningSourceBatch<F, PCS>
+where
+    F: JoltField + Field,
+    PCS: CommitmentScheme<Field = F>,
+{
+    type Id = CommittedPolynomial;
+    type Source<'a> = Stage8OpeningSource<'a, F> where Self: 'a;
+
+    fn source(&self, id: Self::Id) -> Self::Source<'_> {
+        self.source_for_id(id)
+    }
+
+    fn opening_hint(&self, id: Self::Id) -> &PCS::OpeningHint {
+        &self.hints[&id]
+    }
+
+    fn fold_linear_rows(
+        &self,
+        terms: &[LinearSourceTerm<F, Self::Id>],
+        left: &[F],
+        chunk_len: usize,
+    ) -> Vec<F> {
+        self.fold_stage8_streaming_rlc(terms, left, chunk_len)
+    }
+}
+```
+
+`Stage8OpeningSource` can be an enum or adapter over trace-backed committed polynomials and materialized advice polynomials.
+It is a `jolt-core` source adapter, not a new `jolt-openings` concept.
+
+The verifier call should mirror the raw terms, with commitments attached:
+
+```rust
+let terms: Vec<VerifierBatchOpeningTerm<F, PCS, OpeningId, CommittedPolynomial>> =
+    self.stage8_verifier_opening_terms(&opening_point)?;
+
+let opening_public = PCS::verify_batch_opening(
+    &terms,
+    &self.proof.joint_opening_proof,
+    &self.preprocessing.generators,
+    &mut self.transcript,
+)?.public;
+
+let stage8_relation = opening_public.expect_single_linear_relation()?;
+Ok(Stage8VerifyData {
+    opening_ids: stage8_relation.claim_ids(),
+    constraint_coeffs: stage8_relation.coefficients(),
+})
+```
+
+In ZK mode the verifier uses the same shape with `verify_batch_opening_zk`; the returned public data contains `Hidden(y_com)` instead of `Public(joint_claim)`.
 
 ### Proof Serialization
 
@@ -1119,17 +1544,60 @@ The behaviorally important change is that the proof object is scheme-defined bat
 
 Current `main` ZK mode is not just a PCS verify call.
 It also binds a Dory evaluation commitment into the transcript and passes opening proof data into BlindFold.
+After the source-backed batch-opening cutover, that information should come from the PCS batch-opening result.
 
 The cutover must preserve:
 
-1. `y_com` extraction or equivalent `HidingCommitment` extraction.
-2. `y_blinding` or equivalent `Blind` extraction.
-3. BlindFold `OpeningProofData`.
-4. ZK opening input binding.
-5. Pedersen generator derivation used by BlindFold.
+1. `Hidden(y_com)` or equivalent `HidingCommitment` output in `BatchOpeningPublic`.
+2. `y_blinding` or equivalent `Blind` in the prover-only `ZkBatchOpeningWitness`.
+3. `joint_claim` in the prover-only `ZkBatchOpeningWitness`.
+4. BlindFold `OpeningProofData` populated from the returned linear relation and witness.
+5. ZK opening input binding performed by the PCS exactly once, or represented in the returned public output with a single clear call site.
+6. Pedersen generator derivation used by BlindFold.
 
-If the #1467 ZK split is not sufficient to express all BlindFold-specific Dory needs, add a narrow extension trait rather than widening the base `CommitmentSchemeVerifier`.
-The extension trait should describe the capability directly, such as deriving Pedersen generators or exposing a hiding commitment, and should not mention BlindFold from inside `jolt-openings`.
+The returned ZK public relation is the bridge between PCS and BlindFold:
+
+```rust
+let relation = opening_result
+    .public
+    .expect_single_linear_relation()?;
+
+let output_index = relation.output_index;
+let _hidden_output = opening_result.public.outputs[output_index]
+    .value
+    .as_hidden()
+    .ok_or(ProofVerifyError::InvalidOpeningProof)?;
+
+self.blindfold_accumulator.set_opening_proof_data(OpeningProofData {
+    opening_ids: relation.claim_ids(),
+    constraint_coeffs: relation.coefficients(),
+    joint_claim: opening_result.witness.output_values[output_index],
+    y_blinding: opening_result.witness.output_blinds[output_index],
+});
+```
+
+Verifier-side ZK Stage 8 consumes the same public relation but does not know `joint_claim` or `y_blinding`:
+
+```rust
+let relation = opening_result
+    .public
+    .expect_single_linear_relation()?;
+
+let output_index = relation.output_index;
+let _hidden_output = opening_result.public.outputs[output_index]
+    .value
+    .as_hidden()
+    .ok_or(ProofVerifyError::InvalidOpeningProof)?;
+
+Ok(Stage8VerifyData {
+    opening_ids: relation.claim_ids(),
+    constraint_coeffs: relation.coefficients(),
+})
+```
+
+If the ZK split is not sufficient to express all BlindFold-adjacent needs, add a narrow extension trait rather than widening the base `CommitmentSchemeVerifier`.
+The extension trait should describe the capability directly, such as deriving Pedersen generators.
+It should not mention BlindFold from inside `jolt-openings`.
 
 ### Alternatives Considered
 
@@ -1139,11 +1607,11 @@ The extension trait should describe the capability directly, such as deriving Pe
 
 2. **Keep current `jolt-openings` reduce API and only wire it into `jolt-core`.**
    Rejected because it keeps batching as an external orchestration step and still forces future non-homomorphic schemes into the wrong abstraction.
-   #1467 correctly makes fused batching the core API.
+   #1467 correctly makes batch proving part of the PCS API.
 
 3. **Put single-claim `open` and `verify` only on homomorphic extension traits.**
    Rejected because single-claim openings are still a natural PCS semantic, and verifier-only code benefits from a base `verify` method.
-   Hachi/Akita-style schemes can keep native fused batching as the hot path while implementing singleton opening as the one-claim special case.
+   Hachi/Akita-style schemes can keep native batching as the hot path while implementing singleton opening as the one-claim special case.
 
 4. **Move Jolt opening accumulators into `jolt-openings`.**
    Rejected because accumulators are Jolt protocol bookkeeping, not PCS abstraction.
@@ -1153,6 +1621,11 @@ The extension trait should describe the capability directly, such as deriving Pe
    Rejected because this PR should make the reusable PCS boundary reviewable on its own.
    Akita should build on the new boundary after it lands.
 
+6. **Let Stage 8 pre-fuse raw claims into one singleton batch opening.**
+   Rejected because it preserves the current Dory-shaped ownership boundary.
+   It makes `jolt-core` sample PCS fusion challenges, build a joint commitment/source, and manually derive BlindFold coefficients.
+   That is exactly the coupling the new source-backed batch-opening API is meant to remove.
+
 ## Documentation
 
 No Jolt book changes are required for this internal API refactor unless reviewers request them.
@@ -1161,8 +1634,10 @@ The implementation PR should update crate-level docs in:
 
 1. `crates/jolt-openings/src/lib.rs`
 2. `crates/jolt-openings/src/schemes.rs`
-3. `crates/jolt-openings/src/homomorphic.rs`
-4. `crates/jolt-dory/src/lib.rs`
+3. `crates/jolt-openings/src/sources.rs`
+4. `crates/jolt-openings/src/claims.rs`
+5. `crates/jolt-openings/src/homomorphic.rs`
+6. `crates/jolt-dory/src/lib.rs`
 
 The PR should not add user-facing Jolt book documentation unless reviewers request it.
 This is an internal API boundary refactor with no intended SDK or guest-facing behavior change.
@@ -1179,15 +1654,17 @@ Implementation should proceed mechanically:
 6. Replace internal PCS trait imports with `jolt_openings` imports.
 7. Convert `PCS::Commitment` call sites to `PCS::Output`.
 8. Convert `JoltProof` opening proof storage to `PCS::BatchProof`.
-9. Update Stage 8 prover to produce a batch proof through `PCS::prove_batch`.
-10. Update Stage 8 verifier to verify through `PCS::verify_batch`.
-11. Reconcile ZK and BlindFold extraction through the split ZK traits or a narrow extension trait.
-12. Remove the old internal PCS trait family after call sites stop depending on it.
-13. Delete bridge-only Dory APIs, wrappers, and conversions that become unused after direct `jolt-openings` integration.
-14. Run focused crate tests.
-15. Run `muldiv` in standard and ZK mode.
-16. Run clippy in standard and ZK mode.
-17. Run the existing Criterion benchmark path against `main` and the PR branch for Dory/opening-heavy workloads.
+9. Add source-backed batch-opening claim/result/source traits to `jolt-openings`.
+10. Implement Dory source-backed batch opening while preserving the current Stage 8 streaming RLC and hint-combination behavior.
+11. Update Stage 8 prover to produce a batch proof through `PCS::prove_batch_opening` / `PCS::prove_batch_opening_zk`.
+12. Update Stage 8 verifier to verify through `PCS::verify_batch_opening` / `PCS::verify_batch_opening_zk`.
+13. Reconcile ZK and BlindFold extraction through the returned batch-opening output relation and any narrow generator-derivation extension trait.
+14. Remove the old internal PCS trait family after call sites stop depending on it.
+15. Delete bridge-only Dory APIs, wrappers, and conversions that become unused after direct `jolt-openings` integration.
+16. Run focused crate tests.
+17. Run `muldiv` in standard and ZK mode.
+18. Run clippy in standard and ZK mode.
+19. Run the existing Criterion benchmark path against `main` and the PR branch for Dory/opening-heavy workloads.
 
 Recommended commit structure for the implementation PR:
 
@@ -1195,8 +1672,11 @@ Recommended commit structure for the implementation PR:
 2. `refactor(dory): implement split openings traits`
 3. `refactor(core): migrate PCS type family`
 4. `refactor(core): remove in-core PCS bridges`
-5. `perf(dory): preserve opening and commitment hot paths`
-6. `test(openings): cover fused batch helpers`
+5. `refactor(openings): add source-backed batch openings`
+6. `refactor(dory): own stage eight opening fusion`
+7. `refactor(core): pass stage eight raw openings to PCS`
+8. `perf(dory): preserve opening and commitment hot paths`
+9. `test(openings): cover batch-opening output relations`
 
 The spec should stay in the implementation PR so reviewers can check code against the intended boundary as the cutover proceeds.
 

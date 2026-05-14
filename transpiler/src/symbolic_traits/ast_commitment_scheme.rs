@@ -141,19 +141,6 @@ impl CommitmentSchemeVerifier for AstCommitmentScheme {
         )
     }
 
-    fn verify_fused_batch(
-        _commitment: &Self::Output,
-        _point: &[Self::Field],
-        _eval: Self::Field,
-        _proof: &Self::BatchProof,
-        _setup: &Self::VerifierSetup,
-        _transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        unimplemented!(
-            "AstCommitmentScheme::verify_fused_batch is not needed for stages 1-7 transpilation"
-        )
-    }
-
     fn bind_opening_inputs(
         _transcript: &mut impl Transcript<Challenge = Self::Field>,
         _point: &[Self::Field],
@@ -215,20 +202,6 @@ impl CommitmentScheme for AstCommitmentScheme {
     {
         panic!("AstCommitmentScheme::prove_batch should never be called during verification")
     }
-
-    fn prove_fused_batch<S>(
-        _polynomial: &S,
-        _point: &[Self::Field],
-        _eval: Self::Field,
-        _hint: Option<Self::OpeningHint>,
-        _setup: &Self::ProverSetup,
-        _transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof
-    where
-        S: CommitmentSource<Self::Field> + ?Sized,
-    {
-        panic!("AstCommitmentScheme::prove_fused_batch should never be called during verification")
-    }
 }
 
 impl AdditivelyHomomorphicVerifier for AstCommitmentScheme {
@@ -267,18 +240,6 @@ impl ZkOpeningSchemeVerifier for AstCommitmentScheme {
     ) -> Result<(), OpeningsError> {
         unimplemented!(
             "AstCommitmentScheme::verify_batch_zk is not needed for stages 1-7 transpilation"
-        )
-    }
-
-    fn verify_fused_batch_zk(
-        _commitment: &Self::Output,
-        _point: &[Self::Field],
-        _proof: &Self::BatchProof,
-        _setup: &Self::VerifierSetup,
-        _transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        unimplemented!(
-            "AstCommitmentScheme::verify_fused_batch_zk is not needed for stages 1-7 transpilation"
         )
     }
 
@@ -324,22 +285,6 @@ impl ZkOpeningScheme for AstCommitmentScheme {
         S: CommitmentSource<Self::Field>,
     {
         panic!("AstCommitmentScheme::prove_batch_zk should never be called during verification")
-    }
-
-    fn prove_fused_batch_zk<S>(
-        _polynomial: &S,
-        _point: &[Self::Field],
-        _eval: Self::Field,
-        _hint: Self::OpeningHint,
-        _setup: &Self::ProverSetup,
-        _transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
-    where
-        S: CommitmentSource<Self::Field> + ?Sized,
-    {
-        panic!(
-            "AstCommitmentScheme::prove_fused_batch_zk should never be called during verification"
-        )
     }
 }
 

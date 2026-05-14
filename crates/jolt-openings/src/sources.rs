@@ -9,6 +9,8 @@ use std::iter::repeat_n;
 use jolt_field::Field;
 use jolt_poly::{MultilinearPoly, OneHotPolynomial, Polynomial, RlcSource};
 
+use crate::claims::LinearSourceTerm;
+
 /// Stable identifier for a committed source inside a batch commitment source.
 ///
 /// In the Dory/Jolt trace path this can be a logical committed polynomial id.
@@ -213,6 +215,54 @@ pub trait CommitmentSource<F: Field>: Send + Sync {
 
     /// Folds rows against the left-side weights used by opening algorithms.
     fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F>;
+}
+
+impl<F, S> CommitmentSource<F> for &S
+where
+    F: Field,
+    S: CommitmentSource<F> + ?Sized,
+{
+    fn num_vars(&self) -> usize {
+        (**self).num_vars()
+    }
+
+    fn evaluate(&self, point: &[F]) -> F {
+        (**self).evaluate(point)
+    }
+
+    fn natural_chunk_len(&self) -> Option<usize> {
+        (**self).natural_chunk_len()
+    }
+
+    fn for_each_row<V>(&self, chunk_len: usize, visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, F>),
+    {
+        (**self).for_each_row(chunk_len, visit);
+    }
+
+    fn map_rows<R, V>(&self, chunk_len: usize, visit: V) -> Vec<R>
+    where
+        R: Send,
+        V: for<'row> Fn(usize, SourceRow<'row, F>) -> R + Send + Sync,
+    {
+        (**self).map_rows(chunk_len, visit)
+    }
+
+    fn is_one_hot(&self) -> bool {
+        (**self).is_one_hot()
+    }
+
+    fn for_each_one<V>(&self, visit: V)
+    where
+        V: FnMut(usize),
+    {
+        (**self).for_each_one(visit);
+    }
+
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+        (**self).fold_rows(left, chunk_len)
+    }
 }
 
 fn chunk_len_to_sigma(chunk_len: usize) -> usize {
@@ -526,4 +576,68 @@ pub trait BatchCommitmentSource<F: Field>: Send + Sync {
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, F>) -> R + Send + Sync;
+}
+
+/// A batch of already-committed sources available for opening.
+///
+/// Commitment and opening have different traversal needs. Commitment wants to
+/// stream rows for many sources at once. Opening wants to recover individual
+/// committed sources, borrow their backend-owned opening hints, and sometimes
+/// fold a linear combination of sources without first materializing each full
+/// polynomial. This trait captures that opening-side view without naming any
+/// Dory-specific matrix partition.
+pub trait BatchOpeningSource<F: Field, OpeningHint>: Send + Sync {
+    type Id: SourceId;
+
+    /// Borrowed single-source adapter for a source in this batch.
+    type Source<'a>: CommitmentSource<F> + 'a
+    where
+        Self: 'a;
+
+    /// Returns a single-source view for the selected committed source.
+    fn source(&self, id: Self::Id) -> Self::Source<'_>;
+
+    /// Borrows the backend-owned opening hint produced with this source's
+    /// commitment.
+    ///
+    /// The borrow is deliberate: production Dory hints contain row commitments,
+    /// and source-backed Stage 8 opening must combine those hints without
+    /// cloning the row-commitment vectors in the hot path.
+    fn opening_hint(&self, id: Self::Id) -> &OpeningHint;
+
+    /// Folds a linear combination of sources against opening-time left weights.
+    ///
+    /// The default implementation folds each source separately and combines the
+    /// resulting rows. Streaming backends should override this method when they
+    /// can compute the same linear combination in a single pass over their
+    /// native source data.
+    fn fold_linear_rows(
+        &self,
+        terms: &[LinearSourceTerm<F, Self::Id>],
+        left: &[F],
+        chunk_len: usize,
+    ) -> Vec<F> {
+        let Some((first, rest)) = terms.split_first() else {
+            return Vec::new();
+        };
+
+        let mut folded = self.source(first.source_id).fold_rows(left, chunk_len);
+        for value in &mut folded {
+            *value *= first.coefficient;
+        }
+
+        for term in rest {
+            let next = self.source(term.source_id).fold_rows(left, chunk_len);
+            assert_eq!(
+                folded.len(),
+                next.len(),
+                "cannot linearly fold sources with different row-folded lengths",
+            );
+            for (acc, value) in folded.iter_mut().zip(next) {
+                *acc += term.coefficient * value;
+            }
+        }
+
+        folded
+    }
 }

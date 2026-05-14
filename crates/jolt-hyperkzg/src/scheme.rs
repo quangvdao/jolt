@@ -281,21 +281,6 @@ where
         homomorphic_verify_batch::<Self, _>(claims, proof, setup, transcript)
     }
 
-    fn verify_fused_batch(
-        commitment: &Self::Output,
-        point: &[Self::Field],
-        eval: Self::Field,
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError> {
-        let [proof] = proof.as_slice() else {
-            return Err(OpeningsError::VerificationFailed);
-        };
-        Self::verify(setup, commitment, point, &eval, proof, transcript)
-            .map_err(|_| OpeningsError::VerificationFailed)
-    }
-
     fn bind_opening_inputs(
         transcript: &mut impl Transcript<Challenge = Self::Field>,
         point: &[Self::Field],
@@ -373,22 +358,6 @@ where
         S: CommitmentSource<Self::Field>,
     {
         homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
-    }
-
-    fn prove_fused_batch<S>(
-        polynomial: &S,
-        point: &[Self::Field],
-        eval: Self::Field,
-        hint: Option<Self::OpeningHint>,
-        setup: &Self::ProverSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof
-    where
-        S: CommitmentSource<Self::Field> + ?Sized,
-    {
-        vec![<Self as CommitmentScheme>::open(
-            polynomial, point, eval, setup, hint, transcript,
-        )]
     }
 }
 

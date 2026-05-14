@@ -38,10 +38,7 @@ where
         return Vec::new();
     }
 
-    bind_batch_claims::<PCS::Field, _, _>(&claims, transcript);
-
     if claims.len() == 1 {
-        let _rho: PCS::Field = transcript.challenge();
         let mut claims = claims.into_iter();
         let mut hints = hints.into_iter();
         let Some(claim) = claims.next() else {
@@ -59,6 +56,8 @@ where
             transcript,
         )];
     }
+
+    bind_batch_claims::<PCS::Field, _, _>(&claims, transcript);
 
     let groups = group_prover_claims_by_point::<PCS, S>(claims.into_iter().zip(hints).collect());
     let mut proofs = Vec::with_capacity(groups.len());
@@ -110,6 +109,24 @@ where
             return Ok(());
         }
         return Err(OpeningsError::VerificationFailed);
+    }
+
+    if claims.len() == 1 {
+        let [proof] = proofs else {
+            return Err(OpeningsError::VerificationFailed);
+        };
+        let mut claims = claims.into_iter();
+        let Some(claim) = claims.next() else {
+            unreachable!("single claim exists after len check");
+        };
+        return PCS::verify(
+            &claim.commitment,
+            &claim.point,
+            claim.eval,
+            proof,
+            setup,
+            transcript,
+        );
     }
 
     bind_batch_claims::<PCS::Field, _, _>(&claims, transcript);

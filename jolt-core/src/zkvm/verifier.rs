@@ -10,6 +10,7 @@ use ark_serialize::{
 };
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use common::jolt_device::MemoryLayout;
+use jolt_openings::OpeningClaim;
 use jolt_riscv::NormalizedInstruction;
 use tracer::JoltDevice;
 
@@ -1673,9 +1674,12 @@ impl<
 
         let zk_mode = self.opening_accumulator.zk_mode;
         if zk_mode {
-            PCS::verify_fused_batch_zk(
-                &joint_commitment,
-                &dory_opening_point,
+            PCS::verify_batch_zk(
+                vec![OpeningClaim {
+                    commitment: joint_commitment,
+                    point: dory_opening_point.clone(),
+                    eval: joint_claim,
+                }],
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,
@@ -1693,10 +1697,12 @@ impl<
                 return Err(ProofVerifyError::ZkFeatureRequired);
             }
         } else {
-            PCS::verify_fused_batch(
-                &joint_commitment,
-                &dory_opening_point,
-                joint_claim,
+            PCS::verify_batch(
+                vec![OpeningClaim {
+                    commitment: joint_commitment,
+                    point: dory_opening_point,
+                    eval: joint_claim,
+                }],
                 &self.proof.joint_opening_proof,
                 &self.preprocessing.generators,
                 &mut self.transcript,

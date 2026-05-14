@@ -1,8 +1,8 @@
 //! Polynomial commitment scheme (PCS) trait hierarchy.
 //!
-//! The base verifier/prover traits expose single openings, fused batch
-//! openings, and source-based commitment. Homomorphic and ZK traits only add
-//! the operations that are genuinely extra for those schemes.
+//! The base verifier/prover traits expose single openings, ordinary batch
+//! openings, and source-based commitment. Extension traits add homomorphic and
+//! ZK operations only for schemes and protocols that need them.
 
 use std::fmt::Debug;
 
@@ -11,9 +11,13 @@ use jolt_field::Field;
 use jolt_transcript::{AppendToTranscript, Transcript};
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::claims::{OpeningClaim, ProverClaim};
+use crate::claims::{
+    BatchOpeningProverResult, BatchOpeningPublic, BatchOutputExpression, BatchOutputRelation,
+    BatchOutputValue, OpenedBatchOutput, OpeningClaim, ProverBatchOpeningTerm, ProverClaim,
+    VerifierBatchOpeningTerm, ZkBatchOpeningProverResult,
+};
 use crate::error::OpeningsError;
-use crate::sources::{BatchCommitmentSource, CommitmentSource};
+use crate::sources::{BatchCommitmentSource, BatchOpeningSource, CommitmentSource, SourceId};
 
 /// Verifier-side interface for a polynomial commitment scheme.
 pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
@@ -32,7 +36,7 @@ pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
 
-    /// Verifies a fused batch-opening proof.
+    /// Verifies an ordinary batch-opening proof.
     fn verify_batch(
         claims: Vec<OpeningClaim<Self::Field, Self>>,
         proof: &Self::BatchProof,
@@ -40,22 +44,41 @@ pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
 
-    /// Verifies a batch proof for one opening claim that the caller has
-    /// already fused with the surrounding protocol's linear combination.
+    /// Verifies a source-backed batch opening and returns the PCS output
+    /// relation created by that verification.
     ///
-    /// Unlike [`verify_batch`](Self::verify_batch), this method does not own
-    /// batch randomization or bind a batch-RLC challenge. It exists for
-    /// protocols such as Jolt Stage 8, where the sumcheck transcript has
-    /// already chosen the linear combination before entering the PCS layer, but
-    /// the proof container is still batch-shaped.
-    fn verify_fused_batch(
-        commitment: &Self::Output,
-        point: &[Self::Field],
-        eval: Self::Field,
+    /// The default implementation verifies the raw terms through ordinary
+    /// [`verify_batch`](Self::verify_batch) and exposes one public output per
+    /// raw term. Schemes with native source-backed fusion should override this
+    /// method so the PCS owns its batching challenge and output relation.
+    fn verify_batch_opening<ClaimId, SourceIdT>(
+        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
         proof: &Self::BatchProof,
         setup: &Self::VerifierSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError>;
+    ) -> Result<BatchOpeningPublic<Self::Field, (), ClaimId>, OpeningsError>
+    where
+        Self: Sized,
+        SourceIdT: SourceId,
+    {
+        let claims = terms
+            .iter()
+            .map(|term| OpeningClaim {
+                commitment: term.commitment.clone(),
+                point: term.point.proof.clone(),
+                eval: term.eval,
+            })
+            .collect();
+        Self::verify_batch(claims, proof, setup, transcript)?;
+
+        let public = transparent_public_from_terms(
+            terms
+                .into_iter()
+                .map(|term| (term.claim_id, term.point.public, term.eval, term.eval_scale)),
+        );
+        bind_transparent_batch_outputs::<Self, ClaimId>(&public, transcript);
+        Ok(public)
+    }
 
     /// Binds one transparent opening input to the Fiat-Shamir transcript.
     fn bind_opening_inputs(
@@ -123,7 +146,7 @@ pub trait CommitmentScheme: CommitmentSchemeVerifier {
     where
         S: CommitmentSource<Self::Field> + ?Sized;
 
-    /// Proves a fused batch opening.
+    /// Proves an ordinary batch opening.
     fn prove_batch<S>(
         claims: Vec<ProverClaim<Self::Field, S>>,
         hints: Vec<Self::OpeningHint>,
@@ -133,23 +156,43 @@ pub trait CommitmentScheme: CommitmentSchemeVerifier {
     where
         S: CommitmentSource<Self::Field>;
 
-    /// Proves a batch-shaped opening for one already-fused claim.
+    /// Proves a source-backed batch opening and returns the PCS output relation.
     ///
-    /// The caller supplies the polynomial, point, evaluation, and opening hint
-    /// after performing any protocol-level linear combination. Implementations
-    /// should route directly to the single-opening prover and wrap the result
-    /// in their batch-proof representation, preserving the caller's transcript
-    /// schedule.
-    fn prove_fused_batch<S>(
-        polynomial: &S,
-        point: &[Self::Field],
-        eval: Self::Field,
-        hint: Option<Self::OpeningHint>,
+    /// The default implementation routes each raw term through ordinary
+    /// [`prove_batch`](Self::prove_batch). Production backends that can preserve
+    /// streaming fusion should override this method.
+    fn prove_batch_opening<B, ClaimId>(
+        terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
+        source_batch: &B,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Self::BatchProof
+    ) -> BatchOpeningProverResult<Self, ClaimId>
     where
-        S: CommitmentSource<Self::Field> + ?Sized;
+        Self: Sized,
+        B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
+    {
+        let claims = terms
+            .iter()
+            .map(|term| ProverClaim {
+                polynomial: source_batch.source(term.source_id),
+                point: term.point.proof.clone(),
+                eval: term.eval,
+            })
+            .collect();
+        let hints = terms
+            .iter()
+            .map(|term| source_batch.opening_hint(term.source_id).clone())
+            .collect();
+        let proof = Self::prove_batch(claims, hints, setup, transcript);
+
+        let public = transparent_public_from_terms(
+            terms
+                .into_iter()
+                .map(|term| (term.claim_id, term.point.public, term.eval, term.eval_scale)),
+        );
+        bind_transparent_batch_outputs::<Self, ClaimId>(&public, transcript);
+        BatchOpeningProverResult { proof, public }
+    }
 }
 
 /// Verifier-side additive combination of commitments.
@@ -196,7 +239,7 @@ pub trait ZkOpeningSchemeVerifier: CommitmentSchemeVerifier {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
 
-    /// Verifies a fused ZK batch-opening proof.
+    /// Verifies a ZK batch-opening proof.
     fn verify_batch_zk(
         claims: Vec<OpeningClaim<Self::Field, Self>>,
         proof: &Self::BatchProof,
@@ -204,19 +247,25 @@ pub trait ZkOpeningSchemeVerifier: CommitmentSchemeVerifier {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
 
-    /// Verifies a ZK batch proof for one already-fused opening claim.
+    /// Verifies a ZK source-backed batch opening and returns the public output
+    /// relation produced by the PCS.
     ///
-    /// This mirrors [`CommitmentSchemeVerifier::verify_fused_batch`] for
-    /// schemes whose opening proof hides the evaluation. The public evaluation
-    /// is intentionally absent because it is bound through the proof's hiding
-    /// commitment.
-    fn verify_fused_batch_zk(
-        commitment: &Self::Output,
-        point: &[Self::Field],
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<(), OpeningsError>;
+    /// Backends that support ZK source-backed batch opening must override this
+    /// method. The default returns a verification error so unsupported backends
+    /// fail closed rather than guessing how to recover hidden output metadata
+    /// from an arbitrary batch proof.
+    fn verify_batch_opening_zk<ClaimId, SourceIdT>(
+        _terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
+        _proof: &Self::BatchProof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<BatchOpeningPublic<Self::Field, Self::HidingCommitment, ClaimId>, OpeningsError>
+    where
+        Self: Sized,
+        SourceIdT: SourceId,
+    {
+        Err(OpeningsError::VerificationFailed)
+    }
 
     /// Binds one ZK opening input to the Fiat-Shamir transcript.
     ///
@@ -266,7 +315,7 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
     where
         S: CommitmentSource<Self::Field> + ?Sized;
 
-    /// Proves a fused ZK batch opening.
+    /// Proves a ZK batch opening.
     fn prove_batch_zk<S>(
         claims: Vec<ProverClaim<Self::Field, S>>,
         hints: Vec<Self::OpeningHint>,
@@ -276,20 +325,64 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
     where
         S: CommitmentSource<Self::Field>;
 
-    /// Proves a ZK batch-shaped opening for one already-fused claim.
+    /// Proves a ZK source-backed batch opening and returns both public output
+    /// metadata and prover-only hidden-output witnesses.
     ///
-    /// The returned hiding commitment and blind are the same objects produced
-    /// by [`open_zk`](Self::open_zk); only the proof container is batch-shaped.
-    fn prove_fused_batch_zk<S>(
-        polynomial: &S,
-        point: &[Self::Field],
-        eval: Self::Field,
-        hint: Self::OpeningHint,
-        setup: &Self::ProverSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
+    /// Backends that support ZK source-backed batch opening must override this
+    /// method. The default panics because the trait's return type cannot encode
+    /// unsupported backend capability without weakening existing proof APIs.
+    #[expect(
+        clippy::panic,
+        reason = "the default exists only for unsupported ZK source-backed PCS backends"
+    )]
+    fn prove_batch_opening_zk<B, ClaimId>(
+        _terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
+        _source_batch: &B,
+        _setup: &Self::ProverSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> ZkBatchOpeningProverResult<Self, ClaimId>
     where
-        S: CommitmentSource<Self::Field> + ?Sized;
+        Self: Sized,
+        B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
+    {
+        panic!("source-backed ZK batch opening is not implemented for this PCS")
+    }
+}
+
+fn transparent_public_from_terms<F, ClaimId, I>(terms: I) -> BatchOpeningPublic<F, (), ClaimId>
+where
+    F: Field,
+    I: IntoIterator<Item = (ClaimId, Vec<F>, F, F)>,
+{
+    let mut outputs = Vec::new();
+    let mut relations = Vec::new();
+
+    for (claim_id, point, eval, eval_scale) in terms {
+        let output_index = outputs.len();
+        outputs.push(OpenedBatchOutput {
+            point,
+            value: BatchOutputValue::Public(eval * eval_scale),
+        });
+        relations.push(BatchOutputRelation {
+            output_index,
+            expression: BatchOutputExpression::Linear(vec![(claim_id, eval_scale)]),
+        });
+    }
+
+    BatchOpeningPublic { outputs, relations }
+}
+
+fn bind_transparent_batch_outputs<PCS, ClaimId>(
+    public: &BatchOpeningPublic<PCS::Field, (), ClaimId>,
+    transcript: &mut impl Transcript<Challenge = PCS::Field>,
+) where
+    PCS: CommitmentSchemeVerifier,
+{
+    for output in &public.outputs {
+        if let BatchOutputValue::Public(eval) = &output.value {
+            PCS::bind_opening_inputs(transcript, &output.point, eval);
+        }
+    }
 }
 
 /// Verifier-side hooks for schemes whose ZK openings bind a hidden evaluation.

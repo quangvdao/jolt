@@ -1385,7 +1385,6 @@ impl<
 
         let eval_commitment = stage8_data
             .eval_commitment
-            .clone()
             .ok_or(ProofVerifyError::InvalidOpeningProof)?;
         let eval_commitments = vec![eval_commitment];
 

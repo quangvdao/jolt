@@ -2,11 +2,8 @@ use std::fs::File;
 
 use crate::zkvm::config::{OneHotConfig, ReadWriteConfig};
 use crate::{
-    curve::JoltCurve,
-    field::JoltField,
-    poly::commitment::dory::DoryLayout,
-    poly::opening_proof::ProverOpeningAccumulator,
-    transcripts::Transcript,
+    curve::JoltCurve, field::JoltField, poly::commitment::dory::DoryLayout,
+    poly::opening_proof::ProverOpeningAccumulator, transcripts::Transcript,
 };
 
 // Compile-time error if multiple transcript features are enabled
@@ -34,12 +31,11 @@ use crate::transcripts::KeccakTranscript;
 use crate::transcripts::PoseidonTranscript;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Valid};
 use eyre::Result;
-use jolt_crypto::{Bn254, Commitment, HomomorphicCommitment};
+use jolt_crypto::Bn254;
 use jolt_dory::DoryScheme;
 use jolt_field::{Field, Fr};
 use jolt_openings::{
-    AdditivelyHomomorphic, CommitmentScheme, CommitmentSchemeVerifier, EvaluationCommitmentProver,
-    ZkOpeningScheme,
+    CommitmentScheme, CommitmentSchemeVerifier, EvaluationCommitmentProver, ZkOpeningScheme,
 };
 use proof_serialization::JoltProof;
 #[cfg(feature = "prover")]
@@ -53,19 +49,18 @@ use verifier::JoltVerifier;
 ///
 /// The extracted `jolt-openings` traits stay backend-neutral. This trait
 /// collects the extra requirements that Jolt core currently needs for Stage 8:
-/// canonical proof serialization, additive commitment/hint combination,
-/// Dory's hidden-evaluation commitment for BlindFold, and size-only setup.
+/// canonical proof serialization, Dory's hidden-evaluation commitment for
+/// BlindFold, and size-only setup.
 pub trait JoltCommitmentScheme<F, C>:
-    Commitment<Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid>
-    + CommitmentScheme<
+    CommitmentScheme<
         Field = F,
         SetupParams = usize,
         ProverSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
     > + CommitmentSchemeVerifier<
+        Output: CanonicalSerialize + CanonicalDeserialize + Valid,
         BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,
         VerifierSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
-    > + AdditivelyHomomorphic<Field = F>
-    + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+    > + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
     + EvaluationCommitmentProver<C::G1>
 where
     F: JoltField + Field,
@@ -78,10 +73,9 @@ where
     F: JoltField + Field,
     C: JoltCurve<F = F>,
     PCS: CommitmentScheme<Field = F, SetupParams = usize>
-        + AdditivelyHomomorphic<Field = F>
         + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
         + EvaluationCommitmentProver<C::G1>,
-    PCS::Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid,
+    PCS::Output: CanonicalSerialize + CanonicalDeserialize + Valid,
     PCS::BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,
     PCS::ProverSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
     PCS::VerifierSetup: CanonicalSerialize + CanonicalDeserialize + Valid,

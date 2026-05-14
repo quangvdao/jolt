@@ -7,7 +7,10 @@ use crate::utils::thread::unsafe_allocate_zero_vec;
 use crate::zkvm::config::OneHotParams;
 use crate::zkvm::instruction::LookupQuery;
 use crate::zkvm::ram::remap_address;
-use crate::zkvm::{bytecode::BytecodePreprocessing, witness::CommittedPolynomial};
+use crate::zkvm::{
+    bytecode::{get_pc_for_cycle, BytecodePreprocessing},
+    witness::CommittedPolynomial,
+};
 use allocative::Allocative;
 use common::constants::XLEN;
 use common::jolt_device::MemoryLayout;
@@ -809,7 +812,7 @@ impl<'a, F: JoltField> VmvSetup<'a, F> {
         }
 
         // Bytecode RA chunks
-        let pc = crate::zkvm::bytecode::get_pc_for_cycle(self.bytecode, cycle);
+        let pc = get_pc_for_cycle(self.bytecode, cycle);
         for (i, table) in self.folded_tables.bytecode.iter().enumerate() {
             let k = self.one_hot_params.bytecode_pc_chunk(pc, i) as usize;
             inner_sum += table[k].to_unreduced();

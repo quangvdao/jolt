@@ -1,8 +1,17 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Result as IoResult, Write};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
+
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Validate,
+};
+use blake2::{digest::consts::U32, Blake2b, Digest};
+use common::jolt_device::MemoryLayout;
+use jolt_riscv::NormalizedInstruction;
+use tracer::JoltDevice;
 
 use crate::curve::JoltCurve;
 use crate::poly::commitment::dory::{DoryContext, DoryGlobals};
@@ -11,6 +20,8 @@ use crate::poly::commitment::pedersen::PedersenGenerators;
 use crate::poly::lagrange_poly::LagrangeHelper;
 #[cfg(feature = "zk")]
 use crate::poly::opening_proof::AbstractVerifierOpeningAccumulator;
+#[cfg(not(feature = "zk"))]
+use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
 #[cfg(feature = "zk")]
 use crate::subprotocols::blindfold::{
     pedersen_generator_count_for_r1cs, BakedPublicInputs, BlindFoldVerifier,
@@ -53,7 +64,7 @@ use crate::zkvm::{
     proof_serialization::JoltProof,
     r1cs::key::UniformSpartanKey,
     ram::{
-        compute_max_ram_K, compute_min_ram_K,
+        compute_max_ram_K, compute_min_ram_K, gen_ram_initial_memory_state,
         hamming_booleanity::HammingBooleanitySumcheckVerifier,
         output_check::OutputSumcheckVerifier, ra_virtual::RamRaVirtualSumcheckVerifier,
         raf_evaluation::RafEvaluationSumcheckVerifier as RamRafEvaluationSumcheckVerifier,
@@ -69,7 +80,7 @@ use crate::zkvm::{
         product::ProductVirtualRemainderVerifier, shift::ShiftSumcheckVerifier,
         verify_stage1_uni_skip, verify_stage2_uni_skip,
     },
-    stage8_opening_ids, ProverDebugInfo,
+    stage8_opening_ids, JoltCommitmentScheme, ProverDebugInfo,
 };
 use crate::{
     field::JoltField,
@@ -211,16 +222,11 @@ fn scale_batching_coefficients<
         })
         .collect()
 }
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use common::jolt_device::MemoryLayout;
-use jolt_riscv::NormalizedInstruction;
-use tracer::JoltDevice;
-
 pub struct JoltVerifier<
     'a,
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
     ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
 > {
     pub trusted_advice_commitment: Option<PCS::Output>,
@@ -250,7 +256,7 @@ impl<
         'a,
         F: JoltField + jolt_field::Field,
         C: JoltCurve<F = F>,
-        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+        PCS: JoltCommitmentScheme<F, C>,
         ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
     > JoltVerifier<'a, F, C, PCS, ProofTranscript>
 {
@@ -307,7 +313,6 @@ impl<
 
         #[cfg(not(feature = "zk"))]
         {
-            use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
             for (id, (_, claim)) in &proof.opening_claims.0 {
                 let dummy_point = OpeningPoint::<BIG_ENDIAN, F>::new(vec![]);
                 opening_accumulator
@@ -317,9 +322,9 @@ impl<
         }
 
         #[cfg(test)]
-        let mut transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
+        let mut transcript = <ProofTranscript as Transcript>::new(b"Jolt");
         #[cfg(not(test))]
-        let transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
+        let transcript = <ProofTranscript as Transcript>::new(b"Jolt");
 
         #[cfg(test)]
         {
@@ -875,13 +880,9 @@ impl<
             &mut self.opening_accumulator,
         );
         // Domain-separate the batching challenge.
-        crate::transcripts::Transcript::append_bytes(
-            &mut self.transcript,
-            b"ram_val_check_gamma",
-            &[],
-        );
+        Transcript::append_bytes(&mut self.transcript, b"ram_val_check_gamma", &[]);
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
-        let initial_ram_state = crate::zkvm::ram::gen_ram_initial_memory_state::<F>(
+        let initial_ram_state = gen_ram_initial_memory_state::<F>(
             self.proof.ram_K,
             &self.preprocessing.shared.ram,
             &self.program_io,
@@ -1221,14 +1222,11 @@ impl<
             let num_rounds = proof.num_rounds();
             for round_idx in 0..num_rounds {
                 let poly_degree = match proof {
-                    crate::subprotocols::sumcheck::SumcheckInstanceProof::Clear(std_proof) => {
-                        std_proof.compressed_polys[round_idx]
-                            .coeffs_except_linear_term
-                            .len()
-                    }
-                    crate::subprotocols::sumcheck::SumcheckInstanceProof::Zk(zk_proof) => {
-                        zk_proof.poly_degrees[round_idx]
-                    }
+                    SumcheckInstanceProof::Clear(std_proof) => std_proof.compressed_polys
+                        [round_idx]
+                        .coeffs_except_linear_term
+                        .len(),
+                    SumcheckInstanceProof::Zk(zk_proof) => zk_proof.poly_degrees[round_idx],
                 };
                 // First regular round ALWAYS starts a new chain
                 // (batched claims differ from uni-skip output due to batching coefficients)
@@ -1401,8 +1399,7 @@ impl<
             PCS::eval_commitment_gens_verifier(&self.preprocessing.generators);
         let verifier =
             BlindFoldVerifier::<_, _>::new(&pedersen_generators, &r1cs, eval_commitment_gens);
-        let mut blindfold_transcript =
-            <ProofTranscript as crate::transcripts::Transcript>::new(b"BlindFold");
+        let mut blindfold_transcript = <ProofTranscript as Transcript>::new(b"BlindFold");
 
         verifier
             .verify(
@@ -1758,8 +1755,6 @@ impl JoltSharedPreprocessing {
     /// Blake2b-256 digest of the serialized preprocessing, used to bind
     /// the program identity to the Fiat-Shamir transcript.
     pub fn digest(&self) -> [u8; 32] {
-        use ark_serialize::CanonicalSerialize;
-        use blake2::{digest::consts::U32, Blake2b, Digest};
         let mut buf = Vec::new();
         self.serialize_compressed(&mut buf)
             .expect("serialization cannot fail for in-memory buffer");
@@ -1768,11 +1763,11 @@ impl JoltSharedPreprocessing {
 }
 
 impl CanonicalSerialize for JoltSharedPreprocessing {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         mut writer: W,
-        compress: ark_serialize::Compress,
-    ) -> Result<(), ark_serialize::SerializationError> {
+        compress: Compress,
+    ) -> Result<(), SerializationError> {
         self.bytecode
             .as_ref()
             .serialize_with_mode(&mut writer, compress)?;
@@ -1784,7 +1779,7 @@ impl CanonicalSerialize for JoltSharedPreprocessing {
         Ok(())
     }
 
-    fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
+    fn serialized_size(&self, compress: Compress) -> usize {
         self.bytecode.serialized_size(compress)
             + self.ram.serialized_size(compress)
             + self.memory_layout.serialized_size(compress)
@@ -1793,11 +1788,11 @@ impl CanonicalSerialize for JoltSharedPreprocessing {
 }
 
 impl CanonicalDeserialize for JoltSharedPreprocessing {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         mut reader: R,
-        compress: ark_serialize::Compress,
-        validate: ark_serialize::Validate,
-    ) -> Result<Self, ark_serialize::SerializationError> {
+        compress: Compress,
+        validate: Validate,
+    ) -> Result<Self, SerializationError> {
         let bytecode =
             BytecodePreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
         let ram = RAMPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
@@ -1814,7 +1809,7 @@ impl CanonicalDeserialize for JoltSharedPreprocessing {
 }
 
 impl ark_serialize::Valid for JoltSharedPreprocessing {
-    fn check(&self) -> Result<(), ark_serialize::SerializationError> {
+    fn check(&self) -> Result<(), SerializationError> {
         self.bytecode.check()?;
         self.ram.check()?;
         self.memory_layout.check()?;
@@ -1846,7 +1841,7 @@ impl JoltSharedPreprocessing {
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct BlindfoldSetup<C: JoltCurve>(pub PedersenGenerators<C>);
 
-impl<C: JoltCurve> std::ops::Deref for BlindfoldSetup<C> {
+impl<C: JoltCurve> Deref for BlindfoldSetup<C> {
     type Target = PedersenGenerators<C>;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -1864,7 +1859,7 @@ pub struct JoltVerifierPreprocessing<F, C, PCS>
 where
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
 {
     pub generators: PCS::VerifierSetup,
     pub shared: JoltSharedPreprocessing,
@@ -1875,7 +1870,7 @@ impl<F, C, PCS> Serializable for JoltVerifierPreprocessing<F, C, PCS>
 where
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
 {
 }
 
@@ -1883,9 +1878,9 @@ impl<F, C, PCS> JoltVerifierPreprocessing<F, C, PCS>
 where
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
 {
-    pub fn save_to_target_dir(&self, target_dir: &str) -> std::io::Result<()> {
+    pub fn save_to_target_dir(&self, target_dir: &str) -> IoResult<()> {
         let filename = Path::new(target_dir).join("jolt_verifier_preprocessing.dat");
         let mut file = File::create(filename.as_path())?;
         let mut data = Vec::new();
@@ -1894,7 +1889,7 @@ where
         Ok(())
     }
 
-    pub fn read_from_target_dir(target_dir: &str) -> std::io::Result<Self> {
+    pub fn read_from_target_dir(target_dir: &str) -> IoResult<Self> {
         let filename = Path::new(target_dir).join("jolt_verifier_preprocessing.dat");
         let mut file = File::open(filename.as_path())?;
         let mut data = Vec::new();
@@ -1903,11 +1898,8 @@ where
     }
 }
 
-impl<
-        F: JoltField + jolt_field::Field,
-        C: JoltCurve<F = F>,
-        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
-    > JoltVerifierPreprocessing<F, C, PCS>
+impl<F: JoltField + jolt_field::Field, C: JoltCurve<F = F>, PCS: JoltCommitmentScheme<F, C>>
+    JoltVerifierPreprocessing<F, C, PCS>
 {
     #[tracing::instrument(skip_all, name = "JoltVerifierPreprocessing::new")]
     pub fn new(
@@ -1942,11 +1934,8 @@ impl<
 }
 
 #[cfg(feature = "prover")]
-impl<
-        F: JoltField + jolt_field::Field,
-        C: JoltCurve<F = F>,
-        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
-    > From<&JoltProverPreprocessing<F, C, PCS>> for JoltVerifierPreprocessing<F, C, PCS>
+impl<F: JoltField + jolt_field::Field, C: JoltCurve<F = F>, PCS: JoltCommitmentScheme<F, C>>
+    From<&JoltProverPreprocessing<F, C, PCS>> for JoltVerifierPreprocessing<F, C, PCS>
 {
     fn from(prover_preprocessing: &JoltProverPreprocessing<F, C, PCS>) -> Self {
         let shared = prover_preprocessing.shared.clone();

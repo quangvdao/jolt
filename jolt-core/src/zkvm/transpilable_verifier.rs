@@ -62,7 +62,7 @@ use crate::zkvm::{
     proof_serialization::JoltProof,
     r1cs::key::UniformSpartanKey,
     ram::{
-        compute_max_ram_K, compute_min_ram_K,
+        compute_max_ram_K, compute_min_ram_K, gen_ram_initial_memory_state,
         hamming_booleanity::HammingBooleanitySumcheckVerifier,
         output_check::OutputSumcheckVerifier, ra_virtual::RamRaVirtualSumcheckVerifier,
         raf_evaluation::RafEvaluationSumcheckVerifier as RamRafEvaluationSumcheckVerifier,
@@ -79,7 +79,7 @@ use crate::zkvm::{
         verify_stage1_uni_skip, verify_stage2_uni_skip,
     },
     verifier::JoltVerifierPreprocessing,
-    ProverDebugInfo,
+    JoltCommitmentScheme, ProverDebugInfo,
 };
 use crate::{
     field::JoltField,
@@ -116,7 +116,7 @@ pub struct TranspilableVerifier<
     'a,
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
     ProofTranscript: Transcript,
     A: AbstractVerifierOpeningAccumulator<F> = VerifierOpeningAccumulator<F>,
 > {
@@ -140,7 +140,7 @@ impl<
         'a,
         F: JoltField + jolt_field::Field,
         C: JoltCurve<F = F>,
-        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+        PCS: JoltCommitmentScheme<F, C>,
         ProofTranscript: Transcript,
         A: AbstractVerifierOpeningAccumulator<F>,
     > TranspilableVerifier<'a, F, C, PCS, ProofTranscript, A>
@@ -206,9 +206,9 @@ impl<
         }
 
         #[cfg(test)]
-        let mut transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
+        let mut transcript = <ProofTranscript as Transcript>::new(b"Jolt");
         #[cfg(not(test))]
-        let transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
+        let transcript = <ProofTranscript as Transcript>::new(b"Jolt");
 
         #[cfg(test)]
         {
@@ -487,13 +487,9 @@ impl<
             &mut self.opening_accumulator,
         );
         // Domain-separate the batching challenge.
-        crate::transcripts::Transcript::append_bytes(
-            &mut self.transcript,
-            b"ram_val_check_gamma",
-            &[],
-        );
+        Transcript::append_bytes(&mut self.transcript, b"ram_val_check_gamma", &[]);
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
-        let initial_ram_state = crate::zkvm::ram::gen_ram_initial_memory_state::<F>(
+        let initial_ram_state = gen_ram_initial_memory_state::<F>(
             self.proof.ram_K,
             &self.preprocessing.shared.ram,
             &self.program_io,

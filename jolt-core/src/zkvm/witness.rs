@@ -12,7 +12,7 @@ use jolt_poly::{MultilinearPoly, Polynomial as SourcePolynomial};
 use rayon::prelude::*;
 use tracer::{instruction::Cycle, ChunksIterator};
 
-use crate::zkvm::bytecode::BytecodePreprocessing;
+use crate::zkvm::bytecode::{get_pc_for_cycle, BytecodePreprocessing};
 use crate::zkvm::config::OneHotParams;
 use crate::zkvm::instruction::InstructionFlags;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
@@ -369,10 +369,7 @@ where
                 row_cycles
                     .iter()
                     .map(|cycle| {
-                        let pc = crate::zkvm::bytecode::get_pc_for_cycle(
-                            &self.preprocessing.bytecode,
-                            cycle,
-                        );
+                        let pc = get_pc_for_cycle(&self.preprocessing.bytecode, cycle);
                         self.one_hot_index(self.one_hot_params.bytecode_pc_chunk(pc, idx))
                     })
                     .collect(),
@@ -786,8 +783,7 @@ impl CommittedPolynomial {
                 let addresses: Vec<_> = trace
                     .par_iter()
                     .map(|cycle| {
-                        let pc =
-                            crate::zkvm::bytecode::get_pc_for_cycle(bytecode_preprocessing, cycle);
+                        let pc = get_pc_for_cycle(bytecode_preprocessing, cycle);
                         Some(one_hot_params.bytecode_pc_chunk(pc, *i))
                     })
                     .collect();

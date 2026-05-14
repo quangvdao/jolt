@@ -3,12 +3,16 @@ use crate::poly::opening_proof::OpeningId;
 #[cfg(feature = "zk")]
 use crate::zkvm::stage8_opening_ids;
 use crate::zkvm::{claim_reductions::advice::ReductionPhase, config::OneHotConfig};
+#[cfg(feature = "zk")]
+use common::constants::MAX_BLINDFOLD_GENERATORS;
+use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 use std::{
     collections::HashMap,
     fs::File,
-    io::{Read, Write},
+    io::{Read, Result as IoResult, Write},
+    marker::PhantomData,
     path::Path,
     sync::Arc,
 };
@@ -53,7 +57,7 @@ use crate::zkvm::{
         shift::ShiftSumcheckProver,
     },
     witness::CommittedPolynomial,
-    ProverDebugInfo,
+    JoltCommitmentScheme, ProverDebugInfo,
 };
 use crate::{
     field::JoltField,
@@ -134,9 +138,10 @@ use crate::poly::commitment::pedersen::PedersenGenerators;
 use crate::poly::lagrange_poly::LagrangeHelper;
 #[cfg(feature = "zk")]
 use crate::subprotocols::blindfold::{
-    pedersen_generator_count_for_r1cs, BakedPublicInputs, BlindFoldProof, BlindFoldProver,
-    BlindFoldWitness, ExtraConstraintWitness, FinalOutputWitness, RelaxedR1CSInstance,
-    RoundWitness, StageConfig, StageWitness, VerifierR1CSBuilder,
+    pedersen_generator_count_for_r1cs, BakedPublicInputs, BlindFoldAccumulator, BlindFoldProof,
+    BlindFoldProver, BlindFoldWitness, ExtraConstraintWitness, FinalOutputWitness,
+    OpeningProofData, RelaxedR1CSInstance, RoundWitness, StageConfig, StageWitness,
+    VerifierR1CSBuilder,
 };
 #[cfg(feature = "zk")]
 use crate::subprotocols::blindfold::{InputClaimConstraint, OutputClaimConstraint, ValueSource};
@@ -157,7 +162,7 @@ pub struct JoltCpuProver<
     'a,
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
     ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
 > {
     pub preprocessing: &'a JoltProverPreprocessing<F, C, PCS>,
@@ -183,16 +188,16 @@ pub struct JoltCpuProver<
     pub pedersen_generators: PedersenGenerators<C>,
     pub rw_config: ReadWriteConfig,
     #[cfg(feature = "zk")]
-    blindfold_accumulator: crate::subprotocols::blindfold::BlindFoldAccumulator<F, C>,
+    blindfold_accumulator: BlindFoldAccumulator<F, C>,
     #[cfg(not(feature = "zk"))]
-    _curve: std::marker::PhantomData<C>,
+    _curve: PhantomData<C>,
 }
 
 impl<
         'a,
         F: JoltField + jolt_field::Field,
         C: JoltCurve<F = F>,
-        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+        PCS: JoltCommitmentScheme<F, C>,
         ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
     > JoltCpuProver<'a, F, C, PCS, ProofTranscript>
 where
@@ -417,7 +422,7 @@ where
             )
             .next_power_of_two() as usize;
 
-        let transcript = <ProofTranscript as crate::transcripts::Transcript>::new(b"Jolt");
+        let transcript = <ProofTranscript as Transcript>::new(b"Jolt");
         let opening_accumulator = ProverOpeningAccumulator::new(trace.len().log_2());
 
         let spartan_key = UniformSpartanKey::new(trace.len());
@@ -436,10 +441,7 @@ where
             OneHotParams::new(log_T, preprocessing.shared.bytecode.code_size, ram_K);
 
         #[cfg(feature = "zk")]
-        let pedersen_generators = {
-            use common::constants::MAX_BLINDFOLD_GENERATORS;
-            preprocessing.pedersen_generators(MAX_BLINDFOLD_GENERATORS)
-        };
+        let pedersen_generators = { preprocessing.pedersen_generators(MAX_BLINDFOLD_GENERATORS) };
 
         Self {
             preprocessing,
@@ -467,9 +469,9 @@ where
             #[cfg(feature = "zk")]
             pedersen_generators,
             #[cfg(feature = "zk")]
-            blindfold_accumulator: crate::subprotocols::blindfold::BlindFoldAccumulator::new(),
+            blindfold_accumulator: BlindFoldAccumulator::new(),
             #[cfg(not(feature = "zk"))]
-            _curve: std::marker::PhantomData,
+            _curve: PhantomData,
         }
     }
 
@@ -1066,11 +1068,7 @@ where
             &mut self.opening_accumulator,
         );
         // Domain-separate the batching challenge.
-        crate::transcripts::Transcript::append_bytes(
-            &mut self.transcript,
-            b"ram_val_check_gamma",
-            &[],
-        );
+        Transcript::append_bytes(&mut self.transcript, b"ram_val_check_gamma", &[]);
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
         let ram_val_check_params = RamValCheckSumcheckParams::new_from_prover(
             &self.one_hot_params,
@@ -1520,7 +1518,7 @@ where
                         .batching_coefficients
                         .iter()
                         .zip(&zk_data.input_claim_scaling_exponents)
-                        .map(|(alpha, &scale)| crate::field::JoltField::mul_pow_2(alpha, scale))
+                        .map(|(alpha, &scale)| JoltField::mul_pow_2(alpha, scale))
                         .collect();
                     for cv in &zk_data.input_constraint_challenge_values {
                         challenge_values.extend(cv.iter().cloned());
@@ -1623,7 +1621,7 @@ where
                         .batching_coefficients
                         .iter()
                         .zip(&zk_data.input_claim_scaling_exponents)
-                        .map(|(alpha, &scale)| crate::field::JoltField::mul_pow_2(alpha, scale))
+                        .map(|(alpha, &scale)| JoltField::mul_pow_2(alpha, scale))
                         .collect();
                     for cv_inner in &zk_data.input_constraint_challenge_values {
                         cv.extend(cv_inner.iter().cloned());
@@ -1789,7 +1787,7 @@ where
         // Regular noncoeff rows: committed fresh by the prover
         let regular_noncoeff_start = (R_coeff + output_claims_rows) * hyrax_C;
         let noncoeff_row_blindings: Vec<F> = (0..regular_noncoeff_rows)
-            .map(|_| <F as crate::field::JoltField>::random(&mut rng))
+            .map(|_| <F as JoltField>::random(&mut rng))
             .collect();
         let noncoeff_row_commitments: Vec<C::G1> = (0..regular_noncoeff_rows)
             .into_par_iter()
@@ -1830,8 +1828,7 @@ where
         let eval_commitment_gens = PCS::eval_commitment_gens(&self.preprocessing.generators);
         let prover =
             BlindFoldProver::<_, _>::new(&pedersen_generators, &r1cs, eval_commitment_gens);
-        let mut blindfold_transcript =
-            <ProofTranscript as crate::transcripts::Transcript>::new(b"BlindFold");
+        let mut blindfold_transcript = <ProofTranscript as Transcript>::new(b"BlindFold");
 
         prover.prove(&real_instance, &real_witness, &z, &mut blindfold_transcript)
     }
@@ -2115,14 +2112,13 @@ where
         #[cfg(feature = "zk")]
         {
             PCS::bind_zk_opening_inputs(&mut self.transcript, &pcs_opening_point, &y_com);
-            self.blindfold_accumulator.set_opening_proof_data(
-                crate::subprotocols::blindfold::OpeningProofData {
+            self.blindfold_accumulator
+                .set_opening_proof_data(OpeningProofData {
                     opening_ids,
                     constraint_coeffs,
                     joint_claim,
                     y_blinding,
-                },
-            );
+                });
         }
         #[cfg(not(feature = "zk"))]
         {
@@ -2171,22 +2167,21 @@ fn write_instance_flamegraph_svg(
 pub struct JoltProverPreprocessing<
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
 > {
     pub generators: PCS::ProverSetup,
     pub shared: JoltSharedPreprocessing,
-    _curve: std::marker::PhantomData<C>,
+    _curve: PhantomData<C>,
 }
 
 impl<F, C, PCS> JoltProverPreprocessing<F, C, PCS>
 where
     F: JoltField + jolt_field::Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
+    PCS: JoltCommitmentScheme<F, C>,
 {
     #[tracing::instrument(skip_all, name = "JoltProverPreprocessing::gen")]
     pub fn new(shared: JoltSharedPreprocessing) -> Self {
-        use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
         let max_T: usize = shared.max_padded_trace_length.next_power_of_two();
         let max_log_T = max_T.log_2();
         let max_log_k_chunk = if max_log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
@@ -2199,14 +2194,12 @@ where
         JoltProverPreprocessing {
             generators,
             shared,
-            _curve: std::marker::PhantomData,
+            _curve: PhantomData,
         }
     }
 
     #[cfg(feature = "zk")]
     pub fn blindfold_setup(&self) -> BlindfoldSetup<C> {
-        use common::constants::MAX_BLINDFOLD_GENERATORS;
-
         let (g1s, h1) = PCS::zk_generators(&self.generators, MAX_BLINDFOLD_GENERATORS)
             .expect("PCS does not support ZK Pedersen generators");
         BlindfoldSetup(PedersenGenerators::new(g1s, h1))
@@ -2221,7 +2214,7 @@ where
         )
     }
 
-    pub fn save_to_target_dir(&self, target_dir: &str) -> std::io::Result<()> {
+    pub fn save_to_target_dir(&self, target_dir: &str) -> IoResult<()> {
         let filename = Path::new(target_dir).join("jolt_prover_preprocessing.dat");
         let mut file = File::create(filename.as_path())?;
         let mut data = Vec::new();
@@ -2230,7 +2223,7 @@ where
         Ok(())
     }
 
-    pub fn read_from_target_dir(target_dir: &str) -> std::io::Result<Self> {
+    pub fn read_from_target_dir(target_dir: &str) -> IoResult<Self> {
         let filename = Path::new(target_dir).join("jolt_prover_preprocessing.dat");
         let mut file = File::open(filename.as_path())?;
         let mut data = Vec::new();
@@ -2239,11 +2232,8 @@ where
     }
 }
 
-impl<
-        F: JoltField + jolt_field::Field,
-        C: JoltCurve<F = F>,
-        PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
-    > Serializable for JoltProverPreprocessing<F, C, PCS>
+impl<F: JoltField + jolt_field::Field, C: JoltCurve<F = F>, PCS: JoltCommitmentScheme<F, C>>
+    Serializable for JoltProverPreprocessing<F, C, PCS>
 {
 }
 
@@ -2268,6 +2258,15 @@ mod tests {
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{OpeningAccumulator, SumcheckId},
     };
+    #[cfg(feature = "zk")]
+    use crate::subprotocols::blindfold::{
+        BakedPublicInputs, BlindFoldWitness, RoundWitness, StageConfig, StageWitness,
+        VerifierR1CSBuilder,
+    };
+    #[cfg(feature = "zk")]
+    use crate::subprotocols::sumcheck::SumcheckInstanceProof;
+    #[cfg(feature = "zk")]
+    use crate::transcripts::{KeccakTranscript, Transcript};
     use crate::utils::math::Math;
     use crate::zkvm::claim_reductions::AdviceKind;
     use crate::zkvm::verifier::JoltSharedPreprocessing;
@@ -2284,7 +2283,7 @@ mod tests {
     #[cfg(feature = "zk")]
     fn round_commitment_data<F: JoltField, C: JoltCurve<F = F>, R: rand_core::RngCore>(
         gens: &PedersenGenerators<C>,
-        stages: &[crate::subprotocols::blindfold::StageWitness<F>],
+        stages: &[StageWitness<F>],
         rng: &mut R,
     ) -> (Vec<C::G1>, Vec<Vec<F>>, Vec<F>) {
         let mut commitments = Vec::new();
@@ -3042,13 +3041,6 @@ mod tests {
     fn blindfold_r1cs_satisfaction() {
         DoryGlobals::reset();
 
-        use crate::subprotocols::blindfold::{
-            BakedPublicInputs, BlindFoldWitness, RoundWitness, StageConfig, StageWitness,
-            VerifierR1CSBuilder,
-        };
-        use crate::subprotocols::sumcheck::SumcheckInstanceProof;
-        use crate::transcripts::{KeccakTranscript, Transcript};
-        use crate::zkvm::verifier::JoltSharedPreprocessing;
         /// Helper to process a single stage's sumcheck proof.
         /// Returns a list of (RoundWitness, degree) for each round.
         /// For ZK proofs, creates synthetic witnesses with correct degrees to test R1CS structure.

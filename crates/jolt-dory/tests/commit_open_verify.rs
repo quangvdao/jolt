@@ -15,7 +15,7 @@ use jolt_openings::{
     CommitmentSchemeVerifier, CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, SourceRow,
     ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
-use jolt_poly::{OneHotPolynomial, Polynomial};
+use jolt_poly::{MultilinearPoly, OneHotPolynomial, Polynomial};
 use jolt_transcript::{Blake2bTranscript, KeccakTranscript, Transcript};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
@@ -107,18 +107,19 @@ impl CommitmentSource<Fr> for DenseSource<'_> {
         Polynomial::new(self.evaluations.to_vec()).evaluate(point)
     }
 
-    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+    fn for_each_row<V>(&self, chunk_len: usize, mut visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
     {
-        let row_len = 1usize << sigma;
-        for (row_index, row) in self.evaluations.chunks(row_len).enumerate() {
+        for (row_index, row) in self.evaluations.chunks(chunk_len).enumerate() {
             visit(row_index, SourceRow::FieldElements(row));
         }
     }
 
-    fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
-        Polynomial::new(self.evaluations.to_vec()).fold_rows(left, sigma)
+    fn fold_rows(&self, left: &[Fr], chunk_len: usize) -> Vec<Fr> {
+        let sigma = chunk_len.trailing_zeros() as usize;
+        let poly = Polynomial::new(self.evaluations.to_vec());
+        MultilinearPoly::fold_rows(&poly, left, sigma)
     }
 }
 
@@ -160,21 +161,20 @@ impl BatchCommitmentSource<Fr> for DenseBatch {
         }
     }
 
-    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    fn map_rows<R, V>(&self, chunk_len: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
     {
         let _ = self.map_rows_calls.fetch_add(1, Ordering::SeqCst);
-        let row_len = 1usize << sigma;
-        let num_rows = self.evaluations[ids[0]].len() / row_len;
+        let num_rows = self.evaluations[ids[0]].len() / chunk_len;
 
         (0..num_rows)
             .map(|row_index| {
                 ids.iter()
                     .map(|&id| {
-                        let start = row_index * row_len;
-                        let end = start + row_len;
+                        let start = row_index * chunk_len;
+                        let end = start + chunk_len;
                         visit(
                             id,
                             SourceRow::FieldElements(&self.evaluations[id][start..end]),
@@ -230,21 +230,20 @@ impl BatchCommitmentSource<Fr> for I128Batch {
         }
     }
 
-    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    fn map_rows<R, V>(&self, chunk_len: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
     {
         let _ = self.map_rows_calls.fetch_add(1, Ordering::SeqCst);
-        let row_len = 1usize << sigma;
-        let num_rows = self.rows[ids[0]].len() / row_len;
+        let num_rows = self.rows[ids[0]].len() / chunk_len;
 
         (0..num_rows)
             .map(|row_index| {
                 ids.iter()
                     .map(|&id| {
-                        let start = row_index * row_len;
-                        let end = start + row_len;
+                        let start = row_index * chunk_len;
+                        let end = start + chunk_len;
                         visit(id, SourceRow::I128(&self.rows[id][start..end]))
                     })
                     .collect()
@@ -416,7 +415,12 @@ impl BatchCommitmentSource<Fr> for OneHotBatch {
         }
     }
 
-    fn map_rows<R, V>(&self, _sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    fn natural_chunk_len(&self, ids: &[Self::Id]) -> Option<usize> {
+        ids.first()
+            .and_then(|&id| self.chunks[id].first().map(Vec::len))
+    }
+
+    fn map_rows<R, V>(&self, _chunk_len: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,

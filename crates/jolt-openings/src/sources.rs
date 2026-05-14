@@ -72,6 +72,21 @@ pub enum OneHotEntries<'a> {
     MaybeZero(&'a [Option<OneHotIndex>]),
 }
 
+impl OneHotEntries<'_> {
+    /// Number of trace columns represented by this row.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::OnePerColumn(indices) => indices.len(),
+            Self::MaybeZero(indices) => indices.len(),
+        }
+    }
+
+    /// Returns `true` when this row has no trace columns.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// A borrowed row view of a polynomial source.
 ///
 /// This is a traversal hint, not the core polynomial abstraction. Backends that
@@ -138,12 +153,21 @@ pub trait CommitmentSource<F: Field>: Send + Sync {
     /// Evaluates the source at a multilinear point.
     fn evaluate(&self, point: &[F]) -> F;
 
-    /// Visits row-shaped chunks of the source using `sigma` column variables.
+    /// Preferred row length for commitment traversal, when the source has one.
+    ///
+    /// This is a source traversal fact, not a PCS-specific partition. Dory
+    /// interprets it as its row width and derives its private matrix split
+    /// internally. Other backends may ignore it or use it as a tiling hint.
+    fn natural_chunk_len(&self) -> Option<usize> {
+        None
+    }
+
+    /// Visits row-shaped chunks of the source using `chunk_len` columns.
     ///
     /// The borrowed row only has to remain valid for the duration of the visit
     /// call, which lets trace-backed sources allocate temporary row buffers and
     /// avoid ownership wrappers such as `Cow`.
-    fn for_each_row<V>(&self, sigma: usize, visit: V)
+    fn for_each_row<V>(&self, chunk_len: usize, visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>);
 
@@ -155,13 +179,13 @@ pub trait CommitmentSource<F: Field>: Send + Sync {
     /// temporary row buffers. Materialized sources can override this method to
     /// parallelize over borrowed row chunks without first copying them into an
     /// owned staging buffer.
-    fn map_rows<R, V>(&self, sigma: usize, visit: V) -> Vec<R>
+    fn map_rows<R, V>(&self, chunk_len: usize, visit: V) -> Vec<R>
     where
         R: Send,
         V: for<'row> Fn(usize, SourceRow<'row, F>) -> R + Send + Sync,
     {
         let mut rows = Vec::new();
-        self.for_each_row(sigma, |row_index, row| {
+        self.for_each_row(chunk_len, |row_index, row| {
             rows.push(visit(row_index, row));
         });
         rows
@@ -188,7 +212,15 @@ pub trait CommitmentSource<F: Field>: Send + Sync {
     }
 
     /// Folds rows against the left-side weights used by opening algorithms.
-    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F>;
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F>;
+}
+
+fn chunk_len_to_sigma(chunk_len: usize) -> usize {
+    assert!(
+        chunk_len.is_power_of_two(),
+        "commitment source chunk length ({chunk_len}) must be a power of two",
+    );
+    chunk_len.trailing_zeros() as usize
 }
 
 fn multilinear_num_vars<F, T>(source: &T) -> usize
@@ -207,12 +239,13 @@ where
     MultilinearPoly::evaluate(source, point)
 }
 
-fn multilinear_for_each_row<F, T, V>(source: &T, sigma: usize, mut visit: V)
+fn multilinear_for_each_row<F, T, V>(source: &T, chunk_len: usize, mut visit: V)
 where
     F: Field,
     T: MultilinearPoly<F> + ?Sized,
     V: for<'row> FnMut(usize, SourceRow<'row, F>),
 {
+    let sigma = chunk_len_to_sigma(chunk_len);
     MultilinearPoly::for_each_row(source, sigma, &mut |row_index, row| {
         visit(row_index, SourceRow::FieldElements(row));
     });
@@ -235,11 +268,12 @@ where
     MultilinearPoly::for_each_one(source, &mut visit);
 }
 
-fn multilinear_fold_rows<F, T>(source: &T, left: &[F], sigma: usize) -> Vec<F>
+fn multilinear_fold_rows<F, T>(source: &T, left: &[F], chunk_len: usize) -> Vec<F>
 where
     F: Field,
     T: MultilinearPoly<F> + ?Sized,
 {
+    let sigma = chunk_len_to_sigma(chunk_len);
     MultilinearPoly::fold_rows(source, left, sigma)
 }
 
@@ -254,11 +288,11 @@ macro_rules! impl_commitment_source_for_multilinear {
                 multilinear_evaluate(self, point)
             }
 
-            fn for_each_row<V>(&self, sigma: usize, visit: V)
+            fn for_each_row<V>(&self, chunk_len: usize, visit: V)
             where
                 V: for<'row> FnMut(usize, SourceRow<'row, F>),
             {
-                multilinear_for_each_row(self, sigma, visit);
+                multilinear_for_each_row(self, chunk_len, visit);
             }
 
             fn is_one_hot(&self) -> bool {
@@ -272,8 +306,8 @@ macro_rules! impl_commitment_source_for_multilinear {
                 multilinear_for_each_one(self, visit);
             }
 
-            fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
-                multilinear_fold_rows(self, left, sigma)
+            fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+                multilinear_fold_rows(self, left, chunk_len)
             }
         }
     };
@@ -296,11 +330,11 @@ where
         multilinear_evaluate(self, point)
     }
 
-    fn for_each_row<V>(&self, sigma: usize, visit: V)
+    fn for_each_row<V>(&self, chunk_len: usize, visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>),
     {
-        multilinear_for_each_row(self, sigma, visit);
+        multilinear_for_each_row(self, chunk_len, visit);
     }
 
     fn is_one_hot(&self) -> bool {
@@ -314,8 +348,8 @@ where
         multilinear_for_each_one(self, visit);
     }
 
-    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
-        multilinear_fold_rows(self, left, sigma)
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+        multilinear_fold_rows(self, left, chunk_len)
     }
 }
 
@@ -328,11 +362,11 @@ impl<F: Field> CommitmentSource<F> for OneHotPolynomial {
         multilinear_evaluate(self, point)
     }
 
-    fn for_each_row<V>(&self, sigma: usize, visit: V)
+    fn for_each_row<V>(&self, chunk_len: usize, visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>),
     {
-        multilinear_for_each_row(self, sigma, visit);
+        multilinear_for_each_row(self, chunk_len, visit);
     }
 
     fn is_one_hot(&self) -> bool {
@@ -346,8 +380,8 @@ impl<F: Field> CommitmentSource<F> for OneHotPolynomial {
         multilinear_for_each_one::<F, _, _>(self, visit);
     }
 
-    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
-        multilinear_fold_rows(self, left, sigma)
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+        multilinear_fold_rows(self, left, chunk_len)
     }
 }
 
@@ -382,7 +416,10 @@ where
 
     let mut evaluations = Vec::with_capacity(1usize << source.num_vars());
     let mut one_hot_chunks = None;
-    source.for_each_row(source.num_vars(), |_, row| match row {
+    let chunk_len = source
+        .natural_chunk_len()
+        .unwrap_or_else(|| 1usize << source.num_vars());
+    source.for_each_row(chunk_len, |_, row| match row {
         SourceRow::FieldElements(values) => {
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             evaluations.extend_from_slice(values);
@@ -474,13 +511,18 @@ pub trait BatchCommitmentSource<F: Field>: Send + Sync {
     /// Number of multilinear variables in the selected source.
     fn num_vars(&self, id: Self::Id) -> usize;
 
+    /// Preferred shared row length for committing the selected sources.
+    fn natural_chunk_len(&self, _ids: &[Self::Id]) -> Option<usize> {
+        None
+    }
+
     /// Returns a single-source view for backends that do not use batch traversal.
     fn source(&self, id: Self::Id) -> Self::Source<'_>;
 
     /// Maps a row visitor over many sources while sharing source traversal.
     ///
     /// The returned vector is row-major: `output[row_index][id_index]`.
-    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    fn map_rows<R, V>(&self, chunk_len: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, F>) -> R + Send + Sync;

@@ -700,10 +700,9 @@ impl MacroBuilder {
                 let _ctx = jolt::DoryGlobals::with_context(jolt::DoryContext::TrustedAdvice);
 
                 let poly = MultilinearPolynomial::<jolt::F>::from(trusted_advice_vec);
-                let (commitment, hint) = <jolt::PCS as jolt::ShapedCommitmentScheme>::commit_with_shape(
-                    &jolt::PolynomialCommitmentSource(&poly),
-                    nu_a,
-                    sigma_a,
+                let source = jolt::PolynomialCommitmentSource::with_chunk_len(&poly, num_cols);
+                let (commitment, hint) = <jolt::PCS as jolt::CommitmentScheme>::commit(
+                    &source,
                     &preprocessing.generators,
                 );
 

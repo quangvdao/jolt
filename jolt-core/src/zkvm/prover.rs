@@ -688,8 +688,9 @@ where
                 .clone()
                 .pad_using(T, |_| Cycle::NoOp)
                 .collect();
-            let (num_rows, num_cols) = DoryGlobals::matrix_shape();
-            let (nu, sigma) = (num_rows.log_2(), num_cols.log_2());
+            let (_num_rows, num_cols) = DoryGlobals::matrix_shape();
+            let values_per_row = DoryGlobals::address_major_cycles_per_row();
+            let column_stride = DoryGlobals::k_from_matrix_shape();
 
             // Generate witnesses and commit using the regular (non-streaming) path
             let (commitments, hints): (Vec<_>, Vec<_>) = polys
@@ -701,12 +702,17 @@ where
                         &trace,
                         Some(&self.one_hot_params),
                     );
-                    PCS::commit_with_shape(
-                        &PolynomialCommitmentSource(&witness),
-                        nu,
-                        sigma,
-                        &self.preprocessing.generators,
-                    )
+                    let source = PolynomialCommitmentSource::with_strided_rows(
+                        &witness,
+                        num_cols,
+                        values_per_row,
+                        column_stride,
+                    );
+                    #[cfg(feature = "zk")]
+                    let commitment = PCS::commit_zk(&source, &self.preprocessing.generators);
+                    #[cfg(not(feature = "zk"))]
+                    let commitment = PCS::commit(&source, &self.preprocessing.generators);
+                    commitment
                 })
                 .unzip();
 
@@ -779,14 +785,12 @@ where
         let _guard =
             DoryGlobals::initialize_context(1, advice_len, DoryContext::UntrustedAdvice, None);
         let _ctx = DoryGlobals::with_context(DoryContext::UntrustedAdvice);
-        let (num_rows, num_cols) = DoryGlobals::matrix_shape();
-        let (nu, sigma) = (num_rows.log_2(), num_cols.log_2());
-        let (commitment, hint) = PCS::commit_with_shape(
-            &PolynomialCommitmentSource(&poly),
-            nu,
-            sigma,
-            &self.preprocessing.generators,
-        );
+        let (_num_rows, num_cols) = DoryGlobals::matrix_shape();
+        let source = PolynomialCommitmentSource::with_chunk_len(&poly, num_cols);
+        #[cfg(feature = "zk")]
+        let (commitment, hint) = PCS::commit_zk(&source, &self.preprocessing.generators);
+        #[cfg(not(feature = "zk"))]
+        let (commitment, hint) = PCS::commit(&source, &self.preprocessing.generators);
         self.transcript
             .append_serializable(b"untrusted_advice", &commitment);
 
@@ -2087,7 +2091,7 @@ where
                 .iter()
                 .map(|point| (*point).into())
                 .collect();
-        let joint_poly_source = PolynomialCommitmentSource(&joint_poly);
+        let joint_poly_source = PolynomialCommitmentSource::new(&joint_poly);
 
         #[cfg(feature = "zk")]
         let (proof, y_com, y_blinding) = PCS::prove_fused_batch_zk(
@@ -2247,6 +2251,7 @@ mod tests {
 
     use jolt_dory::{DoryCommitment, DoryHint, DoryScheme};
     use jolt_field::Fr;
+    use jolt_openings::CommitmentScheme;
     use serial_test::serial;
 
     use crate::host;
@@ -2267,7 +2272,6 @@ mod tests {
     use crate::subprotocols::sumcheck::SumcheckInstanceProof;
     #[cfg(feature = "zk")]
     use crate::transcripts::{KeccakTranscript, Transcript};
-    use crate::utils::math::Math;
     use crate::zkvm::claim_reductions::AdviceKind;
     use crate::zkvm::verifier::JoltSharedPreprocessing;
     use crate::zkvm::witness::{CommittedPolynomial, PolynomialCommitmentSource};
@@ -2321,14 +2325,9 @@ mod tests {
             DoryGlobals::initialize_context(1, advice_len, DoryContext::TrustedAdvice, None);
         let (commitment, hint) = {
             let _ctx = DoryGlobals::with_context(DoryContext::TrustedAdvice);
-            let (num_rows, num_cols) = DoryGlobals::matrix_shape();
-            let (nu, sigma) = (num_rows.log_2(), num_cols.log_2());
-            DoryScheme::commit_with_shape(
-                &PolynomialCommitmentSource(&poly),
-                nu,
-                sigma,
-                &preprocessing.generators,
-            )
+            let (_num_rows, num_cols) = DoryGlobals::matrix_shape();
+            let source = PolynomialCommitmentSource::with_chunk_len(&poly, num_cols);
+            DoryScheme::commit(&source, &preprocessing.generators)
         };
         (commitment, hint)
     }

@@ -10,7 +10,6 @@
 //! CommitmentSchemeVerifier        verify / verify_batch
 //!          │
 //! CommitmentScheme                commit / commit_batch / open / prove_batch
-//! ShapedCommitmentScheme          commit_with_shape
 //!
 //! PublicVerifierSetup             verifier_setup from public params
 //!
@@ -21,7 +20,6 @@
 //! ZkOpeningSchemeVerifier         verify_zk
 //!          │
 //! ZkOpeningScheme                 commit_zk / commit_batch_zk / open_zk
-//! ShapedZkOpeningScheme           commit_zk_with_shape
 //! ```
 
 mod claims;
@@ -40,8 +38,7 @@ pub use homomorphic::{
 pub use schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
     CommitmentSchemeVerifier, EvaluationCommitmentProver, EvaluationCommitmentScheme,
-    PublicVerifierSetup, ShapedCommitmentScheme, ShapedZkOpeningScheme, ZkOpeningScheme,
-    ZkOpeningSchemeVerifier,
+    PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 pub use sources::{
     BatchCommitmentSource, CommitmentSource, OneHotEntries, OneHotIndex, OneHotRow, SourceId,

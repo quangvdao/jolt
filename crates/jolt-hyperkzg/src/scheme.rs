@@ -419,7 +419,10 @@ where
     S: CommitmentSource<F> + ?Sized,
 {
     let mut evaluations = Vec::with_capacity(1 << source.num_vars());
-    source.for_each_row(source.num_vars(), |_, row| match row {
+    let chunk_len = source
+        .natural_chunk_len()
+        .unwrap_or_else(|| 1usize << source.num_vars());
+    source.for_each_row(chunk_len, |_, row| match row {
         SourceRow::FieldElements(values) => evaluations.extend_from_slice(values),
         SourceRow::StridedFieldElements {
             values,

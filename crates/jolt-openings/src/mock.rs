@@ -350,7 +350,7 @@ mod tests {
         SourceRow,
     };
     use jolt_field::{Fr, FromPrimitiveInt, RandomSampling};
-    use jolt_poly::Polynomial;
+    use jolt_poly::{MultilinearPoly, Polynomial};
     use jolt_transcript::Blake2bTranscript;
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -461,7 +461,11 @@ mod tests {
                 self.dense.evaluate(point)
             }
 
-            fn for_each_row<V>(&self, _sigma: usize, mut visit: V)
+            fn natural_chunk_len(&self) -> Option<usize> {
+                Some(8)
+            }
+
+            fn for_each_row<V>(&self, _chunk_len: usize, mut visit: V)
             where
                 V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
             {
@@ -476,8 +480,9 @@ mod tests {
                 }
             }
 
-            fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
-                self.dense.fold_rows(left, sigma)
+            fn fold_rows(&self, left: &[Fr], chunk_len: usize) -> Vec<Fr> {
+                let sigma = chunk_len.trailing_zeros() as usize;
+                MultilinearPoly::fold_rows(&self.dense, left, sigma)
             }
         }
 
@@ -513,7 +518,11 @@ mod tests {
                 self.dense.evaluate(point)
             }
 
-            fn for_each_row<V>(&self, _sigma: usize, mut visit: V)
+            fn natural_chunk_len(&self) -> Option<usize> {
+                Some(self.entries.len())
+            }
+
+            fn for_each_row<V>(&self, _chunk_len: usize, mut visit: V)
             where
                 V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
             {
@@ -526,8 +535,9 @@ mod tests {
                 );
             }
 
-            fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
-                self.dense.fold_rows(left, sigma)
+            fn fold_rows(&self, left: &[Fr], chunk_len: usize) -> Vec<Fr> {
+                let sigma = chunk_len.trailing_zeros() as usize;
+                MultilinearPoly::fold_rows(&self.dense, left, sigma)
             }
         }
 
@@ -566,7 +576,11 @@ mod tests {
                 self.dense.evaluate(point)
             }
 
-            fn for_each_row<V>(&self, _sigma: usize, mut visit: V)
+            fn natural_chunk_len(&self) -> Option<usize> {
+                self.chunks.first().map(Vec::len)
+            }
+
+            fn for_each_row<V>(&self, _chunk_len: usize, mut visit: V)
             where
                 V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
             {
@@ -581,8 +595,9 @@ mod tests {
                 }
             }
 
-            fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
-                self.dense.fold_rows(left, sigma)
+            fn fold_rows(&self, left: &[Fr], chunk_len: usize) -> Vec<Fr> {
+                let sigma = chunk_len.trailing_zeros() as usize;
+                MultilinearPoly::fold_rows(&self.dense, left, sigma)
             }
         }
 

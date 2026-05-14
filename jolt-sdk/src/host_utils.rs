@@ -31,4 +31,4 @@ pub use jolt_core::poly::multilinear_polynomial::MultilinearPolynomial;
 pub use jolt_core::zkvm::ram::populate_memory_states;
 pub use jolt_core::zkvm::verifier::BlindfoldSetup;
 pub use jolt_core::zkvm::witness::PolynomialCommitmentSource;
-pub use jolt_openings::{CommitmentScheme, CommitmentSchemeVerifier, ShapedCommitmentScheme};
+pub use jolt_openings::{CommitmentScheme, CommitmentSchemeVerifier};

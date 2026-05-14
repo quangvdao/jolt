@@ -224,13 +224,15 @@ impl CanonicalDeserialize for DoryVerifierSetup {
 pub struct DoryHint {
     pub(crate) row_commitments: Vec<Bn254G1>,
     pub(crate) commit_blind: Fr,
+    pub(crate) chunk_len: usize,
 }
 
 impl DoryHint {
-    pub(crate) fn new(row_commitments: Vec<Bn254G1>, commit_blind: Fr) -> Self {
+    pub(crate) fn new(row_commitments: Vec<Bn254G1>, commit_blind: Fr, chunk_len: usize) -> Self {
         Self {
             row_commitments,
             commit_blind,
+            chunk_len,
         }
     }
 }

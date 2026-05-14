@@ -19,7 +19,7 @@ use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::{
     field::{ChallengeFieldOps, FieldChallengeOps, JoltField},
     poly::{
-        commitment::dory::{DoryContext, DoryGlobals, DoryLayout},
+        commitment::dory::DoryGlobals,
         multilinear_polynomial::{MultilinearPolynomial, PolynomialEvaluation},
         one_hot_polynomial::OneHotPolynomial,
     },
@@ -76,17 +76,91 @@ pub fn all_committed_polynomials(one_hot_params: &OneHotParams) -> Vec<Committed
 /// adapter keeps that compact row information available for direct,
 /// non-streaming commits while still delegating evaluation, one-hot traversal,
 /// and opening-time row folds to the underlying polynomial.
-pub struct PolynomialCommitmentSource<'a, F: JoltField>(pub &'a MultilinearPolynomial<F>);
+pub struct PolynomialCommitmentSource<'a, F: JoltField> {
+    polynomial: &'a MultilinearPolynomial<F>,
+    row_shape: PolynomialCommitmentRowShape,
+}
 
-fn address_major_dense_shape() -> Option<(usize, usize)> {
-    (DoryGlobals::current_context() == DoryContext::Main
-        && DoryGlobals::get_layout() == DoryLayout::AddressMajor)
-        .then(|| {
-            (
-                DoryGlobals::address_major_cycles_per_row(),
-                DoryGlobals::k_from_matrix_shape(),
-            )
-        })
+#[derive(Clone, Copy)]
+enum PolynomialCommitmentRowShape {
+    Natural,
+    Chunk {
+        chunk_len: usize,
+    },
+    Strided {
+        chunk_len: usize,
+        values_per_row: usize,
+        column_stride: usize,
+    },
+}
+
+impl<'a, F: JoltField> PolynomialCommitmentSource<'a, F> {
+    pub fn new(polynomial: &'a MultilinearPolynomial<F>) -> Self {
+        Self {
+            polynomial,
+            row_shape: PolynomialCommitmentRowShape::Natural,
+        }
+    }
+
+    pub fn with_chunk_len(polynomial: &'a MultilinearPolynomial<F>, chunk_len: usize) -> Self {
+        assert!(
+            chunk_len.is_power_of_two(),
+            "commitment source chunk length ({chunk_len}) must be a power of two",
+        );
+        Self {
+            polynomial,
+            row_shape: PolynomialCommitmentRowShape::Chunk { chunk_len },
+        }
+    }
+
+    pub fn with_strided_rows(
+        polynomial: &'a MultilinearPolynomial<F>,
+        chunk_len: usize,
+        values_per_row: usize,
+        column_stride: usize,
+    ) -> Self {
+        assert!(
+            chunk_len.is_power_of_two(),
+            "commitment source chunk length ({chunk_len}) must be a power of two",
+        );
+        assert!(
+            values_per_row.is_power_of_two(),
+            "strided source row length ({values_per_row}) must be a power of two",
+        );
+        assert!(
+            column_stride > 0,
+            "strided source column stride must be nonzero",
+        );
+        Self {
+            polynomial,
+            row_shape: PolynomialCommitmentRowShape::Strided {
+                chunk_len,
+                values_per_row,
+                column_stride,
+            },
+        }
+    }
+
+    fn values_per_row(&self, fallback_chunk_len: usize) -> usize {
+        match self.row_shape {
+            PolynomialCommitmentRowShape::Natural => fallback_chunk_len,
+            PolynomialCommitmentRowShape::Chunk { chunk_len } => chunk_len,
+            PolynomialCommitmentRowShape::Strided { values_per_row, .. } => values_per_row,
+        }
+    }
+
+    fn strided_columns(&self) -> Option<(usize, usize)> {
+        match self.row_shape {
+            PolynomialCommitmentRowShape::Strided {
+                values_per_row,
+                column_stride,
+                ..
+            } => Some((values_per_row, column_stride)),
+            PolynomialCommitmentRowShape::Natural | PolynomialCommitmentRowShape::Chunk { .. } => {
+                None
+            }
+        }
+    }
 }
 
 impl<F> CommitmentSource<F> for PolynomialCommitmentSource<'_, F>
@@ -95,23 +169,30 @@ where
     for<'a> &'a F::Challenge: Into<F>,
 {
     fn num_vars(&self) -> usize {
-        MultilinearPoly::num_vars(self.0)
+        MultilinearPoly::num_vars(self.polynomial)
     }
 
     fn evaluate(&self, point: &[F]) -> F {
-        PolynomialEvaluation::evaluate(self.0, point)
+        PolynomialEvaluation::evaluate(self.polynomial, point)
     }
 
-    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+    fn natural_chunk_len(&self) -> Option<usize> {
+        match self.row_shape {
+            PolynomialCommitmentRowShape::Natural => None,
+            PolynomialCommitmentRowShape::Chunk { chunk_len }
+            | PolynomialCommitmentRowShape::Strided { chunk_len, .. } => Some(chunk_len),
+        }
+    }
+
+    fn for_each_row<V>(&self, chunk_len: usize, mut visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>),
     {
-        match self.0 {
+        let values_per_row = self.values_per_row(chunk_len);
+        match self.polynomial {
             MultilinearPolynomial::I128Scalars(poly) => {
-                let strided = address_major_dense_shape();
-                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
-                for (row_index, row) in poly.coeffs.chunks(row_len).enumerate() {
-                    if let Some((_, column_stride)) = strided {
+                for (row_index, row) in poly.coeffs.chunks(values_per_row).enumerate() {
+                    if let Some((_, column_stride)) = self.strided_columns() {
                         visit(
                             row_index,
                             SourceRow::StridedI128 {
@@ -125,10 +206,8 @@ where
                 }
             }
             MultilinearPolynomial::U64Scalars(poly) => {
-                let strided = address_major_dense_shape();
-                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
-                for (row_index, row) in poly.coeffs.chunks(row_len).enumerate() {
-                    if let Some((_, column_stride)) = strided {
+                for (row_index, row) in poly.coeffs.chunks(values_per_row).enumerate() {
+                    if let Some((_, column_stride)) = self.strided_columns() {
                         visit(
                             row_index,
                             SourceRow::StridedU64 {
@@ -142,19 +221,24 @@ where
                 }
             }
             _ => {
-                if let Some((row_len, column_stride)) = address_major_dense_shape() {
-                    let row_sigma = row_len.trailing_zeros() as usize;
-                    MultilinearPoly::for_each_row(self.0, row_sigma, &mut |row_index, row| {
-                        visit(
-                            row_index,
-                            SourceRow::StridedFieldElements {
-                                values: row,
-                                column_stride,
-                            },
-                        );
-                    });
+                if let Some((values_per_row, column_stride)) = self.strided_columns() {
+                    let row_sigma = values_per_row.trailing_zeros() as usize;
+                    MultilinearPoly::for_each_row(
+                        self.polynomial,
+                        row_sigma,
+                        &mut |row_index, row| {
+                            visit(
+                                row_index,
+                                SourceRow::StridedFieldElements {
+                                    values: row,
+                                    column_stride,
+                                },
+                            );
+                        },
+                    );
                 } else {
-                    MultilinearPoly::for_each_row(self.0, sigma, &mut |row_index, row| {
+                    let sigma = chunk_len.trailing_zeros() as usize;
+                    MultilinearPoly::for_each_row(self.polynomial, sigma, &mut |row_index, row| {
                         visit(row_index, SourceRow::FieldElements(row));
                     });
                 }
@@ -162,57 +246,52 @@ where
         }
     }
 
-    fn map_rows<R, V>(&self, sigma: usize, visit: V) -> Vec<R>
+    fn map_rows<R, V>(&self, chunk_len: usize, visit: V) -> Vec<R>
     where
         R: Send,
         V: for<'row> Fn(usize, SourceRow<'row, F>) -> R + Send + Sync,
     {
-        match self.0 {
-            MultilinearPolynomial::I128Scalars(poly) => {
-                let strided = address_major_dense_shape();
-                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
-                poly.coeffs
-                    .par_chunks(row_len)
-                    .enumerate()
-                    .map(|(row_index, row)| {
-                        if let Some((_, column_stride)) = strided {
-                            visit(
-                                row_index,
-                                SourceRow::StridedI128 {
-                                    values: row,
-                                    column_stride,
-                                },
-                            )
-                        } else {
-                            visit(row_index, SourceRow::I128(row))
-                        }
-                    })
-                    .collect()
-            }
-            MultilinearPolynomial::U64Scalars(poly) => {
-                let strided = address_major_dense_shape();
-                let row_len = strided.map_or(1usize << sigma, |(row_len, _)| row_len);
-                poly.coeffs
-                    .par_chunks(row_len)
-                    .enumerate()
-                    .map(|(row_index, row)| {
-                        if let Some((_, column_stride)) = strided {
-                            visit(
-                                row_index,
-                                SourceRow::StridedU64 {
-                                    values: row,
-                                    column_stride,
-                                },
-                            )
-                        } else {
-                            visit(row_index, SourceRow::U64(row))
-                        }
-                    })
-                    .collect()
-            }
+        let values_per_row = self.values_per_row(chunk_len);
+        match self.polynomial {
+            MultilinearPolynomial::I128Scalars(poly) => poly
+                .coeffs
+                .par_chunks(values_per_row)
+                .enumerate()
+                .map(|(row_index, row)| {
+                    if let Some((_, column_stride)) = self.strided_columns() {
+                        visit(
+                            row_index,
+                            SourceRow::StridedI128 {
+                                values: row,
+                                column_stride,
+                            },
+                        )
+                    } else {
+                        visit(row_index, SourceRow::I128(row))
+                    }
+                })
+                .collect(),
+            MultilinearPolynomial::U64Scalars(poly) => poly
+                .coeffs
+                .par_chunks(values_per_row)
+                .enumerate()
+                .map(|(row_index, row)| {
+                    if let Some((_, column_stride)) = self.strided_columns() {
+                        visit(
+                            row_index,
+                            SourceRow::StridedU64 {
+                                values: row,
+                                column_stride,
+                            },
+                        )
+                    } else {
+                        visit(row_index, SourceRow::U64(row))
+                    }
+                })
+                .collect(),
             _ => {
                 let mut rows = Vec::new();
-                self.for_each_row(sigma, |row_index, row| {
+                self.for_each_row(chunk_len, |row_index, row| {
                     rows.push(visit(row_index, row));
                 });
                 rows
@@ -221,14 +300,15 @@ where
     }
 
     fn is_one_hot(&self) -> bool {
-        matches!(self.0, MultilinearPolynomial::OneHot(_)) || MultilinearPoly::is_one_hot(self.0)
+        matches!(self.polynomial, MultilinearPolynomial::OneHot(_))
+            || MultilinearPoly::is_one_hot(self.polynomial)
     }
 
     fn for_each_one<V>(&self, mut visit: V)
     where
         V: FnMut(usize),
     {
-        match self.0 {
+        match self.polynomial {
             MultilinearPolynomial::OneHot(poly) => {
                 let layout = DoryGlobals::get_layout();
                 let t = poly.nonzero_indices.len();
@@ -238,12 +318,13 @@ where
                     }
                 }
             }
-            _ => MultilinearPoly::for_each_one(self.0, &mut visit),
+            _ => MultilinearPoly::for_each_one(self.polynomial, &mut visit),
         }
     }
 
-    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F> {
-        MultilinearPoly::fold_rows(self.0, left, sigma)
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+        let sigma = chunk_len.trailing_zeros() as usize;
+        MultilinearPoly::fold_rows(self.polynomial, left, sigma)
     }
 }
 
@@ -509,14 +590,17 @@ where
         CycleMajorTraceSource { batch: self, id }
     }
 
-    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    fn natural_chunk_len(&self, ids: &[Self::Id]) -> Option<usize> {
+        (!ids.is_empty()).then_some(self.row_len)
+    }
+
+    fn map_rows<R, V>(&self, chunk_len: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, SourceField>) -> R + Send + Sync,
     {
-        let row_len = 1usize << sigma;
         assert_eq!(
-            row_len, self.row_len,
+            chunk_len, self.row_len,
             "CycleMajor trace batch currently preserves the native streaming row width",
         );
 
@@ -575,21 +659,27 @@ where
         self.batch.materialize_source(self.id).evaluate(point)
     }
 
-    fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+    fn natural_chunk_len(&self) -> Option<usize> {
+        Some(self.batch.row_len)
+    }
+
+    fn for_each_row<V>(&self, chunk_len: usize, mut visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, SourceField>),
     {
-        if (1usize << sigma) == self.batch.row_len {
+        if chunk_len == self.batch.row_len {
             self.batch.for_each_native_row(self.id, visit);
         } else {
             let materialized = self.batch.materialize_source(self.id);
+            let sigma = chunk_len.trailing_zeros() as usize;
             MultilinearPoly::for_each_row(&materialized, sigma, &mut |row_index, row| {
                 visit(row_index, SourceRow::FieldElements(row));
             });
         }
     }
 
-    fn fold_rows(&self, left: &[SourceField], sigma: usize) -> Vec<SourceField> {
+    fn fold_rows(&self, left: &[SourceField], chunk_len: usize) -> Vec<SourceField> {
+        let sigma = chunk_len.trailing_zeros() as usize;
         MultilinearPoly::fold_rows(&self.batch.materialize_source(self.id), left, sigma)
     }
 }
@@ -721,7 +811,7 @@ mod cycle_major_trace_batch_tests {
             4,
         );
 
-        let rows = batch.map_rows(2, &ids, |_, row| snapshot(row));
+        let rows = batch.map_rows(4, &ids, |_, row| snapshot(row));
 
         assert_eq!(batch.source_ids(), ids.as_slice());
         assert_eq!(rows.len(), 2);

@@ -4,7 +4,7 @@
 |-------------|--------------|
 | Author(s)   | @quangvdao   |
 | Created     | 2026-05-12   |
-| Status      | proposed     |
+| Status      | active       |
 | PR          | [#1521](https://github.com/a16z/jolt/pull/1521) |
 
 ## Summary
@@ -13,9 +13,20 @@ Jolt previously had two polynomial commitment scheme APIs in the workspace.
 The production zkVM path had a monolithic in-core trait in `jolt-core/src/poly/commitment/commitment_scheme.rs`, while `crates/jolt-openings` and `crates/jolt-dory` defined the extracted crate boundary.
 This PR's target is the full `jolt-core` PCS type-family migration: `jolt-core` compiles against the canonical `jolt-openings` traits directly, and the old in-core PCS trait family is removed rather than left as a compatibility layer.
 
-This spec proposes a main-target API refactor that ports PR [#1467](https://github.com/a16z/jolt/pull/1467) onto current `main`, with review-driven adjustments recorded here.
-The final target makes `jolt-openings` the canonical backend-neutral opening API, splits verifier and prover PCS surfaces, makes fused batched openings the primary API, moves Dory onto the extracted trait family, and cuts `jolt-core` over to `PCS::BatchProof` / `PCS::Output` without introducing Akita or changing the Jolt protocol.
+This spec describes the active main-target API refactor that ports PR [#1467](https://github.com/a16z/jolt/pull/1467) onto current `main`, with review-driven adjustments recorded here.
+The target makes `jolt-openings` the canonical backend-neutral opening API, splits verifier and prover PCS surfaces, makes fused batched openings the primary API, moves Dory onto the extracted trait family, and cuts `jolt-core` over to `PCS::BatchProof` / `PCS::Output` without introducing Akita or changing the Jolt protocol.
 Any bridge traits introduced earlier in the branch were implementation scaffolding only; they are not part of the merge target and are removed by the direct type-family migration.
+
+The branch has now completed the full `jolt-core` PCS type-family cutover and introduced source-backed commitment entry points.
+An interim version used explicit shaped commitment extension traits so Dory/Jolt could pass a protocol-selected matrix shape without putting that shape on the base PCS trait.
+Those traits have been removed.
+The merge-target API moves only backend-neutral traversal information onto `CommitmentSource` / `BatchCommitmentSource`: a source may advertise the natural commitment chunk length it can stream efficiently, while Dory privately interprets that chunk length as its internal matrix split.
+
+This distinction is important.
+`jolt-openings` should not learn Dory's partition vocabulary, and a source should not have a backend-specific associated `Partition` type.
+The source API describes what can be traversed without materialization.
+The backend API decides how that traversal maps to its commitment algorithm.
+Dory's `sigma`, `nu`, row-commitment aggregation, and opening-point reordering remain Dory/Jolt implementation details.
 
 The implementation should be a mechanical transplant of #1467's hard-earned design except where this spec explicitly diverges, not a greenfield rewrite.
 Adaptation is only for current `main` drift, especially current Dory hardening, current Dory ZK evaluation commitments, Stage 8's streaming RLC optimization, and BlindFold wiring.
@@ -74,14 +85,19 @@ Preserve from current `main`:
 11. `jolt-core` keeps protocol-specific opening bookkeeping.
    `OpeningId`, `PolynomialId`, `SumcheckId`, `OpeningPoint`, `ProverOpeningAccumulator`, and `VerifierOpeningAccumulator` do not move into `jolt-openings`.
 12. Dory layout, Dory matrix embedding policy, Stage 8 claim ordering, and BlindFold constraints do not move into `jolt-openings`.
-13. Dory's current transparent and ZK proofs remain verifier-compatible with current `main`.
-14. `JoltProof` stores the opening proof as `PCS::BatchProof`, not `PCS::Proof`.
-15. Standard and ZK `muldiv` end-to-end proofs continue to pass.
-16. The implementation introduces no Akita dependency.
-17. The final PR state contains no in-core PCS compatibility trait family.
+13. `jolt-openings` must not expose Dory's `sigma`/`nu` split, Dory matrix shape, or a generic associated partition type whose real values are Dory-specific.
+    It may expose backend-neutral traversal facts, such as a natural commitment chunk length, that a concrete backend can interpret privately.
+14. Opening hints for schemes whose opening algorithm depends on a commitment traversal must carry enough backend-owned information to replay the same traversal at opening time.
+    For Dory, the hint records the selected chunk length and row commitments, and Dory derives its private opening shape from that hint instead of recomputing a balanced split from the opening point.
+15. The merge-target API does not require `jolt-core` to call shaped PCS extensions.
+16. Dory's current transparent and ZK proofs remain verifier-compatible with current `main`.
+17. `JoltProof` stores the opening proof as `PCS::BatchProof`, not `PCS::Proof`.
+18. Standard and ZK `muldiv` end-to-end proofs continue to pass.
+19. The implementation introduces no Akita dependency.
+20. The final PR state contains no in-core PCS compatibility trait family.
     `jolt-core/src/poly/commitment/commitment_scheme.rs` should no longer define `CommitmentScheme`, `SourceBatchCommitmentScheme`, `BatchOpeningScheme`, or `ZkOpeningSupport` as wrappers around `jolt-openings`.
     Direct users should import the canonical `jolt-openings` traits or a narrow backend-owned extension trait.
-18. `cargo tree -d` must not show duplicate resolved versions of `jolt-field`, `jolt-transcript`, `jolt-crypto`, or `jolt-openings`.
+21. `cargo tree -d` must not show duplicate resolved versions of `jolt-field`, `jolt-transcript`, `jolt-crypto`, or `jolt-openings`.
 
 No new `jolt-eval` invariant is required for this spec.
 The relevant invariants are proof acceptance, transcript parity, and prover/verifier consistency, which are covered by focused crate tests and `jolt-core` end-to-end tests.
@@ -106,9 +122,9 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 - [x] `crates/jolt-openings/src/schemes.rs` defines `CommitmentSchemeVerifier`, `PublicVerifierSetup`, `CommitmentScheme`, `AdditivelyHomomorphicVerifier`, `AdditivelyHomomorphic`, `ZkOpeningSchemeVerifier`, and `ZkOpeningScheme` with the role split.
 - [x] `StreamingCommitment` is not part of the canonical `jolt-openings` API.
 - [x] `crates/jolt-openings/src/sources.rs` defines `SourceId`, `SourceRow`, `CommitmentSource`, and `BatchCommitmentSource`.
-- [x] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `verify`, `verify_batch`, and `bind_opening_inputs`.
+- [x] `CommitmentSchemeVerifier` contains `Field`, `VerifierSetup`, `Proof`, `BatchProof`, `verify`, `verify_batch`, `verify_fused_batch`, and `bind_opening_inputs`.
 - [x] `PublicVerifierSetup` contains `PublicParams` and `verifier_setup` for schemes whose verifier setup is derivable without prover setup.
-- [x] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, and `prove_batch`.
+- [x] `CommitmentScheme` extends `CommitmentSchemeVerifier` and contains `ProverSetup`, `OpeningHint`, `SetupParams`, `setup`, `project_verifier_setup`, `commit`, `commit_batch`, `open`, `prove_batch`, and `prove_fused_batch`.
 - [x] `commit_batch` has a default implementation that commits one source at a time, and Dory overrides it for batch-source row streaming.
 - [x] Homomorphic extension traits contain only the additive-combination operations needed by the default homomorphic batch helper.
 - [x] `crates/jolt-openings/src/homomorphic.rs` contains #1467's `homomorphic_prove_batch`, `homomorphic_verify_batch`, `rlc_combine`, and `rlc_combine_scalars`.
@@ -146,6 +162,16 @@ The relevant invariants are proof acceptance, transcript parity, and prover/veri
 - [x] `cargo clippy --all --features host,zk -q --all-targets -- -D warnings` passes.
 - [x] `cargo fmt -q` produces no diff.
 
+Source-traversal cleanup acceptance criteria:
+
+- [x] `ShapedCommitmentScheme`, `ShapedZkOpeningScheme`, `commit_with_shape`, and `commit_zk_with_shape` are removed from the public merge-target API.
+- [x] `CommitmentSource` exposes `natural_chunk_len` instead of accepting Dory's `sigma` as the generic source traversal parameter.
+- [x] `BatchCommitmentSource` exposes the same batch-level traversal hint for a selected source-id set, so CycleMajor can preserve one trace scan for all committed sources.
+- [x] Dory derives its private `sigma` from the hint's recorded chunk length and its private `nu` from the hint's row-commitment count.
+- [x] Dory commitment hints record the selected chunk length, and `open` / `open_zk` use the hint to replay the commitment traversal rather than recomputing a balanced split from the opening point length.
+- [x] `jolt-core` call sites enter through `PCS::commit`, `PCS::commit_zk`, `PCS::commit_batch`, or `PCS::commit_batch_zk`; no production `jolt-core`, SDK, or transpiler call site calls a shaped PCS extension.
+- [x] `PolynomialCommitmentSource` and `CycleMajorTraceBatch` no longer need to read Dory globals in order to satisfy a generic source API; any Jolt layout choice is passed into the source adapter as source configuration.
+
 ### Testing Strategy
 
 Focused `jolt-openings` tests should validate the API in isolation:
@@ -166,6 +192,8 @@ Focused `jolt-dory` tests should validate the real PCS implementation:
 4. Source-batch streamed Dory commitment still matches direct commitment.
 5. Dory proof deserialization still rejects oversized or malformed proof round counts.
 6. ZK opening behavior still produces and verifies the expected hiding commitment.
+7. A source committed with a non-default natural chunk length opens using the chunk length recorded in `DoryHint`.
+8. CycleMajor batch commitment produces byte-identical commitments before and after replacing shaped traits with source traversal hints.
 
 `jolt-core` tests should validate the real zkVM integration:
 
@@ -205,6 +233,7 @@ Concrete checks:
 3. Run the existing Criterion benchmark path for Dory/opening-heavy workloads before and after the full `jolt-core` type-family cutover.
    The PR should include the measured comparison against `main` or a clear explanation of any unavoidable noise.
 4. Treat any material prover regression in Stage 8 or CycleMajor commitment as a blocker unless the implementation explains and justifies a deliberate algorithmic tradeoff.
+5. Treat the source-traversal cleanup as performance-sensitive: replacing `sigma` with a natural chunk length must preserve the same chunk size, row order, row encodings, Dory row commitments, and parallel schedule for existing CycleMajor paths.
 
 ## Design
 
@@ -243,6 +272,7 @@ CommitmentSchemeVerifier
   - BatchProof
   - verify
   - verify_batch
+  - verify_fused_batch
   - bind_opening_inputs
 
 PublicVerifierSetup: CommitmentSchemeVerifier
@@ -260,6 +290,7 @@ CommitmentScheme: CommitmentSchemeVerifier
   - commit_batch
   - open
   - prove_batch
+  - prove_fused_batch
 
 AdditivelyHomomorphicVerifier: CommitmentSchemeVerifier
   - combine
@@ -270,12 +301,15 @@ AdditivelyHomomorphic: AdditivelyHomomorphicVerifier + CommitmentScheme
 ZkOpeningSchemeVerifier: CommitmentSchemeVerifier
   - HidingCommitment
   - verify_zk
+  - verify_batch_zk
+  - verify_fused_batch_zk
 
 ZkOpeningScheme: ZkOpeningSchemeVerifier + CommitmentScheme
   - Blind
   - commit_zk
   - commit_batch_zk
   - open_zk
+  - prove_fused_batch_zk
 ```
 
 This hierarchy is a role split, not a lifecycle split.
@@ -293,6 +327,11 @@ The PCS should consume polynomial sources directly.
 Streaming is not a standalone commitment-scheme trait, but it is also not quarantined entirely inside source implementations.
 The source abstraction describes what data is available and which traversal shapes can expose it without materializing all committed polynomials.
 The PCS implementation still owns the commitment algorithm: parallel scheduling, row MSM strategy, one-hot grouping, tier-2 aggregation, hint construction, and transparent-vs-ZK finishing.
+The source abstraction should describe traversal in backend-neutral terms.
+In particular, it should expose a natural commitment chunk length, not Dory's `sigma` and not a scheme-specific partition enum.
+For current Dory/Jolt paths, `chunk_len` is the number of columns in each streamed row.
+Dory privately derives `sigma = log2(chunk_len)` and derives `nu` from its backend-owned row-commitment hint, but no `jolt-openings` trait method should name those variables.
+If a future backend has a different partition concept, it can ignore this hint, derive its own plan from source facts, or add a backend-owned extension trait only if the generic source facts are insufficient.
 
 `jolt-openings` should expose source traits with two layers.
 The core semantic object is `CommitmentSource`; `SourceRow` is only a traversal view for commitment implementations that can exploit row structure:
@@ -362,6 +401,16 @@ pub enum OneHotEntries<'a> {
     MaybeZero(&'a [Option<OneHotIndex>]),
 }
 
+impl OneHotEntries<'_> {
+    /// Number of trace columns represented by this one-hot row.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::OnePerColumn(indices) => indices.len(),
+            Self::MaybeZero(indices) => indices.len(),
+        }
+    }
+}
+
 /// A borrowed row view of a polynomial source.
 ///
 /// This is a traversal hint, not the core polynomial abstraction. Backends that
@@ -428,13 +477,23 @@ pub trait CommitmentSource<F>: Send + Sync {
     /// Evaluates the source at a multilinear point.
     fn evaluate(&self, point: &[F]) -> F;
 
-    /// Visits row-shaped chunks of the source using `sigma` column variables.
+    /// Preferred row length for commitment traversal, when the source has one.
+    ///
+    /// The value is a source traversal fact, not a commitment-scheme partition.
+    /// For Jolt's current Dory-backed sources it is the row length that
+    /// preserves existing trace streaming behavior. A backend may ignore it,
+    /// clamp it, or use its own default when the source returns `None`.
+    fn natural_chunk_len(&self) -> Option<usize> {
+        None
+    }
+
+    /// Visits row-shaped chunks of the source using `chunk_len` columns.
     ///
     /// Implementations should call `visit(row_index, row)` once for each row.
     /// The borrowed row only has to remain valid for the duration of the visit
     /// call, which lets trace-backed sources allocate temporary row buffers and
     /// avoid ownership wrappers such as `Cow`.
-    fn for_each_row<V>(&self, sigma: usize, visit: V)
+    fn for_each_row<V>(&self, chunk_len: usize, visit: V)
     where
         V: for<'row> FnMut(usize, SourceRow<'row, F>);
 
@@ -443,7 +502,7 @@ pub trait CommitmentSource<F>: Send + Sync {
     /// The default is a sequential traversal through `for_each_row`.
     /// Materialized sources can override this to parallelize over borrowed row
     /// chunks without copying rows into an owned staging buffer.
-    fn map_rows<R, V>(&self, sigma: usize, visit: V) -> Vec<R>
+    fn map_rows<R, V>(&self, chunk_len: usize, visit: V) -> Vec<R>
     where
         R: Send,
         V: for<'row> Fn(usize, SourceRow<'row, F>) -> R + Send + Sync;
@@ -452,7 +511,7 @@ pub trait CommitmentSource<F>: Send + Sync {
     ///
     /// Dory uses this shape for its vector/matrix product path; other schemes
     /// can implement it by materializing or by using their own source layout.
-    fn fold_rows(&self, left: &[F], sigma: usize) -> Vec<F>;
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F>;
 }
 
 /// A batch of committed sources that can share one traversal.
@@ -475,6 +534,16 @@ pub trait BatchCommitmentSource<F>: Send + Sync {
     /// Number of multilinear variables in the selected source.
     fn num_vars(&self, id: Self::Id) -> usize;
 
+    /// Preferred shared row length for committing the selected sources.
+    ///
+    /// Returning a shared chunk length is how CycleMajor preserves today's
+    /// one-pass trace scan. The value is still backend-neutral: Dory interprets
+    /// it as a row width, while a different backend may use it only as a cache
+    /// tiling hint or ignore it completely.
+    fn natural_chunk_len(&self, ids: &[Self::Id]) -> Option<usize> {
+        None
+    }
+
     /// Returns a single-source view for backends that do not use batch traversal.
     fn source(&self, id: Self::Id) -> Self::Source<'_>;
 
@@ -486,7 +555,7 @@ pub trait BatchCommitmentSource<F>: Send + Sync {
     /// row-major: `output[row_index][id_index]`.
     fn map_rows<R, V>(
         &self,
-        sigma: usize,
+        chunk_len: usize,
         ids: &[Self::Id],
         visit: V,
     ) -> Vec<Vec<R>>
@@ -527,9 +596,20 @@ Current code uses `Option<usize>` for all one-hot rows, but semantically only `R
 2. `BytecodeRa` always has one bytecode PC chunk per cycle, so it can use `OneHotEntries::OnePerColumn`.
 3. `RamRa` can map a cycle to no committed RAM address after `remap_address`, so it uses `OneHotEntries::MaybeZero`.
 
+This is also why the source trait should not have an associated `Partition` type.
+The source knows how to expose rows and evaluate the committed object; it does not know every backend's preferred partition language.
+If `CommitmentSource` had `type Partition`, then either Jolt would have to choose a Dory-shaped partition for every source, or `jolt-openings` would need a universal enum that tries to anticipate Dory, Akita, HyperKZG, and future GPU-specific layouts.
+Both choices put backend strategy into the wrong layer.
+A natural chunk length is deliberately weaker: it is just the row width the source can stream efficiently.
+Dory can turn that into its matrix split; another backend can ignore it or reinterpret it as a tiling hint.
+
 This is the Dory-dependent part of the source API.
 The alternative is to move these encodings behind a Dory-only trait, but then stable Rust cannot make the generic `PCS::commit_batch(&batch, ...)` dispatch to the optimized Dory implementation only for batches that implement that Dory-only trait.
 Without specialization or downcasting, Jolt would have to call a Dory-specific method directly, which defeats the cutover goal.
+
+The current branch is in a halfway state here.
+It has the source row encodings and canonical batch commitment path, but it still passes a Dory-shaped `sigma` through source traversal and uses shaped extension traits at Jolt call sites that need a protocol-selected matrix layout.
+The next cleanup replaces those with `natural_chunk_len` and source-adapter configuration, so source traversal remains generic while Dory's `sigma`/`nu` interpretation becomes private again.
 
 `BatchCommitmentSource::map_rows` is the no-regression traversal hook.
 It lets Jolt's trace-backed source scan the padded trace once, parallelize over trace rows, and run the caller's row-processing closure for every requested committed polynomial in source-id order.
@@ -587,12 +667,14 @@ fn commit_batch_zk<B: BatchCommitmentSource<Self::Field>>(
 Dory overrides both `commit_batch` and `commit_batch_zk`.
 The implementation is the current streaming algorithm moved behind the PCS boundary:
 
-1. Call `batch.map_rows(sigma, ids, |id, row| commit_row(row, setup))` over padded trace rows.
-2. For each row and each requested source id, compute a Dory row commitment from `SourceRow`.
-3. Receive row-major row commitments in the same source-id order as `ids`.
-4. Transpose to per-source row-commitment vectors exactly as current `generate_and_commit_witness_polynomials` does.
-5. Aggregate each per-source row-commitment vector with Dory tier 2 in transparent or ZK mode.
-6. Return the same `(DoryCommitment, DoryHint)` shape used by `open` / `open_zk`.
+1. Choose `chunk_len` from `batch.natural_chunk_len(ids)` when present, otherwise from Dory's default balanced layout.
+2. Privately derive Dory's commitment-time row width from `chunk_len`; the opening-time split is later replayed from `DoryHint`.
+3. Call `batch.map_rows(chunk_len, ids, |id, row| commit_row(row, setup))` over padded trace rows.
+4. For each row and each requested source id, compute a Dory row commitment from `SourceRow`.
+5. Receive row-major row commitments in the same source-id order as `ids`.
+6. Transpose to per-source row-commitment vectors exactly as current `generate_and_commit_witness_polynomials` does.
+7. Aggregate each per-source row-commitment vector with Dory tier 2 in transparent or ZK mode.
+8. Return the same `(DoryCommitment, DoryHint)` shape used by `open` / `open_zk`, with `DoryHint` recording the selected `chunk_len`.
 
 The Dory row helper is private to `jolt-dory`:
 
@@ -622,7 +704,7 @@ The one-hot Dory helper is the previous `process_chunk_onehot` behavior with onl
 fn commit_onehot_row(row: OneHotRow<'_>, setup: &DoryProverSetup) -> Vec<ArkG1> {
     let k = 1usize << row.log_domain_size;
 
-    let row_len = DoryGlobals::get_num_columns();
+    let row_len = row.entries.len();
     let g1_bases = setup.g1_vec[..row_len]
         .iter()
         .map(|g| g.0.into_affine())
@@ -717,18 +799,21 @@ impl BatchCommitmentSource<Fr> for CycleMajorTraceBatch<'_, LazyTraceIterator> {
         JoltTracePolynomialSource { batch: self, id }
     }
 
-    fn map_rows<R, V>(&self, sigma: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
+    fn natural_chunk_len(&self, ids: &[Self::Id]) -> Option<usize> {
+        (!ids.is_empty()).then_some(self.row_len)
+    }
+
+    fn map_rows<R, V>(&self, chunk_len: usize, ids: &[Self::Id], visit: V) -> Vec<Vec<R>>
     where
         R: Send,
         V: for<'row> Fn(Self::Id, SourceRow<'row, Fr>) -> R + Send + Sync,
     {
-        let row_len = 1usize << sigma;
-        assert_eq!(row_len, self.row_len);
+        assert_eq!(chunk_len, self.row_len);
 
         let rows = self.trace
             .clone()
             .pad_using(self.padded_len, |_| Cycle::NoOp)
-            .iter_chunks(row_len)
+            .iter_chunks(chunk_len)
             .enumerate()
             .par_bridge()
             .map(|(row_index, cycles)| {
@@ -808,7 +893,7 @@ The prover call-site change is narrow: the old row-generation helper disappears 
 The call resolves to `jolt-openings::CommitmentScheme` / `ZkOpeningScheme` directly, with Dory providing the optimized batch-source override behind the canonical trait.
 
 ```rust
-let row_len = DoryGlobals::get_num_columns();
+let row_len = layout.commitment_chunk_len();
 let batch = CycleMajorTraceBatch::new(
     self.lazy_trace.clone(),
     preprocessing,
@@ -920,10 +1005,8 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 8. `open` proves one Dory opening.
 9. `prove_batch` delegates to `homomorphic_prove_batch`.
 
-`ShapedCommitmentScheme for DoryScheme`:
-
-1. `commit_with_shape` commits through the same row path using a protocol-selected matrix shape.
-   This is intentionally not on the base `CommitmentScheme`: most backends derive shape from the source, while Dory/Jolt must sometimes commit several logical sources inside one shared matrix domain.
+Dory no longer implements a shaped commitment extension.
+Source-selected traversal is enough: `CommitmentSource::natural_chunk_len` / `BatchCommitmentSource::natural_chunk_len` provide the row width, and Dory stores the selected chunk length in `DoryHint` so opening uses the same traversal as commitment.
 
 `AdditivelyHomomorphicVerifier for DoryScheme`:
 
@@ -939,10 +1022,23 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 2. Preserve current `y_blinding` behavior.
 3. Preserve BlindFold compatibility.
 
-`ShapedZkOpeningScheme for DoryScheme`:
+ZK commitments use the same source-selected traversal.
+`commit_zk` and `commit_batch_zk` choose the same chunk length as transparent commitment and store it in the same backend-owned hint shape.
 
-1. `commit_zk_with_shape` is the hiding-mode counterpart to `commit_with_shape`.
-   It remains an explicit extension because protocol-selected matrix shape is a Dory/Jolt layout capability, not a generic ZK PCS requirement.
+The awkwardness being removed is precise:
+
+1. Jolt sometimes chooses a layout outside the backend and passes that layout into a source adapter as a natural chunk length or strided-row configuration.
+2. The source API names only `chunk_len`, not Dory's `sigma`.
+3. Dory opening has both row-commitment data and the row width used to produce those row commitments.
+4. Commitment and opening therefore share an explicit hint contract instead of relying on a balanced split recomputed from `point.len()`.
+
+The cleaned-up Dory flow is:
+
+1. Commitment asks the source or batch source for `natural_chunk_len`.
+2. Dory validates that the chosen chunk length is a power of two and usable for the source traversal.
+3. Dory derives `sigma` from `chunk_len` and derives `nu` from the row-commitment count in `DoryHint`.
+4. Dory commits rows and stores `chunk_len` in `DoryHint`.
+5. Opening reads `chunk_len` from `DoryHint`, derives the same private split, folds rows with that chunk length, and produces the single Dory proof.
 
 ### `jolt-core` Integration
 
@@ -964,6 +1060,7 @@ Several boundaries intentionally remain outside `jolt-openings`:
    This keeps BlindFold compatible without putting Dory-specific `y_com` semantics on the base PCS trait.
 4. Dory layout globals remain protocol-owned in `jolt-core`.
    The layout affects Jolt's polynomial indexing, opening points, and streaming witness sources, so it should not be hidden inside a backend-neutral PCS API.
+   The generic source traits should receive the resulting traversal choice as source configuration, not reach back into Dory globals themselves.
 
 #### Final Cutover Shape
 

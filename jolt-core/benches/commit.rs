@@ -14,8 +14,7 @@ use rayon::prelude::*;
 fn benchmark_dory_dense(c: &mut Criterion, name: &str, k: usize, t: usize) {
     let globals = DoryGlobals::initialize_context(k, t, DoryContext::Main, None);
     let (setup, _) = DoryScheme::setup(k.log_2() + t.log_2());
-    let sigma = DoryGlobals::get_num_columns().log_2();
-    let nu = DoryGlobals::get_max_num_rows().log_2();
+    let chunk_len = DoryGlobals::get_num_columns();
     let mut rng = ChaCha20Rng::seed_from_u64(111111u64);
 
     // Generate leaves with percentage of ones
@@ -25,7 +24,8 @@ fn benchmark_dory_dense(c: &mut Criterion, name: &str, k: usize, t: usize) {
     c.bench_function(&format!("{name} Dory commit_rows"), |b| {
         b.iter(|| {
             let _ = globals;
-            DoryScheme::commit_with_shape(&PolynomialCommitmentSource(&poly), nu, sigma, &setup);
+            let source = PolynomialCommitmentSource::with_chunk_len(&poly, chunk_len);
+            DoryScheme::commit(&source, &setup);
         });
     });
 }
@@ -33,8 +33,7 @@ fn benchmark_dory_dense(c: &mut Criterion, name: &str, k: usize, t: usize) {
 fn benchmark_dory_one_hot_batch(c: &mut Criterion, name: &str, k: usize, t: usize) {
     let globals = DoryGlobals::initialize_context(k, t, DoryContext::Main, None);
     let (setup, _) = DoryScheme::setup(k.log_2() + t.log_2());
-    let sigma = DoryGlobals::get_num_columns().log_2();
-    let nu = DoryGlobals::get_max_num_rows().log_2();
+    let chunk_len = DoryGlobals::get_num_columns();
     let mut rng = ChaCha20Rng::seed_from_u64(111111u64);
 
     let num_polys = 30;
@@ -53,12 +52,8 @@ fn benchmark_dory_one_hot_batch(c: &mut Criterion, name: &str, k: usize, t: usiz
             polys
                 .par_iter()
                 .map(|poly| {
-                    DoryScheme::commit_with_shape(
-                        &PolynomialCommitmentSource(poly),
-                        nu,
-                        sigma,
-                        &setup,
-                    )
+                    let source = PolynomialCommitmentSource::with_chunk_len(poly, chunk_len);
+                    DoryScheme::commit(&source, &setup)
                 })
                 .collect::<Vec<_>>();
         });
@@ -68,8 +63,7 @@ fn benchmark_dory_one_hot_batch(c: &mut Criterion, name: &str, k: usize, t: usiz
 fn benchmark_dory_mixed_batch(c: &mut Criterion, name: &str, k: usize, t: usize) {
     let globals = DoryGlobals::initialize_context(k, t, DoryContext::Main, None);
     let (setup, _) = DoryScheme::setup(k.log_2() + t.log_2());
-    let sigma = DoryGlobals::get_num_columns().log_2();
-    let nu = DoryGlobals::get_max_num_rows().log_2();
+    let chunk_len = DoryGlobals::get_num_columns();
     let mut rng = ChaCha20Rng::seed_from_u64(111111u64);
 
     let num_polys = 30;
@@ -94,12 +88,8 @@ fn benchmark_dory_mixed_batch(c: &mut Criterion, name: &str, k: usize, t: usize)
             polys
                 .par_iter()
                 .map(|poly| {
-                    DoryScheme::commit_with_shape(
-                        &PolynomialCommitmentSource(poly),
-                        nu,
-                        sigma,
-                        &setup,
-                    )
+                    let source = PolynomialCommitmentSource::with_chunk_len(poly, chunk_len);
+                    DoryScheme::commit(&source, &setup)
                 })
                 .collect::<Vec<_>>();
         });

@@ -21,7 +21,7 @@
 //! - [`DoryCommitment`] — BN254 pairing target element (GT).
 //! - [`DoryProof`] — single opening proof.
 //! - [`DoryProverSetup`] / [`DoryVerifierSetup`] — prover and verifier SRS.
-//! - [`DoryHint`] — row commitments and commitment blind reusable as opening proof hint.
+//! - [`DoryHint`] — row commitments, row width, and commitment blind reusable as opening proof hint.
 
 mod routines;
 mod scheme;

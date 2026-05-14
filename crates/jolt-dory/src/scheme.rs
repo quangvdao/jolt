@@ -30,8 +30,7 @@ use jolt_openings::{
     AdditivelyHomomorphicVerifier, BatchCommitmentSource, CommitmentScheme,
     CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
     EvaluationCommitmentScheme, OneHotEntries, OneHotRow, OpeningClaim, OpeningsError, ProverClaim,
-    PublicVerifierSetup, ShapedCommitmentScheme, ShapedZkOpeningScheme, SourceRow, ZkOpeningScheme,
-    ZkOpeningSchemeVerifier,
+    PublicVerifierSetup, SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
@@ -129,57 +128,9 @@ impl DoryScheme {
         S: CommitmentSource<Fr> + ?Sized,
         M: Mode,
     {
-        let row_commitments = compute_row_commitments(source, setup);
-        finish_row_commitments::<M>(row_commitments, setup)
-    }
-
-    fn commit_with_shape_mode<S, M>(
-        source: &S,
-        nu: usize,
-        sigma: usize,
-        setup: &ArkworksProverSetup,
-    ) -> (DoryCommitment, DoryHint)
-    where
-        S: CommitmentSource<Fr> + ?Sized,
-        M: Mode,
-    {
-        let row_commitments = compute_row_commitments_with_shape(source, nu, sigma, setup);
-        finish_row_commitments::<M>(row_commitments, setup)
-    }
-
-    /// Commits a source using an explicit Dory matrix shape.
-    ///
-    /// The generic [`CommitmentScheme::commit`] entrypoint chooses a balanced
-    /// shape from the source's variable count. Jolt's cycle-major streaming
-    /// path sometimes commits a shorter dense source in the larger matrix
-    /// shape dictated by the trace/one-hot batch. This Dory-specific entrypoint
-    /// makes that layout choice explicit: the source is traversed with
-    /// `2^sigma` columns, and one-hot sources reserve `2^nu` row slots.
-    #[tracing::instrument(skip_all, name = "DoryScheme::commit_with_shape")]
-    pub fn commit_with_shape<S>(
-        source: &S,
-        nu: usize,
-        sigma: usize,
-        setup: &DoryProverSetup,
-    ) -> (DoryCommitment, DoryHint)
-    where
-        S: CommitmentSource<Fr> + ?Sized,
-    {
-        Self::commit_with_shape_mode::<S, Transparent>(source, nu, sigma, &setup.0)
-    }
-
-    /// Commits a hiding source using an explicit Dory matrix shape.
-    #[tracing::instrument(skip_all, name = "DoryScheme::commit_zk_with_shape")]
-    pub fn commit_zk_with_shape<S>(
-        source: &S,
-        nu: usize,
-        sigma: usize,
-        setup: &DoryProverSetup,
-    ) -> (DoryCommitment, DoryHint)
-    where
-        S: CommitmentSource<Fr> + ?Sized,
-    {
-        Self::commit_with_shape_mode::<S, ZK>(source, nu, sigma, &setup.0)
+        let chunk_len = natural_or_balanced_chunk_len(source);
+        let row_commitments = compute_row_commitments(source, chunk_len, setup);
+        finish_row_commitments::<M>(row_commitments, chunk_len, setup)
     }
 
     fn commit_batch_with_mode<B, M>(
@@ -200,9 +151,12 @@ impl DoryScheme {
             .map(|&id| batch.num_vars(id))
             .max()
             .expect("ids is non-empty");
-        let sigma = max_num_vars.div_ceil(2);
-        let ctx = CommitRowContext::new(setup, 1usize << sigma);
-        let row_major = batch.map_rows(sigma, ids, |_, row| commit_source_row(row, &ctx));
+        let chunk_len = batch
+            .natural_chunk_len(ids)
+            .unwrap_or_else(|| balanced_chunk_len(max_num_vars));
+        validate_chunk_len(chunk_len);
+        let ctx = CommitRowContext::new(setup, chunk_len);
+        let row_major = batch.map_rows(chunk_len, ids, |_, row| commit_source_row(row, &ctx));
 
         let mut chunks_by_source: Vec<Vec<DoryChunkCommitment>> = (0..ids.len())
             .map(|_| Vec::with_capacity(row_major.len()))
@@ -220,15 +174,13 @@ impl DoryScheme {
 
         chunks_by_source
             .into_iter()
-            .map(|chunks| aggregate_batch_chunks::<M>(chunks, setup))
+            .map(|chunks| aggregate_batch_chunks::<M>(chunks, chunk_len, setup))
             .collect()
     }
 
     fn open_source_with_mode<S, T, M>(
         source: &S,
         point: &[Fr],
-        nu: usize,
-        sigma: usize,
         setup: &ArkworksProverSetup,
         hint: DoryHint,
         transcript: &mut T,
@@ -240,6 +192,7 @@ impl DoryScheme {
     {
         let adapter = DorySourceAdapter::new(source);
         let ark_point: Vec<ArkFr> = point.iter().rev().map(jolt_fr_to_ark).collect();
+        let (nu, sigma) = hint_shape(&hint);
 
         Self::open_dory_source_with_mode::<_, _, M>(
             &adapter, &ark_point, nu, sigma, setup, hint, transcript,
@@ -280,17 +233,11 @@ impl DoryScheme {
         )
     }
 
-    /// Opens a transparent Dory commitment for an arbitrary commitment source.
-    ///
-    /// This entrypoint is for protocol layers that already know the Dory matrix
-    /// shape and already have a row-commitment hint. It preserves streaming
-    /// opening paths without forcing the source through `DoryScheme::Polynomial`.
-    #[tracing::instrument(skip_all, name = "DoryScheme::open_source_with_shape")]
-    pub fn open_source_with_shape<S, T>(
+    /// Opens a transparent Dory commitment using the traversal recorded in the hint.
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_source_with_hint")]
+    fn open_source_with_hint<S, T>(
         source: &S,
         point: &[Fr],
-        nu: usize,
-        sigma: usize,
         setup: &DoryProverSetup,
         hint: DoryHint,
         transcript: &mut T,
@@ -300,21 +247,16 @@ impl DoryScheme {
         T: DoryTranscript<Curve = InnerBN254>,
     {
         let (proof, _blind) = Self::open_source_with_mode::<S, T, Transparent>(
-            source, point, nu, sigma, &setup.0, hint, transcript,
+            source, point, &setup.0, hint, transcript,
         );
         proof
     }
 
-    /// Opens a ZK/hiding Dory commitment for an arbitrary commitment source.
-    ///
-    /// Returns the proof, the hiding commitment to the evaluation, and the
-    /// evaluation blinding scalar consumed later by BlindFold.
-    #[tracing::instrument(skip_all, name = "DoryScheme::open_zk_source_with_shape")]
-    pub fn open_zk_source_with_shape<S, T>(
+    /// Opens a ZK/hiding Dory commitment using the traversal recorded in the hint.
+    #[tracing::instrument(skip_all, name = "DoryScheme::open_zk_source_with_hint")]
+    fn open_zk_source_with_hint<S, T>(
         source: &S,
         point: &[Fr],
-        nu: usize,
-        sigma: usize,
         setup: &DoryProverSetup,
         hint: DoryHint,
         transcript: &mut T,
@@ -323,9 +265,8 @@ impl DoryScheme {
         S: CommitmentSource<Fr> + ?Sized,
         T: DoryTranscript<Curve = InnerBN254>,
     {
-        let (proof, y_blinding) = Self::open_source_with_mode::<S, T, ZK>(
-            source, point, nu, sigma, &setup.0, hint, transcript,
-        );
+        let (proof, y_blinding) =
+            Self::open_source_with_mode::<S, T, ZK>(source, point, &setup.0, hint, transcript);
         let y_com = ark_to_jolt_g1(proof.0.y_com.expect("ZK proof must contain y_com"));
         let blinding = y_blinding.expect("ZK proof must return y_blinding");
         (proof, y_com, blinding)
@@ -334,11 +275,11 @@ impl DoryScheme {
     /// Verifies a transparent Dory opening using an already Dory-compatible
     /// transcript adapter.
     ///
-    /// This is the verifier-side counterpart to `open_source_with_shape` for
+    /// This is the verifier-side counterpart to opening with a hint for
     /// protocol layers that still own their transcript type but delegate Dory
     /// verification to this crate.
-    #[tracing::instrument(skip_all, name = "DoryScheme::verify_with_shape")]
-    pub fn verify_with_shape<T>(
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify_with_transcript")]
+    pub fn verify_with_transcript<T>(
         commitment: &DoryCommitment,
         point: &[Fr],
         eval: Fr,
@@ -369,8 +310,8 @@ impl DoryScheme {
     ///
     /// In ZK mode the evaluation is hidden and Dory verifies against the
     /// evaluation commitment embedded in the proof.
-    #[tracing::instrument(skip_all, name = "DoryScheme::verify_zk_with_shape")]
-    pub fn verify_zk_with_shape<T>(
+    #[tracing::instrument(skip_all, name = "DoryScheme::verify_zk_with_transcript")]
+    pub fn verify_zk_with_transcript<T>(
         commitment: &DoryCommitment,
         point: &[Fr],
         proof: &DoryProof,
@@ -430,7 +371,7 @@ impl CommitmentSchemeVerifier for DoryScheme {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError> {
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-        Self::verify_with_shape(commitment, point, eval, proof, setup, &mut dory_transcript)
+        Self::verify_with_transcript(commitment, point, eval, proof, setup, &mut dory_transcript)
     }
 
     fn verify_batch(
@@ -522,23 +463,22 @@ impl CommitmentScheme for DoryScheme {
     where
         S: CommitmentSource<Self::Field> + ?Sized,
     {
-        let num_vars = point.len();
-        let sigma = num_vars.div_ceil(2);
-        let nu = num_vars - sigma;
-
-        let hint = match hint {
-            Some(hint) => hint,
-            None => DoryHint::new(
-                ark_to_jolt_g1_vec(compute_row_commitments(poly, &setup.0)),
+        let hint = if let Some(hint) = hint {
+            hint
+        } else {
+            let chunk_len = natural_or_balanced_chunk_len(poly);
+            DoryHint::new(
+                ark_to_jolt_g1_vec(compute_row_commitments(poly, chunk_len, &setup.0)),
                 Fr::from_u64(0),
-            ),
+                chunk_len,
+            )
         };
         debug_assert!(
             hint.commit_blind == Fr::from_u64(0),
             "commit_blind should be 0 for transparent mode"
         );
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-        Self::open_source_with_shape(poly, point, nu, sigma, setup, hint, &mut dory_transcript)
+        Self::open_source_with_hint(poly, point, setup, hint, &mut dory_transcript)
     }
 
     fn prove_batch<S>(
@@ -565,17 +505,6 @@ impl CommitmentScheme for DoryScheme {
         S: CommitmentSource<Self::Field> + ?Sized,
     {
         vec![Self::open(polynomial, point, eval, setup, hint, transcript)]
-    }
-}
-
-impl ShapedCommitmentScheme for DoryScheme {
-    fn commit_with_shape<S: CommitmentSource<Fr> + ?Sized>(
-        source: &S,
-        nu: usize,
-        sigma: usize,
-        setup: &Self::ProverSetup,
-    ) -> (Self::Output, Self::OpeningHint) {
-        DoryScheme::commit_with_shape(source, nu, sigma, setup)
     }
 }
 
@@ -625,7 +554,12 @@ impl AdditivelyHomomorphic for DoryScheme {
             })
             .collect();
 
-        DoryHint::new(combined, combined_blind)
+        let chunk_len = hints
+            .iter()
+            .map(|hint| hint.chunk_len)
+            .max()
+            .unwrap_or_default();
+        DoryHint::new(combined, combined_blind, chunk_len)
     }
 }
 
@@ -641,7 +575,7 @@ impl ZkOpeningSchemeVerifier for DoryScheme {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError> {
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-        Self::verify_zk_with_shape(commitment, point, proof, setup, &mut dory_transcript)
+        Self::verify_zk_with_transcript(commitment, point, proof, setup, &mut dory_transcript)
     }
 
     fn verify_batch_zk(
@@ -717,11 +651,8 @@ impl ZkOpeningScheme for DoryScheme {
     where
         S: CommitmentSource<Self::Field> + ?Sized,
     {
-        let num_vars = point.len();
-        let sigma = num_vars.div_ceil(2);
-        let nu = num_vars - sigma;
         let mut dory_transcript = JoltToDoryTranscript::new(transcript);
-        Self::open_zk_source_with_shape(poly, point, nu, sigma, setup, hint, &mut dory_transcript)
+        Self::open_zk_source_with_hint(poly, point, setup, hint, &mut dory_transcript)
     }
 
     fn prove_batch_zk<S>(
@@ -763,17 +694,6 @@ impl ZkOpeningScheme for DoryScheme {
         let (proof, y_com, y_blinding) =
             Self::open_zk(polynomial, point, eval, setup, hint, transcript);
         (vec![proof], y_com, y_blinding)
-    }
-}
-
-impl ShapedZkOpeningScheme for DoryScheme {
-    fn commit_zk_with_shape<S: CommitmentSource<Fr> + ?Sized>(
-        source: &S,
-        nu: usize,
-        sigma: usize,
-        setup: &Self::ProverSetup,
-    ) -> (Self::Output, Self::OpeningHint) {
-        DoryScheme::commit_zk_with_shape(source, nu, sigma, setup)
     }
 }
 
@@ -825,13 +745,12 @@ impl<'a> CommitRowContext<'a> {
 /// Dense commit: full MSM per row, parallel over rows.
 fn commit_rows_dense<S: CommitmentSource<Fr> + ?Sized>(
     source: &S,
-    sigma: usize,
+    chunk_len: usize,
     setup: &ArkworksProverSetup,
 ) -> Vec<ArkG1> {
-    let num_cols = 1usize << sigma;
-    let ctx = CommitRowContext::new(setup, num_cols);
+    let ctx = CommitRowContext::new(setup, chunk_len);
 
-    let chunks = source.map_rows(sigma, |_, row| commit_source_row(row, &ctx));
+    let chunks = source.map_rows(chunk_len, |_, row| commit_source_row(row, &ctx));
     flatten_chunks(chunks)
 }
 
@@ -1082,6 +1001,7 @@ fn flatten_chunks(chunks: Vec<DoryChunkCommitment>) -> Vec<ArkG1> {
 
 fn aggregate_batch_chunks<M: Mode>(
     chunks: Vec<DoryChunkCommitment>,
+    chunk_len: usize,
     setup: &ArkworksProverSetup,
 ) -> (DoryCommitment, DoryHint) {
     assert!(!chunks.is_empty(), "cannot aggregate an empty source");
@@ -1099,7 +1019,7 @@ fn aggregate_batch_chunks<M: Mode>(
                     }
                 }
             }
-            finish_row_commitments::<M>(row_commitments, setup)
+            finish_row_commitments::<M>(row_commitments, chunk_len, setup)
         }
         DoryChunkCommitment::OneHot(first) => {
             let rows_per_hot_index = chunks.len();
@@ -1125,13 +1045,14 @@ fn aggregate_batch_chunks<M: Mode>(
                     }
                 }
             }
-            finish_row_commitments::<M>(row_commitments, setup)
+            finish_row_commitments::<M>(row_commitments, chunk_len, setup)
         }
     }
 }
 
 fn finish_row_commitments<M: Mode>(
     row_commitments: Vec<ArkG1>,
+    chunk_len: usize,
     setup: &ArkworksProverSetup,
 ) -> (DoryCommitment, DoryHint) {
     let (tier_2, commit_blind) = commit_rows_tier_2::<M>(&row_commitments, setup);
@@ -1140,33 +1061,54 @@ fn finish_row_commitments<M: Mode>(
         DoryHint::new(
             ark_to_jolt_g1_vec(row_commitments),
             ark_to_jolt_fr(&commit_blind),
+            chunk_len,
         ),
     )
 }
 
+fn balanced_chunk_len(num_vars: usize) -> usize {
+    1usize << num_vars.div_ceil(2)
+}
+
+fn validate_chunk_len(chunk_len: usize) {
+    assert!(
+        chunk_len.is_power_of_two(),
+        "Dory commitment chunk length ({chunk_len}) must be a power of two",
+    );
+}
+
+fn natural_or_balanced_chunk_len<S: CommitmentSource<Fr> + ?Sized>(source: &S) -> usize {
+    let chunk_len = source
+        .natural_chunk_len()
+        .unwrap_or_else(|| balanced_chunk_len(source.num_vars()));
+    validate_chunk_len(chunk_len);
+    chunk_len
+}
+
+fn hint_shape(hint: &DoryHint) -> (usize, usize) {
+    validate_chunk_len(hint.chunk_len);
+    assert!(
+        hint.row_commitments.len().is_power_of_two(),
+        "Dory hint row count ({}) must be a power of two",
+        hint.row_commitments.len(),
+    );
+    let sigma = hint.chunk_len.trailing_zeros() as usize;
+    let nu = hint.row_commitments.len().trailing_zeros() as usize;
+    (nu, sigma)
+}
+
 fn compute_row_commitments<S: CommitmentSource<Fr> + ?Sized>(
     source: &S,
+    chunk_len: usize,
     setup: &ArkworksProverSetup,
 ) -> Vec<ArkG1> {
     let num_vars = source.num_vars();
-    let sigma = num_vars.div_ceil(2);
-    let nu = num_vars - sigma;
-
-    compute_row_commitments_with_shape(source, nu, sigma, setup)
-}
-
-fn compute_row_commitments_with_shape<S: CommitmentSource<Fr> + ?Sized>(
-    source: &S,
-    nu: usize,
-    sigma: usize,
-    setup: &ArkworksProverSetup,
-) -> Vec<ArkG1> {
-    let num_cols = 1usize << sigma;
-    let num_rows = 1usize << nu;
+    let sigma = chunk_len.trailing_zeros() as usize;
+    let num_rows = 1usize << num_vars.saturating_sub(sigma);
     if source.is_one_hot() {
-        commit_rows_one_hot(source, num_rows, num_cols, setup)
+        commit_rows_one_hot(source, num_rows, chunk_len, setup)
     } else {
-        commit_rows_dense(source, sigma, setup)
+        commit_rows_dense(source, chunk_len, setup)
     }
 }
 
@@ -1234,7 +1176,7 @@ impl<S: CommitmentSource<Fr> + ?Sized> DoryPolynomial<ArkFr> for DorySourceAdapt
 impl<S: CommitmentSource<Fr> + ?Sized> MultilinearLagrange<ArkFr> for DorySourceAdapter<'_, S> {
     fn vector_matrix_product(&self, left_vec: &[ArkFr], _nu: usize, sigma: usize) -> Vec<ArkFr> {
         let native_left: Vec<Fr> = left_vec.iter().map(ark_to_jolt_fr).collect();
-        let result = self.source.fold_rows(&native_left, sigma);
+        let result = self.source.fold_rows(&native_left, 1usize << sigma);
         result.iter().map(jolt_fr_to_ark).collect()
     }
 }
@@ -1245,7 +1187,7 @@ mod tests {
     use jolt_crypto::{Bn254, JoltGroup, Pedersen, VectorCommitment};
     use jolt_field::{FromPrimitiveInt, RandomSampling};
     use jolt_openings::SourceRow;
-    use jolt_poly::Polynomial;
+    use jolt_poly::{MultilinearPoly, Polynomial};
     use jolt_transcript::Blake2bTranscript;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
@@ -1271,7 +1213,7 @@ mod tests {
                 .iter()
                 .map(|&value| Fr::from_u64(value))
                 .collect();
-            dense.evaluate(point)
+            MultilinearPoly::evaluate(&dense, point)
         }
     }
 
@@ -1284,20 +1226,18 @@ mod tests {
             self.field_evaluation(point)
         }
 
-        fn for_each_row<V>(&self, sigma: usize, mut visit: V)
+        fn for_each_row<V>(&self, chunk_len: usize, mut visit: V)
         where
             V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
         {
-            let row_len = 1usize << sigma;
-            for (row_index, row) in self.evaluations.chunks(row_len).enumerate() {
+            for (row_index, row) in self.evaluations.chunks(chunk_len).enumerate() {
                 visit(row_index, SourceRow::U64(row));
             }
         }
 
-        fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
-            let row_len = 1usize << sigma;
-            let mut result = vec![Fr::from_u64(0); row_len];
-            for (row_index, row) in self.evaluations.chunks(row_len).enumerate() {
+        fn fold_rows(&self, left: &[Fr], chunk_len: usize) -> Vec<Fr> {
+            let mut result = vec![Fr::from_u64(0); chunk_len];
+            for (row_index, row) in self.evaluations.chunks(chunk_len).enumerate() {
                 let weight = left[row_index];
                 for (dest, &value) in result.iter_mut().zip(row) {
                     *dest += Fr::from_u64(value) * weight;
@@ -1316,7 +1256,11 @@ mod tests {
             self.dense.evaluate(point)
         }
 
-        fn for_each_row<V>(&self, _sigma: usize, mut visit: V)
+        fn natural_chunk_len(&self) -> Option<usize> {
+            Some(self.rows[0].len() * self.column_stride)
+        }
+
+        fn for_each_row<V>(&self, _chunk_len: usize, mut visit: V)
         where
             V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
         {
@@ -1331,8 +1275,9 @@ mod tests {
             }
         }
 
-        fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
-            self.dense.fold_rows(left, sigma)
+        fn fold_rows(&self, left: &[Fr], chunk_len: usize) -> Vec<Fr> {
+            let sigma = chunk_len.trailing_zeros() as usize;
+            MultilinearPoly::fold_rows(&self.dense, left, sigma)
         }
     }
 
@@ -1345,15 +1290,16 @@ mod tests {
             self.poly.evaluate(point)
         }
 
-        fn for_each_row<V>(&self, _sigma: usize, _visit: V)
+        fn for_each_row<V>(&self, _chunk_len: usize, _visit: V)
         where
             V: for<'row> FnMut(usize, SourceRow<'row, Fr>),
         {
             panic!("single-claim prove_batch must not materialize source rows")
         }
 
-        fn fold_rows(&self, left: &[Fr], sigma: usize) -> Vec<Fr> {
-            self.poly.fold_rows(left, sigma)
+        fn fold_rows(&self, left: &[Fr], chunk_len: usize) -> Vec<Fr> {
+            let sigma = chunk_len.trailing_zeros() as usize;
+            MultilinearPoly::fold_rows(&self.poly, left, sigma)
         }
     }
 
@@ -1449,10 +1395,13 @@ mod tests {
         };
         let dense_source = Polynomial::new(dense);
 
-        let (strided_commitment, strided_hint) =
-            DoryScheme::commit_with_shape(&source, 1, 3, &prover_setup);
-        let (dense_commitment, dense_hint) =
-            DoryScheme::commit_with_shape(&dense_source, 1, 3, &prover_setup);
+        let (strided_commitment, strided_hint) = DoryScheme::commit(&source, &prover_setup);
+        let dense_wrapped = StridedU64Source {
+            rows: vec![vec![3, 0, 0, 0, 5, 0, 0, 0], vec![7, 0, 0, 0, 11, 0, 0, 0]],
+            dense: dense_source,
+            column_stride: 1,
+        };
+        let (dense_commitment, dense_hint) = DoryScheme::commit(&dense_wrapped, &prover_setup);
 
         assert_eq!(strided_commitment, dense_commitment);
         assert_eq!(strided_hint.row_commitments, dense_hint.row_commitments);
@@ -1501,8 +1450,8 @@ mod tests {
         let a = Fr::from_u64(2);
         let b = Fr::from_u64(7);
 
-        let hint_a = DoryHint::new(vec![g], Fr::from_u64(3));
-        let hint_b = DoryHint::new(vec![h, k], Fr::from_u64(5));
+        let hint_a = DoryHint::new(vec![g], Fr::from_u64(3), 4);
+        let hint_b = DoryHint::new(vec![h, k], Fr::from_u64(5), 8);
 
         let combined = DoryScheme::combine_hints(vec![hint_a, hint_b], &[a, b]);
 
@@ -1517,6 +1466,7 @@ mod tests {
             a * Fr::from_u64(3) + b * Fr::from_u64(5),
             "combined hint blind must match the same linear combination"
         );
+        assert_eq!(combined.chunk_len, 8);
     }
 
     #[test]

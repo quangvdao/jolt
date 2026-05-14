@@ -7,14 +7,21 @@
     reason = "ZK proof y_com/y_blinding are Dory-mode invariants; dory::prove/verify errors are caller-precondition violations surfaced via panic; the dory adapter's commit is unreachable because DoryScheme pre-computes row commitments"
 )]
 
-use dory::backends::arkworks::ArkworksProverSetup;
+use std::mem::{transmute, transmute_copy};
+
+use dory::backends::arkworks::{
+    ArkFr as DoryArkFr, ArkG1 as ArkG1Struct, ArkGT as DoryArkGT, ArkworksProverSetup,
+    BN254 as DoryBN254,
+};
 use dory::mode::Transparent;
 use dory::primitives::arithmetic::{
     DoryRoutines, Field as DoryField, Group as DoryGroup, PairingCurve,
 };
 use dory::primitives::poly::{MultilinearLagrange, Polynomial as DoryPolynomial};
 use dory::primitives::transcript::Transcript as DoryTranscript;
-use dory::Mode;
+use dory::setup::ProverSetup as DoryNativeProverSetup;
+use dory::{error::DoryError, mode::Mode as DoryMode};
+use dory::{prove, verify, Mode, ZK};
 use jolt_crypto::ec::bn254::batch_addition::batch_g1_additions_multi_affine;
 use jolt_crypto::{Bn254G1, Bn254GT, Commitment, DeriveSetup, JoltGroup, PedersenSetup};
 use jolt_field::{Fr, FromPrimitiveInt};
@@ -22,16 +29,16 @@ use jolt_openings::{
     homomorphic_prove_batch, homomorphic_verify_batch, AdditivelyHomomorphic,
     AdditivelyHomomorphicVerifier, BatchCommitmentSource, CommitmentScheme,
     CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
-    EvaluationCommitmentScheme, OpeningClaim, OpeningsError, ProverClaim, PublicVerifierSetup,
-    ShapedCommitmentScheme, ShapedZkOpeningScheme, SourceRow, ZkOpeningScheme,
+    EvaluationCommitmentScheme, OneHotEntries, OneHotRow, OpeningClaim, OpeningsError, ProverClaim,
+    PublicVerifierSetup, ShapedCommitmentScheme, ShapedZkOpeningScheme, SourceRow, ZkOpeningScheme,
     ZkOpeningSchemeVerifier,
 };
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
 
 use ark_bn254::{G1Affine, G1Projective};
+use ark_ec::scalar_mul::variable_base::{msm_i128, msm_u64};
 use ark_ec::CurveGroup;
-use dory::backends::arkworks::ArkG1 as ArkG1Struct;
 
 use crate::routines::{JoltG1Routines, JoltG2Routines};
 use crate::transcript::JoltToDoryTranscript;
@@ -46,10 +53,10 @@ use crate::types::{DoryCommitment, DoryHint, DoryProof, DoryProverSetup, DoryVer
 /// `DoryScheme`. This type is exposed for Dory-native integration points that
 /// already implement dory-pcs polynomial traits and need to avoid converting
 /// large opening-time vectors through the generic source abstraction.
-pub type ArkFr = dory::backends::arkworks::ArkFr;
-pub(crate) type ArkG1 = dory::backends::arkworks::ArkG1;
-pub(crate) type ArkGT = dory::backends::arkworks::ArkGT;
-type InnerBN254 = dory::backends::arkworks::BN254;
+pub type ArkFr = DoryArkFr;
+pub(crate) type ArkG1 = ArkG1Struct;
+pub(crate) type ArkGT = DoryArkGT;
+type InnerBN254 = DoryBN254;
 
 // All conversion functions below rely on repr(transparent) layout identity
 // between jolt and dory-pcs wrappers over the same arkworks inner type.
@@ -57,44 +64,44 @@ type InnerBN254 = dory::backends::arkworks::BN254;
 #[inline]
 pub(crate) fn jolt_fr_to_ark(f: &Fr) -> ArkFr {
     // SAFETY: Fr and ArkFr are both repr(transparent) over ark_bn254::Fr.
-    unsafe { std::mem::transmute_copy(f) }
+    unsafe { transmute_copy(f) }
 }
 
 #[inline]
 pub(crate) fn ark_to_jolt_fr(ark: &ArkFr) -> Fr {
     // SAFETY: same layout as jolt_fr_to_ark.
-    unsafe { std::mem::transmute_copy(ark) }
+    unsafe { transmute_copy(ark) }
 }
 
 #[inline]
 pub(crate) fn jolt_gt_to_ark(gt: &Bn254GT) -> ArkGT {
     // SAFETY: Bn254GT and ArkGT are both repr(transparent) over Fq12.
-    unsafe { std::mem::transmute_copy(gt) }
+    unsafe { transmute_copy(gt) }
 }
 
 #[inline]
 pub(crate) fn ark_to_jolt_gt(ark: &ArkGT) -> Bn254GT {
     // SAFETY: same layout as jolt_gt_to_ark.
-    unsafe { std::mem::transmute_copy(ark) }
+    unsafe { transmute_copy(ark) }
 }
 
 #[inline]
 pub(crate) fn jolt_g1_vec_to_ark(v: Vec<Bn254G1>) -> Vec<ArkG1> {
     // SAFETY: Bn254G1 and ArkG1 have identical size/align (repr(transparent)
     // over G1Projective), so Vec layout is identical.
-    unsafe { std::mem::transmute(v) }
+    unsafe { transmute(v) }
 }
 
 #[inline]
 pub(crate) fn ark_to_jolt_g1_vec(v: Vec<ArkG1>) -> Vec<Bn254G1> {
     // SAFETY: same layout as jolt_g1_vec_to_ark.
-    unsafe { std::mem::transmute(v) }
+    unsafe { transmute(v) }
 }
 
 #[inline]
 pub(crate) fn ark_to_jolt_g1(ark: ArkG1) -> Bn254G1 {
     // SAFETY: Bn254G1 and ArkG1 are both repr(transparent) over G1Projective.
-    unsafe { std::mem::transmute(ark) }
+    unsafe { transmute(ark) }
 }
 
 #[derive(Clone)]
@@ -172,7 +179,7 @@ impl DoryScheme {
     where
         S: CommitmentSource<Fr> + ?Sized,
     {
-        Self::commit_with_shape_mode::<S, dory::ZK>(source, nu, sigma, &setup.0)
+        Self::commit_with_shape_mode::<S, ZK>(source, nu, sigma, &setup.0)
     }
 
     fn commit_batch_with_mode<B, M>(
@@ -255,7 +262,7 @@ impl DoryScheme {
     {
         let (row_commitments, commit_blind) = hint.into_ark_parts();
         let (proof, y_blinding) =
-            dory::prove::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _, _, M>(
+            prove::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _, _, M>(
                 source,
                 ark_point,
                 row_commitments,
@@ -316,7 +323,7 @@ impl DoryScheme {
         S: CommitmentSource<Fr> + ?Sized,
         T: DoryTranscript<Curve = InnerBN254>,
     {
-        let (proof, y_blinding) = Self::open_source_with_mode::<S, T, dory::ZK>(
+        let (proof, y_blinding) = Self::open_source_with_mode::<S, T, ZK>(
             source, point, nu, sigma, &setup.0, hint, transcript,
         );
         let y_com = ark_to_jolt_g1(proof.0.y_com.expect("ZK proof must contain y_com"));
@@ -346,7 +353,7 @@ impl DoryScheme {
         let ark_eval = jolt_fr_to_ark(&eval);
         let ark_commitment = jolt_gt_to_ark(&commitment.0);
 
-        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
+        verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
             ark_commitment,
             ark_eval,
             &ark_point,
@@ -377,7 +384,7 @@ impl DoryScheme {
         let dummy_eval = <ArkFr as DoryField>::zero();
         let ark_commitment = jolt_gt_to_ark(&commitment.0);
 
-        dory::verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
+        verify::<ArkFr, InnerBN254, JoltG1Routines, JoltG2Routines, _>(
             ark_commitment,
             dummy_eval,
             &ark_point,
@@ -686,7 +693,7 @@ impl ZkOpeningScheme for DoryScheme {
         source: &S,
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint) {
-        Self::commit_with_mode::<S, dory::ZK>(source, &setup.0)
+        Self::commit_with_mode::<S, ZK>(source, &setup.0)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_zk")]
@@ -695,7 +702,7 @@ impl ZkOpeningScheme for DoryScheme {
         ids: &[B::Id],
         setup: &Self::ProverSetup,
     ) -> Vec<(Self::Output, Self::OpeningHint)> {
-        Self::commit_batch_with_mode::<B, dory::ZK>(batch, ids, &setup.0)
+        Self::commit_batch_with_mode::<B, ZK>(batch, ids, &setup.0)
     }
 
     #[tracing::instrument(skip_all, name = "DoryScheme::open_zk")]
@@ -790,7 +797,7 @@ impl EvaluationCommitmentProver<Bn254G1> for DoryScheme {
     }
 
     fn zk_generators(setup: &Self::ProverSetup, count: usize) -> Option<(Vec<Bn254G1>, Bn254G1)> {
-        let count = std::cmp::min(count, setup.0.g1_vec.len());
+        let count = count.min(setup.0.g1_vec.len());
         let g1s = ark_to_jolt_g1_vec(setup.0.g1_vec[..count].to_vec());
         Some((g1s, ark_to_jolt_g1(setup.0.h1)))
     }
@@ -895,7 +902,7 @@ fn commit_i128_row(values: &[i128], ctx: &CommitRowContext<'_>) -> ArkG1 {
         values.len(),
         ctx.g1_bases_affine.len(),
     );
-    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_i128::<G1Projective>(
+    ArkG1Struct(msm_i128::<G1Projective>(
         &ctx.g1_bases_affine[..values.len()],
         values,
         true,
@@ -908,9 +915,7 @@ fn commit_strided_i128_row(
     ctx: &CommitRowContext<'_>,
 ) -> ArkG1 {
     let bases = strided_affine_bases(values.len(), column_stride, ctx);
-    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_i128::<G1Projective>(
-        &bases, values, true,
-    ))
+    ArkG1Struct(msm_i128::<G1Projective>(&bases, values, true))
 }
 
 fn commit_u64_row(values: &[u64], ctx: &CommitRowContext<'_>) -> ArkG1 {
@@ -920,7 +925,7 @@ fn commit_u64_row(values: &[u64], ctx: &CommitRowContext<'_>) -> ArkG1 {
         values.len(),
         ctx.g1_bases_affine.len(),
     );
-    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_u64::<G1Projective>(
+    ArkG1Struct(msm_u64::<G1Projective>(
         &ctx.g1_bases_affine[..values.len()],
         values,
         true,
@@ -933,9 +938,7 @@ fn commit_strided_u64_row(
     ctx: &CommitRowContext<'_>,
 ) -> ArkG1 {
     let bases = strided_affine_bases(values.len(), column_stride, ctx);
-    ArkG1Struct(ark_ec::scalar_mul::variable_base::msm_u64::<G1Projective>(
-        &bases, values, true,
-    ))
+    ArkG1Struct(msm_u64::<G1Projective>(&bases, values, true))
 }
 
 /// One-hot commit: O(T) group additions for unit-valued one-hot polynomials.
@@ -969,11 +972,11 @@ fn commit_rows_one_hot<S: CommitmentSource<Fr> + ?Sized>(
         .collect()
 }
 
-fn commit_one_hot_row(row: jolt_openings::OneHotRow<'_>, ctx: &CommitRowContext<'_>) -> Vec<ArkG1> {
+fn commit_one_hot_row(row: OneHotRow<'_>, ctx: &CommitRowContext<'_>) -> Vec<ArkG1> {
     let k = 1usize << row.log_domain_size;
     let num_columns = match row.entries {
-        jolt_openings::OneHotEntries::OnePerColumn(indices) => indices.len(),
-        jolt_openings::OneHotEntries::MaybeZero(indices) => indices.len(),
+        OneHotEntries::OnePerColumn(indices) => indices.len(),
+        OneHotEntries::MaybeZero(indices) => indices.len(),
     };
     assert!(
         num_columns <= ctx.g1_bases_affine.len(),
@@ -984,12 +987,12 @@ fn commit_one_hot_row(row: jolt_openings::OneHotRow<'_>, ctx: &CommitRowContext<
 
     let mut columns_by_hot_index: Vec<Vec<usize>> = vec![Vec::new(); k];
     match row.entries {
-        jolt_openings::OneHotEntries::OnePerColumn(indices) => {
+        OneHotEntries::OnePerColumn(indices) => {
             for (column, hot_index) in indices.iter().enumerate() {
                 columns_by_hot_index[hot_index.get()].push(column);
             }
         }
-        jolt_openings::OneHotEntries::MaybeZero(indices) => {
+        OneHotEntries::MaybeZero(indices) => {
             for (column, hot_index) in indices.iter().enumerate() {
                 if let Some(hot_index) = hot_index {
                     columns_by_hot_index[hot_index.get()].push(column);
@@ -1213,11 +1216,11 @@ impl<S: CommitmentSource<Fr> + ?Sized> DoryPolynomial<ArkFr> for DorySourceAdapt
         &self,
         _nu: usize,
         _sigma: usize,
-        _setup: &dory::setup::ProverSetup<E>,
-    ) -> Result<(E::GT, Vec<E::G1>, ArkFr), dory::error::DoryError>
+        _setup: &DoryNativeProverSetup<E>,
+    ) -> Result<(E::GT, Vec<E::G1>, ArkFr), DoryError>
     where
         E: PairingCurve,
-        Mo: dory::mode::Mode,
+        Mo: DoryMode,
         M1: DoryRoutines<E::G1>,
         E::G1: DoryGroup<Scalar = ArkFr>,
     {
@@ -1243,6 +1246,7 @@ mod tests {
     use jolt_field::{FromPrimitiveInt, RandomSampling};
     use jolt_openings::SourceRow;
     use jolt_poly::Polynomial;
+    use jolt_transcript::Blake2bTranscript;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -1369,7 +1373,7 @@ mod tests {
 
         let (commitment, hint) = DoryScheme::commit(poly.evaluations(), &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"test");
+        let mut prove_transcript = Blake2bTranscript::new(b"test");
         let proof = DoryScheme::open(
             &poly,
             &point,
@@ -1379,7 +1383,7 @@ mod tests {
             &mut prove_transcript,
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"test");
+        let mut verify_transcript = Blake2bTranscript::new(b"test");
         let result = DoryScheme::verify(
             &commitment,
             &point,
@@ -1406,7 +1410,7 @@ mod tests {
         let eval = source.evaluate(&point);
 
         let (commitment, hint) = DoryScheme::commit(&source, &prover_setup);
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"test-u64");
+        let mut prove_transcript = Blake2bTranscript::new(b"test-u64");
         let proof = DoryScheme::open(
             &source,
             &point,
@@ -1416,7 +1420,7 @@ mod tests {
             &mut prove_transcript,
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"test-u64");
+        let mut verify_transcript = Blake2bTranscript::new(b"test-u64");
         let result = DoryScheme::verify(
             &commitment,
             &point,
@@ -1539,7 +1543,7 @@ mod tests {
 
         let (commitment, hint) = DoryScheme::commit(poly.evaluations(), &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"point-order");
+        let mut prove_transcript = Blake2bTranscript::new(b"point-order");
         let proof = DoryScheme::open(
             &poly,
             &point,
@@ -1549,7 +1553,7 @@ mod tests {
             &mut prove_transcript,
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"point-order");
+        let mut verify_transcript = Blake2bTranscript::new(b"point-order");
         let result = DoryScheme::verify(
             &commitment,
             &point,
@@ -1579,7 +1583,7 @@ mod tests {
         let eval = poly.evaluate(&point);
         let (commitment, hint) = DoryScheme::commit(&poly, &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"single-batch");
+        let mut prove_transcript = Blake2bTranscript::new(b"single-batch");
         let proof = DoryScheme::prove_batch(
             vec![ProverClaim {
                 polynomial: source,
@@ -1591,7 +1595,7 @@ mod tests {
             &mut prove_transcript,
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"single-batch");
+        let mut verify_transcript = Blake2bTranscript::new(b"single-batch");
         DoryScheme::verify_batch(
             vec![OpeningClaim {
                 commitment,
@@ -1620,7 +1624,7 @@ mod tests {
         let eval = poly.evaluate(&point);
         let (commitment, hint) = DoryScheme::commit(&poly, &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"fused-batch");
+        let mut prove_transcript = Blake2bTranscript::new(b"fused-batch");
         let proof = DoryScheme::prove_fused_batch(
             &source,
             &point,
@@ -1630,7 +1634,7 @@ mod tests {
             &mut prove_transcript,
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"fused-batch");
+        let mut verify_transcript = Blake2bTranscript::new(b"fused-batch");
         DoryScheme::verify_fused_batch(
             &commitment,
             &point,
@@ -1659,7 +1663,7 @@ mod tests {
         let (commitment, hint) =
             <DoryScheme as ZkOpeningScheme>::commit_zk(poly.evaluations(), &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-test");
+        let mut prove_transcript = Blake2bTranscript::new(b"zk-test");
         let (proof, _eval_com, _blinding) = DoryScheme::open_zk(
             &poly,
             &point,
@@ -1669,7 +1673,7 @@ mod tests {
             &mut prove_transcript,
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-test");
+        let mut verify_transcript = Blake2bTranscript::new(b"zk-test");
         let result = DoryScheme::verify_zk(
             &commitment,
             &point,
@@ -1695,7 +1699,7 @@ mod tests {
         let eval = poly.evaluate(&point);
         let (commitment, hint) = DoryScheme::commit_zk(&poly, &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-batch");
+        let mut prove_transcript = Blake2bTranscript::new(b"zk-batch");
         let (proof, y_com, _blind) = DoryScheme::prove_batch_zk(
             vec![ProverClaim {
                 polynomial: poly,
@@ -1712,7 +1716,7 @@ mod tests {
             "batch proof should expose the hidden evaluation commitment"
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-batch");
+        let mut verify_transcript = Blake2bTranscript::new(b"zk-batch");
         DoryScheme::verify_batch_zk(
             vec![OpeningClaim {
                 commitment,
@@ -1741,7 +1745,7 @@ mod tests {
         let eval = poly.evaluate(&point);
         let (commitment, hint) = DoryScheme::commit_zk(&poly, &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-fused-batch");
+        let mut prove_transcript = Blake2bTranscript::new(b"zk-fused-batch");
         let (proof, y_com, _blind) = DoryScheme::prove_fused_batch_zk(
             &poly,
             &point,
@@ -1752,7 +1756,7 @@ mod tests {
         );
         assert_eq!(DoryScheme::batch_eval_commitment(&proof), Some(y_com));
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"zk-fused-batch");
+        let mut verify_transcript = Blake2bTranscript::new(b"zk-fused-batch");
         DoryScheme::verify_fused_batch_zk(
             &commitment,
             &point,

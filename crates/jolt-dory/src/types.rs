@@ -1,6 +1,6 @@
 //! Public Dory types for the `jolt-openings` commitment traits.
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Result as IoResult, Write};
 
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
@@ -11,6 +11,7 @@ use dory::backends::arkworks::{
 use jolt_crypto::{Bn254G1, Bn254GT, HomomorphicCommitment};
 use jolt_field::Fr;
 use jolt_transcript::{AppendToTranscript, Transcript};
+use serde::{de::Error as DeError, ser::Error as SerError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Caps the upstream `Vec::with_capacity(num_rounds)` allocation against
@@ -38,7 +39,7 @@ impl<'de> Deserialize<'de> for DoryCommitment {
 }
 
 impl CanonicalSerialize for DoryCommitment {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         writer: W,
         compress: Compress,
@@ -58,7 +59,7 @@ impl Valid for DoryCommitment {
 }
 
 impl CanonicalDeserialize for DoryCommitment {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         reader: R,
         compress: Compress,
         validate: Validate,
@@ -92,15 +93,15 @@ impl Serialize for DoryProof {
 impl<'de> Deserialize<'de> for DoryProof {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let buf: Vec<u8> = Deserialize::deserialize(deserializer)?;
-        validate_proof_round_count(&buf).map_err(serde::de::Error::custom)?;
+        validate_proof_round_count(&buf).map_err(DeError::custom)?;
         ArkDoryProof::deserialize_compressed(&buf[..])
-            .map_err(serde::de::Error::custom)
+            .map_err(DeError::custom)
             .map(Self)
     }
 }
 
 impl CanonicalSerialize for DoryProof {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         writer: W,
         compress: Compress,
@@ -120,7 +121,7 @@ impl Valid for DoryProof {
 }
 
 impl CanonicalDeserialize for DoryProof {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         reader: R,
         compress: Compress,
         validate: Validate,
@@ -145,7 +146,7 @@ impl<'de> Deserialize<'de> for DoryProverSetup {
 }
 
 impl CanonicalSerialize for DoryProverSetup {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         writer: W,
         compress: Compress,
@@ -165,7 +166,7 @@ impl Valid for DoryProverSetup {
 }
 
 impl CanonicalDeserialize for DoryProverSetup {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         reader: R,
         compress: Compress,
         validate: Validate,
@@ -190,7 +191,7 @@ impl<'de> Deserialize<'de> for DoryVerifierSetup {
 }
 
 impl CanonicalSerialize for DoryVerifierSetup {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         writer: W,
         compress: Compress,
@@ -210,7 +211,7 @@ impl Valid for DoryVerifierSetup {
 }
 
 impl CanonicalDeserialize for DoryVerifierSetup {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         reader: R,
         compress: Compress,
         validate: Validate,
@@ -241,7 +242,7 @@ fn canonical_serialize<T: CanonicalSerialize, S: Serializer>(
     let mut buf = Vec::new();
     value
         .serialize_compressed(&mut buf)
-        .map_err(serde::ser::Error::custom)?;
+        .map_err(SerError::custom)?;
     serializer.serialize_bytes(&buf)
 }
 
@@ -249,7 +250,7 @@ fn canonical_deserialize<'de, T: CanonicalDeserialize, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<T, D::Error> {
     let buf: Vec<u8> = Deserialize::deserialize(deserializer)?;
-    T::deserialize_compressed(&buf[..]).map_err(serde::de::Error::custom)
+    T::deserialize_compressed(&buf[..]).map_err(DeError::custom)
 }
 
 /// Pre-validates the round count from the proof's wire bytes before invoking
@@ -306,7 +307,7 @@ impl<R> RecordingReader<R> {
 }
 
 impl<R: Read> Read for RecordingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         let count = self.reader.read(buf)?;
         self.recorded.extend_from_slice(&buf[..count]);
         Ok(count)
@@ -317,23 +318,22 @@ impl<R: Read> Read for RecordingReader<R> {
 #[expect(clippy::expect_used, reason = "tests may panic on assertion failures")]
 mod tests {
     use super::*;
-    use jolt_field::RandomSampling;
+    use crate::DoryScheme;
+    use jolt_field::{Fr, RandomSampling};
     use jolt_openings::{CommitmentScheme, CommitmentSchemeVerifier};
     use jolt_poly::Polynomial;
-    use jolt_transcript::Transcript;
+    use jolt_transcript::{Blake2bTranscript, Transcript};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
-
-    use jolt_field::Fr;
 
     #[test]
     fn dory_commitment_serde_round_trip() {
         let num_vars = 3;
         let mut rng = ChaCha20Rng::seed_from_u64(400);
 
-        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let prover_setup = DoryScheme::setup_prover(num_vars);
         let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
-        let (commitment, _) = crate::DoryScheme::commit(poly.evaluations(), &prover_setup);
+        let (commitment, _) = DoryScheme::commit(poly.evaluations(), &prover_setup);
 
         let serialized = serde_json::to_vec(&commitment).expect("serialize commitment");
         let deserialized: DoryCommitment =
@@ -345,24 +345,24 @@ mod tests {
     #[test]
     fn dory_verifier_setup_serde_round_trip() {
         let num_vars = 2;
-        let verifier_setup = crate::DoryScheme::setup_verifier(num_vars);
+        let verifier_setup = DoryScheme::setup_verifier(num_vars);
 
         let serialized = serde_json::to_vec(&verifier_setup).expect("serialize verifier setup");
         let deserialized: DoryVerifierSetup =
             serde_json::from_slice(&serialized).expect("deserialize verifier setup");
 
         let mut rng = ChaCha20Rng::seed_from_u64(401);
-        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let prover_setup = DoryScheme::setup_prover(num_vars);
 
         let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
         let point: Vec<Fr> = (0..num_vars)
             .map(|_| <Fr as RandomSampling>::random(&mut rng))
             .collect();
         let eval = poly.evaluate(&point);
-        let (commitment, hint) = crate::DoryScheme::commit(poly.evaluations(), &prover_setup);
+        let (commitment, hint) = DoryScheme::commit(poly.evaluations(), &prover_setup);
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"serde-vs");
-        let proof = crate::DoryScheme::open(
+        let mut prove_transcript = Blake2bTranscript::new(b"serde-vs");
+        let proof = DoryScheme::open(
             &poly,
             &point,
             eval,
@@ -371,8 +371,8 @@ mod tests {
             &mut prove_transcript,
         );
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"serde-vs");
-        let result = crate::DoryScheme::verify(
+        let mut verify_transcript = Blake2bTranscript::new(b"serde-vs");
+        let result = DoryScheme::verify(
             &commitment,
             &point,
             eval,
@@ -391,7 +391,7 @@ mod tests {
         let num_vars = 2;
         let mut rng = ChaCha20Rng::seed_from_u64(402);
 
-        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let prover_setup = DoryScheme::setup_prover(num_vars);
 
         let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
         let point: Vec<Fr> = (0..num_vars)
@@ -399,19 +399,18 @@ mod tests {
             .collect();
         let eval = poly.evaluate(&point);
 
-        let mut transcript = jolt_transcript::Blake2bTranscript::new(b"serde-bp");
-        let proof =
-            crate::DoryScheme::open(&poly, &point, eval, &prover_setup, None, &mut transcript);
+        let mut transcript = Blake2bTranscript::new(b"serde-bp");
+        let proof = DoryScheme::open(&poly, &point, eval, &prover_setup, None, &mut transcript);
 
         let serialized = serde_json::to_vec(&proof).expect("serialize proof");
         let deserialized: DoryProof =
             serde_json::from_slice(&serialized).expect("deserialize proof");
 
         let verifier_setup = DoryVerifierSetup(prover_setup.0.to_verifier_setup());
-        let (commitment, _) = crate::DoryScheme::commit(poly.evaluations(), &prover_setup);
+        let (commitment, _) = DoryScheme::commit(poly.evaluations(), &prover_setup);
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"serde-bp");
-        let result = crate::DoryScheme::verify(
+        let mut verify_transcript = Blake2bTranscript::new(b"serde-bp");
+        let result = DoryScheme::verify(
             &commitment,
             &point,
             eval,
@@ -427,7 +426,7 @@ mod tests {
         let num_vars = 2;
         let mut rng = ChaCha20Rng::seed_from_u64(405);
 
-        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let prover_setup = DoryScheme::setup_prover(num_vars);
         let mut prover_setup_bytes = Vec::new();
         prover_setup
             .serialize_compressed(&mut prover_setup_bytes)
@@ -448,7 +447,7 @@ mod tests {
             .map(|_| <Fr as RandomSampling>::random(&mut rng))
             .collect();
         let eval = poly.evaluate(&point);
-        let (commitment, hint) = crate::DoryScheme::commit(poly.evaluations(), &prover_setup);
+        let (commitment, hint) = DoryScheme::commit(poly.evaluations(), &prover_setup);
 
         let mut commitment_bytes = Vec::new();
         commitment
@@ -457,8 +456,8 @@ mod tests {
         let commitment = DoryCommitment::deserialize_compressed(&commitment_bytes[..])
             .expect("deserialize commitment");
 
-        let mut prove_transcript = jolt_transcript::Blake2bTranscript::new(b"canonical");
-        let proof = crate::DoryScheme::open(
+        let mut prove_transcript = Blake2bTranscript::new(b"canonical");
+        let proof = DoryScheme::open(
             &poly,
             &point,
             eval,
@@ -473,8 +472,8 @@ mod tests {
             .expect("serialize proof");
         let proof = DoryProof::deserialize_compressed(&proof_bytes[..]).expect("deserialize proof");
 
-        let mut verify_transcript = jolt_transcript::Blake2bTranscript::new(b"canonical");
-        let result = crate::DoryScheme::verify(
+        let mut verify_transcript = Blake2bTranscript::new(b"canonical");
+        let result = DoryScheme::verify(
             &commitment,
             &point,
             eval,
@@ -493,16 +492,15 @@ mod tests {
         let num_vars = 2;
         let mut rng = ChaCha20Rng::seed_from_u64(406);
 
-        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let prover_setup = DoryScheme::setup_prover(num_vars);
         let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
         let point: Vec<Fr> = (0..num_vars)
             .map(|_| <Fr as RandomSampling>::random(&mut rng))
             .collect();
         let eval = poly.evaluate(&point);
 
-        let mut transcript = jolt_transcript::Blake2bTranscript::new(b"canonical-stream");
-        let proof =
-            crate::DoryScheme::open(&poly, &point, eval, &prover_setup, None, &mut transcript);
+        let mut transcript = Blake2bTranscript::new(b"canonical-stream");
+        let proof = DoryScheme::open(&poly, &point, eval, &prover_setup, None, &mut transcript);
 
         let mut bytes = Vec::new();
         vec![proof]
@@ -527,16 +525,15 @@ mod tests {
         let num_vars = 2;
         let mut rng = ChaCha20Rng::seed_from_u64(403);
 
-        let prover_setup = crate::DoryScheme::setup_prover(num_vars);
+        let prover_setup = DoryScheme::setup_prover(num_vars);
         let poly = Polynomial::<Fr>::random(num_vars, &mut rng);
         let point: Vec<Fr> = (0..num_vars)
             .map(|_| <Fr as RandomSampling>::random(&mut rng))
             .collect();
         let eval = poly.evaluate(&point);
 
-        let mut transcript = jolt_transcript::Blake2bTranscript::new(b"serde-oversized");
-        let proof =
-            crate::DoryScheme::open(&poly, &point, eval, &prover_setup, None, &mut transcript);
+        let mut transcript = Blake2bTranscript::new(b"serde-oversized");
+        let proof = DoryScheme::open(&poly, &point, eval, &prover_setup, None, &mut transcript);
 
         let mut bytes = Vec::new();
         proof

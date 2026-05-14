@@ -1,6 +1,6 @@
 #![allow(unused_results)]
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 use jolt_dory::{DoryScheme, DoryVerifierSetup};
 use jolt_field::{Fr, RandomSampling};
@@ -9,7 +9,7 @@ use jolt_openings::{
     CommitmentSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_poly::{OneHotPolynomial, Polynomial};
-use jolt_transcript::Transcript;
+use jolt_transcript::{Blake2bTranscript, Transcript};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
 
@@ -41,7 +41,7 @@ fn bench_commit(c: &mut Criterion) {
                         Polynomial::<Fr>::random(nv, &mut rng)
                     },
                     |poly| DoryScheme::commit(poly.evaluations(), &setup),
-                    criterion::BatchSize::SmallInput,
+                    BatchSize::SmallInput,
                 );
             },
         );
@@ -68,10 +68,10 @@ fn bench_open(c: &mut Criterion) {
                         (poly, point, eval)
                     },
                     |(poly, point, eval)| {
-                        let mut transcript = jolt_transcript::Blake2bTranscript::new(b"bench-open");
+                        let mut transcript = Blake2bTranscript::new(b"bench-open");
                         DoryScheme::open(&poly, &point, eval, &setup, None, &mut transcript)
                     },
-                    criterion::BatchSize::SmallInput,
+                    BatchSize::SmallInput,
                 );
             },
         );
@@ -97,15 +97,13 @@ fn bench_verify(c: &mut Criterion) {
                             .collect();
                         let eval = poly.evaluate(&point);
                         let (commitment, _) = DoryScheme::commit(poly.evaluations(), &setup);
-                        let mut transcript =
-                            jolt_transcript::Blake2bTranscript::new(b"bench-verify");
+                        let mut transcript = Blake2bTranscript::new(b"bench-verify");
                         let proof =
                             DoryScheme::open(&poly, &point, eval, &setup, None, &mut transcript);
                         (commitment, point, eval, proof)
                     },
                     |(commitment, point, eval, proof)| {
-                        let mut transcript =
-                            jolt_transcript::Blake2bTranscript::new(b"bench-verify");
+                        let mut transcript = Blake2bTranscript::new(b"bench-verify");
                         DoryScheme::verify(
                             &commitment,
                             &point,
@@ -115,7 +113,7 @@ fn bench_verify(c: &mut Criterion) {
                             &mut transcript,
                         )
                     },
-                    criterion::BatchSize::SmallInput,
+                    BatchSize::SmallInput,
                 );
             },
         );
@@ -171,7 +169,7 @@ fn bench_combine_hints(c: &mut Criterion) {
                 b.iter_batched(
                     || hints.clone(),
                     |hs| <DoryScheme as AdditivelyHomomorphic>::combine_hints(hs, &scalars),
-                    criterion::BatchSize::SmallInput,
+                    BatchSize::SmallInput,
                 );
             },
         );
@@ -200,11 +198,10 @@ fn bench_open_zk(c: &mut Criterion) {
                         (poly, point, eval, hint)
                     },
                     |(poly, point, eval, hint)| {
-                        let mut transcript =
-                            jolt_transcript::Blake2bTranscript::new(b"bench-open-zk");
+                        let mut transcript = Blake2bTranscript::new(b"bench-open-zk");
                         DoryScheme::open_zk(&poly, &point, eval, &setup, hint, &mut transcript)
                     },
-                    criterion::BatchSize::SmallInput,
+                    BatchSize::SmallInput,
                 );
             },
         );
@@ -231,15 +228,13 @@ fn bench_verify_zk(c: &mut Criterion) {
                         let eval = poly.evaluate(&point);
                         let (commitment, hint) =
                             <DoryScheme as ZkOpeningScheme>::commit_zk(poly.evaluations(), &setup);
-                        let mut transcript =
-                            jolt_transcript::Blake2bTranscript::new(b"bench-verify-zk");
+                        let mut transcript = Blake2bTranscript::new(b"bench-verify-zk");
                         let (proof, _eval_com, _blind) =
                             DoryScheme::open_zk(&poly, &point, eval, &setup, hint, &mut transcript);
                         (commitment, point, proof)
                     },
                     |(commitment, point, proof)| {
-                        let mut transcript =
-                            jolt_transcript::Blake2bTranscript::new(b"bench-verify-zk");
+                        let mut transcript = Blake2bTranscript::new(b"bench-verify-zk");
                         DoryScheme::verify_zk(
                             &commitment,
                             &point,
@@ -248,7 +243,7 @@ fn bench_verify_zk(c: &mut Criterion) {
                             &mut transcript,
                         )
                     },
-                    criterion::BatchSize::SmallInput,
+                    BatchSize::SmallInput,
                 );
             },
         );
@@ -272,7 +267,7 @@ fn bench_commit_one_hot(c: &mut Criterion) {
                     OneHotPolynomial::new(k, indices)
                 },
                 |poly| DoryScheme::commit(&poly, &setup),
-                criterion::BatchSize::SmallInput,
+                BatchSize::SmallInput,
             );
         });
     }

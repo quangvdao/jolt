@@ -4,6 +4,8 @@
 //! exploit. It does not prescribe the backend's commitment algorithm or
 //! parallel schedule.
 
+use std::iter::repeat_n;
+
 use jolt_field::Field;
 use jolt_poly::{MultilinearPoly, OneHotPolynomial, Polynomial, RlcSource};
 
@@ -392,10 +394,7 @@ where
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             for value in values {
                 evaluations.push(*value);
-                evaluations.extend(std::iter::repeat_n(
-                    F::zero(),
-                    column_stride.saturating_sub(1),
-                ));
+                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
             }
         }
         SourceRow::I128(values) => {
@@ -409,10 +408,7 @@ where
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             for value in values {
                 evaluations.push(F::from_i128(*value));
-                evaluations.extend(std::iter::repeat_n(
-                    F::zero(),
-                    column_stride.saturating_sub(1),
-                ));
+                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
             }
         }
         SourceRow::U64(values) => {
@@ -426,10 +422,7 @@ where
             flush_one_hot(&mut evaluations, &mut one_hot_chunks);
             for value in values {
                 evaluations.push(F::from_u64(*value));
-                evaluations.extend(std::iter::repeat_n(
-                    F::zero(),
-                    column_stride.saturating_sub(1),
-                ));
+                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
             }
         }
         SourceRow::OneHot(row) => {

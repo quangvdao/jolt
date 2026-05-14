@@ -1,5 +1,7 @@
 //! Homomorphic batched-opening helper via random linear combination.
 
+use std::iter::successors;
+
 use jolt_crypto::HomomorphicCommitment;
 use jolt_field::Field;
 use jolt_transcript::{AppendToTranscript, LabelWithCount, Transcript};
@@ -10,7 +12,7 @@ use crate::schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
     CommitmentSchemeVerifier,
 };
-use crate::sources::CommitmentSource;
+use crate::sources::{materialize_source_evaluations, CommitmentSource};
 
 /// Groups prover claims by point, RLC-combines each group, and opens one proof
 /// per group.
@@ -209,7 +211,7 @@ where
 }
 
 fn rho_powers<F: Field>(rho: F, n: usize) -> Vec<F> {
-    std::iter::successors(Some(F::from_u64(1)), |prev| Some(*prev * rho))
+    successors(Some(F::from_u64(1)), |prev| Some(*prev * rho))
         .take(n)
         .collect()
 }
@@ -219,7 +221,7 @@ where
     F: Field,
     S: CommitmentSource<F> + ?Sized,
 {
-    crate::sources::materialize_source_evaluations(source)
+    materialize_source_evaluations(source)
 }
 
 type ProverPointGroup<F, PCS, S> = Vec<(Vec<F>, Vec<ProverClaimWithHint<F, PCS, S>>)>;
@@ -270,6 +272,8 @@ mod tests {
     use super::*;
     use jolt_field::{Fr, FromPrimitiveInt, RandomSampling};
     use jolt_poly::Polynomial;
+    use rand_chacha::rand_core::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     #[test]
     fn rlc_combine_single_polynomial_is_identity() {
@@ -292,9 +296,6 @@ mod tests {
 
     #[test]
     fn rlc_combine_scalars_consistent_with_rlc_combine() {
-        use rand_chacha::rand_core::SeedableRng;
-        use rand_chacha::ChaCha20Rng;
-
         let mut rng = ChaCha20Rng::seed_from_u64(555);
         let num_vars = 3;
         let rho = Fr::from_u64(7);

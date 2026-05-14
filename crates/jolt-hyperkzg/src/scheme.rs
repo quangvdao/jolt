@@ -8,14 +8,15 @@
     reason = "KZG operations return Result for API symmetry; with a correctly-sized SRS and well-formed inputs these errors are unreachable"
 )]
 
+use std::iter::repeat_n;
 use std::marker::PhantomData;
 
 use jolt_crypto::{Commitment, DeriveSetup, JoltGroup, PairingGroup, PedersenSetup};
-use jolt_field::{FromPrimitiveInt, RandomSampling};
+use jolt_field::{Field, FromPrimitiveInt, RandomSampling};
 use jolt_openings::{
     homomorphic_prove_batch, homomorphic_verify_batch, AdditivelyHomomorphic,
     AdditivelyHomomorphicVerifier, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
-    OpeningClaim, OpeningsError, ProverClaim, SourceRow,
+    OneHotEntries, OpeningClaim, OpeningsError, ProverClaim, SourceRow,
 };
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use num_traits::{One, Zero};
@@ -414,7 +415,7 @@ where
 
 fn source_to_evaluations<F, S>(source: &S) -> Vec<F>
 where
-    F: jolt_field::Field,
+    F: Field,
     S: CommitmentSource<F> + ?Sized,
 {
     let mut evaluations = Vec::with_capacity(1 << source.num_vars());
@@ -426,10 +427,7 @@ where
         } => {
             for value in values {
                 evaluations.push(*value);
-                evaluations.extend(std::iter::repeat_n(
-                    F::zero(),
-                    column_stride.saturating_sub(1),
-                ));
+                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
             }
         }
         SourceRow::I128(values) => {
@@ -441,10 +439,7 @@ where
         } => {
             for value in values {
                 evaluations.push(F::from_i128(*value));
-                evaluations.extend(std::iter::repeat_n(
-                    F::zero(),
-                    column_stride.saturating_sub(1),
-                ));
+                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
             }
         }
         SourceRow::U64(values) => {
@@ -456,23 +451,20 @@ where
         } => {
             for value in values {
                 evaluations.push(F::from_u64(*value));
-                evaluations.extend(std::iter::repeat_n(
-                    F::zero(),
-                    column_stride.saturating_sub(1),
-                ));
+                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
             }
         }
         SourceRow::OneHot(row) => {
             let domain_size = 1usize << row.log_domain_size;
             match row.entries {
-                jolt_openings::OneHotEntries::OnePerColumn(indices) => {
+                OneHotEntries::OnePerColumn(indices) => {
                     for hot_index in indices {
                         let mut dense = vec![F::zero(); domain_size];
                         dense[hot_index.get()] = F::from_u64(1);
                         evaluations.extend(dense);
                     }
                 }
-                jolt_openings::OneHotEntries::MaybeZero(indices) => {
+                OneHotEntries::MaybeZero(indices) => {
                     for hot_index in indices {
                         let mut dense = vec![F::zero(); domain_size];
                         if let Some(hot_index) = hot_index {
@@ -490,7 +482,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jolt_crypto::Bn254;
+    use jolt_crypto::{Bn254, Bn254G1, Pedersen, VectorCommitment};
     use jolt_field::Fr;
     use jolt_poly::Polynomial;
     use jolt_transcript::Blake2bTranscript;
@@ -760,16 +752,14 @@ mod tests {
 
     #[test]
     fn extract_vc_setup_produces_valid_pedersen() {
-        use jolt_crypto::{Pedersen, VectorCommitment};
-
         let n = 1 << 4;
         let (pk, _vk) = test_setup(n);
 
         let capacity = 5;
-        let vc_setup = PedersenSetup::<jolt_crypto::Bn254G1>::derive(&pk, capacity);
+        let vc_setup = PedersenSetup::<Bn254G1>::derive(&pk, capacity);
 
         assert_eq!(
-            <Pedersen<jolt_crypto::Bn254G1> as VectorCommitment>::capacity(&vc_setup),
+            <Pedersen<Bn254G1> as VectorCommitment>::capacity(&vc_setup),
             capacity,
         );
 

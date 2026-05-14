@@ -5,11 +5,17 @@
 //! - `AstCommitment`: Symbolic representation of PCS commitments
 //!
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError, Valid};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, Read, SerializationError, Valid, Validate,
+    Write,
+};
 use ark_std::Zero;
 use serde::{Deserialize, Serialize};
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self, Error, ErrorKind};
+use std::path::Path;
 
 use crate::mle_ast::{node_arena, set_pending_commitment_chunks, Edge, MleAst, Node, NodeId};
 
@@ -599,18 +605,17 @@ impl AstBundle {
     }
 
     /// Write to a JSON file.
-    pub fn write_json(&self, path: &std::path::Path) -> std::io::Result<()> {
+    pub fn write_json(&self, path: &Path) -> io::Result<()> {
         let json = self
             .to_json_pretty()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        std::fs::write(path, json)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
+        fs::write(path, json)
     }
 
     /// Read from a JSON file.
-    pub fn read_json(path: &std::path::Path) -> std::io::Result<Self> {
-        let json = std::fs::read_to_string(path)?;
-        Self::from_json(&json)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    pub fn read_json(path: &Path) -> io::Result<Self> {
+        let json = fs::read_to_string(path)?;
+        Self::from_json(&json).map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))
     }
 }
 
@@ -677,26 +682,26 @@ impl AstCommitment {
 }
 
 impl CanonicalSerialize for AstCommitment {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         _writer: W,
-        _compress: ark_serialize::Compress,
+        _compress: Compress,
     ) -> Result<(), SerializationError> {
         // Store chunks in thread-local for PoseidonAstTranscript::append_serializable to retrieve
         set_pending_commitment_chunks(self.chunks.clone());
         Ok(())
     }
 
-    fn serialized_size(&self, _compress: ark_serialize::Compress) -> usize {
+    fn serialized_size(&self, _compress: Compress) -> usize {
         self.serialized_byte_len()
     }
 }
 
 impl CanonicalDeserialize for AstCommitment {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         _reader: R,
-        _compress: ark_serialize::Compress,
-        _validate: ark_serialize::Validate,
+        _compress: Compress,
+        _validate: Validate,
     ) -> Result<Self, SerializationError> {
         unimplemented!("AstCommitment deserialization not needed for transpilation")
     }

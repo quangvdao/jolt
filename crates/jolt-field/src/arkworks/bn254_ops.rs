@@ -2,12 +2,14 @@
 //!
 //! Low-level field arithmetic (Montgomery/Barrett reduction, scalar multiplication,
 //! precomputed lookup tables).
-use ark_bn254::FrConfig;
+use core::cmp::Ordering;
+
+use ark_bn254::{Fr as ArkFr, FrConfig};
 use ark_ff::{BigInt, Fp, MontConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use num_traits::Zero;
 
-type Fr = ark_bn254::Fr;
+type Fr = ArkFr;
 
 /// a + b * c + carry → (result, new carry)
 #[inline(always)]
@@ -167,16 +169,16 @@ fn barrett_cond_subtract(r_tmp: BigInt<5>) -> BigInt<N> {
 
     let r_n: [u64; N] = [r_tmp.0[0], r_tmp.0[1], r_tmp.0[2], r_tmp.0[3]];
 
-    if compare_4(r_n, m2_lo) != core::cmp::Ordering::Less {
+    if compare_4(r_n, m2_lo) != Ordering::Less {
         // r_tmp >= 2p
-        if compare_4(r_n, m3_lo) != core::cmp::Ordering::Less {
+        if compare_4(r_n, m3_lo) != Ordering::Less {
             // r_tmp >= 3p → subtract 3p
             BigInt(sub_4(r_n, m3_lo))
         } else {
             // 2p <= r_tmp < 3p → subtract 2p
             BigInt(sub_4(r_n, m2_lo))
         }
-    } else if compare_4(r_n, MODULUS) != core::cmp::Ordering::Less {
+    } else if compare_4(r_n, MODULUS) != Ordering::Less {
         // p <= r_tmp < 2p → subtract p
         BigInt(sub_4(r_n, MODULUS))
     } else {
@@ -187,19 +189,19 @@ fn barrett_cond_subtract(r_tmp: BigInt<5>) -> BigInt<N> {
 
 /// Compare two 4-limb numbers (big-endian comparison)
 #[inline(always)]
-fn compare_4(a: [u64; N], b: [u64; N]) -> core::cmp::Ordering {
+fn compare_4(a: [u64; N], b: [u64; N]) -> Ordering {
     let mut i = N;
     while i > 0 {
         i -= 1;
         if a[i] != b[i] {
             return if a[i] > b[i] {
-                core::cmp::Ordering::Greater
+                Ordering::Greater
             } else {
-                core::cmp::Ordering::Less
+                Ordering::Less
             };
         }
     }
-    core::cmp::Ordering::Equal
+    Ordering::Equal
 }
 
 /// Subtract two 4-limb numbers: a - b. Caller guarantees a >= b.
@@ -313,9 +315,9 @@ pub(crate) fn from_montgomery_reduce<const L: usize>(unreduced: BigInt<L>) -> Fr
 
     // Final conditional subtraction
     let needs_sub = if MODULUS_HAS_SPARE_BIT {
-        compare_4(result.0 .0, MODULUS) != core::cmp::Ordering::Less
+        compare_4(result.0 .0, MODULUS) != Ordering::Less
     } else {
-        carry != 0 || compare_4(result.0 .0, MODULUS) != core::cmp::Ordering::Less
+        carry != 0 || compare_4(result.0 .0, MODULUS) != Ordering::Less
     };
     if needs_sub {
         result.0 = BigInt(sub_4(result.0 .0, MODULUS));

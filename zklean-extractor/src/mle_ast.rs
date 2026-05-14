@@ -2,18 +2,27 @@
 // Imports
 // =============================================================================
 
-use std::cell::RefCell;
-use std::cmp::max;
-use std::collections::HashMap;
-use std::fmt::{self};
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{OnceLock, RwLock};
+use std::{
+    cell::RefCell,
+    cmp::max,
+    collections::HashMap,
+    fmt::{self},
+    hash::{DefaultHasher, Hash, Hasher},
+    io::{Read, Write},
+    mem,
+    ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign},
+    slice,
+    sync::{OnceLock, RwLock},
+};
 
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError, Valid};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
+};
 use ark_std::{One, Zero};
 use serde::{Deserialize, Serialize};
 
-use jolt_core::field::{FieldOps, JoltField};
+use jolt_core::field::{FieldOps, JoltField, UnreducedInteger};
+use jolt_field::{self as jf, NaiveAccumulator};
 
 #[cfg(test)]
 use crate::util::Environment;
@@ -275,7 +284,7 @@ pub fn num_constraints() -> usize {
 
 /// Take all accumulated constraints, clearing the list.
 pub fn take_constraints() -> Vec<MleAst> {
-    SYMBOLIC_CONSTRAINTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    SYMBOLIC_CONSTRAINTS.with(|cell| mem::take(&mut *cell.borrow_mut()))
 }
 
 /// Add a constraint that should equal zero.
@@ -349,7 +358,7 @@ impl TranscriptHashData {
     /// View data elements as a slice (generic traversal).
     pub fn as_slice(&self) -> &[Edge] {
         match self {
-            Self::Poseidon(e) => std::slice::from_ref(e),
+            Self::Poseidon(e) => slice::from_ref(e),
             Self::Blake2b(v) => v.as_slice(),
             Self::Keccak(v) => v.as_slice(),
         }
@@ -1015,7 +1024,7 @@ impl One for MleAst {
     }
 }
 
-impl std::ops::Neg for MleAst {
+impl Neg for MleAst {
     type Output = Self;
 
     fn neg(mut self) -> Self::Output {
@@ -1024,7 +1033,7 @@ impl std::ops::Neg for MleAst {
     }
 }
 
-impl std::ops::Add for MleAst {
+impl Add for MleAst {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
@@ -1032,7 +1041,7 @@ impl std::ops::Add for MleAst {
     }
 }
 
-impl std::ops::Sub for MleAst {
+impl Sub for MleAst {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
@@ -1040,7 +1049,7 @@ impl std::ops::Sub for MleAst {
     }
 }
 
-impl std::ops::Mul for MleAst {
+impl Mul for MleAst {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self::Output {
@@ -1048,7 +1057,7 @@ impl std::ops::Mul for MleAst {
     }
 }
 
-impl std::ops::Div for MleAst {
+impl Div for MleAst {
     type Output = Self;
 
     fn div(self, rhs: Self) -> Self::Output {
@@ -1058,7 +1067,7 @@ impl std::ops::Div for MleAst {
 
 impl FieldOps for MleAst {}
 
-impl std::ops::Add<&Self> for MleAst {
+impl Add<&Self> for MleAst {
     type Output = Self;
 
     fn add(mut self, rhs: &Self) -> Self::Output {
@@ -1075,7 +1084,7 @@ impl std::ops::Add<&Self> for MleAst {
     }
 }
 
-impl std::ops::Sub<&Self> for MleAst {
+impl Sub<&Self> for MleAst {
     type Output = Self;
 
     fn sub(mut self, rhs: &Self) -> Self::Output {
@@ -1093,7 +1102,7 @@ impl std::ops::Sub<&Self> for MleAst {
     }
 }
 
-impl std::ops::Mul<&Self> for MleAst {
+impl Mul<&Self> for MleAst {
     type Output = Self;
 
     fn mul(mut self, rhs: &Self) -> Self::Output {
@@ -1108,7 +1117,7 @@ impl std::ops::Mul<&Self> for MleAst {
     }
 }
 
-impl std::ops::Div<&Self> for MleAst {
+impl Div<&Self> for MleAst {
     type Output = Self;
 
     fn div(mut self, rhs: &Self) -> Self::Output {
@@ -1119,7 +1128,7 @@ impl std::ops::Div<&Self> for MleAst {
 
 impl FieldOps<&Self, Self> for MleAst {}
 
-impl std::ops::AddAssign for MleAst {
+impl AddAssign for MleAst {
     fn add_assign(&mut self, rhs: Self) {
         // Optimization: x += 0 is a no-op
         if rhs.is_zero() {
@@ -1134,7 +1143,7 @@ impl std::ops::AddAssign for MleAst {
     }
 }
 
-impl<'a> std::ops::AddAssign<&'a Self> for MleAst {
+impl<'a> AddAssign<&'a Self> for MleAst {
     fn add_assign(&mut self, rhs: &'a Self) {
         // Optimization: x += 0 is a no-op
         if rhs.is_zero() {
@@ -1149,7 +1158,7 @@ impl<'a> std::ops::AddAssign<&'a Self> for MleAst {
     }
 }
 
-impl std::ops::SubAssign for MleAst {
+impl SubAssign for MleAst {
     fn sub_assign(&mut self, rhs: Self) {
         // Optimization: x -= 0 is a no-op
         if rhs.is_zero() {
@@ -1164,7 +1173,7 @@ impl std::ops::SubAssign for MleAst {
     }
 }
 
-impl<'a> std::ops::SubAssign<&'a Self> for MleAst {
+impl<'a> SubAssign<&'a Self> for MleAst {
     fn sub_assign(&mut self, rhs: &'a Self) {
         // Optimization: x -= 0 is a no-op
         if rhs.is_zero() {
@@ -1179,7 +1188,7 @@ impl<'a> std::ops::SubAssign<&'a Self> for MleAst {
     }
 }
 
-impl std::ops::MulAssign for MleAst {
+impl MulAssign for MleAst {
     fn mul_assign(&mut self, rhs: Self) {
         // Optimization: x *= 0 => x = 0, 0 *= x => stays 0
         if self.is_zero() || rhs.is_zero() {
@@ -1190,7 +1199,7 @@ impl std::ops::MulAssign for MleAst {
     }
 }
 
-impl<'a> std::ops::MulAssign<&'a Self> for MleAst {
+impl<'a> MulAssign<&'a Self> for MleAst {
     fn mul_assign(&mut self, rhs: &'a Self) {
         // Optimization: x *= 0 => x = 0, 0 *= x => stays 0
         if self.is_zero() || rhs.is_zero() {
@@ -1296,7 +1305,7 @@ impl<const N: usize> From<[u64; N]> for MleAst {
     }
 }
 
-impl jolt_core::field::UnreducedInteger for MleAst {}
+impl UnreducedInteger for MleAst {}
 
 impl JoltField for MleAst {
     const NUM_BYTES: usize = 0;
@@ -1482,17 +1491,17 @@ impl JoltField for MleAst {
     }
 }
 
-impl jolt_field::AdditiveGroup for MleAst {}
-impl jolt_field::RingCore for MleAst {}
-impl jolt_field::FieldCore for MleAst {}
+impl jf::AdditiveGroup for MleAst {}
+impl jf::RingCore for MleAst {}
+impl jf::FieldCore for MleAst {}
 
-impl jolt_field::Invertible for MleAst {
+impl jf::Invertible for MleAst {
     fn inverse(&self) -> Option<Self> {
         <Self as JoltField>::inverse(self)
     }
 }
 
-impl jolt_field::FromPrimitiveInt for MleAst {
+impl jf::FromPrimitiveInt for MleAst {
     fn from_u64(v: u64) -> Self {
         <Self as JoltField>::from_u64(v)
     }
@@ -1510,11 +1519,11 @@ impl jolt_field::FromPrimitiveInt for MleAst {
     }
 }
 
-impl jolt_field::FixedByteSize for MleAst {
+impl jf::FixedByteSize for MleAst {
     const NUM_BYTES: usize = 32;
 }
 
-impl jolt_field::CanonicalBytes for MleAst {
+impl jf::CanonicalBytes for MleAst {
     fn to_bytes_le(&self, out: &mut [u8]) {
         out.fill(0);
         if let Node::Atom(Atom::Scalar(value)) = get_node(self.root) {
@@ -1525,15 +1534,15 @@ impl jolt_field::CanonicalBytes for MleAst {
     }
 }
 
-impl jolt_field::ReducingBytes for MleAst {
+impl jf::ReducingBytes for MleAst {
     fn from_le_bytes_mod_order(bytes: &[u8]) -> Self {
         <Self as JoltField>::from_bytes(bytes)
     }
 }
 
-impl jolt_field::FixedBytes<32> for MleAst {}
+impl jf::FixedBytes<32> for MleAst {}
 
-impl jolt_field::CanonicalBitLength for MleAst {
+impl jf::CanonicalBitLength for MleAst {
     fn num_bits(&self) -> u32 {
         match get_node(self.root) {
             Node::Atom(Atom::Scalar(value)) => value
@@ -1545,7 +1554,7 @@ impl jolt_field::CanonicalBitLength for MleAst {
     }
 }
 
-impl jolt_field::CanonicalU64 for MleAst {
+impl jf::CanonicalU64 for MleAst {
     fn to_canonical_u64_checked(&self) -> Option<u64> {
         match get_node(self.root) {
             Node::Atom(Atom::Scalar([lo, 0, 0, 0])) => Some(lo),
@@ -1554,25 +1563,25 @@ impl jolt_field::CanonicalU64 for MleAst {
     }
 }
 
-impl jolt_field::TranscriptChallenge for MleAst {
+impl jf::TranscriptChallenge for MleAst {
     fn from_challenge_bytes(bytes: &[u8]) -> Self {
         <Self as JoltField>::from_bytes(bytes)
     }
 }
 
-impl jolt_field::RandomSampling for MleAst {
+impl jf::RandomSampling for MleAst {
     fn random<R: rand_core::RngCore>(_rng: &mut R) -> Self {
         unimplemented!("Not needed for constructing ASTs")
     }
 }
 
-impl jolt_field::WithAccumulator for MleAst {
-    type Accumulator = jolt_field::NaiveAccumulator<Self>;
+impl jf::WithAccumulator for MleAst {
+    type Accumulator = NaiveAccumulator<Self>;
 }
 
-impl jolt_field::MulPow2 for MleAst {}
-impl jolt_field::MulPrimitiveInt for MleAst {}
-impl jolt_field::Field for MleAst {}
+impl jf::MulPow2 for MleAst {}
+impl jf::MulPrimitiveInt for MleAst {}
+impl jf::Field for MleAst {}
 
 /// Serialization for MleAst uses thread-local tunneling to pass symbolic values
 /// through the generic `Transcript` trait (which expects `CanonicalSerialize`).
@@ -1580,16 +1589,16 @@ impl jolt_field::Field for MleAst {}
 /// `serialize_with_mode` stores `self` in a thread-local via `set_pending_append`,
 /// which `PoseidonAstTranscript::raw_append_scalar` retrieves via `take_pending_append`.
 impl CanonicalSerialize for MleAst {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         _writer: W,
-        _compress: ark_serialize::Compress,
+        _compress: Compress,
     ) -> Result<(), SerializationError> {
         set_pending_append(*self);
         Ok(())
     }
 
-    fn serialized_size(&self, _compress: ark_serialize::Compress) -> usize {
+    fn serialized_size(&self, _compress: Compress) -> usize {
         // Return 32 bytes (standard field element size) for append_scalar length calculations
         32
     }
@@ -1597,10 +1606,10 @@ impl CanonicalSerialize for MleAst {
 
 /// Required by `JoltField` trait bound but not called during symbolic execution.
 impl CanonicalDeserialize for MleAst {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         _reader: R,
-        _compress: ark_serialize::Compress,
-        _validate: ark_serialize::Validate,
+        _compress: Compress,
+        _validate: Validate,
     ) -> Result<Self, SerializationError> {
         unimplemented!("MleAst deserialization not needed. We build ASTs, not read them")
     }
@@ -1618,24 +1627,24 @@ impl Valid for MleAst {
 // =============================================================================
 
 impl CanonicalSerialize for Atom {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         _writer: W,
-        _compress: ark_serialize::Compress,
+        _compress: Compress,
     ) -> Result<(), SerializationError> {
         unimplemented!("Not needed for constructing ASTs")
     }
 
-    fn serialized_size(&self, _compress: ark_serialize::Compress) -> usize {
+    fn serialized_size(&self, _compress: Compress) -> usize {
         unimplemented!("Not needed for constructing ASTs")
     }
 }
 
 impl CanonicalDeserialize for Atom {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         _reader: R,
-        _compress: ark_serialize::Compress,
-        _validate: ark_serialize::Validate,
+        _compress: Compress,
+        _validate: Validate,
     ) -> Result<Self, SerializationError> {
         unimplemented!("Not needed for constructing ASTs")
     }
@@ -1648,24 +1657,24 @@ impl Valid for Atom {
 }
 
 impl CanonicalSerialize for Edge {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         _writer: W,
-        _compress: ark_serialize::Compress,
+        _compress: Compress,
     ) -> Result<(), SerializationError> {
         unimplemented!("Not needed for constructing ASTs")
     }
 
-    fn serialized_size(&self, _compress: ark_serialize::Compress) -> usize {
+    fn serialized_size(&self, _compress: Compress) -> usize {
         unimplemented!("Not needed for constructing ASTs")
     }
 }
 
 impl CanonicalDeserialize for Edge {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         _reader: R,
-        _compress: ark_serialize::Compress,
-        _validate: ark_serialize::Validate,
+        _compress: Compress,
+        _validate: Validate,
     ) -> Result<Self, SerializationError> {
         unimplemented!("Not needed for constructing ASTs")
     }
@@ -1678,24 +1687,24 @@ impl Valid for Edge {
 }
 
 impl CanonicalSerialize for Node {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: Write>(
         &self,
         _writer: W,
-        _compress: ark_serialize::Compress,
+        _compress: Compress,
     ) -> Result<(), SerializationError> {
         unimplemented!("Not needed for constructing ASTs")
     }
 
-    fn serialized_size(&self, _compress: ark_serialize::Compress) -> usize {
+    fn serialized_size(&self, _compress: Compress) -> usize {
         unimplemented!("Not needed for constructing ASTs")
     }
 }
 
 impl CanonicalDeserialize for Node {
-    fn deserialize_with_mode<R: std::io::Read>(
+    fn deserialize_with_mode<R: Read>(
         _reader: R,
-        _compress: ark_serialize::Compress,
-        _validate: ark_serialize::Validate,
+        _compress: Compress,
+        _validate: Validate,
     ) -> Result<Self, SerializationError> {
         unimplemented!("Not needed for constructing ASTs")
     }

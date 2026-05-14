@@ -224,11 +224,14 @@ pub use g1::Bn254G1;
 pub use g2::Bn254G2;
 pub use gt::Bn254GT;
 
-use ark_bn254::Bn254 as ArkBn254;
+use ark_bn254::{Bn254 as ArkBn254, Fr as ArkFr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::pairing::Pairing;
+use ark_ec::AffineRepr;
 use ark_ec::CurveGroup;
 use ark_ff::PrimeField as _;
-use jolt_field::Field;
+use ark_std::UniformRand;
+use jolt_field::{Field, Fr as JoltFr};
+use num_bigint::BigUint;
 
 use crate::PairingGroup;
 
@@ -239,25 +242,22 @@ pub struct Bn254;
 impl Bn254 {
     /// Standard G1 generator. Useful for tests and PCS setup code.
     pub fn g1_generator() -> Bn254G1 {
-        use ark_ec::AffineRepr;
-        Bn254G1(ark_bn254::G1Affine::generator().into())
+        Bn254G1(G1Affine::generator().into())
     }
 
     /// Standard G2 generator. Useful for tests and PCS setup code.
     pub fn g2_generator() -> Bn254G2 {
-        use ark_ec::AffineRepr;
-        Bn254G2(ark_bn254::G2Affine::generator().into())
+        Bn254G2(G2Affine::generator().into())
     }
 
     /// Samples a uniformly random G1 element.
     pub fn random_g1<R: rand_core::RngCore>(rng: &mut R) -> Bn254G1 {
-        use ark_std::UniformRand;
-        Bn254G1(ark_bn254::G1Projective::rand(rng))
+        Bn254G1(G1Projective::rand(rng))
     }
 }
 
 impl PairingGroup for Bn254 {
-    type ScalarField = jolt_field::Fr;
+    type ScalarField = JoltFr;
     type G1 = Bn254G1;
     type G2 = Bn254G2;
     type GT = Bn254GT;
@@ -271,10 +271,10 @@ impl PairingGroup for Bn254 {
         // Batched projective → affine normalization (one inversion for all points)
         // is 10-100× faster than per-point `into_affine` for typical Dory/KZG verifier
         // sizes.
-        let g1_projs: Vec<ark_bn254::G1Projective> = g1s.iter().map(|g| g.0).collect();
-        let g2_projs: Vec<ark_bn254::G2Projective> = g2s.iter().map(|g| g.0).collect();
-        let g1_affines = ark_bn254::G1Projective::normalize_batch(&g1_projs);
-        let g2_affines = ark_bn254::G2Projective::normalize_batch(&g2_projs);
+        let g1_projs: Vec<G1Projective> = g1s.iter().map(|g| g.0).collect();
+        let g2_projs: Vec<G2Projective> = g2s.iter().map(|g| g.0).collect();
+        let g1_affines = G1Projective::normalize_batch(&g1_projs);
+        let g2_affines = G2Projective::normalize_batch(&g2_projs);
         Bn254GT(ArkBn254::multi_pairing(&g1_affines, &g2_affines).0)
     }
 }
@@ -288,18 +288,18 @@ impl PairingGroup for Bn254 {
 /// In debug builds, asserts that the source value fits in the BN254 Fr modulus —
 /// catches silent modular reduction when `F` has a larger modulus than BN254 Fr.
 #[inline]
-pub(crate) fn field_to_fr<F: Field>(f: &F) -> ark_bn254::Fr {
+pub(crate) fn field_to_fr<F: Field>(f: &F) -> ArkFr {
     let mut bytes = vec![0u8; F::NUM_BYTES];
     f.to_bytes_le(&mut bytes);
     #[cfg(debug_assertions)]
     {
         use ark_ff::{BigInteger, PrimeField as _};
-        let value = num_bigint::BigUint::from_bytes_le(&bytes);
-        let modulus = num_bigint::BigUint::from_bytes_le(&ark_bn254::Fr::MODULUS.to_bytes_le());
+        let value = BigUint::from_bytes_le(&bytes);
+        let modulus = BigUint::from_bytes_le(&ArkFr::MODULUS.to_bytes_le());
         debug_assert!(
             value < modulus,
             "field_to_fr: source value >= BN254 Fr modulus (silent reduction)",
         );
     }
-    ark_bn254::Fr::from_le_bytes_mod_order(&bytes)
+    ArkFr::from_le_bytes_mod_order(&bytes)
 }

@@ -911,16 +911,19 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 `CommitmentScheme for DoryScheme`:
 
 1. `ProverSetup = DoryProverSetup`.
-2. `Polynomial = jolt_poly::Polynomial<Fr>`.
-3. `OpeningHint = DoryHint`.
-4. `SetupParams = usize`.
-5. `setup(max_num_vars)` returns prover and verifier setup.
-6. `project_verifier_setup(&prover_setup)` projects prover setup down to verifier setup.
-7. `commit` commits through the current Dory row commitment path.
-8. `commit_with_shape` commits through the same row path using a protocol-selected matrix shape.
-9. `commit_batch` overrides the default with batch-source row streaming.
-10. `open` proves one Dory opening.
-11. `prove_batch` delegates to `homomorphic_prove_batch`.
+2. `OpeningHint = DoryHint`.
+3. `SetupParams = usize`.
+4. `setup(max_num_vars)` returns prover and verifier setup.
+5. `project_verifier_setup(&prover_setup)` projects prover setup down to verifier setup.
+6. `commit` commits through the current Dory row commitment path.
+7. `commit_batch` overrides the default with batch-source row streaming.
+8. `open` proves one Dory opening.
+9. `prove_batch` delegates to `homomorphic_prove_batch`.
+
+`ShapedCommitmentScheme for DoryScheme`:
+
+1. `commit_with_shape` commits through the same row path using a protocol-selected matrix shape.
+   This is intentionally not on the base `CommitmentScheme`: most backends derive shape from the source, while Dory/Jolt must sometimes commit several logical sources inside one shared matrix domain.
 
 `AdditivelyHomomorphicVerifier for DoryScheme`:
 
@@ -935,6 +938,11 @@ Non-homomorphic schemes are not required to implement `combine` or `combine_hint
 1. Preserve current Dory `y_com` behavior.
 2. Preserve current `y_blinding` behavior.
 3. Preserve BlindFold compatibility.
+
+`ShapedZkOpeningScheme for DoryScheme`:
+
+1. `commit_zk_with_shape` is the hiding-mode counterpart to `commit_with_shape`.
+   It remains an explicit extension because protocol-selected matrix shape is a Dory/Jolt layout capability, not a generic ZK PCS requirement.
 
 ### `jolt-core` Integration
 

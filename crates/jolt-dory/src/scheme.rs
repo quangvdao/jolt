@@ -23,7 +23,8 @@ use jolt_openings::{
     AdditivelyHomomorphicVerifier, BatchCommitmentSource, CommitmentScheme,
     CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
     EvaluationCommitmentScheme, OpeningClaim, OpeningsError, ProverClaim, PublicVerifierSetup,
-    SourceRow, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    ShapedCommitmentScheme, ShapedZkOpeningScheme, SourceRow, ZkOpeningScheme,
+    ZkOpeningSchemeVerifier,
 };
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
@@ -493,15 +494,6 @@ impl CommitmentScheme for DoryScheme {
         Self::commit_with_mode::<S, Transparent>(source, &setup.0)
     }
 
-    fn commit_with_shape<S: CommitmentSource<Fr> + ?Sized>(
-        source: &S,
-        nu: usize,
-        sigma: usize,
-        setup: &Self::ProverSetup,
-    ) -> (Self::Output, Self::OpeningHint) {
-        DoryScheme::commit_with_shape(source, nu, sigma, setup)
-    }
-
     #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch")]
     fn commit_batch<B: BatchCommitmentSource<Self::Field>>(
         batch: &B,
@@ -566,6 +558,17 @@ impl CommitmentScheme for DoryScheme {
         S: CommitmentSource<Self::Field> + ?Sized,
     {
         vec![Self::open(polynomial, point, eval, setup, hint, transcript)]
+    }
+}
+
+impl ShapedCommitmentScheme for DoryScheme {
+    fn commit_with_shape<S: CommitmentSource<Fr> + ?Sized>(
+        source: &S,
+        nu: usize,
+        sigma: usize,
+        setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        DoryScheme::commit_with_shape(source, nu, sigma, setup)
     }
 }
 
@@ -686,15 +689,6 @@ impl ZkOpeningScheme for DoryScheme {
         Self::commit_with_mode::<S, dory::ZK>(source, &setup.0)
     }
 
-    fn commit_zk_with_shape<S: CommitmentSource<Fr> + ?Sized>(
-        source: &S,
-        nu: usize,
-        sigma: usize,
-        setup: &Self::ProverSetup,
-    ) -> (Self::Output, Self::OpeningHint) {
-        DoryScheme::commit_zk_with_shape(source, nu, sigma, setup)
-    }
-
     #[tracing::instrument(skip_all, name = "DoryScheme::commit_batch_zk")]
     fn commit_batch_zk<B: BatchCommitmentSource<Self::Field>>(
         batch: &B,
@@ -733,20 +727,19 @@ impl ZkOpeningScheme for DoryScheme {
         S: CommitmentSource<Self::Field>,
     {
         let [claim] = claims.as_slice() else {
-            panic!("Dory ZK batch opening currently expects one already-combined claim");
+            panic!("Dory ZK batch opening expects one already-combined claim");
         };
         let [hint] = hints.as_slice() else {
-            panic!("Dory ZK batch opening currently expects one opening hint");
+            panic!("Dory ZK batch opening expects one already-combined hint");
         };
-        let (proof, y_com, y_blinding) = Self::open_zk(
+        Self::prove_fused_batch_zk(
             &claim.polynomial,
             &claim.point,
             claim.eval,
-            setup,
             hint.clone(),
+            setup,
             transcript,
-        );
-        (vec![proof], y_com, y_blinding)
+        )
     }
 
     fn prove_fused_batch_zk<S>(
@@ -763,6 +756,17 @@ impl ZkOpeningScheme for DoryScheme {
         let (proof, y_com, y_blinding) =
             Self::open_zk(polynomial, point, eval, setup, hint, transcript);
         (vec![proof], y_com, y_blinding)
+    }
+}
+
+impl ShapedZkOpeningScheme for DoryScheme {
+    fn commit_zk_with_shape<S: CommitmentSource<Fr> + ?Sized>(
+        source: &S,
+        nu: usize,
+        sigma: usize,
+        setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        DoryScheme::commit_zk_with_shape(source, nu, sigma, setup)
     }
 }
 

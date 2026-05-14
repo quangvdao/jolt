@@ -48,8 +48,8 @@ use jolt_crypto::Commitment;
 use jolt_openings::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
     CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
-    EvaluationCommitmentScheme, OpeningsError, ProverClaim, PublicVerifierSetup, ZkOpeningScheme,
-    ZkOpeningSchemeVerifier,
+    EvaluationCommitmentScheme, OpeningsError, ProverClaim, PublicVerifierSetup,
+    ShapedCommitmentScheme, ShapedZkOpeningScheme, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_transcript::Transcript;
 use serde::{Deserialize, Serialize};
@@ -231,6 +231,17 @@ impl CommitmentScheme for AstCommitmentScheme {
     }
 }
 
+impl ShapedCommitmentScheme for AstCommitmentScheme {
+    fn commit_with_shape<S: CommitmentSource<Self::Field> + ?Sized>(
+        _source: &S,
+        _nu: usize,
+        _sigma: usize,
+        _setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        panic!("AstCommitmentScheme::commit_with_shape should never be called during verification")
+    }
+}
+
 impl AdditivelyHomomorphicVerifier for AstCommitmentScheme {
     fn combine(_commitments: &[Self::Output], _scalars: &[Self::Field]) -> Self::Output {
         unimplemented!("AstCommitmentScheme::combine is not needed for stages 1-7 transpilation")
@@ -339,6 +350,19 @@ impl ZkOpeningScheme for AstCommitmentScheme {
     {
         panic!(
             "AstCommitmentScheme::prove_fused_batch_zk should never be called during verification"
+        )
+    }
+}
+
+impl ShapedZkOpeningScheme for AstCommitmentScheme {
+    fn commit_zk_with_shape<S: CommitmentSource<Self::Field> + ?Sized>(
+        _source: &S,
+        _nu: usize,
+        _sigma: usize,
+        _setup: &Self::ProverSetup,
+    ) -> (Self::Output, Self::OpeningHint) {
+        panic!(
+            "AstCommitmentScheme::commit_zk_with_shape should never be called during verification"
         )
     }
 }

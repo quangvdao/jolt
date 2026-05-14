@@ -40,7 +40,8 @@ use jolt_crypto::{Bn254, HomomorphicCommitment};
 use jolt_dory::DoryScheme;
 use jolt_field::Fr;
 use jolt_openings::{
-    AdditivelyHomomorphic, CommitmentScheme, EvaluationCommitmentProver, ZkOpeningScheme,
+    AdditivelyHomomorphic, CommitmentScheme, EvaluationCommitmentProver, ShapedCommitmentScheme,
+    ShapedZkOpeningScheme, ZkOpeningScheme,
 };
 use proof_serialization::JoltProof;
 #[cfg(feature = "prover")]
@@ -55,7 +56,8 @@ use verifier::JoltVerifier;
 /// The extracted `jolt-openings` traits stay backend-neutral. This trait
 /// collects the extra requirements that Jolt core currently needs for Stage 8:
 /// canonical proof serialization, additive commitment/hint combination, Dory's
-/// hidden-evaluation commitment for BlindFold, and size-only setup.
+/// hidden-evaluation commitment for BlindFold, protocol-selected Dory matrix
+/// shapes, and size-only setup.
 pub trait JoltCommitmentScheme<F, C>:
     jolt_crypto::Commitment<
         Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid,
@@ -67,7 +69,9 @@ pub trait JoltCommitmentScheme<F, C>:
         BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,
         VerifierSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
     > + AdditivelyHomomorphic<Field = F>
+    + ShapedCommitmentScheme<Field = F>
     + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+    + ShapedZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
     + EvaluationCommitmentProver<C::G1>
 where
     F: JoltField + jolt_field::Field,
@@ -81,7 +85,9 @@ where
     C: JoltCurve<F = F>,
     PCS: CommitmentScheme<Field = F, SetupParams = usize>
         + AdditivelyHomomorphic<Field = F>
+        + ShapedCommitmentScheme<Field = F>
         + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+        + ShapedZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
         + EvaluationCommitmentProver<C::G1>,
     PCS::Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid,
     PCS::BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,

@@ -37,6 +37,9 @@ use crate::symbolic_traits::ast_commitment_scheme::AstBatchedProof;
 use crate::symbolic_traits::ast_commitment_scheme::AstCommitmentScheme;
 use crate::symbolic_traits::ast_curve::AstCurve;
 use crate::symbolic_traits::opening_accumulator::AstOpeningAccumulator;
+use std::{cmp::min, collections::HashMap};
+
+use ark_bn254::Fr as ArkFr;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
 #[cfg(not(feature = "zk"))]
@@ -44,7 +47,7 @@ use jolt_core::curve::JoltCurve;
 #[cfg(not(feature = "zk"))]
 use jolt_core::poly::opening_proof::OpeningPoint;
 #[cfg(not(feature = "zk"))]
-use jolt_core::poly::unipoly::CompressedUniPoly;
+use jolt_core::poly::unipoly::{CompressedUniPoly, UniPoly};
 #[cfg(not(feature = "zk"))]
 use jolt_core::subprotocols::sumcheck::SumcheckInstanceProof;
 #[cfg(not(feature = "zk"))]
@@ -56,6 +59,8 @@ use jolt_core::transcripts::Transcript;
 use jolt_core::zkvm::proof_serialization::Claims;
 use jolt_core::zkvm::proof_serialization::JoltProof;
 use jolt_core::zkvm::RV64IMACProof;
+use jolt_crypto::Bn254;
+use jolt_field::Fr as JoltFr;
 #[cfg(not(feature = "zk"))]
 use std::collections::BTreeMap;
 use zklean_extractor::mle_ast::{MleAst, TargetField};
@@ -101,7 +106,7 @@ impl VarAllocator {
     /// This is the primary allocation method for stages 1-7.
     pub fn alloc_with_value<V>(&mut self, description: &str, value: &V) -> MleAst
     where
-        V: Copy + Into<ark_bn254::Fr>,
+        V: Copy + Into<ArkFr>,
     {
         self.alloc_with_value_and_field(description, value, TargetField::Fr)
     }
@@ -123,10 +128,9 @@ impl VarAllocator {
         target_field: TargetField,
     ) -> MleAst
     where
-        V: Copy + Into<ark_bn254::Fr>,
+        V: Copy + Into<ArkFr>,
     {
-        use ark_ff::PrimeField;
-        let value: ark_bn254::Fr = (*value).into();
+        let value: ArkFr = (*value).into();
         let idx = self.next_idx;
         self.descriptions
             .push((idx, description.to_string(), target_field));
@@ -141,7 +145,7 @@ impl VarAllocator {
     /// guaranteeing they stay in sync.
     pub fn alloc_n_with_values<V>(&mut self, values: &[V], prefix: &str) -> Vec<MleAst>
     where
-        V: Copy + Into<ark_bn254::Fr>,
+        V: Copy + Into<ArkFr>,
     {
         self.alloc_n_with_values_and_field(values, prefix, TargetField::Fr)
     }
@@ -154,7 +158,7 @@ impl VarAllocator {
         target_field: TargetField,
     ) -> Vec<MleAst>
     where
-        V: Copy + Into<ark_bn254::Fr>,
+        V: Copy + Into<ArkFr>,
     {
         values
             .iter()
@@ -182,7 +186,7 @@ impl VarAllocator {
     }
 
     /// Get witness values as a HashMap for JSON serialization.
-    pub fn witness_values(&self) -> std::collections::HashMap<usize, String> {
+    pub fn witness_values(&self) -> HashMap<usize, String> {
         self.witness_values
             .iter()
             .enumerate()
@@ -237,15 +241,15 @@ fn commitment_to_bytes<T: CanonicalSerialize>(commitment: &T) -> Vec<u8> {
 ///
 /// This is PCS-agnostic: Dory (384 bytes) produces 12 chunks,
 /// other PCS types produce different chunk counts based on their commitment size.
-fn commitment_to_field_chunks<T: CanonicalSerialize>(commitment: &T) -> Vec<ark_bn254::Fr> {
+fn commitment_to_field_chunks<T: CanonicalSerialize>(commitment: &T) -> Vec<ArkFr> {
     let bytes = commitment_to_bytes(commitment);
     let num_chunks = bytes.len().div_ceil(BYTES_PER_CHUNK);
 
     (0..num_chunks)
         .map(|i| {
             let start = i * BYTES_PER_CHUNK;
-            let end = std::cmp::min(start + BYTES_PER_CHUNK, bytes.len());
-            ark_bn254::Fr::from_le_bytes_mod_order(&bytes[start..end])
+            let end = min(start + BYTES_PER_CHUNK, bytes.len());
+            ArkFr::from_le_bytes_mod_order(&bytes[start..end])
         })
         .collect()
 }
@@ -318,63 +322,63 @@ pub fn symbolize_proof<OutputTranscript: Transcript>(
         };
 
         // === Symbolize stage 1 uni-skip proof ===
-        let stage1_uni_skip = symbolize_uni_skip_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage1_uni_skip = symbolize_uni_skip_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage1_uni_skip_first_round_proof,
             &mut alloc,
             "stage1_uni_skip",
         );
 
         // === Symbolize stage 1 sumcheck proof ===
-        let stage1_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage1_sumcheck = symbolize_sumcheck_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage1_sumcheck_proof,
             &mut alloc,
             "stage1_sumcheck",
         );
 
         // === Symbolize stage 2 uni-skip proof ===
-        let stage2_uni_skip = symbolize_uni_skip_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage2_uni_skip = symbolize_uni_skip_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage2_uni_skip_first_round_proof,
             &mut alloc,
             "stage2_uni_skip",
         );
 
         // === Symbolize stage 2 sumcheck proof ===
-        let stage2_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage2_sumcheck = symbolize_sumcheck_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage2_sumcheck_proof,
             &mut alloc,
             "stage2_sumcheck",
         );
 
         // === Symbolize stage 3 sumcheck proof ===
-        let stage3_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage3_sumcheck = symbolize_sumcheck_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage3_sumcheck_proof,
             &mut alloc,
             "stage3_sumcheck",
         );
 
         // === Symbolize stage 4 sumcheck proof ===
-        let stage4_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage4_sumcheck = symbolize_sumcheck_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage4_sumcheck_proof,
             &mut alloc,
             "stage4_sumcheck",
         );
 
         // === Symbolize stage 5 sumcheck proof ===
-        let stage5_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage5_sumcheck = symbolize_sumcheck_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage5_sumcheck_proof,
             &mut alloc,
             "stage5_sumcheck",
         );
 
         // === Symbolize stage 6 sumcheck proof ===
-        let stage6_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage6_sumcheck = symbolize_sumcheck_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage6_sumcheck_proof,
             &mut alloc,
             "stage6_sumcheck",
         );
 
         // === Symbolize stage 7 sumcheck proof ===
-        let stage7_sumcheck = symbolize_sumcheck_variant::<jolt_crypto::Bn254, _, OutputTranscript>(
+        let stage7_sumcheck = symbolize_sumcheck_variant::<Bn254, _, OutputTranscript>(
             &real_proof.stage7_sumcheck_proof,
             &mut alloc,
             "stage7_sumcheck",
@@ -432,8 +436,8 @@ pub fn symbolize_proof<OutputTranscript: Transcript>(
 // (MleAst variables) while simultaneously recording witness values in VarAllocator.
 
 #[cfg(not(feature = "zk"))]
-fn symbolize_uni_skip_variant<C: JoltCurve<F = jolt_field::Fr>, T: Transcript, OutT: Transcript>(
-    real: &UniSkipFirstRoundProofVariant<jolt_field::Fr, C, T>,
+fn symbolize_uni_skip_variant<C: JoltCurve<F = JoltFr>, T: Transcript, OutT: Transcript>(
+    real: &UniSkipFirstRoundProofVariant<JoltFr, C, T>,
     alloc: &mut VarAllocator,
     prefix: &str,
 ) -> UniSkipFirstRoundProofVariant<MleAst, AstCurve, OutT> {
@@ -442,7 +446,7 @@ fn symbolize_uni_skip_variant<C: JoltCurve<F = jolt_field::Fr>, T: Transcript, O
             let coeffs =
                 alloc.alloc_n_with_values(&inner.uni_poly.coeffs, &format!("{prefix}_coeff"));
             UniSkipFirstRoundProofVariant::Standard(UniSkipFirstRoundProof::new(
-                jolt_core::poly::unipoly::UniPoly::from_coeff(coeffs),
+                UniPoly::from_coeff(coeffs),
             ))
         }
         UniSkipFirstRoundProofVariant::Zk(_) => {
@@ -452,8 +456,8 @@ fn symbolize_uni_skip_variant<C: JoltCurve<F = jolt_field::Fr>, T: Transcript, O
 }
 
 #[cfg(not(feature = "zk"))]
-fn symbolize_sumcheck_variant<C: JoltCurve<F = jolt_field::Fr>, T: Transcript, OutT: Transcript>(
-    real: &SumcheckInstanceProof<jolt_field::Fr, C, T>,
+fn symbolize_sumcheck_variant<C: JoltCurve<F = JoltFr>, T: Transcript, OutT: Transcript>(
+    real: &SumcheckInstanceProof<JoltFr, C, T>,
     alloc: &mut VarAllocator,
     prefix: &str,
 ) -> SumcheckInstanceProof<MleAst, AstCurve, OutT> {
@@ -489,8 +493,9 @@ fn symbolize_sumcheck_variant<C: JoltCurve<F = jolt_field::Fr>, T: Transcript, O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_bn254::Fr;
+    use ark_bn254::{Fr, G1Affine};
     use ark_ff::PrimeField;
+    use ark_std::{test_rng, UniformRand};
     use zklean_extractor::mle_ast::{get_node, Atom, Node};
 
     // =========================================================================
@@ -638,11 +643,8 @@ mod tests {
     #[test]
     fn test_alloc_commitment() {
         // Test alloc_commitment produces correct number of variables
-        use ark_bn254::G1Affine;
-        use ark_std::UniformRand;
-
         let mut alloc = VarAllocator::new();
-        let mut rng = ark_std::test_rng();
+        let mut rng = test_rng();
         let point = G1Affine::rand(&mut rng);
 
         let vars = alloc.alloc_commitment(&point, "commitment");
@@ -681,10 +683,7 @@ mod tests {
     #[test]
     fn test_commitment_to_field_chunks_g1() {
         // Verify G1Affine commitment produces correct number of chunks
-        use ark_bn254::G1Affine;
-        use ark_std::UniformRand;
-
-        let mut rng = ark_std::test_rng();
+        let mut rng = test_rng();
         let point = G1Affine::rand(&mut rng);
 
         let chunks = commitment_to_field_chunks(&point);
@@ -715,10 +714,7 @@ mod tests {
         // CRITICAL: Verify chunk values match what Poseidon transcript expects
         // This ensures commitment_to_field_chunks produces identical chunks
         // to what Poseidon transcript uses when hashing commitments
-        use ark_bn254::G1Affine;
-        use ark_std::UniformRand;
-
-        let mut rng = ark_std::test_rng();
+        let mut rng = test_rng();
         let point = G1Affine::rand(&mut rng);
 
         let chunks = commitment_to_field_chunks(&point);
@@ -727,7 +723,7 @@ mod tests {
         // Verify each chunk matches its byte slice
         for (i, chunk) in chunks.iter().enumerate() {
             let start = i * BYTES_PER_CHUNK;
-            let end = std::cmp::min(start + BYTES_PER_CHUNK, bytes.len());
+            let end = min(start + BYTES_PER_CHUNK, bytes.len());
             let expected_chunk = Fr::from_le_bytes_mod_order(&bytes[start..end]);
 
             assert_eq!(

@@ -48,7 +48,7 @@ use jolt_crypto::Commitment;
 use jolt_openings::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
     CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
-    EvaluationCommitmentScheme, OpeningsError, ProverClaim, PublicVerifierSetup,
+    EvaluationCommitmentScheme, OpeningClaim, OpeningsError, ProverClaim, PublicVerifierSetup,
     ShapedCommitmentScheme, ShapedZkOpeningScheme, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_transcript::Transcript;
@@ -131,7 +131,7 @@ impl CommitmentSchemeVerifier for AstCommitmentScheme {
     }
 
     fn verify_batch(
-        _claims: Vec<jolt_openings::OpeningClaim<Self::Field, Self>>,
+        _claims: Vec<OpeningClaim<Self::Field, Self>>,
         _proof: &Self::BatchProof,
         _setup: &Self::VerifierSetup,
         _transcript: &mut impl Transcript<Challenge = Self::Field>,
@@ -271,7 +271,7 @@ impl ZkOpeningSchemeVerifier for AstCommitmentScheme {
     }
 
     fn verify_batch_zk(
-        _claims: Vec<jolt_openings::OpeningClaim<Self::Field, Self>>,
+        _claims: Vec<OpeningClaim<Self::Field, Self>>,
         _proof: &Self::BatchProof,
         _setup: &Self::VerifierSetup,
         _transcript: &mut impl Transcript<Challenge = Self::Field>,

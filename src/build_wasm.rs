@@ -5,6 +5,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::Path,
+    process::Command,
 };
 
 use eyre::Result;
@@ -16,6 +17,9 @@ use jolt_core::{
         Serializable,
     },
 };
+use jolt_crypto::Bn254;
+use jolt_dory::DoryScheme;
+use jolt_field::Fr;
 use syn::{punctuated::Punctuated, Attribute, ItemFn, Meta, PathSegment, Token};
 use toml_edit::{value, Array, DocumentMut, Item, Table};
 
@@ -55,10 +59,7 @@ fn preprocess_and_save(func_name: &str, attributes: &Attributes, is_std: bool) -
         e_entry,
     )?;
 
-    let prover_preprocessing =
-        JoltProverPreprocessing::<jolt_field::Fr, jolt_crypto::Bn254, jolt_dory::DoryScheme>::new(
-            shared,
-        );
+    let prover_preprocessing = JoltProverPreprocessing::<Fr, Bn254, DoryScheme>::new(shared);
     let verifier_preprocessing = JoltVerifierPreprocessing::from(&prover_preprocessing);
 
     let verifier_bytes = verifier_preprocessing.serialize_to_bytes()?;
@@ -343,7 +344,7 @@ pub fn build_wasm() {
 
     modify_cargo_toml(".").expect("Failed to update Cargo.toml for WASM build");
 
-    let output = std::process::Command::new("wasm-pack")
+    let output = Command::new("wasm-pack")
         .args(["build", "--release", "--target", "web"])
         .output()
         .expect("Failed to execute wasm-pack command");

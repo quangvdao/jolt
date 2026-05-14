@@ -31,18 +31,23 @@
 //! 6. Generate target-specific circuit code from the AST
 //! 7. Output witness values (captured during symbolization)
 
-use ark_serialize::CanonicalDeserialize;
-use clap::{Parser, ValueEnum};
-use jolt_core::field::JoltField;
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 
+use ark_serialize::CanonicalDeserialize;
+use clap::{Parser, ValueEnum};
 use common::jolt_device::JoltDevice;
+use jolt_core::field::JoltField;
 use jolt_core::transcripts::Transcript;
+use jolt_core::zkvm::ram::{set_pending_initial_ram, PendingInitialRamValues};
 use jolt_core::zkvm::transpilable_verifier::TranspilableVerifier;
 use jolt_core::zkvm::verifier::JoltVerifierPreprocessing;
 use jolt_core::zkvm::RV64IMACProof;
+use jolt_crypto::Bn254;
 use jolt_dory::{DoryCommitment, DoryScheme};
+use jolt_field::Fr;
+use transpiler::symbolic_traits::ast_commitment_scheme::AstVerifierSetup;
 use transpiler::{
     gnark_codegen, symbolize_proof, AstCommitmentScheme, AstCurve, AstOpeningAccumulator,
     SelectedAstTranscript,
@@ -122,7 +127,7 @@ fn main() {
     // - preprocessing: Verifier setup data (bytecode commitments, memory layout)
 
     println!("Loading proof from: {:?}", args.proof);
-    let proof_bytes = std::fs::read(&args.proof)
+    let proof_bytes = fs::read(&args.proof)
         .unwrap_or_else(|e| panic!("Failed to read proof file {:?}: {}", args.proof, e));
     let real_proof: RV64IMACProof = CanonicalDeserialize::deserialize_compressed(&proof_bytes[..])
         .expect("Failed to deserialize proof");
@@ -130,7 +135,7 @@ fn main() {
     println!("  commitments: {}", real_proof.commitments.len());
 
     println!("\nLoading io_device from: {:?}", args.io_device);
-    let io_device_bytes = std::fs::read(&args.io_device)
+    let io_device_bytes = fs::read(&args.io_device)
         .unwrap_or_else(|e| panic!("Failed to read io_device file {:?}: {}", args.io_device, e));
     let io_device: JoltDevice = CanonicalDeserialize::deserialize_compressed(&io_device_bytes[..])
         .expect("Failed to deserialize io_device");
@@ -141,18 +146,15 @@ fn main() {
     // We only need the `shared` field (memory layout, bytecode info) for transpilation;
     // the commitment scheme generators are replaced with stubs for symbolic execution.
     println!("\nLoading preprocessing from: {:?}", args.preprocessing);
-    let preprocessing_bytes = std::fs::read(&args.preprocessing).unwrap_or_else(|e| {
+    let preprocessing_bytes = fs::read(&args.preprocessing).unwrap_or_else(|e| {
         panic!(
             "Failed to read preprocessing file {:?}: {}",
             args.preprocessing, e
         )
     });
-    let real_preprocessing: JoltVerifierPreprocessing<
-        jolt_field::Fr,
-        jolt_crypto::Bn254,
-        DoryScheme,
-    > = CanonicalDeserialize::deserialize_compressed(&preprocessing_bytes[..])
-        .expect("Failed to deserialize preprocessing");
+    let real_preprocessing: JoltVerifierPreprocessing<Fr, Bn254, DoryScheme> =
+        CanonicalDeserialize::deserialize_compressed(&preprocessing_bytes[..])
+            .expect("Failed to deserialize preprocessing");
     println!(
         "  memory_layout: {:?}",
         real_preprocessing.shared.memory_layout
@@ -164,7 +166,7 @@ fn main() {
     // operations. PCS verification is skipped in stages 1-6.
     let symbolic_preprocessing: JoltVerifierPreprocessing<MleAst, AstCurve, AstCommitmentScheme> =
         JoltVerifierPreprocessing {
-            generators: transpiler::symbolic_traits::ast_commitment_scheme::AstVerifierSetup,
+            generators: AstVerifierSetup,
             shared: real_preprocessing.shared.clone(),
             blindfold_setup: None,
         };
@@ -191,7 +193,7 @@ fn main() {
     // The commitment file contains Option<DoryCommitment> (the canonical trusted-advice PCS output).
     let symbolic_trusted_advice = if let Some(ref path) = args.trusted_advice {
         println!("\nLoading trusted advice commitment from: {path:?}");
-        let advice_bytes = std::fs::read(path)
+        let advice_bytes = fs::read(path)
             .unwrap_or_else(|e| panic!("Failed to read trusted advice file {path:?}: {e}"));
         let real_commitment: Option<DoryCommitment> =
             CanonicalDeserialize::deserialize_compressed(&advice_bytes[..])
@@ -225,7 +227,6 @@ fn main() {
 
     // Set PENDING_INITIAL_RAM: bytecode as constants, inputs as symbolic
     {
-        use jolt_core::zkvm::ram::{set_pending_initial_ram, PendingInitialRamValues};
         let bytecode_words: Vec<MleAst> = real_preprocessing
             .shared
             .ram
@@ -389,7 +390,7 @@ fn main() {
                 gnark_codegen::generate_circuit_from_bundle(&bundle, "JoltStagesCircuit");
 
             let circuit_path = output_dir.join("stages_circuit.go");
-            std::fs::write(&circuit_path, &circuit_code)
+            fs::write(&circuit_path, &circuit_code)
                 .unwrap_or_else(|e| panic!("Failed to write circuit file {circuit_path:?}: {e}"));
             println!("  Circuit written to: {circuit_path:?}");
             println!("  Circuit size: {} bytes", circuit_code.len());
@@ -402,11 +403,11 @@ fn main() {
                     true,
                 );
                 let crossval_dir = output_dir.join("crossval");
-                std::fs::create_dir_all(&crossval_dir).unwrap_or_else(|e| {
+                fs::create_dir_all(&crossval_dir).unwrap_or_else(|e| {
                     panic!("Failed to create crossval dir {crossval_dir:?}: {e}")
                 });
                 let crossval_path = crossval_dir.join("circuit.go");
-                std::fs::write(&crossval_path, &crossval_code).unwrap_or_else(|e| {
+                fs::write(&crossval_path, &crossval_code).unwrap_or_else(|e| {
                     panic!("Failed to write crossval circuit {crossval_path:?}: {e}")
                 });
                 println!("  Crossval circuit written to: {crossval_path:?}");
@@ -429,7 +430,7 @@ fn main() {
             let witness_json =
                 serde_json::to_string_pretty(&witness_map).expect("Failed to serialize witness");
             let witness_path = output_dir.join("stages_witness.json");
-            std::fs::write(&witness_path, &witness_json)
+            fs::write(&witness_path, &witness_json)
                 .unwrap_or_else(|e| panic!("Failed to write witness file {witness_path:?}: {e}"));
             println!("  Witness written to: {witness_path:?}");
             println!("  Witness variables: {}", witness_map.len());

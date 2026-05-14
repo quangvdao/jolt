@@ -2,10 +2,20 @@ pub mod fibonacci;
 pub mod secp256k1_ecdsa;
 pub mod sha2_chain;
 
-use jolt_core::transcripts::Blake2bTranscript;
-
 use common::constants::{DEFAULT_MAX_TRUSTED_ADVICE_SIZE, DEFAULT_MAX_UNTRUSTED_ADVICE_SIZE};
 use common::jolt_device::MemoryConfig;
+use jolt_core::{
+    guest::{prover, verifier},
+    transcripts::Blake2bTranscript,
+    zkvm::{
+        proof_serialization::JoltProof,
+        prover::JoltProverPreprocessing,
+        verifier::{JoltVerifier, JoltVerifierPreprocessing},
+    },
+};
+use jolt_crypto::Bn254;
+use jolt_dory::DoryScheme;
+use jolt_field::Fr;
 
 pub use fibonacci::Fibonacci;
 pub use jolt_core::guest::program::Program as GuestProgram;
@@ -14,21 +24,20 @@ pub use secp256k1_ecdsa::Secp256k1EcdsaVerify;
 pub use sha2_chain::Sha2Chain;
 pub use tracer::JoltDevice;
 
-pub type F = jolt_field::Fr;
-pub type C = jolt_crypto::Bn254;
-pub type PCS = jolt_dory::DoryScheme;
+pub type F = Fr;
+pub type C = Bn254;
+pub type PCS = DoryScheme;
 pub type FS = Blake2bTranscript;
 
-pub type Proof = jolt_core::zkvm::proof_serialization::JoltProof<F, C, PCS, FS>;
-pub type ProverPreprocessing = jolt_core::zkvm::prover::JoltProverPreprocessing<F, C, PCS>;
-pub type VerifierPreprocessing = jolt_core::zkvm::verifier::JoltVerifierPreprocessing<F, C, PCS>;
+pub type Proof = JoltProof<F, C, PCS, FS>;
+pub type ProverPreprocessing = JoltProverPreprocessing<F, C, PCS>;
+pub type VerifierPreprocessing = JoltVerifierPreprocessing<F, C, PCS>;
 
 pub fn prover_preprocessing(
     program: &GuestProgram,
     max_trace_length: usize,
 ) -> ProverPreprocessing {
-    jolt_core::guest::prover::preprocess(program, max_trace_length)
-        .expect("prover preprocessing failed")
+    prover::preprocess(program, max_trace_length).expect("prover preprocessing failed")
 }
 
 pub fn verifier_preprocessing(prover_pp: &ProverPreprocessing) -> VerifierPreprocessing {
@@ -41,7 +50,7 @@ pub fn prove(
     inputs: &[u8],
 ) -> (Proof, JoltDevice) {
     let mut output_bytes = vec![0u8; program.memory_config.max_output_size as usize];
-    let (proof, io_device, _debug) = jolt_core::guest::prover::prove::<F, C, PCS, FS>(
+    let (proof, io_device, _debug) = prover::prove::<F, C, PCS, FS>(
         program,
         inputs,
         &[],
@@ -59,7 +68,7 @@ pub fn verify(
     proof: Proof,
     io_device: &JoltDevice,
 ) -> Result<(), ProofVerifyError> {
-    jolt_core::guest::verifier::verify::<F, C, PCS, FS>(
+    verifier::verify::<F, C, PCS, FS>(
         &io_device.inputs,
         None,
         &io_device.outputs,
@@ -76,8 +85,6 @@ pub fn verify_with_claims(
     claimed_outputs: &[u8],
     claimed_panic: bool,
 ) -> Result<(), ProofVerifyError> {
-    use jolt_core::zkvm::verifier::JoltVerifier;
-
     let memory_layout = &verifier_pp.shared.memory_layout;
     let memory_config = MemoryConfig {
         max_untrusted_advice_size: memory_layout.max_untrusted_advice_size,

@@ -4,14 +4,16 @@
 //
 // The upstream merkle-tree example is left unmodified. This crate reuses its guest.
 
-use jolt_sdk::{serialize_and_print_size, TrustedAdvice, UntrustedAdvice};
+use jolt_sdk::{serialize_and_print_size, CommitmentScheme, TrustedAdvice, UntrustedAdvice, PCS};
+use std::env;
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
-    let save_to_disk = std::env::args().any(|arg| arg == "--save");
+    let save_to_disk = env::args().any(|arg| arg == "--save");
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_merkle_tree(target_dir);
@@ -20,9 +22,7 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_merkle_tree(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_merkle_tree(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

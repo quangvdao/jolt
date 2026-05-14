@@ -6,15 +6,16 @@
 //! 3. Proves the execution
 //! 4. Verifies the proof
 
+use jolt_sdk::{CommitmentScheme, PCS};
 use sig_recovery::{generate_test_transactions, serialize_transactions};
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::{fmt, EnvFilter};
 
 fn main() {
-    tracing_subscriber::fmt()
+    fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
@@ -44,9 +45,8 @@ fn main() {
     let start = Instant::now();
     let shared_preprocessing = guest::preprocess_shared_verify_txs(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_verify_txs(shared_preprocessing.clone());
-    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-        &prover_preprocessing.generators,
-    );
+    let verifier_setup =
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
     let verifier_preprocessing =
         guest::preprocess_verifier_verify_txs(shared_preprocessing, verifier_setup, None);
     info!("Preprocessing time: {:?}", start.elapsed());

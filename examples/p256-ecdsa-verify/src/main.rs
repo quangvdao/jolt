@@ -1,8 +1,10 @@
+use jolt_sdk::{CommitmentScheme, PCS};
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_p256_ecdsa_verify(target_dir);
@@ -10,9 +12,8 @@ pub fn main() {
     let shared_preprocessing = guest::preprocess_shared_p256_ecdsa_verify(&mut program).unwrap();
     let prover_preprocessing =
         guest::preprocess_prover_p256_ecdsa_verify(shared_preprocessing.clone());
-    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-        &prover_preprocessing.generators,
-    );
+    let verifier_setup =
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
     let verifier_preprocessing =
         guest::preprocess_verifier_p256_ecdsa_verify(shared_preprocessing, verifier_setup, None);
 

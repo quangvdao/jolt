@@ -1,11 +1,17 @@
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use clap::{Parser, Subcommand};
-use jolt_sdk::{JoltDevice, MemoryConfig, RV64IMACProof, Serializable};
+use jolt_sdk::{
+    guest, host, Curve, JoltDevice, JoltVerifierPreprocessing, MemoryConfig, RV64IMACProof,
+    Serializable, F, PCS,
+};
 use std::cmp::PartialEq;
+use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{error, info};
+use tracing_subscriber::fmt;
 
 fn get_guest_src_dir() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -209,9 +215,9 @@ fn generate_provable_macro(guest: GuestProgram, use_embed: bool, output_dir: &Pa
 
     let provable_macro_path = output_dir.join("provable_macro.rs");
 
-    std::fs::create_dir_all(output_dir).unwrap();
+    fs::create_dir_all(output_dir).unwrap();
 
-    std::fs::write(&provable_macro_path, macro_content).unwrap();
+    fs::write(&provable_macro_path, macro_content).unwrap();
     info!(
         "Generated {} with config: input={}, output={}, memory={}, stack={}, trace={}",
         provable_macro_path.display(),
@@ -226,14 +232,10 @@ fn generate_provable_macro(guest: GuestProgram, use_embed: bool, output_dir: &Pa
 fn check_data_integrity(all_groups_data: &[u8]) -> (u32, u32) {
     info!("Checking data integrity...");
 
-    let mut cursor = std::io::Cursor::new(all_groups_data);
+    let mut cursor = Cursor::new(all_groups_data);
 
-    let verifier_preprocessing = jolt_sdk::JoltVerifierPreprocessing::<
-        jolt_sdk::F,
-        jolt_sdk::Curve,
-        jolt_sdk::PCS,
-    >::deserialize_compressed(&mut cursor)
-    .unwrap();
+    let verifier_preprocessing =
+        JoltVerifierPreprocessing::<F, Curve, PCS>::deserialize_compressed(&mut cursor).unwrap();
     let verifier_bytes = verifier_preprocessing.serialize_to_bytes().unwrap();
     info!(
         "✓ Verifier preprocessing deserialized successfully ({} bytes)",
@@ -279,7 +281,7 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
     };
 
     info!("Creating program...");
-    let mut program = jolt_sdk::host::Program::new(guest.name());
+    let mut program = host::Program::new(guest.name());
     program.set_func(guest.func());
     program.set_std(false);
     program.set_memory_config(memory_config);
@@ -288,21 +290,20 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
     info!("Getting ELF contents...");
     let elf_contents = program.get_elf_contents().unwrap();
     info!("Creating guest program...");
-    let mut guest_prog = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
+    let mut guest_prog = guest::program::Program::new(&elf_contents, &memory_config);
     guest_prog.elf = program.elf;
 
     info!("Preprocessing guest prover...");
     let guest_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&guest_prog, max_trace_length).unwrap();
+        guest::prover::preprocess(&guest_prog, max_trace_length).unwrap();
     info!("Preprocessing guest verifier...");
-    let guest_verifier_preprocessing =
-        jolt_sdk::JoltVerifierPreprocessing::from(&guest_prover_preprocessing);
+    let guest_verifier_preprocessing = JoltVerifierPreprocessing::from(&guest_prover_preprocessing);
 
     let inputs = guest.inputs();
     info!("Got inputs: {inputs:?}");
 
     let mut all_groups_data = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut all_groups_data);
+    let mut cursor = Cursor::new(&mut all_groups_data);
     let mut total_prove_time = 0.0;
 
     guest_verifier_preprocessing
@@ -333,7 +334,7 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
         assert!(!device_io.panic, "Guest program panicked during tracing");
 
         info!("  Proving...");
-        let (proof, io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
+        let (proof, io_device, _debug): (RV64IMACProof, _, _) = guest::prover::prove(
             &guest_prog,
             &input_bytes,
             &[],
@@ -354,7 +355,7 @@ fn collect_guest_proofs(guest: GuestProgram, target_dir: &str, use_embed: bool) 
         io_device.serialize_compressed(&mut cursor).unwrap();
 
         info!("  Verifying...");
-        let is_valid = jolt_sdk::guest::verifier::verify(
+        let is_valid = guest::verifier::verify(
             &input_bytes,
             None,
             &output_bytes,
@@ -403,10 +404,10 @@ fn generate_embedded_bytes(guest: GuestProgram, all_groups_data: &[u8], output_d
     ));
     output.push_str(&format!("// Number of proofs: {n}\n"));
 
-    std::fs::create_dir_all(output_dir).unwrap();
+    fs::create_dir_all(output_dir).unwrap();
 
     let filename = output_dir.join("embedded_bytes.rs");
-    std::fs::write(&filename, output).unwrap();
+    fs::write(&filename, output).unwrap();
     info!("Embedded bytes written to {}", filename.display());
 }
 
@@ -417,10 +418,10 @@ fn save_proof_data(guest: GuestProgram, all_groups_data: &[u8], workdir: &Path) 
         workdir.display()
     );
 
-    std::fs::create_dir_all(workdir).unwrap();
+    fs::create_dir_all(workdir).unwrap();
 
     let proof_file = workdir.join(format!("{}_proofs.bin", guest.name()));
-    std::fs::write(&proof_file, all_groups_data).unwrap();
+    fs::write(&proof_file, all_groups_data).unwrap();
 
     info!("Proof data saved to {}", proof_file.display());
     info!("Total proof data size: {} bytes", all_groups_data.len());
@@ -439,7 +440,7 @@ fn load_proof_data(guest: GuestProgram, workdir: &Path) -> Vec<u8> {
         panic!("Proof file not found: {}", proof_file.display());
     }
 
-    let proof_data = std::fs::read(&proof_file).unwrap();
+    let proof_data = fs::read(&proof_file).unwrap();
     info!(
         "Loaded proof data from {} ({} bytes)",
         proof_file.display(),
@@ -472,13 +473,13 @@ fn run_recursion_proof(
 ) {
     let target_dir = "/tmp/jolt-guest-targets";
 
-    let mut program = jolt_sdk::host::Program::new("recursion-guest");
+    let mut program = host::Program::new("recursion-guest");
     program.set_func("verify");
     program.set_std(true);
     program.set_memory_config(memory_config);
     program.build(target_dir);
     let elf_contents = program.get_elf_contents().unwrap();
-    let mut recursion = jolt_sdk::guest::program::Program::new(&elf_contents, &memory_config);
+    let mut recursion = guest::program::Program::new(&elf_contents, &memory_config);
     recursion.elf = program.elf;
 
     if run_config == RunConfig::Trace || run_config == RunConfig::TraceToFile {
@@ -486,9 +487,9 @@ fn run_recursion_proof(
         max_trace_length = 0;
     }
     let recursion_prover_preprocessing =
-        jolt_sdk::guest::prover::preprocess(&recursion, max_trace_length).unwrap();
+        guest::prover::preprocess(&recursion, max_trace_length).unwrap();
     let recursion_verifier_preprocessing =
-        jolt_sdk::JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
+        JoltVerifierPreprocessing::from(&recursion_prover_preprocessing);
 
     // update program_size in memory_config now that we know it
     recursion.memory_config.program_size = Some(
@@ -507,7 +508,7 @@ fn run_recursion_proof(
     ];
     match run_config {
         RunConfig::Prove => {
-            let (proof, _io_device, _debug): (RV64IMACProof, _, _) = jolt_sdk::guest::prover::prove(
+            let (proof, _io_device, _debug): (RV64IMACProof, _, _) = guest::prover::prove(
                 &recursion,
                 &input_bytes,
                 &[],
@@ -517,7 +518,7 @@ fn run_recursion_proof(
                 &mut output_bytes,
                 &recursion_prover_preprocessing,
             );
-            let is_valid = jolt_sdk::guest::verifier::verify(
+            let is_valid = guest::verifier::verify(
                 &input_bytes,
                 None,
                 &output_bytes,
@@ -615,7 +616,7 @@ fn verify_proofs(
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let cli = Cli::parse();
 

@@ -1,8 +1,10 @@
+use jolt_sdk::{CommitmentScheme, PCS};
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let target_dir = "/tmp/jolt-guest-targets";
 
@@ -14,9 +16,7 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_int_to_string(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_int_to_string(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 
@@ -37,9 +37,7 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_string_concat(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_string_concat(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 
@@ -66,9 +64,7 @@ pub fn main() {
         guest::preprocess_prover_parallel_sum_of_squares(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_parallel_sum_of_squares(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

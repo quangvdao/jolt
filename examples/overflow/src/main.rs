@@ -1,10 +1,12 @@
+use jolt_sdk::{CommitmentScheme, PCS};
 use std::any::Any;
 use std::panic;
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     // An overflowing stack should fail to prove.
     let target_dir = "/tmp/jolt-guest-targets";
@@ -42,9 +44,7 @@ pub fn main() {
         guest::preprocess_prover_allocate_stack_with_increased_size(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_allocate_stack_with_increased_size(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

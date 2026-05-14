@@ -8,6 +8,7 @@ use ark_serialize::{CanonicalDeserialize, Compress, Validate};
 use jolt::{Curve, JoltDevice, JoltVerifierPreprocessing, RV64IMACProof, RV64IMACVerifier, F, PCS};
 
 use jolt::{end_cycle_tracking, start_cycle_tracking};
+use std::io::Cursor;
 
 mod embedded_bytes {
     include!("./embedded_bytes.rs");
@@ -24,7 +25,7 @@ fn verify(bytes: &[u8]) -> u32 {
         bytes
     };
 
-    let mut cursor = std::io::Cursor::new(data_bytes);
+    let mut cursor = Cursor::new(data_bytes);
 
     start_cycle_tracking("deserialize preprocessing");
     let verifier_preprocessing: JoltVerifierPreprocessing<F, Curve, PCS> =

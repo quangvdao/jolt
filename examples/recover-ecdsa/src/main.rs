@@ -1,8 +1,10 @@
 use guest::recover;
-use jolt_sdk::serialize_and_print_size;
+use jolt_sdk::{serialize_and_print_size, CommitmentScheme, PCS};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
+use std::env;
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 const SECRET_KEY: [u8; 32] = [
     59, 148, 11, 85, 134, 130, 61, 253, 2, 174, 59, 70, 27, 180, 51, 107, 94, 203, 174, 253, 102,
@@ -10,7 +12,7 @@ const SECRET_KEY: [u8; 32] = [
 ];
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let secp = Secp256k1::new();
 
@@ -26,7 +28,7 @@ pub fn main() {
 
     let _ = recover(&sig_bytes, msg_digest);
 
-    let save_to_disk = std::env::args().any(|arg| arg == "--save");
+    let save_to_disk = env::args().any(|arg| arg == "--save");
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_recover(target_dir);
@@ -35,9 +37,7 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_recover(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_recover(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

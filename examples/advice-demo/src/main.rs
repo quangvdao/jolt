@@ -1,9 +1,11 @@
+use jolt_sdk::{CommitmentScheme, PCS};
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 // Demonstration of advice tape usage in a provable computation
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let target_dir = "/tmp/jolt-guest-targets";
 
@@ -15,9 +17,8 @@ pub fn main() {
     let mut program = guest::compile_advice_demo(target_dir);
     let shared_preprocessing = guest::preprocess_shared_advice_demo(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_advice_demo(shared_preprocessing.clone());
-    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-        &prover_preprocessing.generators,
-    );
+    let verifier_setup =
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
     let verifier_preprocessing =
         guest::preprocess_verifier_advice_demo(shared_preprocessing, verifier_setup, None);
     let prove_advice_demo = guest::build_prover_advice_demo(program, prover_preprocessing);

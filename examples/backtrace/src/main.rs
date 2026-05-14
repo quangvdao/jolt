@@ -2,15 +2,20 @@
 compile_error!("Enable only one of `nostd` or `std` to avoid guest feature unification.");
 
 #[cfg(any(feature = "nostd", feature = "std"))]
+use jolt_sdk::{CommitmentScheme, PCS};
+#[cfg(any(feature = "nostd", feature = "std"))]
 use std::env;
 
+#[cfg(not(any(feature = "nostd", feature = "std")))]
+use std::process;
 #[cfg(any(feature = "nostd", feature = "std"))]
 use std::time::Instant;
 #[cfg(any(feature = "nostd", feature = "std"))]
 use tracing::info;
+use tracing_subscriber::fmt;
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     #[cfg(any(feature = "nostd", feature = "std"))]
     let should_panic = env_flag("JOLT_BT_TRIGGER").unwrap_or(true);
@@ -26,7 +31,7 @@ fn main() {
     #[cfg(not(any(feature = "nostd", feature = "std")))]
     {
         eprintln!("Enable feature `nostd` or `std`");
-        std::process::exit(1);
+        process::exit(1);
     }
 }
 
@@ -53,9 +58,7 @@ fn run_nostd(target_dir: &str, should_panic: bool) {
         guest_nostd::preprocess_prover_panic_backtrace_nostd(shared_preprocessing.clone());
     let verifier_preprocessing = guest_nostd::preprocess_verifier_panic_backtrace_nostd(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 
@@ -95,9 +98,7 @@ fn run_std(target_dir: &str, should_panic: bool) {
         guest_std::preprocess_prover_panic_backtrace_std(shared_preprocessing.clone());
     let verifier_preprocessing = guest_std::preprocess_verifier_panic_backtrace_std(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

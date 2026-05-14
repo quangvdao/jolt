@@ -1,5 +1,7 @@
+use jolt_sdk::{CommitmentScheme, PCS};
 use spinners::{Spinner, Spinners};
 use tracing::info;
+use tracing_subscriber::fmt;
 
 macro_rules! step {
     ($msg:expr, $action:expr) => {{
@@ -28,9 +30,7 @@ pub fn btreemap() {
     let verifier_preprocessing = step!("Preprocessing verifier", {
         guest::preprocess_verifier_btreemap(
             shared_preprocessing,
-            <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-                &prover_preprocessing.generators,
-            ),
+            <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
             None,
         )
     });
@@ -52,7 +52,7 @@ pub fn btreemap() {
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     info!("BTreeMap");
     btreemap();

@@ -1,11 +1,13 @@
-use jolt_sdk::serialize_and_print_size;
+use jolt_sdk::{serialize_and_print_size, CommitmentScheme, PCS};
+use std::env;
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
-    let save_to_disk = std::env::args().any(|arg| arg == "--save");
+    let save_to_disk = env::args().any(|arg| arg == "--save");
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_fib(target_dir);
@@ -13,9 +15,8 @@ pub fn main() {
     let shared_preprocessing = guest::preprocess_shared_fib(&mut program).unwrap();
 
     let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing.clone());
-    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-        &prover_preprocessing.generators,
-    );
+    let verifier_setup =
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
     let verifier_preprocessing =
         guest::preprocess_verifier_fib(shared_preprocessing, verifier_setup, None);
 

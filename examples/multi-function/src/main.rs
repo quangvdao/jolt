@@ -1,8 +1,10 @@
+use jolt_sdk::{CommitmentScheme, PCS};
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     // Prove addition.
     let target_dir = "/tmp/jolt-guest-targets";
@@ -10,9 +12,8 @@ pub fn main() {
 
     let shared_preprocessing = guest::preprocess_shared_add(&mut program).unwrap();
     let prover_preprocessing = guest::preprocess_prover_add(shared_preprocessing.clone());
-    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-        &prover_preprocessing.generators,
-    );
+    let verifier_setup =
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
     let verifier_preprocessing =
         guest::preprocess_verifier_add(shared_preprocessing, verifier_setup, None);
 
@@ -27,9 +28,7 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_mul(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_mul(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

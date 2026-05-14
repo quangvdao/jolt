@@ -1,21 +1,31 @@
 mod build_wasm;
 
 use std::{
+    env,
     fs::{self, File},
-    io::Write,
+    io::{self, IsTerminal, Write},
     path::PathBuf,
     process::{exit, Command},
 };
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use env_logger::Builder;
 use log::{debug, info};
 use rand::prelude::SliceRandom;
 use sysinfo::System;
 
 use build_wasm::{build_wasm, modify_cargo_toml};
-use zeroos_build::cmds::{build::BacktraceMode, BuildArgs, StdMode};
-use zeroos_build::spec::TargetRenderOptions;
+use zeroos_build::{
+    cmds::{
+        build::BacktraceMode, build_binary_with_rustflags, find_workspace_root,
+        generate_linker_script, generate_target_spec, BuildArgs, GenerateLinkerArgs,
+        GenerateTargetArgs, StdMode,
+    },
+    project::detect_profile,
+    spec::{load_target_profile, parse_target_triple, TargetRenderOptions},
+    toolchain::{get_or_install_or_build_toolchain, InstallConfig, ToolchainConfig},
+};
 
 /// Linker script template embedded at compile time.
 /// This linker script is for Jolt zkVM guests.
@@ -89,7 +99,7 @@ struct RunArgs {
 #[derive(clap::Args, Debug)]
 struct JoltGenerateTargetArgs {
     #[command(flatten)]
-    base: zeroos_build::cmds::GenerateTargetArgs,
+    base: GenerateTargetArgs,
 
     #[arg(long, short = 'o')]
     output: Option<PathBuf>,
@@ -98,7 +108,7 @@ struct JoltGenerateTargetArgs {
 #[derive(clap::Args, Debug)]
 struct JoltGenerateLinkerArgs {
     #[command(flatten)]
-    base: zeroos_build::cmds::GenerateLinkerArgs,
+    base: GenerateLinkerArgs,
 
     #[arg(long, short = 'o', default_value = "linker.ld")]
     output: PathBuf,
@@ -116,7 +126,7 @@ fn version() -> &'static str {
 }
 
 fn main() {
-    env_logger::Builder::from_default_env()
+    Builder::from_default_env()
         .format_timestamp(None)
         .format_module_path(false)
         .init();
@@ -153,7 +163,7 @@ fn main() {
 
 /// Resolve the guest optimization level from `JOLT_GUEST_OPT` env var (default: "3").
 fn guest_opt_flag() -> String {
-    let level = std::env::var("JOLT_GUEST_OPT").unwrap_or_else(|_| "3".to_string());
+    let level = env::var("JOLT_GUEST_OPT").unwrap_or_else(|_| "3".to_string());
     match level.as_str() {
         "0" | "1" | "2" | "3" | "s" | "z" => {}
         _ => panic!("Invalid JOLT_GUEST_OPT value: {level}. Allowed values are 0, 1, 2, 3, s, z"),
@@ -164,7 +174,7 @@ fn guest_opt_flag() -> String {
 fn build_command(args: JoltBuildArgs) -> Result<()> {
     debug!("build_command: {args:?}");
 
-    let workspace_root = zeroos_build::cmds::find_workspace_root()?;
+    let workspace_root = find_workspace_root()?;
     debug!("workspace_root: {}", workspace_root.display());
 
     // Use the embedded linker template (compiled into the binary)
@@ -173,9 +183,9 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
     let fully = args.base.mode == StdMode::Std || args.base.fully;
 
     let toolchain_paths = if args.base.mode == StdMode::Std || fully {
-        let tc_cfg = zeroos_build::toolchain::ToolchainConfig::default();
-        let install_cfg = zeroos_build::toolchain::InstallConfig::default();
-        let paths = zeroos_build::toolchain::get_or_install_or_build_toolchain(
+        let tc_cfg = ToolchainConfig::default();
+        let install_cfg = InstallConfig::default();
+        let paths = get_or_install_or_build_toolchain(
             args.base.musl_lib_path.clone(),
             args.base.gcc_lib_path.clone(),
             &tc_cfg,
@@ -194,7 +204,7 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
     // Strip symbols for smaller ELFs. Preserve them when JOLT_BACKTRACE is set
     // or --backtrace enable is passed, so the tracer can symbolize panic backtraces.
     // In auto mode (default), strip for release and preserve for debug/dev profiles.
-    let backtrace_via_env = std::env::var("JOLT_BACKTRACE")
+    let backtrace_via_env = env::var("JOLT_BACKTRACE")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
 
@@ -207,7 +217,7 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
         || force_frame_pointers
         || match args.base.backtrace {
             BacktraceMode::Auto => {
-                let profile = zeroos_build::project::detect_profile(&args.base.cargo_args);
+                let profile = detect_profile(&args.base.cargo_args);
                 matches!(profile.as_str(), "debug" | "dev")
             }
             _ => false,
@@ -228,13 +238,13 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
         StdMode::NoStd => "riscv64imac_unknown_none_elf",
     };
     let cflags_key = format!("CFLAGS_{cflags_target}");
-    let mut cflags = std::env::var(&cflags_key).unwrap_or_default();
+    let mut cflags = env::var(&cflags_key).unwrap_or_default();
     if !cflags.contains("-mcmodel=medany") {
         if !cflags.is_empty() {
             cflags.push(' ');
         }
         cflags.push_str("-mcmodel=medany");
-        std::env::set_var(&cflags_key, &cflags);
+        env::set_var(&cflags_key, &cflags);
     }
 
     if !preserve_symbols {
@@ -247,7 +257,7 @@ fn build_command(args: JoltBuildArgs) -> Result<()> {
         jolt_rustflags.push("-Cforce-frame-pointers=yes");
     }
 
-    zeroos_build::cmds::build_binary_with_rustflags(
+    build_binary_with_rustflags(
         &workspace_root,
         &args.base,
         toolchain_paths,
@@ -336,9 +346,6 @@ fn run_command(args: RunArgs) -> Result<()> {
 // ============================================================================
 
 fn generate_target_command(cli_args: JoltGenerateTargetArgs) -> Result<()> {
-    use zeroos_build::cmds::generate_target_spec;
-    use zeroos_build::spec::{load_target_profile, parse_target_triple};
-
     let target_triple = if let Some(profile_name) = &cli_args.base.profile {
         load_target_profile(profile_name)
             .ok_or_else(|| anyhow::anyhow!("Unknown profile: {profile_name}"))?
@@ -374,8 +381,6 @@ fn generate_target_command(cli_args: JoltGenerateTargetArgs) -> Result<()> {
 }
 
 fn generate_linker_command(cli_args: JoltGenerateLinkerArgs) -> Result<()> {
-    use zeroos_build::cmds::generate_linker_script;
-
     let result = generate_linker_script(&cli_args.base)?;
 
     if let Some(parent) = cli_args.output.parent() {
@@ -457,7 +462,7 @@ fn create_guest_files(name: &str, zk: bool) -> eyre::Result<()> {
 }
 
 fn display_welcome() {
-    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+    if !IsTerminal::is_terminal(&io::stdout()) {
         return;
     }
     display_greeting();
@@ -550,10 +555,12 @@ ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/tw
 allocative = { git = "https://github.com/facebookexperimental/allocative", rev = "85b773d85d526d068ce94724ff7a7b81203fc95e" }
 "#;
 
-const HOST_MAIN: &str = r#"use tracing::info;
+const HOST_MAIN: &str = r#"use jolt_sdk::{CommitmentScheme, PCS};
+use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_fib(target_dir);
@@ -561,7 +568,7 @@ pub fn main() {
     let shared_preprocessing = guest::preprocess_shared_fib(&mut program).unwrap();
 
     let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing.clone());
-    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
+    let verifier_setup = <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
     let verifier_preprocessing =
         guest::preprocess_verifier_fib(shared_preprocessing, verifier_setup, None);
 
@@ -604,11 +611,12 @@ ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/tw
 allocative = { git = "https://github.com/facebookexperimental/allocative", rev = "85b773d85d526d068ce94724ff7a7b81203fc95e" }
 "#;
 
-const HOST_MAIN_ZK: &str = r#"use jolt_sdk::PrivateInput;
+const HOST_MAIN_ZK: &str = r#"use jolt_sdk::{CommitmentScheme, PCS, PrivateInput};
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_fib(target_dir);
@@ -616,7 +624,7 @@ pub fn main() {
     let shared_preprocessing = guest::preprocess_shared_fib(&mut program).unwrap();
 
     let prover_preprocessing = guest::preprocess_prover_fib(shared_preprocessing.clone());
-    let verifier_setup = <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
+    let verifier_setup = <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators);
     let blindfold_setup = prover_preprocessing.blindfold_setup();
     let verifier_preprocessing =
         guest::preprocess_verifier_fib(shared_preprocessing, verifier_setup, Some(blindfold_setup));

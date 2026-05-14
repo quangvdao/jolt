@@ -1,9 +1,10 @@
-use jolt_sdk::{TrustedAdvice, UntrustedAdvice};
+use jolt_sdk::{CommitmentScheme, TrustedAdvice, UntrustedAdvice, PCS};
 use std::time::Instant;
 use tracing::info;
+use tracing_subscriber::fmt;
 
 pub fn main() {
-    tracing_subscriber::fmt::init();
+    fmt::init();
 
     let target_dir = "/tmp/jolt-guest-targets";
     let mut program = guest::compile_merkle_tree(target_dir);
@@ -12,9 +13,7 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_merkle_tree(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_merkle_tree(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

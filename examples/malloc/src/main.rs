@@ -1,3 +1,4 @@
+use jolt_sdk::{CommitmentScheme, PCS};
 use std::time::Instant;
 
 pub fn main() {
@@ -8,9 +9,7 @@ pub fn main() {
     let prover_preprocessing = guest::preprocess_prover_alloc(shared_preprocessing.clone());
     let verifier_preprocessing = guest::preprocess_verifier_alloc(
         shared_preprocessing,
-        <jolt_sdk::PCS as jolt_sdk::CommitmentScheme>::project_verifier_setup(
-            &prover_preprocessing.generators,
-        ),
+        <PCS as CommitmentScheme>::project_verifier_setup(&prover_preprocessing.generators),
         None,
     );
 

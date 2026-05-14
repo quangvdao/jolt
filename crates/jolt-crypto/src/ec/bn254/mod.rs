@@ -231,7 +231,6 @@ use ark_ec::CurveGroup;
 use ark_ff::PrimeField as _;
 use ark_std::UniformRand;
 use jolt_field::{Field, Fr as JoltFr};
-use num_bigint::BigUint;
 
 use crate::PairingGroup;
 
@@ -294,6 +293,8 @@ pub(crate) fn field_to_fr<F: Field>(f: &F) -> ArkFr {
     #[cfg(debug_assertions)]
     {
         use ark_ff::{BigInteger, PrimeField as _};
+        use num_bigint::BigUint;
+
         let value = BigUint::from_bytes_le(&bytes);
         let modulus = BigUint::from_bytes_le(&ArkFr::MODULUS.to_bytes_le());
         debug_assert!(

@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::iter::successors;
 use std::mem::{transmute, transmute_copy};
 
+#[cfg(not(test))]
+use dory::backends::arkworks::{init_cache, is_cached};
 use dory::backends::arkworks::{
     ArkFr as DoryArkFr, ArkG1 as ArkG1Struct, ArkGT as DoryArkGT, ArkworksProverSetup,
     BN254 as DoryBN254,
@@ -24,7 +26,6 @@ use dory::primitives::transcript::Transcript as DoryTranscript;
 use dory::setup::ProverSetup as DoryNativeProverSetup;
 use dory::{error::DoryError, mode::Mode as DoryMode};
 use dory::{prove, verify, Mode, ZK};
-use jolt_crypto::ec::bn254::batch_addition::batch_g1_additions_multi_affine;
 use jolt_crypto::{Bn254G1, Bn254GT, Commitment, DeriveSetup, JoltGroup, PedersenSetup};
 use jolt_field::{Fr, FromPrimitiveInt};
 use jolt_openings::{
@@ -37,6 +38,7 @@ use jolt_openings::{
     PublicVerifierSetup, SourceId, SourceRow, VerifierBatchOpeningTerm, ZkBatchOpeningProverResult,
     ZkBatchOpeningWitness, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
+use jolt_optimizations::batch_g1_additions_multi;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use rayon::prelude::*;
 
@@ -61,6 +63,14 @@ pub type ArkFr = DoryArkFr;
 pub(crate) type ArkG1 = ArkG1Struct;
 pub(crate) type ArkGT = DoryArkGT;
 type InnerBN254 = DoryBN254;
+
+// The dory-pcs prepared-point cache is global and tied to one URS. Jolt
+// initializes one large Dory setup during preprocessing, so caching that setup
+// preserves the old in-core performance path. Small standalone callers can
+// create several independent toy URS sizes in one process, so avoid seeding the
+// global cache from those setups.
+#[cfg(not(test))]
+const PREPARED_CACHE_MIN_NUM_VARS: usize = 16;
 
 // All conversion functions below rely on repr(transparent) layout identity
 // between jolt and dory-pcs wrappers over the same arkworks inner type.
@@ -118,6 +128,10 @@ impl DoryScheme {
         let setup = ArkworksProverSetup::new_from_urs(max_num_vars);
         #[cfg(target_arch = "wasm32")]
         let setup = ArkworksProverSetup::new(max_num_vars);
+        #[cfg(not(test))]
+        if max_num_vars >= PREPARED_CACHE_MIN_NUM_VARS && !is_cached() {
+            init_cache(&setup.g1_vec, &setup.g2_vec);
+        }
         DoryProverSetup(setup)
     }
 
@@ -178,7 +192,7 @@ impl DoryScheme {
         }
 
         chunks_by_source
-            .into_iter()
+            .into_par_iter()
             .map(|chunks| aggregate_batch_chunks::<M>(chunks, chunk_len, setup))
             .collect()
     }
@@ -1433,7 +1447,7 @@ fn commit_one_hot_row(row: OneHotRow<'_>, ctx: &CommitRowContext<'_>) -> Vec<Ark
         }
     }
 
-    batch_g1_additions_multi_affine(&ctx.g1_bases_affine[..num_columns], &columns_by_hot_index)
+    batch_g1_additions_multi(&ctx.g1_bases_affine[..num_columns], &columns_by_hot_index)
         .into_iter()
         .map(|affine| ArkG1Struct(affine.into()))
         .collect()
@@ -1540,23 +1554,30 @@ fn aggregate_batch_chunks<M: Mode>(
             let mut row_commitments =
                 vec![<InnerBN254 as PairingCurve>::G1::identity(); rows_per_hot_index * k];
 
-            for (chunk_index, chunk) in chunks.into_iter().enumerate() {
-                match chunk {
+            let chunks: Vec<Vec<ArkG1>> = chunks
+                .into_iter()
+                .map(|chunk| match chunk {
                     DoryChunkCommitment::OneHot(commitments) => {
                         assert_eq!(
                             commitments.len(),
                             k,
                             "batch source changed one-hot domain size within one source",
                         );
-                        for (hot_index, row_commitment) in commitments.into_iter().enumerate() {
-                            row_commitments[chunk_index + hot_index * rows_per_hot_index] =
-                                row_commitment;
-                        }
+                        commitments
                     }
                     DoryChunkCommitment::Dense(_) => {
                         panic!("batch source mixed dense and one-hot rows for one source");
                     }
-                }
+                })
+                .collect();
+
+            for (chunk_index, commitments) in chunks.iter().enumerate() {
+                row_commitments
+                    .par_iter_mut()
+                    .skip(chunk_index)
+                    .step_by(rows_per_hot_index)
+                    .zip(commitments.par_iter())
+                    .for_each(|(dest, src)| *dest = *src);
             }
             finish_row_commitments::<M>(row_commitments, chunk_len, setup)
         }

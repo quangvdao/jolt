@@ -613,38 +613,26 @@ where
             "CycleMajor trace batch currently preserves the native streaming row width",
         );
 
-        let rows: Vec<_> = self
-            .trace
+        let row_count = self.padded_trace_len / self.row_len;
+        let mut rows: Vec<Vec<R>> = (0..row_count).map(|_| Vec::new()).collect();
+
+        self.trace
             .clone()
             .pad_using(self.padded_trace_len, |_| Cycle::NoOp)
             .iter_chunks(self.row_len)
-            .enumerate()
+            .zip(rows.iter_mut())
             .par_bridge()
-            .map(|(row_index, row_cycles)| {
-                let row = ids
-                    .iter()
+            .for_each(|(row_cycles, row)| {
+                *row = ids
+                    .par_iter()
                     .map(|&id| {
                         let owned = self.row_for_id(id, &row_cycles);
                         owned.with_borrowed(self.log_domain_size(), |borrowed| visit(id, borrowed))
                     })
                     .collect();
-                (row_index, row)
-            })
-            .collect();
+            });
 
-        let row_count = self.padded_trace_len / self.row_len;
-        let mut ordered_rows: Vec<Option<Vec<R>>> = (0..row_count).map(|_| None).collect();
-        for (row_index, row) in rows {
-            ordered_rows[row_index] = Some(row);
-        }
-        ordered_rows
-            .into_iter()
-            .enumerate()
-            .map(|(row_index, row)| match row {
-                Some(row) => row,
-                None => panic!("missing CycleMajor trace row {row_index}"),
-            })
-            .collect()
+        rows
     }
 }
 

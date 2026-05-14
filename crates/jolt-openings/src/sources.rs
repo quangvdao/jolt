@@ -581,11 +581,10 @@ pub trait BatchCommitmentSource<F: Field>: Send + Sync {
 /// A batch of already-committed sources available for opening.
 ///
 /// Commitment and opening have different traversal needs. Commitment wants to
-/// stream rows for many sources at once. Opening wants to recover individual
-/// committed sources, borrow their backend-owned opening hints, and sometimes
-/// fold a linear combination of sources without first materializing each full
-/// polynomial. This trait captures that opening-side view without naming any
-/// Dory-specific matrix partition.
+/// stream rows for many sources at once. Opening needs a registry that can
+/// recover individual committed sources and borrow their backend-owned opening
+/// hints. Algebraic combinations of several sources are separate capabilities
+/// rather than part of this generic registry.
 pub trait BatchOpeningSource<F: Field, OpeningHint>: Send + Sync {
     type Id: SourceId;
 
@@ -604,40 +603,103 @@ pub trait BatchOpeningSource<F: Field, OpeningHint>: Send + Sync {
     /// and source-backed Stage 8 opening must combine those hints without
     /// cloning the row-commitment vectors in the hot path.
     fn opening_hint(&self, id: Self::Id) -> &OpeningHint;
+}
 
-    /// Folds a linear combination of sources against opening-time left weights.
+/// Opening-source capability for linear combinations of committed sources.
+///
+/// This is the natural capability for homomorphic/RLC-style batch openings:
+/// after a PCS samples batching coefficients, the prover can expose the source
+/// `Σ coefficient_i * source_i` as an ordinary [`CommitmentSource`]. Backends
+/// with a different batching strategy can ignore this trait and provide their
+/// own PCS-specific opening extension instead.
+pub trait LinearCombinationOpeningSource<F: Field, OpeningHint>:
+    BatchOpeningSource<F, OpeningHint>
+{
+    /// Source representing the requested linear combination.
+    type LinearCombination<'a>: CommitmentSource<F> + 'a
+    where
+        Self: 'a;
+
+    /// Builds a source for `Σ terms[i].coefficient * source(terms[i].source_id)`.
     ///
-    /// The default implementation folds each source separately and combines the
-    /// resulting rows. Streaming backends should override this method when they
-    /// can compute the same linear combination in a single pass over their
-    /// native source data.
-    fn fold_linear_rows(
-        &self,
+    /// The mutable receiver lets streaming implementations move one-shot state
+    /// such as advice polynomials into the combined source without interior
+    /// mutability or hidden caches.
+    fn linear_combination<'a>(
+        &'a mut self,
         terms: &[LinearSourceTerm<F, Self::Id>],
-        left: &[F],
-        chunk_len: usize,
-    ) -> Vec<F> {
+    ) -> Self::LinearCombination<'a>;
+}
+
+/// Fallback linear-combination source for callers without a streaming path.
+///
+/// This helper eagerly materializes each input source, combines the evaluations,
+/// and then exposes the result as a normal [`CommitmentSource`]. It is useful
+/// for tests and simple backends. Hot streaming paths should usually implement
+/// [`LinearCombinationOpeningSource`] with a borrowed or one-shot source that
+/// preserves their native traversal.
+pub struct MaterializedLinearCombination<F: Field> {
+    evaluations: Vec<F>,
+}
+
+impl<F: Field> MaterializedLinearCombination<F> {
+    /// Eagerly materializes a linear combination using individual source views.
+    pub fn new<B, OpeningHint>(source_batch: &B, terms: &[LinearSourceTerm<F, B::Id>]) -> Self
+    where
+        B: BatchOpeningSource<F, OpeningHint>,
+    {
         let Some((first, rest)) = terms.split_first() else {
-            return Vec::new();
+            return Self {
+                evaluations: Vec::new(),
+            };
         };
 
-        let mut folded = self.source(first.source_id).fold_rows(left, chunk_len);
-        for value in &mut folded {
+        let mut evaluations = materialize_source_evaluations(&source_batch.source(first.source_id));
+        for value in &mut evaluations {
             *value *= first.coefficient;
         }
 
         for term in rest {
-            let next = self.source(term.source_id).fold_rows(left, chunk_len);
+            let next = materialize_source_evaluations(&source_batch.source(term.source_id));
             assert_eq!(
-                folded.len(),
+                evaluations.len(),
                 next.len(),
-                "cannot linearly fold sources with different row-folded lengths",
+                "cannot linearly combine sources with different materialized lengths",
             );
-            for (acc, value) in folded.iter_mut().zip(next) {
+            for (acc, value) in evaluations.iter_mut().zip(next) {
                 *acc += term.coefficient * value;
             }
         }
 
-        folded
+        Self { evaluations }
+    }
+}
+
+impl<F: Field> CommitmentSource<F> for MaterializedLinearCombination<F> {
+    fn num_vars(&self) -> usize {
+        if self.evaluations.is_empty() {
+            0
+        } else {
+            assert!(
+                self.evaluations.len().is_power_of_two(),
+                "materialized linear-combination source length must be a power of two",
+            );
+            self.evaluations.len().trailing_zeros() as usize
+        }
+    }
+
+    fn evaluate(&self, point: &[F]) -> F {
+        Polynomial::new(self.evaluations.clone()).evaluate(point)
+    }
+
+    fn for_each_row<V>(&self, chunk_len: usize, visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, F>),
+    {
+        multilinear_for_each_row::<F, _, _>(&self.evaluations, chunk_len, visit);
+    }
+
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+        multilinear_fold_rows::<F, _>(&self.evaluations, left, chunk_len)
     }
 }

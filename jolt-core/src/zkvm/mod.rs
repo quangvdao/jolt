@@ -35,7 +35,8 @@ use jolt_crypto::Bn254;
 use jolt_dory::DoryScheme;
 use jolt_field::{Field, Fr};
 use jolt_openings::{
-    CommitmentScheme, CommitmentSchemeVerifier, EvaluationCommitmentProver, ZkOpeningScheme,
+    CommitmentScheme, CommitmentSchemeVerifier, EvaluationCommitmentProver, LinearOpeningScheme,
+    ZkLinearOpeningScheme, ZkOpeningScheme,
 };
 use proof_serialization::JoltProof;
 #[cfg(feature = "prover")]
@@ -60,7 +61,9 @@ pub trait JoltCommitmentScheme<F, C>:
         Output: CanonicalSerialize + CanonicalDeserialize + Valid,
         BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,
         VerifierSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
-    > + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+    > + LinearOpeningScheme<Field = F>
+    + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+    + ZkLinearOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
     + EvaluationCommitmentProver<C::G1>
 where
     F: JoltField + Field,
@@ -73,7 +76,9 @@ where
     F: JoltField + Field,
     C: JoltCurve<F = F>,
     PCS: CommitmentScheme<Field = F, SetupParams = usize>
+        + LinearOpeningScheme<Field = F>
         + ZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
+        + ZkLinearOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
         + EvaluationCommitmentProver<C::G1>,
     PCS::Output: CanonicalSerialize + CanonicalDeserialize + Valid,
     PCS::BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,

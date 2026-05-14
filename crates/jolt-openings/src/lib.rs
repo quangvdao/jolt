@@ -10,6 +10,7 @@
 //! CommitmentSchemeVerifier        verify / verify_batch
 //!          │
 //! CommitmentScheme                commit / commit_batch / open / prove_batch
+//! LinearOpeningScheme             linear source-backed batch openings
 //!
 //! PublicVerifierSetup             verifier_setup from public params
 //!
@@ -20,6 +21,7 @@
 //! ZkOpeningSchemeVerifier         verify_zk
 //!          │
 //! ZkOpeningScheme                 commit_zk / commit_batch_zk / open_zk
+//! ZkLinearOpeningScheme           ZK linear source-backed batch openings
 //! ```
 
 mod claims;
@@ -43,9 +45,10 @@ pub use homomorphic::{
 pub use schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
     CommitmentSchemeVerifier, EvaluationCommitmentProver, EvaluationCommitmentScheme,
-    PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    LinearOpeningScheme, LinearOpeningSchemeVerifier, PublicVerifierSetup, ZkLinearOpeningScheme,
+    ZkLinearOpeningSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 pub use sources::{
-    BatchCommitmentSource, BatchOpeningSource, CommitmentSource, OneHotEntries, OneHotIndex,
-    OneHotRow, SourceId, SourceRow,
+    BatchCommitmentSource, BatchOpeningSource, CommitmentSource, LinearCombinationOpeningSource,
+    MaterializedLinearCombination, OneHotEntries, OneHotIndex, OneHotRow, SourceId, SourceRow,
 };

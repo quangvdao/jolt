@@ -17,7 +17,9 @@ use crate::claims::{
     VerifierBatchOpeningTerm, ZkBatchOpeningProverResult,
 };
 use crate::error::OpeningsError;
-use crate::sources::{BatchCommitmentSource, BatchOpeningSource, CommitmentSource, SourceId};
+use crate::sources::{
+    BatchCommitmentSource, CommitmentSource, LinearCombinationOpeningSource, SourceId,
+};
 
 /// Verifier-side interface for a polynomial commitment scheme.
 pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
@@ -43,42 +45,6 @@ pub trait CommitmentSchemeVerifier: Commitment + Clone + Send + Sync + 'static {
         setup: &Self::VerifierSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
-
-    /// Verifies a source-backed batch opening and returns the PCS output
-    /// relation created by that verification.
-    ///
-    /// The default implementation verifies the raw terms through ordinary
-    /// [`verify_batch`](Self::verify_batch) and exposes one public output per
-    /// raw term. Schemes with native source-backed fusion should override this
-    /// method so the PCS owns its batching challenge and output relation.
-    fn verify_batch_opening<ClaimId, SourceIdT>(
-        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<BatchOpeningPublic<Self::Field, (), ClaimId>, OpeningsError>
-    where
-        Self: Sized,
-        SourceIdT: SourceId,
-    {
-        let claims = terms
-            .iter()
-            .map(|term| OpeningClaim {
-                commitment: term.commitment.clone(),
-                point: term.point.proof.clone(),
-                eval: term.eval,
-            })
-            .collect();
-        Self::verify_batch(claims, proof, setup, transcript)?;
-
-        let public = transparent_public_from_terms(
-            terms
-                .into_iter()
-                .map(|term| (term.claim_id, term.point.public, term.eval, term.eval_scale)),
-        );
-        bind_transparent_batch_outputs::<Self, ClaimId>(&public, transcript);
-        Ok(public)
-    }
 
     /// Binds one transparent opening input to the Fiat-Shamir transcript.
     fn bind_opening_inputs(
@@ -155,21 +121,64 @@ pub trait CommitmentScheme: CommitmentSchemeVerifier {
     ) -> Self::BatchProof
     where
         S: CommitmentSource<Self::Field>;
+}
 
-    /// Proves a source-backed batch opening and returns the PCS output relation.
+/// Verifier-side interface for linear source-backed batch openings.
+pub trait LinearOpeningSchemeVerifier: CommitmentSchemeVerifier {
+    /// Verifies a linear source-backed batch opening and returns the PCS output
+    /// relation created by that verification.
+    ///
+    /// The default implementation verifies the raw terms through ordinary
+    /// [`CommitmentSchemeVerifier::verify_batch`] and exposes one public output
+    /// per raw term. Schemes with native linear-source fusion should override
+    /// this method so the PCS owns its batching challenge and output relation.
+    fn verify_batch_opening<ClaimId, SourceIdT>(
+        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<BatchOpeningPublic<Self::Field, (), ClaimId>, OpeningsError>
+    where
+        Self: Sized,
+        SourceIdT: SourceId,
+    {
+        let claims = terms
+            .iter()
+            .map(|term| OpeningClaim {
+                commitment: term.commitment.clone(),
+                point: term.point.proof.clone(),
+                eval: term.eval,
+            })
+            .collect();
+        Self::verify_batch(claims, proof, setup, transcript)?;
+
+        let public = transparent_public_from_terms(
+            terms
+                .into_iter()
+                .map(|term| (term.claim_id, term.point.public, term.eval, term.eval_scale)),
+        );
+        bind_transparent_batch_outputs::<Self, ClaimId>(&public, transcript);
+        Ok(public)
+    }
+}
+
+/// Prover-side interface for linear source-backed batch openings.
+pub trait LinearOpeningScheme: CommitmentScheme + LinearOpeningSchemeVerifier {
+    /// Proves a linear source-backed batch opening and returns the PCS output
+    /// relation.
     ///
     /// The default implementation routes each raw term through ordinary
-    /// [`prove_batch`](Self::prove_batch). Production backends that can preserve
+    /// [`CommitmentScheme::prove_batch`]. Production backends that can preserve
     /// streaming fusion should override this method.
     fn prove_batch_opening<B, ClaimId>(
         terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
-        source_batch: &B,
+        source_batch: &mut B,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> BatchOpeningProverResult<Self, ClaimId>
     where
         Self: Sized,
-        B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
+        B: LinearCombinationOpeningSource<Self::Field, Self::OpeningHint>,
     {
         let claims = terms
             .iter()
@@ -247,26 +256,6 @@ pub trait ZkOpeningSchemeVerifier: CommitmentSchemeVerifier {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError>;
 
-    /// Verifies a ZK source-backed batch opening and returns the public output
-    /// relation produced by the PCS.
-    ///
-    /// Backends that support ZK source-backed batch opening must override this
-    /// method. The default returns a verification error so unsupported backends
-    /// fail closed rather than guessing how to recover hidden output metadata
-    /// from an arbitrary batch proof.
-    fn verify_batch_opening_zk<ClaimId, SourceIdT>(
-        _terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
-        _proof: &Self::BatchProof,
-        _setup: &Self::VerifierSetup,
-        _transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<BatchOpeningPublic<Self::Field, Self::HidingCommitment, ClaimId>, OpeningsError>
-    where
-        Self: Sized,
-        SourceIdT: SourceId,
-    {
-        Err(OpeningsError::VerificationFailed)
-    }
-
     /// Binds one ZK opening input to the Fiat-Shamir transcript.
     ///
     /// The evaluation is hidden, so the transcript receives the opening point
@@ -324,29 +313,36 @@ pub trait ZkOpeningScheme: CommitmentScheme + ZkOpeningSchemeVerifier {
     ) -> (Self::BatchProof, Self::HidingCommitment, Self::Blind)
     where
         S: CommitmentSource<Self::Field>;
+}
 
-    /// Proves a ZK source-backed batch opening and returns both public output
-    /// metadata and prover-only hidden-output witnesses.
-    ///
-    /// Backends that support ZK source-backed batch opening must override this
-    /// method. The default panics because the trait's return type cannot encode
-    /// unsupported backend capability without weakening existing proof APIs.
-    #[expect(
-        clippy::panic,
-        reason = "the default exists only for unsupported ZK source-backed PCS backends"
-    )]
+/// Verifier-side interface for ZK linear source-backed batch openings.
+pub trait ZkLinearOpeningSchemeVerifier: ZkOpeningSchemeVerifier {
+    /// Verifies a ZK linear source-backed batch opening and returns the public
+    /// output relation produced by the PCS.
+    fn verify_batch_opening_zk<ClaimId, SourceIdT>(
+        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<BatchOpeningPublic<Self::Field, Self::HidingCommitment, ClaimId>, OpeningsError>
+    where
+        Self: Sized,
+        SourceIdT: SourceId;
+}
+
+/// Prover-side interface for ZK linear source-backed batch openings.
+pub trait ZkLinearOpeningScheme: ZkOpeningScheme + ZkLinearOpeningSchemeVerifier {
+    /// Proves a ZK linear source-backed batch opening and returns both public
+    /// output metadata and prover-only hidden-output witnesses.
     fn prove_batch_opening_zk<B, ClaimId>(
-        _terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
-        _source_batch: &B,
-        _setup: &Self::ProverSetup,
-        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+        terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
+        source_batch: &mut B,
+        setup: &Self::ProverSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> ZkBatchOpeningProverResult<Self, ClaimId>
     where
         Self: Sized,
-        B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
-    {
-        panic!("source-backed ZK batch opening is not implemented for this PCS")
-    }
+        B: LinearCombinationOpeningSource<Self::Field, Self::OpeningHint>;
 }
 
 fn transparent_public_from_terms<F, ClaimId, I>(terms: I) -> BatchOpeningPublic<F, (), ClaimId>

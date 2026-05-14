@@ -46,9 +46,12 @@
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use jolt_crypto::Commitment;
 use jolt_openings::{
-    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
-    CommitmentSchemeVerifier, CommitmentSource, EvaluationCommitmentProver,
-    EvaluationCommitmentScheme, OpeningClaim, OpeningsError, ProverClaim, PublicVerifierSetup,
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, BatchOpeningProverResult,
+    BatchOpeningPublic, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
+    EvaluationCommitmentProver, EvaluationCommitmentScheme, LinearCombinationOpeningSource,
+    LinearOpeningScheme, LinearOpeningSchemeVerifier, OpeningClaim, OpeningsError,
+    ProverBatchOpeningTerm, ProverClaim, PublicVerifierSetup, SourceId, VerifierBatchOpeningTerm,
+    ZkBatchOpeningProverResult, ZkLinearOpeningScheme, ZkLinearOpeningSchemeVerifier,
     ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use jolt_transcript::Transcript;
@@ -204,6 +207,40 @@ impl CommitmentScheme for AstCommitmentScheme {
     }
 }
 
+impl LinearOpeningSchemeVerifier for AstCommitmentScheme {
+    fn verify_batch_opening<ClaimId, SourceIdT>(
+        _terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
+        _proof: &Self::BatchProof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<BatchOpeningPublic<Self::Field, (), ClaimId>, OpeningsError>
+    where
+        Self: Sized,
+        SourceIdT: SourceId,
+    {
+        unimplemented!(
+            "AstCommitmentScheme::verify_batch_opening is not needed for stages 1-7 transpilation"
+        )
+    }
+}
+
+impl LinearOpeningScheme for AstCommitmentScheme {
+    fn prove_batch_opening<B, ClaimId>(
+        _terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
+        _source_batch: &mut B,
+        _setup: &Self::ProverSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> BatchOpeningProverResult<Self, ClaimId>
+    where
+        Self: Sized,
+        B: LinearCombinationOpeningSource<Self::Field, Self::OpeningHint>,
+    {
+        panic!(
+            "AstCommitmentScheme::prove_batch_opening should never be called during verification"
+        )
+    }
+}
+
 impl AdditivelyHomomorphicVerifier for AstCommitmentScheme {
     fn combine(_commitments: &[Self::Output], _scalars: &[Self::Field]) -> Self::Output {
         unimplemented!("AstCommitmentScheme::combine is not needed for stages 1-7 transpilation")
@@ -285,6 +322,40 @@ impl ZkOpeningScheme for AstCommitmentScheme {
         S: CommitmentSource<Self::Field>,
     {
         panic!("AstCommitmentScheme::prove_batch_zk should never be called during verification")
+    }
+}
+
+impl ZkLinearOpeningSchemeVerifier for AstCommitmentScheme {
+    fn verify_batch_opening_zk<ClaimId, SourceIdT>(
+        _terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
+        _proof: &Self::BatchProof,
+        _setup: &Self::VerifierSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<BatchOpeningPublic<Self::Field, Self::HidingCommitment, ClaimId>, OpeningsError>
+    where
+        Self: Sized,
+        SourceIdT: SourceId,
+    {
+        unimplemented!(
+            "AstCommitmentScheme::verify_batch_opening_zk is not needed for stages 1-7 transpilation"
+        )
+    }
+}
+
+impl ZkLinearOpeningScheme for AstCommitmentScheme {
+    fn prove_batch_opening_zk<B, ClaimId>(
+        _terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
+        _source_batch: &mut B,
+        _setup: &Self::ProverSetup,
+        _transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> ZkBatchOpeningProverResult<Self, ClaimId>
+    where
+        Self: Sized,
+        B: LinearCombinationOpeningSource<Self::Field, Self::OpeningHint>,
+    {
+        panic!(
+            "AstCommitmentScheme::prove_batch_opening_zk should never be called during verification"
+        )
     }
 }
 

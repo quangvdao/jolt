@@ -33,10 +33,12 @@ use jolt_openings::{
     AdditivelyHomomorphicVerifier, BatchCommitmentSource, BatchOpeningProverResult,
     BatchOpeningPublic, BatchOpeningSource, BatchOutputExpression, BatchOutputRelation,
     BatchOutputValue, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
-    EvaluationCommitmentProver, EvaluationCommitmentScheme, LinearSourceTerm, OneHotEntries,
-    OneHotRow, OpenedBatchOutput, OpeningClaim, OpeningsError, ProverBatchOpeningTerm, ProverClaim,
+    EvaluationCommitmentProver, EvaluationCommitmentScheme, LinearCombinationOpeningSource,
+    LinearOpeningScheme, LinearOpeningSchemeVerifier, LinearSourceTerm, OneHotEntries, OneHotRow,
+    OpenedBatchOutput, OpeningClaim, OpeningsError, ProverBatchOpeningTerm, ProverClaim,
     PublicVerifierSetup, SourceId, SourceRow, VerifierBatchOpeningTerm, ZkBatchOpeningProverResult,
-    ZkBatchOpeningWitness, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    ZkBatchOpeningWitness, ZkLinearOpeningScheme, ZkLinearOpeningSchemeVerifier, ZkOpeningScheme,
+    ZkOpeningSchemeVerifier,
 };
 use jolt_optimizations::batch_g1_additions_multi;
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
@@ -293,7 +295,7 @@ impl DoryScheme {
 
     fn prove_source_backed_batch_with_mode<B, ClaimId, T, M>(
         terms: Vec<ProverBatchOpeningTerm<Fr, ClaimId, B::Id>>,
-        source_batch: &B,
+        source_batch: &mut B,
         setup: &DoryProverSetup,
         transcript: &mut T,
     ) -> (
@@ -303,7 +305,7 @@ impl DoryScheme {
         Option<Fr>,
     )
     where
-        B: BatchOpeningSource<Fr, DoryHint>,
+        B: LinearCombinationOpeningSource<Fr, DoryHint>,
         T: Transcript<Challenge = Fr>,
         M: DoryBatchOpeningMode,
     {
@@ -320,10 +322,10 @@ impl DoryScheme {
         let joint_claim = joint_claim(&terms, &gamma_powers);
         let source_terms = aggregate_source_terms(&terms, &gamma_powers);
         let combined_hint = combine_batch_opening_hints(source_batch, &source_terms);
+        let combined_source = source_batch.linear_combination(&source_terms);
 
         let adapter = DoryBatchOpeningAdapter {
-            source_batch,
-            terms: source_terms,
+            source: &combined_source,
             output_eval: joint_claim,
             num_vars: proof_point.len(),
         };
@@ -789,19 +791,18 @@ impl<ClaimId, SourceIdT> IntoDoryBatchTerm<ClaimId>
     }
 }
 
-struct DoryBatchOpeningAdapter<'a, B>
+struct DoryBatchOpeningAdapter<'a, S>
 where
-    B: BatchOpeningSource<Fr, DoryHint>,
+    S: CommitmentSource<Fr> + ?Sized,
 {
-    source_batch: &'a B,
-    terms: Vec<LinearSourceTerm<Fr, B::Id>>,
+    source: &'a S,
     output_eval: Fr,
     num_vars: usize,
 }
 
-impl<B> DoryPolynomial<ArkFr> for DoryBatchOpeningAdapter<'_, B>
+impl<S> DoryPolynomial<ArkFr> for DoryBatchOpeningAdapter<'_, S>
 where
-    B: BatchOpeningSource<Fr, DoryHint>,
+    S: CommitmentSource<Fr> + ?Sized,
 {
     fn num_vars(&self) -> usize {
         self.num_vars
@@ -830,15 +831,13 @@ where
     }
 }
 
-impl<B> MultilinearLagrange<ArkFr> for DoryBatchOpeningAdapter<'_, B>
+impl<S> MultilinearLagrange<ArkFr> for DoryBatchOpeningAdapter<'_, S>
 where
-    B: BatchOpeningSource<Fr, DoryHint>,
+    S: CommitmentSource<Fr> + ?Sized,
 {
     fn vector_matrix_product(&self, left_vec: &[ArkFr], _nu: usize, sigma: usize) -> Vec<ArkFr> {
         let native_left: Vec<Fr> = left_vec.iter().map(ark_to_jolt_fr).collect();
-        let result = self
-            .source_batch
-            .fold_linear_rows(&self.terms, &native_left, 1usize << sigma);
+        let result = self.source.fold_rows(&native_left, 1usize << sigma);
         result.iter().map(jolt_fr_to_ark).collect()
     }
 }
@@ -887,20 +886,6 @@ impl CommitmentSchemeVerifier for DoryScheme {
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> Result<(), OpeningsError> {
         homomorphic_verify_batch::<Self, _>(claims, proof, setup, transcript)
-    }
-
-    fn verify_batch_opening<ClaimId, SourceIdT>(
-        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<BatchOpeningPublic<Self::Field, (), ClaimId>, OpeningsError>
-    where
-        SourceIdT: SourceId,
-    {
-        Self::verify_source_backed_batch_with_mode::<_, _, _, TransparentBatchOpening>(
-            terms, proof, setup, transcript,
-        )
     }
 
     fn bind_opening_inputs(
@@ -998,15 +983,33 @@ impl CommitmentScheme for DoryScheme {
     {
         homomorphic_prove_batch::<Self, _, _>(claims, hints, setup, transcript)
     }
+}
 
+impl LinearOpeningSchemeVerifier for DoryScheme {
+    fn verify_batch_opening<ClaimId, SourceIdT>(
+        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<BatchOpeningPublic<Self::Field, (), ClaimId>, OpeningsError>
+    where
+        SourceIdT: SourceId,
+    {
+        Self::verify_source_backed_batch_with_mode::<_, _, _, TransparentBatchOpening>(
+            terms, proof, setup, transcript,
+        )
+    }
+}
+
+impl LinearOpeningScheme for DoryScheme {
     fn prove_batch_opening<B, ClaimId>(
         terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
-        source_batch: &B,
+        source_batch: &mut B,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> BatchOpeningProverResult<Self, ClaimId>
     where
-        B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
+        B: LinearCombinationOpeningSource<Self::Field, Self::OpeningHint>,
     {
         let (proof, public, _joint_claim, _blind) =
             Self::prove_source_backed_batch_with_mode::<_, _, _, TransparentBatchOpening>(
@@ -1107,20 +1110,6 @@ impl ZkOpeningSchemeVerifier for DoryScheme {
         Self::verify_zk(&claim.commitment, &claim.point, proof, setup, transcript)
     }
 
-    fn verify_batch_opening_zk<ClaimId, SourceIdT>(
-        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
-        proof: &Self::BatchProof,
-        setup: &Self::VerifierSetup,
-        transcript: &mut impl Transcript<Challenge = Self::Field>,
-    ) -> Result<BatchOpeningPublic<Self::Field, Self::HidingCommitment, ClaimId>, OpeningsError>
-    where
-        SourceIdT: SourceId,
-    {
-        Self::verify_source_backed_batch_with_mode::<_, _, _, ZkBatchOpening>(
-            terms, proof, setup, transcript,
-        )
-    }
-
     fn bind_zk_opening_inputs(
         transcript: &mut impl Transcript<Challenge = Self::Field>,
         point: &[Self::Field],
@@ -1195,15 +1184,33 @@ impl ZkOpeningScheme for DoryScheme {
         );
         (vec![proof], y_com, y_blinding)
     }
+}
 
+impl ZkLinearOpeningSchemeVerifier for DoryScheme {
+    fn verify_batch_opening_zk<ClaimId, SourceIdT>(
+        terms: Vec<VerifierBatchOpeningTerm<Self::Field, Self, ClaimId, SourceIdT>>,
+        proof: &Self::BatchProof,
+        setup: &Self::VerifierSetup,
+        transcript: &mut impl Transcript<Challenge = Self::Field>,
+    ) -> Result<BatchOpeningPublic<Self::Field, Self::HidingCommitment, ClaimId>, OpeningsError>
+    where
+        SourceIdT: SourceId,
+    {
+        Self::verify_source_backed_batch_with_mode::<_, _, _, ZkBatchOpening>(
+            terms, proof, setup, transcript,
+        )
+    }
+}
+
+impl ZkLinearOpeningScheme for DoryScheme {
     fn prove_batch_opening_zk<B, ClaimId>(
         terms: Vec<ProverBatchOpeningTerm<Self::Field, ClaimId, B::Id>>,
-        source_batch: &B,
+        source_batch: &mut B,
         setup: &Self::ProverSetup,
         transcript: &mut impl Transcript<Challenge = Self::Field>,
     ) -> ZkBatchOpeningProverResult<Self, ClaimId>
     where
-        B: BatchOpeningSource<Self::Field, Self::OpeningHint>,
+        B: LinearCombinationOpeningSource<Self::Field, Self::OpeningHint>,
     {
         let (proof, public, joint_claim, y_blinding) =
             Self::prove_source_backed_batch_with_mode::<_, _, _, ZkBatchOpening>(
@@ -1721,8 +1728,8 @@ mod tests {
     use jolt_crypto::{Bn254, JoltGroup, Pedersen, VectorCommitment};
     use jolt_field::{FromPrimitiveInt, RandomSampling};
     use jolt_openings::{
-        BatchOpeningPoint, BatchOpeningSource, ProverBatchOpeningTerm, SourceRow,
-        VerifierBatchOpeningTerm,
+        BatchOpeningPoint, BatchOpeningSource, LinearCombinationOpeningSource,
+        MaterializedLinearCombination, ProverBatchOpeningTerm, SourceRow, VerifierBatchOpeningTerm,
     };
     use jolt_poly::{MultilinearPoly, Polynomial};
     use jolt_transcript::Blake2bTranscript;
@@ -1761,6 +1768,20 @@ mod tests {
 
         fn opening_hint(&self, id: Self::Id) -> &DoryHint {
             &self.hints[id]
+        }
+    }
+
+    impl LinearCombinationOpeningSource<Fr, DoryHint> for TestOpeningBatch {
+        type LinearCombination<'a>
+            = MaterializedLinearCombination<Fr>
+        where
+            Self: 'a;
+
+        fn linear_combination<'a>(
+            &'a mut self,
+            terms: &[LinearSourceTerm<Fr, Self::Id>],
+        ) -> Self::LinearCombination<'a> {
+            MaterializedLinearCombination::new(self, terms)
         }
     }
 
@@ -2233,7 +2254,7 @@ mod tests {
 
         let (c1, h1) = DoryScheme::commit(&p1, &prover_setup);
         let (c2, h2) = DoryScheme::commit(&p2, &prover_setup);
-        let batch = TestOpeningBatch {
+        let mut batch = TestOpeningBatch {
             polynomials: vec![p1, p2],
             hints: vec![h1, h2],
         };
@@ -2276,7 +2297,7 @@ mod tests {
         let mut prove_transcript = Blake2bTranscript::new(b"source-backed-batch");
         let prover_result = DoryScheme::prove_batch_opening(
             prover_terms,
-            &batch,
+            &mut batch,
             &prover_setup,
             &mut prove_transcript,
         );
@@ -2313,7 +2334,7 @@ mod tests {
 
         let (c1, h1) = DoryScheme::commit_zk(&p1, &prover_setup);
         let (c2, h2) = DoryScheme::commit_zk(&p2, &prover_setup);
-        let batch = TestOpeningBatch {
+        let mut batch = TestOpeningBatch {
             polynomials: vec![p1, p2],
             hints: vec![h1, h2],
         };
@@ -2356,7 +2377,7 @@ mod tests {
         let mut prove_transcript = Blake2bTranscript::new(b"source-backed-zk-batch");
         let prover_result = DoryScheme::prove_batch_opening_zk(
             prover_terms,
-            &batch,
+            &mut batch,
             &prover_setup,
             &mut prove_transcript,
         );

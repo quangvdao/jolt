@@ -11,7 +11,7 @@ use std::{
     io::{Read, Result as IoResult, Write},
     marker::PhantomData,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use crate::poly::commitment::dory::DoryContext;
@@ -19,9 +19,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 #[cfg(feature = "zk")]
 use jolt_openings::BatchOutputExpression;
 use jolt_openings::{
-    BatchOpeningPoint, BatchOpeningSource, CommitmentScheme, CommitmentSource, LinearSourceTerm,
-    ProverBatchOpeningTerm, SourceRow,
+    BatchOpeningPoint, BatchOpeningSource, CommitmentScheme, CommitmentSource,
+    LinearCombinationOpeningSource, LinearSourceTerm, ProverBatchOpeningTerm, SourceRow,
 };
+use jolt_poly::MultilinearPoly;
 
 use crate::zkvm::config::ReadWriteConfig;
 use crate::zkvm::ram::remap_address;
@@ -125,6 +126,7 @@ use crate::{
         witness::{all_committed_polynomials, CycleMajorTraceBatch, PolynomialCommitmentSource},
     },
 };
+use jolt_field::Field;
 
 #[cfg(feature = "allocative")]
 use allocative::FlameGraphBuilder;
@@ -162,7 +164,7 @@ use crate::zkvm::verifier::BlindfoldSetup;
 /// Jolt CPU prover for RV64IMAC.
 pub struct JoltCpuProver<
     'a,
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     C: JoltCurve<F = F>,
     PCS: JoltCommitmentScheme<F, C>,
     ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
@@ -197,26 +199,23 @@ pub struct JoltCpuProver<
 
 struct Stage8OpeningSourceBatch<F, PCS>
 where
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     PCS: CommitmentScheme<Field = F>,
 {
     one_hot_params: OneHotParams,
     trace_source: TraceSource,
     streaming_data: Arc<RLCStreamingData>,
     opening_hints: HashMap<CommittedPolynomial, PCS::OpeningHint>,
-    advice_polys: Mutex<Option<HashMap<CommittedPolynomial, MultilinearPolynomial<F>>>>,
-    cached_rlc: Mutex<Option<Stage8CachedRlc<F>>>,
+    advice_polys: Option<HashMap<CommittedPolynomial, MultilinearPolynomial<F>>>,
 }
 
-struct Stage8CachedRlc<F: JoltField + jolt_field::Field> {
-    terms: Vec<LinearSourceTerm<F, CommittedPolynomial>>,
-    chunk_len: usize,
+struct Stage8LinearCombinationSource<F: JoltField + Field> {
     source: MultilinearPolynomial<F>,
 }
 
 struct Stage8OpeningSource<'a, F, PCS>
 where
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     PCS: CommitmentScheme<Field = F>,
 {
     batch: &'a Stage8OpeningSourceBatch<F, PCS>,
@@ -225,7 +224,7 @@ where
 
 impl<F, PCS> BatchOpeningSource<F, PCS::OpeningHint> for Stage8OpeningSourceBatch<F, PCS>
 where
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     for<'challenge> &'challenge F::Challenge: Into<F>,
     PCS: CommitmentScheme<Field = F>,
 {
@@ -242,57 +241,77 @@ where
     fn opening_hint(&self, id: Self::Id) -> &PCS::OpeningHint {
         &self.opening_hints[&id]
     }
+}
 
-    fn fold_linear_rows(
-        &self,
+impl<F, PCS> LinearCombinationOpeningSource<F, PCS::OpeningHint>
+    for Stage8OpeningSourceBatch<F, PCS>
+where
+    F: JoltField + Field,
+    for<'challenge> &'challenge F::Challenge: Into<F>,
+    PCS: CommitmentScheme<Field = F>,
+{
+    type LinearCombination<'a>
+        = Stage8LinearCombinationSource<F>
+    where
+        Self: 'a;
+
+    fn linear_combination<'a>(
+        &'a mut self,
         terms: &[LinearSourceTerm<F, Self::Id>],
-        left: &[F],
-        chunk_len: usize,
-    ) -> Vec<F> {
-        let mut cache = self
-            .cached_rlc
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ) -> Self::LinearCombination<'a> {
+        let advice_polys = self
+            .advice_polys
+            .take()
+            .expect("Stage 8 linear-combination source is built exactly once");
+        let (poly_ids, coeffs): (Vec<_>, Vec<_>) = terms
+            .iter()
+            .map(|term| (term.source_id, term.coefficient))
+            .unzip();
+        let source = MultilinearPolynomial::RLC(RLCPolynomial::new_streaming(
+            self.one_hot_params.clone(),
+            Arc::clone(&self.streaming_data),
+            self.trace_source.clone(),
+            poly_ids,
+            &coeffs,
+            advice_polys,
+        ));
 
-        let rebuild = cache
-            .as_ref()
-            .is_none_or(|cached| cached.terms != terms || cached.chunk_len != chunk_len);
-        if rebuild {
-            let mut advice_polys = self
-                .advice_polys
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let advice_polys = advice_polys.take().unwrap_or_default();
-            let (poly_ids, coeffs): (Vec<_>, Vec<_>) = terms
-                .iter()
-                .map(|term| (term.source_id, term.coefficient))
-                .unzip();
-            let source = MultilinearPolynomial::RLC(RLCPolynomial::new_streaming(
-                self.one_hot_params.clone(),
-                Arc::clone(&self.streaming_data),
-                self.trace_source.clone(),
-                poly_ids,
-                &coeffs,
-                advice_polys,
-            ));
-            *cache = Some(Stage8CachedRlc {
-                terms: terms.to_vec(),
-                chunk_len,
-                source,
-            });
-        }
+        Stage8LinearCombinationSource { source }
+    }
+}
 
-        let cached = cache
-            .as_ref()
-            .expect("Stage 8 RLC source cache initialized before folding");
+impl<F> CommitmentSource<F> for Stage8LinearCombinationSource<F>
+where
+    F: JoltField + Field,
+    for<'challenge> &'challenge F::Challenge: Into<F>,
+{
+    fn num_vars(&self) -> usize {
+        self.source.num_vars()
+    }
+
+    fn evaluate(&self, point: &[F]) -> F {
+        self.source.evaluate(point)
+    }
+
+    fn for_each_row<V>(&self, chunk_len: usize, mut visit: V)
+    where
+        V: for<'row> FnMut(usize, SourceRow<'row, F>),
+    {
         let sigma = chunk_len.trailing_zeros() as usize;
-        jolt_poly::MultilinearPoly::fold_rows(&cached.source, left, sigma)
+        self.source.for_each_row(sigma, &mut |row_index, row| {
+            visit(row_index, SourceRow::FieldElements(row));
+        });
+    }
+
+    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
+        let sigma = chunk_len.trailing_zeros() as usize;
+        self.source.fold_rows(left, sigma)
     }
 }
 
 impl<F, PCS> CommitmentSource<F> for Stage8OpeningSource<'_, F, PCS>
 where
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     for<'challenge> &'challenge F::Challenge: Into<F>,
     PCS: CommitmentScheme<Field = F>,
 {
@@ -323,21 +342,14 @@ where
         panic!("Stage8OpeningSource is only used through source-backed batch opening")
     }
 
-    fn fold_rows(&self, left: &[F], chunk_len: usize) -> Vec<F> {
-        self.batch.fold_linear_rows(
-            &[LinearSourceTerm {
-                source_id: self.id,
-                coefficient: F::one(),
-            }],
-            left,
-            chunk_len,
-        )
+    fn fold_rows(&self, _left: &[F], _chunk_len: usize) -> Vec<F> {
+        panic!("Stage8OpeningSource is only used through linear source-backed batch opening")
     }
 }
 
 impl<
         'a,
-        F: JoltField + jolt_field::Field,
+        F: JoltField + Field,
         C: JoltCurve<F = F>,
         PCS: JoltCommitmentScheme<F, C>,
         ProofTranscript: Transcript + jolt_transcript::Transcript<Challenge = F>,
@@ -2226,26 +2238,25 @@ where
             advice_polys.insert(CommittedPolynomial::UntrustedAdvice, poly);
         }
 
-        let source_batch = Stage8OpeningSourceBatch::<F, PCS> {
+        let mut source_batch = Stage8OpeningSourceBatch::<F, PCS> {
             one_hot_params: self.one_hot_params.clone(),
             streaming_data,
             trace_source: TraceSource::Materialized(Arc::clone(&self.trace)),
             opening_hints: opening_proof_hints,
-            advice_polys: Mutex::new(Some(advice_polys)),
-            cached_rlc: Mutex::new(None),
+            advice_polys: Some(advice_polys),
         };
 
         #[cfg(feature = "zk")]
         let opening_result = PCS::prove_batch_opening_zk(
             opening_terms,
-            &source_batch,
+            &mut source_batch,
             &self.preprocessing.generators,
             &mut self.transcript,
         );
         #[cfg(not(feature = "zk"))]
         let opening_result = PCS::prove_batch_opening(
             opening_terms,
-            &source_batch,
+            &mut source_batch,
             &self.preprocessing.generators,
             &mut self.transcript,
         );
@@ -2314,7 +2325,7 @@ fn write_instance_flamegraph_svg(
 
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct JoltProverPreprocessing<
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     C: JoltCurve<F = F>,
     PCS: JoltCommitmentScheme<F, C>,
 > {
@@ -2325,7 +2336,7 @@ pub struct JoltProverPreprocessing<
 
 impl<F, C, PCS> JoltProverPreprocessing<F, C, PCS>
 where
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     C: JoltCurve<F = F>,
     PCS: JoltCommitmentScheme<F, C>,
 {
@@ -2381,8 +2392,8 @@ where
     }
 }
 
-impl<F: JoltField + jolt_field::Field, C: JoltCurve<F = F>, PCS: JoltCommitmentScheme<F, C>>
-    Serializable for JoltProverPreprocessing<F, C, PCS>
+impl<F: JoltField + Field, C: JoltCurve<F = F>, PCS: JoltCommitmentScheme<F, C>> Serializable
+    for JoltProverPreprocessing<F, C, PCS>
 {
 }
 

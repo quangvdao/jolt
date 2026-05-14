@@ -15,7 +15,8 @@ use crate::error::OpeningsError;
 use crate::homomorphic::{homomorphic_prove_batch, homomorphic_verify_batch};
 use crate::schemes::{
     AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
-    CommitmentSchemeVerifier, PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
+    CommitmentSchemeVerifier, LinearOpeningScheme, LinearOpeningSchemeVerifier,
+    PublicVerifierSetup, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 use crate::sources::{materialize_source_evaluations, CommitmentSource};
 
@@ -192,6 +193,10 @@ impl<F: Field> AdditivelyHomomorphicVerifier for MockCommitmentScheme<F> {
 
 impl<F: Field> AdditivelyHomomorphic for MockCommitmentScheme<F> {}
 
+impl<F: Field> LinearOpeningSchemeVerifier for MockCommitmentScheme<F> {}
+
+impl<F: Field> LinearOpeningScheme for MockCommitmentScheme<F> {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct MockHidingCommitment<F: Field> {
@@ -290,8 +295,9 @@ mod tests {
     use super::*;
     use crate::{
         BatchOpeningPoint, BatchOpeningSource, BatchOutputExpression, CommitmentSource,
-        OneHotEntries, OneHotIndex, OneHotRow, OpeningClaim, ProverBatchOpeningTerm, ProverClaim,
-        SourceRow, VerifierBatchOpeningTerm,
+        LinearCombinationOpeningSource, MaterializedLinearCombination, OneHotEntries, OneHotIndex,
+        OneHotRow, OpeningClaim, ProverBatchOpeningTerm, ProverClaim, SourceRow,
+        VerifierBatchOpeningTerm,
     };
     use jolt_field::{Fr, FromPrimitiveInt, RandomSampling};
     use jolt_poly::{MultilinearPoly, Polynomial};
@@ -723,6 +729,20 @@ mod tests {
             }
         }
 
+        impl LinearCombinationOpeningSource<Fr, ()> for TestOpeningBatch {
+            type LinearCombination<'a>
+                = MaterializedLinearCombination<Fr>
+            where
+                Self: 'a;
+
+            fn linear_combination<'a>(
+                &'a mut self,
+                terms: &[crate::LinearSourceTerm<Fr, Self::Id>],
+            ) -> Self::LinearCombination<'a> {
+                MaterializedLinearCombination::new(self, terms)
+            }
+        }
+
         let mut rng = ChaCha20Rng::seed_from_u64(450);
         let p1 = Polynomial::<Fr>::random(3, &mut rng);
         let p2 = Polynomial::<Fr>::random(3, &mut rng);
@@ -732,7 +752,7 @@ mod tests {
         let scale1 = Fr::from_u64(5);
         let scale2 = Fr::from_u64(7);
 
-        let batch = TestOpeningBatch {
+        let mut batch = TestOpeningBatch {
             polynomials: vec![p1.clone(), p2.clone()],
             hints: vec![(), ()],
         };
@@ -777,7 +797,7 @@ mod tests {
 
         let mut prover_transcript = Blake2bTranscript::new(b"source-backed");
         let prover_result =
-            MockPCS::prove_batch_opening(prover_terms, &batch, &(), &mut prover_transcript);
+            MockPCS::prove_batch_opening(prover_terms, &mut batch, &(), &mut prover_transcript);
 
         let mut verifier_transcript = Blake2bTranscript::new(b"source-backed");
         let verifier_public = MockPCS::verify_batch_opening(

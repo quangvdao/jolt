@@ -435,7 +435,14 @@ impl<F: Field> CommitmentSource<F> for OneHotPolynomial {
     }
 }
 
-pub(crate) fn materialize_source_evaluations<F, S>(source: &S) -> Vec<F>
+/// Materializes a commitment source into its canonical multilinear-evaluation vector.
+///
+/// This helper is the shared fallback for PCS backends that do not have a native
+/// streaming path for a source. It centralizes `SourceRow` expansion so all
+/// materializing backends agree on strided rows and one-hot layout. One-hot rows
+/// are accumulated across chunks and flushed in hot-index-major order, matching
+/// the polynomial layout used by Jolt's one-hot committed sources.
+pub fn materialize_source_evaluations<F, S>(source: &S) -> Vec<F>
 where
     F: Field,
     S: CommitmentSource<F> + ?Sized,

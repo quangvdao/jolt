@@ -213,6 +213,12 @@ struct Stage8LinearCombinationSource<F: JoltField + Field> {
     source: MultilinearPolynomial<F>,
 }
 
+/// Per-source view required by `BatchOpeningSource`.
+///
+/// Stage 8's optimized opening path is the fused streaming RLC source produced
+/// by `LinearCombinationOpeningSource::linear_combination`. Backends used here
+/// must implement the linear source-backed opening methods directly; the
+/// per-source adapter below is not a complete materializable witness source.
 struct Stage8OpeningSource<'a, F, PCS>
 where
     F: JoltField + Field,

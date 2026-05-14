@@ -191,7 +191,11 @@ impl<F: Field> AdditivelyHomomorphicVerifier for MockCommitmentScheme<F> {
     }
 }
 
-impl<F: Field> AdditivelyHomomorphic for MockCommitmentScheme<F> {}
+impl<F: Field> AdditivelyHomomorphic for MockCommitmentScheme<F> {
+    fn combine_hints(hints: Vec<Self::OpeningHint>, scalars: &[Self::Field]) -> Self::OpeningHint {
+        assert_eq!(hints.len(), scalars.len());
+    }
+}
 
 impl<F: Field> LinearOpeningSchemeVerifier for MockCommitmentScheme<F> {}
 

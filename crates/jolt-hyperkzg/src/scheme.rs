@@ -8,15 +8,14 @@
     reason = "KZG operations return Result for API symmetry; with a correctly-sized SRS and well-formed inputs these errors are unreachable"
 )]
 
-use std::iter::repeat_n;
 use std::marker::PhantomData;
 
 use jolt_crypto::{Commitment, DeriveSetup, JoltGroup, PairingGroup, PedersenSetup};
-use jolt_field::{Field, FromPrimitiveInt, RandomSampling};
+use jolt_field::{FromPrimitiveInt, RandomSampling};
 use jolt_openings::{
-    homomorphic_prove_batch, homomorphic_verify_batch, AdditivelyHomomorphic,
-    AdditivelyHomomorphicVerifier, CommitmentScheme, CommitmentSchemeVerifier, CommitmentSource,
-    OneHotEntries, OpeningClaim, OpeningsError, ProverClaim, SourceRow,
+    homomorphic_prove_batch, homomorphic_verify_batch, materialize_source_evaluations,
+    AdditivelyHomomorphic, AdditivelyHomomorphicVerifier, CommitmentScheme,
+    CommitmentSchemeVerifier, CommitmentSource, OpeningClaim, OpeningsError, ProverClaim,
 };
 use jolt_transcript::{AppendToTranscript, Label, LabelWithCount, Transcript};
 use num_traits::{One, Zero};
@@ -326,7 +325,7 @@ where
         setup: &Self::ProverSetup,
     ) -> (Self::Output, Self::OpeningHint) {
         // HyperKZG always works on dense evaluations.
-        let evaluations = source_to_evaluations(source);
+        let evaluations = materialize_source_evaluations(source);
         let point = kzg::kzg_commit::<P>(&evaluations, setup)
             .expect("SRS must be large enough for the polynomial");
         (HyperKZGCommitment { point }, ())
@@ -343,7 +342,7 @@ where
     where
         S: CommitmentSource<Self::Field> + ?Sized,
     {
-        let evaluations = source_to_evaluations(poly);
+        let evaluations = materialize_source_evaluations(poly);
         Self::open(setup, &evaluations, point, transcript)
             .expect("HyperKZG open should not fail with valid inputs")
     }
@@ -380,75 +379,9 @@ where
     P::ScalarField: AppendToTranscript,
     P::G1: AppendToTranscript,
 {
-}
-
-fn source_to_evaluations<F, S>(source: &S) -> Vec<F>
-where
-    F: Field,
-    S: CommitmentSource<F> + ?Sized,
-{
-    let mut evaluations = Vec::with_capacity(1 << source.num_vars());
-    let chunk_len = source
-        .natural_chunk_len()
-        .unwrap_or_else(|| 1usize << source.num_vars());
-    source.for_each_row(chunk_len, |_, row| match row {
-        SourceRow::FieldElements(values) => evaluations.extend_from_slice(values),
-        SourceRow::StridedFieldElements {
-            values,
-            column_stride,
-        } => {
-            for value in values {
-                evaluations.push(*value);
-                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
-            }
-        }
-        SourceRow::I128(values) => {
-            evaluations.extend(values.iter().map(|&value| F::from_i128(value)));
-        }
-        SourceRow::StridedI128 {
-            values,
-            column_stride,
-        } => {
-            for value in values {
-                evaluations.push(F::from_i128(*value));
-                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
-            }
-        }
-        SourceRow::U64(values) => {
-            evaluations.extend(values.iter().map(|&value| F::from_u64(value)));
-        }
-        SourceRow::StridedU64 {
-            values,
-            column_stride,
-        } => {
-            for value in values {
-                evaluations.push(F::from_u64(*value));
-                evaluations.extend(repeat_n(F::zero(), column_stride.saturating_sub(1)));
-            }
-        }
-        SourceRow::OneHot(row) => {
-            let domain_size = 1usize << row.log_domain_size;
-            match row.entries {
-                OneHotEntries::OnePerColumn(indices) => {
-                    for hot_index in indices {
-                        let mut dense = vec![F::zero(); domain_size];
-                        dense[hot_index.get()] = F::from_u64(1);
-                        evaluations.extend(dense);
-                    }
-                }
-                OneHotEntries::MaybeZero(indices) => {
-                    for hot_index in indices {
-                        let mut dense = vec![F::zero(); domain_size];
-                        if let Some(hot_index) = hot_index {
-                            dense[hot_index.get()] = F::from_u64(1);
-                        }
-                        evaluations.extend(dense);
-                    }
-                }
-            }
-        }
-    });
-    evaluations
+    fn combine_hints(hints: Vec<Self::OpeningHint>, scalars: &[Self::Field]) -> Self::OpeningHint {
+        assert_eq!(hints.len(), scalars.len());
+    }
 }
 
 #[cfg(test)]

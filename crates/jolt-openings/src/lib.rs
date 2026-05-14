@@ -49,6 +49,7 @@ pub use schemes::{
     ZkLinearOpeningSchemeVerifier, ZkOpeningScheme, ZkOpeningSchemeVerifier,
 };
 pub use sources::{
-    BatchCommitmentSource, BatchOpeningSource, CommitmentSource, LinearCombinationOpeningSource,
-    MaterializedLinearCombination, OneHotEntries, OneHotIndex, OneHotRow, SourceId, SourceRow,
+    materialize_source_evaluations, BatchCommitmentSource, BatchOpeningSource, CommitmentSource,
+    LinearCombinationOpeningSource, MaterializedLinearCombination, OneHotEntries, OneHotIndex,
+    OneHotRow, SourceId, SourceRow,
 };

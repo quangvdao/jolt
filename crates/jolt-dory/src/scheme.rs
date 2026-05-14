@@ -1043,40 +1043,8 @@ impl AdditivelyHomomorphicVerifier for DoryScheme {
 impl AdditivelyHomomorphic for DoryScheme {
     #[tracing::instrument(skip_all, name = "DoryScheme::combine_hints")]
     fn combine_hints(hints: Vec<Self::OpeningHint>, scalars: &[Self::Field]) -> Self::OpeningHint {
-        assert_eq!(hints.len(), scalars.len());
-        assert!(!hints.is_empty(), "combine_hints: empty hint set");
-
-        let num_rows = hints
-            .iter()
-            .map(|hint| hint.row_commitments.len())
-            .max()
-            .unwrap_or(0);
-
-        let combined_blind = hints
-            .iter()
-            .zip(scalars.iter())
-            .map(|(hint, &scalar)| scalar * hint.commit_blind)
-            .sum();
-
-        let combined: Vec<Bn254G1> = (0..num_rows)
-            .into_par_iter()
-            .map(|row| {
-                let mut acc = Bn254G1::default();
-                for (hint, &scalar) in hints.iter().zip(scalars.iter()) {
-                    if let Some(row_commitment) = hint.row_commitments.get(row) {
-                        acc += row_commitment.scalar_mul(&scalar);
-                    }
-                }
-                acc
-            })
-            .collect();
-
-        let chunk_len = hints
-            .iter()
-            .map(|hint| hint.chunk_len)
-            .max()
-            .unwrap_or_default();
-        DoryHint::new(combined, combined_blind, chunk_len)
+        let hint_refs: Vec<&DoryHint> = hints.iter().collect();
+        combine_hint_refs(&hint_refs, scalars)
     }
 }
 

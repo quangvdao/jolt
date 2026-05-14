@@ -220,12 +220,7 @@ where
 {
     /// Computes the hint corresponding to the same linear combination as
     /// [`AdditivelyHomomorphicVerifier::combine`].
-    fn combine_hints(
-        _hints: Vec<Self::OpeningHint>,
-        _scalars: &[Self::Field],
-    ) -> Self::OpeningHint {
-        Self::OpeningHint::default()
-    }
+    fn combine_hints(hints: Vec<Self::OpeningHint>, scalars: &[Self::Field]) -> Self::OpeningHint;
 }
 
 /// Verifier-side interface for openings that hide evaluations.

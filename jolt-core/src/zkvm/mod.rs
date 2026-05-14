@@ -36,12 +36,12 @@ use crate::transcripts::KeccakTranscript;
 use crate::transcripts::PoseidonTranscript;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Valid};
 use eyre::Result;
-use jolt_crypto::{Bn254, HomomorphicCommitment};
+use jolt_crypto::{Bn254, Commitment, HomomorphicCommitment};
 use jolt_dory::DoryScheme;
-use jolt_field::Fr;
+use jolt_field::{Field, Fr};
 use jolt_openings::{
-    AdditivelyHomomorphic, CommitmentScheme, EvaluationCommitmentProver, ShapedCommitmentScheme,
-    ShapedZkOpeningScheme, ZkOpeningScheme,
+    AdditivelyHomomorphic, CommitmentScheme, CommitmentSchemeVerifier, EvaluationCommitmentProver,
+    ShapedCommitmentScheme, ShapedZkOpeningScheme, ZkOpeningScheme,
 };
 use proof_serialization::JoltProof;
 #[cfg(feature = "prover")]
@@ -59,13 +59,12 @@ use verifier::JoltVerifier;
 /// hidden-evaluation commitment for BlindFold, protocol-selected Dory matrix
 /// shapes, and size-only setup.
 pub trait JoltCommitmentScheme<F, C>:
-    jolt_crypto::Commitment<
-        Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid,
-    > + CommitmentScheme<
+    Commitment<Output: HomomorphicCommitment<F> + CanonicalSerialize + CanonicalDeserialize + Valid>
+    + CommitmentScheme<
         Field = F,
         SetupParams = usize,
         ProverSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
-    > + jolt_openings::CommitmentSchemeVerifier<
+    > + CommitmentSchemeVerifier<
         BatchProof: CanonicalSerialize + CanonicalDeserialize + Valid,
         VerifierSetup: CanonicalSerialize + CanonicalDeserialize + Valid,
     > + AdditivelyHomomorphic<Field = F>
@@ -74,14 +73,14 @@ pub trait JoltCommitmentScheme<F, C>:
     + ShapedZkOpeningScheme<Field = F, HidingCommitment = C::G1, Blind = F>
     + EvaluationCommitmentProver<C::G1>
 where
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     C: JoltCurve<F = F>,
 {
 }
 
 impl<F, C, PCS> JoltCommitmentScheme<F, C> for PCS
 where
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     C: JoltCurve<F = F>,
     PCS: CommitmentScheme<Field = F, SetupParams = usize>
         + AdditivelyHomomorphic<Field = F>

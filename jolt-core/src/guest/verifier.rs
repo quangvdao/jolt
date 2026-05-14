@@ -3,6 +3,7 @@ use crate::field::JoltField;
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::bytecode::PreprocessingError;
 use crate::zkvm::verifier::BlindfoldSetup;
+use crate::zkvm::JoltCommitmentScheme;
 
 use crate::guest::program::Program;
 use crate::transcripts::Transcript;
@@ -10,11 +11,11 @@ use crate::zkvm::proof_serialization::JoltProof;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::zkvm::verifier::JoltVerifier;
 use crate::zkvm::verifier::JoltVerifierPreprocessing;
-use common::jolt_device::MemoryConfig;
-use common::jolt_device::MemoryLayout;
+use common::jolt_device::{JoltDevice, MemoryConfig, MemoryLayout};
 use jolt_crypto::Bn254;
 use jolt_dory::{DoryScheme, DoryVerifierSetup};
-use jolt_field::Fr;
+use jolt_field::{Field, Fr};
+use jolt_transcript::Transcript as OpeningsTranscript;
 
 pub fn preprocess(
     guest: &Program,
@@ -49,10 +50,10 @@ fn preprocess_shared(
 }
 
 pub fn verify<
-    F: JoltField + jolt_field::Field,
+    F: JoltField + Field,
     C: JoltCurve<F = F>,
-    PCS: crate::zkvm::JoltCommitmentScheme<F, C>,
-    FS: Transcript + jolt_transcript::Transcript<Challenge = F>,
+    PCS: JoltCommitmentScheme<F, C>,
+    FS: Transcript + OpeningsTranscript<Challenge = F>,
 >(
     inputs_bytes: &[u8],
     trusted_advice_commitment: Option<PCS::Output>,
@@ -60,7 +61,6 @@ pub fn verify<
     proof: JoltProof<F, C, PCS, FS>,
     preprocessing: &JoltVerifierPreprocessing<F, C, PCS>,
 ) -> Result<(), ProofVerifyError> {
-    use common::jolt_device::JoltDevice;
     let memory_layout = &preprocessing.shared.memory_layout;
     let memory_config = MemoryConfig {
         max_untrusted_advice_size: memory_layout.max_untrusted_advice_size,

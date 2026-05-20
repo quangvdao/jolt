@@ -27,6 +27,15 @@ use rayon::prelude::*;
 use std::borrow::Borrow;
 use tracing::trace_span;
 
+fn debug_disable_dory_setup_cache() -> bool {
+    std::env::var("JOLT_DEBUG_DISABLE_DORY_SETUP_CACHE")
+        .map(|v| {
+            let value = v.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "" | "0" | "false" | "off")
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Clone)]
 pub struct DoryCommitmentScheme;
 
@@ -74,6 +83,18 @@ fn maybe_blind_commitment(setup: &ArkworksProverSetup, commitment: ArkGT) -> (Ar
     }
 }
 
+#[inline]
+fn canonical_setup_log_n(max_num_vars: usize) -> usize {
+    // Dory's generator count depends on ceil(max_log_n / 2), so odd/even pairs like
+    // 23 and 24 share the same generator bucket. Canonicalizing to the even bucket
+    // representative keeps those runs on a single URS file.
+    if max_num_vars.is_multiple_of(2) {
+        max_num_vars
+    } else {
+        max_num_vars + 1
+    }
+}
+
 pub fn bind_opening_inputs<F: JoltField, ProofTranscript: Transcript>(
     transcript: &mut ProofTranscript,
     opening_point: &[F::Challenge],
@@ -116,13 +137,13 @@ impl CommitmentScheme for DoryCommitmentScheme {
 
     fn setup_prover(max_num_vars: usize) -> Self::ProverSetup {
         let _span = trace_span!("DoryCommitmentScheme::setup_prover").entered();
+        let canonical_max_num_vars = canonical_setup_log_n(max_num_vars);
         #[cfg(test)]
         DoryGlobals::configure_test_cache_root();
-
         #[cfg(not(target_arch = "wasm32"))]
-        let setup = ArkworksProverSetup::new_from_urs(max_num_vars);
+        let setup = ArkworksProverSetup::new_from_urs(canonical_max_num_vars);
         #[cfg(target_arch = "wasm32")]
-        let setup = ArkworksProverSetup::new(max_num_vars);
+        let setup = ArkworksProverSetup::new(canonical_max_num_vars);
 
         // The prepared-point cache in dory-pcs is global and can only be initialized once.
         // In unit tests, multiple setups with different sizes are created, so initializing the
@@ -268,7 +289,7 @@ impl CommitmentScheme for DoryCommitmentScheme {
             setup.clone().into_inner(),
             &mut dory_transcript,
         )
-        .map_err(|_| ProofVerifyError::InternalError)?;
+        .map_err(|err| ProofVerifyError::DoryError(format!("dory::verify failed: {err:?}")))?;
 
         Ok(())
     }
@@ -432,7 +453,11 @@ impl StreamingCommitmentScheme for DoryCommitmentScheme {
             }
 
             let g2_bases = &setup.g2_vec[..num_rows];
-            let tier_2 = <BN254 as PairingCurve>::multi_pair_g2_setup(&row_commitments, g2_bases);
+            let tier_2 = if debug_disable_dory_setup_cache() {
+                <BN254 as PairingCurve>::multi_pair(&row_commitments, g2_bases)
+            } else {
+                <BN254 as PairingCurve>::multi_pair_g2_setup(&row_commitments, g2_bases)
+            };
             let (tier_2, commit_blind) = maybe_blind_commitment(setup, tier_2);
 
             (
@@ -444,7 +469,11 @@ impl StreamingCommitmentScheme for DoryCommitmentScheme {
                 chunks.iter().flat_map(|chunk| chunk.clone()).collect();
 
             let g2_bases = &setup.g2_vec[..row_commitments.len()];
-            let tier_2 = <BN254 as PairingCurve>::multi_pair_g2_setup(&row_commitments, g2_bases);
+            let tier_2 = if debug_disable_dory_setup_cache() {
+                <BN254 as PairingCurve>::multi_pair(&row_commitments, g2_bases)
+            } else {
+                <BN254 as PairingCurve>::multi_pair_g2_setup(&row_commitments, g2_bases)
+            };
             let (tier_2, commit_blind) = maybe_blind_commitment(setup, tier_2);
 
             (

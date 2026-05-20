@@ -25,8 +25,10 @@
 //! ## Stages Implemented
 //!
 //! This verifier implements stages 1-7 (all sumcheck stages):
-//! - Stages 1-6: Standard sumcheck verifications
-//! - Stage 7: HammingWeight claim reduction sumcheck
+//! - Stages 1-5: Standard sumcheck verifications
+//! - Stage 6a: Address-phase bytecode read-RAF and booleanity sumchecks
+//! - Stage 6b: Cycle-phase sumchecks and precommitted claim reductions
+//! - Stage 7: HammingWeight claim reduction and address-phase advice reductions
 //!
 //! Stage 8 (PCS verification) is NOT transpiled by this module. It requires
 //! native elliptic curve operations that are handled separately by the target
@@ -35,12 +37,13 @@
 //! ## Advice Verifiers
 //!
 //! `AdviceClaimReduction` verifiers are included when advice commitments are present.
-//! They span stages 6 and 7 with a phase transition between them:
-//! - Stage 6: CycleVariables phase (bind cycle-derived coordinates)
+//! They span stages 6b and 7 with a phase transition between them:
+//! - Stage 6b: CycleVariables phase (bind cycle-derived coordinates)
 //! - Stage 7: AddressVariables phase (bind address-derived coordinates)
 
 use crate::curve::JoltCurve;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::dory::DoryGlobals;
 #[cfg(not(feature = "zk"))]
 use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
 use crate::subprotocols::sumcheck::{BatchedSumcheck, ClearSumcheckProof, SumcheckInstanceProof};
@@ -48,9 +51,12 @@ use crate::zkvm::claim_reductions::{
     AdviceClaimReductionVerifier, AdviceKind, HammingWeightClaimReductionVerifier, ReductionPhase,
     RegistersClaimReductionSumcheckVerifier,
 };
-use crate::zkvm::config::OneHotParams;
+use crate::zkvm::config::{OneHotParams, ProgramMode};
 use crate::zkvm::{
-    bytecode::read_raf_checking::BytecodeReadRafSumcheckVerifier,
+    bytecode::read_raf_checking::{
+        BytecodeReadRafAddressSumcheckVerifier, BytecodeReadRafCycleSumcheckVerifier,
+        BytecodeReadRafSumcheckParams,
+    },
     claim_reductions::{
         IncClaimReductionSumcheckVerifier, InstructionLookupsClaimReductionSumcheckVerifier,
         RamRaClaimReductionSumcheckVerifier,
@@ -79,7 +85,7 @@ use crate::zkvm::{
         product::ProductVirtualRemainderVerifier, shift::ShiftSumcheckVerifier,
         verify_stage1_uni_skip, verify_stage2_uni_skip,
     },
-    verifier::JoltVerifierPreprocessing,
+    verifier::{JoltSharedPreprocessing, JoltVerifierPreprocessing},
     ProverDebugInfo,
 };
 use crate::{
@@ -87,7 +93,10 @@ use crate::{
     poly::opening_proof::{AbstractVerifierOpeningAccumulator, VerifierOpeningAccumulator},
     pprof_scope,
     subprotocols::{
-        booleanity::{BooleanitySumcheckParams, BooleanitySumcheckVerifier},
+        booleanity::{
+            BooleanityAddressSumcheckVerifier, BooleanityCycleSumcheckVerifier,
+            BooleanitySumcheckParams,
+        },
         sumcheck_verifier::SumcheckInstanceVerifier,
     },
     transcripts::Transcript,
@@ -293,6 +302,20 @@ impl<
             advice_reduction_verifier_trusted: None,
             advice_reduction_verifier_untrusted: None,
         }
+    }
+
+    #[inline]
+    fn main_total_vars(&self) -> usize {
+        let trace_log_t = self.proof.trace_length.log_2();
+        let log_k_chunk = self.one_hot_params.log_k_chunk;
+        JoltSharedPreprocessing::<PCS>::max_total_vars_from_candidates(
+            trace_log_t + log_k_chunk,
+            self.preprocessing.shared.precommitted_candidate_total_vars(
+                false,
+                self.trusted_advice_commitment.is_some(),
+                self.proof.untrusted_advice_commitment.is_some(),
+            ),
+        )
     }
 
     /// Verify the Jolt proof (stages 1-7).
@@ -554,25 +577,70 @@ impl<
     }
 
     fn verify_stage6(&mut self) -> Result<(), ProofVerifyError> {
+        let _ = DoryGlobals::initialize_main_with_log_embedding(
+            self.one_hot_params.k_chunk,
+            self.proof.trace_length,
+            self.main_total_vars(),
+            Some(self.proof.dory_layout),
+        );
+        let (bytecode_read_raf_params, booleanity_params) = self.verify_stage6a()?;
+        self.verify_stage6b(bytecode_read_raf_params, booleanity_params)?;
+        Ok(())
+    }
+
+    fn verify_stage6a(
+        &mut self,
+    ) -> Result<
+        (
+            BytecodeReadRafSumcheckParams<F>,
+            BooleanitySumcheckParams<F>,
+        ),
+        ProofVerifyError,
+    > {
         let n_cycle_vars = self.proof.trace_length.log_2();
-        let bytecode_read_raf = BytecodeReadRafSumcheckVerifier::gen(
-            self.preprocessing.shared.bytecode(),
+        let bytecode_read_raf = BytecodeReadRafAddressSumcheckVerifier::new::<PCS>(
+            Some(&self.preprocessing.shared.program),
             n_cycle_vars,
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
-        );
-
-        let ram_hamming_booleanity =
-            HammingBooleanitySumcheckVerifier::new(&self.opening_accumulator);
+            ProgramMode::Full,
+            0,
+        )?;
         let booleanity_params = BooleanitySumcheckParams::new(
             n_cycle_vars,
             &self.one_hot_params,
             &self.opening_accumulator,
             &mut self.transcript,
         );
+        let booleanity = BooleanityAddressSumcheckVerifier::new(booleanity_params.clone());
 
-        let booleanity = BooleanitySumcheckVerifier::new(booleanity_params);
+        let instances: Vec<&dyn SumcheckInstanceVerifier<F, ProofTranscript, A>> =
+            vec![&bytecode_read_raf, &booleanity];
+
+        let _r_stage6a = BatchedSumcheck::verify_standard::<F, ProofTranscript, A>(
+            extract_clear_proof(&self.proof.stage6a_sumcheck_proof),
+            instances,
+            &mut self.opening_accumulator,
+            &mut self.transcript,
+        )?;
+
+        Ok((bytecode_read_raf.into_params(), booleanity_params))
+    }
+
+    fn verify_stage6b(
+        &mut self,
+        bytecode_read_raf_params: BytecodeReadRafSumcheckParams<F>,
+        booleanity_params: BooleanitySumcheckParams<F>,
+    ) -> Result<(), ProofVerifyError> {
+        let bytecode_read_raf = BytecodeReadRafCycleSumcheckVerifier::new(
+            bytecode_read_raf_params,
+            &self.opening_accumulator,
+        );
+        let ram_hamming_booleanity =
+            HammingBooleanitySumcheckVerifier::new(&self.opening_accumulator);
+        let booleanity =
+            BooleanityCycleSumcheckVerifier::new(booleanity_params, &self.opening_accumulator);
         let ram_ra_virtual = RamRaVirtualSumcheckVerifier::new(
             self.proof.trace_length,
             &self.one_hot_params,
@@ -623,8 +691,8 @@ impl<
             instances.push(advice);
         }
 
-        let _r_stage6 = BatchedSumcheck::verify_standard::<F, ProofTranscript, A>(
-            extract_clear_proof(&self.proof.stage6_sumcheck_proof),
+        let _r_stage6b = BatchedSumcheck::verify_standard::<F, ProofTranscript, A>(
+            extract_clear_proof(&self.proof.stage6b_sumcheck_proof),
             instances,
             &mut self.opening_accumulator,
             &mut self.transcript,

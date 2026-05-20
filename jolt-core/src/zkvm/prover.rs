@@ -2174,7 +2174,7 @@ pub struct JoltProverPreprocessing<
     PCS: CommitmentScheme<Field = F>,
 > {
     pub generators: PCS::ProverSetup,
-    pub shared: JoltSharedPreprocessing,
+    pub shared: JoltSharedPreprocessing<PCS>,
     _curve: std::marker::PhantomData<C>,
 }
 
@@ -2184,23 +2184,24 @@ where
     C: JoltCurve<F = F>,
     PCS: CommitmentScheme<Field = F>,
 {
-    #[tracing::instrument(skip_all, name = "JoltProverPreprocessing::gen")]
-    pub fn new(shared: JoltSharedPreprocessing) -> Self {
-        use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
-        let max_T: usize = shared.max_padded_trace_length.next_power_of_two();
-        let max_log_T = max_T.log_2();
-        let max_log_k_chunk = if max_log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
-            4
-        } else {
-            8
-        };
-        let generators = PCS::setup_prover(max_log_k_chunk + max_log_T);
-
-        JoltProverPreprocessing {
+    pub fn new_with_generators(
+        shared: JoltSharedPreprocessing<PCS>,
+        generators: PCS::ProverSetup,
+    ) -> Self {
+        Self {
             generators,
             shared,
             _curve: std::marker::PhantomData,
         }
+    }
+
+    #[tracing::instrument(skip_all, name = "JoltProverPreprocessing::new")]
+    pub fn new(shared: JoltSharedPreprocessing<PCS>) -> Self {
+        let committed_mode = shared.program.is_committed();
+        let (max_total_vars, _) = shared.compute_max_total_vars(committed_mode);
+        let generators = PCS::setup_prover(max_total_vars);
+
+        Self::new_with_generators(shared, generators)
     }
 
     #[cfg(feature = "zk")]
@@ -2350,6 +2351,60 @@ mod tests {
             memory_layout,
             max_trace_len,
         ))
+    }
+
+    #[test]
+    fn committed_bytecode_chunk_count_validation_rejects_invalid_counts() {
+        use crate::zkvm::bytecode::chunks::validate_committed_bytecode_chunk_count;
+
+        assert!(std::panic::catch_unwind(|| validate_committed_bytecode_chunk_count(0)).is_err());
+        assert!(std::panic::catch_unwind(|| validate_committed_bytecode_chunk_count(3)).is_err());
+        assert!(std::panic::catch_unwind(|| validate_committed_bytecode_chunk_count(512)).is_err());
+        validate_committed_bytecode_chunk_count(1);
+        validate_committed_bytecode_chunk_count(256);
+    }
+
+    #[test]
+    #[serial]
+    fn committed_preprocessing_serialization_roundtrip_strips_prover_data() {
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+
+        DoryGlobals::reset();
+        let mut program = host::Program::new("fibonacci-guest");
+        let inputs = postcard::to_stdvec(&5u32).unwrap();
+        let (bytecode, init_memory_state, _, e_entry) = program.decode();
+        let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
+        let program_data =
+            ProgramPreprocessing::preprocess(bytecode, init_memory_state, e_entry).unwrap();
+
+        let shared = JoltSharedPreprocessing::<DoryCommitmentScheme>::new_committed(
+            program_data,
+            io_device.memory_layout.clone(),
+            1 << 16,
+            1,
+        );
+        assert!(shared.program.is_committed());
+        assert!(
+            shared.program.full().is_some(),
+            "prover-side committed preprocessing should retain full program data"
+        );
+
+        let mut bytes = Vec::new();
+        shared.serialize_compressed(&mut bytes).unwrap();
+        let decoded =
+            JoltSharedPreprocessing::<DoryCommitmentScheme>::deserialize_compressed(&*bytes)
+                .unwrap();
+
+        assert!(decoded.program.is_committed());
+        assert_eq!(
+            decoded.program_meta.bytecode_len,
+            shared.program_meta.bytecode_len
+        );
+        assert_eq!(decoded.bytecode_chunk_count, shared.bytecode_chunk_count);
+        assert!(
+            decoded.program.full().is_none(),
+            "serialized verifier preprocessing must not retain prover-only full program data"
+        );
     }
 
     #[test]
@@ -3402,7 +3457,9 @@ mod tests {
         let mut tampered_shared = shared.clone();
         let mut tampered_bytecode = tampered_shared.bytecode().clone();
         tampered_bytecode.entry_address = e_entry.wrapping_add(4);
-        let ProgramPreprocessing::Full(full) = &mut tampered_shared.program;
+        let ProgramPreprocessing::Full(full) = &mut tampered_shared.program else {
+            panic!("test_shared_preprocessing must produce full preprocessing")
+        };
         full.bytecode = tampered_bytecode;
         let tampered_entry_index =
             crate::zkvm::bytecode::entry_bytecode_index(tampered_shared.bytecode());

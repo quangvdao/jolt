@@ -8,7 +8,7 @@ pub mod registers;
 
 pub use advice::{
     AdviceClaimReductionParams, AdviceClaimReductionProver, AdviceClaimReductionVerifier,
-    AdviceKind, ReductionPhase,
+    AdviceKind,
 };
 pub use hamming_weight::{
     HammingWeightClaimReductionParams, HammingWeightClaimReductionProver,
@@ -25,7 +25,7 @@ pub use instruction_lookups::{
 pub use precommitted::{
     permute_precommitted_polys, precommitted_eq_evals_with_scaling, precommitted_skip_round_scale,
     precommitted_sumcheck_inverse_index_permutation, PrecommittedClaimReduction, PrecommittedPhase,
-    PrecommittedPolynomial, PrecommittedSchedulingReference,
+    PrecommittedPolynomial, PrecommittedSchedulingReference, TWO_PHASE_DEGREE_BOUND,
 };
 pub use ram_ra::{
     RaReductionParams, RamRaClaimReductionSumcheckProver, RamRaClaimReductionSumcheckVerifier,

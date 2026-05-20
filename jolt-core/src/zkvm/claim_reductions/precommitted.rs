@@ -5,8 +5,10 @@ use std::sync::Arc;
 use crate::field::JoltField;
 use crate::poly::commitment::dory::{DoryGlobals, DoryLayout};
 use crate::poly::eq_poly::EqPolynomial;
-use crate::poly::multilinear_polynomial::MultilinearPolynomial;
+use crate::poly::multilinear_polynomial::{BindingOrder, MultilinearPolynomial, PolynomialBinding};
 use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN, LITTLE_ENDIAN};
+use crate::poly::unipoly::UniPoly;
+use crate::subprotocols::sumcheck_verifier::SumcheckInstanceParams;
 use crate::utils::math::Math;
 use crate::zkvm::bytecode::chunks::committed_lanes;
 
@@ -520,6 +522,139 @@ pub fn precommitted_sumcheck_inverse_index_permutation(
         })
         .collect();
     Some(inverse_permutation)
+}
+
+pub const TWO_PHASE_DEGREE_BOUND: usize = 2;
+
+pub trait PrecommittedParams<F: JoltField>: SumcheckInstanceParams<F> {
+    fn is_cycle_phase(&self) -> bool;
+    fn is_cycle_phase_round(&self, round: usize) -> bool;
+    fn is_address_phase_round(&self, round: usize) -> bool;
+    fn cycle_alignment_rounds(&self) -> usize;
+    fn address_alignment_rounds(&self) -> usize;
+    fn record_cycle_challenge(&mut self, challenge: F::Challenge);
+}
+
+#[derive(Allocative)]
+pub struct PrecommittedProver<F: JoltField, P: PrecommittedParams<F>> {
+    params: P,
+    value_poly: MultilinearPolynomial<F>,
+    eq_poly: MultilinearPolynomial<F>,
+    scale: F,
+}
+
+impl<F: JoltField, P: PrecommittedParams<F>> PrecommittedProver<F, P> {
+    pub fn new(
+        params: P,
+        value_poly: MultilinearPolynomial<F>,
+        eq_poly: MultilinearPolynomial<F>,
+    ) -> Self {
+        Self {
+            params,
+            value_poly,
+            eq_poly,
+            scale: F::one(),
+        }
+    }
+
+    pub fn params(&self) -> &P {
+        &self.params
+    }
+
+    pub fn params_mut(&mut self) -> &mut P {
+        &mut self.params
+    }
+
+    pub fn set_scale(&mut self, scale: F) {
+        self.scale = scale;
+    }
+
+    fn compute_message_unscaled(&self, previous_claim_unscaled: F) -> UniPoly<F> {
+        let half = self.value_poly.len() / 2;
+        let value_poly = &self.value_poly;
+        let eq_poly = &self.eq_poly;
+        let evals: [F; TWO_PHASE_DEGREE_BOUND] = (0..half)
+            .into_par_iter()
+            .map(|j| {
+                let value_evals = value_poly
+                    .sumcheck_evals_array::<TWO_PHASE_DEGREE_BOUND>(j, BindingOrder::LowToHigh);
+                let eq_evals = eq_poly
+                    .sumcheck_evals_array::<TWO_PHASE_DEGREE_BOUND>(j, BindingOrder::LowToHigh);
+
+                let mut out = [F::zero(); TWO_PHASE_DEGREE_BOUND];
+                for i in 0..TWO_PHASE_DEGREE_BOUND {
+                    out[i] = value_evals[i] * eq_evals[i];
+                }
+                out
+            })
+            .reduce(
+                || [F::zero(); TWO_PHASE_DEGREE_BOUND],
+                |mut acc, arr| {
+                    acc.iter_mut().zip(arr.iter()).for_each(|(a, b)| *a += *b);
+                    acc
+                },
+            );
+        UniPoly::from_evals_and_hint(previous_claim_unscaled, &evals)
+    }
+
+    pub fn compute_message(&mut self, round: usize, previous_claim: F) -> UniPoly<F> {
+        let is_active_round = if self.params.is_cycle_phase() {
+            self.params.is_cycle_phase_round(round)
+        } else {
+            self.params.is_address_phase_round(round)
+        };
+        if !is_active_round {
+            return UniPoly::from_coeff(vec![previous_claim * F::from_u64(2).inverse().unwrap()]);
+        }
+
+        let trailing_cap = if self.params.is_cycle_phase() {
+            self.params.cycle_alignment_rounds()
+        } else {
+            self.params.address_alignment_rounds()
+        };
+        let num_trailing_variables = trailing_cap.saturating_sub(self.params.num_rounds());
+        let scaling_factor = self.scale * F::one().mul_pow_2(num_trailing_variables);
+        let prev_unscaled = previous_claim * scaling_factor.inverse().unwrap();
+        let poly_unscaled = self.compute_message_unscaled(prev_unscaled);
+        poly_unscaled * scaling_factor
+    }
+
+    pub fn ingest_challenge(&mut self, r_j: F::Challenge, round: usize) {
+        let is_active_round = if self.params.is_cycle_phase() {
+            self.params.is_cycle_phase_round(round)
+        } else {
+            self.params.is_address_phase_round(round)
+        };
+        if !is_active_round {
+            self.scale *= F::from_u64(2).inverse().unwrap();
+            return;
+        }
+
+        self.value_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        self.eq_poly.bind_parallel(r_j, BindingOrder::LowToHigh);
+        if self.params.is_cycle_phase() {
+            self.params.record_cycle_challenge(r_j);
+        }
+    }
+
+    pub fn cycle_intermediate_claim(&self) -> F {
+        let len = self.value_poly.len();
+        assert_eq!(len, self.eq_poly.len());
+
+        let mut sum = F::zero();
+        for i in 0..len {
+            sum += self.value_poly.get_bound_coeff(i) * self.eq_poly.get_bound_coeff(i);
+        }
+        sum * self.scale
+    }
+
+    pub fn final_claim_if_ready(&self) -> Option<F> {
+        if self.value_poly.len() == 1 {
+            Some(self.value_poly.get_bound_coeff(0))
+        } else {
+            None
+        }
+    }
 }
 
 pub fn precommitted_skip_round_scale<F: JoltField>(

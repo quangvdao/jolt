@@ -1,8 +1,8 @@
 #[cfg(feature = "zk")]
 use crate::poly::opening_proof::OpeningId;
+use crate::zkvm::config::OneHotConfig;
 #[cfg(feature = "zk")]
 use crate::zkvm::stage8_opening_ids;
-use crate::zkvm::{claim_reductions::advice::ReductionPhase, config::OneHotConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 use std::{
@@ -64,8 +64,8 @@ use crate::{
             HammingWeightClaimReductionParams, HammingWeightClaimReductionProver,
             IncClaimReductionSumcheckParams, IncClaimReductionSumcheckProver,
             InstructionLookupsClaimReductionSumcheckParams,
-            InstructionLookupsClaimReductionSumcheckProver, PrecommittedPolynomial,
-            RaReductionParams, RamRaClaimReductionSumcheckProver,
+            InstructionLookupsClaimReductionSumcheckProver, PrecommittedClaimReduction,
+            PrecommittedPolynomial, RaReductionParams, RamRaClaimReductionSumcheckProver,
             RegistersClaimReductionSumcheckParams, RegistersClaimReductionSumcheckProver,
         },
         config::OneHotParams,
@@ -1413,13 +1413,24 @@ impl<
             &self.opening_accumulator,
             &mut self.transcript,
         );
+        let main_total_vars = self.trace.len().log_2() + self.one_hot_params.log_k_chunk;
+        let precommitted_candidates = self.preprocessing.shared.precommitted_candidate_total_vars(
+            false,
+            self.advice.trusted_advice_polynomial.is_some(),
+            self.advice.untrusted_advice_polynomial.is_some(),
+        );
+        let precommitted_scheduling_reference =
+            PrecommittedClaimReduction::<F>::scheduling_reference(
+                main_total_vars,
+                &precommitted_candidates,
+            );
 
-        // Advice claim reduction (Phase 1 in Stage 6): trusted and untrusted are separate instances.
+        // Advice claim reduction (Phase 1 in Stage 6b): trusted and untrusted are separate instances.
         if self.advice.trusted_advice_polynomial.is_some() {
             let trusted_advice_params = AdviceClaimReductionParams::new(
                 AdviceKind::Trusted,
-                &self.program_io.memory_layout,
-                self.trace.len(),
+                self.program_io.memory_layout.max_trusted_advice_size as usize,
+                precommitted_scheduling_reference,
                 &self.opening_accumulator,
             );
             // Note: We clone the advice polynomial here because Stage 8 needs the original polynomial
@@ -1440,8 +1451,8 @@ impl<
         if self.advice.untrusted_advice_polynomial.is_some() {
             let untrusted_advice_params = AdviceClaimReductionParams::new(
                 AdviceKind::Untrusted,
-                &self.program_io.memory_layout,
-                self.trace.len(),
+                self.program_io.memory_layout.max_untrusted_advice_size as usize,
+                precommitted_scheduling_reference,
                 &self.opening_accumulator,
             );
             // Note: We clone the advice polynomial here because Stage 8 needs the original polynomial
@@ -2051,12 +2062,12 @@ impl<
             self.advice_reduction_prover_trusted.take()
         {
             if advice_reduction_prover_trusted
-                .params
+                .params()
                 .num_address_phase_rounds()
                 > 0
             {
                 // Transition phase
-                advice_reduction_prover_trusted.params.phase = ReductionPhase::AddressVariables;
+                advice_reduction_prover_trusted.transition_to_address_phase();
                 instances.push(Box::new(advice_reduction_prover_trusted));
             }
         }
@@ -2064,12 +2075,12 @@ impl<
             self.advice_reduction_prover_untrusted.take()
         {
             if advice_reduction_prover_untrusted
-                .params
+                .params()
                 .num_address_phase_rounds()
                 > 0
             {
                 // Transition phase
-                advice_reduction_prover_untrusted.params.phase = ReductionPhase::AddressVariables;
+                advice_reduction_prover_untrusted.transition_to_address_phase();
                 instances.push(Box::new(advice_reduction_prover_untrusted));
             }
         }

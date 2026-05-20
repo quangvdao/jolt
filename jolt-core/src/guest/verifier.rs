@@ -4,12 +4,12 @@ use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::commitment_scheme::{StreamingCommitmentScheme, ZkEvalCommitment};
 use crate::utils::errors::ProofVerifyError;
 use crate::zkvm::bytecode::PreprocessingError;
-use crate::zkvm::program::ProgramPreprocessing;
 use crate::zkvm::verifier::BlindfoldSetup;
 
 use crate::guest::program::Program;
 use crate::poly::commitment::dory::DoryCommitmentScheme;
 use crate::transcripts::Transcript;
+use crate::zkvm::program::ProgramPreprocessing;
 use crate::zkvm::proof_serialization::JoltProof;
 use crate::zkvm::verifier::JoltSharedPreprocessing;
 use crate::zkvm::verifier::JoltVerifier;

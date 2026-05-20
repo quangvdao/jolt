@@ -179,11 +179,11 @@ fn main() {
     // AstCommitmentScheme satisfies the CommitmentScheme trait but performs no cryptographic
     // operations. PCS verification is skipped in stages 1-6.
     let symbolic_preprocessing: JoltVerifierPreprocessing<MleAst, AstCurve, AstCommitmentScheme> =
-        JoltVerifierPreprocessing {
-            generators: transpiler::symbolic_traits::ast_commitment_scheme::AstVerifierSetup,
-            shared: symbolic_shared,
-            blindfold_setup: None,
-        };
+        JoltVerifierPreprocessing::new(
+            symbolic_shared,
+            transpiler::symbolic_traits::ast_commitment_scheme::AstVerifierSetup,
+            None,
+        );
 
     // =========================================================================
     // Step 2: Convert proof to symbolic representation
@@ -244,7 +244,10 @@ fn main() {
         use jolt_core::zkvm::ram::{set_pending_initial_ram, PendingInitialRamValues};
         let bytecode_words: Vec<MleAst> = real_preprocessing
             .shared
-            .ram()
+            .program
+            .as_full()
+            .expect("transpiler only supports full preprocessing")
+            .ram
             .bytecode_words
             .iter()
             .map(|&w| MleAst::from_u64(w))

@@ -264,7 +264,7 @@ fn prove_example_with_trace(
     );
 
     let program_data =
-        ProgramPreprocessing::preprocess(bytecode.clone(), init_memory_state, e_entry).unwrap();
+        ProgramPreprocessing::preprocess(bytecode, init_memory_state, e_entry).unwrap();
     let shared_preprocessing = JoltSharedPreprocessing::new(
         program_data,
         program_io.memory_layout.clone(),

@@ -418,11 +418,11 @@ impl<
             .unwrap_or(0)
             .max(
                 remap_address(
-                    preprocessing.shared.ram.min_bytecode_address,
+                    preprocessing.shared.ram().min_bytecode_address,
                     &preprocessing.shared.memory_layout,
                 )
                 .unwrap_or(0)
-                    + preprocessing.shared.ram.bytecode_words.len() as u64
+                    + preprocessing.shared.ram().bytecode_words.len() as u64
                     + 1,
             )
             .next_power_of_two() as usize;
@@ -434,7 +434,7 @@ impl<
 
         let (initial_ram_state, final_ram_state) = gen_ram_memory_states::<F>(
             ram_K,
-            &preprocessing.shared.ram,
+            preprocessing.shared.ram(),
             &program_io,
             &final_memory_state,
         );
@@ -443,7 +443,7 @@ impl<
         let ram_log_K = ram_K.log_2();
         let rw_config = ReadWriteConfig::new(log_T, ram_log_K);
         let one_hot_params =
-            OneHotParams::new(log_T, preprocessing.shared.bytecode.code_size, ram_K);
+            OneHotParams::new(log_T, preprocessing.shared.bytecode().code_size, ram_K);
 
         #[cfg(feature = "zk")]
         let pedersen_generators = {
@@ -500,7 +500,7 @@ impl<
             &self.program_io,
             self.one_hot_params.ram_k,
             self.trace.len(),
-            self.preprocessing.shared.bytecode.entry_address,
+            self.preprocessing.shared.bytecode().entry_address,
             &self.rw_config,
             &self.one_hot_params.to_config(),
             DoryGlobals::get_layout(),
@@ -510,7 +510,7 @@ impl<
 
         tracing::info!(
             "bytecode size: {}",
-            self.preprocessing.shared.bytecode.code_size
+            self.preprocessing.shared.bytecode().code_size
         );
 
         let (commitments, mut opening_proof_hints) = self.generate_and_commit_witness_polynomials();
@@ -702,7 +702,7 @@ impl<
                 .par_iter()
                 .map(|poly_id| {
                     let witness: MultilinearPolynomial<F> = poly_id.generate_witness(
-                        &self.preprocessing.shared.bytecode,
+                        self.preprocessing.shared.bytecode(),
                         &self.preprocessing.shared.memory_layout,
                         &trace,
                         Some(&self.one_hot_params),
@@ -863,14 +863,14 @@ impl<
         let mut uni_skip = OuterUniSkipProver::initialize(
             uni_skip_params.clone(),
             &self.trace,
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
         );
         let first_round_proof = self.prove_uniskip(&mut uni_skip);
 
         let schedule = LinearOnlySchedule::new(uni_skip_params.tau.len() - 1);
         let shared = OuterSharedState::new(
             Arc::clone(&self.trace),
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             &uni_skip_params,
             &self.opening_accumulator,
         );
@@ -938,7 +938,7 @@ impl<
         let ram_read_write_checking = RamReadWriteCheckingProver::initialize(
             ram_read_write_checking_params,
             &self.trace,
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             &self.program_io.memory_layout,
             &self.initial_ram_state,
         );
@@ -1027,7 +1027,7 @@ impl<
         let spartan_shift = ShiftSumcheckProver::initialize(
             spartan_shift_params,
             Arc::clone(&self.trace),
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
         );
         let spartan_instruction_input = InstructionInputSumcheckProver::initialize(
             spartan_instruction_input_params,
@@ -1102,20 +1102,20 @@ impl<
             &self.initial_ram_state,
             self.trace.len(),
             ram_val_check_gamma,
-            &self.preprocessing.shared.ram,
+            self.preprocessing.shared.ram(),
             &self.program_io,
         );
 
         let registers_read_write_checking = RegistersReadWriteCheckingProver::initialize(
             registers_read_write_checking_params,
             self.trace.clone(),
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             &self.program_io.memory_layout,
         );
         let ram_val_check = RamValCheckSumcheckProver::initialize(
             ram_val_check_params,
             &self.trace,
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             &self.program_io.memory_layout,
         );
 
@@ -1184,7 +1184,7 @@ impl<
         let registers_val_evaluation = RegistersValEvaluationSumcheckProver::initialize(
             registers_val_evaluation_params,
             &self.trace,
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             &self.program_io.memory_layout,
         );
 
@@ -1228,7 +1228,7 @@ impl<
         print_current_memory_usage("Stage 6 baseline");
 
         let bytecode_read_raf_params = BytecodeReadRafSumcheckParams::gen(
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             self.trace.len().log_2(),
             &self.one_hot_params,
             &self.opening_accumulator,
@@ -1309,7 +1309,7 @@ impl<
         let mut bytecode_read_raf = BytecodeReadRafSumcheckProver::initialize(
             bytecode_read_raf_params,
             Arc::clone(&self.trace),
-            Arc::clone(&self.preprocessing.shared.bytecode),
+            self.preprocessing.shared.bytecode_arc(),
         );
         let mut ram_hamming_booleanity =
             HammingBooleanitySumcheckProver::initialize(ram_hamming_booleanity_params, &self.trace);
@@ -1317,7 +1317,7 @@ impl<
         let mut booleanity = BooleanitySumcheckProver::initialize(
             booleanity_params,
             &self.trace,
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             &self.program_io.memory_layout,
         );
 
@@ -2080,7 +2080,7 @@ impl<
         };
 
         let streaming_data = Arc::new(RLCStreamingData {
-            bytecode: Arc::clone(&self.preprocessing.shared.bytecode),
+            bytecode: self.preprocessing.shared.bytecode_arc(),
             memory_layout: self.preprocessing.shared.memory_layout.clone(),
         });
 
@@ -2256,9 +2256,9 @@ mod tests {
     extern crate jolt_inlines_keccak256;
     extern crate jolt_inlines_sha2;
 
-    use std::sync::Arc;
-
     use ark_bn254::Fr;
+    use common::jolt_device::MemoryLayout;
+    use jolt_riscv::JoltInstructionRow;
     use serial_test::serial;
 
     use crate::curve::Bn254Curve;
@@ -2274,7 +2274,9 @@ mod tests {
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{OpeningAccumulator, SumcheckId},
     };
+    use crate::zkvm::bytecode::PreprocessingError;
     use crate::zkvm::claim_reductions::AdviceKind;
+    use crate::zkvm::program::ProgramPreprocessing;
     use crate::zkvm::verifier::JoltSharedPreprocessing;
     use crate::zkvm::witness::CommittedPolynomial;
     use crate::zkvm::{
@@ -2335,6 +2337,21 @@ mod tests {
         (commitment, hint)
     }
 
+    fn test_shared_preprocessing(
+        bytecode: Vec<JoltInstructionRow>,
+        init_memory_state: Vec<(u64, u8)>,
+        memory_layout: MemoryLayout,
+        max_trace_len: usize,
+        entry_address: u64,
+    ) -> Result<JoltSharedPreprocessing, PreprocessingError> {
+        let program = ProgramPreprocessing::preprocess(bytecode, init_memory_state, entry_address)?;
+        Ok(JoltSharedPreprocessing::new(
+            program,
+            memory_layout,
+            max_trace_len,
+        ))
+    }
+
     #[test]
     #[serial]
     fn fib_e2e_dory() {
@@ -2343,10 +2360,10 @@ mod tests {
         let inputs = postcard::to_stdvec(&100u32).unwrap();
         let (bytecode, init_memory_state, _, e_entry) = program.decode();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2389,10 +2406,10 @@ mod tests {
         let (bytecode, init_memory_state, _, e_entry) = program.decode();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             8192,
             e_entry,
         )
@@ -2445,10 +2462,10 @@ mod tests {
         let inputs = postcard::to_stdvec(&[5u8; 32]).unwrap();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2503,10 +2520,10 @@ mod tests {
         let inputs = postcard::to_stdvec(&[5u8; 32]).unwrap();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2567,10 +2584,10 @@ mod tests {
 
         let (_, _, _, io_device) = program.trace(&inputs, &untrusted_advice, &trusted_advice);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2631,10 +2648,10 @@ mod tests {
         let (lazy_trace, trace, final_memory_state, io_device) =
             program.trace(&inputs, &untrusted_advice, &trusted_advice);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             4096,
             e_entry,
         )
@@ -2694,10 +2711,10 @@ mod tests {
         trusted_advice.extend(postcard::to_stdvec(&[7u8; 32]).unwrap());
 
         let (_, _, _, io_device) = program.trace(&inputs, &untrusted_advice, &trusted_advice);
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2760,10 +2777,10 @@ mod tests {
         let (lazy_trace, trace, final_memory_state, io_device) =
             program.trace(&inputs, &untrusted_advice, &trusted_advice);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2851,10 +2868,10 @@ mod tests {
         let (bytecode, init_memory_state, _, e_entry) = program.decode();
         let (_, _, _, io_device) = program.trace(&[], &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2897,10 +2914,10 @@ mod tests {
         let inputs = postcard::to_stdvec(&50u32).unwrap();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2943,10 +2960,10 @@ mod tests {
         let inputs = postcard::to_stdvec(&[9u32, 5u32, 3u32]).unwrap();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -2993,10 +3010,10 @@ mod tests {
         let (bytecode, init_memory_state, _, e_entry) = program.decode();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -3050,7 +3067,6 @@ mod tests {
         };
         use crate::subprotocols::sumcheck::SumcheckInstanceProof;
         use crate::transcripts::{KeccakTranscript, Transcript};
-        use crate::zkvm::verifier::JoltSharedPreprocessing;
         /// Helper to process a single stage's sumcheck proof.
         /// Returns a list of (RoundWitness, degree) for each round.
         /// For ZK proofs, creates synthetic witnesses with correct degrees to test R1CS structure.
@@ -3148,10 +3164,10 @@ mod tests {
         let inputs = postcard::to_stdvec(&[9u32, 5u32, 3u32]).unwrap();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -3272,10 +3288,10 @@ mod tests {
         trace.truncate(100);
         program_io.outputs[0] = 0; // change the output to 0
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            program_io.memory_layout.clone(),
             init_memory_state,
+            program_io.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -3312,10 +3328,10 @@ mod tests {
             program.trace(&inputs, &[], &[]);
 
         // Since the preprocessing is done with the original memory layout, the verifier should fail
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            program_io.memory_layout.clone(),
             init_memory_state,
+            program_io.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -3360,10 +3376,10 @@ mod tests {
         let (bytecode, init_memory_state, _, e_entry) = program.decode();
         let (lazy_trace, trace, final_memory_state, program_io) = program.trace(&inputs, &[], &[]);
 
-        let shared = JoltSharedPreprocessing::new(
+        let shared = test_shared_preprocessing(
             bytecode.clone(),
-            program_io.memory_layout.clone(),
             init_memory_state,
+            program_io.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -3380,15 +3396,16 @@ mod tests {
         );
         let (proof, _) = prover.prove();
 
-        let original_entry_index = crate::zkvm::bytecode::entry_bytecode_index(&shared.bytecode);
+        let original_entry_index = crate::zkvm::bytecode::entry_bytecode_index(shared.bytecode());
         // Tamper: give verifier a wrong entry_address so it computes a different
         // entry_bytecode_index and thus a different input_claim expectation.
         let mut tampered_shared = shared.clone();
-        let mut tampered_bytecode = (*tampered_shared.bytecode).clone();
+        let mut tampered_bytecode = tampered_shared.bytecode().clone();
         tampered_bytecode.entry_address = e_entry.wrapping_add(4);
-        tampered_shared.bytecode = Arc::new(tampered_bytecode);
+        let ProgramPreprocessing::Full(full) = &mut tampered_shared.program;
+        full.bytecode = tampered_bytecode;
         let tampered_entry_index =
-            crate::zkvm::bytecode::entry_bytecode_index(&tampered_shared.bytecode);
+            crate::zkvm::bytecode::entry_bytecode_index(tampered_shared.bytecode());
         assert_ne!(
             original_entry_index, tampered_entry_index,
             "tamper did not change entry_bytecode_index — test scenario is invalid"
@@ -3535,10 +3552,10 @@ mod tests {
         let (bytecode, init_memory_state, _, e_entry) = program.decode();
         let (_, _, _, io_device) = program.trace(&inputs, &[], &[]);
 
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )
@@ -3584,10 +3601,10 @@ mod tests {
         trusted_advice.extend(postcard::to_stdvec(&[7u8; 32]).unwrap());
 
         let (_, _, _, io_device) = program.trace(&inputs, &untrusted_advice, &trusted_advice);
-        let shared_preprocessing = JoltSharedPreprocessing::new(
+        let shared_preprocessing = test_shared_preprocessing(
             bytecode.clone(),
-            io_device.memory_layout.clone(),
             init_memory_state,
+            io_device.memory_layout.clone(),
             1 << 16,
             e_entry,
         )

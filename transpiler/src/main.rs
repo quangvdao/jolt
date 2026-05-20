@@ -229,7 +229,7 @@ fn main() {
         use jolt_core::zkvm::ram::{set_pending_initial_ram, PendingInitialRamValues};
         let bytecode_words: Vec<MleAst> = real_preprocessing
             .shared
-            .ram
+            .ram()
             .bytecode_words
             .iter()
             .map(|&w| MleAst::from_u64(w))

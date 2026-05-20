@@ -228,7 +228,7 @@ impl<
             .map_err(ProofVerifyError::InvalidOneHotConfig)?;
 
         let min_ram_K = compute_min_ram_K(
-            &preprocessing.shared.ram,
+            preprocessing.shared.ram(),
             &preprocessing.shared.memory_layout,
         );
         let max_ram_K = compute_max_ram_K(&preprocessing.shared.memory_layout);
@@ -246,7 +246,7 @@ impl<
             .map_err(ProofVerifyError::InvalidReadWriteConfig)?;
 
         // Construct full params from the validated config
-        let bytecode_K = preprocessing.shared.bytecode.code_size;
+        let bytecode_K = preprocessing.shared.bytecode().code_size;
         let one_hot_params =
             OneHotParams::from_config(&proof.one_hot_config, bytecode_K, proof.ram_K);
 
@@ -277,7 +277,7 @@ impl<
         opening_accumulator: A,
     ) -> Self {
         let spartan_key = UniformSpartanKey::new(proof.trace_length.next_power_of_two());
-        let bytecode_K = preprocessing.shared.bytecode.code_size;
+        let bytecode_K = preprocessing.shared.bytecode().code_size;
         let one_hot_params =
             OneHotParams::from_config(&proof.one_hot_config, bytecode_K, proof.ram_K);
 
@@ -309,7 +309,7 @@ impl<
             &self.program_io,
             self.proof.ram_K,
             self.proof.trace_length,
-            self.preprocessing.shared.bytecode.entry_address,
+            self.preprocessing.shared.bytecode().entry_address,
             &self.proof.rw_config,
             &self.proof.one_hot_config,
             self.proof.dory_layout,
@@ -492,13 +492,13 @@ impl<
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
         let initial_ram_state = crate::zkvm::ram::gen_ram_initial_memory_state::<F>(
             self.proof.ram_K,
-            &self.preprocessing.shared.ram,
+            self.preprocessing.shared.ram(),
             &self.program_io,
         );
         let ram_val_check = RamValCheckSumcheckVerifier::new(
             &initial_ram_state,
             &self.program_io,
-            &self.preprocessing.shared.ram,
+            self.preprocessing.shared.ram(),
             self.proof.trace_length,
             self.proof.ram_K,
             &self.proof.rw_config,
@@ -556,7 +556,7 @@ impl<
     fn verify_stage6(&mut self) -> Result<(), ProofVerifyError> {
         let n_cycle_vars = self.proof.trace_length.log_2();
         let bytecode_read_raf = BytecodeReadRafSumcheckVerifier::gen(
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             n_cycle_vars,
             &self.one_hot_params,
             &self.opening_accumulator,

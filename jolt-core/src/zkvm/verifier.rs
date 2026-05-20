@@ -27,10 +27,10 @@ use crate::subprotocols::sumcheck::SumcheckInstanceProof;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceParams;
 #[cfg(feature = "zk")]
 use crate::subprotocols::univariate_skip::UniSkipFirstRoundProofVariant;
-use crate::zkvm::bytecode::{BytecodePreprocessing, PreprocessingError};
 use crate::zkvm::claim_reductions::advice::ReductionPhase;
 use crate::zkvm::claim_reductions::RegistersClaimReductionSumcheckVerifier;
 use crate::zkvm::config::OneHotParams;
+use crate::zkvm::program::ProgramPreprocessing;
 #[cfg(feature = "prover")]
 use crate::zkvm::prover::JoltProverPreprocessing;
 #[cfg(feature = "zk")]
@@ -216,7 +216,6 @@ fn scale_batching_coefficients<
 }
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use common::jolt_device::MemoryLayout;
-use jolt_riscv::{JoltInstructionRow, RV64IMAC_JOLT};
 use tracer::JoltDevice;
 
 pub struct JoltVerifier<
@@ -341,7 +340,7 @@ impl<
             .map_err(ProofVerifyError::InvalidOneHotConfig)?;
 
         let min_ram_K = compute_min_ram_K(
-            &preprocessing.shared.ram,
+            preprocessing.shared.ram(),
             &preprocessing.shared.memory_layout,
         );
         let max_ram_K = compute_max_ram_K(&preprocessing.shared.memory_layout);
@@ -359,7 +358,7 @@ impl<
             .map_err(ProofVerifyError::InvalidReadWriteConfig)?;
 
         // Construct full params from the validated config.
-        let bytecode_K = preprocessing.shared.bytecode.code_size;
+        let bytecode_K = preprocessing.shared.bytecode().code_size;
         let one_hot_params =
             OneHotParams::from_config(&proof.one_hot_config, bytecode_K, proof.ram_K);
 
@@ -411,7 +410,7 @@ impl<
             &self.program_io,
             self.proof.ram_K,
             self.proof.trace_length,
-            self.preprocessing.shared.bytecode.entry_address,
+            self.preprocessing.shared.bytecode().entry_address,
             &self.proof.rw_config,
             &self.proof.one_hot_config,
             self.proof.dory_layout,
@@ -882,13 +881,13 @@ impl<
         let ram_val_check_gamma: F = self.transcript.challenge_scalar::<F>();
         let initial_ram_state = crate::zkvm::ram::gen_ram_initial_memory_state::<F>(
             self.proof.ram_K,
-            &self.preprocessing.shared.ram,
+            self.preprocessing.shared.ram(),
             &self.program_io,
         );
         let ram_val_check = RamValCheckSumcheckVerifier::new(
             &initial_ram_state,
             &self.program_io,
-            &self.preprocessing.shared.ram,
+            self.preprocessing.shared.ram(),
             self.proof.trace_length,
             self.proof.ram_K,
             &self.proof.rw_config,
@@ -1023,7 +1022,7 @@ impl<
     fn verify_stage6(&mut self) -> Result<StageVerifyResult<F>, ProofVerifyError> {
         let n_cycle_vars = self.proof.trace_length.log_2();
         let bytecode_read_raf = BytecodeReadRafSumcheckVerifier::gen(
-            &self.preprocessing.shared.bytecode,
+            self.preprocessing.shared.bytecode(),
             n_cycle_vars,
             &self.one_hot_params,
             &self.opening_accumulator,
@@ -1735,8 +1734,7 @@ impl<
 
 #[derive(Debug, Clone)]
 pub struct JoltSharedPreprocessing {
-    pub bytecode: Arc<BytecodePreprocessing>,
-    pub ram: RAMPreprocessing,
+    pub program: ProgramPreprocessing,
     pub memory_layout: MemoryLayout,
     pub max_padded_trace_length: usize,
 }
@@ -1760,10 +1758,7 @@ impl CanonicalSerialize for JoltSharedPreprocessing {
         mut writer: W,
         compress: ark_serialize::Compress,
     ) -> Result<(), ark_serialize::SerializationError> {
-        self.bytecode
-            .as_ref()
-            .serialize_with_mode(&mut writer, compress)?;
-        self.ram.serialize_with_mode(&mut writer, compress)?;
+        self.program.serialize_with_mode(&mut writer, compress)?;
         self.memory_layout
             .serialize_with_mode(&mut writer, compress)?;
         self.max_padded_trace_length
@@ -1772,8 +1767,7 @@ impl CanonicalSerialize for JoltSharedPreprocessing {
     }
 
     fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
-        self.bytecode.serialized_size(compress)
-            + self.ram.serialized_size(compress)
+        self.program.serialized_size(compress)
             + self.memory_layout.serialized_size(compress)
             + self.max_padded_trace_length.serialized_size(compress)
     }
@@ -1785,15 +1779,12 @@ impl CanonicalDeserialize for JoltSharedPreprocessing {
         compress: ark_serialize::Compress,
         validate: ark_serialize::Validate,
     ) -> Result<Self, ark_serialize::SerializationError> {
-        let bytecode =
-            BytecodePreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
-        let ram = RAMPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
+        let program = ProgramPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
         let memory_layout = MemoryLayout::deserialize_with_mode(&mut reader, compress, validate)?;
         let max_padded_trace_length =
             usize::deserialize_with_mode(&mut reader, compress, validate)?;
         Ok(Self {
-            bytecode: Arc::new(bytecode),
-            ram,
+            program,
             memory_layout,
             max_padded_trace_length,
         })
@@ -1802,8 +1793,7 @@ impl CanonicalDeserialize for JoltSharedPreprocessing {
 
 impl ark_serialize::Valid for JoltSharedPreprocessing {
     fn check(&self) -> Result<(), ark_serialize::SerializationError> {
-        self.bytecode.check()?;
-        self.ram.check()?;
+        self.program.check()?;
         self.memory_layout.check()?;
         Ok(())
     }
@@ -1812,24 +1802,27 @@ impl ark_serialize::Valid for JoltSharedPreprocessing {
 impl JoltSharedPreprocessing {
     #[tracing::instrument(skip_all, name = "JoltSharedPreprocessing::new")]
     pub fn new(
-        bytecode: Vec<JoltInstructionRow>,
+        program: ProgramPreprocessing,
         memory_layout: MemoryLayout,
-        memory_init: Vec<(u64, u8)>,
         max_padded_trace_length: usize,
-        entry_address: u64,
-    ) -> Result<JoltSharedPreprocessing, PreprocessingError> {
-        let bytecode = Arc::new(BytecodePreprocessing::preprocess(
-            bytecode,
-            entry_address,
-            RV64IMAC_JOLT,
-        )?);
-        let ram = RAMPreprocessing::preprocess(memory_init);
-        Ok(Self {
-            bytecode,
-            ram,
+    ) -> JoltSharedPreprocessing {
+        Self {
+            program,
             memory_layout,
             max_padded_trace_length,
-        })
+        }
+    }
+
+    pub fn bytecode(&self) -> &crate::zkvm::bytecode::BytecodePreprocessing {
+        self.program.bytecode()
+    }
+
+    pub fn bytecode_arc(&self) -> Arc<crate::zkvm::bytecode::BytecodePreprocessing> {
+        Arc::new(self.bytecode().clone())
+    }
+
+    pub fn ram(&self) -> &RAMPreprocessing {
+        self.program.ram()
     }
 }
 

@@ -1011,16 +1011,13 @@ mod tests {
 
         let mut expected = vec![Fr::zero(); num_columns];
         let dense_stride = DoryGlobals::dense_stride();
-        let cycles_per_row = num_columns
-            .checked_div(dense_stride)
-            .filter(|&cycles| cycles > 0);
+        let cycles_per_row = num_columns / dense_stride;
 
         // Dense contribution for AddressMajor layout:
         // Dense coefficients occupy evenly-spaced columns (every K-th column).
         // Coefficient i maps to: row = i / cycles_per_row, col = (i % cycles_per_row) * K
         for (i, &coeff) in rlc_dense.iter().enumerate() {
-            if let Some(cycles_per_row) = cycles_per_row {
-                let row = i / cycles_per_row;
+            if let Some(row) = i.checked_div(cycles_per_row) {
                 let col = (i % cycles_per_row) * K;
                 if row < num_rows && col < num_columns {
                     expected[col] += left_vec[row] * coeff;

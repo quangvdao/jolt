@@ -2697,9 +2697,9 @@ mod tests {
     fn test_shared_preprocessing(
         bytecode: Vec<JoltInstructionRow>,
         init_memory_state: Vec<(u64, u8)>,
+        entry_address: u64,
         memory_layout: common::jolt_device::MemoryLayout,
         max_trace_len: usize,
-        entry_address: u64,
     ) -> Result<(JoltSharedPreprocessing, Arc<ProgramPreprocessing>), PreprocessingError> {
         let program = ProgramPreprocessing::preprocess(bytecode, init_memory_state, entry_address)?;
         let shared = JoltSharedPreprocessing::new(program.clone(), memory_layout, max_trace_len);
@@ -2710,9 +2710,9 @@ mod tests {
     fn test_shared_preprocessing_committed(
         bytecode: Vec<JoltInstructionRow>,
         init_memory_state: Vec<(u64, u8)>,
+        entry_address: u64,
         memory_layout: common::jolt_device::MemoryLayout,
         max_trace_len: usize,
-        entry_address: u64,
         bytecode_chunk_count: usize,
     ) -> Result<(JoltSharedPreprocessing, Arc<ProgramPreprocessing>), PreprocessingError> {
         let program = ProgramPreprocessing::preprocess(bytecode, init_memory_state, entry_address)?;
@@ -2737,9 +2737,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing);
@@ -2781,9 +2781,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             8192,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -2836,9 +2836,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -2893,9 +2893,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -2956,9 +2956,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3020,9 +3020,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             4096,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3083,9 +3083,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3149,9 +3149,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3240,9 +3240,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3285,9 +3285,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3330,9 +3330,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3374,9 +3374,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing_committed(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
             1,
         )
         .unwrap();
@@ -3424,9 +3424,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3576,9 +3576,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let preprocessing = JoltProverPreprocessing::new(shared_preprocessing);
@@ -3700,9 +3700,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             program_io.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3739,9 +3739,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             program_io.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());
@@ -3966,9 +3966,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing);
@@ -4015,9 +4015,9 @@ mod tests {
         let (shared_preprocessing, _program_data) = test_shared_preprocessing(
             bytecode,
             init_memory_state,
+            e_entry,
             io_device.memory_layout.clone(),
             1 << 16,
-            e_entry,
         )
         .unwrap();
         let prover_preprocessing = JoltProverPreprocessing::new(shared_preprocessing.clone());

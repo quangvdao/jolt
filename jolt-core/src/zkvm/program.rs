@@ -36,7 +36,7 @@ impl Default for FullProgramPreprocessing {
 }
 
 impl FullProgramPreprocessing {
-    #[tracing::instrument(skip_all, name = "ProgramPreprocessing::preprocess")]
+    #[tracing::instrument(skip_all, name = "FullProgramPreprocessing::preprocess")]
     pub fn preprocess(
         instructions: Vec<JoltInstructionRow>,
         memory_init: Vec<(u64, u8)>,

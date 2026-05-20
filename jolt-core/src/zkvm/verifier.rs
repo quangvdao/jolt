@@ -27,10 +27,14 @@ use crate::subprotocols::sumcheck::SumcheckInstanceProof;
 use crate::subprotocols::sumcheck_verifier::SumcheckInstanceParams;
 #[cfg(feature = "zk")]
 use crate::subprotocols::univariate_skip::UniSkipFirstRoundProofVariant;
+use crate::zkvm::bytecode::chunks::{
+    committed_lanes, validate_committed_bytecode_chunk_count,
+    DEFAULT_COMMITTED_BYTECODE_CHUNK_COUNT,
+};
 use crate::zkvm::claim_reductions::advice::ReductionPhase;
 use crate::zkvm::claim_reductions::RegistersClaimReductionSumcheckVerifier;
 use crate::zkvm::config::OneHotParams;
-use crate::zkvm::program::ProgramPreprocessing;
+use crate::zkvm::program::{ProgramMetadata, ProgramPreprocessing};
 #[cfg(feature = "prover")]
 use crate::zkvm::prover::JoltProverPreprocessing;
 #[cfg(feature = "zk")]
@@ -1733,13 +1737,20 @@ impl<
 }
 
 #[derive(Debug, Clone)]
-pub struct JoltSharedPreprocessing {
-    pub program: ProgramPreprocessing,
+pub struct JoltSharedPreprocessing<
+    PCS: CommitmentScheme = crate::poly::commitment::dory::DoryCommitmentScheme,
+> {
+    pub program: ProgramPreprocessing<PCS>,
+    pub program_meta: ProgramMetadata,
     pub memory_layout: MemoryLayout,
     pub max_padded_trace_length: usize,
+    pub bytecode_chunk_count: usize,
 }
 
-impl JoltSharedPreprocessing {
+impl<PCS: CommitmentScheme> JoltSharedPreprocessing<PCS>
+where
+    PCS::Commitment: CanonicalSerialize,
+{
     /// Blake2b-256 digest of the serialized preprocessing, used to bind
     /// the program identity to the Fiat-Shamir transcript.
     pub fn digest(&self) -> [u8; 32] {
@@ -1752,69 +1763,127 @@ impl JoltSharedPreprocessing {
     }
 }
 
-impl CanonicalSerialize for JoltSharedPreprocessing {
+impl<PCS: CommitmentScheme> CanonicalSerialize for JoltSharedPreprocessing<PCS>
+where
+    PCS::Commitment: CanonicalSerialize,
+{
     fn serialize_with_mode<W: std::io::Write>(
         &self,
         mut writer: W,
         compress: ark_serialize::Compress,
     ) -> Result<(), ark_serialize::SerializationError> {
         self.program.serialize_with_mode(&mut writer, compress)?;
+        self.program_meta
+            .serialize_with_mode(&mut writer, compress)?;
         self.memory_layout
             .serialize_with_mode(&mut writer, compress)?;
         self.max_padded_trace_length
+            .serialize_with_mode(&mut writer, compress)?;
+        self.bytecode_chunk_count
             .serialize_with_mode(&mut writer, compress)?;
         Ok(())
     }
 
     fn serialized_size(&self, compress: ark_serialize::Compress) -> usize {
         self.program.serialized_size(compress)
+            + self.program_meta.serialized_size(compress)
             + self.memory_layout.serialized_size(compress)
             + self.max_padded_trace_length.serialized_size(compress)
+            + self.bytecode_chunk_count.serialized_size(compress)
     }
 }
 
-impl CanonicalDeserialize for JoltSharedPreprocessing {
+impl<PCS: CommitmentScheme> CanonicalDeserialize for JoltSharedPreprocessing<PCS>
+where
+    PCS::Commitment: CanonicalDeserialize,
+{
     fn deserialize_with_mode<R: std::io::Read>(
         mut reader: R,
         compress: ark_serialize::Compress,
         validate: ark_serialize::Validate,
     ) -> Result<Self, ark_serialize::SerializationError> {
         let program = ProgramPreprocessing::deserialize_with_mode(&mut reader, compress, validate)?;
+        let program_meta = ProgramMetadata::deserialize_with_mode(&mut reader, compress, validate)?;
         let memory_layout = MemoryLayout::deserialize_with_mode(&mut reader, compress, validate)?;
         let max_padded_trace_length =
             usize::deserialize_with_mode(&mut reader, compress, validate)?;
+        let bytecode_chunk_count = usize::deserialize_with_mode(&mut reader, compress, validate)?;
         Ok(Self {
             program,
+            program_meta,
             memory_layout,
             max_padded_trace_length,
+            bytecode_chunk_count,
         })
     }
 }
 
-impl ark_serialize::Valid for JoltSharedPreprocessing {
+impl<PCS: CommitmentScheme> ark_serialize::Valid for JoltSharedPreprocessing<PCS>
+where
+    PCS::Commitment: ark_serialize::Valid,
+{
     fn check(&self) -> Result<(), ark_serialize::SerializationError> {
         self.program.check()?;
+        self.program_meta.check()?;
         self.memory_layout.check()?;
         Ok(())
     }
 }
 
-impl JoltSharedPreprocessing {
+impl<PCS: CommitmentScheme> JoltSharedPreprocessing<PCS> {
     #[tracing::instrument(skip_all, name = "JoltSharedPreprocessing::new")]
     pub fn new(
-        program: ProgramPreprocessing,
+        program: ProgramPreprocessing<PCS>,
         memory_layout: MemoryLayout,
         max_padded_trace_length: usize,
-    ) -> JoltSharedPreprocessing {
+    ) -> JoltSharedPreprocessing<PCS> {
         Self {
+            program_meta: program.meta(),
             program,
             memory_layout,
             max_padded_trace_length,
+            bytecode_chunk_count: DEFAULT_COMMITTED_BYTECODE_CHUNK_COUNT,
         }
     }
 
+    #[tracing::instrument(skip_all, name = "JoltSharedPreprocessing::new_committed")]
+    pub fn new_committed(
+        program: ProgramPreprocessing<PCS>,
+        memory_layout: MemoryLayout,
+        max_padded_trace_length: usize,
+        bytecode_chunk_count: usize,
+    ) -> JoltSharedPreprocessing<PCS> {
+        validate_committed_bytecode_chunk_count(bytecode_chunk_count);
+        assert!(
+            program.bytecode_len().is_multiple_of(bytecode_chunk_count),
+            "bytecode chunk count ({bytecode_chunk_count}) must divide bytecode size ({})",
+            program.bytecode_len()
+        );
+        let mut shared = Self {
+            program_meta: program.meta(),
+            program,
+            memory_layout,
+            max_padded_trace_length,
+            bytecode_chunk_count,
+        };
+        let (max_total_vars, max_log_k_chunk) = shared.compute_max_total_vars(true);
+        let generators = PCS::setup_prover(max_total_vars);
+        shared.program = shared.program.commit(
+            &shared.memory_layout,
+            &generators,
+            shared.bytecode_chunk_count,
+            max_log_k_chunk,
+        );
+        shared.program_meta = shared.program.meta();
+        shared
+    }
+
     pub fn bytecode(&self) -> &crate::zkvm::bytecode::BytecodePreprocessing {
-        self.program.bytecode()
+        &self
+            .program
+            .as_full()
+            .expect("full program preprocessing required")
+            .bytecode
     }
 
     pub fn bytecode_arc(&self) -> Arc<crate::zkvm::bytecode::BytecodePreprocessing> {
@@ -1822,7 +1891,84 @@ impl JoltSharedPreprocessing {
     }
 
     pub fn ram(&self) -> &RAMPreprocessing {
-        self.program.ram()
+        &self
+            .program
+            .as_full()
+            .expect("full program preprocessing required")
+            .ram
+    }
+
+    pub fn is_committed_mode(&self) -> bool {
+        self.program.is_committed()
+    }
+
+    pub fn bytecode_size(&self) -> usize {
+        self.program_meta.bytecode_len
+    }
+
+    #[inline]
+    pub fn committed_program_image_num_words(&self) -> usize {
+        self.program_meta
+            .committed_program_image_num_words(&self.memory_layout)
+    }
+
+    pub(crate) fn precommitted_candidate_total_vars(
+        &self,
+        include_committed: bool,
+        include_trusted_advice: bool,
+        include_untrusted_advice: bool,
+    ) -> Vec<usize> {
+        let mut candidates = Vec::with_capacity(
+            include_committed as usize * 2
+                + include_trusted_advice as usize
+                + include_untrusted_advice as usize,
+        );
+
+        if include_trusted_advice {
+            let (trusted_sigma, trusted_nu) = DoryGlobals::advice_sigma_nu_from_max_bytes(
+                self.memory_layout.max_trusted_advice_size as usize,
+            );
+            candidates.push(trusted_sigma + trusted_nu);
+        }
+
+        if include_untrusted_advice {
+            let (untrusted_sigma, untrusted_nu) = DoryGlobals::advice_sigma_nu_from_max_bytes(
+                self.memory_layout.max_untrusted_advice_size as usize,
+            );
+            candidates.push(untrusted_sigma + untrusted_nu);
+        }
+
+        if include_committed {
+            let chunk_cycle_log_t = (self.bytecode_size() / self.bytecode_chunk_count)
+                .next_power_of_two()
+                .log_2();
+            candidates.push(committed_lanes().log_2() + chunk_cycle_log_t);
+            candidates.push(self.committed_program_image_num_words().log_2());
+        }
+
+        candidates
+    }
+
+    pub(crate) fn compute_max_total_vars(&self, include_committed: bool) -> (usize, usize) {
+        use common::constants::ONEHOT_CHUNK_THRESHOLD_LOG_T;
+
+        let max_T = self.max_padded_trace_length.next_power_of_two();
+        let max_log_T = max_T.log_2();
+        let max_log_k_chunk = if max_log_T < ONEHOT_CHUNK_THRESHOLD_LOG_T {
+            4
+        } else {
+            8
+        };
+        let main_total_vars = max_log_k_chunk + max_log_T;
+        let precommitted_total_vars = self
+            .precommitted_candidate_total_vars(include_committed, true, true)
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        (
+            main_total_vars.max(precommitted_total_vars),
+            max_log_k_chunk,
+        )
     }
 }
 
@@ -1851,7 +1997,7 @@ where
     PCS: CommitmentScheme<Field = F>,
 {
     pub generators: PCS::VerifierSetup,
-    pub shared: JoltSharedPreprocessing,
+    pub shared: JoltSharedPreprocessing<PCS>,
     pub blindfold_setup: Option<BlindfoldSetup<C>>,
 }
 
@@ -1892,10 +2038,11 @@ impl<F: JoltField, C: JoltCurve<F = F>, PCS: CommitmentScheme<Field = F>>
 {
     #[tracing::instrument(skip_all, name = "JoltVerifierPreprocessing::new")]
     pub fn new(
-        shared: JoltSharedPreprocessing,
+        mut shared: JoltSharedPreprocessing<PCS>,
         generators: PCS::VerifierSetup,
         blindfold_setup: Option<BlindfoldSetup<C>>,
     ) -> Self {
+        shared.program = shared.program.to_verifier_program();
         Self {
             generators,
             shared,

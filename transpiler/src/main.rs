@@ -159,14 +159,29 @@ fn main() {
         real_preprocessing.shared.memory_layout
     );
 
+    let symbolic_program = match &real_preprocessing.shared.program {
+        jolt_core::zkvm::program::ProgramPreprocessing::Full(full) => {
+            jolt_core::zkvm::program::ProgramPreprocessing::Full(full.clone())
+        }
+        jolt_core::zkvm::program::ProgramPreprocessing::Committed(_) => {
+            panic!("committed preprocessing is not supported by the transpiler yet")
+        }
+    };
+    let symbolic_shared = jolt_core::zkvm::verifier::JoltSharedPreprocessing::<AstCommitmentScheme> {
+        program_meta: symbolic_program.meta(),
+        program: symbolic_program,
+        memory_layout: real_preprocessing.shared.memory_layout.clone(),
+        max_padded_trace_length: real_preprocessing.shared.max_padded_trace_length,
+        bytecode_chunk_count: real_preprocessing.shared.bytecode_chunk_count,
+    };
+
     // Convert to symbolic preprocessing: replace Dory generators with AstVerifierSetup stub.
-    // The `shared` field (memory layout, bytecode info) is reused as-is.
     // AstCommitmentScheme satisfies the CommitmentScheme trait but performs no cryptographic
     // operations. PCS verification is skipped in stages 1-6.
     let symbolic_preprocessing: JoltVerifierPreprocessing<MleAst, AstCurve, AstCommitmentScheme> =
         JoltVerifierPreprocessing {
             generators: transpiler::symbolic_traits::ast_commitment_scheme::AstVerifierSetup,
-            shared: real_preprocessing.shared.clone(),
+            shared: symbolic_shared,
             blindfold_setup: None,
         };
 

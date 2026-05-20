@@ -52,6 +52,7 @@ pub mod config;
 pub mod instruction;
 pub mod instruction_lookups;
 pub mod lookup_table;
+pub mod program;
 pub mod proof_serialization;
 #[cfg(feature = "prover")]
 pub mod prover;

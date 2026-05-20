@@ -434,7 +434,7 @@ impl<F: JoltField> HammingWeightClaimReductionProver<F> {
         // `params.r_cycle` is in BIG_ENDIAN (OpeningPoint) convention.
         let G_vecs = compute_all_G::<F>(
             trace,
-            &preprocessing.bytecode,
+            preprocessing.bytecode(),
             &preprocessing.memory_layout,
             one_hot_params,
             &params.r_cycle,

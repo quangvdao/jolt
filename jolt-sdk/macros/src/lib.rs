@@ -555,13 +555,12 @@ impl MacroBuilder {
                 };
                 let memory_layout = MemoryLayout::new(&memory_config);
 
+                let program_data = jolt::ProgramPreprocessing::preprocess(bytecode, memory_init, e_entry)?;
                 let preprocessing = JoltSharedPreprocessing::new(
-                    bytecode,
+                    program_data,
                     memory_layout,
-                    memory_init,
                     #max_trace_length,
-                    e_entry,
-                )?;
+                );
 
                 Ok(preprocessing)
             }

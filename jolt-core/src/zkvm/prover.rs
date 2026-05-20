@@ -37,11 +37,10 @@ use crate::{
             commitment_scheme::{StreamingCommitmentScheme, ZkEvalCommitment},
             dory::{DoryGlobals, DoryLayout},
         },
-        eq_poly::EqPolynomial,
         multilinear_polynomial::MultilinearPolynomial,
         opening_proof::{
-            compute_advice_lagrange_factor, DoryOpeningState, OpeningAccumulator,
-            ProverOpeningAccumulator, SumcheckId,
+            compute_lagrange_factor, DoryOpeningState, OpeningAccumulator, OpeningPoint,
+            ProverOpeningAccumulator, SumcheckId, BIG_ENDIAN,
         },
         rlc_polynomial::{RLCStreamingData, TraceSource},
     },
@@ -62,9 +61,9 @@ use crate::{
             HammingWeightClaimReductionParams, HammingWeightClaimReductionProver,
             IncClaimReductionSumcheckParams, IncClaimReductionSumcheckProver,
             InstructionLookupsClaimReductionSumcheckParams,
-            InstructionLookupsClaimReductionSumcheckProver, RaReductionParams,
-            RamRaClaimReductionSumcheckProver, RegistersClaimReductionSumcheckParams,
-            RegistersClaimReductionSumcheckProver,
+            InstructionLookupsClaimReductionSumcheckProver, PrecommittedPolynomial,
+            RaReductionParams, RamRaClaimReductionSumcheckProver,
+            RegistersClaimReductionSumcheckParams, RegistersClaimReductionSumcheckProver,
         },
         config::OneHotParams,
         instruction_lookups::{
@@ -275,6 +274,96 @@ impl<
             trusted_advice_hint,
             final_memory_state,
         )
+    }
+
+    #[inline]
+    fn main_total_vars(&self) -> usize {
+        let trace_log_t = self.trace.len().log_2();
+        let log_k_chunk = self.one_hot_params.log_k_chunk;
+        JoltSharedPreprocessing::<PCS>::max_total_vars_from_candidates(
+            trace_log_t + log_k_chunk,
+            self.preprocessing.shared.precommitted_candidate_total_vars(
+                false,
+                !self.program_io.trusted_advice.is_empty(),
+                !self.program_io.untrusted_advice.is_empty(),
+            ),
+        )
+    }
+
+    fn stage8_opening_point(&self) -> OpeningPoint<BIG_ENDIAN, F> {
+        let native_main_vars = self.trace.len().log_2() + self.one_hot_params.log_k_chunk;
+        let mut opening_candidates: Vec<(&'static str, OpeningPoint<BIG_ENDIAN, F>)> = Vec::new();
+
+        if let Some((point, _)) = self
+            .opening_accumulator
+            .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
+        {
+            opening_candidates.push(("trusted_advice", point));
+        }
+        if let Some((point, _)) = self
+            .opening_accumulator
+            .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
+        {
+            opening_candidates.push(("untrusted_advice", point));
+        }
+
+        let max_len = opening_candidates
+            .iter()
+            .map(|(_, point)| point.r.len())
+            .max()
+            .unwrap_or(0);
+        if max_len > native_main_vars {
+            let dominant = opening_candidates
+                .iter()
+                .find(|(_, point)| point.r.len() == max_len)
+                .expect("at least one dominant precommitted candidate expected");
+            for (name, point) in opening_candidates
+                .iter()
+                .filter(|(_, point)| point.r.len() == max_len)
+            {
+                assert_eq!(
+                    point.r, dominant.1.r,
+                    "incompatible dominant precommitted anchors: {} and {} have equal dimensionality {} but different opening points",
+                    dominant.0, name, max_len
+                );
+            }
+            return OpeningPoint::<BIG_ENDIAN, F>::new(dominant.1.r.clone());
+        }
+
+        let (hamming_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
+            CommittedPolynomial::InstructionRa(0),
+            SumcheckId::HammingWeightClaimReduction,
+        );
+        let r_address_stage7 = hamming_point.r[..self.one_hot_params.log_k_chunk].to_vec();
+        let r_cycle_stage6 = self
+            .opening_accumulator
+            .get_committed_polynomial_opening(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            )
+            .0
+            .r;
+
+        match DoryGlobals::get_layout() {
+            DoryLayout::AddressMajor => OpeningPoint::<BIG_ENDIAN, F>::new(
+                [r_cycle_stage6.as_slice(), r_address_stage7.as_slice()].concat(),
+            ),
+            DoryLayout::CycleMajor => {
+                let native_cycle = &hamming_point.r[self.one_hot_params.log_k_chunk..];
+                assert!(
+                    r_cycle_stage6.len() >= native_cycle.len(),
+                    "stage6 cycle challenges shorter than native cycle vars"
+                );
+                assert!(
+                    r_cycle_stage6[..native_cycle.len()] == *native_cycle,
+                    "cycle-major Stage-8 expects stage6 cycle prefix to equal native cycle vars"
+                );
+                let cycle_extra = &r_cycle_stage6[native_cycle.len()..];
+                OpeningPoint::<BIG_ENDIAN, F>::new(
+                    [cycle_extra, r_address_stage7.as_slice(), native_cycle].concat(),
+                )
+            }
+        }
     }
 
     /// Adjusts the padded trace length to ensure the main Dory matrix is large enough
@@ -673,29 +762,27 @@ impl<
         Vec<PCS::Commitment>,
         HashMap<CommittedPolynomial, PCS::OpeningProofHint>,
     ) {
-        let _guard = DoryGlobals::initialize_context(
+        let main_total_vars = self.main_total_vars();
+        let trace = Arc::clone(&self.trace);
+        let _guard = DoryGlobals::initialize_main_with_log_embedding(
             1 << self.one_hot_params.log_k_chunk,
-            self.padded_trace_len,
-            DoryContext::Main,
+            trace.len(),
+            main_total_vars,
             Some(DoryGlobals::get_layout()),
         );
 
         let polys = all_committed_polynomials(&self.one_hot_params);
-        let T = DoryGlobals::get_T();
+        let T = DoryGlobals::get_embedded_t();
 
-        // For AddressMajor, use non-streaming commit path since streaming assumes CycleMajor layout
-        let (commitments, hint_map) = if DoryGlobals::get_layout() == DoryLayout::AddressMajor {
+        // AddressMajor uses non-streaming commit path, and we also use non-streaming when
+        // the Stage 8 embedding domain exceeds the trace domain.
+        let use_materialized_commit =
+            DoryGlobals::get_layout() == DoryLayout::AddressMajor || self.trace.len() != T;
+        let (commitments, hint_map) = if use_materialized_commit {
             tracing::debug!(
-                "Using non-streaming commit path for AddressMajor layout with {} polynomials",
+                "Using non-streaming commit path with {} polynomials",
                 polys.len()
             );
-
-            // Materialize the trace for non-streaming commit
-            let trace: Vec<Cycle> = self
-                .lazy_trace
-                .clone()
-                .pad_using(T, |_| Cycle::NoOp)
-                .collect();
 
             // Generate witnesses and commit using the regular (non-streaming) path
             let (commitments, hints): (Vec<_>, Vec<_>) = polys
@@ -1938,70 +2025,71 @@ impl<
     ) -> PCS::Proof {
         tracing::info!("Stage 8 proving (Dory batch opening)");
 
-        let _guard = DoryGlobals::initialize_context(
+        let _guard = DoryGlobals::initialize_main_with_log_embedding(
             self.one_hot_params.k_chunk,
             self.padded_trace_len,
-            DoryContext::Main,
+            self.main_total_vars(),
             Some(DoryGlobals::get_layout()),
         );
 
-        // Get the unified opening point from HammingWeightClaimReduction
-        // This contains (r_address_stage7 || r_cycle_stage6) in big-endian
-        let (opening_point, _) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::InstructionRa(0),
-            SumcheckId::HammingWeightClaimReduction,
-        );
-
-        let log_k_chunk = self.one_hot_params.log_k_chunk;
-        let r_address_stage7 = &opening_point.r[..log_k_chunk];
+        let opening_point = self.stage8_opening_point();
 
         let mut polynomial_claims = Vec::new();
         let mut scaling_factors = Vec::new();
+        let mut precommitted_polys: HashMap<CommittedPolynomial, PrecommittedPolynomial<F>> =
+            HashMap::new();
 
         // Dense polynomials: RamInc and RdInc (from IncClaimReduction in Stage 6)
         // at r_cycle_stage6 only (length log_T)
-        let (_, ram_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::RamInc,
-            SumcheckId::IncClaimReduction,
-        );
-        let (_, rd_inc_claim) = self.opening_accumulator.get_committed_polynomial_opening(
-            CommittedPolynomial::RdInc,
-            SumcheckId::IncClaimReduction,
-        );
+        let (ram_inc_point, ram_inc_claim) =
+            self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RamInc,
+                SumcheckId::IncClaimReduction,
+            );
+        let (rd_inc_point, rd_inc_claim) =
+            self.opening_accumulator.get_committed_polynomial_opening(
+                CommittedPolynomial::RdInc,
+                SumcheckId::IncClaimReduction,
+            );
 
-        // Dense polynomials are zero-padded in the Dory matrix, so their evaluation
-        // includes a factor eq(r_addr, 0) = ∏(1 − r_addr_i).
-        let lagrange_factor: F = EqPolynomial::zero_selector(r_address_stage7);
-        polynomial_claims.push((CommittedPolynomial::RamInc, ram_inc_claim * lagrange_factor));
-        scaling_factors.push(lagrange_factor);
-        polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * lagrange_factor));
-        scaling_factors.push(lagrange_factor);
+        let ram_inc_lagrange = compute_lagrange_factor::<F>(&opening_point.r, &ram_inc_point.r);
+        let rd_inc_lagrange = compute_lagrange_factor::<F>(&opening_point.r, &rd_inc_point.r);
+        polynomial_claims.push((
+            CommittedPolynomial::RamInc,
+            ram_inc_claim * ram_inc_lagrange,
+        ));
+        scaling_factors.push(ram_inc_lagrange);
+        polynomial_claims.push((CommittedPolynomial::RdInc, rd_inc_claim * rd_inc_lagrange));
+        scaling_factors.push(rd_inc_lagrange);
 
         // Sparse polynomials: all RA polys (from HammingWeightClaimReduction)
         // These are at (r_address_stage7, r_cycle_stage6)
         for i in 0..self.one_hot_params.instruction_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            let (ra_point, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::InstructionRa(i),
                 SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim));
-            scaling_factors.push(F::one());
+            let lagrange = compute_lagrange_factor::<F>(&opening_point.r, &ra_point.r);
+            polynomial_claims.push((CommittedPolynomial::InstructionRa(i), claim * lagrange));
+            scaling_factors.push(lagrange);
         }
         for i in 0..self.one_hot_params.bytecode_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            let (ra_point, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::BytecodeRa(i),
                 SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim));
-            scaling_factors.push(F::one());
+            let lagrange = compute_lagrange_factor::<F>(&opening_point.r, &ra_point.r);
+            polynomial_claims.push((CommittedPolynomial::BytecodeRa(i), claim * lagrange));
+            scaling_factors.push(lagrange);
         }
         for i in 0..self.one_hot_params.ram_d {
-            let (_, claim) = self.opening_accumulator.get_committed_polynomial_opening(
+            let (ra_point, claim) = self.opening_accumulator.get_committed_polynomial_opening(
                 CommittedPolynomial::RamRa(i),
                 SumcheckId::HammingWeightClaimReduction,
             );
-            polynomial_claims.push((CommittedPolynomial::RamRa(i), claim));
-            scaling_factors.push(F::one());
+            let lagrange = compute_lagrange_factor::<F>(&opening_point.r, &ra_point.r);
+            polynomial_claims.push((CommittedPolynomial::RamRa(i), claim * lagrange));
+            scaling_factors.push(lagrange);
         }
 
         // Advice polynomials: TrustedAdvice and UntrustedAdvice (from AdviceClaimReduction in Stage 6)
@@ -2016,8 +2104,7 @@ impl<
             .opening_accumulator
             .get_advice_opening(AdviceKind::Trusted, SumcheckId::AdviceClaimReduction)
         {
-            let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+            let lagrange_factor = compute_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
             polynomial_claims.push((
                 CommittedPolynomial::TrustedAdvice,
                 advice_claim * lagrange_factor,
@@ -2033,8 +2120,7 @@ impl<
             .opening_accumulator
             .get_advice_opening(AdviceKind::Untrusted, SumcheckId::AdviceClaimReduction)
         {
-            let lagrange_factor =
-                compute_advice_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
+            let lagrange_factor = compute_lagrange_factor::<F>(&opening_point.r, &advice_point.r);
             polynomial_claims.push((
                 CommittedPolynomial::UntrustedAdvice,
                 advice_claim * lagrange_factor,
@@ -2084,13 +2170,18 @@ impl<
             memory_layout: self.preprocessing.shared.memory_layout.clone(),
         });
 
-        // Build advice polynomials map for RLC
-        let mut advice_polys = HashMap::new();
+        // Add advice polynomials to precommitted polynomials map for RLC.
         if let Some(poly) = self.advice.trusted_advice_polynomial.take() {
-            advice_polys.insert(CommittedPolynomial::TrustedAdvice, poly);
+            precommitted_polys.insert(
+                CommittedPolynomial::TrustedAdvice,
+                PrecommittedPolynomial::Dense(poly),
+            );
         }
         if let Some(poly) = self.advice.untrusted_advice_polynomial.take() {
-            advice_polys.insert(CommittedPolynomial::UntrustedAdvice, poly);
+            precommitted_polys.insert(
+                CommittedPolynomial::UntrustedAdvice,
+                PrecommittedPolynomial::Dense(poly),
+            );
         }
 
         // Build streaming RLC polynomial directly (no witness poly regeneration!)
@@ -2100,7 +2191,7 @@ impl<
             TraceSource::Materialized(Arc::clone(&self.trace)),
             streaming_data,
             opening_proof_hints,
-            advice_polys,
+            precommitted_polys,
         );
 
         let (proof, _y_blinding) = PCS::prove(

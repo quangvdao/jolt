@@ -2,6 +2,7 @@ pub mod advice;
 pub mod hamming_weight;
 pub mod increments;
 pub mod instruction_lookups;
+mod precommitted;
 pub mod ram_ra;
 pub mod registers;
 
@@ -20,6 +21,11 @@ pub use increments::{
 pub use instruction_lookups::{
     InstructionLookupsClaimReductionSumcheckParams, InstructionLookupsClaimReductionSumcheckProver,
     InstructionLookupsClaimReductionSumcheckVerifier,
+};
+pub use precommitted::{
+    permute_precommitted_polys, precommitted_eq_evals_with_scaling, precommitted_skip_round_scale,
+    precommitted_sumcheck_inverse_index_permutation, PrecommittedClaimReduction, PrecommittedPhase,
+    PrecommittedPolynomial, PrecommittedSchedulingReference,
 };
 pub use ram_ra::{
     RaReductionParams, RamRaClaimReductionSumcheckProver, RamRaClaimReductionSumcheckVerifier,

@@ -48,7 +48,7 @@ use crate::poly::commitment::dory::DoryGlobals;
 use crate::poly::opening_proof::{OpeningPoint, BIG_ENDIAN};
 use crate::subprotocols::sumcheck::{BatchedSumcheck, ClearSumcheckProof, SumcheckInstanceProof};
 use crate::zkvm::claim_reductions::{
-    AdviceClaimReductionVerifier, AdviceKind, HammingWeightClaimReductionVerifier, ReductionPhase,
+    AdviceClaimReductionVerifier, AdviceKind, HammingWeightClaimReductionVerifier,
     RegistersClaimReductionSumcheckVerifier,
 };
 use crate::zkvm::config::{OneHotParams, ProgramMode};
@@ -59,7 +59,7 @@ use crate::zkvm::{
     },
     claim_reductions::{
         IncClaimReductionSumcheckVerifier, InstructionLookupsClaimReductionSumcheckVerifier,
-        RamRaClaimReductionSumcheckVerifier,
+        PrecommittedClaimReduction, RamRaClaimReductionSumcheckVerifier,
     },
     fiat_shamir_preamble,
     instruction_lookups::{
@@ -657,21 +657,32 @@ impl<
             &self.opening_accumulator,
             &mut self.transcript,
         );
+        let main_total_vars = self.proof.trace_length.log_2() + self.one_hot_params.log_k_chunk;
+        let precommitted_candidates = self.preprocessing.shared.precommitted_candidate_total_vars(
+            false,
+            self.trusted_advice_commitment.is_some(),
+            self.proof.untrusted_advice_commitment.is_some(),
+        );
+        let precommitted_scheduling_reference =
+            PrecommittedClaimReduction::<F>::scheduling_reference(
+                main_total_vars,
+                &precommitted_candidates,
+            );
 
-        // Advice claim reduction (Phase 1 in Stage 6): trusted and untrusted are separate instances.
+        // Advice claim reduction (Phase 1 in Stage 6b): trusted and untrusted are separate instances.
         if self.trusted_advice_commitment.is_some() {
             self.advice_reduction_verifier_trusted = Some(AdviceClaimReductionVerifier::new(
                 AdviceKind::Trusted,
-                &self.program_io.memory_layout,
-                self.proof.trace_length,
+                self.program_io.memory_layout.max_trusted_advice_size as usize,
+                precommitted_scheduling_reference,
                 &self.opening_accumulator,
             ));
         }
         if self.proof.untrusted_advice_commitment.is_some() {
             self.advice_reduction_verifier_untrusted = Some(AdviceClaimReductionVerifier::new(
                 AdviceKind::Untrusted,
-                &self.program_io.memory_layout,
-                self.proof.trace_length,
+                self.program_io.memory_layout.max_untrusted_advice_size as usize,
+                precommitted_scheduling_reference,
                 &self.opening_accumulator,
             ));
         }
@@ -722,7 +733,7 @@ impl<
         {
             let mut params = advice_reduction_verifier_trusted.params.borrow_mut();
             if params.num_address_phase_rounds() > 0 {
-                params.phase = ReductionPhase::AddressVariables;
+                params.transition_to_address_phase();
                 instances.push(advice_reduction_verifier_trusted);
             }
         }
@@ -731,7 +742,7 @@ impl<
         {
             let mut params = advice_reduction_verifier_untrusted.params.borrow_mut();
             if params.num_address_phase_rounds() > 0 {
-                params.phase = ReductionPhase::AddressVariables;
+                params.transition_to_address_phase();
                 instances.push(advice_reduction_verifier_untrusted);
             }
         }

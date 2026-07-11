@@ -1,0 +1,17 @@
+[package]
+name = "jolt-android"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Using prover feature for now - will need separate build configuration for actual Android
+jolt-core = { path = "../jolt-core", default-features = false, features = ["prover"] }
+jni = "0.21"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

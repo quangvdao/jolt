@@ -1,6 +1,8 @@
 # Running `jolt-core` on iOS (no SSH)
 
-Jolt's CLI depends on desktop-only tooling (`rustup`, `tar`, filesystem writes under `~/.jolt`, etc.). To run proofs directly on an iPhone you must embed the `jolt-core` library inside an Xcode app, disable the `host` feature set, and expose the prover/verifier logic through your own C-compatible API. This guide walks through the minimum viable setup.
+Jolt's CLI depends on desktop-only tooling (`rustup`, `tar`, filesystem writes under `~/.jolt`, etc.). To run proofs directly on an iPhone, use the `jolt-ios` FFI crate which provides a C-compatible API for embedding Jolt in iOS apps. This guide walks through the setup and integration process.
+
+**Note:** The `jolt-ios` crate currently provides a skeleton API. Full proof generation and verification requires additional implementation work (see `jolt-ios/README.md`).
 
 ## 1. Prerequisites
 
@@ -15,8 +17,10 @@ Jolt's CLI depends on desktop-only tooling (`rustup`, `tar`, filesystem writes u
 
 ## 2. Build configuration (already in repo)
 
-- The default feature flag `host` pulls in blocking dependencies and is turned **off** for iOS builds by passing `--no-default-features --features "minimal prover"`.
-- `Cargo.toml` now advertises a `staticlib` crate type so that Cargo emits `libjolt_core.a`, which can be linked into Swift/Objective-C projects.
+- The `jolt-ios` crate provides a C FFI layer on top of `jolt-core`
+- It uses the `prover` feature (which includes `minimal`) without the `host` feature
+- `jolt-ios/Cargo.toml` configures `crate-type = ["staticlib", "cdylib"]` so Cargo emits `libjolt_ios.a`
+- C headers are auto-generated using `cbindgen` from the Rust code
 
 ## 3. Cross-compile the Rust static libraries
 
@@ -30,38 +34,51 @@ Environment knobs:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `JOLT_IOS_FEATURES` | `"minimal prover"` | Feature set passed to `cargo`. Include extra features if your FFI shim needs them. |
-| `JOLT_IOS_TARGETS` | `"aarch64-apple-ios x86_64-apple-ios"` | Space-separated list of targets to build. Remove `x86_64` if you only care about real devices (Apple Silicon simulators use `arm64`, set `JOLT_IOS_TARGETS="aarch64-apple-ios aarch64-apple-ios-sim"`). |
-| `JOLT_IOS_BUILD_TYPE` | `release` | Use `debug` or the name of a custom Cargo profile if desired. |
-| `JOLT_IOS_HEADERS` | _(unset)_ | Path to the directory that contains the headers generated for your FFI shim. When set, the script will call `xcodebuild -create-xcframework` to emit `target/ios/JoltCore.xcframework`. |
+| `JOLT_IOS_PACKAGE` | `"jolt-ios"` | Cargo package name to build. Use `"jolt-core"` if building the core library directly. |
+| `JOLT_IOS_FEATURES` | `"prover"` | Feature set passed to `cargo`. |
+| `JOLT_IOS_TARGETS` | `"aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios"` | Space-separated list of targets. Includes device (aarch64), Apple Silicon sim (aarch64-sim), and Intel sim (x86_64). |
+| `JOLT_IOS_BUILD_TYPE` | `release` | Use `debug` or a custom Cargo profile name. |
+| `JOLT_IOS_HEADERS` | _(unset)_ | Path to headers directory. When set, creates `target/ios/JoltCore.xcframework`. For `jolt-ios`, use `jolt-ios/include`. |
 
-Artifacts are copied to `target/ios/libjolt_core-<target>.a`. You can manually run `xcodebuild -create-xcframework` later once you have headers.
+Artifacts are copied to `target/ios/libjolt_ios-<target>.a`. If `JOLT_IOS_HEADERS` is set, an `.xcframework` bundle is created for easy Xcode integration.
 
-## 4. Add a C-compatible facade
+## 4. The `jolt-ios` FFI crate
 
-Create (or reuse) a small Rust crate that depends on `jolt-core`, exposes the functions you need via `#[no_mangle] extern "C"`, and ensures the inputs/outputs are plain-old-data. Example skeleton:
+The repository includes a `jolt-ios` crate that provides a C-compatible API:
 
-```rust
-// ffi/src/lib.rs
-use jolt_core::zkvm::{prover::JoltCpuProver, verifier::JoltVerifier};
+```c
+// Generate a proof from an ELF binary
+jolt_proof_result jolt_prove(
+    const uint8_t* elf_bytes,
+    size_t elf_len,
+    const uint8_t* input_bytes,
+    size_t input_len,
+    size_t max_input_size,
+    size_t max_output_size
+);
 
-#[repr(C)]
-pub struct JoltStatus {
-    pub ok: bool,
-    pub cycles: u64,
-}
+// Verify a proof
+jolt_verify_result jolt_verify(
+    const uint8_t* proof_data,
+    size_t proof_len,
+    const uint8_t* preprocessing_data,
+    size_t preprocessing_len,
+    const uint8_t* expected_output,
+    size_t expected_output_len
+);
 
-#[no_mangle]
-pub extern "C" fn jolt_prove(program: *const u8, program_len: usize) -> JoltStatus {
-    // Safety + slice conversion omitted for brevity.
-    // Instantiate preprocessing, run prover, serialize proof, etc.
-    JoltStatus { ok: true, cycles: 0 }
-}
+// Memory management
+void jolt_free_buffer(uint8_t* ptr, size_t len);
 ```
 
-- Build this crate with the same feature set as `jolt-core` (typically `minimal prover`).
-- Run `cbindgen --config cbindgen.toml --crate ffi --output ios/include/jolt_ffi.h` to generate the header referenced by `JOLT_IOS_HEADERS`.
-- Re-run `scripts/build-ios.sh` so the `.xcframework` includes your new header.
+**Current Status:** The crate compiles and exports the API, but `jolt_prove` and `jolt_verify` return `ERROR_NOT_IMPLEMENTED`. See `jolt-ios/README.md` for implementation details and next steps.
+
+To regenerate headers after modifying the FFI:
+
+```bash
+cd jolt-ios
+cbindgen --config cbindgen.toml --output include/jolt_ffi.h
+```
 
 ## 5. Integrate inside an Xcode app
 

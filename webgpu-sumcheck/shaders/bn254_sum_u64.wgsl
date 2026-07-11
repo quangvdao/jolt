@@ -70,9 +70,7 @@ var<workgroup> sc_shared_g0: array<Fr, WORKGROUP_SIZE>;
 var<workgroup> sc_shared_g1: array<Fr, WORKGROUP_SIZE>;
 var<workgroup> sc_shared_g2: array<Fr, WORKGROUP_SIZE>;
 
-fn fr_zero() -> Fr {
-    return Fr(vec4<u64>(u64(0u), u64(0u), u64(0u), u64(0u)));
-}
+const FR_ZERO : Fr = Fr(vec4<u64>(u64(0u), u64(0u), u64(0u), u64(0u)));
 
 // BN254 scalar field modulus in base-2^64, little-endian, represented via
 // 32-bit chunks so that all numeric literals fit within 32 bits.
@@ -179,7 +177,7 @@ fn fr_to_limbs(a: Fr) -> array<u64, 4u> {
 }
 
 fn fr_from_limbs(limbs: ptr<function, array<u64, 4u>>) -> Fr {
-    var r: Fr = fr_zero();
+    var r: Fr = FR_ZERO;
     var i: u32 = 0u;
     loop {
         if (i >= FR_NUM_LIMBS) {
@@ -192,7 +190,7 @@ fn fr_from_limbs(limbs: ptr<function, array<u64, 4u>>) -> Fr {
 }
 
 fn fr_add_raw(a: Fr, b: Fr) -> Fr {
-    var r: Fr = fr_zero();
+    var r: Fr = FR_ZERO;
     var tmp: Add64Result;
     var carry: u64 = u64(0u);
     var i: u32 = 0u;
@@ -287,7 +285,7 @@ fn fr_add(a: Fr, b: Fr) -> Fr {
 }
 
 fn fr_sub_raw(a: Fr, b: Fr) -> Fr {
-    var r: Fr = fr_zero();
+    var r: Fr = FR_ZERO;
     var borrow: u64 = u64(0u);
     var i: u32 = 0u;
     loop {
@@ -445,7 +443,7 @@ fn main(
     let idx = global_id.x;
     let local = local_id.x;
 
-    var acc: Fr = fr_zero();
+    var acc: Fr = FR_ZERO;
     if (idx < params.len) {
         if (params.phase == 0u) {
             let a = p_buf.data[idx];
@@ -505,9 +503,9 @@ fn sumcheck_eval_round(
     let len = sc_params.len;
     let pair_idx = global_id.x;
 
-    var acc0: Fr = fr_zero(); // sum of A coefficients
-    var acc1: Fr = fr_zero(); // sum of B coefficients
-    var acc2: Fr = fr_zero(); // sum of C coefficients
+    var acc0: Fr = FR_ZERO; // sum of A coefficients
+    var acc1: Fr = FR_ZERO; // sum of B coefficients
+    var acc2: Fr = FR_ZERO; // sum of C coefficients
 
     let base = 2u * pair_idx;
     if (base + 1u < len) {
@@ -573,9 +571,9 @@ fn sumcheck_eval_bind_round(
     let len = sc_params.len;
     let pair_idx = global_id.x;
 
-    var acc0: Fr = fr_zero(); // sum of A coefficients
-    var acc1: Fr = fr_zero(); // sum of B coefficients
-    var acc2: Fr = fr_zero(); // sum of C coefficients
+    var acc0: Fr = FR_ZERO; // sum of A coefficients
+    var acc1: Fr = FR_ZERO; // sum of B coefficients
+    var acc2: Fr = FR_ZERO; // sum of C coefficients
 
     let base = 2u * pair_idx;
     if (base + 1u < len) {
@@ -656,9 +654,9 @@ fn sumcheck_reduce_coeffs(
     let len = sc_params.len;
     let idx = global_id.x;
 
-    var acc0: Fr = fr_zero();
-    var acc1: Fr = fr_zero();
-    var acc2: Fr = fr_zero();
+    var acc0: Fr = FR_ZERO;
+    var acc1: Fr = FR_ZERO;
+    var acc2: Fr = FR_ZERO;
 
     if (idx < len) {
         acc0 = sc_g0_partial.data[idx];

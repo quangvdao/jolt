@@ -16,6 +16,9 @@ Jolt is a zkVM (zero-knowledge virtual machine) for RISC-V, built to be the simp
 
 ### Papers
 
+[Speeding Up Sum-Check Proving (ACM CCS 2026): artifact and reproduction guide](ARTIFACT.md) \
+Quang Dao, Zachary DeStefano, Suyash Bagad, Yuval Domb, Justin Thaler
+
 [Jolt: SNARKs for Virtual Machines via Lookups](https://eprint.iacr.org/2023/1217) \
 Arasu Arun, Srinath Setty, Justin Thaler
 
@@ -103,7 +106,10 @@ To generate a trace, run e.g.
 
 ```cargo run --release -p jolt-core profile --name sha3 --format chrome```
 
-Where `--name` can be `sha2`, `sha3`, `sha2-chain`, `fibonacci`, or `btreemap`. The corresponding guest programs can be found in the [`examples`](./examples/) directory. The benchmark inputs are provided in [`bench.rs`](./jolt-core/src/benches/bench.rs).
+Where `--name` can be `sha2`, `sha3`, `sha2-chain`, `fibonacci`, or `btreemap`.
+The corresponding guest programs can be found in the [`examples`](./examples/)
+directory. The SHA2-chain benchmark inputs used by this artifact are provided
+in [`bench.rs`](./examples/sha2-chain/src/bench.rs).
 
 The above command will output a JSON file in the workspace rootwith a name `trace-<timestamp>.json`, which can be viewed in [Perfetto](https://ui.perfetto.dev/).
 

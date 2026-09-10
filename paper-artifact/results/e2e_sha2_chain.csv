@@ -1,0 +1,5 @@
+scale,prove_mean_s,prove_stddev_s,ra_virtualization_share_percent,spartan_outer_share_percent,peak_rss_gb,runs,threads,source
+22,9.76,0.12,8.0,3.0,4.98,3,12,end_to_end_and_trace_spans
+23,15.72,0.18,9.6,3.4,9.91,3,12,end_to_end_and_trace_spans
+24,29.79,0.38,10.2,3.6,14.12,3,12,end_to_end_and_trace_spans
+25,51.09,1.11,11.8,4.2,27.67,3,12,end_to_end_and_trace_spans

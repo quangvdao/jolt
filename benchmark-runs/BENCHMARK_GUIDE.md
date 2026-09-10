@@ -1,6 +1,12 @@
 # Jolt Benchmark Guide
 
-This guide documents the benchmark setup for reproducible performance measurements of Jolt's prover. These benchmarks are used for the paper evaluation.
+This is the general Jolt performance guide. For the CCS 2026 paper artifact,
+start with the repository-level [`ARTIFACT.md`](../ARTIFACT.md); it identifies
+the exact paper experiments, processed results, thread counts, and memory
+requirements. Use `--locked` on Cargo commands when reproducing paper results.
+
+This guide documents the benchmark setup for reproducible performance
+measurements of Jolt's prover.
 
 ## Quick Start
 
@@ -64,7 +70,7 @@ sha2_iters = target_cycles / 3396  (cycles per SHA256)
 ### Basic Usage
 
 ```bash
-cd /path/to/jolt-spartan
+cd /path/to/jolt
 
 # Run at scale 24 with 3 repetitions
 RUST_LOG=info SCALE=24 BENCH_RUNS=3 cargo run --release -p sha2-chain --bin sha2-chain-bench
@@ -146,7 +152,9 @@ RUSTFLAGS="-C target-cpu=native -C opt-level=3" cargo run --release -p sha2-chai
 
 ### 4. Full Optimization Script
 
-See `scripts/optimize_machine.sh` for comprehensive setup.
+The legacy `scripts/optimize_machine.sh` helper changes Linux host settings. It
+is not needed for the paper artifact. Review it before use; do not run it on a
+shared machine.
 
 ---
 
@@ -209,11 +217,13 @@ SCALE=24 BENCH_RUNS=5 cargo run --release -p sha2-chain --bin sha2-chain-bench 2
 
 ## TODO
 
-- [ ] Add memory usage tracking
 - [ ] Add proof size measurement
 - [ ] Support other benchmarks (fibonacci, btreemap, sha3-chain)
 - [ ] CSV output for automated analysis
 - [ ] Warmup runs option
+
+Memory measurement for the CCS 2026 experiments is implemented by
+`jolt-core/src/bin/spartan_outer_memory.rs`; see [`ARTIFACT.md`](../ARTIFACT.md).
 
 ---
 

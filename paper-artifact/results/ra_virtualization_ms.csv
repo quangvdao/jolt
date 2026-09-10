@@ -1,0 +1,5 @@
+ra_virtual_polys,degree,optimized_total_ms,baseline_total_ms,total_speedup,optimized_compute_message_ms,baseline_compute_message_ms,kernel_speedup,optimized_prove_share_percent,baseline_prove_share_percent,scale,threads,source
+8,5,921,1602,1.74,690,1350,1.96,8.4,13.0,22,12,trace_spans
+4,9,1247,2135,1.71,1013,1891,1.87,11.2,17.5,22,12,trace_spans
+2,17,2254,3837,1.70,2011,3595,1.79,17.1,26.0,22,12,trace_spans
+1,33,2979,6501,2.18,2738,6258,2.29,22.8,39.7,22,12,trace_spans

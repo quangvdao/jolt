@@ -1,0 +1,12 @@
+sha2_iterations,univariate_skip_gb,evaluation_basis_streaming_gb,cross_product_streaming_gb,source
+8,0.105,0.105,0.105,setup_normalized_process_peak_rss
+16,0.100,0.101,0.101,setup_normalized_process_peak_rss
+32,0.095,0.094,0.095,setup_normalized_process_peak_rss
+64,0.082,0.082,0.082,setup_normalized_process_peak_rss
+128,0.136,0.057,0.057,setup_normalized_process_peak_rss
+256,0.272,0.011,0.016,setup_normalized_process_peak_rss
+512,0.539,0.015,0.020,setup_normalized_process_peak_rss
+1024,1.078,0.013,0.021,setup_normalized_process_peak_rss
+2048,2.152,0.015,0.028,setup_normalized_process_peak_rss
+4096,4.300,0.017,0.032,setup_normalized_process_peak_rss
+8192,8.593,0.018,0.036,setup_normalized_process_peak_rss

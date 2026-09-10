@@ -1,0 +1,8 @@
+sha2_iterations,baseline_gb,split_eq_gb,delayed_reduction_gb,round_batched_gb,univariate_skip_gb,source
+128,3.280,2.207,2.207,0.329,0.195,process_peak_rss
+256,6.552,4.405,4.406,0.649,0.380,process_peak_rss
+512,13.094,8.802,8.799,1.286,0.749,process_peak_rss
+1024,14.387,12.386,12.386,2.389,1.386,process_peak_rss
+2048,28.202,24.762,24.761,4.763,2.760,process_peak_rss
+4096,28.005,46.102,46.155,9.518,5.761,process_peak_rss
+8192,50.054,46.610,46.998,15.014,11.511,process_peak_rss

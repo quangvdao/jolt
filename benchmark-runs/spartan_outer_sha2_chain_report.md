@@ -1,6 +1,6 @@
 # Spartan outer sumcheck benchmark results (sha2-chain)
 
-Source: `/Users/quang.dao/.cursor/projects/Users-quang-dao-Documents-SNARKs-jolt-spartan/agent-tools/5e0f33cc-a22d-47d7-9fdf-6eb376794b6a.txt`
+Source: historical Criterion console output. The original raw console capture is no longer included.
 
 ## Extracted timings
 All times are Criterion-estimated \([low, mid, high]\). Units are preserved per value.
@@ -51,7 +51,7 @@ For each variant, this is `mid(N*2) / mid(N)` (midpoints converted to ms).
 
 # Spartan outer sumcheck benchmark results (sha2-chain)
 
-Source: `/Users/quang.dao/.cursor/projects/Users-quang-dao-Documents-SNARKs-jolt-spartan/agent-tools/5e0f33cc-a22d-47d7-9fdf-6eb376794b6a.txt`
+Source: historical Criterion console output. The original raw console capture is no longer included.
 
 ## Extracted timings
 All times are Criterion-estimated \([low, mid, high]\). Units are preserved per value.
@@ -99,4 +99,3 @@ For each variant, this is `mid(N*2) / mid(N)` (midpoints converted to ms).
 
 ## Notes / caveats
 - Criterion output sometimes mixes units within a single bracket (e.g. `[897 ms, 1.02 s, 1.15 s]`); this report preserves units per value and converts per-value for ratios.
-

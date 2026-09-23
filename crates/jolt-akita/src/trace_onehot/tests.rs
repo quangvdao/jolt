@@ -25,12 +25,16 @@ use jolt_openings::CommitmentScheme;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::source::{TracePackedOneHotBatchView, TracePackedOneHotView};
+use crate::adapters::JoltCpuConfig;
+use crate::configs::JoltOneHotK16;
 use crate::{
     AkitaField, AkitaProverSetup, AkitaScheduleArtifacts, AkitaScheme, AkitaSetupParams,
     AKITA_ONE_HOT_K16,
 };
 
-fn kernel_backend() -> &'static CpuBackend {
+type TraceBackend = CpuBackend<JoltOneHotK16>;
+
+fn kernel_backend() -> &'static TraceBackend {
     static SETUP: OnceLock<AkitaProverSetup> = OnceLock::new();
     SETUP
         .get_or_init(|| {
@@ -41,6 +45,7 @@ fn kernel_backend() -> &'static CpuBackend {
         })
         .one_hot_backend
         .as_deref()
+        .map(|backend| JoltOneHotK16::backend(backend).unwrap())
         .unwrap()
 }
 
@@ -310,18 +315,18 @@ fn assert_opening_kernels_match_materialized<const D: usize>(
         num_positions_per_block: num_positions,
     };
     let backend = kernel_backend();
-    let streamed = <CpuBackend as OpeningFoldKernel<
-            TracePackedOneHotView<'_, D>,
-            AkitaField,
-            D,
-        >>::evaluate_and_fold(
-            backend,
-            None,
-            <TracePackedOneHot as RootOpeningSource<AkitaField, D>>::opening_view(&source).unwrap(),
-            fold_plan,
-        )
-        .unwrap();
-    let materialized = <CpuBackend as OpeningFoldKernel<_, AkitaField, D>>::evaluate_and_fold(
+    let streamed = <TraceBackend as OpeningFoldKernel<
+        TracePackedOneHotView<'_, D>,
+        AkitaField,
+        D,
+    >>::evaluate_and_fold(
+        backend,
+        None,
+        <TracePackedOneHot as RootOpeningSource<AkitaField, D>>::opening_view(&source).unwrap(),
+        fold_plan,
+    )
+    .unwrap();
+    let materialized = <TraceBackend as OpeningFoldKernel<_, AkitaField, D>>::evaluate_and_fold(
         backend,
         None,
         <OneHotPoly<AkitaField, u8> as RootOpeningSource<AkitaField, D>>::opening_view(
@@ -345,18 +350,18 @@ fn assert_opening_kernels_match_materialized<const D: usize>(
         num_digits: 2,
         log_basis: 3,
     };
-    let streamed = <CpuBackend as OpeningFoldKernel<
-            TracePackedOneHotView<'_, D>,
-            AkitaField,
-            D,
-        >>::decompose_fold(
-            backend,
-            None,
-            <TracePackedOneHot as RootOpeningSource<AkitaField, D>>::opening_view(&source).unwrap(),
-            decompose_plan,
-        )
-        .unwrap();
-    let materialized = <CpuBackend as OpeningFoldKernel<_, AkitaField, D>>::decompose_fold(
+    let streamed = <TraceBackend as OpeningFoldKernel<
+        TracePackedOneHotView<'_, D>,
+        AkitaField,
+        D,
+    >>::decompose_fold(
+        backend,
+        None,
+        <TracePackedOneHot as RootOpeningSource<AkitaField, D>>::opening_view(&source).unwrap(),
+        decompose_plan,
+    )
+    .unwrap();
+    let materialized = <TraceBackend as OpeningFoldKernel<_, AkitaField, D>>::decompose_fold(
         backend,
         None,
         <OneHotPoly<AkitaField, u8> as RootOpeningSource<AkitaField, D>>::opening_view(
@@ -420,7 +425,7 @@ fn assert_opening_kernels_match_materialized<const D: usize>(
         num_digits: 2,
         log_basis: 3,
     };
-    let streamed_chunks = <CpuBackend as OpeningBatchKernel<
+    let streamed_chunks = <TraceBackend as OpeningBatchKernel<
         TracePackedOneHotBatchView<'_, D>,
         AkitaField,
         D,
@@ -432,7 +437,7 @@ fn assert_opening_kernels_match_materialized<const D: usize>(
         batch_plan,
     )
     .unwrap();
-    let materialized_chunks = <CpuBackend as OpeningBatchKernel<
+    let materialized_chunks = <TraceBackend as OpeningBatchKernel<
         OneHotBatchView<'_, AkitaField, D, u8>,
         AkitaField,
         D,
@@ -459,7 +464,7 @@ fn assert_opening_kernels_match_materialized<const D: usize>(
         <TracePackedOneHot as RootOpeningSource<AkitaField, D>>::opening_batch(&trace_sources)
             .unwrap();
     let streamed =
-        <CpuBackend as SubringCoefficientPackingBatchKernel<
+        <TraceBackend as SubringCoefficientPackingBatchKernel<
             TracePackedOneHotBatchView<'_, D>,
             AkitaField,
             AkitaField,
@@ -472,7 +477,7 @@ fn assert_opening_kernels_match_materialized<const D: usize>(
             &materialized_sources,
         )
         .unwrap();
-    let materialized = <CpuBackend as SubringCoefficientPackingBatchKernel<
+    let materialized = <TraceBackend as SubringCoefficientPackingBatchKernel<
         OneHotBatchView<'_, AkitaField, D, u8>,
         AkitaField,
         AkitaField,
@@ -568,7 +573,7 @@ fn chunked_decompose_reads_each_trace_row_once() {
         })
         .collect::<Vec<_>>();
     let sources = [&source];
-    let chunks = <CpuBackend as OpeningBatchKernel<
+    let chunks = <TraceBackend as OpeningBatchKernel<
         TracePackedOneHotBatchView<'_, D>,
         AkitaField,
         D,

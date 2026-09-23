@@ -1,5 +1,6 @@
 use std::any::Any;
 
+use akita_config::CommitmentConfig;
 use akita_error::AkitaError;
 use akita_pcs::{
     custom_source::{
@@ -71,7 +72,9 @@ impl ExternalInnerCommitmentOperation<AkitaField> for TracePackedOneHotCommitOpe
     }
 }
 
-impl<const D: usize> OpeningFoldKernel<TracePackedOneHotView<'_, D>, AkitaField, D> for CpuBackend {
+impl<Cfg: CommitmentConfig, const D: usize>
+    OpeningFoldKernel<TracePackedOneHotView<'_, D>, AkitaField, D> for CpuBackend<Cfg>
+{
     fn evaluate_and_fold(
         &self,
         _prepared: Option<&Self::PreparedSetup>,
@@ -104,8 +107,8 @@ impl<const D: usize> OpeningFoldKernel<TracePackedOneHotView<'_, D>, AkitaField,
     }
 }
 
-impl<const D: usize> OpeningBatchKernel<TracePackedOneHotBatchView<'_, D>, AkitaField, D>
-    for CpuBackend
+impl<Cfg: CommitmentConfig, const D: usize>
+    OpeningBatchKernel<TracePackedOneHotBatchView<'_, D>, AkitaField, D> for CpuBackend<Cfg>
 {
     fn decompose_fold_batch(
         &self,
@@ -150,9 +153,9 @@ impl<const D: usize> OpeningBatchKernel<TracePackedOneHotBatchView<'_, D>, Akita
     }
 }
 
-impl<E, const D: usize>
+impl<Cfg: CommitmentConfig, E, const D: usize>
     SubringCoefficientPackingBatchKernel<TracePackedOneHotBatchView<'_, D>, AkitaField, E, D>
-    for CpuBackend
+    for CpuBackend<Cfg>
 where
     E: ExtField<AkitaField> + FpExtEncoding<AkitaField>,
 {

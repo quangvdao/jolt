@@ -294,7 +294,105 @@ macro_rules! with_one_hot_scheme {
 pub(crate) use with_one_hot_scheme;
 pub(crate) type AkitaBackendCommitment = AkitaBackendCommittedGroup<AkitaField>;
 pub(crate) type AkitaBackendCommitmentPayload = AkitaBackendRingCommitment<AkitaField>;
-pub(crate) type AkitaBackendHint = CommitmentHandle<AkitaField, AkitaBackendExtField>;
+
+/// A configuration served by one of this setup's owning CPU backends.
+///
+/// Akita types backends and commitment handles by configuration, so Jolt
+/// keeps one variant per configuration and recovers the typed value inside
+/// the configuration dispatch.
+pub(crate) trait JoltCpuConfig:
+    CommitmentConfig<Field = AkitaField, ExtField = AkitaBackendExtField> + Sized
+{
+    fn backend(backend: &AkitaCpuBackend) -> Result<&CpuBackend<Self>, OpeningsError>;
+    fn into_backend(backend: CpuBackend<Self>) -> AkitaCpuBackend;
+    fn hint(
+        hint: AkitaBackendHint,
+    ) -> Result<CommitmentHandle<AkitaField, AkitaBackendExtField, Self>, OpeningsError>;
+    fn into_hint(
+        hint: CommitmentHandle<AkitaField, AkitaBackendExtField, Self>,
+    ) -> AkitaBackendHint;
+}
+
+macro_rules! jolt_cpu_configs {
+    ($($variant:ident => $cfg:ty),+ $(,)?) => {
+        /// Owning CPU backend for the configuration this setup selected.
+        #[derive(Debug)]
+        pub(crate) enum AkitaCpuBackend {
+            $($variant(CpuBackend<$cfg>),)+
+        }
+
+        /// Retained commitment handle, typed by the configuration that committed it.
+        #[derive(Clone, Debug)]
+        pub(crate) enum AkitaBackendHint {
+            $($variant(CommitmentHandle<AkitaField, AkitaBackendExtField, $cfg>),)+
+        }
+
+        impl AkitaCpuBackend {
+            pub(crate) fn trim_caches(&self) -> Result<usize, AkitaError> {
+                match self {
+                    $(Self::$variant(backend) => backend.trim_caches(),)+
+                }
+            }
+        }
+
+        impl AkitaBackendHint {
+            /// Revalidates this commitment against `backend`'s setup and
+            /// returns a handle that backend can open.
+            pub(crate) fn import_into<Cfg: JoltCpuConfig>(
+                &self,
+                backend: &CpuBackend<Cfg>,
+            ) -> Result<CommitmentHandle<AkitaField, AkitaBackendExtField, Cfg>, AkitaError> {
+                match self {
+                    $(Self::$variant(hint) => backend.import_commitment(hint),)+
+                }
+            }
+        }
+
+        $(
+            impl JoltCpuConfig for $cfg {
+                fn backend(backend: &AkitaCpuBackend) -> Result<&CpuBackend<Self>, OpeningsError> {
+                    match backend {
+                        AkitaCpuBackend::$variant(backend) => Ok(backend),
+                        #[allow(unreachable_patterns)]
+                        _ => Err(invalid_batch("Akita backend configuration mismatch")),
+                    }
+                }
+
+                fn into_backend(backend: CpuBackend<Self>) -> AkitaCpuBackend {
+                    AkitaCpuBackend::$variant(backend)
+                }
+
+                fn hint(
+                    hint: AkitaBackendHint,
+                ) -> Result<CommitmentHandle<AkitaField, AkitaBackendExtField, Self>, OpeningsError> {
+                    match hint {
+                        AkitaBackendHint::$variant(hint) => Ok(hint),
+                        #[allow(unreachable_patterns)]
+                        _ => Err(invalid_batch("Akita commitment hint configuration mismatch")),
+                    }
+                }
+
+                fn into_hint(
+                    hint: CommitmentHandle<AkitaField, AkitaBackendExtField, Self>,
+                ) -> AkitaBackendHint {
+                    AkitaBackendHint::$variant(hint)
+                }
+            }
+        )+
+    };
+}
+
+jolt_cpu_configs! {
+    Dense => AkitaConfig,
+    K16Single => JoltOneHotK16,
+    K16W2R2 => JoltOneHotK16W2R2,
+    K16W4R2 => JoltOneHotK16W4R2,
+    K16W8R2 => JoltOneHotK16MultiChunk,
+    K256Single => JoltOneHotK256,
+    K256W2R2 => JoltOneHotK256W2R2,
+    K256W4R2 => JoltOneHotK256W4R2,
+    K256W8R2 => JoltOneHotK256MultiChunk,
+}
 pub(crate) type AkitaBackendProof = AkitaBackendBatchProof<AkitaField, AkitaBackendExtField>;
 pub(crate) type AkitaBackendProofShape = AkitaBatchedProofShape;
 pub(crate) type AkitaBackendVerifier = AkitaBackendVerifierSetup<AkitaField>;
@@ -563,9 +661,9 @@ impl AkitaSetupParams {
 #[derive(Clone, Debug)]
 pub struct AkitaProverSetup {
     pub(crate) backend_prover_setup: Option<Arc<AkitaBackendProverSetup>>,
-    pub(crate) backend: Option<Arc<CpuBackend>>,
+    pub(crate) backend: Option<Arc<AkitaCpuBackend>>,
     pub(crate) one_hot_backend_prover_setup: Option<Arc<AkitaBackendProverSetup>>,
-    pub(crate) one_hot_backend: Option<Arc<CpuBackend>>,
+    pub(crate) one_hot_backend: Option<Arc<AkitaCpuBackend>>,
     pub(crate) schedule_artifacts: Arc<AkitaScheduleArtifacts>,
     pub(crate) verifier: AkitaVerifierSetup,
 }
@@ -607,7 +705,7 @@ impl AkitaProverSetup {
 
     pub(crate) fn dense_backend(
         &self,
-    ) -> Result<(&AkitaBackendProverSetup, &CpuBackend), OpeningsError> {
+    ) -> Result<(&AkitaBackendProverSetup, &AkitaCpuBackend), OpeningsError> {
         self.backend_prover_setup
             .as_deref()
             .zip(self.backend.as_deref())
@@ -620,7 +718,7 @@ impl AkitaProverSetup {
 
     pub(crate) fn one_hot_backend(
         &self,
-    ) -> Result<(&AkitaBackendProverSetup, &CpuBackend), OpeningsError> {
+    ) -> Result<(&AkitaBackendProverSetup, &AkitaCpuBackend), OpeningsError> {
         let prover_setup = self
             .one_hot_backend_prover_setup
             .as_deref()

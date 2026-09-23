@@ -20,7 +20,7 @@ use crate::adapters::{
     AkitaBackendHint, AkitaBackendOneHotPoly, AkitaBatchProof, AkitaCommitment, AkitaConfig,
     AkitaField, AkitaHidingCommitment, AkitaLayoutDigest, AkitaProverHint, AkitaProverSetup,
     AkitaScheduleArtifacts, AkitaSetupFlavor, AkitaSetupParams, AkitaVerifierScheduleArtifacts,
-    AkitaVerifierSetup, BackendVerifierCache, AKITA_SOURCE_RING_DIMENSION,
+    AkitaVerifierSetup, BackendVerifierCache, JoltCpuConfig, AKITA_SOURCE_RING_DIMENSION,
 };
 use crate::native_batching::{AkitaNativeBatchPolynomials, AkitaNativeBatching};
 use crate::trace_onehot::{TraceOneHotRows, TracePackedOneHot};
@@ -28,10 +28,13 @@ use crate::trace_onehot::{TraceOneHotRows, TracePackedOneHot};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AkitaScheme;
 
-fn split_commit_output(
-    output: CommitOutput<AkitaField, AkitaBackendExtField>,
+fn split_commit_output<Cfg: JoltCpuConfig>(
+    output: CommitOutput<AkitaField, AkitaBackendExtField, Cfg>,
 ) -> (AkitaBackendCommitment, AkitaBackendHint) {
-    (output.committed_group, output.private_handle)
+    (
+        output.committed_group,
+        Cfg::into_hint(output.private_handle),
+    )
 }
 
 /// Prover seam for committing the packed trace directly from selected one-hot rows.
@@ -244,12 +247,15 @@ impl AkitaScheme {
         );
         let scheme = setup.verifier.one_hot_scheme()?;
         let (backend_commitment, backend_hint) = with_backend_pool(|| {
-            with_one_hot_scheme!(scheme, |_scheme, Cfg| backend
-                .import_source::<Cfg, _>(vec![source])
-                .and_then(|source| backend.commit::<Cfg>(&source, context)))
-        })
-        .map(split_commit_output)
-        .map_err(commit_failed)?;
+            with_one_hot_scheme!(scheme, |_scheme, Cfg| {
+                let backend = Cfg::backend(backend)?;
+                backend
+                    .import_source(vec![source])
+                    .and_then(|source| backend.commit(&source, context))
+                    .map(split_commit_output)
+                    .map_err(commit_failed)
+            })
+        })?;
         Self::package_commitment(
             layout_digest,
             num_vars,
@@ -273,12 +279,15 @@ impl AkitaScheme {
         );
         let scheme = setup.verifier.one_hot_scheme()?;
         with_backend_pool(|| {
-            with_one_hot_scheme!(scheme, |_scheme, Cfg| backend
-                .import_source::<Cfg, _>(polynomials)
-                .and_then(|source| backend.commit::<Cfg>(&source, context)))
+            with_one_hot_scheme!(scheme, |_scheme, Cfg| {
+                let backend = Cfg::backend(backend)?;
+                backend
+                    .import_source(polynomials)
+                    .and_then(|source| backend.commit(&source, context))
+                    .map(split_commit_output)
+                    .map_err(commit_failed)
+            })
         })
-        .map(split_commit_output)
-        .map_err(commit_failed)
     }
 
     /// Freezes the ordered precommitted profiles the final trace group commits
@@ -378,16 +387,15 @@ impl AkitaScheme {
         dense: Vec<AkitaBackendDensePoly>,
     ) -> Result<(AkitaCommitment, AkitaProverHint), OpeningsError> {
         let (_, backend) = setup.dense_backend()?;
+        let backend = AkitaConfig::backend(backend)?;
         let poly_count = dense.len();
         let (backend_commitment, backend_hint) = with_backend_pool(|| {
-            backend
-                .import_source::<AkitaConfig, _>(dense)
-                .and_then(|source| {
-                    backend.commit::<AkitaConfig>(
-                        &source,
-                        GroupContext::scheduler_without_precommitted_groups(),
-                    )
-                })
+            backend.import_source(dense).and_then(|source| {
+                backend.commit(
+                    &source,
+                    GroupContext::scheduler_without_precommitted_groups(),
+                )
+            })
         })
         .map(split_commit_output)
         .map_err(commit_failed)?;
@@ -514,10 +522,11 @@ impl CommitmentScheme for AkitaScheme {
                 })
                 .map_err(invalid_setup)?;
                 let backend = with_backend_pool(|| {
-                    CpuBackend::new::<AkitaConfig>(
+                    CpuBackend::<AkitaConfig>::new(
                         backend_prover_setup.expanded.clone(),
                         scheme.schedules(),
                     )
+                    .map(AkitaConfig::into_backend)
                 })
                 .map_err(invalid_setup)?;
                 let backend_verifier_setup =
@@ -539,10 +548,11 @@ impl CommitmentScheme for AkitaScheme {
                 .map_err(invalid_setup)?;
                 let scheme = verifier.one_hot_scheme()?;
                 let backend = with_backend_pool(|| {
-                    with_one_hot_scheme!(scheme, |scheme, Cfg| CpuBackend::new::<Cfg>(
+                    with_one_hot_scheme!(scheme, |scheme, Cfg| CpuBackend::<Cfg>::new(
                         backend_prover_setup.expanded.clone(),
                         scheme.schedules(),
-                    ))
+                    )
+                    .map(Cfg::into_backend))
                 })
                 .map_err(invalid_setup)?;
                 let backend_verifier_setup =

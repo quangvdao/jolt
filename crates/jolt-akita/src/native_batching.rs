@@ -16,7 +16,7 @@
 //! embeds the backend proof bytes wholesale.
 
 use akita_config::TrustedScheduleCatalog;
-use akita_pcs::{AkitaError, AkitaTranscript, CommitmentHandle};
+use akita_pcs::{AkitaError, AkitaTranscript};
 use akita_prover::SelectedProverOpeningData;
 use akita_types::{
     BasisMode, GroupBatchStatement, OpeningClaims, OpeningScheduleSelection, PolynomialGroupClaims,
@@ -34,8 +34,8 @@ use crate::adapters::{
     invalid_batch, prove_failed, reverse_point, serialize_akita, with_backend_pool,
     with_one_hot_scheme, AkitaBackendCommitment, AkitaBackendExtField, AkitaBackendFlavor,
     AkitaBackendHint, AkitaBackendProof, AkitaBatchProof, AkitaCommitment, AkitaConfig, AkitaField,
-    AkitaProverHint, AkitaProverSetup, AkitaVerifierSetup, JoltCpuConfig, AKITA_ONE_HOT_K16,
-    AKITA_ONE_HOT_K256,
+    AkitaProverHint, AkitaProverSetup, AkitaTypedHint, AkitaVerifierSetup, JoltCpuConfig,
+    AKITA_ONE_HOT_K16, AKITA_ONE_HOT_K256,
 };
 use crate::scheme::validate_precommitted_order;
 
@@ -492,14 +492,9 @@ fn single_group_batch<'a, Cfg>(
     point: &[AkitaField],
     evaluations: &[AkitaField],
     backend_commitment: AkitaBackendCommitment,
-    backend_hint: CommitmentHandle<AkitaField, AkitaBackendExtField, Cfg>,
+    backend_hint: AkitaTypedHint<Cfg>,
 ) -> Result<
-    SelectedProverOpeningData<
-        'a,
-        AkitaBackendExtField,
-        CommitmentHandle<AkitaField, AkitaBackendExtField, Cfg>,
-        AkitaField,
-    >,
+    SelectedProverOpeningData<'a, AkitaBackendExtField, AkitaTypedHint<Cfg>, AkitaField>,
     AkitaError,
 >
 where

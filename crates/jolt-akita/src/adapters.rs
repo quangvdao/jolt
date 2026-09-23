@@ -295,6 +295,9 @@ pub(crate) use with_one_hot_scheme;
 pub(crate) type AkitaBackendCommitment = AkitaBackendCommittedGroup<AkitaField>;
 pub(crate) type AkitaBackendCommitmentPayload = AkitaBackendRingCommitment<AkitaField>;
 
+/// Commitment handle retained by the backend of configuration `Cfg`.
+pub(crate) type AkitaTypedHint<Cfg> = CommitmentHandle<AkitaField, AkitaBackendExtField, Cfg>;
+
 /// A configuration served by one of this setup's owning CPU backends.
 ///
 /// Akita types backends and commitment handles by configuration, so Jolt
@@ -305,12 +308,8 @@ pub(crate) trait JoltCpuConfig:
 {
     fn backend(backend: &AkitaCpuBackend) -> Result<&CpuBackend<Self>, OpeningsError>;
     fn into_backend(backend: CpuBackend<Self>) -> AkitaCpuBackend;
-    fn hint(
-        hint: AkitaBackendHint,
-    ) -> Result<CommitmentHandle<AkitaField, AkitaBackendExtField, Self>, OpeningsError>;
-    fn into_hint(
-        hint: CommitmentHandle<AkitaField, AkitaBackendExtField, Self>,
-    ) -> AkitaBackendHint;
+    fn hint(hint: AkitaBackendHint) -> Result<AkitaTypedHint<Self>, OpeningsError>;
+    fn into_hint(hint: AkitaTypedHint<Self>) -> AkitaBackendHint;
 }
 
 macro_rules! jolt_cpu_configs {
@@ -324,7 +323,7 @@ macro_rules! jolt_cpu_configs {
         /// Retained commitment handle, typed by the configuration that committed it.
         #[derive(Clone, Debug)]
         pub(crate) enum AkitaBackendHint {
-            $($variant(CommitmentHandle<AkitaField, AkitaBackendExtField, $cfg>),)+
+            $($variant(AkitaTypedHint<$cfg>),)+
         }
 
         impl AkitaCpuBackend {
@@ -341,7 +340,7 @@ macro_rules! jolt_cpu_configs {
             pub(crate) fn import_into<Cfg: JoltCpuConfig>(
                 &self,
                 backend: &CpuBackend<Cfg>,
-            ) -> Result<CommitmentHandle<AkitaField, AkitaBackendExtField, Cfg>, AkitaError> {
+            ) -> Result<AkitaTypedHint<Cfg>, AkitaError> {
                 match self {
                     $(Self::$variant(hint) => backend.import_commitment(hint),)+
                 }
@@ -353,7 +352,6 @@ macro_rules! jolt_cpu_configs {
                 fn backend(backend: &AkitaCpuBackend) -> Result<&CpuBackend<Self>, OpeningsError> {
                     match backend {
                         AkitaCpuBackend::$variant(backend) => Ok(backend),
-                        #[allow(unreachable_patterns)]
                         _ => Err(invalid_batch("Akita backend configuration mismatch")),
                     }
                 }
@@ -364,16 +362,15 @@ macro_rules! jolt_cpu_configs {
 
                 fn hint(
                     hint: AkitaBackendHint,
-                ) -> Result<CommitmentHandle<AkitaField, AkitaBackendExtField, Self>, OpeningsError> {
+                ) -> Result<AkitaTypedHint<Self>, OpeningsError> {
                     match hint {
                         AkitaBackendHint::$variant(hint) => Ok(hint),
-                        #[allow(unreachable_patterns)]
                         _ => Err(invalid_batch("Akita commitment hint configuration mismatch")),
                     }
                 }
 
                 fn into_hint(
-                    hint: CommitmentHandle<AkitaField, AkitaBackendExtField, Self>,
+                    hint: AkitaTypedHint<Self>,
                 ) -> AkitaBackendHint {
                     AkitaBackendHint::$variant(hint)
                 }

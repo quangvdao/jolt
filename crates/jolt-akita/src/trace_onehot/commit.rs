@@ -2,14 +2,15 @@ use akita_algebra::{ring::WideCyclotomicRing, CyclotomicRing};
 use akita_error::AkitaError;
 use akita_prover::compute::CommitInnerPlan;
 use akita_prover::{CommitInnerWitness, ComputeBackendSetup, CpuBackend};
-use jolt_field::Fp128x8i32;
 use rayon::prelude::*;
 
-use super::digit_windows::{flush_digit_accumulators, DigitWindows};
+use super::digit_windows::{
+    chunk_rings, flush_digit_accumulators, ChunkShifts, DigitWindows, DIGIT_PLANES,
+};
 use super::source::TracePackedOneHot;
 use super::traversal::{
     flush_deferred_rank, flush_wide, row_is_committed, trace_block_task_schedule,
-    validate_block_geometry, visit_segment_ring_range, visit_segment_ring_row_range,
+    validate_block_geometry, visit_segment_ring_range, visit_segment_ring_row_chunks,
     DeferredFp128Ring,
 };
 use super::{K256_ROW_BATCH, MAX_WIDE_ACCUMULATIONS, NO_SELECTED_ROW};
@@ -96,50 +97,43 @@ pub(super) fn commit_packed<const D: usize>(
                 let mut budget = 0usize;
                 if source.one_hot_k < D {
                     let rows_per_ring = D / source.one_hot_k;
-                    let mut windows = DigitWindows::<D>::new();
-                    let mut accumulators = vec![[Fp128x8i32([0; 8]); D]; num_columns * plan.n_a];
-                    let mut shifts = vec![0usize; rows_per_ring];
-                    visit_segment_ring_row_range::<D>(
+                    let chunk_rings = chunk_rings(rows_per_ring);
+                    let chunk_shifts = chunk_rings * rows_per_ring;
+                    let mut windows = DigitWindows::<D>::new(chunk_rings);
+                    let mut shifts = ChunkShifts::new(num_columns, chunk_shifts);
+                    let mut accumulators =
+                        vec![[[[0; 2]; D]; DIGIT_PLANES]; plan.n_a * num_columns];
+                    visit_segment_ring_row_chunks::<D>(
                         source,
                         ring_start,
                         ring_end,
-                        |ring, selected_rows, committed_zero_masks| {
-                            let position = ring - block_ring_start;
-                            let a_col = position * plan.num_digits_inner;
-                            for (a, a_row) in a_rows.iter().enumerate() {
-                                windows.load(&a_row[a_col]);
-                                for column in 0..num_columns {
-                                    // Every row writes its shift; only committed rows keep it.
-                                    let mut len = 0;
-                                    for (row_offset, (row_indices, &committed_zero_mask)) in
-                                        selected_rows
-                                            .chunks_exact(num_columns)
-                                            .zip(committed_zero_masks)
-                                            .enumerate()
-                                    {
-                                        let hot = row_indices[column];
-                                        shifts[len] =
-                                            row_offset * source.one_hot_k + usize::from(hot);
-                                        len += usize::from(row_is_committed(
-                                            hot,
-                                            committed_zero_mask,
-                                            column,
-                                        ));
-                                    }
-                                    windows.accumulate(
-                                        &mut accumulators[column * plan.n_a + a],
-                                        &shifts[..len],
-                                    );
-                                }
-                            }
-                            budget += rows_per_ring;
-                            if budget >= MAX_WIDE_ACCUMULATIONS {
-                                flush_digit_accumulators(&mut accumulators, &mut reduced);
+                        chunk_rings,
+                        |first_ring, selected_rows, committed_zero_masks| {
+                            if budget + chunk_shifts > MAX_WIDE_ACCUMULATIONS {
+                                flush_digit_accumulators(
+                                    &mut accumulators,
+                                    &mut reduced,
+                                    num_columns,
+                                );
                                 budget = 0;
                             }
+                            shifts.fill::<D>(selected_rows, committed_zero_masks, source.one_hot_k);
+                            let first_position = first_ring - block_ring_start;
+                            let rings = committed_zero_masks.len() / rows_per_ring;
+                            for (a_row, accumulators) in a_rows
+                                .iter()
+                                .zip(accumulators.chunks_exact_mut(num_columns))
+                            {
+                                for window in 0..rings {
+                                    let a_col = (first_position + window) * plan.num_digits_inner;
+                                    windows.load(window, &a_row[a_col]);
+                                }
+                                windows.accumulate(accumulators, &shifts);
+                            }
+                            budget += chunk_shifts;
                         },
                     )?;
-                    flush_digit_accumulators(&mut accumulators, &mut reduced);
+                    flush_digit_accumulators(&mut accumulators, &mut reduced, num_columns);
                     budget = 0;
                 } else if rank_tiled_k256 {
                     // Stream one A rank at a time so its destination accumulators fit in cache.

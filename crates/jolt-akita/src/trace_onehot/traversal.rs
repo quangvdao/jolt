@@ -179,6 +179,19 @@ pub(super) fn visit_segment_ring_row_range<const D: usize>(
     source: &TracePackedOneHot,
     ring_start: usize,
     ring_end: usize,
+    visit: impl FnMut(usize, &[u8], &[u64]),
+) -> Result<(), AkitaError> {
+    visit_segment_ring_row_chunks::<D>(source, ring_start, ring_end, 1, visit)
+}
+
+/// Visits K<D ring elements in chunks of up to `chunk_rings` consecutive
+/// rings. Each callback receives the chunk's first segment-relative ring and
+/// the row indices and committed-zero masks of every row the chunk packs.
+pub(super) fn visit_segment_ring_row_chunks<const D: usize>(
+    source: &TracePackedOneHot,
+    ring_start: usize,
+    ring_end: usize,
+    chunk_rings: usize,
     mut visit: impl FnMut(usize, &[u8], &[u64]),
 ) -> Result<(), AkitaError> {
     validate_dimension::<D>(source.one_hot_k)?;
@@ -202,18 +215,21 @@ pub(super) fn visit_segment_ring_row_range<const D: usize>(
             source.rows.num_rows()
         )));
     }
-    let row_index_count = num_columns.checked_mul(rows_per_ring).ok_or_else(|| {
+    let chunk_rows = rows_per_ring.checked_mul(chunk_rings).ok_or_else(|| {
+        AkitaError::InvalidInput("trace one-hot row chunk size overflow".to_string())
+    })?;
+    let row_index_count = num_columns.checked_mul(chunk_rows).ok_or_else(|| {
         AkitaError::InvalidInput("trace one-hot row-index buffer size overflow".to_string())
     })?;
     let mut selected_rows = vec![NO_SELECTED_ROW; row_index_count];
-    let mut committed_zero_masks = vec![0u64; rows_per_ring];
-    for ring in ring_start..ring_end {
-        let row_start = ring * rows_per_ring;
+    let mut committed_zero_masks = vec![0u64; chunk_rows];
+    for chunk_start in (ring_start..ring_end).step_by(chunk_rings) {
+        let row_start = chunk_start * rows_per_ring;
         let populated_rows = source
             .rows
             .num_rows()
             .saturating_sub(row_start)
-            .min(rows_per_ring);
+            .min((ring_end - chunk_start).min(chunk_rings) * rows_per_ring);
         let populated_indices = &mut selected_rows[..populated_rows * num_columns];
         let populated_masks = &mut committed_zero_masks[..populated_rows];
         source.rows.fill_rows(row_start, populated_indices);
@@ -228,7 +244,7 @@ pub(super) fn visit_segment_ring_row_range<const D: usize>(
                 )));
             }
         }
-        visit(ring, populated_indices, populated_masks);
+        visit(chunk_start, populated_indices, populated_masks);
     }
     Ok(())
 }

@@ -26,11 +26,13 @@ use akita_types::{
     BasisMode, PreparedSubringCoefficientPackingPoint, SetupMatrixCapacity,
     SubringCoefficientPackingGeometry,
 };
-use jolt_field::{Fp128x8i32, One, Ring};
+use jolt_field::{One, Ring};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::commit::commit_packed;
-use super::digit_windows::{flush_digit_accumulators, DigitWindows};
+use super::digit_windows::{
+    chunk_rings, flush_digit_accumulators, ChunkShifts, DigitWindows, DIGIT_PLANES,
+};
 use super::source::{TracePackedOneHotBatchView, TracePackedOneHotView};
 use crate::AkitaField;
 
@@ -154,61 +156,69 @@ fn committed_digit_zero_mapping_is_dimension_generic() {
     assert_ring_mapping::<64>(256, 32, Some(1));
 }
 
-fn digit_window_source<const D: usize>() -> CyclotomicRing<AkitaField, D> {
+fn digit_window_source<const D: usize>(seed: usize) -> CyclotomicRing<AkitaField, D> {
     // Mix small, negative, and near-modulus coefficients so both window
     // halves carry dense 16-bit digits.
-    CyclotomicRing::from_coefficients(std::array::from_fn(|index| match index % 3 {
-        0 => AkitaField::from_u64((index + 1) as u64),
-        1 => -AkitaField::from_u64((index + 1) as u64),
-        _ => AkitaField::from_u128(u128::MAX / (index as u128 + 2)),
+    CyclotomicRing::from_coefficients(std::array::from_fn(|index| {
+        let value = index + 1 + 1000 * seed;
+        match index % 3 {
+            0 => AkitaField::from_u64(value as u64),
+            1 => -AkitaField::from_u64(value as u64),
+            _ => AkitaField::from_u128(u128::MAX / (value as u128 + 1)),
+        }
     }))
 }
 
-fn assert_digit_windows_match_shift_accumulation<const D: usize>() {
+fn assert_digit_windows_match_shift_accumulation<const D: usize>(k: usize) {
     const COLUMNS: usize = 5;
-    let rows_per_ring = D / 16;
-    let mut selected_rows = vec![NO_SELECTED_ROW; rows_per_ring * COLUMNS];
-    let mut committed_zero_masks = vec![0u64; rows_per_ring];
-    for row in 0..rows_per_ring {
-        let shared_hot = ((row + 1) % 15 + 1) as u8;
+    let rows_per_ring = D / k;
+    let rings = chunk_rings(rows_per_ring);
+    let rows = rings * rows_per_ring;
+    let nonzero = |value: usize| (value % (k - 1) + 1) as u8;
+    let mut selected_rows = vec![NO_SELECTED_ROW; rows * COLUMNS];
+    let mut committed_zero_masks = vec![0u64; rows];
+    for row in 0..rows {
+        let shared_hot = nonzero(row + 1);
         selected_rows[row * COLUMNS] = shared_hot;
         selected_rows[row * COLUMNS + 1] = shared_hot;
-        selected_rows[row * COLUMNS + 2] = ((2 * row + 3) % 15 + 1) as u8;
+        selected_rows[row * COLUMNS + 2] = nonzero(2 * row + 3);
         selected_rows[row * COLUMNS + 3] = if row % 3 == 1 {
             NO_SELECTED_ROW
         } else {
-            ((3 * row + 5) % 15 + 1) as u8
+            nonzero(3 * row + 5)
         };
         if row % 2 == 0 {
             committed_zero_masks[row] |= 1 << 4;
         }
     }
 
-    let source = digit_window_source::<D>();
-    let mut windows = DigitWindows::<D>::new();
-    windows.load(&source);
-    let mut actual = vec![[Fp128x8i32([0; 8]); D]; COLUMNS];
-    let wide_source: AkitaWideRing<D> = AkitaWideRing::from_ring(&source);
-    let mut expected = vec![AkitaWideRing::zero(); COLUMNS];
-    for (column, actual) in actual.iter_mut().enumerate() {
-        let mut shifts = Vec::new();
-        for (row, (row_indices, &mask)) in selected_rows
-            .chunks_exact(COLUMNS)
-            .zip(&committed_zero_masks)
-            .enumerate()
-        {
-            let hot = row_indices[column];
+    let sources = (0..rings).map(digit_window_source::<D>).collect::<Vec<_>>();
+    let mut windows = DigitWindows::<D>::new(rings);
+    for (window, source) in sources.iter().enumerate() {
+        windows.load(window, source);
+    }
+    let mut shifts = ChunkShifts::new(COLUMNS, rows);
+    shifts.fill::<D>(&selected_rows, &committed_zero_masks, k);
+    let mut actual = vec![[[[0; 2]; D]; DIGIT_PLANES]; COLUMNS];
+    windows.accumulate(&mut actual, &shifts);
+
+    let mut expected = vec![AkitaWideRing::<D>::zero(); COLUMNS];
+    for (row, (row_indices, &mask)) in selected_rows
+        .chunks_exact(COLUMNS)
+        .zip(&committed_zero_masks)
+        .enumerate()
+    {
+        let wide_source: AkitaWideRing<D> = AkitaWideRing::from_ring(&sources[row / rows_per_ring]);
+        for (column, &hot) in row_indices.iter().enumerate() {
             if traversal::row_is_committed(hot, mask, column) {
-                shifts.push(16 * row + usize::from(hot));
-                wide_source
-                    .shift_accumulate_into(&mut expected[column], 16 * row + usize::from(hot));
+                let shift = row % rows_per_ring * k + usize::from(hot);
+                wide_source.shift_accumulate_into(&mut expected[column], shift);
             }
         }
-        windows.accumulate(actual, &shifts);
     }
 
     let mut reduced = vec![CyclotomicRing::zero(); COLUMNS];
-    flush_digit_accumulators(&mut actual, &mut reduced);
+    flush_digit_accumulators(&mut actual, &mut reduced, COLUMNS);
     let expected = expected
         .into_iter()
         .map(|value| value.reduce::<AkitaField>())
@@ -218,10 +228,11 @@ fn assert_digit_windows_match_shift_accumulation<const D: usize>() {
 
 #[test]
 fn digit_windows_match_shift_accumulation() {
-    assert_digit_windows_match_shift_accumulation::<64>();
-    assert_digit_windows_match_shift_accumulation::<128>();
-    assert_digit_windows_match_shift_accumulation::<256>();
-    assert_digit_windows_match_shift_accumulation::<512>();
+    assert_digit_windows_match_shift_accumulation::<64>(16);
+    assert_digit_windows_match_shift_accumulation::<128>(16);
+    assert_digit_windows_match_shift_accumulation::<256>(16);
+    assert_digit_windows_match_shift_accumulation::<512>(16);
+    assert_digit_windows_match_shift_accumulation::<512>(256);
 }
 
 #[test]
@@ -230,20 +241,22 @@ fn digit_windows_stay_exact_at_accumulation_budget() {
     let source = CyclotomicRing::<AkitaField, D>::from_coefficients(std::array::from_fn(|index| {
         -AkitaField::from_u64(index as u64 + 1)
     }));
-    let mut windows = DigitWindows::<D>::new();
-    windows.load(&source);
-    let shifts = (0..D).collect::<Vec<_>>();
-    let mut actual = [[Fp128x8i32([0; 8]); D]];
+    let mut windows = DigitWindows::<D>::new(1);
+    windows.load(0, &source);
+    // K=1 packs D rows per ring, and committing each row's zero adds every shift.
+    let mut shifts = ChunkShifts::new(1, D);
+    shifts.fill::<D>(&[NO_SELECTED_ROW; D], &[1; D], 1);
+    let mut actual = vec![[[[0; 2]; D]; DIGIT_PLANES]];
     let wide_source: AkitaWideRing<D> = AkitaWideRing::from_ring(&source);
     let mut expected = AkitaWideRing::zero();
     for _ in 0..MAX_WIDE_ACCUMULATIONS / D {
-        windows.accumulate(&mut actual[0], &shifts);
-        for &shift in &shifts {
+        windows.accumulate(&mut actual, &shifts);
+        for shift in 0..D {
             wide_source.shift_accumulate_into(&mut expected, shift);
         }
     }
     let mut reduced = [CyclotomicRing::zero()];
-    flush_digit_accumulators(&mut actual, &mut reduced);
+    flush_digit_accumulators(&mut actual, &mut reduced, 1);
     assert_eq!(reduced[0], expected.reduce::<AkitaField>());
 }
 
@@ -490,40 +503,41 @@ fn blockwise_opening_kernels_match_materialized_onehot() {
     assert_opening_kernels_match_materialized::<64>(16, 32, 4, Some(1));
 }
 
-#[test]
-fn small_k256_blocks_commit_like_materialized_onehot() {
-    const D: usize = 64;
-    const K: usize = 256;
-    const ROWS: usize = 32;
+fn assert_commit_matches_materialized<const D: usize>(
+    k: usize,
+    rows: usize,
+    positions_per_block: usize,
+    committed_zero_column: Option<usize>,
+) {
     const COLUMNS: usize = 3;
     const CAPACITY: usize = 4;
-    const POSITIONS_PER_BLOCK: usize = 2;
     let source = TracePackedOneHot::new(
-        K,
+        k,
         D,
         CAPACITY,
         Arc::new(TestRows {
-            rows: ROWS,
+            rows,
             columns: COLUMNS,
-            k: K,
-            committed_zero_column: None,
+            k,
+            committed_zero_column,
         }),
     )
     .unwrap();
     let packed_indices = (0..CAPACITY)
         .flat_map(|column| {
-            (0..ROWS).map(move |row| {
-                let selected_row = ((row * (2 * column + 1) + column) % K) as u8;
-                (column < COLUMNS && selected_row != 0).then_some(selected_row)
+            (0..rows).map(move |row| {
+                let selected_row = ((row * (2 * column + 1) + column) % k) as u8;
+                (column < COLUMNS && (selected_row != 0 || committed_zero_column == Some(column)))
+                    .then_some(selected_row)
             })
         })
         .collect();
-    let materialized_source = OneHotPoly::<AkitaField, u8>::new(K, packed_indices).unwrap();
+    let materialized_source = OneHotPoly::<AkitaField, u8>::new(k, packed_indices).unwrap();
     let setup = AkitaProverSetup::<AkitaField>::generate_with_capacity(
         1,
         1,
         SetupMatrixCapacity {
-            num_field_elements: D * POSITIONS_PER_BLOCK,
+            num_field_elements: D * positions_per_block,
         },
     )
     .unwrap();
@@ -532,9 +546,9 @@ fn small_k256_blocks_commit_like_materialized_onehot() {
     let plan = CommitInnerPlan {
         ring_dimension: D,
         num_live_blocks: RootPolyShape::<AkitaField, D>::num_ring_elems(&source)
-            / POSITIONS_PER_BLOCK,
+            / positions_per_block,
         n_a: 1,
-        num_positions_per_block: POSITIONS_PER_BLOCK,
+        num_positions_per_block: positions_per_block,
         num_digits_inner: 1,
         log_basis_inner: 1,
     };
@@ -544,7 +558,7 @@ fn small_k256_blocks_commit_like_materialized_onehot() {
     let capabilities = CommitmentRequestCapabilities::split::<()>(
         BackendKindId::of::<MaterializedOneHotTestBackend>("materialized-one-hot-test").unwrap(),
         vec![PolynomialType::OneHot(
-            OneHotType::new(K, OneHotIndexWidth::U8).unwrap(),
+            OneHotType::new(k, OneHotIndexWidth::U8).unwrap(),
         )],
     );
     let resolved = compile_commitment_request(&plan, &source_refs, &capabilities)
@@ -557,6 +571,14 @@ fn small_k256_blocks_commit_like_materialized_onehot() {
         .remove(0);
 
     assert_eq!(streamed.inner_rows, materialized.inner_rows);
+}
+
+#[test]
+fn trace_commit_matches_materialized_onehot() {
+    assert_commit_matches_materialized::<64>(256, 32, 2, None);
+    assert_commit_matches_materialized::<512>(16, 256, 2, Some(1));
+    assert_commit_matches_materialized::<512>(256, 256, 8, Some(1));
+    assert_commit_matches_materialized::<512>(256, 2048, 64, Some(1));
 }
 
 struct MaterializedOneHotTestBackend;

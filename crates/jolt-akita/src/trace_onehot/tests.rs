@@ -359,10 +359,15 @@ fn assert_opening_kernels_match_materialized<const D: usize>(
     .unwrap();
     assert_eq!(streamed, materialized);
 
+    // Seven terms fill two padded scatter groups, and their spread positions
+    // make large shifts wrap terms past X^D.
     let challenges = (0..num_blocks)
         .map(|block| SparseChallenge {
-            positions: vec![0, (block % (D - 1) + 1) as u32].into(),
-            coeffs: vec![1, -1].into(),
+            positions: (0..7)
+                .map(|term| ((block + 37 * term) % D) as u32)
+                .collect::<Vec<_>>()
+                .into(),
+            coeffs: vec![1, -1, 2, -3, 1, -8, 5].into(),
         })
         .collect::<Vec<_>>();
     let decompose_plan = DecomposeFoldPlan {

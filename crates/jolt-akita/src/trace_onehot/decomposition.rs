@@ -43,59 +43,36 @@ impl DecomposeRotationMode {
     }
 }
 
-struct PreparedSparseClass {
-    coefficient: i32,
-    positions: Vec<u16>,
-    wrap_cuts: Vec<u16>,
+const SPARSE_GROUP: usize = 4;
+
+#[derive(Clone, Copy, Default)]
+struct SparseTermGroup {
+    positions: [u32; SPARSE_GROUP],
+    coefficients: [i32; SPARSE_GROUP],
 }
 
+/// A sparse challenge's nonzero terms in fixed-size groups. Zero-coefficient
+/// terms pad the last group, so every rotation scatters the same number of
+/// groups and its loop exits stay predictable.
 pub(super) struct PreparedSparseChallenge {
-    classes: Vec<PreparedSparseClass>,
+    groups: Vec<SparseTermGroup>,
 }
 
 impl PreparedSparseChallenge {
-    fn new<const D: usize>(challenge: &SparseChallenge) -> Result<Self, AkitaError> {
-        if D > usize::from(u16::MAX) + 1 {
-            return Err(AkitaError::InvalidInput(format!(
-                "prepared sparse rotations require D <= {}; got {D}",
-                usize::from(u16::MAX) + 1
-            )));
+    fn new(challenge: &SparseChallenge) -> Self {
+        let mut groups =
+            vec![SparseTermGroup::default(); challenge.positions.len().div_ceil(SPARSE_GROUP)];
+        for (term, (&position, &coefficient)) in challenge
+            .positions
+            .iter()
+            .zip(&challenge.coeffs)
+            .enumerate()
+        {
+            let group = &mut groups[term / SPARSE_GROUP];
+            group.positions[term % SPARSE_GROUP] = position;
+            group.coefficients[term % SPARSE_GROUP] = i32::from(coefficient);
         }
-        let mut grouped = Vec::<(i8, Vec<u16>)>::new();
-        for (&position, &coefficient) in challenge.positions.iter().zip(&challenge.coeffs) {
-            let position = u16::try_from(position).map_err(|_| {
-                AkitaError::InvalidInput(format!(
-                    "sparse challenge position {position} does not fit u16"
-                ))
-            })?;
-            if let Some((_, positions)) = grouped
-                .iter_mut()
-                .find(|(existing, _)| *existing == coefficient)
-            {
-                positions.push(position);
-            } else {
-                grouped.push((coefficient, vec![position]));
-            }
-        }
-        grouped.sort_unstable_by_key(|(coefficient, _)| *coefficient);
-        let classes = grouped
-            .into_iter()
-            .map(|(coefficient, mut positions)| {
-                positions.sort_unstable();
-                let wrap_cuts = (0..D)
-                    .map(|shift| {
-                        positions.partition_point(|&position| usize::from(position) < D - shift)
-                            as u16
-                    })
-                    .collect();
-                PreparedSparseClass {
-                    coefficient: i32::from(coefficient),
-                    positions,
-                    wrap_cuts,
-                }
-            })
-            .collect();
-        Ok(Self { classes })
+        Self { groups }
     }
 }
 
@@ -182,12 +159,12 @@ pub(super) fn prepare_rotations<const D: usize>(
         let prepared = (0..prepared_blocks)
             .into_par_iter()
             .map(|prepared_block| {
-                PreparedSparseChallenge::new::<D>(
+                PreparedSparseChallenge::new(
                     &challenges
                         [active_challenge_index(prepared_block, blocks_per_column, num_columns)],
                 )
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         Ok(PreparedRotations::Sparse(prepared))
     }
 }
@@ -198,14 +175,12 @@ fn add_rotated_sparse<const D: usize>(
     challenge: &PreparedSparseChallenge,
     shift: usize,
 ) {
-    for class in &challenge.classes {
-        let cut = usize::from(class.wrap_cuts[shift]);
-        let coefficient = class.coefficient;
-        for &position in &class.positions[..cut] {
-            dst[usize::from(position) + shift] += coefficient;
-        }
-        for &position in &class.positions[cut..] {
-            dst[usize::from(position) + shift - D] -= coefficient;
+    debug_assert!(shift < D);
+    for group in &challenge.groups {
+        for (&position, &coefficient) in group.positions.iter().zip(&group.coefficients) {
+            let index = position as usize + shift;
+            // X^D = -1: terms rotated past the top wrap around negated.
+            dst[index % D] += if index < D { coefficient } else { -coefficient };
         }
     }
 }
@@ -258,98 +233,6 @@ fn add_rotated<const D: usize>(
         }
         PreparedRotations::Sparse(challenges) => {
             add_rotated_sparse(dst, &challenges[prepared_block], coefficient);
-        }
-    }
-}
-
-#[inline(always)]
-fn add_rotated_dense_rows<const D: usize>(
-    dst: &mut [i32; D],
-    rotated: &[[i16; D]],
-    prepared_block: usize,
-    coefficients: &[usize],
-) {
-    let table = |coefficient| &rotated[prepared_block * D + coefficient];
-    let mut remaining = coefficients;
-    while remaining.len() >= 8 {
-        add_rotated_dense_tables(
-            dst,
-            [
-                table(remaining[0]),
-                table(remaining[1]),
-                table(remaining[2]),
-                table(remaining[3]),
-                table(remaining[4]),
-                table(remaining[5]),
-                table(remaining[6]),
-                table(remaining[7]),
-            ],
-        );
-        remaining = &remaining[8..];
-    }
-    match remaining {
-        [] => {}
-        [c0] => add_rotated_dense(dst, table(*c0)),
-        [c0, c1] => add_rotated_dense_tables(dst, [table(*c0), table(*c1)]),
-        [c0, c1, c2] => {
-            add_rotated_dense_tables(dst, [table(*c0), table(*c1), table(*c2)]);
-        }
-        [c0, c1, c2, c3] => {
-            add_rotated_dense_tables(dst, [table(*c0), table(*c1), table(*c2), table(*c3)]);
-        }
-        [c0, c1, c2, c3, c4] => add_rotated_dense_tables(
-            dst,
-            [table(*c0), table(*c1), table(*c2), table(*c3), table(*c4)],
-        ),
-        [c0, c1, c2, c3, c4, c5] => add_rotated_dense_tables(
-            dst,
-            [
-                table(*c0),
-                table(*c1),
-                table(*c2),
-                table(*c3),
-                table(*c4),
-                table(*c5),
-            ],
-        ),
-        [c0, c1, c2, c3, c4, c5, c6] => add_rotated_dense_tables(
-            dst,
-            [
-                table(*c0),
-                table(*c1),
-                table(*c2),
-                table(*c3),
-                table(*c4),
-                table(*c5),
-                table(*c6),
-            ],
-        ),
-        _ => unreachable!("eight-entry batches leave at most seven contributions"),
-    }
-}
-
-#[inline(always)]
-fn add_rotated_rows<const D: usize>(
-    dst: &mut [i32; D],
-    rotations: &PreparedRotations<D>,
-    prepared_block: usize,
-    coefficients: &[usize],
-) {
-    match rotations {
-        PreparedRotations::Compact(challenges) => {
-            let challenge = &challenges[prepared_block];
-            for &coefficient in coefficients {
-                add_rotated_compact(dst, challenge, coefficient);
-            }
-        }
-        PreparedRotations::Dense(rotated) => {
-            add_rotated_dense_rows(dst, rotated, prepared_block, coefficients);
-        }
-        PreparedRotations::Sparse(challenges) => {
-            let challenge = &challenges[prepared_block];
-            for &coefficient in coefficients {
-                add_rotated_sparse(dst, challenge, coefficient);
-            }
         }
     }
 }
@@ -613,66 +496,40 @@ pub(super) fn decompose_fold_packed_with_mode<const D: usize>(
                     if source.one_hot_k < D {
                         let num_columns = source.rows.num_columns();
                         let rows_per_ring = D / source.one_hot_k;
-                        let mut coefficients = Vec::with_capacity(rows_per_ring);
+                        let mut contributions = vec![(0, 0); num_columns * rows_per_ring];
                         visit_segment_ring_row_range::<D>(
                             source,
                             ring_start,
                             ring_end,
                             |ring, selected_rows, committed_zero_masks| {
                                 let position = ring - trace_block * num_positions;
-                                let dst = &mut compressed[position - position_start];
-                                if rows_per_ring <= 4 {
-                                    for column in 0..num_columns {
-                                        let mut fixed_coefficients = [0usize; 4];
-                                        let mut count = 0;
-                                        for (row_offset, (row_indices, &committed_zero_mask)) in
-                                            selected_rows
-                                                .chunks_exact(num_columns)
-                                                .zip(committed_zero_masks)
-                                                .enumerate()
-                                        {
-                                            let hot = row_indices[column];
-                                            if row_is_committed(hot, committed_zero_mask, column) {
-                                                fixed_coefficients[count] = row_offset
-                                                    * source.one_hot_k
-                                                    + usize::from(hot);
-                                                count += 1;
-                                            }
-                                        }
-                                        let prepared_block = trace_block * num_columns + column;
-                                        add_rotated_rows(
-                                            dst,
-                                            &rotations,
-                                            prepared_block,
-                                            &fixed_coefficients[..count],
+                                let mut len = 0;
+                                for (row_offset, (row_indices, &committed_zero_mask)) in
+                                    selected_rows
+                                        .chunks_exact(num_columns)
+                                        .zip(committed_zero_masks)
+                                        .enumerate()
+                                {
+                                    for (column, &hot) in row_indices.iter().enumerate() {
+                                        // Every row writes its entry; only committed rows keep it.
+                                        contributions[len] = (
+                                            column,
+                                            row_offset * source.one_hot_k + usize::from(hot),
                                         );
-                                    }
-                                } else {
-                                    for column in 0..num_columns {
-                                        coefficients.clear();
-                                        for (row_offset, (row_indices, &committed_zero_mask)) in
-                                            selected_rows
-                                                .chunks_exact(num_columns)
-                                                .zip(committed_zero_masks)
-                                                .enumerate()
-                                        {
-                                            let hot = row_indices[column];
-                                            if row_is_committed(hot, committed_zero_mask, column) {
-                                                coefficients.push(
-                                                    row_offset * source.one_hot_k
-                                                        + usize::from(hot),
-                                                );
-                                            }
-                                        }
-                                        let prepared_block = trace_block * num_columns + column;
-                                        add_rotated_rows(
-                                            dst,
-                                            &rotations,
-                                            prepared_block,
-                                            &coefficients,
-                                        );
+                                        len += usize::from(row_is_committed(
+                                            hot,
+                                            committed_zero_mask,
+                                            column,
+                                        ));
                                     }
                                 }
+                                add_rotated_contributions(
+                                    &mut compressed[position - position_start],
+                                    &contributions[..len],
+                                    &rotations,
+                                    trace_block,
+                                    num_columns,
+                                );
                             },
                         )?;
                     } else if let Some(local_rotations) = local_rotations.as_ref() {

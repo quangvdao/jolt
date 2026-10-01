@@ -5,7 +5,6 @@
 
 use std::ops::Range;
 
-use jolt_claims::protocols::jolt::JoltDerivedId;
 use jolt_field::{Accumulator, JoltField};
 use jolt_poly::{
     BindingOrder, EqPolynomial, GruenSplitEqPolynomial, LtPolynomial, Polynomial, UnivariatePoly,
@@ -14,7 +13,8 @@ use jolt_sumcheck::SumcheckError;
 #[cfg(feature = "parallel")]
 use jolt_utils::par_collect_windows;
 use jolt_verifier::stages::relations::{
-    ConcreteSumcheck, ConcreteSumcheckChallenges, SumcheckInputPoints, SumcheckOutputPoints,
+    ConcreteSumcheck, ConcreteSumcheckChallenges, DerivedIdOf, SumcheckInputPoints,
+    SumcheckOutputPoints,
 };
 use jolt_verifier::VerifierError;
 use jolt_witness::{
@@ -24,7 +24,7 @@ use jolt_witness::{
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::{KernelError, SumcheckKernelError};
+use crate::SumcheckKernelError;
 
 /// A kernel's bound-round count against its total — the one home of the
 /// "claims only after every round is bound" invariant.
@@ -118,11 +118,24 @@ pub(crate) fn collect_rows<B: WitnessBundle + Copy + Send + Sync>(
     Ok(consumers.0.rows)
 }
 
+/// Largest factor count [`accumulate_product_grid`] accepts; `n!` must fit a
+/// `u64` for the finite-difference extension.
+pub(crate) const MAX_GRID_FACTORS: usize = 20;
+
+/// Scratch length [`accumulate_product_grid`] needs for `n` factors: two
+/// child tables per tree level plus one difference table.
+pub(crate) const fn product_grid_scratch_len(n: usize) -> usize {
+    6 * n + 2
+}
+
+/// Largest factor count whose grid is cheaper to walk directly (every
+/// factor multiplied at every point) than through the product tree.
+const DIRECT_GRID_FACTORS: usize = 4;
+
 /// Accumulates `Π factors` into `lane`, fusing the last multiply into the
 /// deferred-reduction accumulator. Requires at least two factors.
 #[inline]
-pub(crate) fn accumulate_product<F: JoltField>(factors: &[F], lane: &mut F::Accumulator) {
-    debug_assert!(factors.len() >= 2);
+fn accumulate_product<F: JoltField>(factors: &[F], lane: &mut F::Accumulator) {
     let last = factors.len() - 1;
     let mut product = factors[0];
     for factor in &factors[1..last] {
@@ -131,26 +144,138 @@ pub(crate) fn accumulate_product<F: JoltField>(factors: &[F], lane: &mut F::Accu
     lane.fmadd(product, factors[last]);
 }
 
-/// Walk one row's product grid: with `evals` seeded at the `t = 1` factor
-/// values and `steps` their per-factor linear steps, accumulate the factor
-/// product `Π evals` into `lanes[t − 1]` for `t = 1, …, n − 1` (advancing
-/// every factor by its step between points) and the leading coefficient
-/// `Π steps` into `lanes[n − 1]`, where `n = lanes.len()`.
+/// Walk one row's product grid: with `evals` the `t = 1` values of `n`
+/// linear factors and `steps` their slopes, accumulate their product at
+/// `t = 1, …, n − 1` into `lanes[t − 1]` and its leading coefficient
+/// `Π steps` into `lanes[n − 1]`, where `n = lanes.len() ≥ 2`.
+///
+/// Above [`DIRECT_GRID_FACTORS`] the product is built as a balanced tree:
+/// each node multiplies its two halves pointwise at exactly as many points
+/// as its degree, after extending both halves to those points by finite
+/// differences (additions only). That costs `O(n log n)` multiplications
+/// instead of the `n · (n − 2)` of multiplying every factor at every point;
+/// the root's multiplications fuse into the deferred-reduction lanes.
+/// `scratch` must hold [`product_grid_scratch_len`]`(n)` elements.
 #[inline]
 pub(crate) fn accumulate_product_grid<F: JoltField>(
-    evals: &mut [F],
+    evals: &[F],
     steps: &[F],
     lanes: &mut [F::Accumulator],
+    scratch: &mut [F],
 ) {
     let n = lanes.len();
-    accumulate_product(evals, &mut lanes[0]);
-    for lane in &mut lanes[1..n - 1] {
-        for (eval, step) in evals.iter_mut().zip(steps) {
-            *eval += *step;
+    debug_assert!((2..=MAX_GRID_FACTORS).contains(&n));
+    debug_assert_eq!(evals.len(), n);
+    debug_assert_eq!(steps.len(), n);
+    if n <= DIRECT_GRID_FACTORS {
+        let point = &mut scratch[..n];
+        point.copy_from_slice(evals);
+        accumulate_product(point, &mut lanes[0]);
+        for lane in &mut lanes[1..n - 1] {
+            for (value, step) in point.iter_mut().zip(steps) {
+                *value += *step;
+            }
+            accumulate_product(point, lane);
         }
-        accumulate_product(evals, lane);
+        accumulate_product(steps, &mut lanes[n - 1]);
+        return;
     }
-    accumulate_product(steps, &mut lanes[n - 1]);
+    let mid = n / 2;
+    let (left, rest) = scratch.split_at_mut(n - 1);
+    let (right, rest) = rest.split_at_mut(n - 1);
+    let left_lead = linear_product(&evals[..mid], &steps[..mid], &mut left[..mid], rest);
+    let right_lead = linear_product(&evals[mid..], &steps[mid..], &mut right[..n - mid], rest);
+    extend_by_differences(left, mid, left_lead, rest);
+    extend_by_differences(right, n - mid, right_lead, rest);
+    for ((lane, left), right) in lanes[..n - 1].iter_mut().zip(&*left).zip(&*right) {
+        lane.fmadd(*left, *right);
+    }
+    lanes[n - 1].fmadd(left_lead, right_lead);
+}
+
+/// The product of the linear factors `values[i] + (t − 1) · steps[i]` at
+/// `t = 1, …, degree` into `out` (`degree = values.len() = out.len()`);
+/// returns its leading coefficient.
+fn linear_product<F: JoltField>(values: &[F], steps: &[F], out: &mut [F], scratch: &mut [F]) -> F {
+    let degree = values.len();
+    if degree == 1 {
+        out[0] = values[0];
+        return steps[0];
+    }
+    let mid = degree / 2;
+    let (left, rest) = scratch.split_at_mut(degree);
+    let (right, rest) = rest.split_at_mut(degree);
+    let left_lead = linear_product(&values[..mid], &steps[..mid], &mut left[..mid], rest);
+    let right_lead = linear_product(
+        &values[mid..],
+        &steps[mid..],
+        &mut right[..degree - mid],
+        rest,
+    );
+    extend_by_differences(left, mid, left_lead, rest);
+    extend_by_differences(right, degree - mid, right_lead, rest);
+    for ((out, left), right) in out.iter_mut().zip(&*left).zip(&*right) {
+        *out = *left * *right;
+    }
+    left_lead * right_lead
+}
+
+/// Extends a degree-`degree` polynomial known at `t = 1, …, degree`
+/// (`values[..degree]`) with leading coefficient `lead` to every
+/// `t ≤ values.len()`: the `degree`-th difference is the constant
+/// `degree! · lead`, so each new point costs `degree` additions after one
+/// backward-difference table at `t = degree`.
+fn extend_by_differences<F: JoltField>(
+    values: &mut [F],
+    degree: usize,
+    lead: F,
+    scratch: &mut [F],
+) {
+    const FACTORIALS: [u64; MAX_GRID_FACTORS + 1] = {
+        let mut table = [1u64; MAX_GRID_FACTORS + 1];
+        let mut i = 1;
+        while i <= MAX_GRID_FACTORS {
+            table[i] = table[i - 1] * i as u64;
+            i += 1;
+        }
+        table
+    };
+    if values.len() <= degree {
+        return;
+    }
+    let (known, unknown) = values.split_at_mut(degree);
+    if degree == 1 {
+        let mut value = known[0];
+        for next in unknown {
+            value += lead;
+            *next = value;
+        }
+        return;
+    }
+    // `back[k] = ∇^k p(degree)`: the last entry of each difference order.
+    let (work, back) = scratch.split_at_mut(degree);
+    let back = &mut back[..degree];
+    work.copy_from_slice(known);
+    back[0] = work[degree - 1];
+    for (order, last) in back.iter_mut().enumerate().skip(1) {
+        for i in (order..degree).rev() {
+            work[i] -= work[i - 1];
+        }
+        *last = work[degree - 1];
+    }
+    let top = if degree == 2 {
+        lead + lead
+    } else {
+        lead.mul_u64(FACTORIALS[degree])
+    };
+    for next in unknown {
+        let mut higher = top;
+        for difference in back.iter_mut().rev() {
+            *difference += higher;
+            higher = *difference;
+        }
+        *next = higher;
+    }
 }
 
 /// Accumulate `eq · F(value)` for a full-range `u64` on the small-scalar
@@ -188,31 +313,6 @@ pub(crate) fn gamma_powers<F: JoltField>(gamma: F, count: usize) -> Vec<F> {
         power *= gamma;
     }
     powers
-}
-
-/// `(γ^i, γ^{-i})` pairs for pre-scaled shared tables. The inverse powers
-/// unscale the final claims back to the committed polynomials' values;
-/// `γ^i · γ^{-i} = 1` exactly, so unscaling is byte-exact. `reason` names
-/// the batching challenge in the (unreachable) non-invertible error.
-pub(crate) fn gamma_power_pairs<F: JoltField>(
-    gamma: F,
-    count: usize,
-    reason: &'static str,
-) -> Result<(Vec<F>, Vec<F>), KernelError<F>> {
-    let gamma_inv = gamma
-        .inverse()
-        .ok_or(KernelError::InvariantViolation { reason })?;
-    let mut powers = Vec::with_capacity(count);
-    let mut powers_inv = Vec::with_capacity(count);
-    let mut power = F::one();
-    let mut power_inv = F::one();
-    for _ in 0..count {
-        powers.push(power);
-        powers_inv.push(power_inv);
-        power *= gamma;
-        power_inv *= gamma_inv;
-    }
-    Ok((powers, powers_inv))
 }
 
 /// `scale · eq(point, ·)` evaluations, big-endian (`point[0]` pairs the index
@@ -312,7 +412,7 @@ impl<F: JoltField> RoundChallenges<F> {
 /// naive tier's check on its hand-materialized derived tables.
 pub(crate) fn pin_derived_term<F: JoltField, R: ConcreteSumcheck<F>>(
     relation: &R,
-    id: JoltDerivedId,
+    id: DerivedIdOf<F, R>,
     input_points: &SumcheckInputPoints<F, R>,
     output_points: &SumcheckOutputPoints<F, R>,
     challenges: &ConcreteSumcheckChallenges<F, R>,
@@ -320,7 +420,11 @@ pub(crate) fn pin_derived_term<F: JoltField, R: ConcreteSumcheck<F>>(
 ) -> Result<(), SumcheckKernelError<F>> {
     let expected = relation.derive_output_term(&id, input_points, output_points, challenges)?;
     if got != expected {
-        return Err(SumcheckKernelError::DerivedTableDrift { id, expected, got });
+        return Err(SumcheckKernelError::DerivedTableDrift {
+            id: id.into(),
+            expected,
+            got,
+        });
     }
     Ok(())
 }
@@ -329,16 +433,18 @@ pub(crate) fn pin_derived_term<F: JoltField, R: ConcreteSumcheck<F>>(
 /// the term under this proof shape (`MissingStageClaimDerived`).
 pub(crate) fn pin_derived_term_if_derived<F: JoltField, R: ConcreteSumcheck<F>>(
     relation: &R,
-    id: JoltDerivedId,
+    id: DerivedIdOf<F, R>,
     input_points: &SumcheckInputPoints<F, R>,
     output_points: &SumcheckOutputPoints<F, R>,
     challenges: &ConcreteSumcheckChallenges<F, R>,
     got: F,
 ) -> Result<(), SumcheckKernelError<F>> {
     match relation.derive_output_term(&id, input_points, output_points, challenges) {
-        Ok(expected) if got != expected => {
-            Err(SumcheckKernelError::DerivedTableDrift { id, expected, got })
-        }
+        Ok(expected) if got != expected => Err(SumcheckKernelError::DerivedTableDrift {
+            id: id.into(),
+            expected,
+            got,
+        }),
         Ok(_) | Err(VerifierError::MissingStageClaimDerived { .. }) => Ok(()),
         Err(error) => Err(error.into()),
     }
@@ -362,6 +468,34 @@ pub(crate) trait GruenRoundMessage<F: JoltField> {
         previous_claim: F,
         round: usize,
     ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+
+    fn checked_cubic(
+        &self,
+        q_zero: F,
+        q_leading: F,
+        previous_claim: F,
+        round: usize,
+        q_at_one: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+
+    fn checked_toom(
+        &self,
+        q_evals: &[F],
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+
+    #[cfg(feature = "field-inline")]
+    fn checked_linear(
+        &self,
+        q_one: F,
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>>;
+
+    fn product_at_one(&self, a: &Polynomial<F>, b: &Polynomial<F>) -> F;
 
     /// `(q(0), q(∞))` of the two-table product summand
     /// `Σ_y E(y) · a(y) · b(y)` over the remaining low-to-high `(lo, hi)`
@@ -395,6 +529,64 @@ impl<F: JoltField> GruenRoundMessage<F> for GruenSplitEqPolynomial<F> {
             });
         }
         Ok(UnivariatePoly::from_evals(q_evals))
+    }
+
+    fn checked_cubic(
+        &self,
+        q_zero: F,
+        q_leading: F,
+        previous_claim: F,
+        round: usize,
+        q_at_one: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        self.gruen_poly_deg_3(q_zero, q_leading, previous_claim, q_at_one)
+            .map_err(|actual| SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual,
+            })
+    }
+
+    fn checked_toom(
+        &self,
+        q_evals: &[F],
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        self.gruen_poly_from_evals(q_evals, previous_claim, q_at_zero)
+            .map_err(|actual| SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual,
+            })
+    }
+
+    #[cfg(feature = "field-inline")]
+    fn checked_linear(
+        &self,
+        q_one: F,
+        previous_claim: F,
+        round: usize,
+        q_at_zero: impl FnOnce() -> F,
+    ) -> Result<UnivariatePoly<F>, SumcheckError<F>> {
+        self.gruen_poly_deg_2(q_one, previous_claim, q_at_zero)
+            .map_err(|actual| SumcheckError::RoundCheckFailed {
+                round,
+                expected: previous_claim,
+                actual,
+            })
+    }
+
+    fn product_at_one(&self, a: &Polynomial<F>, b: &Polynomial<F>) -> F {
+        self.par_fold_out_in(
+            F::zero,
+            |sum, row, _, weight| {
+                *sum += weight * a.evals()[2 * row + 1] * b.evals()[2 * row + 1];
+            },
+            |_, weight, sum| weight * sum,
+            |left, right| left + right,
+        )
     }
 
     fn product_endpoints(&self, a: &Polynomial<F>, b: &Polynomial<F>) -> (F, F) {

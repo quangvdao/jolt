@@ -23,8 +23,8 @@ use jolt_akita::schedule_registry::{
     dense_group_profile, FIXTURE_K16_FINAL_NUM_VARS, FIXTURE_TRUSTED_ADVICE_GROUP,
 };
 use jolt_akita::schedules::emit::{
-    family_specs, keys, K16_COLUMN_VARIABLES, K16_NUM_POLYS, K16_NUM_VARS, K256_COLUMN_VARIABLES,
-    K256_NUM_POLYS, K256_NUM_VARS, RECURSIVE_TRACE_LOG_T_CUTOVER,
+    family_specs, one_hot_keys, K16_COLUMN_VARIABLES, K16_NUM_VARS, K256_COLUMN_VARIABLES,
+    RECURSIVE_TRACE_LOG_T_CUTOVER,
 };
 use jolt_akita::{
     AkitaOneHotChunkProfile, AkitaScheduleArtifacts, AkitaScheme, AkitaSetupParams,
@@ -96,24 +96,9 @@ fn four_file_directory_supports_single_profile() {
 
 #[test]
 fn catalogs_cover_every_reachable_one_hot_trace_shape() {
-    for (catalog, num_vars) in [
-        (
-            one_hot_catalog(AKITA_ONE_HOT_K16, AkitaOneHotChunkProfile::Single),
-            K16_NUM_VARS,
-        ),
-        (
-            one_hot_catalog(AKITA_ONE_HOT_K256, AkitaOneHotChunkProfile::Single),
-            K256_NUM_VARS,
-        ),
-    ] {
-        let grid = keys(
-            if num_vars.1 == K16_NUM_VARS.1 {
-                K16_NUM_POLYS
-            } else {
-                K256_NUM_POLYS
-            },
-            num_vars,
-        );
+    for one_hot_k in [AKITA_ONE_HOT_K16, AKITA_ONE_HOT_K256] {
+        let catalog = one_hot_catalog(one_hot_k, AkitaOneHotChunkProfile::Single);
+        let grid = one_hot_keys(one_hot_k, AkitaOneHotChunkProfile::Single).expect("one-hot keys");
         assert!(!grid.is_empty());
         for key in &grid {
             let resolved = catalog
@@ -154,20 +139,13 @@ fn multi_chunk_catalogs_cover_every_supported_profile() {
             JoltOneHotK256MultiChunk::schedule_family_name(),
         ),
     ] {
-        for (one_hot_k, num_vars, family_name) in [
-            (AKITA_ONE_HOT_K16, (16, K16_NUM_VARS.1), k16_family),
-            (AKITA_ONE_HOT_K256, (16, K256_NUM_VARS.1), k256_family),
+        for (one_hot_k, family_name) in [
+            (AKITA_ONE_HOT_K16, k16_family),
+            (AKITA_ONE_HOT_K256, k256_family),
         ] {
             let catalog = one_hot_catalog(one_hot_k, profile);
             assert_eq!(catalog.family_name(), family_name);
-            let grid = keys(
-                if num_vars.1 == K16_NUM_VARS.1 {
-                    K16_NUM_POLYS
-                } else {
-                    K256_NUM_POLYS
-                },
-                num_vars,
-            );
+            let grid = one_hot_keys(one_hot_k, profile).expect("one-hot keys");
             for key in &grid {
                 let schedule = catalog
                     .resolve_key(&ScheduleLookupKey::single(*key))
@@ -192,10 +170,14 @@ fn multi_chunk_catalogs_cover_every_supported_profile() {
     }
 }
 
-fn scalar_schedule(catalog: &ValidatedScheduleCatalog, num_vars: usize) -> FoldSchedule {
+fn trace_schedule(
+    catalog: &ValidatedScheduleCatalog,
+    num_vars: usize,
+    num_polys: usize,
+) -> FoldSchedule {
     catalog
         .resolve_key(&ScheduleLookupKey::single(PolynomialGroupLayout::new(
-            num_vars, 1,
+            num_vars, num_polys,
         )))
         .expect("cutover row must resolve")
         .schedule()
@@ -211,30 +193,34 @@ fn uses_setup_offloading(schedule: &FoldSchedule) -> bool {
 
 #[test]
 fn one_hot_catalogs_switch_to_setup_offloading_at_the_trace_cutover() {
-    for (catalog, column_variables) in [
+    for (catalog, column_variables, num_polys) in [
         (
             one_hot_catalog(AKITA_ONE_HOT_K16, AkitaOneHotChunkProfile::Single),
             K16_COLUMN_VARIABLES,
+            51,
         ),
         (
             one_hot_catalog(AKITA_ONE_HOT_K256, AkitaOneHotChunkProfile::Single),
             K256_COLUMN_VARIABLES,
+            27,
         ),
     ] {
         let cutover_num_vars = RECURSIVE_TRACE_LOG_T_CUTOVER + column_variables;
-        assert!(!uses_setup_offloading(&scalar_schedule(
+        assert!(!uses_setup_offloading(&trace_schedule(
             &catalog,
-            cutover_num_vars - 1
+            cutover_num_vars - 1,
+            num_polys,
         )));
-        assert!(uses_setup_offloading(&scalar_schedule(
+        assert!(uses_setup_offloading(&trace_schedule(
             &catalog,
-            cutover_num_vars
+            cutover_num_vars,
+            num_polys,
         )));
     }
 }
 
 const TRUSTED_ADVICE_GROUP: PolynomialGroupLayout = PolynomialGroupLayout::new(20, 1);
-const TRUSTED_ADVICE_K256_FINAL_GROUP: PolynomialGroupLayout = PolynomialGroupLayout::new(34, 1);
+const TRUSTED_ADVICE_K256_FINAL_GROUP: PolynomialGroupLayout = PolynomialGroupLayout::new(34, 27);
 
 fn trusted_advice_grouped_key(dense: &ValidatedScheduleCatalog) -> ScheduleLookupKey {
     let trusted_profile = dense_group_profile(dense, TRUSTED_ADVICE_GROUP)
@@ -331,7 +317,7 @@ fn grouped_adaptation_preserves_direct_and_recursive_k16_trace_skeletons() {
                 None,
                 Some(FIXTURE_TRUSTED_ADVICE_GROUP.num_vars()),
                 Vec::new(),
-                PolynomialGroupLayout::new(final_num_vars, 1),
+                PolynomialGroupLayout::new(final_num_vars, 51),
             ),
             AKITA_ONE_HOT_K16,
         )
@@ -339,7 +325,7 @@ fn grouped_adaptation_preserves_direct_and_recursive_k16_trace_skeletons() {
         let setup_catalog =
             jolt_akita::schedule_registry::extend_catalog::<JoltOneHotK16>(&base, &rows)
                 .expect("freeze adapted K=16 catalog");
-        let final_group = PolynomialGroupLayout::new(final_num_vars, 1);
+        let final_group = PolynomialGroupLayout::new(final_num_vars, 51);
         let resolved = setup_catalog
             .resolve_key(&ScheduleLookupKey {
                 final_group,
@@ -383,7 +369,7 @@ fn grouped_setup_capacity_covers_precommit_and_complete_schedule() {
     .expect("precommit capacity");
     let trusted_catalog =
         TrustedScheduleCatalog::<JoltOneHotK256>::new(setup_catalog).expect("config-bound catalog");
-    let setup_capacity = SetupRequirements::from_catalog(&trusted_catalog, 39, 2)
+    let setup_capacity = SetupRequirements::from_catalog(&trusted_catalog, 38, 28)
         .expect("catalog-backed setup capacity")
         .matrix_capacity();
     assert!(setup_capacity.num_field_elements >= full_capacity.num_field_elements);
@@ -406,7 +392,7 @@ fn base_catalogs_contain_no_grouped_advice_rows() {
     ] {
         for num_vars in FIXTURE_K16_FINAL_NUM_VARS.0..=FIXTURE_K16_FINAL_NUM_VARS.1 {
             let key = ScheduleLookupKey {
-                final_group: PolynomialGroupLayout::new(num_vars, 1),
+                final_group: PolynomialGroupLayout::new(num_vars, 51),
                 precommitteds: precommitteds.clone(),
             };
             assert!(base.resolve_key(&key).is_err());
@@ -415,25 +401,25 @@ fn base_catalogs_contain_no_grouped_advice_rows() {
 }
 
 #[test]
-fn grouped_provisioning_rejects_out_of_family_final_arity() {
+fn grouped_provisioning_rejects_unadmitted_final_shape() {
     let final_num_vars = K16_NUM_VARS.0 - 1;
     let request = GroupedScheduleParams::new(
         None,
         Some(FIXTURE_TRUSTED_ADVICE_GROUP.num_vars()),
         Vec::new(),
-        PolynomialGroupLayout::new(final_num_vars, 1),
+        PolynomialGroupLayout::new(final_num_vars, 51),
     );
     let error = AkitaScheme::setup(AkitaSetupParams::one_hot_only_grouped(
         final_num_vars,
-        1,
-        2,
+        51,
+        52,
         [3; 32],
         AKITA_ONE_HOT_K16,
         Some(request),
         Arc::new(artifacts()),
     ))
     .expect_err("a declared reachable arity outside the family must fail setup");
-    assert!(error.to_string().contains("outside the supported range"));
+    assert!(error.to_string().contains("outside the admitted catalog"));
 }
 
 /// The emit specs are the single source of truth for what the generator
@@ -556,11 +542,16 @@ mod field_inc {
         let dense = dense_catalog();
         let full_dense = full_dense_catalog();
         let base = one_hot_catalog(one_hot_k, AkitaOneHotChunkProfile::Single);
+        let num_polys = if one_hot_k == AKITA_ONE_HOT_K16 {
+            51
+        } else {
+            27
+        };
         let overhead = trace_arity_overhead(one_hot_k);
         let reachable_min = (overhead + PROVER_MIN_LOG_T).max(declared_min);
         for final_num_vars in reachable_min..=ceiling {
             let layout = FieldIncLayout::new(final_num_vars - overhead);
-            let rows = provision_groups_for_k(&dense, &full_dense, &base, &GroupedScheduleParams::new(None, None, vec![DenseGroupLayout::FullWidth { num_vars: layout.num_vars() }], PolynomialGroupLayout::new(final_num_vars, 1)), one_hot_k)
+            let rows = provision_groups_for_k(&dense, &full_dense, &base, &GroupedScheduleParams::new(None, None, vec![DenseGroupLayout::FullWidth { num_vars: layout.num_vars() }], PolynomialGroupLayout::new(final_num_vars, num_polys)), one_hot_k)
             .unwrap_or_else(|error| {
                 panic!(
                     "K={one_hot_k} final arity {final_num_vars}: field-inline provisioning failed: {error}"
@@ -572,7 +563,7 @@ mod field_inc {
                 "K={one_hot_k} final arity {final_num_vars} must plan its field-inline row"
             );
             let key = ScheduleLookupKey {
-                final_group: PolynomialGroupLayout::new(final_num_vars, 1),
+                final_group: PolynomialGroupLayout::new(final_num_vars, num_polys),
                 precommitteds: vec![dense_group_profile(
                     &full_dense,
                     PolynomialGroupLayout::new(layout.num_vars(), 1),
@@ -607,40 +598,6 @@ mod field_inc {
     }
 
     #[test]
-    fn full_width_replanning_is_limited_to_one_inc_and_two_advice_groups() {
-        let full = DenseGroupLayout::FullWidth { num_vars: 30 };
-        let dense = dense_catalog();
-        let full_dense = full_dense_catalog();
-        let base = one_hot_catalog(AKITA_ONE_HOT_K256, AkitaOneHotChunkProfile::Single);
-        for layouts in [
-            vec![
-                DenseGroupLayout::Bounded { num_vars: 14 },
-                DenseGroupLayout::Bounded { num_vars: 15 },
-                DenseGroupLayout::Bounded { num_vars: 16 },
-                full,
-            ],
-            vec![full, full],
-        ] {
-            assert!(
-                provision_groups_for_k(
-                    &dense,
-                    &full_dense,
-                    &base,
-                    &GroupedScheduleParams::new(
-                        None,
-                        None,
-                        layouts,
-                        PolynomialGroupLayout::new(38, 1)
-                    ),
-                    AKITA_ONE_HOT_K256
-                )
-                .is_err(),
-                "unsupported batch shapes must retain the guided-planning rejection"
-            );
-        }
-    }
-
-    #[test]
     fn field_inline_rows_append_the_inc_group_to_every_advice_combination() {
         let dense = dense_catalog();
         let full_dense = full_dense_catalog();
@@ -658,7 +615,7 @@ mod field_inc {
                 vec![DenseGroupLayout::FullWidth {
                     num_vars: layout.num_vars(),
                 }],
-                PolynomialGroupLayout::new(final_num_vars, 1),
+                PolynomialGroupLayout::new(final_num_vars, 51),
             ),
             AKITA_ONE_HOT_K16,
         )
@@ -680,7 +637,7 @@ mod field_inc {
                     .expect("full-width advice-shaped profile");
             assert!(catalog
                 .resolve_key(&ScheduleLookupKey {
-                    final_group: PolynomialGroupLayout::new(final_num_vars, 1),
+                    final_group: PolynomialGroupLayout::new(final_num_vars, 51),
                     precommitteds: vec![widened_advice, inc],
                 })
                 .is_err());

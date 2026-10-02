@@ -22,25 +22,23 @@ pub mod emit {
     use akita_planner::EmitSpec;
 
     use crate::configs::{
-        JoltDenseBounded, JoltDenseFull, JoltOneHotK16, JoltOneHotK16Direct,
-        JoltOneHotK16MultiChunk, JoltOneHotK16MultiChunkDirect, JoltOneHotK16W2R2,
-        JoltOneHotK16W2R2Direct, JoltOneHotK16W4R2, JoltOneHotK16W4R2Direct, JoltOneHotK256,
-        JoltOneHotK256Direct, JoltOneHotK256MultiChunk, JoltOneHotK256MultiChunkDirect,
-        JoltOneHotK256W2R2, JoltOneHotK256W2R2Direct, JoltOneHotK256W4R2, JoltOneHotK256W4R2Direct,
+        AkitaOneHotChunkProfile, JoltDenseBounded, JoltDenseFull, JoltOneHotK16,
+        JoltOneHotK16Direct, JoltOneHotK16MultiChunk, JoltOneHotK16MultiChunkDirect,
+        JoltOneHotK16W2R2, JoltOneHotK16W2R2Direct, JoltOneHotK16W4R2, JoltOneHotK16W4R2Direct,
+        JoltOneHotK256, JoltOneHotK256Direct, JoltOneHotK256MultiChunk,
+        JoltOneHotK256MultiChunkDirect, JoltOneHotK256W2R2, JoltOneHotK256W2R2Direct,
+        JoltOneHotK256W4R2, JoltOneHotK256W4R2Direct,
     };
     use crate::planning::plan_schedule;
+    use crate::{AKITA_ONE_HOT_K16, AKITA_ONE_HOT_K256};
 
-    /// Adapter fixtures plus native trace widths admitted by the row mask.
-    pub const K16_NUM_POLYS: &[usize] = &[
-        1, 2, 4, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
-    ];
-    pub const K256_NUM_POLYS: &[usize] = &[
-        1, 2, 4, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
-    ];
-    pub const K16_NUM_VARS: (usize, usize) = (12, 28);
-    pub const K256_NUM_VARS: (usize, usize) = (12, 38);
-    /// Multi-chunk profiles require enough witness geometry for two chunked fold levels.
-    pub const MULTI_CHUNK_MIN_NUM_VARS: usize = 16;
+    /// Native trace counts: 192/log_K + carry + bytecode and RAM chunks.
+    /// Bytecode PCs fit u32; remapped u64 addresses have at most 61 word bits.
+    /// K=16 is additionally bounded by the 64-column row mask.
+    pub const K16_NUM_POLYS: &[usize] = &[51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64];
+    pub const K256_NUM_POLYS: &[usize] = &[27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37];
+    pub const K16_NUM_VARS: (usize, usize) = (16, 28);
+    pub const K256_NUM_VARS: (usize, usize) = (33, 38);
     /// Bounded-dense advice and committed-program byte objects.
     pub const DENSE_NUM_VARS: (usize, usize) = (14, 34);
 
@@ -149,10 +147,55 @@ pub mod emit {
         keys
     }
 
+    /// Default production shapes plus the exact adapter, benchmark, and override fixtures.
+    pub fn one_hot_keys(
+        one_hot_k: usize,
+        profile: AkitaOneHotChunkProfile,
+    ) -> Result<Vec<PolynomialGroupLayout>, AkitaError> {
+        let (widths, arities, fixtures): (_, _, &[(usize, usize)]) = match one_hot_k {
+            AKITA_ONE_HOT_K16 => (
+                K16_NUM_POLYS,
+                K16_NUM_VARS,
+                &[(12, 1), (12, 2), (16, 1), (25, 1)],
+            ),
+            AKITA_ONE_HOT_K256 => (
+                K256_NUM_POLYS,
+                K256_NUM_VARS,
+                &[
+                    (13, 27),
+                    (14, 1),
+                    (15, 1),
+                    (16, 1),
+                    (20, 1),
+                    (25, 1),
+                    (28, 27),
+                    (29, 27),
+                    (20, 29),
+                ],
+            ),
+            other => {
+                return Err(AkitaError::InvalidSetup(format!(
+                    "unsupported one-hot K={other}"
+                )))
+            }
+        };
+        let mut admitted = keys(widths, arities);
+        let fixtures = if profile == AkitaOneHotChunkProfile::Single {
+            fixtures
+        } else {
+            &[(16, 1)]
+        };
+        admitted.extend(
+            fixtures
+                .iter()
+                .map(|&(vars, polys)| PolynomialGroupLayout::new(vars, polys)),
+        );
+        Ok(admitted)
+    }
+
     fn spec<Cfg: CommitmentConfig>(
         family_name: &'static str,
-        num_polys: &[usize],
-        num_vars: (usize, usize),
+        keys: Vec<PolynomialGroupLayout>,
         regen: fn(PolynomialGroupLayout) -> Result<FoldSchedule, AkitaError>,
         output_dir: PathBuf,
     ) -> Result<EmitSpec, AkitaError> {
@@ -160,7 +203,7 @@ pub mod emit {
             family_name,
             policy: policy_of::<Cfg>(),
             source_contract: Cfg::committed_source_contract()?,
-            keys: keys(num_polys, num_vars),
+            keys,
             grouped_requests: Vec::new(),
             preplanned_scalar: Vec::new(),
             output_dir,
@@ -178,71 +221,61 @@ pub mod emit {
         Ok(vec![
             spec::<JoltOneHotK16>(
                 JoltOneHotK16::schedule_family_name(),
-                K16_NUM_POLYS,
-                K16_NUM_VARS,
+                one_hot_keys(AKITA_ONE_HOT_K16, AkitaOneHotChunkProfile::Single)?,
                 regen_one_hot_k16,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256>(
                 JoltOneHotK256::schedule_family_name(),
-                K256_NUM_POLYS,
-                K256_NUM_VARS,
+                one_hot_keys(AKITA_ONE_HOT_K256, AkitaOneHotChunkProfile::Single)?,
                 regen_one_hot_k256,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK16W2R2>(
                 JoltOneHotK16W2R2::schedule_family_name(),
-                K16_NUM_POLYS,
-                (MULTI_CHUNK_MIN_NUM_VARS, K16_NUM_VARS.1),
+                one_hot_keys(AKITA_ONE_HOT_K16, AkitaOneHotChunkProfile::Two)?,
                 regen_one_hot_k16_w2r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256W2R2>(
                 JoltOneHotK256W2R2::schedule_family_name(),
-                K256_NUM_POLYS,
-                (MULTI_CHUNK_MIN_NUM_VARS, K256_NUM_VARS.1),
+                one_hot_keys(AKITA_ONE_HOT_K256, AkitaOneHotChunkProfile::Two)?,
                 regen_one_hot_k256_w2r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK16W4R2>(
                 JoltOneHotK16W4R2::schedule_family_name(),
-                K16_NUM_POLYS,
-                (MULTI_CHUNK_MIN_NUM_VARS, K16_NUM_VARS.1),
+                one_hot_keys(AKITA_ONE_HOT_K16, AkitaOneHotChunkProfile::Four)?,
                 regen_one_hot_k16_w4r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256W4R2>(
                 JoltOneHotK256W4R2::schedule_family_name(),
-                K256_NUM_POLYS,
-                (MULTI_CHUNK_MIN_NUM_VARS, K256_NUM_VARS.1),
+                one_hot_keys(AKITA_ONE_HOT_K256, AkitaOneHotChunkProfile::Four)?,
                 regen_one_hot_k256_w4r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK16MultiChunk>(
                 JoltOneHotK16MultiChunk::schedule_family_name(),
-                K16_NUM_POLYS,
-                (MULTI_CHUNK_MIN_NUM_VARS, K16_NUM_VARS.1),
+                one_hot_keys(AKITA_ONE_HOT_K16, AkitaOneHotChunkProfile::Eight)?,
                 regen_one_hot_k16_multi_chunk,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256MultiChunk>(
                 JoltOneHotK256MultiChunk::schedule_family_name(),
-                K256_NUM_POLYS,
-                (MULTI_CHUNK_MIN_NUM_VARS, K256_NUM_VARS.1),
+                one_hot_keys(AKITA_ONE_HOT_K256, AkitaOneHotChunkProfile::Eight)?,
                 regen_one_hot_k256_multi_chunk,
                 output_dir.clone(),
             )?,
             spec::<JoltDenseBounded>(
                 JoltDenseBounded::schedule_family_name(),
-                &[1, 2],
-                DENSE_NUM_VARS,
+                keys(&[1, 2], DENSE_NUM_VARS),
                 regen::<JoltDenseBounded>,
                 output_dir.clone(),
             )?,
             spec::<JoltDenseFull>(
                 JoltDenseFull::schedule_family_name(),
-                &[1],
-                DENSE_NUM_VARS,
+                keys(&[1], DENSE_NUM_VARS),
                 regen::<JoltDenseFull>,
                 output_dir,
             )?,

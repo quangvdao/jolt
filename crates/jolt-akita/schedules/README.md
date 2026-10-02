@@ -66,9 +66,8 @@ only bounded dense objects fail if that fixed geometry is infeasible.
 A full-width field increment can require different trace fold geometry. If
 guided planning returns `UnsupportedSchedule` for the supported field batch—
 exactly one full-width field increment and at most two bounded advice groups—
-preprocessing runs the full planner under the same audited policy. Larger
-batches and batches with multiple full-width objects retain the guided-planning
-rejection, including its opening-assignment budget. Every auxiliary commitment's
+preprocessing runs the full planner under the same audited policy. If guided planning rejects a larger batch or one with multiple full-width
+objects, that rejection propagates; those shapes never invoke full search. Every auxiliary commitment's
 profile stays fixed, and the resulting grouped row passes the usual schedule
 audit before entering the setup-owned catalog. Other errors propagate. The
 checked-in base catalogs are unchanged; proving and verification use the
@@ -85,5 +84,10 @@ argument to narrow regeneration to matching families. `k16-single` and
 `k256-single` select only the corresponding standard single-chunk catalog.
 
 Trace groups use native columns with arity `log_T + log_K`, without selector
-variables. Catalog keys include the actual column count; the row mask admits
-at most 64 columns. Regenerate catalogs after updating Akita.
+variables. Default trace keys cover K=16 arities 16–28 with 51–64 columns and
+K=256 arities 33–38 with 27–37 columns. The bounds follow the 32-bit bytecode
+PCs, 61-bit remapped RAM word addresses, and 64-column row mask. Adapter,
+benchmark, and forced-K fixtures add only the explicit keys in
+`one_hot_keys`; multi-chunk catalogs retain just their 16-variable singleton
+roundtrip fixture. Other explicit configurations require a catalog containing
+that exact shape. Regenerate catalogs after updating Akita.

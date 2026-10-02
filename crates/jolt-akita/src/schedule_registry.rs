@@ -217,6 +217,21 @@ fn plan_row<Cfg: CommitmentConfig>(
         return Ok(None);
     }
     let main_row = base.resolve_key(&ScheduleLookupKey::single(key.final_group))?;
+    let full_width_count = producers
+        .iter()
+        .filter(|producer| {
+            !producer
+                .source_contract()
+                .decomposition()
+                .has_bounded_committed_source()
+        })
+        .count();
+    if full_width_count > 1 || (full_width_count == 1 && producers.len() > 3) {
+        return Err(AkitaError::UnsupportedSchedule(
+            "full-width batches support one field increment and at most two advice groups"
+                .to_owned(),
+        ));
+    }
     let adapted = find_adapted_schedule(
         main_row,
         &request,
@@ -227,17 +242,7 @@ fn plan_row<Cfg: CommitmentConfig>(
     let schedule = match adapted {
         Ok(planned) => planned.schedule,
         Err(AkitaError::UnsupportedSchedule(_))
-            if producers.len() <= 3
-                && producers
-                    .iter()
-                    .filter(|producer| {
-                        !producer
-                            .source_contract()
-                            .decomposition()
-                            .has_bounded_committed_source()
-                    })
-                    .count()
-                    == 1 =>
+            if producers.len() <= 3 && full_width_count == 1 =>
         {
             // FieldRdInc plus at most two advice groups is the only supported
             // full-width batch. Restrict full search to that shape so it cannot

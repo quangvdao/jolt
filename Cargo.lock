@@ -3257,6 +3257,7 @@ name = "jolt-dory"
 version = "0.1.0"
 dependencies = [
  "akita-config",
+ "akita-params",
  "akita-pcs",
  "akita-types",
  "ark-bn254",

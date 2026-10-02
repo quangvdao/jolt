@@ -200,10 +200,10 @@ where
             auxiliary_groups.push((object.plan.group_role(), &object.commitment, &object.hint));
         }
     }
-    let required_batch_polys = auxiliary_groups.len() + 1;
+    let required_batch_polys = auxiliary_groups.len() + plan.ids().len();
     // The setup is shape-exact for the canonical OneHotTrace group.
-    if preprocessing.pcs_setup.max_num_vars() != plan.packing().packed_num_vars()
-        || preprocessing.pcs_setup.max_num_polys_per_commitment_group() != 1
+    if preprocessing.pcs_setup.max_num_vars() != plan.num_vars()
+        || preprocessing.pcs_setup.max_num_polys_per_commitment_group() != plan.ids().len()
         || preprocessing.pcs_setup.max_total_batch_polys() < required_batch_polys
         || preprocessing.pcs_setup.one_hot_k() != 1usize << log_k_chunk
     {
@@ -220,7 +220,6 @@ where
             let committed = PCS::commit_trace_one_hot(
                 &preprocessing.pcs_setup,
                 preprocessing.pcs_setup.default_layout_digest(),
-                plan.packing().slot_capacity(),
                 Arc::clone(&assembled.rows) as Arc<dyn TraceOneHotRows>,
                 &group_hints,
             );

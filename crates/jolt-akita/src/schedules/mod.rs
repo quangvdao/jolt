@@ -30,32 +30,24 @@ pub mod emit {
     };
     use crate::planning::plan_schedule;
 
-    /// Prefix packing produces one physical polynomial; two-polynomial rows
-    /// cover adapter and tamper-test shapes.
-    pub const ONE_HOT_TRACE_NUM_POLYS: &[usize] = &[1, 2];
-    /// K=16 adds six selector variables to column arity `4 + log_T`;
-    /// the catalog covers logical traces through `2^30`.
-    pub const K16_NUM_VARS: (usize, usize) = (12, 40);
-    /// K=256 adds five selector variables to column arity `8 + log_T`.
-    pub const K256_NUM_VARS: (usize, usize) = (12, 43);
+    /// Adapter fixtures plus native trace widths admitted by the row mask.
+    pub const K16_NUM_POLYS: &[usize] = &[
+        1, 2, 4, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
+    ];
+    pub const K256_NUM_POLYS: &[usize] = &[
+        1, 2, 4, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+    ];
+    pub const K16_NUM_VARS: (usize, usize) = (12, 28);
+    pub const K256_NUM_VARS: (usize, usize) = (12, 38);
     /// Multi-chunk profiles require enough witness geometry for two chunked fold levels.
     pub const MULTI_CHUNK_MIN_NUM_VARS: usize = 16;
     /// Bounded-dense advice and committed-program byte objects.
     pub const DENSE_NUM_VARS: (usize, usize) = (14, 34);
 
-    /// First Jolt trace exponent whose one-hot row uses setup offloading.
-    ///
-    /// K=16 has ten packing variables (`4 + log_T` column arity plus six
-    /// selectors), while K=256 has thirteen (`8 + log_T` plus five). Keeping
-    /// the cutover in logical trace space makes the two artifact families
-    /// describe the same deployment policy. In the crossover sweep, `log_T=20`
-    /// missed the 2x single-thread verifier gate and its proof-only phase
-    /// exceeded 10% overhead; `log_T=21` was the first size to clear both.
+    /// First logical trace exponent using setup offloading.
     pub const RECURSIVE_TRACE_LOG_T_CUTOVER: usize = 21;
-    /// Physical one-hot arity added to the logical trace exponent for K=16.
-    pub const K16_PACKING_VARIABLES: usize = 10;
-    /// Physical one-hot arity added to the logical trace exponent for K=256.
-    pub const K256_PACKING_VARIABLES: usize = 13;
+    pub const K16_COLUMN_VARIABLES: usize = 4;
+    pub const K256_COLUMN_VARIABLES: usize = 8;
 
     /// Pure DP regeneration for `Cfg`; never consults an artifact.
     fn regen<Cfg: CommitmentConfig>(
@@ -65,7 +57,7 @@ pub mod emit {
     }
 
     fn regen_one_hot_k16(key: PolynomialGroupLayout) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_COLUMN_VARIABLES {
             regen::<JoltOneHotK16>(key)
         } else {
             regen::<JoltOneHotK16Direct>(key)
@@ -73,7 +65,7 @@ pub mod emit {
     }
 
     fn regen_one_hot_k256(key: PolynomialGroupLayout) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_COLUMN_VARIABLES {
             regen::<JoltOneHotK256>(key)
         } else {
             regen::<JoltOneHotK256Direct>(key)
@@ -81,7 +73,7 @@ pub mod emit {
     }
 
     fn regen_one_hot_k16_w2r2(key: PolynomialGroupLayout) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_COLUMN_VARIABLES {
             regen::<JoltOneHotK16W2R2>(key)
         } else {
             regen::<JoltOneHotK16W2R2Direct>(key)
@@ -89,7 +81,7 @@ pub mod emit {
     }
 
     fn regen_one_hot_k256_w2r2(key: PolynomialGroupLayout) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_COLUMN_VARIABLES {
             regen::<JoltOneHotK256W2R2>(key)
         } else {
             regen::<JoltOneHotK256W2R2Direct>(key)
@@ -97,7 +89,7 @@ pub mod emit {
     }
 
     fn regen_one_hot_k16_w4r2(key: PolynomialGroupLayout) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_COLUMN_VARIABLES {
             regen::<JoltOneHotK16W4R2>(key)
         } else {
             regen::<JoltOneHotK16W4R2Direct>(key)
@@ -105,7 +97,7 @@ pub mod emit {
     }
 
     fn regen_one_hot_k256_w4r2(key: PolynomialGroupLayout) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_COLUMN_VARIABLES {
             regen::<JoltOneHotK256W4R2>(key)
         } else {
             regen::<JoltOneHotK256W4R2Direct>(key)
@@ -115,7 +107,7 @@ pub mod emit {
     fn regen_one_hot_k16_multi_chunk(
         key: PolynomialGroupLayout,
     ) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K16_COLUMN_VARIABLES {
             regen::<JoltOneHotK16MultiChunk>(key)
         } else {
             regen::<JoltOneHotK16MultiChunkDirect>(key)
@@ -125,7 +117,7 @@ pub mod emit {
     fn regen_one_hot_k256_multi_chunk(
         key: PolynomialGroupLayout,
     ) -> Result<FoldSchedule, AkitaError> {
-        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_PACKING_VARIABLES {
+        if key.num_vars() >= RECURSIVE_TRACE_LOG_T_CUTOVER + K256_COLUMN_VARIABLES {
             regen::<JoltOneHotK256MultiChunk>(key)
         } else {
             regen::<JoltOneHotK256MultiChunkDirect>(key)
@@ -186,63 +178,63 @@ pub mod emit {
         Ok(vec![
             spec::<JoltOneHotK16>(
                 JoltOneHotK16::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K16_NUM_POLYS,
                 K16_NUM_VARS,
                 regen_one_hot_k16,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256>(
                 JoltOneHotK256::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K256_NUM_POLYS,
                 K256_NUM_VARS,
                 regen_one_hot_k256,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK16W2R2>(
                 JoltOneHotK16W2R2::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K16_NUM_POLYS,
                 (MULTI_CHUNK_MIN_NUM_VARS, K16_NUM_VARS.1),
                 regen_one_hot_k16_w2r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256W2R2>(
                 JoltOneHotK256W2R2::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K256_NUM_POLYS,
                 (MULTI_CHUNK_MIN_NUM_VARS, K256_NUM_VARS.1),
                 regen_one_hot_k256_w2r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK16W4R2>(
                 JoltOneHotK16W4R2::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K16_NUM_POLYS,
                 (MULTI_CHUNK_MIN_NUM_VARS, K16_NUM_VARS.1),
                 regen_one_hot_k16_w4r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256W4R2>(
                 JoltOneHotK256W4R2::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K256_NUM_POLYS,
                 (MULTI_CHUNK_MIN_NUM_VARS, K256_NUM_VARS.1),
                 regen_one_hot_k256_w4r2,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK16MultiChunk>(
                 JoltOneHotK16MultiChunk::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K16_NUM_POLYS,
                 (MULTI_CHUNK_MIN_NUM_VARS, K16_NUM_VARS.1),
                 regen_one_hot_k16_multi_chunk,
                 output_dir.clone(),
             )?,
             spec::<JoltOneHotK256MultiChunk>(
                 JoltOneHotK256MultiChunk::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                K256_NUM_POLYS,
                 (MULTI_CHUNK_MIN_NUM_VARS, K256_NUM_VARS.1),
                 regen_one_hot_k256_multi_chunk,
                 output_dir.clone(),
             )?,
             spec::<JoltDenseBounded>(
                 JoltDenseBounded::schedule_family_name(),
-                ONE_HOT_TRACE_NUM_POLYS,
+                &[1, 2],
                 DENSE_NUM_VARS,
                 regen::<JoltDenseBounded>,
                 output_dir.clone(),

@@ -36,7 +36,7 @@ resolve the exact admitted row and never choose a mode dynamically.
 Each K=16 and K=256 family has W2R2, W4R2, and W8R2 multi-chunk companion
 catalogs. The selected profile splits the root and first recursive fold into
 two, four, or eight chunks, while later folds remain single-chunk; their
-smallest admitted physical arity is 16 variables. The original one-hot
+smallest admitted column arity is 16 variables. The original one-hot
 catalogs and the dense advice and committed-program catalog remain
 single-chunk. Existing four-file directories continue to support `Single`;
 selecting a profile whose companion catalog is absent fails during setup.
@@ -83,3 +83,7 @@ cargo run --release -p jolt-akita --bin gen_jolt_schedules -- crates/jolt-akita/
 Pass `k16`, `k256`, `w2r2`, `w4r2`, `multi-chunk`, `dense-bounded`, `dense-full`, or `dense` as a final
 argument to narrow regeneration to matching families. `k16-single` and
 `k256-single` select only the corresponding standard single-chunk catalog.
+
+Trace groups use native columns with arity `log_T + log_K`, without selector
+variables. Catalog keys include the actual column count; the row mask admits
+at most 64 columns. Regenerate catalogs after updating Akita.

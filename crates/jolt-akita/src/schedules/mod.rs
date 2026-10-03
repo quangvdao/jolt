@@ -37,7 +37,7 @@ pub mod emit {
     /// K=16 is additionally bounded by the 64-column row mask.
     pub const K16_NUM_POLYS: &[usize] = &[51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64];
     pub const K256_NUM_POLYS: &[usize] = &[27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37];
-    pub const K16_NUM_VARS: (usize, usize) = (16, 28);
+    pub const K16_NUM_VARS: (usize, usize) = (16, 34);
     pub const K256_NUM_VARS: (usize, usize) = (33, 38);
     /// Bounded-dense advice and committed-program byte objects.
     pub const DENSE_NUM_VARS: (usize, usize) = (14, 34);

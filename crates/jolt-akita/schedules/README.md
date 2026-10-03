@@ -84,7 +84,7 @@ argument to narrow regeneration to matching families. `k16-single` and
 `k256-single` select only the corresponding standard single-chunk catalog.
 
 Trace groups use native columns with arity `log_T + log_K`, without selector
-variables. Default trace keys cover K=16 arities 16–28 with 51–64 columns and
+variables. Default trace keys cover K=16 arities 16–34 with 51–64 columns and
 K=256 arities 33–38 with 27–37 columns. The bounds follow the 32-bit bytecode
 PCs, 61-bit remapped RAM word addresses, and 64-column row mask. Adapter,
 benchmark, and forced-K fixtures add only the explicit keys in

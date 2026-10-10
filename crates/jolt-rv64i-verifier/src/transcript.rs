@@ -7,7 +7,9 @@ use crate::{commitment::BitsCommitmentScheme, statement::CheckedInputs};
 use jolt_field::F128;
 use jolt_transcript::{Blake2bTranscript, Label, LabelWithCount, Transcript, U64Word};
 
+/// The binary-field transcript used by this protocol's reference front end.
 pub type Rv64iTranscript = Blake2bTranscript<F128>;
+/// Version-zero domain separator; changing the fixed preamble grammar requires a new domain.
 pub const PROTOCOL_LABEL: &[u8] = b"jolt-rv64i-binary-v0";
 
 /// Creates and absorbs the checked front-end preamble, without drawing a challenge.
@@ -19,7 +21,8 @@ pub fn preamble<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     transcript
 }
 
-/// Absorbs the 36 bodies of the front-end preamble in their wire order.
+/// Absorbs the 36 checked preamble bodies in their wire order, including empty public segments, without drawing a challenge.
+/// The caller initializes the transcript with `PROTOCOL_LABEL` and performs the scheme's commit phase immediately afterwards.
 pub fn append_preamble<S: BitsCommitmentScheme, T: Transcript<Challenge = F128>>(
     checked: &CheckedInputs<'_, S>,
     transcript: &mut T,

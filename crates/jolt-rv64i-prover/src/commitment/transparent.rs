@@ -18,30 +18,49 @@ use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TransparentCommitment(pub [u8; 32]);
+/// Digest of the cycle exponent followed by packed rows in cycle and word order.
+pub struct TransparentCommitment(
+    /// Exactly 32 canonical commitment bytes, absorbed after the `bits_commitment` label.
+    pub [u8; 32],
+);
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransparentOpening(pub Arc<[BitsRow]>);
+/// The complete packed table opened by the test scheme; its digest and multilinear evaluation are verified.
+pub struct TransparentOpening(
+    /// Exactly `2^log_T` rows, shared with retained prover state and encoded as four little-endian words per cycle.
+    pub Arc<[BitsRow]>,
+);
+/// Retained prover commitment state sharing the packed table allocation until `open` consumes it.
 pub struct TransparentState {
     geometry: BitsGeometry,
     commitment: TransparentCommitment,
     bits: Arc<[BitsRow]>,
 }
+/// Test-only bit-table scheme admitting exponents at most 20 and opening the complete packed table.
+/// Commit absorbs its digest before front-end challenges; open consumes retained state after column absorption and point drawing.
 pub struct TransparentBits;
 #[derive(Debug, Error)]
+/// Unsupported geometry, malformed table shape or a rejected digest or evaluation claim.
 pub enum TransparentError {
     #[error("transparent bit-table exponent {log_T} exceeds 20")]
+    /// The requested exponent exceeds the scheme's bound, checked before allocation.
     Dimension { log_T: usize },
     #[error("bit-table row count differs from its geometry")]
+    /// The packed table does not contain the number of rows selected by its geometry.
     RowCount,
     #[error("opening has invalid point or column dimensions")]
+    /// Opening points are not of widths 8 and `log_T`, or the column vector does not have 256 values.
     OpeningShape,
     #[error("opening geometry differs from the retained commitment geometry")]
+    /// The opening's cycle exponent differs from the retained commitment geometry.
     Geometry,
     #[error("opening table digest differs from the commitment")]
+    /// The disclosed packed table is not bound by the retained digest.
     Digest,
     #[error("opening value differs from the committed bit table")]
+    /// The disclosed table evaluation disagrees with the supplied column-vector evaluation.
     Evaluation,
     #[error(transparent)]
+    /// A supplied point does not fit the integer-index domain needed for evaluation.
     Points(#[from] PointsError),
 }
 impl TransparentBits {
@@ -95,15 +114,18 @@ impl TransparentBits {
     }
 }
 impl BitsWire for TransparentCommitment {
+    /// Appends the 32-byte digest without a length prefix.
     fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.0);
     }
+    /// Accepts exactly 32 bytes for an exponent at most 20, otherwise returning `None`.
     fn read(bytes: &[u8], geometry: BitsGeometry) -> Option<Self> {
         let _ = TransparentBits::rows(geometry).ok()?;
         Some(Self(bytes.try_into().ok()?))
     }
 }
 impl BitsWire for TransparentOpening {
+    /// Appends packed rows in cycle order, with each row's four words encoded little-endian.
     fn write(&self, out: &mut Vec<u8>) {
         for row in self.0.iter() {
             for word in row {
@@ -111,6 +133,7 @@ impl BitsWire for TransparentOpening {
             }
         }
     }
+    /// Accepts exactly `32 * 2^log_T` bytes with exponent at most 20, otherwise returning `None` before allocation.
     fn read(bytes: &[u8], geometry: BitsGeometry) -> Option<Self> {
         let count = TransparentBits::rows(geometry).ok()?;
         if bytes.len() != count * 32 {
@@ -133,6 +156,8 @@ impl BitsCommitmentScheme for TransparentBits {
     type VerifierState = (BitsGeometry, TransparentCommitment);
     type OpeningProof = TransparentOpening;
     type Error = TransparentError;
+    /// Absorbs the commitment label and digest and retains the geometry and digest for one opening check.
+    /// Returns `Dimension` for an unsupported exponent before any front-end challenge is drawn.
     fn verify_commit<T: Transcript<Challenge = F128>>(
         _setup: &(),
         geometry: BitsGeometry,
@@ -144,6 +169,8 @@ impl BitsCommitmentScheme for TransparentBits {
         transcript.append_bytes(&commitment.0);
         Ok((geometry, *commitment))
     }
+    /// Consumes retained verifier state and checks geometry, digest, shape and the full packed-table evaluation.
+    /// Returns the first typed opening failure; the caller has already absorbed columns and drawn the column point.
     fn verify_opening<T: Transcript<Challenge = F128>>(
         _setup: &(),
         state: Self::VerifierState,
@@ -167,6 +194,8 @@ impl BitsCommitmentScheme for TransparentBits {
 impl BitsCommitmentProver for TransparentBits {
     type ProverSetup = ();
     type ProverState = TransparentState;
+    /// Validates geometry and row count, absorbs the digest and retains a clone of the same row handle.
+    /// Returns `Dimension` or `RowCount` for unsupported geometry or inconsistent rows without copying the table.
     fn commit<T: Transcript<Challenge = F128>>(
         _setup: &(),
         geometry: BitsGeometry,
@@ -184,6 +213,8 @@ impl BitsCommitmentProver for TransparentBits {
             },
         ))
     }
+    /// Consumes retained prover state, checks the requested opening and transfers its shared row handle to the proof.
+    /// Returns a typed opening error on inconsistent geometry, dimensions or evaluation.
     fn open<T: Transcript<Challenge = F128>>(
         _setup: &(),
         state: TransparentState,

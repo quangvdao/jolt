@@ -12,19 +12,26 @@ use jolt_rv64i_arith::Chunk;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+/// Invalid point dimensions, integer vertices or required column indices.
 pub enum PointsError {
     #[error("point has {actual} coordinates, expected {expected}")]
+    /// The provided coordinate count differs from the required count.
     Dimension { expected: usize, actual: usize },
     #[error("index {index} does not fit a point of {variables} coordinates")]
+    /// The integer vertex is outside the representable point domain.
     Index { index: usize, variables: usize },
     #[error("column {column} is absent from the column values")]
+    /// A chunk indicator references a column absent from the supplied values.
     MissingColumn { column: usize },
 }
 
+/// Converts a low-variable-first point to the most-significant-variable-first order of `jolt-poly`.
 pub fn to_high_to_low<F: Copy>(point: &[F]) -> Vec<F> {
     point.iter().rev().copied().collect()
 }
 
+/// Evaluates the equality extension on low-variable-first points of equal length.
+/// Returns `Dimension` if their lengths differ.
 pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     if x.len() != y.len() {
         return Err(PointsError::Dimension {
@@ -35,6 +42,8 @@ pub fn eq<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(EqPolynomial::mle(x, y))
 }
 
+/// Evaluates equality with the integer vertex whose bit `i` is coordinate `i`.
+/// Returns `Index` if the index does not fit or the point exceeds the machine-word bit width.
 pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsError> {
     if point.len() > usize::BITS as usize
         || (point.len() < usize::BITS as usize && index >= 1_usize << point.len())
@@ -62,6 +71,8 @@ pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError>
     Ok(EqPolynomial::new(point.iter().rev().copied().collect()).evaluations())
 }
 
+/// Evaluates the extension of unsigned `x < y`, with low-variable-first integer bits.
+/// Returns `Dimension` if the point lengths differ.
 pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     if x.len() != y.len() {
         return Err(PointsError::Dimension {
@@ -74,6 +85,8 @@ pub fn lt<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(LtPolynomial::evaluate(&x_high, &y_high))
 }
 
+/// Evaluates the extension of `y = x + 1` without wrap, with low-variable-first integer bits.
+/// Returns `Dimension` if the point lengths differ.
 pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     if x.len() != y.len() {
         return Err(PointsError::Dimension {
@@ -84,6 +97,8 @@ pub fn next<F: JoltField>(x: &[F], y: &[F]) -> Result<F, PointsError> {
     Ok(EqPlusOnePolynomial::new(to_high_to_low(x)).evaluate(&to_high_to_low(y)))
 }
 
+/// Evaluates the 64-bit table of a word at a six-coordinate low-variable-first bit point.
+/// Returns `Dimension` for any other point length.
 pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
     if point.len() != 6 {
         return Err(PointsError::Dimension {
@@ -96,6 +111,8 @@ pub fn lift<F: JoltField>(word: u64, point: &[F]) -> Result<F, PointsError> {
         .try_fold(F::zero(), |sum, bit| Ok(sum + eq_index(point, bit)?))
 }
 
+/// Evaluates the full digit selector in low-variable-first digit order, reconstructing digit zero from stored columns.
+/// Returns `Dimension` for the wrong digit width or `MissingColumn` when a required indicator is absent.
 pub fn chunk<F: JoltField>(
     descriptor: Chunk,
     point: &[F],

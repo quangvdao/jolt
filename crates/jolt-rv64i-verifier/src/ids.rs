@@ -10,269 +10,449 @@ use jolt_claims::Expr;
 use jolt_verifier::stages::ids::{VerifierChallengeId, VerifierDerivedId};
 use serde::{Deserialize, Serialize};
 
+/// The external identifier family; decoders reject composites from any other family.
 pub const FAMILY: &str = "rv64i-binary";
+/// Symbolic expressions whose opening, derived and challenge identifiers belong to this family.
 pub type FamilyExpr<F> = Expr<F, OpeningId, DerivedId, ChallengeId>;
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// The five router payloads, encoded as indices 0 through 4 in declaration order.
 pub enum Router {
+    /// Payload index 0 in composites that select this enum.
     Variant,
+    /// Payload index 1 in composites that select this enum.
     Shift,
+    /// Payload index 2 in composites that select this enum.
     Memory,
+    /// Payload index 3 in composites that select this enum.
     Compare,
+    /// Payload index 4 in composites that select this enum.
     Branch,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// The outer row block: binary rows encode as 0 and extension-field rows as 1.
 pub enum RowBlock {
+    /// Payload index 0 in composites that select this enum.
     F2,
+    /// Payload index 1 in composites that select this enum.
     F128,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Cycle-weight payloads 0 through 4: router, read, value, entry and successor weights.
 pub enum CycleWeight {
+    /// Payload index 0 in composites that select this enum.
     Router,
+    /// Payload index 1 in composites that select this enum.
     Read,
+    /// Payload index 2 in composites that select this enum.
     Val,
+    /// Payload index 3 in composites that select this enum.
     Entry,
+    /// Payload index 4 in composites that select this enum.
     Next,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Stable relation indices 0 through 17 in declaration order; composites reject every other relation index.
 pub enum RelationId {
+    /// Relation index 0 in external composites.
     SpartanOuterF2,
+    /// Relation index 1 in external composites.
     SpartanOuterF128,
+    /// Relation index 2 in external composites.
     SpartanInner,
+    /// Relation index 3 in external composites.
     RouterShort,
+    /// Relation index 4 in external composites.
     RouterCycleVariant,
+    /// Relation index 5 in external composites.
     RouterCycleShift,
+    /// Relation index 6 in external composites.
     RouterCycleMemory,
+    /// Relation index 7 in external composites.
     RouterCycleCompare,
+    /// Relation index 8 in external composites.
     RouterCycleBranch,
+    /// Relation index 9 in external composites.
     RegistersReadChecking,
+    /// Relation index 10 in external composites.
     RamReadChecking,
+    /// Relation index 11 in external composites.
     RamOutputCheck,
+    /// Relation index 12 in external composites.
     RegistersValEvaluation,
+    /// Relation index 13 in external composites.
     RamValEvaluation,
+    /// Relation index 14 in external composites.
     BytecodeReadAddress,
+    /// Relation index 15 in external composites.
     BytecodeReadCycle,
+    /// Relation index 16 in external composites.
     RamRaProduct,
+    /// Relation index 17 in external composites.
     BitsReduction,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Functionals of the committed bit table, with tags 0 through 6; only `Column` has an integer payload.
 pub enum CommittedPolynomial {
+    /// Tag 0, with zero payload in external composites.
     DirectColumns,
+    /// Tag 1, with zero payload in external composites.
     VariantBits,
+    /// Tag 2, with zero payload in external composites.
     PosRa0,
+    /// Tag 3, with zero payload in external composites.
     PosRa1,
+    /// Tag 4, with zero payload in external composites.
     ShouldBranch,
+    /// Tag 5, with zero payload in external composites.
     Inc,
+    /// Bit-table column payload in `0..256`; composite decoding rejects larger indices.
     Column(usize),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Replay, routing and public-bytecode functionals with tags 0 through 29 in declaration order.
 pub enum VirtualPolynomial {
+    /// Tag 0, with zero payload in external composites.
     Az,
+    /// Tag 1, with zero payload in external composites.
     Bz,
+    /// Tag 2, with zero payload in external composites.
     Cz,
+    /// Tag 3, with zero payload in external composites.
     WitnessRouted,
+    /// Fold payload selecting one of the five router tables.
     RouterFold(Router),
+    /// Tag 5, with zero payload in external composites.
     Rs1Value,
+    /// Tag 6, with zero payload in external composites.
     Rs2Value,
+    /// Tag 7, with zero payload in external composites.
     RdPreValue,
+    /// Tag 8, with zero payload in external composites.
     RamReadValue,
+    /// Tag 9, with zero payload in external composites.
     NextPC,
+    /// Tag 10, with zero payload in external composites.
     PC,
+    /// Tag 11, with zero payload in external composites.
     Imm,
+    /// Tag 12, with zero payload in external composites.
     FallThroughPC,
+    /// Tag 13, with zero payload in external composites.
     PCPlusImm,
+    /// Tag 14, with zero payload in external composites.
     Variant,
+    /// Tag 15, with zero payload in external composites.
     ShiftKind,
+    /// Tag 16, with zero payload in external composites.
     AccessKind,
+    /// Tag 17, with zero payload in external composites.
     KeyKind,
+    /// Tag 18, with zero payload in external composites.
     Branch,
+    /// Tag 19, with zero payload in external composites.
     Store,
+    /// Tag 20, with zero payload in external composites.
     Rs1Ra,
+    /// Tag 21, with zero payload in external composites.
     Rs2Ra,
+    /// Tag 22, with zero payload in external composites.
     RdWa,
+    /// Tag 23, with zero payload in external composites.
     RegistersVal,
+    /// Tag 24, with zero payload in external composites.
     RamVal,
+    /// Tag 25, with zero payload in external composites.
     RamValFinal,
+    /// Tag 26, with zero payload in external composites.
     RamRa,
+    /// Tag 27, with zero payload in external composites.
     BytecodeAddressClaim,
+    /// Bytecode digit chunk payload in `0..6`, independent of the chosen layout.
     BytecodeRaChunk(usize),
+    /// RAM digit chunk payload in `0..16`, independent of the chosen layout.
     RamRaChunk(usize),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Separates committed and virtual opening tags; the opening encoding reserves one bit for this distinction.
 pub enum PolynomialId {
+    /// Committed opening kind 1; its tag and payload come from `CommittedPolynomial`.
     Committed(CommittedPolynomial),
+    /// Virtual opening kind 0; its tag and payload come from `VirtualPolynomial`.
     Virtual(VirtualPolynomial),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Public derived terms scoped to a relation; composite decoding enforces the syntactic domains of §13.
 pub enum DerivedId {
+    /// Terms scoped to the `SpartanOuter` relation instance; wrapped enums define their accepted tags and payloads.
     SpartanOuter(RowBlock, OuterDerived),
+    /// Terms scoped to the `SpartanInner` relation instance; wrapped enums define their accepted tags and payloads.
     SpartanInner(InnerDerived),
+    /// Terms scoped to the `RouterShort` relation instance; wrapped enums define their accepted tags and payloads.
     RouterShort(RouterShortDerived),
+    /// Terms scoped to the `RouterCycle` relation instance; wrapped enums define their accepted tags and payloads.
     RouterCycle(Router, RouterCycleDerived),
+    /// Terms scoped to the `RegistersReadChecking` relation instance; wrapped enums define their accepted tags and payloads.
     RegistersReadChecking(ReadCheckingDerived),
+    /// Terms scoped to the `RamReadChecking` relation instance; wrapped enums define their accepted tags and payloads.
     RamReadChecking(ReadCheckingDerived),
+    /// Terms scoped to the `RamOutputCheck` relation instance; wrapped enums define their accepted tags and payloads.
     RamOutputCheck(OutputCheckDerived),
+    /// Terms scoped to the `RegistersValEvaluation` relation instance; wrapped enums define their accepted tags and payloads.
     RegistersValEvaluation(ValEvaluationDerived),
+    /// Terms scoped to the `RamValEvaluation` relation instance; wrapped enums define their accepted tags and payloads.
     RamValEvaluation(ValEvaluationDerived),
+    /// Terms scoped to the `BytecodeReadAddress` relation instance; wrapped enums define their accepted tags and payloads.
     BytecodeReadAddress(BytecodeAddressDerived),
+    /// Terms scoped to the `BytecodeReadCycle` relation instance; wrapped enums define their accepted tags and payloads.
     BytecodeReadCycle(BytecodeCycleDerived),
+    /// Terms scoped to the `RamRaProduct` relation instance; wrapped enums define their accepted tags and payloads.
     RamRaProduct(RamRaProductDerived),
+    /// Terms scoped to the `BitsReduction` relation instance; wrapped enums define their accepted tags and payloads.
     BitsReduction(BitsReductionDerived),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Relation-scoped scalar challenges; composites admit only each listed challenge tag and a zero payload.
 pub enum ChallengeId {
+    /// Scalar challenges scoped to `SpartanInner`; the wrapped enum defines the accepted zero-payload tags.
     SpartanInner(InnerChallenge),
+    /// Scalar challenges scoped to `RegistersReadChecking`; the wrapped enum defines the accepted zero-payload tags.
     RegistersReadChecking(RegistersReadChallenge),
+    /// Scalar challenges scoped to `RamValEvaluation`; the wrapped enum defines the accepted zero-payload tags.
     RamValEvaluation(RamValChallenge),
+    /// Scalar challenges scoped to `BytecodeReadAddress`; the wrapped enum defines the accepted zero-payload tags.
     BytecodeReadAddress(BytecodeChallenge),
+    /// Scalar challenges scoped to `RamRaProduct`; the wrapped enum defines the accepted zero-payload tags.
     RamRaProduct(RamRaChallenge),
+    /// Scalar challenges scoped to `BitsReduction`; the wrapped enum defines the accepted zero-payload tags.
     BitsReduction(BitsReductionChallenge),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// The outer equality weight, with tag 0 and no payload.
 pub enum OuterDerived {
+    /// Tag 0, with zero payload in external composites.
     EqTau,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Inner matrix and public-column weights, with tags 0 and 1 and no payload.
 pub enum InnerDerived {
+    /// Tag 0, with zero payload in external composites.
     MatrixWeight,
+    /// Tag 1, with zero payload in external composites.
     PublicColumns,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// The short-router route weight, with tag 0 and one of the five `Router` payloads.
 pub enum RouterShortDerived {
+    /// Tag 0; the wrapped enum supplies the payload domain.
     RouteWeight(Router),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Cycle equality, word-slot and constant-slot weights, with tags 0 through 2.
 pub enum RouterCycleDerived {
+    /// Tag 0, with zero payload in external composites.
     EqCycle,
+    /// Source word slot payload in `0..8`.
     WordSlot(usize),
+    /// Tag 2, with zero payload in external composites.
     OneSlot,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// The read-checking cycle equality weight, with tag 0 and no payload.
 pub enum ReadCheckingDerived {
+    /// Tag 0, with zero payload in external composites.
     EqCycle,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Output equality, I/O mask and public-value terms, with tags 0 through 2 and no payload.
 pub enum OutputCheckDerived {
+    /// Tag 0, with zero payload in external composites.
     EqTau,
+    /// Tag 1, with zero payload in external composites.
     IoMask,
+    /// Tag 2, with zero payload in external composites.
     ValIo,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Order and initial-value terms, with tags 0 and 1 and no payload.
 pub enum ValEvaluationDerived {
+    /// Tag 0, with zero payload in external composites.
     Lt,
+    /// Tag 1, with zero payload in external composites.
     InitEval,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Public entry and final PC values, with tags 0 and 1 and no payload.
 pub enum BytecodeAddressDerived {
+    /// Tag 0, with zero payload in external composites.
     EntryPc,
+    /// Tag 1, with zero payload in external composites.
     FinalPc,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Folded bytecode and cycle-weight terms, with tags 0 and 1 and a `CycleWeight` payload.
 pub enum BytecodeCycleDerived {
+    /// Tag 0; the wrapped enum supplies the payload domain.
     BytecodeFold(CycleWeight),
+    /// Tag 1; the wrapped enum supplies the payload domain.
     Weight(CycleWeight),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Read and value cycle equality weights, with tags 0 and 1 and no payload.
 pub enum RamRaProductDerived {
+    /// Tag 0, with zero payload in external composites.
     EqRead,
+    /// Tag 1, with zero payload in external composites.
     EqVal,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Position-zero and bit-column reduction weights, with tags 0 and 1.
 pub enum BitsReductionDerived {
+    /// Position digit payload in `0..2`.
     PosZero(usize),
+    /// Bit-table column payload in `0..256`.
     ColumnWeight(usize),
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// The six outer-value fold coefficients, with tags 0 through 5 and no payload.
 pub enum InnerChallenge {
+    /// Tag 0, with zero payload in external composites.
     AzF2,
+    /// Tag 1, with zero payload in external composites.
     BzF2,
+    /// Tag 2, with zero payload in external composites.
     CzF2,
+    /// Tag 3, with zero payload in external composites.
     AzF128,
+    /// Tag 4, with zero payload in external composites.
     BzF128,
+    /// Tag 5, with zero payload in external composites.
     CzF128,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Register-operand fold coefficients, with tags 0 through 2 and no payload.
 pub enum RegistersReadChallenge {
+    /// Tag 0, with zero payload in external composites.
     Rs1,
+    /// Tag 1, with zero payload in external composites.
     Rs2,
+    /// Tag 2, with zero payload in external composites.
     Rd,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Current and final RAM value fold coefficients, with tags 0 and 1 and no payload.
 pub enum RamValChallenge {
+    /// Tag 0, with zero payload in external composites.
     Val,
+    /// Tag 1, with zero payload in external composites.
     Final,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// Bytecode-check fold coefficients, with tags 0 through 15 and no payload.
 pub enum BytecodeChallenge {
+    /// Tag 0, with zero payload in external composites.
     Imm,
+    /// Tag 1, with zero payload in external composites.
     FallThroughPC,
+    /// Tag 2, with zero payload in external composites.
     PCPlusImm,
+    /// Tag 3, with zero payload in external composites.
     PC,
+    /// Tag 4, with zero payload in external composites.
     Variant,
+    /// Tag 5, with zero payload in external composites.
     ShiftKind,
+    /// Tag 6, with zero payload in external composites.
     AccessKind,
+    /// Tag 7, with zero payload in external composites.
     KeyKind,
+    /// Tag 8, with zero payload in external composites.
     Branch,
+    /// Tag 9, with zero payload in external composites.
     Rs1Ra,
+    /// Tag 10, with zero payload in external composites.
     Rs2Ra,
+    /// Tag 11, with zero payload in external composites.
     RdWaRead,
+    /// Tag 12, with zero payload in external composites.
     RdWaWrite,
+    /// Tag 13, with zero payload in external composites.
     Store,
+    /// Tag 14, with zero payload in external composites.
     Entry,
+    /// Tag 15, with zero payload in external composites.
     Next,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// RAM-selector read and value fold coefficients, with tags 0 and 1 and no payload.
 pub enum RamRaChallenge {
+    /// Tag 0, with zero payload in external composites.
     Read,
+    /// Tag 1, with zero payload in external composites.
     Val,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// The six committed-functional fold coefficients, with tags 0 through 5 and no payload.
 pub enum BitsReductionChallenge {
+    /// Tag 0, with zero payload in external composites.
     DirectColumns,
+    /// Tag 1, with zero payload in external composites.
     VariantBits,
+    /// Tag 2, with zero payload in external composites.
     PosRa0,
+    /// Tag 3, with zero payload in external composites.
     PosRa1,
+    /// Tag 4, with zero payload in external composites.
     ShouldBranch,
+    /// Tag 5, with zero payload in external composites.
     Inc,
 }
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+/// A polynomial opening scoped to its consumer relation; construction does not validate payloads.
+/// Composite decoding checks syntactic domains, while a consumer reports identifiers without a declared cell.
 pub struct OpeningId {
+    /// The committed or virtual functional whose evaluation is requested.
     pub polynomial: PolynomialId,
+    /// The relation that owns the opening cell.
     pub relation: RelationId,
 }
 impl OpeningId {
+    /// Constructs a committed opening without checking whether the relation declares the cell.
+    /// `Column` payloads must be below 256 to survive composite decoding.
     pub fn committed(polynomial: CommittedPolynomial, relation: RelationId) -> Self {
         Self {
             polynomial: PolynomialId::Committed(polynomial),
             relation,
         }
     }
+    /// Constructs a virtual opening without checking whether the relation declares the cell.
+    /// Composite decoding bounds router payloads below 5, bytecode chunks below 6 and RAM chunks below 16.
     pub fn virtual_polynomial(polynomial: VirtualPolynomial, relation: RelationId) -> Self {
         Self {
             polynomial: PolynomialId::Virtual(polynomial),

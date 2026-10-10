@@ -11,15 +11,23 @@ use crate::{
     preprocessing::VerifierPreprocessing, proof::Rv64iProof,
 };
 
+/// Maximum admitted trace exponent; checked before any trace-dependent dimension is used.
 pub const LOG_T_MAX: u8 = 32;
 
 #[derive(Clone, Debug, PartialEq)]
+/// Public execution statement, admitted by `CheckedInputs` before transcript absorption.
+/// It supplies the trace length, entry PC and public I/O; execution agreement is checked by the protocol relations.
 pub struct Statement {
+    /// The exponent of the number of cycles, admitted in `1..=LOG_T_MAX`.
     pub log_T: u8,
+    /// The claimed PC of cycle zero, bound by the bytecode-address relation.
     pub entry_pc: u64,
+    /// Canonical memory layout, public segments and panic flag; advice must be empty.
     pub device: JoltDevice,
 }
 
+/// Validated public geometry, I/O and canonical initial RAM, borrowing the statement and preprocessing.
+/// `of_statement` establishes checks 1–7 of §7; `new` additionally checks the proof's canonical shape.
 pub struct CheckedInputs<'a, S: BitsCommitmentScheme> {
     preprocessing: &'a VerifierPreprocessing<S>,
     statement: &'a Statement,
@@ -30,9 +38,8 @@ pub struct CheckedInputs<'a, S: BitsCommitmentScheme> {
 }
 
 impl<'a, S: BitsCommitmentScheme> CheckedInputs<'a, S> {
-    /// Runs checks 1–7 in order. Before the I/O check only the bounded chunk
-    /// lists of `Layout::new` allocate; public-memory vectors are built after
-    /// dimensions, canonical layout, RAM bounds and segment lengths pass.
+    /// Runs checks 1–7 of §7, returning the typed error of the first failed dimension, layout, segment, image or final-PC check.
+    /// Only bounded chunk metadata allocates before dimensions, canonical memory, RAM bounds and segment lengths pass.
     pub fn of_statement(
         preprocessing: &'a VerifierPreprocessing<S>,
         statement: &'a Statement,
@@ -137,7 +144,8 @@ impl<'a, S: BitsCommitmentScheme> CheckedInputs<'a, S> {
         })
     }
 
-    /// Adds the canonical round-count, round-message and column-count check.
+    /// Runs the statement checks and then checks canonical round counts, round messages and 256 column values.
+    /// Returns the first statement error or `ProofShape` before any sum-check runs.
     pub fn new(
         preprocessing: &'a VerifierPreprocessing<S>,
         statement: &'a Statement,
@@ -151,39 +159,47 @@ impl<'a, S: BitsCommitmentScheme> CheckedInputs<'a, S> {
         Ok(checked)
     }
 
+    /// The admitted statement; its execution claims are still obligations of the protocol relations.
     pub fn statement(&self) -> &Statement {
         self.statement
     }
 
+    /// The public bytecode, canonical image digest and scheme setup checked against this statement.
     pub fn preprocessing(&self) -> &VerifierPreprocessing<S> {
         self.preprocessing
     }
 
+    /// The validated bit-column and RAM geometry shared by the family relations.
     pub fn layout(&self) -> &Layout {
         &self.layout
     }
 
+    /// The public I/O, panic and termination words and their checked I/O mask.
     pub fn io(&self) -> &PublicIoMemory {
         &self.io
     }
 
-    /// Canonical increasing nonzero input words followed by the program image.
+    /// Canonical increasing nonzero input words followed by the program image; outputs and status words are absent.
     pub fn initial_ram(&self) -> &[(u64, u64)] {
         &self.initial_ram
     }
 
+    /// The admitted cycle exponent in `1..=LOG_T_MAX`.
     pub fn log_T(&self) -> usize {
         usize::from(self.statement.log_T)
     }
 
+    /// The padded bytecode exponent in `1..=24`.
     pub fn log_K_bytecode(&self) -> usize {
         self.layout.log_K_bytecode()
     }
 
+    /// The admitted RAM-word exponent in `5..=61`, bounded by the statement's memory layout.
     pub fn log_K_ram(&self) -> usize {
         self.layout.log_K_ram()
     }
 
+    /// The successor PC after the last cycle, checked to name a valid bytecode row.
     pub fn final_pc(&self) -> u64 {
         self.final_pc
     }

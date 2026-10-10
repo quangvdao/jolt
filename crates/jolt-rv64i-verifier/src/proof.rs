@@ -15,8 +15,12 @@ use jolt_poly::CompressedPoly;
 use jolt_sumcheck::{ClearProof, CompressedSumcheckProof, SumcheckProof};
 
 #[derive(Clone, Debug)]
+/// Canonical compressed clear rounds and the ordered wire values of one reduction batch.
+/// `Rv64iProof::validate_shape` rejects other round forms and noncanonical coefficient counts before verification.
 pub struct BatchProof<V> {
+    /// Round messages with the linear coefficient omitted and trailing zeros trimmed to at least one stored coefficient.
     pub rounds: SumcheckProof<F128, NoCommitment>,
+    /// Only the batch's transmitted evaluations, excluding derived values and aliased copies.
     pub values: V,
 }
 
@@ -26,8 +30,14 @@ trait WireValues: Sized {
 }
 macro_rules! values {
     ($name:ident { $($field:ident),+ $(,)? }) => {
+        /// Ordered binary-field evaluation cells transmitted by one batch; derived and aliased cells are absent.
         #[derive(Clone, Debug, PartialEq, Eq)]
-        pub struct $name { $(pub $field: F128),+ }
+        pub struct $name {
+            $(
+                /// A transmitted evaluation in the batch's declared wire order.
+                pub $field: F128
+            ),+
+        }
         impl WireValues for $name {
             fn write(&self, out: &mut Vec<u8>) { $(write_element(self.$field, out);)+ }
             fn read(cursor: &mut Cursor<'_>) -> Result<Self, ProofDecodeError> { Ok(Self { $($field: cursor.element()?),+ }) }
@@ -90,7 +100,11 @@ values!(ValEvaluationValues {
 });
 values!(BytecodeAddressValue { address_claim });
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BitsColumns(pub Vec<F128>);
+/// Evaluations of all 256 bit columns at the final cycle point, transmitted in column-index order.
+pub struct BitsColumns(
+    /// Exactly 256 binary-field evaluations; `validate_shape` rejects any other count.
+    pub Vec<F128>,
+);
 impl WireValues for BitsColumns {
     fn write(&self, out: &mut Vec<u8>) {
         for value in &self.0 {
@@ -107,18 +121,32 @@ impl WireValues for BitsColumns {
     }
 }
 
+/// Version-zero proof envelope: chosen RAM size, final PC, scheme messages and the eight ordered reduction batches.
+/// Public trace and bytecode dimensions come from checked inputs; decoding validates byte shape, not the sum-check claims.
 pub struct Rv64iProof<S: BitsCommitmentScheme> {
+    /// The prover's RAM-word exponent, admitted in `5..=61` and bounded by checked memory geometry.
     pub log_K_ram: u8,
+    /// The successor PC of the last cycle, checked to identify a valid bytecode row.
     pub final_pc: u64,
+    /// Scheme commitment messages absorbed after the preamble and before front-end challenges.
     pub bits_commitment: S::Commitment,
+    /// Outer row-system reductions over the binary and extension-field blocks.
     pub stage1: BatchProof<OuterValues>,
+    /// Inner witness-column reduction.
     pub stage2: BatchProof<InnerValues>,
+    /// Short router folds.
     pub stage3a: BatchProof<RouterFoldValues>,
+    /// Cycle reductions for the five routers.
     pub stage3b: BatchProof<RouterCycleValues>,
+    /// Register reads, RAM reads and public output checking.
     pub stage4: BatchProof<ReadCheckingValues>,
+    /// Register and RAM value evaluation reductions.
     pub stage5: BatchProof<ValEvaluationValues>,
+    /// Bytecode address reduction.
     pub stage6a: BatchProof<BytecodeAddressValue>,
+    /// Bytecode cycle, RAM selector product and bit-column reductions.
     pub stage6b: BatchProof<BitsColumns>,
+    /// Evidence opened after all column evaluations are absorbed and the column point is drawn.
     pub opening: S::OpeningProof,
 }
 
@@ -137,7 +165,8 @@ fn geometry(t: usize, b: usize, a: usize) -> [(usize, usize); 8] {
     ]
 }
 impl<S: BitsCommitmentScheme> Rv64iProof<S> {
-    /// Rejects malformed in-memory round forms and column vectors before sum-check.
+    /// Checks admitted dimensions, expected batch round counts, canonical compressed clear messages and exactly 256 column values.
+    /// Returns `Dimensions` or `ProofShape` before any sum-check; it does not verify evaluation claims.
     pub fn validate_shape(
         &self,
         log_T: usize,
@@ -164,7 +193,8 @@ impl<S: BitsCommitmentScheme> Rv64iProof<S> {
         }
         Ok(())
     }
-    /// Serializes a shape-checked proof; an invalid in-memory proof has no encoding.
+    /// Encodes a shape-checked proof with fixed-width padded rounds and bounded scheme byte strings.
+    /// Returns an empty vector for an invalid in-memory proof.
     pub fn to_bytes(&self) -> Vec<u8> {
         let t = self.stage6b.round_count();
         let b = self.stage6a.round_count();
@@ -186,6 +216,8 @@ impl<S: BitsCommitmentScheme> Rv64iProof<S> {
         write_scheme(&self.opening, &mut out);
         out
     }
+    /// Decodes one complete version-zero envelope using public dimensions `1..=LOG_T_MAX` and `1..=24`.
+    /// Returns a typed error for invalid version or dimensions, unavailable bytes, invalid scheme encodings or trailing bytes; allocation is bounded by the input.
     pub fn from_bytes(
         bytes: &[u8],
         log_T: u8,

@@ -1264,7 +1264,7 @@ enum Unit {
 impl Unit {
     fn new(
         case: &ProbeCase,
-        source: Arc<SyntheticTrace>,
+        source: Option<Arc<SyntheticTrace>>,
         threads: usize,
     ) -> Result<Self, ProbeError> {
         if threads == 0 {
@@ -1274,6 +1274,7 @@ impl Unit {
             unit: case.unit.to_owned(),
             variant: case.variant.clone(),
         };
+        let trace = || source.as_ref().map(Arc::clone).ok_or_else(invalid);
         match case.unit {
             "lookup" => {
                 let variant = case
@@ -1293,7 +1294,7 @@ impl Unit {
                     "g_bytes" => LookupPattern::Bytes,
                     _ => return Err(invalid()),
                 };
-                Ok(Self::Lookup(Box::new(Lookup::new(source, pattern, kib))))
+                Ok(Self::Lookup(Box::new(Lookup::new(trace()?, pattern, kib))))
             }
             "bucket" => {
                 let layout = if case.variant == "column_128kib" {
@@ -1316,7 +1317,7 @@ impl Unit {
                         share,
                     }
                 };
-                Ok(Self::Bucket(Bucket::new(source, layout, threads)))
+                Ok(Self::Bucket(Bucket::new(trace()?, layout, threads)))
             }
             "scatter" => {
                 let (method, rows) = case.variant.split_once("_rows_").ok_or_else(invalid)?;
@@ -1329,11 +1330,9 @@ impl Unit {
                     "gather" => ScatterMethod::Gather,
                     _ => return Err(invalid()),
                 };
-                Ok(Self::Scatter(Scatter::new(source, method, threads)?))
+                Ok(Self::Scatter(Scatter::new(trace()?, method, threads)?))
             }
-            "sct" => Ok(Self::Partitioned(Box::new(PartitionedScatter::new(
-                source,
-            )?))),
+            "sct" => Ok(Self::Partitioned(Box::new(PartitionedScatter::new(trace()?)?))),
             "fmadd" => {
                 let terms = case
                     .variant
@@ -1341,7 +1340,7 @@ impl Unit {
                     .and_then(|terms| terms.parse::<usize>().ok())
                     .filter(|terms| [0, 1, 2, 4, 8, 20].contains(terms))
                     .ok_or_else(invalid)?;
-                Ok(Self::Fmadd(Box::new(Fmadd::new(source, terms))))
+                Ok(Self::Fmadd(Box::new(Fmadd::new(trace()?, terms))))
             }
             "arithmetic" => {
                 let kind = match case.variant.as_str() {
@@ -1350,7 +1349,10 @@ impl Unit {
                     "word_monomial_mix" => ArithmeticKind::Word,
                     _ => return Err(invalid()),
                 };
-                Ok(Self::Arithmetic(Arithmetic { source, kind }))
+                Ok(Self::Arithmetic(Arithmetic {
+                    source: trace()?,
+                    kind,
+                }))
             }
             "readout" => {
                 let layout = match case.variant.as_str() {
@@ -1517,7 +1519,7 @@ fn main() -> Result<(), RunnerError> {
         cases.push(ProbeCase {
             unit: "merge",
             variant: variant.to_owned(),
-            profiles: BOTH,
+            profiles: &[],
         });
     }
     for variant in [
@@ -1535,7 +1537,7 @@ fn main() -> Result<(), RunnerError> {
         cases.push(ProbeCase {
             unit: "readout",
             variant: variant.to_owned(),
-            profiles: BOTH,
+            profiles: &[],
         });
     }
     run_probe(&cases, Unit::new)

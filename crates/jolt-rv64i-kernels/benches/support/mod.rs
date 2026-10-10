@@ -315,6 +315,7 @@ where
 }
 
 /// One operation mix and memory layout in the probe's configuration matrix.
+/// Empty profiles identify source-independent, fixed-size records.
 pub struct ProbeCase {
     pub unit: &'static str,
     pub variant: String,
@@ -387,13 +388,15 @@ impl ChainFit {
 /// Allocation fields are maxima across samples and include construction; final
 /// bytes count the state still resident after its measured passes. Probe defaults
 /// are log_t=22, threads=1,12 and samples=5; `--units` selects case groups.
+/// Fixed-size records run once per thread count under independent/fixed, without
+/// generating a trace. A source is built only when selected cases consume it.
 #[expect(
     clippy::print_stdout,
     reason = "unit records are the probe output contract"
 )]
 pub fn run_probe<C, E>(
     cases: &[ProbeCase],
-    construct: impl Fn(&ProbeCase, Arc<SyntheticTrace>, usize) -> Result<C, E> + Sync,
+    construct: impl Fn(&ProbeCase, Option<Arc<SyntheticTrace>>, usize) -> Result<C, E> + Sync,
 ) -> Result<(), RunnerError>
 where
     C: ProbeKernel,
@@ -409,76 +412,99 @@ where
         }
     }
     let pools = warmed_pools(&options.threads)?;
+    let selected = |case: &&ProbeCase| {
+        options.units.is_empty() || options.units.iter().any(|unit| unit == case.unit)
+    };
     for (threads, pool) in &pools {
+        let mut settings = vec![None];
         for profile in [SynthProfile::Local, SynthProfile::AllRows] {
             for &log_t in &options.log_t {
-                let source = Arc::new(
+                settings.push(Some((profile, log_t)));
+            }
+        }
+        for setting in settings {
+            let selected_cases: Vec<_> = cases
+                .iter()
+                .filter(selected)
+                .filter(|case| {
+                    setting.map_or(case.profiles.is_empty(), |(profile, _)| {
+                        case.profiles.contains(&profile)
+                    })
+                })
+                .collect();
+            if selected_cases.is_empty() {
+                continue;
+            }
+            let source = setting
+                .map(|(profile, log_t)| {
                     pool.install(|| SyntheticTrace::new(profile, log_t, 1 << 20, 0x5eed))
+                        .map(Arc::new)
                         .map_err(|error| RunnerError::Trace {
                             message: error.to_string(),
-                        })?,
-                );
-                let mut chain_points = Vec::new();
-                for case in cases.iter().filter(|case| {
-                    case.profiles.contains(&profile)
-                        && (options.units.is_empty()
-                            || options.units.iter().any(|unit| unit == case.unit))
-                }) {
-                    let mut samples = Vec::with_capacity(options.samples);
-                    let mut operations = [0; 2];
-                    let mut chain_terms = None;
-                    let mut lookup_layout = None;
-                    for _ in 0..options.samples {
-                        let (sample, (counts, terms, layout)) = pool.install(|| {
-                            let measurement = AllocationMeasurement::begin();
-                            let start = Instant::now();
-                            let mut kernel = construct(case, Arc::clone(&source), *threads)
-                                .map_err(|error| RunnerError::Core {
+                        })
+                })
+                .transpose()?;
+            let profile_name = setting.map_or("independent", |(profile, _)| profile.name());
+            let log_t = setting.map_or_else(|| "fixed".to_owned(), |(_, log_t)| log_t.to_string());
+            let mut chain_points = Vec::new();
+            for case in selected_cases {
+                let mut samples = Vec::with_capacity(options.samples);
+                let mut operations = [0; 2];
+                let mut chain_terms = None;
+                let mut lookup_layout = None;
+                for _ in 0..options.samples {
+                    let (sample, (counts, terms, layout)) = pool.install(|| {
+                        let measurement = AllocationMeasurement::begin();
+                        let start = Instant::now();
+                        let mut kernel =
+                            construct(case, source.clone(), *threads).map_err(|error| {
+                                RunnerError::Core {
                                     message: error.to_string(),
-                                })?;
-                            let construct_ns = start.elapsed().as_nanos() as f64;
-                            let counts = kernel.operations();
-                            let terms = kernel.chain_terms();
-                            let layout = kernel.lookup_layout();
-                            if counts[0] == 0 {
-                                return Err(RunnerError::WorkCount {
-                                    variant: case.variant.clone(),
-                                });
-                            }
+                                }
+                            })?;
+                        let construct_ns = start.elapsed().as_nanos() as f64;
+                        let counts = kernel.operations();
+                        let terms = kernel.chain_terms();
+                        let layout = kernel.lookup_layout();
+                        if counts[0] == 0 {
+                            return Err(RunnerError::WorkCount {
+                                variant: case.variant.clone(),
+                            });
+                        }
+                        let start = Instant::now();
+                        let _ = black_box(kernel.run());
+                        let primary_ns = start.elapsed().as_nanos() as f64;
+                        let auxiliary_ns = if counts[1] == 0 {
+                            0.0
+                        } else {
                             let start = Instant::now();
-                            let _ = black_box(kernel.run());
-                            let primary_ns = start.elapsed().as_nanos() as f64;
-                            let auxiliary_ns = if counts[1] == 0 {
-                                0.0
-                            } else {
-                                let start = Instant::now();
-                                let _ = black_box(kernel.finish());
-                                start.elapsed().as_nanos() as f64
-                            };
-                            let allocation = measurement.finish();
-                            Ok::<_, RunnerError>((
-                                Sample {
-                                    times: [construct_ns, primary_ns, auxiliary_ns, 0.0],
-                                    allocation,
-                                },
-                                (counts, terms, layout),
-                            ))
-                        })?;
-                        samples.push(sample);
-                        operations = counts;
-                        chain_terms = terms;
-                        lookup_layout = layout;
-                    }
-                    let primary = Sample::phase(&samples, 1, operations[0] as f64);
-                    if let Some(terms) = chain_terms {
-                        chain_points.push((terms, primary.median));
-                    }
-                    let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
-                    print!(
+                            let _ = black_box(kernel.finish());
+                            start.elapsed().as_nanos() as f64
+                        };
+                        let allocation = measurement.finish();
+                        Ok::<_, RunnerError>((
+                            Sample {
+                                times: [construct_ns, primary_ns, auxiliary_ns, 0.0],
+                                allocation,
+                            },
+                            (counts, terms, layout),
+                        ))
+                    })?;
+                    samples.push(sample);
+                    operations = counts;
+                    chain_terms = terms;
+                    lookup_layout = layout;
+                }
+                let primary = Sample::phase(&samples, 1, operations[0] as f64);
+                if let Some(terms) = chain_terms {
+                    chain_points.push((terms, primary.median));
+                }
+                let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
+                print!(
                         "probe/{}/{}/{}/{log_t}/{threads} ns={:.6} min_ns={:.6} max_ns={:.6} samples={} peak_bytes={} final_bytes={} allocs={}",
                         case.unit,
                         case.variant,
-                        profile.name(),
+                        profile_name,
                         primary.median,
                         primary.min,
                         primary.max,
@@ -487,21 +513,20 @@ where
                         final_bytes,
                         allocs
                     );
-                    if let Some((bytes, entries)) = lookup_layout {
-                        print!(" allocated_bytes={bytes} addressable_entries={entries}");
-                    }
-                    if operations[1] != 0 {
-                        let auxiliary = Sample::phase(&samples, 2, operations[1] as f64);
-                        print!(
-                            " reduce_ns={:.6} reduce_min_ns={:.6} reduce_max_ns={:.6}",
-                            auxiliary.median, auxiliary.min, auxiliary.max
-                        );
-                    }
-                    println!();
+                if let Some((bytes, entries)) = lookup_layout {
+                    print!(" allocated_bytes={bytes} addressable_entries={entries}");
                 }
-                if let Some(fit) = ChainFit::new(&chain_points) {
-                    println!("probe/fmadd/fit/{}/{log_t}/{threads} slope_ns={:.6} intercept_ns={:.6} baseline_ns={:.6} reduction_ns={:.6} residual_ns={:.6}", profile.name(), fit.slope, fit.intercept, fit.baseline, fit.reduction, fit.residual);
+                if operations[1] != 0 {
+                    let auxiliary = Sample::phase(&samples, 2, operations[1] as f64);
+                    print!(
+                        " reduce_ns={:.6} reduce_min_ns={:.6} reduce_max_ns={:.6}",
+                        auxiliary.median, auxiliary.min, auxiliary.max
+                    );
                 }
+                println!();
+            }
+            if let Some(fit) = ChainFit::new(&chain_points) {
+                println!("probe/fmadd/fit/{}/{log_t}/{threads} slope_ns={:.6} intercept_ns={:.6} baseline_ns={:.6} reduction_ns={:.6} residual_ns={:.6}", profile_name, fit.slope, fit.intercept, fit.baseline, fit.reduction, fit.residual);
             }
         }
     }

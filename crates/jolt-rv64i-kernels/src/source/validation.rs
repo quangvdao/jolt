@@ -57,7 +57,8 @@ impl GroupChunk<'_> {
                 self.bytes.as_chunks_mut::<5>().0[offset] = narrow_run(digits, start, self.bias);
             }
             GroupColumns::Eight(indices) => {
-                self.bytes.as_chunks_mut::<8>().0[offset] = gather_group(digits, indices, self.bias);
+                self.bytes.as_chunks_mut::<8>().0[offset] =
+                    gather_group(digits, indices, self.bias);
             }
             GroupColumns::General(columns) => {
                 let width = columns.len();

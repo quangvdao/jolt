@@ -5,7 +5,7 @@
 //! min/max in wall-clock nanoseconds divided by its operation count. Twelve-thread
 //! figures are a scaling column, never single-thread unit prices or CPU time.
 //! The final unit-table uses the largest requested stream with one thread and
-//! the representative ids below; excluded cases/one-thread runs say not_measured.
+//! the representative ids below; excluded cases/runs omitting one thread say not_measured.
 //! Constants in this bench retain both specification estimates for comparison.
 //!
 //! | Unit | Representative record (before size/thread suffix) | Timed work |
@@ -14,7 +14,7 @@
 //! | A | fmadd/fit/local, slope_ns | least-squares slope of fused stack chains |
 //! | R | fmadd/fit/local, reduction_ns | fit intercept minus zero-length preparation/XOR baseline |
 //! | L | lookup/g_digits_69kib/local | the canonical digit builder's 37 reads/XORs |
-//! | Bk | bucket/fold_none_share_0/all_rows | default nibble-layout updates, selectors prepared first |
+//! | Bk | bucket/fold_none_share_0/all_rows | model's no-byte-bucket layout updates, selectors prepared first |
 //! | sct | sct/partitioned_emit_rows_20/all_rows | cycle-order pair emission and range-local application |
 //! | mrg | readout/column_128kib/independent | per-bit bucket read-out, normalized by reads/XORs |
 //! | X | arithmetic/mul_x_raw_shift_substitute/local | raw shift and conditional modulus XOR |
@@ -29,10 +29,10 @@
 //!
 //! mul_x is absent from this branch's field API. Its substitute implements the
 //! specified polynomial-basis shift/reduction using modulus mask 0x87. The word
-//! stream mirrors outer rounds 1--3: two three-stage Moebius transforms, an AND
-//! product and stride-eight gather (nine shifts, eleven ANDs, six XORs, three
-//! ORs, 29 operations). The spec does not define an exact ratio behind its 410 w;
-//! this representative mix is explicit rather than claiming whole-core coverage.
+//! hot word block computes two three-stage Moebius transforms, two live subset
+//! alignment shifts, an AND and stride-eight gather: 31 live logical operations.
+//! Native shifted-operand instructions may fuse logical operators; no transform
+//! is dead. This coefficient product does not claim whole-core coverage.
 //!
 //! Canonical lookup patterns and the specification passages they mirror:
 //! | Pattern | Passage/suboperation | L covered |
@@ -1568,19 +1568,16 @@ impl Unit {
 }
 
 impl ProbeKernel for Unit {
-    fn operations(&self) -> [usize; 2] {
+    fn operations(&self) -> usize {
         match self {
-            Self::Lookup(unit) => [
-                CycleSource::cycles(unit.source.as_ref()) * unit.pattern.reads(),
-                0,
-            ],
-            Self::Bucket(unit) => [unit.operations, 0],
-            Self::Scatter(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
-            Self::Partitioned(unit) => [unit.cycles(), 0],
-            Self::Fmadd(unit) => [CycleSource::cycles(unit.source.as_ref()), 0],
-            Self::Merge(unit) => [unit.operations(), 0],
-            Self::Readout(unit) => [unit.operations, 0],
-            Self::Hot(unit) => [unit.operations(), 0],
+            Self::Lookup(unit) => CycleSource::cycles(unit.source.as_ref()) * unit.pattern.reads(),
+            Self::Bucket(unit) => unit.operations,
+            Self::Scatter(unit) => CycleSource::cycles(unit.source.as_ref()),
+            Self::Partitioned(unit) => unit.cycles(),
+            Self::Fmadd(unit) => CycleSource::cycles(unit.source.as_ref()),
+            Self::Merge(unit) => unit.operations(),
+            Self::Readout(unit) => unit.operations,
+            Self::Hot(unit) => unit.operations(),
         }
     }
 
@@ -1607,10 +1604,10 @@ impl ProbeKernel for Unit {
         }
     }
 
-    fn memory_layout(&self) -> Option<(usize,usize)> {
+    fn memory_layout(&self) -> Option<(usize, usize)> {
         match self {
             Self::Merge(unit) => Some(unit.layout()),
-            Self::Readout(unit) => Some((unit.buckets.len()*size_of::<F128>(),1)),
+            Self::Readout(unit) => Some((unit.buckets.len() * size_of::<F128>(), 1)),
             _ => None,
         }
     }

@@ -1,8 +1,5 @@
 //! Live subset coefficients of packed outer monomials.
 
-// Two transforms (18), two alignment shifts, AND and mask (2), gather (9).
-pub const WORD_OPERATIONS: usize = 31;
-
 #[derive(Clone, Copy)]
 pub struct WordInput {
     pub a: u64,
@@ -35,4 +32,3 @@ pub fn word_monomial(input: WordInput) -> u64 {
     }
     value
 }
-

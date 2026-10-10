@@ -9,8 +9,8 @@
 
 mod allocator;
 pub mod arithmetic;
-pub mod word;
 pub mod example;
+pub mod word;
 
 use std::error::Error as StdError;
 use std::hint::black_box;
@@ -325,18 +325,16 @@ pub struct ProbeCase {
 }
 
 /// A preallocated operation stream. The runner times each pass once per sample.
-/// `operations` gives the primary and optional auxiliary operation counts;
-/// `finish` is used for separately measured accumulator reductions.
+/// `operations` gives the count consumed by the one measured pass.
 pub trait ProbeKernel: Send {
-    fn operations(&self) -> [usize; 2];
+    fn operations(&self) -> usize;
     fn run(&mut self) -> F128;
-    fn finish(&mut self) -> F128 {
-        F128::from_raw(0)
-    }
     fn chain_terms(&self) -> Option<usize> {
         None
     }
-    fn memory_layout(&self) -> Option<(usize, usize)> { None }
+    fn memory_layout(&self) -> Option<(usize, usize)> {
+        None
+    }
     fn lookup_layout(&self) -> Option<(usize, usize)> {
         None
     }
@@ -419,7 +417,7 @@ where
             let log_t = setting.map_or_else(|| "fixed".to_owned(), |(_, log_t)| log_t.to_string());
             for case in selected_cases {
                 let mut samples = Vec::with_capacity(options.samples);
-                let mut operations = [0; 2];
+                let mut operations = 0;
                 let mut chain_terms = None;
                 let mut lookup_layout = None;
                 let mut memory_layout = None;
@@ -438,7 +436,7 @@ where
                         let terms = kernel.chain_terms();
                         let layout = kernel.lookup_layout();
                         let memory = kernel.memory_layout();
-                        if counts[0] == 0 {
+                        if counts == 0 {
                             return Err(RunnerError::WorkCount {
                                 variant: case.variant.clone(),
                             });
@@ -446,17 +444,10 @@ where
                         let start = Instant::now();
                         let _ = black_box(kernel.run());
                         let primary_ns = start.elapsed().as_nanos() as f64;
-                        let auxiliary_ns = if counts[1] == 0 {
-                            0.0
-                        } else {
-                            let start = Instant::now();
-                            let _ = black_box(kernel.finish());
-                            start.elapsed().as_nanos() as f64
-                        };
                         let allocation = measurement.finish();
                         Ok::<_, RunnerError>((
                             Sample {
-                                times: [construct_ns, primary_ns, auxiliary_ns, 0.0],
+                                times: [construct_ns, primary_ns, 0.0, 0.0],
                                 allocation,
                             },
                             (counts, terms, layout, memory),
@@ -468,7 +459,7 @@ where
                     lookup_layout = layout;
                     memory_layout = memory;
                 }
-                let primary = Sample::phase(&samples, 1, operations[0] as f64);
+                let primary = Sample::phase(&samples, 1, operations as f64);
                 let (peak_bytes, final_bytes, allocs) = Sample::allocations(&samples);
                 let id = format!(
                     "probe/{}/{}/{profile_name}/{log_t}/{threads}",
@@ -489,13 +480,6 @@ where
                 }
                 if let Some((bytes, arrays)) = memory_layout {
                     print!(" bytes_per_array={bytes} arrays={arrays}");
-                }
-                if operations[1] != 0 {
-                    let auxiliary = Sample::phase(&samples, 2, operations[1] as f64);
-                    print!(
-                        " reduce_ns={:.6} reduce_min_ns={:.6} reduce_max_ns={:.6}",
-                        auxiliary.median, auxiliary.min, auxiliary.max
-                    );
                 }
                 if let Some(terms) = chain_terms {
                     print!(

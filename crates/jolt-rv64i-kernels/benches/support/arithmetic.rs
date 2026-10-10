@@ -16,7 +16,9 @@ type F128Accumulator = <F128 as WithAccumulator>::Accumulator;
 const PAIRS: usize = 1024;
 const BANK: usize = 128;
 const BLOCKS: usize = 4096;
-use super::word::{word_monomial, WordInput, WORD_OPERATIONS};
+use super::word::{word_monomial, WordInput};
+// Two transforms (18), alignment (2), AND/mask (2), gather (9).
+const WORD_OPERATIONS: usize = 31;
 
 pub enum HotArithmetic {
     Product(Box<[(F128, F128); PAIRS]>),
@@ -123,9 +125,13 @@ impl HotArithmetic {
                 .map(|_| black_box(Self::reduce_block(black_box(bank.as_slice()))))
                 .reduce(|| F128::from_raw(0), |a, b| a + b),
             Self::Control(bank) => {
-                let checksum = (0..BLOCKS).into_par_iter().map(|_| {
-                    black_box(Self::control_block(black_box(bank.as_slice())))
-                }).reduce(F128Accumulator::default, |mut a,b| { a.merge(b); a });
+                let checksum = (0..BLOCKS)
+                    .into_par_iter()
+                    .map(|_| black_box(Self::control_block(black_box(bank.as_slice()))))
+                    .reduce(F128Accumulator::default, |mut a, b| {
+                        a.merge(b);
+                        a
+                    });
                 let _ = black_box(checksum);
                 F128::from_raw(0)
             }

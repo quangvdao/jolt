@@ -8,7 +8,7 @@ use crate::points::PointsError;
 use crate::proof::batch_geometry;
 use crate::proof::{ReadCheckingValues, ValEvaluationValues};
 use crate::public::ram_init;
-use crate::statement::CheckedInputs;
+use crate::statement::{CheckedInputs, LOG_T_MAX};
 use jolt_field::{JoltField, Zero, F128};
 use jolt_rv64i_arith::Layout;
 use jolt_verifier::{stages::relations::SumcheckBatch, VerifierError};
@@ -162,8 +162,14 @@ pub use verify::Output;
 
 impl Stage5Sumchecks<F128> {
     /// Constructs geometry instances with bounded address/bit points and no witness or public-memory table.
-    /// The generated schedule reads the concrete members' rounds and degrees.
+    /// Returns `PointsError` for unsupported trace widths before allocation; the generated schedule reads the concrete members.
     pub fn for_geometry(log_T: usize, layout: &Layout) -> Result<Self, PointsError> {
+        if !(1..=usize::from(LOG_T_MAX)).contains(&log_T) {
+            return Err(PointsError::Dimension {
+                expected: usize::from(LOG_T_MAX),
+                actual: log_T,
+            });
+        }
         Ok(Self {
             registers_val_evaluation: RegistersValEvaluation::new(
                 vec![F128::zero(); 5],

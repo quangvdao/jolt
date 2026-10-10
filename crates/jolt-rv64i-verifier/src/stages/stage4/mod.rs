@@ -7,6 +7,7 @@ pub mod verify;
 use crate::error::Rv64iVerifierError;
 use crate::points::PointsError;
 use crate::proof::batch_geometry;
+use crate::statement::LOG_T_MAX;
 use common::jolt_device::{JoltDevice, MemoryConfig, MemoryLayout};
 use jolt_field::{JoltField, Zero, F128};
 use jolt_program::preprocess::PublicIoMemory;
@@ -51,8 +52,15 @@ impl<F: JoltField> Stage4Sumchecks<F> {
 
 impl Stage4Sumchecks<F128> {
     /// Constructs bounded geometry instances without a witness or statement-sized public data.
-    /// Concrete relation constructors establish the address/bit/cycle bounds used by the generated schedule.
+    /// Rejects unsupported trace widths before allocation; concrete constructors establish the remaining point bounds.
     pub fn for_geometry(log_T: usize, layout: &Layout) -> Result<Self, Rv64iVerifierError> {
+        if !(1..=usize::from(LOG_T_MAX)).contains(&log_T) {
+            return Err(verify::term_error(PointsError::Dimension {
+                expected: usize::from(LOG_T_MAX),
+                actual: log_T,
+            })
+            .into());
+        }
         let memory_layout = MemoryLayout::try_new(&MemoryConfig {
             max_input_size: 0,
             max_output_size: 0,

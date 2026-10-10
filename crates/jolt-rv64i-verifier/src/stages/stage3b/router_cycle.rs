@@ -37,6 +37,8 @@ struct CycleGeometry<F: JoltField> {
 }
 
 impl<F: JoltField> CycleGeometry<F> {
+    /// Checks the seventeen short slots, returning `Dimension` for another width; no trace width is supplied here.
+    /// `verify::from_upstream` and `Stage3bSumchecks::for_geometry` establish the cycle width before construction.
     fn new(
         layout: &Layout,
         r_1: Arc<Vec<F>>,

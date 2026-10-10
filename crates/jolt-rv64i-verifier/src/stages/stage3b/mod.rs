@@ -29,8 +29,8 @@ pub struct Stage3bSumchecks<F: JoltField> {
 }
 
 impl<F: JoltField> Stage3bSumchecks<F> {
-    /// Checks the seventeen short slots `x` and the cycle point `r_1` from stage 1.
-    /// Every member binds cycle variables low first; invalid dimensions return `PointsError`.
+    /// Checks the seventeen low-variable-first short slots `x`, returning `PointsError` for an invalid width.
+    /// This constructor does not bound `r_1`; `verify::from_upstream` checks its trace width and `for_geometry` checks the supplied trace exponent.
     pub fn new(layout: &Layout, r_1: Vec<F>, x: Vec<F>) -> Result<Self, PointsError> {
         let r_1 = Arc::new(r_1);
         let x = Arc::new(x);

@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Packed-bit sum-check kernels over a binary field"
 
+[lib]
+path = "lib.rs"
+
 [lints]
 workspace = true
 

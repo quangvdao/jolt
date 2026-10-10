@@ -271,7 +271,7 @@ fn source_validation_rejects_each_malformed_source_contract() {
     ));
 
     let mut source = SourceFixture::new();
-    source.widths[1] = usize::BITS as usize;
+    source.widths[1] = 16;
     assert!(matches!(
         ValidatedTrace::new(Arc::new(source)),
         Err(SourceError::Width { column: 1, .. })
@@ -484,7 +484,7 @@ fn validation_rejects_unrepresentable_scratch_sizes_without_allocating() {
     source.rows = rows;
     assert!(matches!(ValidatedTrace::new(Arc::new(source)),
         Err(SourceError::ValidationScratchSize { len, element_size, .. })
-        if len == rows && element_size == size_of::<usize>()));
+        if len == rows && element_size == size_of::<u16>()));
 }
 
 struct OrderedFaults {

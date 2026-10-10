@@ -1564,19 +1564,18 @@ impl CycleSource for WideColumns {
 
 #[test]
 fn router_dimension_group_width_and_empty_cycle_point_are_rejected() {
-    let width = usize::BITS as usize - 5;
-    let trace = ValidatedTrace::new(Arc::new(WideColumns { width })).unwrap();
-    let shapes = vec![tiny_shape(
-        WordSlot::Bits(vec![BitEntry::Indicator {
-            column: 1,
-            value: 0,
-        }]),
-        6,
-        vec![],
-    )];
-    assert!(
-        matches!(source_lift(&trace, &shapes, &[ZERO; 6]), Err(RouterError::Dimension { variables }) if variables == width)
-    );
+    let variables = usize::BITS as usize - 5;
+    assert!(matches!(
+        RouterShape::new(RouterShapeRequest {
+            slots: variables,
+            bank: vec![WordSlot::Zero],
+            factors: vec![SelectorFactor { column: 0, slots: vec![] }],
+            word_slots: vec![],
+            log_outputs: 0,
+            route: vec![],
+        }),
+        Err(RouterError::Dimension { variables: actual }) if actual == variables
+    ));
     let trace = ValidatedTrace::new(Arc::new(WideColumns { width: 7 })).unwrap();
     let shapes = vec![shape(RouterShapeRequest {
         slots: 14,

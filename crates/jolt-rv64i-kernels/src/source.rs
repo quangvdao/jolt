@@ -6,7 +6,6 @@ use jolt_kernels::optimized::lazy_ra::ChunkIndexSource;
 use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use std::mem::size_of;
-use std::num::{NonZeroU8, NonZeroUsize};
 use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
@@ -77,7 +76,7 @@ pub enum SourceError {
     BytecodeRows { rows: usize },
     #[error("column {column} is outside {columns} digit columns")]
     Column { column: usize, columns: usize },
-    #[error("column {column} width {bits} cannot be represented")]
+    #[error("column {column} width {bits} exceeds the 15-bit source limit")]
     Width { column: usize, bits: usize },
     #[error("column {column} width {bits} exceeds group limit {max_bits}")]
     GroupWidth {
@@ -276,87 +275,15 @@ struct GroupChunk<'a> {
 
 const ROW_CHUNK: usize = 4096;
 
-enum RowDigits {
-    Byte(Vec<Option<NonZeroU8>>),
-    Word(Vec<Option<NonZeroUsize>>),
-}
-
 struct RowColumn {
     column: usize,
     bound: usize,
-    digits: RowDigits,
-}
-
-enum RowChunk<'a> {
-    Byte {
-        column: usize,
-        bound: usize,
-        digits: &'a mut [Option<NonZeroU8>],
-    },
-    Word {
-        column: usize,
-        bound: usize,
-        digits: &'a mut [Option<NonZeroUsize>],
-    },
-}
-
-struct RowFault {
-    column: usize,
-    row: usize,
-    digit: usize,
-    bound: usize,
-}
-
-impl RowChunk<'_> {
-    fn validate(&mut self, source: &impl CycleSource, rows: Range<usize>) -> Option<RowFault> {
-        match self {
-            Self::Byte {
-                column,
-                bound,
-                digits,
-            } => cache_rows(source, *column, *bound, rows, digits, |value| {
-                NonZeroU8::new((value + 1) as u8)
-            }),
-            Self::Word {
-                column,
-                bound,
-                digits,
-            } => cache_rows(source, *column, *bound, rows, digits, |value| {
-                NonZeroUsize::new(value + 1)
-            }),
-        }
-    }
-}
-
-fn cache_rows<N>(
-    source: &impl CycleSource,
-    column: usize,
-    bound: usize,
-    rows: Range<usize>,
-    cache: &mut [Option<N>],
-    encode: impl Fn(usize) -> Option<N>,
-) -> Option<RowFault> {
-    for (row, slot) in rows.zip(cache) {
-        let digit = source.row_digit(column, row);
-        if let Some(digit) = digit {
-            if digit >= bound {
-                return Some(RowFault {
-                    column,
-                    row,
-                    digit,
-                    bound,
-                });
-            }
-        }
-        *slot = digit.and_then(&encode);
-    }
-    None
 }
 
 struct CycleValidation<'a> {
     per_cycle: Vec<(usize, usize)>,
-    row_bytes: Vec<(usize, usize, &'a [Option<NonZeroU8>])>,
-    row_words: Vec<(usize, usize, &'a [Option<NonZeroUsize>])>,
+    row_columns: &'a [RowColumn],
+    row_cache: &'a [u16],
     targets: Vec<Vec<GroupTarget>>,
 }
 
@@ -482,19 +409,16 @@ impl CycleValidation<'_> {
         for &(column, bound) in &self.per_cycle {
             column!(column, bound, |_, _| None);
         }
-        for &(column, bound, cache) in &self.row_bytes {
-            column!(column, bound, |digit: Option<usize>, cycle| {
+        for (position, RowColumn { column, bound }) in self.row_columns.iter().enumerate() {
+            column!(*column, *bound, |digit: Option<usize>, cycle| {
                 let row = source.bytecode_index(cycle);
                 (digit.map_or(0, |value| value + 1)
-                    != cache[row].map_or(0, |value| usize::from(value.get())))
-                .then_some(SourceError::RowDigit { column, cycle, row })
-            });
-        }
-        for &(column, bound, cache) in &self.row_words {
-            column!(column, bound, |digit: Option<usize>, cycle| {
-                let row = source.bytecode_index(cycle);
-                (digit.map_or(0, |value| value + 1) != cache[row].map_or(0, NonZeroUsize::get))
-                    .then_some(SourceError::RowDigit { column, cycle, row })
+                    != usize::from(self.row_cache[row * self.row_columns.len() + position]))
+                .then_some(SourceError::RowDigit {
+                    column: *column,
+                    cycle,
+                    row,
+                })
             });
         }
         if let Some((_, _, error)) = fault {
@@ -543,37 +467,32 @@ impl<S: CycleSource> ValidatedTrace<S> {
         }
         let columns = source.digit_columns();
         check_validation_size::<usize>(columns, "digit widths")?;
-        check_validation_size::<Option<Vec<Option<NonZeroUsize>>>>(
-            columns,
-            "row digit cache metadata",
-        )?;
         check_validation_size::<RowColumn>(columns, "row digit cache columns")?;
         let mut widths = Vec::with_capacity(columns);
-        let mut row_digits = Vec::new();
+        let mut row_columns = Vec::new();
         let mut per_cycle = Vec::new();
         for column in 0..columns {
             let bits = source.bits(column);
-            if bits >= usize::BITS as usize {
+            if bits > 15 {
                 return Err(SourceError::Width { column, bits });
             }
             widths.push(bits);
             let bound = 1 << bits;
             if source.by_row(column) {
-                check_validation_size::<Option<NonZeroUsize>>(rows, "row digit cache")?;
-                let digits = if bits < u8::BITS as usize {
-                    RowDigits::Byte(vec![None; rows])
-                } else {
-                    RowDigits::Word(vec![None; rows])
-                };
-                row_digits.push(RowColumn {
-                    column,
-                    bound,
-                    digits,
-                });
+                row_columns.push(RowColumn { column, bound });
             } else {
                 per_cycle.push((column, bound));
             }
         }
+        let cache_len =
+            rows.checked_mul(row_columns.len())
+                .ok_or(SourceError::ValidationScratchSize {
+                    name: "row digit cache",
+                    len: rows,
+                    element_size: row_columns.len(),
+                })?;
+        check_validation_size::<u16>(cache_len, "row digit cache")?;
+        let mut row_cache = unsafe_allocate_zero_vec::<u16>(cache_len);
         let mut groups = PreparedGroups {
             present: request
                 .present
@@ -606,89 +525,41 @@ impl<S: CycleSource> ValidatedTrace<S> {
             }
             group_count += 1;
         }
-        if !row_digits.is_empty() {
-            let chunk_count = rows.div_ceil(ROW_CHUNK);
-            let descriptors = chunk_count.checked_mul(row_digits.len()).ok_or(
-                SourceError::ValidationScratchSize {
-                    name: "row chunk metadata",
-                    len: chunk_count,
-                    element_size: size_of::<(usize, RowChunk<'_>)>(),
-                },
-            )?;
-            check_validation_size::<(usize, RowChunk<'_>)>(descriptors, "row chunk metadata")?;
-            let column_count = row_digits.len();
-            let mut chunks = Vec::with_capacity(descriptors);
-            for RowColumn {
-                column,
-                bound,
-                digits,
-            } in &mut row_digits
-            {
-                match digits {
-                    RowDigits::Byte(digits) => {
-                        for (chunk, digits) in digits.chunks_mut(ROW_CHUNK).enumerate() {
-                            chunks.push((
-                                chunk,
-                                RowChunk::Byte {
-                                    column: *column,
-                                    bound: *bound,
-                                    digits,
-                                },
-                            ));
-                        }
-                    }
-                    RowDigits::Word(digits) => {
-                        for (chunk, digits) in digits.chunks_mut(ROW_CHUNK).enumerate() {
-                            chunks.push((
-                                chunk,
-                                RowChunk::Word {
-                                    column: *column,
-                                    bound: *bound,
-                                    digits,
-                                },
-                            ));
-                        }
-                    }
-                }
-            }
-            chunks.sort_unstable_by_key(|(chunk, _)| *chunk);
-            if let Some(Some(fault)) = chunks
-                .par_chunks_mut(column_count)
+        if !row_columns.is_empty() {
+            if let Some(Some(error)) = row_cache
+                .par_chunks_mut(ROW_CHUNK * row_columns.len())
                 .enumerate()
-                .map(|(chunk, columns)| {
-                    let rows = chunk * ROW_CHUNK..((chunk + 1) * ROW_CHUNK).min(rows);
-                    columns
-                        .iter_mut()
-                        .filter_map(|(_, column)| column.validate(source.as_ref(), rows.clone()))
-                        .min_by_key(|fault| (fault.row, fault.column))
+                .map(|(chunk, cache)| {
+                    for (offset, output) in cache.chunks_exact_mut(row_columns.len()).enumerate() {
+                        let row = chunk * ROW_CHUNK + offset;
+                        for (slot, RowColumn { column, bound }) in
+                            output.iter_mut().zip(&row_columns)
+                        {
+                            let digit = source.row_digit(*column, row);
+                            if let Some(digit) = digit.filter(|digit| digit >= bound) {
+                                return Some(SourceError::RowDigitRange {
+                                    column: *column,
+                                    row,
+                                    digit,
+                                    bound: *bound,
+                                });
+                            }
+                            *slot = digit.map_or(0, |digit| (digit + 1) as u16);
+                        }
+                    }
+                    None
                 })
                 .find_first(Option::is_some)
             {
-                return Err(SourceError::RowDigitRange {
-                    column: fault.column,
-                    row: fault.row,
-                    digit: fault.digit,
-                    bound: fault.bound,
-                });
+                return Err(error);
             }
         }
-        let mut validation = CycleValidation {
+        let validation = CycleValidation {
             per_cycle,
-            row_bytes: Vec::new(),
-            row_words: Vec::new(),
+            row_columns: &row_columns,
+            row_cache: &row_cache,
             targets,
         };
-        for RowColumn {
-            column,
-            bound,
-            digits,
-        } in &row_digits
-        {
-            match digits {
-                RowDigits::Byte(digits) => validation.row_bytes.push((*column, *bound, digits)),
-                RowDigits::Word(digits) => validation.row_words.push((*column, *bound, digits)),
-            }
-        }
         let geometry = CycleChunks::new(cycles.ilog2() as usize, 0)
             .map_err(|_| SourceError::CycleCount { cycles })?;
         let chunk_count = cycles / geometry.chunk_len();

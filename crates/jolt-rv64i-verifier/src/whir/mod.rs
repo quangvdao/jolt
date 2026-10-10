@@ -15,4 +15,5 @@
 //! sections 2–6 and 8.
 
 pub mod error;
+pub mod merkle;
 pub mod params;

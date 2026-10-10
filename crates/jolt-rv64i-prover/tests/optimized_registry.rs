@@ -11,9 +11,12 @@
 )]
 mod support;
 
+use jolt_field::F128;
+use jolt_prover::ProverError;
 use jolt_rv64i_prover::{
     backend::Rv64iBackend,
     commitment::transparent::TransparentBits,
+    error::Rv64iProverError,
     optimized::{
         outer::SpartanOuterF2Prepare,
         routers::{
@@ -24,6 +27,8 @@ use jolt_rv64i_prover::{
     },
     prover::{prove, ProverPreprocessing},
 };
+use jolt_sumcheck::SumcheckError;
+use support::{PROGRAMS, PROVING_FAILURES};
 
 #[derive(Clone, Copy, Debug)]
 enum Slot {
@@ -111,4 +116,70 @@ fn mixed_registry_proofs_match_reference() {
         check(name, mixed(slots));
     }
     check("all ten installed individually", mixed(&SLOTS));
+}
+
+#[test]
+fn optimized_corpus_proofs_match_reference() {
+    let reference = Rv64iBackend::reference();
+    let optimized = Rv64iBackend::optimized();
+    for program in PROGRAMS {
+        for log_t in [6, 8, 10] {
+            let (statement, verifier, witness) = support::program_fixture(program, log_t);
+            let preprocessing = ProverPreprocessing {
+                verifier,
+                scheme: (),
+            };
+            let expected =
+                prove::<TransparentBits>(&preprocessing, &statement, &witness, &reference)
+                    .unwrap()
+                    .to_bytes();
+            let proof = prove::<TransparentBits>(&preprocessing, &statement, &witness, &optimized)
+                .unwrap_or_else(|error| panic!("{} t={log_t}: {error}", program.name()));
+            assert_eq!(proof.to_bytes(), expected, "{} t={log_t}", program.name());
+        }
+    }
+}
+
+fn failed_round(error: Rv64iProverError, expected_batch: &str) -> (usize, F128, F128) {
+    let Rv64iProverError::Batch { batch, source } = error else {
+        panic!("expected batch {expected_batch} rejection, found {error:?}");
+    };
+    assert_eq!(batch, expected_batch);
+    let Rv64iProverError::Prover(ProverError::Sumcheck(SumcheckError::RoundCheckFailed {
+        round,
+        expected,
+        actual,
+    })) = *source
+    else {
+        panic!("expected RoundCheckFailed in batch {batch}, found {source:?}");
+    };
+    assert_eq!(round, 0);
+    (round, expected, actual)
+}
+
+#[test]
+fn optimized_rejects_the_same_public_statement_failures() {
+    for case in PROVING_FAILURES {
+        let fixture = support::proving_failure_fixture(case);
+        let preprocessing = ProverPreprocessing {
+            verifier: fixture.verifier,
+            scheme: (),
+        };
+        let failure = |backend: Rv64iBackend| {
+            let error = prove::<TransparentBits>(
+                &preprocessing,
+                &fixture.changed,
+                &fixture.witness,
+                &backend,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{case:?}: expected proving failure"));
+            failed_round(error, fixture.expected_batch)
+        };
+        assert_eq!(
+            failure(Rv64iBackend::optimized()),
+            failure(Rv64iBackend::reference()),
+            "{case:?}"
+        );
+    }
 }

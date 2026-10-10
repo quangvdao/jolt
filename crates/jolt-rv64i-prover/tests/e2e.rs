@@ -28,7 +28,7 @@ use jolt_transcript::Transcript;
 use jolt_verifier::VerifierError;
 use std::collections::HashSet;
 use std::time::Instant;
-use support::{Program, RecordedTranscript, PROGRAMS};
+use support::{Program, ProvingFailure, ProvingFailureFixture, RecordedTranscript, PROGRAMS};
 
 #[expect(
     clippy::print_stdout,
@@ -142,7 +142,13 @@ fn assert_statement_binding_rejection(error: Rv64iVerifierError) {
 /// The verifier rejection checks statement binding into the transcript, not the equation.
 #[test]
 fn wrong_output_is_rejected_by_proving_and_statement_binding() {
-    let (statement, verifier, witness) = support::program_fixture(Program::ByteCopy, 6);
+    let ProvingFailureFixture {
+        statement,
+        changed,
+        verifier,
+        witness,
+        ..
+    } = support::proving_failure_fixture(ProvingFailure::WrongOutput);
     let preprocessing = ProverPreprocessing {
         verifier,
         scheme: (),
@@ -155,8 +161,6 @@ fn wrong_output_is_rejected_by_proving_and_statement_binding() {
         &backend,
     )
     .unwrap();
-    let mut changed = statement;
-    changed.device.outputs[0] ^= 1;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
         &changed,
@@ -179,8 +183,13 @@ fn wrong_output_is_rejected_by_proving_and_statement_binding() {
 /// The verifier rejection checks statement binding into the transcript, not the equation.
 #[test]
 fn missing_termination_is_rejected_by_proving_and_statement_binding() {
-    let (mut changed, verifier, witness) =
-        support::program_fixture(Program::CountingLoopWithoutTermination, 6);
+    let ProvingFailureFixture {
+        statement: changed,
+        changed: rejected,
+        verifier,
+        witness,
+        ..
+    } = support::proving_failure_fixture(ProvingFailure::MissingTermination);
     assert!(changed.device.panic);
     assert_eq!(witness.final_ram[3], 0);
     assert!(witness.bits.iter().all(|row| {
@@ -199,7 +208,7 @@ fn missing_termination_is_rejected_by_proving_and_statement_binding() {
         &backend,
     )
     .unwrap();
-    changed.device.panic = false;
+    let changed = rejected;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
         &changed,
@@ -222,7 +231,13 @@ fn missing_termination_is_rejected_by_proving_and_statement_binding() {
 /// The verifier rejection checks statement binding into the transcript, not the equation.
 #[test]
 fn wrong_entry_is_rejected_by_proving_and_statement_binding() {
-    let (mut changed, verifier, witness) = support::counting_loop();
+    let ProvingFailureFixture {
+        statement: changed,
+        changed: rejected,
+        verifier,
+        witness,
+        ..
+    } = support::proving_failure_fixture(ProvingFailure::WrongEntry);
     let preprocessing = ProverPreprocessing {
         verifier,
         scheme: (),
@@ -235,7 +250,7 @@ fn wrong_entry_is_rejected_by_proving_and_statement_binding() {
         &backend,
     )
     .unwrap();
-    changed.entry_pc += 4;
+    let changed = rejected;
     let error = prove_with_transcript::<TransparentBits, RecordedTranscript>(
         &preprocessing,
         &changed,

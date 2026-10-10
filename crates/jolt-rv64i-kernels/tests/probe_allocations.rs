@@ -21,11 +21,12 @@ mod tests {
 
     #[test]
     fn prepared_scatter_and_bucket_passes_allocate_nothing() {
+        // Retain this pool across both measurements; Rayon worker teardown is asynchronous.
         let workers = ThreadPoolBuilder::new().num_threads(12).build().unwrap();
         let runtime_allocs = RAYON_WORKER_ALLOWANCE.allocs * workers.current_num_threads();
         let runtime_bytes = RAYON_WORKER_ALLOWANCE.bytes * workers.current_num_threads();
         workers.install(|| {
-            let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 16, 256, 81).unwrap());
+            let source = Arc::new(SyntheticTrace::new(SynthProfile::AllRows, 17, 256, 81).unwrap());
             let plan = ScatterPlan::new(Arc::new(ValidatedTrace::new(source).unwrap())).unwrap();
             let mut weights = vec![F128::from_raw(0); plan.cycles()];
             let mut output = vec![F128::from_raw(0); plan.bytecode_rows()];

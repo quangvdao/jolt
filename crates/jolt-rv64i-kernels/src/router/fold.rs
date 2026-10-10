@@ -1,19 +1,25 @@
 //! Complete source-selector folds; routing support is deliberately absent from this pass.
 
-use super::shape::{table_len, BitEntry, RouterError, RouterShape, SlotVariable, WordSlot};
-use crate::packed::buckets::{ByteBuckets, NibbleBuckets};
+use super::shape::{table_len, BitEntry, RouterError, RouterShape, WordSlot};
+mod compiled;
+use crate::packed::buckets::{ByteBuckets, DigitHistogram, NibbleBuckets};
 use crate::packed::pool::ScratchPool;
 use crate::packed::scatter::ScatterPlan;
 use crate::par::CycleChunks;
 use crate::round::eq::eq_table;
 use crate::source::{CycleSource, ValidatedTrace};
+use compiled::{BankStorage, CompiledShape, ReadBit};
 use jolt_field::F128;
+use jolt_utils::unsafe_allocate_zero_vec;
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "test-utils")]
+mod calibration;
+#[cfg(feature = "test-utils")]
+pub use calibration::FoldCalibration;
+
 const ZERO: F128 = F128::from_raw(0);
-const NIBBLE_WORD: usize = 256;
-const BYTE_WORD: usize = 2048;
 
 #[derive(Debug, Clone)]
 struct ShapeLayout {
@@ -39,15 +45,14 @@ pub struct FoldLayout {
     shapes: Vec<ShapeLayout>,
     entries: usize,
     row_entries: usize,
-    calibration_bytes: usize,
-    offsets: [usize; 5],
+    compiled: Vec<CompiledShape>,
 }
 
 const fn word_entries(bytes: bool) -> usize {
     if bytes {
-        BYTE_WORD
+        ByteBuckets::ELEMENTS_PER_WORD
     } else {
-        NIBBLE_WORD
+        NibbleBuckets::ELEMENTS_PER_WORD
     }
 }
 fn storage_add(total: &mut usize, added: usize) -> Result<(), RouterError> {
@@ -65,10 +70,6 @@ const fn word_sets(selectors: usize, words: usize, bytes: usize) -> usize {
 }
 
 impl FoldLayout {
-    /// Selector domains of the five experiment shapes in protocol order.
-    pub const CALIBRATION_SELECTORS: [usize; 5] = [64, 512, 128, 512, 1];
-    /// Cycle-bucketed words of the five experiment shapes.
-    pub const CALIBRATION_WORD_SETS: [usize; 5] = [5, 1, 2, 3, 2];
     /// Construct ranges for validated shapes and chosen byte-bucket selector
     /// values. Checks source indices and selector-set lengths and membership.
     pub fn new<S: CycleSource>(
@@ -123,7 +124,11 @@ impl FoldLayout {
                                 }
                             } else if !digits.iter().any(|&(c, _)| c == column) {
                                 let _ = table_len(source.bits(column))?;
-                                digits.push((column, (1 << source.bits(column)).max(16)));
+                                digits.push((
+                                    column,
+                                    (1 << source.bits(column))
+                                        .max(NibbleBuckets::ENTRIES_PER_POSITION),
+                                ));
                             }
                         }
                     }
@@ -135,7 +140,8 @@ impl FoldLayout {
             for &h in &sorted {
                 byte_flags[h] = true;
             }
-            let mut meta_len = flags.len().div_ceil(4) * 16;
+            let mut meta_len = flags.len().div_ceil(NibbleBuckets::BITS_PER_POSITION)
+                * NibbleBuckets::ENTRIES_PER_POSITION;
             for &(_, bound) in &digits {
                 storage_add(&mut meta_len, bound)?;
             }
@@ -211,12 +217,78 @@ impl FoldLayout {
                 variables: usize::BITS as usize,
             });
         }
+        let compiled = shapes
+            .iter()
+            .zip(&layouts)
+            .map(|(shape, layout)| CompiledShape::new(shape, layout, source.as_ref()))
+            .collect();
         Ok(Self {
+            compiled,
             shapes: layouts,
             entries: entries.max(row_entries),
             row_entries,
-            calibration_bytes: 0,
-            offsets: [0; 5],
+        })
+    }
+
+    fn validate<S: CycleSource>(
+        &self,
+        trace: &ValidatedTrace<S>,
+        shapes: &[RouterShape],
+        r_cycle: &[F128],
+        plan: &ScatterPlan<S>,
+    ) -> Result<usize, RouterError> {
+        let source = trace.source().as_ref();
+        let log_t = source.cycles().ilog2() as usize;
+        if r_cycle.len() != log_t {
+            return Err(RouterError::PointLength {
+                expected: log_t,
+                actual: r_cycle.len(),
+            });
+        }
+        for (table, expected, actual) in [
+            ("layout shapes", shapes.len(), self.shapes.len()),
+            ("scatter cycles", source.cycles(), plan.cycles()),
+            ("scatter rows", source.bytecode_rows(), plan.bytecode_rows()),
+        ] {
+            if expected != actual {
+                return Err(RouterError::TableLength {
+                    table,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        self.check_identity(trace, shapes)?;
+        Ok(log_t)
+    }
+
+    fn check_identity<S: CycleSource>(
+        &self,
+        trace: &ValidatedTrace<S>,
+        shapes: &[RouterShape],
+    ) -> Result<(), RouterError> {
+        let source = trace.source();
+        for shape in shapes {
+            shape.check_source(source.as_ref())?;
+        }
+        if self
+            .compiled
+            .iter()
+            .zip(shapes)
+            .all(|(compiled, shape)| compiled.matches(shape, source.as_ref()))
+        {
+            return Ok(());
+        }
+        let values: Vec<_> = self
+            .shapes
+            .iter()
+            .map(|shape| shape.byte_values.clone())
+            .collect();
+        let checked = Self::new(trace, shapes, &values)?;
+        Err(RouterError::TableLength {
+            table: "layout geometry",
+            expected: checked.entries,
+            actual: self.entries,
         })
     }
 
@@ -237,28 +309,6 @@ impl FoldLayout {
         fold_impl::<S, true>(source, shapes, point, plan, self, histogram_columns)
     }
 
-    /// Calibration geometry of the experiment, with the first `byte_selectors`
-    /// Variant values bucketed by byte. Values above 64 are clamped to 64.
-    /// This sizes the machinery/probe layouts without borrowing a trace.
-    pub const fn calibration(byte_selectors: usize) -> Self {
-        let bytes = if byte_selectors > 64 {
-            64
-        } else {
-            byte_selectors
-        };
-        let metadata = word_sets(64, 5, bytes);
-        let shift = metadata + 64 * 8 * 16;
-        let memory = shift + word_sets(512, 1, 0);
-        let compare = memory + word_sets(128, 2, 0);
-        let branch = compare + word_sets(512, 3, 0);
-        Self {
-            shapes: Vec::new(),
-            entries: branch + word_sets(1, 2, 0),
-            row_entries: word_sets(64, 4, bytes),
-            calibration_bytes: bytes,
-            offsets: [metadata, shift, memory, compare, branch],
-        }
-    }
     /// Cycle bucket elements per worker; includes metadata and any constant totals.
     pub const fn entries(&self) -> usize {
         self.entries
@@ -266,32 +316,6 @@ impl FoldLayout {
     /// Row bucket elements per worker, used after the cycle scratch is merged.
     pub const fn row_entries(&self) -> usize {
         self.row_entries
-    }
-    /// Calibration metadata and subsequent shape starts, in field elements.
-    pub const fn offsets(&self) -> [usize; 5] {
-        self.offsets
-    }
-    /// Calibration Variant word-set start. Caller supplies a value below 64.
-    pub const fn variant_base(&self, selector: usize) -> usize {
-        let bytes = self.calibration_bytes;
-        if selector < bytes {
-            selector * 5 * BYTE_WORD
-        } else {
-            bytes * 5 * BYTE_WORD + (selector - bytes) * 5 * NIBBLE_WORD
-        }
-    }
-    /// Calibration shape start. Caller supplies shape 0..5 and a valid selector.
-    pub const fn shape_base(&self, shape: usize, selector: usize) -> usize {
-        let words = [5, 1, 2, 3, 2];
-        if shape == 0 {
-            self.variant_base(selector)
-        } else {
-            self.offsets[shape] + selector * words[shape] * NIBBLE_WORD
-        }
-    }
-    /// Calibration Variant digit/flag start. Caller supplies a value below 64.
-    pub const fn variant_metadata_base(&self, selector: usize) -> usize {
-        self.offsets[0] + selector * 8 * 16
     }
 }
 
@@ -318,8 +342,8 @@ impl ShapeLayout {
             self.metadata
                 + h * self.meta_len()
                 + self.digits.iter().map(|&(_, n)| n).sum::<usize>()
-                + index / 4 * 16,
-            index % 4,
+                + index / NibbleBuckets::BITS_PER_POSITION * NibbleBuckets::ENTRIES_PER_POSITION,
+            index % NibbleBuckets::BITS_PER_POSITION,
         ))
     }
 }
@@ -335,21 +359,21 @@ pub struct FoldOutput {
 
 #[expect(
     clippy::expect_used,
-    reason = "private bucket slices are whole words, sized by FoldLayout"
+    reason = "private word slices have the checked layout dimensions"
 )]
 #[inline]
 fn bucket_word(storage: &mut [F128], mut word: u64, weight: F128, bytes: bool) {
     if bytes {
         let mut buckets = ByteBuckets::new(storage).expect("whole byte positions");
         for position in buckets.positions_mut() {
-            position[(word & 255) as usize] += weight;
-            word >>= 8;
+            position[(word & (ByteBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] += weight;
+            word >>= ByteBuckets::BITS_PER_POSITION;
         }
     } else {
         let mut buckets = NibbleBuckets::new(storage).expect("whole nibble positions");
         for position in buckets.positions_mut() {
-            position[(word & 15) as usize] += weight;
-            word >>= 4;
+            position[(word & (NibbleBuckets::ENTRIES_PER_POSITION - 1) as u64) as usize] += weight;
+            word >>= NibbleBuckets::BITS_PER_POSITION;
         }
     }
 }
@@ -366,7 +390,7 @@ enum HistogramPlan {
 /// `ra_fold` and the requested digit histograms. The cycle pass emits each
 /// equality weight through the caller's scatter plan, without recomputing it.
 /// `layout` must be made by `FoldLayout::new` for these shapes and this source;
-/// this is checked by rebuilding its small geometry. The plan must refer to the
+/// this is checked against its compiled identity. The plan must refer to the
 /// same immutable source: required of the caller, not checked, detected by the
 /// verifier through the resulting claims. `route` is never read.
 pub fn fold_pass<S: CycleSource>(
@@ -379,6 +403,311 @@ pub fn fold_pass<S: CycleSource>(
 ) -> Result<FoldOutput, RouterError> {
     fold_impl::<S, false>(trace, shapes, r_cycle, plan, layout, histogram_columns)
         .map(|(output, _)| output)
+}
+
+struct Histograms<'a, S> {
+    source: &'a S,
+    columns: &'a [usize],
+    plans: Vec<HistogramPlan>,
+    offsets: Vec<usize>,
+    fallbacks: Vec<Vec<(usize, usize)>>,
+    direct: Vec<(usize, usize)>,
+    rows: Vec<(usize, usize)>,
+    cycle_entries: usize,
+    row_entries: usize,
+}
+
+impl<'a, S: CycleSource> Histograms<'a, S> {
+    fn new(
+        source: &'a S,
+        layout: &FoldLayout,
+        histogram_columns: &'a [usize],
+    ) -> Result<Self, RouterError> {
+        let mut hist_plans = Vec::with_capacity(histogram_columns.len());
+        let mut hist_offsets = Vec::with_capacity(histogram_columns.len());
+        let mut scratch_len = layout.entries;
+        for &column in histogram_columns {
+            if column >= source.digit_columns() {
+                return Err(RouterError::Column {
+                    column,
+                    columns: source.digit_columns(),
+                });
+            }
+            let bound = table_len(source.bits(column))?;
+            hist_offsets.push(scratch_len);
+            storage_add(&mut scratch_len, bound)?;
+            let marginal = layout.shapes.iter().enumerate().find_map(|(shape, s)| {
+                if s.digits.iter().any(|&(c, _)| c == column) {
+                    Some(HistogramPlan::Digit { shape })
+                } else if s.flags.contains(&column) {
+                    Some(HistogramPlan::Flag { shape })
+                } else {
+                    None
+                }
+            });
+            hist_plans.push(if source.by_row(column) {
+                HistogramPlan::Row
+            } else {
+                marginal.unwrap_or(HistogramPlan::Cycle)
+            });
+        }
+        let mut fallbacks = vec![Vec::new(); layout.shapes.len()];
+        let mut direct_histograms = Vec::new();
+        let mut row_histograms = Vec::new();
+        let mut row_hist_base = layout.row_entries;
+        for ((&column, &hp), &base) in histogram_columns.iter().zip(&hist_plans).zip(&hist_offsets)
+        {
+            match hp {
+                HistogramPlan::Digit { shape } | HistogramPlan::Flag { shape } => {
+                    fallbacks[shape].push((column, base));
+                }
+                HistogramPlan::Cycle => direct_histograms.push((column, base)),
+                HistogramPlan::Row => row_histograms.push((column, row_hist_base)),
+            }
+            row_hist_base += 1 << source.bits(column);
+        }
+        let mut row_entries = layout.row_entries;
+        for &column in histogram_columns {
+            storage_add(&mut row_entries, table_len(source.bits(column))?)?;
+        }
+        Ok(Self {
+            source,
+            columns: histogram_columns,
+            plans: hist_plans,
+            offsets: hist_offsets,
+            fallbacks,
+            direct: direct_histograms,
+            rows: row_histograms,
+            cycle_entries: scratch_len,
+            row_entries,
+        })
+    }
+    #[expect(
+        clippy::expect_used,
+        reason = "the plan names checked marginal storage"
+    )]
+    fn read_cycles(&self, layout: &FoldLayout, buckets: &mut [F128]) -> Vec<Vec<F128>> {
+        let mut histograms = Vec::with_capacity(self.columns.len());
+        for ((&column, &hp), &base) in self.columns.iter().zip(&self.plans).zip(&self.offsets) {
+            let bound = 1 << self.source.bits(column);
+            match hp {
+                HistogramPlan::Row => {}
+                HistogramPlan::Digit { shape } => {
+                    for h in 0..layout.shapes[shape].selectors {
+                        let (offset, _) = layout.shapes[shape]
+                            .digit_base(h, column)
+                            .expect("selected digit marginal");
+                        for digit in 0..bound {
+                            let e = buckets[offset + digit];
+                            buckets[base + digit] += e;
+                        }
+                    }
+                }
+                HistogramPlan::Flag { shape } => {
+                    for h in 0..layout.shapes[shape].selectors {
+                        let (offset, bit) = layout.shapes[shape]
+                            .flag_base(h, column)
+                            .expect("selected flag marginal");
+                        let sum = NibbleBuckets::position_bit(
+                            buckets[offset..offset + NibbleBuckets::ENTRIES_PER_POSITION]
+                                .try_into()
+                                .expect("flag position"),
+                            bit,
+                        )
+                        .expect("checked flag bit");
+                        buckets[base] += sum;
+                    }
+                }
+                HistogramPlan::Cycle => {}
+            }
+            histograms.push(buckets[base..base + bound].to_vec());
+        }
+        histograms
+    }
+    fn read_rows(&self, layout: &FoldLayout, row_buckets: &[F128], histograms: &mut [Vec<F128>]) {
+        let mut row_base = layout.row_entries;
+        for ((&column, &hp), histogram) in self.columns.iter().zip(&self.plans).zip(histograms) {
+            let bound = 1 << self.source.bits(column);
+            if matches!(hp, HistogramPlan::Row) {
+                histogram.copy_from_slice(&row_buckets[row_base..row_base + bound]);
+            }
+            row_base += bound;
+        }
+    }
+}
+
+struct CyclePass<'a, S: CycleSource> {
+    source: &'a S,
+    layout: &'a FoldLayout,
+    shapes: &'a [RouterShape],
+    plan: &'a ScatterPlan<S>,
+    pool: &'a ScratchPool,
+    histograms: &'a Histograms<'a, S>,
+    low: &'a [F128],
+    high: &'a [F128],
+    weights: &'a mut [F128],
+}
+
+impl<S: CycleSource> CyclePass<'_, S> {
+    #[expect(
+        clippy::expect_used,
+        reason = "validated chunk geometry and exclusive scratch loans"
+    )]
+    fn run(self) {
+        let Self {
+            source,
+            layout,
+            shapes,
+            plan,
+            pool,
+            histograms,
+            low,
+            high,
+            weights,
+        } = self;
+        plan.emission_chunks(weights)
+            .expect("freshly sized weight buffer")
+            .for_each(|(interval, slots, weights)| {
+                let Some(last) = weights.len().checked_sub(1) else {
+                    return;
+                };
+                let mut scratch = pool.take().expect("sequential chunk body");
+                for (block, slots) in slots.chunks_exact(low.len()).enumerate() {
+                    let start = interval.start + block * low.len();
+                    let hi = high[start / low.len()];
+                    for (offset, (&lo, &slot)) in low.iter().zip(slots).enumerate() {
+                        let cycle = start + offset;
+                        let e = hi * lo;
+                        // Scatter slots are relative to the whole chunk, not its equality block.
+                        weights[usize::from(slot).min(last)] = e;
+                        for (index, (shape, sl)) in shapes.iter().zip(&layout.shapes).enumerate() {
+                            if let Some(h) = shape.selector(source, cycle, false) {
+                                let bytes = sl.bytes(h);
+                                let size = word_entries(bytes);
+                                let base = sl.bases[h];
+                                for ((_, word), storage) in sl.words.iter().zip(
+                                    scratch[base..base + sl.words.len() * size]
+                                        .chunks_exact_mut(size),
+                                ) {
+                                    let word = match *word {
+                                        WordSlot::Trace(index) => source.trace_word(index, cycle),
+                                        WordSlot::Bytecode(index) => source
+                                            .bytecode_word(index, source.bytecode_index(cycle)),
+                                        WordSlot::Bits(_) | WordSlot::Zero => 0,
+                                    };
+                                    bucket_word(storage, word, e, bytes);
+                                }
+                                let mut base = sl.metadata + h * sl.meta_len();
+                                for &(column, bound) in &sl.digits {
+                                    if let Some(digit) = source.digit(column, cycle) {
+                                        let storage = &mut scratch[base..base + bound];
+                                        if bound == NibbleBuckets::ENTRIES_PER_POSITION {
+                                            let mut buckets = NibbleBuckets::new(storage)
+                                                .expect("one padded digit position");
+                                            buckets.positions_mut()[0][digit
+                                                & (NibbleBuckets::ENTRIES_PER_POSITION - 1)] += e;
+                                        } else if let Some(last) = storage.len().checked_sub(1) {
+                                            storage[digit.min(last)] += e;
+                                        }
+                                    }
+                                    base += bound;
+                                }
+                                for flags in sl.flags.chunks(NibbleBuckets::BITS_PER_POSITION) {
+                                    let mut value = 0;
+                                    for (bit, &column) in flags.iter().enumerate() {
+                                        value |= usize::from(source.digit(column, cycle).is_some())
+                                            << bit;
+                                    }
+                                    let mut buckets = NibbleBuckets::new(
+                                        &mut scratch
+                                            [base..base + NibbleBuckets::ENTRIES_PER_POSITION],
+                                    )
+                                    .expect("one packed flag position");
+                                    buckets.positions_mut()[0]
+                                        [value & (NibbleBuckets::ENTRIES_PER_POSITION - 1)] += e;
+                                    base += NibbleBuckets::ENTRIES_PER_POSITION;
+                                }
+                                if let Some(base) = sl.totals {
+                                    scratch[base + h] += e;
+                                }
+                            } else {
+                                for &(column, base) in &histograms.fallbacks[index] {
+                                    if let Some(digit) = source.digit(column, cycle) {
+                                        scratch[base + digit] += e;
+                                    }
+                                }
+                            }
+                        }
+                        for &(column, base) in &histograms.direct {
+                            if let Some(digit) = source.digit(column, cycle) {
+                                scratch[base + digit] += e;
+                            }
+                        }
+                    }
+                }
+            });
+    }
+}
+
+struct RowPass<'a, S> {
+    source: &'a S,
+    layout: &'a FoldLayout,
+    shapes: &'a [RouterShape],
+    pool: &'a ScratchPool,
+    histograms: &'a [(usize, usize)],
+    weights: &'a [F128],
+}
+
+impl<S: CycleSource> RowPass<'_, S> {
+    #[expect(
+        clippy::expect_used,
+        reason = "row chunks hold exclusive scratch loans"
+    )]
+    fn run(self, chunk_len: usize) {
+        let Self {
+            source,
+            layout,
+            shapes,
+            pool: row_pool,
+            histograms,
+            weights,
+        } = self;
+        let row_shapes: Vec<_> = shapes
+            .iter()
+            .zip(&layout.shapes)
+            .filter(|(_, sl)| !sl.row_words.is_empty())
+            .collect();
+        weights
+            .par_chunks(chunk_len)
+            .enumerate()
+            .for_each(|(chunk, rows)| {
+                let mut scratch = row_pool.take().expect("sequential row body");
+                for (offset, &e) in rows.iter().enumerate() {
+                    if e == ZERO {
+                        continue;
+                    }
+                    let row = chunk * chunk_len + offset;
+                    for &(shape, sl) in &row_shapes {
+                        if let Some(h) = shape.selector(source, row, true) {
+                            let bytes = sl.bytes(h);
+                            let size = word_entries(bytes);
+                            let base = sl.row_bases[h];
+                            for (&(_, word), storage) in sl.row_words.iter().zip(
+                                scratch[base..base + sl.row_words.len() * size]
+                                    .chunks_exact_mut(size),
+                            ) {
+                                bucket_word(storage, source.bytecode_word(word, row), e, bytes);
+                            }
+                        }
+                    }
+                    for &(column, base) in histograms {
+                        if let Some(digit) = source.row_digit(column, row) {
+                            scratch[base + digit] += e;
+                        }
+                    }
+                }
+            });
+    }
 }
 
 #[expect(
@@ -396,189 +725,39 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
     let mut times = [Duration::ZERO; 4];
     let mut start = MEASURE.then(Instant::now);
     let source = trace.source().as_ref();
-    let log_t = source.cycles().ilog2() as usize;
-    if r_cycle.len() != log_t {
-        return Err(RouterError::PointLength {
-            expected: log_t,
-            actual: r_cycle.len(),
-        });
-    }
-    for (table, expected, actual) in [
-        ("layout shapes", shapes.len(), layout.shapes.len()),
-        ("scatter cycles", source.cycles(), plan.cycles()),
-        ("scatter rows", source.bytecode_rows(), plan.bytecode_rows()),
-    ] {
-        if expected != actual {
-            return Err(RouterError::TableLength {
-                table,
-                expected,
-                actual,
-            });
-        }
-    }
-    let values: Vec<_> = layout
-        .shapes
-        .iter()
-        .map(|s| s.byte_values.clone())
-        .collect();
-    let checked = FoldLayout::new(trace, shapes, &values)?;
-    if checked.entries != layout.entries
-        || checked.row_entries != layout.row_entries
-        || checked.shapes.iter().zip(&layout.shapes).any(|(a, b)| {
-            a.words != b.words
-                || a.row_words != b.row_words
-                || a.digits != b.digits
-                || a.flags != b.flags
-                || a.selectors != b.selectors
-        })
-    {
-        return Err(RouterError::TableLength {
-            table: "layout geometry",
-            expected: checked.entries,
-            actual: layout.entries,
-        });
-    }
-    drop(checked);
-    drop(values);
-    let mut hist_plans = Vec::with_capacity(histogram_columns.len());
-    let mut hist_offsets = Vec::with_capacity(histogram_columns.len());
-    let mut scratch_len = layout.entries;
-    for &column in histogram_columns {
-        if column >= source.digit_columns() {
-            return Err(RouterError::Column {
-                column,
-                columns: source.digit_columns(),
-            });
-        }
-        let bound = table_len(source.bits(column))?;
-        hist_offsets.push(scratch_len);
-        storage_add(&mut scratch_len, bound)?;
-        let marginal = layout.shapes.iter().enumerate().find_map(|(shape, s)| {
-            if s.digits.iter().any(|&(c, _)| c == column) {
-                Some(HistogramPlan::Digit { shape })
-            } else if s.flags.contains(&column) {
-                Some(HistogramPlan::Flag { shape })
-            } else {
-                None
-            }
-        });
-        hist_plans.push(if source.by_row(column) {
-            HistogramPlan::Row
-        } else {
-            marginal.unwrap_or(HistogramPlan::Cycle)
-        });
-    }
-    let mut fallbacks = vec![Vec::new(); shapes.len()];
-    let mut direct_histograms = Vec::new();
-    let mut row_histograms = Vec::new();
-    let mut row_hist_base = layout.row_entries;
-    for ((&column, &hp), &base) in histogram_columns.iter().zip(&hist_plans).zip(&hist_offsets) {
-        match hp {
-            HistogramPlan::Digit { shape } | HistogramPlan::Flag { shape } => {
-                fallbacks[shape].push((column, base));
-            }
-            HistogramPlan::Cycle => direct_histograms.push((column, base)),
-            HistogramPlan::Row => row_histograms.push((column, row_hist_base)),
-        }
-        row_hist_base += 1 << source.bits(column);
-    }
+    let log_t = layout.validate(trace, shapes, r_cycle, plan)?;
+    let histograms = Histograms::new(source, layout, histogram_columns)?;
     let geometry = CycleChunks::new(log_t, 0).expect("validated cycles");
     let (low, high) = geometry.split_point(r_cycle).expect("checked cycle point");
     let low = eq_table(low, None);
     let high = eq_table(high, None);
-    let pool = ScratchPool::new(scratch_len).map_err(|_| RouterError::Dimension {
+    let pool = ScratchPool::new(histograms.cycle_entries).map_err(|_| RouterError::Dimension {
         variables: usize::BITS as usize,
     })?;
-    let mut weights = vec![ZERO; source.cycles()];
+    let mut weights = unsafe_allocate_zero_vec(source.cycles());
     if let Some(clock) = start {
         times[3] += clock.elapsed();
         start = Some(Instant::now());
     }
-    plan.emission_chunks(&mut weights)
-        .expect("freshly sized weight buffer")
-        .for_each(|(interval, slots, weights)| {
-            let Some(last) = weights.len().checked_sub(1) else {
-                return;
-            };
-            let mut scratch = pool.take().expect("sequential chunk body");
-            for (block, slots) in slots.chunks_exact(low.len()).enumerate() {
-                let start = interval.start + block * low.len();
-                let hi = high[start / low.len()];
-                for (offset, (&lo, &slot)) in low.iter().zip(slots).enumerate() {
-                    let cycle = start + offset;
-                    let e = hi * lo;
-                    // Scatter slots are relative to the whole chunk, not its equality block.
-                    weights[usize::from(slot).min(last)] = e;
-                    for (index, (shape, sl)) in shapes.iter().zip(&layout.shapes).enumerate() {
-                        if let Some(h) = shape.selector(source, cycle, false) {
-                            let bytes = sl.bytes(h);
-                            let size = word_entries(bytes);
-                            let base = sl.bases[h];
-                            for ((_, word), storage) in sl.words.iter().zip(
-                                scratch[base..base + sl.words.len() * size].chunks_exact_mut(size),
-                            ) {
-                                let word = match *word {
-                                    WordSlot::Trace(index) => source.trace_word(index, cycle),
-                                    WordSlot::Bytecode(index) => {
-                                        source.bytecode_word(index, source.bytecode_index(cycle))
-                                    }
-                                    WordSlot::Bits(_) | WordSlot::Zero => 0,
-                                };
-                                bucket_word(storage, word, e, bytes);
-                            }
-                            let mut base = sl.metadata + h * sl.meta_len();
-                            for &(column, bound) in &sl.digits {
-                                if let Some(digit) = source.digit(column, cycle) {
-                                    let storage = &mut scratch[base..base + bound];
-                                    if bound == 16 {
-                                        let mut buckets = NibbleBuckets::new(storage)
-                                            .expect("one padded digit position");
-                                        buckets.positions_mut()[0][digit & 15] += e;
-                                    } else if let Some(last) = storage.len().checked_sub(1) {
-                                        storage[digit.min(last)] += e;
-                                    }
-                                }
-                                base += bound;
-                            }
-                            for flags in sl.flags.chunks(4) {
-                                let mut value = 0;
-                                for (bit, &column) in flags.iter().enumerate() {
-                                    value |=
-                                        usize::from(source.digit(column, cycle).is_some()) << bit;
-                                }
-                                let mut buckets = NibbleBuckets::new(&mut scratch[base..base + 16])
-                                    .expect("one packed flag position");
-                                buckets.positions_mut()[0][value & 15] += e;
-                                base += 16;
-                            }
-                            if let Some(base) = sl.totals {
-                                scratch[base + h] += e;
-                            }
-                        } else {
-                            for &(column, base) in &fallbacks[index] {
-                                if let Some(digit) = source.digit(column, cycle) {
-                                    scratch[base + digit] += e;
-                                }
-                            }
-                        }
-                    }
-                    for &(column, base) in &direct_histograms {
-                        if let Some(digit) = source.digit(column, cycle) {
-                            scratch[base + digit] += e;
-                        }
-                    }
-                }
-            }
-        });
+    CyclePass {
+        source,
+        layout,
+        shapes,
+        plan,
+        pool: &pool,
+        histograms: &histograms,
+        low: &low,
+        high: &high,
+        weights: &mut weights,
+    }
+    .run();
     if let Some(clock) = start {
         times[0] = clock.elapsed();
         start = Some(Instant::now());
     }
     drop(low);
     drop(high);
-    drop(fallbacks);
-    drop(direct_histograms);
-    let mut ra_fold = vec![ZERO; source.bytecode_rows()];
+    let mut ra_fold = unsafe_allocate_zero_vec(source.bytecode_rows());
     plan.apply_buffer(&weights, &mut ra_fold)
         .expect("freshly sized scatter buffers");
     drop(weights);
@@ -589,106 +768,35 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
     let mut buckets = pool.merge().expect("all chunk loans returned");
     let mut folds: Vec<_> = shapes
         .iter()
-        .map(|shape| vec![ZERO; shape.fold_len()])
+        .map(|shape| unsafe_allocate_zero_vec(shape.fold_len()))
         .collect();
-    readout(shapes, layout, &buckets, &[], false, &mut folds);
-    let mut histograms = Vec::with_capacity(histogram_columns.len());
-    for ((&column, &hp), &base) in histogram_columns.iter().zip(&hist_plans).zip(&hist_offsets) {
-        let bound = 1 << source.bits(column);
-        match hp {
-            HistogramPlan::Row => {}
-            HistogramPlan::Digit { shape } => {
-                for h in 0..layout.shapes[shape].selectors {
-                    let (offset, _) = layout.shapes[shape]
-                        .digit_base(h, column)
-                        .expect("selected digit marginal");
-                    for digit in 0..bound {
-                        let e = buckets[offset + digit];
-                        buckets[base + digit] += e;
-                    }
-                }
-            }
-            HistogramPlan::Flag { shape } => {
-                for h in 0..layout.shapes[shape].selectors {
-                    let (offset, bit) = layout.shapes[shape]
-                        .flag_base(h, column)
-                        .expect("selected flag marginal");
-                    let sum = (0..16)
-                        .filter(|value| value & (1 << bit) != 0)
-                        .fold(ZERO, |sum, value| sum + buckets[offset + value]);
-                    buckets[base] += sum;
-                }
-            }
-            HistogramPlan::Cycle => {}
-        }
-        histograms.push(buckets[base..base + bound].to_vec());
-    }
+    readout(layout, FoldStorage::Cycles(&buckets), &mut folds);
+    let mut histogram_outputs = histograms.read_cycles(layout, &mut buckets);
     drop(buckets);
-    let mut row_scratch_len = layout.row_entries;
-    for &column in histogram_columns {
-        storage_add(&mut row_scratch_len, 1 << source.bits(column))?;
-    }
-    let row_pool = ScratchPool::new(row_scratch_len).map_err(|_| RouterError::Dimension {
-        variables: usize::BITS as usize,
-    })?;
+    let row_pool =
+        ScratchPool::new(histograms.row_entries).map_err(|_| RouterError::Dimension {
+            variables: usize::BITS as usize,
+        })?;
     if let Some(clock) = start {
         times[3] += clock.elapsed();
         start = Some(Instant::now());
     }
-    let row_shapes: Vec<_> = shapes
-        .iter()
-        .zip(&layout.shapes)
-        .filter(|(_, sl)| !sl.row_words.is_empty())
-        .collect();
-    ra_fold
-        .par_chunks(geometry.chunk_len())
-        .enumerate()
-        .for_each(|(chunk, rows)| {
-            let mut scratch = row_pool.take().expect("sequential row body");
-            for (offset, &e) in rows.iter().enumerate() {
-                if e == ZERO {
-                    continue;
-                }
-                let row = chunk * geometry.chunk_len() + offset;
-                for &(shape, sl) in &row_shapes {
-                    if let Some(h) = shape.selector(source, row, true) {
-                        let bytes = sl.bytes(h);
-                        let size = word_entries(bytes);
-                        let base = sl.row_bases[h];
-                        for (&(_, word), storage) in sl.row_words.iter().zip(
-                            scratch[base..base + sl.row_words.len() * size].chunks_exact_mut(size),
-                        ) {
-                            bucket_word(storage, source.bytecode_word(word, row), e, bytes);
-                        }
-                    }
-                }
-                for &(column, base) in &row_histograms {
-                    if let Some(digit) = source.row_digit(column, row) {
-                        scratch[base + digit] += e;
-                    }
-                }
-            }
-        });
+    RowPass {
+        source,
+        layout,
+        shapes,
+        pool: &row_pool,
+        histograms: &histograms.rows,
+        weights: &ra_fold,
+    }
+    .run(geometry.chunk_len());
     if let Some(clock) = start {
         times[2] = clock.elapsed();
         start = Some(Instant::now());
     }
-    drop(row_shapes);
-    drop(row_histograms);
     let row_buckets = row_pool.merge().expect("all row loans returned");
-    readout(shapes, layout, &[], &row_buckets, true, &mut folds);
-    let mut row_base = layout.row_entries;
-    for ((&column, &hp), histogram) in histogram_columns
-        .iter()
-        .zip(&hist_plans)
-        .zip(&mut histograms)
-    {
-        let bound = 1 << source.bits(column);
-        if matches!(hp, HistogramPlan::Row) {
-            histogram.copy_from_slice(&row_buckets[row_base..row_base + bound]);
-        }
-        row_base += bound;
-    }
+    readout(layout, FoldStorage::Rows(&row_buckets), &mut folds);
+    histograms.read_rows(layout, &row_buckets, &mut histogram_outputs);
     if let Some(clock) = start {
         times[3] += clock.elapsed();
     }
@@ -696,146 +804,135 @@ fn fold_impl<S: CycleSource, const MEASURE: bool>(
         FoldOutput {
             folds,
             ra_fold,
-            histograms,
+            histograms: histogram_outputs,
         },
         times,
     ))
 }
 
+enum FoldStorage<'a> {
+    Cycles(&'a [F128]),
+    Rows(&'a [F128]),
+}
+
 #[expect(
     clippy::expect_used,
-    reason = "FoldLayout checked every source slot and bit entry"
+    reason = "compiled metadata has checked power-of-two domains and valid bit indices"
 )]
-fn readout(
-    shapes: &[RouterShape],
-    layout: &FoldLayout,
-    buckets: &[F128],
-    row_buckets: &[F128],
-    row_mode: bool,
-    folds: &mut [Vec<F128>],
-) {
-    shapes
-        .iter()
-        .zip(&layout.shapes)
-        .zip(folds)
-        .for_each(|((shape, sl), fold)| {
-            if row_mode && sl.row_words.is_empty() {
-                return;
-            }
-            for h in 0..sl.selectors {
-                let bytes = sl.bytes(h);
-                let size = word_entries(bytes);
-                let bits = if bytes { 8 } else { 4 };
-                let width = 1 << bits;
-                let total = if row_mode {
-                    row_buckets[sl.row_bases[h]..sl.row_bases[h] + width]
-                        .iter()
-                        .copied()
-                        .sum()
-                } else if let Some(base) = sl.totals {
-                    buckets[base + h]
-                } else if !sl.words.is_empty() {
-                    buckets[sl.bases[h]..sl.bases[h] + width]
-                        .iter()
-                        .copied()
-                        .sum()
-                } else {
-                    ZERO
-                };
-                let mut selector_shift = [0; 3];
-                for index in 1..shape.factors().len() {
-                    selector_shift[index] =
-                        selector_shift[index - 1] + shape.factors()[index - 1].slots.len();
-                }
-                for (word_slot, word) in shape.bank().iter().enumerate() {
-                    let row_word = sl.row_words.iter().any(|&(slot, _)| slot == word_slot);
-                    if matches!(word, WordSlot::Trace(_) | WordSlot::Bytecode(_))
-                        && row_word != row_mode
-                    {
-                        continue;
-                    }
-                    if row_mode
-                        && matches!(word, WordSlot::Bits(_))
-                        && (!sl.words.is_empty() || sl.totals.is_some())
-                    {
-                        continue;
-                    }
-                    let entries = match word {
-                        WordSlot::Zero => continue,
-                        WordSlot::Bits(entries) => entries.len(),
-                        _ => 64,
-                    };
-                    let mut destination = 0;
-                    for (position, &(_, variable)) in shape.slot_map().iter().enumerate().skip(6) {
-                        let value = match variable {
-                            SlotVariable::Bit(_) => 0,
-                            SlotVariable::Word(bit) => word_slot >> bit,
-                            SlotVariable::Selector { factor, bit } => {
-                                h >> (selector_shift[factor] + bit)
-                            }
-                        };
-                        destination |= (value & 1) << position;
-                    }
-                    let word_storage = sl
-                        .words
-                        .iter()
-                        .position(|(slot, _)| *slot == word_slot)
-                        .map(|index| (&buckets, sl.bases[h] + index * size))
-                        .or_else(|| {
-                            sl.row_words
-                                .iter()
-                                .position(|&(slot, _)| slot == word_slot)
-                                .map(|index| (&row_buckets, sl.row_bases[h] + index * size))
-                        });
-                    for bit in 0..entries {
-                        if let WordSlot::Bits(entries) = word {
-                            let one = matches!(entries[bit], BitEntry::One);
-                            if row_mode != (one && sl.words.is_empty() && sl.totals.is_none()) {
+fn readout(layout: &FoldLayout, storage: FoldStorage<'_>, folds: &mut [Vec<F128>]) {
+    let (buckets, rows) = match storage {
+        FoldStorage::Cycles(buckets) => (buckets, false),
+        FoldStorage::Rows(buckets) => (buckets, true),
+    };
+    for ((sl, compiled), fold) in layout.shapes.iter().zip(&layout.compiled).zip(folds) {
+        if rows && sl.row_words.is_empty() {
+            continue;
+        }
+        for h in 0..sl.selectors {
+            let bytes = sl.bytes(h);
+            let size = word_entries(bytes);
+            let total = if rows {
+                word_total(buckets, sl.row_bases[h], bytes)
+            } else if let Some(base) = sl.totals {
+                buckets[base + h]
+            } else if !sl.words.is_empty() {
+                word_total(buckets, sl.bases[h], bytes)
+            } else {
+                ZERO
+            };
+            let metadata = sl.metadata + h * sl.meta_len;
+            for (word, bank) in compiled.bank_storage.iter().enumerate() {
+                let destination = compiled.destinations[h * compiled.bank_storage.len() + word];
+                match bank {
+                    BankStorage::Cycle(index) if !rows => read_word(
+                        buckets,
+                        sl.bases[h] + index * size,
+                        bytes,
+                        &mut fold[destination..destination + 64],
+                    ),
+                    BankStorage::Row(index) if rows => read_word(
+                        buckets,
+                        sl.row_bases[h] + index * size,
+                        bytes,
+                        &mut fold[destination..destination + 64],
+                    ),
+                    BankStorage::Bits(entries) => {
+                        for (bit, entry) in entries.iter().enumerate() {
+                            if rows
+                                != (matches!(entry, ReadBit::One)
+                                    && sl.words.is_empty()
+                                    && sl.totals.is_none())
+                            {
                                 continue;
                             }
+                            fold[destination + bit] = match *entry {
+                                ReadBit::One => total,
+                                ReadBit::Value { offset, value } => {
+                                    buckets[metadata + offset + value]
+                                }
+                                ReadBit::Bit { offset, bound, bit } => DigitHistogram::sum_bit(
+                                    &buckets[metadata + offset..metadata + offset + bound],
+                                    bound.ilog2() as usize,
+                                    bit,
+                                )
+                                .expect("compiled bit domain"),
+                                ReadBit::Zero => ZERO,
+                            };
                         }
-                        let value = match word {
-                            WordSlot::Trace(_) | WordSlot::Bytecode(_) => {
-                                let (storage, base) = word_storage.expect("checked word slot");
-                                let position = &storage
-                                    [base + (bit / bits) * width..base + (bit / bits + 1) * width];
-                                position
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(value, _)| value & (1 << (bit % bits)) != 0)
-                                    .map(|(_, &value)| value)
-                                    .sum()
-                            }
-                            WordSlot::Bits(entries) => match entries.get(bit) {
-                                Some(BitEntry::One) => total,
-                                Some(BitEntry::Indicator { column, value }) => {
-                                    if let Some((base, _)) = sl.digit_base(h, *column) {
-                                        buckets[base + value]
-                                    } else {
-                                        let (base, flag) =
-                                            sl.flag_base(h, *column).expect("checked flag");
-                                        (0..16)
-                                            .filter(|value| value & (1 << flag) != 0)
-                                            .map(|value| buckets[base + value])
-                                            .sum()
-                                    }
-                                }
-                                Some(BitEntry::DigitBit { column, bit }) => {
-                                    let (base, bound) =
-                                        sl.digit_base(h, *column).expect("checked digit bit");
-                                    (0..bound)
-                                        .filter(|value| value & (1 << bit) != 0)
-                                        .map(|value| buckets[base + value])
-                                        .sum()
-                                }
-                                Some(BitEntry::Zero) | None => ZERO,
-                            },
-                            WordSlot::Zero => ZERO,
-                        };
-                        // new pins the six bit variables to the first six occupied slots.
-                        fold[destination + bit] = value;
                     }
+                    BankStorage::Cycle(_) | BankStorage::Row(_) | BankStorage::Zero => {}
                 }
             }
-        });
+        }
+    }
+}
+
+fn read_word(buckets: &[F128], base: usize, bytes: bool, output: &mut [F128]) {
+    if bytes {
+        for (position, output) in buckets[base..base + ByteBuckets::ELEMENTS_PER_WORD]
+            .as_chunks::<{ ByteBuckets::ENTRIES_PER_POSITION }>()
+            .0
+            .iter()
+            .zip(
+                output
+                    .as_chunks_mut::<{ ByteBuckets::BITS_PER_POSITION }>()
+                    .0,
+            )
+        {
+            *output = ByteBuckets::position_bits(position);
+        }
+    } else {
+        for (position, output) in buckets[base..base + NibbleBuckets::ELEMENTS_PER_WORD]
+            .as_chunks::<{ NibbleBuckets::ENTRIES_PER_POSITION }>()
+            .0
+            .iter()
+            .zip(
+                output
+                    .as_chunks_mut::<{ NibbleBuckets::BITS_PER_POSITION }>()
+                    .0,
+            )
+        {
+            *output = NibbleBuckets::position_bits(position);
+        }
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "checked word storage contains its complete first position"
+)]
+fn word_total(buckets: &[F128], base: usize, bytes: bool) -> F128 {
+    if bytes {
+        ByteBuckets::position_total(
+            buckets[base..base + ByteBuckets::ENTRIES_PER_POSITION]
+                .try_into()
+                .expect("byte position"),
+        )
+    } else {
+        NibbleBuckets::position_total(
+            buckets[base..base + NibbleBuckets::ENTRIES_PER_POSITION]
+                .try_into()
+                .expect("nibble position"),
+        )
+    }
 }

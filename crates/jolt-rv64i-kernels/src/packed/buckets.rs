@@ -43,6 +43,52 @@ macro_rules! buckets {
         }
 
         impl<'a> $name<'a> {
+            /// Number of value bits represented by one position.
+            pub const BITS_PER_POSITION: usize = $bits;
+            /// Number of value buckets in one position.
+            pub const ENTRIES_PER_POSITION: usize = $entries;
+            /// Number of positions needed for one 64-bit word.
+            pub const POSITIONS_PER_WORD: usize = 64 / Self::BITS_PER_POSITION;
+            /// Number of field elements needed for one 64-bit word.
+            pub const ELEMENTS_PER_WORD: usize =
+                Self::POSITIONS_PER_WORD * Self::ENTRIES_PER_POSITION;
+
+            /// Returns every bit's XOR sum from a position in value order.
+            /// Whether entries represent the claimed source is required of the
+            /// caller, not checked here, detected by the verifier through the resulting claims.
+            #[inline]
+            pub fn position_bits(position: &[F128; $entries]) -> [F128; $bits] {
+                std::array::from_fn(|bit| bit_sum(position, bit))
+            }
+
+            /// Returns one bit's XOR sum from a position in value order,
+            /// rejecting a bit outside its width. Whether entries represent the
+            /// claimed source is required of the caller, not checked here,
+            /// detected by the verifier through the resulting claims.
+            #[inline]
+            pub fn position_bit(
+                position: &[F128; $entries],
+                bit: usize,
+            ) -> Result<F128, BucketError> {
+                if bit >= Self::BITS_PER_POSITION {
+                    return Err(BucketError::Bit {
+                        bit,
+                        bits: Self::BITS_PER_POSITION,
+                    });
+                }
+                Ok(bit_sum(position, bit))
+            }
+
+            /// XOR of all buckets in a read-only position, including value zero.
+            /// Whether entries represent the claimed source is required of the
+            /// caller, not checked here, detected by the verifier through the resulting claims.
+            #[inline]
+            pub fn position_total(position: &[F128; $entries]) -> F128 {
+                position
+                    .iter()
+                    .copied()
+                    .fold(F128::from_raw(0), |sum, e| sum + e)
+            }
             /// Borrows storage containing a whole number of positions.
             /// Contents are retained; the caller supplies the initial sums.
             pub fn new(storage: &'a mut [F128]) -> Result<Self, BucketError> {
@@ -97,7 +143,7 @@ macro_rules! buckets {
                     position,
                     positions: self.positions.len(),
                 })?;
-                Ok(std::array::from_fn(|bit| bit_sum(bucket, bit)))
+                Ok(Self::position_bits(bucket))
             }
 
             /// Returns one bit's sum, rejecting a bit outside the value width.
@@ -109,7 +155,7 @@ macro_rules! buckets {
                     position,
                     positions: self.positions.len(),
                 })?;
-                Ok(bit_sum(bucket, bit))
+                Self::position_bit(bucket, bit)
             }
 
             /// XOR of every value bucket at a position, including value zero.
@@ -118,10 +164,7 @@ macro_rules! buckets {
                     position,
                     positions: self.positions.len(),
                 })?;
-                Ok(bucket
-                    .iter()
-                    .copied()
-                    .fold(F128::from_raw(0), |sum, e| sum + e))
+                Ok(Self::position_total(bucket))
             }
         }
     };
@@ -148,16 +191,31 @@ pub struct DigitHistogram<'a> {
 impl<'a> DigitHistogram<'a> {
     /// Checks the representable width and exact storage length; retains contents.
     pub fn new(storage: &'a mut [F128], bits: usize) -> Result<Self, BucketError> {
+        Self::check_domain(storage.len(), bits)?;
+        Ok(Self { sums: storage })
+    }
+
+    /// XOR of buckets whose digit has `bit` set, in a read-only `2^bits`
+    /// domain. Checks the width, exact length and requested bit. Whether entries
+    /// represent the claimed source is required of the caller, not checked here,
+    /// detected by the verifier through the resulting claims.
+    #[inline]
+    pub fn sum_bit(storage: &[F128], bits: usize, bit: usize) -> Result<F128, BucketError> {
+        Self::check_domain(storage.len(), bits)?;
+        if bit >= bits {
+            return Err(BucketError::Bit { bit, bits });
+        }
+        Ok(bit_sum(storage, bit))
+    }
+
+    fn check_domain(len: usize, bits: usize) -> Result<(), BucketError> {
         let bound = 1_usize
             .checked_shl(u32::try_from(bits).unwrap_or(u32::MAX))
             .ok_or(BucketError::Width { bits })?;
-        if storage.len() != bound {
-            return Err(BucketError::HistogramLength {
-                len: storage.len(),
-                bound,
-            });
+        if len != bound {
+            return Err(BucketError::HistogramLength { len, bound });
         }
-        Ok(Self { sums: storage })
+        Ok(())
     }
 
     /// Adds `e` to a digit's sum, checking the digit against the domain.

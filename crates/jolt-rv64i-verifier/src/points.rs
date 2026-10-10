@@ -50,12 +50,12 @@ pub fn eq_index<F: JoltField>(point: &[F], index: usize) -> Result<F, PointsErro
     eq(point, &vertex)
 }
 
-/// Materializes at most 64 equality weights in low-variable-first index order.
+/// Materializes at most 1,024 equality weights in low-variable-first index order.
 /// The dimension bound precedes the polynomial layer's allocation and shift.
 pub(crate) fn eq_table<F: JoltField>(point: &[F]) -> Result<Vec<F>, PointsError> {
-    if point.len() > 6 {
+    if point.len() > 10 {
         return Err(PointsError::Dimension {
-            expected: 6,
+            expected: 10,
             actual: point.len(),
         });
     }

@@ -45,3 +45,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "wire"
 required-features = ["test-utils"]
+
+[[test]]
+name = "spartan"
+required-features = ["test-utils"]
